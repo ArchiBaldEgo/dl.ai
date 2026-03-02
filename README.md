@@ -1,2 +1,1 @@
-# dl.ai
-Приложение для dl.gsu.by с ИИ, заточенное для обучении студентов/школьников
+daphne -p 80 DjangoTest.asgi:application
