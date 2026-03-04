@@ -7,6 +7,10 @@ services:
       dockerfile: Dockerfile
     container_name: dl_ai_web
     command: daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application
+<<<<<<< HEAD
+=======
+    restart: unless-stopped
+>>>>>>> origin/ArseniyN
     volumes:
       - .:/app
     ports:
@@ -15,6 +19,7 @@ services:
       - .env
     depends_on:
       - db
+<<<<<<< HEAD
 
   db:
       image: postgres:14
@@ -25,10 +30,30 @@ services:
         POSTGRES_USER: dlaibd
         POSTGRES_PASSWORD: dlaibd
         POSTGRES_DB: dlaibd
+=======
+    networks:
+      # Добавьте это
+      - shared-network # Подключаем к общей сети
+
+  db:
+    image: postgres:14
+    container_name: dl_ai_db
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: dlaibd
+      POSTGRES_PASSWORD: dlaibd
+      POSTGRES_DB: dlaibd
+>>>>>>> origin/ArseniyN
 
   nginx:
     image: nginx:latest
     container_name: dl_ai_nginx
+<<<<<<< HEAD
+=======
+    restart: unless-stopped
+>>>>>>> origin/ArseniyN
     ports:
       - "80:8000"
     volumes:
@@ -36,7 +61,23 @@ services:
       - static_volume:/app/static
     depends_on:
       - web
+<<<<<<< HEAD
 
 volumes:
   postgres_data:
   static_volume:
+=======
+    networks:
+      # Добавьте это
+      - shared-network
+
+volumes:
+  postgres_data:
+  static_volume:
+
+
+networks:
+  # Добавьте эту секцию
+  shared-network:
+    external: true # Используем ту же внешнюю сеть
+>>>>>>> origin/ArseniyN
