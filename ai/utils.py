@@ -233,6 +233,7 @@ async def ask_DeepSeek_R1_Distill_Llama_70B_async(messages: str, user_id: int) -
         hist[user_id] = []
         return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
 
+<<<<<<< HEAD
 async def ask_Llama_3_1_Tulu_3_405B_async(messages: str, user_id: int) -> str:
     if user_id not in hist:
         hist[user_id] = []
@@ -328,6 +329,8 @@ async def ask_Llama_3_1_Tulu_3_405B_async(messages: str, user_id: int) -> str:
         return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
 
 
+=======
+>>>>>>> origin/ArseniyN
 async def ask_Meta_Llama_3_1_70B_Instruct_async(messages: str, user_id: int) -> str:
     if user_id not in hist:
         hist[user_id] = []
@@ -443,6 +446,7 @@ async def ask_Mistral_Nemo_Instruct_async(messages: str, user_id: int) -> str:
     return answer
 
 
+<<<<<<< HEAD
 async def ask_QwQ_32B_async(messages: str, user_id: int) -> str:
     if user_id not in hist:
         hist[user_id] = []
@@ -629,6 +633,8 @@ async def ask_Mixtral_8x22b_async(messages: str, user_id: int) -> str:
         hist[user_id] = []
         return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
 
+=======
+>>>>>>> origin/ArseniyN
 async def ask_Gemma_7b_async(messages: str, user_id: int) -> str:
     if user_id not in hist:
         hist[user_id] = []
@@ -768,4 +774,170 @@ async def ask_Gpt_oss_120b_async(messages: str, user_id: int) -> Tuple[str, Opti
             # Очищаем историю при других ошибках
             hist[user_id] = []
             return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
+<<<<<<< HEAD
         
+=======
+        
+async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> str:
+    #проверка на hist делается на стороне сервера. пользователю достаточно просто отправить промпт
+    try:
+        response = await asyncio.to_thread(
+            requests.post,
+            'http://bot-pool-api:3000/api/send',
+            json={
+                "model": "deepseek",
+                "user_id": user_id,
+                "thinking": True,
+                "message": msg
+            },
+            headers={
+                "Content-Type": "application/json",
+            },
+            #proxies=proxies,
+            timeout=120  # Добавляем таймаут для запроса
+        )
+
+        # Логирование статуса ответа и содержимого
+        print(f"Response Status: {response.status_code}")
+        print(f"Response Content: {response.text}")
+
+        if response.status_code != 200:
+            if response.status_code == 400:
+                return 'Неправильный запрос', '0'
+            elif response.status_code == 401:
+                return 'Бот не авторизован. Проверьте логин/пароль', '0'
+            elif response.status_code == 429:
+                return 'Все боты заняты'
+            elif response.status_code >= 503:
+                return 'Бот инициализируется. Попробуйте чуть позже', '0'
+        
+        response_content = response.text  # Используем text вместо content.decode()
+        if not response_content:
+            raise ValueError("Пустой ответ от сервера.")
+
+        try:
+            obj = json.loads(response_content)
+        except json.JSONDecodeError as e:
+            print(f"Ошибка при декодировании JSON: {e}")
+            print(f"Содержимое ответа: {response_content}")
+            return 'Что-то пошло не так с обработкой JSON.', '0'
+
+        return obj['data']["content"], 0
+    
+    except requests.exceptions.ConnectionError as e:
+        print(f"Ошибка соединения: {e}")
+        
+        # Проверяем конкретные типы ошибок соединения
+        if "NameResolutionError" in str(e) or "Failed to resolve" in str(e):
+            return 'Отсутствует подключение к интернету.', '0'
+        elif "Max retries exceeded" in str(e):
+            return 'Отсутствует интернет-соединение.', '0'
+        else:
+            return 'Отсутствует интернет-соединение.', '0'
+    
+    except requests.exceptions.Timeout:
+        print("Таймаут при подключении к API")
+        return 'Таймаут при подключении к серверу. Попробуйте позже.', '0'
+    
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка при выполнении запроса: {e}")
+        return 'Ошибка при подключении к серверу API.', '0'
+    
+    except KeyError as e:
+        if "'choices'" in str(e) or "choices" in str(e):
+            print(f"Ошибка в структуре ответа AI модели: {e}")
+            # Не очищаем историю при этой ошибке
+            return 'Ошибка в ответе от сервера AI.', '0'
+        else:
+            print(f"Ключевая ошибка: {e}")
+            raise
+    
+    except Exception as e:
+        print(f"Общая ошибка: {type(e).__name__}: {e}")
+        # Очищаем историю только при определенных ошибках
+        if "ConnectionError" in str(type(e).__name__) or "timeout" in str(e).lower():
+            # Не очищаем историю при сетевых ошибках
+            return 'Ошибка подключения. Ваш контекст сохранен, попробуйте позже.', '0'
+
+async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
+    #проверка на hist делается на стороне сервера. пользователю достаточно просто отправить промпт
+    try:
+        response = await asyncio.to_thread(
+            requests.post,
+            'http://bot-pool-api:3000/api/send',
+            json={
+                "model": "deepseek",
+                "user_id": user_id,
+                "thinking": False,
+                "message": msg
+            },
+            headers={
+                "Content-Type": "application/json",
+            },
+            #proxies=proxies,
+            timeout=120  # Добавляем таймаут для запроса
+        )
+
+        # Логирование статуса ответа и содержимого
+        print(f"Response Status: {response.status_code}")
+        print(f"Response Content: {response.text}")
+
+        if response.status_code != 200:
+            if response.status_code == 400:
+                return 'Неправильный запрос', '0'
+            elif response.status_code == 401:
+                return 'Бот не авторизован. Проверьте логин/пароль', '0'
+            elif response.status_code == 429:
+                return 'Все боты заняты'
+            elif response.status_code >= 503:
+                return 'Бот инициализируется. Попробуйте чуть позже', '0'
+        
+        response_content = response.text  # Используем text вместо content.decode()
+        if not response_content:
+            raise ValueError("Пустой ответ от сервера.")
+
+        try:
+            obj = json.loads(response_content)
+        except json.JSONDecodeError as e:
+            print(f"Ошибка при декодировании JSON: {e}")
+            print(f"Содержимое ответа: {response_content}")
+            return 'Что-то пошло не так с обработкой JSON.', '0'
+
+        return obj['data']["content"], 0
+    
+    except requests.exceptions.ConnectionError as e:
+        print(f"Ошибка соединения: {e}")
+        
+        # Проверяем конкретные типы ошибок соединения
+        if "NameResolutionError" in str(e) or "Failed to resolve" in str(e):
+            return 'Отсутствует подключение к интернету.', '0'
+        elif "Max retries exceeded" in str(e):
+            return 'Отсутствует интернет-соединение.', '0'
+        else:
+            return 'Отсутствует интернет-соединение.', '0'
+    
+    except requests.exceptions.Timeout:
+        print("Таймаут при подключении к API")
+        return 'Таймаут при подключении к серверу. Попробуйте позже.', '0'
+    
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка при выполнении запроса: {e}")
+        return 'Ошибка при подключении к серверу API.', '0'
+    
+    except KeyError as e:
+        if "'choices'" in str(e) or "choices" in str(e):
+            print(f"Ошибка в структуре ответа AI модели: {e}")
+            # Не очищаем историю при этой ошибке
+            return 'Ошибка в ответе от сервера AI.', '0'
+        else:
+            print(f"Ключевая ошибка: {e}")
+            raise
+    
+    except Exception as e:
+        print(f"Общая ошибка: {type(e).__name__}: {e}")
+        # Очищаем историю только при определенных ошибках
+        if "ConnectionError" in str(type(e).__name__) or "timeout" in str(e).lower():
+            # Не очищаем историю при сетевых ошибках
+            return 'Ошибка подключения. Ваш контекст сохранен, попробуйте позже.', '0'
+
+>>>>>>> origin/ArseniyN
