@@ -1,0 +1,121 @@
+<!doctype html>
+{% load static %}
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+        content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <link rel="stylesheet" href="{% static 'admin/css/decide_task.css' %}"/>
+    <script src="{% static 'admin/js/decide_task.js' %}" defer></script>
+    <title>DLAPI</title>
+</head>
+
+<body>
+    <div id="content">
+        <div class="line-panel">
+            <div>
+                <select id="selectLang">
+                    <option language="Russian">Русский</option>
+                    <option language="English">English</option>
+                    <option language="French">Français</option>
+                </select>
+                <select id="select">
+                    <option value="DeepSeek_R1_Distill_Llama_70B">DeepSeek-R1-Distill-Llama-70B</option>
+                    <option value="DeepSeek_R1">DeepSeek-R1</option>
+                    <option value="Meta_Llama_3_1_70B_Instruct">Meta-Llama-3.1-70B-Instruct</option>
+                    <option value="Mixtral_8x22b">Mixtral-8x22b</option>
+                    <option value="Gpt_oss_120b">Gpt_oss_120b</option>
+                    <option value="Web_DeepSeek">Web DeepSeek</option>
+                    <option value="Web_DeepSeek_Thinking">Web DeepSeek Thinking</option>
+                </select>
+                <select id="selectType"
+                    onchange="document.location.href=this.querySelector('option:checked').dataset.link">
+                    <option data-link="/ai/chat/">Чат с DLAI</option>
+                    <option selected>Реши задачу</option>
+                    <option data-link="/ai/find-error/">В чём ошибка?</option>
+                </select>
+            </div>
+            <div class="voice-mod-div">
+                <button type="button" class="voice-mode-btn" onclick="toggleVoiceControls()">
+                    Голосовой режим
+                </button>
+                <div class="voice-status" id="voiceStatus"></div>
+            </div>
+            <!-- Голосовые контролы (скрыты по умолчанию) -->
+            <div class="voice-controls" id="voiceControls">
+                <button type="button" class="voice-btn" id="voiceInputBtn" onclick="toggleVoiceInput()">
+                    <span class="voice-input-indicator" id="voiceIndicator"></span>
+                    Голосовой ввод
+                </button>
+                <button type="button" class="voice-btn" id="voiceOutputBtn" onclick="speakLastResponse()">
+                    Озвучить ответ
+                </button>
+                <button type="button" class="voice-btn" onclick="stopSpeech()">
+                    Стоп
+                </button>
+                
+                <!-- Чекбокс для think-тегов -->
+                <div class="think-checkbox">
+                    <input type="checkbox" id="speakThinkContent" checked>
+                    <label for="speakThinkContent">Озвучивать think-блоки</label>
+                </div>
+                
+            </div>
+        </div>
+        <hr/>
+        <div class="blo">
+            <ul id='messages'>
+            </ul>
+            <div class="dv">
+                <div class="resize-button" onmousedown="startResize(event)">🠔 </div>
+                <form action="" onsubmit="sendMessage(event)">
+                    
+                    <textarea type="text" id="messageText"
+                        placeholder="Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)"
+                        autocomplete="off"></textarea>
+                    <div class="buttons-block">
+                        <button type="submit">Send</button>
+                        <button type="button" onclick="clearContext()">Clear Context</button>
+                        <!--<div class="check">
+                            <input type="checkbox" class="inp" checked> <div class="check-text">При нажатии на Enter будет отправлятся вопрос(для переноса строки Enter+Shift)</div>
+                        </div> -->
+                    </div> 
+
+                    <div class="top-dv">
+                        <select id="selectProgLng">
+                        </select>
+                        <select id="selectTheme">
+                        </select>
+                        <div class="top-preprompt">
+                            <div class="preprompt">Препромпт:</div>
+                            <select id="selectPrompt">
+                            </select>
+                        </div>
+                    </div>   
+                </form>
+            </div>
+        </div>
+
+        <div class="sidebar">
+            <a href="/ai/admin" style="text-decoration: none; color: black;">
+                <div class="sidebar-header">
+                    Админ-Панель
+                </div>
+            </a>
+            <div class="sidebar-content">
+            </div>
+        </div>
+        
+        <a href="/ai/admin" style="text-decoration: none; color: black;">
+            <button class="toggle-button">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="9 18 15 12 9 6" />
+                </svg>
+            </button>
+        </a>
+    </div>
+</body>
+</html>
