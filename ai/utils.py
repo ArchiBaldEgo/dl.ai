@@ -233,7 +233,6 @@ async def ask_DeepSeek_R1_Distill_Llama_70B_async(messages: str, user_id: int) -
         hist[user_id] = []
         return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
 
-<<<<<<< HEAD
 async def ask_Llama_3_1_Tulu_3_405B_async(messages: str, user_id: int) -> str:
     if user_id not in hist:
         hist[user_id] = []
@@ -329,8 +328,6 @@ async def ask_Llama_3_1_Tulu_3_405B_async(messages: str, user_id: int) -> str:
         return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
 
 
-=======
->>>>>>> origin/ArseniyN
 async def ask_Meta_Llama_3_1_70B_Instruct_async(messages: str, user_id: int) -> str:
     if user_id not in hist:
         hist[user_id] = []
@@ -446,7 +443,6 @@ async def ask_Mistral_Nemo_Instruct_async(messages: str, user_id: int) -> str:
     return answer
 
 
-<<<<<<< HEAD
 async def ask_QwQ_32B_async(messages: str, user_id: int) -> str:
     if user_id not in hist:
         hist[user_id] = []
@@ -633,8 +629,6 @@ async def ask_Mixtral_8x22b_async(messages: str, user_id: int) -> str:
         hist[user_id] = []
         return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
 
-=======
->>>>>>> origin/ArseniyN
 async def ask_Gemma_7b_async(messages: str, user_id: int) -> str:
     if user_id not in hist:
         hist[user_id] = []
@@ -774,9 +768,6 @@ async def ask_Gpt_oss_120b_async(messages: str, user_id: int) -> Tuple[str, Opti
             # Очищаем историю при других ошибках
             hist[user_id] = []
             return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
-<<<<<<< HEAD
-        
-=======
         
 async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> str:
     #проверка на hist делается на стороне сервера. пользователю достаточно просто отправить промпт
@@ -807,7 +798,7 @@ async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> str:
             elif response.status_code == 401:
                 return 'Бот не авторизован. Проверьте логин/пароль', '0'
             elif response.status_code == 429:
-                return 'Все боты заняты'
+                return 'Все боты заняты', '0'
             elif response.status_code >= 503:
                 return 'Бот инициализируется. Попробуйте чуть позже', '0'
         
@@ -939,5 +930,3 @@ async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
         if "ConnectionError" in str(type(e).__name__) or "timeout" in str(e).lower():
             # Не очищаем историю при сетевых ошибках
             return 'Ошибка подключения. Ваш контекст сохранен, попробуйте позже.', '0'
-
->>>>>>> origin/ArseniyN

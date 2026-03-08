@@ -31,16 +31,33 @@ DB_NAME = os.getenv("DB_NAME", "dl_ai")
 DB_HOST = os.getenv("DB_HOST", "db")
 DB_PORT = os.getenv("DB_PORT", "5432")
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
-ALLOWED_HOSTS = [ 
-    "dl.gsu.by",
-    "dlai.gsu.by",
-    "127.0.0.1",
-    "localhost",
-    "10.1.2.201",
-    ]
+
+def _env_csv(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = _env_bool("DEBUG", default=False)
+
+ALLOWED_HOSTS = _env_csv(
+    "ALLOWED_HOSTS",
+    default=[
+        "dl.gsu.by",
+        "dlai.gsu.by",
+        "127.0.0.1",
+        "localhost",
+        "10.1.2.201",
+    ],
+)
 
 
 # Application definition
@@ -91,7 +108,19 @@ ASGI_APPLICATION = 'DjangoTest.asgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
-CSRF_TRUSTED_ORIGINS = ['http://dl.gsu.by', 'https://dl.gsu.by']
+CSRF_TRUSTED_ORIGINS = _env_csv(
+    "CSRF_TRUSTED_ORIGINS",
+    default=[
+        "http://dl.gsu.by",
+        "https://dl.gsu.by",
+        "http://dlai.gsu.by",
+        "https://dlai.gsu.by",
+    ],
+)
+
+# If you terminate TLS at a reverse proxy (nginx, etc.), enable this.
+if _env_bool("USE_X_FORWARDED_PROTO", default=not DEBUG):
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',

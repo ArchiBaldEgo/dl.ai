@@ -5,19 +5,24 @@ ENV PYTHONUNBUFFERED=1
 
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
+ARG ALL_PROXY
 ARG NO_PROXY
 ARG http_proxy
 ARG https_proxy
+ARG all_proxy
 ARG no_proxy
 
-ENV HTTP_PROXY=${HTTP_PROXY}
-ENV HTTPS_PROXY=${HTTPS_PROXY}
-ENV NO_PROXY=${NO_PROXY}
-ENV http_proxy=${http_proxy}
-ENV https_proxy=${https_proxy}
-ENV no_proxy=${no_proxy}
+ENV HTTP_PROXY=$HTTP_PROXY \
+	HTTPS_PROXY=$HTTPS_PROXY \
+	ALL_PROXY=$ALL_PROXY \
+	NO_PROXY=$NO_PROXY \
+	http_proxy=$http_proxy \
+	https_proxy=$https_proxy \
+	all_proxy=$all_proxy \
+	no_proxy=$no_proxy
 
-RUN apt-get update && apt-get install -y libpq-dev
+RUN apt-get update 
+RUN apt-get install -y libpq-dev
 RUN pip install --upgrade pip
 
 WORKDIR /app

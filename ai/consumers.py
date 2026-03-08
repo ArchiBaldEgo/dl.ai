@@ -43,7 +43,6 @@ class MyConsumer(AsyncWebsocketConsumer):
         print(f"Connection closed for client {self.client_id}")
 
     async def receive(self, text_data):
-
         try:
             data = json.loads(text_data)
             print(f"Received data: {data}")
@@ -122,33 +121,24 @@ class MyConsumer(AsyncWebsocketConsumer):
                 elif value == "DeepSeek_R1_Distill_Llama_70B":
                     response = await ask_DeepSeek_R1_Distill_Llama_70B_async(message, self.client_id)
                     modell = "DeepSeek_R1_Distill_Llama_70B"
-<<<<<<< HEAD
                 elif value == "Llama_3_1_Tulu_3_405B":
                     response = await ask_Llama_3_1_Tulu_3_405B_async(message, self.client_id)
-                    modell = "Llama_3_1_Tulu_3_405B"
+                    modell = value
                 elif value == "DeepSeek_R1":
                     response = await ask_DeepSeek_R1_async(message, self.client_id)
-                    modell = "DeepSeek_R1"
+                    modell = value
                 elif value == "QwQ_32B":
                     response = await ask_QwQ_32B_async(message, self.client_id)
-                    modell = "QwQ_32B"
+                    modell = value
                 elif value == "Gpt_oss_120b":
                     response = await ask_Gpt_oss_120b_async(message, self.client_id)
-                    modell = "Gpt_oss_120b"
-=======
-                elif value == "DeepSeek_R1":
-                    response = await ask_DeepSeek_R1_async(message, self.client_id)
-                    modell = "DeepSeek_R1"
-                elif value == "Gpt_oss_120b":
-                    response = await ask_Gpt_oss_120b_async(message, self.client_id)
-                    modell = "Gpt_oss_120b"
+                    modell = value
                 elif value == "Web_DeepSeek":
                     response = await ask_Web_DeepSeek_async(message, self.client_id)
-                    modell = "Web_DeepSeek"
+                    modell = value
                 elif value == "Web_DeepSeek_Thinking":
                     response = await ask_Web_DeepSeek_Thinking_async(message, self.client_id)
-                    modell = "Web_DeepSeek_Thinking" # правильнее делать modell = value, иначе повторы идут
->>>>>>> origin/ArseniyN
+                    modell = value
                 else:
                     response = f"Модель {value} не найдена. Используйте доступные модели."
                 
@@ -181,7 +171,7 @@ class MyConsumer(AsyncWebsocketConsumer):
                 Потрачено токенов: {response[1]}
                 {response[0]}''')
             else:
-                await self.send(text_data=f'''<think> {end_hour}:{end_minute}:{end_second} Запрос успешно обработан</think>
+                await self.send(text_data=f'''<think> {end_str} Запрос успешно обработан</think>
                 {response}''')
 
         except json.JSONDecodeError as e:
