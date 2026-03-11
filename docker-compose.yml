@@ -5,6 +5,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: "http://main%5Cdlupdate:3sd4y-K8yf3@proxy.gsu.by:800/"
+        HTTPS_PROXY: "http://main%5Cdlupdate:3sd4y-K8yf3@proxy.gsu.by:800/"
+        NO_PROXY: "localhost,127.0.0.1,db,nginx,.local"
     container_name: dl_ai_web
     command: daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application
     restart: unless-stopped
@@ -14,22 +18,26 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      - HTTP_PROXY=http://main%5Cdlupdate:3sd4y-K8yf3@proxy.gsu.by:800/
+      - HTTPS_PROXY=http://main%5Cdlupdate:3sd4y-K8yf3@proxy.gsu.by:800/
+      - NO_PROXY=localhost,127.0.0.1,db,nginx,.local
     depends_on:
       - db
     networks:
-      # Добавьте это
-      - shared-network # Подключаем к общей сети
+      - shared-network
 
   db:
     image: postgres:14
     container_name: dl_ai_db
-    restart: unless-stopped
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
       POSTGRES_USER: dlaibd
       POSTGRES_PASSWORD: dlaibd
       POSTGRES_DB: dlaibd
+    networks:
+      - shared-network
 
   nginx:
     image: nginx:latest
@@ -43,7 +51,6 @@ services:
     depends_on:
       - web
     networks:
-      # Добавьте это
       - shared-network
 
 volumes:
@@ -52,6 +59,5 @@ volumes:
 
 
 networks:
-  # Добавьте эту секцию
   shared-network:
-    external: true # Используем ту же внешнюю сеть
+    external: true
