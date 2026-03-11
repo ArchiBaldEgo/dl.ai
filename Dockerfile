@@ -1,4 +1,4 @@
-FROM python:3.10.9
+GNU nano 7.2                                                             Dockerfile                                                                       FROM python:3.10.9
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -18,7 +18,18 @@ RUN if [ -n "$HTTP_PROXY" ]; then \
     pip config set global.proxy "$HTTP_PROXY"; \
     fi
 
-RUN apt-get update && apt-get install -y libpq-dev
+RUN rm -rf /var/lib/apt/lists/* && \
+    printf '%s\n' \
+    'Acquire::Retries "5";' \
+    'Acquire::http::Pipeline-Depth "0";' \
+    'Acquire::http::No-Cache "true";' \
+    'Acquire::http::No-Store "true";' \
+    'Acquire::By-Hash "yes";' \
+    'Acquire::CompressionTypes::Order { "gz"; "bz2"; "xz"; };' \
+    > /etc/apt/apt.conf.d/99proxyfix && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends libpq-dev && \
+    rm -rf /var/lib/apt/lists/*
 RUN pip install --upgrade pip
 
 WORKDIR /app
