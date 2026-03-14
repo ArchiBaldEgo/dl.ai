@@ -1,4 +1,4 @@
-GNU nano 7.2                                                             Dockerfile                                                                       FROM python:3.10.9
+FROM python:3.10.9
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
