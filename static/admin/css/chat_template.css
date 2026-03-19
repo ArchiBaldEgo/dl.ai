@@ -1,0 +1,732 @@
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
+
+body {
+    font-family: 'Roboto', sans-serif;
+    margin: 0;
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+}
+
+#content {
+    height: 100%;
+    width: 100%;
+}
+
+.think {
+    background-color: #f0f8ff;
+    border-left: 5px solid #4caf50;
+    padding: 15px 20px;
+    margin: 10px 0;
+    font-family: 'Arial', sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+    color: #333;
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    transition: all 0.3s ease;
+}
+
+h1,
+h2 {
+    font-family: 'Roboto', sans-serif;
+}
+
+h1 {
+    font-size: 2.5em;
+    color: #333;
+    margin-bottom: 20px;
+}
+
+h2 {
+    font-size: 2em;
+    color: #555;
+    margin-bottom: 15px;
+}
+
+#messageText {
+    width: 100%;
+    font-size: 18px;
+    border: 2px solid #ccc;
+    border-radius: 10px;
+    box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+    resize: none;
+    height: 80vh;
+    margin-top: 2vh;
+}
+
+button {
+    padding: 10px 20px;
+    margin: 5px;
+    font-size: 16px;
+    color: white;
+    background-color: #007BFF;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+    transition: background-color 0.3s ease;
+}
+
+button:hover {
+    background-color: #0056b3;
+}
+
+#messages {
+    height: 80vh;
+    width: 100vw;
+    margin-left: 10px;
+    margin-right: 10px;
+    padding: 20px 0;
+    padding: 10px;
+    border: 2px solid #ccc;
+    border-radius: 10px;
+    box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+    overflow-y: auto;
+    font-family: 'Roboto', sans-serif;
+    background-color: #fff;
+}
+
+#messages li {
+    font-size: 18px;
+}
+
+.msg-user {
+    background-color: #e6f0ff;
+    border-left: 5px solid #3399ff;
+}
+
+.msg-assistant {
+    background-color: #eaffea;
+    border-left: 5px solid #4caf50;
+}
+
+.accordion {
+    background-color: #eee;
+    color: #444;
+    cursor: pointer;
+    padding: 10px;
+    width: 100%;
+    border: none;
+    text-align: left;
+    outline: none;
+    font-size: 18px;
+    transition: background-color 0.2s ease;
+    border-radius: 5px;
+    margin: 3px;
+}
+
+.accordion-user {
+    background-color: #3399ff;
+    color: #fff;
+}
+
+.accordion-user.active,
+.accordion-user:hover {
+    background-color: #1976d2;
+}
+
+.accordion-assistant {
+    background-color: #4caf50;
+    color: #fff;
+}
+
+.accordion-assistant.active,
+.accordion-assistant:hover {
+    background-color: #357a38;
+}
+
+.panel {
+    padding: 0 10px;
+    display: none;
+    background-color: white;
+    overflow: hidden;
+    border-radius: 0 0 5px 5px;
+}
+
+.panel.open {
+    display: block;
+}
+
+form {
+    display: flex;
+    flex-direction: column;
+    margin-right: 1vw;
+    padding-left: 40px;
+    width: 35vw;
+    max-width: 90vw;
+    max-height: 95%;
+}
+
+#select,
+#selectType,
+#selectLang {
+    font-size: 18px;
+    max-width: 77%;
+}
+
+.blo {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+}
+
+.line-panel {
+    display: flex;
+    grid-row: 1;
+    align-items: center;
+    background-color: #d8d8d8;
+    padding-left: 10px;
+    height: 80px;
+    position: relative;
+}
+
+.panel-date {
+    position: absolute;
+    right: 20px;
+    bottom: 8px;
+    font-size: 12px;
+    color: #3b3b3b;
+    opacity: 0.75;
+    pointer-events: none;
+}
+
+hr {
+    margin: 0;
+    color: #ccc;
+}
+
+.resize-button {
+    left: 2;
+    position: absolute;
+    height: 83vh;
+    margin-top: 2vh;
+    width: 30px;
+    background-color: #d8d8d8;
+    cursor: ew-resize;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
+    transition: background-color 0.3s ease;
+    font-size: 32px;
+    color: black;
+}
+
+.check {
+    font-family: 'Roboto', sans-serif;
+    font-size: small;
+    font-weight: 400;
+    display: flex;
+    align-items: center;
+}
+
+.dv {
+    display: grid;
+    justify-content: flex-start;
+}
+
+.dv button {
+    width: 150px;
+    padding: 5px 30px;
+}
+
+.buttons-block {
+    display: flex;
+    flex-direction: row;
+    justify-content: flex-start;
+    height: 60px;
+}
+
+.toggle-button {
+    margin: 0;
+    padding: 0;
+    position: absolute;
+    top: 10px;
+    right: 0;
+    border: none;
+    background-color: transparent;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    z-index: 1001;
+    height: 50px;
+    background-color: rgb(207, 205, 205);
+    border-radius: 30px 0 0 30px;
+}
+
+.toggle-button::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -30px;
+    width: 30px;
+    height: 100%;
+    transition: all 0.3s ease;
+    z-index: -1;
+}
+
+.toggle-button:hover {
+    background-color: rgb(119, 119, 119);
+}
+
+.sidebar {
+    position: fixed;
+    top: 0;
+    right: -300px;
+    width: 300px;
+    height: 100%;
+    background-color: white;
+    box-shadow: -2px 0 5px rgba(0, 0, 0, 0.2);
+    transition: transform 0.3s ease-in-out;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid rgba(0, 0, 0, 0.1);
+    z-index: 1000;
+}
+
+.sidebar-header {
+    padding: 15px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.sidebar-content {
+    padding: 15px;
+    flex: 1;
+}
+
+.sidebar.open {
+    transform: translateX(-300px);
+}
+
+.sidebar.open+.toggle-button {
+    transform: translateX(-300px);
+}
+
+.toggle-button svg {
+    transition: transform 0.3s ease;
+    transform: rotate(180deg);
+}
+
+.sidebar.open+.toggle-button svg {
+    transform: rotate(0deg);
+}
+
+.voice-controls {
+    display: none;
+    margin: 0px 0px;
+    flex-wrap: wrap;
+}
+
+.voice-controls.active {
+    display: flex;
+}
+
+.voice-btn {
+    display: flex;
+    align-items: center;
+    padding: 8px 15px;
+    font-size: 14px;
+    height: 45px;
+}
+
+.voice-btn.recording {
+    background-color: #ff4444;
+    animation: pulse 1.5s infinite;
+}
+
+.voice-btn.speaking {
+    background-color: #4caf50;
+}
+
+.voice-status {
+    font-size: 14px;
+    color: #666;
+    margin: 0px;
+    min-height: 20px;
+}
+
+@keyframes pulse {
+    0% {
+        background-color: #ff4444;
+    }
+
+    50% {
+        background-color: #ff6666;
+    }
+
+    100% {
+        background-color: #ff4444;
+    }
+}
+
+.voice-input-indicator {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background-color: #ff4444;
+    border-radius: 50%;
+    margin-right: 5px;
+    opacity: 0;
+}
+
+.voice-input-indicator.active {
+    animation: voicePulse 0.8s infinite;
+}
+
+@keyframes voicePulse {
+    0% {
+        opacity: 0.3;
+        transform: scale(0.8);
+    }
+
+    50% {
+        opacity: 1;
+        transform: scale(1.2);
+    }
+
+    100% {
+        opacity: 0.3;
+        transform: scale(0.8);
+    }
+}
+
+.voice-mod-div {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-left: 10px;
+}
+
+.voice-mode-btn {
+    margin: 0px 5px;
+    width: fit-content;
+    height: 45px;
+    margin-top: 19px;
+}
+
+.think-checkbox {
+    display: flex;
+    align-items: center;
+    margin: 5px 10px;
+    font-size: 14px;
+}
+
+.think-checkbox input {
+    margin-right: 8px;
+}
+
+/* При масштабе 80% */
+@media (min-resolution: 95dpi) and (max-resolution: 105dpi) {
+    .line-panel {
+        display: flex;
+        grid-row: 1;
+        align-items: center;
+        background-color: #d8d8d8;
+        padding-left: 10px;
+        height: 120px;
+    }
+
+    .voice-mode-btn {
+        margin: 0px 5px;
+        width: 160px;
+        height: 50px;
+        font-size: 14px;
+        margin-top: 21px;
+    }
+
+    .voice-btn {
+        margin: 15px 5px;
+        margin-top: 17px;
+        display: flex;
+        align-items: center;
+        text-align: center;
+        padding: 8px 15px;
+        font-size: 14px;
+        height: 50px;
+    }
+}
+
+
+/* При масштабе 90% */
+@media (min-resolution: 106dpi) and (max-resolution: 118dpi) {
+    .line-panel {
+        display: flex;
+        grid-row: 1;
+        align-items: center;
+        background-color: #d8d8d8;
+        padding-left: 10px;
+        height: 100px;
+    }
+}
+
+/* При масштабе 110%*/
+@media (min-resolution: 131dpi) and (max-resolution: 143dpi) {
+    .line-panel {
+        display: flex;
+        grid-row: 1;
+        align-items: center;
+        background-color: #d8d8d8;
+        padding-left: 10px;
+        height: 80px;
+    }
+
+    .voice-mode-btn {
+        margin: 0px 5px;
+        width: 140px;
+        height: 45px;
+        font-size: 14px;
+        margin-top: 21px;
+    }
+
+    .voice-btn {
+        margin: 15px 5px;
+        margin-top: 17px;
+        display: flex;
+        align-items: center;
+        text-align: center;
+        padding: 8px 15px;
+        font-size: 14px;
+        height: 45px;
+    }
+}
+
+/* При масштабе 125% */
+@media (min-resolution: 144dpi) and (max-resolution: 150dpi) {
+    .line-panel {
+        display: flex;
+        grid-row: 1;
+        align-items: center;
+        background-color: #d8d8d8;
+        padding-left: 10px;
+        height: 80px;
+    }
+
+    button {
+        padding: 10px 20px;
+        margin: 5px;
+        font-size: 16px;
+        color: white;
+        background-color: #007BFF;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        transition: background-color 0.3s ease;
+        height: 40px;
+    }
+
+    .voice-mode-btn {
+        margin: 0px 5px;
+        margin-left: -5px;
+        width: 120px;
+        height: 40px;
+        font-size: 12px;
+        margin-top: 21px;
+    }
+
+    #messages {
+        height: 79vh;
+        width: 100vw;
+        margin-left: 10px;
+        margin-right: 10px;
+        padding: 20px 0;
+        padding: 10px;
+        border: 2px solid #ccc;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        overflow-y: auto;
+        font-family: 'Roboto', sans-serif;
+        background-color: #fff;
+    }
+
+    #messageText {
+        width: 100%;
+        font-size: 18px;
+        border: 2px solid #ccc;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        resize: none;
+        height: 79vh;
+        margin-top: 2vh;
+    }
+
+}
+
+/* При масштабе 150% */
+@media (min-resolution: 151dpi) and (max-resolution: 180dpi) {
+    .line-panel {
+        display: flex;
+        grid-row: 1;
+        align-items: center;
+        background-color: #d8d8d8;
+        padding-left: 10px;
+        height: 80px;
+    }
+
+    button {
+        padding: 10px 20px;
+        margin: 5px;
+        font-size: 16px;
+        color: white;
+        background-color: #007BFF;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        transition: background-color 0.3s ease;
+        height: 43px;
+    }
+
+    #messageText {
+        width: 100%;
+        font-size: 18px;
+        border: 2px solid #ccc;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        resize: none;
+        height: 73vh;
+        margin-top: 2vh;
+    }
+
+    .voice-btn {
+        margin: -5px 5px;
+        margin-top: 17px;
+        display: flex;
+        align-items: center;
+        text-align: center;
+        padding: 8px 15px;
+        font-size: 12px;
+    }
+
+    .voice-mode-btn {
+        margin: 0px 5px;
+        margin-left: -5px;
+        width: fit-content;
+        height: 40px;
+        font-size: 12px;
+        margin-top: 13px;
+    }
+
+    #messages {
+        height: 75vh;
+        width: 100vw;
+        margin-left: 10px;
+        margin-right: 10px;
+        padding: 20px 0;
+        padding: 10px;
+        border: 2px solid #ccc;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        overflow-y: auto;
+        font-family: 'Roboto', sans-serif;
+        background-color: #fff;
+    }
+
+    .resize-button {
+        left: 2;
+        position: absolute;
+        height: 80vh;
+        margin-top: 2vh;
+        width: 30px;
+        background-color: #d8d8d8;
+        cursor: ew-resize;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
+        transition: background-color 0.3s ease;
+        font-size: 32px;
+        color: black;
+    }
+}
+
+/* При масштабе 150% */
+@media (min-resolution: 181dpi) {
+    .line-panel {
+        display: flex;
+        grid-row: 1;
+        align-items: center;
+        background-color: #d8d8d8;
+        padding-left: 10px;
+        height: 70px;
+    }
+
+    button {
+        padding: 10px 20px;
+        margin: 5px;
+        font-size: 16px;
+        color: white;
+        background-color: #007BFF;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        transition: background-color 0.3s ease;
+        height: 43px;
+    }
+
+    #messageText {
+        width: 100%;
+        font-size: 18px;
+        border: 2px solid #ccc;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        resize: none;
+        height: 70vh;
+        margin-top: 2vh;
+    }
+
+    .voice-btn {
+        margin: -5px 5px;
+        margin-top: 17px;
+        display: flex;
+        align-items: center;
+        text-align: center;
+        padding: 8px 15px;
+        font-size: 10px;
+    }
+
+    .voice-mode-btn {
+        margin: 0px 5px;
+        margin-left: -5px;
+        width: fit-content;
+        height: 40px;
+        font-size: 10px;
+        margin-top: 13px;
+    }
+
+    #messages {
+        height: 71vh;
+        width: 100vw;
+        margin-left: 10px;
+        margin-right: 10px;
+        padding: 20px 0;
+        padding: 10px;
+        border: 2px solid #ccc;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        overflow-y: auto;
+        font-family: 'Roboto', sans-serif;
+        background-color: #fff;
+    }
+
+    .resize-button {
+        left: 2;
+        position: absolute;
+        height: 80vh;
+        margin-top: 2vh;
+        width: 30px;
+        background-color: #d8d8d8;
+        cursor: ew-resize;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
+        transition: background-color 0.3s ease;
+        font-size: 32px;
+        color: black;
+    }
+}
