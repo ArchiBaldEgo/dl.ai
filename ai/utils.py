@@ -44,7 +44,7 @@ async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25
                 requests.post,
                 'https://api.sambanova.ai/v1/chat/completions',
                 json={
-                    "model": "DeepSeek-R1",
+                    "model": "DeepSeek-R1-0528",
                     "messages": hist[user_id],
                     "max_tokens": 9000,
                     "temperature": 0.7,
