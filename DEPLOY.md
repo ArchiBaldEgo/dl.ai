@@ -166,6 +166,9 @@ docker compose --env-file .env exec -T web python manage.py collectstatic --noin
 
 Важно: порядок локаций должен быть именно такой (сначала static, потом ws, потом общий `/ai/`).
 
+Готовый сниппет лежит в `nginx/external-dl.gsu.by.example.nginx-snippet`.
+Это файл-шаблон для внешнего nginx: не кладите его в `/etc/nginx/conf.d` контейнера этого проекта.
+
 Пример рабочего фрагмента:
 
 ```nginx

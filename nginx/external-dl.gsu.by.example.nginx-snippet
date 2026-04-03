@@ -1,7 +1,10 @@
 # Example external nginx config for dl.gsu.by -> docker AI stack on 127.0.0.1:8081
 #
-# Place these location blocks inside the existing server { ... } for dl.gsu.by.
-# Order matters: static -> websocket -> generic /ai/.
+# IMPORTANT:
+# - This snippet is for the OUTER nginx on dl.gsu.by.
+# - Do not copy this file into this repo's nginx/conf.d on the app host.
+# - Paste these location blocks into the existing server { ... } for dl.gsu.by.
+# - Order matters: static -> websocket -> generic /ai/.
 
 location ^~ /ai/static/ {
     proxy_pass http://127.0.0.1:8081/ai/static/;
