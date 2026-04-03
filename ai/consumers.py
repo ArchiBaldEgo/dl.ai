@@ -106,6 +106,7 @@ class MyConsumer(AsyncWebsocketConsumer):
             await self.send(text_data=f"<think> {start_str} Обрабатываю запрос пользователя</think> Вы: {message}")
             # Обработка модели AI
             response = "Что-то пошло не так. Попробуйте еще раз."
+            modell = value
 
             try:
                 # Используем выбранную модель
@@ -160,13 +161,15 @@ class MyConsumer(AsyncWebsocketConsumer):
 
             # Отправляем ответ
             if isinstance(response, tuple):
+                response_text = response[0] if len(response) > 0 else "Пустой ответ от модели."
+                response_tokens = response[1] if len(response) > 1 else '0'
                 await self.send(text_data=f'''<think> {end_str} Запрос успешно обработан</think>
                 Модель: {modell}
                 Время обработки запроса: {duration}
-                Потрачено токенов: {response[1]}
-                {response[0]}''')
+                Потрачено токенов: {response_tokens}
+                {response_text}''')
             else:
-                await self.send(text_data=f'''<think> {end_hour}:{end_minute}:{end_second} Запрос успешно обработан</think>
+                await self.send(text_data=f'''<think> {end_str} Запрос успешно обработан</think>
                 {response}''')
 
         except json.JSONDecodeError as e:
