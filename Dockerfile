@@ -21,8 +21,16 @@ ENV HTTP_PROXY=$HTTP_PROXY \
 	all_proxy=$all_proxy \
 	no_proxy=$no_proxy
 
+RUN if [ -n "$HTTP_PROXY" ]; then \
+		echo "Acquire::http::Proxy \"$HTTP_PROXY\";" > /etc/apt/apt.conf.d/99proxy; \
+		echo "Acquire::https::Proxy \"${HTTPS_PROXY:-$HTTP_PROXY}\";" >> /etc/apt/apt.conf.d/99proxy; \
+	fi
+
 RUN apt-get update 
 RUN apt-get install -y libpq-dev
+RUN if [ -n "$HTTP_PROXY" ]; then \
+		python -m pip config set global.proxy "${HTTPS_PROXY:-$HTTP_PROXY}"; \
+	fi
 RUN pip install --upgrade pip
 
 WORKDIR /app

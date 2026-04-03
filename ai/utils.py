@@ -13,25 +13,69 @@ from dotenv import load_dotenv
 from typing import Tuple, Optional
 import time
 from asyncio import TimeoutError as AsyncTimeoutError
+from urllib.parse import urlsplit, urlunsplit, quote
 
 load_dotenv()
 CLIENT_ID = os.getenv("CLIENT_ID")
 SECRET = os.getenv("SBER_SECRET")
 HF_TOKEN = os.getenv("HF_TOKEN")
-SC_TOKEN=os.getenv("SC_TOKEN")
+SC_TOKEN = (
+    os.getenv("SC_TOKEN")
+    or os.getenv("SAMBANOVA_API_KEY")
+    or os.getenv("SAMBANOVA_TOKEN")
+)
 MIST_TOKEN = os.getenv("MIST_TOKEN")
 GROQ_TOKEN = os.getenv("GROQ_TOKEN")
 timeout = 0
 
 hist=dict([])
 
-proxies = {
-            'http': os.getenv("PROXY"),
-            'https': os.getenv("PROXY")
-        }
+
+def _encode_proxy_credentials(proxy_url: str) -> str:
+    """Safely encode proxy user/password so special chars do not break requests."""
+    parsed = urlsplit(proxy_url)
+    if not parsed.hostname:
+        return proxy_url
+
+    if parsed.username is None and parsed.password is None:
+        return proxy_url
+
+    username = quote(parsed.username or "", safe="")
+    password = quote(parsed.password or "", safe="")
+    auth = username if parsed.password is None else f"{username}:{password}"
+    host = parsed.hostname
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+
+    netloc = f"{auth}@{host}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def _get_requests_proxies() -> Optional[dict]:
+    raw_proxy = (
+        os.getenv("PROXY")
+        or os.getenv("HTTPS_PROXY")
+        or os.getenv("HTTP_PROXY")
+        or os.getenv("https_proxy")
+        or os.getenv("http_proxy")
+    )
+    if not raw_proxy:
+        return None
+
+    proxy_url = _encode_proxy_credentials(raw_proxy.strip().strip("\"'"))
+    return {
+        'http': proxy_url,
+        'https': proxy_url,
+    }
+
+
+proxies = _get_requests_proxies()
 
 
 async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25.0) -> Tuple[str, Optional[int]]:
+
+    if not SC_TOKEN:
+        return 'Не задан токен SambaNova. Укажите SC_TOKEN (или SAMBANOVA_API_KEY) в .env и перезапустите контейнер.', '0'
 
     if user_id not in hist:
         hist[user_id] = []
@@ -73,6 +117,15 @@ async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25
                 return 'Превышен лимит запросов. Попробуйте позже.', 
             elif response.status_code >= 500:
                 return 'Ошибка сервера API. Попробуйте позже.', '0'
+            elif response.status_code == 401:
+                details = (response.text or '').strip().replace('\n', ' ')
+                if len(details) > 220:
+                    details = details[:220] + '...'
+                return (
+                    'Ошибка API (код 401). Проверьте SC_TOKEN/SAMBANOVA_API_KEY, права токена и прокси-аутентификацию. '
+                    f'Ответ API: {details or "без деталей"}',
+                    '0'
+                )
             else:
                 return f'Ошибка API (код {response.status_code}).', '0'
         
