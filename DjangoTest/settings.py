@@ -168,8 +168,10 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 STATIC_URL = '/ai/static/'
 
+# Include project-level static assets (chat_template.css, decide_task.css, etc.)
+# so `collectstatic` copies them into STATIC_ROOT in production.
+STATICFILES_DIRS = [
+    BASE_DIR / 'static',
+]
 
-# STATICFILES_DIRS = [
-#     os.path.join(BASE_DIR, '/static'),
-# ]
 STATIC_ROOT = "/app/static/" 
