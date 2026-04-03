@@ -158,27 +158,67 @@ docker compose --env-file .env exec -T web python manage.py collectstatic --noin
 
 ## 7. Прокси на стороне `dl.gsu.by` (важно для логина)
 
-На `dl.gsu.by` должен быть настроен reverse-proxy, который:
+На внешнем nginx (основной сайт) должны быть отдельные локации для:
 
-- пропускает в AI только уже авторизованных пользователей (как именно — зависит от того, как у вас устроен логин на основном сайте)
-- проксирует HTTP и WebSocket на `http://127.0.0.1:8081`
+- статики `/ai/static/`
+- websocket `/ai/chat/ws/`
+- остальных запросов `/ai/`
 
-Пример фрагмента nginx-конфига (на стороне основного сайта):
+Важно: порядок локаций должен быть именно такой (сначала static, потом ws, потом общий `/ai/`).
+
+Пример рабочего фрагмента:
 
 ```nginx
+location ^~ /ai/static/ {
+	proxy_pass http://127.0.0.1:8081/ai/static/;
+	proxy_http_version 1.1;
+
+	proxy_set_header Host 127.0.0.1;
+	proxy_set_header X-Forwarded-Proto https;
+	proxy_set_header X-Real-IP $remote_addr;
+	proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+	# Защита от проблем с промежуточным gzip/прокси-кэшем
+	proxy_set_header Accept-Encoding "";
+	proxy_redirect off;
+}
+
+location /ai/chat/ws/ {
+	proxy_pass http://127.0.0.1:8081/ai/chat/ws/;
+	proxy_http_version 1.1;
+
+	proxy_set_header Upgrade $http_upgrade;
+	proxy_set_header Connection "upgrade";
+
+	proxy_set_header Host $host;
+	proxy_set_header X-Forwarded-Proto https;
+	proxy_set_header X-Real-IP $remote_addr;
+	proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+
 location /ai/ {
-	proxy_pass http://127.0.0.1:8081;
+	proxy_pass http://127.0.0.1:8081/ai/;
 	proxy_http_version 1.1;
 
 	proxy_set_header Host $host;
+	proxy_set_header X-Forwarded-Proto https;
 	proxy_set_header X-Real-IP $remote_addr;
 	proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-	proxy_set_header X-Forwarded-Proto https;
-
-	# WebSocket для /ai/chat/ws/...
-	proxy_set_header Upgrade $http_upgrade;
-	proxy_set_header Connection "upgrade";
 }
 ```
 
-Если у вас есть отдельная локация под статику на основном nginx, можно сделать отдельный `location /ai/static/` и добавить кэширование — но это необязательно: внутри стека уже есть nginx, который отдаёт `/ai/static/`.
+После изменения внешнего nginx:
+
+```bash
+nginx -t
+sudo systemctl reload nginx
+```
+
+Проверка:
+
+```bash
+curl -I https://dl.gsu.by/ai/static/admin/css/chat_template.css
+curl -I https://dl.gsu.by/ai/static/admin/js/chat_template.js
+```
+
+Ожидается `HTTP 200` и корректные MIME-типы (`text/css`, `application/javascript`/`text/javascript`).
