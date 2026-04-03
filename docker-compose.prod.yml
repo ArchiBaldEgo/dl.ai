@@ -2,7 +2,7 @@ services:
   web:
     ports: []
     volumes:
-      - static_volume:/app/static
+      - static_volume:/app/staticfiles
 
   nginx:
     ports:
