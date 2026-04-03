@@ -24,10 +24,17 @@ ENV HTTP_PROXY=$HTTP_PROXY \
 RUN if [ -n "$HTTP_PROXY" ]; then \
 		echo "Acquire::http::Proxy \"$HTTP_PROXY\";" > /etc/apt/apt.conf.d/99proxy; \
 		echo "Acquire::https::Proxy \"${HTTPS_PROXY:-$HTTP_PROXY}\";" >> /etc/apt/apt.conf.d/99proxy; \
+		echo "Acquire::Retries \"5\";" >> /etc/apt/apt.conf.d/99proxy; \
+		echo "Acquire::http::No-Cache \"true\";" >> /etc/apt/apt.conf.d/99proxy; \
+		echo "Acquire::https::No-Cache \"true\";" >> /etc/apt/apt.conf.d/99proxy; \
+		echo "Acquire::http::Pipeline-Depth \"0\";" >> /etc/apt/apt.conf.d/99proxy; \
 	fi
 
-RUN apt-get update 
-RUN apt-get install -y libpq-dev
+RUN rm -rf /var/lib/apt/lists/* && \
+	apt-get clean && \
+	apt-get update -o Acquire::Retries=5 && \
+	apt-get install -y --no-install-recommends libpq-dev && \
+	rm -rf /var/lib/apt/lists/*
 RUN if [ -n "$HTTP_PROXY" ]; then \
 		python -m pip config set global.proxy "${HTTPS_PROXY:-$HTTP_PROXY}"; \
 	fi
