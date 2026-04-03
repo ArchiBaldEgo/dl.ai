@@ -274,6 +274,10 @@
                 if (!input.value.trim()) {
                     return;
                 }
+                if (!progLng) {
+                    updateVoiceStatus('Выберите язык программирования перед отправкой.');
+                    return;
+                }
                 
                 ws.send(JSON.stringify({
                     type: '2',
@@ -490,6 +494,10 @@
                     alert("Пожалуйста, введите сообщение");
                     return;
                 }
+                if (!progLng) {
+                    alert("Выберите язык программирования перед отправкой");
+                    return;
+                }
                 
                 ws.send(JSON.stringify({
                     type: '2',
@@ -531,7 +539,7 @@
             // Обработка клавиши Enter
             document.addEventListener("keydown", function (event) {
                 const checkbox = document.querySelector(".inp");
-                if (event.key === "Enter" && checkbox.checked && !event.shiftKey && !notEnter) {
+                if (event.key === "Enter" && (!checkbox || checkbox.checked) && !event.shiftKey && !notEnter) {
                     notEnter = true;
                     sendMessage(event);
                 }
@@ -620,8 +628,14 @@
                 document.querySelector("#selectType option:nth-child(1)").textContent = localization[selectedLang].chat;
                 document.querySelector("#selectType option:nth-child(2)").textContent = localization[selectedLang].decideTask;
                 document.querySelector("#selectType option:nth-child(3)").textContent = localization[selectedLang].findError;
-                document.querySelector(".check-text").textContent = localization[selectedLang].enterHint;
-                document.querySelector(".preprompt").textContent = localization[selectedLang].preprompt;
+                const checkTextEl = document.querySelector(".check-text");
+                if (checkTextEl) {
+                    checkTextEl.textContent = localization[selectedLang].enterHint;
+                }
+                const prepromptEl = document.querySelector(".preprompt");
+                if (prepromptEl) {
+                    prepromptEl.textContent = localization[selectedLang].preprompt;
+                }
                 updateAccordionLabels();
             });
 

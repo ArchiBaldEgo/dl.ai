@@ -81,14 +81,28 @@ class MyConsumer(AsyncWebsocketConsumer):
 
             # Обработка специальных типов сообщений
             if type == "2":
-                progLng = await getProgLng(data.get('progLng'))
+                prog_lng_id = data.get('progLng')
+                if not prog_lng_id:
+                    await self.send(text_data="Выберите язык программирования перед отправкой запроса.")
+                    return
+                progLng = await getProgLng(prog_lng_id)
+                if not progLng:
+                    await self.send(text_data="Выбранный язык программирования не найден. Обновите страницу и выберите язык заново.")
+                    return
                 promptText = await getPromptText(data.get('preprompt'))
                 message = f"У меня есть задача по программированию, решай ее на языке {progLng}\n{message}"
                 if promptText and (not hasattr(self, 'last_prompt') or self.last_prompt != promptText):
                     message += f". Препромпт: {promptText}"
                     self.last_prompt = promptText
             elif type == "3":
-                progLng = await getProgLng(data.get('progLng'))
+                prog_lng_id = data.get('progLng')
+                if not prog_lng_id:
+                    await self.send(text_data="Выберите язык программирования перед отправкой запроса.")
+                    return
+                progLng = await getProgLng(prog_lng_id)
+                if not progLng:
+                    await self.send(text_data="Выбранный язык программирования не найден. Обновите страницу и выберите язык заново.")
+                    return
                 code = data.get('code', '')
                 promptText = await getPromptText(data.get('preprompt'))
                 message = f"У меня есть задача по программированию, я написал для нее код на языке {progLng}, код не работает, найди пожалуйста ошибку. Задача: {message}. Код: {code}."
