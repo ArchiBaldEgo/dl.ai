@@ -33,8 +33,22 @@ def getProgLng(language_id):
         return None
 
 
+@sync_to_async
+def is_ai_app_enabled():
+    from .models import AIAppSettings
+    return AIAppSettings.get_solo().is_enabled
+
+
 class MyConsumer(AsyncWebsocketConsumer):
     async def connect(self):
+        if self.scope.get("user") is None or self.scope["user"].is_anonymous:
+            await self.close(code=4403)
+            return
+
+        if not await is_ai_app_enabled():
+            await self.close(code=4403)
+            return
+
         self.client_id = self.scope['url_route']['kwargs']['client_id']
         await self.accept()
         print(f"WebSocket connected for client {self.client_id}")

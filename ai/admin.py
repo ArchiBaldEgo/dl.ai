@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django import forms
-from .models import ProgrammingLanguage, Topic, Prompt
+from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 
 # Форма для Prompt с улучшенным Textarea
 class PromptForm(forms.ModelForm):
@@ -50,6 +50,19 @@ class PromptAdmin(admin.ModelAdmin):
     def short_prompt_text(self, obj):
         return f"{obj.prompt_text[:100]}..." if len(obj.prompt_text) > 100 else obj.prompt_text
     short_prompt_text.short_description = "Prompt Text"
+
+
+@admin.register(AIAppSettings)
+class AIAppSettingsAdmin(admin.ModelAdmin):
+    list_display = ("is_enabled", "updated_at")
+
+    def has_add_permission(self, request):
+        if AIAppSettings.objects.exists():
+            return False
+        return super().has_add_permission(request)
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 # Регистрация
 admin.site.register(ProgrammingLanguage, ProgrammingLanguageAdmin)
