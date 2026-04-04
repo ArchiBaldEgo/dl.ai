@@ -745,7 +745,8 @@
 
                 async function fetchData(url) {
                     try {
-                        const response = await fetch(url);
+                        const urlWithAuth = `${url}${window.location.search || ''}`;
+                        const response = await fetch(urlWithAuth);
                         if (!response.ok) {
                             throw new Error(`HTTP error! status: ${response.status}`);
                         }
