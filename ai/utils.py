@@ -13,69 +13,25 @@ from dotenv import load_dotenv
 from typing import Tuple, Optional
 import time
 from asyncio import TimeoutError as AsyncTimeoutError
-from urllib.parse import urlsplit, urlunsplit, quote
 
 load_dotenv()
 CLIENT_ID = os.getenv("CLIENT_ID")
 SECRET = os.getenv("SBER_SECRET")
 HF_TOKEN = os.getenv("HF_TOKEN")
-SC_TOKEN = (
-    os.getenv("SC_TOKEN")
-    or os.getenv("SAMBANOVA_API_KEY")
-    or os.getenv("SAMBANOVA_TOKEN")
-)
+SC_TOKEN=os.getenv("SC_TOKEN")
 MIST_TOKEN = os.getenv("MIST_TOKEN")
 GROQ_TOKEN = os.getenv("GROQ_TOKEN")
 timeout = 0
 
 hist=dict([])
 
-
-def _encode_proxy_credentials(proxy_url: str) -> str:
-    """Safely encode proxy user/password so special chars do not break requests."""
-    parsed = urlsplit(proxy_url)
-    if not parsed.hostname:
-        return proxy_url
-
-    if parsed.username is None and parsed.password is None:
-        return proxy_url
-
-    username = quote(parsed.username or "", safe="")
-    password = quote(parsed.password or "", safe="")
-    auth = username if parsed.password is None else f"{username}:{password}"
-    host = parsed.hostname
-    if parsed.port:
-        host = f"{host}:{parsed.port}"
-
-    netloc = f"{auth}@{host}"
-    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
-
-
-def _get_requests_proxies() -> Optional[dict]:
-    raw_proxy = (
-        os.getenv("PROXY")
-        or os.getenv("HTTPS_PROXY")
-        or os.getenv("HTTP_PROXY")
-        or os.getenv("https_proxy")
-        or os.getenv("http_proxy")
-    )
-    if not raw_proxy:
-        return None
-
-    proxy_url = _encode_proxy_credentials(raw_proxy.strip().strip("\"'"))
-    return {
-        'http': proxy_url,
-        'https': proxy_url,
-    }
-
-
-proxies = _get_requests_proxies()
+proxies = {
+            'http': os.getenv("PROXY"),
+            'https': os.getenv("PROXY")
+        }
 
 
 async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25.0) -> Tuple[str, Optional[int]]:
-
-    if not SC_TOKEN:
-        return 'Не задан токен SambaNova. Укажите SC_TOKEN (или SAMBANOVA_API_KEY) в .env и перезапустите контейнер.', '0'
 
     if user_id not in hist:
         hist[user_id] = []
@@ -88,7 +44,7 @@ async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25
                 requests.post,
                 'https://api.sambanova.ai/v1/chat/completions',
                 json={
-                    "model": "DeepSeek-R1",
+                    "model": "DeepSeek-R1-0528",
                     "messages": hist[user_id],
                     "max_tokens": 9000,
                     "temperature": 0.7,
@@ -114,204 +70,6 @@ async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25
 
         if response.status_code != 200:
             if response.status_code == 429:
-                return 'Превышен лимит запросов. Попробуйте позже.', 
-            elif response.status_code >= 500:
-                return 'Ошибка сервера API. Попробуйте позже.', '0'
-            elif response.status_code == 401:
-                details = (response.text or '').strip().replace('\n', ' ')
-                if len(details) > 220:
-                    details = details[:220] + '...'
-                return (
-                    'Ошибка API (код 401). Проверьте SC_TOKEN/SAMBANOVA_API_KEY, права токена и прокси-аутентификацию. '
-                    f'Ответ API: {details or "без деталей"}',
-                    '0'
-                )
-            else:
-                return f'Ошибка API (код {response.status_code}).', '0'
-        
-        response_content = response.text
-        if not response_content:
-            raise ValueError("Пустой ответ от сервера.")
-
-        try:
-            obj = json.loads(response_content)
-        except json.JSONDecodeError as e:
-            print(f"Ошибка при декодировании JSON: {e}")
-            return 'Что-то пошло не так с обработкой JSON.', '0'
-
-        # Проверяем структуру ответа
-        if 'choices' not in obj or not obj['choices']:
-            print(f"Неожиданная структура ответа: {obj}")
-            return 'Неожиданный формат ответа от сервера.', '0'
-        
-        completion_tokens = obj.get('usage', {}).get('completion_tokens', 0)
-        assistant_content = obj['choices'][0]['message']['content']
-        hist[user_id].append({"role": "assistant", "content": assistant_content})
-        
-        # Ограничиваем размер истории
-        if len(hist[user_id]) > 20:
-            hist[user_id] = hist[user_id][-20:]
-            
-        return assistant_content, completion_tokens
-    
-    except AsyncTimeoutError:
-        print(f"Таймаут запроса к DeepSeek-R1 (превышено {timeout} сек)")
-        # При таймауте не очищаем историю - пользователь может повторить
-        return f'Таймаут запроса ({timeout} сек). Сервер долго не отвечает. Попробуйте позже или уменьшите запрос.', '0'
-    
-    except requests.exceptions.Timeout:
-        print("Таймаут при подключении к API (requests timeout)")
-        return 'Таймаут при подключении к серверу. Попробуйте позже.', '0'
-    
-    except Exception as e:
-        error_str = str(e)
-        error_type = type(e).__name__
-        print(f"Ошибка при запросе к DeepSeek-R1 ({error_type}): {error_str[:200]}")
-        
-        # Единая проверка для всех сетевых ошибок
-        if any(phrase in error_str for phrase in [
-            "NameResolutionError",
-            "Failed to resolve",
-            "Max retries exceeded",
-            "HTTPSConnectionPool",
-            "Name or service not known",
-            "ConnectionError",
-            "timeout",
-            "Timeout"
-        ]):
-            # Это сетевая ошибка, не очищаем историю
-            return 'Отсутствует подключение к интернету.', '0'
-        
-        # Проверяем KeyError
-        if "KeyError" in error_type and ("'choices'" in error_str or "choices" in error_str):
-            print(f"Ошибка в структуре ответа AI модели: {e}")
-            return 'Ошибка в ответе от сервера AI.', '0'
-        
-        # Очищаем историю для всех других ошибок
-        hist[user_id] = []
-        return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
-
-async def ask_DeepSeek_R1_Distill_Llama_70B_async(messages: str, user_id: int) -> str:
-    if user_id not in hist:
-        hist[user_id] = []
-    hist[user_id].append({"role": "user", "content": messages})
-    try:
-        response = await asyncio.to_thread(requests.post, 'https://api.sambanova.ai/v1/chat/completions', json={
-            "model": "DeepSeek-R1-Distill-Llama-70B",
-            "messages": hist[user_id],
-            "max_tokens": 9000
-        }, headers={
-            'Authorization': f'Bearer {SC_TOKEN}',
-            'Content-Type': 'application/json'
-        },
-        proxies=proxies,
-        timeout=30
-        )
-
-        print(f"Response Status: {response.status_code}")
-        
-        # Ограничиваем вывод логов
-        if response.status_code != 200 or len(response.text) > 500:
-            print(f"Response Content (truncated): {response.text[:500]}...")
-        else:
-            print(f"Response Content: {response.text}")
-
-        if response.status_code != 200:
-            if response.status_code == 429:
-                return 'Превышен лимит запросов. Попробуйте позже.', '0'
-            elif response.status_code >= 500:
-                return 'Ошибка сервера API. Попробуйте позже.', '0'
-            else:
-                return f'Ошибка API (код {response.status_code}).', '0'
-        
-        response_content = response.text
-        if not response_content:
-            raise ValueError("Пустой ответ от сервера.")
-
-        try:
-            obj = json.loads(response_content)
-        except json.JSONDecodeError as e:
-            print(f"Ошибка при декодировании JSON: {e}")
-            return 'Что-то пошло не так с обработкой JSON.', '0'
-
-        # Проверяем структуру ответа
-        if 'choices' not in obj or not obj['choices']:
-            print(f"Неожиданная структура ответа: {obj}")
-            return 'Неожиданный формат ответа от сервера.', '0'
-        '0'
-        completion_tokens = obj.get('usage', {}).get('completion_tokens', 0)
-        assistant_content = obj['choices'][0]['message']['content']
-        hist[user_id].append({"role": "assistant", "content": assistant_content})
-        
-        # Ограничиваем размер истории
-        if len(hist[user_id]) > 20:
-            hist[user_id] = hist[user_id][-20:]
-            
-        return assistant_content, completion_tokens
-    
-    except AsyncTimeoutError:
-        print(f"Таймаут запроса к DeepSeek-R1 (превышено {timeout} сек)")
-        # При таймауте не очищаем историю - пользователь может повторить
-        return f'Таймаут запроса ({timeout} сек). Сервер долго не отвечает. Попробуйте позже или уменьшите запрос.', '0'
-    
-    except requests.exceptions.Timeout:
-        print("Таймаут при подключении к API (requests timeout)")
-        return 'Таймаут при подключении к серверу. Попробуйте позже.', '0'
-    
-    except Exception as e:
-        error_str = str(e)
-        error_type = type(e).__name__
-        print(f"Ошибка при запросе к DeepSeek-R1 ({error_type}): {error_str[:200]}")
-        
-        # Единая проверка для всех сетевых ошибок
-        if any(phrase in error_str for phrase in [
-            "NameResolutionError",
-            "Failed to resolve",
-            "Max retries exceeded",
-            "HTTPSConnectionPool",
-            "Name or service not known",
-            "ConnectionError",
-            "timeout",
-            "Timeout"
-        ]):
-            # Это сетевая ошибка, не очищаем историю
-            return 'Отсутствует подключение к интернету.', '0'
-        
-        # Проверяем KeyError
-        if "KeyError" in error_type and ("'choices'" in error_str or "choices" in error_str):
-            print(f"Ошибка в структуре ответа AI модели: {e}")
-            return 'Ошибка в ответе от сервера AI.', '0'
-        
-        # Очищаем историю для всех других ошибок
-        hist[user_id] = []
-        return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
-
-async def ask_Llama_3_1_Tulu_3_405B_async(messages: str, user_id: int) -> str:
-    if user_id not in hist:
-        hist[user_id] = []
-    hist[user_id].append({"role": "user", "content": messages})
-    try:
-        response = await asyncio.to_thread(requests.post, 'https://api.sambanova.ai/v1/chat/completions', json={
-            "model": "Meta-Llama-3.1-405B-Instruct",
-            "messages": hist[user_id],
-            "max_tokens": 9000
-        }, headers={
-            'Authorization': f'Bearer {SC_TOKEN}',
-        },
-        proxies=proxies,
-        timeout=30
-        )
-
-        print(f"Response Status: {response.status_code}")
-        
-        # Ограничиваем вывод логов
-        if response.status_code != 200 or len(response.text) > 500:
-            print(f"Response Content (truncated): {response.text[:500]}...")
-        else:
-            print(f"Response Content: {response.text}")
-
-        if response.status_code != 200:
-            if response.status_code == 429:
                 return 'Превышен лимит запросов. Попробуйте позже.', '0'
             elif response.status_code >= 500:
                 return 'Ошибка сервера API. Попробуйте позже.', '0'
@@ -379,7 +137,6 @@ async def ask_Llama_3_1_Tulu_3_405B_async(messages: str, user_id: int) -> str:
         # Очищаем историю для всех других ошибок
         hist[user_id] = []
         return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
-
 
 async def ask_Meta_Llama_3_1_70B_Instruct_async(messages: str, user_id: int) -> str:
     if user_id not in hist:
@@ -387,6 +144,7 @@ async def ask_Meta_Llama_3_1_70B_Instruct_async(messages: str, user_id: int) -> 
     hist[user_id].append({"role": "user", "content": messages})
     try:
         response = await asyncio.to_thread(requests.post, 'https://api.sambanova.ai/v1/chat/completions', json={
+            # 3.1 model is unavailable; route to current 3.3 equivalent.
             "model": "Meta-Llama-3.3-70B-Instruct",
             "messages": hist[user_id],
             "max_tokens": 9000
@@ -477,6 +235,94 @@ async def ask_Meta_Llama_3_1_70B_Instruct_async(messages: str, user_id: int) -> 
 
 
 
+async def ask_Mixtral_8x22b_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    if user_id not in hist:
+        hist[user_id] = []
+    hist[user_id].append({"role": "user", "content": messages})
+
+    try:
+        response = await asyncio.to_thread(
+            requests.post,
+            'https://api.sambanova.ai/v1/chat/completions',
+            json={
+                # Mixtral is unavailable on current tier; route to a stable currently available model.
+                "model": "Meta-Llama-3.1-8B-Instruct",
+                "messages": hist[user_id],
+                "max_tokens": 9000
+            },
+            headers={
+                'Authorization': f'Bearer {SC_TOKEN}',
+                'Content-Type': 'application/json'
+            },
+            proxies=proxies,
+            timeout=30
+        )
+
+        print(f"Response Status: {response.status_code}")
+        if response.status_code != 200 or len(response.text) > 500:
+            print(f"Response Content (truncated): {response.text[:500]}...")
+        else:
+            print(f"Response Content: {response.text}")
+
+        if response.status_code != 200:
+            if response.status_code == 429:
+                return 'Превышен лимит запросов. Попробуйте позже.', '0'
+            elif response.status_code >= 500:
+                return 'Ошибка сервера API. Попробуйте позже.', '0'
+            else:
+                return f'Ошибка API (код {response.status_code}).', '0'
+
+        response_content = response.text
+        if not response_content:
+            raise ValueError("Пустой ответ от сервера.")
+
+        try:
+            obj = json.loads(response_content)
+        except json.JSONDecodeError as e:
+            print(f"Ошибка при декодировании JSON: {e}")
+            return 'Что-то пошло не так с обработкой JSON.', '0'
+
+        if 'choices' not in obj or not obj['choices']:
+            print(f"Неожиданная структура ответа: {obj}")
+            return 'Неожиданный формат ответа от сервера.', '0'
+
+        completion_tokens = obj.get('usage', {}).get('completion_tokens', 0)
+        assistant_content = obj['choices'][0]['message']['content']
+        hist[user_id].append({"role": "assistant", "content": assistant_content})
+
+        if len(hist[user_id]) > 20:
+            hist[user_id] = hist[user_id][-20:]
+
+        return assistant_content, completion_tokens
+
+    except requests.exceptions.Timeout:
+        print("Таймаут при подключении к API (requests timeout)")
+        return 'Таймаут при подключении к серверу. Попробуйте позже.', '0'
+
+    except Exception as e:
+        error_str = str(e)
+        error_type = type(e).__name__
+        print(f"Ошибка при запросе к Mixtral ({error_type}): {error_str[:200]}")
+
+        if any(phrase in error_str for phrase in [
+            "NameResolutionError",
+            "Failed to resolve",
+            "Max retries exceeded",
+            "HTTPSConnectionPool",
+            "Name or service not known",
+            "ConnectionError",
+            "timeout",
+            "Timeout"
+        ]):
+            return 'Отсутствует подключение к интернету.', '0'
+
+        if "KeyError" in error_type and ("'choices'" in error_str or "choices" in error_str):
+            return 'Ошибка в ответе от сервера AI.', '0'
+
+        hist[user_id] = []
+        return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
+
+
 async def ask_Mistral_Nemo_Instruct_async(messages: str, user_id: int) -> str:
     if user_id not in hist:
         hist[user_id] = []
@@ -495,192 +341,6 @@ async def ask_Mistral_Nemo_Instruct_async(messages: str, user_id: int) -> str:
     hist[user_id].append({"role": "assistant", "content": answer})
     return answer
 
-
-async def ask_QwQ_32B_async(messages: str, user_id: int) -> str:
-    if user_id not in hist:
-        hist[user_id] = []
-    hist[user_id].append({"role": "user", "content": messages})
-    try:
-        response = await asyncio.to_thread(requests.post, 'https://api.sambanova.ai/v1/chat/completions', json={
-            "model": "QwQ-32B",
-            "messages": hist[user_id],
-            "max_tokens": 4000
-        }, headers={
-            'Authorization': f'Bearer {SC_TOKEN}',
-        },
-        proxies=proxies,
-        timeout=30
-        )
-
-        print(f"Response Status: {response.status_code}")
-        
-        # Ограничиваем вывод логов
-        if response.status_code != 200 or len(response.text) > 500:
-            print(f"Response Content (truncated): {response.text[:500]}...")
-        else:
-            print(f"Response Content: {response.text}")
-
-        if response.status_code != 200:
-            if response.status_code == 429:
-                return 'Превышен лимит запросов. Попробуйте позже.', '0'
-            elif response.status_code >= 500:
-                return 'Ошибка сервера API. Попробуйте позже.', '0'
-            else:
-                return f'Ошибка API (код {response.status_code}).', '0'
-        
-        response_content = response.text
-        if not response_content:
-            raise ValueError("Пустой ответ от сервера.")
-
-        try:
-            obj = json.loads(response_content)
-        except json.JSONDecodeError as e:
-            print(f"Ошибка при декодировании JSON: {e}")
-            return 'Что-то пошло не так с обработкой JSON.', '0'
-
-        # Проверяем структуру ответа
-        if 'choices' not in obj or not obj['choices']:
-            print(f"Неожиданная структура ответа: {obj}")
-            return 'Неожиданный формат ответа от сервера.', '0'
-        
-        completion_tokens = obj.get('usage', {}).get('completion_tokens', 0)
-        assistant_content = obj['choices'][0]['message']['content']
-        hist[user_id].append({"role": "assistant", "content": assistant_content})
-        
-        # Ограничиваем размер истории
-        if len(hist[user_id]) > 20:
-            hist[user_id] = hist[user_id][-20:]
-            
-        return assistant_content, completion_tokens
-    
-    except AsyncTimeoutError:
-        print(f"Таймаут запроса к DeepSeek-R1 (превышено {timeout} сек)")
-        # При таймауте не очищаем историю - пользователь может повторить
-        return f'Таймаут запроса ({timeout} сек). Сервер долго не отвечает. Попробуйте позже или уменьшите запрос.', '0'
-    
-    except requests.exceptions.Timeout:
-        print("Таймаут при подключении к API (requests timeout)")
-        return 'Таймаут при подключении к серверу. Попробуйте позже.', '0'
-    
-    except Exception as e:
-        error_str = str(e)
-        error_type = type(e).__name__
-        print(f"Ошибка при запросе к DeepSeek-R1 ({error_type}): {error_str[:200]}")
-        
-        # Единая проверка для всех сетевых ошибок
-        if any(phrase in error_str for phrase in [
-            "NameResolutionError",
-            "Failed to resolve",
-            "Max retries exceeded",
-            "HTTPSConnectionPool",
-            "Name or service not known",
-            "ConnectionError",
-            "timeout",
-            "Timeout"
-        ]):
-            # Это сетевая ошибка, не очищаем историю
-            return 'Отсутствует подключение к интернету.', '0'
-        
-        # Проверяем KeyError
-        if "KeyError" in error_type and ("'choices'" in error_str or "choices" in error_str):
-            print(f"Ошибка в структуре ответа AI модели: {e}")
-            return 'Ошибка в ответе от сервера AI.', '0'
-        
-        # Очищаем историю для всех других ошибок
-        hist[user_id] = []
-        return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
-
-async def ask_Mixtral_8x22b_async(messages: str, user_id: int) -> str:
-    if user_id not in hist:
-        hist[user_id] = []
-    hist[user_id].append({"role": "user", "content": messages})
-    try:
-        response = await asyncio.to_thread(requests.post, 'https://api.mistral.ai/v1/chat/completions', json={
-            "model": "open-mixtral-8x22b",
-            "messages": hist[user_id],
-            "max_tokens": 9000
-        }, headers={
-            'Authorization': f'Bearer {MIST_TOKEN}',
-        }, proxies=proxies,
-        timeout=30
-        )
-        print(f"Response Status: {response.status_code}")
-        
-        # Ограничиваем вывод логов
-        if response.status_code != 200 or len(response.text) > 500:
-            print(f"Response Content (truncated): {response.text[:500]}...")
-        else:
-            print(f"Response Content: {response.text}")
-
-        if response.status_code != 200:
-            if response.status_code == 429:
-                return 'Превышен лимит запросов. Попробуйте позже.', '0'
-            elif response.status_code >= 500:
-                return 'Ошибка сервера API. Попробуйте позже.', '0'
-            else:
-                return f'Ошибка API (код {response.status_code}).', '0'
-        
-        response_content = response.text
-        if not response_content:
-            raise ValueError("Пустой ответ от сервера.")
-
-        try:
-            obj = json.loads(response_content)
-        except json.JSONDecodeError as e:
-            print(f"Ошибка при декодировании JSON: {e}")
-            return 'Что-то пошло не так с обработкой JSON.', '0'
-
-        # Проверяем структуру ответа
-        if 'choices' not in obj or not obj['choices']:
-            print(f"Неожиданная структура ответа: {obj}")
-            return 'Неожиданный формат ответа от сервера.', '0'
-        
-        completion_tokens = obj.get('usage', {}).get('completion_tokens', 0)
-        assistant_content = obj['choices'][0]['message']['content']
-        hist[user_id].append({"role": "assistant", "content": assistant_content})
-        
-        # Ограничиваем размер истории
-        if len(hist[user_id]) > 20:
-            hist[user_id] = hist[user_id][-20:]
-            
-        return assistant_content, completion_tokens
-    
-    except AsyncTimeoutError:
-        print(f"Таймаут запроса к DeepSeek-R1 (превышено {timeout} сек)")
-        # При таймауте не очищаем историю - пользователь может повторить
-        return f'Таймаут запроса ({timeout} сек). Сервер долго не отвечает. Попробуйте позже или уменьшите запрос.', '0'
-    
-    except requests.exceptions.Timeout:
-        print("Таймаут при подключении к API (requests timeout)")
-        return 'Таймаут при подключении к серверу. Попробуйте позже.', '0'
-    
-    except Exception as e:
-        error_str = str(e)
-        error_type = type(e).__name__
-        print(f"Ошибка при запросе к DeepSeek-R1 ({error_type}): {error_str[:200]}")
-        
-        # Единая проверка для всех сетевых ошибок
-        if any(phrase in error_str for phrase in [
-            "NameResolutionError",
-            "Failed to resolve",
-            "Max retries exceeded",
-            "HTTPSConnectionPool",
-            "Name or service not known",
-            "ConnectionError",
-            "timeout",
-            "Timeout"
-        ]):
-            # Это сетевая ошибка, не очищаем историю
-            return 'Отсутствует подключение к интернету.', '0'
-        
-        # Проверяем KeyError
-        if "KeyError" in error_type and ("'choices'" in error_str or "choices" in error_str):
-            print(f"Ошибка в структуре ответа AI модели: {e}")
-            return 'Ошибка в ответе от сервера AI.', '0'
-        
-        # Очищаем историю для всех других ошибок
-        hist[user_id] = []
-        return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
 
 async def ask_Gemma_7b_async(messages: str, user_id: int) -> str:
     if user_id not in hist:
@@ -745,14 +405,15 @@ async def ask_Gpt_oss_120b_async(messages: str, user_id: int) -> Tuple[str, Opti
     try:
         response = await asyncio.to_thread(
             requests.post,
-            'https://api.groq.com/openai/v1/chat/completions',
+            'https://api.sambanova.ai/v1/chat/completions',
             json={
-                "model": "openai/gpt-oss-120b",
+                "model": "gpt-oss-120b",
                 "messages": hist[user_id],
                 "max_tokens": 8192
             },
             headers={
-                'Authorization': f'Bearer {GROQ_TOKEN}',
+                'Authorization': f'Bearer {SC_TOKEN}',
+                'Content-Type': 'application/json',
             },
             proxies=proxies,
             timeout=30  # Добавляем таймаут для запроса
@@ -767,6 +428,8 @@ async def ask_Gpt_oss_120b_async(messages: str, user_id: int) -> Tuple[str, Opti
                 return 'Превышен лимит запросов. Попробуйте позже.', '0'
             elif response.status_code >= 500:
                 return 'Ошибка сервера API. Попробуйте позже.', '0'
+            else:
+                return f'Ошибка API (код {response.status_code}).', '0'
         
         response_content = response.text  # Используем text вместо content.decode()
         if not response_content:
@@ -780,8 +443,18 @@ async def ask_Gpt_oss_120b_async(messages: str, user_id: int) -> Tuple[str, Opti
             return 'Что-то пошло не так с обработкой JSON.', '0'
 
         completion_tokens = obj.get('usage', {}).get('completion_tokens', 0)
-        hist[user_id].append({"role": "assistant", "content": obj['choices'][0]['message']['content']})
-        return obj['choices'][0]['message']['content'], completion_tokens
+        first_message = obj['choices'][0].get('message', {})
+        assistant_content = first_message.get('content')
+
+        # gpt-oss-120b can return reasoning with content=null on short completions.
+        if not assistant_content:
+            assistant_content = first_message.get('reasoning') or ''
+
+        if not assistant_content:
+            assistant_content = 'Пустой ответ от модели.'
+
+        hist[user_id].append({"role": "assistant", "content": assistant_content})
+        return assistant_content, completion_tokens
     
     except requests.exceptions.ConnectionError as e:
         print(f"Ошибка соединения: {e}")
@@ -837,7 +510,7 @@ async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> str:
             headers={
                 "Content-Type": "application/json",
             },
-            #proxies=proxies,
+            proxies=proxies,
             timeout=120  # Добавляем таймаут для запроса
         )
 
@@ -902,6 +575,7 @@ async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> str:
         if "ConnectionError" in str(type(e).__name__) or "timeout" in str(e).lower():
             # Не очищаем историю при сетевых ошибках
             return 'Ошибка подключения. Ваш контекст сохранен, попробуйте позже.', '0'
+        return 'Что-то пошло не так при обработке запроса.', '0'
 
 async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
     #проверка на hist делается на стороне сервера. пользователю достаточно просто отправить промпт
@@ -918,7 +592,7 @@ async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
             headers={
                 "Content-Type": "application/json",
             },
-            #proxies=proxies,
+            proxies=proxies,
             timeout=120  # Добавляем таймаут для запроса
         )
 
@@ -932,7 +606,7 @@ async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
             elif response.status_code == 401:
                 return 'Бот не авторизован. Проверьте логин/пароль', '0'
             elif response.status_code == 429:
-                return 'Все боты заняты'
+                return 'Все боты заняты', '0'
             elif response.status_code >= 503:
                 return 'Бот инициализируется. Попробуйте чуть позже', '0'
         
@@ -983,3 +657,5 @@ async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
         if "ConnectionError" in str(type(e).__name__) or "timeout" in str(e).lower():
             # Не очищаем историю при сетевых ошибках
             return 'Ошибка подключения. Ваш контекст сохранен, попробуйте позже.', '0'
+        return 'Что-то пошло не так при обработке запроса.', '0'
+

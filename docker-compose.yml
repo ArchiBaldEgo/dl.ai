@@ -1,65 +1,63 @@
+version: '3.8'
+
 services:
   web:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        # Build-time proxy is OPTIONAL: enable only when the Docker builder
-        # can actually reach your proxy/DNS (corporate network, etc.).
-        # Runtime proxy for the app is configured separately below.
-        HTTP_PROXY: ${BUILD_HTTP_PROXY:-}
-        HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-}
-        ALL_PROXY: ${BUILD_ALL_PROXY:-}
-        NO_PROXY: ${BUILD_NO_PROXY:-}
-        http_proxy: ${BUILD_http_proxy:-${BUILD_HTTP_PROXY:-}}
-        https_proxy: ${BUILD_https_proxy:-${BUILD_HTTPS_PROXY:-}}
-        all_proxy: ${BUILD_all_proxy:-${BUILD_ALL_PROXY:-}}
-        no_proxy: ${BUILD_no_proxy:-${BUILD_NO_PROXY:-}}
+        HTTP_PROXY: "http://main%5Cdlupdate:3sd4y-K8yf3@proxy.gsu.by:800/"
+        HTTPS_PROXY: "http://main%5Cdlupdate:3sd4y-K8yf3@proxy.gsu.by:800/"
+        NO_PROXY: "localhost,127.0.0.1,db,nginx,.local"
     container_name: dl_ai_web
     command: daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application
     restart: unless-stopped
     volumes:
       - .:/app
-      - static_volume:/app/staticfiles
     ports:
       - "8000:8000"
     env_file:
       - .env
     environment:
-      HTTP_PROXY: ${HTTP_PROXY:-}
-      HTTPS_PROXY: ${HTTPS_PROXY:-}
-      ALL_PROXY: ${ALL_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-}
-      http_proxy: ${http_proxy:-${HTTP_PROXY:-}}
-      https_proxy: ${https_proxy:-${HTTPS_PROXY:-}}
-      all_proxy: ${all_proxy:-${ALL_PROXY:-}}
-      no_proxy: ${no_proxy:-${NO_PROXY:-}}
+      - HTTP_PROXY=http://main%5Cdlupdate:3sd4y-K8yf3@proxy.gsu.by:800/
+      - HTTPS_PROXY=http://main%5Cdlupdate:3sd4y-K8yf3@proxy.gsu.by:800/
+      - NO_PROXY=localhost,127.0.0.1,db,nginx,.local
     depends_on:
       - db
+    networks:
+      - shared-network
 
   db:
     image: postgres:14
     container_name: dl_ai_db
-    restart: unless-stopped
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
-      POSTGRES_USER: ${DB_USER:-dlaibd}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-dlaibd}
-      POSTGRES_DB: ${DB_NAME:-dl_ai}
+      POSTGRES_USER: dlaibd
+      POSTGRES_PASSWORD: dlaibd
+      POSTGRES_DB: dlaibd
+    networks:
+      - shared-network
 
   nginx:
     image: nginx:latest
     container_name: dl_ai_nginx
     restart: unless-stopped
     ports:
-      - "8080:80"
+      - "80:8000"
     volumes:
-      - ./nginx:/etc/nginx/conf.d:ro
-      - static_volume:/app/staticfiles:ro
+      - ./nginx:/etc/nginx/conf.d
+      - static_volume:/app/static
     depends_on:
       - web
+    networks:
+      - shared-network
 
 volumes:
   postgres_data:
   static_volume:
+
+
+networks:
+  shared-network:
+    external: true

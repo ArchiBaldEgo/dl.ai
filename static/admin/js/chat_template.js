@@ -357,7 +357,7 @@ function convertMarkdownToHTML(markdown) {
 function initWebSocket() {
     try {
         var wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        var wsUrl = `${wsProtocol}//${window.location.host}/ai/chat/ws/${client_id}`;
+        var wsUrl = `${wsProtocol}//${window.location.host}/ai/chat/ws/${client_id}${window.location.search}`;
 
         ws = new WebSocket(wsUrl);
 

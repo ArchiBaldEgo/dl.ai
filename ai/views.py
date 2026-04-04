@@ -1,57 +1,71 @@
 from django.shortcuts import render
 from django.core.cache import cache
-from django.http import JsonResponse, Http404, FileResponse
-from django.conf import settings
-from .models import ProgrammingLanguage, Topic, Prompt
-from pathlib import Path
-import mimetypes
+from django.http import JsonResponse
+from django.http import HttpResponseForbidden, HttpResponseNotFound
+from django.db import ProgrammingError
+from functools import wraps
+from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 import uuid
 
+
+def ai_access_required(view_func):
+    @wraps(view_func)
+    def _wrapped(request, *args, **kwargs):
+        is_django_authenticated = request.user.is_authenticated
+        uid = (request.GET.get("uid") or request.session.get("external_uid") or "").strip()
+        has_external_uid = uid.isdigit()
+
+        if has_external_uid:
+            request.session["external_uid"] = uid
+
+        if not is_django_authenticated and not has_external_uid:
+            return HttpResponseForbidden("Authentication required")
+
+        try:
+            if not AIAppSettings.get_solo().is_enabled:
+                return HttpResponseNotFound("AI app is disabled")
+        except ProgrammingError:
+            # AIAppSettings table may be absent before migrations are applied.
+            pass
+
+        return view_func(request, *args, **kwargs)
+
+    return _wrapped
+
+
+@ai_access_required
 def chat_view(request):
     # Генерируем уникальный client_id для каждого пользователя
     client_id = str(uuid.uuid4())
     return render(request, 'ai/chat.html', {'client_id': client_id})
 
+
+@ai_access_required
 def decide_task_view(request):
     client_id = str(uuid.uuid4())
     return render(request, 'ai/decide-task.html', {'client_id': client_id})
 
+
+@ai_access_required
 def find_error_view(request):
     client_id = str(uuid.uuid4())
     return render(request, 'ai/find-error.html', {'client_id': client_id})
 
 
-def asset_view(request, asset_path):
-    static_dir = (Path(settings.BASE_DIR) / 'static').resolve()
-    requested_path = asset_path.lstrip('/').strip()
-    file_path = (static_dir / requested_path).resolve()
-
-    if not str(file_path).startswith(str(static_dir)):
-        raise Http404('Asset path is not allowed')
-
-    if not file_path.is_file():
-        raise Http404('Asset not found')
-
-    content_type, _ = mimetypes.guess_type(str(file_path))
-    response = FileResponse(
-        file_path.open('rb'),
-        content_type=content_type or 'application/octet-stream',
-    )
-    response['Cache-Control'] = 'public, max-age=86400'
-    return response
-
-
+@ai_access_required
 def get_languages(request):
     languages = ProgrammingLanguage.objects.all().values('id', 'language_name')
     return JsonResponse(list(languages), safe=False)
 
 
+@ai_access_required
 def get_topics(request):
     topics = list(Topic.objects.values('id', 'topic_name', 'programming_language'))
     return JsonResponse(topics, safe=False)
 
 
 
+@ai_access_required
 def get_prompts(request):
     prompts = list(Prompt.objects.values(
         'id', 

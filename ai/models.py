@@ -23,3 +23,25 @@ class Prompt(models.Model):
     def __str__(self):
         # Возвращаем только имя промпта вместо полного текста
         return self.prompt_name if self.prompt_name else f"Prompt #{self.id}"    
+
+
+class AIAppSettings(models.Model):
+    is_enabled = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "AI app setting"
+        verbose_name_plural = "AI app settings"
+
+    def save(self, *args, **kwargs):
+        # Keep a single row for global app state.
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_solo(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    def __str__(self):
+        return "AI app settings"
