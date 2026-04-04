@@ -25,6 +25,7 @@ def ai_access_required(view_func):
             if not AIAppSettings.get_solo().is_enabled:
                 return HttpResponseNotFound("AI app is disabled")
         except ProgrammingError:
+            # AIAppSettings table may be absent before migrations are applied.
             pass
 
         return view_func(request, *args, **kwargs)
