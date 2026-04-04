@@ -2,6 +2,7 @@ from django.shortcuts import render
 from django.core.cache import cache
 from django.http import JsonResponse
 from django.http import HttpResponseForbidden, HttpResponseNotFound
+from django.db import ProgrammingError
 from functools import wraps
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 import uuid
@@ -20,8 +21,11 @@ def ai_access_required(view_func):
         if not is_django_authenticated and not has_external_uid:
             return HttpResponseForbidden("Authentication required")
 
-        if not AIAppSettings.get_solo().is_enabled:
-            return HttpResponseNotFound("AI app is disabled")
+        try:
+            if not AIAppSettings.get_solo().is_enabled:
+                return HttpResponseNotFound("AI app is disabled")
+        except ProgrammingError:
+            pass
 
         return view_func(request, *args, **kwargs)
 
