@@ -33,3 +33,19 @@ class ChatViewTests(SimpleTestCase):
         request.session = {}
         response = chat_view(request)
         self.assertEqual(response.status_code, 403)
+
+    @patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True))
+    def test_chat_view_with_uid_works_without_session_table(self, _mock_get_solo):
+        class BrokenSession:
+            def get(self, *_args, **_kwargs):
+                raise ProgrammingError
+
+            def __setitem__(self, _key, _value):
+                raise ProgrammingError
+
+        request = self.factory.get("/ai/chat/?uid=186638")
+        request.user = SimpleNamespace(is_authenticated=False)
+        request.session = BrokenSession()
+        with patch("ai.views.render", return_value=HttpResponse("ok")):
+            response = chat_view(request)
+        self.assertEqual(response.status_code, 200)
