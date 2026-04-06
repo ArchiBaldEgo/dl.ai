@@ -1,8 +1,11 @@
+import os
+
 from django.shortcuts import render
 from django.core.cache import cache
 from django.http import JsonResponse
-from django.http import HttpResponseForbidden, HttpResponseNotFound
+from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound
 from django.db import ProgrammingError
+from django.contrib.staticfiles import finders
 from functools import wraps
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 import uuid
@@ -75,3 +78,12 @@ def get_prompts(request):
         'prompt_name',
     ))
     return JsonResponse(prompts, safe=False)
+
+
+@ai_access_required
+def asset_view(request, asset_path):
+    asset_full_path = finders.find(asset_path)
+    if not asset_full_path or not os.path.isfile(asset_full_path):
+        raise Http404("Asset not found")
+
+    return FileResponse(open(asset_full_path, "rb"))
