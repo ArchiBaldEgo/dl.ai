@@ -174,4 +174,4 @@ STATICFILES_DIRS = [
     BASE_DIR / 'static',
 ]
 
-STATIC_ROOT = "/app/staticfiles/" 
+STATIC_ROOT = "/app/static/" 

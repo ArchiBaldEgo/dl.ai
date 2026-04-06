@@ -32,10 +32,10 @@
                     <option value="Web_DeepSeek_Thinking">Web DeepSeek Thinking</option>
                 </select>
                 <select id="selectType"
-                    onchange="document.location.href=this.querySelector('option:checked').dataset.link">
+                    onchange="var lnk=this.querySelector('option:checked').dataset.link; if(lnk) document.location.href=lnk+window.location.search;">
                     <option data-link="/ai/chat/">Чат с DLAI</option>
                     <option data-link="/ai/solve-problem/">Реши задачу</option>
-                    <option selected>В чём ошибка?</option>
+                    <option data-link="/ai/find-error/" selected>В чём ошибка?</option>
                 </select>
             </div>
             <div class="voice-mod-div">
