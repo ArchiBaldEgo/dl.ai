@@ -38,10 +38,10 @@ class ChatViewTests(SimpleTestCase):
     def test_chat_view_with_uid_works_without_session_table(self, _mock_get_solo):
         class BrokenSession:
             def get(self, *_args, **_kwargs):
-                raise ProgrammingError
+                raise ProgrammingError('relation "django_session" does not exist')
 
             def __setitem__(self, _key, _value):
-                raise ProgrammingError
+                raise ProgrammingError('relation "django_session" does not exist')
 
         request = self.factory.get("/ai/chat/?uid=186638")
         request.user = SimpleNamespace(is_authenticated=False)
