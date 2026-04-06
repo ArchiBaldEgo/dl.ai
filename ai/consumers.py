@@ -42,17 +42,9 @@ def is_ai_app_enabled():
 
 @sync_to_async
 def get_external_uid(scope):
-    session = scope.get("session")
-    if session is not None:
-        session_uid = str(session.get("external_uid") or "").strip()
-        if session_uid.isdigit():
-            return session_uid
-
     raw_query = scope.get("query_string", b"").decode()
     query_uid = (parse_qs(raw_query).get("uid") or [""])[0].strip()
-    if query_uid.isdigit() and session is not None:
-        session["external_uid"] = query_uid
-        session.save()
+    if query_uid.isdigit():
         return query_uid
 
     return None
@@ -60,12 +52,9 @@ def get_external_uid(scope):
 
 class MyConsumer(AsyncWebsocketConsumer):
     async def connect(self):
-        is_django_authenticated = bool(
-            self.scope.get("user") is not None and not self.scope["user"].is_anonymous
-        )
         external_uid = await get_external_uid(self.scope)
 
-        if not is_django_authenticated and not external_uid:
+        if not external_uid:
             await self.close(code=4403)
             return
 

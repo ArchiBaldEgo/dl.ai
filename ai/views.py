@@ -14,14 +14,8 @@ import uuid
 def ai_access_required(view_func):
     @wraps(view_func)
     def _wrapped(request, *args, **kwargs):
-        is_django_authenticated = request.user.is_authenticated
-        uid = (request.GET.get("uid") or request.session.get("external_uid") or "").strip()
-        has_external_uid = uid.isdigit()
-
-        if has_external_uid:
-            request.session["external_uid"] = uid
-
-        if not is_django_authenticated and not has_external_uid:
+        uid = (request.GET.get("uid") or "").strip()
+        if not uid.isdigit():
             return HttpResponseForbidden("Authentication required")
 
         try:
