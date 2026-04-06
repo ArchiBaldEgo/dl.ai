@@ -32,9 +32,9 @@
                     <option value="Web_DeepSeek_Thinking">Web DeepSeek Thinking</option>
                 </select>
                 <select id="selectType"
-                    onchange="document.location.href=this.querySelector('option:checked').dataset.link">
+                    onchange="goToAiPage(this)">
                     <option data-link="/ai/chat/">Чат с DLAI</option>
-                    <option selected>Реши задачу</option>
+                    <option data-link="/ai/solve-problem/" selected>Реши задачу</option>
                     <option data-link="/ai/find-error/">В чём ошибка?</option>
                 </select>
             </div>
@@ -101,7 +101,7 @@
         </div>
 
         <div class="sidebar">
-            <a href="/ai/admin" style="text-decoration: none; color: black;">
+            <a href="/ai/admin/" style="text-decoration: none; color: black;">
                 <div class="sidebar-header">
                     Админ-Панель
                 </div>
@@ -110,7 +110,7 @@
             </div>
         </div>
         
-        <a href="/ai/admin" style="text-decoration: none; color: black;">
+        <a href="/ai/admin/" style="text-decoration: none; color: black;">
             <button class="toggle-button">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
                     stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -120,4 +120,17 @@
         </a>
     </div>
 </body>
+<script>
+function goToAiPage(selectEl) {
+    const selected = selectEl.querySelector('option:checked');
+    const target = selected && selected.dataset ? selected.dataset.link : '';
+    if (!target) {
+        return;
+    }
+
+    const query = window.location.search || '';
+    const destination = query ? `${target}${query}` : target;
+    window.location.href = destination;
+}
+</script>
 </html>

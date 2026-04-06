@@ -14,8 +14,11 @@ import uuid
 def ai_access_required(view_func):
     @wraps(view_func)
     def _wrapped(request, *args, **kwargs):
+        is_authenticated = bool(getattr(request, "user", None) and request.user.is_authenticated)
         uid = (request.GET.get("uid") or "").strip()
-        if not uid.isdigit():
+
+        # Fast-fail before touching DB when request is clearly unauthorized.
+        if not is_authenticated and not uid.isdigit():
             return HttpResponseForbidden("Authentication required")
 
         try:
