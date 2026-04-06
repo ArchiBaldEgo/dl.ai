@@ -166,7 +166,9 @@ USE_TZ = True
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-STATIC_URL = '/ai/static/'
+# Serve static URLs through the app-level asset endpoint.
+# This avoids dependency on outer reverse-proxy static mappings.
+STATIC_URL = '/ai/assets/'
 
 # Include project-level static assets (chat_template.css, decide_task.css, etc.)
 # so `collectstatic` copies them into STATIC_ROOT in production.

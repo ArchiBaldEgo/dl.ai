@@ -510,7 +510,7 @@ async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> str:
             headers={
                 "Content-Type": "application/json",
             },
-            proxies=proxies,
+            proxies=None,
             timeout=120  # Добавляем таймаут для запроса
         )
 
@@ -527,6 +527,7 @@ async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> str:
                 return 'Все боты заняты', '0'
             elif response.status_code >= 503:
                 return 'Бот инициализируется. Попробуйте чуть позже', '0'
+            return f'Ошибка сервиса Web DeepSeek (код {response.status_code}).', '0'
         
         response_content = response.text  # Используем text вместо content.decode()
         if not response_content:
@@ -592,7 +593,7 @@ async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
             headers={
                 "Content-Type": "application/json",
             },
-            proxies=proxies,
+            proxies=None,
             timeout=120  # Добавляем таймаут для запроса
         )
 
@@ -609,6 +610,7 @@ async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
                 return 'Все боты заняты', '0'
             elif response.status_code >= 503:
                 return 'Бот инициализируется. Попробуйте чуть позже', '0'
+            return f'Ошибка сервиса Web DeepSeek (код {response.status_code}).', '0'
         
         response_content = response.text  # Используем text вместо content.decode()
         if not response_content:
