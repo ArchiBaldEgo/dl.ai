@@ -74,7 +74,6 @@ def get_prompts(request):
     return JsonResponse(prompts, safe=False)
 
 
-@ai_access_required
 def asset_view(request, asset_path):
     asset_full_path = finders.find(asset_path)
     if not asset_full_path or not os.path.isfile(asset_full_path):
