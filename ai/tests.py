@@ -3,7 +3,7 @@ from django.http import HttpResponse
 from django.db import ProgrammingError
 from unittest.mock import patch
 from types import SimpleNamespace
-from ai.views import chat_view
+from ai.views import chat_view, decide_task_view, find_error_view
 
 
 class ChatViewTests(SimpleTestCase):
@@ -48,4 +48,22 @@ class ChatViewTests(SimpleTestCase):
         request.session = BrokenSession()
         with patch("ai.views.render", return_value=HttpResponse("ok")):
             response = chat_view(request)
+        self.assertEqual(response.status_code, 200)
+
+    @patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True))
+    def test_solve_problem_view_allows_uid_without_django_auth(self, _mock_get_solo):
+        request = self.factory.get("/ai/solve-problem/?uid=186638")
+        request.user = SimpleNamespace(is_authenticated=False)
+        request.session = {}
+        with patch("ai.views.render", return_value=HttpResponse("ok")):
+            response = decide_task_view(request)
+        self.assertEqual(response.status_code, 200)
+
+    @patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True))
+    def test_find_error_view_allows_uid_without_django_auth(self, _mock_get_solo):
+        request = self.factory.get("/ai/find-error/?uid=186638")
+        request.user = SimpleNamespace(is_authenticated=False)
+        request.session = {}
+        with patch("ai.views.render", return_value=HttpResponse("ok")):
+            response = find_error_view(request)
         self.assertEqual(response.status_code, 200)

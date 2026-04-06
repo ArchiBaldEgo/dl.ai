@@ -30,8 +30,8 @@
                             <option value="Web_DeepSeek_Thinking">Web DeepSeek Thinking</option>
                         </select>
                         <select id="selectType"
-                            onchange="document.location.href=this.querySelector('option:checked').dataset.link">
-                            <option selected>Чат с DLAI</option>
+                            onchange="switchAiPage(this)">
+                            <option data-link="/ai/chat/" selected>Чат с DLAI</option>
                             <option data-link="/ai/solve-problem/">Реши задачу</option>
                             <option data-link="/ai/find-error/">В чём ошибка?</option>
                         </select>

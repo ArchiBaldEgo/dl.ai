@@ -2,6 +2,16 @@
             var ws = null;
             var client_id = generateClientId();
             var notEnter = false;
+
+            function switchAiPage(selectElement) {
+                const selectedOption = selectElement.querySelector('option:checked');
+                const target = selectedOption?.dataset?.link;
+                if (!target) {
+                    return;
+                }
+                const query = window.location.search || '';
+                window.location.href = `${target}${query}`;
+            }
             
             // Голосовые переменные
             var recognition = null;
