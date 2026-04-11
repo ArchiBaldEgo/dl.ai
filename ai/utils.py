@@ -31,6 +31,18 @@ proxies = {
         }
 
 
+def _post_to_bot_pool(payload: dict, timeout_seconds: int = 120) -> requests.Response:
+    # Internal service call must bypass env proxies (HTTP_PROXY/HTTPS_PROXY).
+    with requests.Session() as session:
+        session.trust_env = False
+        return session.post(
+            'http://bot-pool-api:3000/api/send',
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=timeout_seconds,
+        )
+
+
 async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25.0) -> Tuple[str, Optional[int]]:
 
     if user_id not in hist:
@@ -499,19 +511,14 @@ async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> str:
     #проверка на hist делается на стороне сервера. пользователю достаточно просто отправить промпт
     try:
         response = await asyncio.to_thread(
-            requests.post,
-            'http://bot-pool-api:3000/api/send',
-            json={
+            _post_to_bot_pool,
+            {
                 "model": "deepseek",
                 "user_id": user_id,
                 "thinking": True,
                 "message": msg
             },
-            headers={
-                "Content-Type": "application/json",
-            },
-            proxies=None,
-            timeout=120  # Добавляем таймаут для запроса
+            120,
         )
 
         # Логирование статуса ответа и содержимого
@@ -582,19 +589,14 @@ async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
     #проверка на hist делается на стороне сервера. пользователю достаточно просто отправить промпт
     try:
         response = await asyncio.to_thread(
-            requests.post,
-            'http://bot-pool-api:3000/api/send',
-            json={
+            _post_to_bot_pool,
+            {
                 "model": "deepseek",
                 "user_id": user_id,
                 "thinking": False,
                 "message": msg
             },
-            headers={
-                "Content-Type": "application/json",
-            },
-            proxies=None,
-            timeout=120  # Добавляем таймаут для запроса
+            120,
         )
 
         # Логирование статуса ответа и содержимого
