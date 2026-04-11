@@ -43,6 +43,51 @@ def _post_to_bot_pool(payload: dict, timeout_seconds: int = 120) -> requests.Res
         )
 
 
+async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tuple[str, int]:
+    payload = {
+        "model": "deepseek",
+        "user_id": user_id,
+        "thinking": thinking,
+        "message": msg,
+    }
+
+    max_attempts = 4
+    for attempt in range(1, max_attempts + 1):
+        response = await asyncio.to_thread(_post_to_bot_pool, payload, 120)
+        print(f"Response Status: {response.status_code} (attempt {attempt}/{max_attempts})")
+        print(f"Response Content: {response.text}")
+
+        if response.status_code == 200:
+            response_content = response.text
+            if not response_content:
+                raise ValueError("Пустой ответ от сервера.")
+
+            try:
+                obj = json.loads(response_content)
+            except json.JSONDecodeError as e:
+                print(f"Ошибка при декодировании JSON: {e}")
+                print(f"Содержимое ответа: {response_content}")
+                return 'Что-то пошло не так с обработкой JSON.', 0
+
+            return obj['data']["content"], 0
+
+        # bot-pool может вернуть 503/504 во время инициализации; делаем несколько ретраев
+        if response.status_code in (503, 504) and attempt < max_attempts:
+            await asyncio.sleep(attempt * 2)
+            continue
+
+        if response.status_code == 400:
+            return 'Неправильный запрос', 0
+        if response.status_code == 401:
+            return 'Бот не авторизован. Проверьте логин/пароль', 0
+        if response.status_code == 429:
+            return 'Все боты заняты', 0
+        if response.status_code >= 503:
+            return 'Бот инициализируется слишком долго. Попробуйте позже.', 0
+
+        return f'Ошибка сервиса Web DeepSeek (код {response.status_code}).', 0
+
+
 async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25.0) -> Tuple[str, Optional[int]]:
 
     if user_id not in hist:
@@ -510,44 +555,7 @@ async def ask_Gpt_oss_120b_async(messages: str, user_id: int) -> Tuple[str, Opti
 async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> str:
     #проверка на hist делается на стороне сервера. пользователю достаточно просто отправить промпт
     try:
-        response = await asyncio.to_thread(
-            _post_to_bot_pool,
-            {
-                "model": "deepseek",
-                "user_id": user_id,
-                "thinking": True,
-                "message": msg
-            },
-            120,
-        )
-
-        # Логирование статуса ответа и содержимого
-        print(f"Response Status: {response.status_code}")
-        print(f"Response Content: {response.text}")
-
-        if response.status_code != 200:
-            if response.status_code == 400:
-                return 'Неправильный запрос', '0'
-            elif response.status_code == 401:
-                return 'Бот не авторизован. Проверьте логин/пароль', '0'
-            elif response.status_code == 429:
-                return 'Все боты заняты', '0'
-            elif response.status_code >= 503:
-                return 'Бот инициализируется. Попробуйте чуть позже', '0'
-            return f'Ошибка сервиса Web DeepSeek (код {response.status_code}).', '0'
-        
-        response_content = response.text  # Используем text вместо content.decode()
-        if not response_content:
-            raise ValueError("Пустой ответ от сервера.")
-
-        try:
-            obj = json.loads(response_content)
-        except json.JSONDecodeError as e:
-            print(f"Ошибка при декодировании JSON: {e}")
-            print(f"Содержимое ответа: {response_content}")
-            return 'Что-то пошло не так с обработкой JSON.', '0'
-
-        return obj['data']["content"], 0
+        return await _ask_web_deepseek_common(msg, user_id, thinking=True)
     
     except requests.exceptions.ConnectionError as e:
         print(f"Ошибка соединения: {e}")
@@ -588,44 +596,7 @@ async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> str:
 async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
     #проверка на hist делается на стороне сервера. пользователю достаточно просто отправить промпт
     try:
-        response = await asyncio.to_thread(
-            _post_to_bot_pool,
-            {
-                "model": "deepseek",
-                "user_id": user_id,
-                "thinking": False,
-                "message": msg
-            },
-            120,
-        )
-
-        # Логирование статуса ответа и содержимого
-        print(f"Response Status: {response.status_code}")
-        print(f"Response Content: {response.text}")
-
-        if response.status_code != 200:
-            if response.status_code == 400:
-                return 'Неправильный запрос', '0'
-            elif response.status_code == 401:
-                return 'Бот не авторизован. Проверьте логин/пароль', '0'
-            elif response.status_code == 429:
-                return 'Все боты заняты', '0'
-            elif response.status_code >= 503:
-                return 'Бот инициализируется. Попробуйте чуть позже', '0'
-            return f'Ошибка сервиса Web DeepSeek (код {response.status_code}).', '0'
-        
-        response_content = response.text  # Используем text вместо content.decode()
-        if not response_content:
-            raise ValueError("Пустой ответ от сервера.")
-
-        try:
-            obj = json.loads(response_content)
-        except json.JSONDecodeError as e:
-            print(f"Ошибка при декодировании JSON: {e}")
-            print(f"Содержимое ответа: {response_content}")
-            return 'Что-то пошло не так с обработкой JSON.', '0'
-
-        return obj['data']["content"], 0
+        return await _ask_web_deepseek_common(msg, user_id, thinking=False)
     
     except requests.exceptions.ConnectionError as e:
         print(f"Ошибка соединения: {e}")
