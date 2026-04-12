@@ -21,6 +21,7 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 SC_TOKEN=os.getenv("SC_TOKEN")
 MIST_TOKEN = os.getenv("MIST_TOKEN")
 GROQ_TOKEN = os.getenv("GROQ_TOKEN")
+DEEPSEEK_API_TOKEN = os.getenv("DEEPSEEK_API_TOKEN") or os.getenv("DEEPSEEK_API_KEY")
 timeout = 0
 
 hist=dict([])
@@ -44,6 +45,60 @@ def _post_to_bot_pool(payload: dict, timeout_seconds: int = 120) -> requests.Res
 
 
 async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tuple[str, int]:
+    if DEEPSEEK_API_TOKEN:
+        model_name = "deepseek-reasoner" if thinking else "deepseek-chat"
+        response = await asyncio.to_thread(
+            requests.post,
+            'https://api.deepseek.com/chat/completions',
+            json={
+                "model": model_name,
+                "messages": [{"role": "user", "content": msg}],
+                "stream": False,
+            },
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            proxies=proxies,
+            timeout=35,
+        )
+
+        print(f"DeepSeek API status: {response.status_code}")
+        if response.status_code != 200:
+            if response.status_code == 400:
+                return 'Неправильный запрос', 0
+            if response.status_code == 401:
+                return 'DeepSeek API не авторизован. Проверьте DEEPSEEK_API_TOKEN.', 0
+            if response.status_code == 429:
+                return 'Превышен лимит запросов DeepSeek. Попробуйте позже.', 0
+            if response.status_code >= 500:
+                return 'Сервер DeepSeek временно недоступен. Попробуйте позже.', 0
+            return f'Ошибка сервиса DeepSeek (код {response.status_code}).', 0
+
+        response_content = response.text
+        if not response_content:
+            raise ValueError("Пустой ответ от DeepSeek API.")
+
+        try:
+            obj = json.loads(response_content)
+        except json.JSONDecodeError as e:
+            print(f"Ошибка при декодировании JSON DeepSeek: {e}")
+            return 'Что-то пошло не так с обработкой JSON.', 0
+
+        choices = obj.get('choices') or []
+        if not choices:
+            return 'Неожиданный формат ответа от DeepSeek.', 0
+
+        first_message = choices[0].get('message', {})
+        assistant_content = first_message.get('content')
+        if not assistant_content:
+            assistant_content = first_message.get('reasoning_content') or ''
+        if not assistant_content:
+            assistant_content = 'Пустой ответ от модели.'
+
+        completion_tokens = obj.get('usage', {}).get('completion_tokens', 0)
+        return assistant_content, completion_tokens
+
     payload = {
         "model": "deepseek",
         "user_id": user_id,
