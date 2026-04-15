@@ -1,9 +1,9 @@
-FROM python:3.10.9
-
-FROM node:20-bookworm-slim
+FROM python:3.10-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_NO_CACHE_DIR=1
 
 # Принимаем аргументы прокси
 ARG HTTP_PROXY
@@ -18,9 +18,6 @@ ENV NO_PROXY=${NO_PROXY}
 # Настраиваем pip для использования прокси
 RUN if [ -n "$HTTP_PROXY" ]; then \
     pip config set global.proxy "$HTTP_PROXY"; \
-        npm config set proxy "$HTTP_PROXY"; \
-        npm config set https-proxy "$HTTPS_PROXY"; \
-        npm config set noproxy "$NO_PROXY"; \
     fi
 
 RUN rm -rf /var/lib/apt/lists/* && \
@@ -33,19 +30,22 @@ RUN rm -rf /var/lib/apt/lists/* && \
       'Acquire::CompressionTypes::Order { "gz"; "bz2"; "xz"; };' \
       > /etc/apt/apt.conf.d/99proxyfix && \
     apt-get update && \
-    apt-get install -y --no-install-recommends libpq-dev && \
+    apt-get install -y --no-install-recommends gcc libpq-dev && \
     rm -rf /var/lib/apt/lists/*
-RUN pip install --upgrade pip
+
+RUN python -m pip install --upgrade pip
 
 WORKDIR /app
 
-COPY . /app
+COPY requirements.txt /app/requirements.txt
 
 # Явно указываем прокси для pip
 RUN if [ -n "$HTTP_PROXY" ]; then \
-    pip install --proxy=$HTTP_PROXY --default-timeout=100 -r requirements.txt; \
+    python -m pip install --proxy=$HTTP_PROXY --default-timeout=100 -r requirements.txt; \
     else \
-    pip install --default-timeout=100 -r requirements.txt; \
+    python -m pip install --default-timeout=100 -r requirements.txt; \
     fi
+
+COPY . /app
 
 CMD ["daphne", "-p", "8000", "-b", "0.0.0.0", "DjangoTest.asgi:application"]
