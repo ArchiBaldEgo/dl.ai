@@ -10,47 +10,55 @@ from asgiref.sync import async_to_sync
 import time
 
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
-from .utils import (
-    ask_DeepSeek_R1_Distill_Llama_70B_async,
-    ask_DeepSeek_R1_async,
-    ask_Meta_Llama_3_1_70B_Instruct_async,
-    ask_Mixtral_8x22b_async,
-    ask_Gpt_oss_120b_async,
-    ask_Web_DeepSeek_async,
-    ask_Web_DeepSeek_Thinking_async,
-)
 
 
-MODEL_HANDLERS = {
+MODEL_SPECS = {
     "DeepSeek_R1_Distill_Llama_70B": {
         "title": "DeepSeek-R1-Distill-Llama-70B",
-        "handler": ask_DeepSeek_R1_Distill_Llama_70B_async,
+        "handler_name": "ask_DeepSeek_R1_Distill_Llama_70B_async",
     },
     "DeepSeek_R1": {
         "title": "DeepSeek-R1",
-        "handler": ask_DeepSeek_R1_async,
+        "handler_name": "ask_DeepSeek_R1_async",
     },
     "Meta_Llama_3_1_70B_Instruct": {
         "title": "Meta-Llama-3.1-70B-Instruct",
-        "handler": ask_Meta_Llama_3_1_70B_Instruct_async,
+        "handler_name": "ask_Meta_Llama_3_1_70B_Instruct_async",
     },
     "Mixtral_8x22b": {
         "title": "Mixtral-8x22b",
-        "handler": ask_Mixtral_8x22b_async,
+        "handler_name": "ask_Mixtral_8x22b_async",
     },
     "Gpt_oss_120b": {
         "title": "Gpt_oss_120b",
-        "handler": ask_Gpt_oss_120b_async,
+        "handler_name": "ask_Gpt_oss_120b_async",
     },
     "Web_DeepSeek": {
         "title": "Web DeepSeek",
-        "handler": ask_Web_DeepSeek_async,
+        "handler_name": "ask_Web_DeepSeek_async",
     },
     "Web_DeepSeek_Thinking": {
         "title": "Web DeepSeek Thinking",
-        "handler": ask_Web_DeepSeek_Thinking_async,
+        "handler_name": "ask_Web_DeepSeek_Thinking_async",
     },
 }
+
+
+def _load_model_handlers():
+    try:
+        from . import utils as ai_utils
+    except Exception:
+        return {}
+
+    handlers = {}
+    for key, spec in MODEL_SPECS.items():
+        handler = getattr(ai_utils, spec["handler_name"], None)
+        if handler:
+            handlers[key] = {
+                "title": spec["title"],
+                "handler": handler,
+            }
+    return handlers
 
 
 def _can_access_arm(request):
@@ -105,6 +113,7 @@ def admin_arm_find_error_view(request):
     error_message = ""
 
     if request.method == "POST":
+        model_handlers = _load_model_handlers()
         selected_models = request.POST.getlist("models")
         selected_language_ui = request.POST.get("interface_language", "Русский")
         selected_prog_lng = request.POST.get("programming_language", "")
@@ -137,7 +146,7 @@ def admin_arm_find_error_view(request):
             total_tokens = 0
 
             for model_key in selected_models:
-                model_info = MODEL_HANDLERS.get(model_key)
+                model_info = model_handlers.get(model_key)
                 if not model_info:
                     continue
 
@@ -206,7 +215,7 @@ def admin_arm_find_error_view(request):
         "topics": topics,
         "prompts": prompts,
         "model_options": [
-            {"key": key, "title": value["title"]} for key, value in MODEL_HANDLERS.items()
+            {"key": key, "title": value["title"]} for key, value in MODEL_SPECS.items()
         ],
         "selected_models": selected_models,
         "selected_language_ui": selected_language_ui,

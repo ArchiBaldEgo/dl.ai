@@ -1,9 +1,6 @@
-<<<<<<< HEAD
 FROM python:3.10.9
-=======
 
 FROM node:20-bookworm-slim
->>>>>>> 2daa7fc (Мои изменения в подмодуле)
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -20,13 +17,10 @@ ENV NO_PROXY=${NO_PROXY}
 
 # Настраиваем pip для использования прокси
 RUN if [ -n "$HTTP_PROXY" ]; then \
-<<<<<<< HEAD
     pip config set global.proxy "$HTTP_PROXY"; \
-=======
         npm config set proxy "$HTTP_PROXY"; \
         npm config set https-proxy "$HTTPS_PROXY"; \
         npm config set noproxy "$NO_PROXY"; \
->>>>>>> 2daa7fc (Мои изменения в подмодуле)
     fi
 
 RUN rm -rf /var/lib/apt/lists/* && \
@@ -47,7 +41,6 @@ WORKDIR /app
 
 COPY . /app
 
-<<<<<<< HEAD
 # Явно указываем прокси для pip
 RUN if [ -n "$HTTP_PROXY" ]; then \
     pip install --proxy=$HTTP_PROXY --default-timeout=100 -r requirements.txt; \
@@ -56,22 +49,3 @@ RUN if [ -n "$HTTP_PROXY" ]; then \
     fi
 
 CMD ["daphne", "-p", "8000", "-b", "0.0.0.0", "DjangoTest.asgi:application"]
-=======
-# Устанавливаем зависимости (если есть прокси, npm уже настроен)
-RUN npm ci --omit=dev --no-audit --no-fund
-
-# После установки зависимостей удаляем настройки прокси из npm, чтобы они не попали в образ
-RUN if [ -n "$HTTP_PROXY" ]; then \
-        npm config delete proxy; \
-        npm config delete https-proxy; \
-        npm config delete noproxy; \
-    fi
-
-COPY api/ ./api/
-COPY worker/ ./worker/
-
-EXPOSE 3000
-
-# В CMD переменные прокси уже не заданы, контейнер будет использовать прямой доступ
-CMD ["npm", "start"]
->>>>>>> 2daa7fc (Мои изменения в подмодуле)
