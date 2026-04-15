@@ -46,7 +46,7 @@ def _env_csv(name: str, default: list[str]) -> list[str]:
 
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = _env_bool("DEBUG", default=False)
+DEBUG = _env_bool("DEBUG", default=True)
 
 ALLOWED_HOSTS = _env_csv(
     "ALLOWED_HOSTS",
