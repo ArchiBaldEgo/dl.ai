@@ -1,9 +1,7 @@
-FROM node:20-bookworm-slim
+FROM python:3.10.9
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1
-ENV PIP_NO_CACHE_DIR=1
 
 # Принимаем аргументы прокси
 ARG HTTP_PROXY
@@ -17,7 +15,7 @@ ENV NO_PROXY=${NO_PROXY}
 
 # Настраиваем pip для использования прокси
 RUN if [ -n "$HTTP_PROXY" ]; then \
-    pip config set global.proxy "$HTTP_PROXY"; \
+    python -m pip config set global.proxy "$HTTP_PROXY"; \
     fi
 
 RUN rm -rf /var/lib/apt/lists/* && \
@@ -30,10 +28,10 @@ RUN rm -rf /var/lib/apt/lists/* && \
       'Acquire::CompressionTypes::Order { "gz"; "bz2"; "xz"; };' \
       > /etc/apt/apt.conf.d/99proxyfix && \
     apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip gcc libpq-dev && \
+    apt-get install -y --no-install-recommends libpq-dev && \
     rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --upgrade pip
+RUN python -m pip install --upgrade pip
 
 WORKDIR /app
 
@@ -41,9 +39,9 @@ COPY requirements.txt /app/requirements.txt
 
 # Явно указываем прокси для pip
 RUN if [ -n "$HTTP_PROXY" ]; then \
-    python3 -m pip install --proxy=$HTTP_PROXY --default-timeout=100 -r requirements.txt; \
+    python -m pip install --proxy=$HTTP_PROXY --default-timeout=100 -r /app/requirements.txt; \
     else \
-    python3 -m pip install --default-timeout=100 -r requirements.txt; \
+    python -m pip install --default-timeout=100 -r /app/requirements.txt; \
     fi
 
 COPY . /app
