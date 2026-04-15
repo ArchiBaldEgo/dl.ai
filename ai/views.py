@@ -2,6 +2,7 @@ from django.shortcuts import render
 from django.core.cache import cache
 from django.http import JsonResponse
 from django.http import HttpResponseForbidden, HttpResponseNotFound
+from django.db import ProgrammingError
 from functools import wraps
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 import uuid
@@ -11,17 +12,29 @@ def ai_access_required(view_func):
     @wraps(view_func)
     def _wrapped(request, *args, **kwargs):
         is_django_authenticated = request.user.is_authenticated
-        uid = (request.GET.get("uid") or request.session.get("external_uid") or "").strip()
+        uid = (request.GET.get("uid") or "").strip()
+        if not uid:
+            try:
+                uid = (request.session.get("external_uid") or "").strip()
+            except ProgrammingError:
+                uid = ""
         has_external_uid = uid.isdigit()
 
         if has_external_uid:
-            request.session["external_uid"] = uid
+            try:
+                request.session["external_uid"] = uid
+            except ProgrammingError:
+                pass
 
         if not is_django_authenticated and not has_external_uid:
             return HttpResponseForbidden("Authentication required")
 
-        if not AIAppSettings.get_solo().is_enabled:
-            return HttpResponseNotFound("AI app is disabled")
+        try:
+            if not AIAppSettings.get_solo().is_enabled:
+                return HttpResponseNotFound("AI app is disabled")
+        except ProgrammingError:
+            # AIAppSettings table may be absent before migrations are applied.
+            pass
 
         return view_func(request, *args, **kwargs)
 

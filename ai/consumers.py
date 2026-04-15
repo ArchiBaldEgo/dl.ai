@@ -158,9 +158,6 @@ class MyConsumer(AsyncWebsocketConsumer):
                 elif value == "Mixtral_8x22b":
                     response = await ask_Mixtral_8x22b_async(message, self.client_id)
                     modell = "Mixtral_8x22b"
-                elif value == "DeepSeek_R1_Distill_Llama_70B":
-                    response = await ask_DeepSeek_R1_Distill_Llama_70B_async(message, self.client_id)
-                    modell = "DeepSeek_R1_Distill_Llama_70B"
                 elif value == "DeepSeek_R1":
                     response = await ask_DeepSeek_R1_async(message, self.client_id)
                     modell = "DeepSeek_R1"
