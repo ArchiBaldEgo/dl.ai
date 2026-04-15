@@ -1,7 +1,6 @@
 from django.contrib import admin
 from django.contrib.admin.forms import AdminAuthenticationForm
 from django import forms
-from django.contrib.admin.views.decorators import staff_member_required
 from django.http import HttpResponseForbidden
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
@@ -110,7 +109,6 @@ def _build_find_error_message(task_text, code_text, prog_lang_name, prompt_text,
     return message
 
 
-@staff_member_required
 def admin_arm_find_error_view(request):
     if not _can_access_arm(request):
         return HttpResponseForbidden("Access denied")
