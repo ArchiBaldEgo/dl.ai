@@ -1,6 +1,7 @@
 import os
 
-from django.shortcuts import render
+from django.contrib.auth import authenticate, login
+from django.shortcuts import redirect, render
 from django.core.cache import cache
 from django.http import JsonResponse
 from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound
@@ -44,6 +45,26 @@ def tester_access_required(view_func):
         return HttpResponseForbidden("Tester access required")
 
     return _wrapped
+
+
+def tester_login_view(request):
+    if request.user.is_authenticated and request.user.groups.filter(name="tester").exists():
+        return redirect("/ai/admin/arm/find-error/")
+
+    error_message = ""
+
+    if request.method == "POST":
+        username = (request.POST.get("username") or "").strip()
+        password = request.POST.get("password") or ""
+
+        user = authenticate(request, username=username, password=password)
+        if user and user.is_active and user.groups.filter(name="tester").exists():
+            login(request, user)
+            return redirect("/ai/admin/arm/find-error/")
+
+        error_message = "Неверный логин/пароль или у пользователя нет группы tester."
+
+    return render(request, "ai/test-panel-login.html", {"error_message": error_message})
 
 
 @ai_access_required

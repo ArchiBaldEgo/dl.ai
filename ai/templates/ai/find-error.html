@@ -105,22 +105,23 @@
 
         <div class="sidebar">
             <a href="/ai/admin/" style="text-decoration: none; color: black;">
-                <div class="sidebar-header">
+                <div class="sidebar-header" id="adminPanelLink">
                     Админ-Панель
                 </div>
             </a>
-            <div class="sidebar-content">
+            <div class="sidebar-content" style="display: flex; flex-direction: column; gap: 8px;">
+                <a href="/ai/test-panel/login/" id="testPanelLink" style="text-decoration: none; color: black; border: 1px solid #ddd; border-radius: 6px; padding: 10px 12px;">
+                    Тест-панель
+                </a>
             </div>
         </div>
         
-        <a href="/ai/admin/" style="text-decoration: none; color: black;">
-            <button class="toggle-button">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="9 18 15 12 9 6" />
-                </svg>
-            </button>
-        </a>
+        <button class="toggle-button" type="button" aria-label="Open menu">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="9 18 15 12 9 6" />
+            </svg>
+        </button>
     </div>
 </body>
 <script>

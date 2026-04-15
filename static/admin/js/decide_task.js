@@ -583,6 +583,7 @@
                     clear: "Очистить контекст",
                     placeholder: "Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)\nПример форматирования кода:\n```\nprint('Hello, world!')\n```",
                     adminPanel: "Админ-Панель",
+                    testPanel: "Тест-панель",
                     chat: "Чат с DLAI",
                     decideTask: "Реши задачу",
                     findError: "В чём ошибка?",
@@ -596,6 +597,7 @@
                     clear: "Clear Context",
                     placeholder: "Ask a question (preferably in English to avoid errors), for nice formatting wrap the code in ```\nExample of code formatting:\n```\nprint('Hello, world!')\n```",
                     adminPanel: "Admin Panel",
+                    testPanel: "Test Panel",
                     chat: "Chat with DLAI",
                     decideTask: "Solve the task",
                     findError: "What's the error?",
@@ -609,6 +611,7 @@
                     clear: "Effacer le contexte",
                     placeholder: "Posez une question (de préférence en anglais pour éviter les erreurs), pour un bon formatage, encadrez le code dans ```\nExemple de formatage du code:\n```\nprint('Hello, world!')\n```",
                     adminPanel: "Panneau Admin",
+                    testPanel: "Panneau Test",
                     chat: "Chat avec DLAI",
                     decideTask: "Résoudre la tâche",
                     findError: "Quelle est l'erreur?",
@@ -625,6 +628,10 @@
                 document.querySelector("button[onclick='clearContext()']").textContent = localization[selectedLang].clear;
                 document.getElementById("messageText").setAttribute("placeholder", localization[selectedLang].placeholder);
                 document.querySelector(".sidebar-header").textContent = localization[selectedLang].adminPanel;
+                const testPanelLink = document.getElementById("testPanelLink");
+                if (testPanelLink) {
+                    testPanelLink.textContent = localization[selectedLang].testPanel;
+                }
                 document.querySelector("#selectType option:nth-child(1)").textContent = localization[selectedLang].chat;
                 document.querySelector("#selectType option:nth-child(2)").textContent = localization[selectedLang].decideTask;
                 document.querySelector("#selectType option:nth-child(3)").textContent = localization[selectedLang].findError;
