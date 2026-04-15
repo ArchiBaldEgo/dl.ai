@@ -30,6 +30,19 @@
 </style>
 {% endblock %}
 
+{% block extrahead %}
+{{ block.super }}
+<script>
+  (function () {
+    // Keep user choice intact; force dark only for first-time admin visits.
+    if (!localStorage.getItem('theme')) {
+      document.documentElement.dataset.theme = 'dark';
+      localStorage.setItem('theme', 'dark');
+    }
+  })();
+</script>
+{% endblock %}
+
 {% block coltype %}colMS{% endblock %}
 {% block bodyclass %}{{ block.super }} dashboard{% endblock %}
 {% block nav-breadcrumbs %}{% endblock %}

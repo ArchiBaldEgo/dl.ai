@@ -2,6 +2,7 @@ from django.contrib import admin
 from django import forms
 from django.contrib.admin.views.decorators import staff_member_required
 from django.http import HttpResponseForbidden
+from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path
 from django.utils.html import strip_tags
@@ -236,6 +237,25 @@ def _custom_admin_urls():
 
 
 admin.site.get_urls = _custom_admin_urls
+
+
+_default_admin_view = admin.site.admin_view
+
+
+def _custom_admin_view(view, cacheable=False):
+    wrapped_view = _default_admin_view(view, cacheable)
+
+    def inner(request, *args, **kwargs):
+        if _can_access_arm(request) and not request.user.is_superuser:
+            arm_path = "/ai/admin/arm/find-error/"
+            if not request.path.startswith(arm_path):
+                return redirect(arm_path)
+        return wrapped_view(request, *args, **kwargs)
+
+    return inner
+
+
+admin.site.admin_view = _custom_admin_view
 
 
 _default_each_context = admin.site.each_context
