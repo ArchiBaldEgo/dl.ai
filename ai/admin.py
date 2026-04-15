@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.contrib.admin.forms import AdminAuthenticationForm
 from django import forms
 from django.contrib.admin.views.decorators import staff_member_required
 from django.http import HttpResponseForbidden
@@ -67,6 +68,23 @@ def _can_access_arm(request):
     if request.user.is_superuser:
         return True
     return request.user.groups.filter(name="tester").exists()
+
+
+class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
+    def confirm_login_allowed(self, user):
+        if not user.is_active:
+            raise forms.ValidationError(
+                self.error_messages["inactive"],
+                code="inactive",
+            )
+
+        if user.is_superuser or user.is_staff or user.groups.filter(name="tester").exists():
+            return
+
+        raise forms.ValidationError(
+            "Please enter the correct username and password for a staff or tester account.",
+            code="invalid_login",
+        )
 
 
 def _language_instruction(language_name):
@@ -246,6 +264,19 @@ def _custom_admin_urls():
 
 
 admin.site.get_urls = _custom_admin_urls
+
+
+def _custom_has_permission(request):
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated or not user.is_active:
+        return False
+    if user.is_superuser or user.is_staff:
+        return True
+    return user.groups.filter(name="tester").exists()
+
+
+admin.site.has_permission = _custom_has_permission
+admin.site.login_form = TesterOrStaffAdminAuthenticationForm
 
 
 _default_admin_view = admin.site.admin_view

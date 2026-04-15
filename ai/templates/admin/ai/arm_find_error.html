@@ -1,0 +1,508 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<style>
+  .arm-wrap {
+    max-width: 1200px;
+  }
+  .arm-card {
+    background: var(--body-bg);
+    border: 1px solid var(--hairline-color);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .arm-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px;
+  }
+  .arm-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .arm-textarea {
+    width: 100%;
+    min-height: 140px;
+    resize: vertical;
+  }
+  .arm-models {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .arm-model {
+    border: 1px solid var(--hairline-color);
+    border-radius: 6px;
+    padding: 8px;
+  }
+  .arm-error {
+    color: #b42318;
+    font-weight: 600;
+    margin-top: 8px;
+  }
+  .arm-report {
+    margin: 0;
+    padding-left: 18px;
+  }
+  .arm-result {
+    border: 1px solid var(--hairline-color);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+  .arm-result.ok {
+    border-left: 4px solid #12b76a;
+  }
+  .arm-result.error {
+    border-left: 4px solid #f04438;
+  }
+  .arm-meta {
+    color: var(--body-quiet-color);
+    font-size: 12px;
+    margin-top: 4px;
+  }
+  .arm-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .arm-link {
+    margin-bottom: 12px;
+    display: inline-block;
+  }
+</style>
+
+<div class="arm-wrap">
+  <a class="arm-link" href="/ai/admin/">← Назад в админку</a>
+  <h1>ARM: В чем ошибка</h1>
+
+  <div class="arm-card">
+    <form method="post">
+      {% csrf_token %}
+
+      <div class="arm-grid">
+        <div class="arm-field">
+          <label for="interface_language">Язык интерфейса</label>
+          <select id="interface_language" name="interface_language">
+            <option value="Русский" {% if selected_language_ui == "Русский" %}selected{% endif %}>Русский</option>
+            <option value="English" {% if selected_language_ui == "English" %}selected{% endif %}>English</option>
+            <option value="Français" {% if selected_language_ui == "Français" %}selected{% endif %}>Français</option>
+          </select>
+        </div>
+
+        <div class="arm-field">
+          <label for="programming_language">Язык программирования</label>
+          <select id="programming_language" name="programming_language"></select>
+        </div>
+
+        <div class="arm-field">
+          <label for="topic">Тема</label>
+          <select id="topic" name="topic"></select>
+        </div>
+
+        <div class="arm-field">
+          <label for="prompt">Препромпт</label>
+          <select id="prompt" name="prompt"></select>
+        </div>
+      </div>
+
+      <div class="arm-field" style="margin-top: 12px;">
+        <label for="task_text">Задача</label>
+        <textarea class="arm-textarea" id="task_text" name="task_text" placeholder="Вставьте сюда условие задачи">{{ task_text }}</textarea>
+      </div>
+
+      <div class="arm-field" style="margin-top: 12px;">
+        <label for="code_text">Код программы</label>
+        <textarea class="arm-textarea" id="code_text" name="code_text" placeholder="Вставьте сюда код решения">{{ code_text }}</textarea>
+      </div>
+
+      <div class="arm-field" style="margin-top: 12px;">
+        <label>Модели для проверки</label>
+        <div class="arm-models">
+          {% for model in model_options %}
+            <label class="arm-model">
+              <input type="checkbox" name="models" value="{{ model.key }}" {% if model.key in selected_models %}checked{% endif %}>
+              {{ model.title }}
+            </label>
+          {% endfor %}
+        </div>
+      </div>
+
+      {% if error_message %}
+        <div class="arm-error">{{ error_message }}</div>
+      {% endif %}
+
+      <div class="arm-actions">
+        <button type="submit" class="default">Запустить отчет</button>
+      </div>
+    </form>
+  </div>
+
+  {% if report %}
+    <div class="arm-card">
+      <h2>Краткий отчет</h2>
+      <ul class="arm-report">
+        <li>Всего моделей: {{ report.models_total }}</li>
+        <li>Успешно: {{ report.success_count }}</li>
+        <li>С ошибкой: {{ report.error_count }}</li>
+        <li>Суммарно токенов: {{ report.tokens_total }}</li>
+        <li>Самая быстрая: {{ report.fastest_model }} ({{ report.fastest_duration }} сек)</li>
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if results %}
+    <div class="arm-card">
+      <h2>Ответы моделей</h2>
+      {% for item in results %}
+        <div class="arm-result {{ item.status }}">
+          <strong>{{ item.model_title }}</strong>
+          <div class="arm-meta">Время: {{ item.duration }} сек | Токены: {{ item.tokens }}</div>
+          <div style="margin-top: 8px;">{{ item.short_response }}</div>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+</div>
+
+{{ languages|json_script:"langs-data" }}
+{{ topics|json_script:"topics-data" }}
+{{ prompts|json_script:"prompts-data" }}
+
+<script>
+  (function () {
+    const langSelect = document.getElementById('programming_language');
+    const topicSelect = document.getElementById('topic');
+    const promptSelect = document.getElementById('prompt');
+
+    const selectedLang = "{{ selected_prog_lng|escapejs }}";
+    const selectedTopic = "{{ selected_topic|escapejs }}";
+    const selectedPrompt = "{{ selected_prompt|escapejs }}";
+
+    const languages = JSON.parse(document.getElementById('langs-data').textContent || '[]');
+    const topics = JSON.parse(document.getElementById('topics-data').textContent || '[]');
+    const prompts = JSON.parse(document.getElementById('prompts-data').textContent || '[]');
+
+    function fillLanguages() {
+      langSelect.innerHTML = '<option value="">Выберите язык</option>';
+      languages.forEach(function (item) {
+        const option = document.createElement('option');
+        option.value = String(item.id);
+        option.textContent = item.language_name;
+        if (selectedLang && String(item.id) === selectedLang) {
+          option.selected = true;
+        }
+        langSelect.appendChild(option);
+      });
+    }
+
+    function fillTopics(languageId) {
+      topicSelect.innerHTML = '<option value="">Выберите тему</option>';
+      promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
+      if (!languageId) {
+        return;
+      }
+
+      topics
+        .filter(function (item) { return String(item.programming_language_id) === String(languageId); })
+        .forEach(function (item) {
+          const option = document.createElement('option');
+          option.value = String(item.id);
+          option.textContent = item.topic_name;
+          if (selectedTopic && String(item.id) === selectedTopic) {
+            option.selected = true;
+          }
+          topicSelect.appendChild(option);
+        });
+    }
+
+    function fillPrompts(topicId) {
+      promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
+      if (!topicId) {
+        return;
+      }
+
+      prompts
+        .filter(function (item) { return String(item.topic_id) === String(topicId); })
+        .forEach(function (item) {
+          const option = document.createElement('option');
+          option.value = String(item.id);
+          option.textContent = item.prompt_name || ('Prompt #' + item.id);
+          if (selectedPrompt && String(item.id) === selectedPrompt) {
+            option.selected = true;
+          }
+          promptSelect.appendChild(option);
+        });
+    }
+
+    langSelect.addEventListener('change', function () {
+      fillTopics(langSelect.value);
+    });
+
+    topicSelect.addEventListener('change', function () {
+      fillPrompts(topicSelect.value);
+    });
+
+    fillLanguages();
+    fillTopics(langSelect.value);
+    fillPrompts(topicSelect.value);
+  })();
+</script>
+{% endblock %}
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<style>
+  .arm-wrap {
+    max-width: 1200px;
+  }
+  .arm-card {
+    background: var(--body-bg);
+    border: 1px solid var(--hairline-color);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .arm-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px;
+  }
+  .arm-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .arm-textarea {
+    width: 100%;
+    min-height: 140px;
+    resize: vertical;
+  }
+  .arm-models {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .arm-model {
+    border: 1px solid var(--hairline-color);
+    border-radius: 6px;
+    padding: 8px;
+  }
+  .arm-error {
+    color: #b42318;
+    font-weight: 600;
+    margin-top: 8px;
+  }
+  .arm-report {
+    margin: 0;
+    padding-left: 18px;
+  }
+  .arm-result {
+    border: 1px solid var(--hairline-color);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+  .arm-result.ok {
+    border-left: 4px solid #12b76a;
+  }
+  .arm-result.error {
+    border-left: 4px solid #f04438;
+  }
+  .arm-meta {
+    color: var(--body-quiet-color);
+    font-size: 12px;
+    margin-top: 4px;
+  }
+  .arm-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .arm-link {
+    margin-bottom: 12px;
+    display: inline-block;
+  }
+</style>
+
+<div class="arm-wrap">
+  <a class="arm-link" href="/ai/admin/">← Назад в админку</a>
+  <h1>ARM: В чем ошибка</h1>
+
+  <div class="arm-card">
+    <form method="post">
+      {% csrf_token %}
+
+      <div class="arm-grid">
+        <div class="arm-field">
+          <label for="interface_language">Язык интерфейса</label>
+          <select id="interface_language" name="interface_language">
+            <option value="Русский" {% if selected_language_ui == "Русский" %}selected{% endif %}>Русский</option>
+            <option value="English" {% if selected_language_ui == "English" %}selected{% endif %}>English</option>
+            <option value="Français" {% if selected_language_ui == "Français" %}selected{% endif %}>Français</option>
+          </select>
+        </div>
+
+        <div class="arm-field">
+          <label for="programming_language">Язык программирования</label>
+          <select id="programming_language" name="programming_language"></select>
+        </div>
+
+        <div class="arm-field">
+          <label for="topic">Тема</label>
+          <select id="topic" name="topic"></select>
+        </div>
+
+        <div class="arm-field">
+          <label for="prompt">Препромпт</label>
+          <select id="prompt" name="prompt"></select>
+        </div>
+      </div>
+
+      <div class="arm-field" style="margin-top: 12px;">
+        <label for="task_text">Задача</label>
+        <textarea class="arm-textarea" id="task_text" name="task_text" placeholder="Вставьте сюда условие задачи">{{ task_text }}</textarea>
+      </div>
+
+      <div class="arm-field" style="margin-top: 12px;">
+        <label for="code_text">Код программы</label>
+        <textarea class="arm-textarea" id="code_text" name="code_text" placeholder="Вставьте сюда код решения">{{ code_text }}</textarea>
+      </div>
+
+      <div class="arm-field" style="margin-top: 12px;">
+        <label>Модели для параллельной проверки (чекбоксы)</label>
+        <div class="arm-models">
+          {% for model in model_options %}
+            <label class="arm-model">
+              <input type="checkbox" name="models" value="{{ model.key }}" {% if model.key in selected_models %}checked{% endif %}>
+              {{ model.title }}
+            </label>
+          {% endfor %}
+        </div>
+      </div>
+
+      {% if error_message %}
+        <div class="arm-error">{{ error_message }}</div>
+      {% endif %}
+
+      <div class="arm-actions">
+        <button type="submit" class="default">Запустить отчет</button>
+      </div>
+    </form>
+  </div>
+
+  {% if report %}
+    <div class="arm-card">
+      <h2>Краткий отчет</h2>
+      <ul class="arm-report">
+        <li>Всего моделей: {{ report.models_total }}</li>
+        <li>Успешно: {{ report.success_count }}</li>
+        <li>С ошибкой: {{ report.error_count }}</li>
+        <li>Суммарно токенов: {{ report.tokens_total }}</li>
+        <li>Самая быстрая: {{ report.fastest_model }} ({{ report.fastest_duration }} сек)</li>
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if results %}
+    <div class="arm-card">
+      <h2>Ответы моделей</h2>
+      {% for item in results %}
+        <div class="arm-result {{ item.status }}">
+          <strong>{{ item.model_title }}</strong>
+          <div class="arm-meta">Время: {{ item.duration }} сек | Токены: {{ item.tokens }}</div>
+          <div style="margin-top: 8px;">{{ item.short_response }}</div>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+</div>
+
+{{ languages|json_script:"langs-data" }}
+{{ topics|json_script:"topics-data" }}
+{{ prompts|json_script:"prompts-data" }}
+
+<script>
+  (function () {
+    const langSelect = document.getElementById('programming_language');
+    const topicSelect = document.getElementById('topic');
+    const promptSelect = document.getElementById('prompt');
+
+    const selectedLang = "{{ selected_prog_lng|escapejs }}";
+    const selectedTopic = "{{ selected_topic|escapejs }}";
+    const selectedPrompt = "{{ selected_prompt|escapejs }}";
+
+    const languages = JSON.parse(document.getElementById('langs-data').textContent || '[]');
+    const topics = JSON.parse(document.getElementById('topics-data').textContent || '[]');
+    const prompts = JSON.parse(document.getElementById('prompts-data').textContent || '[]');
+
+    function fillLanguages() {
+      langSelect.innerHTML = '<option value="">Выберите язык</option>';
+      languages.forEach(function (item) {
+        const option = document.createElement('option');
+        option.value = String(item.id);
+        option.textContent = item.language_name;
+        if (selectedLang && String(item.id) === selectedLang) {
+          option.selected = true;
+        }
+        langSelect.appendChild(option);
+      });
+    }
+
+    function fillTopics(languageId) {
+      topicSelect.innerHTML = '<option value="">Выберите тему</option>';
+      promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
+      if (!languageId) {
+        return;
+      }
+
+      topics
+        .filter(function (item) { return String(item.programming_language_id) === String(languageId); })
+        .forEach(function (item) {
+          const option = document.createElement('option');
+          option.value = String(item.id);
+          option.textContent = item.topic_name;
+          if (selectedTopic && String(item.id) === selectedTopic) {
+            option.selected = true;
+          }
+          topicSelect.appendChild(option);
+        });
+    }
+
+    function fillPrompts(topicId) {
+      promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
+      if (!topicId) {
+        return;
+      }
+
+      prompts
+        .filter(function (item) { return String(item.topic_id) === String(topicId); })
+        .forEach(function (item) {
+          const option = document.createElement('option');
+          option.value = String(item.id);
+          option.textContent = item.prompt_name || ('Prompt #' + item.id);
+          if (selectedPrompt && String(item.id) === selectedPrompt) {
+            option.selected = true;
+          }
+          promptSelect.appendChild(option);
+        });
+    }
+
+    langSelect.addEventListener('change', function () {
+      fillTopics(langSelect.value);
+    });
+
+    topicSelect.addEventListener('change', function () {
+      fillPrompts(topicSelect.value);
+    });
+
+    fillLanguages();
+    fillTopics(langSelect.value);
+    fillPrompts(topicSelect.value);
+  })();
+</script>
+{% endblock %}
