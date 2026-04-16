@@ -1,6 +1,5 @@
 from django.contrib import admin
 from django.contrib.admin.forms import AdminAuthenticationForm
-from django.contrib.auth import logout
 from django import forms
 from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import redirect
@@ -61,6 +60,8 @@ class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
             )
 
         if user.is_superuser or user.is_staff or user.groups.filter(name="tester").exists():
+            if getattr(self, "request", None) is not None:
+                self.request.session["admin_fresh_auth"] = True
             return
 
         raise forms.ValidationError(
@@ -324,6 +325,13 @@ admin.site.get_urls = _custom_admin_urls
 
 
 def _custom_has_permission(request):
+    # Prevent login view from auto-redirecting authenticated users to index.
+    # This avoids /admin -> /admin/login ping-pong when fresh-auth marker is missing.
+    if request.path.startswith("/ai/admin/login/"):
+        if request.method != "POST":
+            request.session.pop("admin_fresh_auth", None)
+        return False
+
     user = getattr(request, "user", None)
     if not user or not user.is_authenticated or not user.is_active:
         return False
@@ -343,24 +351,6 @@ def _custom_admin_view(view, cacheable=False):
     wrapped_view = _default_admin_view(view, cacheable)
 
     def inner(request, *args, **kwargs):
-        admin_login_path = "/ai/admin/login/"
-
-        if request.path.startswith(admin_login_path):
-            if request.method != "POST" and request.user.is_authenticated:
-                logout(request)
-                request.session.pop("admin_fresh_auth", None)
-
-            response = wrapped_view(request, *args, **kwargs)
-
-            if request.method == "POST" and request.user.is_authenticated:
-                request.session["admin_fresh_auth"] = True
-
-            if request.method != "POST":
-                response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-                response["Pragma"] = "no-cache"
-
-            return response
-
         if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
             next_path = quote(request.get_full_path(), safe="/?=&")
             return redirect(f"/ai/admin/login/?next={next_path}")
