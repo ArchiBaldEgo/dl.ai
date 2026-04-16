@@ -133,18 +133,6 @@
 <div class="arm-wrap">
   <a class="arm-link" href="{{ arm_back_url }}">← Вернуться в чат</a>
   <h1>ARM: В чем ошибка</h1>
-
-  <div class="arm-card">
-    <div><strong>Окно проверки моделей:</strong> {{ health_window_date }} (04:00 МСК)</div>
-    <div class="arm-actions">
-      <form id="armRefreshModelsForm" method="post" onsubmit="return false;">
-        {% csrf_token %}
-        <button id="armRefreshModelsBtn" type="button">Обновить модели вручную</button>
-      </form>
-    </div>
-    <div id="armRefreshAsyncMessage"></div>
-  </div>
-
   <div class="arm-card">
     <form id="armRunForm" method="post">
       {% csrf_token %}
