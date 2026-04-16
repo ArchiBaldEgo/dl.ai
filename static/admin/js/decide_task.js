@@ -2,6 +2,7 @@
             var ws = null;
             var client_id = generateClientId();
             var notEnter = false;
+            var requestInFlight = false;
             
             // Голосовые переменные
             var recognition = null;
@@ -259,9 +260,33 @@
                 document.getElementById('voiceStatus').textContent = message;
             }
 
+            function setRequestLock(isLocked) {
+                requestInFlight = isLocked;
+                const sendBtn = document.querySelector("button[type='submit']");
+                if (sendBtn) {
+                    sendBtn.disabled = isLocked;
+                }
+            }
+
+            function isTerminalAiMessage(payload) {
+                const text = String(payload || "").toLowerCase();
+                return text.includes("запрос успешно обработан")
+                    || text.includes("request processed successfully")
+                    || text.includes("ошибка при обработке запроса")
+                    || text.includes("что-то пошло не так")
+                    || text.includes("неверный формат json")
+                    || text.includes("контекст очищен")
+                    || text.includes("context cleared");
+            }
+
             function simulateSend() {
                 if (!ws || ws.readyState !== WebSocket.OPEN) {
                     updateVoiceStatus('Ошибка: соединение не установлено');
+                    return;
+                }
+
+                if (requestInFlight) {
+                    updateVoiceStatus('Дождитесь ответа модели перед новым запросом');
                     return;
                 }
                 
@@ -287,7 +312,9 @@
                     progLng: progLng,
                     preprompt: preprompt
                 }));
-                
+
+                setRequestLock(true);
+                notEnter = true;
                 updateVoiceStatus('Сообщение отправлено');
                 input.value = '';
             }
@@ -378,9 +405,11 @@
                         message.appendChild(messageContent);
                         messages.appendChild(message);
                         messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
-                        var input = document.getElementById("messageText");
-                        input.value = '';
-                        notEnter = false;
+
+                        if (isTerminalAiMessage(event.data)) {
+                            setRequestLock(false);
+                            notEnter = false;
+                        }
                         
                         initAccordionForMessages();
                         collapseAllExceptLast();
@@ -389,11 +418,15 @@
                     ws.onerror = function(error) {
                         console.error('WebSocket error:', error);
                         updateVoiceStatus('Ошибка соединения');
+                        setRequestLock(false);
+                        notEnter = false;
                     };
 
                     ws.onclose = function(event) {
                         console.log('WebSocket connection closed');
                         updateVoiceStatus('Соединение закрыто');
+                        setRequestLock(false);
+                        notEnter = false;
                     };
 
                 } catch (error) {
@@ -483,6 +516,11 @@
                     alert("Соединение не установлено. Пожалуйста, подождите...");
                     return;
                 }
+
+                if (requestInFlight) {
+                    alert("Дождитесь ответа модели перед новым запросом.");
+                    return;
+                }
                 
                 var value = document.querySelector("#select").value;
                 var language = document.querySelector("#selectLang").value;
@@ -512,6 +550,8 @@
                     progLng: progLng,
                     preprompt: preprompt
                 }));
+                setRequestLock(true);
+                notEnter = true;
                 input.value = '';
             }
 
@@ -545,7 +585,6 @@
             document.addEventListener("keydown", function (event) {
                 const checkbox = document.querySelector(".inp");
                 if (event.key === "Enter" && (!checkbox || checkbox.checked) && !event.shiftKey && !notEnter) {
-                    notEnter = true;
                     sendMessage(event);
                 }
             });

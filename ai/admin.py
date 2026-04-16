@@ -11,9 +11,11 @@ import time
 
 from .model_health import (
     get_available_model_options,
+    get_model_status_rows,
     get_health_window_date,
+    is_model_health_refresh_running,
     get_runtime_model_handlers,
-    run_model_health_check,
+    trigger_model_health_refresh_async,
 )
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 
@@ -21,12 +23,31 @@ def _load_model_handlers():
     return get_runtime_model_handlers()
 
 
+def _safe_relative_url(candidate, fallback):
+    value = (candidate or "").strip()
+    if value.startswith("/") and not value.startswith("//"):
+        return value
+    return fallback
+
+
+def _is_tester_user(request):
+    if not request.user.is_authenticated:
+        return False
+    return request.user.groups.filter(name="tester").exists()
+
+
 def _can_access_arm(request):
     if not request.user.is_authenticated:
         return False
-    if request.user.is_superuser:
+    if request.user.is_superuser or request.user.is_staff:
         return True
-    return request.user.groups.filter(name="tester").exists()
+    return _is_tester_user(request)
+
+
+def _can_access_model_status(request):
+    if not request.user.is_authenticated:
+        return False
+    return request.user.is_superuser or request.user.is_staff
 
 
 class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
@@ -87,121 +108,109 @@ def admin_arm_find_error_view(request):
     results = []
     report = None
     error_message = ""
-    refresh_message = ""
-    refresh_error = ""
 
     if request.method == "POST":
-        action = request.POST.get("action", "run_report")
+        model_handlers = _load_model_handlers()
+        selected_models = request.POST.getlist("models")
+        selected_language_ui = request.POST.get("interface_language", "Русский")
+        selected_prog_lng = request.POST.get("programming_language", "")
+        selected_topic = request.POST.get("topic", "")
+        selected_prompt = request.POST.get("prompt", "")
+        task_text = (request.POST.get("task_text") or "").strip()
+        code_text = (request.POST.get("code_text") or "").strip()
 
-        if action == "refresh_models":
-            try:
-                run_model_health_check(force=True)
-                refresh_message = (
-                    "Проверка моделей перезапущена вручную. "
-                    "Основное окно 04:00 МСК сохранено."
-                )
-            except Exception as exc:
-                refresh_error = f"Не удалось обновить список моделей: {exc}"
+        if not selected_models:
+            error_message = "Выберите хотя бы одну модель"
+        elif not task_text and not code_text:
+            error_message = "Заполните условие задачи или код"
         else:
-            model_handlers = _load_model_handlers()
-            selected_models = request.POST.getlist("models")
-            selected_language_ui = request.POST.get("interface_language", "Русский")
-            selected_prog_lng = request.POST.get("programming_language", "")
-            selected_topic = request.POST.get("topic", "")
-            selected_prompt = request.POST.get("prompt", "")
-            task_text = (request.POST.get("task_text") or "").strip()
-            code_text = (request.POST.get("code_text") or "").strip()
+            prog_lng_name = ProgrammingLanguage.objects.filter(id=selected_prog_lng).values_list(
+                "language_name", flat=True
+            ).first() or "Python"
+            prompt_text = Prompt.objects.filter(id=selected_prompt).values_list(
+                "prompt_text", flat=True
+            ).first() or ""
 
-            if not selected_models:
-                error_message = "Выберите хотя бы одну модель"
-            elif not task_text and not code_text:
-                error_message = "Заполните условие задачи или код"
-            else:
-                prog_lng_name = ProgrammingLanguage.objects.filter(id=selected_prog_lng).values_list(
-                    "language_name", flat=True
-                ).first() or "Python"
-                prompt_text = Prompt.objects.filter(id=selected_prompt).values_list(
-                    "prompt_text", flat=True
-                ).first() or ""
+            message = _build_find_error_message(
+                task_text=task_text,
+                code_text=code_text,
+                prog_lang_name=prog_lng_name,
+                prompt_text=prompt_text,
+                ui_language=selected_language_ui,
+            )
 
-                message = _build_find_error_message(
-                    task_text=task_text,
-                    code_text=code_text,
-                    prog_lang_name=prog_lng_name,
-                    prompt_text=prompt_text,
-                    ui_language=selected_language_ui,
-                )
+            success_count = 0
+            total_tokens = 0
 
-                success_count = 0
-                total_tokens = 0
+            for model_key in selected_models:
+                model_info = model_handlers.get(model_key)
+                if not model_info:
+                    continue
 
-                for model_key in selected_models:
-                    model_info = model_handlers.get(model_key)
-                    if not model_info:
-                        continue
+                started = time.perf_counter()
+                try:
+                    response = async_to_sync(model_info["handler"])(
+                        message,
+                        f"admin-{request.user.id}-{model_key}",
+                    )
+                    elapsed = round(time.perf_counter() - started, 2)
 
-                    started = time.perf_counter()
-                    try:
-                        response = async_to_sync(model_info["handler"])(
-                            message,
-                            f"admin-{request.user.id}-{model_key}",
-                        )
-                        elapsed = round(time.perf_counter() - started, 2)
+                    if isinstance(response, tuple):
+                        response_text = response[0] if len(response) > 0 else ""
+                        tokens = int(response[1]) if len(response) > 1 and str(response[1]).isdigit() else 0
+                    else:
+                        response_text = str(response)
+                        tokens = 0
 
-                        if isinstance(response, tuple):
-                            response_text = response[0] if len(response) > 0 else ""
-                            tokens = int(response[1]) if len(response) > 1 and str(response[1]).isdigit() else 0
-                        else:
-                            response_text = str(response)
-                            tokens = 0
+                    cleaned_text = strip_tags(response_text or "")
+                    short_response = cleaned_text[:300] + ("..." if len(cleaned_text) > 300 else "")
+                    is_ok = bool(cleaned_text) and "ошибка" not in cleaned_text.lower()[:25]
+                    if is_ok:
+                        success_count += 1
+                    total_tokens += tokens
 
-                        cleaned_text = strip_tags(response_text or "")
-                        short_response = cleaned_text[:300] + ("..." if len(cleaned_text) > 300 else "")
-                        is_ok = bool(cleaned_text) and "ошибка" not in cleaned_text.lower()[:25]
-                        if is_ok:
-                            success_count += 1
-                        total_tokens += tokens
+                    results.append(
+                        {
+                            "model_key": model_key,
+                            "model_title": model_info["title"],
+                            "duration": elapsed,
+                            "tokens": tokens,
+                            "short_response": short_response,
+                            "status": "ok" if is_ok else "error",
+                            "raw_response": cleaned_text,
+                        }
+                    )
+                except Exception as exc:
+                    elapsed = round(time.perf_counter() - started, 2)
+                    results.append(
+                        {
+                            "model_key": model_key,
+                            "model_title": model_info["title"],
+                            "duration": elapsed,
+                            "tokens": 0,
+                            "short_response": f"Ошибка вызова модели: {exc}",
+                            "status": "error",
+                            "raw_response": "",
+                        }
+                    )
 
-                        results.append(
-                            {
-                                "model_key": model_key,
-                                "model_title": model_info["title"],
-                                "duration": elapsed,
-                                "tokens": tokens,
-                                "short_response": short_response,
-                                "status": "ok" if is_ok else "error",
-                                "raw_response": cleaned_text,
-                            }
-                        )
-                    except Exception as exc:
-                        elapsed = round(time.perf_counter() - started, 2)
-                        results.append(
-                            {
-                                "model_key": model_key,
-                                "model_title": model_info["title"],
-                                "duration": elapsed,
-                                "tokens": 0,
-                                "short_response": f"Ошибка вызова модели: {exc}",
-                                "status": "error",
-                                "raw_response": "",
-                            }
-                        )
+            if results:
+                fastest = min(results, key=lambda item: item["duration"])
+                report = {
+                    "models_total": len(results),
+                    "success_count": success_count,
+                    "error_count": len(results) - success_count,
+                    "tokens_total": total_tokens,
+                    "fastest_model": fastest["model_title"],
+                    "fastest_duration": fastest["duration"],
+                }
 
-                if results:
-                    fastest = min(results, key=lambda item: item["duration"])
-                    report = {
-                        "models_total": len(results),
-                        "success_count": success_count,
-                        "error_count": len(results) - success_count,
-                        "tokens_total": total_tokens,
-                        "fastest_model": fastest["model_title"],
-                        "fastest_duration": fastest["duration"],
-                    }
-
+    arm_back_url = _safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
     context = {
         **admin.site.each_context(request),
         "title": "ARM: В чем ошибка",
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
+        "arm_back_url": arm_back_url,
         "languages": languages,
         "topics": topics,
         "prompts": prompts,
@@ -216,10 +225,40 @@ def admin_arm_find_error_view(request):
         "results": results,
         "report": report,
         "error_message": error_message,
-        "refresh_message": refresh_message,
-        "refresh_error": refresh_error,
     }
     return TemplateResponse(request, "admin/ai/arm_find_error.html", context)
+
+
+def admin_model_status_view(request):
+    if not _can_access_model_status(request):
+        return HttpResponseForbidden("Access denied")
+
+    refresh_message = ""
+    refresh_error = ""
+
+    if request.method == "POST" and request.POST.get("action") == "refresh_models":
+        try:
+            if trigger_model_health_refresh_async():
+                refresh_message = (
+                    "Обновление моделей запущено в фоне. "
+                    "Окно 04:00 МСК не изменяется."
+                )
+            else:
+                refresh_message = "Обновление уже выполняется. Дождитесь завершения."
+        except Exception as exc:
+            refresh_error = f"Не удалось запустить обновление моделей: {exc}"
+
+    context = {
+        **admin.site.each_context(request),
+        "title": "AI: Состояние моделей",
+        "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
+        "model_status_rows": get_model_status_rows(),
+        "refresh_message": refresh_message,
+        "refresh_error": refresh_error,
+        "refresh_in_progress": is_model_health_refresh_running(),
+        "arm_find_error_url": "/ai/admin/arm/find-error/",
+    }
+    return TemplateResponse(request, "admin/ai/model_status.html", context)
 
 
 _default_get_urls = admin.site.get_urls
@@ -227,6 +266,11 @@ _default_get_urls = admin.site.get_urls
 
 def _custom_admin_urls():
     custom_urls = [
+        path(
+            "arm/models/",
+            admin.site.admin_view(admin_model_status_view),
+            name="ai_arm_model_status",
+        ),
         path(
             "arm/find-error/",
             admin.site.admin_view(admin_arm_find_error_view),
@@ -259,7 +303,7 @@ def _custom_admin_view(view, cacheable=False):
     wrapped_view = _default_admin_view(view, cacheable)
 
     def inner(request, *args, **kwargs):
-        if _can_access_arm(request) and not request.user.is_superuser:
+        if _is_tester_user(request) and not request.user.is_superuser:
             arm_path = "/ai/admin/arm/find-error/"
             if not request.path.startswith(arm_path):
                 return redirect(arm_path)
@@ -277,7 +321,9 @@ _default_each_context = admin.site.each_context
 def _custom_each_context(request):
     context = _default_each_context(request)
     context["show_arm_link"] = _can_access_arm(request)
+    context["show_model_status_link"] = _can_access_model_status(request)
     context["arm_find_error_url"] = "/ai/admin/arm/find-error/"
+    context["arm_model_status_url"] = "/ai/admin/arm/models/"
     return context
 
 

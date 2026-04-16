@@ -90,8 +90,10 @@
   </style>
 </head>
 <body>
-  <form class="login-card" method="post">
+  <form class="login-card" method="post" autocomplete="off">
     {% csrf_token %}
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <input type="hidden" name="back" value="{{ back_url }}">
     <h1 class="title">Тест-панель</h1>
     <p class="subtitle">Вход доступен только пользователям из группы tester.</p>
 
@@ -101,17 +103,17 @@
 
     <div class="field">
       <label for="id_username">Логин</label>
-      <input id="id_username" type="text" name="username" autocomplete="username" required>
+      <input id="id_username" type="text" name="username" autocomplete="off" required>
     </div>
 
     <div class="field">
       <label for="id_password">Пароль</label>
-      <input id="id_password" type="password" name="password" autocomplete="current-password" required>
+      <input id="id_password" type="password" name="password" autocomplete="new-password" required>
     </div>
 
     <div class="actions">
       <button type="submit" class="btn-primary">Войти</button>
-      <a class="back-link" href="/ai/chat/">В чат</a>
+      <a class="back-link" href="{{ back_url }}">Вернуться назад</a>
     </div>
   </form>
 </body>

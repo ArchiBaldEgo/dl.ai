@@ -1,8 +1,7 @@
 import os
 
-from django.contrib.auth import authenticate, login
+from django.contrib.auth import authenticate, login, logout
 from django.shortcuts import redirect, render
-from django.core.cache import cache
 from django.http import JsonResponse
 from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound
 from django.db import ProgrammingError
@@ -13,15 +12,20 @@ from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 import uuid
 
 
+def _safe_relative_url(candidate, fallback):
+    value = (candidate or "").strip()
+    if value.startswith("/") and not value.startswith("//"):
+        return value
+    return fallback
+
+
 def ai_access_required(view_func):
     @wraps(view_func)
     def _wrapped(request, *args, **kwargs):
-        is_authenticated = bool(getattr(request, "user", None) and request.user.is_authenticated)
         uid = (request.GET.get("uid") or "").strip()
 
-        # Fast-fail before touching DB when request is clearly unauthorized.
-        if not is_authenticated and not uid.isdigit():
-            return HttpResponseForbidden("Authentication required")
+        if not uid.isdigit():
+            return HttpResponseForbidden("UID query parameter is required")
 
         try:
             if not AIAppSettings.get_solo().is_enabled:
@@ -49,23 +53,44 @@ def tester_access_required(view_func):
 
 
 def tester_login_view(request):
-    if request.user.is_authenticated and request.user.groups.filter(name="tester").exists():
-        return redirect("/ai/admin/arm/find-error/")
+    default_next = "/ai/admin/arm/find-error/"
+    next_url = _safe_relative_url(request.GET.get("next"), default_next)
+    back_url = _safe_relative_url(request.GET.get("back"), "/")
+
+    # Test-panel entry should always require explicit credentials.
+    if request.method != "POST" and request.user.is_authenticated:
+        logout(request)
 
     error_message = ""
 
     if request.method == "POST":
+        next_url = _safe_relative_url(request.POST.get("next"), default_next)
+        back_url = _safe_relative_url(request.POST.get("back"), "/")
         username = (request.POST.get("username") or "").strip()
         password = request.POST.get("password") or ""
 
         user = authenticate(request, username=username, password=password)
         if user and user.is_active and user.groups.filter(name="tester").exists():
+            request.session["ai_testpanel_back_url"] = back_url
             login(request, user)
-            return redirect("/ai/admin/arm/find-error/")
+            return redirect(next_url)
 
         error_message = "Неверный логин/пароль или у пользователя нет группы tester."
 
-    return render(request, "ai/test-panel-login.html", {"error_message": error_message})
+    request.session["ai_testpanel_back_url"] = back_url
+
+    response = render(
+        request,
+        "ai/test-panel-login.html",
+        {
+            "error_message": error_message,
+            "next_url": next_url,
+            "back_url": back_url,
+        },
+    )
+    response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response["Pragma"] = "no-cache"
+    return response
 
 
 @ai_access_required

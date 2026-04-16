@@ -131,23 +131,10 @@
 </style>
 
 <div class="arm-wrap">
-  <a class="arm-link" href="/ai/admin/">← Назад в админку</a>
+  <a class="arm-link" href="{{ arm_back_url }}">← Вернуться в чат</a>
   <h1>ARM: В чем ошибка</h1>
 
-  <div class="arm-card">
-    <div><strong>Окно проверки моделей:</strong> {{ health_window_date }} (04:00 МСК)</div>
-    <form method="post" class="arm-actions">
-      {% csrf_token %}
-      <input type="hidden" name="action" value="refresh_models">
-      <button type="submit">Обновить модели вручную</button>
-    </form>
-    {% if refresh_message %}
-      <div class="arm-success">{{ refresh_message }}</div>
-    {% endif %}
-    {% if refresh_error %}
-      <div class="arm-error">{{ refresh_error }}</div>
-    {% endif %}
-  </div>
+  <div class="arm-card"><strong>Окно проверки моделей:</strong> {{ health_window_date }} (04:00 МСК)</div>
 
   <div class="arm-card">
     <form method="post">

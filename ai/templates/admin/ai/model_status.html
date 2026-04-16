@@ -1,0 +1,135 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<style>
+  .status-wrap {
+    max-width: 1100px;
+  }
+  .status-card {
+    background: var(--body-bg);
+    border: 1px solid var(--hairline-color);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .status-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+  .status-error {
+    color: #b42318;
+    font-weight: 600;
+    margin-top: 10px;
+  }
+  .status-success {
+    color: #067647;
+    font-weight: 600;
+    margin-top: 10px;
+  }
+  .status-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .status-table th,
+  .status-table td {
+    border-bottom: 1px solid var(--hairline-color);
+    padding: 10px 8px;
+    text-align: left;
+  }
+  .badge {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .badge.up {
+    background: rgba(18, 183, 106, 0.16);
+    color: #067647;
+  }
+  .badge.down {
+    background: rgba(240, 68, 56, 0.14);
+    color: #b42318;
+  }
+  .quiet {
+    color: var(--body-quiet-color);
+    font-size: 12px;
+  }
+</style>
+
+<div class="status-wrap">
+  <a href="/ai/admin/">&larr; Назад в админку</a>
+  <h1>AI: Состояние моделей</h1>
+
+  <div class="status-card">
+    <div><strong>Окно проверки:</strong> {{ health_window_date }} (04:00 МСК)</div>
+    <div class="status-actions">
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="refresh_models">
+        <button type="submit" class="default">Обновить состояние моделей</button>
+      </form>
+      <a class="button" href="{{ arm_find_error_url }}">Перейти в ARM</a>
+    </div>
+
+    {% if refresh_message %}
+      <div class="status-success">{{ refresh_message }}</div>
+    {% endif %}
+    {% if refresh_error %}
+      <div class="status-error">{{ refresh_error }}</div>
+    {% endif %}
+    {% if refresh_in_progress %}
+      <div class="status-success">Обновление в процессе. Обновите страницу через несколько секунд.</div>
+    {% endif %}
+  </div>
+
+  <div class="status-card">
+    <table class="status-table">
+      <thead>
+        <tr>
+          <th>Модель</th>
+          <th>Состояние</th>
+          <th>Дата окна</th>
+          <th>Проверено</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in model_status_rows %}
+          <tr>
+            <td>
+              <div>{{ row.title }}</div>
+              <div class="quiet">{{ row.key }}</div>
+            </td>
+            <td>
+              {% if row.is_active %}
+                <span class="badge up">Активна</span>
+              {% else %}
+                <span class="badge down">Неактивна</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if row.window_date %}
+                {{ row.window_date }}
+                {% if not row.is_current_window %}
+                  <div class="quiet">данные из предыдущего окна</div>
+                {% endif %}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td>
+              {% if row.checked_at %}
+                {{ row.checked_at|date:"d.m.Y H:i:s" }}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

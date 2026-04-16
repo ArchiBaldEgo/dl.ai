@@ -7,7 +7,7 @@ from time import perf_counter
 from zoneinfo import ZoneInfo
 
 from asgiref.sync import async_to_sync
-from django.db import transaction
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 
 from .models import AIModelAvailability, AIModelHealthRun
@@ -18,6 +18,8 @@ HEALTHCHECK_PROMPT = "Ответь только одной цифрой без �
 logger = logging.getLogger(__name__)
 _scheduler_lock = threading.Lock()
 _scheduler_started = False
+_manual_refresh_lock = threading.Lock()
+_manual_refresh_started = False
 
 MODEL_CATALOG = (
     {
@@ -238,6 +240,55 @@ def run_model_health_check(force=False):
         return False
 
 
+def _has_recent_running_run(window_date):
+    return AIModelHealthRun.objects.filter(
+        window_date=window_date,
+        status=AIModelHealthRun.STATUS_RUNNING,
+        started_at__gt=timezone.now() - timedelta(minutes=45),
+    ).exists()
+
+
+def is_model_health_refresh_running():
+    window_date = get_health_window_date()
+
+    if _manual_refresh_started:
+        return True
+
+    return _has_recent_running_run(window_date)
+
+
+def _manual_refresh_worker():
+    global _manual_refresh_started
+
+    close_old_connections()
+    try:
+        run_model_health_check(force=True)
+    except Exception:
+        logger.exception("Manual model health refresh failed")
+    finally:
+        close_old_connections()
+        with _manual_refresh_lock:
+            _manual_refresh_started = False
+
+
+def trigger_model_health_refresh_async():
+    global _manual_refresh_started
+
+    window_date = get_health_window_date()
+    with _manual_refresh_lock:
+        if _manual_refresh_started or _has_recent_running_run(window_date):
+            return False
+
+        thread = threading.Thread(
+            target=_manual_refresh_worker,
+            name="ai-model-health-manual-refresh",
+            daemon=True,
+        )
+        thread.start()
+        _manual_refresh_started = True
+        return True
+
+
 def ensure_model_health_for_current_window():
     window_date = get_health_window_date()
     is_ready = AIModelHealthRun.objects.filter(
@@ -289,6 +340,49 @@ def start_model_health_scheduler():
 
 def get_all_model_options():
     return [{"key": item["key"], "title": item["title"]} for item in MODEL_CATALOG]
+
+
+def get_model_status_rows():
+    ordered = get_all_model_options()
+    ordered_keys = [item["key"] for item in ordered]
+    current_window = get_health_window_date()
+
+    current_rows = {
+        row.model_key: row
+        for row in AIModelAvailability.objects.filter(
+            window_date=current_window,
+            model_key__in=ordered_keys,
+        )
+    }
+
+    missing_keys = [key for key in ordered_keys if key not in current_rows]
+    latest_rows = {}
+    if missing_keys:
+        for row in AIModelAvailability.objects.filter(model_key__in=missing_keys).order_by(
+            "model_key", "-window_date"
+        ):
+            if row.model_key not in latest_rows:
+                latest_rows[row.model_key] = row
+
+    result = []
+    for item in ordered:
+        key = item["key"]
+        row = current_rows.get(key) or latest_rows.get(key)
+        is_active = bool(row and row.is_available)
+
+        result.append(
+            {
+                "key": key,
+                "title": item["title"],
+                "is_active": is_active,
+                "status_label": "Активна" if is_active else "Неактивна",
+                "window_date": row.window_date if row else None,
+                "checked_at": row.checked_at if row else None,
+                "is_current_window": bool(row and row.window_date == current_window),
+            }
+        )
+
+    return result
 
 
 def get_available_model_options():
