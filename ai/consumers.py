@@ -7,6 +7,7 @@ import os
 from datetime import datetime, timedelta
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'DjangoTest.settings')
 django.setup()
+from .model_health import MODEL_ALIASES
 from .models import ProgrammingLanguage, Prompt
 from .utils import *
 from asgiref.sync import sync_to_async
@@ -135,28 +136,26 @@ class MyConsumer(AsyncWebsocketConsumer):
             response = "Что-то пошло не так. Попробуйте еще раз."
             modell = value
 
+            normalized_value = MODEL_ALIASES.get(value, value)
+
             try:
                 # Используем выбранную модель
-                if value == "Meta_Llama_3_1_70B_Instruct":
+                if normalized_value == "Meta_Llama_3_1_70B_Instruct":
                     response = await ask_Meta_Llama_3_1_70B_Instruct_async(message, self.client_id)
                     modell = "Meta_Llama_3_1_70B_Instruct"
-                elif value == "Mixtral_8x7B":
-                    # Используем Mixtral 8x22b как замену
-                    response = await ask_Mixtral_8x22b_async(message, self.client_id)
-                    modell = "Mixtral_8x7B"
-                elif value == "Mixtral_8x22b":
+                elif normalized_value == "Mixtral_8x22b":
                     response = await ask_Mixtral_8x22b_async(message, self.client_id)
                     modell = "Mixtral_8x22b"
-                elif value == "DeepSeek_R1":
+                elif normalized_value == "DeepSeek_R1":
                     response = await ask_DeepSeek_R1_async(message, self.client_id)
                     modell = "DeepSeek_R1"
-                elif value == "Gpt_oss_120b":
+                elif normalized_value == "Gpt_oss_120b":
                     response = await ask_Gpt_oss_120b_async(message, self.client_id)
                     modell = "Gpt_oss_120b"
-                elif value == "Web_DeepSeek":
+                elif normalized_value == "Web_DeepSeek":
                     response = await ask_Web_DeepSeek_async(message, self.client_id)
                     modell = "Web_DeepSeek"
-                elif value == "Web_DeepSeek_Thinking":
+                elif normalized_value == "Web_DeepSeek_Thinking":
                     response = await ask_Web_DeepSeek_Thinking_async(message, self.client_id)
                     modell = "Web_DeepSeek_Thinking" # правильнее делать modell = value, иначе повторы идут
                 else:

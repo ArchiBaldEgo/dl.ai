@@ -22,6 +22,13 @@ SC_TOKEN=os.getenv("SC_TOKEN")
 MIST_TOKEN = os.getenv("MIST_TOKEN")
 GROQ_TOKEN = os.getenv("GROQ_TOKEN")
 DEEPSEEK_API_TOKEN = os.getenv("DEEPSEEK_API_TOKEN") or os.getenv("DEEPSEEK_API_KEY")
+
+# Centralized SambaCloud model IDs to avoid code edits on every deprecation.
+SAMBANOVA_MODEL_DEEPSEEK = os.getenv("SAMBANOVA_MODEL_DEEPSEEK", "DeepSeek-V3.1")
+SAMBANOVA_MODEL_META = os.getenv("SAMBANOVA_MODEL_META", "Meta-Llama-3.3-70B-Instruct")
+SAMBANOVA_MODEL_GPT_OSS = os.getenv("SAMBANOVA_MODEL_GPT_OSS", "gpt-oss-120b")
+SAMBANOVA_MODEL_MIXTRAL_ALIAS = os.getenv("SAMBANOVA_MODEL_MIXTRAL_ALIAS", SAMBANOVA_MODEL_META)
+
 timeout = 0
 
 hist=dict([])
@@ -156,7 +163,7 @@ async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25
                 requests.post,
                 'https://api.sambanova.ai/v1/chat/completions',
                 json={
-                    "model": "DeepSeek-R1-0528",
+                    "model": SAMBANOVA_MODEL_DEEPSEEK,
                     "messages": hist[user_id],
                     "max_tokens": 9000,
                     "temperature": 0.7,
@@ -256,8 +263,7 @@ async def ask_Meta_Llama_3_1_70B_Instruct_async(messages: str, user_id: int) -> 
     hist[user_id].append({"role": "user", "content": messages})
     try:
         response = await asyncio.to_thread(requests.post, 'https://api.sambanova.ai/v1/chat/completions', json={
-            # 3.1 model is unavailable; route to current 3.3 equivalent.
-            "model": "Meta-Llama-3.3-70B-Instruct",
+            "model": SAMBANOVA_MODEL_META,
             "messages": hist[user_id],
             "max_tokens": 9000
         }, headers={
@@ -357,8 +363,8 @@ async def ask_Mixtral_8x22b_async(messages: str, user_id: int) -> Tuple[str, Opt
             requests.post,
             'https://api.sambanova.ai/v1/chat/completions',
             json={
-                # Mixtral is unavailable on current tier; route to a stable currently available model.
-                "model": "Meta-Llama-3.1-8B-Instruct",
+                # Mixtral alias routes to a currently available Samba model.
+                "model": SAMBANOVA_MODEL_MIXTRAL_ALIAS,
                 "messages": hist[user_id],
                 "max_tokens": 9000
             },
@@ -519,7 +525,7 @@ async def ask_Gpt_oss_120b_async(messages: str, user_id: int) -> Tuple[str, Opti
             requests.post,
             'https://api.sambanova.ai/v1/chat/completions',
             json={
-                "model": "gpt-oss-120b",
+                "model": SAMBANOVA_MODEL_GPT_OSS,
                 "messages": hist[user_id],
                 "max_tokens": 8192
             },

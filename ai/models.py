@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 class ProgrammingLanguage(models.Model):
     language_name = models.CharField(max_length=255,)
@@ -45,3 +46,53 @@ class AIAppSettings(models.Model):
 
     def __str__(self):
         return "AI app settings"
+
+
+class AIModelHealthRun(models.Model):
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+
+    STATUS_CHOICES = (
+        (STATUS_RUNNING, "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
+    )
+
+    window_date = models.DateField(unique=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING)
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default="")
+
+    class Meta:
+        verbose_name = "AI model health run"
+        verbose_name_plural = "AI model health runs"
+        ordering = ("-window_date",)
+
+    def __str__(self):
+        return f"{self.window_date} ({self.status})"
+
+
+class AIModelAvailability(models.Model):
+    model_key = models.CharField(max_length=128, db_index=True)
+    model_title = models.CharField(max_length=255)
+    is_available = models.BooleanField(default=False)
+    window_date = models.DateField(db_index=True)
+    checked_at = models.DateTimeField(auto_now=True)
+    response_time_ms = models.PositiveIntegerField(null=True, blank=True)
+    last_message = models.TextField(blank=True, default="")
+
+    class Meta:
+        verbose_name = "AI model availability"
+        verbose_name_plural = "AI model availability"
+        ordering = ("model_title",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("model_key", "window_date"),
+                name="ai_model_availability_key_window_uniq",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.model_key}: {'up' if self.is_available else 'down'}"

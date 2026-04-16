@@ -472,6 +472,11 @@ function sendMessage(event) {
     var language = document.querySelector("#selectLang").value;
     var input = document.getElementById("messageText");
 
+    if (!value) {
+        alert("Сегодня нет доступных моделей. Повторите позже.");
+        return;
+    }
+
     if (!input.value.trim()) {
         alert("Пожалуйста, введите сообщение");
         return;
@@ -518,9 +523,11 @@ document.addEventListener("keydown", function (event) {
 const toggleButton = document.querySelector('.toggle-button');
 const sidebar = document.querySelector('.sidebar');
 
-toggleButton.addEventListener('click', () => {
-    sidebar.classList.toggle('open');
-});
+if (toggleButton && sidebar) {
+    toggleButton.addEventListener('click', () => {
+        sidebar.classList.toggle('open');
+    });
+}
 
 
 let isResizing = false;

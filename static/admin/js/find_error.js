@@ -450,19 +450,20 @@
                 var codeInput = document.getElementById("codeText");
                 var progLng = document.querySelector("#selectProgLng").value;
                 var preprompt = document.querySelector("#selectPrompt").value;
+
+                if (!value) {
+                    alert("Сегодня нет доступных моделей. Повторите позже.");
+                    return;
+                }
                 
                 if (!taskInput.value.trim() && !codeInput.value.trim()) {
                     alert("Пожалуйста, введите условие задачи или код программы");
                     return;
                 }
-                    if (!progLng) {
-                        alert("Выберите язык программирования перед отправкой");
-                        return;
-                    }
-                    if (!progLng) {
-                        alert("Выберите язык программирования перед отправкой");
-                        return;
-                    }
+                if (!progLng) {
+                    alert("Выберите язык программирования перед отправкой");
+                    return;
+                }
                 
                 ws.send(JSON.stringify({
                     type: '3',
@@ -516,9 +517,11 @@
             const toggleButton = document.querySelector('.toggle-button');
             const sidebar = document.querySelector('.sidebar');
 
-            toggleButton.addEventListener('click', () => {
-                sidebar.classList.toggle('open');
-            });
+            if (toggleButton && sidebar) {
+                toggleButton.addEventListener('click', () => {
+                    sidebar.classList.toggle('open');
+                });
+            }
 
             let isResizing = false;
 

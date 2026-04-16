@@ -43,6 +43,11 @@
     font-weight: 600;
     margin-top: 8px;
   }
+  .arm-success {
+    color: #067647;
+    font-weight: 600;
+    margin-top: 8px;
+  }
   .arm-report {
     margin: 0;
     padding-left: 18px;
@@ -52,6 +57,7 @@
     border-radius: 8px;
     padding: 12px;
     margin-bottom: 10px;
+    cursor: pointer;
   }
   .arm-result.ok {
     border-left: 4px solid #12b76a;
@@ -63,6 +69,55 @@
     color: var(--body-quiet-color);
     font-size: 12px;
     margin-top: 4px;
+  }
+  .arm-modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 9999;
+    padding: 20px;
+    box-sizing: border-box;
+  }
+  .arm-modal.open {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .arm-modal-card {
+    width: min(900px, 100%);
+    max-height: 90vh;
+    background: var(--body-bg);
+    border-radius: 10px;
+    border: 1px solid var(--hairline-color);
+    display: flex;
+    flex-direction: column;
+  }
+  .arm-modal-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--hairline-color);
+  }
+  .arm-modal-title {
+    font-weight: 700;
+  }
+  .arm-modal-close {
+    border: 0;
+    background: transparent;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--body-fg);
+  }
+  .arm-modal-body {
+    padding: 14px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 13px;
+    line-height: 1.45;
   }
   .arm-actions {
     display: flex;
@@ -80,8 +135,24 @@
   <h1>ARM: В чем ошибка</h1>
 
   <div class="arm-card">
+    <div><strong>Окно проверки моделей:</strong> {{ health_window_date }} (04:00 МСК)</div>
+    <form method="post" class="arm-actions">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="refresh_models">
+      <button type="submit">Обновить модели вручную</button>
+    </form>
+    {% if refresh_message %}
+      <div class="arm-success">{{ refresh_message }}</div>
+    {% endif %}
+    {% if refresh_error %}
+      <div class="arm-error">{{ refresh_error }}</div>
+    {% endif %}
+  </div>
+
+  <div class="arm-card">
     <form method="post">
       {% csrf_token %}
+      <input type="hidden" name="action" value="run_report">
 
       <div class="arm-grid">
         <div class="arm-field">
@@ -122,12 +193,16 @@
       <div class="arm-field" style="margin-top: 12px;">
         <label>Модели для проверки</label>
         <div class="arm-models">
-          {% for model in model_options %}
-            <label class="arm-model">
-              <input type="checkbox" name="models" value="{{ model.key }}" {% if model.key in selected_models %}checked{% endif %}>
-              {{ model.title }}
-            </label>
-          {% endfor %}
+          {% if model_options %}
+            {% for model in model_options %}
+              <label class="arm-model">
+                <input type="checkbox" name="models" value="{{ model.key }}" {% if model.key in selected_models %}checked{% endif %}>
+                {{ model.title }}
+              </label>
+            {% endfor %}
+          {% else %}
+            <div class="arm-model">Сегодня нет доступных моделей (проверка 04:00 МСК).</div>
+          {% endif %}
         </div>
       </div>
 
@@ -158,14 +233,25 @@
     <div class="arm-card">
       <h2>Ответы моделей</h2>
       {% for item in results %}
-        <div class="arm-result {{ item.status }}">
+        <div class="arm-result {{ item.status }}" onclick="openArmModal(this)">
           <strong>{{ item.model_title }}</strong>
           <div class="arm-meta">Время: {{ item.duration }} сек | Токены: {{ item.tokens }}</div>
           <div style="margin-top: 8px;">{{ item.short_response }}</div>
+          <div class="arm-full-raw" hidden>{{ item.raw_response }}</div>
         </div>
       {% endfor %}
     </div>
   {% endif %}
+</div>
+
+<div id="armModal" class="arm-modal" onclick="closeArmModalOnBackdrop(event)">
+  <div class="arm-modal-card">
+    <div class="arm-modal-head">
+      <div id="armModalTitle" class="arm-modal-title">Полный ответ модели</div>
+      <button type="button" class="arm-modal-close" aria-label="Close" onclick="closeArmModal()">×</button>
+    </div>
+    <div id="armModalBody" class="arm-modal-body"></div>
+  </div>
 </div>
 
 {{ languages|json_script:"langs-data" }}
@@ -250,5 +336,39 @@
     fillTopics(langSelect.value);
     fillPrompts(topicSelect.value);
   })();
+
+  function openArmModal(card) {
+    const titleEl = card.querySelector('strong');
+    const rawEl = card.querySelector('.arm-full-raw');
+    const modal = document.getElementById('armModal');
+    const modalTitle = document.getElementById('armModalTitle');
+    const modalBody = document.getElementById('armModalBody');
+    if (!modal || !modalTitle || !modalBody) {
+      return;
+    }
+
+    modalTitle.textContent = titleEl ? titleEl.textContent : 'Полный ответ модели';
+    modalBody.textContent = rawEl ? rawEl.textContent : 'Нет полного ответа.';
+    modal.classList.add('open');
+  }
+
+  function closeArmModal() {
+    const modal = document.getElementById('armModal');
+    if (modal) {
+      modal.classList.remove('open');
+    }
+  }
+
+  function closeArmModalOnBackdrop(event) {
+    if (event.target && event.target.id === 'armModal') {
+      closeArmModal();
+    }
+  }
+
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') {
+      closeArmModal();
+    }
+  });
 </script>
 {% endblock %}

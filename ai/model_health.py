@@ -1,0 +1,334 @@
+import re
+import threading
+import time
+import logging
+from datetime import time as dtime, timedelta
+from time import perf_counter
+from zoneinfo import ZoneInfo
+
+from asgiref.sync import async_to_sync
+from django.db import transaction
+from django.utils import timezone
+
+from .models import AIModelAvailability, AIModelHealthRun
+
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+HEALTHCHECK_PROMPT = "Ответь только одной цифрой без пояснений: 1+1=?"
+
+logger = logging.getLogger(__name__)
+_scheduler_lock = threading.Lock()
+_scheduler_started = False
+
+MODEL_CATALOG = (
+    {
+        "key": "DeepSeek_R1",
+        "title": "DeepSeek-R1",
+        "handler_name": "ask_DeepSeek_R1_async",
+    },
+    {
+        "key": "Meta_Llama_3_1_70B_Instruct",
+        "title": "Meta-Llama-3.1-70B-Instruct",
+        "handler_name": "ask_Meta_Llama_3_1_70B_Instruct_async",
+    },
+    {
+        "key": "Mixtral_8x22b",
+        "title": "Mixtral-8x22b",
+        "handler_name": "ask_Mixtral_8x22b_async",
+    },
+    {
+        "key": "Gpt_oss_120b",
+        "title": "Gpt_oss_120b",
+        "handler_name": "ask_Gpt_oss_120b_async",
+    },
+    {
+        "key": "Web_DeepSeek",
+        "title": "Web DeepSeek",
+        "handler_name": "ask_Web_DeepSeek_async",
+    },
+    {
+        "key": "Web_DeepSeek_Thinking",
+        "title": "Web DeepSeek Thinking",
+        "handler_name": "ask_Web_DeepSeek_Thinking_async",
+    },
+)
+
+MODEL_ALIASES = {
+    # Legacy values kept for backward compatibility with stale browser cache.
+    "Llama_3_1_Tulu_3_405B": "Meta_Llama_3_1_70B_Instruct",
+    "QwQ_32B": "DeepSeek_R1",
+    "DeepSeek_R1_Distill_Llama_70B": "DeepSeek_R1",
+    "Mixtral_8x7B": "Mixtral_8x22b",
+}
+
+_ERROR_MARKERS = (
+    "ошибка",
+    "не авторизован",
+    "таймаут",
+    "недоступ",
+    "превышен лимит",
+    "подключени",
+    "неправильный запрос",
+    "пустой ответ",
+    "not found",
+    "unauthorized",
+    "timeout",
+    "rate limit",
+)
+
+_TWO_RE = re.compile(r"(^|\D)2(\D|$)")
+
+
+def get_health_window_date(now=None):
+    current = now or timezone.now()
+    moscow_now = current.astimezone(MOSCOW_TZ)
+    window_date = moscow_now.date()
+    if moscow_now.time() < dtime(4, 0):
+        window_date -= timedelta(days=1)
+    return window_date
+
+
+def _extract_response_text(result):
+    if isinstance(result, tuple):
+        if len(result) > 0 and result[0] is not None:
+            return str(result[0]).strip()
+        return ""
+    if result is None:
+        return ""
+    return str(result).strip()
+
+
+def _is_healthy_response(response_text):
+    if not response_text:
+        return False
+
+    low = response_text.lower().strip()
+    if any(marker in low for marker in _ERROR_MARKERS):
+        return False
+
+    if _TWO_RE.search(response_text):
+        return True
+
+    return low in {"два", "two"}
+
+
+def _load_runtime_handler(handler_name):
+    from . import utils as ai_utils
+
+    return getattr(ai_utils, handler_name, None)
+
+
+def get_runtime_model_handlers():
+    handlers = {}
+    for spec in MODEL_CATALOG:
+        handler = _load_runtime_handler(spec["handler_name"])
+        if handler:
+            handlers[spec["key"]] = {
+                "title": spec["title"],
+                "handler": handler,
+            }
+    return handlers
+
+
+def _save_availability(window_date, key, title, is_available, response_time_ms, last_message):
+    AIModelAvailability.objects.update_or_create(
+        model_key=key,
+        window_date=window_date,
+        defaults={
+            "model_title": title,
+            "is_available": is_available,
+            "response_time_ms": response_time_ms,
+            "last_message": (last_message or "")[:2000],
+        },
+    )
+
+
+def run_model_health_check(force=False):
+    window_date = get_health_window_date()
+    now = timezone.now()
+
+    with transaction.atomic():
+        run = (
+            AIModelHealthRun.objects.select_for_update()
+            .filter(window_date=window_date)
+            .first()
+        )
+
+        if run and run.status == AIModelHealthRun.STATUS_COMPLETED and not force:
+            return False
+
+        if (
+            run
+            and run.status == AIModelHealthRun.STATUS_RUNNING
+            and run.started_at
+            and run.started_at > now - timedelta(minutes=45)
+            and not force
+        ):
+            return False
+
+        if run is None:
+            run = AIModelHealthRun(window_date=window_date)
+
+        run.status = AIModelHealthRun.STATUS_RUNNING
+        run.started_at = now
+        run.finished_at = None
+        run.error_message = ""
+        run.save()
+
+    try:
+        handlers = get_runtime_model_handlers()
+
+        for spec in MODEL_CATALOG:
+            key = spec["key"]
+            title = spec["title"]
+            handler_info = handlers.get(key)
+
+            if not handler_info:
+                _save_availability(
+                    window_date=window_date,
+                    key=key,
+                    title=title,
+                    is_available=False,
+                    response_time_ms=None,
+                    last_message="Handler not found",
+                )
+                continue
+
+            started = perf_counter()
+            try:
+                result = async_to_sync(handler_info["handler"])(
+                    HEALTHCHECK_PROMPT,
+                    f"health-{window_date.isoformat()}-{key}",
+                )
+                elapsed_ms = int((perf_counter() - started) * 1000)
+                response_text = _extract_response_text(result)
+                is_available = _is_healthy_response(response_text)
+
+                _save_availability(
+                    window_date=window_date,
+                    key=key,
+                    title=title,
+                    is_available=is_available,
+                    response_time_ms=elapsed_ms,
+                    last_message=response_text,
+                )
+            except Exception as exc:
+                elapsed_ms = int((perf_counter() - started) * 1000)
+                _save_availability(
+                    window_date=window_date,
+                    key=key,
+                    title=title,
+                    is_available=False,
+                    response_time_ms=elapsed_ms,
+                    last_message=f"Health check exception: {exc}",
+                )
+
+        AIModelHealthRun.objects.filter(pk=run.pk).update(
+            status=AIModelHealthRun.STATUS_COMPLETED,
+            finished_at=timezone.now(),
+            error_message="",
+        )
+        return True
+
+    except Exception as exc:
+        AIModelHealthRun.objects.filter(pk=run.pk).update(
+            status=AIModelHealthRun.STATUS_FAILED,
+            finished_at=timezone.now(),
+            error_message=str(exc)[:1000],
+        )
+        return False
+
+
+def ensure_model_health_for_current_window():
+    window_date = get_health_window_date()
+    is_ready = AIModelHealthRun.objects.filter(
+        window_date=window_date,
+        status=AIModelHealthRun.STATUS_COMPLETED,
+    ).exists()
+
+    if not is_ready:
+        run_model_health_check(force=False)
+
+
+def _seconds_until_next_4am_moscow(now=None):
+    current = (now or timezone.now()).astimezone(MOSCOW_TZ)
+    next_run = current.replace(hour=4, minute=0, second=0, microsecond=0)
+    if current >= next_run:
+        next_run += timedelta(days=1)
+    return max(int((next_run - current).total_seconds()), 1)
+
+
+def _scheduler_loop():
+    while True:
+        try:
+            run_model_health_check(force=False)
+            wait_seconds = _seconds_until_next_4am_moscow()
+        except Exception:
+            logger.exception("Model health scheduler iteration failed")
+            # DB/network can be temporarily unavailable during startup.
+            # Retry sooner instead of waiting for the next daily window.
+            wait_seconds = 300
+
+        time.sleep(wait_seconds)
+
+
+def start_model_health_scheduler():
+    global _scheduler_started
+
+    with _scheduler_lock:
+        if _scheduler_started:
+            return
+
+        thread = threading.Thread(
+            target=_scheduler_loop,
+            name="ai-model-health-scheduler",
+            daemon=True,
+        )
+        thread.start()
+        _scheduler_started = True
+
+
+def get_all_model_options():
+    return [{"key": item["key"], "title": item["title"]} for item in MODEL_CATALOG]
+
+
+def get_available_model_options():
+    ensure_model_health_for_current_window()
+
+    ordered_keys = [item["key"] for item in MODEL_CATALOG]
+    titles = {item["key"]: item["title"] for item in MODEL_CATALOG}
+
+    window_date = get_health_window_date()
+    available_rows = {
+        row.model_key: row
+        for row in AIModelAvailability.objects.filter(
+            window_date=window_date,
+            is_available=True,
+            model_key__in=ordered_keys,
+        )
+    }
+
+    if not available_rows:
+        fallback_date = (
+            AIModelAvailability.objects.filter(
+                is_available=True,
+                model_key__in=ordered_keys,
+            )
+            .order_by("-window_date")
+            .values_list("window_date", flat=True)
+            .first()
+        )
+        if fallback_date:
+            available_rows = {
+                row.model_key: row
+                for row in AIModelAvailability.objects.filter(
+                    window_date=fallback_date,
+                    is_available=True,
+                    model_key__in=ordered_keys,
+                )
+            }
+
+    return [
+        {"key": key, "title": titles[key]}
+        for key in ordered_keys
+        if key in available_rows
+    ]

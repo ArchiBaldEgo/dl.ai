@@ -8,6 +8,7 @@ from django.http import FileResponse, Http404, HttpResponseForbidden, HttpRespon
 from django.db import ProgrammingError
 from django.contrib.staticfiles import finders
 from functools import wraps
+from .model_health import get_available_model_options
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 import uuid
 
@@ -71,21 +72,30 @@ def tester_login_view(request):
 def chat_view(request):
     # Генерируем уникальный client_id для каждого пользователя
     client_id = str(uuid.uuid4())
-    return render(request, 'ai/chat.html', {'client_id': client_id})
+    return render(request, 'ai/chat.html', {
+        'client_id': client_id,
+        'available_models': get_available_model_options(),
+    })
 
 
 @ai_access_required
 @tester_access_required
 def decide_task_view(request):
     client_id = str(uuid.uuid4())
-    return render(request, 'ai/decide-task.html', {'client_id': client_id})
+    return render(request, 'ai/decide-task.html', {
+        'client_id': client_id,
+        'available_models': get_available_model_options(),
+    })
 
 
 @ai_access_required
 @tester_access_required
 def find_error_view(request):
     client_id = str(uuid.uuid4())
-    return render(request, 'ai/find-error.html', {'client_id': client_id})
+    return render(request, 'ai/find-error.html', {
+        'client_id': client_id,
+        'available_models': get_available_model_options(),
+    })
 
 
 @ai_access_required

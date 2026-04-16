@@ -489,6 +489,11 @@
                 var input = document.getElementById("messageText");
                 var progLng = document.querySelector("#selectProgLng").value;
                 var preprompt = document.querySelector("#selectPrompt").value;
+
+                if (!value) {
+                    alert("Сегодня нет доступных моделей. Повторите позже.");
+                    return;
+                }
                 
                 if (!input.value.trim()) {
                     alert("Пожалуйста, введите сообщение");
@@ -548,9 +553,11 @@
             const toggleButton = document.querySelector('.toggle-button');
             const sidebar = document.querySelector('.sidebar');
 
-            toggleButton.addEventListener('click', () => {
-                sidebar.classList.toggle('open');
-            });
+            if (toggleButton && sidebar) {
+                toggleButton.addEventListener('click', () => {
+                    sidebar.classList.toggle('open');
+                });
+            }
 
             let isResizing = false;
 
