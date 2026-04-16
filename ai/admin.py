@@ -5,23 +5,17 @@ from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonRespo
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path
-from django.utils.html import strip_tags
-from asgiref.sync import async_to_sync
-import time
 from urllib.parse import quote
 
+from .arm_runner import get_arm_run_snapshot, start_arm_sequential_run
 from .model_health import (
     get_available_model_options,
     get_model_status_rows,
     get_health_window_date,
     is_model_health_refresh_running,
-    get_runtime_model_handlers,
     trigger_model_health_refresh_async,
 )
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
-
-def _load_model_handlers():
-    return get_runtime_model_handlers()
 
 
 def _safe_relative_url(candidate, fallback):
@@ -93,6 +87,51 @@ def _build_find_error_message(task_text, code_text, prog_lang_name, prompt_text,
     return message
 
 
+def _collect_arm_form_state(request):
+    return {
+        "selected_models": request.POST.getlist("models"),
+        "selected_language_ui": request.POST.get("interface_language", "Русский"),
+        "selected_prog_lng": request.POST.get("programming_language", ""),
+        "selected_topic": request.POST.get("topic", ""),
+        "selected_prompt": request.POST.get("prompt", ""),
+        "task_text": (request.POST.get("task_text") or "").strip(),
+        "code_text": (request.POST.get("code_text") or "").strip(),
+    }
+
+
+def _prepare_arm_run_payload(form_state):
+    selected_models = form_state["selected_models"]
+    task_text = form_state["task_text"]
+    code_text = form_state["code_text"]
+
+    if not selected_models:
+        return None, "Выберите хотя бы одну модель"
+
+    if not task_text and not code_text:
+        return None, "Заполните условие задачи или код"
+
+    prog_lng_name = ProgrammingLanguage.objects.filter(
+        id=form_state["selected_prog_lng"]
+    ).values_list("language_name", flat=True).first() or "Python"
+
+    prompt_text = Prompt.objects.filter(
+        id=form_state["selected_prompt"]
+    ).values_list("prompt_text", flat=True).first() or ""
+
+    message = _build_find_error_message(
+        task_text=task_text,
+        code_text=code_text,
+        prog_lang_name=prog_lng_name,
+        prompt_text=prompt_text,
+        ui_language=form_state["selected_language_ui"],
+    )
+
+    return {
+        "selected_models": selected_models,
+        "message": message,
+    }, ""
+
+
 def admin_arm_find_error_view(request):
     if not _can_access_arm(request):
         return HttpResponseForbidden("Access denied")
@@ -111,102 +150,41 @@ def admin_arm_find_error_view(request):
     results = []
     report = None
     error_message = ""
+    active_run_id = (request.GET.get("run_id") or "").strip()
+    active_run_snapshot = None
 
     if request.method == "POST":
-        model_handlers = _load_model_handlers()
-        selected_models = request.POST.getlist("models")
-        selected_language_ui = request.POST.get("interface_language", "Русский")
-        selected_prog_lng = request.POST.get("programming_language", "")
-        selected_topic = request.POST.get("topic", "")
-        selected_prompt = request.POST.get("prompt", "")
-        task_text = (request.POST.get("task_text") or "").strip()
-        code_text = (request.POST.get("code_text") or "").strip()
+        form_state = _collect_arm_form_state(request)
+        selected_models = form_state["selected_models"]
+        selected_language_ui = form_state["selected_language_ui"]
+        selected_prog_lng = form_state["selected_prog_lng"]
+        selected_topic = form_state["selected_topic"]
+        selected_prompt = form_state["selected_prompt"]
+        task_text = form_state["task_text"]
+        code_text = form_state["code_text"]
 
-        if not selected_models:
-            error_message = "Выберите хотя бы одну модель"
-        elif not task_text and not code_text:
-            error_message = "Заполните условие задачи или код"
-        else:
-            prog_lng_name = ProgrammingLanguage.objects.filter(id=selected_prog_lng).values_list(
-                "language_name", flat=True
-            ).first() or "Python"
-            prompt_text = Prompt.objects.filter(id=selected_prompt).values_list(
-                "prompt_text", flat=True
-            ).first() or ""
-
-            message = _build_find_error_message(
-                task_text=task_text,
-                code_text=code_text,
-                prog_lang_name=prog_lng_name,
-                prompt_text=prompt_text,
-                ui_language=selected_language_ui,
+        run_payload, error_message = _prepare_arm_run_payload(form_state)
+        if not error_message:
+            run_id, start_error = start_arm_sequential_run(
+                run_payload["message"],
+                run_payload["selected_models"],
+                request.user.id,
             )
 
-            success_count = 0
-            total_tokens = 0
+            if run_id:
+                return redirect(f"/ai/admin/arm/find-error/?run_id={run_id}")
 
-            for model_key in selected_models:
-                model_info = model_handlers.get(model_key)
-                if not model_info:
-                    continue
+            error_message = start_error or "Не удалось запустить ARM процесс"
 
-                started = time.perf_counter()
-                try:
-                    response = async_to_sync(model_info["handler"])(
-                        message,
-                        f"admin-{request.user.id}-{model_key}",
-                    )
-                    elapsed = round(time.perf_counter() - started, 2)
-
-                    if isinstance(response, tuple):
-                        response_text = response[0] if len(response) > 0 else ""
-                        tokens = int(response[1]) if len(response) > 1 and str(response[1]).isdigit() else 0
-                    else:
-                        response_text = str(response)
-                        tokens = 0
-
-                    cleaned_text = strip_tags(response_text or "")
-                    short_response = cleaned_text[:300] + ("..." if len(cleaned_text) > 300 else "")
-                    is_ok = bool(cleaned_text) and "ошибка" not in cleaned_text.lower()[:25]
-                    if is_ok:
-                        success_count += 1
-                    total_tokens += tokens
-
-                    results.append(
-                        {
-                            "model_key": model_key,
-                            "model_title": model_info["title"],
-                            "duration": elapsed,
-                            "tokens": tokens,
-                            "short_response": short_response,
-                            "status": "ok" if is_ok else "error",
-                            "raw_response": cleaned_text,
-                        }
-                    )
-                except Exception as exc:
-                    elapsed = round(time.perf_counter() - started, 2)
-                    results.append(
-                        {
-                            "model_key": model_key,
-                            "model_title": model_info["title"],
-                            "duration": elapsed,
-                            "tokens": 0,
-                            "short_response": f"Ошибка вызова модели: {exc}",
-                            "status": "error",
-                            "raw_response": "",
-                        }
-                    )
-
-            if results:
-                fastest = min(results, key=lambda item: item["duration"])
-                report = {
-                    "models_total": len(results),
-                    "success_count": success_count,
-                    "error_count": len(results) - success_count,
-                    "tokens_total": total_tokens,
-                    "fastest_model": fastest["model_title"],
-                    "fastest_duration": fastest["duration"],
-                }
+    if active_run_id:
+        active_run_snapshot = get_arm_run_snapshot(active_run_id)
+        if active_run_snapshot:
+            results = active_run_snapshot.get("results") or []
+            report = active_run_snapshot.get("report")
+            if active_run_snapshot.get("status") == "failed":
+                error_message = active_run_snapshot.get("error_message") or "ARM процесс завершился с ошибкой"
+        else:
+            error_message = "ARM процесс не найден или уже завершен"
 
     arm_back_url = _safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
     context = {
@@ -228,8 +206,71 @@ def admin_arm_find_error_view(request):
         "results": results,
         "report": report,
         "error_message": error_message,
+        "arm_find_error_start_url": "/ai/admin/arm/find-error/start/",
+        "arm_find_error_status_url": "/ai/admin/arm/find-error/status/",
+        "active_run_id": active_run_id,
+        "active_run_snapshot": active_run_snapshot or {},
     }
     return TemplateResponse(request, "admin/ai/arm_find_error.html", context)
+
+
+def admin_arm_find_error_start_view(request):
+    if not _can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    form_state = _collect_arm_form_state(request)
+    run_payload, error_message = _prepare_arm_run_payload(form_state)
+    if error_message:
+        return JsonResponse({"ok": False, "message": error_message}, status=400)
+
+    run_id, start_error = start_arm_sequential_run(
+        run_payload["message"],
+        run_payload["selected_models"],
+        request.user.id,
+    )
+    if not run_id:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": start_error or "Не удалось запустить ARM процесс",
+            },
+            status=400,
+        )
+
+    return JsonResponse(
+        {
+            "ok": True,
+            "run_id": run_id,
+            "run": get_arm_run_snapshot(run_id),
+        }
+    )
+
+
+def admin_arm_find_error_status_view(request):
+    if not _can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "GET":
+        return HttpResponseNotAllowed(["GET"])
+
+    run_id = (request.GET.get("run_id") or "").strip()
+    if not run_id:
+        return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
+
+    run_snapshot = get_arm_run_snapshot(run_id)
+    if not run_snapshot:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": "ARM процесс не найден или уже завершен",
+            },
+            status=404,
+        )
+
+    return JsonResponse({"ok": True, "run": run_snapshot})
 
 
 def admin_model_status_view(request):
@@ -302,6 +343,16 @@ _default_get_urls = admin.site.get_urls
 
 def _custom_admin_urls():
     custom_urls = [
+        path(
+            "arm/find-error/start/",
+            admin.site.admin_view(admin_arm_find_error_start_view),
+            name="ai_arm_find_error_start",
+        ),
+        path(
+            "arm/find-error/status/",
+            admin.site.admin_view(admin_arm_find_error_status_view),
+            name="ai_arm_find_error_status",
+        ),
         path(
             "arm/models/refresh/",
             admin.site.admin_view(admin_model_status_refresh_view),

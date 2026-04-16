@@ -146,7 +146,7 @@
   </div>
 
   <div class="arm-card">
-    <form method="post">
+    <form id="armRunForm" method="post">
       {% csrf_token %}
       <input type="hidden" name="action" value="run_report">
 
@@ -202,32 +202,31 @@
         </div>
       </div>
 
-      {% if error_message %}
-        <div class="arm-error">{{ error_message }}</div>
-      {% endif %}
+      <div id="armRunError" class="arm-error"{% if not error_message %} style="display: none;"{% endif %}>{{ error_message }}</div>
+      <div id="armRunProgress" class="arm-success" style="display: none;"></div>
 
       <div class="arm-actions">
-        <button type="submit" class="default">Запустить отчет</button>
+        <button id="armRunSubmitBtn" type="submit" class="default">Запустить отчет</button>
       </div>
     </form>
   </div>
 
-  {% if report %}
-    <div class="arm-card">
-      <h2>Краткий отчет</h2>
-      <ul class="arm-report">
+  <div id="armReportCard" class="arm-card"{% if not report %} style="display: none;"{% endif %}>
+    <h2>Краткий отчет</h2>
+    <ul id="armReportList" class="arm-report">
+      {% if report %}
         <li>Всего моделей: {{ report.models_total }}</li>
         <li>Успешно: {{ report.success_count }}</li>
         <li>С ошибкой: {{ report.error_count }}</li>
         <li>Суммарно токенов: {{ report.tokens_total }}</li>
         <li>Самая быстрая: {{ report.fastest_model }} ({{ report.fastest_duration }} сек)</li>
-      </ul>
-    </div>
-  {% endif %}
+      {% endif %}
+    </ul>
+  </div>
 
-  {% if results %}
-    <div class="arm-card">
-      <h2>Ответы моделей</h2>
+  <div id="armResultsCard" class="arm-card"{% if not results %} style="display: none;"{% endif %}>
+    <h2>Ответы моделей</h2>
+    <div id="armResultsList">
       {% for item in results %}
         <div class="arm-result {{ item.status }}" onclick="openArmModal(this)">
           <strong>{{ item.model_title }}</strong>
@@ -237,7 +236,7 @@
         </div>
       {% endfor %}
     </div>
-  {% endif %}
+  </div>
 </div>
 
 <div id="armModal" class="arm-modal" onclick="closeArmModalOnBackdrop(event)">
@@ -253,6 +252,7 @@
 {{ languages|json_script:"langs-data" }}
 {{ topics|json_script:"topics-data" }}
 {{ prompts|json_script:"prompts-data" }}
+{{ active_run_snapshot|json_script:"arm-initial-run-data" }}
 
 <script>
   (function () {
@@ -366,6 +366,245 @@
       closeArmModal();
     }
   });
+
+  (function () {
+    const runForm = document.getElementById('armRunForm');
+    const submitButton = document.getElementById('armRunSubmitBtn');
+    const runError = document.getElementById('armRunError');
+    const runProgress = document.getElementById('armRunProgress');
+    const reportCard = document.getElementById('armReportCard');
+    const reportList = document.getElementById('armReportList');
+    const resultsCard = document.getElementById('armResultsCard');
+    const resultsList = document.getElementById('armResultsList');
+    const initialRunRaw = document.getElementById('arm-initial-run-data');
+    const csrfInput = runForm ? runForm.querySelector('input[name="csrfmiddlewaretoken"]') : null;
+
+    if (!runForm || !submitButton || !runError || !runProgress || !reportCard || !reportList || !resultsCard || !resultsList || !csrfInput) {
+      return;
+    }
+
+    let pollTimer = null;
+    let currentRunId = '{{ active_run_id|escapejs }}';
+    let initialRun = {};
+    try {
+      initialRun = initialRunRaw ? JSON.parse(initialRunRaw.textContent || '{}') : {};
+    } catch (error) {
+      initialRun = {};
+    }
+
+    function setSubmitDisabled(isDisabled) {
+      submitButton.disabled = Boolean(isDisabled);
+      submitButton.textContent = isDisabled ? 'Проверяем модели...' : 'Запустить отчет';
+    }
+
+    function setRunError(text) {
+      if (!text) {
+        runError.textContent = '';
+        runError.style.display = 'none';
+        return;
+      }
+
+      runError.textContent = text;
+      runError.style.display = 'block';
+    }
+
+    function setRunProgress(text) {
+      if (!text) {
+        runProgress.textContent = '';
+        runProgress.style.display = 'none';
+        return;
+      }
+
+      runProgress.textContent = text;
+      runProgress.style.display = 'block';
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function renderReport(report) {
+      if (!report) {
+        reportList.innerHTML = '';
+        reportCard.style.display = 'none';
+        return;
+      }
+
+      const fastestDuration = Number(report.fastest_duration || 0).toFixed(2);
+      reportList.innerHTML = [
+        `Всего моделей: ${Number(report.models_total || 0)}`,
+        `Успешно: ${Number(report.success_count || 0)}`,
+        `С ошибкой: ${Number(report.error_count || 0)}`,
+        `Суммарно токенов: ${Number(report.tokens_total || 0)}`,
+        `Самая быстрая: ${report.fastest_model || '-'} (${fastestDuration} сек)`,
+      ].map(function (line) { return `<li>${escapeHtml(line)}</li>`; }).join('');
+      reportCard.style.display = 'block';
+    }
+
+    function renderResults(results) {
+      if (!Array.isArray(results) || results.length === 0) {
+        resultsList.innerHTML = '';
+        resultsCard.style.display = 'none';
+        return;
+      }
+
+      resultsList.innerHTML = '';
+      results.forEach(function (item) {
+        const card = document.createElement('div');
+        card.className = `arm-result ${item.status || 'error'}`;
+        card.innerHTML = [
+          `<strong>${escapeHtml(item.model_title || item.model_key || '-')}</strong>`,
+          `<div class="arm-meta">Время: ${escapeHtml(item.duration)} сек | Токены: ${escapeHtml(item.tokens)}</div>`,
+          `<div style="margin-top: 8px;">${escapeHtml(item.short_response || '')}</div>`,
+          '<div class="arm-full-raw" hidden></div>',
+        ].join('');
+
+        const raw = card.querySelector('.arm-full-raw');
+        if (raw) {
+          raw.textContent = item.raw_response || '';
+        }
+
+        card.addEventListener('click', function () {
+          openArmModal(card);
+        });
+
+        resultsList.appendChild(card);
+      });
+
+      resultsCard.style.display = 'block';
+    }
+
+    function applyRunSnapshot(run) {
+      if (!run) {
+        return;
+      }
+
+      const completed = Number(run.completed_models || 0);
+      const total = Number(run.total_models || 0);
+      const currentModelTitle = run.current_model_title || '';
+
+      renderResults(run.results || []);
+      renderReport(run.report || null);
+
+      if (run.status === 'running') {
+        const suffix = currentModelTitle ? ` | Сейчас: ${currentModelTitle}` : '';
+        setRunProgress(`Проверка моделей: ${completed}/${total}${suffix}`);
+        setRunError('');
+        setSubmitDisabled(true);
+        return;
+      }
+
+      if (run.status === 'completed') {
+        setRunProgress(`Проверка завершена: ${completed}/${total}`);
+        setRunError('');
+        setSubmitDisabled(false);
+        return;
+      }
+
+      if (run.status === 'failed') {
+        setRunProgress('');
+        setRunError(run.error_message || 'ARM процесс завершился с ошибкой');
+        setSubmitDisabled(false);
+      }
+    }
+
+    async function pollRunStatus() {
+      if (!currentRunId) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`{{ arm_find_error_status_url }}?run_id=${encodeURIComponent(currentRunId)}`, {
+          method: 'GET',
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+        });
+
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.message || 'Не удалось получить статус ARM');
+        }
+
+        const run = data.run || {};
+        applyRunSnapshot(run);
+
+        if (run.status === 'running') {
+          pollTimer = window.setTimeout(pollRunStatus, 1500);
+        }
+      } catch (error) {
+        setRunError(error.message || 'Ошибка обновления статуса ARM');
+        setSubmitDisabled(false);
+      }
+    }
+
+    runForm.addEventListener('submit', async function (event) {
+      event.preventDefault();
+
+      if (submitButton.disabled) {
+        return;
+      }
+
+      if (pollTimer) {
+        window.clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+
+      setSubmitDisabled(true);
+      setRunError('');
+      setRunProgress('Запускаем ARM процесс...');
+      renderReport(null);
+      renderResults([]);
+
+      const formData = new FormData(runForm);
+      const body = new URLSearchParams(formData);
+
+      try {
+        const response = await fetch('{{ arm_find_error_start_url }}', {
+          method: 'POST',
+          headers: {
+            'X-CSRFToken': csrfInput.value,
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: body.toString(),
+        });
+
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.message || 'Не удалось запустить ARM процесс');
+        }
+
+        currentRunId = data.run_id || '';
+        if (currentRunId && window.history && window.history.replaceState) {
+          const newUrl = `${window.location.pathname}?run_id=${encodeURIComponent(currentRunId)}`;
+          window.history.replaceState({}, '', newUrl);
+        }
+
+        applyRunSnapshot(data.run || {});
+        if (data.run && data.run.status === 'running') {
+          pollRunStatus();
+        }
+      } catch (error) {
+        setRunError(error.message || 'Ошибка запуска ARM процесса');
+        setRunProgress('');
+        setSubmitDisabled(false);
+      }
+    });
+
+    if (initialRun && initialRun.run_id) {
+      currentRunId = initialRun.run_id;
+      applyRunSnapshot(initialRun);
+      if (initialRun.status === 'running') {
+        pollRunStatus();
+      }
+    }
+  })();
 
   (function () {
     const form = document.getElementById('armRefreshModelsForm');
