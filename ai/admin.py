@@ -5,7 +5,9 @@ from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonRespo
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path
+from django.utils import timezone
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from .arm_runner import get_arm_run_snapshot, start_arm_sequential_run
 from .model_health import (
@@ -16,6 +18,8 @@ from .model_health import (
     trigger_model_health_refresh_async,
 )
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
+
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 
 def _safe_relative_url(candidate, fallback):
@@ -302,8 +306,53 @@ def admin_model_status_view(request):
         "refresh_in_progress": is_model_health_refresh_running(),
         "arm_find_error_url": "/ai/admin/arm/find-error/",
         "arm_model_status_refresh_url": "/ai/admin/arm/models/refresh/",
+        "arm_model_status_state_url": "/ai/admin/arm/models/state/",
     }
     return TemplateResponse(request, "admin/ai/model_status.html", context)
+
+
+def _serialize_model_status_rows_for_api(rows):
+    serialized = []
+
+    for row in rows:
+        checked_at = row.get("checked_at")
+        checked_at_msk = ""
+        if checked_at:
+            checked_at_msk = timezone.localtime(checked_at, MOSCOW_TZ).strftime("%d.%m.%Y %H:%M:%S")
+
+        window_date = row.get("window_date")
+
+        serialized.append(
+            {
+                "key": row.get("key") or "",
+                "title": row.get("title") or "",
+                "is_active": bool(row.get("is_active")),
+                "status_label": row.get("status_label") or "",
+                "window_date": window_date.isoformat() if window_date else "",
+                "checked_at_msk": checked_at_msk,
+                "is_current_window": bool(row.get("is_current_window")),
+            }
+        )
+
+    return serialized
+
+
+def admin_model_status_state_view(request):
+    if not _can_access_model_status(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "GET":
+        return HttpResponseNotAllowed(["GET"])
+
+    rows = get_model_status_rows()
+    return JsonResponse(
+        {
+            "ok": True,
+            "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
+            "refresh_in_progress": is_model_health_refresh_running(),
+            "model_status_rows": _serialize_model_status_rows_for_api(rows),
+        }
+    )
 
 
 def admin_model_status_refresh_view(request):
@@ -357,6 +406,11 @@ def _custom_admin_urls():
             "arm/models/refresh/",
             admin.site.admin_view(admin_model_status_refresh_view),
             name="ai_arm_model_status_refresh",
+        ),
+        path(
+            "arm/models/state/",
+            admin.site.admin_view(admin_model_status_state_view),
+            name="ai_arm_model_status_state",
         ),
         path(
             "arm/models/",
@@ -428,6 +482,7 @@ def _custom_each_context(request):
     context["arm_find_error_url"] = "/ai/admin/arm/find-error/"
     context["arm_model_status_url"] = "/ai/admin/arm/models/"
     context["arm_model_status_refresh_url"] = "/ai/admin/arm/models/refresh/"
+    context["arm_model_status_state_url"] = "/ai/admin/arm/models/state/"
     return context
 
 

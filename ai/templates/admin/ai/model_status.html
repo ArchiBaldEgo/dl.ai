@@ -1,4 +1,5 @@
 {% extends "admin/base_site.html" %}
+{% load tz %}
 
 {% block content %}
 <style>
@@ -64,7 +65,7 @@
   <h1>AI: Состояние моделей</h1>
 
   <div class="status-card">
-    <div><strong>Окно проверки:</strong> {{ health_window_date }} (04:00 МСК)</div>
+    <div><strong>Окно проверки:</strong> <span id="statusHealthWindowDate">{{ health_window_date }}</span> (04:00 МСК)</div>
     <div class="status-actions">
       <form id="refreshModelsForm" method="post" onsubmit="return false;">
         {% csrf_token %}
@@ -79,9 +80,7 @@
     {% if refresh_error %}
       <div class="status-error">{{ refresh_error }}</div>
     {% endif %}
-    {% if refresh_in_progress %}
-      <div class="status-success">Обновление в процессе. Обновите страницу через несколько секунд.</div>
-    {% endif %}
+    <div id="refreshInProgressHint" class="status-success"{% if not refresh_in_progress %} style="display: none;"{% endif %}>Обновление в процессе. Страница обновляется автоматически.</div>
     <div id="refreshAsyncMessage"></div>
   </div>
 
@@ -95,7 +94,7 @@
           <th>Проверено</th>
         </tr>
       </thead>
-      <tbody>
+      <tbody id="modelStatusRowsBody">
         {% for row in model_status_rows %}
           <tr>
             <td>
@@ -121,7 +120,7 @@
             </td>
             <td>
               {% if row.checked_at %}
-                {{ row.checked_at|date:"d.m.Y H:i:s" }}
+                {{ row.checked_at|timezone:"Europe/Moscow"|date:"d.m.Y H:i:s" }}
               {% else %}
                 -
               {% endif %}
@@ -138,8 +137,11 @@
     const form = document.getElementById('refreshModelsForm');
     const button = document.getElementById('refreshModelsBtn');
     const message = document.getElementById('refreshAsyncMessage');
+    const rowsBody = document.getElementById('modelStatusRowsBody');
+    const healthWindowDate = document.getElementById('statusHealthWindowDate');
+    const inProgressHint = document.getElementById('refreshInProgressHint');
 
-    if (!form || !button || !message) {
+    if (!form || !button || !message || !rowsBody || !healthWindowDate || !inProgressHint) {
       return;
     }
 
@@ -148,9 +150,92 @@
       return;
     }
 
+    let pollTimer = null;
+    let refreshInProgress = {{ refresh_in_progress|yesno:"true,false" }};
+
     function setMessage(text, isError) {
       message.textContent = text || '';
       message.className = isError ? 'status-error' : 'status-success';
+    }
+
+    function setInProgressHint(isVisible) {
+      inProgressHint.style.display = isVisible ? 'block' : 'none';
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function renderStatusRows(rows) {
+      rowsBody.innerHTML = '';
+
+      (rows || []).forEach(function (row) {
+        const tr = document.createElement('tr');
+        const statusBadge = row.is_active
+          ? '<span class="badge up">Активна</span>'
+          : '<span class="badge down">Неактивна</span>';
+
+        const windowDateCell = row.window_date
+          ? `${escapeHtml(row.window_date)}${row.is_current_window ? '' : '<div class="quiet">данные из предыдущего окна</div>'}`
+          : '-';
+
+        tr.innerHTML = [
+          `<td><div>${escapeHtml(row.title)}</div><div class="quiet">${escapeHtml(row.key)}</div></td>`,
+          `<td>${statusBadge}</td>`,
+          `<td>${windowDateCell}</td>`,
+          `<td>${row.checked_at_msk ? escapeHtml(row.checked_at_msk) : '-'}</td>`,
+        ].join('');
+
+        rowsBody.appendChild(tr);
+      });
+    }
+
+    function schedulePoll(delayMs) {
+      if (pollTimer) {
+        window.clearTimeout(pollTimer);
+      }
+
+      pollTimer = window.setTimeout(fetchState, delayMs);
+    }
+
+    async function fetchState() {
+      try {
+        const response = await fetch('{{ arm_model_status_state_url }}', {
+          method: 'GET',
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+        });
+
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.message || 'Не удалось получить состояние моделей');
+        }
+
+        if (data.health_window_date) {
+          healthWindowDate.textContent = data.health_window_date;
+        }
+
+        renderStatusRows(data.model_status_rows || []);
+
+        const nextRefreshInProgress = Boolean(data.refresh_in_progress);
+        setInProgressHint(nextRefreshInProgress);
+
+        if (refreshInProgress && !nextRefreshInProgress) {
+          setMessage('Обновление завершено. Таблица обновлена.', false);
+        }
+
+        refreshInProgress = nextRefreshInProgress;
+        schedulePoll(refreshInProgress ? 2000 : 8000);
+      } catch (error) {
+        setMessage(error.message || 'Ошибка обновления статусов', true);
+        schedulePoll(8000);
+      }
     }
 
     button.addEventListener('click', async function () {
@@ -178,12 +263,17 @@
         }
 
         setMessage(data.message || 'Обновление запущено', false);
+        refreshInProgress = Boolean(data.refresh_in_progress);
+        setInProgressHint(refreshInProgress);
+        fetchState();
       } catch (error) {
         setMessage(error.message || 'Ошибка запуска обновления', true);
       } finally {
         button.disabled = false;
       }
     });
+
+    fetchState();
   })();
 </script>
 {% endblock %}
