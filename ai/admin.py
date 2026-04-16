@@ -1,5 +1,6 @@
 from django.contrib import admin
 from django.contrib.admin.forms import AdminAuthenticationForm
+from django.contrib.auth import logout
 from django import forms
 from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import redirect
@@ -8,6 +9,7 @@ from django.urls import path
 from django.utils.html import strip_tags
 from asgiref.sync import async_to_sync
 import time
+from urllib.parse import quote
 
 from .model_health import (
     get_available_model_options,
@@ -263,7 +265,7 @@ def admin_model_status_view(request):
 
 
 def admin_model_status_refresh_view(request):
-    if not _can_access_model_status(request):
+    if not _can_access_arm(request):
         return HttpResponseForbidden("Access denied")
 
     if request.method != "POST":
@@ -341,6 +343,28 @@ def _custom_admin_view(view, cacheable=False):
     wrapped_view = _default_admin_view(view, cacheable)
 
     def inner(request, *args, **kwargs):
+        admin_login_path = "/ai/admin/login/"
+
+        if request.path.startswith(admin_login_path):
+            if request.method != "POST" and request.user.is_authenticated:
+                logout(request)
+                request.session.pop("admin_fresh_auth", None)
+
+            response = wrapped_view(request, *args, **kwargs)
+
+            if request.method == "POST" and request.user.is_authenticated:
+                request.session["admin_fresh_auth"] = True
+
+            if request.method != "POST":
+                response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                response["Pragma"] = "no-cache"
+
+            return response
+
+        if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
+            next_path = quote(request.get_full_path(), safe="/?=&")
+            return redirect(f"/ai/admin/login/?next={next_path}")
+
         if _is_tester_user(request) and not request.user.is_superuser:
             arm_path = "/ai/admin/arm/find-error/"
             if not request.path.startswith(arm_path):

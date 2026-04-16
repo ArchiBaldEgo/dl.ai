@@ -24,10 +24,32 @@ GROQ_TOKEN = os.getenv("GROQ_TOKEN")
 DEEPSEEK_API_TOKEN = os.getenv("DEEPSEEK_API_TOKEN") or os.getenv("DEEPSEEK_API_KEY")
 
 # Centralized SambaCloud model IDs to avoid code edits on every deprecation.
-SAMBANOVA_MODEL_DEEPSEEK = os.getenv("SAMBANOVA_MODEL_DEEPSEEK", "DeepSeek-V3.1")
-SAMBANOVA_MODEL_META = os.getenv("SAMBANOVA_MODEL_META", "Meta-Llama-3.3-70B-Instruct")
+SAMBANOVA_MODEL_DEEPSEEK_R1_DISTILL_LLAMA_70B = os.getenv(
+    "SAMBANOVA_MODEL_DEEPSEEK_R1_DISTILL_LLAMA_70B",
+    "DeepSeek-R1-Distill-Llama-70B",
+)
+SAMBANOVA_MODEL_DEEPSEEK_V3_1 = os.getenv("SAMBANOVA_MODEL_DEEPSEEK_V3_1", "DeepSeek-V3.1")
+SAMBANOVA_MODEL_DEEPSEEK_V3_1_CB = os.getenv("SAMBANOVA_MODEL_DEEPSEEK_V3_1_CB", "DeepSeek-V3.1-cb")
+SAMBANOVA_MODEL_DEEPSEEK_V3_2 = os.getenv("SAMBANOVA_MODEL_DEEPSEEK_V3_2", "DeepSeek-V3.2")
+SAMBANOVA_MODEL_LLAMA_4_MAVERICK_17B_128E_INSTRUCT = os.getenv(
+    "SAMBANOVA_MODEL_LLAMA_4_MAVERICK_17B_128E_INSTRUCT",
+    "Llama-4-Maverick-17B-128E-Instruct",
+)
+SAMBANOVA_MODEL_META_LLAMA_3_3_70B_INSTRUCT = os.getenv(
+    "SAMBANOVA_MODEL_META_LLAMA_3_3_70B_INSTRUCT",
+    "Meta-Llama-3.3-70B-Instruct",
+)
+SAMBANOVA_MODEL_MINIMAX_M2_5 = os.getenv("SAMBANOVA_MODEL_MINIMAX_M2_5", "MiniMax-M2.5")
+SAMBANOVA_MODEL_GEMMA_3_12B_IT = os.getenv("SAMBANOVA_MODEL_GEMMA_3_12B_IT", "gemma-3-12b-it")
 SAMBANOVA_MODEL_GPT_OSS = os.getenv("SAMBANOVA_MODEL_GPT_OSS", "gpt-oss-120b")
-SAMBANOVA_MODEL_MIXTRAL_ALIAS = os.getenv("SAMBANOVA_MODEL_MIXTRAL_ALIAS", SAMBANOVA_MODEL_META)
+
+# Backward-compatible env names used in older code paths.
+SAMBANOVA_MODEL_DEEPSEEK = os.getenv("SAMBANOVA_MODEL_DEEPSEEK", SAMBANOVA_MODEL_DEEPSEEK_V3_1)
+SAMBANOVA_MODEL_META = os.getenv("SAMBANOVA_MODEL_META", SAMBANOVA_MODEL_META_LLAMA_3_3_70B_INSTRUCT)
+SAMBANOVA_MODEL_MIXTRAL_ALIAS = os.getenv(
+    "SAMBANOVA_MODEL_MIXTRAL_ALIAS",
+    SAMBANOVA_MODEL_LLAMA_4_MAVERICK_17B_128E_INSTRUCT,
+)
 
 timeout = 0
 
@@ -150,6 +172,115 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
         return f'Ошибка сервиса Web DeepSeek (код {response.status_code}).', 0
 
 
+def _extract_sambanova_answer(obj: dict) -> str:
+    choices = obj.get('choices') or []
+    if not choices:
+        return ''
+
+    first_message = choices[0].get('message', {})
+    assistant_content = first_message.get('content')
+    if not assistant_content:
+        assistant_content = first_message.get('reasoning_content') or ''
+    if not assistant_content:
+        assistant_content = first_message.get('reasoning') or ''
+    if not assistant_content:
+        assistant_content = 'Пустой ответ от модели.'
+    return assistant_content
+
+
+async def _ask_sambanova_model_async(
+    messages: str,
+    user_id: int,
+    model_name: str,
+    *,
+    max_tokens: int = 9000,
+    temperature: Optional[float] = None,
+) -> Tuple[str, Optional[int]]:
+    if user_id not in hist:
+        hist[user_id] = []
+    hist[user_id].append({"role": "user", "content": messages})
+
+    payload = {
+        "model": model_name,
+        "messages": hist[user_id],
+        "max_tokens": max_tokens,
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+
+    try:
+        response = await asyncio.to_thread(
+            requests.post,
+            'https://api.sambanova.ai/v1/chat/completions',
+            json=payload,
+            headers={
+                'Authorization': f'Bearer {SC_TOKEN}',
+                'Content-Type': 'application/json',
+            },
+            proxies=proxies,
+            timeout=30,
+        )
+
+        print(f"Response Status: {response.status_code}")
+        if response.status_code != 200 or len(response.text) > 500:
+            print(f"Response Content (truncated): {response.text[:500]}...")
+        else:
+            print(f"Response Content: {response.text}")
+
+        if response.status_code != 200:
+            if response.status_code == 429:
+                return 'Превышен лимит запросов. Попробуйте позже.', '0'
+            if response.status_code >= 500:
+                return 'Ошибка сервера API. Попробуйте позже.', '0'
+            return f'Ошибка API (код {response.status_code}).', '0'
+
+        response_content = response.text
+        if not response_content:
+            raise ValueError("Пустой ответ от сервера.")
+
+        try:
+            obj = json.loads(response_content)
+        except json.JSONDecodeError as e:
+            print(f"Ошибка при декодировании JSON: {e}")
+            return 'Что-то пошло не так с обработкой JSON.', '0'
+
+        if 'choices' not in obj or not obj['choices']:
+            print(f"Неожиданная структура ответа: {obj}")
+            return 'Неожиданный формат ответа от сервера.', '0'
+
+        completion_tokens = obj.get('usage', {}).get('completion_tokens', 0)
+        assistant_content = _extract_sambanova_answer(obj)
+
+        hist[user_id].append({"role": "assistant", "content": assistant_content})
+        if len(hist[user_id]) > 20:
+            hist[user_id] = hist[user_id][-20:]
+
+        return assistant_content, completion_tokens
+
+    except requests.exceptions.ConnectionError as e:
+        print(f"Ошибка соединения: {e}")
+        if "NameResolutionError" in str(e) or "Failed to resolve" in str(e):
+            return 'Отсутствует подключение к интернету.', '0'
+        if "Max retries exceeded" in str(e):
+            return 'Отсутствует интернет-соединение.', '0'
+        return 'Отсутствует интернет-соединение.', '0'
+
+    except requests.exceptions.Timeout:
+        print("Таймаут при подключении к API")
+        return 'Таймаут при подключении к серверу. Попробуйте позже.', '0'
+
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка при выполнении запроса: {e}")
+        return 'Ошибка при подключении к серверу API.', '0'
+
+    except Exception as e:
+        print(f"Общая ошибка: {type(e).__name__}: {e}")
+        if "ConnectionError" in str(type(e).__name__) or "timeout" in str(e).lower():
+            return 'Ошибка подключения. Ваш контекст сохранен, попробуйте позже.', '0'
+        hist[user_id] = []
+        return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
+
+
 async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25.0) -> Tuple[str, Optional[int]]:
 
     if user_id not in hist:
@@ -256,6 +387,80 @@ async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25
         # Очищаем историю для всех других ошибок
         hist[user_id] = []
         return 'Что-то пошло не так. Контекст очищен, введите новый запрос.', '0'
+
+
+async def ask_DeepSeek_R1_Distill_Llama_70B_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    return await _ask_sambanova_model_async(
+        messages,
+        user_id,
+        SAMBANOVA_MODEL_DEEPSEEK_R1_DISTILL_LLAMA_70B,
+        max_tokens=9000,
+        temperature=0.7,
+    )
+
+
+async def ask_DeepSeek_V3_1_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    return await _ask_sambanova_model_async(
+        messages,
+        user_id,
+        SAMBANOVA_MODEL_DEEPSEEK_V3_1,
+        max_tokens=9000,
+        temperature=0.7,
+    )
+
+
+async def ask_DeepSeek_V3_1_cb_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    return await _ask_sambanova_model_async(
+        messages,
+        user_id,
+        SAMBANOVA_MODEL_DEEPSEEK_V3_1_CB,
+        max_tokens=9000,
+    )
+
+
+async def ask_DeepSeek_V3_2_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    return await _ask_sambanova_model_async(
+        messages,
+        user_id,
+        SAMBANOVA_MODEL_DEEPSEEK_V3_2,
+        max_tokens=9000,
+    )
+
+
+async def ask_Llama_4_Maverick_17B_128E_Instruct_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    return await _ask_sambanova_model_async(
+        messages,
+        user_id,
+        SAMBANOVA_MODEL_LLAMA_4_MAVERICK_17B_128E_INSTRUCT,
+        max_tokens=9000,
+    )
+
+
+async def ask_Meta_Llama_3_3_70B_Instruct_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    return await _ask_sambanova_model_async(
+        messages,
+        user_id,
+        SAMBANOVA_MODEL_META_LLAMA_3_3_70B_INSTRUCT,
+        max_tokens=9000,
+    )
+
+
+async def ask_MiniMax_M2_5_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    return await _ask_sambanova_model_async(
+        messages,
+        user_id,
+        SAMBANOVA_MODEL_MINIMAX_M2_5,
+        max_tokens=9000,
+    )
+
+
+async def ask_Gemma_3_12b_it_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    return await _ask_sambanova_model_async(
+        messages,
+        user_id,
+        SAMBANOVA_MODEL_GEMMA_3_12B_IT,
+        max_tokens=9000,
+    )
 
 async def ask_Meta_Llama_3_1_70B_Instruct_async(messages: str, user_id: int) -> str:
     if user_id not in hist:

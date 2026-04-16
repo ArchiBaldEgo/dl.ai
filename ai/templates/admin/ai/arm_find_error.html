@@ -134,7 +134,16 @@
   <a class="arm-link" href="{{ arm_back_url }}">← Вернуться в чат</a>
   <h1>ARM: В чем ошибка</h1>
 
-  <div class="arm-card"><strong>Окно проверки моделей:</strong> {{ health_window_date }} (04:00 МСК)</div>
+  <div class="arm-card">
+    <div><strong>Окно проверки моделей:</strong> {{ health_window_date }} (04:00 МСК)</div>
+    <div class="arm-actions">
+      <form id="armRefreshModelsForm" method="post" onsubmit="return false;">
+        {% csrf_token %}
+        <button id="armRefreshModelsBtn" type="button">Обновить модели вручную</button>
+      </form>
+    </div>
+    <div id="armRefreshAsyncMessage"></div>
+  </div>
 
   <div class="arm-card">
     <form method="post">
@@ -357,5 +366,57 @@
       closeArmModal();
     }
   });
+
+  (function () {
+    const form = document.getElementById('armRefreshModelsForm');
+    const button = document.getElementById('armRefreshModelsBtn');
+    const message = document.getElementById('armRefreshAsyncMessage');
+
+    if (!form || !button || !message) {
+      return;
+    }
+
+    const csrfInput = form.querySelector('input[name="csrfmiddlewaretoken"]');
+    if (!csrfInput) {
+      return;
+    }
+
+    function setMessage(text, isError) {
+      message.textContent = text || '';
+      message.className = isError ? 'arm-error' : 'arm-success';
+    }
+
+    button.addEventListener('click', async function () {
+      if (button.disabled) {
+        return;
+      }
+
+      button.disabled = true;
+      setMessage('Запускаем обновление моделей...', false);
+
+      try {
+        const response = await fetch('{{ arm_model_status_refresh_url }}', {
+          method: 'POST',
+          headers: {
+            'X-CSRFToken': csrfInput.value,
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: 'action=refresh_models',
+        });
+
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.message || 'Не удалось запустить обновление');
+        }
+
+        setMessage(data.message || 'Обновление запущено', false);
+      } catch (error) {
+        setMessage(error.message || 'Ошибка запуска обновления', true);
+      } finally {
+        button.disabled = false;
+      }
+    });
+  })();
 </script>
 {% endblock %}

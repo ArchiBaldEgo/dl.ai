@@ -1,45 +1,39 @@
 {% load i18n %}
 
 {% if app_list %}
-  {% if show_arm_link or show_model_status_link %}
-    <div class="app-ai module{% if arm_find_error_url in request.path|urlencode %} current-app{% endif %}">
-      <table>
-        <caption>
-          <a href="{{ arm_model_status_url|default:arm_find_error_url }}" class="section">AI</a>
-        </caption>
-        {% if show_model_status_link %}
-          <tr class="model-aimodelstatus{% if arm_model_status_url in request.path|urlencode %} current-model{% endif %}">
-            <th scope="row" id="ai-model-status">
-              <a href="{{ arm_model_status_url }}"{% if arm_model_status_url in request.path|urlencode %} aria-current="page"{% endif %}>Состояние моделей</a>
-            </th>
-            <td></td>
-            {% if show_changelinks %}
-              <td><a href="{{ arm_model_status_url }}" class="viewlink" aria-describedby="ai-model-status">{% translate 'View' %}</a></td>
-            {% endif %}
-          </tr>
-        {% endif %}
-
-        {% if show_arm_link %}
-          <tr class="model-armfinderror{% if arm_find_error_url in request.path|urlencode %} current-model{% endif %}">
-            <th scope="row" id="arm-armfinderror">
-              <a href="{{ arm_find_error_url }}"{% if arm_find_error_url in request.path|urlencode %} aria-current="page"{% endif %}>В чем ошибка (ARM)</a>
-            </th>
-            <td></td>
-            {% if show_changelinks %}
-              <td><a href="{{ arm_find_error_url }}" class="viewlink" aria-describedby="arm-armfinderror">{% translate 'View' %}</a></td>
-            {% endif %}
-          </tr>
-        {% endif %}
-      </table>
-    </div>
-  {% endif %}
-
   {% for app in app_list %}
     <div class="app-{{ app.app_label }} module{% if app.app_url in request.path|urlencode %} current-app{% endif %}">
       <table>
         <caption>
           <a href="{{ app.app_url }}" class="section" title="{% blocktranslate with name=app.name %}Models in the {{ name }} application{% endblocktranslate %}">{{ app.name }}</a>
         </caption>
+
+        {% if app.app_label == "ai" %}
+          {% if show_model_status_link %}
+            <tr class="model-aimodelstatus{% if arm_model_status_url in request.path|urlencode %} current-model{% endif %}">
+              <th scope="row" id="ai-model-status">
+                <a href="{{ arm_model_status_url }}"{% if arm_model_status_url in request.path|urlencode %} aria-current="page"{% endif %}>Состояние моделей</a>
+              </th>
+              <td></td>
+              {% if show_changelinks %}
+                <td><a href="{{ arm_model_status_url }}" class="viewlink" aria-describedby="ai-model-status">{% translate 'View' %}</a></td>
+              {% endif %}
+            </tr>
+          {% endif %}
+
+          {% if show_arm_link %}
+            <tr class="model-armfinderror{% if arm_find_error_url in request.path|urlencode %} current-model{% endif %}">
+              <th scope="row" id="arm-armfinderror">
+                <a href="{{ arm_find_error_url }}"{% if arm_find_error_url in request.path|urlencode %} aria-current="page"{% endif %}>В чем ошибка (ARM)</a>
+              </th>
+              <td></td>
+              {% if show_changelinks %}
+                <td><a href="{{ arm_find_error_url }}" class="viewlink" aria-describedby="arm-armfinderror">{% translate 'View' %}</a></td>
+              {% endif %}
+            </tr>
+          {% endif %}
+        {% endif %}
+
         {% for model in app.models %}
           {% with model_name=model.object_name|lower %}
             <tr class="model-{{ model_name }}{% if model.admin_url in request.path|urlencode %} current-model{% endif %}">

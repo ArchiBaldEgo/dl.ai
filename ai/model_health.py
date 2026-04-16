@@ -23,23 +23,48 @@ _manual_refresh_started = False
 
 MODEL_CATALOG = (
     {
-        "key": "DeepSeek_R1",
-        "title": "DeepSeek-R1",
-        "handler_name": "ask_DeepSeek_R1_async",
+        "key": "DeepSeek_R1_Distill_Llama_70B",
+        "title": "DeepSeek-R1-Distill-Llama-70B",
+        "handler_name": "ask_DeepSeek_R1_Distill_Llama_70B_async",
     },
     {
-        "key": "Meta_Llama_3_1_70B_Instruct",
-        "title": "Meta-Llama-3.1-70B-Instruct",
-        "handler_name": "ask_Meta_Llama_3_1_70B_Instruct_async",
+        "key": "DeepSeek_V3_1",
+        "title": "DeepSeek-V3.1",
+        "handler_name": "ask_DeepSeek_V3_1_async",
     },
     {
-        "key": "Mixtral_8x22b",
-        "title": "Mixtral-8x22b",
-        "handler_name": "ask_Mixtral_8x22b_async",
+        "key": "DeepSeek_V3_1_cb",
+        "title": "DeepSeek-V3.1-cb",
+        "handler_name": "ask_DeepSeek_V3_1_cb_async",
+    },
+    {
+        "key": "DeepSeek_V3_2",
+        "title": "DeepSeek-V3.2",
+        "handler_name": "ask_DeepSeek_V3_2_async",
+    },
+    {
+        "key": "Llama_4_Maverick_17B_128E_Instruct",
+        "title": "Llama-4-Maverick-17B-128E-Instruct",
+        "handler_name": "ask_Llama_4_Maverick_17B_128E_Instruct_async",
+    },
+    {
+        "key": "Meta_Llama_3_3_70B_Instruct",
+        "title": "Meta-Llama-3.3-70B-Instruct",
+        "handler_name": "ask_Meta_Llama_3_3_70B_Instruct_async",
+    },
+    {
+        "key": "MiniMax_M2_5",
+        "title": "MiniMax-M2.5",
+        "handler_name": "ask_MiniMax_M2_5_async",
+    },
+    {
+        "key": "Gemma_3_12b_it",
+        "title": "gemma-3-12b-it",
+        "handler_name": "ask_Gemma_3_12b_it_async",
     },
     {
         "key": "Gpt_oss_120b",
-        "title": "Gpt_oss_120b",
+        "title": "gpt-oss-120b",
         "handler_name": "ask_Gpt_oss_120b_async",
     },
     {
@@ -56,10 +81,22 @@ MODEL_CATALOG = (
 
 MODEL_ALIASES = {
     # Legacy values kept for backward compatibility with stale browser cache.
-    "Llama_3_1_Tulu_3_405B": "Meta_Llama_3_1_70B_Instruct",
-    "QwQ_32B": "DeepSeek_R1",
-    "DeepSeek_R1_Distill_Llama_70B": "DeepSeek_R1",
-    "Mixtral_8x7B": "Mixtral_8x22b",
+    "DeepSeek_R1": "DeepSeek_R1_Distill_Llama_70B",
+    "DeepSeek-R1": "DeepSeek_R1_Distill_Llama_70B",
+    "DeepSeek-R1-Distill-Llama-70B": "DeepSeek_R1_Distill_Llama_70B",
+    "DeepSeek-V3.1": "DeepSeek_V3_1",
+    "DeepSeek-V3.1-cb": "DeepSeek_V3_1_cb",
+    "DeepSeek-V3.2": "DeepSeek_V3_2",
+    "Llama_3_1_Tulu_3_405B": "Meta_Llama_3_3_70B_Instruct",
+    "Meta_Llama_3_1_70B_Instruct": "Meta_Llama_3_3_70B_Instruct",
+    "Meta-Llama-3.3-70B-Instruct": "Meta_Llama_3_3_70B_Instruct",
+    "Llama-4-Maverick-17B-128E-Instruct": "Llama_4_Maverick_17B_128E_Instruct",
+    "MiniMax-M2.5": "MiniMax_M2_5",
+    "gemma-3-12b-it": "Gemma_3_12b_it",
+    "gpt-oss-120b": "Gpt_oss_120b",
+    "QwQ_32B": "DeepSeek_R1_Distill_Llama_70B",
+    "Mixtral_8x7B": "Llama_4_Maverick_17B_128E_Instruct",
+    "Mixtral_8x22b": "Llama_4_Maverick_17B_128E_Instruct",
 }
 
 _ERROR_MARKERS = (
