@@ -66,10 +66,9 @@
   <div class="status-card">
     <div><strong>Окно проверки:</strong> {{ health_window_date }} (04:00 МСК)</div>
     <div class="status-actions">
-      <form method="post">
+      <form id="refreshModelsForm" method="post" onsubmit="return false;">
         {% csrf_token %}
-        <input type="hidden" name="action" value="refresh_models">
-        <button type="submit" class="default">Обновить состояние моделей</button>
+        <button id="refreshModelsBtn" type="button" class="default">Обновить состояние моделей</button>
       </form>
       <a class="button" href="{{ arm_find_error_url }}">Перейти в ARM</a>
     </div>
@@ -83,6 +82,7 @@
     {% if refresh_in_progress %}
       <div class="status-success">Обновление в процессе. Обновите страницу через несколько секунд.</div>
     {% endif %}
+    <div id="refreshAsyncMessage"></div>
   </div>
 
   <div class="status-card">
@@ -132,4 +132,58 @@
     </table>
   </div>
 </div>
+
+<script>
+  (function () {
+    const form = document.getElementById('refreshModelsForm');
+    const button = document.getElementById('refreshModelsBtn');
+    const message = document.getElementById('refreshAsyncMessage');
+
+    if (!form || !button || !message) {
+      return;
+    }
+
+    const csrfInput = form.querySelector('input[name="csrfmiddlewaretoken"]');
+    if (!csrfInput) {
+      return;
+    }
+
+    function setMessage(text, isError) {
+      message.textContent = text || '';
+      message.className = isError ? 'status-error' : 'status-success';
+    }
+
+    button.addEventListener('click', async function () {
+      if (button.disabled) {
+        return;
+      }
+
+      button.disabled = true;
+      setMessage('Запускаем обновление состояния моделей...', false);
+
+      try {
+        const response = await fetch('{{ arm_model_status_refresh_url }}', {
+          method: 'POST',
+          headers: {
+            'X-CSRFToken': csrfInput.value,
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: 'action=refresh_models',
+        });
+
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.message || 'Не удалось запустить обновление');
+        }
+
+        setMessage(data.message || 'Обновление запущено', false);
+      } catch (error) {
+        setMessage(error.message || 'Ошибка запуска обновления', true);
+      } finally {
+        button.disabled = false;
+      }
+    });
+  })();
+</script>
 {% endblock %}

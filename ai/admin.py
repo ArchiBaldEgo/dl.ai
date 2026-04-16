@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.admin.forms import AdminAuthenticationForm
 from django import forms
-from django.http import HttpResponseForbidden
+from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path
@@ -257,8 +257,41 @@ def admin_model_status_view(request):
         "refresh_error": refresh_error,
         "refresh_in_progress": is_model_health_refresh_running(),
         "arm_find_error_url": "/ai/admin/arm/find-error/",
+        "arm_model_status_refresh_url": "/ai/admin/arm/models/refresh/",
     }
     return TemplateResponse(request, "admin/ai/model_status.html", context)
+
+
+def admin_model_status_refresh_view(request):
+    if not _can_access_model_status(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    try:
+        started = trigger_model_health_refresh_async()
+    except Exception as exc:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": f"Не удалось запустить обновление моделей: {exc}",
+            },
+            status=500,
+        )
+
+    if started:
+        message = "Обновление моделей запущено в фоне. Окно 04:00 МСК не изменяется."
+    else:
+        message = "Обновление уже выполняется. Дождитесь завершения."
+
+    return JsonResponse(
+        {
+            "ok": True,
+            "message": message,
+            "refresh_in_progress": is_model_health_refresh_running(),
+        }
+    )
 
 
 _default_get_urls = admin.site.get_urls
@@ -266,6 +299,11 @@ _default_get_urls = admin.site.get_urls
 
 def _custom_admin_urls():
     custom_urls = [
+        path(
+            "arm/models/refresh/",
+            admin.site.admin_view(admin_model_status_refresh_view),
+            name="ai_arm_model_status_refresh",
+        ),
         path(
             "arm/models/",
             admin.site.admin_view(admin_model_status_view),
@@ -324,10 +362,13 @@ def _custom_each_context(request):
     context["show_model_status_link"] = _can_access_model_status(request)
     context["arm_find_error_url"] = "/ai/admin/arm/find-error/"
     context["arm_model_status_url"] = "/ai/admin/arm/models/"
+    context["arm_model_status_refresh_url"] = "/ai/admin/arm/models/refresh/"
     return context
 
 
 admin.site.each_context = _custom_each_context
+admin.site.index_template = "admin/ai/index.html"
+admin.site.app_index_template = "admin/ai/app_index.html"
 
 # Форма для Prompt с улучшенным Textarea
 class PromptForm(forms.ModelForm):
