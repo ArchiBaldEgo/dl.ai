@@ -7,10 +7,5 @@
 
 {% block content %}
 <div id="content-main">
-  {% if app_list %}
-    {% include "admin/ai/app_list.html" with app_list=app_list show_changelinks=True %}
-  {% else %}
-    <p>{% translate "You don't have permission to view or edit anything." %}</p>
-  {% endif %}
 </div>
 {% endblock %}
