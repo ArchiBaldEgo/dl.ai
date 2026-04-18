@@ -1,0 +1,14 @@
+{
+  "name": "bot-pool-api",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node api/index.js"
+  },
+  "dependencies": {
+    "express": "4.22.1",
+    "puppeteer": "20.9.0",
+    "puppeteer-extra": "3.3.6",
+    "puppeteer-extra-plugin-stealth": "2.11.2"
+  }
+}
