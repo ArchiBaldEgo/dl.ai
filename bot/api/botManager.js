@@ -102,6 +102,11 @@ class BotManager {
     _reapDeadBots() {
         const before = this._bots.length;
         this._bots = this._bots.filter((b) => {
+            // Don't touch bots that are still starting up — their browser/page
+            // simply hasn't been created yet, so isAlive() would return false
+            // and we'd kill a healthy bot mid-init.
+            if (b.state === BotState.STARTING) return true;
+
             // Keep NOT_AUTORIZED entries so the API can return 401 and surface the reason.
             if (b.state === BotState.NOT_AUTORIZED) return true;
 
