@@ -1,0 +1,279 @@
+{% extends "admin/base_site.html" %}
+{% load tz %}
+
+{% block content %}
+<style>
+  .status-wrap {
+    max-width: 1100px;
+  }
+  .status-card {
+    background: var(--body-bg);
+    border: 1px solid var(--hairline-color);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .status-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+  .status-error {
+    color: #b42318;
+    font-weight: 600;
+    margin-top: 10px;
+  }
+  .status-success {
+    color: #067647;
+    font-weight: 600;
+    margin-top: 10px;
+  }
+  .status-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .status-table th,
+  .status-table td {
+    border-bottom: 1px solid var(--hairline-color);
+    padding: 10px 8px;
+    text-align: left;
+  }
+  .badge {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .badge.up {
+    background: rgba(18, 183, 106, 0.16);
+    color: #067647;
+  }
+  .badge.down {
+    background: rgba(240, 68, 56, 0.14);
+    color: #b42318;
+  }
+  .quiet {
+    color: var(--body-quiet-color);
+    font-size: 12px;
+  }
+</style>
+
+<div class="status-wrap">
+  <a href="/ai/admin/">&larr; Назад в админку</a>
+  <h1>AI: Состояние моделей</h1>
+
+  <div class="status-card">
+    <div><strong>Окно проверки:</strong> <span id="statusHealthWindowDate">{{ health_window_date }}</span> (04:00 МСК)</div>
+    <div class="status-actions">
+      <form id="refreshModelsForm" method="post" onsubmit="return false;">
+        {% csrf_token %}
+        <button id="refreshModelsBtn" type="button" class="default">Обновить состояние моделей</button>
+      </form>
+      <a class="button" href="{{ arm_find_error_url }}">Перейти в ARM</a>
+    </div>
+
+    {% if refresh_message %}
+      <div class="status-success">{{ refresh_message }}</div>
+    {% endif %}
+    {% if refresh_error %}
+      <div class="status-error">{{ refresh_error }}</div>
+    {% endif %}
+    <div id="refreshInProgressHint" class="status-success"{% if not refresh_in_progress %} style="display: none;"{% endif %}>Обновление в процессе. Страница обновляется автоматически.</div>
+    <div id="refreshAsyncMessage"></div>
+  </div>
+
+  <div class="status-card">
+    <table class="status-table">
+      <thead>
+        <tr>
+          <th>Модель</th>
+          <th>Состояние</th>
+          <th>Дата окна</th>
+          <th>Проверено</th>
+        </tr>
+      </thead>
+      <tbody id="modelStatusRowsBody">
+        {% for row in model_status_rows %}
+          <tr>
+            <td>
+              <div>{{ row.title }}</div>
+              <div class="quiet">{{ row.key }}</div>
+            </td>
+            <td>
+              {% if row.is_active %}
+                <span class="badge up">Активна</span>
+              {% else %}
+                <span class="badge down">Неактивна</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if row.window_date %}
+                {{ row.window_date }}
+                {% if not row.is_current_window %}
+                  <div class="quiet">данные из предыдущего окна</div>
+                {% endif %}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td>
+              {% if row.checked_at %}
+                {{ row.checked_at|timezone:"Europe/Moscow"|date:"d.m.Y H:i:s" }}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  (function () {
+    const form = document.getElementById('refreshModelsForm');
+    const button = document.getElementById('refreshModelsBtn');
+    const message = document.getElementById('refreshAsyncMessage');
+    const rowsBody = document.getElementById('modelStatusRowsBody');
+    const healthWindowDate = document.getElementById('statusHealthWindowDate');
+    const inProgressHint = document.getElementById('refreshInProgressHint');
+
+    if (!form || !button || !message || !rowsBody || !healthWindowDate || !inProgressHint) {
+      return;
+    }
+
+    const csrfInput = form.querySelector('input[name="csrfmiddlewaretoken"]');
+    if (!csrfInput) {
+      return;
+    }
+
+    let pollTimer = null;
+    let refreshInProgress = {{ refresh_in_progress|yesno:"true,false" }};
+
+    function setMessage(text, isError) {
+      message.textContent = text || '';
+      message.className = isError ? 'status-error' : 'status-success';
+    }
+
+    function setInProgressHint(isVisible) {
+      inProgressHint.style.display = isVisible ? 'block' : 'none';
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function renderStatusRows(rows) {
+      rowsBody.innerHTML = '';
+
+      (rows || []).forEach(function (row) {
+        const tr = document.createElement('tr');
+        const statusBadge = row.is_active
+          ? '<span class="badge up">Активна</span>'
+          : '<span class="badge down">Неактивна</span>';
+
+        const windowDateCell = row.window_date
+          ? `${escapeHtml(row.window_date)}${row.is_current_window ? '' : '<div class="quiet">данные из предыдущего окна</div>'}`
+          : '-';
+
+        tr.innerHTML = [
+          `<td><div>${escapeHtml(row.title)}</div><div class="quiet">${escapeHtml(row.key)}</div></td>`,
+          `<td>${statusBadge}</td>`,
+          `<td>${windowDateCell}</td>`,
+          `<td>${row.checked_at_msk ? escapeHtml(row.checked_at_msk) : '-'}</td>`,
+        ].join('');
+
+        rowsBody.appendChild(tr);
+      });
+    }
+
+    function schedulePoll(delayMs) {
+      if (pollTimer) {
+        window.clearTimeout(pollTimer);
+      }
+
+      pollTimer = window.setTimeout(fetchState, delayMs);
+    }
+
+    async function fetchState() {
+      try {
+        const response = await fetch('{{ arm_model_status_state_url }}', {
+          method: 'GET',
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+        });
+
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.message || 'Не удалось получить состояние моделей');
+        }
+
+        if (data.health_window_date) {
+          healthWindowDate.textContent = data.health_window_date;
+        }
+
+        renderStatusRows(data.model_status_rows || []);
+
+        const nextRefreshInProgress = Boolean(data.refresh_in_progress);
+        setInProgressHint(nextRefreshInProgress);
+
+        if (refreshInProgress && !nextRefreshInProgress) {
+          setMessage('Обновление завершено. Таблица обновлена.', false);
+        }
+
+        refreshInProgress = nextRefreshInProgress;
+        schedulePoll(refreshInProgress ? 2000 : 8000);
+      } catch (error) {
+        setMessage(error.message || 'Ошибка обновления статусов', true);
+        schedulePoll(8000);
+      }
+    }
+
+    button.addEventListener('click', async function () {
+      if (button.disabled) {
+        return;
+      }
+
+      button.disabled = true;
+      setMessage('Запускаем обновление состояния моделей...', false);
+
+      try {
+        const response = await fetch('{{ arm_model_status_refresh_url }}', {
+          method: 'POST',
+          headers: {
+            'X-CSRFToken': csrfInput.value,
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: 'action=refresh_models',
+        });
+
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.message || 'Не удалось запустить обновление');
+        }
+
+        setMessage(data.message || 'Обновление запущено', false);
+        refreshInProgress = Boolean(data.refresh_in_progress);
+        setInProgressHint(refreshInProgress);
+        fetchState();
+      } catch (error) {
+        setMessage(error.message || 'Ошибка запуска обновления', true);
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    fetchState();
+  })();
+</script>
+{% endblock %}

@@ -1,0 +1,68 @@
+{
+    "services": {
+        "deepseek": "https://chat.deepseek.com/"
+    },
+    "loginUrls": {
+        "deepseek": "https://chat.deepseek.com/sign_in"
+    },
+    "registerUrls": {
+        "deepseek": "https://chat.deepseek.com/sign_up"
+    },
+
+    "xpaths": {
+        "auth": {
+            "loginLabel": {
+                "deepseek": "//input[@type='text' and contains(@placeholder, 'email address')]"
+            },
+            "passwordLabel": {
+                "deepseek": "//input[@type='password']"
+            },
+            "authButton": {
+                "deepseek": "//span[text()='Log in']/ancestor::button"
+            },
+            "incorrectPassMessage": {
+                "deepseek": "//div[contains(text(), 'password is incorrect')]"
+            }
+        },
+        "register": {
+            "emailLabel": {
+                "deepseek": "//input[@type='text' and contains(@placeholder, 'Email')]"
+            },
+            "passwordLabel": {
+                "deepseek": "//input[@type='password']"
+            },
+            "confirmPasswordLabel": {
+                "deepseek": "//input[@type='password' and contains(@placeholder, 'Confirm password')]"
+            },
+            "sendCodeButton": {
+                "deepseek": "//span[text()='Send code']/ancestor::button"
+            },
+            "codeLabel": {
+                "deepseek": "//input[@type='tel']"
+            },
+            "signUpButton": {
+                "deepseek": "//span[text()='Sign up']/ancestor::button"
+            }
+        },
+        "chat": {
+            "thinkingButtonEnabled": {
+                "deepseek": "//span[text()='DeepThink']/ancestor::div[@role='button' and contains(@class, 'ds-toggle-button--selected')]"
+            },
+            "thinkingButtonDisabled": {
+                "deepseek": "//span[text()='DeepThink']/ancestor::div[@role='button' and not(contains(@class, 'ds-toggle-button--selected'))]"
+            },
+            "inputLabel": {
+                "deepseek": "//textarea"
+            },
+            "sendMessageButton": {
+                "deepseek": "//div[@role='button' and contains(concat(' ', normalize-space(@class), ' '), ' ds-icon-button ') and .//*[local-name()='path' and starts-with(@d, 'M8.3125 0.981587')]]"
+            },
+            "answer": {
+                "deepseek": "//div[contains(@class, 'ds-message')]/div[contains(@class, 'ds-markdown')]"
+            },
+            "fullAnswer": {
+                "deepseek": "//div[contains(@class, 'ds-message')]"
+            }
+        }
+    }
+}

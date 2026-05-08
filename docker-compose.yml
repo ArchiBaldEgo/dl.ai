@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   web:
     build:
@@ -35,7 +33,7 @@ services:
     environment:
       POSTGRES_USER: dlaibd
       POSTGRES_PASSWORD: dlaibd
-      POSTGRES_DB: dlaibd
+      POSTGRES_DB: dl_ai
     networks:
       - shared-network
 
@@ -55,6 +53,8 @@ services:
 
 volumes:
   postgres_data:
+    external: true
+    name: dlai_postgres_data
   static_volume:
 
 

@@ -1,6 +1,7 @@
 var ws = null;
 var client_id = generateClientId();
 var notEnter = false;
+var requestInFlight = false;
 
 var recognition = null;
 var isListening = false;
@@ -256,9 +257,33 @@ function updateVoiceStatus(message) {
     document.getElementById('voiceStatus').textContent = message;
 }
 
+function setRequestLock(isLocked) {
+    requestInFlight = isLocked;
+    const sendBtn = document.querySelector("button[type='submit']");
+    if (sendBtn) {
+        sendBtn.disabled = isLocked;
+    }
+}
+
+function isTerminalAiMessage(payload) {
+    const text = String(payload || "").toLowerCase();
+    return text.includes("запрос успешно обработан")
+        || text.includes("request processed successfully")
+        || text.includes("ошибка при обработке запроса")
+        || text.includes("что-то пошло не так")
+        || text.includes("неверный формат json")
+        || text.includes("контекст очищен")
+        || text.includes("context cleared");
+}
+
 function simulateSend() {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         updateVoiceStatus('Ошибка: соединение не установлено');
+        return;
+    }
+
+    if (requestInFlight) {
+        updateVoiceStatus('Дождитесь ответа модели перед новым запросом');
         return;
     }
 
@@ -277,6 +302,8 @@ function simulateSend() {
         language: language,
     }));
 
+    setRequestLock(true);
+    notEnter = true;
     updateVoiceStatus('Сообщение отправлено');
     input.value = '';
 }
@@ -438,7 +465,11 @@ function initWebSocket() {
             messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
             var input = document.getElementById("messageText");
             input.value = '';
-            notEnter = false;
+
+            if (isTerminalAiMessage(event.data)) {
+                setRequestLock(false);
+                notEnter = false;
+            }
 
             initAccordionForMessages();
             collapseAllExceptLast();
@@ -446,10 +477,14 @@ function initWebSocket() {
 
         ws.onerror = function (error) {
             updateVoiceStatus('Ошибка соединения');
+            setRequestLock(false);
+            notEnter = false;
         };
 
         ws.onclose = function (event) {
             updateVoiceStatus('Соединение закрыто');
+            setRequestLock(false);
+            notEnter = false;
         };
 
     } catch (error) {
@@ -468,9 +503,19 @@ function sendMessage(event) {
         return;
     }
 
+    if (requestInFlight) {
+        alert("Дождитесь ответа модели перед новым запросом.");
+        return;
+    }
+
     var value = document.querySelector("#select").value;
     var language = document.querySelector("#selectLang").value;
     var input = document.getElementById("messageText");
+
+    if (!value) {
+        alert("Сегодня нет доступных моделей. Повторите позже.");
+        return;
+    }
 
     if (!input.value.trim()) {
         alert("Пожалуйста, введите сообщение");
@@ -483,6 +528,8 @@ function sendMessage(event) {
         value: value,
         language: language,
     }));
+    setRequestLock(true);
+    notEnter = true;
     input.value = '';
 }
 
@@ -510,7 +557,6 @@ function clearContext() {
 document.addEventListener("keydown", function (event) {
     const checkbox = document.querySelector(".inp");
     if (event.key === "Enter" && (!checkbox || checkbox.checked) && !event.shiftKey && !notEnter) {
-        notEnter = true;
         sendMessage(event);
     }
 });
@@ -518,9 +564,11 @@ document.addEventListener("keydown", function (event) {
 const toggleButton = document.querySelector('.toggle-button');
 const sidebar = document.querySelector('.sidebar');
 
-toggleButton.addEventListener('click', () => {
-    sidebar.classList.toggle('open');
-});
+if (toggleButton && sidebar) {
+    toggleButton.addEventListener('click', () => {
+        sidebar.classList.toggle('open');
+    });
+}
 
 
 let isResizing = false;
@@ -548,6 +596,7 @@ const localization = {
         clear: "Очистить контекст",
         placeholder: "Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)\nПример форматирования кода:\n```\nprint('Hello, world!')\n```",
         adminPanel: "Админ-Панель",
+        testPanel: "Тест-панель",
         chat: "Чат с DLAI",
         decideTask: "Реши задачу",
         findError: "В чём ошибка?",
@@ -561,6 +610,7 @@ const localization = {
         clear: "Clear Context",
         placeholder: "Ask a question (preferably in English to avoid errors), for nice formatting wrap the code in ```\nExample of code formatting:\n```\nprint('Hello, world!')\n```",
         adminPanel: "Admin Panel",
+        testPanel: "Test Panel",
         chat: "Chat with DLAI",
         decideTask: "Solve the task",
         findError: "What's the error?",
@@ -574,6 +624,7 @@ const localization = {
         clear: "Effacer le contexte",
         placeholder: "Posez une question (de préférence en anglais pour éviter les erreurs), pour un bon formatage, encadrez le code dans ```\nExemple de formatage du code:\n```\nprint('Hello, world!')\n```",
         adminPanel: "Panneau Admin",
+        testPanel: "Panneau Test",
         chat: "Chat avec DLAI",
         decideTask: "Résoudre la tâche",
         findError: "Quelle est l'erreur?",
@@ -590,6 +641,10 @@ document.getElementById("selectLang").addEventListener("change", function () {
     document.querySelector("button[onclick='clearContext()']").textContent = localization[selectedLang].clear;
     document.getElementById("messageText").setAttribute("placeholder", localization[selectedLang].placeholder);
     document.querySelector(".sidebar-header").textContent = localization[selectedLang].adminPanel;
+    const testPanelLink = document.getElementById("testPanelLink");
+    if (testPanelLink) {
+        testPanelLink.textContent = localization[selectedLang].testPanel;
+    }
     document.querySelector("#selectType option:nth-child(1)").textContent = localization[selectedLang].chat;
     document.querySelector("#selectType option:nth-child(2)").textContent = localization[selectedLang].decideTask;
     document.querySelector("#selectType option:nth-child(3)").textContent = localization[selectedLang].findError;
