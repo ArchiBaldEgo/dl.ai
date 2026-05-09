@@ -56,13 +56,19 @@ class PromptAdminAccessTests(TestCase):
             username="prompt_dev",
             password="test-pass",
         )
+        self.tester_developer = user_model.objects.create_user(
+            username="tester_dev",
+            password="test-pass",
+        )
         self.other_prompt_developer = user_model.objects.create_user(
             username="prompt_dev_other",
             password="test-pass",
         )
 
         prompt_developer_group, _ = Group.objects.get_or_create(name="prompt_developer")
+        tester_group, _ = Group.objects.get_or_create(name="tester")
         self.prompt_developer.groups.add(prompt_developer_group)
+        self.tester_developer.groups.add(tester_group)
         self.other_prompt_developer.groups.add(prompt_developer_group)
 
         self.editable_prompt = Prompt.objects.create(
@@ -82,8 +88,9 @@ class PromptAdminAccessTests(TestCase):
         self.editable_prompt.editors.add(self.prompt_developer)
         self.legacy_assigned_prompt.editors.add(self.prompt_developer)
 
-    def _build_request(self, user):
-        request = self.factory.get("/ai/admin/ai/prompt/")
+    def _build_request(self, user, query_params=None):
+        query_params = query_params or {}
+        request = self.factory.get("/ai/admin/ai/prompt/", data=query_params)
         request.user = user
         return request
 
@@ -106,6 +113,17 @@ class PromptAdminAccessTests(TestCase):
         self.assertEqual(new_prompt.owner_id, self.prompt_developer.id)
         self.assertTrue(new_prompt.editors.filter(pk=self.prompt_developer.pk).exists())
 
+    def test_tester_group_has_prompt_developer_rights(self):
+        request = self._build_request(self.tester_developer)
+        self.assertTrue(self.prompt_admin.has_add_permission(request))
+
+        prompt = Prompt(prompt_name="Tester prompt", prompt_text="Tester prompt text")
+        self.prompt_admin.save_model(request, prompt, form=None, change=False)
+        prompt.refresh_from_db()
+
+        self.assertEqual(prompt.owner_id, self.tester_developer.id)
+        self.assertTrue(prompt.editors.filter(pk=self.tester_developer.pk).exists())
+
     def test_prompt_developer_fields_are_readonly_for_foreign_prompt(self):
         request = self._build_request(self.prompt_developer)
 
@@ -114,6 +132,14 @@ class PromptAdminAccessTests(TestCase):
 
         self.assertEqual(editable_fields, ())
         self.assertEqual(readonly_fields, ("topic", "prompt_name", "prompt_text"))
+
+    def test_prompt_developer_mine_filter_shows_only_own_scope(self):
+        request = self._build_request(self.prompt_developer, {"mine": "1"})
+        prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
+
+        self.assertIn(self.editable_prompt.id, prompt_ids)
+        self.assertIn(self.legacy_assigned_prompt.id, prompt_ids)
+        self.assertNotIn(self.readonly_prompt.id, prompt_ids)
 
     def test_staff_user_has_full_prompt_permissions(self):
         request = self._build_request(self.staff_user)

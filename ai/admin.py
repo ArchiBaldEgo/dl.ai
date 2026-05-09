@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.contrib.admin.forms import AdminAuthenticationForm
 from django import forms
+from django.db.models import Q
 from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
@@ -20,6 +21,7 @@ from .model_health import (
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+PROMPT_WORKER_GROUPS = ("tester", "prompt_developer")
 
 
 def _safe_relative_url(candidate, fallback):
@@ -32,13 +34,13 @@ def _safe_relative_url(candidate, fallback):
 def _is_tester_user(request):
     if not request.user.is_authenticated:
         return False
-    return request.user.groups.filter(name="tester").exists()
+    return request.user.groups.filter(name__in=PROMPT_WORKER_GROUPS).exists()
 
 
 def _is_prompt_developer_user(request):
     if not request.user.is_authenticated:
         return False
-    return request.user.groups.filter(name="prompt_developer").exists()
+    return request.user.groups.filter(name__in=PROMPT_WORKER_GROUPS).exists()
 
 
 def _is_staff_or_superuser(user):
@@ -50,7 +52,7 @@ def _can_access_arm(request):
         return False
     if _is_staff_or_superuser(request.user):
         return True
-    return _is_tester_user(request)
+    return request.user.groups.filter(name__in=PROMPT_WORKER_GROUPS).exists()
 
 
 def _can_access_model_status(request):
@@ -68,27 +70,9 @@ def _can_access_prompt_admin(request):
 
 
 def _get_my_prompt_admin_url(request):
-    if not request.user.is_authenticated:
-        return "/ai/admin/ai/prompt/"
     if _is_staff_or_superuser(request.user):
         return "/ai/admin/ai/prompt/"
-
-    prompt_id = (
-        Prompt.objects.filter(owner=request.user)
-        .order_by("id")
-        .values_list("id", flat=True)
-        .first()
-    )
-    if not prompt_id:
-        prompt_id = (
-            Prompt.objects.filter(editors=request.user)
-            .order_by("id")
-            .values_list("id", flat=True)
-            .first()
-        )
-    if prompt_id:
-        return f"/ai/admin/ai/prompt/{prompt_id}/change/"
-    return "/ai/admin/ai/prompt/"
+    return "/ai/admin/ai/prompt/?mine=1"
 
 
 class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
@@ -101,8 +85,7 @@ class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
 
         if (
             _is_staff_or_superuser(user)
-            or user.groups.filter(name="tester").exists()
-            or user.groups.filter(name="prompt_developer").exists()
+            or user.groups.filter(name__in=PROMPT_WORKER_GROUPS).exists()
         ):
             if getattr(self, "request", None) is not None:
                 self.request.session["admin_fresh_auth"] = True
@@ -499,7 +482,7 @@ def _custom_has_permission(request):
         return False
     if _is_staff_or_superuser(user):
         return True
-    return user.groups.filter(name__in=("tester", "prompt_developer")).exists()
+    return user.groups.filter(name__in=PROMPT_WORKER_GROUPS).exists()
 
 
 admin.site.has_permission = _custom_has_permission
@@ -610,12 +593,19 @@ class PromptAdmin(admin.ModelAdmin):
     filter_horizontal = ("editors",)
 
     def get_queryset(self, request):
-        return (
+        queryset = (
             super()
             .get_queryset(request)
             .select_related("topic", "owner")
             .prefetch_related("editors")
         )
+        mine_mode = (request.GET.get("mine") or "").strip() == "1"
+        if mine_mode and not _is_staff_or_superuser(request.user):
+            queryset = queryset.filter(
+                Q(owner=request.user)
+                | Q(owner__isnull=True, editors=request.user)
+            ).distinct()
+        return queryset
 
     def _can_edit_prompt(self, request, obj):
         if _is_staff_or_superuser(request.user):
