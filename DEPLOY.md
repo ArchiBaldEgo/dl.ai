@@ -34,11 +34,11 @@ nano .env
 - `DB_USER`
 - `DB_PASSWORD`
 - `DB_NAME`
-- `HTTP_PROXY`
-- `HTTPS_PROXY`
+- `HTTP_PROXY` (опционально)
+- `HTTPS_PROXY` (опционально)
 - `ALL_PROXY` (опционально; некоторые утилиты/библиотеки читают именно его)
-- `NO_PROXY`
-- `PROXY`
+- `NO_PROXY` (опционально)
+- `PROXY` (опционально)
 
 Рекомендуемые для продакшена переменные:
 
@@ -89,25 +89,30 @@ docker compose ps
 Для стандартного запуска (dev-like, nginx на 8080):
 
 ```bash
-ENV_FILE=.env bash server-up.sh
-```
-
-Для продакшена (рекомендуется: без bind-mount исходников, nginx на 127.0.0.1:8081):
-
-```bash
-COMPOSE_PROD=1 ENV_FILE=.env bash server-up.sh
-```
-
-Эквивалентно вручную:
-
-```bash
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env up -d --build
 docker compose --env-file .env exec -T web python manage.py migrate
 docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
 docker compose ps
 ```
 
-По умолчанию `docker-compose.prod.yml` публикует nginx как `127.0.0.1:8081->80`.
+Для продакшена (nginx на 127.0.0.1:8081):
+
+```bash
+AI_NGINX_BIND=127.0.0.1 AI_NGINX_PORT=8081 docker compose --env-file .env up -d --build
+docker compose --env-file .env exec -T web python manage.py migrate
+docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
+docker compose ps
+```
+
+Эквивалентно вручную:
+
+```bash
+docker compose --env-file .env up -d --build
+docker compose --env-file .env exec -T web python manage.py migrate
+docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
+docker compose ps
+```
+
 Если нужно иначе, перед запуском задайте:
 
 ```bash
@@ -115,12 +120,12 @@ export AI_NGINX_BIND=127.0.0.1
 export AI_NGINX_PORT=8081
 ```
 
-Скрипт сам:
+Команды выше:
 
-- соберёт контейнеры
-- запустит их
-- выполнит миграции
-- выполнит `collectstatic`
+- соберут контейнеры
+- запустят их
+- выполнят миграции
+- выполнят `collectstatic`
 
 ## 5. Проверить, что всё работает
 
@@ -141,14 +146,16 @@ docker compose logs -f web
 
 ```bash
 git pull
-ENV_FILE=.env bash server-up.sh
+docker compose --env-file .env up -d --build
+docker compose --env-file .env exec -T web python manage.py migrate
+docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
 ```
 
-Если вы используете прод-override:
+Если вы используете прод-порт 8081:
 
 ```bash
 git pull
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+AI_NGINX_BIND=127.0.0.1 AI_NGINX_PORT=8081 docker compose --env-file .env up -d --build
 docker compose --env-file .env exec -T web python manage.py migrate
 docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
 
