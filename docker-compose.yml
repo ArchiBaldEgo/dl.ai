@@ -4,22 +4,23 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        HTTP_PROXY: "http://main%5Cdlupdate:3sd4y-K8yf3@proxy.gsu.by:800/"
-        HTTPS_PROXY: "http://main%5Cdlupdate:3sd4y-K8yf3@proxy.gsu.by:800/"
-        NO_PROXY: "localhost,127.0.0.1,db,nginx,.local"
+        HTTP_PROXY: "${HTTP_PROXY:-}"
+        HTTPS_PROXY: "${HTTPS_PROXY:-}"
+        NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,db,nginx,.local}"
     container_name: dl_ai_web
     command: daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application
     restart: unless-stopped
     volumes:
       - .:/app
+      - static_volume:/app/staticfiles
     ports:
       - "8000:8000"
     env_file:
       - .env
     environment:
-      - HTTP_PROXY=http://main%5Cdlupdate:3sd4y-K8yf3@proxy.gsu.by:800/
-      - HTTPS_PROXY=http://main%5Cdlupdate:3sd4y-K8yf3@proxy.gsu.by:800/
-      - NO_PROXY=localhost,127.0.0.1,db,nginx,.local
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,db,nginx,.local}"
     depends_on:
       - db
     networks:
@@ -31,9 +32,9 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
-      POSTGRES_USER: dlaibd
-      POSTGRES_PASSWORD: dlaibd
-      POSTGRES_DB: dl_ai
+      POSTGRES_USER: "${DB_USER:-dlaibd}"
+      POSTGRES_PASSWORD: "${DB_PASSWORD:-dlaibd}"
+      POSTGRES_DB: "${DB_NAME:-dl_ai}"
     networks:
       - shared-network
 
@@ -42,10 +43,10 @@ services:
     container_name: dl_ai_nginx
     restart: unless-stopped
     ports:
-      - "80:8000"
+      - "${AI_NGINX_BIND:-0.0.0.0}:${AI_NGINX_PORT:-8080}:80"
     volumes:
       - ./nginx:/etc/nginx/conf.d
-      - static_volume:/app/static
+      - static_volume:/app/staticfiles
     depends_on:
       - web
     networks:
@@ -53,11 +54,10 @@ services:
 
 volumes:
   postgres_data:
-    external: true
-    name: dlai_postgres_data
+    name: "${POSTGRES_VOLUME_NAME:-dlai_postgres_data}"
   static_volume:
 
 
 networks:
   shared-network:
-    external: true
+    name: "${DOCKER_NETWORK_NAME:-dlai-network}"
