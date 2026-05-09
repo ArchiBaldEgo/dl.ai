@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
@@ -21,6 +22,12 @@ class Prompt(models.Model):
     topic = models.ForeignKey(Topic, on_delete=models.CASCADE, null = True)
     prompt_text = models.TextField()
     prompt_name = models.CharField(max_length=255, null = True)
+    editors = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        related_name="editable_prompts",
+    )
+
     def __str__(self):
         # Возвращаем только имя промпта вместо полного текста
         return self.prompt_name if self.prompt_name else f"Prompt #{self.id}"    

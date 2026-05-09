@@ -35,10 +35,20 @@ def _is_tester_user(request):
     return request.user.groups.filter(name="tester").exists()
 
 
+def _is_prompt_developer_user(request):
+    if not request.user.is_authenticated:
+        return False
+    return request.user.groups.filter(name="prompt_developer").exists()
+
+
+def _is_staff_or_superuser(user):
+    return bool(user and (user.is_superuser or user.is_staff))
+
+
 def _can_access_arm(request):
     if not request.user.is_authenticated:
         return False
-    if request.user.is_superuser or request.user.is_staff:
+    if _is_staff_or_superuser(request.user):
         return True
     return _is_tester_user(request)
 
@@ -57,13 +67,17 @@ class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
                 code="inactive",
             )
 
-        if user.is_superuser or user.is_staff or user.groups.filter(name="tester").exists():
+        if (
+            _is_staff_or_superuser(user)
+            or user.groups.filter(name="tester").exists()
+            or user.groups.filter(name="prompt_developer").exists()
+        ):
             if getattr(self, "request", None) is not None:
                 self.request.session["admin_fresh_auth"] = True
             return
 
         raise forms.ValidationError(
-            "Please enter the correct username and password for a staff or tester account.",
+            "Please enter the correct username and password for a staff, tester, or prompt developer account.",
             code="invalid_login",
         )
 
@@ -440,9 +454,9 @@ def _custom_has_permission(request):
     user = getattr(request, "user", None)
     if not user or not user.is_authenticated or not user.is_active:
         return False
-    if user.is_superuser or user.is_staff:
+    if _is_staff_or_superuser(user):
         return True
-    return user.groups.filter(name="tester").exists()
+    return user.groups.filter(name__in=("tester", "prompt_developer")).exists()
 
 
 admin.site.has_permission = _custom_has_permission
@@ -460,7 +474,11 @@ def _custom_admin_view(view, cacheable=False):
             next_path = quote(request.get_full_path(), safe="/?=&")
             return redirect(f"/ai/admin/login/?next={next_path}")
 
-        if _is_tester_user(request) and not request.user.is_superuser:
+        if _is_prompt_developer_user(request) and not _is_staff_or_superuser(request.user):
+            prompt_admin_path = "/ai/admin/ai/prompt/"
+            if not request.path.startswith(prompt_admin_path):
+                return redirect(prompt_admin_path)
+        elif _is_tester_user(request) and not request.user.is_superuser:
             arm_path = "/ai/admin/arm/find-error/"
             if not request.path.startswith(arm_path):
                 return redirect(arm_path)
@@ -531,10 +549,58 @@ class TopicAdmin(admin.ModelAdmin):
 
 class PromptAdmin(admin.ModelAdmin):
     form = PromptForm
-    list_display = ('prompt_name', 'topic', 'short_prompt_text')
+    list_display = ('prompt_name', 'topic', 'assigned_editors', 'short_prompt_text')
     list_filter = ('topic__programming_language', 'topic')
     search_fields = ('prompt_name', 'prompt_text')
-    
+    filter_horizontal = ("editors",)
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("editors", "topic")
+
+    def has_module_permission(self, request):
+        if _is_staff_or_superuser(request.user):
+            return True
+        return _is_prompt_developer_user(request)
+
+    def has_view_permission(self, request, obj=None):
+        if _is_staff_or_superuser(request.user):
+            return True
+        return _is_prompt_developer_user(request)
+
+    def has_change_permission(self, request, obj=None):
+        if _is_staff_or_superuser(request.user):
+            return True
+        if not _is_prompt_developer_user(request):
+            return False
+        if obj is None:
+            return True
+        return obj.editors.filter(pk=request.user.pk).exists()
+
+    def has_add_permission(self, request):
+        return _is_staff_or_superuser(request.user)
+
+    def has_delete_permission(self, request, obj=None):
+        return _is_staff_or_superuser(request.user)
+
+    def get_fields(self, request, obj=None):
+        if _is_staff_or_superuser(request.user):
+            return ("topic", "prompt_name", "prompt_text", "editors")
+        return ("topic", "prompt_name", "prompt_text")
+
+    def get_readonly_fields(self, request, obj=None):
+        if _is_staff_or_superuser(request.user):
+            return ()
+        if obj is None:
+            return ("topic", "prompt_name")
+        if obj.editors.filter(pk=request.user.pk).exists():
+            return ("topic", "prompt_name")
+        return ("topic", "prompt_name", "prompt_text")
+
+    def assigned_editors(self, obj):
+        usernames = sorted(obj.editors.values_list("username", flat=True))
+        return ", ".join(usernames) if usernames else "-"
+    assigned_editors.short_description = "Editors"
+
     def short_prompt_text(self, obj):
         return f"{obj.prompt_text[:100]}..." if len(obj.prompt_text) > 100 else obj.prompt_text
     short_prompt_text.short_description = "Prompt Text"

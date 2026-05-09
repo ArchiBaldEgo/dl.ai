@@ -26,6 +26,24 @@ Django + Channels (ASGI, Daphne). UI and API live under `/ai/...`.
 - [Инструкция для суперадмина](DOCX.md#инструкция-для-суперадмина)
 - [Запуск на сервере](DEPLOY.md)
 
+## Разграничение доступа к препромптам (Prompt ACL)
+
+- Группа `prompt_developer` создаётся автоматически после `migrate`.
+- Участник `prompt_developer` видит все промпты в `/ai/admin/ai/prompt/`.
+- Редактировать он может только те промпты, где назначен в поле `editors`.
+- `topic` и `prompt_name` для `prompt_developer` только для чтения; редактируется только `prompt_text`.
+- Назначение разработчиков на конкретный промпт делает администратор/сотрудник.
+
+Команды для сервера (через Docker):
+
+```bash
+docker compose --env-file .env exec -T web python manage.py shell -c "from ai.models import Prompt; print(*[f'{p.id}: {p.prompt_name} | editors={[u.username for u in p.editors.all()]}' for p in Prompt.objects.prefetch_related('editors').order_by('id')], sep='\n')"
+```
+
+```bash
+docker compose --env-file .env exec -T web python manage.py shell -c "from django.contrib.auth.models import User; print(*[f'{u.id}: {u.username}' for u in User.objects.order_by('username')], sep='\n')"
+```
+
 ## Локальный запуск (без Docker)
 
 Нужны: `Python 3.10+`, `PostgreSQL 14+`, `psql`.
@@ -73,6 +91,13 @@ cp .env.example .env
 docker compose --env-file .env up -d --build
 docker compose --env-file .env exec -T web python manage.py migrate
 docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
+```
+
+Если нужна подробная сборка без кэша:
+
+```bash
+chmod +x build_no_cache.sh
+./build_no_cache.sh
 ```
 
 По умолчанию nginx доступен на `http://localhost:8080/ai/...`.
