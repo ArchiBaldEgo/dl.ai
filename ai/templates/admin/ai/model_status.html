@@ -72,6 +72,9 @@
         <button id="refreshModelsBtn" type="button" class="default">Обновить состояние моделей</button>
       </form>
       <a class="button" href="{{ arm_find_error_url }}">Перейти в ARM</a>
+      {% if show_prompt_link %}
+        <a class="button" href="{{ my_prompt_url }}">Мой препромпт</a>
+      {% endif %}
     </div>
 
     {% if refresh_message %}

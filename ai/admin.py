@@ -59,6 +59,31 @@ def _can_access_model_status(request):
     return request.user.is_superuser or request.user.is_staff
 
 
+def _can_access_prompt_admin(request):
+    if not request.user.is_authenticated:
+        return False
+    if _is_staff_or_superuser(request.user):
+        return True
+    return _is_prompt_developer_user(request)
+
+
+def _get_my_prompt_admin_url(request):
+    if not request.user.is_authenticated:
+        return "/ai/admin/ai/prompt/"
+    if _is_staff_or_superuser(request.user):
+        return "/ai/admin/ai/prompt/"
+
+    prompt_id = (
+        Prompt.objects.filter(editors=request.user)
+        .order_by("id")
+        .values_list("id", flat=True)
+        .first()
+    )
+    if prompt_id:
+        return f"/ai/admin/ai/prompt/{prompt_id}/change/"
+    return "/ai/admin/ai/prompt/"
+
+
 class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
     def confirm_login_allowed(self, user):
         if not user.is_active:
@@ -401,6 +426,12 @@ def admin_model_status_refresh_view(request):
     )
 
 
+def admin_my_prompt_view(request):
+    if not _can_access_prompt_admin(request):
+        return HttpResponseForbidden("Access denied")
+    return redirect(_get_my_prompt_admin_url(request))
+
+
 _default_get_urls = admin.site.get_urls
 
 
@@ -435,6 +466,11 @@ def _custom_admin_urls():
             "arm/find-error/",
             admin.site.admin_view(admin_arm_find_error_view),
             name="ai_arm_find_error",
+        ),
+        path(
+            "prompts/my/",
+            admin.site.admin_view(admin_my_prompt_view),
+            name="ai_my_prompt",
         ),
     ]
     return custom_urls + _default_get_urls()
@@ -474,14 +510,22 @@ def _custom_admin_view(view, cacheable=False):
             next_path = quote(request.get_full_path(), safe="/?=&")
             return redirect(f"/ai/admin/login/?next={next_path}")
 
-        if _is_prompt_developer_user(request) and not _is_staff_or_superuser(request.user):
-            prompt_admin_path = "/ai/admin/ai/prompt/"
-            if not request.path.startswith(prompt_admin_path):
-                return redirect(prompt_admin_path)
-        elif _is_tester_user(request) and not request.user.is_superuser:
-            arm_path = "/ai/admin/arm/find-error/"
-            if not request.path.startswith(arm_path):
-                return redirect(arm_path)
+        if not _is_staff_or_superuser(request.user):
+            has_tester_role = _is_tester_user(request)
+            has_prompt_developer_role = _is_prompt_developer_user(request)
+
+            if has_tester_role and not has_prompt_developer_role:
+                arm_path = "/ai/admin/arm/find-error/"
+                if not request.path.startswith(arm_path):
+                    return redirect(arm_path)
+            elif has_prompt_developer_role and not has_tester_role:
+                prompt_admin_path = "/ai/admin/ai/prompt/"
+                my_prompt_path = "/ai/admin/prompts/my/"
+                if (
+                    not request.path.startswith(prompt_admin_path)
+                    and not request.path.startswith(my_prompt_path)
+                ):
+                    return redirect(my_prompt_path)
         return wrapped_view(request, *args, **kwargs)
 
     return inner
@@ -497,10 +541,14 @@ def _custom_each_context(request):
     context = _default_each_context(request)
     context["show_arm_link"] = _can_access_arm(request)
     context["show_model_status_link"] = _can_access_model_status(request)
+    context["show_prompt_link"] = _can_access_prompt_admin(request)
     context["arm_find_error_url"] = "/ai/admin/arm/find-error/"
     context["arm_model_status_url"] = "/ai/admin/arm/models/"
     context["arm_model_status_refresh_url"] = "/ai/admin/arm/models/refresh/"
     context["arm_model_status_state_url"] = "/ai/admin/arm/models/state/"
+    context["prompt_admin_url"] = "/ai/admin/ai/prompt/"
+    context["my_prompt_url"] = "/ai/admin/prompts/my/"
+    context["my_prompt_change_url"] = _get_my_prompt_admin_url(request)
     return context
 
 

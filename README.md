@@ -29,6 +29,7 @@ Django + Channels (ASGI, Daphne). UI and API live under `/ai/...`.
 ## Разграничение доступа к препромптам (Prompt ACL)
 
 - Группа `prompt_developer` создаётся автоматически после `migrate`.
+- Группа `tester` даёт доступ только к ARM, без редактирования препромптов.
 - Участник `prompt_developer` видит все промпты в `/ai/admin/ai/prompt/`.
 - Редактировать он может только те промпты, где назначен в поле `editors`.
 - `topic` и `prompt_name` для `prompt_developer` только для чтения; редактируется только `prompt_text`.
