@@ -93,7 +93,14 @@ docker compose --env-file .env exec -T web python manage.py migrate
 docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
 ```
 
-Если нужна подробная сборка без кэша:
+Если нужна обычная пересборка с кэшем:
+
+```bash
+chmod +x build.sh
+./build.sh
+```
+
+Если нужна полная пересборка без кэша:
 
 ```bash
 chmod +x build_no_cache.sh

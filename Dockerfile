@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM python:3.10.9
 
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -18,7 +19,9 @@ RUN if [ -n "$HTTP_PROXY" ]; then \
     python -m pip config set global.proxy "$HTTP_PROXY"; \
     fi
 
-RUN rm -rf /var/lib/apt/lists/* && \
+RUN --mount=type=cache,target=/var/cache/apt \
+    --mount=type=cache,target=/var/lib/apt/lists \
+    rm -rf /var/lib/apt/lists/* && \
     printf '%s\n' \
       'Acquire::Retries "5";' \
       'Acquire::http::Pipeline-Depth "0";' \
@@ -38,7 +41,8 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 
 # Явно указываем прокси для pip
-RUN if [ -n "$HTTP_PROXY" ]; then \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ -n "$HTTP_PROXY" ]; then \
     python -m pip install --proxy=$HTTP_PROXY --default-timeout=100 -r /app/requirements.txt; \
     else \
     python -m pip install --default-timeout=100 -r /app/requirements.txt; \
