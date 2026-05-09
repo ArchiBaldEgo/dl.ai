@@ -74,11 +74,18 @@ def _get_my_prompt_admin_url(request):
         return "/ai/admin/ai/prompt/"
 
     prompt_id = (
-        Prompt.objects.filter(editors=request.user)
+        Prompt.objects.filter(owner=request.user)
         .order_by("id")
         .values_list("id", flat=True)
         .first()
     )
+    if not prompt_id:
+        prompt_id = (
+            Prompt.objects.filter(editors=request.user)
+            .order_by("id")
+            .values_list("id", flat=True)
+            .first()
+        )
     if prompt_id:
         return f"/ai/admin/ai/prompt/{prompt_id}/change/"
     return "/ai/admin/ai/prompt/"
@@ -597,13 +604,29 @@ class TopicAdmin(admin.ModelAdmin):
 
 class PromptAdmin(admin.ModelAdmin):
     form = PromptForm
-    list_display = ('prompt_name', 'topic', 'assigned_editors', 'short_prompt_text')
+    list_display = ('prompt_name', 'topic', 'owner_username', 'assigned_editors', 'short_prompt_text')
     list_filter = ('topic__programming_language', 'topic')
     search_fields = ('prompt_name', 'prompt_text')
     filter_horizontal = ("editors",)
 
     def get_queryset(self, request):
-        return super().get_queryset(request).prefetch_related("editors", "topic")
+        return (
+            super()
+            .get_queryset(request)
+            .select_related("topic", "owner")
+            .prefetch_related("editors")
+        )
+
+    def _can_edit_prompt(self, request, obj):
+        if _is_staff_or_superuser(request.user):
+            return True
+        if not _is_prompt_developer_user(request):
+            return False
+        if obj is None:
+            return True
+        if obj.owner_id == request.user.pk:
+            return True
+        return obj.editors.filter(pk=request.user.pk).exists()
 
     def has_module_permission(self, request):
         if _is_staff_or_superuser(request.user):
@@ -616,38 +639,41 @@ class PromptAdmin(admin.ModelAdmin):
         return _is_prompt_developer_user(request)
 
     def has_change_permission(self, request, obj=None):
-        if _is_staff_or_superuser(request.user):
-            return True
-        if not _is_prompt_developer_user(request):
-            return False
-        if obj is None:
-            return True
-        return obj.editors.filter(pk=request.user.pk).exists()
+        return self._can_edit_prompt(request, obj)
 
     def has_add_permission(self, request):
-        return _is_staff_or_superuser(request.user)
+        return _is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)
 
     def has_delete_permission(self, request, obj=None):
         return _is_staff_or_superuser(request.user)
 
     def get_fields(self, request, obj=None):
         if _is_staff_or_superuser(request.user):
-            return ("topic", "prompt_name", "prompt_text", "editors")
+            return ("topic", "prompt_name", "prompt_text", "owner", "editors")
         return ("topic", "prompt_name", "prompt_text")
 
     def get_readonly_fields(self, request, obj=None):
         if _is_staff_or_superuser(request.user):
             return ()
-        if obj is None:
-            return ("topic", "prompt_name")
-        if obj.editors.filter(pk=request.user.pk).exists():
-            return ("topic", "prompt_name")
+        if self._can_edit_prompt(request, obj):
+            return ()
         return ("topic", "prompt_name", "prompt_text")
+
+    def save_model(self, request, obj, form, change):
+        if not _is_staff_or_superuser(request.user) and not change and not obj.owner_id:
+            obj.owner = request.user
+        super().save_model(request, obj, form, change)
+        if not _is_staff_or_superuser(request.user):
+            obj.editors.add(request.user)
 
     def assigned_editors(self, obj):
         usernames = sorted(obj.editors.values_list("username", flat=True))
         return ", ".join(usernames) if usernames else "-"
     assigned_editors.short_description = "Editors"
+
+    def owner_username(self, obj):
+        return obj.owner.username if obj.owner else "-"
+    owner_username.short_description = "Owner"
 
     def short_prompt_text(self, obj):
         return f"{obj.prompt_text[:100]}..." if len(obj.prompt_text) > 100 else obj.prompt_text

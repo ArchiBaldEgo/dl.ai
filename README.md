@@ -31,14 +31,14 @@ Django + Channels (ASGI, Daphne). UI and API live under `/ai/...`.
 - Группа `prompt_developer` создаётся автоматически после `migrate`.
 - Группа `tester` даёт доступ только к ARM, без редактирования препромптов.
 - Участник `prompt_developer` видит все промпты в `/ai/admin/ai/prompt/`.
-- Редактировать он может только те промпты, где назначен в поле `editors`.
-- `topic` и `prompt_name` для `prompt_developer` только для чтения; редактируется только `prompt_text`.
-- Назначение разработчиков на конкретный промпт делает администратор/сотрудник.
+- Создаваемый `prompt_developer` промпт автоматически закрепляется за ним (`owner`) и добавляет его в `editors`.
+- Редактировать `prompt_developer` может только свои промпты (`owner`) и ранее назначенные через `editors`; чужие — только просмотр.
+- Назначение разработчиков на конкретный промпт и изменение `owner` делает администратор/сотрудник.
 
 Команды для сервера (через Docker):
 
 ```bash
-docker compose --env-file .env exec -T web python manage.py shell -c "from ai.models import Prompt; print(*[f'{p.id}: {p.prompt_name} | editors={[u.username for u in p.editors.all()]}' for p in Prompt.objects.prefetch_related('editors').order_by('id')], sep='\n')"
+docker compose --env-file .env exec -T web python manage.py shell -c "from ai.models import Prompt; print(*[f'{p.id}: {p.prompt_name} | owner={(p.owner.username if p.owner else \"-\")} | editors={[u.username for u in p.editors.all()]}' for p in Prompt.objects.select_related('owner').prefetch_related('editors').order_by('id')], sep='\n')"
 ```
 
 ```bash

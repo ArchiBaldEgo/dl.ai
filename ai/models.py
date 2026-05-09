@@ -22,6 +22,13 @@ class Prompt(models.Model):
     topic = models.ForeignKey(Topic, on_delete=models.CASCADE, null = True)
     prompt_text = models.TextField()
     prompt_name = models.CharField(max_length=255, null = True)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="owned_prompts",
+    )
     editors = models.ManyToManyField(
         settings.AUTH_USER_MODEL,
         blank=True,

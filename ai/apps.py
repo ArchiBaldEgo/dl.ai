@@ -17,7 +17,7 @@ def ensure_default_groups(sender, **kwargs):
     if prompt_content_type:
         prompt_permissions = Permission.objects.filter(
             content_type=prompt_content_type,
-            codename__in=("view_prompt", "change_prompt"),
+            codename__in=("add_prompt", "view_prompt", "change_prompt"),
         )
         prompt_developer_group.permissions.add(*prompt_permissions)
 

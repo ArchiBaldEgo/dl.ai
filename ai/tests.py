@@ -68,32 +68,51 @@ class PromptAdminAccessTests(TestCase):
         self.editable_prompt = Prompt.objects.create(
             prompt_name="Editable prompt",
             prompt_text="Editable prompt text",
+            owner=self.prompt_developer,
         )
         self.readonly_prompt = Prompt.objects.create(
             prompt_name="Readonly prompt",
             prompt_text="Readonly prompt text",
+            owner=self.other_prompt_developer,
+        )
+        self.legacy_assigned_prompt = Prompt.objects.create(
+            prompt_name="Legacy assigned prompt",
+            prompt_text="Legacy assigned prompt text",
         )
         self.editable_prompt.editors.add(self.prompt_developer)
+        self.legacy_assigned_prompt.editors.add(self.prompt_developer)
 
     def _build_request(self, user):
         request = self.factory.get("/ai/admin/ai/prompt/")
         request.user = user
         return request
 
-    def test_prompt_developer_can_edit_only_assigned_prompt(self):
+    def test_prompt_developer_can_edit_only_own_or_assigned_prompt(self):
         request = self._build_request(self.prompt_developer)
 
         self.assertTrue(self.prompt_admin.has_change_permission(request, self.editable_prompt))
+        self.assertTrue(self.prompt_admin.has_change_permission(request, self.legacy_assigned_prompt))
         self.assertFalse(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
         self.assertTrue(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
+
+    def test_prompt_developer_can_add_prompt_and_becomes_owner(self):
+        request = self._build_request(self.prompt_developer)
+        self.assertTrue(self.prompt_admin.has_add_permission(request))
+
+        new_prompt = Prompt(prompt_name="My prompt", prompt_text="My prompt text")
+        self.prompt_admin.save_model(request, new_prompt, form=None, change=False)
+        new_prompt.refresh_from_db()
+
+        self.assertEqual(new_prompt.owner_id, self.prompt_developer.id)
+        self.assertTrue(new_prompt.editors.filter(pk=self.prompt_developer.pk).exists())
 
     def test_prompt_developer_fields_are_readonly_for_foreign_prompt(self):
         request = self._build_request(self.prompt_developer)
 
-        editable_fields = self.prompt_admin.get_readonly_fields(request, self.editable_prompt)
         readonly_fields = self.prompt_admin.get_readonly_fields(request, self.readonly_prompt)
+        editable_fields = self.prompt_admin.get_readonly_fields(request, self.editable_prompt)
 
-        self.assertEqual(editable_fields, ("topic", "prompt_name"))
+        self.assertEqual(editable_fields, ())
         self.assertEqual(readonly_fields, ("topic", "prompt_name", "prompt_text"))
 
     def test_staff_user_has_full_prompt_permissions(self):
