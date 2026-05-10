@@ -67,11 +67,11 @@
     </div>
   {% endfor %}
 {% else %}
-  {% if show_arm_link or show_model_status_link %}
+  {% if show_arm_link or show_model_status_link or show_prompt_link %}
     <div class="app-ai module{% if arm_find_error_url in request.path|urlencode %} current-app{% endif %}">
       <table>
         <caption>
-          <a href="{{ arm_model_status_url|default:arm_find_error_url }}" class="section">AI</a>
+          <a href="{{ arm_model_status_url|default:arm_find_error_url|default:prompt_admin_url }}" class="section">AI</a>
         </caption>
         {% if show_model_status_link %}
           <tr class="model-aimodelstatus{% if arm_model_status_url in request.path|urlencode %} current-model{% endif %}">
@@ -93,6 +93,18 @@
             <td></td>
             {% if show_changelinks %}
               <td><a href="{{ arm_find_error_url }}" class="viewlink" aria-describedby="arm-armfinderror-empty">{% translate 'View' %}</a></td>
+            {% endif %}
+          </tr>
+        {% endif %}
+
+        {% if show_prompt_link %}
+          <tr class="model-myprompt{% if my_prompt_url in request.path|urlencode or prompt_admin_url in request.path|urlencode %} current-model{% endif %}">
+            <th scope="row" id="ai-my-prompt-empty">
+              <a href="{{ my_prompt_url }}"{% if my_prompt_url in request.path|urlencode or prompt_admin_url in request.path|urlencode %} aria-current="page"{% endif %}>Мой препромпт</a>
+            </th>
+            <td></td>
+            {% if show_changelinks %}
+              <td><a href="{{ my_prompt_url }}" class="viewlink" aria-describedby="ai-my-prompt-empty">{% translate 'View' %}</a></td>
             {% endif %}
           </tr>
         {% endif %}
