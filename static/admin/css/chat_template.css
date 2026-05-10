@@ -1,6 +1,5 @@
 @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
 
-<<<<<<< HEAD
         body {
             font-family: 'Roboto', sans-serif;
             margin: 0;
@@ -676,7 +675,6 @@
                 color: black;
             }
         }
-=======
 body {
     font-family: 'Roboto', sans-serif;
     margin: 0;
@@ -855,6 +853,17 @@ form {
     background-color: #d8d8d8;
     padding-left: 10px;
     height: 80px;
+    position: relative;
+}
+
+.panel-date {
+    position: absolute;
+    right: 20px;
+    bottom: 8px;
+    font-size: 12px;
+    color: #9a9a9a;
+    opacity: 0.45;
+    pointer-events: none;
 }
 
 hr {
@@ -1396,4 +1405,3 @@ hr {
         color: black;
     }
 }
->>>>>>> origin/ArseniyN

@@ -22,20 +22,18 @@
                     <option language="French">Français</option>
                 </select>
                 <select id="select">
-                    <option value="DeepSeek_R1_Distill_Llama_70B">DeepSeek-R1-Distill-Llama-70B</option>
-                    <option value="DeepSeek_R1">DeepSeek-R1</option>
-                    <option value="Llama_3_1_Tulu_3_405B">Llama-3.1-Tulu-3-405B</option>
-                    <option value="Meta_Llama_3_1_70B_Instruct">Meta-Llama-3.1-70B-Instruct</option>
-                    <option value="QwQ_32B">Qwen QwQ-32B</option>
-                    <option value="Mixtral_8x22b">Mixtral-8x22b</option>
-                    <option value="Gpt_oss_120b">Gpt_oss_120b</option>
-                    <option value="Web_DeepSeek">Web DeepSeek</option>
-                    <option value="Web_DeepSeek_Thinking">Web DeepSeek Thinking</option>
+                    {% if available_models %}
+                        {% for model in available_models %}
+                            <option value="{{ model.key }}">{{ model.title }}</option>
+                        {% endfor %}
+                    {% else %}
+                        <option value="" selected disabled>Сегодня нет доступных моделей</option>
+                    {% endif %}
                 </select>
                 <select id="selectType"
-                    onchange="document.location.href=this.querySelector('option:checked').dataset.link">
+                    onchange="goToAiPage(this)">
                     <option data-link="/ai/chat/">Чат с DLAI</option>
-                    <option selected>Реши задачу</option>
+                    <option data-link="/ai/solve-problem/" selected>Реши задачу</option>
                     <option data-link="/ai/find-error/">В чём ошибка?</option>
                 </select>
             </div>
@@ -65,6 +63,7 @@
                 </div>
                 
             </div>
+            <div class="panel-date">11.03.2026</div>
         </div>
         <hr/>
         <div class="blo">
@@ -101,23 +100,33 @@
         </div>
 
         <div class="sidebar">
-            <a href="/ai/admin" style="text-decoration: none; color: black;">
-                <div class="sidebar-header">
+            <a href="/ai/admin/login/?next=/ai/admin/" style="text-decoration: none; color: black;">
+                <div class="sidebar-header" id="adminPanelLink">
                     Админ-Панель
                 </div>
             </a>
-            <div class="sidebar-content">
-            </div>
+
         </div>
-        
-        <a href="/ai/admin" style="text-decoration: none; color: black;">
-            <button class="toggle-button">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="9 18 15 12 9 6" />
-                </svg>
-            </button>
-        </a>
+
+        <button class="toggle-button" type="button" aria-label="Open menu">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="9 18 15 12 9 6" />
+            </svg>
+        </button>
     </div>
 </body>
+<script>
+function goToAiPage(selectEl) {
+    const selected = selectEl.querySelector('option:checked');
+    const target = selected && selected.dataset ? selected.dataset.link : '';
+    if (!target) {
+        return;
+    }
+
+    const query = window.location.search || '';
+    const destination = query ? `${target}${query}` : target;
+    window.location.href = destination;
+}
+</script>
 </html>

@@ -1,0 +1,76 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+  .arm-entry {
+    margin-bottom: 16px;
+  }
+  .arm-entry a {
+    display: block;
+    border: 1px solid var(--hairline-color);
+    border-radius: 8px;
+    padding: 12px;
+    text-decoration: none;
+    color: var(--body-fg);
+    background: var(--body-bg);
+  }
+  .arm-entry a:hover {
+    border-color: var(--link-fg);
+    background: var(--darkened-bg);
+  }
+  .arm-title {
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .arm-subtitle {
+    color: var(--body-quiet-color);
+  }
+</style>
+{% endblock %}
+
+{% block extrahead %}
+{{ block.super }}
+<script>
+  (function () {
+    // Keep user choice intact; force dark only for first-time admin visits.
+    if (!localStorage.getItem('theme')) {
+      document.documentElement.dataset.theme = 'dark';
+      localStorage.setItem('theme', 'dark');
+    }
+  })();
+</script>
+{% endblock %}
+
+{% block coltype %}colMS{% endblock %}
+{% block bodyclass %}{{ block.super }} dashboard{% endblock %}
+{% block nav-breadcrumbs %}{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  {% if show_model_status_link %}
+    <div class="arm-entry">
+      <a href="{{ arm_model_status_url }}">
+        <div class="arm-title">AI: Состояние моделей</div>
+        <div class="arm-subtitle">Список всех моделей, их состояние и фоновое обновление</div>
+      </a>
+    </div>
+  {% endif %}
+
+  {% if show_arm_link %}
+    <div class="arm-entry">
+      <a href="{{ arm_find_error_url }}">
+        <div class="arm-title">ARM: В чем ошибка</div>
+        <div class="arm-subtitle">Пакетная проверка одной задачи в нескольких моделях с кратким отчетом</div>
+      </a>
+    </div>
+  {% endif %}
+
+  {% if app_list %}
+    {% include "admin/app_list.html" with app_list=app_list show_changelinks=True %}
+  {% else %}
+    <p>{% translate "You don't have permission to view or edit anything." %}</p>
+  {% endif %}
+</div>
+{% endblock %}

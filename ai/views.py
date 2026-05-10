@@ -1,57 +1,140 @@
-from django.shortcuts import render
-from django.core.cache import cache
-from django.http import JsonResponse, Http404, FileResponse
-from django.conf import settings
-from .models import ProgrammingLanguage, Topic, Prompt
-from pathlib import Path
-import mimetypes
+import os
+
+from django.contrib.auth import authenticate, login, logout
+from django.shortcuts import redirect, render
+from django.http import JsonResponse
+from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound
+from django.db import ProgrammingError
+from django.contrib.staticfiles import finders
+from functools import wraps
+from .model_health import get_available_model_options
+from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 import uuid
 
-def chat_view(request):
-    # Генерируем уникальный client_id для каждого пользователя
-    client_id = str(uuid.uuid4())
-    return render(request, 'ai/chat.html', {'client_id': client_id})
 
-def decide_task_view(request):
-    client_id = str(uuid.uuid4())
-    return render(request, 'ai/decide-task.html', {'client_id': client_id})
-
-def find_error_view(request):
-    client_id = str(uuid.uuid4())
-    return render(request, 'ai/find-error.html', {'client_id': client_id})
+def _safe_relative_url(candidate, fallback):
+    value = (candidate or "").strip()
+    if value.startswith("/") and not value.startswith("//"):
+        return value
+    return fallback
 
 
-def asset_view(request, asset_path):
-    static_dir = (Path(settings.BASE_DIR) / 'static').resolve()
-    requested_path = asset_path.lstrip('/').strip()
-    file_path = (static_dir / requested_path).resolve()
+def ai_access_required(view_func):
+    @wraps(view_func)
+    def _wrapped(request, *args, **kwargs):
+        uid = (request.GET.get("uid") or "").strip()
 
-    if not str(file_path).startswith(str(static_dir)):
-        raise Http404('Asset path is not allowed')
+        if not uid.isdigit():
+            return HttpResponseForbidden("UID query parameter is required")
 
-    if not file_path.is_file():
-        raise Http404('Asset not found')
+        try:
+            if not AIAppSettings.get_solo().is_enabled:
+                return HttpResponseNotFound("AI app is disabled")
+        except ProgrammingError:
+            # AIAppSettings table may be absent before migrations are applied.
+            pass
 
-    content_type, _ = mimetypes.guess_type(str(file_path))
-    response = FileResponse(
-        file_path.open('rb'),
-        content_type=content_type or 'application/octet-stream',
+        return view_func(request, *args, **kwargs)
+
+    return _wrapped
+
+
+def tester_access_required(view_func):
+    @wraps(view_func)
+    def _wrapped(request, *args, **kwargs):
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return HttpResponseForbidden("Tester access required")
+        if user.is_superuser or user.groups.filter(name="tester").exists():
+            return view_func(request, *args, **kwargs)
+        return HttpResponseForbidden("Tester access required")
+
+    return _wrapped
+
+
+def tester_login_view(request):
+    default_next = "/ai/admin/arm/find-error/"
+    next_url = _safe_relative_url(request.GET.get("next"), default_next)
+    back_url = _safe_relative_url(request.GET.get("back"), "/")
+
+    # Test-panel entry should always require explicit credentials.
+    if request.method != "POST" and request.user.is_authenticated:
+        logout(request)
+
+    error_message = ""
+
+    if request.method == "POST":
+        next_url = _safe_relative_url(request.POST.get("next"), default_next)
+        back_url = _safe_relative_url(request.POST.get("back"), "/")
+        username = (request.POST.get("username") or "").strip()
+        password = request.POST.get("password") or ""
+
+        user = authenticate(request, username=username, password=password)
+        if user and user.is_active and user.groups.filter(name="tester").exists():
+            request.session["ai_testpanel_back_url"] = back_url
+            login(request, user)
+            return redirect(next_url)
+
+        error_message = "Неверный логин/пароль или у пользователя нет группы tester."
+
+    request.session["ai_testpanel_back_url"] = back_url
+
+    response = render(
+        request,
+        "ai/test-panel-login.html",
+        {
+            "error_message": error_message,
+            "next_url": next_url,
+            "back_url": back_url,
+        },
     )
-    response['Cache-Control'] = 'public, max-age=86400'
+    response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response["Pragma"] = "no-cache"
     return response
 
 
+@ai_access_required
+def chat_view(request):
+    # Генерируем уникальный client_id для каждого пользователя
+    client_id = str(uuid.uuid4())
+    return render(request, 'ai/chat.html', {
+        'client_id': client_id,
+        'available_models': get_available_model_options(),
+    })
+
+
+@ai_access_required
+def decide_task_view(request):
+    client_id = str(uuid.uuid4())
+    return render(request, 'ai/decide-task.html', {
+        'client_id': client_id,
+        'available_models': get_available_model_options(),
+    })
+
+
+@ai_access_required
+def find_error_view(request):
+    client_id = str(uuid.uuid4())
+    return render(request, 'ai/find-error.html', {
+        'client_id': client_id,
+        'available_models': get_available_model_options(),
+    })
+
+
+@ai_access_required
 def get_languages(request):
     languages = ProgrammingLanguage.objects.all().values('id', 'language_name')
     return JsonResponse(list(languages), safe=False)
 
 
+@ai_access_required
 def get_topics(request):
     topics = list(Topic.objects.values('id', 'topic_name', 'programming_language'))
     return JsonResponse(topics, safe=False)
 
 
 
+@ai_access_required
 def get_prompts(request):
     prompts = list(Prompt.objects.values(
         'id', 
@@ -61,3 +144,11 @@ def get_prompts(request):
         'prompt_name',
     ))
     return JsonResponse(prompts, safe=False)
+
+
+def asset_view(request, asset_path):
+    asset_full_path = finders.find(asset_path)
+    if not asset_full_path or not os.path.isfile(asset_full_path):
+        raise Http404("Asset not found")
+
+    return FileResponse(open(asset_full_path, "rb"))

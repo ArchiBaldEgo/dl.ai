@@ -1,11 +1,13 @@
 import requests
 import json
+from urllib.parse import parse_qs
 from channels.generic.websocket import AsyncWebsocketConsumer
 import django
 import os
 from datetime import datetime, timedelta
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'DjangoTest.settings')
 django.setup()
+from .model_health import MODEL_ALIASES
 from .models import ProgrammingLanguage, Prompt
 from .utils import *
 from asgiref.sync import sync_to_async
@@ -33,8 +35,34 @@ def getProgLng(language_id):
         return None
 
 
+@sync_to_async
+def is_ai_app_enabled():
+    from .models import AIAppSettings
+    return AIAppSettings.get_solo().is_enabled
+
+
+@sync_to_async
+def get_external_uid(scope):
+    raw_query = scope.get("query_string", b"").decode()
+    query_uid = (parse_qs(raw_query).get("uid") or [""])[0].strip()
+    if query_uid.isdigit():
+        return query_uid
+
+    return None
+
+
 class MyConsumer(AsyncWebsocketConsumer):
     async def connect(self):
+        external_uid = await get_external_uid(self.scope)
+
+        if not external_uid:
+            await self.close(code=4403)
+            return
+
+        if not await is_ai_app_enabled():
+            await self.close(code=4403)
+            return
+
         self.client_id = self.scope['url_route']['kwargs']['client_id']
         await self.accept()
         print(f"WebSocket connected for client {self.client_id}")
@@ -43,6 +71,7 @@ class MyConsumer(AsyncWebsocketConsumer):
         print(f"Connection closed for client {self.client_id}")
 
     async def receive(self, text_data):
+
         try:
             data = json.loads(text_data)
             print(f"Received data: {data}")
@@ -81,28 +110,14 @@ class MyConsumer(AsyncWebsocketConsumer):
 
             # Обработка специальных типов сообщений
             if type == "2":
-                prog_lng_id = data.get('progLng')
-                if not prog_lng_id:
-                    await self.send(text_data="Выберите язык программирования перед отправкой запроса.")
-                    return
-                progLng = await getProgLng(prog_lng_id)
-                if not progLng:
-                    await self.send(text_data="Выбранный язык программирования не найден. Обновите страницу и выберите язык заново.")
-                    return
+                progLng = await getProgLng(data.get('progLng'))
                 promptText = await getPromptText(data.get('preprompt'))
                 message = f"У меня есть задача по программированию, решай ее на языке {progLng}\n{message}"
                 if promptText and (not hasattr(self, 'last_prompt') or self.last_prompt != promptText):
                     message += f". Препромпт: {promptText}"
                     self.last_prompt = promptText
             elif type == "3":
-                prog_lng_id = data.get('progLng')
-                if not prog_lng_id:
-                    await self.send(text_data="Выберите язык программирования перед отправкой запроса.")
-                    return
-                progLng = await getProgLng(prog_lng_id)
-                if not progLng:
-                    await self.send(text_data="Выбранный язык программирования не найден. Обновите страницу и выберите язык заново.")
-                    return
+                progLng = await getProgLng(data.get('progLng'))
                 code = data.get('code', '')
                 promptText = await getPromptText(data.get('preprompt'))
                 message = f"У меня есть задача по программированию, я написал для нее код на языке {progLng}, код не работает, найди пожалуйста ошибку. Задача: {message}. Код: {code}."
@@ -119,40 +134,63 @@ class MyConsumer(AsyncWebsocketConsumer):
             await self.send(text_data=f"<think> {start_str} Обрабатываю запрос пользователя</think> Вы: {message}")
             # Обработка модели AI
             response = "Что-то пошло не так. Попробуйте еще раз."
+            modell = value
+
+            normalized_value = MODEL_ALIASES.get(value, value)
 
             try:
-                # Используем выбранную модель
-                if value == "Meta_Llama_3_1_70B_Instruct":
-                    response = await ask_Meta_Llama_3_1_70B_Instruct_async(message, self.client_id)
-                    modell = "Meta_Llama_3_1_70B_Instruct"
-                elif value == "Mixtral_8x7B":
-                    # Используем Mixtral 8x22b как замену
-                    response = await ask_Mixtral_8x22b_async(message, self.client_id)
-                    modell = "Mixtral_8x7B"
-                elif value == "Mixtral_8x22b":
-                    response = await ask_Mixtral_8x22b_async(message, self.client_id)
-                    modell = "Mixtral_8x22b"
-                elif value == "DeepSeek_R1_Distill_Llama_70B":
-                    response = await ask_DeepSeek_R1_Distill_Llama_70B_async(message, self.client_id)
-                    modell = "DeepSeek_R1_Distill_Llama_70B"
-                elif value == "Llama_3_1_Tulu_3_405B":
-                    response = await ask_Llama_3_1_Tulu_3_405B_async(message, self.client_id)
-                    modell = value
-                elif value == "DeepSeek_R1":
-                    response = await ask_DeepSeek_R1_async(message, self.client_id)
-                    modell = value
-                elif value == "QwQ_32B":
-                    response = await ask_QwQ_32B_async(message, self.client_id)
-                    modell = value
-                elif value == "Gpt_oss_120b":
-                    response = await ask_Gpt_oss_120b_async(message, self.client_id)
-                    modell = value
-                elif value == "Web_DeepSeek":
-                    response = await ask_Web_DeepSeek_async(message, self.client_id)
-                    modell = value
-                elif value == "Web_DeepSeek_Thinking":
-                    response = await ask_Web_DeepSeek_Thinking_async(message, self.client_id)
-                    modell = value
+                model_dispatch = {
+                    "DeepSeek_R1_Distill_Llama_70B": (
+                        ask_DeepSeek_R1_Distill_Llama_70B_async,
+                        "DeepSeek-R1-Distill-Llama-70B",
+                    ),
+                    "DeepSeek_V3_1": (
+                        ask_DeepSeek_V3_1_async,
+                        "DeepSeek-V3.1",
+                    ),
+                    "DeepSeek_V3_1_cb": (
+                        ask_DeepSeek_V3_1_cb_async,
+                        "DeepSeek-V3.1-cb",
+                    ),
+                    "DeepSeek_V3_2": (
+                        ask_DeepSeek_V3_2_async,
+                        "DeepSeek-V3.2",
+                    ),
+                    "Llama_4_Maverick_17B_128E_Instruct": (
+                        ask_Llama_4_Maverick_17B_128E_Instruct_async,
+                        "Llama-4-Maverick-17B-128E-Instruct",
+                    ),
+                    "Meta_Llama_3_3_70B_Instruct": (
+                        ask_Meta_Llama_3_3_70B_Instruct_async,
+                        "Meta-Llama-3.3-70B-Instruct",
+                    ),
+                    "MiniMax_M2_5": (
+                        ask_MiniMax_M2_5_async,
+                        "MiniMax-M2.5",
+                    ),
+                    "Gemma_3_12b_it": (
+                        ask_Gemma_3_12b_it_async,
+                        "gemma-3-12b-it",
+                    ),
+                    "Gpt_oss_120b": (
+                        ask_Gpt_oss_120b_async,
+                        "gpt-oss-120b",
+                    ),
+                    "Web_DeepSeek": (
+                        ask_Web_DeepSeek_async,
+                        "Web DeepSeek",
+                    ),
+                    "Web_DeepSeek_Thinking": (
+                        ask_Web_DeepSeek_Thinking_async,
+                        "Web DeepSeek Thinking",
+                    ),
+                }
+
+                model_handler = model_dispatch.get(normalized_value)
+                if model_handler:
+                    handler, model_title = model_handler
+                    response = await handler(message, self.client_id)
+                    modell = model_title
                 else:
                     response = f"Модель {value} не найдена. Используйте доступные модели."
                 
@@ -179,11 +217,13 @@ class MyConsumer(AsyncWebsocketConsumer):
 
             # Отправляем ответ
             if isinstance(response, tuple):
+                response_text = response[0] if len(response) > 0 else "Пустой ответ от модели."
+                response_tokens = response[1] if len(response) > 1 else '0'
                 await self.send(text_data=f'''<think> {end_str} Запрос успешно обработан</think>
                 Модель: {modell}
                 Время обработки запроса: {duration}
-                Потрачено токенов: {response[1]}
-                {response[0]}''')
+                Потрачено токенов: {response_tokens}
+                {response_text}''')
             else:
                 await self.send(text_data=f'''<think> {end_str} Запрос успешно обработан</think>
                 {response}''')

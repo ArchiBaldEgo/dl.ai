@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Тест-панель: Вход</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      box-sizing: border-box;
+    }
+    .login-card {
+      width: 100%;
+      max-width: 420px;
+      background: #fff;
+      border: 1px solid #d8dde3;
+      border-radius: 12px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+      padding: 24px;
+      box-sizing: border-box;
+    }
+    .title {
+      margin: 0 0 8px;
+      font-size: 24px;
+      color: #1f2937;
+    }
+    .subtitle {
+      margin: 0 0 18px;
+      color: #4b5563;
+      font-size: 14px;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      margin-bottom: 12px;
+      gap: 6px;
+    }
+    .field input {
+      height: 40px;
+      border: 1px solid #cfd7df;
+      border-radius: 8px;
+      padding: 0 12px;
+      font-size: 14px;
+      outline: none;
+    }
+    .field input:focus {
+      border-color: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+    }
+    .error {
+      margin: 6px 0 12px;
+      padding: 10px 12px;
+      border: 1px solid #f3b2b2;
+      background: #fff3f3;
+      color: #9f1239;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+    .actions {
+      margin-top: 12px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .btn-primary {
+      height: 40px;
+      padding: 0 14px;
+      border: 0;
+      border-radius: 8px;
+      background: #1d4ed8;
+      color: #fff;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .btn-primary:hover {
+      background: #1e40af;
+    }
+    .back-link {
+      font-size: 14px;
+      color: #1d4ed8;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <form class="login-card" method="post" autocomplete="off">
+    {% csrf_token %}
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <input type="hidden" name="back" value="{{ back_url }}">
+    <h1 class="title">Тест-панель</h1>
+    <p class="subtitle">Вход доступен только пользователям из группы tester.</p>
+
+    {% if error_message %}
+      <div class="error">{{ error_message }}</div>
+    {% endif %}
+
+    <div class="field">
+      <label for="id_username">Логин</label>
+      <input id="id_username" type="text" name="username" autocomplete="off" required>
+    </div>
+
+    <div class="field">
+      <label for="id_password">Пароль</label>
+      <input id="id_password" type="password" name="password" autocomplete="new-password" required>
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="btn-primary">Войти</button>
+      <a class="back-link" href="{{ back_url }}">Вернуться назад</a>
+    </div>
+  </form>
+</body>
+</html>
