@@ -763,13 +763,6 @@
                     updateVoiceStatus(getVoiceStatusText('readyForVoice'));
 
                     if (recognition) {
-                        recognition.lang = getSpeechLanguage(selectedLang);
-                        if (isListening) {
-                            recognition.stop();
-                            setTimeout(() => {
-                                try { recognition.start(); } catch(e) {}
-                            }, 100);
-                        }
                     }
             });
 
