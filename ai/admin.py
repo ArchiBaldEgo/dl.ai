@@ -21,7 +21,7 @@ from .model_health import (
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
-PROMPT_WORKER_GROUPS = ("tester", "prompt_developer")
+PROMPT_DEVELOPER_GROUP = "prompt_developer"
 
 
 def _safe_relative_url(candidate, fallback):
@@ -31,16 +31,10 @@ def _safe_relative_url(candidate, fallback):
     return fallback
 
 
-def _is_tester_user(request):
-    if not request.user.is_authenticated:
-        return False
-    return request.user.groups.filter(name__in=PROMPT_WORKER_GROUPS).exists()
-
-
 def _is_prompt_developer_user(request):
     if not request.user.is_authenticated:
         return False
-    return request.user.groups.filter(name__in=PROMPT_WORKER_GROUPS).exists()
+    return request.user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists()
 
 
 def _is_staff_or_superuser(user):
@@ -52,7 +46,7 @@ def _can_access_arm(request):
         return False
     if _is_staff_or_superuser(request.user):
         return True
-    return request.user.groups.filter(name__in=PROMPT_WORKER_GROUPS).exists()
+    return _is_prompt_developer_user(request)
 
 
 def _can_access_model_status(request):
@@ -85,14 +79,14 @@ class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
 
         if (
             _is_staff_or_superuser(user)
-            or user.groups.filter(name__in=PROMPT_WORKER_GROUPS).exists()
+            or user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists()
         ):
             if getattr(self, "request", None) is not None:
                 self.request.session["admin_fresh_auth"] = True
             return
 
         raise forms.ValidationError(
-            "Please enter the correct username and password for a staff, tester, or prompt developer account.",
+            "Please enter the correct username and password for a staff or prompt developer account.",
             code="invalid_login",
         )
 
@@ -482,7 +476,7 @@ def _custom_has_permission(request):
         return False
     if _is_staff_or_superuser(user):
         return True
-    return user.groups.filter(name__in=PROMPT_WORKER_GROUPS).exists()
+    return user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists()
 
 
 admin.site.has_permission = _custom_has_permission
@@ -499,23 +493,6 @@ def _custom_admin_view(view, cacheable=False):
         if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
             next_path = quote(request.get_full_path(), safe="/?=&")
             return redirect(f"/ai/admin/login/?next={next_path}")
-
-        if not _is_staff_or_superuser(request.user):
-            has_tester_role = _is_tester_user(request)
-            has_prompt_developer_role = _is_prompt_developer_user(request)
-
-            if has_tester_role and not has_prompt_developer_role:
-                arm_path = "/ai/admin/arm/find-error/"
-                if not request.path.startswith(arm_path):
-                    return redirect(arm_path)
-            elif has_prompt_developer_role and not has_tester_role:
-                prompt_admin_path = "/ai/admin/ai/prompt/"
-                my_prompt_path = "/ai/admin/prompts/my/"
-                if (
-                    not request.path.startswith(prompt_admin_path)
-                    and not request.path.startswith(my_prompt_path)
-                ):
-                    return redirect(my_prompt_path)
         return wrapped_view(request, *args, **kwargs)
 
     return inner

@@ -11,6 +11,8 @@ from .model_health import get_available_model_options
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 import uuid
 
+PROMPT_DEVELOPER_GROUP = "prompt_developer"
+
 
 def _safe_relative_url(candidate, fallback):
     value = (candidate or "").strip()
@@ -39,20 +41,20 @@ def ai_access_required(view_func):
     return _wrapped
 
 
-def tester_access_required(view_func):
+def prompt_developer_access_required(view_func):
     @wraps(view_func)
     def _wrapped(request, *args, **kwargs):
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated:
-            return HttpResponseForbidden("Tester access required")
-        if user.is_superuser or user.groups.filter(name="tester").exists():
+            return HttpResponseForbidden("Prompt developer access required")
+        if user.is_superuser or user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists():
             return view_func(request, *args, **kwargs)
-        return HttpResponseForbidden("Tester access required")
+        return HttpResponseForbidden("Prompt developer access required")
 
     return _wrapped
 
 
-def tester_login_view(request):
+def prompt_developer_login_view(request):
     default_next = "/ai/admin/arm/find-error/"
     next_url = _safe_relative_url(request.GET.get("next"), default_next)
     back_url = _safe_relative_url(request.GET.get("back"), "/")
@@ -70,12 +72,12 @@ def tester_login_view(request):
         password = request.POST.get("password") or ""
 
         user = authenticate(request, username=username, password=password)
-        if user and user.is_active and user.groups.filter(name="tester").exists():
+        if user and user.is_active and user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists():
             request.session["ai_testpanel_back_url"] = back_url
             login(request, user)
             return redirect(next_url)
 
-        error_message = "Неверный логин/пароль или у пользователя нет группы tester."
+        error_message = "Неверный логин/пароль или у пользователя нет группы prompt_developer."
 
     request.session["ai_testpanel_back_url"] = back_url
 
