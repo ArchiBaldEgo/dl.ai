@@ -19,17 +19,16 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 
-from ai.views import get_languages, get_topics, get_prompts, tester_login_view
+from ai.views import get_languages, get_topics, get_prompts, prompt_developer_login_view
 from django.contrib import admin
 from django.urls import path, include
 
 urlpatterns = [
     path('ai/admin/', admin.site.urls),
     path('', include('ai.urls')),
-    path('ai/test-panel/login/', tester_login_view, name='tester_login_view_fallback'),
+    path('ai/test-panel/login/', prompt_developer_login_view, name='prompt_developer_login_view_fallback'),
     path('ai/api/languages/', get_languages, name='get_languages'),
     path('ai/api/topics/', get_topics, name='get_topics'),
     path('ai/api/prompts/', get_prompts, name='get_prompts'),
 
 ] + static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
-

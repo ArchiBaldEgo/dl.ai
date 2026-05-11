@@ -28,6 +28,8 @@ Django + Channels (ASGI, Daphne). UI and API live under `/ai/...`.
 
 ## Разграничение доступа к препромптам (Prompt ACL)
 
+- Группа `tester` больше не используется; рабочая группа доступа — `prompt_developer`.
+- Участник `prompt_developer` видит ARM и все промпты в `/ai/admin/ai/prompt/`.
 - Группы `tester` и `prompt_developer` объединены по доступу (достаточно любой одной).
 - Участник объединённой роли видит ARM и все промпты в `/ai/admin/ai/prompt/`.
 - Ссылка "Мой препромпт" открывает только свои/закреплённые промпты (`/ai/admin/ai/prompt/?mine=1`).
