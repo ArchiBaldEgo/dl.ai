@@ -44,7 +44,7 @@
                     recognition.onstart = function() {
                         isListening = true;
                         updateVoiceUI();
-                        updateVoiceStatus('Слушаю... Говорите сейчас');
+                        updateVoiceStatus(getVoiceStatusText('listening'));
                     };
                     
                     recognition.onresult = function(event) {
@@ -62,19 +62,19 @@
                         
                         if (finalTranscript) {
                             document.getElementById('messageText').value = finalTranscript;
-                            updateVoiceStatus('Распознано: ' + finalTranscript);
+                            updateVoiceStatus(getVoiceStatusText('recognized') + finalTranscript);
                             setTimeout(() => {
                                 if (document.getElementById('messageText').value.trim()) {
                                     simulateSend();
                                 }
                             }, 500);
                         } else if (interimTranscript) {
-                            updateVoiceStatus('Распознаю: ' + interimTranscript);
+                            updateVoiceStatus(getVoiceStatusText('recognizing') + interimTranscript);
                         }
                     };
                     
                     recognition.onerror = function(event) {
-                        updateVoiceStatus('Ошибка: ' + event.error);
+                        updateVoiceStatus(getVoiceStatusText('error') + event.error);
                         isListening = false;
                         updateVoiceUI();
                     };
@@ -82,11 +82,11 @@
                     recognition.onend = function() {
                         isListening = false;
                         updateVoiceUI();
-                        updateVoiceStatus('Готов к голосовому вводу');
+                        updateVoiceStatus(getVoiceStatusText('readyForVoice'));
                     };
                     
                 } catch (error) {
-                    updateVoiceStatus('Голосовой ввод не поддерживается вашим браузером');
+                    updateVoiceStatus(getVoiceStatusText('notSupported'));
                 }
             }
 
@@ -119,7 +119,7 @@
                     try {
                         recognition.start();
                     } catch (error) {
-                        updateVoiceStatus('Ошибка запуска распознавания');
+                        updateVoiceStatus(getVoiceStatusText('startError'));
                     }
                 }
             }
@@ -129,7 +129,7 @@
                 const assistantMessages = messages.querySelectorAll('.msg-assistant');
                 
                 if (assistantMessages.length === 0) {
-                    updateVoiceStatus('Нет ответов для озвучивания');
+                    updateVoiceStatus(getVoiceStatusText('noResponse'));
                     return;
                 }
                 
@@ -144,7 +144,7 @@
                 }
                 
                 if (!text.trim()) {
-                    updateVoiceStatus('Текст для озвучивания пуст');
+                    updateVoiceStatus(getVoiceStatusText('textEmpty'));
                     return;
                 }
                 
@@ -159,7 +159,7 @@
                 const cleanText = cleanSpeechText(text);
                 
                 if (!cleanText.trim()) {
-                    updateVoiceStatus('Нет текста для озвучивания');
+                    updateVoiceStatus(getVoiceStatusText('noText'));
                     return;
                 }
                 
@@ -172,17 +172,17 @@
                 currentUtterance.pitch = 1;
                 
                 currentUtterance.onstart = function() {
-                    updateVoiceStatus('Озвучиваю...');
+                    updateVoiceStatus(getVoiceStatusText('speaking'));
                     document.getElementById('voiceOutputBtn').classList.add('speaking');
                 };
                 
                 currentUtterance.onend = function() {
-                    updateVoiceStatus('Озвучивание завершено');
+                    updateVoiceStatus(getVoiceStatusText('speechEnd'));
                     document.getElementById('voiceOutputBtn').classList.remove('speaking');
                 };
                 
                 currentUtterance.onerror = function(event) {
-                    updateVoiceStatus('Ошибка озвучивания');
+                    updateVoiceStatus(getVoiceStatusText('speechError'));
                     document.getElementById('voiceOutputBtn').classList.remove('speaking');
                 };
                 
@@ -235,7 +235,7 @@
             function stopSpeech() {
                 if (speechSynthesis.speaking) {
                     speechSynthesis.cancel();
-                    updateVoiceStatus('Озвучивание остановлено');
+                    updateVoiceStatus(getVoiceStatusText('speechStopped'));
                 }
                 if (isListening && recognition) {
                     recognition.stop();
@@ -281,12 +281,12 @@
 
             function simulateSend() {
                 if (!ws || ws.readyState !== WebSocket.OPEN) {
-                    updateVoiceStatus('Ошибка: соединение не установлено');
+                    updateVoiceStatus(getVoiceStatusText('connectionError'));
                     return;
                 }
 
                 if (requestInFlight) {
-                    updateVoiceStatus('Дождитесь ответа модели перед новым запросом');
+                    updateVoiceStatus(getVoiceStatusText('waitForModel'));
                     return;
                 }
                 
@@ -315,7 +315,7 @@
 
                 setRequestLock(true);
                 notEnter = true;
-                updateVoiceStatus('Сообщение отправлено');
+                updateVoiceStatus(getVoiceStatusText('messageSent'));
                 input.value = '';
             }
 
@@ -330,7 +330,7 @@
 
                     ws.onopen = function(event) {
                         console.log('WebSocket connection established');
-                        updateVoiceStatus('Соединение установлено.');
+                        updateVoiceStatus(getVoiceStatusText('connectionEstablished'));
                     };
 
                     ws.onmessage = function (event) {
@@ -417,14 +417,14 @@
 
                     ws.onerror = function(error) {
                         console.error('WebSocket error:', error);
-                        updateVoiceStatus('Ошибка соединения');
+                        updateVoiceStatus(getVoiceStatusText('wsError'));
                         setRequestLock(false);
                         notEnter = false;
                     };
 
                     ws.onclose = function(event) {
                         console.log('WebSocket connection closed');
-                        updateVoiceStatus('Соединение закрыто');
+                        updateVoiceStatus(getVoiceStatusText('connectionClosed'));
                         setRequestLock(false);
                         notEnter = false;
                     };
@@ -624,49 +624,141 @@
             }
 
             const localization = {
-                Russian: {
-                    send: "Отправить",
-                    clear: "Очистить контекст",
-                    placeholder: "Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)\nПример форматирования кода:\n```\nprint('Hello, world!')\n```",
-                    adminPanel: "Админ-Панель",
-                    testPanel: "Тест-панель",
-                    chat: "Чат с DLAI",
-                    decideTask: "Реши задачу",
-                    findError: "В чём ошибка?",
-                    enterHint: "При нажатии на Enter будет отправляться вопрос (для переноса строки Enter+Shift)",
-                    preprompt: "Препромпт",
-                    chooseLanguage: "Выберите язык",
-                    chooseTheme: "Выберите тему"
-                },
-                English: {
-                    send: "Send",
-                    clear: "Clear Context",
-                    placeholder: "Ask a question (preferably in English to avoid errors), for nice formatting wrap the code in ```\nExample of code formatting:\n```\nprint('Hello, world!')\n```",
-                    adminPanel: "Admin Panel",
-                    testPanel: "Test Panel",
-                    chat: "Chat with DLAI",
-                    decideTask: "Solve the task",
-                    findError: "What's the error?",
-                    enterHint: "Press Enter to send the question (Shift+Enter for a new line)",
-                    preprompt: "Preprompt",
-                    chooseLanguage: "Choose language",
-                    chooseTheme: "Choose theme"
-                },
-                French: {
-                    send: "Envoyer",
-                    clear: "Effacer le contexte",
-                    placeholder: "Posez une question (de préférence en anglais pour éviter les erreurs), pour un bon formatage, encadrez le code dans ```\nExemple de formatage du code:\n```\nprint('Hello, world!')\n```",
-                    adminPanel: "Panneau Admin",
-                    testPanel: "Panneau Test",
-                    chat: "Chat avec DLAI",
-                    decideTask: "Résoudre la tâche",
-                    findError: "Quelle est l'erreur?",
-                    enterHint: "Appuyez sur Entrée pour envoyer la question (Shift+Enter pour une nouvelle ligne)",
-                    preprompt: "Pré-promp",
-                    chooseLanguage: "Choisir la langue",
-                    chooseTheme: "Choisir le thème"
+            Russian: {
+                send: "Отправить",
+                clear: "Очистить контекст",
+                placeholder: "Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)\nПример форматирования кода:\n```\nprint('Hello, world!')\n```",
+                adminPanel: "Админ-Панель",
+                testPanel: "Тест-панель",
+                chat: "Чат с DLAI",
+                decideTask: "Реши задачу",
+                findError: "В чём ошибка?",
+                enterHint: "При нажатии на Enter будет отправляться вопрос (для переноса строки Enter+Shift)",
+                preprompt: "Препромпт",
+                chooseLanguage: "Выберите язык",
+                chooseTheme: "Выберите тему",
+                voiceMode: "Голосовой режим",
+                voiceInput: "Голосовой ввод",
+                voiceOutput: "Озвучить ответ",
+                voiceStop: "Стоп",
+                speakThinkLabel: "Озвучивать think-блоки",
+                voiceStatus: {
+                    listening: "Слушаю... Говорите сейчас",
+                    recognized: "Распознано: ",
+                    recognizing: "Распознаю: ",
+                    error: "Ошибка: ",
+                    readyForVoice: "Готов к голосовому вводу",
+                    notSupported: "Голосовой ввод не поддерживается вашим браузером",
+                    startError: "Ошибка запуска распознавания",
+                    noResponse: "Нет ответов для озвучивания",
+                    textEmpty: "Текст для озвучивания пуст",
+                    noText: "Нет текста для озвучивания",
+                    speaking: "Озвучиваю...",
+                    speechEnd: "Озвучивание завершено",
+                    speechError: "Ошибка озвучивания",
+                    speechStopped: "Озвучивание остановлено",
+                    connectionError: "Ошибка: соединение не установлено",
+                    waitForModel: "Дождитесь ответа модели перед новым запросом",
+                    messageSent: "Сообщение отправлено",
+                    connectionEstablished: "Соединение установлено.",
+                    connectionClosed: "Соединение закрыто",
+                    wsError: "Ошибка соединения",
+                    ready: 'Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.'
                 }
-            };
+            },
+    
+            English: {
+                send: "Send",
+                clear: "Clear Context",
+                placeholder: "Ask a question (preferably in English to avoid errors), for nice formatting wrap the code in ```\nExample of code formatting:\n```\nprint('Hello, world!')\n```",
+                adminPanel: "Admin Panel",
+                testPanel: "Test Panel",
+                chat: "Chat with DLAI",
+                decideTask: "Solve the task",
+                findError: "What's the error?",
+                enterHint: "Press Enter to send the question (Shift+Enter for a new line)",
+                preprompt: "Preprompt",
+                chooseLanguage: "Choose language",
+                chooseTheme: "Choose theme",
+                voiceMode: "Voice mode",
+                voiceInput: "Voice input",
+                voiceOutput: "Voice answer",
+                voiceStop: "Stop",
+                speakThinkLabel: "Voice think blocks",
+                voiceStatus: {
+                    listening: "Listening... Speak now",
+                    recognized: "Recognized: ",
+                    recognizing: "Recognizing: ",
+                    error: "Error: ",
+                    readyForVoice: "Ready for voice input",
+                    notSupported: "Voice input not supported in your browser",
+                    startError: "Error starting recognition",
+                    noResponse: "No responses to speak",
+                    textEmpty: "Text to speak is empty",
+                    noText: "No text to speak",
+                    speaking: "Speaking...",
+                    speechEnd: "Speaking finished",
+                    speechError: "Speech error",
+                    speechStopped: "Speech stopped",
+                    connectionError: "Error: connection not established",
+                    waitForModel: "Wait for model response before new request",
+                    messageSent: "Message sent",
+                    connectionEstablished: "Connection established.",
+                    connectionClosed: "Connection closed",
+                    wsError: "Connection error",
+                    ready: 'Ready. Click "Voice mode" to activate voice features.'
+                }
+            },
+            French: {
+                send: "Envoyer",
+                clear: "Effacer le contexte",
+                placeholder: "Posez une question (de préférence en anglais pour éviter les erreurs), pour un bon formatage, encadrez le code dans ```\nExemple de formatage du code:\n```\nprint('Hello, world!')\n```",
+                adminPanel: "Panneau Admin",
+                testPanel: "Panneau Test",
+                chat: "Chat avec DLAI",
+                decideTask: "Résoudre la tâche",
+                findError: "Quelle est l'erreur?",
+                enterHint: "Appuyez sur Entrée pour envoyer la question (Shift+Enter pour une nouvelle ligne)",
+                preprompt: "Pré-promp",
+                chooseLanguage: "Choisir la langue",
+                chooseTheme: "Choisir le thème",
+                voiceMode: "Mode vocal",
+                voiceInput: "Saisie vocale",
+                voiceOutput: "Lire la réponse",
+                voiceStop: "Arrêter",
+                speakThinkLabel: "Lire les blocs think",
+                voiceStatus: {
+                    listening: "Écoute... Parlez maintenant",
+                    recognized: "Reconnu : ",
+                    recognizing: "Reconnaissance : ",
+                    error: "Erreur : ",
+                    readyForVoice: "Prêt pour la saisie vocale",
+                    notSupported: "Saisie vocale non supportée par votre navigateur",
+                    startError: "Erreur de démarrage de la reconnaissance",
+                    noResponse: "Aucune réponse à lire",
+                    textEmpty: "Texte à lire vide",
+                    noText: "Pas de texte à lire",
+                    speaking: "Lecture...",
+                    speechEnd: "Lecture terminée",
+                    speechError: "Erreur de lecture",
+                    speechStopped: "Lecture arrêtée",
+                    connectionError: "Erreur : connexion non établie",
+                    waitForModel: "Attendez la réponse du modèle avant une nouvelle requête",
+                    messageSent: "Message envoyé",
+                    connectionEstablished: "Connexion établie.",
+                    connectionClosed: "Connexion fermée",
+                    wsError: "Erreur de connexion",
+                    ready: 'Prêt. Cliquez sur "Mode vocal" pour activer les fonctions vocales.'
+                }
+            }
+        };
+
+        function getVoiceStatusText(key, param = '') {
+            const selectLang = document.getElementById('selectLang');
+            const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
+            const msg = localization[lang]?.voiceStatus?.[key];
+            return (msg || localization.Russian.voiceStatus[key] || key) + param;
+        }
 
             document.getElementById("selectLang").addEventListener("change", function () {
                 const selectedLang = this.options[this.selectedIndex].getAttribute("language");
@@ -690,6 +782,33 @@
                     prepromptEl.textContent = localization[selectedLang].preprompt;
                 }
                 updateAccordionLabels();
+
+                const voiceModeBtn = document.getElementById("voiceModeBtn");
+                if (voiceModeBtn) voiceModeBtn.textContent = localization[selectedLang].voiceMode;
+
+                const voiceInputBtn = document.getElementById("voiceInputBtn");
+                if (voiceInputBtn) voiceInputBtn.textContent = localization[selectedLang].voiceInput;
+
+                const voiceOutputBtn = document.getElementById("voiceOutputBtn");
+                if (voiceOutputBtn) voiceOutputBtn.textContent = localization[selectedLang].voiceOutput;
+
+                const voiceStopBtn = document.getElementById("voiceStopBtn");
+                if (voiceStopBtn) voiceStopBtn.textContent = localization[selectedLang].voiceStop;
+
+                const speakThinkLabel = document.getElementById("speakThinkLabel");
+                if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
+
+                updateVoiceStatus(getVoiceStatusText('readyForVoice'));
+
+                if (recognition) {
+                    recognition.lang = getSpeechLanguage(selectedLang);
+                    if (isListening) {
+                        recognition.stop();
+                        setTimeout(() => {
+                            try { recognition.start(); } catch(e) {}
+                        }, 100);
+                    }
+                }
             });
 
             function initAccordionForMessages() {
@@ -914,7 +1033,7 @@
                 initSpeechRecognition();
                 document.getElementById("selectLang").dispatchEvent(new Event("change"));
                 initAccordionForMessages();
-                updateVoiceStatus('Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.');
+                updateVoiceStatus(getVoiceStatusText('ready'));
                 
                 // Инициализация чекбокса think-блоков
                 const speakThinkCheckbox = document.getElementById('speakThinkContent');
