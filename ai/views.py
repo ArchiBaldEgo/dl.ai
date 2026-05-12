@@ -14,6 +14,10 @@ import uuid
 PROMPT_DEVELOPER_GROUP = "prompt_developer"
 
 
+def health_view(request):
+    return JsonResponse({"ok": True})
+
+
 def _safe_relative_url(candidate, fallback):
     value = (candidate or "").strip()
     if value.startswith("/") and not value.startswith("//"):
