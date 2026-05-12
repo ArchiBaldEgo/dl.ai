@@ -60,13 +60,15 @@ proxies = {
             'https': os.getenv("PROXY")
         }
 
+BOT_POOL_URL = os.getenv("BOT_POOL_URL", "http://localhost:3000").rstrip("/")
+
 
 def _post_to_bot_pool(payload: dict, timeout_seconds: int = 120) -> requests.Response:
     # Internal service call must bypass env proxies (HTTP_PROXY/HTTPS_PROXY).
     with requests.Session() as session:
         session.trust_env = False
         return session.post(
-            'http://bot-pool-api:3000/api/send',
+            f"{BOT_POOL_URL}/api/send",
             json=payload,
             headers={"Content-Type": "application/json"},
             timeout=timeout_seconds,

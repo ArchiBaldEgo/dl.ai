@@ -91,23 +91,15 @@ cp .env.example .env
 3. Запустите контейнеры:
 
 ```bash
-docker compose --env-file .env up -d --build
-docker compose --env-file .env exec -T web python manage.py migrate
-docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
+docker compose up -d --build --no-cache
+docker compose exec -T web python manage.py migrate
+docker compose exec -T web python manage.py collectstatic --noinput
 ```
 
-Если нужна обычная пересборка с кэшем:
+Остановка:
 
 ```bash
-chmod +x build.sh
-./build.sh
-```
-
-Если нужна полная пересборка без кэша:
-
-```bash
-chmod +x build_no_cache.sh
-./build_no_cache.sh
+docker compose down
 ```
 
 По умолчанию nginx доступен на `http://localhost:8080/ai/...`.
