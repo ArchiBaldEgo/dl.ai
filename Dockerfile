@@ -22,7 +22,22 @@ RUN if [ -n "$HTTP_PROXY" ]; then \
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" no_proxy="$NO_PROXY" && \
-    apt-get update && \
+    if [ -n "$HTTP_PROXY" ] || [ -n "$HTTPS_PROXY" ]; then \
+        printf '%s\n' \
+          'Acquire::Retries "5";' \
+          'Acquire::http::Pipeline-Depth "0";' \
+          'Acquire::http::No-Cache "true";' \
+          'Acquire::http::No-Store "true";' \
+          'Acquire::https::No-Cache "true";' \
+          'Acquire::https::No-Store "true";' \
+          'Acquire::By-Hash "yes";' \
+          'Acquire::CompressionTypes::Order { "gz"; "bz2"; "xz"; };' \
+          > /etc/apt/apt.conf.d/99proxyfix; \
+    else \
+        rm -f /etc/apt/apt.conf.d/99proxyfix; \
+    fi && \
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get update || (rm -rf /var/lib/apt/lists/* && apt-get update) && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
