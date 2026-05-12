@@ -7,9 +7,18 @@ from django.db.models.signals import post_migrate
 
 def ensure_default_groups(sender, **kwargs):
     # Ensure required RBAC groups exist in every environment.
-    from django.contrib.auth.models import Group
+    from django.contrib.auth.models import Group, Permission
+    from django.contrib.contenttypes.models import ContentType
 
-    Group.objects.get_or_create(name="tester")
+    prompt_developer_group, _ = Group.objects.get_or_create(name="prompt_developer")
+
+    prompt_content_type = ContentType.objects.filter(app_label="ai", model="prompt").first()
+    if prompt_content_type:
+        prompt_permissions = Permission.objects.filter(
+            content_type=prompt_content_type,
+            codename__in=("add_prompt", "view_prompt", "change_prompt"),
+        )
+        prompt_developer_group.permissions.add(*prompt_permissions)
 
 
 class AiConfig(AppConfig):
