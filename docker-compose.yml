@@ -16,7 +16,7 @@ services:
       - bot_puppeteer_cache:/app/bot/.puppeteer-cache
     ports:
       - "8000:8000"
-      - "${PORT:-3000}:3000"
+      - "${PORT:-3001}:3000"
     env_file:
       - .env
       - ./bot/.env
