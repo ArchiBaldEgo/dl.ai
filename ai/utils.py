@@ -76,7 +76,7 @@ def _post_to_bot_pool(payload: dict, timeout_seconds: int = 120) -> requests.Res
 
 
 async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tuple[str, int]:
-    if DEEPSEEK_API_TOKEN:
+    '''if DEEPSEEK_API_TOKEN:
         model_name = "deepseek-reasoner" if thinking else "deepseek-chat"
         response = await asyncio.to_thread(
             requests.post,
@@ -128,7 +128,8 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
             assistant_content = 'Пустой ответ от модели.'
 
         completion_tokens = obj.get('usage', {}).get('completion_tokens', 0)
-        return assistant_content, completion_tokens
+        return assistant_content, completion_tokens'''
+    #боту не нужен токен
 
     payload = {
         "model": "deepseek",
