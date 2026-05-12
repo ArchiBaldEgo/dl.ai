@@ -52,6 +52,29 @@ services:
     networks:
       - shared-network
 
+  bot-pool-api:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: "${HTTP_PROXY:-}"
+        HTTPS_PROXY: "${HTTPS_PROXY:-}"
+        NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,db,nginx,.local,bot_pool_api,shared-network,dl_ai_web,dl_ai_db,dl_ai_nginx}"
+    container_name: bot_pool_api
+    env_file:
+      - .env
+      - ./bot/.env
+    ports:
+      - "${PORT:-3000}:3000"
+    init: true
+    restart: unless-stopped
+    networks:
+      - shared-network
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 77.88.8.8
+
 volumes:
   postgres_data:
     name: "${POSTGRES_VOLUME_NAME:-dlai_postgres_data}"
