@@ -2,6 +2,46 @@ const { log, error } = require('../utils/logger');
 const { sleep } = require('../utils/helpers');
 const TIMEOUT = 60000;
 
+async function queryXPath(page, xpath) {
+	if (typeof page.$x === 'function') {
+		const elements = await page.$x(xpath);
+		if (!elements.length) return null;
+		const [first, ...rest] = elements;
+		for (const el of rest) {
+			try { await el.dispose(); } catch (_) {}
+		}
+		return first;
+	}
+
+	const handle = await page.evaluateHandle((xp) => {
+		const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+		return result.singleNodeValue;
+	}, xpath);
+	const el = handle.asElement();
+	if (!el) {
+		await handle.dispose();
+		return null;
+	}
+	return el;
+}
+
+async function waitForXPathCompat(page, xpath, opts = {}) {
+	if (typeof page.waitForXPath === 'function') {
+		return page.waitForXPath(xpath, opts);
+	}
+
+	const timeout = typeof opts.timeout === 'number' ? opts.timeout : TIMEOUT;
+	const start = Date.now();
+
+	while (Date.now() - start < timeout) {
+		const el = await queryXPath(page, xpath);
+		if (el) return el;
+		await sleep(250);
+	}
+
+	throw new Error(`TimeoutError: Waiting for XPath ${xpath} failed: ${timeout}ms exceeded`);
+}
+
 // Базовые функции ожидания и взаимодействия
 async function waitAndType(page, selector, text, callback = null) {
 	await sleep(500);
@@ -31,7 +71,7 @@ async function waitAndTypeX(page, xpath, text, callback = null) {
 	await sleep(500);
     let element = null;
 	try {
-		element = await page.waitForXPath(xpath, { timeout: TIMEOUT });
+		element = await waitForXPathCompat(page, xpath, { timeout: TIMEOUT });
 		await sleep(500);
 		await element.click({ clickCount: 3 });
 		await element.type(text, { delay: 0 });
@@ -79,7 +119,7 @@ async function waitAndClickX(page, xpath, callback = null) {
 	await sleep(500);
     let element = null;
 	try {
-		element = await page.waitForXPath(xpath, { timeout: TIMEOUT });
+		element = await waitForXPathCompat(page, xpath, { timeout: TIMEOUT });
 		await sleep(500);
 		await element.click();
 		await sleep(500);
@@ -103,8 +143,10 @@ async function waitAndClickX(page, xpath, callback = null) {
 async function elementExists(page, selector) {
 	try {
 		if (selector.startsWith('//')) {
-			const elements = await page.$x(selector);
-			return elements.length > 0;
+			const element = await queryXPath(page, selector);
+			if (!element) return false;
+			await element.dispose();
+			return true;
 		} else {
 			const element = await page.$(selector);
 			return element !== null;
@@ -115,21 +157,15 @@ async function elementExists(page, selector) {
 }
 
 async function clickIfExists(page, selector) {
-    let elements = [];
     let element = null;
 	try {
 		if (selector.startsWith('//')) {
-			elements = await page.$x(selector);
-			if (elements.length > 0) {
-				await elements[0].click();
-				log(`Кликнут элемент: ${selector}`);
-                
-                // Освобождаем все элементы
-                for (let el of elements) {
-                    await el.dispose();
-                }
-				return true;
-			}
+			element = await queryXPath(page, selector);
+			if (!element) return false;
+			await element.click();
+			log(`Кликнут элемент: ${selector}`);
+			await element.dispose();
+			return true;
 		} else {
 			element = await page.$(selector);
 			if (element) {
@@ -146,13 +182,6 @@ async function clickIfExists(page, selector) {
         // Дополнительная очистка на случай ошибок
         if (element) {
             await element.dispose();
-        }
-        for (let el of elements) {
-            try {
-                await el.dispose();
-            } catch (e) {
-                // Игнорируем ошибки при очистке
-            }
         }
     }
 }
