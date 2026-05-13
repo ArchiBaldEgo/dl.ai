@@ -211,6 +211,7 @@ module.exports = {
 	waitAndClickX,
 	elementExists,
 	clickIfExists,
+	waitForXPathCompat,
 	getCurrentUrl,
 	isCurrentUrlContains
 };
