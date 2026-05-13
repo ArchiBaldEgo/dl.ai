@@ -25,26 +25,6 @@ def _safe_relative_url(candidate, fallback):
     return fallback
 
 
-def ai_access_required(view_func):
-    @wraps(view_func)
-    def _wrapped(request, *args, **kwargs):
-        uid = (request.GET.get("uid") or "").strip()
-
-        if not uid.isdigit():
-            return HttpResponseForbidden("UID query parameter is required")
-
-        try:
-            if not AIAppSettings.get_solo().is_enabled:
-                return HttpResponseNotFound("AI app is disabled")
-        except ProgrammingError:
-            # AIAppSettings table may be absent before migrations are applied.
-            pass
-
-        return view_func(request, *args, **kwargs)
-
-    return _wrapped
-
-
 def prompt_developer_access_required(view_func):
     @wraps(view_func)
     def _wrapped(request, *args, **kwargs):
@@ -99,7 +79,6 @@ def prompt_developer_login_view(request):
     return response
 
 
-@ai_access_required
 def chat_view(request):
     # Генерируем уникальный client_id для каждого пользователя
     client_id = str(uuid.uuid4())
@@ -109,7 +88,6 @@ def chat_view(request):
     })
 
 
-@ai_access_required
 def decide_task_view(request):
     client_id = str(uuid.uuid4())
     return render(request, 'ai/decide-task.html', {
@@ -118,7 +96,6 @@ def decide_task_view(request):
     })
 
 
-@ai_access_required
 def find_error_view(request):
     client_id = str(uuid.uuid4())
     return render(request, 'ai/find-error.html', {
@@ -127,20 +104,16 @@ def find_error_view(request):
     })
 
 
-@ai_access_required
 def get_languages(request):
     languages = ProgrammingLanguage.objects.all().values('id', 'language_name')
     return JsonResponse(list(languages), safe=False)
 
 
-@ai_access_required
 def get_topics(request):
     topics = list(Topic.objects.values('id', 'topic_name', 'programming_language'))
     return JsonResponse(topics, safe=False)
 
 
-
-@ai_access_required
 def get_prompts(request):
     prompts = list(Prompt.objects.values(
         'id', 

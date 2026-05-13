@@ -19,7 +19,7 @@ services:
       - "${PORT:-3001}:3000"
     env_file:
       - .env
-      - ./bot/.env
+      # - ./bot/.env
     environment:
       HTTP_PROXY: "${HTTP_PROXY:-}"
       HTTPS_PROXY: "${HTTPS_PROXY:-}"
