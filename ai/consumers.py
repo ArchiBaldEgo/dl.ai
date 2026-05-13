@@ -1,12 +1,14 @@
 import requests
 import json
-from urllib.parse import parse_qs
+from urllib.parse import unquote
 from channels.generic.websocket import AsyncWebsocketConsumer
 import django
 import os
 from datetime import datetime, timedelta
+
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'DjangoTest.settings')
 django.setup()
+
 from .model_health import MODEL_ALIASES
 from .models import ProgrammingLanguage, Prompt
 from .utils import *
@@ -40,24 +42,40 @@ def is_ai_app_enabled():
     from .models import AIAppSettings
     return AIAppSettings.get_solo().is_enabled
 
-
-@sync_to_async
-def get_external_uid(scope):
-    raw_query = scope.get("query_string", b"").decode()
-    query_uid = (parse_qs(raw_query).get("uid") or [""])[0].strip()
-    if query_uid.isdigit():
-        return query_uid
-
-    return None
+#функция проверки сессии через внешний API
+def check_session(session_id):
+    try:
+        response = requests.post(
+            'https://dl.gsu.by/restapi/get-user-info',
+            json={'sessionId': session_id, 'removeHtmlTags': True},
+            verify=False,
+            timeout=10
+        )
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception as e:
+        print(f"Session check error: {e}")
+        return None
 
 
 class MyConsumer(AsyncWebsocketConsumer):
     async def connect(self):
-        external_uid = await get_external_uid(self.scope)
-
-        if not external_uid:
+        cookies = self.scope.get('cookies', {})
+        raw_session_id = cookies.get('DLSID')
+        if not raw_session_id:
             await self.close(code=4403)
             return
+
+        session_id = unquote(raw_session_id)
+
+        user_info = await sync_to_async(check_session)(session_id)
+        if not user_info:
+            await self.close(code=4403)
+            return
+
+        # Сохраняем user_id для возможного использования
+        self.user_id = user_info.get('userId')
 
         if not await is_ai_app_enabled():
             await self.close(code=4403)
@@ -65,7 +83,7 @@ class MyConsumer(AsyncWebsocketConsumer):
 
         self.client_id = self.scope['url_route']['kwargs']['client_id']
         await self.accept()
-        print(f"WebSocket connected for client {self.client_id}")
+        print(f"WebSocket connected for client {self.client_id}, user_id={self.user_id}")
 
     async def disconnect(self, close_code):
         print(f"Connection closed for client {self.client_id}")
@@ -90,7 +108,7 @@ class MyConsumer(AsyncWebsocketConsumer):
             message = data.get('message', '')
             language = data.get('language', 'Russian')
             value = data.get("value", "DeepSeek_R1")
-            
+
             print(f"Processing message: type={type}, language={language}, model={value}")
 
             # Обработка языка
@@ -105,7 +123,7 @@ class MyConsumer(AsyncWebsocketConsumer):
                 
                 if language_instruction:
                     message += language_instruction
-            
+
             self.old_language = language
 
             # Обработка специальных типов сообщений
