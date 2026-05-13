@@ -1,9 +1,12 @@
-const data = require("../data.json")
+const data = require('../data.json');
 
+const { error } = require('../utils/logger');
+const { waitAndTypeX, waitAndClickX } = require('../core/page-utils');
 
-const {
-	waitAndTypeX,
-	waitAndClickX } = require('../core/page-utils')
+function getTimeoutMs() {
+    const raw = Number(process.env.AUTH_TIMEOUT_MS || 45000);
+    return Number.isFinite(raw) && raw > 0 ? raw : 45000;
+}
 
 async function login(ctx, payload = {}) {
     const page = ctx?.page;
@@ -17,24 +20,39 @@ async function login(ctx, payload = {}) {
             }
         };
 
+    const currentService = payload.model;
+    const timeWait = getTimeoutMs();
+    const loginUrl = data?.loginUrls?.[currentService];
+    const loginXPath = data?.xpaths?.auth?.loginLabel?.[currentService];
+    const passwordXPath = data?.xpaths?.auth?.passwordLabel?.[currentService];
+    const authButtonXPath = data?.xpaths?.auth?.authButton?.[currentService];
+    const incorrectPassXPath = data?.xpaths?.auth?.incorrectPassMessage?.[currentService];
+
+    if (!loginUrl || !loginXPath || !passwordXPath || !authButtonXPath) {
+        return {
+            ok: false,
+            reason: 'missing auth selectors or login url for service',
+        };
+    }
+
     try {
-        let currentService = payload.model;
+        await ctx.page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: timeWait });
 
-        let timeWait = 45000;
+        const loginOk = await waitAndTypeX(page, loginXPath, payload.username);
+        if (!loginOk) return { ok: false, reason: 'login field not found' };
 
-        await ctx.page.goto(data.loginUrls[currentService]);
-        await waitAndTypeX(page, data.xpaths.auth.loginLabel[currentService], payload.username);
-        await waitAndTypeX(page, data.xpaths.auth.passwordLabel[currentService], payload.password);
+        const passOk = await waitAndTypeX(page, passwordXPath, payload.password);
+        if (!passOk) return { ok: false, reason: 'password field not found' };
 
         const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: timeWait })
             .then(() => 'nav')
             .catch(() => 'nav_timeout');
 
-        const badPromise = ctx.page.waitForXPath(data.xpaths.auth.incorrectPassMessage[currentService], {timeout: timeWait})
+        const badPromise = ctx.page.waitForXPath(incorrectPassXPath, { timeout: timeWait })
             .then(() => 'bad')
             .catch(() => 'bad_timeout');
 
-        const clickOk = await waitAndClickX(page, data.xpaths.auth.authButton[currentService]);
+        const clickOk = await waitAndClickX(page, authButtonXPath);
         if (!clickOk) 
             return { ok: false, reason: 'click failed' };
 
@@ -68,43 +86,32 @@ async function login(ctx, payload = {}) {
             }
         }
     } catch (er) {
-    const msg = er?.message || String(er);
-    const stack = er?.stack || '';
+        const msg = er?.message || String(er);
+        const stack = er?.stack || '';
 
-    let url = '';
-    let title = '';
-    let html = '';
+        let url = '';
+        let title = '';
+        let html = '';
 
-    try { url = page.url(); } catch (_) {}
-    try { title = await page.title(); } catch (_) {}
-    try {
-console.log(`[auth] goto: ${data.loginUrls[currentService]}`);
-await ctx.page.goto(data.loginUrls[currentService], { waitUntil: 'domcontentloaded', timeout: timeWait });
-console.log('[auth] goto ok');
+        try { url = page.url(); } catch (_) {}
+        try { title = await page.title(); } catch (_) {}
+        try {
+            html = await page.content();
+            html = String(html).slice(0, 4000); // чтобы не заспамить лог
+        } catch (_) {}
 
-console.log('[auth] type login');
-await waitAndTypeX(page, data.xpaths.auth.loginLabel[currentService], payload.username);
+        error(`[auth] login exception: ${msg}`);
+        if (stack) error(`[auth] stack: ${stack}`);
+        if (url) error(`[auth] url: ${url}`);
+        if (title) error(`[auth] title: ${title}`);
+        if (html) error(`[auth] html_head: ${html}`);
 
-console.log('[auth] type password');
-await waitAndTypeX(page, data.xpaths.auth.passwordLabel[currentService], payload.password);
-
-console.log('[auth] click auth button');
-        html = await page.content();
-        html = String(html).slice(0, 4000); // чтобы не заспамить лог
-    } catch (_) {}
-
-    console.error('[auth] login exception:', msg);
-    if (stack) console.error('[auth] stack:', stack);
-    if (url) console.error('[auth] url:', url);
-    if (title) console.error('[auth] title:', title);
-    if (html) console.error('[auth] html_head:', html);
-
-    return {
-        ok: false,
-        reason: `login exception: ${msg}`,
-        data: { moreInformation: stack || msg, url, title }
-    };
-}
+        return {
+            ok: false,
+            reason: `login exception: ${msg}`,
+            data: { moreInformation: stack || msg, url, title }
+        };
+    }
 }
 
 async function register(ctx, payload) {
