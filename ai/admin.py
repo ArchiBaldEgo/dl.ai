@@ -525,15 +525,75 @@ admin.site.app_index_template = "admin/ai/app_index.html"
 
 # Форма для Prompt с улучшенным Textarea
 class PromptForm(forms.ModelForm):
+    programming_language = forms.ModelChoiceField(
+        queryset=ProgrammingLanguage.objects.none(),
+        required=False,
+        label="Programming language",
+    )
+
     class Meta:
         model = Prompt
+        fields = '__all__'
         widgets = {
             'prompt_text': forms.Textarea(attrs={
                 'rows': 25,
                 'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
             }),
         }
-        fields = '__all__'
+
+    class Media:
+        js = ("admin/js/prompt_language_topic.js",)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if "programming_language" not in self.fields or "topic" not in self.fields:
+            return
+
+        self.fields["programming_language"].queryset = ProgrammingLanguage.objects.order_by("language_name")
+        self.fields["programming_language"].widget.attrs["data-topics-url"] = "/ai/api/topics/"
+
+        selected_language_id = self._resolve_selected_language_id()
+        self.fields["topic"].queryset = Topic.objects.none()
+        if selected_language_id:
+            self.fields["topic"].queryset = Topic.objects.filter(
+                programming_language_id=selected_language_id
+            ).order_by("topic_name")
+        elif self.instance.pk and self.instance.topic_id:
+            self.fields["topic"].queryset = Topic.objects.filter(pk=self.instance.topic_id)
+        else:
+            self.fields["topic"].widget.attrs["disabled"] = "disabled"
+
+        if not self.is_bound and selected_language_id:
+            self.fields["programming_language"].initial = selected_language_id
+
+    def _resolve_selected_language_id(self):
+        if self.is_bound:
+            language_id = self.data.get(self.add_prefix("programming_language"))
+            if language_id:
+                return language_id
+
+            topic_id = self.data.get(self.add_prefix("topic"))
+            if topic_id:
+                return Topic.objects.filter(pk=topic_id).values_list("programming_language_id", flat=True).first()
+            return None
+
+        if self.instance.pk and self.instance.topic_id:
+            return self.instance.topic.programming_language_id
+        return None
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if "programming_language" not in self.fields or "topic" not in self.fields:
+            return cleaned_data
+
+        topic = cleaned_data.get("topic")
+        programming_language = cleaned_data.get("programming_language")
+
+        if topic and not programming_language:
+            self.add_error("programming_language", "Выберите язык программирования.")
+        if topic and programming_language and topic.programming_language_id != programming_language.id:
+            self.add_error("topic", "Тема не относится к выбранному языку программирования.")
+        return cleaned_data
 
 # Inline для Prompt
 class PromptInline(admin.TabularInline):
@@ -616,15 +676,15 @@ class PromptAdmin(admin.ModelAdmin):
 
     def get_fields(self, request, obj=None):
         if _is_staff_or_superuser(request.user):
-            return ("topic", "prompt_name", "prompt_text", "owner", "editors")
-        return ("topic", "prompt_name", "prompt_text")
+            return ("programming_language", "topic", "prompt_name", "prompt_text", "owner", "editors")
+        return ("programming_language", "topic", "prompt_name", "prompt_text")
 
     def get_readonly_fields(self, request, obj=None):
         if _is_staff_or_superuser(request.user):
             return ()
         if self._can_edit_prompt(request, obj):
             return ()
-        return ("topic", "prompt_name", "prompt_text")
+        return ("programming_language", "topic", "prompt_name", "prompt_text")
 
     def save_model(self, request, obj, form, change):
         if not _is_staff_or_superuser(request.user) and not change and not obj.owner_id:

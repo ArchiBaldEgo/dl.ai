@@ -7,8 +7,8 @@ from django.db import ProgrammingError
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from ai.admin import PromptAdmin
-from ai.models import Prompt
+from ai.admin import PromptAdmin, PromptForm
+from ai.models import ProgrammingLanguage, Prompt, Topic
 from ai.views import chat_view
 
 
@@ -130,7 +130,7 @@ class PromptAdminAccessTests(TestCase):
         editable_fields = self.prompt_admin.get_readonly_fields(request, self.editable_prompt)
 
         self.assertEqual(editable_fields, ())
-        self.assertEqual(readonly_fields, ("topic", "prompt_name", "prompt_text"))
+        self.assertEqual(readonly_fields, ("programming_language", "topic", "prompt_name", "prompt_text"))
 
     def test_prompt_developer_mine_filter_shows_only_own_scope(self):
         request = self._build_request(self.prompt_developer, {"mine": "1"})
@@ -146,3 +146,63 @@ class PromptAdminAccessTests(TestCase):
         self.assertTrue(self.prompt_admin.has_add_permission(request))
         self.assertTrue(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
         self.assertEqual(self.prompt_admin.get_readonly_fields(request, self.readonly_prompt), ())
+
+
+class PromptFormTests(TestCase):
+    def setUp(self):
+        self.python_language = ProgrammingLanguage.objects.create(language_name="Python")
+        self.c_language = ProgrammingLanguage.objects.create(language_name="C")
+        self.python_topic = Topic.objects.create(
+            topic_name="Loops",
+            programming_language=self.python_language,
+        )
+        self.c_topic = Topic.objects.create(
+            topic_name="Pointers",
+            programming_language=self.c_language,
+        )
+
+    def test_form_sets_programming_language_from_prompt_topic(self):
+        prompt = Prompt.objects.create(
+            topic=self.python_topic,
+            prompt_name="Prompt",
+            prompt_text="Body",
+        )
+
+        form = PromptForm(instance=prompt)
+
+        self.assertEqual(form.fields["programming_language"].initial, self.python_language.id)
+        self.assertQuerysetEqual(
+            form.fields["topic"].queryset,
+            [self.python_topic],
+            transform=lambda item: item,
+        )
+
+    def test_form_filters_topics_by_selected_language(self):
+        form = PromptForm(
+            data={
+                "programming_language": str(self.python_language.id),
+                "topic": str(self.python_topic.id),
+                "prompt_name": "Prompt",
+                "prompt_text": "Body",
+            }
+        )
+
+        self.assertTrue(form.is_valid())
+        self.assertQuerysetEqual(
+            form.fields["topic"].queryset,
+            [self.python_topic],
+            transform=lambda item: item,
+        )
+
+    def test_form_validates_topic_belongs_to_selected_language(self):
+        form = PromptForm(
+            data={
+                "programming_language": str(self.python_language.id),
+                "topic": str(self.c_topic.id),
+                "prompt_name": "Prompt",
+                "prompt_text": "Body",
+            }
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("topic", form.errors)
