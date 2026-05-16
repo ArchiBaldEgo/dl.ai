@@ -30,3 +30,10 @@ ENV/
 
 # Docker / compose
 *.log
+
+# Bot build artifacts
+bot/node_modules/
+bot/.cache/
+bot/.puppeteer-cache/
+bot/chrome*
+bot/chromium*

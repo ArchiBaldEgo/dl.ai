@@ -4,7 +4,7 @@ Django + Channels (ASGI, Daphne). UI and API live under `/ai/...`.
 
 ## Регламент работы для студентов (обязательно)
 
-1. Студент берёт текущий проект и выполняет своё ТЗ **только в своей отдельной ветке cо своей фамилией**.
+1. Студент берёт текущий проект и выполняет своё ТЗ **только в своей отдельной ветке со своей фамилией**.
 2. После завершения работы студент открывает Pull Request из своей ветки в `main`.
 3. Изменения проверяются через нейросеть и вручную перед подтверждением.
 4. Если всё корректно, PR мерджится в `main`, затем изменения выкатываются на боевой `dl`.
@@ -28,6 +28,8 @@ Django + Channels (ASGI, Daphne). UI and API live under `/ai/...`.
 
 ## Разграничение доступа к препромптам (Prompt ACL)
 
+- Группа `tester` больше не используется; рабочая группа доступа — `prompt_developer`.
+- Участник `prompt_developer` видит ARM и все промпты в `/ai/admin/ai/prompt/`.
 - Группы `tester` и `prompt_developer` объединены по доступу (достаточно любой одной).
 - Участник объединённой роли видит ARM и все промпты в `/ai/admin/ai/prompt/`.
 - Ссылка "Мой препромпт" открывает только свои/закреплённые промпты (`/ai/admin/ai/prompt/?mine=1`).
@@ -89,23 +91,15 @@ cp .env.example .env
 3. Запустите контейнеры:
 
 ```bash
-docker compose --env-file .env up -d --build
-docker compose --env-file .env exec -T web python manage.py migrate
-docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
+docker compose up -d --build --no-cache
+docker compose exec -T web python manage.py migrate
+docker compose exec -T web python manage.py collectstatic --noinput
 ```
 
-Если нужна обычная пересборка с кэшем:
+Остановка:
 
 ```bash
-chmod +x build.sh
-./build.sh
-```
-
-Если нужна полная пересборка без кэша:
-
-```bash
-chmod +x build_no_cache.sh
-./build_no_cache.sh
+docker compose down
 ```
 
 По умолчанию nginx доступен на `http://localhost:8080/ai/...`.

@@ -8,19 +8,28 @@ services:
         HTTPS_PROXY: "${HTTPS_PROXY:-}"
         NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,db,nginx,.local}"
     container_name: dl_ai_web
-    command: daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application
     restart: unless-stopped
     volumes:
       - .:/app
       - static_volume:/app/staticfiles
+      - bot_node_modules:/app/bot/node_modules
+      - bot_puppeteer_cache:/app/bot/.puppeteer-cache
     ports:
       - "8000:8000"
+      - "${PORT:-3001}:3000"
     env_file:
       - .env
+      # - ./bot/.env
     environment:
       HTTP_PROXY: "${HTTP_PROXY:-}"
       HTTPS_PROXY: "${HTTPS_PROXY:-}"
       NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,db,nginx,.local}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null && curl -fsS http://localhost:3000/health >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     depends_on:
       - db
     networks:
@@ -52,10 +61,13 @@ services:
     networks:
       - shared-network
 
+
 volumes:
   postgres_data:
     name: "${POSTGRES_VOLUME_NAME:-dlai_postgres_data}"
   static_volume:
+  bot_node_modules:
+  bot_puppeteer_cache:
 
 
 networks:

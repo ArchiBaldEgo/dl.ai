@@ -56,8 +56,8 @@ class PromptAdminAccessTests(TestCase):
             username="prompt_dev",
             password="test-pass",
         )
-        self.tester_developer = user_model.objects.create_user(
-            username="tester_dev",
+        self.second_prompt_developer = user_model.objects.create_user(
+            username="prompt_dev_second",
             password="test-pass",
         )
         self.other_prompt_developer = user_model.objects.create_user(
@@ -66,9 +66,8 @@ class PromptAdminAccessTests(TestCase):
         )
 
         prompt_developer_group, _ = Group.objects.get_or_create(name="prompt_developer")
-        tester_group, _ = Group.objects.get_or_create(name="tester")
         self.prompt_developer.groups.add(prompt_developer_group)
-        self.tester_developer.groups.add(tester_group)
+        self.second_prompt_developer.groups.add(prompt_developer_group)
         self.other_prompt_developer.groups.add(prompt_developer_group)
 
         self.editable_prompt = Prompt.objects.create(
@@ -113,16 +112,16 @@ class PromptAdminAccessTests(TestCase):
         self.assertEqual(new_prompt.owner_id, self.prompt_developer.id)
         self.assertTrue(new_prompt.editors.filter(pk=self.prompt_developer.pk).exists())
 
-    def test_tester_group_has_prompt_developer_rights(self):
-        request = self._build_request(self.tester_developer)
+    def test_second_prompt_developer_can_add_and_own_prompt(self):
+        request = self._build_request(self.second_prompt_developer)
         self.assertTrue(self.prompt_admin.has_add_permission(request))
 
-        prompt = Prompt(prompt_name="Tester prompt", prompt_text="Tester prompt text")
+        prompt = Prompt(prompt_name="Second prompt", prompt_text="Second prompt text")
         self.prompt_admin.save_model(request, prompt, form=None, change=False)
         prompt.refresh_from_db()
 
-        self.assertEqual(prompt.owner_id, self.tester_developer.id)
-        self.assertTrue(prompt.editors.filter(pk=self.tester_developer.pk).exists())
+        self.assertEqual(prompt.owner_id, self.second_prompt_developer.id)
+        self.assertTrue(prompt.editors.filter(pk=self.second_prompt_developer.pk).exists())
 
     def test_prompt_developer_fields_are_readonly_for_foreign_prompt(self):
         request = self._build_request(self.prompt_developer)

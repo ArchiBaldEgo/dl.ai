@@ -10,7 +10,6 @@ def ensure_default_groups(sender, **kwargs):
     from django.contrib.auth.models import Group, Permission
     from django.contrib.contenttypes.models import ContentType
 
-    tester_group, _ = Group.objects.get_or_create(name="tester")
     prompt_developer_group, _ = Group.objects.get_or_create(name="prompt_developer")
 
     prompt_content_type = ContentType.objects.filter(app_label="ai", model="prompt").first()
@@ -19,7 +18,6 @@ def ensure_default_groups(sender, **kwargs):
             content_type=prompt_content_type,
             codename__in=("add_prompt", "view_prompt", "change_prompt"),
         )
-        tester_group.permissions.add(*prompt_permissions)
         prompt_developer_group.permissions.add(*prompt_permissions)
 
 
