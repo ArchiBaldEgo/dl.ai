@@ -21,9 +21,9 @@ services:
       - .env
       # - ./bot/.env
     environment:
-      HTTP_PROXY: "${HTTP_PROXY:-}"
-      HTTPS_PROXY: "${HTTPS_PROXY:-}"
-      NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,db,nginx,.local}"
+      HTTP_PROXY: "${RUNTIME_HTTP_PROXY:-}"
+      HTTPS_PROXY: "${RUNTIME_HTTPS_PROXY:-}"
+      NO_PROXY: "${RUNTIME_NO_PROXY:-localhost,127.0.0.1,db,nginx,.local}"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null && curl -fsS http://localhost:3000/health >/dev/null"]
       interval: 30s

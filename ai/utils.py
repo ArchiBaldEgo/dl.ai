@@ -1,6 +1,7 @@
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 import os
+from pathlib import Path
 import uuid
 import asyncio
 import copy
@@ -14,7 +15,8 @@ from typing import Tuple, Optional
 import time
 from asyncio import TimeoutError as AsyncTimeoutError
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 CLIENT_ID = os.getenv("CLIENT_ID")
 SECRET = os.getenv("SBER_SECRET")
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -902,4 +904,3 @@ async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
             # Не очищаем историю при сетевых ошибках
             return 'Ошибка подключения. Ваш контекст сохранен, попробуйте позже.', '0'
         return 'Что-то пошло не так при обработке запроса.', '0'
-

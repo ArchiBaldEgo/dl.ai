@@ -148,17 +148,45 @@ function deepseekHtmlToApiMarkdown(html) {
 }
 
 async function getLastOuterHtmlByXPath(page, xpath) {
-    const els = await page.$x(xpath);
-    if (!els.length) return '';
+  return page.evaluate((xp) => {
+    const result = document.evaluate(
+      xp,
+      document,
+      null,
+      XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+      null
+    );
+    if (!result || result.snapshotLength === 0) return '';
+    const node = result.snapshotItem(result.snapshotLength - 1);
+    return node?.outerHTML || '';
+  }, xpath);
+}
 
-    const last = els[els.length - 1];
-    try {
-        return await page.evaluate(el => el.outerHTML, last);
-    } finally {
-        for (const el of els) {
-        try { await el.dispose?.(); } catch {}
-        }
-    }
+async function waitForXPathCompat(page, xpath, {
+  timeoutMs = 60000,
+  visible = false,
+} = {}) {
+  if (typeof page.waitForXPath === 'function') {
+    return page.waitForXPath(xpath, { timeout: timeoutMs, visible });
+  }
+
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const ok = await page.evaluate((xp, wantVisible) => {
+      const res = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+      const node = res.singleNodeValue;
+      if (!node) return false;
+      if (!wantVisible) return true;
+      if (!node.getBoundingClientRect) return false;
+      const rect = node.getBoundingClientRect();
+      return !!(rect && rect.width > 0 && rect.height > 0);
+    }, xpath, visible);
+
+    if (ok) return true;
+    await sleep(250);
+  }
+
+  throw new Error(`waitForXPath timeout for xpath: ${xpath}`);
 }
 
 async function waitLastOuterHtmlStable(page, xpath, {
@@ -170,7 +198,7 @@ async function waitLastOuterHtmlStable(page, xpath, {
     const start = Date.now();
 
     // Дожидаемся появления элемента
-    await page.waitForXPath(xpath, { timeout: timeoutMs, visible });
+    await waitForXPathCompat(page, xpath, { timeoutMs, visible });
 
     let prev = null;
     let sameCount = 0;
