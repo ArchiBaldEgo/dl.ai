@@ -47,7 +47,7 @@ function initSpeechRecognition() {
         recognition.onstart = function () {
             isListening = true;
             updateVoiceUI();
-            updateVoiceStatus('Слушаю... Говорите сейчас');
+            updateVoiceStatus(getVoiceStatusText('listening'));
         };
 
         recognition.onresult = function (event) {
@@ -65,19 +65,19 @@ function initSpeechRecognition() {
 
             if (finalTranscript) {
                 document.getElementById('messageText').value = finalTranscript;
-                updateVoiceStatus('Распознано: ' + finalTranscript);
+                updateVoiceStatus(getVoiceStatusText('recognized') + finalTranscript);
                 setTimeout(() => {
                     if (document.getElementById('messageText').value.trim()) {
                         simulateSend();
                     }
                 }, 500);
             } else if (interimTranscript) {
-                updateVoiceStatus('Распознаю: ' + interimTranscript);
+                updateVoiceStatus(getVoiceStatusText('recognizing') + interimTranscript);
             }
         };
 
         recognition.onerror = function (event) {
-            updateVoiceStatus('Ошибка: ' + event.error);
+            updateVoiceStatus(getVoiceStatusText('error') + event.error);
             isListening = false;
             updateVoiceUI();
         };
@@ -85,11 +85,11 @@ function initSpeechRecognition() {
         recognition.onend = function () {
             isListening = false;
             updateVoiceUI();
-            updateVoiceStatus('Готов к голосовому вводу');
+            updateVoiceStatus(getVoiceStatusText('readyForVoice'));
         };
 
     } catch (error) {
-        updateVoiceStatus('Голосовой ввод не поддерживается вашим браузером');
+        updateVoiceStatus(getVoiceStatusText('notSupported'));
     }
 }
 
@@ -122,7 +122,7 @@ function toggleVoiceInput() {
         try {
             recognition.start();
         } catch (error) {
-            updateVoiceStatus('Ошибка запуска распознавания');
+            updateVoiceStatus(getVoiceStatusText('startError'));
         }
     }
 }
@@ -132,7 +132,7 @@ function speakLastResponse() {
     const assistantMessages = messages.querySelectorAll('.msg-assistant');
 
     if (assistantMessages.length === 0) {
-        updateVoiceStatus('Нет ответов для озвучивания');
+        updateVoiceStatus(getVoiceStatusText('noResponse'));
         return;
     }
 
@@ -147,7 +147,7 @@ function speakLastResponse() {
     }
 
     if (!text.trim()) {
-        updateVoiceStatus('Текст для озвучивания пуст');
+        updateVoiceStatus(getVoiceStatusText('textEmpty'));
         return;
     }
 
@@ -162,7 +162,7 @@ function speakText(text) {
     const cleanText = cleanSpeechText(text);
 
     if (!cleanText.trim()) {
-        updateVoiceStatus('Нет текста для озвучивания');
+        updateVoiceStatus(getVoiceStatusText('noText'));
         return;
     }
 
@@ -175,17 +175,17 @@ function speakText(text) {
     currentUtterance.pitch = 1;
 
     currentUtterance.onstart = function () {
-        updateVoiceStatus('Озвучиваю...');
+        updateVoiceStatus(getVoiceStatusText('speaking'));
         document.getElementById('voiceOutputBtn').classList.add('speaking');
     };
 
     currentUtterance.onend = function () {
-        updateVoiceStatus('Озвучивание завершено');
+        updateVoiceStatus(getVoiceStatusText('speechEnd'));
         document.getElementById('voiceOutputBtn').classList.remove('speaking');
     };
 
     currentUtterance.onerror = function (event) {
-        updateVoiceStatus('Ошибка озвучивания');
+        updateVoiceStatus(getVoiceStatusText('speechError'));
         document.getElementById('voiceOutputBtn').classList.remove('speaking');
     };
 
@@ -197,10 +197,29 @@ function cleanSpeechText(text) {
 
     let cleanText = text;
 
-    // Убираем think-блоки только если пользователь этого не хочет
-    if (!speakThinkEnabled) {
-        cleanText = cleanText.replace(/<think>[\s\S]*?<\/think>/g, '');
+    if (speakThinkEnabled) {
+        cleanText = cleanText.replace(/Показать:.*?(Скрыть:|$)/g, '');
+        cleanText = cleanText.replace(/Скрыть:.*?(Показать:|$)/g, '');
+        cleanText = cleanText.replace(/<[^>]*>/g, '');
+        return cleanText.trim();
     }
+
+    cleanText = cleanText.replace(/<think>[\s\S]*?<\/think>/g, '');
+
+    const technicalPatterns = [
+        /^\d{2}:\d{2}:\d{2}\s+Запрос успешно обработан\s*$/gm,
+        /^\d{2}:\d{2}:\d{2}\s+Request processed successfully\s*$/gm,
+        /Модель:\s*.+/gi,
+        /Время обработки запроса:\s*.+сек/gi,
+        /Потрачено токенов:\s*\d+/gi,
+        /^Скрыть:\s*(Ассистент|Assistant|Vous)\s*$/gim,
+        /^Показать:\s*(Ассистент|Assistant|Vous)\s*$/gim,
+        /^\d{2}:\d{2}:\d{2}\s*$/gm
+    ];
+
+    technicalPatterns.forEach(pattern => {
+        cleanText = cleanText.replace(pattern, '');
+    });
 
     cleanText = cleanText.replace(/Показать:.*?(Скрыть:|$)/g, '');
     cleanText = cleanText.replace(/Скрыть:.*?(Показать:|$)/g, '');
@@ -211,9 +230,9 @@ function cleanSpeechText(text) {
         /\b(?:Ассистент|Assistant|Vous|Вы|User|Пользователь)\s*:\s*/gi,
         /\b(?:Скрыть|Показать|Hide|Show)\s*:\s*/gi,
         /\bЗапрос успешно обработан\b/gi,
+        /\bRequest processed successfully\b/gi,
         /\bОбрабатываю запрос пользователя\b/gi,
         /\bProcessing user request\b/gi,
-        /\bRequest processed successfully\b/gi,
         /\bКонтекст очищен\b/gi,
         /\bContext cleared\b/gi,
         /\bСоединение установлено\b/gi,
@@ -221,15 +240,14 @@ function cleanSpeechText(text) {
         /\bГотов к работе\b/gi,
         /\bReady to work\b/gi,
         /\bСообщение отправлено\b/gi,
-        /\bMessage sent\b/gi,
-        /\bПоказать:.*$/gm,
-        /\bСкрыть:.*$/gm
+        /\bMessage sent\b/gi
     ];
 
     servicePatterns.forEach(pattern => {
         cleanText = cleanText.replace(pattern, '');
     });
 
+    cleanText = cleanText.replace(/\n\s*\n/g, '\n');
     cleanText = cleanText.replace(/\s+/g, ' ').trim();
 
     return cleanText;
@@ -238,7 +256,7 @@ function cleanSpeechText(text) {
 function stopSpeech() {
     if (speechSynthesis.speaking) {
         speechSynthesis.cancel();
-        updateVoiceStatus('Озвучивание остановлено');
+        updateVoiceStatus(getVoiceStatusText('speechStopped'));
     }
     if (isListening && recognition) {
         recognition.stop();
@@ -284,12 +302,12 @@ function isTerminalAiMessage(payload) {
 
 function simulateSend() {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-        updateVoiceStatus('Ошибка: соединение не установлено');
+        updateVoiceStatus(getVoiceStatusText('connectionError'));
         return;
     }
 
     if (requestInFlight) {
-        updateVoiceStatus('Дождитесь ответа модели перед новым запросом');
+        updateVoiceStatus(getVoiceStatusText('waitForModel'));
         return;
     }
 
@@ -310,7 +328,7 @@ function simulateSend() {
 
     setRequestLock(true);
     notEnter = true;
-    updateVoiceStatus('Сообщение отправлено');
+    updateVoiceStatus(getVoiceStatusText('messageSent'));
     input.value = '';
 }
 
@@ -395,7 +413,7 @@ function initWebSocket() {
         ws = new WebSocket(wsUrl);
 
         ws.onopen = function (event) {
-            updateVoiceStatus('Соединение установлено.');
+            updateVoiceStatus(getVoiceStatusText('connectionEstablished'));
         };
 
         ws.onmessage = function (event) {
@@ -482,13 +500,13 @@ function initWebSocket() {
         };
 
         ws.onerror = function (error) {
-            updateVoiceStatus('Ошибка соединения');
+            updateVoiceStatus(getVoiceStatusText('wsError'));
             setRequestLock(false);
             notEnter = false;
         };
 
         ws.onclose = function (event) {
-            updateVoiceStatus('Соединение закрыто');
+            updateVoiceStatus(getVoiceStatusText('connectionClosed'));
             setRequestLock(false);
             notEnter = false;
         };
@@ -609,8 +627,37 @@ const localization = {
         enterHint: "При нажатии на Enter будет отправляться вопрос (для переноса строки Enter+Shift)",
         preprompt: "Препромпт",
         chooseLanguage: "Выберите язык",
-        chooseTheme: "Выберите тему"
+        chooseTheme: "Выберите тему",
+        voiceMode: "Голосовой режим",
+        voiceInput: "Голосовой ввод",
+        voiceOutput: "Озвучить ответ",
+        voiceStop: "Стоп",
+        speakThinkLabel: "Озвучивать дополнительную информацию",
+        voiceStatus: {
+            listening: "Слушаю... Говорите сейчас",
+            recognized: "Распознано: ",
+            recognizing: "Распознаю: ",
+            error: "Ошибка: ",
+            readyForVoice: "Готов к голосовому вводу",
+            notSupported: "Голосовой ввод не поддерживается вашим браузером",
+            startError: "Ошибка запуска распознавания",
+            noResponse: "Нет ответов для озвучивания",
+            textEmpty: "Текст для озвучивания пуст",
+            noText: "Нет текста для озвучивания",
+            speaking: "Озвучиваю...",
+            speechEnd: "Озвучивание завершено",
+            speechError: "Ошибка озвучивания",
+            speechStopped: "Озвучивание остановлено",
+            connectionError: "Ошибка: соединение не установлено",
+            waitForModel: "Дождитесь ответа модели перед новым запросом",
+            messageSent: "Сообщение отправлено",
+            connectionEstablished: "Соединение установлено.",
+            connectionClosed: "Соединение закрыто",
+            wsError: "Ошибка соединения",
+            ready: 'Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.'
+        }
     },
+    
     English: {
         send: "Send",
         clear: "Clear Context",
@@ -623,7 +670,35 @@ const localization = {
         enterHint: "Press Enter to send the question (Shift+Enter for a new line)",
         preprompt: "Preprompt",
         chooseLanguage: "Choose language",
-        chooseTheme: "Choose theme"
+        chooseTheme: "Choose theme",
+        voiceMode: "Voice mode",
+        voiceInput: "Voice input",
+        voiceOutput: "Voice answer",
+        voiceStop: "Stop",
+        speakThinkLabel: "Voice extra information",
+        voiceStatus: {
+            listening: "Listening... Speak now",
+            recognized: "Recognized: ",
+            recognizing: "Recognizing: ",
+            error: "Error: ",
+            readyForVoice: "Ready for voice input",
+            notSupported: "Voice input not supported in your browser",
+            startError: "Error starting recognition",
+            noResponse: "No responses to speak",
+            textEmpty: "Text to speak is empty",
+            noText: "No text to speak",
+            speaking: "Speaking...",
+            speechEnd: "Speaking finished",
+            speechError: "Speech error",
+            speechStopped: "Speech stopped",
+            connectionError: "Error: connection not established",
+            waitForModel: "Wait for model response before new request",
+            messageSent: "Message sent",
+            connectionEstablished: "Connection established.",
+            connectionClosed: "Connection closed",
+            wsError: "Connection error",
+            ready: 'Ready. Click "Voice mode" to activate voice features.'
+        }
     },
     French: {
         send: "Envoyer",
@@ -637,9 +712,44 @@ const localization = {
         enterHint: "Appuyez sur Entrée pour envoyer la question (Shift+Enter pour une nouvelle ligne)",
         preprompt: "Pré-promp",
         chooseLanguage: "Choisir la langue",
-        chooseTheme: "Choisir le thème"
+        chooseTheme: "Choisir le thème",
+        voiceMode: "Mode vocal",
+        voiceInput: "Saisie vocale",
+        voiceOutput: "Lire la réponse",
+        voiceStop: "Arrêter",
+        speakThinkLabel: "Informations supplémentaires vocales",
+        voiceStatus: {
+            listening: "Écoute... Parlez maintenant",
+            recognized: "Reconnu : ",
+            recognizing: "Reconnaissance : ",
+            error: "Erreur : ",
+            readyForVoice: "Prêt pour la saisie vocale",
+            notSupported: "Saisie vocale non supportée par votre navigateur",
+            startError: "Erreur de démarrage de la reconnaissance",
+            noResponse: "Aucune réponse à lire",
+            textEmpty: "Texte à lire vide",
+            noText: "Pas de texte à lire",
+            speaking: "Lecture...",
+            speechEnd: "Lecture terminée",
+            speechError: "Erreur de lecture",
+            speechStopped: "Lecture arrêtée",
+            connectionError: "Erreur : connexion non établie",
+            waitForModel: "Attendez la réponse du modèle avant une nouvelle requête",
+            messageSent: "Message envoyé",
+            connectionEstablished: "Connexion établie.",
+            connectionClosed: "Connexion fermée",
+            wsError: "Erreur de connexion",
+            ready: 'Prêt. Cliquez sur "Mode vocal" pour activer les fonctions vocales.'
+        }
     }
 };
+
+function getVoiceStatusText(key, param = '') {
+    const selectLang = document.getElementById('selectLang');
+    const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
+    const msg = localization[lang]?.voiceStatus?.[key];
+    return (msg || localization.Russian.voiceStatus[key] || key) + param;
+}
 
 document.getElementById("selectLang").addEventListener("change", function () {
     const selectedLang = this.options[this.selectedIndex].getAttribute("language");
@@ -662,7 +772,28 @@ document.getElementById("selectLang").addEventListener("change", function () {
     if (prepromptEl) {
         prepromptEl.textContent = localization[selectedLang].preprompt;
     }
+    const voiceModeBtn = document.getElementById("voiceModeBtn");
+    if (voiceModeBtn) voiceModeBtn.textContent = localization[selectedLang].voiceMode;
+
+    const voiceInputBtn = document.getElementById("voiceInputBtn");
+    if (voiceInputBtn) voiceInputBtn.textContent = localization[selectedLang].voiceInput;
+
+    const voiceOutputBtn = document.getElementById("voiceOutputBtn");
+    if (voiceOutputBtn) voiceOutputBtn.textContent = localization[selectedLang].voiceOutput;
+
+    const voiceStopBtn = document.getElementById("voiceStopBtn");
+    if (voiceStopBtn) voiceStopBtn.textContent = localization[selectedLang].voiceStop;
+
+    const speakThinkLabel = document.getElementById("speakThinkLabel");
+    if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
+
     updateAccordionLabels();
+
+    updateVoiceStatus(getVoiceStatusText('readyForVoice'));
+
+    if (recognition) {
+        recognition.lang = getSpeechLanguage(selectedLang);
+    }
 });
 
 function stopResize() {
@@ -742,6 +873,30 @@ function initAccordionForMessages() {
     window._accordionRoles = roles;
 }
 
+function updateAccordionLabels() {
+    const selectLang = document.getElementById('selectLang');
+    const langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
+    const roleLabels = {
+        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други' },
+        English: { user: 'You', assistant: 'Assistant', other: 'Others' },
+        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
+    };
+    const roleLabelsShort = roleLabels[langAttr] || roleLabels.Russian;
+    const allMessages = document.querySelectorAll('#messages li');
+    const roles = window._accordionRoles || [];
+
+    allMessages.forEach((li, idx) => {
+        const btn = li.querySelector('.accordion');
+        const panel = li.querySelector('.panel');
+        if (btn && panel) {
+            const role = roles[idx] || 'other';
+            const isOpen = panel.classList.contains('open');
+            const label = roleLabelsShort[role] || role;
+            btn.textContent = isOpen ? `Скрыть: ${label}` : `Показать: ${label}`;
+        }
+    });
+}
+
 function collapseAllExceptLast() {
     const allMessages = document.getElementById('messages').querySelectorAll('li');
     const selectLang = document.getElementById('selectLang');
@@ -781,7 +936,7 @@ window.onload = function () {
     initSpeechRecognition();
     document.getElementById("selectLang").dispatchEvent(new Event("change"));
     initAccordionForMessages();
-    updateVoiceStatus('Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.');
+    updateVoiceStatus(getVoiceStatusText('ready'));
 
     // Инициализация чекбокса think-блоков
     const speakThinkCheckbox = document.getElementById('speakThinkContent');
