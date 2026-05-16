@@ -61,11 +61,15 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
             
             # Migrate username only if it changed
             if user.username != new_username:
-                user.username = new_username
-                user.save(update_fields=['username'])
-                ext_account.external_login = external_login
-                ext_account.save(update_fields=['external_login'])
-                logger.info(f"Updated user {user.id}: username {user.username}")
+                try:
+                    user.username = new_username
+                    user.save(update_fields=['username'])
+                    ext_account.external_login = external_login
+                    ext_account.save(update_fields=['external_login'])
+                    logger.info(f"Updated user {user.id}: username {user.username}")
+                except IntegrityError as e:
+                    logger.error(f"Failed to update username for user {user.id}: {e}")
+                    raise
     
     except ExternalDLAccount.DoesNotExist:
         # 2. Try to find by username
@@ -75,27 +79,39 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
         except User.DoesNotExist:
             # 3. Create new user
             username = _find_available_username(external_login)
-            user = User.objects.create_user(
-                username=username,
-                email='',  # Will be set later if available
-            )
-            user.set_unusable_password()
-            user.save()
-            created = True
-            logger.info(f"Created new user: {user.username}")
+            try:
+                user = User.objects.create_user(
+                    username=username,
+                    email='',  # Will be set later if available
+                )
+                user.set_unusable_password()
+                user.save()
+                created = True
+                logger.info(f"Created new user: {user.username}")
+            except IntegrityError as e:
+                logger.error(f"Failed to create user with username {username}: {e}")
+                raise
         
         # Link external account
-        ext_account, _ = ExternalDLAccount.objects.get_or_create(
-            external_user_id=external_user_id,
-            defaults={
-                'user': user,
-                'external_login': external_login,
-            }
-        )
+        try:
+            ext_account, _ = ExternalDLAccount.objects.get_or_create(
+                external_user_id=external_user_id,
+                defaults={
+                    'user': user,
+                    'external_login': external_login,
+                }
+            )
+        except IntegrityError as e:
+            logger.error(f"Failed to create external account for user {user.username}: {e}")
+            raise
     
     # Ensure user is in prompt_developer group
-    from django.contrib.auth.models import Group
-    group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-    user.groups.add(group)
+    try:
+        from django.contrib.auth.models import Group
+        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        user.groups.add(group)
+    except Exception as e:
+        logger.error(f"Failed to add user {user.username} to prompt_developer group: {e}")
+        raise
     
     return user, created
