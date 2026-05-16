@@ -191,10 +191,29 @@ function cleanSpeechText(text) {
 
     let cleanText = text;
 
-    // Убираем think-блоки только если пользователь этого не хочет
-    if (!speakThinkEnabled) {
-        cleanText = cleanText.replace(/<think>[\s\S]*?<\/think>/g, '');
+    if (speakThinkEnabled) {
+        cleanText = cleanText.replace(/Показать:.*?(Скрыть:|$)/g, '');
+        cleanText = cleanText.replace(/Скрыть:.*?(Показать:|$)/g, '');
+        cleanText = cleanText.replace(/<[^>]*>/g, '');
+        return cleanText.trim();
     }
+
+    cleanText = cleanText.replace(/<think>[\s\S]*?<\/think>/g, '');
+
+    const technicalPatterns = [
+        /^\d{2}:\d{2}:\d{2}\s+Запрос успешно обработан\s*$/gm,
+        /^\d{2}:\d{2}:\d{2}\s+Request processed successfully\s*$/gm,
+        /Модель:\s*.+/gi,
+        /Время обработки запроса:\s*.+сек/gi,
+        /Потрачено токенов:\s*\d+/gi,
+        /^Скрыть:\s*(Ассистент|Assistant|Vous)\s*$/gim,
+        /^Показать:\s*(Ассистент|Assistant|Vous)\s*$/gim,
+        /^\d{2}:\d{2}:\d{2}\s*$/gm
+    ];
+
+    technicalPatterns.forEach(pattern => {
+        cleanText = cleanText.replace(pattern, '');
+    });
 
     cleanText = cleanText.replace(/Показать:.*?(Скрыть:|$)/g, '');
     cleanText = cleanText.replace(/Скрыть:.*?(Показать:|$)/g, '');
@@ -205,9 +224,9 @@ function cleanSpeechText(text) {
         /\b(?:Ассистент|Assistant|Vous|Вы|User|Пользователь)\s*:\s*/gi,
         /\b(?:Скрыть|Показать|Hide|Show)\s*:\s*/gi,
         /\bЗапрос успешно обработан\b/gi,
+        /\bRequest processed successfully\b/gi,
         /\bОбрабатываю запрос пользователя\b/gi,
         /\bProcessing user request\b/gi,
-        /\bRequest processed successfully\b/gi,
         /\bКонтекст очищен\b/gi,
         /\bContext cleared\b/gi,
         /\bСоединение установлено\b/gi,
@@ -215,15 +234,14 @@ function cleanSpeechText(text) {
         /\bГотов к работе\b/gi,
         /\bReady to work\b/gi,
         /\bСообщение отправлено\b/gi,
-        /\bMessage sent\b/gi,
-        /\bПоказать:.*$/gm,
-        /\bСкрыть:.*$/gm
+        /\bMessage sent\b/gi
     ];
 
     servicePatterns.forEach(pattern => {
         cleanText = cleanText.replace(pattern, '');
     });
 
+    cleanText = cleanText.replace(/\n\s*\n/g, '\n');
     cleanText = cleanText.replace(/\s+/g, ' ').trim();
 
     return cleanText;
@@ -608,7 +626,7 @@ const localization = {
         voiceInput: "Голосовой ввод",
         voiceOutput: "Озвучить ответ",
         voiceStop: "Стоп",
-        speakThinkLabel: "Озвучивать think-блоки",
+        speakThinkLabel: "Озвучивать дополнительную информацию",
         voiceStatus: {
             listening: "Слушаю... Говорите сейчас",
             recognized: "Распознано: ",
@@ -651,7 +669,7 @@ const localization = {
         voiceInput: "Voice input",
         voiceOutput: "Voice answer",
         voiceStop: "Stop",
-        speakThinkLabel: "Voice think blocks",
+        speakThinkLabel: "Voice extra information",
         voiceStatus: {
             listening: "Listening... Speak now",
             recognized: "Recognized: ",
@@ -693,7 +711,7 @@ const localization = {
         voiceInput: "Saisie vocale",
         voiceOutput: "Lire la réponse",
         voiceStop: "Arrêter",
-        speakThinkLabel: "Lire les blocs think",
+        speakThinkLabel: "Informations supplémentaires vocales",
         voiceStatus: {
             listening: "Écoute... Parlez maintenant",
             recognized: "Reconnu : ",
