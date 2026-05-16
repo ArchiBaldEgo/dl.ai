@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.contrib.auth import logout as auth_logout
 from django.contrib.admin.forms import AdminAuthenticationForm
 from django import forms
 from django.db.models import Q
@@ -18,7 +19,7 @@ from .model_health import (
     is_model_health_refresh_running,
     trigger_model_health_refresh_async,
 )
-from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
+from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings, ExternalDLAccount
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 PROMPT_DEVELOPER_GROUP = "prompt_developer"
@@ -70,6 +71,18 @@ def _get_my_prompt_admin_url(request):
 
 
 class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
+    def clean(self):
+        username = (self.data.get("username") or "").strip()
+        if username and username.isdigit():
+            account = ExternalDLAccount.objects.select_related("user").filter(
+                external_user_id=username
+            ).first()
+            mapped_username = account.user.username if account and account.user_id else f"user_{username}"
+            mutable_data = self.data.copy()
+            mutable_data["username"] = mapped_username
+            self.data = mutable_data
+        return super().clean()
+
     def confirm_login_allowed(self, user):
         if not user.is_active:
             raise forms.ValidationError(
@@ -82,8 +95,7 @@ class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
             or user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists()
         ):
             # Check if user needs to set password first
-            if user.has_unusable_password() and getattr(self, "request", None) is not None:
-                from django.shortcuts import redirect
+            if (not user.has_usable_password()) and getattr(self, "request", None) is not None:
                 request = self.request
                 next_url = request.GET.get("next", "/ai/admin/")
                 raise forms.ValidationError(
@@ -478,6 +490,8 @@ def _custom_has_permission(request):
     # This avoids /admin -> /admin/login ping-pong when fresh-auth marker is missing.
     if request.path.startswith("/ai/admin/login/"):
         if request.method != "POST":
+            if request.user.is_authenticated:
+                auth_logout(request)
             request.session.pop("admin_fresh_auth", None)
         return False
 
@@ -501,7 +515,7 @@ def _custom_admin_view(view, cacheable=False):
 
     def inner(request, *args, **kwargs):
         # Check if user needs to set password
-        if request.user.is_authenticated and request.user.has_unusable_password():
+        if request.user.is_authenticated and (not request.user.has_usable_password()):
             # Allow only set-password view and logout
             if not request.path.startswith("/ai/admin/set-password/"):
                 next_path = quote(request.get_full_path(), safe="/?=&")

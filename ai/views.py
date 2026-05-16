@@ -110,7 +110,7 @@ def set_password_view(request):
         new_password_confirm = request.POST.get("new_password_confirm") or ""
         if not target_user or not target_user.is_active:
             error_message = "Не удалось найти пользователя для установки пароля."
-        elif not target_user.has_unusable_password():
+        elif target_user.has_usable_password():
             error_message = "Пользователь уже имеет пароль. Используйте обычный вход."
         elif new_password != new_password_confirm:
             error_message = "Пароли не совпадают."

@@ -25,6 +25,15 @@ def _find_available_username(base_username: str) -> str:
         counter += 1
 
 
+def _extract_external_login(user_info: dict) -> str:
+    """Extract a login/nickname from API payload using known candidate keys."""
+    for key in ("login", "username", "userName", "nickname", "nick"):
+        value = (user_info.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
     """
     Get or create Django User from external DL API response.
@@ -39,7 +48,7 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
         (user, created) tuple where created=True if user was newly created
     """
     external_user_id = str(user_info.get('userId'))
-    external_login = (user_info.get('login') or '').strip()
+    external_login = _extract_external_login(user_info)
     
     if not external_user_id or external_user_id == "None":
         logger.error(f"Invalid user_info: userId={external_user_id}")
@@ -59,10 +68,19 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
         if external_login and ext_account.external_login != external_login:
             ext_account.external_login = external_login
             ext_account.save(update_fields=['external_login'])
+
+        # Prefer external nickname as Django username when available.
+        if external_login and user.username != external_login:
+            candidate = external_login
+            if User.objects.filter(username=candidate).exclude(pk=user.pk).exists():
+                candidate = _find_available_username(external_login)
+            if user.username != candidate:
+                user.username = candidate
+                user.save(update_fields=['username'])
     
     except ExternalDLAccount.DoesNotExist:
-        # 2. Create new user with deterministic username from userId.
-        base_username = f"user_{external_user_id}"
+        # 2. Create new user with nickname if available, otherwise user_<userId>.
+        base_username = external_login or f"user_{external_user_id}"
         username = _find_available_username(base_username)
         try:
             user = User.objects.create_user(
