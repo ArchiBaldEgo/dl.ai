@@ -8,7 +8,7 @@ from django.db import ProgrammingError
 from django.contrib.staticfiles import finders
 from functools import wraps
 from .model_health import get_available_model_options
-from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
+from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings, ExternalDLAccount
 
 User = get_user_model()
 
@@ -82,50 +82,54 @@ def prompt_developer_login_view(request):
 
 def set_password_view(request):
     """Allow user with unusable password to set their first password."""
+    next_url = _safe_relative_url(
+        request.POST.get("next") if request.method == "POST" else request.GET.get("next"),
+        "/ai/admin/",
+    )
+    error_message = ""
+    target_user = None
+
+    if request.user.is_authenticated and request.user.is_active:
+        target_user = request.user
+    else:
+        external_user_id = (
+            request.POST.get("external_user_id")
+            or request.GET.get("uid")
+            or request.GET.get("userId")
+        )
+        if external_user_id:
+            try:
+                target_user = ExternalDLAccount.objects.select_related("user").get(
+                    external_user_id=str(external_user_id)
+                ).user
+            except ExternalDLAccount.DoesNotExist:
+                target_user = None
+
     if request.method == "POST":
-        old_username = (request.POST.get("username") or "").strip()
         new_password = request.POST.get("new_password") or ""
         new_password_confirm = request.POST.get("new_password_confirm") or ""
-        next_url = _safe_relative_url(request.POST.get("next"), "/ai/admin/")
-        
-        error_message = ""
-        
-        try:
-            user = authenticate(request, username=old_username, password=None)
-            if not user or not user.is_active:
-                # User doesn't exist or inactive - authenticate by username for password-less account
-                try:
-                    user = User.objects.get(username=old_username, is_active=True)
-                    if not user.has_unusable_password():
-                        error_message = "Пользователь уже имеет пароль. Используйте обычный вход."
-                        user = None
-                except User.DoesNotExist:
-                    error_message = "Пользователь не найден."
-            
-            if user and user.has_unusable_password():
-                if new_password != new_password_confirm:
-                    error_message = "Пароли не совпадают."
-                elif len(new_password) < 8:
-                    error_message = "Пароль должен быть не менее 8 символов."
-                else:
-                    # Set password and log in
-                    user.set_password(new_password)
-                    user.save()
-                    login(request, user, backend='django.contrib.auth.backends.ModelBackend')
-                    request.session["ai_testpanel_back_url"] = "/"
-                    return redirect(next_url)
-            elif not user:
-                if not error_message:
-                    error_message = "Не удалось найти пользователя для установки пароля."
-        except Exception as e:
-            error_message = f"Ошибка: {str(e)}"
-        
+        if not target_user or not target_user.is_active:
+            error_message = "Не удалось найти пользователя для установки пароля."
+        elif not target_user.has_unusable_password():
+            error_message = "Пользователь уже имеет пароль. Используйте обычный вход."
+        elif new_password != new_password_confirm:
+            error_message = "Пароли не совпадают."
+        elif len(new_password) < 8:
+            error_message = "Пароль должен быть не менее 8 символов."
+        else:
+            target_user.set_password(new_password)
+            target_user.save()
+            login(request, target_user, backend='django.contrib.auth.backends.ModelBackend')
+            request.session["ai_testpanel_back_url"] = "/"
+            return redirect(next_url)
+
         response = render(
             request,
             "ai/set-password.html",
             {
                 "error_message": error_message,
                 "next_url": next_url,
+                "username": target_user.username if target_user else "",
             },
         )
         response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -133,13 +137,13 @@ def set_password_view(request):
         return response
     
     # GET: Show form
-    next_url = _safe_relative_url(request.GET.get("next"), "/ai/admin/")
     response = render(
         request,
         "ai/set-password.html",
         {
-            "error_message": "",
+            "error_message": error_message,
             "next_url": next_url,
+            "username": target_user.username if target_user else "",
         },
     )
     response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"

@@ -31,68 +31,53 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
     
     Args:
         user_info: Response from dl.gsu.by/restapi/get-user-info containing:
-                   - userId (int)
-                   - login (str)
+                   - userId (int) - required
+                   - login (str) - optional
                    - other fields (courseID, nodeId, taskId, etc.)
     
     Returns:
         (user, created) tuple where created=True if user was newly created
     """
     external_user_id = str(user_info.get('userId'))
-    external_login = user_info.get('login', '').strip()
+    external_login = (user_info.get('login') or '').strip()
     
-    if not external_user_id or not external_login:
-        logger.error(f"Invalid user_info: userId={external_user_id}, login={external_login}")
-        raise ValueError("userId and login are required")
+    if not external_user_id or external_user_id == "None":
+        logger.error(f"Invalid user_info: userId={external_user_id}")
+        raise ValueError("userId is required")
     
     user = None
     created = False
     
-    # 1. Try to find by ExternalDLAccount (if user already linked)
+    # 1. Primary lookup by external userId.
     try:
         ext_account = ExternalDLAccount.objects.select_related('user').get(
             external_user_id=external_user_id
         )
         user = ext_account.user
         
-        # Update external_login if changed on DL side
-        if ext_account.external_login != external_login:
-            new_username = _find_available_username(external_login)
-            
-            # Migrate username only if it changed
-            if user.username != new_username:
-                try:
-                    user.username = new_username
-                    user.save(update_fields=['username'])
-                    ext_account.external_login = external_login
-                    ext_account.save(update_fields=['external_login'])
-                    logger.info(f"Updated user {user.id}: username {user.username}")
-                except IntegrityError as e:
-                    logger.error(f"Failed to update username for user {user.id}: {e}")
-                    raise
+        # Store latest external login if API provides it.
+        if external_login and ext_account.external_login != external_login:
+            ext_account.external_login = external_login
+            ext_account.save(update_fields=['external_login'])
     
     except ExternalDLAccount.DoesNotExist:
-        # 2. Try to find by username
+        # 2. Create new user with deterministic username from userId.
+        base_username = f"user_{external_user_id}"
+        username = _find_available_username(base_username)
         try:
-            user = User.objects.get(username=external_login)
-            logger.info(f"Found existing user by username: {user.username}")
-        except User.DoesNotExist:
-            # 3. Create new user
-            username = _find_available_username(external_login)
-            try:
-                user = User.objects.create_user(
-                    username=username,
-                    email='',  # Will be set later if available
-                )
-                user.set_unusable_password()
-                user.save()
-                created = True
-                logger.info(f"Created new user: {user.username}")
-            except IntegrityError as e:
-                logger.error(f"Failed to create user with username {username}: {e}")
-                raise
+            user = User.objects.create_user(
+                username=username,
+                email='',
+            )
+            user.set_unusable_password()
+            user.save()
+            created = True
+            logger.info(f"Created new user: {user.username}")
+        except IntegrityError as e:
+            logger.error(f"Failed to create user with username {username}: {e}")
+            raise
         
-        # Link external account
+        # Link external account by external userId.
         try:
             ext_account, _ = ExternalDLAccount.objects.get_or_create(
                 external_user_id=external_user_id,

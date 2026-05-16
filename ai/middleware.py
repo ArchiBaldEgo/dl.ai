@@ -17,20 +17,22 @@ class ExternalAuthMiddleware:
         self.session_cookie_name = os.getenv('EXTERNAL_SESSION_COOKIE_NAME', 'DLSID')
         skip_paths = os.getenv('EXTERNAL_AUTH_SKIP_PATHS', '')
         self.skip_paths = [p.strip() for p in skip_paths.split(',') if p.strip()]
-        print(f"Middleware init: skip_paths={self.skip_paths}")
+        logger.info(f"Middleware init: skip_paths={self.skip_paths}")
 
     def __call__(self, request):
         # Пропуск путей
+        request_path = (request.path or "/").rstrip("/") or "/"
         for path in self.skip_paths:
-            if request.path == path or request.path.startswith(path.rstrip('/') + '/'):
+            normalized = (path or "/").rstrip("/") or "/"
+            if request_path == normalized or request_path.startswith(normalized + '/'):
                 return self.get_response(request)
 
         raw_session_id = request.COOKIES.get(self.session_cookie_name)
         if not raw_session_id:
             return JsonResponse({'error': 'Unauthorized: missing session cookie'}, status=401)
 
-        session_id = unquote(raw_session_id)  
-        print(f"Session ID decoded: {session_id}") 
+        session_id = unquote(raw_session_id)
+        logger.debug("Session ID decoded")
 
         try:
             response = requests.post(
@@ -43,6 +45,7 @@ class ExternalAuthMiddleware:
                 return JsonResponse({'error': 'Unauthorized: invalid or expired session'}, status=401)
             response.raise_for_status()
             user_info = response.json()
+            logger.info(f"API response: {user_info}")
         except requests.RequestException as e:
             logger.error(f"Request to external API failed: {e}")
             return JsonResponse({'error': 'Authentication service unavailable'}, status=503)
