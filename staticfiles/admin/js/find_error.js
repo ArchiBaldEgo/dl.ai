@@ -1,6 +1,6 @@
 // Глобальные переменные
             var ws = null;
-            var client_id = generateClientId();
+            var client_id = resolveClientId();
             var notEnter = false;
             
             // Голосовые переменные
@@ -10,9 +10,14 @@
             var currentUtterance = null;
             var speakThinkEnabled = true;
 
-            // Генерация client_id
-            function generateClientId() {
-                return 'client_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+            function getCookieValue(name) {
+                const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+                return match ? decodeURIComponent(match[1]) : '';
+            }
+
+            function resolveClientId() {
+                const sessionId = getCookieValue('DLSID');
+                return sessionId ? `dlsid_${encodeURIComponent(sessionId)}` : 'dlsid_missing';
             }
 
             // Функции голосового управления

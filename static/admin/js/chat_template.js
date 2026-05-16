@@ -1,5 +1,5 @@
 var ws = null;
-var client_id = generateClientId();
+var client_id = resolveClientId();
 var notEnter = false;
 var requestInFlight = false;
 
@@ -9,8 +9,14 @@ var speechSynthesis = window.speechSynthesis;
 var currentUtterance = null;
 var speakThinkEnabled = true;
 
-function generateClientId() {
-    return 'client_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+function getCookieValue(name) {
+    const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+    return match ? decodeURIComponent(match[1]) : '';
+}
+
+function resolveClientId() {
+    const sessionId = getCookieValue('DLSID');
+    return sessionId ? `dlsid_${encodeURIComponent(sessionId)}` : 'dlsid_missing';
 }
 
 // Функция для показа/скрытия голосовых контролов

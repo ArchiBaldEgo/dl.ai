@@ -2,7 +2,6 @@ import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 import os
 from pathlib import Path
-import uuid
 import asyncio
 import copy
 #from chat.database import insert_into_bd,start_bd

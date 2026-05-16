@@ -1,6 +1,6 @@
 import os
 
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import authenticate, login, logout, get_user_model
 from django.shortcuts import redirect, render
 from django.http import JsonResponse
 from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound
@@ -9,7 +9,8 @@ from django.contrib.staticfiles import finders
 from functools import wraps
 from .model_health import get_available_model_options
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
-import uuid
+
+User = get_user_model()
 
 PROMPT_DEVELOPER_GROUP = "prompt_developer"
 
@@ -79,27 +80,87 @@ def prompt_developer_login_view(request):
     return response
 
 
+def set_password_view(request):
+    """Allow user with unusable password to set their first password."""
+    if request.method == "POST":
+        old_username = (request.POST.get("username") or "").strip()
+        new_password = request.POST.get("new_password") or ""
+        new_password_confirm = request.POST.get("new_password_confirm") or ""
+        next_url = _safe_relative_url(request.POST.get("next"), "/ai/admin/")
+        
+        error_message = ""
+        
+        try:
+            user = authenticate(request, username=old_username, password=None)
+            if not user or not user.is_active:
+                # User doesn't exist or inactive - authenticate by username for password-less account
+                try:
+                    user = User.objects.get(username=old_username, is_active=True)
+                    if not user.has_unusable_password():
+                        error_message = "Пользователь уже имеет пароль. Используйте обычный вход."
+                        user = None
+                except User.DoesNotExist:
+                    error_message = "Пользователь не найден."
+            
+            if user and user.has_unusable_password():
+                if new_password != new_password_confirm:
+                    error_message = "Пароли не совпадают."
+                elif len(new_password) < 8:
+                    error_message = "Пароль должен быть не менее 8 символов."
+                else:
+                    # Set password and log in
+                    user.set_password(new_password)
+                    user.save()
+                    login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+                    request.session["ai_testpanel_back_url"] = "/"
+                    return redirect(next_url)
+            elif not user:
+                if not error_message:
+                    error_message = "Не удалось найти пользователя для установки пароля."
+        except Exception as e:
+            error_message = f"Ошибка: {str(e)}"
+        
+        response = render(
+            request,
+            "ai/set-password.html",
+            {
+                "error_message": error_message,
+                "next_url": next_url,
+            },
+        )
+        response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response["Pragma"] = "no-cache"
+        return response
+    
+    # GET: Show form
+    next_url = _safe_relative_url(request.GET.get("next"), "/ai/admin/")
+    response = render(
+        request,
+        "ai/set-password.html",
+        {
+            "error_message": "",
+            "next_url": next_url,
+        },
+    )
+    response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response["Pragma"] = "no-cache"
+    return response
+
+
 def chat_view(request):
-    # Генерируем уникальный client_id для каждого пользователя
-    client_id = str(uuid.uuid4())
     return render(request, 'ai/chat.html', {
-        'client_id': client_id,
         'available_models': get_available_model_options(),
     })
 
 
 def decide_task_view(request):
-    client_id = str(uuid.uuid4())
     return render(request, 'ai/decide-task.html', {
-        'client_id': client_id,
         'available_models': get_available_model_options(),
     })
 
 
 def find_error_view(request):
-    client_id = str(uuid.uuid4())
     return render(request, 'ai/find-error.html', {
-        'client_id': client_id,
         'available_models': get_available_model_options(),
     })
 

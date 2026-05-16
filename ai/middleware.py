@@ -3,6 +3,11 @@ from urllib.parse import unquote
 from dotenv import load_dotenv
 import requests
 from django.http import JsonResponse
+from django.contrib.auth import login
+from .external_account import get_or_create_user_from_external
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ExternalAuthMiddleware:
     def __init__(self, get_response):
@@ -43,4 +48,17 @@ class ExternalAuthMiddleware:
             return JsonResponse({'error': 'Authentication service unavailable'}, status=503)
 
         request.user_info = user_info
+        
+        # Auto-provision user if needed
+        try:
+            user, created = get_or_create_user_from_external(user_info)
+            if user:
+                # Login user for web interface access
+                login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+                if created:
+                    logger.info(f"New user provisioned: {user.username} (external_id={user_info.get('userId')})")
+        except Exception as e:
+            logger.error(f"User provisioning failed: {e}")
+            return JsonResponse({'error': 'User provisioning failed'}, status=500)
+        
         return self.get_response(request)

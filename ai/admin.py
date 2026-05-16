@@ -81,6 +81,16 @@ class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
             _is_staff_or_superuser(user)
             or user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists()
         ):
+            # Check if user needs to set password first
+            if user.has_unusable_password() and getattr(self, "request", None) is not None:
+                from django.shortcuts import redirect
+                request = self.request
+                next_url = request.GET.get("next", "/ai/admin/")
+                raise forms.ValidationError(
+                    f"Please set your password first. <a href='/ai/admin/set-password/?next={next_url}'>Set password</a>",
+                    code="set_password_required",
+                )
+            
             if getattr(self, "request", None) is not None:
                 self.request.session["admin_fresh_auth"] = True
             return
@@ -490,6 +500,13 @@ def _custom_admin_view(view, cacheable=False):
     wrapped_view = _default_admin_view(view, cacheable)
 
     def inner(request, *args, **kwargs):
+        # Check if user needs to set password
+        if request.user.is_authenticated and request.user.has_unusable_password():
+            # Allow only set-password view and logout
+            if not request.path.startswith("/ai/admin/set-password/"):
+                next_path = quote(request.get_full_path(), safe="/?=&")
+                return redirect(f"/ai/admin/set-password/?next={next_path}")
+        
         if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
             next_path = quote(request.get_full_path(), safe="/?=&")
             return redirect(f"/ai/admin/login/?next={next_path}")
@@ -522,6 +539,7 @@ def _custom_each_context(request):
 admin.site.each_context = _custom_each_context
 admin.site.index_template = "admin/ai/index.html"
 admin.site.app_index_template = "admin/ai/app_index.html"
+admin.site.site_url = "/ai/chat/"
 
 # Форма для Prompt с улучшенным Textarea
 class PromptForm(forms.ModelForm):

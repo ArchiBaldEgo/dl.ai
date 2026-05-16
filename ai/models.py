@@ -2,6 +2,35 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
+
+class ExternalDLAccount(models.Model):
+    """Link between Django User and external DL (dl.gsu.by) account."""
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='external_dl_account',
+    )
+    external_user_id = models.CharField(
+        max_length=255,
+        unique=True,
+        db_index=True,
+        help_text="User ID from dl.gsu.by API"
+    )
+    external_login = models.CharField(
+        max_length=255,
+        help_text="Last known login/nickname from dl.gsu.by"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "External DL Account"
+        verbose_name_plural = "External DL Accounts"
+
+    def __str__(self):
+        return f"{self.user.username} (DL: {self.external_login})"
+
+
 class ProgrammingLanguage(models.Model):
     language_name = models.CharField(max_length=255,)
 
