@@ -1,5 +1,5 @@
 from django.contrib import admin
-from django.contrib.auth import logout as auth_logout, login as auth_login
+from django.contrib.auth import authenticate, logout as auth_logout, login as auth_login
 from django.contrib.admin.forms import AdminAuthenticationForm
 from django import forms
 from django.db.models import Q
@@ -20,6 +20,11 @@ from .model_health import (
     trigger_model_health_refresh_async,
 )
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings, ExternalDLAccount
+from .auth_backends import (
+    ADMIN_EXTERNAL_AUTH_BACKEND,
+    ensure_prompt_developer_group,
+    get_external_user_id_from_request,
+)
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 PROMPT_DEVELOPER_GROUP = "prompt_developer"
@@ -76,27 +81,55 @@ def _auto_login_from_external(request):
     Если есть — автоматически логинит пользователя без пароля.
     Возвращает True если удалось залогинить.
     """
-    user_info = getattr(request, 'user_info', None)
-    if not user_info:
+    external_user_id = get_external_user_id_from_request(request)
+    if not external_user_id:
         return False
-    
-    external_user_id = str(user_info.get('userId', ''))
-    if not external_user_id or external_user_id == "None":
+
+    user = authenticate(request, external_user_id=external_user_id)
+    if not user:
         return False
-    
-    try:
-        ext_account = ExternalDLAccount.objects.select_related('user').get(
-            external_user_id=external_user_id
-        )
-        user = ext_account.user
-        if user and user.is_active:
-            auth_login(request, user, backend='django.contrib.auth.backends.ModelBackend')
-            request.session["admin_fresh_auth"] = True
-            return True
-    except ExternalDLAccount.DoesNotExist:
-        pass
-    
-    return False
+
+    auth_login(request, user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
+    request.session["admin_fresh_auth"] = True
+    return True
+
+
+def _is_admin_password_setup_path(request):
+    return request.path.startswith("/ai/admin/set-password/")
+
+
+def _is_admin_auth_service_path(request):
+    return (
+        request.path.startswith("/ai/admin/login/")
+        or request.path.startswith("/ai/admin/logout/")
+        or _is_admin_password_setup_path(request)
+    )
+
+
+def _external_admin_entry_response(request):
+    if request.method != "GET" or _is_admin_auth_service_path(request):
+        return None
+
+    external_user_id = get_external_user_id_from_request(request)
+    if not external_user_id:
+        return None
+
+    current_user = getattr(request, "user", None)
+    if (
+        current_user
+        and current_user.is_authenticated
+        and current_user.is_active
+        and current_user.username == external_user_id
+    ):
+        ensure_prompt_developer_group(current_user)
+        request.session["admin_fresh_auth"] = True
+        return None
+
+    if _auto_login_from_external(request):
+        return None
+
+    next_path = quote(request.get_full_path(), safe="/?=&")
+    return redirect(f"/ai/admin/set-password/?next={next_path}")
 
 
 class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
@@ -471,7 +504,14 @@ _default_get_urls = admin.site.get_urls
 
 
 def _custom_admin_urls():
+    from .views import set_password_view
+
     custom_urls = [
+        path(
+            "set-password/",
+            set_password_view,
+            name="set_password_view",
+        ),
         path(
             "arm/find-error/start/",
             admin.site.admin_view(admin_arm_find_error_start_view),
@@ -550,6 +590,10 @@ def _custom_admin_view(view, cacheable=False):
     wrapped_view = _default_admin_view(view, cacheable)
 
     def inner(request, *args, **kwargs):
+        external_entry_response = _external_admin_entry_response(request)
+        if external_entry_response is not None:
+            return external_entry_response
+
         # Если пользователь уже аутентифицирован через middleware, но нет fresh_auth — ставим
         if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
             if hasattr(request, 'user_info') or request.user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists():

@@ -1,15 +1,17 @@
 from django.contrib.admin.sites import AdminSite
-from django.contrib.auth import get_user_model
+from django.contrib.auth import SESSION_KEY, get_user_model
+from django.contrib.auth.models import AnonymousUser
 from django.contrib.auth.models import Group
+from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import SimpleTestCase, RequestFactory, TestCase
 from django.http import HttpResponse
 from django.db import ProgrammingError
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from ai.admin import PromptAdmin, PromptForm
+from ai.admin import PromptAdmin, PromptForm, _external_admin_entry_response
 from ai.models import ProgrammingLanguage, Prompt, Topic
-from ai.views import chat_view
+from ai.views import chat_view, set_password_view
 
 
 class ChatViewTests(SimpleTestCase):
@@ -39,6 +41,70 @@ class ChatViewTests(SimpleTestCase):
         request.session = {}
         response = chat_view(request)
         self.assertEqual(response.status_code, 403)
+
+
+class AdminExternalAuthTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def _request(self, method="get", path="/ai/admin/", data=None, user_id="12345"):
+        request = getattr(self.factory, method)(path, data=data or {})
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.user = AnonymousUser()
+        request.user_info = {"userId": user_id}
+        return request
+
+    def test_existing_external_user_auto_logs_into_admin(self):
+        user = self.user_model.objects.create_user(
+            username="12345",
+            password="initial-pass",
+        )
+        request = self._request()
+
+        response = _external_admin_entry_response(request)
+
+        self.assertIsNone(response)
+        self.assertEqual(request.session[SESSION_KEY], str(user.pk))
+        self.assertTrue(request.session["admin_fresh_auth"])
+
+    def test_new_external_user_sets_password_once_and_is_created(self):
+        request = self._request(
+            method="post",
+            path="/ai/admin/set-password/",
+            data={
+                "next": "/ai/admin/",
+                "new_password": "strong-pass-123",
+                "new_password_confirm": "strong-pass-123",
+            },
+            user_id="67890",
+        )
+
+        response = set_password_view(request)
+
+        user = self.user_model.objects.get(username="67890")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/ai/admin/")
+        self.assertTrue(user.check_password("strong-pass-123"))
+        self.assertEqual(request.session[SESSION_KEY], str(user.pk))
+
+    def test_admin_external_users_are_assigned_prompt_developer_group(self):
+        request = self._request(
+            method="post",
+            path="/ai/admin/set-password/",
+            data={
+                "next": "/ai/admin/",
+                "new_password": "strong-pass-123",
+                "new_password_confirm": "strong-pass-123",
+            },
+            user_id="24680",
+        )
+
+        set_password_view(request)
+
+        group = Group.objects.get(name="prompt_developer")
+        user = self.user_model.objects.get(username="24680")
+        self.assertTrue(user.groups.filter(pk=group.pk).exists())
 
 
 class PromptAdminAccessTests(TestCase):

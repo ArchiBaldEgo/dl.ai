@@ -9,6 +9,14 @@ from django.contrib.staticfiles import finders
 from functools import wraps
 from .model_health import get_available_model_options
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings, ExternalDLAccount
+from .auth_backends import (
+    ADMIN_EXTERNAL_AUTH_BACKEND,
+    create_admin_user_with_password,
+    ensure_prompt_developer_group,
+    get_admin_user_by_external_id,
+    get_external_user_id_from_request,
+    normalize_external_user_id,
+)
 
 User = get_user_model()
 
@@ -80,7 +88,7 @@ def prompt_developer_login_view(request):
     return response
 
 
-def set_password_view(request):
+def legacy_set_password_view(request):
     """Allow user with unusable password to set their first password."""
     next_url = _safe_relative_url(
         request.POST.get("next") if request.method == "POST" else request.GET.get("next"),
@@ -144,6 +152,96 @@ def set_password_view(request):
             "error_message": error_message,
             "next_url": next_url,
             "username": target_user.username if target_user else "",
+        },
+    )
+    response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response["Pragma"] = "no-cache"
+    return response
+
+
+def set_password_view(request):
+    """Allow an externally authenticated admin user to set a first password."""
+    next_url = _safe_relative_url(
+        request.POST.get("next") if request.method == "POST" else request.GET.get("next"),
+        "/ai/admin/",
+    )
+    error_message = ""
+    subtitle = "Для входа в админку введите пароль. Это однократная регистрация."
+    target_user = None
+    external_user_id = get_external_user_id_from_request(request)
+    if not external_user_id:
+        external_user_id = normalize_external_user_id(
+            request.POST.get("external_user_id")
+            or request.GET.get("uid")
+            or request.GET.get("userId")
+        )
+
+    is_admin_registration = request.path.startswith("/ai/admin/set-password/") and bool(external_user_id)
+
+    if is_admin_registration:
+        target_user = get_admin_user_by_external_id(external_user_id)
+    elif request.user.is_authenticated and request.user.is_active:
+        target_user = request.user
+    elif external_user_id:
+        try:
+            target_user = ExternalDLAccount.objects.select_related("user").get(
+                external_user_id=str(external_user_id)
+            ).user
+        except ExternalDLAccount.DoesNotExist:
+            target_user = None
+
+    if request.method == "POST":
+        new_password = request.POST.get("new_password") or ""
+        new_password_confirm = request.POST.get("new_password_confirm") or ""
+
+        if is_admin_registration and target_user and target_user.has_usable_password():
+            ensure_prompt_developer_group(target_user)
+            login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
+            request.session["admin_fresh_auth"] = True
+            return redirect(next_url)
+
+        if not is_admin_registration and (not target_user or not target_user.is_active):
+            error_message = "Не удалось найти пользователя для установки пароля."
+        elif not is_admin_registration and target_user.has_usable_password():
+            error_message = "Пользователь уже имеет пароль. Используйте обычный вход."
+        elif new_password != new_password_confirm:
+            error_message = "Пароли не совпадают."
+        elif len(new_password) < 8:
+            error_message = "Пароль должен быть не менее 8 символов."
+        else:
+            if is_admin_registration:
+                target_user = create_admin_user_with_password(external_user_id, new_password)
+                login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
+                request.session["admin_fresh_auth"] = True
+            else:
+                target_user.set_password(new_password)
+                target_user.save()
+                login(request, target_user, backend='django.contrib.auth.backends.ModelBackend')
+                request.session["ai_testpanel_back_url"] = "/"
+            return redirect(next_url)
+
+        response = render(
+            request,
+            "ai/set-password.html",
+            {
+                "error_message": error_message,
+                "next_url": next_url,
+                "username": target_user.username if target_user else external_user_id,
+                "subtitle": subtitle,
+            },
+        )
+        response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response["Pragma"] = "no-cache"
+        return response
+
+    response = render(
+        request,
+        "ai/set-password.html",
+        {
+            "error_message": error_message,
+            "next_url": next_url,
+            "username": target_user.username if target_user else external_user_id,
+            "subtitle": subtitle,
         },
     )
     response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
