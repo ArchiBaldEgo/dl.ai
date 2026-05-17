@@ -1,5 +1,5 @@
 from django.contrib import admin
-from django.contrib.auth import logout as auth_logout
+from django.contrib.auth import logout as auth_logout, login as auth_login
 from django.contrib.admin.forms import AdminAuthenticationForm
 from django import forms
 from django.db.models import Q
@@ -68,6 +68,35 @@ def _get_my_prompt_admin_url(request):
     if _is_staff_or_superuser(request.user):
         return "/ai/admin/ai/prompt/"
     return "/ai/admin/ai/prompt/?mine=1"
+
+
+def _auto_login_from_external(request):
+    """
+    Проверяет, есть ли user_info от middleware (ExternalAuthMiddleware).
+    Если есть — автоматически логинит пользователя без пароля.
+    Возвращает True если удалось залогинить.
+    """
+    user_info = getattr(request, 'user_info', None)
+    if not user_info:
+        return False
+    
+    external_user_id = str(user_info.get('userId', ''))
+    if not external_user_id or external_user_id == "None":
+        return False
+    
+    try:
+        ext_account = ExternalDLAccount.objects.select_related('user').get(
+            external_user_id=external_user_id
+        )
+        user = ext_account.user
+        if user and user.is_active:
+            auth_login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+            request.session["admin_fresh_auth"] = True
+            return True
+    except ExternalDLAccount.DoesNotExist:
+        pass
+    
+    return False
 
 
 class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
@@ -486,10 +515,17 @@ admin.site.get_urls = _custom_admin_urls
 
 
 def _custom_has_permission(request):
-    # Prevent login view from auto-redirecting authenticated users to index.
-    # This avoids /admin -> /admin/login ping-pong when fresh-auth marker is missing.
+    # На странице логина — если пользователь уже аутентифицирован через middleware,
+    # автоматически пропускаем. Иначе очищаем сессию и требуем вход.
     if request.path.startswith("/ai/admin/login/"):
         if request.method != "POST":
+            # Если middleware уже залогинил пользователя — пропускаем
+            if request.user.is_authenticated and request.session.get("admin_fresh_auth"):
+                return True
+            # Если есть user_info от middleware, но пользователь не залогинен — пробуем автологин
+            if hasattr(request, 'user_info') and _auto_login_from_external(request):
+                return True
+            # Иначе — разлогиниваем и показываем форму
             if request.user.is_authenticated:
                 auth_logout(request)
             request.session.pop("admin_fresh_auth", None)
@@ -514,6 +550,11 @@ def _custom_admin_view(view, cacheable=False):
     wrapped_view = _default_admin_view(view, cacheable)
 
     def inner(request, *args, **kwargs):
+        # Если пользователь уже аутентифицирован через middleware, но нет fresh_auth — ставим
+        if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
+            if hasattr(request, 'user_info') or request.user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists():
+                request.session["admin_fresh_auth"] = True
+        
         # Check if user needs to set password
         if request.user.is_authenticated and (not request.user.has_usable_password()):
             # Allow only set-password view and logout

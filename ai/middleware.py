@@ -58,6 +58,8 @@ class ExternalAuthMiddleware:
             if user:
                 # Login user for web interface access
                 login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+                # Устанавливаем маркер свежей аутентификации для админки
+                request.session["admin_fresh_auth"] = True
                 if created:
                     logger.info(f"New user provisioned: {user.username} (external_id={user_info.get('userId')})")
         except Exception as e:
