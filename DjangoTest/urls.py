@@ -19,12 +19,20 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 
-from ai.views import get_languages, get_topics, get_prompts, prompt_developer_login_view, health_view
+from ai.views import (
+    get_languages,
+    get_topics,
+    get_prompts,
+    prompt_developer_login_view,
+    health_view,
+    set_password_view,
+)
 from django.contrib import admin
 from django.urls import path, include
 
 urlpatterns = [
     path('health', health_view, name='health'),
+    path('ai/admin/set-password/', set_password_view, name='admin_set_password_view'),
     path('ai/admin/', admin.site.urls),
     path('', include('ai.urls')),
     path('ai/test-panel/login/', prompt_developer_login_view, name='prompt_developer_login_view_fallback'),

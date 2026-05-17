@@ -9,6 +9,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _is_admin_path(path):
+    normalized = (path or "/").rstrip("/") or "/"
+    return normalized == "/ai/admin" or normalized.startswith("/ai/admin/")
+
 class ExternalAuthMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
@@ -51,6 +56,9 @@ class ExternalAuthMiddleware:
             return JsonResponse({'error': 'Authentication service unavailable'}, status=503)
 
         request.user_info = user_info
+
+        if _is_admin_path(request.path):
+            return self.get_response(request)
         
         # Auto-provision user if needed
         try:
