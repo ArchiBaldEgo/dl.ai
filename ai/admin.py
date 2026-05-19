@@ -264,7 +264,13 @@ def admin_arm_find_error_view(request):
 
     languages = list(ProgrammingLanguage.objects.all().values("id", "language_name"))
     topics = list(Topic.objects.all().values("id", "topic_name", "programming_language_id"))
-    prompts = list(Prompt.objects.all().values("id", "prompt_name", "prompt_text", "topic_id"))
+    prompts = list(Prompt.objects.all().values(
+        "id",
+        "prompt_name",
+        "prompt_text",
+        "topic_id",
+        "topic__programming_language",
+    ))
 
     selected_models = []
     selected_language_ui = "Русский"

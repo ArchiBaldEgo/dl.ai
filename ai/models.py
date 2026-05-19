@@ -60,7 +60,7 @@ class Topic(models.Model):
 
 # Модель препромпта
 class Prompt(models.Model):
-    topic = models.ForeignKey(Topic, on_delete=models.CASCADE, null = True)
+    topic = models.ForeignKey(Topic, on_delete=models.CASCADE, null=True, blank=True)
     prompt_text = models.TextField()
     prompt_name = models.CharField(max_length=255, null = True)
     owner = models.ForeignKey(

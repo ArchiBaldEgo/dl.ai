@@ -880,11 +880,29 @@
                     selectFirstIfSingle(topicSelect);
                 }
 
-                async function loadPrompts(topicId) {
+                function filterPrompts(prompts, languageId, topicId) {
+                    const languageValue = languageId ? String(languageId) : "";
+                    const topicValue = topicId ? String(topicId) : "";
+                    return prompts.filter(prompt => {
+                        const hasTopic = prompt.topic_id !== null && prompt.topic_id !== undefined && prompt.topic_id !== "";
+                        if (!hasTopic) {
+                            return true;
+                        }
+                        if (topicValue) {
+                            return String(prompt.topic_id) === topicValue;
+                        }
+                        if (!languageValue) {
+                            return false;
+                        }
+                        return String(prompt.topic__programming_language) === languageValue;
+                    });
+                }
+
+                async function loadPrompts(languageId, topicId) {
                     const prompts = await fetchData("/ai/api/prompts");
                     promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
                     if (prompts && prompts.length > 0) {
-                        const filteredPrompts = prompts.filter(prompt => prompt.topic_id == topicId);
+                        const filteredPrompts = filterPrompts(prompts, languageId, topicId);
                         filteredPrompts.forEach(prompt => {
                             const option = new Option(prompt.prompt_name, prompt.id);
                             promptSelect.appendChild(option);
@@ -899,18 +917,21 @@
                     promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
                     if (!isNaN(languageId)) {
                         await loadTopics(languageId);
+                        await loadPrompts(languageId, null);
+                    } else {
+                        await loadPrompts(null, null);
                     }
                 });
 
                 topicSelect.addEventListener("change", async () => {
                     const topicId = parseInt(topicSelect.value);
                     promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
-                    if (!isNaN(topicId)) {
-                        await loadPrompts(topicId);
-                    }
+                    const languageId = parseInt(languageSelect.value);
+                    await loadPrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
                 });
 
                 await loadLanguages();
+                await loadPrompts(null, null);
             });
 
             window.onload = function () {

@@ -302,36 +302,49 @@
         });
     }
 
-    function fillPrompts(topicId) {
-      promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
-      if (!topicId) {
-        return;
-      }
+    function filterPrompts(prompts, languageId, topicId) {
+      const languageValue = languageId ? String(languageId) : "";
+      const topicValue = topicId ? String(topicId) : "";
+      return prompts.filter(function (item) {
+        const hasTopic = item.topic_id !== null && item.topic_id !== undefined && item.topic_id !== "";
+        if (!hasTopic) {
+          return true;
+        }
+        if (topicValue) {
+          return String(item.topic_id) === topicValue;
+        }
+        if (!languageValue) {
+          return false;
+        }
+        return String(item.topic__programming_language) === languageValue;
+      });
+    }
 
-      prompts
-        .filter(function (item) { return String(item.topic_id) === String(topicId); })
-        .forEach(function (item) {
-          const option = document.createElement('option');
-          option.value = String(item.id);
-          option.textContent = item.prompt_name || ('Prompt #' + item.id);
-          if (selectedPrompt && String(item.id) === selectedPrompt) {
-            option.selected = true;
-          }
-          promptSelect.appendChild(option);
-        });
+    function fillPrompts(languageId, topicId) {
+      promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
+      filterPrompts(prompts, languageId, topicId).forEach(function (item) {
+        const option = document.createElement('option');
+        option.value = String(item.id);
+        option.textContent = item.prompt_name || ('Prompt #' + item.id);
+        if (selectedPrompt && String(item.id) === selectedPrompt) {
+          option.selected = true;
+        }
+        promptSelect.appendChild(option);
+      });
     }
 
     langSelect.addEventListener('change', function () {
       fillTopics(langSelect.value);
+      fillPrompts(langSelect.value, null);
     });
 
     topicSelect.addEventListener('change', function () {
-      fillPrompts(topicSelect.value);
+      fillPrompts(langSelect.value, topicSelect.value);
     });
 
     fillLanguages();
     fillTopics(langSelect.value);
-    fillPrompts(topicSelect.value);
+    fillPrompts(langSelect.value, topicSelect.value);
   })();
 
   function openArmModal(card) {
