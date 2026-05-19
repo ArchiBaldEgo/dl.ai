@@ -28,6 +28,7 @@ from .auth_backends import (
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 PROMPT_DEVELOPER_GROUP = "prompt_developer"
+ADMIN_LOGOUT_COOKIE_NAME = "ai_admin_logged_out"
 
 
 def _safe_relative_url(candidate, fallback):
@@ -35,6 +36,10 @@ def _safe_relative_url(candidate, fallback):
     if value.startswith("/") and not value.startswith("//"):
         return value
     return fallback
+
+
+def _is_admin_logout_forced(request):
+    return bool(request.COOKIES.get(ADMIN_LOGOUT_COOKIE_NAME))
 
 
 def _is_prompt_developer_user(request):
@@ -81,6 +86,9 @@ def _auto_login_from_external(request):
     Если есть — автоматически логинит пользователя без пароля.
     Возвращает True если удалось залогинить.
     """
+    if _is_admin_logout_forced(request):
+        return False
+
     external_user_id = get_external_user_id_from_request(request)
     if not external_user_id:
         return False
@@ -109,6 +117,12 @@ def _is_admin_auth_service_path(request):
 def _external_admin_entry_response(request):
     if request.method != "GET" or _is_admin_auth_service_path(request):
         return None
+
+    if _is_admin_logout_forced(request):
+        if request.session.get("admin_manual_login"):
+            return None
+        next_path = quote(request.get_full_path(), safe="/?=&")
+        return redirect(f"/ai/admin/login/?next={next_path}")
 
     external_user_id = get_external_user_id_from_request(request)
     if not external_user_id:
@@ -167,6 +181,7 @@ class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
             
             if getattr(self, "request", None) is not None:
                 self.request.session["admin_fresh_auth"] = True
+                self.request.session["admin_manual_login"] = True
             return
 
         raise forms.ValidationError(
@@ -500,6 +515,20 @@ def admin_my_prompt_view(request):
     return redirect(_get_my_prompt_admin_url(request))
 
 
+def admin_logout_view(request):
+    if request.method not in {"GET", "POST"}:
+        return HttpResponseNotAllowed(["GET", "POST"])
+
+    next_candidate = request.POST.get("next") if request.method == "POST" else request.GET.get("next")
+    next_url = _safe_relative_url(next_candidate, "/ai/admin/")
+    next_path = quote(next_url, safe="/?=&")
+
+    auth_logout(request)
+    response = redirect(f"/ai/admin/login/?next={next_path}")
+    response.set_cookie(ADMIN_LOGOUT_COOKIE_NAME, "1", path="/ai/admin/", samesite="Lax")
+    return response
+
+
 _default_get_urls = admin.site.get_urls
 
 
@@ -507,6 +536,11 @@ def _custom_admin_urls():
     from .views import set_password_view
 
     custom_urls = [
+        path(
+            "logout/",
+            admin_logout_view,
+            name="logout",
+        ),
         path(
             "set-password/",
             set_password_view,
@@ -559,6 +593,11 @@ def _custom_has_permission(request):
     # автоматически пропускаем. Иначе очищаем сессию и требуем вход.
     if request.path.startswith("/ai/admin/login/"):
         if request.method != "POST":
+            if _is_admin_logout_forced(request):
+                if request.user.is_authenticated:
+                    auth_logout(request)
+                request.session.pop("admin_fresh_auth", None)
+                return False
             # Если middleware уже залогинил пользователя — пропускаем
             if request.user.is_authenticated and request.session.get("admin_fresh_auth"):
                 return True
@@ -609,7 +648,10 @@ def _custom_admin_view(view, cacheable=False):
         if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
             next_path = quote(request.get_full_path(), safe="/?=&")
             return redirect(f"/ai/admin/login/?next={next_path}")
-        return wrapped_view(request, *args, **kwargs)
+        response = wrapped_view(request, *args, **kwargs)
+        if request.session.pop("admin_manual_login", None):
+            response.delete_cookie(ADMIN_LOGOUT_COOKIE_NAME, path="/ai/admin/")
+        return response
 
     return inner
 
