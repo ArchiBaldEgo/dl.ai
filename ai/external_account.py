@@ -34,6 +34,50 @@ def _extract_external_login(user_info: dict) -> str:
     return ""
 
 
+def _normalize_name(value) -> str:
+    return (value or "").strip()
+
+
+def _extract_first_last_name(user_info: dict) -> tuple[str, str]:
+    first_name = ""
+    last_name = ""
+
+    for key in ("firstName", "first_name", "firstname", "givenName", "given_name", "givenname"):
+        first_name = _normalize_name(user_info.get(key))
+        if first_name:
+            break
+
+    for key in ("lastName", "last_name", "lastname", "surname", "familyName", "family_name", "familyname"):
+        last_name = _normalize_name(user_info.get(key))
+        if last_name:
+            break
+
+    name_value = _normalize_name(user_info.get("name"))
+    if name_value and (not first_name and not last_name):
+        parts = [part for part in name_value.split() if part]
+        if len(parts) >= 2:
+            last_name = parts[0]
+            first_name = parts[1]
+        else:
+            first_name = name_value
+
+    full_name = ""
+    for key in ("fullName", "full_name", "fullname", "fio", "FIO", "displayName", "display_name"):
+        full_name = _normalize_name(user_info.get(key))
+        if full_name:
+            break
+
+    if full_name and (not first_name or not last_name):
+        parts = [part for part in full_name.split() if part]
+        if len(parts) >= 2:
+            last_name = last_name or parts[0]
+            first_name = first_name or parts[1]
+        elif len(parts) == 1 and not first_name:
+            first_name = parts[0]
+
+    return first_name, last_name
+
+
 def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
     """
     Get or create Django User from external DL API response.
@@ -49,6 +93,7 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
     """
     external_user_id = str(user_info.get('userId'))
     external_login = _extract_external_login(user_info)
+    external_first_name, external_last_name = _extract_first_last_name(user_info)
     
     if not external_user_id or external_user_id == "None":
         logger.error(f"Invalid user_info: userId={external_user_id}")
@@ -65,9 +110,17 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
         user = ext_account.user
         
         # Store latest external login if API provides it.
+        updates = {}
         if external_login and ext_account.external_login != external_login:
-            ext_account.external_login = external_login
-            ext_account.save(update_fields=['external_login'])
+            updates["external_login"] = external_login
+        if external_first_name and ext_account.external_first_name != external_first_name:
+            updates["external_first_name"] = external_first_name
+        if external_last_name and ext_account.external_last_name != external_last_name:
+            updates["external_last_name"] = external_last_name
+        if updates:
+            for key, value in updates.items():
+                setattr(ext_account, key, value)
+            ext_account.save(update_fields=list(updates.keys()))
 
         # Prefer external nickname as Django username when available.
         if external_login and user.username != external_login:
@@ -102,12 +155,25 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
                 defaults={
                     'user': user,
                     'external_login': external_login,
+                    'external_first_name': external_first_name,
+                    'external_last_name': external_last_name,
                 }
             )
         except IntegrityError as e:
             logger.error(f"Failed to create external account for user {user.username}: {e}")
             raise
     
+    if user:
+        user_updates = {}
+        if external_first_name and user.first_name != external_first_name:
+            user_updates["first_name"] = external_first_name
+        if external_last_name and user.last_name != external_last_name:
+            user_updates["last_name"] = external_last_name
+        if user_updates:
+            for key, value in user_updates.items():
+                setattr(user, key, value)
+            user.save(update_fields=list(user_updates.keys()))
+
     # Ensure user is in prompt_developer group
     try:
         from django.contrib.auth.models import Group

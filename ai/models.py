@@ -20,6 +20,18 @@ class ExternalDLAccount(models.Model):
         max_length=255,
         help_text="Last known login/nickname from dl.gsu.by"
     )
+    external_first_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="First name from dl.gsu.by"
+    )
+    external_last_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Last name from dl.gsu.by"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
