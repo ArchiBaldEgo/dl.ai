@@ -58,6 +58,11 @@ MODEL_CATALOG = (
         "handler_name": "ask_MiniMax_M2_5_async",
     },
     {
+        "key": "MiniMax_M2_7",
+        "title": "MiniMax-M2.7",
+        "handler_name": "ask_MiniMax_M2_7_async",
+    },
+    {
         "key": "Gemma_3_12b_it",
         "title": "gemma-3-12b-it",
         "handler_name": "ask_Gemma_3_12b_it_async",
@@ -92,6 +97,7 @@ MODEL_ALIASES = {
     "Meta-Llama-3.3-70B-Instruct": "Meta_Llama_3_3_70B_Instruct",
     "Llama-4-Maverick-17B-128E-Instruct": "Llama_4_Maverick_17B_128E_Instruct",
     "MiniMax-M2.5": "MiniMax_M2_5",
+    "MiniMax-M2.7": "MiniMax_M2_7",
     "gemma-3-12b-it": "Gemma_3_12b_it",
     "gpt-oss-120b": "Gpt_oss_120b",
     "QwQ_32B": "DeepSeek_R1_Distill_Llama_70B",

@@ -2,7 +2,7 @@ import os
 from urllib.parse import unquote
 from dotenv import load_dotenv
 import requests
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponseRedirect
 from django.contrib.auth import login
 from .external_account import get_or_create_user_from_external
 import logging
@@ -20,6 +20,7 @@ class ExternalAuthMiddleware:
         load_dotenv()
         self.api_url = os.getenv('EXTERNAL_AUTH_API_URL')
         self.session_cookie_name = os.getenv('EXTERNAL_SESSION_COOKIE_NAME', 'DLSID')
+        self.redirect_url = os.getenv('EXTERNAL_AUTH_REDIRECT_URL', 'https://dl.gsu.by')
         skip_paths = os.getenv('EXTERNAL_AUTH_SKIP_PATHS', '')
         self.skip_paths = [p.strip() for p in skip_paths.split(',') if p.strip()]
         logger.info(f"Middleware init: skip_paths={self.skip_paths}")
@@ -34,7 +35,7 @@ class ExternalAuthMiddleware:
 
         raw_session_id = request.COOKIES.get(self.session_cookie_name)
         if not raw_session_id:
-            return JsonResponse({'error': 'Unauthorized: missing session cookie'}, status=401)
+            return HttpResponseRedirect(self.redirect_url)
 
         session_id = unquote(raw_session_id)
         logger.debug("Session ID decoded")
@@ -47,7 +48,7 @@ class ExternalAuthMiddleware:
                 timeout=10     
             )
             if response.status_code == 401:
-                return JsonResponse({'error': 'Unauthorized: invalid or expired session'}, status=401)
+                return HttpResponseRedirect(self.redirect_url)
             response.raise_for_status()
             user_info = response.json()
             logger.info(f"API response: {user_info}")

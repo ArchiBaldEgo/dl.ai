@@ -458,6 +458,15 @@ async def ask_MiniMax_M2_5_async(messages: str, user_id: int) -> Tuple[str, Opti
     )
 
 
+async def ask_MiniMax_M2_7_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    return await _ask_sambanova_model_async(
+        messages,
+        user_id,
+        SAMBANOVA_MODEL_MINIMAX_M2_7,
+        max_tokens=9000,
+    )
+
+
 async def ask_Gemma_3_12b_it_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
     return await _ask_sambanova_model_async(
         messages,

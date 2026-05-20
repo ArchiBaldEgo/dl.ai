@@ -186,6 +186,10 @@ class MyConsumer(AsyncWebsocketConsumer):
                         ask_MiniMax_M2_5_async,
                         "MiniMax-M2.5",
                     ),
+                    "MiniMax_M2_7": (
+                        ask_MiniMax_M2_7_async,
+                        "MiniMax-M2.7",
+                    ),
                     "Gemma_3_12b_it": (
                         ask_Gemma_3_12b_it_async,
                         "gemma-3-12b-it",
