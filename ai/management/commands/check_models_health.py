@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand, CommandError
 
-from ai.model_health import get_available_model_options, run_model_health_check
+from ai.model_health import get_model_status_rows, run_model_health_check
 
 
 class Command(BaseCommand):
@@ -16,7 +16,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         try:
             updated = run_model_health_check(force=options["force"])
-            available = get_available_model_options()
+            rows = get_model_status_rows()
         except Exception as exc:
             raise CommandError(f"Model health check failed: {exc}") from exc
 
@@ -25,9 +25,9 @@ class Command(BaseCommand):
         else:
             self.stdout.write("Model health check is already up-to-date for current window.")
 
-        if available:
-            self.stdout.write("Available models:")
-            for model in available:
-                self.stdout.write(f"- {model['title']} ({model['key']})")
+        if rows:
+            self.stdout.write("Model statuses:")
+            for row in rows:
+                self.stdout.write(f"- {row['title']}: {row['status_label']}")
         else:
-            self.stdout.write(self.style.WARNING("No models are available in current window."))
+            self.stdout.write(self.style.WARNING("No model status data found."))
