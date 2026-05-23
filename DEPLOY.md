@@ -50,6 +50,7 @@ nano .env
 - `CSRF_COOKIE_PATH=/ai/`
 - `SESSION_COOKIE_PATH=/ai/`
 - `CSRF_USE_SESSIONS=1`
+- (опционально) Фоллбек, если остались старые `csrftoken` cookies: их значения будут мигрироваться в сессию автоматически.
 - Если используете и `dl.gsu.by`, и `dlai.gsu.by`, дополнительно задайте:
   - `CSRF_COOKIE_DOMAIN=.gsu.by`
   - `SESSION_COOKIE_DOMAIN=.gsu.by`

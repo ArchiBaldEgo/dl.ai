@@ -2,8 +2,10 @@ import os
 from urllib.parse import unquote
 from dotenv import load_dotenv
 import requests
-from django.http import JsonResponse, HttpResponseRedirect
+from django.conf import settings
 from django.contrib.auth import login
+from django.http import JsonResponse, HttpResponseRedirect
+from django.middleware import csrf
 from .external_account import get_or_create_user_from_external
 import logging
 
@@ -13,6 +15,28 @@ logger = logging.getLogger(__name__)
 def _is_admin_path(path):
     normalized = (path or "/").rstrip("/") or "/"
     return normalized == "/ai/admin" or normalized.startswith("/ai/admin/")
+
+
+class CsrfSessionFallbackMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.use_sessions = bool(getattr(settings, "CSRF_USE_SESSIONS", False))
+        self.primary_cookie_name = getattr(settings, "CSRF_COOKIE_NAME", "csrftoken")
+        self.fallback_cookie_names = []
+        if self.primary_cookie_name != "csrftoken":
+            self.fallback_cookie_names.append("csrftoken")
+
+    def __call__(self, request):
+        if self.use_sessions and hasattr(request, "session"):
+            if csrf.CSRF_SESSION_KEY not in request.session:
+                for name in [self.primary_cookie_name, *self.fallback_cookie_names]:
+                    value = request.COOKIES.get(name)
+                    if value:
+                        request.session[csrf.CSRF_SESSION_KEY] = value
+                        request.session.modified = True
+                        break
+        return self.get_response(request)
+
 
 class ExternalAuthMiddleware:
     def __init__(self, get_response):
