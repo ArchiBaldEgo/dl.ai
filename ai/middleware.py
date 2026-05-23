@@ -89,10 +89,11 @@ class ExternalAuthMiddleware:
         try:
             user, created = get_or_create_user_from_external(user_info)
             if user:
-                # Login user for web interface access
-                login(request, user, backend='django.contrib.auth.backends.ModelBackend')
-                # Устанавливаем маркер свежей аутентификации для админки
-                request.session["admin_fresh_auth"] = True
+                # Avoid rotating CSRF/session on every request when already authenticated.
+                if not request.user.is_authenticated or request.user.pk != user.pk:
+                    login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+                    # Устанавливаем маркер свежей аутентификации для админки
+                    request.session["admin_fresh_auth"] = True
                 if created:
                     logger.info(f"New user provisioned: {user.username} (external_id={user_info.get('userId')})")
         except Exception as e:
