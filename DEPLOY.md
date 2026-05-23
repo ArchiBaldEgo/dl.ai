@@ -45,6 +45,10 @@ nano .env
 - `DEBUG=0`
 - `ALLOWED_HOSTS=dl.gsu.by,dlai.gsu.by`
 - `CSRF_TRUSTED_ORIGINS=https://dl.gsu.by,https://dlai.gsu.by`
+- `CSRF_COOKIE_NAME=ai_csrftoken`
+- `SESSION_COOKIE_NAME=ai_sessionid`
+- `CSRF_COOKIE_PATH=/ai/`
+- `SESSION_COOKIE_PATH=/ai/`
 - `USE_X_FORWARDED_PROTO=1` (если TLS терминируется на nginx/прокси)
 
 Если прокси вам не нужен (или имя прокси не резолвится на сервере), оставьте `HTTP_PROXY/HTTPS_PROXY/PROXY` пустыми или удалите эти строки.
