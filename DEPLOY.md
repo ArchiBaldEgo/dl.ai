@@ -49,6 +49,7 @@ nano .env
 - `SESSION_COOKIE_NAME=ai_sessionid`
 - `CSRF_COOKIE_PATH=/ai/`
 - `SESSION_COOKIE_PATH=/ai/`
+- `CSRF_USE_SESSIONS=1`
 - Если используете и `dl.gsu.by`, и `dlai.gsu.by`, дополнительно задайте:
   - `CSRF_COOKIE_DOMAIN=.gsu.by`
   - `SESSION_COOKIE_DOMAIN=.gsu.by`
