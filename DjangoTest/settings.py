@@ -124,6 +124,8 @@ CSRF_COOKIE_NAME = os.getenv("CSRF_COOKIE_NAME", "ai_csrftoken")
 SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "ai_sessionid")
 CSRF_COOKIE_PATH = os.getenv("CSRF_COOKIE_PATH", "/ai/")
 SESSION_COOKIE_PATH = os.getenv("SESSION_COOKIE_PATH", "/ai/")
+CSRF_COOKIE_DOMAIN = os.getenv("CSRF_COOKIE_DOMAIN") or None
+SESSION_COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN") or None
 
 # If you terminate TLS at a reverse proxy (nginx, etc.), enable this.
 if _env_bool("USE_X_FORWARDED_PROTO", default=not DEBUG):

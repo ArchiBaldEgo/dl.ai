@@ -49,6 +49,9 @@ nano .env
 - `SESSION_COOKIE_NAME=ai_sessionid`
 - `CSRF_COOKIE_PATH=/ai/`
 - `SESSION_COOKIE_PATH=/ai/`
+- Если используете и `dl.gsu.by`, и `dlai.gsu.by`, дополнительно задайте:
+  - `CSRF_COOKIE_DOMAIN=.gsu.by`
+  - `SESSION_COOKIE_DOMAIN=.gsu.by`
 - `USE_X_FORWARDED_PROTO=1` (если TLS терминируется на nginx/прокси)
 
 Если прокси вам не нужен (или имя прокси не резолвится на сервере), оставьте `HTTP_PROXY/HTTPS_PROXY/PROXY` пустыми или удалите эти строки.
