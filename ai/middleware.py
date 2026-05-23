@@ -92,6 +92,7 @@ class ExternalAuthMiddleware:
                 # Avoid rotating CSRF/session on every request when already authenticated.
                 if not request.user.is_authenticated or request.user.pk != user.pk:
                     login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+                    csrf.rotate_token(request)
                     # Устанавливаем маркер свежей аутентификации для админки
                     request.session["admin_fresh_auth"] = True
                 if created:

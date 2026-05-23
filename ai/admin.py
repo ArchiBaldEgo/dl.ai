@@ -4,6 +4,7 @@ from django.contrib.admin.forms import AdminAuthenticationForm
 from django import forms
 from django.db.models import Q
 from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
+from django.middleware import csrf
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path
@@ -98,6 +99,7 @@ def _auto_login_from_external(request):
         return False
 
     auth_login(request, user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
+    csrf.rotate_token(request)
     request.session["admin_fresh_auth"] = True
     return True
 

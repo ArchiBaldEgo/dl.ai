@@ -6,6 +6,7 @@ from django.http import JsonResponse
 from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound
 from django.db import ProgrammingError
 from django.contrib.staticfiles import finders
+from django.middleware import csrf
 from functools import wraps
 from .model_health import get_available_model_options
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings, ExternalDLAccount
@@ -68,6 +69,7 @@ def prompt_developer_login_view(request):
         if user and user.is_active and user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists():
             request.session["ai_testpanel_back_url"] = back_url
             login(request, user)
+            csrf.rotate_token(request)
             return redirect(next_url)
 
         error_message = "Неверный логин/пароль или у пользователя нет группы prompt_developer."
@@ -128,6 +130,7 @@ def legacy_set_password_view(request):
             target_user.set_password(new_password)
             target_user.save()
             login(request, target_user, backend='django.contrib.auth.backends.ModelBackend')
+            csrf.rotate_token(request)
             request.session["ai_testpanel_back_url"] = "/"
             return redirect(next_url)
 
@@ -197,6 +200,7 @@ def set_password_view(request):
         if is_admin_registration and target_user and target_user.has_usable_password():
             ensure_prompt_developer_group(target_user)
             login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
+            csrf.rotate_token(request)
             request.session["admin_fresh_auth"] = True
             return redirect(next_url)
 
@@ -212,11 +216,13 @@ def set_password_view(request):
             if is_admin_registration:
                 target_user = create_admin_user_with_password(external_user_id, new_password)
                 login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
+                csrf.rotate_token(request)
                 request.session["admin_fresh_auth"] = True
             else:
                 target_user.set_password(new_password)
                 target_user.save()
                 login(request, target_user, backend='django.contrib.auth.backends.ModelBackend')
+                csrf.rotate_token(request)
                 request.session["ai_testpanel_back_url"] = "/"
             return redirect(next_url)
 
