@@ -244,13 +244,24 @@ class PromptAdminAccessTests(TestCase):
         self.assertEqual(editable_fields, ())
         self.assertEqual(readonly_fields, ("programming_language", "topic", "prompt_name", "prompt_text"))
 
-    def test_prompt_developer_queryset_shows_only_owned_prompts(self):
+    def test_prompt_developer_queryset_shows_all_prompts(self):
         request = self._build_request(self.prompt_developer)
         prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
 
-        self.assertIn(self.editable_prompt.id, prompt_ids)
-        self.assertNotIn(self.legacy_assigned_prompt.id, prompt_ids)
-        self.assertNotIn(self.readonly_prompt.id, prompt_ids)
+        self.assertEqual(
+            prompt_ids,
+            {
+                self.editable_prompt.id,
+                self.readonly_prompt.id,
+                self.legacy_assigned_prompt.id,
+            },
+        )
+
+    def test_prompt_developer_queryset_can_filter_mine(self):
+        request = self._build_request(self.prompt_developer, query_params={"mine": "1"})
+        prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
+
+        self.assertEqual(prompt_ids, {self.editable_prompt.id})
 
     def test_staff_user_sees_only_own_prompts(self):
         request = self._build_request(self.staff_user)
