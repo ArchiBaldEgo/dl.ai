@@ -966,6 +966,10 @@ class PromptAdmin(admin.ModelAdmin):
     programming_language_name.short_description = "Language"
     programming_language_name.admin_order_field = "topic__programming_language__language_name"
 
+    def programming_language(self, obj):
+        return self.programming_language_name(obj)
+    programming_language.short_description = "Programming language"
+
     def owner_user_id(self, obj):
         return obj.owner_id or "-"
     owner_user_id.short_description = "userId"
