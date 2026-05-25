@@ -851,7 +851,6 @@ class PromptUserIdFilter(admin.SimpleListFilter):
 class PromptAdmin(admin.ModelAdmin):
     form = PromptForm
     list_display = (
-        'id',
         'prompt_name',
         'programming_language_name',
         'topic',
@@ -859,6 +858,7 @@ class PromptAdmin(admin.ModelAdmin):
         'owner_username',
         'short_prompt_text',
     )
+    list_display_links = ('prompt_name',)
     list_filter = (PromptUserIdFilter, 'topic__programming_language', 'topic')
     list_per_page = 25
     search_fields = ('prompt_name', 'prompt_text', 'owner__username', '=owner__id')
