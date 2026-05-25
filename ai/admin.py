@@ -78,10 +78,12 @@ def _can_access_prompt_admin(request):
 
 
 def _get_my_prompt_admin_url(request):
-    return "/ai/admin/ai/prompt/?mine=1"
+    return "/ai/admin/prompts/my/"
 
 
 def _is_mine_only_request(request):
+    if getattr(request, "_mine_only", False):
+        return True
     value = (request.GET.get("mine") or "").strip().lower()
     return value in {"1", "true", "yes"}
 
@@ -543,7 +545,11 @@ def admin_model_status_refresh_view(request):
 def admin_my_prompt_view(request):
     if not _can_access_prompt_admin(request):
         return HttpResponseForbidden("Access denied")
-    return redirect(_get_my_prompt_admin_url(request))
+    request._mine_only = True
+    prompt_admin = admin.site._registry.get(Prompt)
+    if prompt_admin is None:
+        return HttpResponse("Prompt admin is not registered", status=404)
+    return prompt_admin.changelist_view(request, extra_context={"mine_only": True})
 
 
 def admin_logout_view(request):
@@ -872,6 +878,11 @@ class PromptAdmin(admin.ModelAdmin):
                 return queryset.none()
             return queryset.filter(owner_id=user.pk)
         return queryset
+
+    def lookup_allowed(self, lookup, value, request=None):
+        if lookup == "mine":
+            return True
+        return super().lookup_allowed(lookup, value)
 
     def _can_edit_prompt(self, request, obj):
         if not (_is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)):
