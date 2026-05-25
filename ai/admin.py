@@ -261,10 +261,12 @@ def _prepare_arm_run_payload(form_state, user=None):
         id=form_state["selected_prog_lng"]
     ).values_list("language_name", flat=True).first() or "Python"
 
-    prompt_text = _prompt_queryset_for_user(
-        Prompt.objects.all(),
-        user,
-    ).filter(id=form_state["selected_prompt"]).values_list("prompt_text", flat=True).first() or ""
+    prompt_text = (
+        Prompt.objects.filter(id=form_state["selected_prompt"])
+        .values_list("prompt_text", flat=True)
+        .first()
+        or ""
+    )
 
     message = _build_find_error_message(
         task_text=task_text,
@@ -287,8 +289,7 @@ def admin_arm_find_error_view(request):
     languages = list(ProgrammingLanguage.objects.all().values("id", "language_name"))
     topics = list(Topic.objects.all().values("id", "topic_name", "programming_language_id"))
     prompts = list(
-        _prompt_queryset_for_user(Prompt.objects.all(), request.user)
-        .select_related("topic")
+        Prompt.objects.select_related("topic")
         .order_by("prompt_name", "id")
         .values(
             "id",

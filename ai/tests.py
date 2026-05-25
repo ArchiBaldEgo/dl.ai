@@ -278,8 +278,8 @@ class PromptAdminAccessTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Editable prompt")
-        self.assertNotContains(response, "Readonly prompt")
-        self.assertNotContains(response, "Legacy assigned prompt")
+        self.assertContains(response, "Readonly prompt")
+        self.assertContains(response, "Legacy assigned prompt")
 
     def test_superuser_queryset_shows_all_prompts(self):
         superuser = get_user_model().objects.create_superuser(

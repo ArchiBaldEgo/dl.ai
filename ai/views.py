@@ -326,8 +326,11 @@ def get_topics(request):
 
 
 def get_prompts(request):
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+
     prompts = list(
-        _prompt_queryset_for_user(getattr(request, "user", None))
+        Prompt.objects.select_related("topic", "topic__programming_language", "owner")
         .order_by("prompt_name", "id")
         .values(
             'id',
