@@ -676,10 +676,10 @@ def _custom_admin_view(view, cacheable=False):
             if hasattr(request, 'user_info') or request.user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists():
                 request.session["admin_fresh_auth"] = True
         
-        # Check if user needs to set password
+        # Check if user needs to set password (avoid breaking POST saves)
         if request.user.is_authenticated and (not request.user.has_usable_password()):
-            # Allow only set-password view and logout
-            if not request.path.startswith("/ai/admin/set-password/"):
+            # Allow only set-password view and logout; skip redirect for POST
+            if not request.path.startswith("/ai/admin/set-password/") and request.method == "GET":
                 next_path = quote(request.get_full_path(), safe="/?=&")
                 return redirect(f"/ai/admin/set-password/?next={next_path}")
         
