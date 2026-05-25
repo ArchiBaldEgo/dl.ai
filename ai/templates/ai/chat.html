@@ -74,7 +74,8 @@
             </ul>
             <div class="dv">
                 <div class="resize-button" onmousedown="startResize(event)">🠔 </div>
-                <form action="" onsubmit="sendMessage(event)">
+                <form action="" method="post" onsubmit="sendMessage(event)">
+                    {% csrf_token %}
                     <textarea type="text" id="messageText"
                         placeholder="Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)"
                         autocomplete="off"></textarea>

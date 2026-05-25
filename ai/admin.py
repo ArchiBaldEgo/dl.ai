@@ -1,9 +1,10 @@
+import csv
 from django.contrib import admin
-from django.contrib.auth import authenticate, logout as auth_logout, login as auth_login
+from django.contrib.auth import authenticate, get_user_model, logout as auth_logout, login as auth_login
 from django.contrib.admin.forms import AdminAuthenticationForm
 from django import forms
 from django.db.models import Q
-from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
+from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.middleware import csrf
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
@@ -30,6 +31,7 @@ from .auth_backends import (
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 PROMPT_DEVELOPER_GROUP = "prompt_developer"
 ADMIN_LOGOUT_COOKIE_NAME = "ai_admin_logged_out"
+User = get_user_model()
 
 
 def _safe_relative_url(candidate, fallback):
@@ -76,9 +78,17 @@ def _can_access_prompt_admin(request):
 
 
 def _get_my_prompt_admin_url(request):
-    if _is_staff_or_superuser(request.user):
+    if request.user.is_superuser:
         return "/ai/admin/ai/prompt/"
     return "/ai/admin/ai/prompt/?mine=1"
+
+
+def _prompt_queryset_for_user(queryset, user):
+    if not user or not user.is_authenticated:
+        return queryset.none()
+    if user.is_superuser:
+        return queryset
+    return queryset.filter(Q(owner=user) | Q(editors=user)).distinct()
 
 
 def _auto_login_from_external(request):
@@ -227,7 +237,7 @@ def _collect_arm_form_state(request):
     }
 
 
-def _prepare_arm_run_payload(form_state):
+def _prepare_arm_run_payload(form_state, user=None):
     selected_models = form_state["selected_models"]
     task_text = form_state["task_text"]
     code_text = form_state["code_text"]
@@ -242,9 +252,10 @@ def _prepare_arm_run_payload(form_state):
         id=form_state["selected_prog_lng"]
     ).values_list("language_name", flat=True).first() or "Python"
 
-    prompt_text = Prompt.objects.filter(
-        id=form_state["selected_prompt"]
-    ).values_list("prompt_text", flat=True).first() or ""
+    prompt_text = _prompt_queryset_for_user(
+        Prompt.objects.all(),
+        user,
+    ).filter(id=form_state["selected_prompt"]).values_list("prompt_text", flat=True).first() or ""
 
     message = _build_find_error_message(
         task_text=task_text,
@@ -266,13 +277,18 @@ def admin_arm_find_error_view(request):
 
     languages = list(ProgrammingLanguage.objects.all().values("id", "language_name"))
     topics = list(Topic.objects.all().values("id", "topic_name", "programming_language_id"))
-    prompts = list(Prompt.objects.all().values(
-        "id",
-        "prompt_name",
-        "prompt_text",
-        "topic_id",
-        "topic__programming_language",
-    ))
+    prompts = list(
+        _prompt_queryset_for_user(Prompt.objects.all(), request.user)
+        .select_related("topic")
+        .order_by("prompt_name", "id")
+        .values(
+            "id",
+            "prompt_name",
+            "prompt_text",
+            "topic_id",
+            "topic__programming_language",
+        )
+    )
 
     selected_models = []
     selected_language_ui = "Русский"
@@ -297,7 +313,7 @@ def admin_arm_find_error_view(request):
         task_text = form_state["task_text"]
         code_text = form_state["code_text"]
 
-        run_payload, error_message = _prepare_arm_run_payload(form_state)
+        run_payload, error_message = _prepare_arm_run_payload(form_state, request.user)
         if not error_message:
             run_id, start_error = start_arm_sequential_run(
                 run_payload["message"],
@@ -356,7 +372,7 @@ def admin_arm_find_error_start_view(request):
         return HttpResponseNotAllowed(["POST"])
 
     form_state = _collect_arm_form_state(request)
-    run_payload, error_message = _prepare_arm_run_payload(form_state)
+    run_payload, error_message = _prepare_arm_run_payload(form_state, request.user)
     if error_message:
         return JsonResponse({"ok": False, "message": error_message}, status=400)
 
@@ -766,9 +782,15 @@ class PromptForm(forms.ModelForm):
 class PromptInline(admin.TabularInline):
     model = Prompt
     form = PromptForm
-    extra = 1
-    fields = ('prompt_name',)  # Показываем только нужные поля
-    classes = ('collapse',)  # Делаем сворачиваемым
+    extra = 0
+    fields = ('prompt_name',)
+    classes = ('collapse',)
+
+    def get_queryset(self, request):
+        return _prompt_queryset_for_user(
+            super().get_queryset(request).select_related("owner"),
+            request.user,
+        )
 
 # Inline для Topic (исправлено: было "ininlines")
 class TopicInline(admin.TabularInline):
@@ -789,32 +811,60 @@ class TopicAdmin(admin.ModelAdmin):
     search_fields = ('topic_name',)
     raw_id_fields = ('programming_language',)  # Для удобства при многих языках
 
+
+class PromptUserIdFilter(admin.SimpleListFilter):
+    title = "userId"
+    parameter_name = "user_id"
+
+    def lookups(self, request, model_admin):
+        if not request.user.is_superuser:
+            return ()
+
+        users = (
+            User.objects.filter(Q(owned_prompts__isnull=False) | Q(editable_prompts__isnull=False))
+            .distinct()
+            .order_by("id")
+        )
+        return [(str(user.id), f"{user.id}: {user.get_username()}") for user in users]
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if not value:
+            return queryset
+        return queryset.filter(Q(owner_id=value) | Q(editors__id=value)).distinct()
+
+
 class PromptAdmin(admin.ModelAdmin):
     form = PromptForm
-    list_display = ('prompt_name', 'topic', 'owner_username', 'assigned_editors', 'short_prompt_text')
-    list_filter = ('topic__programming_language', 'topic')
-    search_fields = ('prompt_name', 'prompt_text')
-    filter_horizontal = ("editors",)
+    list_display = (
+        'id',
+        'prompt_name',
+        'programming_language_name',
+        'topic',
+        'owner_user_id',
+        'owner_username',
+        'short_prompt_text',
+    )
+    list_filter = (PromptUserIdFilter, 'topic__programming_language', 'topic')
+    list_per_page = 25
+    search_fields = ('prompt_name', 'prompt_text', 'owner__username', '=owner__id')
+    autocomplete_fields = ("owner", "editors")
+    actions = ("export_prompts_csv",)
+    date_hierarchy = "created_at" if any(field.name == "created_at" for field in Prompt._meta.fields) else None
 
     def get_queryset(self, request):
         queryset = (
             super()
             .get_queryset(request)
-            .select_related("topic", "owner")
+            .select_related("topic", "topic__programming_language", "owner")
             .prefetch_related("editors")
         )
-        mine_mode = (request.GET.get("mine") or "").strip() == "1"
-        if mine_mode and not _is_staff_or_superuser(request.user):
-            queryset = queryset.filter(
-                Q(owner=request.user)
-                | Q(owner__isnull=True, editors=request.user)
-            ).distinct()
-        return queryset
+        return _prompt_queryset_for_user(queryset, request.user)
 
     def _can_edit_prompt(self, request, obj):
-        if _is_staff_or_superuser(request.user):
+        if request.user.is_superuser:
             return True
-        if not _is_prompt_developer_user(request):
+        if not (_is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)):
             return False
         if obj is None:
             return True
@@ -828,9 +878,11 @@ class PromptAdmin(admin.ModelAdmin):
         return _is_prompt_developer_user(request)
 
     def has_view_permission(self, request, obj=None):
-        if _is_staff_or_superuser(request.user):
+        if request.user.is_superuser:
             return True
-        return _is_prompt_developer_user(request)
+        if obj is None:
+            return _is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)
+        return self._can_edit_prompt(request, obj)
 
     def has_change_permission(self, request, obj=None):
         return self._can_edit_prompt(request, obj)
@@ -839,12 +891,16 @@ class PromptAdmin(admin.ModelAdmin):
         return _is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)
 
     def has_delete_permission(self, request, obj=None):
-        return _is_staff_or_superuser(request.user)
+        return request.user.is_superuser
 
-    def get_fields(self, request, obj=None):
-        if _is_staff_or_superuser(request.user):
-            return ("programming_language", "topic", "prompt_name", "prompt_text", "owner", "editors")
-        return ("programming_language", "topic", "prompt_name", "prompt_text")
+    def get_fieldsets(self, request, obj=None):
+        main_fields = ("programming_language", "topic", "prompt_name", "prompt_text")
+        if request.user.is_superuser:
+            return (
+                (None, {"fields": main_fields}),
+                ("Access", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
+            )
+        return ((None, {"fields": main_fields}),)
 
     def get_readonly_fields(self, request, obj=None):
         if _is_staff_or_superuser(request.user):
@@ -854,16 +910,43 @@ class PromptAdmin(admin.ModelAdmin):
         return ("programming_language", "topic", "prompt_name", "prompt_text")
 
     def save_model(self, request, obj, form, change):
-        if not _is_staff_or_superuser(request.user) and not change and not obj.owner_id:
+        if not request.user.is_superuser and not change and not obj.owner_id:
             obj.owner = request.user
         super().save_model(request, obj, form, change)
-        if not _is_staff_or_superuser(request.user):
+        if not request.user.is_superuser:
             obj.editors.add(request.user)
 
-    def assigned_editors(self, obj):
-        usernames = sorted(obj.editors.values_list("username", flat=True))
-        return ", ".join(usernames) if usernames else "-"
-    assigned_editors.short_description = "Editors"
+    def export_prompts_csv(self, request, queryset):
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="prompts.csv"'
+        writer = csv.writer(response)
+        writer.writerow(["id", "prompt_name", "language", "topic", "owner_id", "owner_username", "prompt_text"])
+        for prompt in queryset.select_related("topic", "topic__programming_language", "owner"):
+            topic = prompt.topic
+            language = topic.programming_language.language_name if topic and topic.programming_language else ""
+            writer.writerow([
+                prompt.id,
+                prompt.prompt_name or "",
+                language,
+                topic.topic_name if topic else "",
+                prompt.owner_id or "",
+                prompt.owner.username if prompt.owner else "",
+                prompt.prompt_text,
+            ])
+        return response
+    export_prompts_csv.short_description = "Export selected prompts to CSV"
+
+    def programming_language_name(self, obj):
+        if obj.topic and obj.topic.programming_language:
+            return obj.topic.programming_language.language_name
+        return "-"
+    programming_language_name.short_description = "Language"
+    programming_language_name.admin_order_field = "topic__programming_language__language_name"
+
+    def owner_user_id(self, obj):
+        return obj.owner_id or "-"
+    owner_user_id.short_description = "userId"
+    owner_user_id.admin_order_field = "owner_id"
 
     def owner_username(self, obj):
         return obj.owner.username if obj.owner else "-"

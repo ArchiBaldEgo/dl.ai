@@ -442,6 +442,17 @@
         .replace(/'/g, '&#039;');
     }
 
+    function getCookie(name) {
+      const cookieValue = document.cookie
+        .split('; ')
+        .find(function (row) { return row.startsWith(name + '='); });
+      return cookieValue ? decodeURIComponent(cookieValue.split('=').slice(1).join('=')) : '';
+    }
+
+    function getCsrfToken() {
+      return getCookie('csrftoken') || csrfInput.value;
+    }
+
     function renderReport(report) {
       if (!report) {
         reportList.innerHTML = '';
@@ -535,6 +546,7 @@
       try {
         const response = await fetch(`{{ arm_find_error_status_url }}?run_id=${encodeURIComponent(currentRunId)}`, {
           method: 'GET',
+          credentials: 'same-origin',
           headers: {
             'X-Requested-With': 'XMLHttpRequest',
           },
@@ -581,8 +593,9 @@
       try {
         const response = await fetch('{{ arm_find_error_start_url }}', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: {
-            'X-CSRFToken': csrfInput.value,
+            'X-CSRFToken': getCsrfToken(),
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
             'X-Requested-With': 'XMLHttpRequest',
           },
@@ -639,6 +652,13 @@
       message.className = isError ? 'arm-error' : 'arm-success';
     }
 
+    function getCookie(name) {
+      const cookieValue = document.cookie
+        .split('; ')
+        .find(function (row) { return row.startsWith(name + '='); });
+      return cookieValue ? decodeURIComponent(cookieValue.split('=').slice(1).join('=')) : '';
+    }
+
     button.addEventListener('click', async function () {
       if (button.disabled) {
         return;
@@ -650,8 +670,9 @@
       try {
         const response = await fetch('{{ arm_model_status_refresh_url }}', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: {
-            'X-CSRFToken': csrfInput.value,
+            'X-CSRFToken': getCookie('csrftoken') || csrfInput.value,
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
             'X-Requested-With': 'XMLHttpRequest',
           },
