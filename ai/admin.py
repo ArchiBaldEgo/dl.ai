@@ -81,6 +81,11 @@ def _get_my_prompt_admin_url(request):
     return "/ai/admin/ai/prompt/?mine=1"
 
 
+def _is_mine_only_request(request):
+    value = (request.GET.get("mine") or "").strip().lower()
+    return value in {"1", "true", "yes"}
+
+
 def _prompt_queryset_for_user(queryset, user):
     if not user or not user.is_authenticated:
         return queryset.none()
@@ -861,9 +866,11 @@ class PromptAdmin(admin.ModelAdmin):
             .select_related("topic", "topic__programming_language", "owner")
             .prefetch_related("editors")
         )
-        mine_only = (request.GET.get("mine") or "").strip().lower() in {"1", "true", "yes"}
-        if mine_only:
-            return _prompt_queryset_for_user(queryset, request.user)
+        if _is_mine_only_request(request):
+            user = getattr(request, "user", None)
+            if not user or not user.is_authenticated:
+                return queryset.none()
+            return queryset.filter(owner_id=user.pk)
         return queryset
 
     def _can_edit_prompt(self, request, obj):
