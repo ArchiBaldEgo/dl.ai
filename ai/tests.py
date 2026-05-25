@@ -211,7 +211,9 @@ class PromptAdminAccessTests(TestCase):
         self.assertTrue(self.prompt_admin.has_change_permission(request, self.editable_prompt))
         self.assertFalse(self.prompt_admin.has_change_permission(request, self.legacy_assigned_prompt))
         self.assertFalse(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
-        self.assertFalse(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
+        self.assertTrue(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
+        self.assertTrue(self.prompt_admin.has_delete_permission(request, self.editable_prompt))
+        self.assertFalse(self.prompt_admin.has_delete_permission(request, self.readonly_prompt))
 
     def test_prompt_developer_can_add_prompt_and_becomes_owner(self):
         request = self._build_request(self.prompt_developer)
@@ -268,7 +270,7 @@ class PromptAdminAccessTests(TestCase):
 
         self.assertTrue(self.prompt_admin.has_add_permission(request))
         self.assertFalse(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
-        self.assertFalse(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
+        self.assertTrue(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
 
     def test_get_prompts_api_returns_only_current_user_prompts(self):
         request = self._build_request(self.prompt_developer)
