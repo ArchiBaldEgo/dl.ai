@@ -91,7 +91,7 @@ def _is_mine_only_request(request):
 def _prompt_queryset_for_user(queryset, user):
     if not user or not user.is_authenticated:
         return queryset.none()
-    return queryset.filter(owner=user)
+    return queryset.filter(Q(owner=user) | Q(editors=user)).distinct()
 
 
 def _user_matches_external_id(user, external_user_id):
@@ -877,7 +877,7 @@ class PromptAdmin(admin.ModelAdmin):
             user = getattr(request, "user", None)
             if not user or not user.is_authenticated:
                 return queryset.none()
-            return queryset.filter(owner_id=user.pk)
+            return _prompt_queryset_for_user(queryset, user)
         return queryset
 
     def lookup_allowed(self, lookup, value, request=None):
@@ -892,7 +892,9 @@ class PromptAdmin(admin.ModelAdmin):
             return True
         if obj is None:
             return True
-        return obj.owner_id == request.user.pk
+        if obj.owner_id == request.user.pk:
+            return True
+        return obj.editors.filter(pk=request.user.pk).exists()
 
     def has_module_permission(self, request):
         if _is_staff_or_superuser(request.user):

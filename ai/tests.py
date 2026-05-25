@@ -205,11 +205,11 @@ class PromptAdminAccessTests(TestCase):
         request.user = user
         return request
 
-    def test_prompt_developer_can_edit_only_own_prompt(self):
+    def test_prompt_developer_can_edit_owned_or_assigned_prompt(self):
         request = self._build_request(self.prompt_developer)
 
         self.assertTrue(self.prompt_admin.has_change_permission(request, self.editable_prompt))
-        self.assertFalse(self.prompt_admin.has_change_permission(request, self.legacy_assigned_prompt))
+        self.assertTrue(self.prompt_admin.has_change_permission(request, self.legacy_assigned_prompt))
         self.assertFalse(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
         self.assertTrue(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
         self.assertTrue(self.prompt_admin.has_delete_permission(request, self.editable_prompt))
@@ -263,7 +263,7 @@ class PromptAdminAccessTests(TestCase):
         request = self._build_request(self.prompt_developer, query_params={"mine": "1"})
         prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
 
-        self.assertEqual(prompt_ids, {self.editable_prompt.id})
+        self.assertEqual(prompt_ids, {self.editable_prompt.id, self.legacy_assigned_prompt.id})
 
     def test_staff_user_sees_only_own_prompts(self):
         request = self._build_request(self.staff_user)
