@@ -165,7 +165,7 @@ class PromptAdminAccessTests(TestCase):
         self.assertTrue(self.prompt_admin.has_change_permission(request, self.editable_prompt))
         self.assertTrue(self.prompt_admin.has_change_permission(request, self.legacy_assigned_prompt))
         self.assertFalse(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
-        self.assertTrue(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
+        self.assertFalse(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
 
     def test_prompt_developer_can_add_prompt_and_becomes_owner(self):
         request = self._build_request(self.prompt_developer)
@@ -198,20 +198,33 @@ class PromptAdminAccessTests(TestCase):
         self.assertEqual(editable_fields, ())
         self.assertEqual(readonly_fields, ("programming_language", "topic", "prompt_name", "prompt_text"))
 
-    def test_prompt_developer_mine_filter_shows_only_own_scope(self):
-        request = self._build_request(self.prompt_developer, {"mine": "1"})
+    def test_prompt_developer_queryset_shows_only_own_scope(self):
+        request = self._build_request(self.prompt_developer)
         prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
 
         self.assertIn(self.editable_prompt.id, prompt_ids)
         self.assertIn(self.legacy_assigned_prompt.id, prompt_ids)
         self.assertNotIn(self.readonly_prompt.id, prompt_ids)
 
-    def test_staff_user_has_full_prompt_permissions(self):
+    def test_staff_user_sees_only_own_prompts(self):
         request = self._build_request(self.staff_user)
 
         self.assertTrue(self.prompt_admin.has_add_permission(request))
+        self.assertFalse(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
+        self.assertFalse(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
+
+    def test_superuser_has_full_prompt_access(self):
+        superuser = get_user_model().objects.create_superuser(
+            username="super_user",
+            password="test-pass",
+        )
+        request = self._build_request(superuser)
+        prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
+
+        self.assertIn(self.editable_prompt.id, prompt_ids)
+        self.assertIn(self.readonly_prompt.id, prompt_ids)
         self.assertTrue(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
-        self.assertEqual(self.prompt_admin.get_readonly_fields(request, self.readonly_prompt), ())
+        self.assertTrue(self.prompt_admin.has_delete_permission(request, self.readonly_prompt))
 
 
 class PromptFormTests(TestCase):

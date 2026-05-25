@@ -1,10 +1,11 @@
 import os
 
-from django.contrib.auth import authenticate, login, logout, get_user_model
+from django.contrib.auth import authenticate, login, logout
 from django.shortcuts import redirect, render
 from django.http import JsonResponse
 from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound
 from django.db import ProgrammingError
+from django.db.models import Q
 from django.contrib.staticfiles import finders
 from django.middleware import csrf
 from functools import wraps
@@ -18,8 +19,6 @@ from .auth_backends import (
     get_external_user_id_from_request,
     normalize_external_user_id,
 )
-
-User = get_user_model()
 
 PROMPT_DEVELOPER_GROUP = "prompt_developer"
 
@@ -46,6 +45,42 @@ def prompt_developer_access_required(view_func):
         return HttpResponseForbidden("Prompt developer access required")
 
     return _wrapped
+
+
+def _is_ai_app_enabled():
+    try:
+        return AIAppSettings.get_solo().is_enabled
+    except ProgrammingError:
+        return True
+
+
+def _has_page_access(request):
+    user = getattr(request, "user", None)
+    return bool(
+        user
+        and user.is_authenticated
+        or get_external_user_id_from_request(request)
+        or getattr(request, "user_info", None)
+    )
+
+
+def _render_ai_page(request, template_name):
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+    if not _is_ai_app_enabled():
+        return HttpResponseNotFound("AI app is disabled")
+    return render(request, template_name, {
+        'available_models': get_available_model_options(),
+    })
+
+
+def _prompt_queryset_for_user(user):
+    queryset = Prompt.objects.select_related("topic", "topic__programming_language", "owner")
+    if not user or not user.is_authenticated:
+        return queryset.none()
+    if user.is_superuser:
+        return queryset
+    return queryset.filter(Q(owner=user) | Q(editors=user)).distinct()
 
 
 def prompt_developer_login_view(request):
@@ -256,41 +291,43 @@ def set_password_view(request):
 
 
 def chat_view(request):
-    return render(request, 'ai/chat.html', {
-        'available_models': get_available_model_options(),
-    })
+    return _render_ai_page(request, 'ai/chat.html')
 
 
 def decide_task_view(request):
-    return render(request, 'ai/decide-task.html', {
-        'available_models': get_available_model_options(),
-    })
+    return _render_ai_page(request, 'ai/decide-task.html')
 
 
 def find_error_view(request):
-    return render(request, 'ai/find-error.html', {
-        'available_models': get_available_model_options(),
-    })
+    return _render_ai_page(request, 'ai/find-error.html')
 
 
 def get_languages(request):
-    languages = ProgrammingLanguage.objects.all().values('id', 'language_name')
+    languages = ProgrammingLanguage.objects.order_by('language_name').values('id', 'language_name')
     return JsonResponse(list(languages), safe=False)
 
 
 def get_topics(request):
-    topics = list(Topic.objects.values('id', 'topic_name', 'programming_language'))
+    topics = list(
+        Topic.objects.select_related("programming_language")
+        .order_by("topic_name")
+        .values('id', 'topic_name', 'programming_language')
+    )
     return JsonResponse(topics, safe=False)
 
 
 def get_prompts(request):
-    prompts = list(Prompt.objects.values(
-        'id', 
-        'topic_id',  # ID Topic
-        'topic__programming_language',  # ID ProgrammingLanguage
-        'prompt_text', 
-        'prompt_name',
-    ))
+    prompts = list(
+        _prompt_queryset_for_user(getattr(request, "user", None))
+        .order_by("prompt_name", "id")
+        .values(
+            'id',
+            'topic_id',
+            'topic__programming_language',
+            'prompt_text',
+            'prompt_name',
+        )
+    )
     return JsonResponse(prompts, safe=False)
 
 

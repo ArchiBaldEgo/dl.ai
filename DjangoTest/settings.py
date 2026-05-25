@@ -117,17 +117,29 @@ CSRF_TRUSTED_ORIGINS = _env_csv(
         "https://dl.gsu.by",
         "http://dlai.gsu.by",
         "https://dlai.gsu.by",
+        "http://localhost",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:8000",
+        "http://localhost:8080",
+        "http://127.0.0.1",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8000",
+        "http://127.0.0.1:8080",
     ],
 )
 
-# Isolate CSRF/session cookies from the main site when served under /ai/.
-CSRF_COOKIE_NAME = os.getenv("CSRF_COOKIE_NAME", "ai_csrftoken")
+# Keep the standard csrftoken cookie name so AJAX can read and send X-CSRFToken.
+# The path still scopes the cookie to the /ai/ application by default.
+CSRF_COOKIE_NAME = os.getenv("CSRF_COOKIE_NAME", "csrftoken")
 SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "ai_sessionid")
 CSRF_COOKIE_PATH = os.getenv("CSRF_COOKIE_PATH", "/ai/")
 SESSION_COOKIE_PATH = os.getenv("SESSION_COOKIE_PATH", "/ai/")
 CSRF_COOKIE_DOMAIN = os.getenv("CSRF_COOKIE_DOMAIN") or None
 SESSION_COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN") or None
-CSRF_USE_SESSIONS = _env_bool("CSRF_USE_SESSIONS", default=True)
+CSRF_COOKIE_HTTPONLY = _env_bool("CSRF_COOKIE_HTTPONLY", default=False)
+CSRF_USE_SESSIONS = _env_bool("CSRF_USE_SESSIONS", default=False)
 
 # If you terminate TLS at a reverse proxy (nginx, etc.), enable this.
 if _env_bool("USE_X_FORWARDED_PROTO", default=not DEBUG):

@@ -71,7 +71,8 @@
             </ul>
             <div class="dv">
                 <div class="resize-button" onmousedown="startResize(event)">🠔 </div>
-                <form action="" onsubmit="sendMessage(event)">
+                <form action="" method="post" onsubmit="sendMessage(event)">
+                    {% csrf_token %}
                     <h3 class="task">Задача:</h3>
                     <textarea type="text" id="taskText" class="messageText" placeholder="Вставьте сюда условие задачи"
                         autocomplete="off"></textarea>
