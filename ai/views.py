@@ -5,7 +5,6 @@ from django.shortcuts import redirect, render
 from django.http import JsonResponse
 from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound
 from django.db import ProgrammingError
-from django.db.models import Q
 from django.contrib.staticfiles import finders
 from django.middleware import csrf
 from functools import wraps
@@ -78,9 +77,7 @@ def _prompt_queryset_for_user(user):
     queryset = Prompt.objects.select_related("topic", "topic__programming_language", "owner")
     if not user or not user.is_authenticated:
         return queryset.none()
-    if user.is_superuser:
-        return queryset
-    return queryset.filter(Q(owner=user) | Q(editors=user)).distinct()
+    return queryset.filter(owner=user)
 
 
 def prompt_developer_login_view(request):
@@ -249,7 +246,12 @@ def set_password_view(request):
             error_message = "Пароль должен быть не менее 8 символов."
         else:
             if is_admin_registration:
-                target_user = create_admin_user_with_password(external_user_id, new_password)
+                if target_user:
+                    target_user.set_password(new_password)
+                    target_user.save(update_fields=["password"])
+                    ensure_prompt_developer_group(target_user)
+                else:
+                    target_user = create_admin_user_with_password(external_user_id, new_password)
                 login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
                 csrf.rotate_token(request)
                 request.session["admin_fresh_auth"] = True
@@ -274,6 +276,13 @@ def set_password_view(request):
         response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response["Pragma"] = "no-cache"
         return response
+
+    if is_admin_registration and target_user and target_user.has_usable_password():
+        ensure_prompt_developer_group(target_user)
+        login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
+        csrf.rotate_token(request)
+        request.session["admin_fresh_auth"] = True
+        return redirect(next_url)
 
     response = render(
         request,

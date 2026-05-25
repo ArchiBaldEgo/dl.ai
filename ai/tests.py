@@ -10,8 +10,8 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from ai.admin import PromptAdmin, PromptForm, _external_admin_entry_response
-from ai.models import ProgrammingLanguage, Prompt, Topic
-from ai.views import chat_view, set_password_view
+from ai.models import ExternalDLAccount, ProgrammingLanguage, Prompt, Topic
+from ai.views import chat_view, get_prompts, set_password_view
 
 
 class ChatViewTests(SimpleTestCase):
@@ -68,6 +68,24 @@ class AdminExternalAuthTests(TestCase):
         self.assertEqual(request.session[SESSION_KEY], str(user.pk))
         self.assertTrue(request.session["admin_fresh_auth"])
 
+    def test_existing_mapped_external_user_keeps_valid_admin_session(self):
+        user = self.user_model.objects.create_user(
+            username="external-login",
+            password="initial-pass",
+        )
+        ExternalDLAccount.objects.create(
+            user=user,
+            external_user_id="12345",
+            external_login="external-login",
+        )
+        request = self._request(path="/ai/admin/ai/prompt/add/")
+        request.user = user
+
+        response = _external_admin_entry_response(request)
+
+        self.assertIsNone(response)
+        self.assertTrue(request.session["admin_fresh_auth"])
+
     def test_new_external_user_sets_password_once_and_is_created(self):
         request = self._request(
             method="post",
@@ -105,6 +123,34 @@ class AdminExternalAuthTests(TestCase):
         group = Group.objects.get(name="prompt_developer")
         user = self.user_model.objects.get(username="24680")
         self.assertTrue(user.groups.filter(pk=group.pk).exists())
+
+    def test_mapped_external_user_without_password_sets_password_on_existing_user(self):
+        user = self.user_model.objects.create_user(username="external-login")
+        user.set_unusable_password()
+        user.save(update_fields=["password"])
+        ExternalDLAccount.objects.create(
+            user=user,
+            external_user_id="13579",
+            external_login="external-login",
+        )
+        request = self._request(
+            method="post",
+            path="/ai/admin/set-password/",
+            data={
+                "next": "/ai/admin/ai/prompt/add/",
+                "new_password": "strong-pass-123",
+                "new_password_confirm": "strong-pass-123",
+            },
+            user_id="13579",
+        )
+
+        response = set_password_view(request)
+        user.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/ai/admin/ai/prompt/add/")
+        self.assertTrue(user.check_password("strong-pass-123"))
+        self.assertEqual(self.user_model.objects.filter(username="13579").count(), 0)
 
 
 class PromptAdminAccessTests(TestCase):
@@ -159,11 +205,11 @@ class PromptAdminAccessTests(TestCase):
         request.user = user
         return request
 
-    def test_prompt_developer_can_edit_only_own_or_assigned_prompt(self):
+    def test_prompt_developer_can_edit_only_own_prompt(self):
         request = self._build_request(self.prompt_developer)
 
         self.assertTrue(self.prompt_admin.has_change_permission(request, self.editable_prompt))
-        self.assertTrue(self.prompt_admin.has_change_permission(request, self.legacy_assigned_prompt))
+        self.assertFalse(self.prompt_admin.has_change_permission(request, self.legacy_assigned_prompt))
         self.assertFalse(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
         self.assertFalse(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
 
@@ -198,12 +244,12 @@ class PromptAdminAccessTests(TestCase):
         self.assertEqual(editable_fields, ())
         self.assertEqual(readonly_fields, ("programming_language", "topic", "prompt_name", "prompt_text"))
 
-    def test_prompt_developer_queryset_shows_only_own_scope(self):
+    def test_prompt_developer_queryset_shows_only_owned_prompts(self):
         request = self._build_request(self.prompt_developer)
         prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
 
         self.assertIn(self.editable_prompt.id, prompt_ids)
-        self.assertIn(self.legacy_assigned_prompt.id, prompt_ids)
+        self.assertNotIn(self.legacy_assigned_prompt.id, prompt_ids)
         self.assertNotIn(self.readonly_prompt.id, prompt_ids)
 
     def test_staff_user_sees_only_own_prompts(self):
@@ -213,18 +259,34 @@ class PromptAdminAccessTests(TestCase):
         self.assertFalse(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
         self.assertFalse(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
 
-    def test_superuser_has_full_prompt_access(self):
+    def test_get_prompts_api_returns_only_current_user_prompts(self):
+        request = self._build_request(self.prompt_developer)
+        response = get_prompts(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Editable prompt")
+        self.assertNotContains(response, "Readonly prompt")
+        self.assertNotContains(response, "Legacy assigned prompt")
+
+    def test_superuser_queryset_is_also_limited_to_own_prompts(self):
         superuser = get_user_model().objects.create_superuser(
             username="super_user",
             password="test-pass",
         )
+        own_prompt = Prompt.objects.create(
+            prompt_name="Superuser prompt",
+            prompt_text="Superuser prompt text",
+            owner=superuser,
+        )
         request = self._build_request(superuser)
         prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
 
-        self.assertIn(self.editable_prompt.id, prompt_ids)
-        self.assertIn(self.readonly_prompt.id, prompt_ids)
-        self.assertTrue(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
-        self.assertTrue(self.prompt_admin.has_delete_permission(request, self.readonly_prompt))
+        self.assertEqual(prompt_ids, {own_prompt.id})
+        self.assertFalse(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
+        self.assertFalse(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
+        self.assertTrue(self.prompt_admin.has_change_permission(request, own_prompt))
+        self.assertFalse(self.prompt_admin.has_delete_permission(request, self.readonly_prompt))
+        self.assertTrue(self.prompt_admin.has_delete_permission(request, own_prompt))
 
 
 class PromptFormTests(TestCase):
