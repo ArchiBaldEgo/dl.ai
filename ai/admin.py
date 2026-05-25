@@ -861,6 +861,11 @@ class PromptAdmin(admin.ModelAdmin):
             .select_related("topic", "topic__programming_language", "owner")
             .prefetch_related("editors")
         )
+        if _is_staff_or_superuser(request.user):
+            mine_only = (request.GET.get("mine") or "").strip().lower() in {"1", "true", "yes"}
+            if mine_only:
+                return _prompt_queryset_for_user(queryset, request.user)
+            return queryset
         return _prompt_queryset_for_user(queryset, request.user)
 
     def _can_edit_prompt(self, request, obj):

@@ -268,7 +268,7 @@ class PromptAdminAccessTests(TestCase):
         self.assertNotContains(response, "Readonly prompt")
         self.assertNotContains(response, "Legacy assigned prompt")
 
-    def test_superuser_queryset_is_also_limited_to_own_prompts(self):
+    def test_superuser_queryset_shows_all_prompts(self):
         superuser = get_user_model().objects.create_superuser(
             username="super_user",
             password="test-pass",
@@ -281,12 +281,35 @@ class PromptAdminAccessTests(TestCase):
         request = self._build_request(superuser)
         prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
 
-        self.assertEqual(prompt_ids, {own_prompt.id})
+        self.assertEqual(
+            prompt_ids,
+            {
+                self.editable_prompt.id,
+                self.readonly_prompt.id,
+                self.legacy_assigned_prompt.id,
+                own_prompt.id,
+            },
+        )
         self.assertFalse(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
         self.assertFalse(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
         self.assertTrue(self.prompt_admin.has_change_permission(request, own_prompt))
         self.assertFalse(self.prompt_admin.has_delete_permission(request, self.readonly_prompt))
         self.assertTrue(self.prompt_admin.has_delete_permission(request, own_prompt))
+
+    def test_superuser_queryset_can_filter_mine(self):
+        superuser = get_user_model().objects.create_superuser(
+            username="super_user_mine",
+            password="test-pass",
+        )
+        own_prompt = Prompt.objects.create(
+            prompt_name="Superuser prompt mine",
+            prompt_text="Superuser prompt text",
+            owner=superuser,
+        )
+        request = self._build_request(superuser, query_params={"mine": "1"})
+        prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
+
+        self.assertEqual(prompt_ids, {own_prompt.id})
 
 
 class PromptFormTests(TestCase):
