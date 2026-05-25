@@ -4,12 +4,18 @@
             var notEnter = false;
             var requestInFlight = false;
             
-            // Голосовые переменные
-            var recognition = null;
+            // Голосовые переменные для MediaRecorder
+            var mediaRecorder = null;
+            var audioChunks = [];
             var isListening = false;
+            var audioStream = null;
             var speechSynthesis = window.speechSynthesis;
             var currentUtterance = null;
             var speakThinkEnabled = true;
+            
+            // Таймер для автоматической остановки записи
+            var recordingTimeout = null;
+            var MAX_RECORDING_TIME = 30000;
 
             // Генерация client_id
             function generateClientId() {
@@ -22,67 +28,149 @@
                 if (voiceControls.style.display === 'flex') {
                     voiceControls.style.display = 'none';
                     stopSpeech();
-                    if (isListening && recognition) {
-                        recognition.stop();
+                    if (isListening && mediaRecorder && mediaRecorder.state === 'recording') {
+                        stopMediaRecording();
                     }
                 } else {
                     voiceControls.style.display = 'flex';
                 }
             }
 
-            function initSpeechRecognition() {
+            // Инициализация MediaRecorder
+            async function initMediaRecorder() {
                 try {
-                    recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+                    audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                     
-                    const langSelect = document.getElementById('selectLang');
-                    const selectedLang = langSelect.options[langSelect.selectedIndex].getAttribute('language');
-                    recognition.lang = getSpeechLanguage(selectedLang);
+                    mediaRecorder = new MediaRecorder(audioStream);
+                    audioChunks = [];
                     
-                    recognition.continuous = false;
-                    recognition.interimResults = true;
-                    
-                    recognition.onstart = function() {
-                        isListening = true;
-                        updateVoiceUI();
-                        updateVoiceStatus(getVoiceStatusText('listening'));
-                    };
-                    
-                    recognition.onresult = function(event) {
-                        let finalTranscript = '';
-                        let interimTranscript = '';
-                        
-                        for (let i = event.resultIndex; i < event.results.length; i++) {
-                            const transcript = event.results[i][0].transcript;
-                            if (event.results[i].isFinal) {
-                                finalTranscript += transcript;
-                            } else {
-                                interimTranscript += transcript;
-                            }
-                        }
-                        
-                        if (finalTranscript) {
-                            document.getElementById('taskText').value = finalTranscript;
-                            updateVoiceStatus(getVoiceStatusText('recognized') + finalTranscript);
-                        } else if (interimTranscript) {
-                            updateVoiceStatus(getVoiceStatusText('recognizing') + interimTranscript);
+                    mediaRecorder.ondataavailable = (event) => {
+                        if (event.data.size > 0) {
+                            audioChunks.push(event.data);
                         }
                     };
                     
-                    recognition.onerror = function(event) {
-                        updateVoiceStatus(getVoiceStatusText('error') + event.error);
+                    mediaRecorder.onstop = () => {
+                        if (audioChunks.length > 0) {
+                            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                            sendAudioToServer(audioBlob);
+                        }
+                        
+                        if (audioStream) {
+                            audioStream.getTracks().forEach(track => track.stop());
+                            audioStream = null;
+                        }
+                        
+                        if (recordingTimeout) {
+                            clearTimeout(recordingTimeout);
+                            recordingTimeout = null;
+                        }
+                        
                         isListening = false;
                         updateVoiceUI();
                     };
                     
-                    recognition.onend = function() {
+                    mediaRecorder.onerror = (event) => {
+                        console.error('MediaRecorder error:', event.error);
+                        updateVoiceStatus(getVoiceStatusText('error') + getVoiceStatusText('recording_error'));
                         isListening = false;
                         updateVoiceUI();
-                        updateVoiceStatus(getVoiceStatusText('readyForVoice'));
+                        
+                        if (audioStream) {
+                            audioStream.getTracks().forEach(track => track.stop());
+                            audioStream = null;
+                        }
                     };
                     
+                    return true;
                 } catch (error) {
-                    updateVoiceStatus(getVoiceStatusText('notSupported'));
+                    console.error('Microphone access error:', error);
+                    if (error.name === 'NotAllowedError') {
+                        updateVoiceStatus(getVoiceStatusText('microphone_denied'));
+                    } else if (error.name === 'NotFoundError') {
+                        updateVoiceStatus(getVoiceStatusText('microphone_not_found'));
+                    } else {
+                        updateVoiceStatus(getVoiceStatusText('notSupported'));
+                    }
+                    return false;
                 }
+            }
+
+            // Отправка аудио на сервер для распознавания
+            async function sendAudioToServer(audioBlob) {
+                updateVoiceStatus(getVoiceStatusText('recognizing'));
+                
+                const formData = new FormData();
+                formData.append('audio', audioBlob, 'recording.webm');
+                
+                const langSelect = document.getElementById('selectLang');
+                const selectedLang = langSelect.options[langSelect.selectedIndex].getAttribute('language');
+                formData.append('language', selectedLang);
+                
+                try {
+                    const response = await fetch('/ai/transcribe/', {
+                        method: 'POST',
+                        body: formData,
+                        headers: {
+                            'X-CSRFToken': getCsrfToken()
+                        }
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success && data.text) {
+                        document.getElementById('taskText').value = data.text;
+                        updateVoiceStatus(getVoiceStatusText('recognized') + data.text);
+                        
+                        if (document.getElementById('taskText').value.trim()) {
+                            simulateSend();
+                        }
+                    } else {
+                        updateVoiceStatus(getVoiceStatusText('recognition_failed'));
+                    }
+                } catch (error) {
+                    console.error('Transcription error:', error);
+                    updateVoiceStatus(getVoiceStatusText('server_error'));
+                }
+            }
+
+            // Запуск записи
+            async function startMediaRecording() {
+                if (mediaRecorder && mediaRecorder.state === 'recording') {
+                    return;
+                }
+                
+                const success = await initMediaRecorder();
+                if (!success) return;
+                
+                mediaRecorder.start();
+                isListening = true;
+                updateVoiceUI();
+                updateVoiceStatus(getVoiceStatusText('press_stop_to_send'));
+                
+                recordingTimeout = setTimeout(() => {
+                    if (mediaRecorder && mediaRecorder.state === 'recording') {
+                        stopMediaRecording();
+                        updateVoiceStatus(getVoiceStatusText('max_time_exceeded'));
+                    }
+                }, MAX_RECORDING_TIME);
+            }
+
+            // Остановка записи
+            function stopMediaRecording() {
+                if (mediaRecorder && mediaRecorder.state === 'recording') {
+                    mediaRecorder.stop();
+                }
+            }
+
+            // Функция для получения CSRF токена
+            function getCsrfToken() {
+                const cookies = document.cookie.split(';');
+                for (let cookie of cookies) {
+                    const [name, value] = cookie.trim().split('=');
+                    if (name === 'csrftoken') return value;
+                }
+                return '';
             }
 
             function getSpeechLanguage(lang) {
@@ -104,18 +192,10 @@
             }
 
             function toggleVoiceInput() {
-                if (!recognition) {
-                    initSpeechRecognition();
-                }
-                
                 if (isListening) {
-                    recognition.stop();
+                    stopMediaRecording();
                 } else {
-                    try {
-                        recognition.start();
-                    } catch (error) {
-                        updateVoiceStatus(getVoiceStatusText('startError'));
-                    }
+                    startMediaRecording();
                 }
             }
 
@@ -250,8 +330,8 @@
                     speechSynthesis.cancel();
                     updateVoiceStatus(getVoiceStatusText('speechStopped'));
                 }
-                if (isListening && recognition) {
-                    recognition.stop();
+                if (isListening && mediaRecorder && mediaRecorder.state === 'recording') {
+                    stopMediaRecording();
                 }
                 document.getElementById('voiceOutputBtn').classList.remove('speaking');
             }
@@ -260,17 +340,28 @@
                 const voiceBtn = document.getElementById('voiceInputBtn');
                 const voiceIndicator = document.getElementById('voiceIndicator');
                 
-                if (isListening) {
-                    voiceBtn.classList.add('recording');
-                    voiceIndicator.classList.add('active');
-                } else {
-                    voiceBtn.classList.remove('recording');
-                    voiceIndicator.classList.remove('active');
+                if (voiceBtn) {
+                    if (isListening) {
+                        voiceBtn.classList.add('recording');
+                    } else {
+                        voiceBtn.classList.remove('recording');
+                    }
+                }
+                
+                if (voiceIndicator) {
+                    if (isListening) {
+                        voiceIndicator.classList.add('active');
+                    } else {
+                        voiceIndicator.classList.remove('active');
+                    }
                 }
             }
 
             function updateVoiceStatus(message) {
-                document.getElementById('voiceStatus').textContent = message;
+                const voiceStatus = document.getElementById('voiceStatus');
+                if (voiceStatus) {
+                    voiceStatus.textContent = message;
+                }
             }
 
             function setRequestLock(isLocked) {
@@ -620,13 +711,13 @@
                 voiceStop: "Стоп",
                 speakThinkLabel: "Озвучивать дополнительную информацию",
                 voiceStatus: {
-                    listening: "Слушаю... Говорите сейчас",
+                    listening: "Запись... Говорите сейчас",
                     recognized: "Распознано: ",
-                    recognizing: "Распознаю: ",
+                    recognizing: "Распознаю...",
                     error: "Ошибка: ",
                     readyForVoice: "Готов к голосовому вводу",
-                    notSupported: "Голосовой ввод не поддерживается вашим браузером",
-                    startError: "Ошибка запуска распознавания",
+                    notSupported: "Голосовой ввод не поддерживается вашим браузером или нет микрофона",
+                    startError: "Ошибка запуска записи",
                     noResponse: "Нет ответов для озвучивания",
                     textEmpty: "Текст для озвучивания пуст",
                     noText: "Нет текста для озвучивания",
@@ -640,7 +731,14 @@
                     connectionEstablished: "Соединение установлено.",
                     connectionClosed: "Соединение закрыто",
                     wsError: "Ошибка соединения",
-                    ready: 'Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.'
+                    ready: 'Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.',
+                    press_stop_to_send: "Нажмите Стоп для отправки",
+                    recording_error: "Ошибка записи",
+                    recognition_failed: "Не удалось распознать речь",
+                    server_error: "Ошибка связи с сервером",
+                    microphone_denied: "Разрешите доступ к микрофону",
+                    microphone_not_found: "Микрофон не найден",
+                    max_time_exceeded: "Превышено время записи"
                 }
             },
     
@@ -659,17 +757,17 @@
                 chooseTheme: "Choose theme",
                 voiceMode: "Voice mode",
                 voiceInput: "Voice input",
-                voiceOutput: "Voice answer",
+                voiceOutput: "Speak answer",
                 voiceStop: "Stop",
                 speakThinkLabel: "Voice extra information",
                 voiceStatus: {
-                    listening: "Listening... Speak now",
+                    listening: "Recording... Speak now",
                     recognized: "Recognized: ",
-                    recognizing: "Recognizing: ",
+                    recognizing: "Recognizing...",
                     error: "Error: ",
                     readyForVoice: "Ready for voice input",
-                    notSupported: "Voice input not supported in your browser",
-                    startError: "Error starting recognition",
+                    notSupported: "Voice input not supported in your browser or no microphone",
+                    startError: "Error starting recording",
                     noResponse: "No responses to speak",
                     textEmpty: "Text to speak is empty",
                     noText: "No text to speak",
@@ -683,7 +781,14 @@
                     connectionEstablished: "Connection established.",
                     connectionClosed: "Connection closed",
                     wsError: "Connection error",
-                    ready: 'Ready. Click "Voice mode" to activate voice features.'
+                    ready: 'Ready. Click "Voice mode" to activate voice features.',
+                    press_stop_to_send: "Press Stop to send",
+                    recording_error: "Recording error",
+                    recognition_failed: "Recognition failed",
+                    server_error: "Server connection error",
+                    microphone_denied: "Microphone access denied",
+                    microphone_not_found: "Microphone not found",
+                    max_time_exceeded: "Max recording time exceeded"
                 }
             },
             French: {
@@ -705,13 +810,13 @@
                 voiceStop: "Arrêter",
                 speakThinkLabel: "Informations supplémentaires vocales",
                 voiceStatus: {
-                    listening: "Écoute... Parlez maintenant",
+                    listening: "Enregistrement... Parlez maintenant",
                     recognized: "Reconnu : ",
-                    recognizing: "Reconnaissance : ",
+                    recognizing: "Reconnaissance...",
                     error: "Erreur : ",
                     readyForVoice: "Prêt pour la saisie vocale",
-                    notSupported: "Saisie vocale non supportée par votre navigateur",
-                    startError: "Erreur de démarrage de la reconnaissance",
+                    notSupported: "Saisie vocale non supportée par votre navigateur ou pas de microphone",
+                    startError: "Erreur de démarrage de l'enregistrement",
                     noResponse: "Aucune réponse à lire",
                     textEmpty: "Texte à lire vide",
                     noText: "Pas de texte à lire",
@@ -725,7 +830,14 @@
                     connectionEstablished: "Connexion établie.",
                     connectionClosed: "Connexion fermée",
                     wsError: "Erreur de connexion",
-                    ready: 'Prêt. Cliquez sur "Mode vocal" pour activer les fonctions vocales.'
+                    ready: 'Prêt. Cliquez sur "Mode vocal" pour activer les fonctions vocales.',
+                    press_stop_to_send: "Appuyez sur Arrêter pour envoyer",
+                    recording_error: "Erreur d'enregistrement",
+                    recognition_failed: "Reconnaissance échouée",
+                    server_error: "Erreur de connexion au serveur",
+                    microphone_denied: "Accès au micro refusé",
+                    microphone_not_found: "Microphone introuvable",
+                    max_time_exceeded: "Durée d'enregistrement dépassée"
                 }
             }
         };
@@ -763,25 +875,22 @@
                 document.querySelector(".codetx").textContent = localization[selectedLang].codetx;
                 updateAccordionLabels();
 
-                    const voiceModeBtn = document.getElementById("voiceModeBtn");
-                    if (voiceModeBtn) voiceModeBtn.textContent = localization[selectedLang].voiceMode;
+                const voiceModeBtn = document.getElementById("voiceModeBtn");
+                if (voiceModeBtn) voiceModeBtn.textContent = localization[selectedLang].voiceMode;
 
-                    const voiceInputBtn = document.getElementById("voiceInputBtn");
-                    if (voiceInputBtn) voiceInputBtn.textContent = localization[selectedLang].voiceInput;
+                const voiceInputBtn = document.getElementById("voiceInputBtn");
+                if (voiceInputBtn) voiceInputBtn.textContent = localization[selectedLang].voiceInput;
 
-                    const voiceOutputBtn = document.getElementById("voiceOutputBtn");
-                    if (voiceOutputBtn) voiceOutputBtn.textContent = localization[selectedLang].voiceOutput;
+                const voiceOutputBtn = document.getElementById("voiceOutputBtn");
+                if (voiceOutputBtn) voiceOutputBtn.textContent = localization[selectedLang].voiceOutput;
 
-                    const voiceStopBtn = document.getElementById("voiceStopBtn");
-                    if (voiceStopBtn) voiceStopBtn.textContent = localization[selectedLang].voiceStop;
+                const voiceStopBtn = document.getElementById("voiceStopBtn");
+                if (voiceStopBtn) voiceStopBtn.textContent = localization[selectedLang].voiceStop;
 
-                    const speakThinkLabel = document.getElementById("speakThinkLabel");
-                    if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
+                const speakThinkLabel = document.getElementById("speakThinkLabel");
+                if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
 
-                    updateVoiceStatus(getVoiceStatusText('readyForVoice'));
-
-                    if (recognition) {
-                    }
+                updateVoiceStatus(getVoiceStatusText('readyForVoice'));
             });
 
             function initAccordionForMessages() {
@@ -1003,7 +1112,7 @@
             window.onload = function () {
                 console.log('Initializing WebSocket with client_id:', client_id);
                 initWebSocket();
-                initSpeechRecognition();
+                // MediaRecorder инициализируется при первом нажатии на кнопку записи
                 document.getElementById("selectLang").dispatchEvent(new Event("change"));
                 initAccordionForMessages();
                 updateVoiceStatus(getVoiceStatusText('ready'));

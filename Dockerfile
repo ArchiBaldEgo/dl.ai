@@ -31,7 +31,9 @@ RUN --mount=type=cache,target=/var/cache/apt \
       'Acquire::CompressionTypes::Order { "gz"; "bz2"; "xz"; };' \
       > /etc/apt/apt.conf.d/99proxyfix && \
     apt-get update && \
-    apt-get install -y --no-install-recommends libpq-dev && \
+    apt-get install -y --no-install-recommends \
+        libpq-dev \
+        ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip install --upgrade pip
