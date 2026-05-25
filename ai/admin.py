@@ -887,6 +887,8 @@ class PromptAdmin(admin.ModelAdmin):
     def _can_edit_prompt(self, request, obj):
         if not (_is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)):
             return False
+        if request.user.is_superuser:
+            return True
         if obj is None:
             return True
         return obj.owner_id == request.user.pk
@@ -908,7 +910,7 @@ class PromptAdmin(admin.ModelAdmin):
         return _is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)
 
     def has_delete_permission(self, request, obj=None):
-        return bool(request.user.is_superuser and (obj is None or obj.owner_id == request.user.pk))
+        return bool(request.user.is_superuser)
 
     def get_fieldsets(self, request, obj=None):
         main_fields = ("programming_language", "topic", "prompt_name", "prompt_text")

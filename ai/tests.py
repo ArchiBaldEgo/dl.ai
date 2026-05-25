@@ -301,10 +301,10 @@ class PromptAdminAccessTests(TestCase):
                 own_prompt.id,
             },
         )
-        self.assertFalse(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
-        self.assertFalse(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
+        self.assertTrue(self.prompt_admin.has_view_permission(request, self.readonly_prompt))
+        self.assertTrue(self.prompt_admin.has_change_permission(request, self.readonly_prompt))
         self.assertTrue(self.prompt_admin.has_change_permission(request, own_prompt))
-        self.assertFalse(self.prompt_admin.has_delete_permission(request, self.readonly_prompt))
+        self.assertTrue(self.prompt_admin.has_delete_permission(request, self.readonly_prompt))
         self.assertTrue(self.prompt_admin.has_delete_permission(request, own_prompt))
 
     def test_superuser_queryset_can_filter_mine(self):
