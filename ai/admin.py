@@ -78,17 +78,24 @@ def _can_access_prompt_admin(request):
 
 
 def _get_my_prompt_admin_url(request):
-    if request.user.is_superuser:
-        return "/ai/admin/ai/prompt/"
     return "/ai/admin/ai/prompt/?mine=1"
 
 
 def _prompt_queryset_for_user(queryset, user):
     if not user or not user.is_authenticated:
         return queryset.none()
-    if user.is_superuser:
-        return queryset
-    return queryset.filter(Q(owner=user) | Q(editors=user)).distinct()
+    return queryset.filter(owner=user)
+
+
+def _user_matches_external_id(user, external_user_id):
+    if not user or not user.is_authenticated or not user.is_active or not external_user_id:
+        return False
+    if user.username == external_user_id:
+        return True
+    return ExternalDLAccount.objects.filter(
+        user=user,
+        external_user_id=external_user_id,
+    ).exists()
 
 
 def _auto_login_from_external(request):
@@ -141,12 +148,7 @@ def _external_admin_entry_response(request):
         return None
 
     current_user = getattr(request, "user", None)
-    if (
-        current_user
-        and current_user.is_authenticated
-        and current_user.is_active
-        and current_user.username == external_user_id
-    ):
+    if _user_matches_external_id(current_user, external_user_id):
         ensure_prompt_developer_group(current_user)
         request.session["admin_fresh_auth"] = True
         return None
@@ -862,15 +864,11 @@ class PromptAdmin(admin.ModelAdmin):
         return _prompt_queryset_for_user(queryset, request.user)
 
     def _can_edit_prompt(self, request, obj):
-        if request.user.is_superuser:
-            return True
         if not (_is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)):
             return False
         if obj is None:
             return True
-        if obj.owner_id == request.user.pk:
-            return True
-        return obj.editors.filter(pk=request.user.pk).exists()
+        return obj.owner_id == request.user.pk
 
     def has_module_permission(self, request):
         if _is_staff_or_superuser(request.user):
@@ -878,8 +876,6 @@ class PromptAdmin(admin.ModelAdmin):
         return _is_prompt_developer_user(request)
 
     def has_view_permission(self, request, obj=None):
-        if request.user.is_superuser:
-            return True
         if obj is None:
             return _is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)
         return self._can_edit_prompt(request, obj)
@@ -891,7 +887,7 @@ class PromptAdmin(admin.ModelAdmin):
         return _is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)
 
     def has_delete_permission(self, request, obj=None):
-        return request.user.is_superuser
+        return bool(request.user.is_superuser and (obj is None or obj.owner_id == request.user.pk))
 
     def get_fieldsets(self, request, obj=None):
         main_fields = ("programming_language", "topic", "prompt_name", "prompt_text")
@@ -910,7 +906,7 @@ class PromptAdmin(admin.ModelAdmin):
         return ("programming_language", "topic", "prompt_name", "prompt_text")
 
     def save_model(self, request, obj, form, change):
-        if not request.user.is_superuser and not change and not obj.owner_id:
+        if not change and not obj.owner_id:
             obj.owner = request.user
         super().save_model(request, obj, form, change)
         if not request.user.is_superuser:

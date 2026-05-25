@@ -54,7 +54,16 @@ def get_admin_user_by_external_id(external_user_id):
     try:
         return User.objects.get(username=external_user_id)
     except User.DoesNotExist:
-        return None
+        pass
+
+    from .models import ExternalDLAccount
+
+    account = (
+        ExternalDLAccount.objects.select_related("user")
+        .filter(external_user_id=external_user_id)
+        .first()
+    )
+    return account.user if account else None
 
 
 def create_admin_user_with_password(external_user_id, password):
