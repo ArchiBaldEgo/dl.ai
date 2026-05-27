@@ -102,6 +102,7 @@ class Bot {
 
         const headless = "new";//toBool(process.env.HEADLESS, false);
         //const executablePath = resolveChromePath();
+		const proxyServer = cleanEnvStr(process.env.BOT_PROXY);
 
         const launchOpts = {
             headless,
