@@ -20,6 +20,7 @@ from .auth_backends import (
 )
 
 PROMPT_DEVELOPER_GROUP = "prompt_developer"
+_WEB_PRIORITY_MODELS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
 
 
 def health_view(request):
@@ -68,8 +69,18 @@ def _render_ai_page(request, template_name):
         return HttpResponseForbidden("Authentication required")
     if not _is_ai_app_enabled():
         return HttpResponseNotFound("AI app is disabled")
+    available_models = get_available_model_options()
+    if available_models:
+        priority_map = {item["key"]: item for item in available_models}
+        ordered_priority = [
+            priority_map[key]
+            for key in _WEB_PRIORITY_MODELS
+            if key in priority_map
+        ]
+        rest = [item for item in available_models if item["key"] not in _WEB_PRIORITY_MODELS]
+        available_models = ordered_priority + rest
     return render(request, template_name, {
-        'available_models': get_available_model_options(),
+        'available_models': available_models,
     })
 
 
