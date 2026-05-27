@@ -106,6 +106,7 @@ class Bot {
         const launchOpts = {
             headless,
             args: [
+				...(proxyServer ? [`--proxy-server=${proxyServer}`] : []),
 				...(headless ? ['--disable-gpu'] : []),
                 '--disable-extensions',
                 '--disable-default-apps',
@@ -141,6 +142,12 @@ class Bot {
         const pages = await this.browser.pages().catch(() => []);
         this.page = pages[0] ?? (await this.browser.newPage());
         await this.page.setViewport(getViewport()).catch(() => { });
+		
+		const proxyUser = cleanEnvStr(process.env.BOT_PROXY_USER);
+		const proxyPass = cleanEnvStr(process.env.BOT_PROXY_PASS);
+		if (proxyUser) {
+			await this.page.authenticate({ username: proxyUser, password: proxyPass });
+		}
 
         this._attachPageEvents(this.page);
 
