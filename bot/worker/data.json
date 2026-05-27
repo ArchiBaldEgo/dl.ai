@@ -12,16 +12,16 @@
     "xpaths": {
         "auth": {
             "loginLabel": {
-                "deepseek": "//input[@type='text' and contains(@placeholder, 'email address')]"
+                "deepseek": "//input[@type='text']"
             },
             "passwordLabel": {
                 "deepseek": "//input[@type='password']"
             },
             "authButton": {
-                "deepseek": "//span[text()='Log in']/ancestor::button"
+                "deepseek": "//button[@role='button']"
             },
             "incorrectPassMessage": {
-                "deepseek": "//div[contains(text(), 'password is incorrect')]"
+                "deepseek": "//div[contains(text(), 'password is incorrect') or contains(text(), 'Неверный')]"
             }
         },
         "register": {
