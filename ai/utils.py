@@ -1,7 +1,7 @@
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 import os
-from pathlib import Path
+import uuid
 import asyncio
 import copy
 #from chat.database import insert_into_bd,start_bd
@@ -14,8 +14,7 @@ from typing import Tuple, Optional
 import time
 from asyncio import TimeoutError as AsyncTimeoutError
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
+load_dotenv()
 CLIENT_ID = os.getenv("CLIENT_ID")
 SECRET = os.getenv("SBER_SECRET")
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -41,7 +40,6 @@ SAMBANOVA_MODEL_META_LLAMA_3_3_70B_INSTRUCT = os.getenv(
     "Meta-Llama-3.3-70B-Instruct",
 )
 SAMBANOVA_MODEL_MINIMAX_M2_5 = os.getenv("SAMBANOVA_MODEL_MINIMAX_M2_5", "MiniMax-M2.5")
-SAMBANOVA_MODEL_MINIMAX_M2_7 = os.getenv("SAMBANOVA_MODEL_MINIMAX_M2_7", "MiniMax-M2.7")
 SAMBANOVA_MODEL_GEMMA_3_12B_IT = os.getenv("SAMBANOVA_MODEL_GEMMA_3_12B_IT", "gemma-3-12b-it")
 SAMBANOVA_MODEL_GPT_OSS = os.getenv("SAMBANOVA_MODEL_GPT_OSS", "gpt-oss-120b")
 
@@ -131,6 +129,7 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
 
         completion_tokens = obj.get('usage', {}).get('completion_tokens', 0)
         return assistant_content, completion_tokens'''
+    #тут не нужна проверка на токен. веб автоматизация так не работает
     #боту не нужен токен
 
     payload = {
@@ -455,15 +454,6 @@ async def ask_MiniMax_M2_5_async(messages: str, user_id: int) -> Tuple[str, Opti
         messages,
         user_id,
         SAMBANOVA_MODEL_MINIMAX_M2_5,
-        max_tokens=9000,
-    )
-
-
-async def ask_MiniMax_M2_7_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    return await _ask_sambanova_model_async(
-        messages,
-        user_id,
-        SAMBANOVA_MODEL_MINIMAX_M2_7,
         max_tokens=9000,
     )
 
@@ -913,3 +903,4 @@ async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
             # Не очищаем историю при сетевых ошибках
             return 'Ошибка подключения. Ваш контекст сохранен, попробуйте позже.', '0'
         return 'Что-то пошло не так при обработке запроса.', '0'
+

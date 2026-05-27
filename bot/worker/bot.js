@@ -1,5 +1,7 @@
 'use strict';
 
+const proxyChain = require('proxy-chain');
+
 const fs = require('fs');
 const path = require('path');
 
@@ -56,14 +58,6 @@ function cleanEnvStr(v) {
     return s.trim();
 }
 
-function getProxyConfig() {
-    const noProxy = toBool(process.env.PUPPETEER_NO_PROXY, false);
-    const proxyServer = cleanEnvStr(process.env.PUPPETEER_PROXY_SERVER);
-    const proxyUsername = cleanEnvStr(process.env.PUPPETEER_PROXY_USERNAME);
-    const proxyPassword = cleanEnvStr(process.env.PUPPETEER_PROXY_PASSWORD);
-    return { noProxy, proxyServer, proxyUsername, proxyPassword };
-}
-
 class Bot {
     constructor({ id }) {
         this.id = id;
@@ -110,16 +104,21 @@ class Bot {
 
         const headless = "new";//toBool(process.env.HEADLESS, false);
         //const executablePath = resolveChromePath();
-
-        const proxy = getProxyConfig();
-        const proxyServer = proxy.noProxy ? '' : proxy.proxyServer;
+		let proxyServer = cleanEnvStr(process.env.BOT_PROXY);
+		const proxyUser = cleanEnvStr(process.env.BOT_PROXY_USER);
+		const proxyPass = cleanEnvStr(process.env.BOT_PROXY_PASS);
+		if (proxyServer && proxyUser) {
+			const host = proxyServer.replace(/^https?:\/\//, '');
+			const upstream = `http://${encodeURIComponent(proxyUser)}:${encodeURIComponent(proxyPass)}@${host}`;
+			this._localProxy = await proxyChain.anonymizeProxy(upstream);
+			proxyServer = this._localProxy;
+		}
 
         const launchOpts = {
             headless,
             args: [
+				...(proxyServer ? [`--proxy-server=${proxyServer}`] : []),
 				...(headless ? ['--disable-gpu'] : []),
-                ...(proxy.noProxy ? ['--no-proxy-server'] : []),
-                ...(proxyServer ? [`--proxy-server=${proxyServer}`] : []),
                 '--disable-extensions',
                 '--disable-default-apps',
                 '--disable-component-update',
@@ -153,12 +152,6 @@ class Bot {
 
         const pages = await this.browser.pages().catch(() => []);
         this.page = pages[0] ?? (await this.browser.newPage());
-        if (proxyServer && (proxy.proxyUsername || proxy.proxyPassword)) {
-            await this.page.authenticate({
-                username: proxy.proxyUsername,
-                password: proxy.proxyPassword,
-            });
-        }
         await this.page.setViewport(getViewport()).catch(() => { });
 
         this._attachPageEvents(this.page);
@@ -252,6 +245,11 @@ class Bot {
             this.browser = null;
             this.page = null;
         }
+		
+		if (this._localProxy) {
+			await proxyChain.closeAnonymizedProxy(this._localProxy, true).catch(() => {});
+			this._localProxy = null;
+		}
     }
 }
 

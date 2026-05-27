@@ -16,14 +16,17 @@ services:
       - bot_puppeteer_cache:/app/bot/.puppeteer-cache
     ports:
       - "8000:8000"
-      - "${PORT:-3001}:3000"
+      - "${PORT:-3000}:3000"
     env_file:
       - .env
-      # - ./bot/.env
+      - ./bot/.env
     environment:
-      HTTP_PROXY: "${RUNTIME_HTTP_PROXY:-}"
-      HTTPS_PROXY: "${RUNTIME_HTTPS_PROXY:-}"
-      NO_PROXY: "${RUNTIME_NO_PROXY:-localhost,127.0.0.1,db,nginx,.local}"
+      BOT_PROXY: 'http://proxy.gsu.by:800'
+      BOT_PROXY_USER: 'main\dlupdate'
+      BOT_PROXY_PASS: '3sd4y-K8yf3'
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,db,nginx,.local}"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null && curl -fsS http://localhost:3000/health >/dev/null"]
       interval: 30s
