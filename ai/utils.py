@@ -129,11 +129,8 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
 
         completion_tokens = obj.get('usage', {}).get('completion_tokens', 0)
         return assistant_content, completion_tokens'''
-<<<<<<< HEAD
     #тут не нужна проверка на токен. веб автоматизация так не работает
-=======
     #боту не нужен токен
->>>>>>> origin/v0.9
 
     payload = {
         "model": "deepseek",
