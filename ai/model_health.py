@@ -23,6 +23,16 @@ _manual_refresh_started = False
 
 MODEL_CATALOG = (
     {
+        "key": "Web_DeepSeek",
+        "title": "Web DeepSeek",
+        "handler_name": "ask_Web_DeepSeek_async",
+    },
+    {
+        "key": "Web_DeepSeek_Thinking",
+        "title": "Web DeepSeek Thinking",
+        "handler_name": "ask_Web_DeepSeek_Thinking_async",
+    },
+    {
         "key": "DeepSeek_R1_Distill_Llama_70B",
         "title": "DeepSeek-R1-Distill-Llama-70B",
         "handler_name": "ask_DeepSeek_R1_Distill_Llama_70B_async",
@@ -71,16 +81,6 @@ MODEL_CATALOG = (
         "key": "Gpt_oss_120b",
         "title": "gpt-oss-120b",
         "handler_name": "ask_Gpt_oss_120b_async",
-    },
-    {
-        "key": "Web_DeepSeek",
-        "title": "Web DeepSeek",
-        "handler_name": "ask_Web_DeepSeek_async",
-    },
-    {
-        "key": "Web_DeepSeek_Thinking",
-        "title": "Web DeepSeek Thinking",
-        "handler_name": "ask_Web_DeepSeek_Thinking_async",
     },
 )
 
