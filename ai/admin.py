@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.contrib.admin.forms import AdminAuthenticationForm
 from django import forms
+from django.db.models import Q
 from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
@@ -20,6 +21,7 @@ from .model_health import (
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+PROMPT_DEVELOPER_GROUP = "prompt_developer"
 
 
 def _safe_relative_url(candidate, fallback):
@@ -29,24 +31,42 @@ def _safe_relative_url(candidate, fallback):
     return fallback
 
 
-def _is_tester_user(request):
+def _is_prompt_developer_user(request):
     if not request.user.is_authenticated:
         return False
-    return request.user.groups.filter(name="tester").exists()
+    return request.user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists()
+
+
+def _is_staff_or_superuser(user):
+    return bool(user and (user.is_superuser or user.is_staff))
 
 
 def _can_access_arm(request):
     if not request.user.is_authenticated:
         return False
-    if request.user.is_superuser or request.user.is_staff:
+    if _is_staff_or_superuser(request.user):
         return True
-    return _is_tester_user(request)
+    return _is_prompt_developer_user(request)
 
 
 def _can_access_model_status(request):
     if not request.user.is_authenticated:
         return False
     return request.user.is_superuser or request.user.is_staff
+
+
+def _can_access_prompt_admin(request):
+    if not request.user.is_authenticated:
+        return False
+    if _is_staff_or_superuser(request.user):
+        return True
+    return _is_prompt_developer_user(request)
+
+
+def _get_my_prompt_admin_url(request):
+    if _is_staff_or_superuser(request.user):
+        return "/ai/admin/ai/prompt/"
+    return "/ai/admin/ai/prompt/?mine=1"
 
 
 class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
@@ -57,13 +77,16 @@ class TesterOrStaffAdminAuthenticationForm(AdminAuthenticationForm):
                 code="inactive",
             )
 
-        if user.is_superuser or user.is_staff or user.groups.filter(name="tester").exists():
+        if (
+            _is_staff_or_superuser(user)
+            or user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists()
+        ):
             if getattr(self, "request", None) is not None:
                 self.request.session["admin_fresh_auth"] = True
             return
 
         raise forms.ValidationError(
-            "Please enter the correct username and password for a staff or tester account.",
+            "Please enter the correct username and password for a staff or prompt developer account.",
             code="invalid_login",
         )
 
@@ -387,6 +410,12 @@ def admin_model_status_refresh_view(request):
     )
 
 
+def admin_my_prompt_view(request):
+    if not _can_access_prompt_admin(request):
+        return HttpResponseForbidden("Access denied")
+    return redirect(_get_my_prompt_admin_url(request))
+
+
 _default_get_urls = admin.site.get_urls
 
 
@@ -422,6 +451,11 @@ def _custom_admin_urls():
             admin.site.admin_view(admin_arm_find_error_view),
             name="ai_arm_find_error",
         ),
+        path(
+            "prompts/my/",
+            admin.site.admin_view(admin_my_prompt_view),
+            name="ai_my_prompt",
+        ),
     ]
     return custom_urls + _default_get_urls()
 
@@ -440,9 +474,9 @@ def _custom_has_permission(request):
     user = getattr(request, "user", None)
     if not user or not user.is_authenticated or not user.is_active:
         return False
-    if user.is_superuser or user.is_staff:
+    if _is_staff_or_superuser(user):
         return True
-    return user.groups.filter(name="tester").exists()
+    return user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists()
 
 
 admin.site.has_permission = _custom_has_permission
@@ -459,11 +493,6 @@ def _custom_admin_view(view, cacheable=False):
         if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
             next_path = quote(request.get_full_path(), safe="/?=&")
             return redirect(f"/ai/admin/login/?next={next_path}")
-
-        if _is_tester_user(request) and not request.user.is_superuser:
-            arm_path = "/ai/admin/arm/find-error/"
-            if not request.path.startswith(arm_path):
-                return redirect(arm_path)
         return wrapped_view(request, *args, **kwargs)
 
     return inner
@@ -479,10 +508,14 @@ def _custom_each_context(request):
     context = _default_each_context(request)
     context["show_arm_link"] = _can_access_arm(request)
     context["show_model_status_link"] = _can_access_model_status(request)
+    context["show_prompt_link"] = _can_access_prompt_admin(request)
     context["arm_find_error_url"] = "/ai/admin/arm/find-error/"
     context["arm_model_status_url"] = "/ai/admin/arm/models/"
     context["arm_model_status_refresh_url"] = "/ai/admin/arm/models/refresh/"
     context["arm_model_status_state_url"] = "/ai/admin/arm/models/state/"
+    context["prompt_admin_url"] = "/ai/admin/ai/prompt/"
+    context["my_prompt_url"] = "/ai/admin/prompts/my/"
+    context["my_prompt_change_url"] = _get_my_prompt_admin_url(request)
     return context
 
 
@@ -531,10 +564,84 @@ class TopicAdmin(admin.ModelAdmin):
 
 class PromptAdmin(admin.ModelAdmin):
     form = PromptForm
-    list_display = ('prompt_name', 'topic', 'short_prompt_text')
+    list_display = ('prompt_name', 'topic', 'owner_username', 'assigned_editors', 'short_prompt_text')
     list_filter = ('topic__programming_language', 'topic')
     search_fields = ('prompt_name', 'prompt_text')
-    
+    filter_horizontal = ("editors",)
+
+    def get_queryset(self, request):
+        queryset = (
+            super()
+            .get_queryset(request)
+            .select_related("topic", "owner")
+            .prefetch_related("editors")
+        )
+        mine_mode = (request.GET.get("mine") or "").strip() == "1"
+        if mine_mode and not _is_staff_or_superuser(request.user):
+            queryset = queryset.filter(
+                Q(owner=request.user)
+                | Q(owner__isnull=True, editors=request.user)
+            ).distinct()
+        return queryset
+
+    def _can_edit_prompt(self, request, obj):
+        if _is_staff_or_superuser(request.user):
+            return True
+        if not _is_prompt_developer_user(request):
+            return False
+        if obj is None:
+            return True
+        if obj.owner_id == request.user.pk:
+            return True
+        return obj.editors.filter(pk=request.user.pk).exists()
+
+    def has_module_permission(self, request):
+        if _is_staff_or_superuser(request.user):
+            return True
+        return _is_prompt_developer_user(request)
+
+    def has_view_permission(self, request, obj=None):
+        if _is_staff_or_superuser(request.user):
+            return True
+        return _is_prompt_developer_user(request)
+
+    def has_change_permission(self, request, obj=None):
+        return self._can_edit_prompt(request, obj)
+
+    def has_add_permission(self, request):
+        return _is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)
+
+    def has_delete_permission(self, request, obj=None):
+        return _is_staff_or_superuser(request.user)
+
+    def get_fields(self, request, obj=None):
+        if _is_staff_or_superuser(request.user):
+            return ("topic", "prompt_name", "prompt_text", "owner", "editors")
+        return ("topic", "prompt_name", "prompt_text")
+
+    def get_readonly_fields(self, request, obj=None):
+        if _is_staff_or_superuser(request.user):
+            return ()
+        if self._can_edit_prompt(request, obj):
+            return ()
+        return ("topic", "prompt_name", "prompt_text")
+
+    def save_model(self, request, obj, form, change):
+        if not _is_staff_or_superuser(request.user) and not change and not obj.owner_id:
+            obj.owner = request.user
+        super().save_model(request, obj, form, change)
+        if not _is_staff_or_superuser(request.user):
+            obj.editors.add(request.user)
+
+    def assigned_editors(self, obj):
+        usernames = sorted(obj.editors.values_list("username", flat=True))
+        return ", ".join(usernames) if usernames else "-"
+    assigned_editors.short_description = "Editors"
+
+    def owner_username(self, obj):
+        return obj.owner.username if obj.owner else "-"
+    owner_username.short_description = "Owner"
+
     def short_prompt_text(self, obj):
         return f"{obj.prompt_text[:100]}..." if len(obj.prompt_text) > 100 else obj.prompt_text
     short_prompt_text.short_description = "Prompt Text"

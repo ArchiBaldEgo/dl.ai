@@ -128,10 +128,23 @@
     margin-bottom: 12px;
     display: inline-block;
   }
+  .arm-top-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
 </style>
 
 <div class="arm-wrap">
   <a class="arm-link" href="{{ arm_back_url }}">← Вернуться в чат</a>
+  <div class="arm-top-actions">
+    <a class="button" href="/ai/admin/">В админку</a>
+    {% if show_prompt_link %}
+      <a class="button" href="{{ my_prompt_url }}">Мой препромпт</a>
+      <a class="button" href="{{ prompt_admin_url }}">Все препромпты</a>
+    {% endif %}
+  </div>
   <h1>ARM: В чем ошибка</h1>
   <div class="arm-card">
     <form id="armRunForm" method="post">

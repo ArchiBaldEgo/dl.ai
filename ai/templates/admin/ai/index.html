@@ -6,6 +6,41 @@
 {% block nav-breadcrumbs %}{% endblock %}
 
 {% block content %}
-<div id="content-main">
+<style>
+  .ai-admin-wrap {
+    max-width: 900px;
+  }
+  .ai-admin-card {
+    background: var(--body-bg);
+    border: 1px solid var(--hairline-color);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .ai-admin-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+</style>
+
+<div id="content-main" class="ai-admin-wrap">
+  <div class="ai-admin-card">
+    <h1>AI: рабочая панель</h1>
+    <p>Выберите раздел для работы.</p>
+    <div class="ai-admin-actions">
+      {% if show_arm_link %}
+        <a class="button" href="{{ arm_find_error_url }}">ARM: В чем ошибка</a>
+      {% endif %}
+      {% if show_prompt_link %}
+        <a class="button" href="{{ my_prompt_url }}">Мой препромпт</a>
+        <a class="button" href="{{ prompt_admin_url }}">Все препромпты</a>
+      {% endif %}
+      {% if show_model_status_link %}
+        <a class="button" href="{{ arm_model_status_url }}">Состояние моделей</a>
+      {% endif %}
+    </div>
+  </div>
 </div>
 {% endblock %}

@@ -60,13 +60,15 @@ proxies = {
             'https': os.getenv("PROXY")
         }
 
+BOT_POOL_URL = os.getenv("BOT_POOL_URL", "http://localhost:3000").rstrip("/")
+
 
 def _post_to_bot_pool(payload: dict, timeout_seconds: int = 120) -> requests.Response:
     # Internal service call must bypass env proxies (HTTP_PROXY/HTTPS_PROXY).
     with requests.Session() as session:
         session.trust_env = False
         return session.post(
-            'http://bot-pool-api:3000/api/send',
+            f"{BOT_POOL_URL}/api/send",
             json=payload,
             headers={"Content-Type": "application/json"},
             timeout=timeout_seconds,
@@ -127,7 +129,11 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
 
         completion_tokens = obj.get('usage', {}).get('completion_tokens', 0)
         return assistant_content, completion_tokens'''
+<<<<<<< HEAD
     #тут не нужна проверка на токен. веб автоматизация так не работает
+=======
+    #боту не нужен токен
+>>>>>>> origin/v0.9
 
     payload = {
         "model": "deepseek",
