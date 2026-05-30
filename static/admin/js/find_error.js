@@ -27,7 +27,11 @@
                 const voiceControls = document.getElementById('voiceControls');
                 if (voiceControls.style.display === 'flex') {
                     voiceControls.style.display = 'none';
-                    stopSpeech();
+                    if (speechSynthesis.speaking) {
+                        speechSynthesis.cancel();
+                        updateVoiceStatus(getVoiceStatusText('speechStopped'));
+                        document.getElementById('voiceOutputBtn').classList.remove('speaking');
+                    }
                     if (isListening && mediaRecorder && mediaRecorder.state === 'recording') {
                         stopMediaRecording();
                     }
@@ -140,13 +144,19 @@
                     return;
                 }
                 
+                if (speechSynthesis.speaking) {
+                    speechSynthesis.cancel();
+                    updateVoiceStatus(getVoiceStatusText('speechStopped'));
+                    document.getElementById('voiceOutputBtn').classList.remove('speaking');
+                }
+                
                 const success = await initMediaRecorder();
                 if (!success) return;
                 
                 mediaRecorder.start();
                 isListening = true;
                 updateVoiceUI();
-                updateVoiceStatus(getVoiceStatusText('press_stop_to_send'));
+                updateVoiceStatus(getVoiceStatusText('listening'));
                 
                 recordingTimeout = setTimeout(() => {
                     if (mediaRecorder && mediaRecorder.state === 'recording') {
@@ -208,6 +218,10 @@
                     return;
                 }
                 
+                if (isListening) {
+                    stopMediaRecording();
+                }
+                
                 const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
                 const panel = lastAssistantMessage.querySelector('.panel');
                 let text = '';
@@ -220,6 +234,13 @@
                 
                 if (!text.trim()) {
                     updateVoiceStatus(getVoiceStatusText('textEmpty'));
+                    return;
+                }
+                
+                if (speechSynthesis.speaking) {
+                    speechSynthesis.cancel();
+                    updateVoiceStatus(getVoiceStatusText('speechStopped'));
+                    document.getElementById('voiceOutputBtn').classList.remove('speaking');
                     return;
                 }
                 
@@ -381,6 +402,47 @@
                     || text.includes("неверный формат json")
                     || text.includes("контекст очищен")
                     || text.includes("context cleared");
+            }
+
+            function simulateSend() {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    updateVoiceStatus(getVoiceStatusText('connectionError'));
+                    return;
+                }
+
+                if (requestInFlight) {
+                    updateVoiceStatus(getVoiceStatusText('waitForModel'));
+                    return;
+                }
+                
+                var value = document.querySelector("#select").value;
+                var language = document.querySelector("#selectLang").value;
+                var input = document.getElementById("taskText");
+                var progLng = document.querySelector("#selectProgLng").value;
+                var preprompt = document.querySelector("#selectPrompt").value;
+                
+                if (!input.value.trim()) {
+                    return;
+                }
+                if (!progLng) {
+                    updateVoiceStatus(getVoiceStatusText('select_prog_lang'));
+                    return;
+                }
+                
+                ws.send(JSON.stringify({
+                    type: '3',
+                    message: input.value,
+                    value: value,
+                    language: language,
+                    progLng: progLng,
+                    preprompt: preprompt,
+                    code: document.getElementById("codeText").value
+                }));
+
+                setRequestLock(true);
+                notEnter = true;
+                updateVoiceStatus(getVoiceStatusText('messageSent'));
+                input.value = '';
             }
 
             // Инициализация WebSocket
@@ -708,10 +770,9 @@
                 voiceMode: "Голосовой режим",
                 voiceInput: "Голосовой ввод",
                 voiceOutput: "Озвучить ответ",
-                voiceStop: "Стоп",
                 speakThinkLabel: "Озвучивать дополнительную информацию",
                 voiceStatus: {
-                    listening: "Запись... Говорите сейчас",
+                    listening: "Запись голоса",
                     recognized: "Распознано: ",
                     recognizing: "Распознаю...",
                     error: "Ошибка: ",
@@ -732,13 +793,13 @@
                     connectionClosed: "Соединение закрыто",
                     wsError: "Ошибка соединения",
                     ready: 'Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.',
-                    press_stop_to_send: "Нажмите Стоп для отправки",
                     recording_error: "Ошибка записи",
                     recognition_failed: "Не удалось распознать речь",
                     server_error: "Ошибка связи с сервером",
                     microphone_denied: "Разрешите доступ к микрофону",
                     microphone_not_found: "Микрофон не найден",
-                    max_time_exceeded: "Превышено время записи"
+                    max_time_exceeded: "Превышено время записи",
+                    select_prog_lang: "Выберите язык программирования"
                 }
             },
     
@@ -758,10 +819,9 @@
                 voiceMode: "Voice mode",
                 voiceInput: "Voice input",
                 voiceOutput: "Speak answer",
-                voiceStop: "Stop",
                 speakThinkLabel: "Voice extra information",
                 voiceStatus: {
-                    listening: "Recording... Speak now",
+                    listening: "Voice recording",
                     recognized: "Recognized: ",
                     recognizing: "Recognizing...",
                     error: "Error: ",
@@ -782,13 +842,13 @@
                     connectionClosed: "Connection closed",
                     wsError: "Connection error",
                     ready: 'Ready. Click "Voice mode" to activate voice features.',
-                    press_stop_to_send: "Press Stop to send",
                     recording_error: "Recording error",
                     recognition_failed: "Recognition failed",
                     server_error: "Server connection error",
                     microphone_denied: "Microphone access denied",
                     microphone_not_found: "Microphone not found",
-                    max_time_exceeded: "Max recording time exceeded"
+                    max_time_exceeded: "Max recording time exceeded",
+                    select_prog_lang: "Select programming language"
                 }
             },
             French: {
@@ -807,10 +867,9 @@
                 voiceMode: "Mode vocal",
                 voiceInput: "Saisie vocale",
                 voiceOutput: "Lire la réponse",
-                voiceStop: "Arrêter",
                 speakThinkLabel: "Informations supplémentaires vocales",
                 voiceStatus: {
-                    listening: "Enregistrement... Parlez maintenant",
+                    listening: "Enregistrement vocal",
                     recognized: "Reconnu : ",
                     recognizing: "Reconnaissance...",
                     error: "Erreur : ",
@@ -831,13 +890,13 @@
                     connectionClosed: "Connexion fermée",
                     wsError: "Erreur de connexion",
                     ready: 'Prêt. Cliquez sur "Mode vocal" pour activer les fonctions vocales.',
-                    press_stop_to_send: "Appuyez sur Arrêter pour envoyer",
                     recording_error: "Erreur d'enregistrement",
-                    recognition_failed: "Reconnaissance échouée",
+                    recognition_failed: "Échec de reconnaissance",
                     server_error: "Erreur de connexion au serveur",
                     microphone_denied: "Accès au micro refusé",
                     microphone_not_found: "Microphone introuvable",
-                    max_time_exceeded: "Durée d'enregistrement dépassée"
+                    max_time_exceeded: "Durée d'enregistrement dépassée",
+                    select_prog_lang: "Sélectionnez le langage de programmation"
                 }
             }
         };
@@ -883,9 +942,6 @@
 
                 const voiceOutputBtn = document.getElementById("voiceOutputBtn");
                 if (voiceOutputBtn) voiceOutputBtn.textContent = localization[selectedLang].voiceOutput;
-
-                const voiceStopBtn = document.getElementById("voiceStopBtn");
-                if (voiceStopBtn) voiceStopBtn.textContent = localization[selectedLang].voiceStop;
 
                 const speakThinkLabel = document.getElementById("speakThinkLabel");
                 if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
