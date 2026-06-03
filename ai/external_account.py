@@ -4,12 +4,11 @@ External DL account model and utilities for user provisioning.
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from .models import ExternalDLAccount
+from .constants import PROMPT_DEVELOPER_GROUP
 import logging
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
-
-PROMPT_DEVELOPER_GROUP = "prompt_developer"
 
 
 def _find_available_username(base_username: str) -> str:

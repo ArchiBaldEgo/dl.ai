@@ -155,7 +155,7 @@ class ExternalAuthMiddleware:
             logger.error(f"Request to external API failed: {exc}")
             if _is_optional_auth_path(request_path):
                 return self.get_response(request)
-            return JsonResponse({'error': 'Authentication service unavailable'}, status=503)
+            return JsonResponse({"error": "Authentication service unavailable"}, status=503)
 
         request.user_info = user_info
 
@@ -176,6 +176,6 @@ class ExternalAuthMiddleware:
                     logger.info(f"New user provisioned: {user.username} (external_id={user_info.get('userId')})")
         except Exception as e:
             logger.exception(f"User provisioning failed: {e}")
-            return JsonResponse({'error': 'User provisioning failed'}, status=500)
+            return JsonResponse({"error": "User provisioning failed"}, status=500)
         
         return self.get_response(request)

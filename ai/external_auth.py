@@ -51,11 +51,15 @@ def fetch_external_user_info(
     resolved_api_url = (api_url or get_external_auth_api_url()).strip()
     if not resolved_api_url:
         raise ExternalAuthMisconfigured("EXTERNAL_AUTH_API_URL is empty")
+    
+    # SSL verification can be disabled via environment variable for development
+    verify_ssl = not os.getenv("SKIP_SSL_VERIFICATION", "").lower() in ("1", "true")
+    
     try:
         response = requests.post(
             resolved_api_url,
             json={"sessionId": session_id, "removeHtmlTags": True},
-            verify=False,
+            verify=verify_ssl,
             timeout=timeout,
         )
     except requests.RequestException as exc:

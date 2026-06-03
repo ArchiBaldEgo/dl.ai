@@ -18,8 +18,8 @@ from .auth_backends import (
     get_external_user_id_from_request,
     normalize_external_user_id,
 )
+from .constants import PROMPT_DEVELOPER_GROUP
 
-PROMPT_DEVELOPER_GROUP = "prompt_developer"
 _WEB_PRIORITY_MODELS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
 
 

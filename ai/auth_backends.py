@@ -5,8 +5,9 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.backends import BaseBackend
 from django.contrib.auth.models import Group
 
+from .constants import PROMPT_DEVELOPER_GROUP
 
-PROMPT_DEVELOPER_GROUP = "prompt_developer"
+
 ADMIN_EXTERNAL_AUTH_BACKEND = "ai.auth_backends.AdminExternalAuthBackend"
 
 
