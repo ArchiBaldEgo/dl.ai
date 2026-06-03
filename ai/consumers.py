@@ -1,10 +1,11 @@
-import requests
 import json
-from urllib.parse import unquote
-from channels.generic.websocket import AsyncWebsocketConsumer
-import django
+import logging
 import os
 from datetime import datetime, timedelta
+from urllib.parse import unquote
+
+import django
+from channels.generic.websocket import AsyncWebsocketConsumer
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'DjangoTest.settings')
 django.setup()
@@ -13,8 +14,16 @@ from .model_health import MODEL_ALIASES
 from .models import ProgrammingLanguage, Prompt
 from .utils import *
 from asgiref.sync import sync_to_async
+from .external_auth import (
+    ExternalAuthMisconfigured,
+    ExternalAuthUnauthorized,
+    ExternalAuthUnavailable,
+    fetch_external_user_info,
+    get_external_session_cookie_name,
+)
 
 current_tokens = 0
+logger = logging.getLogger(__name__)
 
 @sync_to_async
 def getPromptText(prompt_id):
@@ -45,31 +54,50 @@ def is_ai_app_enabled():
 #функция проверки сессии через внешний API
 def check_session(session_id):
     try:
-        response = requests.post(
-            'https://dl.gsu.by/restapi/get-user-info',
-            json={'sessionId': session_id, 'removeHtmlTags': True},
-            verify=False,
-            timeout=10
-        )
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except Exception as e:
-        print(f"Session check error: {e}")
+        return fetch_external_user_info(session_id)
+    except (ExternalAuthMisconfigured, ExternalAuthUnauthorized, ExternalAuthUnavailable) as exc:
+        logger.error(f"Session check error: {exc}")
         return None
 
 
 class MyConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         cookies = self.scope.get('cookies', {})
-        raw_session_id = cookies.get('DLSID')
+        user = self.scope.get("user")
+        if user is not None and getattr(user, "is_authenticated", False):
+            self.user_id = getattr(user, "username", None) or str(getattr(user, "pk", ""))
+            if not await is_ai_app_enabled():
+                await self.close(code=4403)
+                return
+            self.client_id = self.scope['url_route']['kwargs']['client_id']
+            await self.accept()
+            print(f"WebSocket connected for client {self.client_id}, user_id={self.user_id}")
+            return
+
+        session_cookie_name = get_external_session_cookie_name()
+        raw_session_id = cookies.get(session_cookie_name)
         if not raw_session_id:
             await self.close(code=4403)
             return
 
         session_id = unquote(raw_session_id)
 
-        user_info = await sync_to_async(check_session)(session_id)
+        session = self.scope.get("session")
+        user_info = None
+        if session is not None:
+            cached_session_id = session.get("external_session_id")
+            cached_user_info = session.get("external_user_info")
+            if cached_session_id == session_id and isinstance(cached_user_info, dict) and cached_user_info:
+                user_info = cached_user_info
+
+        if user_info is None:
+            user_info = await sync_to_async(check_session)(session_id)
+            if user_info and session is not None:
+                session["external_session_id"] = session_id
+                session["external_user_info"] = user_info
+                session.modified = True
+                await sync_to_async(session.save)()
+
         if not user_info:
             await self.close(code=4403)
             return

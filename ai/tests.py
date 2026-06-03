@@ -3,13 +3,14 @@ from django.contrib.auth import SESSION_KEY, get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.auth.models import Group
 from django.contrib.sessions.middleware import SessionMiddleware
-from django.test import SimpleTestCase, RequestFactory, TestCase
+from django.test import SimpleTestCase, RequestFactory, TestCase, override_settings
 from django.http import HttpResponse
 from django.db import ProgrammingError
 from unittest.mock import patch
 from types import SimpleNamespace
 
 from ai.admin import PromptAdmin, PromptForm, _external_admin_entry_response
+from ai.middleware import ExternalAuthMiddleware
 from ai.models import ExternalDLAccount, ProgrammingLanguage, Prompt, Topic
 from ai.views import chat_view, get_prompts, set_password_view
 
@@ -41,6 +42,49 @@ class ChatViewTests(SimpleTestCase):
         request.session = {}
         response = chat_view(request)
         self.assertEqual(response.status_code, 403)
+
+
+@override_settings(SESSION_ENGINE="django.contrib.sessions.backends.signed_cookies")
+class ExternalAuthMiddlewareTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.middleware = ExternalAuthMiddleware(lambda req: HttpResponse("ok"))
+
+    def _add_session(self, request):
+        SessionMiddleware(lambda req: None).process_request(request)
+
+    def test_test_panel_login_skips_external_auth(self):
+        request = self.factory.get("/ai/test-panel/login/")
+        self._add_session(request)
+
+        response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_authenticated_user_skips_external_auth(self):
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = SimpleNamespace(is_authenticated=True, pk=1)
+
+        with patch("ai.middleware.fetch_external_user_info") as fetch_user_info:
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        fetch_user_info.assert_not_called()
+
+    def test_cached_user_info_skips_external_call(self):
+        request = self.factory.get("/ai/admin/")
+        self._add_session(request)
+        request.COOKIES["DLSID"] = "session-123"
+        request.session["external_session_id"] = "session-123"
+        request.session["external_user_info"] = {"userId": "42"}
+
+        with patch("ai.middleware.fetch_external_user_info") as fetch_user_info:
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        fetch_user_info.assert_not_called()
+        self.assertEqual(request.user_info, {"userId": "42"})
 
 
 class AdminExternalAuthTests(TestCase):
