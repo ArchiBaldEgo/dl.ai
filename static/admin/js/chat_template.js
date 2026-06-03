@@ -14,18 +14,21 @@ var speakThinkEnabled = true;
 
 // Таймер для автоматической остановки записи (максимум 30 секунд)
 var recordingTimeout = null;
-var MAX_RECORDING_TIME = 30000; // 30 секунд
+var MAX_RECORDING_TIME = 30000;
 
 function generateClientId() {
     return 'client_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
 }
 
-// Функция для показа/скрытия голосовых контролов
 function toggleVoiceControls() {
     const voiceControls = document.getElementById('voiceControls');
     if (voiceControls.style.display === 'flex') {
         voiceControls.style.display = 'none';
-        stopSpeech();
+        if (speechSynthesis.speaking) {
+            speechSynthesis.cancel();
+            updateVoiceStatus(getVoiceStatusText('speechStopped'));
+            document.getElementById('voiceOutputBtn').classList.remove('speaking');
+        }
         if (isListening && mediaRecorder && mediaRecorder.state === 'recording') {
             stopMediaRecording();
         }
@@ -34,10 +37,8 @@ function toggleVoiceControls() {
     }
 }
 
-// Инициализация MediaRecorder
 async function initMediaRecorder() {
     try {
-        // Запрашиваем доступ к микрофону
         audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         
         mediaRecorder = new MediaRecorder(audioStream);
@@ -137,13 +138,19 @@ async function startMediaRecording() {
         return;
     }
     
+    if (speechSynthesis.speaking) {
+        speechSynthesis.cancel();
+        updateVoiceStatus(getVoiceStatusText('speechStopped'));
+        document.getElementById('voiceOutputBtn').classList.remove('speaking');
+    }
+    
     const success = await initMediaRecorder();
     if (!success) return;
     
     mediaRecorder.start();
     isListening = true;
     updateVoiceUI();
-    updateVoiceStatus(getVoiceStatusText('press_stop_to_send'));
+    updateVoiceStatus(getVoiceStatusText('listening'));
     
     recordingTimeout = setTimeout(() => {
         if (mediaRecorder && mediaRecorder.state === 'recording') {
@@ -168,7 +175,6 @@ function getCsrfToken() {
     return '';
 }
 
-// Функции для синтеза речи
 function getSpeechSynthesisLanguage(lang) {
     const languageMap = {
         'Russian': 'ru-RU',
@@ -187,6 +193,10 @@ function speakLastResponse() {
         return;
     }
     
+    if (isListening) {
+        stopMediaRecording();
+    }
+    
     const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
     const panel = lastAssistantMessage.querySelector('.panel');
     let text = '';
@@ -199,6 +209,13 @@ function speakLastResponse() {
     
     if (!text.trim()) {
         updateVoiceStatus(getVoiceStatusText('textEmpty'));
+        return;
+    }
+    
+    if (speechSynthesis.speaking) {
+        speechSynthesis.cancel();
+        updateVoiceStatus(getVoiceStatusText('speechStopped'));
+        document.getElementById('voiceOutputBtn').classList.remove('speaking');
         return;
     }
     
@@ -307,11 +324,11 @@ function stopSpeech() {
     if (speechSynthesis.speaking) {
         speechSynthesis.cancel();
         updateVoiceStatus(getVoiceStatusText('speechStopped'));
+        document.getElementById('voiceOutputBtn').classList.remove('speaking');
     }
     if (isListening && mediaRecorder && mediaRecorder.state === 'recording') {
         stopMediaRecording();
     }
-    document.getElementById('voiceOutputBtn').classList.remove('speaking');
 }
 
 function toggleVoiceInput() {
@@ -699,10 +716,9 @@ const localization = {
         voiceMode: "Голосовой режим",
         voiceInput: "Голосовой ввод",
         voiceOutput: "Озвучить ответ",
-        voiceStop: "Стоп",
         speakThinkLabel: "Озвучивать дополнительную информацию",
         voiceStatus: {
-            listening: "Запись... Говорите сейчас",
+            listening: "Запись голоса",
             recognized: "Распознано: ",
             recognizing: "Распознаю...",
             error: "Ошибка: ",
@@ -723,7 +739,6 @@ const localization = {
             connectionClosed: "Соединение закрыто",
             wsError: "Ошибка соединения",
             ready: 'Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.',
-            press_stop_to_send: "Нажмите Стоп для отправки",
             recording_error: "Ошибка записи",
             recognition_failed: "Не удалось распознать речь",
             server_error: "Ошибка связи с сервером",
@@ -749,10 +764,9 @@ const localization = {
         voiceMode: "Voice mode",
         voiceInput: "Voice input",
         voiceOutput: "Speak answer",
-        voiceStop: "Stop",
         speakThinkLabel: "Voice extra information",
         voiceStatus: {
-            listening: "Recording... Speak now",
+            listening: "Voice recording",
             recognized: "Recognized: ",
             recognizing: "Recognizing...",
             error: "Error: ",
@@ -773,7 +787,6 @@ const localization = {
             connectionClosed: "Connection closed",
             wsError: "Connection error",
             ready: 'Ready. Click "Voice mode" to activate voice features.',
-            press_stop_to_send: "Press Stop to send",
             recording_error: "Recording error",
             recognition_failed: "Recognition failed",
             server_error: "Server connection error",
@@ -798,10 +811,9 @@ const localization = {
         voiceMode: "Mode vocal",
         voiceInput: "Saisie vocale",
         voiceOutput: "Lire la réponse",
-        voiceStop: "Arrêter",
         speakThinkLabel: "Informations supplémentaires vocales",
         voiceStatus: {
-            listening: "Enregistrement... Parlez maintenant",
+            listening: "Enregistrement vocal",
             recognized: "Reconnu : ",
             recognizing: "Reconnaissance...",
             error: "Erreur : ",
@@ -822,7 +834,6 @@ const localization = {
             connectionClosed: "Connexion fermée",
             wsError: "Erreur de connexion",
             ready: 'Prêt. Cliquez sur "Mode vocal" pour activer les fonctions vocales.',
-            press_stop_to_send: "Appuyez sur Arrêter pour envoyer",
             recording_error: "Erreur d'enregistrement",
             recognition_failed: "Échec de reconnaissance",
             server_error: "Erreur de connexion au serveur",
@@ -869,9 +880,6 @@ document.getElementById("selectLang").addEventListener("change", function() {
     
     const voiceOutputBtn = document.getElementById("voiceOutputBtn");
     if (voiceOutputBtn) voiceOutputBtn.textContent = localization[selectedLang].voiceOutput;
-    
-    const voiceStopBtn = document.getElementById("voiceStopBtn");
-    if (voiceStopBtn) voiceStopBtn.textContent = localization[selectedLang].voiceStop;
     
     const speakThinkLabel = document.getElementById("speakThinkLabel");
     if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
@@ -1015,12 +1023,10 @@ function collapseAllExceptLast() {
 window.onload = function() {
     console.log('Initializing WebSocket with client_id:', client_id);
     initWebSocket();
-    // MediaRecorder инициализируется при первом нажатии на кнопку записи
     document.getElementById("selectLang").dispatchEvent(new Event("change"));
     initAccordionForMessages();
     updateVoiceStatus(getVoiceStatusText('ready'));
     
-    // Инициализация чекбокса think-блоков
     const speakThinkCheckbox = document.getElementById('speakThinkContent');
     if (speakThinkCheckbox) {
         speakThinkCheckbox.addEventListener('change', function() {
