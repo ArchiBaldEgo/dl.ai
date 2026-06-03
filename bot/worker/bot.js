@@ -56,14 +56,6 @@ function cleanEnvStr(v) {
     return s.trim();
 }
 
-function getProxyConfig() {
-    const noProxy = toBool(process.env.PUPPETEER_NO_PROXY, false);
-    const proxyServer = cleanEnvStr(process.env.PUPPETEER_PROXY_SERVER);
-    const proxyUsername = cleanEnvStr(process.env.PUPPETEER_PROXY_USERNAME);
-    const proxyPassword = cleanEnvStr(process.env.PUPPETEER_PROXY_PASSWORD);
-    return { noProxy, proxyServer, proxyUsername, proxyPassword };
-}
-
 class Bot {
     constructor({ id }) {
         this.id = id;
@@ -110,16 +102,13 @@ class Bot {
 
         const headless = "new";//toBool(process.env.HEADLESS, false);
         //const executablePath = resolveChromePath();
-
-        const proxy = getProxyConfig();
-        const proxyServer = proxy.noProxy ? '' : proxy.proxyServer;
+		const proxyServer = cleanEnvStr(process.env.BOT_PROXY);
 
         const launchOpts = {
             headless,
             args: [
+				...(proxyServer ? [`--proxy-server=${proxyServer}`] : []),
 				...(headless ? ['--disable-gpu'] : []),
-                ...(proxy.noProxy ? ['--no-proxy-server'] : []),
-                ...(proxyServer ? [`--proxy-server=${proxyServer}`] : []),
                 '--disable-extensions',
                 '--disable-default-apps',
                 '--disable-component-update',
@@ -153,13 +142,13 @@ class Bot {
 
         const pages = await this.browser.pages().catch(() => []);
         this.page = pages[0] ?? (await this.browser.newPage());
-        if (proxyServer && (proxy.proxyUsername || proxy.proxyPassword)) {
-            await this.page.authenticate({
-                username: proxy.proxyUsername,
-                password: proxy.proxyPassword,
-            });
-        }
         await this.page.setViewport(getViewport()).catch(() => { });
+		
+		const proxyUser = cleanEnvStr(process.env.BOT_PROXY_USER);
+		const proxyPass = cleanEnvStr(process.env.BOT_PROXY_PASS);
+		if (proxyUser) {
+			await this.page.authenticate({ username: proxyUser, password: proxyPass });
+		}
 
         this._attachPageEvents(this.page);
 
