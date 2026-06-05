@@ -54,14 +54,23 @@ def fetch_external_user_info(
     
     # SSL verification can be disabled via environment variable for development
     verify_ssl = not os.getenv("SKIP_SSL_VERIFICATION", "").lower() in ("1", "true")
+    disable_proxy = os.getenv("EXTERNAL_AUTH_DISABLE_PROXY", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    proxies = {"http": None, "https": None} if disable_proxy else None
     
     try:
-        response = requests.post(
-            resolved_api_url,
-            json={"sessionId": session_id, "removeHtmlTags": True},
-            verify=verify_ssl,
-            timeout=timeout,
-        )
+        request_kwargs = {
+            "json": {"sessionId": session_id, "removeHtmlTags": True},
+            "verify": verify_ssl,
+            "timeout": timeout,
+        }
+        if proxies is not None:
+            request_kwargs["proxies"] = proxies
+        response = requests.post(resolved_api_url, **request_kwargs)
     except requests.RequestException as exc:
         raise ExternalAuthUnavailable(str(exc)) from exc
 
