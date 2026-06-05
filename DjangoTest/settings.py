@@ -139,11 +139,20 @@ SESSION_COOKIE_PATH = os.getenv("SESSION_COOKIE_PATH", "/ai/")
 CSRF_COOKIE_DOMAIN = os.getenv("CSRF_COOKIE_DOMAIN") or None
 SESSION_COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN") or None
 CSRF_COOKIE_HTTPONLY = _env_bool("CSRF_COOKIE_HTTPONLY", default=False)
+CSRF_COOKIE_SAMESITE = os.getenv("CSRF_COOKIE_SAMESITE", "Lax")
+SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
 CSRF_USE_SESSIONS = _env_bool("CSRF_USE_SESSIONS", default=False)
 
 # If you terminate TLS at a reverse proxy (nginx, etc.), enable this.
 if _env_bool("USE_X_FORWARDED_PROTO", default=not DEBUG):
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    # In production with HTTPS, enable Secure flag on cookies
+    CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_SECURE = True
+else:
+    # Development: allow insecure cookies
+    CSRF_COOKIE_SECURE = False
+    SESSION_COOKIE_SECURE = False
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
