@@ -12,8 +12,8 @@ services:
     volumes:
       - .:/app
       - static_volume:/app/staticfiles
-      - bot_node_modules:/app/bot/node_modules
-      - bot_puppeteer_cache:/app/bot/.puppeteer-cache
+#      - bot_node_modules:/app/bot/node_modules
+#      - bot_puppeteer_cache:/app/bot/.puppeteer-cache
     ports:
       - "8000:8000"
       - "${PORT:-3000}:3000"

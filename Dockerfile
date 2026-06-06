@@ -1,12 +1,13 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.11 AS builder
+# ==================== БИЛДЕР ====================
+FROM python:3.11-bookworm AS builder
 
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
 
-# Системные зависимости (apt с явным прокси)
+# Все системные зависимости за один RUN (быстрее)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update \
@@ -20,20 +21,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 libgbm1 \
         libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 \
         libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
-        libxkbcommon0 libxrandr2 xdg-utils ffmpeg
+        libxkbcommon0 libxrandr2 xdg-utils ffmpeg && \
+    curl --proxy "$HTTP_PROXY" -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
 
-# Node.js 20 (curl с --proxy)
-RUN curl --proxy "$HTTP_PROXY" -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesetup.sh && \
-    bash /tmp/nodesetup.sh && \
-    apt-get update \
-        -o Acquire::http::Proxy="$HTTP_PROXY" \
-        -o Acquire::https::Proxy="$HTTPS_PROXY" && \
-    apt-get install -y --no-install-recommends nodejs \
-        -o Acquire::http::Proxy="$HTTP_PROXY" \
-        -o Acquire::https::Proxy="$HTTPS_PROXY" && \
-    rm /tmp/nodesetup.sh
-
-# Виртуальное окружение
+# Виртуальное окружение Python
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
@@ -43,7 +36,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip --proxy="$HTTP_PROXY" && \
     pip install --proxy="$HTTP_PROXY" --default-timeout=100 -r requirements.txt
 
-# Node‑зависимости и браузер
+# Node.js зависимости
 WORKDIR /app/bot
 COPY bot/package.json bot/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
@@ -57,8 +50,8 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
 
 COPY . .
 
-# -------------------- Runtime --------------------
-FROM python:3.11-slim
+# ==================== РАНТАЙМ ====================
+FROM python:3.11-slim-bookworm
 
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
