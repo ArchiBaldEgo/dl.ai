@@ -40,12 +40,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Node.js зависимости
 WORKDIR /app/bot
 COPY bot/package.json bot/package-lock.json ./
+# puppeteer 20.9.0 не имеет CLI `puppeteer` — Chromium качает его postinstall (install.js)
+# во время npm ci. Задаём PUPPETEER_CACHE_DIR и прокси, чтобы скачалось в /opt/puppeteer-cache.
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm config set proxy "$HTTP_PROXY" && \
     npm config set https-proxy "$HTTPS_PROXY" && \
-    npm ci --omit=dev --no-audit --no-fund && \
     PUPPETEER_CACHE_DIR=/opt/puppeteer-cache \
-    npx puppeteer browsers install chrome && \
+    HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="$HTTPS_PROXY" \
+    npm ci --omit=dev --no-audit --no-fund && \
     mkdir -p /opt/puppeteer-runtime && \
     cp -r /opt/puppeteer-cache/. /opt/puppeteer-runtime/
 COPY . .
