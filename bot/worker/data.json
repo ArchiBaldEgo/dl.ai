@@ -18,7 +18,7 @@
                 "deepseek": "//input[@type='password']"
             },
             "authButton": {
-                "deepseek": "//button[@role='button']"
+                "deepseek": "//button[@role='button'] | //div[@role='button'] | //div[contains(@class,'ds-button--filled') and contains(@class,'ds-button--primary')]"
             },
             "incorrectPassMessage": {
                 "deepseek": "//div[contains(text(), 'password is incorrect') or contains(text(), 'Неверный')]"
