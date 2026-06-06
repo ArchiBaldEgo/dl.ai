@@ -21,9 +21,6 @@ services:
       - .env
       - ./bot/.env
     environment:
-      BOT_PROXY: 'http://proxy.gsu.by:800'
-      BOT_PROXY_USER: 'main\dlupdate'
-      BOT_PROXY_PASS: '3sd4y-K8yf3'
       HTTP_PROXY: "${HTTP_PROXY:-}"
       HTTPS_PROXY: "${HTTPS_PROXY:-}"
       NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,db,nginx,.local}"
