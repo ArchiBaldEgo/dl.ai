@@ -7,12 +7,17 @@ ARG NO_PROXY
 # Все системные зависимости за один RUN (быстрее)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache && \
     apt-get update \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
-        -o Acquire::https::Proxy="$HTTPS_PROXY" && \
+        -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::Retries=5 && \
     apt-get install -y --no-install-recommends \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::Retries=5 \
+        -o Acquire::http::Timeout=60 \
         ca-certificates curl gnupg tini libpq-dev \
         fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 \
         libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 libgbm1 \
@@ -20,9 +25,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
         libxkbcommon0 libxrandr2 xdg-utils && \
     curl --proxy "$HTTP_PROXY" -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs && \
-    rm -rf /var/lib/apt/lists/*
-# ^^^ ИЗМЕНЕНИЕ 1: убрал ffmpeg из apt (ставим его через pip-пакет imageio-ffmpeg в requirements.txt)
+    apt-get install -y --no-install-recommends -o Acquire::Retries=5 nodejs
+# ffmpeg НЕ ставим из apt — он приходит pip-пакетом imageio-ffmpeg (см. requirements.txt)
+# docker-clean удалён + keep-cache: скачанные .deb остаются в кэше между пересборками
+# Acquire::Retries=5 + Timeout=60: терпим обрывы и медленный прокси GSU
 # Виртуальное окружение Python
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -50,23 +56,26 @@ ARG HTTPS_PROXY
 ARG NO_PROXY
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache && \
     apt-get update \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
-        -o Acquire::https::Proxy="$HTTPS_PROXY" && \
+        -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::Retries=5 && \
     apt-get install -y --no-install-recommends \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::Retries=5 \
+        -o Acquire::http::Timeout=60 \
         ca-certificates curl fonts-liberation libasound2 libatk-bridge2.0-0 \
         libatk1.0-0 libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 \
         libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 \
         libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
-        libxkbcommon0 libxrandr2 xdg-utils && \
-    rm -rf /var/lib/apt/lists/*
-# ^^^ ИЗМЕНЕНИЕ 2: убрал ffmpeg, добавил curl (его требует healthcheck в compose)
+        libxkbcommon0 libxrandr2 xdg-utils
+# curl нужен healthcheck в compose; ffmpeg убран; retries/keep-cache как в билдере
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /usr/bin/tini /usr/bin/tini
 COPY --from=builder /usr/bin/node /usr/local/bin/node
-# ^^^ ИЗМЕНЕНИЕ 3: node в рантайм-образе не было — без него `node /app/bot/api/index.js` падает с "not found"
 COPY --from=builder /opt/puppeteer-runtime /opt/puppeteer-runtime
 COPY --from=builder /app/bot/node_modules /app/bot/node_modules
 COPY --from=builder /app /app
