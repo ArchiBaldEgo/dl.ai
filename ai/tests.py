@@ -352,6 +352,7 @@ class PromptAdminAccessTests(TestCase):
         self.assertTrue(self.prompt_admin.has_change_permission(request, own_prompt))
         self.assertTrue(self.prompt_admin.has_delete_permission(request, self.readonly_prompt))
         self.assertTrue(self.prompt_admin.has_delete_permission(request, own_prompt))
+        self.assertEqual(self.prompt_admin.get_readonly_fields(request, self.readonly_prompt), ())
 
     def test_superuser_queryset_can_filter_mine(self):
         superuser = get_user_model().objects.create_superuser(

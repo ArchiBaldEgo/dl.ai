@@ -4,12 +4,18 @@
             var notEnter = false;
             var requestInFlight = false;
             
-            // Голосовые переменные
-            var recognition = null;
+            // Голосовые переменные для MediaRecorder
+            var mediaRecorder = null;
+            var audioChunks = [];
             var isListening = false;
+            var audioStream = null;
             var speechSynthesis = window.speechSynthesis;
             var currentUtterance = null;
             var speakThinkEnabled = true;
+            
+            // Таймер для автоматической остановки записи
+            var recordingTimeout = null;
+            var MAX_RECORDING_TIME = 30000;
 
             function getCookieValue(name) {
                 const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
@@ -26,68 +32,160 @@
                 const voiceControls = document.getElementById('voiceControls');
                 if (voiceControls.style.display === 'flex') {
                     voiceControls.style.display = 'none';
-                    stopSpeech();
-                    if (isListening && recognition) {
-                        recognition.stop();
+                    if (speechSynthesis.speaking) {
+                        speechSynthesis.cancel();
+                        updateVoiceStatus(getVoiceStatusText('speechStopped'));
+                        document.getElementById('voiceOutputBtn').classList.remove('speaking');
+                    }
+                    if (isListening && mediaRecorder && mediaRecorder.state === 'recording') {
+                        stopMediaRecording();
                     }
                 } else {
                     voiceControls.style.display = 'flex';
                 }
             }
 
-            function initSpeechRecognition() {
+            // Инициализация MediaRecorder
+            async function initMediaRecorder() {
                 try {
-                    recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+                    audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                     
-                    const langSelect = document.getElementById('selectLang');
-                    const selectedLang = langSelect.options[langSelect.selectedIndex].getAttribute('language');
-                    recognition.lang = getSpeechLanguage(selectedLang);
+                    mediaRecorder = new MediaRecorder(audioStream);
+                    audioChunks = [];
                     
-                    recognition.continuous = false;
-                    recognition.interimResults = true;
-                    
-                    recognition.onstart = function() {
-                        isListening = true;
-                        updateVoiceUI();
-                        updateVoiceStatus('Слушаю... Говорите сейчас');
-                    };
-                    
-                    recognition.onresult = function(event) {
-                        let finalTranscript = '';
-                        let interimTranscript = '';
-                        
-                        for (let i = event.resultIndex; i < event.results.length; i++) {
-                            const transcript = event.results[i][0].transcript;
-                            if (event.results[i].isFinal) {
-                                finalTranscript += transcript;
-                            } else {
-                                interimTranscript += transcript;
-                            }
-                        }
-                        
-                        if (finalTranscript) {
-                            document.getElementById('taskText').value = finalTranscript;
-                            updateVoiceStatus('Распознано: ' + finalTranscript);
-                        } else if (interimTranscript) {
-                            updateVoiceStatus('Распознаю: ' + interimTranscript);
+                    mediaRecorder.ondataavailable = (event) => {
+                        if (event.data.size > 0) {
+                            audioChunks.push(event.data);
                         }
                     };
                     
-                    recognition.onerror = function(event) {
-                        updateVoiceStatus('Ошибка: ' + event.error);
+                    mediaRecorder.onstop = () => {
+                        if (audioChunks.length > 0) {
+                            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                            sendAudioToServer(audioBlob);
+                        }
+                        
+                        if (audioStream) {
+                            audioStream.getTracks().forEach(track => track.stop());
+                            audioStream = null;
+                        }
+                        
+                        if (recordingTimeout) {
+                            clearTimeout(recordingTimeout);
+                            recordingTimeout = null;
+                        }
+                        
                         isListening = false;
                         updateVoiceUI();
                     };
                     
-                    recognition.onend = function() {
+                    mediaRecorder.onerror = (event) => {
+                        console.error('MediaRecorder error:', event.error);
+                        updateVoiceStatus(getVoiceStatusText('error') + getVoiceStatusText('recording_error'));
                         isListening = false;
                         updateVoiceUI();
-                        updateVoiceStatus('Готов к голосовому вводу');
+                        
+                        if (audioStream) {
+                            audioStream.getTracks().forEach(track => track.stop());
+                            audioStream = null;
+                        }
                     };
                     
+                    return true;
                 } catch (error) {
-                    updateVoiceStatus('Голосовой ввод не поддерживается вашим браузером');
+                    console.error('Microphone access error:', error);
+                    if (error.name === 'NotAllowedError') {
+                        updateVoiceStatus(getVoiceStatusText('microphone_denied'));
+                    } else if (error.name === 'NotFoundError') {
+                        updateVoiceStatus(getVoiceStatusText('microphone_not_found'));
+                    } else {
+                        updateVoiceStatus(getVoiceStatusText('notSupported'));
+                    }
+                    return false;
                 }
+            }
+
+            // Отправка аудио на сервер для распознавания
+            async function sendAudioToServer(audioBlob) {
+                updateVoiceStatus(getVoiceStatusText('recognizing'));
+                
+                const formData = new FormData();
+                formData.append('audio', audioBlob, 'recording.webm');
+                
+                const langSelect = document.getElementById('selectLang');
+                const selectedLang = langSelect.options[langSelect.selectedIndex].getAttribute('language');
+                formData.append('language', selectedLang);
+                
+                try {
+                    const response = await fetch('/ai/transcribe/', {
+                        method: 'POST',
+                        body: formData,
+                        headers: {
+                            'X-CSRFToken': getCsrfToken()
+                        }
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success && data.text) {
+                        document.getElementById('taskText').value = data.text;
+                        updateVoiceStatus(getVoiceStatusText('recognized') + data.text);
+                        
+                        if (document.getElementById('taskText').value.trim()) {
+                            simulateSend();
+                        }
+                    } else {
+                        updateVoiceStatus(getVoiceStatusText('recognition_failed'));
+                    }
+                } catch (error) {
+                    console.error('Transcription error:', error);
+                    updateVoiceStatus(getVoiceStatusText('server_error'));
+                }
+            }
+
+            // Запуск записи
+            async function startMediaRecording() {
+                if (mediaRecorder && mediaRecorder.state === 'recording') {
+                    return;
+                }
+                
+                if (speechSynthesis.speaking) {
+                    speechSynthesis.cancel();
+                    updateVoiceStatus(getVoiceStatusText('speechStopped'));
+                    document.getElementById('voiceOutputBtn').classList.remove('speaking');
+                }
+                
+                const success = await initMediaRecorder();
+                if (!success) return;
+                
+                mediaRecorder.start();
+                isListening = true;
+                updateVoiceUI();
+                updateVoiceStatus(getVoiceStatusText('listening'));
+                
+                recordingTimeout = setTimeout(() => {
+                    if (mediaRecorder && mediaRecorder.state === 'recording') {
+                        stopMediaRecording();
+                        updateVoiceStatus(getVoiceStatusText('max_time_exceeded'));
+                    }
+                }, MAX_RECORDING_TIME);
+            }
+
+            // Остановка записи
+            function stopMediaRecording() {
+                if (mediaRecorder && mediaRecorder.state === 'recording') {
+                    mediaRecorder.stop();
+                }
+            }
+
+            // Функция для получения CSRF токена
+            function getCsrfToken() {
+                const cookies = document.cookie.split(';');
+                for (let cookie of cookies) {
+                    const [name, value] = cookie.trim().split('=');
+                    if (name === 'csrftoken') return value;
+                }
+                return '';
             }
 
             function getSpeechLanguage(lang) {
@@ -109,18 +207,10 @@
             }
 
             function toggleVoiceInput() {
-                if (!recognition) {
-                    initSpeechRecognition();
-                }
-                
                 if (isListening) {
-                    recognition.stop();
+                    stopMediaRecording();
                 } else {
-                    try {
-                        recognition.start();
-                    } catch (error) {
-                        updateVoiceStatus('Ошибка запуска распознавания');
-                    }
+                    startMediaRecording();
                 }
             }
 
@@ -129,8 +219,12 @@
                 const assistantMessages = messages.querySelectorAll('.msg-assistant');
                 
                 if (assistantMessages.length === 0) {
-                    updateVoiceStatus('Нет ответов для озвучивания');
+                    updateVoiceStatus(getVoiceStatusText('noResponse'));
                     return;
+                }
+                
+                if (isListening) {
+                    stopMediaRecording();
                 }
                 
                 const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
@@ -144,7 +238,14 @@
                 }
                 
                 if (!text.trim()) {
-                    updateVoiceStatus('Текст для озвучивания пуст');
+                    updateVoiceStatus(getVoiceStatusText('textEmpty'));
+                    return;
+                }
+                
+                if (speechSynthesis.speaking) {
+                    speechSynthesis.cancel();
+                    updateVoiceStatus(getVoiceStatusText('speechStopped'));
+                    document.getElementById('voiceOutputBtn').classList.remove('speaking');
                     return;
                 }
                 
@@ -159,7 +260,7 @@
                 const cleanText = cleanSpeechText(text);
                 
                 if (!cleanText.trim()) {
-                    updateVoiceStatus('Нет текста для озвучивания');
+                    updateVoiceStatus(getVoiceStatusText('noText'));
                     return;
                 }
                 
@@ -172,17 +273,17 @@
                 currentUtterance.pitch = 1;
                 
                 currentUtterance.onstart = function() {
-                    updateVoiceStatus('Озвучиваю...');
+                    updateVoiceStatus(getVoiceStatusText('speaking'));
                     document.getElementById('voiceOutputBtn').classList.add('speaking');
                 };
                 
                 currentUtterance.onend = function() {
-                    updateVoiceStatus('Озвучивание завершено');
+                    updateVoiceStatus(getVoiceStatusText('speechEnd'));
                     document.getElementById('voiceOutputBtn').classList.remove('speaking');
                 };
                 
                 currentUtterance.onerror = function(event) {
-                    updateVoiceStatus('Ошибка озвучивания');
+                    updateVoiceStatus(getVoiceStatusText('speechError'));
                     document.getElementById('voiceOutputBtn').classList.remove('speaking');
                 };
                 
@@ -191,26 +292,45 @@
 
             function cleanSpeechText(text) {
                 if (!text) return '';
-                
+
                 let cleanText = text;
-                
-                // Убираем think-блоки только если пользователь этого не хочет
-                if (!speakThinkEnabled) {
-                    cleanText = cleanText.replace(/<think>[\s\S]*?<\/think>/g, '');
+
+                if (speakThinkEnabled) {
+                    cleanText = cleanText.replace(/Показать:.*?(Скрыть:|$)/g, '');
+                    cleanText = cleanText.replace(/Скрыть:.*?(Показать:|$)/g, '');
+                    cleanText = cleanText.replace(/<[^>]*>/g, '');
+                    return cleanText.trim();
                 }
-                
+
+                cleanText = cleanText.replace(/<think>[\s\S]*?<\/think>/g, '');
+
+                const technicalPatterns = [
+                    /^\d{2}:\d{2}:\d{2}\s+Запрос успешно обработан\s*$/gm,
+                    /^\d{2}:\d{2}:\d{2}\s+Request processed successfully\s*$/gm,
+                    /Модель:\s*.+/gi,
+                    /Время обработки запроса:\s*.+сек/gi,
+                    /Потрачено токенов:\s*\d+/gi,
+                    /^Скрыть:\s*(Ассистент|Assistant|Vous)\s*$/gim,
+                    /^Показать:\s*(Ассистент|Assistant|Vous)\s*$/gim,
+                    /^\d{2}:\d{2}:\d{2}\s*$/gm
+                ];
+
+                technicalPatterns.forEach(pattern => {
+                    cleanText = cleanText.replace(pattern, '');
+                });
+
                 cleanText = cleanText.replace(/Показать:.*?(Скрыть:|$)/g, '');
                 cleanText = cleanText.replace(/Скрыть:.*?(Показать:|$)/g, '');
-                
+
                 cleanText = cleanText.replace(/<[^>]*>/g, '');
-                
+
                 const servicePatterns = [
                     /\b(?:Ассистент|Assistant|Vous|Вы|User|Пользователь)\s*:\s*/gi,
                     /\b(?:Скрыть|Показать|Hide|Show)\s*:\s*/gi,
                     /\bЗапрос успешно обработан\b/gi,
+                    /\bRequest processed successfully\b/gi,
                     /\bОбрабатываю запрос пользователя\b/gi,
                     /\bProcessing user request\b/gi,
-                    /\bRequest processed successfully\b/gi,
                     /\bКонтекст очищен\b/gi,
                     /\bContext cleared\b/gi,
                     /\bСоединение установлено\b/gi,
@@ -218,27 +338,26 @@
                     /\bГотов к работе\b/gi,
                     /\bReady to work\b/gi,
                     /\bСообщение отправлено\b/gi,
-                    /\bMessage sent\b/gi,
-                    /\bПоказать:.*$/gm,
-                    /\bСкрыть:.*$/gm
+                    /\bMessage sent\b/gi
                 ];
-                
+
                 servicePatterns.forEach(pattern => {
                     cleanText = cleanText.replace(pattern, '');
                 });
-                
+
+                cleanText = cleanText.replace(/\n\s*\n/g, '\n');
                 cleanText = cleanText.replace(/\s+/g, ' ').trim();
-                
+
                 return cleanText;
             }
 
             function stopSpeech() {
                 if (speechSynthesis.speaking) {
                     speechSynthesis.cancel();
-                    updateVoiceStatus('Озвучивание остановлено');
+                    updateVoiceStatus(getVoiceStatusText('speechStopped'));
                 }
-                if (isListening && recognition) {
-                    recognition.stop();
+                if (isListening && mediaRecorder && mediaRecorder.state === 'recording') {
+                    stopMediaRecording();
                 }
                 document.getElementById('voiceOutputBtn').classList.remove('speaking');
             }
@@ -247,17 +366,28 @@
                 const voiceBtn = document.getElementById('voiceInputBtn');
                 const voiceIndicator = document.getElementById('voiceIndicator');
                 
-                if (isListening) {
-                    voiceBtn.classList.add('recording');
-                    voiceIndicator.classList.add('active');
-                } else {
-                    voiceBtn.classList.remove('recording');
-                    voiceIndicator.classList.remove('active');
+                if (voiceBtn) {
+                    if (isListening) {
+                        voiceBtn.classList.add('recording');
+                    } else {
+                        voiceBtn.classList.remove('recording');
+                    }
+                }
+                
+                if (voiceIndicator) {
+                    if (isListening) {
+                        voiceIndicator.classList.add('active');
+                    } else {
+                        voiceIndicator.classList.remove('active');
+                    }
                 }
             }
 
             function updateVoiceStatus(message) {
-                document.getElementById('voiceStatus').textContent = message;
+                const voiceStatus = document.getElementById('voiceStatus');
+                if (voiceStatus) {
+                    voiceStatus.textContent = message;
+                }
             }
 
             function setRequestLock(isLocked) {
@@ -279,6 +409,47 @@
                     || text.includes("context cleared");
             }
 
+            function simulateSend() {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    updateVoiceStatus(getVoiceStatusText('connectionError'));
+                    return;
+                }
+
+                if (requestInFlight) {
+                    updateVoiceStatus(getVoiceStatusText('waitForModel'));
+                    return;
+                }
+                
+                var value = document.querySelector("#select").value;
+                var language = document.querySelector("#selectLang").value;
+                var input = document.getElementById("taskText");
+                var progLng = document.querySelector("#selectProgLng").value;
+                var preprompt = document.querySelector("#selectPrompt").value;
+                
+                if (!input.value.trim()) {
+                    return;
+                }
+                if (!progLng) {
+                    updateVoiceStatus(getVoiceStatusText('select_prog_lang'));
+                    return;
+                }
+                
+                ws.send(JSON.stringify({
+                    type: '3',
+                    message: input.value,
+                    value: value,
+                    language: language,
+                    progLng: progLng,
+                    preprompt: preprompt,
+                    code: document.getElementById("codeText").value
+                }));
+
+                setRequestLock(true);
+                notEnter = true;
+                updateVoiceStatus(getVoiceStatusText('messageSent'));
+                input.value = '';
+            }
+
             // Инициализация WebSocket
             function initWebSocket() {
                 try {
@@ -290,7 +461,7 @@
 
                     ws.onopen = function(event) {
                         console.log('WebSocket connection established');
-                        updateVoiceStatus('Соединение установлено.');
+                        updateVoiceStatus(getVoiceStatusText('connectionEstablished'));
                     };
 
                     ws.onmessage = function (event) {
@@ -377,14 +548,14 @@
 
                     ws.onerror = function(error) {
                         console.error('WebSocket error:', error);
-                        updateVoiceStatus('Ошибка соединения');
+                        updateVoiceStatus(getVoiceStatusText('wsError'));
                         setRequestLock(false);
                         notEnter = false;
                     };
 
                     ws.onclose = function(event) {
                         console.log('WebSocket connection closed');
-                        updateVoiceStatus('Соединение закрыто');
+                        updateVoiceStatus(getVoiceStatusText('connectionClosed'));
                         setRequestLock(false);
                         notEnter = false;
                     };
@@ -588,61 +759,159 @@
             }
 
             const localization = {
-                Russian: {
-                    send: "Отправить",
-                    clear: "Очистить контекст",
-                    placeholder: "Введите сюда ваш код решения задачи, для красивого форматирования оберните код в ```(буква Ё на клавиатуре)\nПример форматирования кода:\n```\nprint('Hello, world!')\n```",
-                    taskplace: "Вставьте сюда условие задачи",
-                    adminPanel: "Админ-Панель",
-                    testPanel: "Тест-панель",
-                    chat: "Чат с DLAI",
-                    decideTask: "Реши задачу",
-                    findError: "В чём ошибка?",
-                    enterHint: "При нажатии на Enter будет отправляться вопрос (для переноса строки Enter+Shift)",
-                    preprompt: "Препромпт",
-                    task: "Задача",
-                    codetx: "Код программы",
-                    chooseLanguage: "Выберите язык",
-                    chooseTheme: "Выберите тему",
-                    choosePrompt: "Выберите промпт"
-                },
-                English: {
-                    send: "Send",
-                    clear: "Clear Context",
-                    placeholder: "Enter your code for solving the problem here, for beautiful formatting wrap the code in ```\nExample of code formatting:\n```\nprint('Hello, world!')\n```",
-                    taskplace: "Paste the task description here",
-                    adminPanel: "Admin Panel",
-                    testPanel: "Test Panel",
-                    chat: "Chat with DLAI",
-                    decideTask: "Solve the task",
-                    findError: "What's the error?",
-                    enterHint: "Press Enter to send the question (Shift+Enter for a new line)",
-                    preprompt: "Preprompt",
-                    task: "Task",
-                    codetx: "Program code",
-                    chooseLanguage: "Choose language",
-                    chooseTheme: "Choose theme",
-                    choosePrompt: "Choose prompt"
-                },
-                French: {
-                    send: "Envoyer",
-                    clear: "Effacer le contexte",
-                    placeholder: "Entrez votre code pour résoudre le problème ici, pour un beau formatage, enveloppez le code dans ```\nExemple de formatage de code :\n```\nprint('Hello, world!')\n```",
-                    taskplace: "Collez la description de la tâche ici",
-                    adminPanel: "Panneau Admin",
-                    testPanel: "Panneau Test",
-                    chat: "Chat avec DLAI",
-                    decideTask: "Résoudre la tâche",
-                    findError: "Quelle est l'erreur?",
-                    enterHint: "Appuyez sur Entrée pour envoyer la question (Shift+Enter pour une nouvelle ligne)",
-                    preprompt: "Pré-promp",
-                    task: "Tâche",
-                    codetx: "Code du programme",
-                    chooseLanguage: "Choisir la langue",
-                    chooseTheme: "Choisir le thème",
-                    choosePrompt: "Choisir le prompt"
+            Russian: {
+                send: "Отправить",
+                clear: "Очистить контекст",
+                placeholder: "Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)\nПример форматирования кода:\n```\nprint('Hello, world!')\n```",
+                adminPanel: "Админ-Панель",
+                testPanel: "Тест-панель",
+                chat: "Чат с DLAI",
+                decideTask: "Реши задачу",
+                findError: "В чём ошибка?",
+                enterHint: "При нажатии на Enter будет отправляться вопрос (для переноса строки Enter+Shift)",
+                preprompt: "Препромпт",
+                chooseLanguage: "Выберите язык",
+                chooseTheme: "Выберите тему",
+                voiceMode: "Голосовой режим",
+                voiceInput: "Голосовой ввод",
+                voiceOutput: "Озвучить ответ",
+                speakThinkLabel: "Озвучивать дополнительную информацию",
+                voiceStatus: {
+                    listening: "Запись голоса",
+                    recognized: "Распознано: ",
+                    recognizing: "Распознаю...",
+                    error: "Ошибка: ",
+                    readyForVoice: "Готов к голосовому вводу",
+                    notSupported: "Голосовой ввод не поддерживается вашим браузером или нет микрофона",
+                    startError: "Ошибка запуска записи",
+                    noResponse: "Нет ответов для озвучивания",
+                    textEmpty: "Текст для озвучивания пуст",
+                    noText: "Нет текста для озвучивания",
+                    speaking: "Озвучиваю...",
+                    speechEnd: "Озвучивание завершено",
+                    speechError: "Ошибка озвучивания",
+                    speechStopped: "Озвучивание остановлено",
+                    connectionError: "Ошибка: соединение не установлено",
+                    waitForModel: "Дождитесь ответа модели перед новым запросом",
+                    messageSent: "Сообщение отправлено",
+                    connectionEstablished: "Соединение установлено.",
+                    connectionClosed: "Соединение закрыто",
+                    wsError: "Ошибка соединения",
+                    ready: 'Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.',
+                    recording_error: "Ошибка записи",
+                    recognition_failed: "Не удалось распознать речь",
+                    server_error: "Ошибка связи с сервером",
+                    microphone_denied: "Разрешите доступ к микрофону",
+                    microphone_not_found: "Микрофон не найден",
+                    max_time_exceeded: "Превышено время записи",
+                    select_prog_lang: "Выберите язык программирования"
                 }
-            };
+            },
+    
+            English: {
+                send: "Send",
+                clear: "Clear Context",
+                placeholder: "Ask a question (preferably in English to avoid errors), for nice formatting wrap the code in ```\nExample of code formatting:\n```\nprint('Hello, world!')\n```",
+                adminPanel: "Admin Panel",
+                testPanel: "Test Panel",
+                chat: "Chat with DLAI",
+                decideTask: "Solve the task",
+                findError: "What's the error?",
+                enterHint: "Press Enter to send the question (Shift+Enter for a new line)",
+                preprompt: "Preprompt",
+                chooseLanguage: "Choose language",
+                chooseTheme: "Choose theme",
+                voiceMode: "Voice mode",
+                voiceInput: "Voice input",
+                voiceOutput: "Speak answer",
+                speakThinkLabel: "Voice extra information",
+                voiceStatus: {
+                    listening: "Voice recording",
+                    recognized: "Recognized: ",
+                    recognizing: "Recognizing...",
+                    error: "Error: ",
+                    readyForVoice: "Ready for voice input",
+                    notSupported: "Voice input not supported in your browser or no microphone",
+                    startError: "Error starting recording",
+                    noResponse: "No responses to speak",
+                    textEmpty: "Text to speak is empty",
+                    noText: "No text to speak",
+                    speaking: "Speaking...",
+                    speechEnd: "Speaking finished",
+                    speechError: "Speech error",
+                    speechStopped: "Speech stopped",
+                    connectionError: "Error: connection not established",
+                    waitForModel: "Wait for model response before new request",
+                    messageSent: "Message sent",
+                    connectionEstablished: "Connection established.",
+                    connectionClosed: "Connection closed",
+                    wsError: "Connection error",
+                    ready: 'Ready. Click "Voice mode" to activate voice features.',
+                    recording_error: "Recording error",
+                    recognition_failed: "Recognition failed",
+                    server_error: "Server connection error",
+                    microphone_denied: "Microphone access denied",
+                    microphone_not_found: "Microphone not found",
+                    max_time_exceeded: "Max recording time exceeded",
+                    select_prog_lang: "Select programming language"
+                }
+            },
+            French: {
+                send: "Envoyer",
+                clear: "Effacer le contexte",
+                placeholder: "Posez une question (de préférence en anglais pour éviter les erreurs), pour un bon formatage, encadrez le code dans ```\nExemple de formatage du code:\n```\nprint('Hello, world!')\n```",
+                adminPanel: "Panneau Admin",
+                testPanel: "Panneau Test",
+                chat: "Chat avec DLAI",
+                decideTask: "Résoudre la tâche",
+                findError: "Quelle est l'erreur?",
+                enterHint: "Appuyez sur Entrée pour envoyer la question (Shift+Enter pour une nouvelle ligne)",
+                preprompt: "Pré-promp",
+                chooseLanguage: "Choisir la langue",
+                chooseTheme: "Choisir le thème",
+                voiceMode: "Mode vocal",
+                voiceInput: "Saisie vocale",
+                voiceOutput: "Lire la réponse",
+                speakThinkLabel: "Informations supplémentaires vocales",
+                voiceStatus: {
+                    listening: "Enregistrement vocal",
+                    recognized: "Reconnu : ",
+                    recognizing: "Reconnaissance...",
+                    error: "Erreur : ",
+                    readyForVoice: "Prêt pour la saisie vocale",
+                    notSupported: "Saisie vocale non supportée par votre navigateur ou pas de microphone",
+                    startError: "Erreur de démarrage de l'enregistrement",
+                    noResponse: "Aucune réponse à lire",
+                    textEmpty: "Texte à lire vide",
+                    noText: "Pas de texte à lire",
+                    speaking: "Lecture...",
+                    speechEnd: "Lecture terminée",
+                    speechError: "Erreur de lecture",
+                    speechStopped: "Lecture arrêtée",
+                    connectionError: "Erreur : connexion non établie",
+                    waitForModel: "Attendez la réponse du modèle avant une nouvelle requête",
+                    messageSent: "Message envoyé",
+                    connectionEstablished: "Connexion établie.",
+                    connectionClosed: "Connexion fermée",
+                    wsError: "Erreur de connexion",
+                    ready: 'Prêt. Cliquez sur "Mode vocal" pour activer les fonctions vocales.',
+                    recording_error: "Erreur d'enregistrement",
+                    recognition_failed: "Échec de reconnaissance",
+                    server_error: "Erreur de connexion au serveur",
+                    microphone_denied: "Accès au micro refusé",
+                    microphone_not_found: "Microphone introuvable",
+                    max_time_exceeded: "Durée d'enregistrement dépassée",
+                    select_prog_lang: "Sélectionnez le langage de programmation"
+                }
+            }
+        };
+
+        function getVoiceStatusText(key, param = '') {
+            const selectLang = document.getElementById('selectLang');
+            const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
+            const msg = localization[lang]?.voiceStatus?.[key];
+            return (msg || localization.Russian.voiceStatus[key] || key) + param;
+        }
 
             document.getElementById("selectLang").addEventListener("change", function () {
                 const selectedLang = this.options[this.selectedIndex].getAttribute("language");
@@ -669,6 +938,20 @@
                 document.querySelector(".task").textContent = localization[selectedLang].task;
                 document.querySelector(".codetx").textContent = localization[selectedLang].codetx;
                 updateAccordionLabels();
+
+                const voiceModeBtn = document.getElementById("voiceModeBtn");
+                if (voiceModeBtn) voiceModeBtn.textContent = localization[selectedLang].voiceMode;
+
+                const voiceInputBtn = document.getElementById("voiceInputBtn");
+                if (voiceInputBtn) voiceInputBtn.textContent = localization[selectedLang].voiceInput;
+
+                const voiceOutputBtn = document.getElementById("voiceOutputBtn");
+                if (voiceOutputBtn) voiceOutputBtn.textContent = localization[selectedLang].voiceOutput;
+
+                const speakThinkLabel = document.getElementById("speakThinkLabel");
+                if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
+
+                updateVoiceStatus(getVoiceStatusText('readyForVoice'));
             });
 
             function initAccordionForMessages() {
@@ -911,10 +1194,10 @@
             window.onload = function () {
                 console.log('Initializing WebSocket with client_id:', client_id);
                 initWebSocket();
-                initSpeechRecognition();
+                // MediaRecorder инициализируется при первом нажатии на кнопку записи
                 document.getElementById("selectLang").dispatchEvent(new Event("change"));
                 initAccordionForMessages();
-                updateVoiceStatus('Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.');
+                updateVoiceStatus(getVoiceStatusText('ready'));
                 
                 // Инициализация чекбокса think-блоков
                 const speakThinkCheckbox = document.getElementById('speakThinkContent');

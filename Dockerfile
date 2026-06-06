@@ -66,9 +66,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libxfixes3 \
         libxkbcommon0 \
         libxrandr2 \
-        xdg-utils && \
+        xdg-utils \
+        ffmpeg && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip install --upgrade pip
 

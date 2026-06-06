@@ -1,5 +1,6 @@
 import os
 
+import tempfile
 from django.contrib.auth import authenticate, login, logout
 from django.shortcuts import redirect, render
 from django.http import JsonResponse
@@ -8,6 +9,9 @@ from django.db import ProgrammingError
 from django.contrib.staticfiles import finders
 from django.middleware import csrf
 from functools import wraps
+from django.views.decorators.csrf import csrf_exempt       
+from django.views.decorators.http import require_http_methods  
+from django.conf import settings
 from .model_health import get_available_model_options
 from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings, ExternalDLAccount
 from .auth_backends import (
@@ -26,6 +30,11 @@ _WEB_PRIORITY_MODELS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
 def health_view(request):
     return JsonResponse({"ok": True})
 
+try:
+    import speech_recognition as sr
+    SPEECH_RECOGNITION_AVAILABLE = True
+except ImportError:
+    SPEECH_RECOGNITION_AVAILABLE = False
 
 def _safe_relative_url(candidate, fallback):
     value = (candidate or "").strip()
@@ -360,3 +369,56 @@ def asset_view(request, asset_path):
         raise Http404("Asset not found")
 
     return FileResponse(open(asset_full_path, "rb"))
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def transcribe_audio(request):
+    audio_file = request.FILES.get('audio')
+    if not audio_file:
+        return JsonResponse({'success': False, 'error': 'No audio file provided'})
+    
+    language = request.POST.get('language', 'Russian')
+    
+    # Сохраняется временный файл
+    with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as tmp:
+        for chunk in audio_file.chunks():
+            tmp.write(chunk)
+        tmp_path = tmp.name
+    
+    try:
+        # Конвертируется webm в wav
+        from pydub import AudioSegment
+        audio = AudioSegment.from_file(tmp_path)
+        
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as wav_tmp:
+            audio.export(wav_tmp.name, format='wav')
+            wav_path = wav_tmp.name
+        
+        import speech_recognition as sr
+        recognizer = sr.Recognizer()
+        
+        with sr.AudioFile(wav_path) as source:
+            audio_data = recognizer.record(source)
+        
+        lang_map = {
+            'Russian': 'ru-RU',
+            'English': 'en-US',
+            'French': 'fr-FR'
+        }
+        
+        text = recognizer.recognize_google(audio_data, language=lang_map.get(language, 'en-US'))
+        
+        # Чистим временные файлы
+        os.unlink(tmp_path)
+        os.unlink(wav_path)
+        
+        return JsonResponse({'success': True, 'text': text})
+        
+    except sr.UnknownValueError:
+        return JsonResponse({'success': False, 'error': 'Не удалось разобрать речь'})
+    except sr.RequestError as e:
+        return JsonResponse({'success': False, 'error': f'Ошибка сервиса распознавания: {e}'})
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        return JsonResponse({'success': False, 'error': str(e)})

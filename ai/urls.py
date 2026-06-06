@@ -8,4 +8,5 @@ urlpatterns = [
     path('ai/test-panel/login/', views.prompt_developer_login_view, name='prompt_developer_login_view'),
     path('ai/admin/set-password/', views.set_password_view, name='set_password_view'),
     path('ai/assets/<path:asset_path>', views.asset_view, name='asset_view'),
+    path('ai/transcribe/', views.transcribe_audio, name='transcribe_audio'),
 ]

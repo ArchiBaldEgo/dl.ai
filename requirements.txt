@@ -5,6 +5,7 @@ attrs==24.2.0
 autobahn==24.4.2
 Automat==25.4.16
 certifi==2024.8.30
+pydub
 cffi==1.17.1
 channels==4.2.0
 charset-normalizer==3.4.0
@@ -15,6 +16,7 @@ daphne==4.1.2
 Django==5.1.4
 dnspython==2.7.0
 filelock==3.16.1
+SpeechRecognition
 fsspec==2024.10.0
 gevent==24.11.1
 greenlet==3.1.1
@@ -31,7 +33,6 @@ markdown-it-py==3.0.0
 MarkupSafe==3.0.2
 mdurl==0.1.2
 orjson==3.10.12
-packaging==24.2
 psycopg2-binary==2.9.11
 pyasn1==0.6.1
 pyasn1_modules==0.4.1

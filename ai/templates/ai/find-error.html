@@ -38,8 +38,8 @@
                 </select>
             </div>
             <div class="voice-mod-div">
-                <button type="button" class="voice-mode-btn" onclick="toggleVoiceControls()">
-                    🎤 Голосовой режим
+                <button type="button" class="voice-mode-btn" id="voiceModeBtn" onclick="toggleVoiceControls()">
+                    Голосовой режим
                 </button>
                 <div class="voice-status" id="voiceStatus"></div>
             </div>
@@ -47,19 +47,16 @@
             <div class="voice-controls" id="voiceControls">
                 <button type="button" class="voice-btn" id="voiceInputBtn" onclick="toggleVoiceInput()">
                     <span class="voice-input-indicator" id="voiceIndicator"></span>
-                    🎤 Голосовой ввод
+                    Голосовой ввод
                 </button>
                 <button type="button" class="voice-btn" id="voiceOutputBtn" onclick="speakLastResponse()">
-                    🔊 Озвучить ответ
-                </button>
-                <button type="button" class="voice-btn" onclick="stopSpeech()">
-                    ⏹️ Стоп
+                    Озвучить ответ
                 </button>
                 
                 <!-- Чекбокс для think-тегов -->
                 <div class="think-checkbox">
                     <input type="checkbox" id="speakThinkContent" checked>
-                    <label for="speakThinkContent">Озвучивать think-блоки</label>
+                    <label for="speakThinkContent" id="speakThinkLabel">Озвучивать think-блоки</label>
                 </div>
                 
             </div>
