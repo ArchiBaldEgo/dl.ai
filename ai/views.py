@@ -423,8 +423,7 @@ def transcribe_audio(request):
             os.unlink(tmp_path)
         return JsonResponse({'success': False, 'error': str(e)})'''
     
-    Вот этот же блок целиком, с правкой — можешь просто заменить им свой:
-python    try:
+    try:
         # Конвертируется webm в wav (ffmpeg берём из pip-пакета imageio-ffmpeg, не из apt)
         from pydub import AudioSegment
         import imageio_ffmpeg
