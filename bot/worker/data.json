@@ -18,7 +18,7 @@
                 "deepseek": "//input[@type='password']"
             },
             "authButton": {
-                "deepseek": "//button[@role='button']"
+                "deepseek": "//div[contains(@class,'ds-button--filled') and contains(@class,'ds-button--primary')]"
             },
             "incorrectPassMessage": {
                 "deepseek": "//div[contains(text(), 'password is incorrect') or contains(text(), 'Неверный')]"
@@ -46,16 +46,16 @@
         },
         "chat": {
             "thinkingButtonEnabled": {
-                "deepseek": "//span[text()='DeepThink']/ancestor::div[@role='button' and contains(@class, 'ds-toggle-button--selected')]"
+                "deepseek": "//span[text()='DeepThink']/ancestor::div[@aria-pressed='false']"
             },
             "thinkingButtonDisabled": {
-                "deepseek": "//span[text()='DeepThink']/ancestor::div[@role='button' and not(contains(@class, 'ds-toggle-button--selected'))]"
+                "deepseek": "//span[text()='DeepThink']/ancestor::div[@aria-pressed='true']"
             },
             "inputLabel": {
                 "deepseek": "//textarea"
             },
             "sendMessageButton": {
-                "deepseek": "//div[@role='button' and contains(concat(' ', normalize-space(@class), ' '), ' ds-icon-button ') and .//*[local-name()='path' and starts-with(@d, 'M8.3125 0.981587')]]"
+                "deepseek": "//div[@role='button' and .//*[local-name()='path' and starts-with(@d, 'M8.3125 0.981587')]]"
             },
             "answer": {
                 "deepseek": "//div[contains(@class, 'ds-message')]/div[contains(@class, 'ds-markdown')]"

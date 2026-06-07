@@ -385,7 +385,7 @@ def transcribe_audio(request):
             tmp.write(chunk)
         tmp_path = tmp.name
     
-    try:
+    '''try:
         # Конвертируется webm в wav
         from pydub import AudioSegment
         audio = AudioSegment.from_file(tmp_path)
@@ -414,6 +414,47 @@ def transcribe_audio(request):
         
         return JsonResponse({'success': True, 'text': text})
         
+    except sr.UnknownValueError:
+        return JsonResponse({'success': False, 'error': 'Не удалось разобрать речь'})
+    except sr.RequestError as e:
+        return JsonResponse({'success': False, 'error': f'Ошибка сервиса распознавания: {e}'})
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        return JsonResponse({'success': False, 'error': str(e)})'''
+    
+    try:
+        # Конвертируется webm в wav (ffmpeg берём из pip-пакета imageio-ffmpeg, не из apt)
+        from pydub import AudioSegment
+        import imageio_ffmpeg
+        AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
+
+        audio = AudioSegment.from_file(tmp_path, format='webm')
+
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as wav_tmp:
+            audio.export(wav_tmp.name, format='wav')
+            wav_path = wav_tmp.name
+
+        import speech_recognition as sr
+        recognizer = sr.Recognizer()
+
+        with sr.AudioFile(wav_path) as source:
+            audio_data = recognizer.record(source)
+
+        lang_map = {
+            'Russian': 'ru-RU',
+            'English': 'en-US',
+            'French': 'fr-FR'
+        }
+
+        text = recognizer.recognize_google(audio_data, language=lang_map.get(language, 'en-US'))
+
+        # Чистим временные файлы
+        os.unlink(tmp_path)
+        os.unlink(wav_path)
+
+        return JsonResponse({'success': True, 'text': text})
+
     except sr.UnknownValueError:
         return JsonResponse({'success': False, 'error': 'Не удалось разобрать речь'})
     except sr.RequestError as e:
