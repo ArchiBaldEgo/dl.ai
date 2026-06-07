@@ -42,6 +42,7 @@ SAMBANOVA_MODEL_META_LLAMA_3_3_70B_INSTRUCT = os.getenv(
     "Meta-Llama-3.3-70B-Instruct",
 )
 SAMBANOVA_MODEL_MINIMAX_M2_5 = os.getenv("SAMBANOVA_MODEL_MINIMAX_M2_5", "MiniMax-M2.5")
+SAMBANOVA_MODEL_MINIMAX_M2_7 = os.getenv("SAMBANOVA_MODEL_MINIMAX_M2_7", "MiniMax-M2.7")
 SAMBANOVA_MODEL_GEMMA_3_12B_IT = os.getenv("SAMBANOVA_MODEL_GEMMA_3_12B_IT", "gemma-3-12b-it")
 SAMBANOVA_MODEL_GPT_OSS = os.getenv("SAMBANOVA_MODEL_GPT_OSS", "gpt-oss-120b")
 
@@ -456,6 +457,15 @@ async def ask_MiniMax_M2_5_async(messages: str, user_id: int) -> Tuple[str, Opti
         messages,
         user_id,
         SAMBANOVA_MODEL_MINIMAX_M2_5,
+        max_tokens=9000,
+    )
+
+
+async def ask_MiniMax_M2_7_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    return await _ask_sambanova_model_async(
+        messages,
+        user_id,
+        SAMBANOVA_MODEL_MINIMAX_M2_7,
         max_tokens=9000,
     )
 
