@@ -138,6 +138,7 @@ set "BOT_PASSWORD=пароль"
 ---
 
 ## Диагностика из Docker
+> Просто ctrl+C -> ctrl+V на сервере для теста
 
 Контейнер — `dl_ai_web`, бот внутри лежит в `/app/bot`, Chromium от puppeteer — в `/opt/puppeteer-runtime`. Проверки гоняем через `docker exec -w /app/bot` (так `require('puppeteer')` и `require('./worker')` резолвятся из бота). Команды одноразовые, контейнер должен быть запущен.
 
