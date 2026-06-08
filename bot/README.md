@@ -1,377 +1,220 @@
-# bot-pool-api — DeepSeek Web Bot
+# Бот для DeepSeek
 
-Сервис-обёртка над веб-интерфейсом [chat.deepseek.com](https://chat.deepseek.com), который притворяется обычным OpenAI-совместимым API. Под капотом — пул headless-браузеров (Puppeteer + Stealth), которые логинятся в DeepSeek и отправляют сообщения через настоящий UI.
+Обёртка над `chat.deepseek.com`: пул headless-браузеров (Puppeteer + stealth) логинится в DeepSeek и шлёт сообщения через настоящий UI, а наружу торчит как обычный OpenAI-совместимый API. Смысл — не платить за официальный доступ.
 
-Нужен, когда не хочется (или нет возможности) платить за официальный DeepSeek API.
-
----
-
-## Содержание
-
-1. [Архитектура](#архитектура)
-2. [Структура проекта](#структура-проекта)
-3. [Конфигурация (`.env`)](#конфигурация-env)
-4. [Запуск](#запуск)
-5. [HTTP API](#http-api)
-6. [Как живёт пул ботов](#как-живёт-пул-ботов)
-7. [Поддерживаемые модели](#поддерживаемые-модели)
-8. [Логи и диагностика](#логи-и-диагностика)
-9. [Типичные ошибки](#типичные-ошибки)
-10. [Ограничения](#ограничения)
-
----
-
-## Архитектура
+Стек: Node, Express (порт `3000`), Puppeteer `20.9.0`. Две части:
+- **`api`** — диспетчер: принимает HTTP, держит пул, раздаёт запросы свободным ботам.
+- **`worker`** — сам бот: Chrome, логин, печать, парсинг ответа.
 
 ```
-   Django (ai/utils.py)
-          │
-          │  HTTP POST /api/send
-          ▼
-   ┌─────────────────────┐
-   │   bot-pool-api      │   Express, порт 3000
-   │   (api/index.js)    │
-   └─────────┬───────────┘
-             │
-             │  acquire bot
-             ▼
-   ┌─────────────────────┐
-   │   BotManager        │   пул из N браузеров
-   │   (botManager.js)   │   состояния: STARTING / READY / BUSY / NOT_AUTORIZED / FAILED
-   └─────────┬───────────┘
-             │
-             ▼
-   ┌─────────────────────┐
-   │   Worker (Bot)      │   Puppeteer + stealth
-   │   (worker/bot.js)   │   headless Chrome
-   └─────────┬───────────┘
-             │
-             ▼
-   chat.deepseek.com (реальный сайт)
-```
-
-Один бот = один headless-Chrome с одной залогиненной сессией. Запросы между разными ботами идут параллельно, внутри одного бота — последовательно.
-
----
-
-## Структура проекта
-
-```
-bot/
-├── api/
-│   ├── index.js         # entrypoint, поднимает Express
-│   ├── server.js        # роуты /v1/chat/completions, /api/send, /health
-│   ├── botManager.js    # пул ботов, состояния, реап мёртвых
-│   ├── config.js        # парсинг env
-│   └── openaiFormat.js  # форматирование ответов в стиле OpenAI
-├── worker/
-│   ├── index.js         # экспортит createBot()
-│   ├── bot.js           # класс Bot, lifecycle (init/sendMessage/close)
-│   ├── hist.js          # in-memory история диалогов (общая для всех ботов)
-│   ├── data.json        # URL'ы и XPath'ы для chat.deepseek.com
-│   ├── modules/
-│   │   ├── auth.js      # логин на DeepSeek через UI
-│   │   └── promtps.js   # отправка сообщения + парсинг HTML-ответа в Markdown
-│   ├── core/
-│   │   └── page-utils.js   # helpers для puppeteer (waitAndTypeX и т.п.)
-│   └── utils/
-│       ├── logger.js    # запись в worker/logs/application.log
-│       └── helpers.js   # sleep и т.п.
-├── .env                 # секреты (логин/пароль DeepSeek и настройки пула)
-├── Dockerfile
-├── docker-compose.linux.yml
-└── package.json
+клиент → api (Express :3000) → botManager (пул) → worker/bot.js (Chrome) → chat.deepseek.com
 ```
 
 ---
 
-## Конфигурация (`.env`)
+## Структура
 
-| Переменная | Значение по умолчанию | Описание |
-|---|---|---|
-| `PORT` | `3000` | На каком порту слушает Express |
-| `MAX_BOT_COUNT` | `3` | Максимум одновременных ботов в пуле. Каждый бот = отдельный Chrome, кушает ~150-250 MB RAM |
-| `RETRY_AFTER_SEC` | `3` | Что писать в HTTP-заголовок `Retry-After` при 429/503 |
-| `REQUEST_TIMEOUT_MS` | `180000` | Таймаут на один запрос к DeepSeek (3 минуты) |
-| `SERVICE_MODEL` | `deepseek` | Ключ сервиса из `worker/data.json`. Сейчас поддерживается только `deepseek` |
-| `HEADLESS` | `true` | Запускать ли Chrome без окна. В коде сейчас захардкожено `"new"` — параметр игнорируется |
-| `VIEWPORT_W` / `VIEWPORT_H` | `800` / `800` | Размер viewport браузера |
-| `BOT_USERNAME` | — | Email от аккаунта DeepSeek (**обязательно**) |
-| `BOT_PASSWORD` | — | Пароль от аккаунта DeepSeek (**обязательно**) |
-
-Пример `.env`:
-
-```env
-PORT=3000
-MAX_BOT_COUNT=15
-RETRY_AFTER_SEC=45
-REQUEST_TIMEOUT_MS=180000
-
-SERVICE_MODEL=deepseek
-HEADLESS=true
-VIEWPORT_W=800
-VIEWPORT_H=800
-
-BOT_USERNAME=your_email@gmail.com
-BOT_PASSWORD=your_password
 ```
-
-> ⚠️ Не коммить `.env` в git. Если репа публичная — обязательно ротируй пароль.
-
----
-
-## Запуск
-
-### Через Docker Compose (рекомендуется)
-
-Требует, чтобы существовала external network `shared-network` (её обычно создаёт основной docker-compose Django-проекта):
-
-```bash
-docker network create shared-network   # один раз, если ещё нет
-docker compose -f docker-compose.linux.yml up -d --build
+api/
+  index.js        старт: поднимает BotManager + Express, ловит SIGINT/SIGTERM
+  server.js       роуты /health, /v1/chat/completions, /api/send
+  botManager.js   пул ботов, состояния, reap мёртвых
+  config.js       чтение env
+  openaiFormat.js сборка ответа/ошибки в формате OpenAI
+worker/
+  index.js        createBot()
+  bot.js          класс Bot: init / sendMessage / isAlive / close
+  data.json       URL'ы + XPath'ы DeepSeek  ← правится при смене вёрстки
+  hist.js         история диалогов (in-memory, общая на все боты)
+  modules/auth.js     логин (и register-заглушка)
+  modules/promtps.js  отправка сообщения + HTML→markdown
+  core/page-utils.js  helpers puppeteer (waitAndTypeX и т.п.)
+  utils/              logger, sleep
 ```
-
-Логи:
-```bash
-docker logs -f bot_pool_api
-```
-
-Остановка:
-```bash
-docker compose -f docker-compose.linux.yml down
-```
-
-### Локально (без Docker)
-
-Нужен Node.js 20+ и Chromium, который скачает puppeteer.
-
-```bash
-npm install
-node api/index.js
-```
-
-В консоли должно быть:
-```
-[api] listening on :3000
-[api] MAX_BOT_COUNT=3
-```
-
-Первый бот стартанёт лениво — при первом запросе к `/api/send` или `/v1/chat/completions`.
 
 ---
 
 ## HTTP API
 
-### `GET /health`
+| Метод | Что |
+|---|---|
+| `GET /health` | `{ ok, bots: [{id, state}] }` — только живые боты |
+| `POST /api/send` | простой формат: `{ message, model, thinking?, conversation_id?/user_id? }` → `{ ok, data: { content } }` |
+| `POST /v1/chat/completions` | OpenAI-формат: `{ model, messages[], thinking? }` → стандартный `chat.completion` |
 
-Проверка живости + список активных ботов. Боты, чьё окно/вкладка были закрыты, в список не попадают.
+Коды ошибок: `400` нет обязательных полей, `401 not_autorized` логин не прошёл, `429` все боты заняты, `503` бот ещё стартует (оба с `Retry-After`), `500` упало в процессе.
 
-```json
-{
-  "ok": true,
-  "bots": [
-    { "id": 1, "state": "ready" },
-    { "id": 2, "state": "busy" }
-  ]
-}
-```
-
-Возможные состояния:
-- `starting` — бот запускается, ещё не залогинен
-- `ready` — готов принимать запрос
-- `busy` — обрабатывает запрос
-- `not_autorized` — логин не прошёл (неверный пароль или DeepSeek просит капчу)
-- `failed` — упал в процессе работы
+**Важно по OpenAI-эндпоинту:** из `messages[]` берётся **только последнее user-сообщение** (`extractLastUserMessage`), историю бот ведёт сам по `conversation_id`. Поле `model` в роутинг не идёт — всё уходит в DeepSeek. `conversation_id` резолвится так: `conversation_id` → заголовок `x-conversation-id` → `user_id` → `default`.
 
 ---
 
-### `POST /api/send` — простой формат
+## worker → bot.js
 
-Минималистичный формат, удобный для своих сервисов.
+Один бот и весь его жизненный цикл. Четыре метода:
 
-**Запрос:**
+- **`init()`** — запускает headless Chrome (флаг захардкожен `"new"`, env `HEADLESS` игнорируется), идёт на DeepSeek, логинится из `BOT_USERNAME`/`BOT_PASSWORD`. Не пустили → `NotAuthorizedError` (`code: not_autorized`), бот сам себя закрывает.
+- **`sendMessage(payload)`** — печатает текст, при `thinking:true` жмёт DeepThink, отправляет, ждёт стабилизации HTML ответа (`waitLastOuterHtmlStable`), парсит в markdown.
+- **`isAlive()`** — жив ли браузер/вкладка; этим пул отсеивает дохлых.
+- **`close()`** — гасит Chrome (+ локальный прокси, если поднимался через `proxy-chain`).
 
-```json
-{
-  "message": "Привет, как дела?",
-  "model": "deepseek",
-  "user_id": "user-42",
-  "thinking": false,
-  "conversation_id": "chat-123"
-}
+Один бот = один Chrome = один аккаунт. Прокси опционально: `BOT_PROXY` / `BOT_PROXY_USER` / `BOT_PROXY_PASS`.
+
+---
+
+## data.json — карта кнопок (тут чинится вёрстка)
+
+Бот не видит страницу — он ходит по **XPath**'ам из `worker/data.json` (поле ввода, кнопка отправки, контейнер ответа, поля логина, тумблер DeepThink).
+
+⚠️ DeepSeek периодически меняет вёрстку → XPath перестаёт находить элемент → сыплется `can't send message` / `waitLastOuterHtmlStable timeout`, **при живом логине и интернете**. Лечится **только правкой `data.json`**: открыть сайт, снять новый DOM, переписать XPath, перезапустить. Не паролями и не настройками.
+
+**Добавить новый сервис:** дописать в `data.json` блок под новым ключом (`services`, `loginUrls`, `xpaths.*`). Но парсинг ответа заточен под DeepSeek (`promtps.js → deepseekHtmlToApiMarkdown`) — под другой сайт нужен свой конвертер HTML→markdown.
+
+---
+
+## Пул ботов (botManager.js)
+
+Просто массив ботов в памяти. Правила:
+
+- размер ограничен `MAX_BOT_COUNT`, каждый бот ест ~150–250 МБ.
+- все логинятся под **одним** аккаунтом.
+- **ленивый старт**: на старте пул пуст, первый бот рождается на первый запрос → `503 Retry-After`, клиент ретраит.
+- спавн **по одному** (`_spawning`), чтобы не долбить логин параллельно.
+- reap-таймер раз в 5 сек выкидывает `failed` и мёртвых (закрытый браузер/вкладка). `not_autorized` **не удаляются** — чтобы API отдавал внятный 401; чтобы перелогиниться после правки env, перезапусти сервис.
+- состояния: `starting → ready → busy`, плюс `not_autorized` / `failed`. `acquireReadyBot()` сразу ставит `busy`, в `finally` запроса — `markReady()`.
+
+---
+
+## Подводные камни (важно для поддержки)
+
+- **История в памяти и общая.** `worker/hist.js` — один объект на все боты, ключ = `conversation_id`. **Перезапуск = всё стёрлось.** Персистентности нет.
+- **Контекст шлётся как JSON в поле ввода.** В `promtps.js` весь массив `hist[uid]` сериализуется и печатается в textarea целиком. Т.е. «память» — это не нативные треды DeepSeek, а JSON-простыня в каждом сообщении. Растёт линейно, длинные диалоги упрутся в лимиты.
+- **Капчу бот не решает** — при ней логин падает в `not_autorized`.
+- **Один аккаунт на всех ботов** — DeepSeek может ограничить за параллель.
+- **Стриминга нет** — ответ отдаётся целиком после генерации.
+- **`register()` в auth.js — заглушка** (код подтверждения захардкожен), на проде не использовать.
+
+---
+
+## Запуск (Windows)
+
+В `run_api.bat` вписать данные и запустить даблкликом:
+
+```
+set "BOT_USERNAME=email@gmail.com"
+set "BOT_PASSWORD=пароль"
 ```
 
-| Поле | Обязательное | Описание |
+Первый раз сам поставит зависимости (`npm i`). Готово, когда в консоли `listening on :3000`. Без `.bat`: `npm install && npm start`.
+
+> Пароль в `.bat`/`.env` лежит в открытом виде — публично не выкладывать.
+
+---
+
+## Настройки (env)
+
+| env | что | дефолт |
 |---|---|---|
-| `message` | ✅ | Текст пользователя |
-| `model` | ✅ | Сервис из `data.json`. Сейчас всегда `deepseek` |
-| `user_id` или `conversation_id` | ❌ | Ключ для разделения диалогов. Если не задан — используется `default` (все будут писать в один общий диалог!) |
-| `thinking` | ❌ | `true` — включить DeepThink (reasoning), `false` — обычный режим |
-
-**Успешный ответ (200):**
-
-```json
-{
-  "ok": true,
-  "data": {
-    "content": "Привет! Всё отлично, спасибо. Чем могу помочь?"
-  }
-}
-```
-
-**Ошибки:**
-
-| HTTP | `reason` | Что значит |
-|---|---|---|
-| `400` | `message and model are required` | Не передал обязательное поле |
-| `401` | `not_autorized` | Логин/пароль неверный, или DeepSeek заблокировал аккаунт. Проверь `BOT_USERNAME` / `BOT_PASSWORD` |
-| `429` | `All bots are busy...` | Достигнут лимит `MAX_BOT_COUNT`, все боты заняты. Retry-After в заголовке |
-| `503` | `No bots ready. Starting a bot...` | Бот ещё инициализируется. Retry-After в заголовке |
-| `500` | `Internal error` (или текст ошибки) | Что-то сломалось в процессе. Смотри логи |
+| `BOT_USERNAME` / `BOT_PASSWORD` | аккаунт DeepSeek (обязательно) | — |
+| `MAX_BOT_COUNT` | размер пула, ~200 МБ на бота | `3` |
+| `PORT` | порт Express | `3000` |
+| `REQUEST_TIMEOUT_MS` | таймаут одного запроса к DeepSeek | `180000` |
+| `RETRY_AFTER_SEC` | значение заголовка `Retry-After` при 429/503 | `3` |
+| `SERVICE_MODEL` | ключ сервиса из `data.json` | `deepseek` |
+| `BOT_PROXY` / `_USER` / `_PASS` | прокси (опц.) | — |
+| `AUTH_DEBUG` / `AUTH_TIMEOUT_MS` | дамп html+скрин при сбое логина в `worker/logs/` | `0` / `45000` |
 
 ---
 
-### `POST /v1/chat/completions` — OpenAI-совместимый формат
+## Если сломалось
 
-Подходит для готовых OpenAI SDK / клиентов, которые умеют менять `base_url`.
+- **503 на первый запрос** — норма, бот логинится (5–10 сек), ретрай.
+- **401 / not_autorized** — логин/пароль или капча. Проверить вход руками; при `AUTH_DEBUG=1` смотреть дамп в `worker/logs/`.
+- **429** — пул занят: поднять `MAX_BOT_COUNT` (следить за RAM) или ретрай.
+- **`timeout` / не нашёл поле при верном логине** — почти всегда сменилась вёрстка → чинить `data.json`.
+- **история пропала** — перезапускали сервис, ожидаемо.
 
-**Запрос:**
-
-```json
-{
-  "model": "gpt-4o",
-  "messages": [
-    { "role": "user", "content": "Привет!" }
-  ],
-  "thinking": false,
-  "conversation_id": "chat-123"
-}
-```
-
-> Поле `model` в теле сейчас игнорируется (всё уходит в DeepSeek). Заголовок `x-conversation-id` тоже принимается как `conversation_id`.
-
-**Важно:** из массива `messages` бот берёт только **последнее user-сообщение**. Историю он ведёт **сам**, в памяти, по `conversation_id`. То есть нельзя через этот endpoint переписать историю — все предыдущие assistant-ответы он помнит из своего `hist`.
-
-**Успешный ответ (200):**
-
-```json
-{
-  "id": "chatcmpl_abc123...",
-  "object": "chat.completion",
-  "created": 1730000000,
-  "model": "gpt-4o",
-  "choices": [
-    {
-      "index": 0,
-      "message": { "role": "assistant", "content": "Привет!" },
-      "finish_reason": "stop"
-    }
-  ],
-  "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 }
-}
-```
-
-**Ошибки** — в формате OpenAI:
-
-```json
-{
-  "error": {
-    "message": "Bot is not authorized (login failed). Check BOT_USERNAME/BOT_PASSWORD.",
-    "type": "invalid_request_error",
-    "param": null,
-    "code": "not_autorized"
-  }
-}
-```
-
-Возможные коды ошибок: `invalid_request`, `not_autorized`, `bot_starting`, `bots_busy`, `internal_error`.
+Логи действий ботов — `worker/logs/application.log`, префикс `[bot#N]` = номер бота. Stdout Express уходит в консоль/`docker logs`.
 
 ---
 
-## Как живёт пул ботов
+## Диагностика из Docker
 
-1. **Ленивая инициализация.** Боты не стартуют при запуске сервиса. Первый запрос триггерит создание первого бота → 503 с `Retry-After`. Клиент должен повторить запрос.
-2. **Один новый бот за раз.** Пока один бот стартует (логинится), новые не создаются — чтобы не задудосить страницу логина DeepSeek.
-3. **Каждые 5 секунд** реап-таймер чистит «мёртвых» ботов — у кого браузер закрылся, или страница упала.
-4. **`NOT_AUTORIZED`-боты не удаляются** — они нужны, чтобы API мог вернуть 401 с понятной причиной. Если поправил `.env` и хочешь, чтобы пул попробовал залогиниться заново — перезапусти сервис.
-5. **История диалогов** живёт в `worker/hist.js` (in-memory). **При перезапуске сервиса вся история теряется.** Если нужна персистентность — это TODO.
+Контейнер — `dl_ai_web`, бот внутри лежит в `/app/bot`, Chromium от puppeteer — в `/opt/puppeteer-runtime`. Проверки гоняем через `docker exec -w /app/bot` (так `require('puppeteer')` и `require('./worker')` резолвятся из бота). Команды одноразовые, контейнер должен быть запущен.
 
----
+> ⚠️ **Egress только через прокси с авторизацией.** Голый `puppeteer.launch` упрётся в `net::ERR_INVALID_AUTH_CREDENTIALS` — Chromium ушёл в прокси без логина/пароля. Прокси лежит в `bot/.env` (`BOT_PROXY` / `BOT_PROXY_USER` / `BOT_PROXY_PASS`), и `bot.js` оборачивает его через `proxy-chain` в локальный прокси без авторизации. Поэтому **тест №2 (через рабочий код бота) проходит, а сырые puppeteer-команды — нет**. В тестах ниже та же прокси-обвязка вшита в начало скрипта.
 
-## Поддерживаемые модели
+### 1. Есть ли вообще выход в сеть (puppeteer → google → title)
 
-Сейчас всего одна:
-
-- `deepseek` — DeepSeek V3/V4 chat (с переключателем DeepThink через флаг `thinking`)
-
-Добавить новый сервис — это:
-1. Прописать URL'ы и XPath'ы в `worker/data.json` под новым ключом
-2. Перезапустить
-
-Подопытно работают логин/набор текста/клик отправки и парсинг ответа. На DeepSeek специфика парсинга HTML-ответа в Markdown лежит в `worker/modules/promtps.js` → `deepseekHtmlToApiMarkdown`. Для другого провайдера нужен свой конвертер.
-
----
-
-## Логи и диагностика
-
-- **Application лог:** `worker/logs/application.log` — старт ботов, логины, клики
-- **Stdout/stderr Express'а:** прёт в `docker logs bot_pool_api`
-- **Префикс `[bot#N]`** в логах — номер бота из пула
-
-Что искать при проблемах:
+Базовый санити-чек: поднимается ли Chromium и ходит ли он наружу через прокси.
 
 ```bash
-# логин не проходит
-docker logs bot_pool_api 2>&1 | grep -E "login|auth"
-
-# бот падает
-docker logs bot_pool_api 2>&1 | grep -E "failed|error|stack"
-
-# что вообще происходит сейчас
-curl http://localhost:3000/health
+docker exec -w /app/bot dl_ai_web node -e "
+const puppeteer=require('puppeteer');
+const proxyChain=require('proxy-chain');
+const clean=v=>String(v||'').trim().replace(/^['\"]|['\"]$/g,'');
+(async()=>{
+  let px=null, s=clean(process.env.BOT_PROXY), u=clean(process.env.BOT_PROXY_USER), pw=clean(process.env.BOT_PROXY_PASS);
+  if(s&&u){const host=s.replace(/^https?:\/\//,''); px=await proxyChain.anonymizeProxy('http://'+encodeURIComponent(u)+':'+encodeURIComponent(pw)+'@'+host);}
+  const b=await puppeteer.launch({headless:'new',args:[...(px?['--proxy-server='+px]:[]),'--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
+  const p=await b.newPage();
+  await p.goto('https://www.google.com',{waitUntil:'domcontentloaded',timeout:60000});
+  console.log('TITLE:', await p.title());
+  await b.close(); if(px) await proxyChain.closeAnonymizedProxy(px,true);
+})().catch(e=>{console.error('ERR:',e.message);process.exit(1);});
+"
 ```
 
----
+Ждём `TITLE: Google`. Если всё равно падает на прокси — проверь сами значения `BOT_PROXY*` в `bot/.env`. Если виснет без прокси-ошибки — Chromium не стартует (не хватает системных либ) или прокси недоступен.
 
-## Типичные ошибки
+### 2. Создаётся ли вообще бот (init + логин в DeepSeek)
 
-### `401 not_autorized`
+Сквозная проверка через рабочий код бота (`worker/index.js`) — он сам поднимает прокси и логинится. Логин/пароль и прокси берутся из env контейнера (`bot/.env`).
 
-- Проверь `BOT_USERNAME`/`BOT_PASSWORD` в `.env` — нет ли лишних пробелов, кавычек, экранирования
-- Попробуй вручную залогиниться на chat.deepseek.com тем же логином — может, аккаунт временно залочен или DeepSeek просит капчу. Капчу бот не умеет решать.
-- В Docker `.env` загружается из `env_file: .env` — убедись, что файл точно есть в контексте сборки
+```bash
+docker exec -w /app/bot dl_ai_web node -e "
+const {createBot}=require('./worker');
+(async()=>{
+  const bot=createBot({id:999});
+  await bot.init();
+  console.log('BOT OK, alive =', bot.isAlive());
+  await bot.close();
+})().catch(e=>{console.error('BOT FAIL:', e.code||'', e.message);process.exit(1);});
+"
+```
 
-### `503 No bots ready. Starting a bot.`
+`BOT OK` → бот создаётся и логинится (если так — сеть/прокси/логин в порядке, проблема где-то выше). `BOT FAIL ... not_autorized` → логин не прошёл (пароль/капча). Другая ошибка → почти наверняка съехала вёрстка → `data.json`. После закрытия в логах мелькнёт `page closed` — это норма, бот сам себя погасил. Учти: тест логинится тем же аккаунтом, что и боевой пул, — гоняй разово.
 
-Это **нормально на первый запрос** после старта сервиса. Бот логинится 5–10 секунд. Просто ретрайни через `Retry-After` секунд.
+### 3. Снять с DeepSeek кнопки/поля (для починки data.json)
 
-Если 503 не уходит:
-- Посмотри `docker logs` — возможно, логин падает с исключением
-- Возможно, заблокирована страница chat.deepseek.com из твоего региона — нужен прокси (сейчас не настроен в рантайме, только при сборке)
+Когда XPath перестал находить элемент, снимаем актуальный DOM и пересобираем XPath. Прокси-обвязка та же, что в тесте 1.
 
-### `429 All bots are busy`
+> DeepSeek — SPA: после загрузки страница ещё раз сама себя перерисовывает, из-за чего `evaluate` ловит `Execution context was destroyed`. Поэтому ждём не `networkidle2`, а появления конкретного элемента (`input`/`textarea`) и оборачиваем съём DOM в ретрай.
 
-Текущий `MAX_BOT_COUNT` исчерпан. Либо подними лимит (но помни про RAM ~200 MB на бота), либо ретрайни через `Retry-After`.
+**Страница логина** (поля логина/пароля + кнопка авторизации):
 
-### `500` с `waitLastOuterHtmlStable timeout`
-
-DeepSeek не отдал ответ за `REQUEST_TIMEOUT_MS`. Бывает на сложных запросах с DeepThink. Подними таймаут, или переотправь запрос.
-
-### `402` от клиента (Django-стороны)
-
-⚠️ **Этот код возвращает не bot-pool-api**, а официальный DeepSeek API. Если в Django выставлен `DEEPSEEK_API_TOKEN` — запрос сначала идёт туда, а не в этот бот. 402 = недостаточно средств на платформе DeepSeek.
-
-Решение: либо пополнить баланс, либо убрать `DEEPSEEK_API_TOKEN` из env Django, чтобы запросы шли только в web-бот.
-
----
-
-## Ограничения
-
-- **Капча.** Если DeepSeek покажет капчу при логине — бот не пройдёт, вернётся `NOT_AUTORIZED`.
-- **Один аккаунт = много ботов.** Все боты пула логинятся под одним и тем же `BOT_USERNAME`. DeepSeek может это заметить и ограничить.
-- **Память.** Каждый бот — отдельный Chrome ≈ 150–250 MB. `MAX_BOT_COUNT=15` это уже 2–4 GB только под бота.
-- **История в памяти.** Перезапуск сервиса = чистая история всех диалогов.
-- **Только один сервис.** `data.json` сейчас содержит только DeepSeek. Поддержки ChatGPT/Claude/etc. в коде есть «места под», но XPath'ов нет.
-- **Поле `model` из OpenAI-запроса игнорируется** — всегда отвечает DeepSeek.
-- **Стриминга нет.** Ответ возвращается целиком, после того как DeepSeek закончил генерацию.
-- **DOM может поменяться.** Если DeepSeek обновит вёрстку — все XPath'ы в `data.json` нужно будет перепрописывать.
+```bash
+docker exec -w /app/bot dl_ai_web node -e "
+const puppeteer=require('puppeteer');
+const proxyChain=require('proxy-chain');
+const clean=v=>String(v||'').trim().replace(/^['\"]|['\"]$/g,'');
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+(async()=>{
+  let px=null, s=clean(process.env.BOT_PROXY), u=clean(process.env.BOT_PROXY_USER), pw=clean(process.env.BOT_PROXY_PASS);
+  if(s&&u){const host=s.replace(/^https?:\/\//,''); px=await proxyChain.anonymizeProxy('http://'+encodeURIComponent(u)+':'+encodeURIComponent(pw)+'@'+host);}
+  const b=await puppeteer.launch({headless:'new',args:[...(px?['--proxy-server='+px]:[]),'--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
+  const p=await b.newPage();
+  await p.goto('https://chat.deepseek.com/sign_in',{waitUntil:'domcontentloaded',timeout:60000});
+  await p.waitForSelector('input',{timeout:30000}).catch(()=>{});
+  async function grab(fn){for(let i=0;i<6;i++){try{return await p.evaluate(fn);}catch(e){if(/context was destroyed|detached|Cannot find context/i.test(e.message)){await sleep(1500);continue;}throw e;}}throw new Error('evaluate keeps failing');}
+  const d=await grab(()=>{
+    const short=el=>el.outerHTML.slice(0,160).replace(/\s+/g,' ');
+    return {
+      inputs:[...document.querySelectorAll('input')].map(el=>({type:el.type,placeholder:el.placeholder,html:short(el)})),
+      buttons:[...document.querySelectorAll('button,[role=button],div.ds-button')].map(el=>({text:el.innerText.trim().slice(0,40),cls:el.className}))
+    };
+  });
+  console.log(JSON.stringify(d,null,2));
+  await b.close(); if(px) await proxyChain.closeAnonymizedProxy(px,true);
+})().catch(e=>{console.error('ERR:',e.message);process.exit(1);});
+"
+```
