@@ -7,6 +7,9 @@
     <meta name="viewport"
         content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
     <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    {% if external_session_id %}
+    <meta name="external-session-id" content="{{ external_session_id }}">
+    {% endif %}
     <link rel='stylesheet' href="/ai/assets/admin/css/chat_template.css"/>
     <script src="/ai/assets/admin/js/chat_template.js" defer></script>
     <title>DLAPI</title>

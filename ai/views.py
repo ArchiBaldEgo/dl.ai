@@ -88,8 +88,10 @@ def _render_ai_page(request, template_name):
         ]
         rest = [item for item in available_models if item["key"] not in _WEB_PRIORITY_MODELS]
         available_models = ordered_priority + rest
+    external_session_id = request.session.get('external_session_id')
     return render(request, template_name, {
         'available_models': available_models,
+        'external_session_id': external_session_id,
     })
 
 

@@ -17,9 +17,20 @@ function getCookieValue(name) {
     return match ? decodeURIComponent(match[1]) : '';
 }
 
+function getMetaContent(name) {
+    const meta = document.querySelector(`meta[name="${name}"]`);
+    return meta ? meta.getAttribute('content') : null;
+}
+
 function resolveClientId() {
-    const sessionId = getCookieValue('DLSID');
-    return sessionId ? `dlsid_${encodeURIComponent(sessionId)}` : 'dlsid_missing';
+    // First, try to get the session ID from the meta tag (set by server)
+    const sessionIdFromMeta = getMetaContent('external-session-id');
+    if (sessionIdFromMeta) {
+        return `dlsid_${encodeURIComponent(sessionIdFromMeta)}`;
+    }
+    // Fallback to cookie
+    const sessionIdFromCookie = getCookieValue('DLSID');
+    return sessionIdFromCookie ? `dlsid_${encodeURIComponent(sessionIdFromCookie)}` : 'dlsid_missing';
 }
 
 // Таймер для автоматической остановки записи (максимум 30 секунд)
