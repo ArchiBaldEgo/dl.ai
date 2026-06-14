@@ -355,8 +355,8 @@ def get_model_status_rows():
 def get_available_model_options():
     ensure_model_health_for_current_window()
 
-    ordered_keys = [item["key"] for item in MODEL_CATALOG]
-    titles = {item["key"]: item["title"] for item in MODEL_CATALOG}
+    ordered_keys = MODEL_CATALOG_KEYS
+    titles = {key: registry.title(key) for key in MODEL_CATALOG_KEYS}
 
     window_date = get_health_window_date()
     available_rows = {
