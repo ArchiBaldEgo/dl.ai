@@ -1177,8 +1177,6 @@
                 }
 
                 // Загрузка общих (shared) препромптов
-                const sharedPromptSelect = document.getElementById("selectSharedPrompt");
-                const sharedPromptSection = document.querySelector(".shared-prompt-section");
 
                 async function loadSharedPrompts(languageId) {
                     if (!sharedPromptSelect) return;
@@ -1204,11 +1202,10 @@
                     if (!isNaN(languageId)) {
                         await loadTopics(languageId);
                         await loadPrompts(languageId, null);
-                        await loadSharedPrompts(languageId);
                     } else {
                         await loadPrompts(null, null);
-                        await loadSharedPrompts(null);
                     }
+                    saveState();
                 });
 
                 topicSelect.addEventListener("change", async () => {
@@ -1216,11 +1213,37 @@
                     promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
                     const languageId = parseInt(languageSelect.value);
                     await loadPrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
+                    saveState();
                 });
+
+                promptSelect.addEventListener("change", saveState);
+
+                // Text persistence
+                const taskText = document.getElementById('taskText');
+                const codeText = document.getElementById('codeText');
+                const TEXT_KEY = 'ai_page_text';
+                function saveText() {
+                    try {
+                        localStorage.setItem(TEXT_KEY, JSON.stringify({
+                            task: taskText ? taskText.value : '',
+                            code: codeText ? codeText.value : ''
+                        }));
+                    } catch(e) {}
+                }
+                function restoreText() {
+                    try {
+                        const saved = JSON.parse(localStorage.getItem(TEXT_KEY) || '{}');
+                        if (saved.task && taskText) taskText.value = saved.task;
+                        if (saved.code && codeText) codeText.value = saved.code;
+                    } catch(e) {}
+                }
+                if (taskText) taskText.addEventListener('input', saveText);
+                if (codeText) codeText.addEventListener('input', saveText);
 
                 await loadLanguages();
                 await loadPrompts(null, null);
-                await loadSharedPrompts(null);
+                restoreSelections();
+                restoreText();
             });
 
             window.onload = function () {

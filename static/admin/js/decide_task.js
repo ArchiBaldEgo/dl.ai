@@ -1088,8 +1088,6 @@
                 const languageSelect = document.getElementById("selectProgLng");
                 const topicSelect = document.getElementById("selectTheme");
                 const promptSelect = document.getElementById("selectPrompt");
-                const sharedPromptSelect = document.getElementById("selectSharedPrompt");
-                const sharedPromptSection = document.querySelector(".shared-prompt-section");
 
                 async function fetchData(url) {
                     try {
@@ -1160,8 +1158,29 @@
                 async function loadPrompts(languageId, topicId) {
                     const prompts = await fetchData("/ai/api/prompts");
                     promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
-                    if (prompts && prompts.length > 0) {
-                        const filteredPrompts = filterPrompts(prompts, languageId, topicId);
+
+                    let allPrompts = prompts || [];
+
+                    if (languageId) {
+                        try {
+                            const sharedPrompts = await fetchData(`/ai/api/shared-prompts/?language_id=${languageId}`);
+                            if (sharedPrompts && sharedPrompts.length > 0) {
+                                sharedPrompts.forEach(sp => {
+                                    allPrompts.push({
+                                        id: `shared_${sp.id}`,
+                                        prompt_name: `[Общий] ${sp.prompt_name}`,
+                                        topic_id: null,
+                                        topic__programming_language: String(languageId)
+                                    });
+                                });
+                            }
+                        } catch (e) {
+                            console.error('Failed to load shared prompts', e);
+                        }
+                    }
+
+                    if (allPrompts.length > 0) {
+                        const filteredPrompts = filterPrompts(allPrompts, languageId, topicId);
                         filteredPrompts.forEach(prompt => {
                             const option = new Option(prompt.prompt_name, prompt.id);
                             promptSelect.appendChild(option);
@@ -1170,21 +1189,42 @@
                     selectFirstIfSingle(promptSelect);
                 }
 
-                async function loadSharedPrompts(languageId) {
-                    if (!sharedPromptSelect) return;
-                    const url = languageId ? `/ai/api/shared-prompts/?language_id=${languageId}` : "/ai/api/shared-prompts";
-                    const sharedPrompts = await fetchData(url);
-                    sharedPromptSelect.innerHTML = '<option value="">Выберите общий препромпт</option>';
-                    if (sharedPrompts && sharedPrompts.length > 0) {
-                        sharedPrompts.forEach(sp => {
-                            const option = new Option(sp.prompt_name, sp.id);
-                            sharedPromptSelect.appendChild(option);
-                        });
-                        if (sharedPromptSection) sharedPromptSection.style.display = "flex";
-                    } else {
-                        if (sharedPromptSection) sharedPromptSection.style.display = "none";
-                    }
-                    selectFirstIfSingle(sharedPromptSelect);
+                // State persistence
+                const STATE_KEY = 'ai_page_state';
+                function saveState() {
+                    try {
+                        const state = JSON.parse(localStorage.getItem(STATE_KEY) || '{}');
+                        state.language = languageSelect.value;
+                        state.topic = topicSelect.value;
+                        state.prompt = promptSelect.value;
+                        localStorage.setItem(STATE_KEY, JSON.stringify(state));
+                    } catch(e) {}
+                }
+                function restoreSelections() {
+                    try {
+                        const state = JSON.parse(localStorage.getItem(STATE_KEY) || '{}');
+                        if (!state.language) return;
+                        const langOpt = Array.from(languageSelect.options).find(o => o.value === state.language);
+                        if (!langOpt) return;
+                        languageSelect.value = state.language;
+                        // trigger chain: language -> topics -> prompts
+                        languageSelect.dispatchEvent(new Event('change'));
+                        if (state.topic) {
+                            setTimeout(() => {
+                                const topicOpt = Array.from(topicSelect.options).find(o => o.value === state.topic);
+                                if (topicOpt) {
+                                    topicSelect.value = state.topic;
+                                    topicSelect.dispatchEvent(new Event('change'));
+                                    if (state.prompt) {
+                                        setTimeout(() => {
+                                            const promptOpt = Array.from(promptSelect.options).find(o => o.value === state.prompt);
+                                            if (promptOpt) promptSelect.value = state.prompt;
+                                        }, 50);
+                                    }
+                                }
+                            }, 50);
+                        }
+                    } catch(e) {}
                 }
 
                 languageSelect.addEventListener("change", async () => {
@@ -1194,11 +1234,10 @@
                     if (!isNaN(languageId)) {
                         await loadTopics(languageId);
                         await loadPrompts(languageId, null);
-                        await loadSharedPrompts(languageId);
                     } else {
                         await loadPrompts(null, null);
-                        await loadSharedPrompts(null);
                     }
+                    saveState();
                 });
 
                 topicSelect.addEventListener("change", async () => {
@@ -1206,11 +1245,33 @@
                     promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
                     const languageId = parseInt(languageSelect.value);
                     await loadPrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
+                    saveState();
                 });
+
+                promptSelect.addEventListener("change", saveState);
+
+                // Text persistence
+                const messageText = document.getElementById('messageText');
+                const TEXT_KEY = 'ai_page_text';
+                function saveText() {
+                    try {
+                        localStorage.setItem(TEXT_KEY, JSON.stringify({ message: messageText.value }));
+                    } catch(e) {}
+                }
+                function restoreText() {
+                    try {
+                        const saved = JSON.parse(localStorage.getItem(TEXT_KEY) || '{}');
+                        if (saved.message) messageText.value = saved.message;
+                    } catch(e) {}
+                }
+                if (messageText) {
+                    messageText.addEventListener('input', saveText);
+                }
 
                 await loadLanguages();
                 await loadPrompts(null, null);
-                await loadSharedPrompts(null);
+                restoreSelections();
+                restoreText();
             });
 
             window.onload = function () {
