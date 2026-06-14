@@ -4,15 +4,12 @@ import time
 import logging
 from datetime import time as dtime, timedelta
 from time import perf_counter
-from zoneinfo import ZoneInfo
-
 from asgiref.sync import async_to_sync
 from django.db import close_old_connections, transaction
 from django.utils import timezone
 
+from .constants import MOSCOW_TZ
 from .models import AIModelAvailability, AIModelHealthRun
-
-MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 HEALTHCHECK_PROMPT = "Ответь только одной цифрой без пояснений: 1+1=?"
 
 logger = logging.getLogger(__name__)
@@ -21,89 +18,23 @@ _scheduler_started = False
 _manual_refresh_lock = threading.Lock()
 _manual_refresh_started = False
 
-MODEL_CATALOG = (
-    {
-        "key": "Web_DeepSeek",
-        "title": "Web DeepSeek",
-        "handler_name": "ask_Web_DeepSeek_async",
-    },
-    {
-        "key": "Web_DeepSeek_Thinking",
-        "title": "Web DeepSeek Thinking",
-        "handler_name": "ask_Web_DeepSeek_Thinking_async",
-    },
-    {
-        "key": "DeepSeek_R1_Distill_Llama_70B",
-        "title": "DeepSeek-R1-Distill-Llama-70B",
-        "handler_name": "ask_DeepSeek_R1_Distill_Llama_70B_async",
-    },
-    {
-        "key": "DeepSeek_V3_1",
-        "title": "DeepSeek-V3.1",
-        "handler_name": "ask_DeepSeek_V3_1_async",
-    },
-    {
-        "key": "DeepSeek_V3_1_cb",
-        "title": "DeepSeek-V3.1-cb",
-        "handler_name": "ask_DeepSeek_V3_1_cb_async",
-    },
-    {
-        "key": "DeepSeek_V3_2",
-        "title": "DeepSeek-V3.2",
-        "handler_name": "ask_DeepSeek_V3_2_async",
-    },
-    {
-        "key": "Llama_4_Maverick_17B_128E_Instruct",
-        "title": "Llama-4-Maverick-17B-128E-Instruct",
-        "handler_name": "ask_Llama_4_Maverick_17B_128E_Instruct_async",
-    },
-    {
-        "key": "Meta_Llama_3_3_70B_Instruct",
-        "title": "Meta-Llama-3.3-70B-Instruct",
-        "handler_name": "ask_Meta_Llama_3_3_70B_Instruct_async",
-    },
-    {
-        "key": "MiniMax_M2_5",
-        "title": "MiniMax-M2.5",
-        "handler_name": "ask_MiniMax_M2_5_async",
-    },
-    {
-        "key": "MiniMax_M2_7",
-        "title": "MiniMax-M2.7",
-        "handler_name": "ask_MiniMax_M2_7_async",
-    },
-    {
-        "key": "Gemma_3_12b_it",
-        "title": "gemma-3-12b-it",
-        "handler_name": "ask_Gemma_3_12b_it_async",
-    },
-    {
-        "key": "Gpt_oss_120b",
-        "title": "gpt-oss-120b",
-        "handler_name": "ask_Gpt_oss_120b_async",
-    },
-)
+from .model_clients import registry
 
-MODEL_ALIASES = {
-    # Legacy values kept for backward compatibility with stale browser cache.
-    "DeepSeek_R1": "DeepSeek_R1_Distill_Llama_70B",
-    "DeepSeek-R1": "DeepSeek_R1_Distill_Llama_70B",
-    "DeepSeek-R1-Distill-Llama-70B": "DeepSeek_R1_Distill_Llama_70B",
-    "DeepSeek-V3.1": "DeepSeek_V3_1",
-    "DeepSeek-V3.1-cb": "DeepSeek_V3_1_cb",
-    "DeepSeek-V3.2": "DeepSeek_V3_2",
-    "Llama_3_1_Tulu_3_405B": "Meta_Llama_3_3_70B_Instruct",
-    "Meta_Llama_3_1_70B_Instruct": "Meta_Llama_3_3_70B_Instruct",
-    "Meta-Llama-3.3-70B-Instruct": "Meta_Llama_3_3_70B_Instruct",
-    "Llama-4-Maverick-17B-128E-Instruct": "Llama_4_Maverick_17B_128E_Instruct",
-    "MiniMax-M2.5": "MiniMax_M2_5",
-    "MiniMax-M2.7": "MiniMax_M2_7",
-    "gemma-3-12b-it": "Gemma_3_12b_it",
-    "gpt-oss-120b": "Gpt_oss_120b",
-    "QwQ_32B": "DeepSeek_R1_Distill_Llama_70B",
-    "Mixtral_8x7B": "Llama_4_Maverick_17B_128E_Instruct",
-    "Mixtral_8x22b": "Llama_4_Maverick_17B_128E_Instruct",
-}
+# Health checks only exercise the models defined in the registry below.
+MODEL_CATALOG_KEYS = [
+    "Web_DeepSeek",
+    "Web_DeepSeek_Thinking",
+    "DeepSeek_R1_Distill_Llama_70B",
+    "DeepSeek_V3_1",
+    "DeepSeek_V3_1_cb",
+    "DeepSeek_V3_2",
+    "Llama_4_Maverick_17B_128E_Instruct",
+    "Meta_Llama_3_3_70B_Instruct",
+    "MiniMax_M2_5",
+    "MiniMax_M2_7",
+    "Gemma_3_12b_it",
+    "Gpt_oss_120b",
+]
 
 _ERROR_MARKERS = (
     "ошибка",
@@ -156,19 +87,13 @@ def _is_healthy_response(response_text):
     return low in {"два", "two"}
 
 
-def _load_runtime_handler(handler_name):
-    from . import utils as ai_utils
-
-    return getattr(ai_utils, handler_name, None)
-
-
 def get_runtime_model_handlers():
     handlers = {}
-    for spec in MODEL_CATALOG:
-        handler = _load_runtime_handler(spec["handler_name"])
+    for key in MODEL_CATALOG_KEYS:
+        handler = registry.handler(key)
         if handler:
-            handlers[spec["key"]] = {
-                "title": spec["title"],
+            handlers[key] = {
+                "title": registry.title(key),
                 "handler": handler,
             }
     return handlers
@@ -222,9 +147,8 @@ def run_model_health_check(force=False):
     try:
         handlers = get_runtime_model_handlers()
 
-        for spec in MODEL_CATALOG:
-            key = spec["key"]
-            title = spec["title"]
+        for key in MODEL_CATALOG_KEYS:
+            title = registry.title(key)
             handler_info = handlers.get(key)
 
             if not handler_info:
@@ -382,7 +306,7 @@ def start_model_health_scheduler():
 
 
 def get_all_model_options():
-    return [{"key": item["key"], "title": item["title"]} for item in MODEL_CATALOG]
+    return [{"key": key, "title": registry.title(key)} for key in MODEL_CATALOG_KEYS]
 
 
 def get_model_status_rows():

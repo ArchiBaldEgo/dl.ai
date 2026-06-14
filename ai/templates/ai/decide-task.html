@@ -1,130 +1,30 @@
-<!doctype html>
-{% load static %}
-<html lang="en">
+{% extends "ai/base_chat.html" %}
 
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport"
-        content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
-    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+{% block extra_css %}
     <link rel="stylesheet" href="/ai/assets/admin/css/decide_task.css"/>
-    <script src="/ai/assets/admin/js/decide_task.js" defer></script>
-    <title>DLAPI</title>
-</head>
+{% endblock %}
 
-<body>
-    <div id="content">
-        <div class="line-panel">
-            <div>
-                <select id="selectLang">
-                    <option language="Russian">Русский</option>
-                    <option language="English">English</option>
-                    <option language="French">Français</option>
-                </select>
-                <select id="select">
-                    {% if available_models %}
-                        {% for model in available_models %}
-                            <option value="{{ model.key }}">{{ model.title }}</option>
-                        {% endfor %}
-                    {% else %}
-                        <option value="" selected disabled>Сегодня нет доступных моделей</option>
-                    {% endif %}
-                </select>
-                <select id="selectType"
-                    onchange="goToAiPage(this)">
-                    <option data-link="/ai/chat/">Чат с DLAI</option>
-                    <option data-link="/ai/solve-problem/" selected>Реши задачу</option>
-                    <option data-link="/ai/find-error/">В чём ошибка?</option>
-                </select>
-            </div>
-            <div class="voice-mod-div">
-                <button type="button" class="voice-mode-btn" id="voiceModeBtn" onclick="toggleVoiceControls()">
-                    Голосовой режим
-                </button>
-                <div class="voice-status" id="voiceStatus"></div>
-            </div>
-            <!-- Голосовые контролы (скрыты по умолчанию) -->
-            <div class="voice-controls" id="voiceControls">
-                <button type="button" class="voice-btn" id="voiceInputBtn" onclick="toggleVoiceInput()">
-                    <span class="voice-input-indicator" id="voiceIndicator"></span>
-                    Голосовой ввод
-                </button>
-                <button type="button" class="voice-btn" id="voiceOutputBtn" onclick="speakLastResponse()">
-                    Озвучить ответ
-                </button>
-                
-                <!-- Чекбокс для think-тегов -->
-                <div class="think-checkbox">
-                    <input type="checkbox" id="speakThinkContent" checked>
-                    <label for="speakThinkContent" id="speakThinkLabel">Озвучивать think-блоки</label>
-                </div>
-                
-            </div>
-            <div class="panel-date">11.03.2026</div>
-        </div>
-        <hr/>
-        <div class="blo">
-            <ul id='messages'>
-            </ul>
-            <div class="dv">
-                <div class="resize-button" onmousedown="startResize(event)">🠔 </div>
-                <form action="" method="post" onsubmit="sendMessage(event)">
-                    {% csrf_token %}
-                    
-                    <textarea type="text" id="messageText"
-                        placeholder="Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)"
-                        autocomplete="off"></textarea>
-                    <div class="buttons-block">
-                        <button type="submit">Send</button>
-                        <button type="button" onclick="clearContext()">Clear Context</button>
-                        <!--<div class="check">
-                            <input type="checkbox" class="inp" checked> <div class="check-text">При нажатии на Enter будет отправлятся вопрос(для переноса строки Enter+Shift)</div>
-                        </div> -->
-                    </div> 
+{% block extra_js %}
+    <script src="/ai/assets/admin/js/ai-common.js" defer></script>
+    <script src="/ai/assets/admin/js/decide-task.js" defer></script>
+{% endblock %}
 
-                    <div class="top-dv">
-                        <select id="selectProgLng">
-                        </select>
-                        <select id="selectTheme">
-                        </select>
-                        <div class="top-preprompt">
-                            <div class="preprompt">Препромпт:</div>
-                            <select id="selectPrompt">
-                            </select>
-                        </div>
-                    </div>   
-                </form>
-            </div>
-        </div>
+{% block solve_selected %}selected{% endblock %}
 
-        <div class="sidebar">
-            <a href="/ai/admin/login/?next=/ai/admin/" style="text-decoration: none; color: black;">
-                <div class="sidebar-header" id="adminPanelLink">
-                    Админ-Панель
-                </div>
-            </a>
+{% block form_content %}
+    <textarea type="text" id="messageText"
+        placeholder="Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)"
+        autocomplete="off"></textarea>
+{% endblock %}
 
-        </div>
-
-        <button class="toggle-button" type="button" aria-label="Open menu">
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="9 18 15 12 9 6" />
-            </svg>
-        </button>
+{% block top_dv %}
+    <select id="selectProgLng">
+    </select>
+    <select id="selectTheme">
+    </select>
+    <div class="top-preprompt">
+        <div class="preprompt">Препромпт:</div>
+        <select id="selectPrompt">
+        </select>
     </div>
-</body>
-<script>
-function goToAiPage(selectEl) {
-    const selected = selectEl.querySelector('option:checked');
-    const target = selected && selected.dataset ? selected.dataset.link : '';
-    if (!target) {
-        return;
-    }
-
-    const query = window.location.search || '';
-    const destination = query ? `${target}${query}` : target;
-    window.location.href = destination;
-}
-</script>
-</html>
+{% endblock %}

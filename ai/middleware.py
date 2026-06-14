@@ -111,6 +111,15 @@ class ExternalAuthMiddleware:
         request.session[self.cache_user_key] = user_info
         request.session.modified = True
 
+    def _redirect_or_optional(self, request, request_path: str):
+        """Return the response when the request is unauthenticated.
+
+        Optional auth paths continue; everything else is redirected.
+        """
+        if _is_optional_auth_path(request_path):
+            return self.get_response(request)
+        return HttpResponseRedirect(self.redirect_url)
+
     def __call__(self, request):
         # Пропуск путей
         request_path = _normalize_path(request.path)
@@ -124,9 +133,7 @@ class ExternalAuthMiddleware:
 
         raw_session_id = request.COOKIES.get(self.session_cookie_name)
         if not raw_session_id:
-            if _is_optional_auth_path(request_path):
-                return self.get_response(request)
-            return HttpResponseRedirect(self.redirect_url)
+            return self._redirect_or_optional(request, request_path)
 
         session_id = unquote(raw_session_id)
         logger.debug("Session ID decoded")
@@ -140,9 +147,7 @@ class ExternalAuthMiddleware:
                 self._store_cached_user_info(request, session_id, user_info)
             logger.info(f"API response: {user_info}")
         except ExternalAuthUnauthorized:
-            if _is_optional_auth_path(request_path):
-                return self.get_response(request)
-            return HttpResponseRedirect(self.redirect_url)
+            return self._redirect_or_optional(request, request_path)
         except ExternalAuthMisconfigured as exc:
             logger.error(f"External auth misconfigured: {exc}")
             if _is_optional_auth_path(request_path):
@@ -161,7 +166,7 @@ class ExternalAuthMiddleware:
 
         if _is_admin_path(request.path):
             return self.get_response(request)
-        
+
         # Auto-provision user if needed
         try:
             user, created = get_or_create_user_from_external(user_info)
@@ -177,5 +182,5 @@ class ExternalAuthMiddleware:
         except Exception as e:
             logger.exception(f"User provisioning failed: {e}")
             return JsonResponse({"error": "User provisioning failed"}, status=500)
-        
+
         return self.get_response(request)

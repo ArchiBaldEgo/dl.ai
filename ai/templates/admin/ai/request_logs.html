@@ -80,7 +80,24 @@
     font-size: 12px;
     max-width: 200px;
   }
+  .ai-log-row {
+    cursor: pointer;
+  }
+  .ai-log-row:hover {
+    background: var(--selected-row);
+  }
 </style>
+
+<script>
+  document.querySelectorAll('.ai-log-row').forEach(function (row) {
+    row.addEventListener('click', function () {
+      const url = row.dataset.detailUrl;
+      if (url) {
+        window.location.href = url;
+      }
+    });
+  });
+</script>
 
 <div class="ai-logs-wrap">
   <div style="display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 16px;">
@@ -148,12 +165,11 @@
       </thead>
       <tbody>
         {% for log in page_obj.object_list %}
-          <tr>
-            <td>{{ log.sent_at|default:"—" }}</td>
-            <td>{{ log.received_at|default:"—" }}</td>
+          <tr class="ai-log-row" data-detail-url="/ai/admin/logs/{{ log.id }}/">
+            <td>{{ log.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
+            <td>{{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>
               {% if log.user_full_name %}{{ log.user_full_name }}{% endif %}
-              {% if log.username %}<br><small>login: {{ log.username }}</small>{% endif %}
               {% if log.external_user_id %}<br><small>id: {{ log.external_user_id }}</small>{% endif %}
             </td>
             <td class="ai-logs-models">{{ log.model_names|join:", " }}</td>
@@ -164,7 +180,7 @@
             <td class="{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">
               {{ log.get_status_display }}
             </td>
-            <td>{{ log.duration_seconds|default:"—" }}</td>
+            <td>{{ log.duration_seconds|floatformat:0|default:"—" }}</td>
             <td class="ai-logs-message">{{ log.message|default:"—" }}</td>
           </tr>
         {% endfor %}

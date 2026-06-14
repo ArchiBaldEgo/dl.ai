@@ -68,3 +68,14 @@ def get_localized_text(obj: Any, ui_language: str, default_attr: str = "text") -
         if value:
             return str(value)
     return ""
+
+
+def get_language_instruction(ui_language: str) -> str:
+    """Return a language constraint instruction for model prompts."""
+    if ui_language == "Русский":
+        return ". Разговаривай со мной только по-русски"
+    if ui_language == "Français":
+        return ". Communiquez avec moi uniquement en français"
+    if ui_language == "English":
+        return ". Communicate with me only in English"
+    return ""

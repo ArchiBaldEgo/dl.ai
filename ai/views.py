@@ -23,7 +23,16 @@ from .auth_backends import (
     normalize_external_user_id,
 )
 from .constants import PROMPT_DEVELOPER_GROUP
-from .i18n import get_localized_name, get_localized_text
+from .http_utils import safe_relative_url
+from .i18n import get_language_instruction, get_localized_name, get_localized_text
+from .querysets import prompt_queryset_for_user
+from .serializers import (
+    programming_language as serialize_programming_language,
+    prompt as serialize_prompt,
+    shared_prompt as serialize_shared_prompt,
+    shared_prompt_with_dates as serialize_shared_prompt_with_dates,
+    topic as serialize_topic,
+)
 
 _WEB_PRIORITY_MODELS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
 
@@ -37,11 +46,8 @@ try:
 except ImportError:
     SPEECH_RECOGNITION_AVAILABLE = False
 
-def _safe_relative_url(candidate, fallback):
-    value = (candidate or "").strip()
-    if value.startswith("/") and not value.startswith("//"):
-        return value
-    return fallback
+
+_safe_relative_url = safe_relative_url
 
 
 def prompt_developer_access_required(view_func):
@@ -96,13 +102,6 @@ def _render_ai_page(request, template_name):
     })
 
 
-def _prompt_queryset_for_user(user):
-    queryset = Prompt.objects.select_related("topic", "topic__programming_language", "owner")
-    if not user or not user.is_authenticated:
-        return queryset.none()
-    return queryset.filter(owner=user)
-
-
 def prompt_developer_login_view(request):
     default_next = "/ai/admin/arm/find-error/"
     next_url = _safe_relative_url(request.GET.get("next"), default_next)
@@ -138,78 +137,6 @@ def prompt_developer_login_view(request):
             "error_message": error_message,
             "next_url": next_url,
             "back_url": back_url,
-        },
-    )
-    response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    response["Pragma"] = "no-cache"
-    return response
-
-
-def legacy_set_password_view(request):
-    """Allow user with unusable password to set their first password."""
-    next_url = _safe_relative_url(
-        request.POST.get("next") if request.method == "POST" else request.GET.get("next"),
-        "/ai/admin/",
-    )
-    error_message = ""
-    target_user = None
-
-    if request.user.is_authenticated and request.user.is_active:
-        target_user = request.user
-    else:
-        external_user_id = (
-            request.POST.get("external_user_id")
-            or request.GET.get("uid")
-            or request.GET.get("userId")
-        )
-        if external_user_id:
-            try:
-                target_user = ExternalDLAccount.objects.select_related("user").get(
-                    external_user_id=str(external_user_id)
-                ).user
-            except ExternalDLAccount.DoesNotExist:
-                target_user = None
-
-    if request.method == "POST":
-        new_password = request.POST.get("new_password") or ""
-        new_password_confirm = request.POST.get("new_password_confirm") or ""
-        if not target_user or not target_user.is_active:
-            error_message = "Не удалось найти пользователя для установки пароля."
-        elif target_user.has_usable_password():
-            error_message = "Пользователь уже имеет пароль. Используйте обычный вход."
-        elif new_password != new_password_confirm:
-            error_message = "Пароли не совпадают."
-        elif len(new_password) < 8:
-            error_message = "Пароль должен быть не менее 8 символов."
-        else:
-            target_user.set_password(new_password)
-            target_user.save()
-            login(request, target_user, backend='django.contrib.auth.backends.ModelBackend')
-            csrf.rotate_token(request)
-            request.session["ai_testpanel_back_url"] = "/"
-            return redirect(next_url)
-
-        response = render(
-            request,
-            "ai/set-password.html",
-            {
-                "error_message": error_message,
-                "next_url": next_url,
-                "username": target_user.username if target_user else "",
-            },
-        )
-        response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        response["Pragma"] = "no-cache"
-        return response
-    
-    # GET: Show form
-    response = render(
-        request,
-        "ai/set-password.html",
-        {
-            "error_message": error_message,
-            "next_url": next_url,
-            "username": target_user.username if target_user else "",
         },
     )
     response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -336,11 +263,7 @@ def find_error_view(request):
 
 def get_languages(request):
     languages = [
-        {
-            'id': lang.id,
-            'language_name': lang.language_name,
-            'name': lang.language_name,
-        }
+        serialize_programming_language(lang)
         for lang in ProgrammingLanguage.objects.order_by('language_name')
     ]
     return JsonResponse(languages, safe=False)
@@ -348,14 +271,10 @@ def get_languages(request):
 
 def get_topics(request):
     ui_language = request.GET.get('ui_language', 'Русский')
-    topics = []
-    for topic in Topic.objects.select_related("programming_language").order_by('topic_name'):
-        topics.append({
-            'id': topic.id,
-            'topic_name': topic.topic_name,
-            'name': get_localized_name(topic, ui_language, 'topic_name'),
-            'programming_language': topic.programming_language_id,
-        })
+    topics = [
+        serialize_topic(topic, ui_language)
+        for topic in Topic.objects.select_related("programming_language").order_by('topic_name')
+    ]
     return JsonResponse(topics, safe=False)
 
 
@@ -364,20 +283,10 @@ def get_prompts(request):
         return HttpResponseForbidden("Authentication required")
 
     ui_language = request.GET.get('ui_language', 'Русский')
-    prompts = []
-    for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name', 'id'):
-        prompts.append({
-            'id': p.id,
-            'topic_id': p.topic_id,
-            'topic__programming_language': p.topic.programming_language_id if p.topic else None,
-            'prompt_name': p.prompt_name,
-            'name': get_localized_name(p, ui_language, 'prompt_name'),
-            'prompt_text': p.prompt_text,
-            'effective_text': p.get_effective_text(ui_language, ""),
-            'shared_prompt_id': p.shared_prompt_id,
-            'shared_prompt__prompt_name': p.shared_prompt.prompt_name if p.shared_prompt else None,
-            'is_shared': bool(p.shared_prompt),
-        })
+    prompts = [
+        serialize_prompt(p, ui_language)
+        for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name', 'id')
+    ]
     return JsonResponse(prompts, safe=False)
 
 
@@ -396,18 +305,10 @@ def get_shared_prompts(request):
             models.Q(programming_languages__id=language_id) | models.Q(programming_languages__isnull=True)
         ).distinct()
 
-    shared = []
-    for sp in qs:
-        shared.append({
-            'id': sp.id,
-            'prompt_name': sp.prompt_name,
-            'name': get_localized_name(sp, ui_language, 'prompt_name'),
-            'prompt_text': sp.prompt_text,
-            'effective_text': sp.get_effective_text(ui_language, ""),
-            'language_ids': list(sp.programming_languages.values_list('id', flat=True)),
-            'created_at': sp.created_at.isoformat() if sp.created_at else None,
-            'updated_at': sp.updated_at.isoformat() if sp.updated_at else None,
-        })
+    shared = [
+        serialize_shared_prompt_with_dates(sp, ui_language)
+        for sp in qs
+    ]
     return JsonResponse(shared, safe=False)
 
 
@@ -419,48 +320,21 @@ def get_problem_data(request):
     ui_language = request.GET.get('ui_language', 'Русский')
 
     languages = [
-        {
-            'id': lang.id,
-            'language_name': lang.language_name,
-            'name': lang.language_name,
-        }
+        serialize_programming_language(lang)
         for lang in ProgrammingLanguage.objects.order_by('language_name')
     ]
-
-    topics = []
-    for topic in Topic.objects.select_related("programming_language").order_by('topic_name'):
-        topics.append({
-            'id': topic.id,
-            'topic_name': topic.topic_name,
-            'name': get_localized_name(topic, ui_language, 'topic_name'),
-            'programming_language': topic.programming_language_id,
-        })
-
-    prompts = []
-    for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name', 'id'):
-        prompts.append({
-            'id': p.id,
-            'topic_id': p.topic_id,
-            'topic__programming_language': p.topic.programming_language_id if p.topic else None,
-            'prompt_name': p.prompt_name,
-            'name': get_localized_name(p, ui_language, 'prompt_name'),
-            'prompt_text': p.prompt_text,
-            'effective_text': p.get_effective_text(ui_language, ""),
-            'shared_prompt_id': p.shared_prompt_id,
-            'shared_prompt__prompt_name': p.shared_prompt.prompt_name if p.shared_prompt else None,
-            'is_shared': bool(p.shared_prompt),
-        })
-
-    shared_prompts = []
-    for sp in SharedPrompt.objects.prefetch_related('programming_languages'):
-        shared_prompts.append({
-            'id': sp.id,
-            'prompt_name': sp.prompt_name,
-            'name': get_localized_name(sp, ui_language, 'prompt_name'),
-            'prompt_text': sp.prompt_text,
-            'effective_text': sp.get_effective_text(ui_language, ""),
-            'language_ids': list(sp.programming_languages.values_list('id', flat=True)),
-        })
+    topics = [
+        serialize_topic(topic, ui_language)
+        for topic in Topic.objects.select_related("programming_language").order_by('topic_name')
+    ]
+    prompts = [
+        serialize_prompt(p, ui_language)
+        for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name', 'id')
+    ]
+    shared_prompts = [
+        serialize_shared_prompt(sp, ui_language)
+        for sp in SharedPrompt.objects.prefetch_related('programming_languages')
+    ]
 
     return JsonResponse({
         'languages': languages,
@@ -491,45 +365,7 @@ def transcribe_audio(request):
         for chunk in audio_file.chunks():
             tmp.write(chunk)
         tmp_path = tmp.name
-    
-    '''try:
-        # Конвертируется webm в wav
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(tmp_path)
-        
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as wav_tmp:
-            audio.export(wav_tmp.name, format='wav')
-            wav_path = wav_tmp.name
-        
-        import speech_recognition as sr
-        recognizer = sr.Recognizer()
-        
-        with sr.AudioFile(wav_path) as source:
-            audio_data = recognizer.record(source)
-        
-        lang_map = {
-            'Russian': 'ru-RU',
-            'English': 'en-US',
-            'French': 'fr-FR'
-        }
-        
-        text = recognizer.recognize_google(audio_data, language=lang_map.get(language, 'en-US'))
-        
-        # Чистим временные файлы
-        os.unlink(tmp_path)
-        os.unlink(wav_path)
-        
-        return JsonResponse({'success': True, 'text': text})
-        
-    except sr.UnknownValueError:
-        return JsonResponse({'success': False, 'error': 'Не удалось разобрать речь'})
-    except sr.RequestError as e:
-        return JsonResponse({'success': False, 'error': f'Ошибка сервиса распознавания: {e}'})
-    except Exception as e:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        return JsonResponse({'success': False, 'error': str(e)})'''
-    
+
     try:
         # Конвертируется webm в wav (ffmpeg берём из pip-пакета imageio-ffmpeg, не из apt)
         from pydub import AudioSegment

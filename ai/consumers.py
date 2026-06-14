@@ -11,10 +11,10 @@ from django.utils import timezone
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'DjangoTest.settings')
 django.setup()
 
-from .i18n import get_localized_name
-from .model_health import MODEL_ALIASES
+from .i18n import get_language_instruction, get_localized_name
+from .model_clients import registry
+from .model_clients.history import conversation_history
 from .models import AIRequestLog, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic
-from .utils import *
 from asgiref.sync import sync_to_async
 from .external_auth import (
     ExternalAuthMisconfigured,
@@ -26,6 +26,31 @@ from .external_auth import (
 
 current_tokens = 0
 logger = logging.getLogger(__name__)
+
+
+_LEGACY_ALIASES = {
+    "DeepSeek_R1": "DeepSeek_R1_Distill_Llama_70B",
+    "DeepSeek-R1": "DeepSeek_R1_Distill_Llama_70B",
+    "DeepSeek-R1-Distill-Llama-70B": "DeepSeek_R1_Distill_Llama_70B",
+    "DeepSeek-V3.1": "DeepSeek_V3_1",
+    "DeepSeek-V3.1-cb": "DeepSeek_V3_1_cb",
+    "DeepSeek-V3.2": "DeepSeek_V3_2",
+    "Llama_3_1_Tulu_3_405B": "Meta_Llama_3_3_70B_Instruct",
+    "Meta_Llama_3_1_70B_Instruct": "Meta_Llama_3_3_70B_Instruct",
+    "Meta-Llama-3.3-70B-Instruct": "Meta_Llama_3_3_70B_Instruct",
+    "Llama-4-Maverick-17B-128E-Instruct": "Llama_4_Maverick_17B_128E_Instruct",
+    "MiniMax-M2.5": "MiniMax_M2_5",
+    "MiniMax-M2.7": "MiniMax_M2_7",
+    "gemma-3-12b-it": "Gemma_3_12b_it",
+    "gpt-oss-120b": "Gpt_oss_120b",
+    "QwQ_32B": "DeepSeek_R1_Distill_Llama_70B",
+    "Mixtral_8x7B": "Llama_4_Maverick_17B_128E_Instruct",
+    "Mixtral_8x22b": "Llama_4_Maverick_17B_128E_Instruct",
+}
+
+
+def _resolve_legacy_alias(value: str) -> str:
+    return _LEGACY_ALIASES.get(value, value)
 
 
 @sync_to_async
@@ -198,9 +223,7 @@ class MyConsumer(AsyncWebsocketConsumer):
 
             # Обработка нажатия кнопки Clear Context
             if data.get('action') == 'clear_context':
-                # Очищаем историю в utils.py
-                if self.client_id in hist:
-                    hist[self.client_id] = []
+                conversation_history.reset(self.client_id)
                 self.old_language = None
                 # Отправляем простое сообщение без тегов think
                 await self.send(text_data="Контекст очищен")
@@ -215,16 +238,7 @@ class MyConsumer(AsyncWebsocketConsumer):
 
             # Обработка языка
             if hasattr(self, 'old_language') and self.old_language != language:
-                language_instruction = ""
-                if language == "Русский":
-                    language_instruction = ". Разговаривай со мной только по-русски"
-                elif language == "Français":
-                    language_instruction = ". Communiquez avec moi uniquement en français"
-                elif language == "English":
-                    language_instruction = ". Communicate with me only in English"
-                
-                if language_instruction:
-                    message += language_instruction
+                message += get_language_instruction(language)
 
             self.old_language = language
 
@@ -293,65 +307,13 @@ class MyConsumer(AsyncWebsocketConsumer):
             response = "Что-то пошло не так. Попробуйте еще раз."
             modell = value
 
-            normalized_value = MODEL_ALIASES.get(value, value)
+            normalized_value = registry.get(value) and value or _resolve_legacy_alias(value)
 
             try:
-                model_dispatch = {
-                    "DeepSeek_R1_Distill_Llama_70B": (
-                        ask_DeepSeek_R1_Distill_Llama_70B_async,
-                        "DeepSeek-R1-Distill-Llama-70B",
-                    ),
-                    "DeepSeek_V3_1": (
-                        ask_DeepSeek_V3_1_async,
-                        "DeepSeek-V3.1",
-                    ),
-                    "DeepSeek_V3_1_cb": (
-                        ask_DeepSeek_V3_1_cb_async,
-                        "DeepSeek-V3.1-cb",
-                    ),
-                    "DeepSeek_V3_2": (
-                        ask_DeepSeek_V3_2_async,
-                        "DeepSeek-V3.2",
-                    ),
-                    "Llama_4_Maverick_17B_128E_Instruct": (
-                        ask_Llama_4_Maverick_17B_128E_Instruct_async,
-                        "Llama-4-Maverick-17B-128E-Instruct",
-                    ),
-                    "Meta_Llama_3_3_70B_Instruct": (
-                        ask_Meta_Llama_3_3_70B_Instruct_async,
-                        "Meta-Llama-3.3-70B-Instruct",
-                    ),
-                    "MiniMax_M2_5": (
-                        ask_MiniMax_M2_5_async,
-                        "MiniMax-M2.5",
-                    ),
-                    "MiniMax_M2_7": (
-                        ask_MiniMax_M2_7_async,
-                        "MiniMax-M2.7",
-                    ),
-                    "Gemma_3_12b_it": (
-                        ask_Gemma_3_12b_it_async,
-                        "gemma-3-12b-it",
-                    ),
-                    "Gpt_oss_120b": (
-                        ask_Gpt_oss_120b_async,
-                        "gpt-oss-120b",
-                    ),
-                    "Web_DeepSeek": (
-                        ask_Web_DeepSeek_async,
-                        "Web DeepSeek",
-                    ),
-                    "Web_DeepSeek_Thinking": (
-                        ask_Web_DeepSeek_Thinking_async,
-                        "Web DeepSeek Thinking",
-                    ),
-                }
-
-                model_handler = model_dispatch.get(normalized_value)
-                if model_handler:
-                    handler, model_title = model_handler
+                handler = registry.handler(normalized_value)
+                if handler:
+                    modell = registry.title(normalized_value)
                     response = await handler(message, self.client_id)
-                    modell = model_title
                     await _update_log_after_response(log, timezone.now(), response, modell)
                 else:
                     response = f"Модель {value} не найдена. Используйте доступные модели."

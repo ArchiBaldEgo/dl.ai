@@ -24,7 +24,8 @@ class ChatViewTests(SimpleTestCase):
         self.factory = RequestFactory()
 
     @patch("ai.views.AIAppSettings.get_solo", side_effect=ProgrammingError)
-    def test_chat_view_does_not_fail_when_ai_settings_table_missing(self, _mock_get_solo):
+    @patch("ai.views.get_available_model_options", return_value=[])
+    def test_chat_view_does_not_fail_when_ai_settings_table_missing(self, _mock_models, _mock_get_solo):
         request = self.factory.get("/ai/chat/")
         request.user = SimpleNamespace(is_authenticated=True)
         request.session = {}
@@ -33,7 +34,8 @@ class ChatViewTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
 
     @patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=False))
-    def test_chat_view_returns_404_when_ai_app_disabled(self, _mock_get_solo):
+    @patch("ai.views.get_available_model_options", return_value=[])
+    def test_chat_view_returns_404_when_ai_app_disabled(self, _mock_models, _mock_get_solo):
         request = self.factory.get("/ai/chat/")
         request.user = SimpleNamespace(is_authenticated=True)
         request.session = {}
@@ -377,9 +379,19 @@ class PromptAdminAccessTests(TestCase):
             owner=superuser,
         )
         request = self._build_request(superuser, query_params={"mine": "1"})
+        # The "mine" filter is intended for prompt developers; superusers bypass
+        # it and continue to see all prompts.
         prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
 
-        self.assertEqual(prompt_ids, {own_prompt.id})
+        self.assertEqual(
+            prompt_ids,
+            {
+                self.editable_prompt.id,
+                self.readonly_prompt.id,
+                self.legacy_assigned_prompt.id,
+                own_prompt.id,
+            },
+        )
 
 
 class PromptFormTests(TestCase):
@@ -405,7 +417,7 @@ class PromptFormTests(TestCase):
         form = PromptForm(instance=prompt)
 
         self.assertEqual(form.fields["programming_language"].initial, self.python_language.id)
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             form.fields["topic"].queryset,
             [self.python_topic],
             transform=lambda item: item,
@@ -422,7 +434,7 @@ class PromptFormTests(TestCase):
         )
 
         self.assertTrue(form.is_valid())
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             form.fields["topic"].queryset,
             [self.python_topic],
             transform=lambda item: item,
@@ -552,3 +564,33 @@ class AIRequestLogModelTests(TestCase):
         self.assertEqual(log.programming_language_name, "Python")
         self.assertEqual(log.topic_name, "Loops")
         self.assertEqual(log.prompt_name, "Helper")
+
+
+class ModelClientRegistryTests(SimpleTestCase):
+    def test_registry_contains_expected_models(self):
+        from ai.model_clients import registry
+
+        expected_keys = {
+            "DeepSeek_R1_Distill_Llama_70B",
+            "DeepSeek_V3_1",
+            "DeepSeek_V3_1_cb",
+            "DeepSeek_V3_2",
+            "Llama_4_Maverick_17B_128E_Instruct",
+            "Meta_Llama_3_3_70B_Instruct",
+            "MiniMax_M2_5",
+            "MiniMax_M2_7",
+            "Gemma_3_12b_it",
+            "Gpt_oss_120b",
+            "Web_DeepSeek",
+            "Web_DeepSeek_Thinking",
+        }
+        for key in expected_keys:
+            self.assertIsNotNone(registry.get(key), f"Missing registry entry for {key}")
+            self.assertTrue(callable(registry.handler(key)))
+
+    def test_registry_includes_backward_compatible_aliases(self):
+        from ai.model_clients import registry
+
+        self.assertIsNotNone(registry.get("DeepSeek_R1"))
+        self.assertIsNotNone(registry.get("Meta_Llama_3_1_70B_Instruct"))
+        self.assertIsNotNone(registry.get("Mixtral_8x22b"))

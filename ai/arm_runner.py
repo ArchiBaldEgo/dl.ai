@@ -50,6 +50,59 @@ def _extract_model_response(response):
     return str(response or ""), 0
 
 
+_ARM_ERROR_PATTERNS = (
+    # (sequence of substrings, friendly message)
+    (
+        ("неправильный запрос", "код 400", "error 400", "status 400", "bad request"),
+        "Ошибка запроса к модели (400). Обычно это значит, что запрос слишком длинный, "
+        "содержит неподдерживаемый формат или лишние спецсимволы. "
+        "Попробуйте сократить условие/код и отправить снова.",
+    ),
+    (
+        ("код 401", "error 401", "status 401", "unauthorized", "не авториз"),
+        "Ошибка авторизации модели (401). Проверьте API-ключ/токен и права доступа к модели.",
+    ),
+    (
+        ("код 403", "error 403", "status 403", "forbidden", "доступ запрещ"),
+        "Доступ к модели запрещен (403). У текущего ключа нет нужных прав или доступ ограничен политикой сервиса.",
+    ),
+    (
+        ("код 404", "error 404", "status 404", "not found", "не найден"),
+        "Модель не найдена (404). Возможно, имя модели устарело или эта модель сейчас недоступна у провайдера.",
+    ),
+    (
+        ("код 429", "error 429", "status 429", "rate limit", "превышен лимит", "все боты заняты"),
+        "Сервис модели ограничил частоту запросов (429). Подождите немного и запустите проверку снова.",
+    ),
+    (
+        ("таймаут", "timeout", "timed out", "код 408", "status 408"),
+        "Модель не ответила вовремя (таймаут). Попробуйте повторить запрос позже или сократить объем задачи/кода.",
+    ),
+    (
+        (
+            "код 500", "error 500", "status 500",
+            "код 502", "error 502", "status 502",
+            "код 503", "error 503", "status 503",
+            "код 504", "error 504", "status 504",
+            "bad gateway", "gateway", "server error", "ошибка сервера",
+            "временно недоступ", "инициализируется слишком долго",
+        ),
+        "Сервис модели временно недоступен (5xx). Это серверная ошибка провайдера, попробуйте позже.",
+    ),
+    (
+        (
+            "отсутствует подключение к интернету", "отсутствует интернет",
+            "connectionerror", "failed to resolve", "name resolution",
+            "max retries exceeded", "httpsconnectionpool", "не удалось подключ",
+        ),
+        "Ошибка подключения к сервису модели. Проверьте сеть/прокси и доступность внешнего API.",
+    ),
+)
+
+_CONNECTION_ERROR_MARKERS = _ARM_ERROR_PATTERNS[-1][0]
+_SERVER_ERROR_MARKERS = _ARM_ERROR_PATTERNS[-2][0]
+
+
 def _humanize_arm_model_error(raw_text):
     text = (raw_text or "").strip()
     if not text:
@@ -61,138 +114,18 @@ def _humanize_arm_model_error(raw_text):
     if len(low) > 350 and not low.startswith(("ошибка", "error", "exception", "traceback")):
         return text, text
 
-    def _pack(friendly_text):
-        detailed_text = friendly_text
-        if text and text != friendly_text:
-            detailed_text += f"\n\nТехническая деталь: {text}"
-        return friendly_text, detailed_text
-
-    is_bad_request = (
-        low == "неправильный запрос"
-        or "код 400" in low
-        or "error 400" in low
-        or "status 400" in low
-        or "bad request" in low
-    )
-
-    is_unauthorized = (
-        "код 401" in low
-        or "error 401" in low
-        or "status 401" in low
-        or "unauthorized" in low
-        or "не авториз" in low
-    )
-
-    is_forbidden = (
-        "код 403" in low
-        or "error 403" in low
-        or "status 403" in low
-        or "forbidden" in low
-        or "доступ запрещ" in low
-    )
-
-    is_not_found = (
-        "код 404" in low
-        or "error 404" in low
-        or "status 404" in low
-        or "not found" in low
-        or "не найден" in low
-    )
-
-    is_rate_limited = (
-        "код 429" in low
-        or "error 429" in low
-        or "status 429" in low
-        or "rate limit" in low
-        or "превышен лимит" in low
-        or "все боты заняты" in low
-    )
-
-    is_timeout = (
-        "таймаут" in low
-        or "timeout" in low
-        or "timed out" in low
-        or "код 408" in low
-        or "status 408" in low
-    )
-
-    is_server_error = (
-        "код 500" in low
-        or "код 502" in low
-        or "код 503" in low
-        or "код 504" in low
-        or "error 500" in low
-        or "error 502" in low
-        or "error 503" in low
-        or "error 504" in low
-        or "status 500" in low
-        or "status 502" in low
-        or "status 503" in low
-        or "status 504" in low
-        or "bad gateway" in low
-        or "gateway" in low
-        or "server error" in low
-        or "ошибка сервера" in low
-        or "временно недоступ" in low
-        or "инициализируется слишком долго" in low
-    )
-
-    is_connection_error = (
-        "отсутствует подключение к интернету" in low
-        or "отсутствует интернет" in low
-        or "connectionerror" in low
-        or "failed to resolve" in low
-        or "name resolution" in low
-        or "max retries exceeded" in low
-        or "httpsconnectionpool" in low
-        or "не удалось подключ" in low
-    )
-
-    if is_bad_request:
-        return _pack(
-            "Ошибка запроса к модели (400). Обычно это значит, что запрос слишком длинный, "
-            "содержит неподдерживаемый формат или лишние спецсимволы. "
-            "Попробуйте сократить условие/код и отправить снова."
-        )
-
-    if is_unauthorized:
-        return _pack(
-            "Ошибка авторизации модели (401). Проверьте API-ключ/токен и права доступа к модели."
-        )
-
-    if is_forbidden:
-        return _pack(
-            "Доступ к модели запрещен (403). У текущего ключа нет нужных прав или доступ ограничен политикой сервиса."
-        )
-
-    if is_not_found:
-        return _pack(
-            "Модель не найдена (404). Возможно, имя модели устарело или эта модель сейчас недоступна у провайдера."
-        )
-
-    if is_rate_limited:
-        return _pack(
-            "Сервис модели ограничил частоту запросов (429). Подождите немного и запустите проверку снова."
-        )
-
-    if is_timeout:
-        return _pack(
-            "Модель не ответила вовремя (таймаут). Попробуйте повторить запрос позже или сократить объем задачи/кода."
-        )
-
-    if is_server_error:
-        return _pack(
-            "Сервис модели временно недоступен (5xx). Это серверная ошибка провайдера, попробуйте позже."
-        )
-
-    if is_connection_error:
-        return _pack(
-            "Ошибка подключения к сервису модели. Проверьте сеть/прокси и доступность внешнего API."
-        )
+    for markers, friendly_text in _ARM_ERROR_PATTERNS:
+        if any(marker in low for marker in markers):
+            detailed_text = friendly_text
+            if text and text != friendly_text:
+                detailed_text += f"\n\nТехническая деталь: {text}"
+            return friendly_text, detailed_text
 
     if low.startswith("ошибка api") or "api (код" in low:
-        return _pack(
-            "Сервис модели вернул ошибку API. Проверьте параметры запроса и повторите попытку чуть позже."
+        return (
+            "Сервис модели вернул ошибку API. Проверьте параметры запроса и повторите попытку чуть позже.",
+            f"Сервис модели вернул ошибку API. Проверьте параметры запроса и повторите попытку чуть позже.\n\n"
+            f"Техническая деталь: {text}",
         )
 
     return text, text
