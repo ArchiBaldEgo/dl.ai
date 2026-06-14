@@ -472,7 +472,7 @@
                 notEnter = true;
                 updateVoiceStatus(getVoiceStatusText('messageSent'));
                 input.value = '';
-                savePageText();
+                saveSharedText();
             }
 
             // Инициализация WebSocket
@@ -713,7 +713,7 @@
                 notEnter = true;
                 taskInput.value = '';
                 codeInput.value = '';
-                savePageText();
+                saveSharedText();
             }
 
             // ОРИГИНАЛЬНАЯ функция clearContext - НЕ ТРОГАТЬ
@@ -1204,9 +1204,9 @@
                     selectFirstIfSingle(promptSelect);
                 }
 
-                // Persistence keys (per page)
+                // Persistence keys
                 const PAGE_STATE_KEY = 'ai_page_state_problem';
-                const PAGE_TEXT_KEY = 'ai_text_find_error';
+                const SHARED_TEXT_KEY = 'ai_text_shared';
 
                 function savePageState() {
                     try {
@@ -1218,50 +1218,53 @@
                     } catch(e) {}
                 }
 
-                function restorePageState() {
+                async function restorePageState() {
                     try {
                         const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
                         if (!state.progLng) return;
                         const langOpt = Array.from(languageSelect.options).find(o => o.value === state.progLng);
                         if (!langOpt) return;
+
+                        const languageId = parseInt(state.progLng);
                         languageSelect.value = state.progLng;
-                        languageSelect.dispatchEvent(new Event('change'));
+
+                        // Явно загружаем темы и препромпты, не полагаясь на таймауты
+                        await loadTopics(languageId);
+                        await loadPrompts(languageId, null);
+
                         if (state.topic) {
-                            setTimeout(() => {
-                                const topicOpt = Array.from(topicSelect.options).find(o => o.value === state.topic);
-                                if (topicOpt) {
-                                    topicSelect.value = state.topic;
-                                    topicSelect.dispatchEvent(new Event('change'));
-                                    if (state.prompt) {
-                                        setTimeout(() => {
-                                            const promptOpt = Array.from(promptSelect.options).find(o => o.value === state.prompt);
-                                            if (promptOpt) promptSelect.value = state.prompt;
-                                        }, 50);
-                                    }
+                            const topicOpt = Array.from(topicSelect.options).find(o => o.value === state.topic);
+                            if (topicOpt) {
+                                topicSelect.value = state.topic;
+                                const topicId = parseInt(state.topic);
+                                await loadPrompts(languageId, isNaN(topicId) ? null : topicId);
+                                if (state.prompt) {
+                                    const promptOpt = Array.from(promptSelect.options).find(o => o.value === state.prompt);
+                                    if (promptOpt) promptSelect.value = state.prompt;
                                 }
-                            }, 50);
+                            }
                         }
                     } catch(e) {}
                 }
 
-                function savePageText() {
+                function saveSharedText() {
                     try {
                         const taskText = document.getElementById('taskText');
                         const codeText = document.getElementById('codeText');
-                        localStorage.setItem(PAGE_TEXT_KEY, JSON.stringify({
-                            task: taskText ? taskText.value : '',
-                            code: codeText ? codeText.value : ''
-                        }));
+                        const saved = JSON.parse(localStorage.getItem(SHARED_TEXT_KEY) || '{}');
+                        if (taskText) saved.message = taskText.value;
+                        if (codeText) saved.code = codeText.value;
+                        localStorage.setItem(SHARED_TEXT_KEY, JSON.stringify(saved));
                     } catch(e) {}
                 }
 
-                function restorePageText() {
+                function restoreSharedText() {
                     try {
-                        const saved = JSON.parse(localStorage.getItem(PAGE_TEXT_KEY) || '{}');
+                        const saved = JSON.parse(localStorage.getItem(SHARED_TEXT_KEY) || '{}');
                         const taskText = document.getElementById('taskText');
                         const codeText = document.getElementById('codeText');
-                        if (saved.task && taskText) taskText.value = saved.task;
-                        if (saved.code && codeText) codeText.value = saved.code;
+                        if (taskText && saved.message !== undefined) taskText.value = saved.message;
+                        if (codeText && saved.code !== undefined) codeText.value = saved.code;
                     } catch(e) {}
                 }
 
@@ -1290,13 +1293,13 @@
 
                 const taskText = document.getElementById('taskText');
                 const codeText = document.getElementById('codeText');
-                if (taskText) taskText.addEventListener('input', savePageText);
-                if (codeText) codeText.addEventListener('input', savePageText);
+                if (taskText) taskText.addEventListener('input', saveSharedText);
+                if (codeText) codeText.addEventListener('input', saveSharedText);
 
                 await loadLanguages();
                 await loadPrompts(null, null);
-                restorePageState();
-                restorePageText();
+                await restorePageState();
+                restoreSharedText();
             });
 
             window.onload = function () {

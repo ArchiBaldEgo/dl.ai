@@ -437,7 +437,7 @@ function simulateSend() {
     notEnter = true;
     updateVoiceStatus(getVoiceStatusText('messageSent'));
     input.value = '';
-    saveChatText();
+    saveSharedText();
 }
 
 function fetchCanUseAi(dlsid) {
@@ -597,7 +597,7 @@ function initWebSocket() {
             messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
             var input = document.getElementById("messageText");
             input.value = '';
-            saveChatText();
+            saveSharedText();
 
             if (isTerminalAiMessage(event.data)) {
                 setRequestLock(false);
@@ -664,7 +664,7 @@ function sendMessage(event) {
     setRequestLock(true);
     notEnter = true;
     input.value = '';
-    saveChatText();
+    saveSharedText();
 }
 
 function clearContext() {
@@ -1047,7 +1047,7 @@ function collapseAllExceptLast() {
 
 // Persistence keys
 const INTERFACE_LANG_KEY = 'ai_interface_language';
-const CHAT_TEXT_KEY = 'ai_text_chat';
+const SHARED_TEXT_KEY = 'ai_text_shared';
 
 function saveInterfaceLanguage() {
     try {
@@ -1072,20 +1072,22 @@ function restoreInterfaceLanguage() {
     } catch (e) {}
 }
 
-function saveChatText() {
+function saveSharedText() {
     try {
         const messageText = document.getElementById('messageText');
+        const saved = JSON.parse(localStorage.getItem(SHARED_TEXT_KEY) || '{}');
         if (messageText) {
-            localStorage.setItem(CHAT_TEXT_KEY, JSON.stringify({ message: messageText.value }));
+            saved.message = messageText.value;
         }
+        localStorage.setItem(SHARED_TEXT_KEY, JSON.stringify(saved));
     } catch (e) {}
 }
 
-function restoreChatText() {
+function restoreSharedText() {
     try {
-        const saved = JSON.parse(localStorage.getItem(CHAT_TEXT_KEY) || '{}');
+        const saved = JSON.parse(localStorage.getItem(SHARED_TEXT_KEY) || '{}');
         const messageText = document.getElementById('messageText');
-        if (messageText && saved.message) {
+        if (messageText && saved.message !== undefined) {
             messageText.value = saved.message;
         }
     } catch (e) {}
@@ -1097,7 +1099,7 @@ window.onload = function() {
     initWebSocket();
     document.getElementById("selectLang").dispatchEvent(new Event("change"));
     initAccordionForMessages();
-    restoreChatText();
+    restoreSharedText();
     updateVoiceStatus(getVoiceStatusText('ready'));
 
     const speakThinkCheckbox = document.getElementById('speakThinkContent');
@@ -1109,6 +1111,6 @@ window.onload = function() {
 
     const messageText = document.getElementById('messageText');
     if (messageText) {
-        messageText.addEventListener('input', saveChatText);
+        messageText.addEventListener('input', saveSharedText);
     }
 };

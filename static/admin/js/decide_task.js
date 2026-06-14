@@ -471,7 +471,7 @@
                 notEnter = true;
                 updateVoiceStatus(getVoiceStatusText('messageSent'));
                 input.value = '';
-                savePageText();
+                saveSharedText();
             }
 
             // Инициализация WebSocket
@@ -708,7 +708,7 @@
                 setRequestLock(true);
                 notEnter = true;
                 input.value = '';
-                savePageText();
+                saveSharedText();
             }
 
             // ОРИГИНАЛЬНАЯ функция clearContext - НЕ ТРОГАТЬ
@@ -1208,9 +1208,9 @@
                     selectFirstIfSingle(promptSelect);
                 }
 
-                // Persistence keys (per page)
+                // Persistence keys
                 const PAGE_STATE_KEY = 'ai_page_state_problem';
-                const PAGE_TEXT_KEY = 'ai_text_solve_problem';
+                const SHARED_TEXT_KEY = 'ai_text_shared';
 
                 function savePageState() {
                     try {
@@ -1222,46 +1222,53 @@
                     } catch(e) {}
                 }
 
-                function restorePageState() {
+                async function restorePageState() {
                     try {
                         const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
                         if (!state.progLng) return;
                         const langOpt = Array.from(languageSelect.options).find(o => o.value === state.progLng);
                         if (!langOpt) return;
+
+                        const languageId = parseInt(state.progLng);
                         languageSelect.value = state.progLng;
-                        languageSelect.dispatchEvent(new Event('change'));
+
+                        // Явно загружаем темы и препромпты, не полагаясь на таймауты
+                        await loadTopics(languageId);
+                        await loadPrompts(languageId, null);
+
                         if (state.topic) {
-                            setTimeout(() => {
-                                const topicOpt = Array.from(topicSelect.options).find(o => o.value === state.topic);
-                                if (topicOpt) {
-                                    topicSelect.value = state.topic;
-                                    topicSelect.dispatchEvent(new Event('change'));
-                                    if (state.prompt) {
-                                        setTimeout(() => {
-                                            const promptOpt = Array.from(promptSelect.options).find(o => o.value === state.prompt);
-                                            if (promptOpt) promptSelect.value = state.prompt;
-                                        }, 50);
-                                    }
+                            const topicOpt = Array.from(topicSelect.options).find(o => o.value === state.topic);
+                            if (topicOpt) {
+                                topicSelect.value = state.topic;
+                                const topicId = parseInt(state.topic);
+                                await loadPrompts(languageId, isNaN(topicId) ? null : topicId);
+                                if (state.prompt) {
+                                    const promptOpt = Array.from(promptSelect.options).find(o => o.value === state.prompt);
+                                    if (promptOpt) promptSelect.value = state.prompt;
                                 }
-                            }, 50);
+                            }
                         }
                     } catch(e) {}
                 }
 
-                function savePageText() {
+                function saveSharedText() {
                     try {
                         const messageText = document.getElementById('messageText');
+                        const saved = JSON.parse(localStorage.getItem(SHARED_TEXT_KEY) || '{}');
                         if (messageText) {
-                            localStorage.setItem(PAGE_TEXT_KEY, JSON.stringify({ message: messageText.value }));
+                            saved.message = messageText.value;
                         }
+                        localStorage.setItem(SHARED_TEXT_KEY, JSON.stringify(saved));
                     } catch(e) {}
                 }
 
-                function restorePageText() {
+                function restoreSharedText() {
                     try {
-                        const saved = JSON.parse(localStorage.getItem(PAGE_TEXT_KEY) || '{}');
+                        const saved = JSON.parse(localStorage.getItem(SHARED_TEXT_KEY) || '{}');
                         const messageText = document.getElementById('messageText');
-                        if (messageText && saved.message) messageText.value = saved.message;
+                        if (messageText && saved.message !== undefined) {
+                            messageText.value = saved.message;
+                        }
                     } catch(e) {}
                 }
 
@@ -1290,13 +1297,13 @@
 
                 const messageText = document.getElementById('messageText');
                 if (messageText) {
-                    messageText.addEventListener('input', savePageText);
+                    messageText.addEventListener('input', saveSharedText);
                 }
 
                 await loadLanguages();
                 await loadPrompts(null, null);
-                restorePageState();
-                restorePageText();
+                await restorePageState();
+                restoreSharedText();
             });
 
             window.onload = function () {
