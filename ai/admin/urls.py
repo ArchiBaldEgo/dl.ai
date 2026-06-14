@@ -38,6 +38,6 @@ def get_ai_admin_urls():
         path("logs/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),
     ]
     return [
-        path("", include((ai_admin_site.get_urls(), ai_admin_site.name), namespace=ai_admin_site.name)),
         *custom_urls,
+        path("", include((ai_admin_site.get_urls(), ai_admin_site.name), namespace=ai_admin_site.name)),
     ]

@@ -17,6 +17,7 @@ from .models import (
 )
 from .forms import PromptForm, SharedPromptForm
 from .logs import AIRequestLogAdmin, admin_request_log_detail_view, admin_request_logs_view
+from ..models import AIRequestLog
 from .arm import (
     admin_arm_find_error_view,
     admin_arm_find_error_start_view,
@@ -57,6 +58,7 @@ ai_admin_site.register(ProgrammingLanguage, ProgrammingLanguageAdmin)
 ai_admin_site.register(Topic, TopicAdmin)
 ai_admin_site.register(Prompt, PromptAdmin)
 ai_admin_site.register(SharedPrompt, SharedPromptAdmin)
+ai_admin_site.register(AIRequestLog, AIRequestLogAdmin)
 
 User = get_user_model()
 ai_admin_site.register(User, UserAdmin)
