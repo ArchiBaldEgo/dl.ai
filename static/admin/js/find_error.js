@@ -17,6 +17,15 @@
             var recordingTimeout = null;
             var MAX_RECORDING_TIME = 30000;
 
+            // Данные задачи: языки, темы и препромпты (shared между обработчиками)
+            let problemData = null;
+            const PROBLEM_DATA_KEY = 'ai_problem_data_cache';
+            const PAGE_STATE_KEY = 'ai_page_state_problem';
+            const SHARED_TEXT_KEY = 'ai_text_shared';
+            let problemLanguageSelect = null;
+            let problemTopicSelect = null;
+            let problemPromptSelect = null;
+
             function getCookieValue(name) {
                 const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
                 return match ? decodeURIComponent(match[1]) : '';
@@ -957,61 +966,6 @@
             return (localization[lang] && localization[lang][key]) || defaultValue;
         }
 
-            document.getElementById("selectLang").addEventListener("change", async function () {
-                const selectedLang = this.options[this.selectedIndex].getAttribute("language");
-                document.querySelector("button[type='submit']").textContent = localization[selectedLang].send;
-                document.querySelector("button[onclick='clearContext()']").textContent = localization[selectedLang].clear;
-                document.getElementById("codeText").setAttribute("placeholder", localization[selectedLang].placeholder);
-                document.getElementById("taskText").setAttribute("placeholder", localization[selectedLang].taskplace);
-                document.querySelector(".sidebar-header").textContent = localization[selectedLang].adminPanel;
-                const testPanelLink = document.getElementById("testPanelLink");
-                if (testPanelLink) {
-                    testPanelLink.textContent = localization[selectedLang].testPanel;
-                }
-                document.querySelector("#selectType option:nth-child(1)").textContent = localization[selectedLang].chat;
-                document.querySelector("#selectType option:nth-child(2)").textContent = localization[selectedLang].decideTask;
-                document.querySelector("#selectType option:nth-child(3)").textContent = localization[selectedLang].findError;
-                const checkTextEl = document.querySelector(".check-text");
-                if (checkTextEl) {
-                    checkTextEl.textContent = localization[selectedLang].enterHint;
-                }
-                const prepromptEl = document.querySelector(".preprompt");
-                if (prepromptEl) {
-                    prepromptEl.textContent = localization[selectedLang].preprompt;
-                }
-                document.querySelector(".task").textContent = localization[selectedLang].task;
-                document.querySelector(".codetx").textContent = localization[selectedLang].codetx;
-                updateAccordionLabels();
-
-                const voiceModeBtn = document.getElementById("voiceModeBtn");
-                if (voiceModeBtn) voiceModeBtn.textContent = localization[selectedLang].voiceMode;
-
-                const voiceInputBtn = document.getElementById("voiceInputBtn");
-                if (voiceInputBtn) voiceInputBtn.textContent = localization[selectedLang].voiceInput;
-
-                const voiceOutputBtn = document.getElementById("voiceOutputBtn");
-                if (voiceOutputBtn) voiceOutputBtn.textContent = localization[selectedLang].voiceOutput;
-
-                const speakThinkLabel = document.getElementById("speakThinkLabel");
-                if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
-
-                // Reload topics/prompts in the selected UI language
-                problemData = null;
-                await fetchProblemData();
-                const languageId = parseInt(languageSelect.value);
-                populateLanguages(problemData.languages);
-                if (!isNaN(languageId)) {
-                    populateTopics(languageId);
-                    populatePrompts(languageId, null);
-                } else {
-                    populateTopics(null);
-                    populatePrompts(null, null);
-                }
-
-                saveInterfaceLanguage();
-                updateVoiceStatus(getVoiceStatusText('readyForVoice'));
-            });
-
             function initAccordionForMessages() {
                 const messages = document.getElementById('messages');
                 const allMessages = messages.querySelectorAll(':scope > li');
@@ -1143,14 +1097,9 @@
 
             // Загрузка языков, тем и промптов
             document.addEventListener("DOMContentLoaded", async () => {
-                const languageSelect = document.getElementById("selectProgLng");
-                const topicSelect = document.getElementById("selectTheme");
-                const promptSelect = document.getElementById("selectPrompt");
-
-                const PROBLEM_DATA_KEY = 'ai_problem_data_cache';
-                const PAGE_STATE_KEY = 'ai_page_state_problem';
-                const SHARED_TEXT_KEY = 'ai_text_shared';
-                let problemData = null;
+                problemLanguageSelect = document.getElementById("selectProgLng");
+                problemTopicSelect = document.getElementById("selectTheme");
+                problemPromptSelect = document.getElementById("selectPrompt");
 
                 async function fetchProblemData() {
                     if (problemData) return problemData;
@@ -1164,13 +1113,9 @@
 
                     try {
                         const uiLang = document.getElementById('selectLang').value || 'Русский';
-                        let url = '/ai/api/problem-data/';
-                        if (window.location.search) {
-                            url += window.location.search + '&ui_language=' + encodeURIComponent(uiLang);
-                        } else {
-                            url += '?ui_language=' + encodeURIComponent(uiLang);
-                        }
-                        const response = await fetch(url);
+                        const url = new URL('/ai/api/problem-data/', window.location.origin);
+                        url.searchParams.set('ui_language', uiLang);
+                        const response = await fetch(url.toString());
                         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                         const data = await response.json();
                         problemData = data;
@@ -1191,25 +1136,25 @@
                 }
 
                 function populateLanguages(languages) {
-                    languageSelect.innerHTML = '<option value="">' + getUiString('select_prog_lang', 'Выберите язык программирования') + '</option>';
+                    problemLanguageSelect.innerHTML = '<option value="">' + getUiString('select_prog_lang', 'Выберите язык программирования') + '</option>';
                     if (languages && languages.length > 0) {
                         languages.forEach(lang => {
                             const option = new Option(lang.language_name, lang.id);
-                            languageSelect.appendChild(option);
+                            problemLanguageSelect.appendChild(option);
                         });
                     }
-                    selectFirstIfSingle(languageSelect);
+                    selectFirstIfSingle(problemLanguageSelect);
                 }
 
                 function populateTopics(languageId) {
-                    topicSelect.innerHTML = '<option value="">' + getUiString('chooseTheme', 'Выберите тему') + '</option>';
+                    problemTopicSelect.innerHTML = '<option value="">' + getUiString('chooseTheme', 'Выберите тему') + '</option>';
                     const topics = (problemData && problemData.topics) || [];
                     const filteredTopics = topics.filter(topic => topic.programming_language == languageId);
                     filteredTopics.forEach(topic => {
                         const option = new Option(topic.name || topic.topic_name, topic.id);
-                        topicSelect.appendChild(option);
+                        problemTopicSelect.appendChild(option);
                     });
-                    selectFirstIfSingle(topicSelect);
+                    selectFirstIfSingle(problemTopicSelect);
                 }
 
                 function filterPrompts(prompts, languageId, topicId) {
@@ -1225,7 +1170,7 @@
                 }
 
                 function populatePrompts(languageId, topicId) {
-                    promptSelect.innerHTML = '<option value="">' + getUiString('choosePrompt', 'Выберите промпт') + '</option>';
+                    problemPromptSelect.innerHTML = '<option value="">' + getUiString('choosePrompt', 'Выберите промпт') + '</option>';
                     if (!problemData) return;
                     let allPrompts = (problemData.prompts || []).slice();
 
@@ -1248,17 +1193,17 @@
                     const filteredPrompts = filterPrompts(allPrompts, languageId, topicId);
                     filteredPrompts.forEach(prompt => {
                         const option = new Option(prompt.name || prompt.prompt_name, prompt.id);
-                        promptSelect.appendChild(option);
+                        problemPromptSelect.appendChild(option);
                     });
-                    selectFirstIfSingle(promptSelect);
+                    selectFirstIfSingle(problemPromptSelect);
                 }
 
                 function savePageState() {
                     try {
                         const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
-                        state.progLng = languageSelect.value;
-                        state.topic = topicSelect.value;
-                        state.prompt = promptSelect.value;
+                        state.progLng = problemLanguageSelect.value;
+                        state.topic = problemTopicSelect.value;
+                        state.prompt = problemPromptSelect.value;
                         localStorage.setItem(PAGE_STATE_KEY, JSON.stringify(state));
                     } catch(e) {}
                 }
@@ -1267,23 +1212,23 @@
                     try {
                         const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
                         if (!state.progLng) return;
-                        const langOpt = Array.from(languageSelect.options).find(o => o.value === state.progLng);
+                        const langOpt = Array.from(problemLanguageSelect.options).find(o => o.value === state.progLng);
                         if (!langOpt) return;
 
                         const languageId = parseInt(state.progLng);
-                        languageSelect.value = state.progLng;
+                        problemLanguageSelect.value = state.progLng;
                         populateTopics(languageId);
                         populatePrompts(languageId, null);
 
                         if (state.topic) {
-                            const topicOpt = Array.from(topicSelect.options).find(o => o.value === state.topic);
+                            const topicOpt = Array.from(problemTopicSelect.options).find(o => o.value === state.topic);
                             if (topicOpt) {
-                                topicSelect.value = state.topic;
+                                problemTopicSelect.value = state.topic;
                                 const topicId = parseInt(state.topic);
                                 populatePrompts(languageId, isNaN(topicId) ? null : topicId);
                                 if (state.prompt) {
-                                    const promptOpt = Array.from(promptSelect.options).find(o => o.value === state.prompt);
-                                    if (promptOpt) promptSelect.value = state.prompt;
+                                    const promptOpt = Array.from(problemPromptSelect.options).find(o => o.value === state.prompt);
+                                    if (promptOpt) problemPromptSelect.value = state.prompt;
                                 }
                             }
                         }
@@ -1311,10 +1256,10 @@
                     } catch(e) {}
                 }
 
-                languageSelect.addEventListener("change", () => {
-                    const languageId = parseInt(languageSelect.value);
-                    topicSelect.innerHTML = '<option value="">Выберите тему</option>';
-                    promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
+                problemLanguageSelect.addEventListener("change", () => {
+                    const languageId = parseInt(problemLanguageSelect.value);
+                    problemTopicSelect.innerHTML = '<option value="">Выберите тему</option>';
+                    problemPromptSelect.innerHTML = '<option value="">Выберите промпт</option>';
                     if (!isNaN(languageId)) {
                         populateTopics(languageId);
                         populatePrompts(languageId, null);
@@ -1324,20 +1269,86 @@
                     savePageState();
                 });
 
-                topicSelect.addEventListener("change", () => {
-                    const topicId = parseInt(topicSelect.value);
-                    promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
-                    const languageId = parseInt(languageSelect.value);
+                problemTopicSelect.addEventListener("change", () => {
+                    const topicId = parseInt(problemTopicSelect.value);
+                    problemPromptSelect.innerHTML = '<option value="">Выберите промпт</option>';
+                    const languageId = parseInt(problemLanguageSelect.value);
                     populatePrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
                     savePageState();
                 });
 
-                promptSelect.addEventListener("change", savePageState);
+                problemPromptSelect.addEventListener("change", savePageState);
 
                 const taskText = document.getElementById('taskText');
                 const codeText = document.getElementById('codeText');
                 if (taskText) taskText.addEventListener('input', saveSharedText);
                 if (codeText) codeText.addEventListener('input', saveSharedText);
+
+                document.getElementById("selectLang").addEventListener("change", async function () {
+                    const selectedLang = this.options[this.selectedIndex].getAttribute("language");
+                    const submitBtn = document.querySelector("button[type='submit']");
+                    if (submitBtn) submitBtn.textContent = localization[selectedLang].send;
+                    const clearBtn = document.querySelector("button[onclick='clearContext()']");
+                    if (clearBtn) clearBtn.textContent = localization[selectedLang].clear;
+                    const codeTextEl = document.getElementById("codeText");
+                    if (codeTextEl) codeTextEl.setAttribute("placeholder", localization[selectedLang].placeholder);
+                    const taskTextEl = document.getElementById("taskText");
+                    if (taskTextEl) taskTextEl.setAttribute("placeholder", localization[selectedLang].taskplace);
+                    const sidebarHeader = document.querySelector(".sidebar-header");
+                    if (sidebarHeader) sidebarHeader.textContent = localization[selectedLang].adminPanel;
+                    const testPanelLink = document.getElementById("testPanelLink");
+                    if (testPanelLink) {
+                        testPanelLink.textContent = localization[selectedLang].testPanel;
+                    }
+                    const selectType1 = document.querySelector("#selectType option:nth-child(1)");
+                    if (selectType1) selectType1.textContent = localization[selectedLang].chat;
+                    const selectType2 = document.querySelector("#selectType option:nth-child(2)");
+                    if (selectType2) selectType2.textContent = localization[selectedLang].decideTask;
+                    const selectType3 = document.querySelector("#selectType option:nth-child(3)");
+                    if (selectType3) selectType3.textContent = localization[selectedLang].findError;
+                    const checkTextEl = document.querySelector(".check-text");
+                    if (checkTextEl) {
+                        checkTextEl.textContent = localization[selectedLang].enterHint;
+                    }
+                    const prepromptEl = document.querySelector(".preprompt");
+                    if (prepromptEl) {
+                        prepromptEl.textContent = localization[selectedLang].preprompt;
+                    }
+                    const taskLabel = document.querySelector(".task");
+                    if (taskLabel) taskLabel.textContent = localization[selectedLang].task;
+                    const codeLabel = document.querySelector(".codetx");
+                    if (codeLabel) codeLabel.textContent = localization[selectedLang].codetx;
+                    updateAccordionLabels();
+
+                    const voiceModeBtn = document.getElementById("voiceModeBtn");
+                    if (voiceModeBtn) voiceModeBtn.textContent = localization[selectedLang].voiceMode;
+
+                    const voiceInputBtn = document.getElementById("voiceInputBtn");
+                    if (voiceInputBtn) voiceInputBtn.textContent = localization[selectedLang].voiceInput;
+
+                    const voiceOutputBtn = document.getElementById("voiceOutputBtn");
+                    if (voiceOutputBtn) voiceOutputBtn.textContent = localization[selectedLang].voiceOutput;
+
+                    const speakThinkLabel = document.getElementById("speakThinkLabel");
+                    if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
+
+                    // Reload topics/prompts in the selected UI language
+                    sessionStorage.removeItem(PROBLEM_DATA_KEY);
+                    problemData = null;
+                    await fetchProblemData();
+                    const languageId = parseInt(problemLanguageSelect.value);
+                    populateLanguages(problemData.languages);
+                    if (!isNaN(languageId)) {
+                        populateTopics(languageId);
+                        populatePrompts(languageId, null);
+                    } else {
+                        populateTopics(null);
+                        populatePrompts(null, null);
+                    }
+
+                    saveInterfaceLanguage();
+                    updateVoiceStatus(getVoiceStatusText('readyForVoice'));
+                });
 
                 await fetchProblemData();
                 populateLanguages(problemData.languages);
@@ -1357,7 +1368,9 @@
 
                 // Инициализация чекбокса think-блоков
                 const speakThinkCheckbox = document.getElementById('speakThinkContent');
-                speakThinkCheckbox.addEventListener('change', function() {
-                    speakThinkEnabled = this.checked;
-                });
+                if (speakThinkCheckbox) {
+                    speakThinkCheckbox.addEventListener('change', function() {
+                        speakThinkEnabled = this.checked;
+                    });
+                }
             };

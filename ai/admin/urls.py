@@ -34,8 +34,8 @@ def get_ai_admin_urls():
         path("arm/models/", ai_admin_site.admin_view(admin_model_status_view), name="ai_arm_model_status"),
         path("arm/find-error/", ai_admin_site.admin_view(admin_arm_find_error_view), name="ai_arm_find_error"),
         path("prompts/my/", ai_admin_site.admin_view(admin_my_prompt_view), name="ai_my_prompt"),
-        path("logs/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
-        path("logs/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),
+        path("airequestlog/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
+        path("airequestlog/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),
     ]
     return [
         *custom_urls,

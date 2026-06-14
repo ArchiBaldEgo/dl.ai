@@ -879,7 +879,10 @@ document.getElementById("selectLang").addEventListener("change", function() {
     const selectedLang = this.options[this.selectedIndex].getAttribute("language");
     document.querySelector("button[type='submit']").textContent = localization[selectedLang].send;
     document.querySelector("button[onclick='clearContext()']").textContent = localization[selectedLang].clear;
-    document.getElementById("messageText").setAttribute("placeholder", localization[selectedLang].placeholder);
+    const messageText = document.getElementById("messageText");
+    if (messageText) {
+        messageText.setAttribute("placeholder", localization[selectedLang].placeholder);
+    }
     document.querySelector(".sidebar-header").textContent = localization[selectedLang].adminPanel;
     const testPanelLink = document.getElementById("testPanelLink");
     if (testPanelLink) {
