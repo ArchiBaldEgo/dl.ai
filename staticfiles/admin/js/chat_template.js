@@ -1,9 +1,13 @@
 var ws = null;
 var client_id = resolveClientId();
 var notEnter = false;
+var requestInFlight = false;
 
-var recognition = null;
+// Голосовые переменные для MediaRecorder
+var mediaRecorder = null;
+var audioChunks = [];
 var isListening = false;
+var audioStream = null;
 var speechSynthesis = window.speechSynthesis;
 var currentUtterance = null;
 var speakThinkEnabled = true;
@@ -13,92 +17,183 @@ function getCookieValue(name) {
     return match ? decodeURIComponent(match[1]) : '';
 }
 
-function resolveClientId() {
-    const sessionId = getCookieValue('DLSID');
-    return sessionId ? `dlsid_${encodeURIComponent(sessionId)}` : 'dlsid_missing';
+function getMetaContent(name) {
+    const meta = document.querySelector(`meta[name="${name}"]`);
+    return meta ? meta.getAttribute('content') : null;
 }
 
-// Функция для показа/скрытия голосовых контролов
+function resolveClientId() {
+    // First, try to get the session ID from the meta tag (set by server)
+    const sessionIdFromMeta = getMetaContent('external-session-id');
+    if (sessionIdFromMeta) {
+        return `dlsid_${encodeURIComponent(sessionIdFromMeta)}`;
+    }
+    // Fallback to cookie
+    const sessionIdFromCookie = getCookieValue('DLSID');
+    return sessionIdFromCookie ? `dlsid_${encodeURIComponent(sessionIdFromCookie)}` : 'dlsid_missing';
+}
+
+// Таймер для автоматической остановки записи (максимум 30 секунд)
+var recordingTimeout = null;
+var MAX_RECORDING_TIME = 30000;
+
+function generateClientId() {
+    return 'client_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+}
+
 function toggleVoiceControls() {
     const voiceControls = document.getElementById('voiceControls');
     if (voiceControls.style.display === 'flex') {
         voiceControls.style.display = 'none';
-        stopSpeech();
-        if (isListening && recognition) {
-            recognition.stop();
+        if (speechSynthesis.speaking) {
+            speechSynthesis.cancel();
+            updateVoiceStatus(getVoiceStatusText('speechStopped'));
+            document.getElementById('voiceOutputBtn').classList.remove('speaking');
+        }
+        if (isListening && mediaRecorder && mediaRecorder.state === 'recording') {
+            stopMediaRecording();
         }
     } else {
         voiceControls.style.display = 'flex';
     }
 }
 
-function initSpeechRecognition() {
+async function initMediaRecorder() {
     try {
-        recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-
-        const langSelect = document.getElementById('selectLang');
-        const selectedLang = langSelect.options[langSelect.selectedIndex].getAttribute('language');
-        recognition.lang = getSpeechLanguage(selectedLang);
-
-        recognition.continuous = false;
-        recognition.interimResults = true;
-
-        recognition.onstart = function () {
-            isListening = true;
-            updateVoiceUI();
-            updateVoiceStatus('Слушаю... Говорите сейчас');
-        };
-
-        recognition.onresult = function (event) {
-            let finalTranscript = '';
-            let interimTranscript = '';
-
-            for (let i = event.resultIndex; i < event.results.length; i++) {
-                const transcript = event.results[i][0].transcript;
-                if (event.results[i].isFinal) {
-                    finalTranscript += transcript;
-                } else {
-                    interimTranscript += transcript;
-                }
-            }
-
-            if (finalTranscript) {
-                document.getElementById('messageText').value = finalTranscript;
-                updateVoiceStatus('Распознано: ' + finalTranscript);
-                setTimeout(() => {
-                    if (document.getElementById('messageText').value.trim()) {
-                        simulateSend();
-                    }
-                }, 500);
-            } else if (interimTranscript) {
-                updateVoiceStatus('Распознаю: ' + interimTranscript);
+        audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        
+        mediaRecorder = new MediaRecorder(audioStream);
+        audioChunks = [];
+        
+        mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+                audioChunks.push(event.data);
             }
         };
-
-        recognition.onerror = function (event) {
-            updateVoiceStatus('Ошибка: ' + event.error);
+        
+        mediaRecorder.onstop = () => {
+            if (audioChunks.length > 0) {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                sendAudioToServer(audioBlob);
+            }
+            
+            if (audioStream) {
+                audioStream.getTracks().forEach(track => track.stop());
+                audioStream = null;
+            }
+            
+            if (recordingTimeout) {
+                clearTimeout(recordingTimeout);
+                recordingTimeout = null;
+            }
+            
             isListening = false;
             updateVoiceUI();
         };
-
-        recognition.onend = function () {
+        
+        mediaRecorder.onerror = (event) => {
+            console.error('MediaRecorder error:', event.error);
+            updateVoiceStatus(getVoiceStatusText('error') + getVoiceStatusText('recording_error'));
             isListening = false;
             updateVoiceUI();
-            updateVoiceStatus('Готов к голосовому вводу');
+            
+            if (audioStream) {
+                audioStream.getTracks().forEach(track => track.stop());
+                audioStream = null;
+            }
         };
-
+        
+        return true;
     } catch (error) {
-        updateVoiceStatus('Голосовой ввод не поддерживается вашим браузером');
+        console.error('Microphone access error:', error);
+        if (error.name === 'NotAllowedError') {
+            updateVoiceStatus(getVoiceStatusText('microphone_denied'));
+        } else if (error.name === 'NotFoundError') {
+            updateVoiceStatus(getVoiceStatusText('microphone_not_found'));
+        } else {
+            updateVoiceStatus(getVoiceStatusText('notSupported'));
+        }
+        return false;
     }
 }
 
-function getSpeechLanguage(lang) {
-    const languageMap = {
-        'Russian': 'ru-RU',
-        'English': 'en-US',
-        'French': 'fr-FR'
-    };
-    return languageMap[lang] || 'en-US';
+async function sendAudioToServer(audioBlob) {
+    updateVoiceStatus(getVoiceStatusText('recognizing'));
+    
+    const formData = new FormData();
+    formData.append('audio', audioBlob, 'recording.webm');
+    
+    const langSelect = document.getElementById('selectLang');
+    const selectedLang = langSelect.options[langSelect.selectedIndex].getAttribute('language');
+    formData.append('language', selectedLang);
+    
+    try {
+        const response = await fetch('/ai/transcribe/', {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'X-CSRFToken': getCsrfToken()
+            }
+        });
+        
+        const data = await response.json();
+        
+        if (data.success && data.text) {
+            document.getElementById('messageText').value = data.text;
+            updateVoiceStatus(getVoiceStatusText('recognized') + data.text);
+            
+            if (document.getElementById('messageText').value.trim()) {
+                simulateSend();
+            }
+        } else {
+            updateVoiceStatus(getVoiceStatusText('recognition_failed'));
+        }
+    } catch (error) {
+        console.error('Transcription error:', error);
+        updateVoiceStatus(getVoiceStatusText('server_error'));
+    }
+}
+
+async function startMediaRecording() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+        return;
+    }
+    
+    if (speechSynthesis.speaking) {
+        speechSynthesis.cancel();
+        updateVoiceStatus(getVoiceStatusText('speechStopped'));
+        document.getElementById('voiceOutputBtn').classList.remove('speaking');
+    }
+    
+    const success = await initMediaRecorder();
+    if (!success) return;
+    
+    mediaRecorder.start();
+    isListening = true;
+    updateVoiceUI();
+    updateVoiceStatus(getVoiceStatusText('listening'));
+    
+    recordingTimeout = setTimeout(() => {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            stopMediaRecording();
+            updateVoiceStatus(getVoiceStatusText('max_time_exceeded'));
+        }
+    }, MAX_RECORDING_TIME);
+}
+
+function stopMediaRecording() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+    }
+}
+
+function getCsrfToken() {
+    const cookies = document.cookie.split(';');
+    for (let cookie of cookies) {
+        const [name, value] = cookie.trim().split('=');
+        if (name === 'csrftoken') return value;
+    }
+    return '';
 }
 
 function getSpeechSynthesisLanguage(lang) {
@@ -110,46 +205,41 @@ function getSpeechSynthesisLanguage(lang) {
     return languageMap[lang] || 'en-US';
 }
 
-function toggleVoiceInput() {
-    if (!recognition) {
-        initSpeechRecognition();
-    }
-
-    if (isListening) {
-        recognition.stop();
-    } else {
-        try {
-            recognition.start();
-        } catch (error) {
-            updateVoiceStatus('Ошибка запуска распознавания');
-        }
-    }
-}
-
 function speakLastResponse() {
     const messages = document.getElementById('messages');
     const assistantMessages = messages.querySelectorAll('.msg-assistant');
-
+    
     if (assistantMessages.length === 0) {
-        updateVoiceStatus('Нет ответов для озвучивания');
+        updateVoiceStatus(getVoiceStatusText('noResponse'));
         return;
     }
-
+    
+    if (isListening) {
+        stopMediaRecording();
+    }
+    
     const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
     const panel = lastAssistantMessage.querySelector('.panel');
     let text = '';
-
+    
     if (panel) {
         text = panel.innerText || panel.textContent || '';
     } else {
         text = lastAssistantMessage.innerText || lastAssistantMessage.textContent || '';
     }
-
+    
     if (!text.trim()) {
-        updateVoiceStatus('Текст для озвучивания пуст');
+        updateVoiceStatus(getVoiceStatusText('textEmpty'));
         return;
     }
-
+    
+    if (speechSynthesis.speaking) {
+        speechSynthesis.cancel();
+        updateVoiceStatus(getVoiceStatusText('speechStopped'));
+        document.getElementById('voiceOutputBtn').classList.remove('speaking');
+        return;
+    }
+    
     speakText(text);
 }
 
@@ -157,62 +247,80 @@ function speakText(text) {
     if (speechSynthesis.speaking) {
         speechSynthesis.cancel();
     }
-
+    
     const cleanText = cleanSpeechText(text);
-
+    
     if (!cleanText.trim()) {
-        updateVoiceStatus('Нет текста для озвучивания');
+        updateVoiceStatus(getVoiceStatusText('noText'));
         return;
     }
-
+    
     const langSelect = document.getElementById('selectLang');
     const selectedLang = langSelect.options[langSelect.selectedIndex].getAttribute('language');
-
+    
     currentUtterance = new SpeechSynthesisUtterance(cleanText);
     currentUtterance.lang = getSpeechSynthesisLanguage(selectedLang);
     currentUtterance.rate = 0.9;
     currentUtterance.pitch = 1;
-
-    currentUtterance.onstart = function () {
-        updateVoiceStatus('Озвучиваю...');
+    
+    currentUtterance.onstart = function() {
+        updateVoiceStatus(getVoiceStatusText('speaking'));
         document.getElementById('voiceOutputBtn').classList.add('speaking');
     };
-
-    currentUtterance.onend = function () {
-        updateVoiceStatus('Озвучивание завершено');
+    
+    currentUtterance.onend = function() {
+        updateVoiceStatus(getVoiceStatusText('speechEnd'));
         document.getElementById('voiceOutputBtn').classList.remove('speaking');
     };
-
-    currentUtterance.onerror = function (event) {
-        updateVoiceStatus('Ошибка озвучивания');
+    
+    currentUtterance.onerror = function(event) {
+        updateVoiceStatus(getVoiceStatusText('speechError'));
         document.getElementById('voiceOutputBtn').classList.remove('speaking');
     };
-
+    
     speechSynthesis.speak(currentUtterance);
 }
 
 function cleanSpeechText(text) {
     if (!text) return '';
-
+    
     let cleanText = text;
-
-    // Убираем think-блоки только если пользователь этого не хочет
-    if (!speakThinkEnabled) {
-        cleanText = cleanText.replace(/<think>[\s\S]*?<\/think>/g, '');
+    
+    if (speakThinkEnabled) {
+        cleanText = cleanText.replace(/Показать:.*?(Скрыть:|$)/g, '');
+        cleanText = cleanText.replace(/Скрыть:.*?(Показать:|$)/g, '');
+        cleanText = cleanText.replace(/<[^>]*>/g, '');
+        return cleanText.trim();
     }
-
+    
+    cleanText = cleanText.replace(/<think>[\s\S]*?<\/think>/g, '');
+    
+    const technicalPatterns = [
+        /^\d{2}:\d{2}:\d{2}\s+Запрос успешно обработан\s*$/gm,
+        /^\d{2}:\d{2}:\d{2}\s+Request processed successfully\s*$/gm,
+        /Модель:\s*.+/gi,
+        /Время обработки запроса:\s*.+сек/gi,
+        /Потрачено токенов:\s*\d+/gi,
+        /^Скрыть:\s*(Ассистент|Assistant|Vous)\s*$/gim,
+        /^Показать:\s*(Ассистент|Assistant|Vous)\s*$/gim,
+        /^\d{2}:\d{2}:\d{2}\s*$/gm
+    ];
+    
+    technicalPatterns.forEach(pattern => {
+        cleanText = cleanText.replace(pattern, '');
+    });
+    
     cleanText = cleanText.replace(/Показать:.*?(Скрыть:|$)/g, '');
     cleanText = cleanText.replace(/Скрыть:.*?(Показать:|$)/g, '');
-
     cleanText = cleanText.replace(/<[^>]*>/g, '');
-
+    
     const servicePatterns = [
         /\b(?:Ассистент|Assistant|Vous|Вы|User|Пользователь)\s*:\s*/gi,
         /\b(?:Скрыть|Показать|Hide|Show)\s*:\s*/gi,
         /\bЗапрос успешно обработан\b/gi,
+        /\bRequest processed successfully\b/gi,
         /\bОбрабатываю запрос пользователя\b/gi,
         /\bProcessing user request\b/gi,
-        /\bRequest processed successfully\b/gi,
         /\bКонтекст очищен\b/gi,
         /\bContext cleared\b/gi,
         /\bСоединение установлено\b/gi,
@@ -220,71 +328,116 @@ function cleanSpeechText(text) {
         /\bГотов к работе\b/gi,
         /\bReady to work\b/gi,
         /\bСообщение отправлено\b/gi,
-        /\bMessage sent\b/gi,
-        /\bПоказать:.*$/gm,
-        /\bСкрыть:.*$/gm
+        /\bMessage sent\b/gi
     ];
-
+    
     servicePatterns.forEach(pattern => {
         cleanText = cleanText.replace(pattern, '');
     });
-
+    
+    cleanText = cleanText.replace(/\n\s*\n/g, '\n');
     cleanText = cleanText.replace(/\s+/g, ' ').trim();
-
+    
     return cleanText;
 }
 
 function stopSpeech() {
     if (speechSynthesis.speaking) {
         speechSynthesis.cancel();
-        updateVoiceStatus('Озвучивание остановлено');
+        updateVoiceStatus(getVoiceStatusText('speechStopped'));
+        document.getElementById('voiceOutputBtn').classList.remove('speaking');
     }
-    if (isListening && recognition) {
-        recognition.stop();
+    if (isListening && mediaRecorder && mediaRecorder.state === 'recording') {
+        stopMediaRecording();
     }
-    document.getElementById('voiceOutputBtn').classList.remove('speaking');
+}
+
+function toggleVoiceInput() {
+    if (isListening) {
+        stopMediaRecording();
+    } else {
+        startMediaRecording();
+    }
 }
 
 function updateVoiceUI() {
     const voiceBtn = document.getElementById('voiceInputBtn');
     const voiceIndicator = document.getElementById('voiceIndicator');
-
-    if (isListening) {
-        voiceBtn.classList.add('recording');
-        voiceIndicator.classList.add('active');
-    } else {
-        voiceBtn.classList.remove('recording');
-        voiceIndicator.classList.remove('active');
+    
+    if (voiceBtn) {
+        if (isListening) {
+            voiceBtn.classList.add('recording');
+        } else {
+            voiceBtn.classList.remove('recording');
+        }
+    }
+    
+    if (voiceIndicator) {
+        if (isListening) {
+            voiceIndicator.classList.add('active');
+        } else {
+            voiceIndicator.classList.remove('active');
+        }
     }
 }
 
 function updateVoiceStatus(message) {
-    document.getElementById('voiceStatus').textContent = message;
+    const voiceStatus = document.getElementById('voiceStatus');
+    if (voiceStatus) {
+        voiceStatus.textContent = message;
+    }
+}
+
+function setRequestLock(isLocked) {
+    requestInFlight = isLocked;
+    const sendBtn = document.querySelector("button[type='submit']");
+    if (sendBtn) {
+        sendBtn.disabled = isLocked;
+    }
+}
+
+function isTerminalAiMessage(payload) {
+    const text = String(payload || "").toLowerCase();
+    return text.includes("запрос успешно обработан")
+        || text.includes("request processed successfully")
+        || text.includes("ошибка при обработке запроса")
+        || text.includes("что-то пошло не так")
+        || text.includes("неверный формат json")
+        || text.includes("контекст очищен")
+        || text.includes("context cleared");
 }
 
 function simulateSend() {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-        updateVoiceStatus('Ошибка: соединение не установлено');
+        updateVoiceStatus(getVoiceStatusText('connectionError'));
         return;
     }
-
+    
+    if (requestInFlight) {
+        updateVoiceStatus(getVoiceStatusText('waitForModel'));
+        return;
+    }
+    
     var value = document.querySelector("#select").value;
     var language = document.querySelector("#selectLang").value;
     var input = document.getElementById("messageText");
-
+    
     if (!input.value.trim()) {
         return;
     }
-
+    
     ws.send(JSON.stringify({
         type: '1',
         message: input.value,
         value: value,
-        language: language,
+        language: language
     }));
 
-    updateVoiceStatus('Сообщение отправлено');
+    setRequestLock(true);
+    notEnter = true;
+    updateVoiceStatus(getVoiceStatusText('messageSent'));
     input.value = '';
+    saveSharedText();
 }
 
 function fetchCanUseAi(dlsid) {
@@ -316,7 +469,7 @@ function parseThinkTag(inputText) {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .trim();
-
+    
     return {
         thinkContent: thinkContent.trim(),
         remainingText: remainingText
@@ -325,7 +478,7 @@ function parseThinkTag(inputText) {
 
 function convertMarkdownToHTML(markdown) {
     markdown = markdown.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
+    
     let codeBlocks = [];
     markdown = markdown.replace(/```([^\`]*)```/g, (match, code) => {
         const codeId = `%%CODEBLOCK${codeBlocks.length}%%`;
@@ -364,14 +517,14 @@ function initWebSocket() {
     try {
         var wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         var wsUrl = `${wsProtocol}//${window.location.host}/ai/chat/ws/${client_id}${window.location.search}`;
-
+        
         ws = new WebSocket(wsUrl);
-
-        ws.onopen = function (event) {
-            updateVoiceStatus('Соединение установлено.');
+        
+        ws.onopen = function(event) {
+            updateVoiceStatus(getVoiceStatusText('connectionEstablished'));
         };
-
-        ws.onmessage = function (event) {
+        
+        ws.onmessage = function(event) {
             var messages = document.getElementById('messages');
             var message = document.createElement('li');
             var inThinkTag = document.createElement('div');
@@ -383,27 +536,27 @@ function initWebSocket() {
             const parsedHTML = convertMarkdownToHTML(mainMessText);
             const messageContent = document.createElement('div');
             messageContent.innerHTML = parsedHTML;
-
+            
             const allMessages = messages.querySelectorAll(':scope > li');
             const roles = [];
             for (let i = 0; i < allMessages.length; i++) {
                 if (i % 2 === 0) roles.push('user');
                 else roles.push('assistant');
             }
-
-            allMessages.forEach(function (li, idx) {
+            
+            allMessages.forEach(function(li, idx) {
                 if (!li.classList.contains('accordion-li') && !li.querySelector('.accordion')) {
                     li.classList.add('accordion-li');
                     const role = roles[idx] || 'other';
                     li.classList.remove('msg-user', 'msg-assistant');
                     if (role === 'user') li.classList.add('msg-user');
                     if (role === 'assistant') li.classList.add('msg-assistant');
-
+                    
                     const btn = document.createElement('button');
                     btn.className = 'accordion';
                     if (role === 'user') btn.classList.add('accordion-user');
                     if (role === 'assistant') btn.classList.add('accordion-assistant');
-
+                    
                     const selectLang = document.getElementById('selectLang');
                     const langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
                     const roleLabels = {
@@ -411,22 +564,22 @@ function initWebSocket() {
                         English: { user: 'You', assistant: 'Assistant', other: 'Others' },
                         French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
                     };
-
+                    
                     function getRoleLabel(role, lang) {
                         return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
                     }
-
+                    
                     btn.textContent = `Показать: ${getRoleLabel(role, langAttr)}`;
                     const panel = document.createElement('div');
                     panel.className = 'panel';
-
+                    
                     while (li.firstChild) {
                         panel.appendChild(li.firstChild);
                     }
                     li.appendChild(btn);
                     li.appendChild(panel);
-
-                    btn.addEventListener('click', function () {
+                    
+                    btn.addEventListener('click', function() {
                         panel.classList.toggle('open');
                         btn.classList.toggle('active');
                         btn.textContent = panel.classList.contains('open')
@@ -435,7 +588,7 @@ function initWebSocket() {
                     });
                 }
             });
-
+            
             if (parseThinkTag(event.data).thinkContent) {
                 message.appendChild(inThinkTag);
             }
@@ -444,20 +597,29 @@ function initWebSocket() {
             messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
             var input = document.getElementById("messageText");
             input.value = '';
-            notEnter = false;
+            saveSharedText();
 
+            if (isTerminalAiMessage(event.data)) {
+                setRequestLock(false);
+                notEnter = false;
+            }
+            
             initAccordionForMessages();
             collapseAllExceptLast();
         };
-
-        ws.onerror = function (error) {
-            updateVoiceStatus('Ошибка соединения');
+        
+        ws.onerror = function(error) {
+            updateVoiceStatus(getVoiceStatusText('wsError'));
+            setRequestLock(false);
+            notEnter = false;
         };
-
-        ws.onclose = function (event) {
-            updateVoiceStatus('Соединение закрыто');
+        
+        ws.onclose = function(event) {
+            updateVoiceStatus(getVoiceStatusText('connectionClosed'));
+            setRequestLock(false);
+            notEnter = false;
         };
-
+        
     } catch (error) {
     }
 }
@@ -468,55 +630,67 @@ function sendMessage(event) {
         alert("Соединение не установлено. Пожалуйста, подождите...");
         return;
     }
-
+    
     if (ws.readyState !== WebSocket.OPEN) {
         alert("Соединение не установлено. Пожалуйста, подождите...");
         return;
     }
-
+    
+    if (requestInFlight) {
+        alert("Дождитесь ответа модели перед новым запросом.");
+        return;
+    }
+    
     var value = document.querySelector("#select").value;
     var language = document.querySelector("#selectLang").value;
     var input = document.getElementById("messageText");
-
+    
+    if (!value) {
+        alert("Сегодня нет доступных моделей. Повторите позже.");
+        return;
+    }
+    
     if (!input.value.trim()) {
         alert("Пожалуйста, введите сообщение");
         return;
     }
-
+    
     ws.send(JSON.stringify({
         type: '1',
         message: input.value,
         value: value,
-        language: language,
+        language: language
     }));
+    setRequestLock(true);
+    notEnter = true;
     input.value = '';
+    saveSharedText();
 }
 
 function clearContext() {
     if (!ws) {
         return;
     }
-
+    
     if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ action: 'clear_context' }));
-
+        
         var messages = document.getElementById('messages');
         messages.innerHTML = '';
-
+        
         var clearMessage = document.createElement('li');
         clearMessage.innerHTML = '<div style="color: green;">Контекст очищен</div>';
         messages.appendChild(clearMessage);
         messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
-
+        
     } else {
         alert("Соединение не установлено");
     }
 }
 
-document.addEventListener("keydown", function (event) {
+document.addEventListener("keydown", function(event) {
     const checkbox = document.querySelector(".inp");
     if (event.key === "Enter" && (!checkbox || checkbox.checked) && !event.shiftKey && !notEnter) {
-        notEnter = true;
         sendMessage(event);
     }
 });
@@ -524,10 +698,11 @@ document.addEventListener("keydown", function (event) {
 const toggleButton = document.querySelector('.toggle-button');
 const sidebar = document.querySelector('.sidebar');
 
-toggleButton.addEventListener('click', () => {
-    sidebar.classList.toggle('open');
-});
-
+if (toggleButton && sidebar) {
+    toggleButton.addEventListener('click', () => {
+        sidebar.classList.toggle('open');
+    });
+}
 
 let isResizing = false;
 
@@ -554,48 +729,162 @@ const localization = {
         clear: "Очистить контекст",
         placeholder: "Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)\nПример форматирования кода:\n```\nprint('Hello, world!')\n```",
         adminPanel: "Админ-Панель",
+        testPanel: "Тест-панель",
         chat: "Чат с DLAI",
         decideTask: "Реши задачу",
         findError: "В чём ошибка?",
         enterHint: "При нажатии на Enter будет отправляться вопрос (для переноса строки Enter+Shift)",
         preprompt: "Препромпт",
         chooseLanguage: "Выберите язык",
-        chooseTheme: "Выберите тему"
+        chooseTheme: "Выберите тему",
+        voiceMode: "Голосовой режим",
+        voiceInput: "Голосовой ввод",
+        voiceOutput: "Озвучить ответ",
+        speakThinkLabel: "Озвучивать дополнительную информацию",
+        voiceStatus: {
+            listening: "Запись голоса",
+            recognized: "Распознано: ",
+            recognizing: "Распознаю...",
+            error: "Ошибка: ",
+            readyForVoice: "Готов к голосовому вводу",
+            notSupported: "Голосовой ввод не поддерживается вашим браузером или нет микрофона",
+            startError: "Ошибка запуска записи",
+            noResponse: "Нет ответов для озвучивания",
+            textEmpty: "Текст для озвучивания пуст",
+            noText: "Нет текста для озвучивания",
+            speaking: "Озвучиваю...",
+            speechEnd: "Озвучивание завершено",
+            speechError: "Ошибка озвучивания",
+            speechStopped: "Озвучивание остановлено",
+            connectionError: "Ошибка: соединение не установлено",
+            waitForModel: "Дождитесь ответа модели перед новым запросом",
+            messageSent: "Сообщение отправлено",
+            connectionEstablished: "Соединение установлено.",
+            connectionClosed: "Соединение закрыто",
+            wsError: "Ошибка соединения",
+            ready: 'Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.',
+            recording_error: "Ошибка записи",
+            recognition_failed: "Не удалось распознать речь",
+            server_error: "Ошибка связи с сервером",
+            microphone_denied: "Разрешите доступ к микрофону",
+            microphone_not_found: "Микрофон не найден",
+            max_time_exceeded: "Превышено время записи"
+        }
     },
+    
     English: {
         send: "Send",
         clear: "Clear Context",
         placeholder: "Ask a question (preferably in English to avoid errors), for nice formatting wrap the code in ```\nExample of code formatting:\n```\nprint('Hello, world!')\n```",
         adminPanel: "Admin Panel",
+        testPanel: "Test Panel",
         chat: "Chat with DLAI",
         decideTask: "Solve the task",
         findError: "What's the error?",
         enterHint: "Press Enter to send the question (Shift+Enter for a new line)",
         preprompt: "Preprompt",
         chooseLanguage: "Choose language",
-        chooseTheme: "Choose theme"
+        chooseTheme: "Choose theme",
+        voiceMode: "Voice mode",
+        voiceInput: "Voice input",
+        voiceOutput: "Speak answer",
+        speakThinkLabel: "Voice extra information",
+        voiceStatus: {
+            listening: "Voice recording",
+            recognized: "Recognized: ",
+            recognizing: "Recognizing...",
+            error: "Error: ",
+            readyForVoice: "Ready for voice input",
+            notSupported: "Voice input not supported in your browser or no microphone",
+            startError: "Error starting recording",
+            noResponse: "No responses to speak",
+            textEmpty: "Text to speak is empty",
+            noText: "No text to speak",
+            speaking: "Speaking...",
+            speechEnd: "Speaking finished",
+            speechError: "Speech error",
+            speechStopped: "Speech stopped",
+            connectionError: "Error: connection not established",
+            waitForModel: "Wait for model response before new request",
+            messageSent: "Message sent",
+            connectionEstablished: "Connection established.",
+            connectionClosed: "Connection closed",
+            wsError: "Connection error",
+            ready: 'Ready. Click "Voice mode" to activate voice features.',
+            recording_error: "Recording error",
+            recognition_failed: "Recognition failed",
+            server_error: "Server connection error",
+            microphone_denied: "Microphone access denied",
+            microphone_not_found: "Microphone not found",
+            max_time_exceeded: "Max recording time exceeded"
+        }
     },
     French: {
         send: "Envoyer",
         clear: "Effacer le contexte",
         placeholder: "Posez une question (de préférence en anglais pour éviter les erreurs), pour un bon formatage, encadrez le code dans ```\nExemple de formatage du code:\n```\nprint('Hello, world!')\n```",
         adminPanel: "Panneau Admin",
+        testPanel: "Panneau Test",
         chat: "Chat avec DLAI",
         decideTask: "Résoudre la tâche",
         findError: "Quelle est l'erreur?",
         enterHint: "Appuyez sur Entrée pour envoyer la question (Shift+Enter pour une nouvelle ligne)",
         preprompt: "Pré-promp",
         chooseLanguage: "Choisir la langue",
-        chooseTheme: "Choisir le thème"
+        chooseTheme: "Choisir le thème",
+        voiceMode: "Mode vocal",
+        voiceInput: "Saisie vocale",
+        voiceOutput: "Lire la réponse",
+        speakThinkLabel: "Informations supplémentaires vocales",
+        voiceStatus: {
+            listening: "Enregistrement vocal",
+            recognized: "Reconnu : ",
+            recognizing: "Reconnaissance...",
+            error: "Erreur : ",
+            readyForVoice: "Prêt pour la saisie vocale",
+            notSupported: "Saisie vocale non supportée par votre navigateur ou pas de microphone",
+            startError: "Erreur de démarrage de l'enregistrement",
+            noResponse: "Aucune réponse à lire",
+            textEmpty: "Texte à lire vide",
+            noText: "Pas de texte à lire",
+            speaking: "Lecture...",
+            speechEnd: "Lecture terminée",
+            speechError: "Erreur de lecture",
+            speechStopped: "Lecture arrêtée",
+            connectionError: "Erreur : connexion non établie",
+            waitForModel: "Attendez la réponse du modèle avant une nouvelle requête",
+            messageSent: "Message envoyé",
+            connectionEstablished: "Connexion établie.",
+            connectionClosed: "Connexion fermée",
+            wsError: "Erreur de connexion",
+            ready: 'Prêt. Cliquez sur "Mode vocal" pour activer les fonctions vocales.',
+            recording_error: "Erreur d'enregistrement",
+            recognition_failed: "Échec de reconnaissance",
+            server_error: "Erreur de connexion au serveur",
+            microphone_denied: "Accès au micro refusé",
+            microphone_not_found: "Microphone introuvable",
+            max_time_exceeded: "Durée d'enregistrement dépassée"
+        }
     }
 };
 
-document.getElementById("selectLang").addEventListener("change", function () {
+function getVoiceStatusText(key, param = '') {
+    const selectLang = document.getElementById('selectLang');
+    const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
+    const msg = localization[lang]?.voiceStatus?.[key];
+    return (msg || localization.Russian.voiceStatus[key] || key) + param;
+}
+
+document.getElementById("selectLang").addEventListener("change", function() {
     const selectedLang = this.options[this.selectedIndex].getAttribute("language");
     document.querySelector("button[type='submit']").textContent = localization[selectedLang].send;
     document.querySelector("button[onclick='clearContext()']").textContent = localization[selectedLang].clear;
     document.getElementById("messageText").setAttribute("placeholder", localization[selectedLang].placeholder);
     document.querySelector(".sidebar-header").textContent = localization[selectedLang].adminPanel;
+    const testPanelLink = document.getElementById("testPanelLink");
+    if (testPanelLink) {
+        testPanelLink.textContent = localization[selectedLang].testPanel;
+    }
     document.querySelector("#selectType option:nth-child(1)").textContent = localization[selectedLang].chat;
     document.querySelector("#selectType option:nth-child(2)").textContent = localization[selectedLang].decideTask;
     document.querySelector("#selectType option:nth-child(3)").textContent = localization[selectedLang].findError;
@@ -607,7 +896,21 @@ document.getElementById("selectLang").addEventListener("change", function () {
     if (prepromptEl) {
         prepromptEl.textContent = localization[selectedLang].preprompt;
     }
+    const voiceModeBtn = document.getElementById("voiceModeBtn");
+    if (voiceModeBtn) voiceModeBtn.textContent = localization[selectedLang].voiceMode;
+    
+    const voiceInputBtn = document.getElementById("voiceInputBtn");
+    if (voiceInputBtn) voiceInputBtn.textContent = localization[selectedLang].voiceInput;
+    
+    const voiceOutputBtn = document.getElementById("voiceOutputBtn");
+    if (voiceOutputBtn) voiceOutputBtn.textContent = localization[selectedLang].voiceOutput;
+    
+    const speakThinkLabel = document.getElementById("speakThinkLabel");
+    if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
+
+    saveInterfaceLanguage();
     updateAccordionLabels();
+    updateVoiceStatus(getVoiceStatusText('readyForVoice'));
 });
 
 function stopResize() {
@@ -616,8 +919,6 @@ function stopResize() {
     window.removeEventListener('mouseup', stopResize);
 }
 
-
-// Остальные функции остаются без изменений
 function initAccordionForMessages() {
     const messages = document.getElementById('messages');
     const allMessages = messages.querySelectorAll(':scope > li');
@@ -626,7 +927,7 @@ function initAccordionForMessages() {
         if (i % 2 === 0) roles.push('user');
         else roles.push('assistant');
     }
-
+    
     const selectLang = document.getElementById('selectLang');
     const langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
     const roleLabels = {
@@ -634,17 +935,17 @@ function initAccordionForMessages() {
         English: { user: 'You', assistant: 'Assistant', other: 'Others' },
         French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
     };
-
+    
     function getRoleLabel(role, lang) {
         return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
     }
-
-    allMessages.forEach(function (li, idx) {
+    
+    allMessages.forEach(function(li, idx) {
         if (!li.classList.contains('accordion-li')) {
             li.classList.add('accordion-li');
             const role = roles[idx] || 'other';
             li.classList.remove('msg-user', 'msg-assistant');
-
+            
             const btn = document.createElement('button');
             if (role === 'user') li.classList.add('msg-user');
             if (role === 'assistant') li.classList.add('msg-assistant');
@@ -652,17 +953,17 @@ function initAccordionForMessages() {
             if (role === 'user') btn.classList.add('accordion-user');
             if (role === 'assistant') btn.classList.add('accordion-assistant');
             btn.textContent = `Показать: ${getRoleLabel(role, langAttr)}`;
-
+            
             const panel = document.createElement('div');
             panel.className = 'panel';
-
+            
             while (li.firstChild) {
                 panel.appendChild(li.firstChild);
             }
             li.appendChild(btn);
             li.appendChild(panel);
-
-            btn.addEventListener('click', function () {
+            
+            btn.addEventListener('click', function() {
                 panel.classList.toggle('open');
                 btn.classList.toggle('active');
                 btn.textContent = panel.classList.contains('open')
@@ -671,7 +972,7 @@ function initAccordionForMessages() {
             });
         }
     });
-
+    
     if (allMessages.length > 0) {
         const lastLi = allMessages[allMessages.length - 1];
         const lastBtn = lastLi.querySelector('.accordion');
@@ -683,8 +984,32 @@ function initAccordionForMessages() {
             lastBtn.textContent = `Скрыть: ${getRoleLabel(lastRole, langAttr)}`;
         }
     }
-
+    
     window._accordionRoles = roles;
+}
+
+function updateAccordionLabels() {
+    const selectLang = document.getElementById('selectLang');
+    const langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
+    const roleLabels = {
+        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други' },
+        English: { user: 'You', assistant: 'Assistant', other: 'Others' },
+        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
+    };
+    const roleLabelsShort = roleLabels[langAttr] || roleLabels.Russian;
+    const allMessages = document.querySelectorAll('#messages li');
+    const roles = window._accordionRoles || [];
+    
+    allMessages.forEach((li, idx) => {
+        const btn = li.querySelector('.accordion');
+        const panel = li.querySelector('.panel');
+        if (btn && panel) {
+            const role = roles[idx] || 'other';
+            const isOpen = panel.classList.contains('open');
+            const label = roleLabelsShort[role] || role;
+            btn.textContent = isOpen ? `Скрыть: ${label}` : `Показать: ${label}`;
+        }
+    });
 }
 
 function collapseAllExceptLast() {
@@ -696,12 +1021,12 @@ function collapseAllExceptLast() {
         English: { user: 'You', assistant: 'Assistant', other: 'Others' },
         French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
     };
-
+    
     const roles = window._accordionRoles || [];
     function getRoleLabel(role, lang) {
         return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
     }
-
+    
     allMessages.forEach((li, idx) => {
         const btn = li.querySelector('.accordion');
         const panel = li.querySelector('.panel');
@@ -720,17 +1045,72 @@ function collapseAllExceptLast() {
     });
 }
 
-window.onload = function () {
+// Persistence keys
+const INTERFACE_LANG_KEY = 'ai_interface_language';
+const SHARED_TEXT_KEY = 'ai_text_shared';
+
+function saveInterfaceLanguage() {
+    try {
+        const selectLang = document.getElementById('selectLang');
+        if (selectLang) {
+            const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
+            localStorage.setItem(INTERFACE_LANG_KEY, lang);
+        }
+    } catch (e) {}
+}
+
+function restoreInterfaceLanguage() {
+    try {
+        const savedLang = localStorage.getItem(INTERFACE_LANG_KEY);
+        if (!savedLang) return;
+        const selectLang = document.getElementById('selectLang');
+        if (!selectLang) return;
+        const option = Array.from(selectLang.options).find(o => o.getAttribute('language') === savedLang);
+        if (option) {
+            selectLang.selectedIndex = option.index;
+        }
+    } catch (e) {}
+}
+
+function saveSharedText() {
+    try {
+        const messageText = document.getElementById('messageText');
+        const saved = JSON.parse(localStorage.getItem(SHARED_TEXT_KEY) || '{}');
+        if (messageText) {
+            saved.message = messageText.value;
+        }
+        localStorage.setItem(SHARED_TEXT_KEY, JSON.stringify(saved));
+    } catch (e) {}
+}
+
+function restoreSharedText() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(SHARED_TEXT_KEY) || '{}');
+        const messageText = document.getElementById('messageText');
+        if (messageText && saved.message !== undefined) {
+            messageText.value = saved.message;
+        }
+    } catch (e) {}
+}
+
+window.onload = function() {
     console.log('Initializing WebSocket with client_id:', client_id);
+    restoreInterfaceLanguage();
     initWebSocket();
-    initSpeechRecognition();
     document.getElementById("selectLang").dispatchEvent(new Event("change"));
     initAccordionForMessages();
-    updateVoiceStatus('Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.');
+    restoreSharedText();
+    updateVoiceStatus(getVoiceStatusText('ready'));
 
-    // Инициализация чекбокса think-блоков
     const speakThinkCheckbox = document.getElementById('speakThinkContent');
-    speakThinkCheckbox.addEventListener('change', function () {
-        speakThinkEnabled = this.checked;
-    });
+    if (speakThinkCheckbox) {
+        speakThinkCheckbox.addEventListener('change', function () {
+            speakThinkEnabled = this.checked;
+        });
+    }
+
+    const messageText = document.getElementById('messageText');
+    if (messageText) {
+        messageText.addEventListener('input', saveSharedText);
+    }
 };

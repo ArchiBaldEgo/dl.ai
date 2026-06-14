@@ -403,6 +403,57 @@ def get_shared_prompts(request):
     return JsonResponse(shared, safe=False)
 
 
+def get_problem_data(request):
+    """Возвращает языки, темы, промпты и общие промпты одним запросом."""
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+
+    languages = list(ProgrammingLanguage.objects.order_by('language_name').values('id', 'language_name'))
+    topics = list(
+        Topic.objects.select_related("programming_language")
+        .order_by("topic_name")
+        .values('id', 'topic_name', 'programming_language')
+    )
+
+    prompts_qs = Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt") \
+        .order_by("prompt_name", "id") \
+        .values(
+            'id',
+            'topic_id',
+            'topic__programming_language',
+            'prompt_text',
+            'prompt_name',
+            'shared_prompt_id',
+            'shared_prompt__prompt_text',
+            'shared_prompt__prompt_name',
+        )
+    prompts = list(prompts_qs)
+    for p in prompts:
+        if p['shared_prompt_id']:
+            p['is_shared'] = True
+            p['effective_text'] = p['shared_prompt__prompt_text'] or p['prompt_text']
+        else:
+            p['is_shared'] = False
+            p['effective_text'] = p['prompt_text']
+
+    shared_qs = SharedPrompt.objects.prefetch_related('programming_languages')
+    shared_prompts = []
+    for sp in shared_qs:
+        shared_prompts.append({
+            'id': sp.id,
+            'prompt_name': sp.prompt_name,
+            'prompt_text': sp.prompt_text,
+            'language_ids': list(sp.programming_languages.values_list('id', flat=True)),
+        })
+
+    return JsonResponse({
+        'languages': languages,
+        'topics': topics,
+        'prompts': prompts,
+        'shared_prompts': shared_prompts,
+    })
+
+
 def asset_view(request, asset_path):
     asset_full_path = finders.find(asset_path)
     if not asset_full_path or not os.path.isfile(asset_full_path):

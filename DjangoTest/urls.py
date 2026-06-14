@@ -24,6 +24,7 @@ from ai.views import (
     get_topics,
     get_prompts,
     get_shared_prompts,
+    get_problem_data,
     prompt_developer_login_view,
     health_view,
     set_password_view,
@@ -41,5 +42,6 @@ urlpatterns = [
     path('ai/api/topics/', get_topics, name='get_topics'),
     path('ai/api/shared-prompts/', get_shared_prompts, name='get_shared_prompts'),
     path('ai/api/prompts/', get_prompts, name='get_prompts'),
+    path('ai/api/problem-data/', get_problem_data, name='get_problem_data'),
 
 ] + static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)

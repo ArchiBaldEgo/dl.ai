@@ -1108,31 +1108,44 @@
                 const topicSelect = document.getElementById("selectTheme");
                 const promptSelect = document.getElementById("selectPrompt");
 
-                async function fetchData(url) {
+                const PROBLEM_DATA_KEY = 'ai_problem_data_cache';
+                const PAGE_STATE_KEY = 'ai_page_state_problem';
+                const SHARED_TEXT_KEY = 'ai_text_shared';
+                let problemData = null;
+
+                async function fetchProblemData() {
+                    if (problemData) return problemData;
                     try {
-                        const urlWithAuth = `${url}${window.location.search || ''}`;
-                        const response = await fetch(urlWithAuth);
-                        if (!response.ok) {
-                            throw new Error(`HTTP error! status: ${response.status}`);
+                        const cached = sessionStorage.getItem(PROBLEM_DATA_KEY);
+                        if (cached) {
+                            problemData = JSON.parse(cached);
+                            return problemData;
                         }
+                    } catch (e) {}
+
+                    try {
+                        const url = `/ai/api/problem-data/${window.location.search || ''}`;
+                        const response = await fetch(url);
+                        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                         const data = await response.json();
-                        console.log('Fetched data:', data);
+                        problemData = data;
+                        try {
+                            sessionStorage.setItem(PROBLEM_DATA_KEY, JSON.stringify(data));
+                        } catch (e) {}
                         return data;
                     } catch (error) {
-                        console.error('Error fetching data:', error);
-                        return [];
+                        console.error('Error fetching problem data:', error);
+                        return { languages: [], topics: [], prompts: [], shared_prompts: [] };
                     }
                 }
 
-                // Функция для выбора первого варианта, если он единственный
                 function selectFirstIfSingle(selectElement) {
                     if (selectElement && selectElement.options.length === 1) {
                         selectElement.selectedIndex = 0;
                     }
                 }
 
-                async function loadLanguages() {
-                    const languages = await fetchData("/ai/api/languages");
+                function populateLanguages(languages) {
                     languageSelect.innerHTML = '<option value="">Выберите язык</option>';
                     if (languages && languages.length > 0) {
                         languages.forEach(lang => {
@@ -1143,16 +1156,14 @@
                     selectFirstIfSingle(languageSelect);
                 }
 
-                async function loadTopics(languageId) {
-                    const topics = await fetchData("/ai/api/topics");
+                function populateTopics(languageId) {
                     topicSelect.innerHTML = '<option value="">Выберите тему</option>';
-                    if (topics && topics.length > 0) {
-                        const filteredTopics = topics.filter(topic => topic.programming_language == languageId);
-                        filteredTopics.forEach(topic => {
-                            const option = new Option(topic.topic_name, topic.id);
-                            topicSelect.appendChild(option);
-                        });
-                    }
+                    const topics = (problemData && problemData.topics) || [];
+                    const filteredTopics = topics.filter(topic => topic.programming_language == languageId);
+                    filteredTopics.forEach(topic => {
+                        const option = new Option(topic.topic_name, topic.id);
+                        topicSelect.appendChild(option);
+                    });
                     selectFirstIfSingle(topicSelect);
                 }
 
@@ -1161,56 +1172,41 @@
                     const topicValue = topicId ? String(topicId) : "";
                     return prompts.filter(prompt => {
                         const hasTopic = prompt.topic_id !== null && prompt.topic_id !== undefined && prompt.topic_id !== "";
-                        if (!hasTopic) {
-                            return true;
-                        }
-                        if (topicValue) {
-                            return String(prompt.topic_id) === topicValue;
-                        }
-                        if (!languageValue) {
-                            return false;
-                        }
+                        if (!hasTopic) return true;
+                        if (topicValue) return String(prompt.topic_id) === topicValue;
+                        if (!languageValue) return false;
                         return String(prompt.topic__programming_language) === languageValue;
                     });
                 }
 
-                async function loadPrompts(languageId, topicId) {
-                    const prompts = await fetchData("/ai/api/prompts");
+                function populatePrompts(languageId, topicId) {
                     promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
-
-                    let allPrompts = prompts || [];
+                    if (!problemData) return;
+                    let allPrompts = (problemData.prompts || []).slice();
 
                     if (languageId) {
-                        try {
-                            const sharedPrompts = await fetchData(`/ai/api/shared-prompts/?language_id=${languageId}`);
-                            if (sharedPrompts && sharedPrompts.length > 0) {
-                                sharedPrompts.forEach(sp => {
-                                    allPrompts.push({
-                                        id: `shared_${sp.id}`,
-                                        prompt_name: `[Общий] ${sp.prompt_name}`,
-                                        topic_id: null,
-                                        topic__programming_language: String(languageId)
-                                    });
-                                });
-                            }
-                        } catch (e) {
-                            console.error('Failed to load shared prompts', e);
-                        }
-                    }
-
-                    if (allPrompts.length > 0) {
-                        const filteredPrompts = filterPrompts(allPrompts, languageId, topicId);
-                        filteredPrompts.forEach(prompt => {
-                            const option = new Option(prompt.prompt_name, prompt.id);
-                            promptSelect.appendChild(option);
+                        const langIdStr = String(languageId);
+                        const shared = (problemData.shared_prompts || []).filter(sp => {
+                            const ids = sp.language_ids || [];
+                            return ids.length === 0 || ids.includes(languageId) || ids.includes(langIdStr);
+                        });
+                        shared.forEach(sp => {
+                            allPrompts.push({
+                                id: `shared_${sp.id}`,
+                                prompt_name: `[Общий] ${sp.prompt_name}`,
+                                topic_id: null,
+                                topic__programming_language: langIdStr
+                            });
                         });
                     }
+
+                    const filteredPrompts = filterPrompts(allPrompts, languageId, topicId);
+                    filteredPrompts.forEach(prompt => {
+                        const option = new Option(prompt.prompt_name, prompt.id);
+                        promptSelect.appendChild(option);
+                    });
                     selectFirstIfSingle(promptSelect);
                 }
-
-                // Persistence keys
-                const PAGE_STATE_KEY = 'ai_page_state_problem';
-                const SHARED_TEXT_KEY = 'ai_text_shared';
 
                 function savePageState() {
                     try {
@@ -1222,7 +1218,7 @@
                     } catch(e) {}
                 }
 
-                async function restorePageState() {
+                function restorePageState() {
                     try {
                         const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
                         if (!state.progLng) return;
@@ -1231,17 +1227,15 @@
 
                         const languageId = parseInt(state.progLng);
                         languageSelect.value = state.progLng;
-
-                        // Явно загружаем темы и препромпты, не полагаясь на таймауты
-                        await loadTopics(languageId);
-                        await loadPrompts(languageId, null);
+                        populateTopics(languageId);
+                        populatePrompts(languageId, null);
 
                         if (state.topic) {
                             const topicOpt = Array.from(topicSelect.options).find(o => o.value === state.topic);
                             if (topicOpt) {
                                 topicSelect.value = state.topic;
                                 const topicId = parseInt(state.topic);
-                                await loadPrompts(languageId, isNaN(topicId) ? null : topicId);
+                                populatePrompts(languageId, isNaN(topicId) ? null : topicId);
                                 if (state.prompt) {
                                     const promptOpt = Array.from(promptSelect.options).find(o => o.value === state.prompt);
                                     if (promptOpt) promptSelect.value = state.prompt;
@@ -1255,9 +1249,7 @@
                     try {
                         const messageText = document.getElementById('messageText');
                         const saved = JSON.parse(localStorage.getItem(SHARED_TEXT_KEY) || '{}');
-                        if (messageText) {
-                            saved.message = messageText.value;
-                        }
+                        if (messageText) saved.message = messageText.value;
                         localStorage.setItem(SHARED_TEXT_KEY, JSON.stringify(saved));
                     } catch(e) {}
                 }
@@ -1266,43 +1258,40 @@
                     try {
                         const saved = JSON.parse(localStorage.getItem(SHARED_TEXT_KEY) || '{}');
                         const messageText = document.getElementById('messageText');
-                        if (messageText && saved.message !== undefined) {
-                            messageText.value = saved.message;
-                        }
+                        if (messageText && saved.message !== undefined) messageText.value = saved.message;
                     } catch(e) {}
                 }
 
-                languageSelect.addEventListener("change", async () => {
+                languageSelect.addEventListener("change", () => {
                     const languageId = parseInt(languageSelect.value);
                     topicSelect.innerHTML = '<option value="">Выберите тему</option>';
                     promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
                     if (!isNaN(languageId)) {
-                        await loadTopics(languageId);
-                        await loadPrompts(languageId, null);
+                        populateTopics(languageId);
+                        populatePrompts(languageId, null);
                     } else {
-                        await loadPrompts(null, null);
+                        populatePrompts(null, null);
                     }
                     savePageState();
                 });
 
-                topicSelect.addEventListener("change", async () => {
+                topicSelect.addEventListener("change", () => {
                     const topicId = parseInt(topicSelect.value);
                     promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
                     const languageId = parseInt(languageSelect.value);
-                    await loadPrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
+                    populatePrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
                     savePageState();
                 });
 
                 promptSelect.addEventListener("change", savePageState);
 
                 const messageText = document.getElementById('messageText');
-                if (messageText) {
-                    messageText.addEventListener('input', saveSharedText);
-                }
+                if (messageText) messageText.addEventListener('input', saveSharedText);
 
-                await loadLanguages();
-                await loadPrompts(null, null);
-                await restorePageState();
+                await fetchProblemData();
+                populateLanguages(problemData.languages);
+                populatePrompts(null, null);
+                restorePageState();
                 restoreSharedText();
             });
 
