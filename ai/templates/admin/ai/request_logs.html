@@ -165,7 +165,7 @@
       </thead>
       <tbody>
         {% for log in page_obj.object_list %}
-          <tr class="ai-log-row" data-detail-url="/ai/admin/airequestlog/{{ log.id }}/">
+          <tr class="ai-log-row" data-detail-url="/ai/admin/ai/airequestlog/{{ log.id }}/">
             <td>{{ log.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>{{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>

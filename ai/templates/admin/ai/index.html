@@ -33,7 +33,7 @@
       {% if show_arm_link %}
         <a class="button" href="{{ arm_find_error_url }}">ARM: В чем ошибка</a>
       {% endif %}
-      {% if show_prompt_link %}
+      {% if is_prompt_developer %}
         <a class="button" href="{{ my_prompt_url }}">Мой препромпт</a>
         <a class="button" href="{{ prompt_admin_url }}">Все препромпты</a>
       {% endif %}

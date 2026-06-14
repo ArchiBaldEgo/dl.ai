@@ -43,9 +43,7 @@ class AIAdminSite(admin.AdminSite):
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated or not user.is_active:
             return False
-        if is_staff_or_superuser(user):
-            return True
-        return is_prompt_developer_user(user)
+        return is_staff_or_superuser(user)
 
     def admin_view(self, view, cacheable=False):
         wrapped_view = super().admin_view(view, cacheable)
@@ -80,7 +78,12 @@ class AIAdminSite(admin.AdminSite):
 
     def each_context(self, request):
         from .my_prompt import get_my_prompt_admin_url
+        from .permissions import is_prompt_developer_user, is_staff_or_superuser
         context = super().each_context(request)
+        is_pd = is_prompt_developer_user(request.user)
+        is_staff = is_staff_or_superuser(request.user)
+        context["is_prompt_developer"] = is_pd
+        context["is_staff_or_superuser"] = is_staff
         context["show_arm_link"] = can_access_arm(request)
         context["show_model_status_link"] = can_access_model_status(request)
         context["show_prompt_link"] = can_access_prompt_admin(request)
@@ -92,7 +95,7 @@ class AIAdminSite(admin.AdminSite):
         context["prompt_admin_url"] = "/ai/admin/ai/prompt/"
         context["my_prompt_url"] = "/ai/admin/prompts/my/"
         context["my_prompt_change_url"] = get_my_prompt_admin_url(request)
-        context["ai_logs_url"] = "/ai/admin/airequestlog/"
+        context["ai_logs_url"] = "/ai/admin/ai/airequestlog/"
         return context
 
 

@@ -43,7 +43,6 @@ class ProgrammingLanguageAdmin(admin.ModelAdmin):
 
 
 class TopicAdmin(admin.ModelAdmin):
-    inlines = [PromptInline]
     list_display = ('topic_name', 'programming_language')
     list_filter = ('programming_language',)
     search_fields = ('topic_name', 'topic_name_ru', 'topic_name_en', 'topic_name_fr')

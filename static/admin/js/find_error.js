@@ -1184,6 +1184,7 @@
                             allPrompts.push({
                                 id: `shared_${sp.id}`,
                                 prompt_name: `[Общий] ${sp.name || sp.prompt_name}`,
+                                name: `[Общий] ${sp.name || sp.prompt_name}`,
                                 topic_id: null,
                                 topic__programming_language: langIdStr
                             });
