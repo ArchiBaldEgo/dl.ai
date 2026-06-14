@@ -4,15 +4,19 @@ from django.contrib.auth.models import AnonymousUser
 from django.contrib.auth.models import Group
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import SimpleTestCase, RequestFactory, TestCase, override_settings
+import json
+
 from django.http import HttpResponse
 from django.db import ProgrammingError
+from django.utils import timezone
 from unittest.mock import patch
 from types import SimpleNamespace
 
 from ai.admin import PromptAdmin, PromptForm, _external_admin_entry_response
 from ai.middleware import ExternalAuthMiddleware
-from ai.models import ExternalDLAccount, ProgrammingLanguage, Prompt, Topic
-from ai.views import chat_view, get_prompts, set_password_view
+from ai.i18n import get_localized_name, get_ui_language_suffix
+from ai.models import AIRequestLog, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic
+from ai.views import chat_view, get_problem_data, get_prompts, set_password_view
 
 
 class ChatViewTests(SimpleTestCase):
@@ -288,7 +292,15 @@ class PromptAdminAccessTests(TestCase):
         editable_fields = self.prompt_admin.get_readonly_fields(request, self.editable_prompt)
 
         self.assertEqual(editable_fields, ())
-        self.assertEqual(readonly_fields, ("programming_language", "topic", "prompt_name", "prompt_text"))
+        self.assertEqual(
+            readonly_fields,
+            (
+                "programming_language", "topic",
+                "prompt_name", "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
+                "shared_prompt", "prompt_text_override",
+                "prompt_text", "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
+            ),
+        )
 
     def test_prompt_developer_queryset_shows_all_prompts(self):
         request = self._build_request(self.prompt_developer)
@@ -428,3 +440,115 @@ class PromptFormTests(TestCase):
 
         self.assertFalse(form.is_valid())
         self.assertIn("topic", form.errors)
+
+
+class LocalizationHelpersTests(TestCase):
+    def test_ui_language_suffix_mapping(self):
+        self.assertEqual(get_ui_language_suffix("Русский"), "ru")
+        self.assertEqual(get_ui_language_suffix("English"), "en")
+        self.assertEqual(get_ui_language_suffix("Français"), "fr")
+        self.assertEqual(get_ui_language_suffix("Russian"), "ru")
+
+    def test_get_localized_name_falls_back(self):
+        topic = Topic(topic_name="Base", topic_name_ru="Рус", topic_name_en="Eng", topic_name_fr="Fra")
+        self.assertEqual(get_localized_name(topic, "Русский", "topic_name"), "Рус")
+        self.assertEqual(get_localized_name(topic, "English", "topic_name"), "Eng")
+        self.assertEqual(get_localized_name(topic, "Français", "topic_name"), "Fra")
+        self.assertEqual(get_localized_name(topic, "Unknown", "topic_name"), "Рус")
+
+
+class PromptEffectiveTextTests(TestCase):
+    def setUp(self):
+        self.pl = ProgrammingLanguage.objects.create(language_name="Python")
+
+    def test_effective_text_uses_ui_language(self):
+        prompt = Prompt(
+            prompt_name="P",
+            prompt_text="Base {language}",
+            prompt_text_ru="Рус {language}",
+            prompt_text_en="Eng {language}",
+        )
+        self.assertEqual(prompt.get_effective_text("Русский", "Python"), "Рус Python")
+        self.assertEqual(prompt.get_effective_text("English", "Python"), "Eng Python")
+
+    def test_shared_prompt_text_uses_ui_language(self):
+        shared = SharedPrompt(prompt_name="S", prompt_text="Base {language}", prompt_text_ru="Рус {language}")
+        prompt = Prompt(prompt_name="P", shared_prompt=shared)
+        self.assertEqual(prompt.get_effective_text("Русский", "C++"), "Рус C++")
+        self.assertEqual(prompt.get_effective_text("English", "C++"), "Base C++")
+
+
+class ProblemDataApiUiLanguageTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(username="api_user", password="test-pass")
+
+    def _request(self, ui_language=""):
+        params = {}
+        if ui_language:
+            params["ui_language"] = ui_language
+        request = self.factory.get("/ai/api/problem-data/", data=params)
+        request.user = self.user
+        return request
+
+    def test_problem_data_localizes_topic_and_prompt_names(self):
+        pl = ProgrammingLanguage.objects.create(language_name="Python")
+        topic = Topic.objects.create(
+            topic_name="Base topic",
+            topic_name_ru="Русская тема",
+            topic_name_en="English topic",
+            programming_language=pl,
+        )
+        Prompt.objects.create(
+            topic=topic,
+            prompt_name="Base prompt",
+            prompt_name_ru="Русский промпт",
+            prompt_name_en="English prompt",
+            prompt_text="text",
+        )
+
+        response_en = get_problem_data(self._request("English"))
+        data_en = json.loads(response_en.content)
+        self.assertEqual(data_en["topics"][0]["name"], "English topic")
+        self.assertEqual(data_en["prompts"][0]["name"], "English prompt")
+
+        response_ru = get_problem_data(self._request("Русский"))
+        data_ru = json.loads(response_ru.content)
+        self.assertEqual(data_ru["topics"][0]["name"], "Русская тема")
+        self.assertEqual(data_ru["prompts"][0]["name"], "Русский промпт")
+
+
+class AIRequestLogModelTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="log_user",
+            password="test-pass",
+            first_name="Log",
+            last_name="User",
+        )
+
+    def test_create_log_from_websocket(self):
+        log = AIRequestLog.objects.create(
+            user=self.user,
+            username=self.user.username,
+            external_user_id="42",
+            user_full_name=self.user.get_full_name(),
+            client_id="client-1",
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            sent_at=timezone.now(),
+            model_names=["DeepSeek-R1"],
+            message="hello",
+            programming_language_id=1,
+            programming_language_name="Python",
+            topic_id=2,
+            topic_name="Loops",
+            prompt_id=3,
+            prompt_name="Helper",
+        )
+        log.refresh_from_db()
+        self.assertEqual(log.user_full_name, "Log User")
+        self.assertEqual(log.model_names, ["DeepSeek-R1"])
+        self.assertEqual(log.status, AIRequestLog.STATUS_SUCCESS)
+        self.assertEqual(log.programming_language_name, "Python")
+        self.assertEqual(log.topic_name, "Loops")
+        self.assertEqual(log.prompt_name, "Helper")

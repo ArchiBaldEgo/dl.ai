@@ -1,0 +1,187 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<style>
+  .ai-logs-wrap {
+    max-width: 1400px;
+  }
+  .ai-logs-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-end;
+    margin-bottom: 16px;
+  }
+  .ai-logs-filters .filter-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .ai-logs-filters label {
+    font-weight: 600;
+    font-size: 12px;
+  }
+  .ai-logs-filters input,
+  .ai-logs-filters select {
+    padding: 6px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--body-bg);
+    color: var(--body-fg);
+  }
+  .ai-logs-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .ai-logs-table th,
+  .ai-logs-table td {
+    border: 1px solid var(--hairline-color);
+    padding: 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .ai-logs-table th {
+    background: var(--darkened-bg);
+  }
+  .ai-logs-table tr:nth-child(even) {
+    background: var(--darkened-bg);
+  }
+  .ai-logs-status-success {
+    color: #067647;
+    font-weight: 600;
+  }
+  .ai-logs-status-error {
+    color: #b42318;
+    font-weight: 600;
+  }
+  .ai-logs-paginator {
+    margin-top: 16px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .ai-logs-empty {
+    padding: 24px;
+    border: 1px dashed var(--hairline-color);
+    border-radius: 6px;
+    text-align: center;
+    color: var(--body-quiet-color);
+  }
+  .ai-logs-message {
+    max-width: 300px;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    font-size: 12px;
+    max-height: 120px;
+    overflow: auto;
+  }
+  .ai-logs-models {
+    font-size: 12px;
+    max-width: 200px;
+  }
+</style>
+
+<div class="ai-logs-wrap">
+  <div style="display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 16px;">
+    <h1>{{ title }}</h1>
+    <a class="button" href="/ai/admin/ai/airequestlog/">Открыть в Django admin</a>
+  </div>
+
+  <form method="get" class="ai-logs-filters">
+    <div class="filter-field">
+      <label for="id_status">Статус</label>
+      <select id="id_status" name="status">
+        <option value="">Все</option>
+        {% for key, label in status_choices %}
+          <option value="{{ key }}" {% if filters.status == key %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="filter-field">
+      <label for="id_source">Источник</label>
+      <select id="id_source" name="source">
+        <option value="">Все</option>
+        {% for key, label in source_choices %}
+          <option value="{{ key }}" {% if filters.source == key %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="filter-field">
+      <label for="id_model">Модель</label>
+      <input id="id_model" type="text" name="model" value="{{ filters.model }}" placeholder="Название модели">
+    </div>
+    <div class="filter-field">
+      <label for="id_user">Пользователь</label>
+      <input id="id_user" type="text" name="user" value="{{ filters.user }}" placeholder="ID, логин или ФИО">
+    </div>
+    <div class="filter-field">
+      <label for="id_date_from">С</label>
+      <input id="id_date_from" type="date" name="date_from" value="{{ filters.date_from }}">
+    </div>
+    <div class="filter-field">
+      <label for="id_date_to">По</label>
+      <input id="id_date_to" type="date" name="date_to" value="{{ filters.date_to }}">
+    </div>
+    <div class="filter-field">
+      <button type="submit" class="default">Фильтровать</button>
+      <a class="button" href="{{ request.path }}">Сбросить</a>
+    </div>
+  </form>
+
+  {% if page_obj.object_list %}
+    <table class="ai-logs-table">
+      <thead>
+        <tr>
+          <th>Отправлен</th>
+          <th>Получен</th>
+          <th>Пользователь</th>
+          <th>Модели</th>
+          <th>Язык программирования</th>
+          <th>Тема</th>
+          <th>Препромпт</th>
+          <th>Источник</th>
+          <th>Статус</th>
+          <th>Длительность, с</th>
+          <th>Сообщение</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for log in page_obj.object_list %}
+          <tr>
+            <td>{{ log.sent_at|default:"—" }}</td>
+            <td>{{ log.received_at|default:"—" }}</td>
+            <td>
+              {% if log.user_full_name %}{{ log.user_full_name }}{% endif %}
+              {% if log.username %}<br><small>login: {{ log.username }}</small>{% endif %}
+              {% if log.external_user_id %}<br><small>id: {{ log.external_user_id }}</small>{% endif %}
+            </td>
+            <td class="ai-logs-models">{{ log.model_names|join:", " }}</td>
+            <td>{{ log.programming_language_name|default:"—" }}</td>
+            <td>{{ log.topic_name|default:"—" }}</td>
+            <td>{{ log.prompt_name|default:"—" }}</td>
+            <td>{{ log.get_source_display }}</td>
+            <td class="{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">
+              {{ log.get_status_display }}
+            </td>
+            <td>{{ log.duration_seconds|default:"—" }}</td>
+            <td class="ai-logs-message">{{ log.message|default:"—" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="ai-logs-paginator">
+      {% if page_obj.has_previous %}
+        <a class="button" href="?{{ filters_query }}page={{ page_obj.previous_page_number }}">← Назад</a>
+      {% endif %}
+      <span>Страница {{ page_obj.number }} из {{ page_obj.paginator.num_pages }}</span>
+      {% if page_obj.has_next %}
+        <a class="button" href="?{{ filters_query }}page={{ page_obj.next_page_number }}">Вперёд →</a>
+      {% endif %}
+    </div>
+  {% else %}
+    <div class="ai-logs-empty">Логи не найдены.</div>
+  {% endif %}
+</div>
+{% endblock %}

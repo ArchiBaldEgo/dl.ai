@@ -565,7 +565,7 @@
         .forEach(function (item) {
           const option = document.createElement('option');
           option.value = String(item.id);
-          option.textContent = item.topic_name;
+          option.textContent = item.name || item.topic_name;
           if (selectedTopic && String(item.id) === selectedTopic) {
             option.selected = true;
           }
@@ -596,7 +596,7 @@
       filterPrompts(prompts, languageId, topicId).forEach(function (item) {
         const option = document.createElement('option');
         option.value = String(item.id);
-        option.textContent = item.prompt_name || ('Prompt #' + item.id);
+        option.textContent = item.name || item.prompt_name || ('Prompt #' + item.id);
         if (selectedPrompt && String(item.id) === selectedPrompt) {
           option.selected = true;
         }
@@ -612,6 +612,34 @@
     topicSelect.addEventListener('change', function () {
       fillPrompts(langSelect.value, topicSelect.value);
     });
+
+    const interfaceLangSelect = document.getElementById('interface_language');
+    async function reloadProblemData() {
+      try {
+        const uiLang = interfaceLangSelect.value;
+        const response = await fetch(`/ai/api/problem-data/?ui_language=${encodeURIComponent(uiLang)}`);
+        if (!response.ok) throw new Error('HTTP error');
+        const data = await response.json();
+        topics = data.topics || [];
+        prompts = (data.prompts || []).map(function (p) {
+          return {
+            id: p.id,
+            prompt_name: p.prompt_name,
+            name: p.name,
+            topic_id: p.topic_id,
+            topic__programming_language: p.topic__programming_language,
+          };
+        });
+        fillLanguages();
+        fillTopics(langSelect.value);
+        fillPrompts(langSelect.value, topicSelect.value);
+      } catch (error) {
+        console.error('Failed to reload problem data:', error);
+      }
+    }
+    if (interfaceLangSelect) {
+      interfaceLangSelect.addEventListener('change', reloadProblemData);
+    }
 
     fillLanguages();
     fillTopics(langSelect.value);

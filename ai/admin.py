@@ -4,16 +4,18 @@ from django.contrib.auth import authenticate, get_user_model, logout as auth_log
 from django.contrib.admin.forms import AdminAuthenticationForm
 from django import forms
 from django.db.models import Q
+from django.core.paginator import Paginator
 from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.middleware import csrf
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path
 from django.utils import timezone
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo
 
 from .arm_runner import get_arm_run_snapshot, start_arm_sequential_run
+from .i18n import get_localized_name, get_localized_text
 from .model_health import (
     get_available_model_options,
     get_model_status_rows,
@@ -21,7 +23,7 @@ from .model_health import (
     is_model_health_refresh_running,
     trigger_model_health_refresh_async,
 )
-from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
+from .models import AIRequestLog, ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
 from .auth_backends import (
     ADMIN_EXTERNAL_AUTH_BACKEND,
     ensure_prompt_developer_group,
@@ -75,6 +77,10 @@ def _can_access_prompt_admin(request):
     if _is_staff_or_superuser(request.user):
         return True
     return _is_prompt_developer_user(request)
+
+
+def _can_access_logs(request):
+    return request.user.is_authenticated and _is_staff_or_superuser(request.user)
 
 
 def _get_my_prompt_admin_url(request):
@@ -261,11 +267,18 @@ def _prepare_arm_run_payload(form_state, user=None):
         id=form_state["selected_prog_lng"]
     ).values_list("language_name", flat=True).first() or "Python"
 
-    prompt_text = (
+    topic = None
+    if form_state["selected_topic"]:
+        topic = Topic.objects.filter(id=form_state["selected_topic"]).first()
+
+    prompt_obj = (
         Prompt.objects.filter(id=form_state["selected_prompt"])
-        .values_list("prompt_text", flat=True)
+        .select_related("shared_prompt")
         .first()
-        or ""
+    )
+    prompt_text = (
+        prompt_obj.get_effective_text(form_state["selected_language_ui"], prog_lng_name)
+        if prompt_obj else ""
     )
 
     message = _build_find_error_message(
@@ -279,6 +292,14 @@ def _prepare_arm_run_payload(form_state, user=None):
     return {
         "selected_models": selected_models,
         "message": message,
+        "programming_language_id": form_state["selected_prog_lng"] or None,
+        "programming_language_name": prog_lng_name,
+        "topic_id": form_state["selected_topic"] or None,
+        "topic_name": topic.topic_name if topic else "",
+        "topic_name_localized": get_localized_name(topic, form_state["selected_language_ui"], "topic_name") if topic else "",
+        "prompt_id": form_state["selected_prompt"] or None,
+        "prompt_name": prompt_obj.prompt_name if prompt_obj else "",
+        "prompt_name_localized": get_localized_name(prompt_obj, form_state["selected_language_ui"], "prompt_name") if prompt_obj else "",
     }, ""
 
 
@@ -287,18 +308,27 @@ def admin_arm_find_error_view(request):
         return HttpResponseForbidden("Access denied")
 
     languages = list(ProgrammingLanguage.objects.all().values("id", "language_name"))
-    topics = list(Topic.objects.all().values("id", "topic_name", "programming_language_id"))
-    prompts = list(
-        Prompt.objects.select_related("topic")
-        .order_by("prompt_name", "id")
-        .values(
-            "id",
-            "prompt_name",
-            "prompt_text",
-            "topic_id",
-            "topic__programming_language",
-        )
-    )
+    topics = [
+        {
+            "id": t.id,
+            "topic_name": t.topic_name,
+            "name": get_localized_name(t, selected_language_ui, "topic_name"),
+            "programming_language_id": t.programming_language_id,
+        }
+        for t in Topic.objects.all()
+    ]
+    prompts = [
+        {
+            "id": p.id,
+            "prompt_name": p.prompt_name,
+            "name": get_localized_name(p, selected_language_ui, "prompt_name"),
+            "prompt_text": p.prompt_text,
+            "effective_text": p.get_effective_text(selected_language_ui, ""),
+            "topic_id": p.topic_id,
+            "topic__programming_language": p.topic.programming_language_id if p.topic else None,
+        }
+        for p in Prompt.objects.select_related("topic").order_by("prompt_name", "id")
+    ]
 
     selected_models = []
     selected_language_ui = "Русский"
@@ -329,6 +359,12 @@ def admin_arm_find_error_view(request):
                 run_payload["message"],
                 run_payload["selected_models"],
                 request.user.id,
+                programming_language_id=run_payload.get("programming_language_id"),
+                programming_language_name=run_payload.get("programming_language_name"),
+                topic_id=run_payload.get("topic_id"),
+                topic_name=run_payload.get("topic_name_localized") or run_payload.get("topic_name"),
+                prompt_id=run_payload.get("prompt_id"),
+                prompt_name=run_payload.get("prompt_name_localized") or run_payload.get("prompt_name"),
             )
 
             if run_id:
@@ -390,6 +426,12 @@ def admin_arm_find_error_start_view(request):
         run_payload["message"],
         run_payload["selected_models"],
         request.user.id,
+        programming_language_id=run_payload.get("programming_language_id"),
+        programming_language_name=run_payload.get("programming_language_name"),
+        topic_id=run_payload.get("topic_id"),
+        topic_name=run_payload.get("topic_name_localized") or run_payload.get("topic_name"),
+        prompt_id=run_payload.get("prompt_id"),
+        prompt_name=run_payload.get("prompt_name_localized") or run_payload.get("prompt_name"),
     )
     if not run_id:
         return JsonResponse(
@@ -553,6 +595,70 @@ def admin_my_prompt_view(request):
     return prompt_admin.changelist_view(request, extra_context={"mine_only": True})
 
 
+def admin_request_logs_view(request):
+    if not _can_access_logs(request):
+        return HttpResponseForbidden("Access denied")
+
+    qs = AIRequestLog.objects.all()
+
+    status = request.GET.get("status", "").strip()
+    source = request.GET.get("source", "").strip()
+    model = request.GET.get("model", "").strip()
+    user_q = request.GET.get("user", "").strip()
+    date_from = request.GET.get("date_from", "").strip()
+    date_to = request.GET.get("date_to", "").strip()
+
+    status_values = dict(AIRequestLog.STATUS_CHOICES)
+    source_values = dict(AIRequestLog.SOURCE_CHOICES)
+
+    if status in status_values:
+        qs = qs.filter(status=status)
+    if source in source_values:
+        qs = qs.filter(source=source)
+    if model:
+        qs = qs.filter(model_names__contains=[model])
+    if user_q:
+        qs = qs.filter(
+            Q(user_full_name__icontains=user_q)
+            | Q(username__icontains=user_q)
+            | Q(external_user_id__icontains=user_q)
+        )
+    if date_from:
+        qs = qs.filter(sent_at__date__gte=date_from)
+    if date_to:
+        qs = qs.filter(sent_at__date__lte=date_to)
+
+    qs = qs.order_by("-sent_at")
+
+    paginator = Paginator(qs, 50)
+    page_number = request.GET.get("page")
+    page_obj = paginator.get_page(page_number)
+
+    filters_query = request.GET.copy()
+    filters_query.pop("page", None)
+    filters_query_str = urlencode(filters_query)
+    if filters_query_str:
+        filters_query_str += "&"
+
+    context = {
+        **admin.site.each_context(request),
+        "title": "DL.AI: Логи запросов",
+        "page_obj": page_obj,
+        "status_choices": AIRequestLog.STATUS_CHOICES,
+        "source_choices": AIRequestLog.SOURCE_CHOICES,
+        "filters_query": filters_query_str,
+        "filters": {
+            "status": status,
+            "source": source,
+            "model": model,
+            "user": user_q,
+            "date_from": date_from,
+            "date_to": date_to,
+        },
+    }
+    return TemplateResponse(request, "admin/ai/request_logs.html", context)
+
+
 def admin_logout_view(request):
     if request.method not in {"GET", "POST"}:
         return HttpResponseNotAllowed(["GET", "POST"])
@@ -618,6 +724,11 @@ def _custom_admin_urls():
             "prompts/my/",
             admin.site.admin_view(admin_my_prompt_view),
             name="ai_my_prompt",
+        ),
+        path(
+            "logs/",
+            admin.site.admin_view(admin_request_logs_view),
+            name="ai_request_logs",
         ),
     ]
     return custom_urls + _default_get_urls()
@@ -705,6 +816,7 @@ def _custom_each_context(request):
     context["show_arm_link"] = _can_access_arm(request)
     context["show_model_status_link"] = _can_access_model_status(request)
     context["show_prompt_link"] = _can_access_prompt_admin(request)
+    context["show_logs_link"] = _can_access_logs(request)
     context["arm_find_error_url"] = "/ai/admin/arm/find-error/"
     context["arm_model_status_url"] = "/ai/admin/arm/models/"
     context["arm_model_status_refresh_url"] = "/ai/admin/arm/models/refresh/"
@@ -712,6 +824,7 @@ def _custom_each_context(request):
     context["prompt_admin_url"] = "/ai/admin/ai/prompt/"
     context["my_prompt_url"] = "/ai/admin/prompts/my/"
     context["my_prompt_change_url"] = _get_my_prompt_admin_url(request)
+    context["ai_logs_url"] = "/ai/admin/logs/"
     return context
 
 
@@ -733,6 +846,18 @@ class PromptForm(forms.ModelForm):
         fields = '__all__'
         widgets = {
             'prompt_text': forms.Textarea(attrs={
+                'rows': 25,
+                'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
+            }),
+            'prompt_text_ru': forms.Textarea(attrs={
+                'rows': 25,
+                'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
+            }),
+            'prompt_text_en': forms.Textarea(attrs={
+                'rows': 25,
+                'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
+            }),
+            'prompt_text_fr': forms.Textarea(attrs={
                 'rows': 25,
                 'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
             }),
@@ -807,6 +932,18 @@ class SharedPromptForm(forms.ModelForm):
                 'rows': 25,
                 'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
             }),
+            'prompt_text_ru': forms.Textarea(attrs={
+                'rows': 25,
+                'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
+            }),
+            'prompt_text_en': forms.Textarea(attrs={
+                'rows': 25,
+                'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
+            }),
+            'prompt_text_fr': forms.Textarea(attrs={
+                'rows': 25,
+                'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
+            }),
         }
 
 class SharedPromptAdmin(admin.ModelAdmin):
@@ -860,7 +997,11 @@ class SharedPromptAdmin(admin.ModelAdmin):
 
     def get_fieldsets(self, request, obj=None):
         return (
-            (None, {"fields": ("prompt_name", "prompt_text", "programming_languages")}),
+            (None, {"fields": (
+                "prompt_name", "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
+                "prompt_text", "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
+                "programming_languages",
+            )}),
             ("Доступ", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
         )
 
@@ -895,8 +1036,11 @@ class TopicAdmin(admin.ModelAdmin):
     inlines = [PromptInline]
     list_display = ('topic_name', 'programming_language')
     list_filter = ('programming_language',)
-    search_fields = ('topic_name',)
+    search_fields = ('topic_name', 'topic_name_ru', 'topic_name_en', 'topic_name_fr')
     raw_id_fields = ('programming_language',)  # Для удобства при многих языках
+    fieldsets = (
+        (None, {"fields": ("topic_name", "topic_name_ru", "topic_name_en", "topic_name_fr", "programming_language")}),
+    )
 
 
 class PromptUserIdFilter(admin.SimpleListFilter):
@@ -993,7 +1137,12 @@ class PromptAdmin(admin.ModelAdmin):
         return obj.owner_id == request.user.pk
 
     def get_fieldsets(self, request, obj=None):
-        main_fields = ("programming_language", "topic", "prompt_name", "shared_prompt", "prompt_text_override", "prompt_text")
+        main_fields = (
+            "programming_language", "topic",
+            "prompt_name", "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
+            "shared_prompt", "prompt_text_override",
+            "prompt_text", "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
+        )
         if request.user.is_superuser:
             return (
                 (None, {"fields": main_fields}),
@@ -1006,7 +1155,12 @@ class PromptAdmin(admin.ModelAdmin):
             return ()
         if self._can_edit_prompt(request, obj):
             return ()
-        return ("programming_language", "topic", "prompt_name", "shared_prompt", "prompt_text_override", "prompt_text")
+        return (
+            "programming_language", "topic",
+            "prompt_name", "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
+            "shared_prompt", "prompt_text_override",
+            "prompt_text", "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
+        )
 
     def save_model(self, request, obj, form, change):
         if not change and not obj.owner_id:
@@ -1071,6 +1225,65 @@ class AIAppSettingsAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+@admin.register(AIRequestLog)
+class AIRequestLogAdmin(admin.ModelAdmin):
+    list_display = (
+        "sent_at",
+        "received_at",
+        "user_full_name",
+        "username",
+        "external_user_id",
+        "model_names_display",
+        "programming_language_name",
+        "topic_name",
+        "prompt_name",
+        "status",
+        "source",
+        "duration_seconds",
+    )
+    list_filter = ("status", "source", "programming_language_name", "sent_at")
+    search_fields = (
+        "external_user_id",
+        "username",
+        "user_full_name",
+        "message",
+        "programming_language_name",
+        "topic_name",
+        "prompt_name",
+    )
+    date_hierarchy = "sent_at"
+    ordering = ("-sent_at",)
+    readonly_fields = [f.name for f in AIRequestLog._meta.fields]
+
+    def has_module_permission(self, request):
+        return _can_access_logs(request)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return _can_access_logs(request)
+
+    def model_names_display(self, obj):
+        return ", ".join(obj.model_names or [])
+    model_names_display.short_description = "Модели"
+
+    def programming_language_name(self, obj):
+        return obj.programming_language_name or "—"
+    programming_language_name.short_description = "Язык программирования"
+
+    def topic_name(self, obj):
+        return obj.topic_name or "—"
+    topic_name.short_description = "Тема"
+
+    def prompt_name(self, obj):
+        return obj.prompt_name or "—"
+    prompt_name.short_description = "Препромпт"
+
 
 # Регистрация
 admin.site.register(ProgrammingLanguage, ProgrammingLanguageAdmin)

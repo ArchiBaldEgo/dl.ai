@@ -1,17 +1,19 @@
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import timedelta
 from urllib.parse import unquote
 
 import django
 from channels.generic.websocket import AsyncWebsocketConsumer
+from django.utils import timezone
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'DjangoTest.settings')
 django.setup()
 
+from .i18n import get_localized_name
 from .model_health import MODEL_ALIASES
-from .models import ProgrammingLanguage, Prompt, SharedPrompt
+from .models import AIRequestLog, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic
 from .utils import *
 from asgiref.sync import sync_to_async
 from .external_auth import (
@@ -25,11 +27,82 @@ from .external_auth import (
 current_tokens = 0
 logger = logging.getLogger(__name__)
 
+
 @sync_to_async
-def getPromptText(prompt_id, language_name=""):
+def _resolve_user_for_log(user):
+    """Return (user, username, external_user_id, full_name) for logging."""
+    if not user or not getattr(user, "is_authenticated", False):
+        return None, "", "", ""
+
+    username = getattr(user, "username", "") or ""
+    full_name = (user.get_full_name() or "").strip() or username
+    external_id = username
+    try:
+        external_id = user.external_dl_account.external_user_id
+    except (ExternalDLAccount.DoesNotExist, AttributeError):
+        pass
+    return user, username, external_id, full_name
+
+
+@sync_to_async
+def _resolve_context_names(prog_lng_id, topic_id, prompt_id, ui_language=""):
+    """Return (programming_language_name, topic_name, prompt_name) for logging."""
+    prog_lng_name = ""
+    topic_name = ""
+    prompt_name = ""
+    try:
+        if prog_lng_id:
+            prog_lng_name = ProgrammingLanguage.objects.values_list("language_name", flat=True).get(id=prog_lng_id)
+    except ProgrammingLanguage.DoesNotExist:
+        pass
+    try:
+        if topic_id:
+            topic = Topic.objects.get(id=topic_id)
+            topic_name = get_localized_name(topic, ui_language, "topic_name")
+    except Topic.DoesNotExist:
+        pass
+    try:
+        if prompt_id:
+            prompt = Prompt.objects.select_related("shared_prompt").get(id=prompt_id)
+            prompt_name = get_localized_name(prompt, ui_language, "prompt_name")
+    except Prompt.DoesNotExist:
+        pass
+    return prog_lng_name, topic_name, prompt_name
+
+
+@sync_to_async
+def _update_log_after_response(log, end_time, response, modell):
+    """Update AIRequestLog after a model response."""
+    if isinstance(response, tuple):
+        response_text = response[0] if len(response) > 0 else ""
+        tokens = response[1] if len(response) > 1 else 0
+    else:
+        response_text = response
+        tokens = 0
+
+    log.received_at = end_time
+    log.duration_seconds = (end_time - log.sent_at).total_seconds() if log.sent_at else None
+    log.model_names = [modell] if modell else log.model_names
+    log.response_text = str(response_text or "")[:5000]
+    log.tokens = tokens or 0
+
+    error_markers = (
+        "ошибка", "error", "таймаут", "timeout", "не удалось", "failed",
+        "недоступ", "unavailable", "превышен лимит", "rate limit",
+    )
+    text_sample = str(response_text or "").lower()[:100]
+    if any(marker in text_sample for marker in error_markers):
+        log.status = AIRequestLog.STATUS_ERROR
+    else:
+        log.status = AIRequestLog.STATUS_SUCCESS
+    log.save(update_fields=["received_at", "duration_seconds", "model_names", "response_text", "tokens", "status"])
+
+
+@sync_to_async
+def getPromptText(prompt_id, ui_language="", programming_language_name=""):
     try:
         prompt = Prompt.objects.select_related('shared_prompt').get(id=prompt_id)
-        return prompt.get_effective_text(language_name)
+        return prompt.get_effective_text(ui_language, programming_language_name)
     except Prompt.DoesNotExist:
         return None
     except Exception as e:
@@ -159,13 +232,13 @@ class MyConsumer(AsyncWebsocketConsumer):
             if type == "1":
                 preprompt = data.get('preprompt', '')
                 if preprompt:
-                    promptText = await getPromptText(preprompt, "")
+                    promptText = await getPromptText(preprompt, language, "")
                     if promptText and (not hasattr(self, 'last_prompt') or self.last_prompt != promptText):
                         message = f"{message}\n\nПрепромпт: {promptText}"
                         self.last_prompt = promptText
             elif type == "2":
                 progLng = await getProgLng(data.get('progLng'))
-                promptText = await getPromptText(data.get('preprompt'), progLng or "")
+                promptText = await getPromptText(data.get('preprompt'), language, progLng or "")
                 message = f"У меня есть задача по программированию, решай ее на языке {progLng}\n{message}"
                 if promptText and (not hasattr(self, 'last_prompt') or self.last_prompt != promptText):
                     message += f". Препромпт: {promptText}"
@@ -173,7 +246,7 @@ class MyConsumer(AsyncWebsocketConsumer):
             elif type == "3":
                 progLng = await getProgLng(data.get('progLng'))
                 code = data.get('code', '')
-                promptText = await getPromptText(data.get('preprompt'), progLng or "")
+                promptText = await getPromptText(data.get('preprompt'), language, progLng or "")
                 message = f"У меня есть задача по программированию, я написал для нее код на языке {progLng}, код не работает, найди пожалуйста ошибку. Задача: {message}. Код: {code}."
                 if promptText and (not hasattr(self, 'last_prompt') or self.last_prompt != promptText):
                     message += f". Препромпт: {promptText}"
@@ -181,11 +254,41 @@ class MyConsumer(AsyncWebsocketConsumer):
 
             
             # Время отправки запроса
-            start_time = datetime.now()
+            start_time = timezone.now()
             start_str = (start_time + timedelta(hours=3)).strftime("%H:%M:%S")
 
             # Отправляем сообщение пользователю
             await self.send(text_data=f"<think> {start_str} Обрабатываю запрос пользователя</think> Вы: {message}")
+
+            # Создаём запись лога перед вызовом модели
+            log_user, log_username, log_external_id, log_full_name = await _resolve_user_for_log(
+                self.scope.get("user")
+            )
+
+            prog_lng_id = data.get("progLng") if type in ("2", "3") else None
+            topic_id = data.get("topic") if type in ("2", "3") else None
+            prompt_id = data.get("preprompt")
+            prog_lng_name, topic_name, prompt_name = await _resolve_context_names(
+                prog_lng_id, topic_id, prompt_id, language
+            )
+
+            log = await sync_to_async(AIRequestLog.objects.create)(
+                user=log_user,
+                username=log_username,
+                external_user_id=log_external_id,
+                user_full_name=log_full_name,
+                client_id=self.client_id,
+                source=AIRequestLog.SOURCE_WEBSOCKET,
+                sent_at=start_time,
+                model_names=[value],
+                message=message,
+                programming_language_id=int(prog_lng_id) if prog_lng_id else None,
+                programming_language_name=prog_lng_name,
+                topic_id=int(topic_id) if topic_id else None,
+                topic_name=topic_name,
+                prompt_id=int(prompt_id) if prompt_id else None,
+                prompt_name=prompt_name,
+            )
             # Обработка модели AI
             response = "Что-то пошло не так. Попробуйте еще раз."
             modell = value
@@ -249,17 +352,30 @@ class MyConsumer(AsyncWebsocketConsumer):
                     handler, model_title = model_handler
                     response = await handler(message, self.client_id)
                     modell = model_title
+                    await _update_log_after_response(log, timezone.now(), response, modell)
                 else:
                     response = f"Модель {value} не найдена. Используйте доступные модели."
-                
-                        
+                    end_time = timezone.now()
+                    log.status = AIRequestLog.STATUS_ERROR
+                    log.error_message = response[:2000]
+                    log.received_at = end_time
+                    log.duration_seconds = (end_time - start_time).total_seconds()
+                    await sync_to_async(log.save)(update_fields=["status", "error_message", "received_at", "duration_seconds"])
+
             except Exception as e:
                 print(f"Error in AI model processing: {str(e)}")
-                response = f"Ошибка при обработке запроса: {str(e)}"
+                error_text = str(e)
+                response = f"Ошибка при обработке запроса: {error_text}"
+                end_time = timezone.now()
+                log.status = AIRequestLog.STATUS_ERROR
+                log.error_message = error_text[:2000]
+                log.received_at = end_time
+                log.duration_seconds = (end_time - start_time).total_seconds()
+                await sync_to_async(log.save)(update_fields=["status", "error_message", "received_at", "duration_seconds"])
 
 
             # Время отправки ответа
-            end_time = datetime.now()
+            end_time = timezone.now()
             end_str = (end_time + timedelta(hours=3)).strftime("%H:%M:%S")
 
             # Время обработки

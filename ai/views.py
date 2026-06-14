@@ -23,6 +23,7 @@ from .auth_backends import (
     normalize_external_user_id,
 )
 from .constants import PROMPT_DEVELOPER_GROUP
+from .i18n import get_localized_name, get_localized_text
 
 _WEB_PRIORITY_MODELS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
 
@@ -334,16 +335,27 @@ def find_error_view(request):
 
 
 def get_languages(request):
-    languages = ProgrammingLanguage.objects.order_by('language_name').values('id', 'language_name')
-    return JsonResponse(list(languages), safe=False)
+    languages = [
+        {
+            'id': lang.id,
+            'language_name': lang.language_name,
+            'name': lang.language_name,
+        }
+        for lang in ProgrammingLanguage.objects.order_by('language_name')
+    ]
+    return JsonResponse(languages, safe=False)
 
 
 def get_topics(request):
-    topics = list(
-        Topic.objects.select_related("programming_language")
-        .order_by("topic_name")
-        .values('id', 'topic_name', 'programming_language')
-    )
+    ui_language = request.GET.get('ui_language', 'Русский')
+    topics = []
+    for topic in Topic.objects.select_related("programming_language").order_by('topic_name'):
+        topics.append({
+            'id': topic.id,
+            'topic_name': topic.topic_name,
+            'name': get_localized_name(topic, ui_language, 'topic_name'),
+            'programming_language': topic.programming_language_id,
+        })
     return JsonResponse(topics, safe=False)
 
 
@@ -351,28 +363,21 @@ def get_prompts(request):
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
 
-    prompts = list(
-        Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt")
-        .order_by("prompt_name", "id")
-        .values(
-            'id',
-            'topic_id',
-            'topic__programming_language',
-            'prompt_text',
-            'prompt_name',
-            'shared_prompt_id',
-            'shared_prompt__prompt_text',
-            'shared_prompt__prompt_name',
-        )
-    )
-    # Добавляем effective_text — итоговый текст с подстановкой языка
-    for p in prompts:
-        if p['shared_prompt_id']:
-            p['is_shared'] = True
-            p['effective_text'] = p['shared_prompt__prompt_text'] or p['prompt_text']
-        else:
-            p['is_shared'] = False
-            p['effective_text'] = p['prompt_text']
+    ui_language = request.GET.get('ui_language', 'Русский')
+    prompts = []
+    for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name', 'id'):
+        prompts.append({
+            'id': p.id,
+            'topic_id': p.topic_id,
+            'topic__programming_language': p.topic.programming_language_id if p.topic else None,
+            'prompt_name': p.prompt_name,
+            'name': get_localized_name(p, ui_language, 'prompt_name'),
+            'prompt_text': p.prompt_text,
+            'effective_text': p.get_effective_text(ui_language, ""),
+            'shared_prompt_id': p.shared_prompt_id,
+            'shared_prompt__prompt_name': p.shared_prompt.prompt_name if p.shared_prompt else None,
+            'is_shared': bool(p.shared_prompt),
+        })
     return JsonResponse(prompts, safe=False)
 
 
@@ -381,6 +386,7 @@ def get_shared_prompts(request):
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
 
+    ui_language = request.GET.get('ui_language', 'Русский')
     language_id = request.GET.get('language_id')
     qs = SharedPrompt.objects.prefetch_related('programming_languages')
 
@@ -395,7 +401,9 @@ def get_shared_prompts(request):
         shared.append({
             'id': sp.id,
             'prompt_name': sp.prompt_name,
+            'name': get_localized_name(sp, ui_language, 'prompt_name'),
             'prompt_text': sp.prompt_text,
+            'effective_text': sp.get_effective_text(ui_language, ""),
             'language_ids': list(sp.programming_languages.values_list('id', flat=True)),
             'created_at': sp.created_at.isoformat() if sp.created_at else None,
             'updated_at': sp.updated_at.isoformat() if sp.updated_at else None,
@@ -408,41 +416,49 @@ def get_problem_data(request):
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
 
-    languages = list(ProgrammingLanguage.objects.order_by('language_name').values('id', 'language_name'))
-    topics = list(
-        Topic.objects.select_related("programming_language")
-        .order_by("topic_name")
-        .values('id', 'topic_name', 'programming_language')
-    )
+    ui_language = request.GET.get('ui_language', 'Русский')
 
-    prompts_qs = Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt") \
-        .order_by("prompt_name", "id") \
-        .values(
-            'id',
-            'topic_id',
-            'topic__programming_language',
-            'prompt_text',
-            'prompt_name',
-            'shared_prompt_id',
-            'shared_prompt__prompt_text',
-            'shared_prompt__prompt_name',
-        )
-    prompts = list(prompts_qs)
-    for p in prompts:
-        if p['shared_prompt_id']:
-            p['is_shared'] = True
-            p['effective_text'] = p['shared_prompt__prompt_text'] or p['prompt_text']
-        else:
-            p['is_shared'] = False
-            p['effective_text'] = p['prompt_text']
+    languages = [
+        {
+            'id': lang.id,
+            'language_name': lang.language_name,
+            'name': lang.language_name,
+        }
+        for lang in ProgrammingLanguage.objects.order_by('language_name')
+    ]
 
-    shared_qs = SharedPrompt.objects.prefetch_related('programming_languages')
+    topics = []
+    for topic in Topic.objects.select_related("programming_language").order_by('topic_name'):
+        topics.append({
+            'id': topic.id,
+            'topic_name': topic.topic_name,
+            'name': get_localized_name(topic, ui_language, 'topic_name'),
+            'programming_language': topic.programming_language_id,
+        })
+
+    prompts = []
+    for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name', 'id'):
+        prompts.append({
+            'id': p.id,
+            'topic_id': p.topic_id,
+            'topic__programming_language': p.topic.programming_language_id if p.topic else None,
+            'prompt_name': p.prompt_name,
+            'name': get_localized_name(p, ui_language, 'prompt_name'),
+            'prompt_text': p.prompt_text,
+            'effective_text': p.get_effective_text(ui_language, ""),
+            'shared_prompt_id': p.shared_prompt_id,
+            'shared_prompt__prompt_name': p.shared_prompt.prompt_name if p.shared_prompt else None,
+            'is_shared': bool(p.shared_prompt),
+        })
+
     shared_prompts = []
-    for sp in shared_qs:
+    for sp in SharedPrompt.objects.prefetch_related('programming_languages'):
         shared_prompts.append({
             'id': sp.id,
             'prompt_name': sp.prompt_name,
+            'name': get_localized_name(sp, ui_language, 'prompt_name'),
             'prompt_text': sp.prompt_text,
+            'effective_text': sp.get_effective_text(ui_language, ""),
             'language_ids': list(sp.programming_languages.values_list('id', flat=True)),
         })
 

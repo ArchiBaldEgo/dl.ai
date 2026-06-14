@@ -793,6 +793,7 @@
                 preprompt: "Препромпт",
                 chooseLanguage: "Выберите язык",
                 chooseTheme: "Выберите тему",
+                choosePrompt: "Выберите промпт",
                 voiceMode: "Голосовой режим",
                 voiceInput: "Голосовой ввод",
                 voiceOutput: "Озвучить ответ",
@@ -842,6 +843,7 @@
                 preprompt: "Preprompt",
                 chooseLanguage: "Choose language",
                 chooseTheme: "Choose theme",
+                choosePrompt: "Choose prompt",
                 voiceMode: "Voice mode",
                 voiceInput: "Voice input",
                 voiceOutput: "Speak answer",
@@ -890,6 +892,7 @@
                 preprompt: "Pré-promp",
                 chooseLanguage: "Choisir la langue",
                 chooseTheme: "Choisir le thème",
+                choosePrompt: "Choisir le pré-promp",
                 voiceMode: "Mode vocal",
                 voiceInput: "Saisie vocale",
                 voiceOutput: "Lire la réponse",
@@ -934,7 +937,13 @@
             return (msg || localization.Russian.voiceStatus[key] || key) + param;
         }
 
-            document.getElementById("selectLang").addEventListener("change", function () {
+        function getUiString(key, defaultValue = '') {
+            const selectLang = document.getElementById('selectLang');
+            const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
+            return (localization[lang] && localization[lang][key]) || defaultValue;
+        }
+
+            document.getElementById("selectLang").addEventListener("change", async function () {
                 const selectedLang = this.options[this.selectedIndex].getAttribute("language");
                 document.querySelector("button[type='submit']").textContent = localization[selectedLang].send;
                 document.querySelector("button[onclick='clearContext()']").textContent = localization[selectedLang].clear;
@@ -968,6 +977,19 @@
 
                 const speakThinkLabel = document.getElementById("speakThinkLabel");
                 if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
+
+                // Reload topics/prompts in the selected UI language
+                problemData = null;
+                await fetchProblemData();
+                const languageId = parseInt(languageSelect.value);
+                populateLanguages(problemData.languages);
+                if (!isNaN(languageId)) {
+                    populateTopics(languageId);
+                    populatePrompts(languageId, null);
+                } else {
+                    populateTopics(null);
+                    populatePrompts(null, null);
+                }
 
                 saveInterfaceLanguage();
                 updateVoiceStatus(getVoiceStatusText('readyForVoice'));
@@ -1124,7 +1146,13 @@
                     } catch (e) {}
 
                     try {
-                        const url = `/ai/api/problem-data/${window.location.search || ''}`;
+                        const uiLang = document.getElementById('selectLang').value || 'Русский';
+                        let url = '/ai/api/problem-data/';
+                        if (window.location.search) {
+                            url += window.location.search + '&ui_language=' + encodeURIComponent(uiLang);
+                        } else {
+                            url += '?ui_language=' + encodeURIComponent(uiLang);
+                        }
                         const response = await fetch(url);
                         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                         const data = await response.json();
@@ -1146,7 +1174,7 @@
                 }
 
                 function populateLanguages(languages) {
-                    languageSelect.innerHTML = '<option value="">Выберите язык</option>';
+                    languageSelect.innerHTML = '<option value="">' + getUiString('select_prog_lang', 'Выберите язык программирования') + '</option>';
                     if (languages && languages.length > 0) {
                         languages.forEach(lang => {
                             const option = new Option(lang.language_name, lang.id);
@@ -1157,11 +1185,11 @@
                 }
 
                 function populateTopics(languageId) {
-                    topicSelect.innerHTML = '<option value="">Выберите тему</option>';
+                    topicSelect.innerHTML = '<option value="">' + getUiString('chooseTheme', 'Выберите тему') + '</option>';
                     const topics = (problemData && problemData.topics) || [];
                     const filteredTopics = topics.filter(topic => topic.programming_language == languageId);
                     filteredTopics.forEach(topic => {
-                        const option = new Option(topic.topic_name, topic.id);
+                        const option = new Option(topic.name || topic.topic_name, topic.id);
                         topicSelect.appendChild(option);
                     });
                     selectFirstIfSingle(topicSelect);
@@ -1180,7 +1208,7 @@
                 }
 
                 function populatePrompts(languageId, topicId) {
-                    promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
+                    promptSelect.innerHTML = '<option value="">' + getUiString('choosePrompt', 'Выберите промпт') + '</option>';
                     if (!problemData) return;
                     let allPrompts = (problemData.prompts || []).slice();
 
@@ -1193,7 +1221,7 @@
                         shared.forEach(sp => {
                             allPrompts.push({
                                 id: `shared_${sp.id}`,
-                                prompt_name: `[Общий] ${sp.prompt_name}`,
+                                prompt_name: `[Общий] ${sp.name || sp.prompt_name}`,
                                 topic_id: null,
                                 topic__programming_language: langIdStr
                             });
@@ -1202,7 +1230,7 @@
 
                     const filteredPrompts = filterPrompts(allPrompts, languageId, topicId);
                     filteredPrompts.forEach(prompt => {
-                        const option = new Option(prompt.prompt_name, prompt.id);
+                        const option = new Option(prompt.name || prompt.prompt_name, prompt.id);
                         promptSelect.appendChild(option);
                     });
                     selectFirstIfSingle(promptSelect);

@@ -2,6 +2,8 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
+from .i18n import get_localized_name, get_localized_text
+
 
 class ExternalDLAccount(models.Model):
     """Link between Django User and external DL (dl.gsu.by) account."""
@@ -52,17 +54,26 @@ class ProgrammingLanguage(models.Model):
 
 class Topic(models.Model):
     topic_name = models.CharField(max_length=255)
+    topic_name_ru = models.CharField(max_length=255, blank=True, default="")
+    topic_name_en = models.CharField(max_length=255, blank=True, default="")
+    topic_name_fr = models.CharField(max_length=255, blank=True, default="")
     programming_language = models.ForeignKey(ProgrammingLanguage, on_delete=models.CASCADE, null = True)  # Добавляем связь с языком программирования
 
     def __str__(self):
-        return self.topic_name
+        return get_localized_name(self, "", "topic_name")
 
 
 # Общий (shared) препромпт - не привязан к конкретному языку программирования.
 # Текст может содержать placeholder {language}, который заменяется на имя языка при использовании.
 class SharedPrompt(models.Model):
     prompt_name = models.CharField(max_length=255)
+    prompt_name_ru = models.CharField(max_length=255, blank=True, default="")
+    prompt_name_en = models.CharField(max_length=255, blank=True, default="")
+    prompt_name_fr = models.CharField(max_length=255, blank=True, default="")
     prompt_text = models.TextField()
+    prompt_text_ru = models.TextField(blank=True, default="")
+    prompt_text_en = models.TextField(blank=True, default="")
+    prompt_text_fr = models.TextField(blank=True, default="")
     # Языки, для которых этот общий препромпт доступен (blank = для всех)
     programming_languages = models.ManyToManyField(
         ProgrammingLanguage, blank=True, related_name="shared_prompts"
@@ -83,7 +94,14 @@ class SharedPrompt(models.Model):
     )
 
     def __str__(self):
-        return f"[Общий] {self.prompt_name}"
+        return f"[Общий] {get_localized_name(self, '', 'prompt_name')}"
+
+    def get_effective_text(self, ui_language="", programming_language_name=""):
+        base = get_localized_text(self, ui_language, "prompt_text") or self.prompt_text
+        if programming_language_name:
+            base = base.replace("{language}", programming_language_name)
+            base = base.replace("{язык}", programming_language_name)
+        return base
 
     class Meta:
         db_table = 'ai_sharedprompt'
@@ -93,7 +111,13 @@ class SharedPrompt(models.Model):
 class Prompt(models.Model):
     topic = models.ForeignKey(Topic, on_delete=models.CASCADE, null=True, blank=True)
     prompt_text = models.TextField()
+    prompt_text_ru = models.TextField(blank=True, default="")
+    prompt_text_en = models.TextField(blank=True, default="")
+    prompt_text_fr = models.TextField(blank=True, default="")
     prompt_name = models.CharField(max_length=255, null = True)
+    prompt_name_ru = models.CharField(max_length=255, blank=True, default="")
+    prompt_name_en = models.CharField(max_length=255, blank=True, default="")
+    prompt_name_fr = models.CharField(max_length=255, blank=True, default="")
     # Ссылка на общий препромпт (если есть - текст берётся из него с подстановкой языка)
     shared_prompt = models.ForeignKey(
         SharedPrompt, on_delete=models.SET_NULL, null=True, blank=True,
@@ -114,22 +138,23 @@ class Prompt(models.Model):
         related_name="editable_prompts",
     )
 
-    def get_effective_text(self, language_name: str = ""):
-        """Возвращает итоговый текст препромпта с подстановкой языка."""
+    def get_effective_text(self, ui_language: str = "", programming_language_name: str = ""):
+        """Возвращает итоговый текст препромпта с учётом UI-языка и языка программирования."""
         if self.prompt_text_override:
             base = self.prompt_text_override
         elif self.shared_prompt:
-            base = self.shared_prompt.prompt_text
+            base = self.shared_prompt.get_effective_text(ui_language, programming_language_name)
         else:
-            base = self.prompt_text
-        if language_name:
-            base = base.replace("{language}", language_name)
-            base = base.replace("{язык}", language_name)
+            base = get_localized_text(self, ui_language, "prompt_text") or self.prompt_text
+        if programming_language_name:
+            base = base.replace("{language}", programming_language_name)
+            base = base.replace("{язык}", programming_language_name)
         return base
 
     def __str__(self):
-        # Возвращаем только имя промпта вместо полного текста
-        return self.prompt_name if self.prompt_name else f"Prompt #{self.id}"
+        # Возвращаем локализованное имя промпта вместо полного текста
+        name = get_localized_name(self, "", "prompt_name")
+        return name if name else f"Prompt #{self.id}"
 
     class Meta:
         db_table = 'ai_prompt'
@@ -206,3 +231,60 @@ class AIModelAvailability(models.Model):
 
     def __str__(self):
         return f"{self.model_key}: {'up' if self.is_available else 'down'}"
+
+
+class AIRequestLog(models.Model):
+    STATUS_SUCCESS = "success"
+    STATUS_ERROR = "error"
+
+    STATUS_CHOICES = (
+        (STATUS_SUCCESS, "Success"),
+        (STATUS_ERROR, "Error"),
+    )
+
+    SOURCE_WEBSOCKET = "websocket"
+    SOURCE_ARM = "arm"
+
+    SOURCE_CHOICES = (
+        (SOURCE_WEBSOCKET, "WebSocket"),
+        (SOURCE_ARM, "ARM"),
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ai_request_logs",
+    )
+    external_user_id = models.CharField(max_length=255, blank=True, db_index=True)
+    username = models.CharField(max_length=255, blank=True)
+    user_full_name = models.CharField(max_length=500, blank=True)
+    client_id = models.CharField(max_length=255, blank=True)
+    source = models.CharField(max_length=32, choices=SOURCE_CHOICES, default=SOURCE_WEBSOCKET)
+    sent_at = models.DateTimeField()
+    received_at = models.DateTimeField(null=True, blank=True)
+    duration_seconds = models.FloatField(null=True, blank=True)
+    model_names = models.JSONField(default=list, blank=True)
+    message = models.TextField(blank=True)
+    response_text = models.TextField(blank=True)
+    tokens = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_SUCCESS)
+    error_message = models.TextField(blank=True)
+
+    # Context selected by the user (programming task pages and ARM)
+    programming_language_id = models.IntegerField(null=True, blank=True)
+    programming_language_name = models.CharField(max_length=255, blank=True)
+    topic_id = models.IntegerField(null=True, blank=True)
+    topic_name = models.CharField(max_length=255, blank=True)
+    prompt_id = models.IntegerField(null=True, blank=True)
+    prompt_name = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        db_table = "ai_airequestlog"
+        verbose_name = "AI request log"
+        verbose_name_plural = "AI request logs"
+        ordering = ("-sent_at",)
+
+    def __str__(self):
+        return f"{self.sent_at} — {self.user_full_name or self.username or self.external_user_id}"

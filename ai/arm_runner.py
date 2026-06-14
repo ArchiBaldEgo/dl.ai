@@ -1,13 +1,20 @@
 import copy
+import json
 import threading
 import time
 import uuid
 from time import perf_counter
 
 from asgiref.sync import async_to_sync
+from django.contrib.auth import get_user_model
+from django.utils import timezone
 from django.utils.html import strip_tags
 
 from .model_health import get_runtime_model_handlers
+from .models import AIRequestLog, ExternalDLAccount
+
+
+User = get_user_model()
 
 _jobs_lock = threading.Lock()
 _jobs = {}
@@ -235,6 +242,40 @@ def _run_job_worker(run_id, message, selected_model_keys, user_id):
                     }
                 )
 
+        start_time = timezone.now()
+        models_titles = [m["title"] for m in ordered_models]
+        user = None
+        username = ""
+        external_id = ""
+        full_name = ""
+        try:
+            user = User.objects.get(pk=user_id)
+            username = user.username
+            full_name = (user.get_full_name() or "").strip() or username
+            try:
+                external_id = user.external_dl_account.external_user_id
+            except (ExternalDLAccount.DoesNotExist, AttributeError):
+                external_id = username
+        except User.DoesNotExist:
+            pass
+
+        log = AIRequestLog.objects.create(
+            user=user,
+            username=username,
+            external_user_id=external_id,
+            user_full_name=full_name,
+            source=AIRequestLog.SOURCE_ARM,
+            sent_at=start_time,
+            model_names=models_titles,
+            message=message,
+            programming_language_id=programming_language_id,
+            programming_language_name=programming_language_name or "",
+            topic_id=topic_id,
+            topic_name=topic_name or "",
+            prompt_id=prompt_id,
+            prompt_name=prompt_name or "",
+        )
+
         if not ordered_models:
             _update_job(
                 run_id,
@@ -242,6 +283,12 @@ def _run_job_worker(run_id, message, selected_model_keys, user_id):
                 error_message="Выбранные модели недоступны. Обновите список и попробуйте снова.",
                 current_model_key="",
                 current_model_title="",
+            )
+            AIRequestLog.objects.filter(pk=log.pk).update(
+                received_at=timezone.now(),
+                duration_seconds=0,
+                status=AIRequestLog.STATUS_ERROR,
+                error_message="Выбранные модели недоступны",
             )
             return
 
@@ -314,6 +361,27 @@ def _run_job_worker(run_id, message, selected_model_keys, user_id):
             job["status"] = "completed"
             job["updated_at_ts"] = time.time()
 
+        end_time = timezone.now()
+        results = job.get("results") or []
+        response_summary = json.dumps(
+            [
+                {
+                    "model": r.get("model_title"),
+                    "status": r.get("status"),
+                    "duration": r.get("duration"),
+                    "tokens": r.get("tokens"),
+                }
+                for r in results
+            ],
+            ensure_ascii=False,
+        )
+        AIRequestLog.objects.filter(pk=log.pk).update(
+            received_at=end_time,
+            duration_seconds=(end_time - start_time).total_seconds(),
+            response_text=response_summary[:5000],
+            status=AIRequestLog.STATUS_SUCCESS,
+        )
+
     except Exception as exc:
         _update_job(
             run_id,
@@ -322,9 +390,28 @@ def _run_job_worker(run_id, message, selected_model_keys, user_id):
             current_model_key="",
             current_model_title="",
         )
+        if "log" in locals():
+            end_time = timezone.now()
+            AIRequestLog.objects.filter(pk=log.pk).update(
+                received_at=end_time,
+                duration_seconds=(end_time - start_time).total_seconds() if "start_time" in locals() else None,
+                status=AIRequestLog.STATUS_ERROR,
+                error_message=str(exc)[:2000],
+            )
 
 
-def start_arm_sequential_run(message, selected_model_keys, user_id):
+def start_arm_sequential_run(
+    message,
+    selected_model_keys,
+    user_id,
+    *,
+    programming_language_id=None,
+    programming_language_name="",
+    topic_id=None,
+    topic_name="",
+    prompt_id=None,
+    prompt_name="",
+):
     handlers = get_runtime_model_handlers()
     valid_model_keys = [key for key in selected_model_keys if key in handlers]
     if not valid_model_keys:
