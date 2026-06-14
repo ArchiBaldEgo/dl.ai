@@ -23,6 +23,7 @@ from ai.views import (
     get_languages,
     get_topics,
     get_prompts,
+    get_shared_prompts,
     prompt_developer_login_view,
     health_view,
     set_password_view,
@@ -38,6 +39,7 @@ urlpatterns = [
     path('ai/test-panel/login/', prompt_developer_login_view, name='prompt_developer_login_view_fallback'),
     path('ai/api/languages/', get_languages, name='get_languages'),
     path('ai/api/topics/', get_topics, name='get_topics'),
+    path('ai/api/shared-prompts/', get_shared_prompts, name='get_shared_prompts'),
     path('ai/api/prompts/', get_prompts, name='get_prompts'),
 
 ] + static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)

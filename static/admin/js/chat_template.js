@@ -426,11 +426,18 @@ function simulateSend() {
         return;
     }
     
+    var sharedPromptSelect = document.getElementById("selectSharedPrompt");
+    var sharedPreprompt = sharedPromptSelect ? sharedPromptSelect.value : "";
+    
+    // Используем общий препромпт, если он выбран
+    var effectivePreprompt = sharedPreprompt || "";
+    
     ws.send(JSON.stringify({
         type: '1',
         message: input.value,
         value: value,
         language: language,
+        preprompt: effectivePreprompt,
     }));
     
     setRequestLock(true);
@@ -653,11 +660,18 @@ function sendMessage(event) {
         return;
     }
     
+    var sharedPromptSelect = document.getElementById("selectSharedPrompt");
+    var sharedPreprompt = sharedPromptSelect ? sharedPromptSelect.value : "";
+    
+    // Используем общий препромпт, если он выбран
+    var effectivePreprompt = sharedPreprompt || "";
+    
     ws.send(JSON.stringify({
         type: '1',
         message: input.value,
         value: value,
         language: language,
+        preprompt: effectivePreprompt,
     }));
     setRequestLock(true);
     notEnter = true;
@@ -1054,4 +1068,33 @@ window.onload = function() {
             speakThinkEnabled = this.checked;
         });
     }
+    
+    // Загрузка общих препромптов для чата
+    loadSharedPromptsForChat();
 };
+
+async function loadSharedPromptsForChat() {
+    const sharedPromptSelect = document.getElementById("selectSharedPrompt");
+    const sharedPromptSection = document.querySelector(".shared-prompt-section");
+    if (!sharedPromptSelect) return;
+    
+    try {
+        const urlWithAuth = `/ai/api/shared-prompts/${window.location.search || ''}`;
+        const response = await fetch(urlWithAuth);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const sharedPrompts = await response.json();
+        sharedPromptSelect.innerHTML = '<option value="">Выберите общий препромпт</option>';
+        if (sharedPrompts && sharedPrompts.length > 0) {
+            sharedPrompts.forEach(sp => {
+                const option = new Option(sp.prompt_name, sp.id);
+                sharedPromptSelect.appendChild(option);
+            });
+            if (sharedPromptSection) sharedPromptSection.style.display = "flex";
+        } else {
+            if (sharedPromptSection) sharedPromptSection.style.display = "none";
+        }
+    } catch (error) {
+        console.error('Error fetching shared prompts:', error);
+        if (sharedPromptSection) sharedPromptSection.style.display = "none";
+    }
+}

@@ -741,3 +741,15 @@
              max-width: 180px;
          }
         }
+/* Общие препромпты */
+.shared-prompt-section {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-top: 5px;
+}
+
+.shared-prompt-label {
+    color: #2196F3;
+    font-weight: bold;
+}

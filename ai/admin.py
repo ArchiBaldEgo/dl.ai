@@ -21,7 +21,7 @@ from .model_health import (
     is_model_health_refresh_running,
     trigger_model_health_refresh_async,
 )
-from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings, ExternalDLAccount
+from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
 from .auth_backends import (
     ADMIN_EXTERNAL_AUTH_BACKEND,
     ensure_prompt_developer_group,
@@ -736,6 +736,10 @@ class PromptForm(forms.ModelForm):
                 'rows': 25,
                 'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
             }),
+            'prompt_text_override': forms.Textarea(attrs={
+                'rows': 25,
+                'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
+            }),
         }
 
     class Media:
@@ -791,6 +795,75 @@ class PromptForm(forms.ModelForm):
         if topic and programming_language and topic.programming_language_id != programming_language.id:
             self.add_error("topic", "Тема не относится к выбранному языку программирования.")
         return cleaned_data
+
+
+class SharedPromptForm(forms.ModelForm):
+    """Форма для общих (shared) препромптов."""
+    class Meta:
+        model = SharedPrompt
+        fields = '__all__'
+        widgets = {
+            'prompt_text': forms.Textarea(attrs={
+                'rows': 25,
+                'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
+            }),
+        }
+
+class SharedPromptAdmin(admin.ModelAdmin):
+    form = SharedPromptForm
+    list_display = ('prompt_name', 'language_list', 'updated_at', 'owner_username')
+    list_display_links = ('prompt_name',)
+    list_filter = ('programming_languages',)
+    search_fields = ('prompt_name', 'prompt_text')
+    autocomplete_fields = ('owner', 'editors')
+    filter_horizontal = ('programming_languages', 'editors')
+
+    def language_list(self, obj):
+        langs = obj.programming_languages.all()
+        return ", ".join([l.language_name for l in langs]) if langs else "Все языки"
+    language_list.short_description = "Языки"
+
+    def owner_username(self, obj):
+        return obj.owner.username if obj.owner else "-"
+    owner_username.short_description = "Owner"
+
+    def has_module_permission(self, request):
+        if _is_staff_or_superuser(request.user):
+            return True
+        return _is_prompt_developer_user(request)
+
+    def has_view_permission(self, request, obj=None):
+        return _is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)
+
+    def has_add_permission(self, request):
+        return _is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)
+
+    def has_change_permission(self, request, obj=None):
+        if request.user.is_superuser:
+            return True
+        if not (_is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)):
+            return False
+        if obj is None:
+            return True
+        if obj.owner_id == request.user.pk:
+            return True
+        return obj.editors.filter(pk=request.user.pk).exists()
+
+    def has_delete_permission(self, request, obj=None):
+        if request.user.is_superuser:
+            return True
+        if not (_is_staff_or_superuser(request.user) or _is_prompt_developer_user(request)):
+            return False
+        if obj is None:
+            return True
+        return obj.owner_id == request.user.pk
+
+    def get_fieldsets(self, request, obj=None):
+        return (
+            (None, {"fields": ("prompt_name", "prompt_text", "programming_languages")}),
+            ("Доступ", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
+        )
+
 
 # Inline для Prompt
 class PromptInline(admin.TabularInline):
@@ -920,7 +993,7 @@ class PromptAdmin(admin.ModelAdmin):
         return obj.owner_id == request.user.pk
 
     def get_fieldsets(self, request, obj=None):
-        main_fields = ("programming_language", "topic", "prompt_name", "prompt_text")
+        main_fields = ("programming_language", "topic", "prompt_name", "shared_prompt", "prompt_text_override", "prompt_text")
         if request.user.is_superuser:
             return (
                 (None, {"fields": main_fields}),
@@ -933,7 +1006,7 @@ class PromptAdmin(admin.ModelAdmin):
             return ()
         if self._can_edit_prompt(request, obj):
             return ()
-        return ("programming_language", "topic", "prompt_name", "prompt_text")
+        return ("programming_language", "topic", "prompt_name", "shared_prompt", "prompt_text_override", "prompt_text")
 
     def save_model(self, request, obj, form, change):
         if not change and not obj.owner_id:
@@ -1003,3 +1076,4 @@ class AIAppSettingsAdmin(admin.ModelAdmin):
 admin.site.register(ProgrammingLanguage, ProgrammingLanguageAdmin)
 admin.site.register(Topic, TopicAdmin)
 admin.site.register(Prompt, PromptAdmin)
+admin.site.register(SharedPrompt, SharedPromptAdmin)

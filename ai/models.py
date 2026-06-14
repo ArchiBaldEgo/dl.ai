@@ -48,7 +48,7 @@ class ProgrammingLanguage(models.Model):
 
     def __str__(self):
         return self.language_name
-    
+
 
 class Topic(models.Model):
     topic_name = models.CharField(max_length=255)
@@ -56,13 +56,51 @@ class Topic(models.Model):
 
     def __str__(self):
         return self.topic_name
-    
 
-# Модель препромпта
+
+# Общий (shared) препромпт - не привязан к конкретному языку программирования.
+# Текст может содержать placeholder {language}, который заменяется на имя языка при использовании.
+class SharedPrompt(models.Model):
+    prompt_name = models.CharField(max_length=255)
+    prompt_text = models.TextField()
+    # Языки, для которых этот общий препромпт доступен (blank = для всех)
+    programming_languages = models.ManyToManyField(
+        ProgrammingLanguage, blank=True, related_name="shared_prompts"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="owned_shared_prompts",
+    )
+    editors = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        related_name="editable_shared_prompts",
+    )
+
+    def __str__(self):
+        return f"[Общий] {self.prompt_name}"
+
+    class Meta:
+        db_table = 'ai_sharedprompt'
+        verbose_name = 'Общий препромпт'
+        verbose_name_plural = 'Общие препромпты'
+
 class Prompt(models.Model):
     topic = models.ForeignKey(Topic, on_delete=models.CASCADE, null=True, blank=True)
     prompt_text = models.TextField()
     prompt_name = models.CharField(max_length=255, null = True)
+    # Ссылка на общий препромпт (если есть - текст берётся из него с подстановкой языка)
+    shared_prompt = models.ForeignKey(
+        SharedPrompt, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="language_prompts"
+    )
+    # Переопределение текста для конкретного языка (если null - используется shared_prompt.prompt_text)
+    prompt_text_override = models.TextField(null=True, blank=True)
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -76,9 +114,26 @@ class Prompt(models.Model):
         related_name="editable_prompts",
     )
 
+    def get_effective_text(self, language_name: str = ""):
+        """Возвращает итоговый текст препромпта с подстановкой языка."""
+        if self.prompt_text_override:
+            base = self.prompt_text_override
+        elif self.shared_prompt:
+            base = self.shared_prompt.prompt_text
+        else:
+            base = self.prompt_text
+        if language_name:
+            base = base.replace("{language}", language_name)
+            base = base.replace("{язык}", language_name)
+        return base
+
     def __str__(self):
         # Возвращаем только имя промпта вместо полного текста
-        return self.prompt_name if self.prompt_name else f"Prompt #{self.id}"    
+        return self.prompt_name if self.prompt_name else f"Prompt #{self.id}"
+
+    class Meta:
+        db_table = 'ai_prompt'
+
 
 
 class AIAppSettings(models.Model):

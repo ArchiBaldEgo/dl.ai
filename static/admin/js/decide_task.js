@@ -425,6 +425,7 @@
                 var input = document.getElementById("messageText");
                 var progLng = document.querySelector("#selectProgLng").value;
                 var preprompt = document.querySelector("#selectPrompt").value;
+                var sharedPreprompt = sharedPromptSelect ? sharedPromptSelect.value : "";
                 
                 if (!input.value.trim()) {
                     return;
@@ -434,13 +435,16 @@
                     return;
                 }
                 
+                // Используем общий препромпт, если он выбран, иначе обычный
+                var effectivePreprompt = sharedPreprompt || preprompt;
+                
                 ws.send(JSON.stringify({
                     type: '2',
                     message: input.value,
                     value: value,
                     language: language,
                     progLng: progLng,
-                    preprompt: preprompt
+                    preprompt: effectivePreprompt
                 }));
 
                 setRequestLock(true);
@@ -657,6 +661,7 @@
                 var input = document.getElementById("messageText");
                 var progLng = document.querySelector("#selectProgLng").value;
                 var preprompt = document.querySelector("#selectPrompt").value;
+                var sharedPreprompt = sharedPromptSelect ? sharedPromptSelect.value : "";
 
                 if (!value) {
                     alert("Сегодня нет доступных моделей. Повторите позже.");
@@ -672,13 +677,16 @@
                     return;
                 }
                 
+                // Используем общий препромпт, если он выбран, иначе обычный
+                var effectivePreprompt = sharedPreprompt || preprompt;
+                
                 ws.send(JSON.stringify({
                     type: '2',
                     message: input.value,
                     value: value,
                     language: language,
                     progLng: progLng,
-                    preprompt: preprompt
+                    preprompt: effectivePreprompt
                 }));
                 setRequestLock(true);
                 notEnter = true;
@@ -1080,6 +1088,8 @@
                 const languageSelect = document.getElementById("selectProgLng");
                 const topicSelect = document.getElementById("selectTheme");
                 const promptSelect = document.getElementById("selectPrompt");
+                const sharedPromptSelect = document.getElementById("selectSharedPrompt");
+                const sharedPromptSection = document.querySelector(".shared-prompt-section");
 
                 async function fetchData(url) {
                     try {
@@ -1160,6 +1170,23 @@
                     selectFirstIfSingle(promptSelect);
                 }
 
+                async function loadSharedPrompts(languageId) {
+                    if (!sharedPromptSelect) return;
+                    const url = languageId ? `/ai/api/shared-prompts/?language_id=${languageId}` : "/ai/api/shared-prompts";
+                    const sharedPrompts = await fetchData(url);
+                    sharedPromptSelect.innerHTML = '<option value="">Выберите общий препромпт</option>';
+                    if (sharedPrompts && sharedPrompts.length > 0) {
+                        sharedPrompts.forEach(sp => {
+                            const option = new Option(sp.prompt_name, sp.id);
+                            sharedPromptSelect.appendChild(option);
+                        });
+                        if (sharedPromptSection) sharedPromptSection.style.display = "flex";
+                    } else {
+                        if (sharedPromptSection) sharedPromptSection.style.display = "none";
+                    }
+                    selectFirstIfSingle(sharedPromptSelect);
+                }
+
                 languageSelect.addEventListener("change", async () => {
                     const languageId = parseInt(languageSelect.value);
                     topicSelect.innerHTML = '<option value="">Выберите тему</option>';
@@ -1167,8 +1194,10 @@
                     if (!isNaN(languageId)) {
                         await loadTopics(languageId);
                         await loadPrompts(languageId, null);
+                        await loadSharedPrompts(languageId);
                     } else {
                         await loadPrompts(null, null);
+                        await loadSharedPrompts(null);
                     }
                 });
 
@@ -1181,6 +1210,7 @@
 
                 await loadLanguages();
                 await loadPrompts(null, null);
+                await loadSharedPrompts(null);
             });
 
             window.onload = function () {

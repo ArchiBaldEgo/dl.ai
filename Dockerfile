@@ -16,8 +16,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get install -y --no-install-recommends \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
-        -o Acquire::Retries=5 \
-        -o Acquire::http::Timeout=60 \
+        -o Acquire::Retries=10 \
+        -o Acquire::http::Timeout=300 \
         ca-certificates curl gnupg tini libpq-dev \
         fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 \
         libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 libgbm1 \
@@ -67,8 +67,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get install -y --no-install-recommends \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
-        -o Acquire::Retries=5 \
-        -o Acquire::http::Timeout=60 \
+        -o Acquire::Retries=10 \
+        -o Acquire::http::Timeout=300 \
         ca-certificates curl fonts-liberation libasound2 libatk-bridge2.0-0 \
         libatk1.0-0 libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 \
         libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 \

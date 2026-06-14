@@ -11,7 +11,7 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'DjangoTest.settings')
 django.setup()
 
 from .model_health import MODEL_ALIASES
-from .models import ProgrammingLanguage, Prompt
+from .models import ProgrammingLanguage, Prompt, SharedPrompt
 from .utils import *
 from asgiref.sync import sync_to_async
 from .external_auth import (
@@ -26,9 +26,10 @@ current_tokens = 0
 logger = logging.getLogger(__name__)
 
 @sync_to_async
-def getPromptText(prompt_id):
+def getPromptText(prompt_id, language_name=""):
     try:
-        return Prompt.objects.get(id=prompt_id).prompt_text
+        prompt = Prompt.objects.select_related('shared_prompt').get(id=prompt_id)
+        return prompt.get_effective_text(language_name)
     except Prompt.DoesNotExist:
         return None
     except Exception as e:
@@ -155,9 +156,16 @@ class MyConsumer(AsyncWebsocketConsumer):
             self.old_language = language
 
             # Обработка специальных типов сообщений
-            if type == "2":
+            if type == "1":
+                preprompt = data.get('preprompt', '')
+                if preprompt:
+                    promptText = await getPromptText(preprompt, "")
+                    if promptText and (not hasattr(self, 'last_prompt') or self.last_prompt != promptText):
+                        message = f"{message}\n\nПрепромпт: {promptText}"
+                        self.last_prompt = promptText
+            elif type == "2":
                 progLng = await getProgLng(data.get('progLng'))
-                promptText = await getPromptText(data.get('preprompt'))
+                promptText = await getPromptText(data.get('preprompt'), progLng or "")
                 message = f"У меня есть задача по программированию, решай ее на языке {progLng}\n{message}"
                 if promptText and (not hasattr(self, 'last_prompt') or self.last_prompt != promptText):
                     message += f". Препромпт: {promptText}"
@@ -165,7 +173,7 @@ class MyConsumer(AsyncWebsocketConsumer):
             elif type == "3":
                 progLng = await getProgLng(data.get('progLng'))
                 code = data.get('code', '')
-                promptText = await getPromptText(data.get('preprompt'))
+                promptText = await getPromptText(data.get('preprompt'), progLng or "")
                 message = f"У меня есть задача по программированию, я написал для нее код на языке {progLng}, код не работает, найди пожалуйста ошибку. Задача: {message}. Код: {code}."
                 if promptText and (not hasattr(self, 'last_prompt') or self.last_prompt != promptText):
                     message += f". Препромпт: {promptText}"

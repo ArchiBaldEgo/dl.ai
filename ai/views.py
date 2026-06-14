@@ -5,7 +5,7 @@ from django.contrib.auth import authenticate, login, logout
 from django.shortcuts import redirect, render
 from django.http import JsonResponse
 from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound
-from django.db import ProgrammingError
+from django.db import ProgrammingError, models
 from django.contrib.staticfiles import finders
 from django.middleware import csrf
 from functools import wraps
@@ -13,7 +13,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods  
 from django.conf import settings
 from .model_health import get_available_model_options
-from .models import ProgrammingLanguage, Topic, Prompt, AIAppSettings, ExternalDLAccount
+from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
 from .auth_backends import (
     ADMIN_EXTERNAL_AUTH_BACKEND,
     create_admin_user_with_password,
@@ -352,7 +352,7 @@ def get_prompts(request):
         return HttpResponseForbidden("Authentication required")
 
     prompts = list(
-        Prompt.objects.select_related("topic", "topic__programming_language", "owner")
+        Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt")
         .order_by("prompt_name", "id")
         .values(
             'id',
@@ -360,9 +360,47 @@ def get_prompts(request):
             'topic__programming_language',
             'prompt_text',
             'prompt_name',
+            'shared_prompt_id',
+            'shared_prompt__prompt_text',
+            'shared_prompt__prompt_name',
         )
     )
+    # Добавляем effective_text — итоговый текст с подстановкой языка
+    for p in prompts:
+        if p['shared_prompt_id']:
+            p['is_shared'] = True
+            p['effective_text'] = p['shared_prompt__prompt_text'] or p['prompt_text']
+        else:
+            p['is_shared'] = False
+            p['effective_text'] = p['prompt_text']
     return JsonResponse(prompts, safe=False)
+
+
+def get_shared_prompts(request):
+    """Возвращает общие (shared) препромпты с привязкой к языкам."""
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+
+    language_id = request.GET.get('language_id')
+    qs = SharedPrompt.objects.prefetch_related('programming_languages')
+
+    if language_id:
+        # Фильтруем: либо общий препромпт привязан к этому языку, либо без привязки (для всех)
+        qs = qs.filter(
+            models.Q(programming_languages__id=language_id) | models.Q(programming_languages__isnull=True)
+        ).distinct()
+
+    shared = []
+    for sp in qs:
+        shared.append({
+            'id': sp.id,
+            'prompt_name': sp.prompt_name,
+            'prompt_text': sp.prompt_text,
+            'language_ids': list(sp.programming_languages.values_list('id', flat=True)),
+            'created_at': sp.created_at.isoformat() if sp.created_at else None,
+            'updated_at': sp.updated_at.isoformat() if sp.updated_at else None,
+        })
+    return JsonResponse(shared, safe=False)
 
 
 def asset_view(request, asset_path):
