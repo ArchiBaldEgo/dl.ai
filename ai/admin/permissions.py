@@ -13,6 +13,10 @@ def is_staff_or_superuser(user):
     return bool(user and (user.is_superuser or user.is_staff))
 
 
+def can_access_admin(user):
+    return is_staff_or_superuser(user) or is_prompt_developer_user(user)
+
+
 def can_access_arm(request):
     if not request.user.is_authenticated:
         return False

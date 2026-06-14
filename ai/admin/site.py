@@ -9,7 +9,13 @@ from django.utils.http import urlencode
 from ..constants import ADMIN_LOGOUT_COOKIE_NAME
 from ..http_utils import safe_relative_url
 from .auth import TesterOrStaffAdminAuthenticationForm, _external_admin_entry_response
-from .permissions import can_access_arm, can_access_logs, can_access_model_status, can_access_prompt_admin
+from .permissions import (
+    can_access_admin,
+    can_access_arm,
+    can_access_logs,
+    can_access_model_status,
+    can_access_prompt_admin,
+)
 
 
 class AIAdminSite(admin.AdminSite):
@@ -43,7 +49,7 @@ class AIAdminSite(admin.AdminSite):
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated or not user.is_active:
             return False
-        return is_staff_or_superuser(user)
+        return can_access_admin(user)
 
     def admin_view(self, view, cacheable=False):
         wrapped_view = super().admin_view(view, cacheable)

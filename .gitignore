@@ -30,3 +30,6 @@ staticfiles/
 # Bot logs
 bot/worker/logs/
 bot/worker/logs/*
+
+# Claude
+.claude/

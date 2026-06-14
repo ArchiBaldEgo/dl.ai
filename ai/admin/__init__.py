@@ -4,7 +4,6 @@ The real admin site lives in ai.admin.site.ai_admin_site and is wired in
 DjangoTest.urls through ai.admin.urls.get_ai_admin_urls().
 """
 from django.contrib.auth import get_user_model
-from django.contrib.auth.admin import UserAdmin
 
 from .site import ai_admin_site
 from ..models import AIAppSettings, ProgrammingLanguage, Prompt, SharedPrompt, Topic
@@ -13,6 +12,7 @@ from .models import (
     ProgrammingLanguageAdmin,
     TopicAdmin,
     PromptAdmin,
+    RestrictedUserAdmin,
     SharedPromptAdmin,
 )
 from .forms import PromptForm, SharedPromptForm
@@ -61,4 +61,4 @@ ai_admin_site.register(SharedPrompt, SharedPromptAdmin)
 ai_admin_site.register(AIRequestLog, AIRequestLogAdmin)
 
 User = get_user_model()
-ai_admin_site.register(User, UserAdmin)
+ai_admin_site.register(User, RestrictedUserAdmin)

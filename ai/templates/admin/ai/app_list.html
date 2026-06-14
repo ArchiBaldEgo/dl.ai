@@ -32,6 +32,18 @@
               {% endif %}
             </tr>
           {% endif %}
+
+          {% if is_prompt_developer %}
+            <tr class="model-myprompt{% if my_prompt_url in request.path|urlencode %} current-model{% endif %}">
+              <th scope="row" id="ai-my-prompt">
+                <a href="{{ my_prompt_url }}"{% if my_prompt_url in request.path|urlencode %} aria-current="page"{% endif %}>Мой препромпт</a>
+              </th>
+              <td></td>
+              {% if show_changelinks %}
+                <td><a href="{{ my_prompt_url }}" class="viewlink" aria-describedby="ai-my-prompt">{% translate 'View' %}</a></td>
+              {% endif %}
+            </tr>
+          {% endif %}
         {% endif %}
 
         {% for model in app.models %}

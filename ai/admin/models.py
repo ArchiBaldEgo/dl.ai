@@ -4,6 +4,7 @@ import csv
 
 from django.contrib import admin
 from django.contrib.auth import get_user_model
+from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
 from django.http import HttpResponse
 
@@ -36,13 +37,32 @@ class TopicInline(admin.TabularInline):
     show_change_link = True
 
 
-class ProgrammingLanguageAdmin(admin.ModelAdmin):
+class _StaffOnlyAdminMixin:
+    """Mixin that restricts all admin access to staff/superuser only."""
+
+    def has_module_permission(self, request):
+        return is_staff_or_superuser(request.user)
+
+    def has_view_permission(self, request, obj=None):
+        return is_staff_or_superuser(request.user)
+
+    def has_add_permission(self, request):
+        return is_staff_or_superuser(request.user)
+
+    def has_change_permission(self, request, obj=None):
+        return is_staff_or_superuser(request.user)
+
+    def has_delete_permission(self, request, obj=None):
+        return is_staff_or_superuser(request.user)
+
+
+class ProgrammingLanguageAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     inlines = [TopicInline]
     list_display = ('language_name',)
     search_fields = ('language_name',)
 
 
-class TopicAdmin(admin.ModelAdmin):
+class TopicAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     list_display = ('topic_name', 'programming_language')
     list_filter = ('programming_language',)
     search_fields = ('topic_name', 'topic_name_ru', 'topic_name_en', 'topic_name_fr')
@@ -240,35 +260,19 @@ class SharedPromptAdmin(admin.ModelAdmin):
     owner_username.short_description = "Owner"
 
     def has_module_permission(self, request):
-        if is_staff_or_superuser(request.user):
-            return True
-        return is_prompt_developer_user(request.user)
+        return is_staff_or_superuser(request.user)
 
     def has_view_permission(self, request, obj=None):
-        return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+        return is_staff_or_superuser(request.user)
 
     def has_add_permission(self, request):
-        return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+        return is_staff_or_superuser(request.user)
 
     def has_change_permission(self, request, obj=None):
-        if request.user.is_superuser:
-            return True
-        if not (is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)):
-            return False
-        if obj is None:
-            return True
-        if obj.owner_id == request.user.pk:
-            return True
-        return obj.editors.filter(pk=request.user.pk).exists()
+        return is_staff_or_superuser(request.user)
 
     def has_delete_permission(self, request, obj=None):
-        if request.user.is_superuser:
-            return True
-        if not (is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)):
-            return False
-        if obj is None:
-            return True
-        return obj.owner_id == request.user.pk
+        return is_staff_or_superuser(request.user)
 
     def get_fieldsets(self, request, obj=None):
         return (
@@ -281,13 +285,21 @@ class SharedPromptAdmin(admin.ModelAdmin):
         )
 
 
-class AIAppSettingsAdmin(admin.ModelAdmin):
+class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     list_display = ("is_enabled", "updated_at")
 
     def has_add_permission(self, request):
+        if not is_staff_or_superuser(request.user):
+            return False
         if AIAppSettings.objects.exists():
             return False
         return super().has_add_permission(request)
 
     def has_delete_permission(self, request, obj=None):
+        if not is_staff_or_superuser(request.user):
+            return False
         return False
+
+
+class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
+    """User management restricted to staff/superuser in the AI admin site."""
