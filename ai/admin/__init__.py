@@ -3,8 +3,18 @@
 The real admin site lives in ai.admin.site.ai_admin_site and is wired in
 DjangoTest.urls through ai.admin.urls.get_ai_admin_urls().
 """
+from django.contrib.auth import get_user_model
+from django.contrib.auth.admin import UserAdmin
+
 from .site import ai_admin_site
-from .models import ProgrammingLanguageAdmin, TopicAdmin, PromptAdmin, SharedPromptAdmin
+from ..models import AIAppSettings, ProgrammingLanguage, Prompt, SharedPrompt, Topic
+from .models import (
+    AIAppSettingsAdmin,
+    ProgrammingLanguageAdmin,
+    TopicAdmin,
+    PromptAdmin,
+    SharedPromptAdmin,
+)
 from .forms import PromptForm, SharedPromptForm
 from .logs import AIRequestLogAdmin, admin_request_log_detail_view, admin_request_logs_view
 from .arm import (
@@ -22,6 +32,7 @@ from .auth import _external_admin_entry_response
 
 __all__ = [
     "ai_admin_site",
+    "AIAppSettingsAdmin",
     "ProgrammingLanguageAdmin",
     "TopicAdmin",
     "PromptAdmin",
@@ -39,3 +50,13 @@ __all__ = [
     "admin_request_logs_view",
     "_external_admin_entry_response",
 ]
+
+# Register AI models on the custom admin site so they appear in /ai/admin/.
+ai_admin_site.register(AIAppSettings, AIAppSettingsAdmin)
+ai_admin_site.register(ProgrammingLanguage, ProgrammingLanguageAdmin)
+ai_admin_site.register(Topic, TopicAdmin)
+ai_admin_site.register(Prompt, PromptAdmin)
+ai_admin_site.register(SharedPrompt, SharedPromptAdmin)
+
+User = get_user_model()
+ai_admin_site.register(User, UserAdmin)

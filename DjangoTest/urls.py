@@ -33,7 +33,6 @@ from ai.views import (
 
 urlpatterns = [
     path('health', health_view, name='health'),
-    path('ai/admin/set-password/', set_password_view, name='admin_set_password_view'),
     path('ai/admin/', include(get_ai_admin_urls())),
     path('', include('ai.urls')),
     path('ai/test-panel/login/', prompt_developer_login_view, name='prompt_developer_login_view_fallback'),

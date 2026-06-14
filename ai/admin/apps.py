@@ -1,18 +1,8 @@
-"""Admin config for small AI app models."""
+"""Backward-compatible re-export of AIAppSettingsAdmin.
 
-from django.contrib import admin
+The canonical definition now lives in ai.admin.models to keep all
+ModelAdmins in one place and avoid duplicate admin registrations.
+"""
+from .models import AIAppSettingsAdmin
 
-from ..models import AIAppSettings
-
-
-@admin.register(AIAppSettings)
-class AIAppSettingsAdmin(admin.ModelAdmin):
-    list_display = ("is_enabled", "updated_at")
-
-    def has_add_permission(self, request):
-        if AIAppSettings.objects.exists():
-            return False
-        return super().has_add_permission(request)
-
-    def has_delete_permission(self, request, obj=None):
-        return False
+__all__ = ["AIAppSettingsAdmin"]

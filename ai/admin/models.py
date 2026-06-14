@@ -282,7 +282,6 @@ class SharedPromptAdmin(admin.ModelAdmin):
         )
 
 
-@admin.register(AIAppSettings)
 class AIAppSettingsAdmin(admin.ModelAdmin):
     list_display = ("is_enabled", "updated_at")
 

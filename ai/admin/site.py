@@ -96,4 +96,4 @@ class AIAdminSite(admin.AdminSite):
         return context
 
 
-ai_admin_site = AIAdminSite(name="ai_admin")
+ai_admin_site = AIAdminSite(name="admin")

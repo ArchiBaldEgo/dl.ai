@@ -6,7 +6,7 @@ ai.admin.TesterOrStaffAdminAuthenticationForm, etc. continues to work.
 from .admin.auth import TesterOrStaffAdminAuthenticationForm, _admin_logout_view
 from .admin.models import ProgrammingLanguageAdmin, TopicAdmin, PromptAdmin, SharedPromptAdmin
 from .admin.logs import AIRequestLogAdmin
-from .admin.apps import AIAppSettingsAdmin
+from .admin.models import AIAppSettingsAdmin
 from .admin.arm import (
     admin_arm_find_error_view,
     admin_arm_find_error_start_view,
