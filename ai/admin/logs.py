@@ -3,6 +3,7 @@
 from django.contrib import admin
 from django.core.paginator import Paginator
 from django.db.models import Q
+from .site import ai_admin_site
 from django.http import HttpResponseForbidden
 from django.template.response import TemplateResponse
 from django.utils.http import urlencode
@@ -137,7 +138,7 @@ def admin_request_logs_view(request):
         filters_query_str += "&"
 
     context = {
-        **admin.site.each_context(request),
+        **ai_admin_site.each_context(request),
         "title": "DL.AI: Логи запросов",
         "page_obj": page_obj,
         "status_choices": AIRequestLog.STATUS_CHOICES,
@@ -161,7 +162,7 @@ def admin_request_log_detail_view(request, log_id):
 
     log = AIRequestLog.objects.get(pk=log_id)
     context = {
-        **admin.site.each_context(request),
+        **ai_admin_site.each_context(request),
         "title": "DL.AI: Детали запроса",
         "log": log,
     }

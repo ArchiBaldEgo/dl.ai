@@ -1,6 +1,6 @@
 """Model health status admin views."""
 
-from django.contrib import admin
+from .site import ai_admin_site
 from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.template.response import TemplateResponse
 from django.utils import timezone
@@ -53,7 +53,7 @@ def admin_model_status_view(request):
             refresh_error = f"Не удалось запустить обновление моделей: {exc}"
 
     context = {
-        **admin.site.each_context(request),
+        **ai_admin_site.each_context(request),
         "title": "AI: Состояние моделей",
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "model_status_rows": get_model_status_rows(),

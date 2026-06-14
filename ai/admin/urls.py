@@ -1,6 +1,6 @@
 """Custom URL wiring for the AI admin site."""
 
-from django.urls import path
+from django.urls import include, path
 
 from ..views import set_password_view
 from .arm import (
@@ -37,4 +37,7 @@ def get_ai_admin_urls():
         path("logs/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
         path("logs/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),
     ]
-    return custom_urls + ai_admin_site.get_urls()
+    return [
+        path("", include((ai_admin_site.get_urls(), ai_admin_site.name), namespace=ai_admin_site.name)),
+        *custom_urls,
+    ]

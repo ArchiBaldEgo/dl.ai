@@ -1,10 +1,10 @@
 """"My prompts" helper view for prompt developers."""
 
-from django.contrib import admin
 from django.http import HttpResponse, HttpResponseForbidden
 
-from ..models import Prompt
 from .permissions import can_access_prompt_admin
+from .site import ai_admin_site
+from ..models import Prompt
 from .models import PromptAdmin
 
 
@@ -23,7 +23,7 @@ def admin_my_prompt_view(request):
     if not can_access_prompt_admin(request):
         return HttpResponseForbidden("Access denied")
     request._mine_only = True
-    prompt_admin = admin.site._registry.get(Prompt)
+    prompt_admin = ai_admin_site._registry.get(Prompt)
     if prompt_admin is None:
         return HttpResponse("Prompt admin is not registered", status=404)
     return prompt_admin.changelist_view(request, extra_context={"mine_only": True})
