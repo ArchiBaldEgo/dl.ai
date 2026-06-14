@@ -426,24 +426,18 @@ function simulateSend() {
         return;
     }
     
-    var sharedPromptSelect = document.getElementById("selectSharedPrompt");
-    var sharedPreprompt = sharedPromptSelect ? sharedPromptSelect.value : "";
-    
-    // Используем общий препромпт, если он выбран
-    var effectivePreprompt = sharedPreprompt || "";
-    
     ws.send(JSON.stringify({
         type: '1',
         message: input.value,
         value: value,
-        language: language,
-        preprompt: effectivePreprompt,
+        language: language
     }));
-    
+
     setRequestLock(true);
     notEnter = true;
     updateVoiceStatus(getVoiceStatusText('messageSent'));
     input.value = '';
+    saveChatText();
 }
 
 function fetchCanUseAi(dlsid) {
@@ -603,7 +597,8 @@ function initWebSocket() {
             messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
             var input = document.getElementById("messageText");
             input.value = '';
-            
+            saveChatText();
+
             if (isTerminalAiMessage(event.data)) {
                 setRequestLock(false);
                 notEnter = false;
@@ -660,22 +655,16 @@ function sendMessage(event) {
         return;
     }
     
-    var sharedPromptSelect = document.getElementById("selectSharedPrompt");
-    var sharedPreprompt = sharedPromptSelect ? sharedPromptSelect.value : "";
-    
-    // Используем общий препромпт, если он выбран
-    var effectivePreprompt = sharedPreprompt || "";
-    
     ws.send(JSON.stringify({
         type: '1',
         message: input.value,
         value: value,
-        language: language,
-        preprompt: effectivePreprompt,
+        language: language
     }));
     setRequestLock(true);
     notEnter = true;
     input.value = '';
+    saveChatText();
 }
 
 function clearContext() {
@@ -918,7 +907,8 @@ document.getElementById("selectLang").addEventListener("change", function() {
     
     const speakThinkLabel = document.getElementById("speakThinkLabel");
     if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
-    
+
+    saveInterfaceLanguage();
     updateAccordionLabels();
     updateVoiceStatus(getVoiceStatusText('readyForVoice'));
 });
@@ -1055,46 +1045,70 @@ function collapseAllExceptLast() {
     });
 }
 
+// Persistence keys
+const INTERFACE_LANG_KEY = 'ai_interface_language';
+const CHAT_TEXT_KEY = 'ai_text_chat';
+
+function saveInterfaceLanguage() {
+    try {
+        const selectLang = document.getElementById('selectLang');
+        if (selectLang) {
+            const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
+            localStorage.setItem(INTERFACE_LANG_KEY, lang);
+        }
+    } catch (e) {}
+}
+
+function restoreInterfaceLanguage() {
+    try {
+        const savedLang = localStorage.getItem(INTERFACE_LANG_KEY);
+        if (!savedLang) return;
+        const selectLang = document.getElementById('selectLang');
+        if (!selectLang) return;
+        const option = Array.from(selectLang.options).find(o => o.getAttribute('language') === savedLang);
+        if (option) {
+            selectLang.selectedIndex = option.index;
+        }
+    } catch (e) {}
+}
+
+function saveChatText() {
+    try {
+        const messageText = document.getElementById('messageText');
+        if (messageText) {
+            localStorage.setItem(CHAT_TEXT_KEY, JSON.stringify({ message: messageText.value }));
+        }
+    } catch (e) {}
+}
+
+function restoreChatText() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(CHAT_TEXT_KEY) || '{}');
+        const messageText = document.getElementById('messageText');
+        if (messageText && saved.message) {
+            messageText.value = saved.message;
+        }
+    } catch (e) {}
+}
+
 window.onload = function() {
     console.log('Initializing WebSocket with client_id:', client_id);
+    restoreInterfaceLanguage();
     initWebSocket();
     document.getElementById("selectLang").dispatchEvent(new Event("change"));
     initAccordionForMessages();
+    restoreChatText();
     updateVoiceStatus(getVoiceStatusText('ready'));
-    
+
     const speakThinkCheckbox = document.getElementById('speakThinkContent');
     if (speakThinkCheckbox) {
         speakThinkCheckbox.addEventListener('change', function () {
             speakThinkEnabled = this.checked;
         });
     }
-    
-    // Загрузка общих препромптов для чата
-    loadSharedPromptsForChat();
-};
 
-async function loadSharedPromptsForChat() {
-    const sharedPromptSelect = document.getElementById("selectSharedPrompt");
-    const sharedPromptSection = document.querySelector(".shared-prompt-section");
-    if (!sharedPromptSelect) return;
-    
-    try {
-        const urlWithAuth = `/ai/api/shared-prompts/${window.location.search || ''}`;
-        const response = await fetch(urlWithAuth);
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        const sharedPrompts = await response.json();
-        sharedPromptSelect.innerHTML = '<option value="">Выберите общий препромпт</option>';
-        if (sharedPrompts && sharedPrompts.length > 0) {
-            sharedPrompts.forEach(sp => {
-                const option = new Option(sp.prompt_name, sp.id);
-                sharedPromptSelect.appendChild(option);
-            });
-            if (sharedPromptSection) sharedPromptSection.style.display = "flex";
-        } else {
-            if (sharedPromptSection) sharedPromptSection.style.display = "none";
-        }
-    } catch (error) {
-        console.error('Error fetching shared prompts:', error);
-        if (sharedPromptSection) sharedPromptSection.style.display = "none";
+    const messageText = document.getElementById('messageText');
+    if (messageText) {
+        messageText.addEventListener('input', saveChatText);
     }
-}
+};

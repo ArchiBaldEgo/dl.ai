@@ -27,6 +27,30 @@
                 return sessionId ? `dlsid_${encodeURIComponent(sessionId)}` : 'dlsid_missing';
             }
 
+            // Interface language persistence (shared across all AI pages)
+            const INTERFACE_LANG_KEY = 'ai_interface_language';
+            function saveInterfaceLanguage() {
+                try {
+                    const selectLang = document.getElementById('selectLang');
+                    if (selectLang) {
+                        const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
+                        localStorage.setItem(INTERFACE_LANG_KEY, lang);
+                    }
+                } catch (e) {}
+            }
+            function restoreInterfaceLanguage() {
+                try {
+                    const savedLang = localStorage.getItem(INTERFACE_LANG_KEY);
+                    if (!savedLang) return;
+                    const selectLang = document.getElementById('selectLang');
+                    if (!selectLang) return;
+                    const option = Array.from(selectLang.options).find(o => o.getAttribute('language') === savedLang);
+                    if (option) {
+                        selectLang.selectedIndex = option.index;
+                    }
+                } catch (e) {}
+            }
+
             // Функции голосового управления
             function toggleVoiceControls() {
                 const voiceControls = document.getElementById('voiceControls');
@@ -425,8 +449,7 @@
                 var input = document.getElementById("messageText");
                 var progLng = document.querySelector("#selectProgLng").value;
                 var preprompt = document.querySelector("#selectPrompt").value;
-                var sharedPreprompt = sharedPromptSelect ? sharedPromptSelect.value : "";
-                
+
                 if (!input.value.trim()) {
                     return;
                 }
@@ -434,23 +457,21 @@
                     updateVoiceStatus(getVoiceStatusText('select_prog_lang'));
                     return;
                 }
-                
-                // Используем общий препромпт, если он выбран, иначе обычный
-                var effectivePreprompt = sharedPreprompt || preprompt;
-                
+
                 ws.send(JSON.stringify({
                     type: '2',
                     message: input.value,
                     value: value,
                     language: language,
                     progLng: progLng,
-                    preprompt: effectivePreprompt
+                    preprompt: preprompt
                 }));
 
                 setRequestLock(true);
                 notEnter = true;
                 updateVoiceStatus(getVoiceStatusText('messageSent'));
                 input.value = '';
+                savePageText();
             }
 
             // Инициализация WebSocket
@@ -661,13 +682,12 @@
                 var input = document.getElementById("messageText");
                 var progLng = document.querySelector("#selectProgLng").value;
                 var preprompt = document.querySelector("#selectPrompt").value;
-                var sharedPreprompt = sharedPromptSelect ? sharedPromptSelect.value : "";
 
                 if (!value) {
                     alert("Сегодня нет доступных моделей. Повторите позже.");
                     return;
                 }
-                
+
                 if (!input.value.trim()) {
                     alert("Пожалуйста, введите сообщение");
                     return;
@@ -676,21 +696,19 @@
                     alert("Выберите язык программирования перед отправкой");
                     return;
                 }
-                
-                // Используем общий препромпт, если он выбран, иначе обычный
-                var effectivePreprompt = sharedPreprompt || preprompt;
-                
+
                 ws.send(JSON.stringify({
                     type: '2',
                     message: input.value,
                     value: value,
                     language: language,
                     progLng: progLng,
-                    preprompt: effectivePreprompt
+                    preprompt: preprompt
                 }));
                 setRequestLock(true);
                 notEnter = true;
                 input.value = '';
+                savePageText();
             }
 
             // ОРИГИНАЛЬНАЯ функция clearContext - НЕ ТРОГАТЬ
@@ -951,6 +969,7 @@
                 const speakThinkLabel = document.getElementById("speakThinkLabel");
                 if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
 
+                saveInterfaceLanguage();
                 updateVoiceStatus(getVoiceStatusText('readyForVoice'));
             });
 
@@ -1189,25 +1208,27 @@
                     selectFirstIfSingle(promptSelect);
                 }
 
-                // State persistence
-                const STATE_KEY = 'ai_page_state';
-                function saveState() {
+                // Persistence keys (per page)
+                const PAGE_STATE_KEY = 'ai_page_state_problem';
+                const PAGE_TEXT_KEY = 'ai_text_solve_problem';
+
+                function savePageState() {
                     try {
-                        const state = JSON.parse(localStorage.getItem(STATE_KEY) || '{}');
-                        state.language = languageSelect.value;
+                        const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
+                        state.progLng = languageSelect.value;
                         state.topic = topicSelect.value;
                         state.prompt = promptSelect.value;
-                        localStorage.setItem(STATE_KEY, JSON.stringify(state));
+                        localStorage.setItem(PAGE_STATE_KEY, JSON.stringify(state));
                     } catch(e) {}
                 }
-                function restoreSelections() {
+
+                function restorePageState() {
                     try {
-                        const state = JSON.parse(localStorage.getItem(STATE_KEY) || '{}');
-                        if (!state.language) return;
-                        const langOpt = Array.from(languageSelect.options).find(o => o.value === state.language);
+                        const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
+                        if (!state.progLng) return;
+                        const langOpt = Array.from(languageSelect.options).find(o => o.value === state.progLng);
                         if (!langOpt) return;
-                        languageSelect.value = state.language;
-                        // trigger chain: language -> topics -> prompts
+                        languageSelect.value = state.progLng;
                         languageSelect.dispatchEvent(new Event('change'));
                         if (state.topic) {
                             setTimeout(() => {
@@ -1227,6 +1248,23 @@
                     } catch(e) {}
                 }
 
+                function savePageText() {
+                    try {
+                        const messageText = document.getElementById('messageText');
+                        if (messageText) {
+                            localStorage.setItem(PAGE_TEXT_KEY, JSON.stringify({ message: messageText.value }));
+                        }
+                    } catch(e) {}
+                }
+
+                function restorePageText() {
+                    try {
+                        const saved = JSON.parse(localStorage.getItem(PAGE_TEXT_KEY) || '{}');
+                        const messageText = document.getElementById('messageText');
+                        if (messageText && saved.message) messageText.value = saved.message;
+                    } catch(e) {}
+                }
+
                 languageSelect.addEventListener("change", async () => {
                     const languageId = parseInt(languageSelect.value);
                     topicSelect.innerHTML = '<option value="">Выберите тему</option>';
@@ -1237,7 +1275,7 @@
                     } else {
                         await loadPrompts(null, null);
                     }
-                    saveState();
+                    savePageState();
                 });
 
                 topicSelect.addEventListener("change", async () => {
@@ -1245,43 +1283,31 @@
                     promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
                     const languageId = parseInt(languageSelect.value);
                     await loadPrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
-                    saveState();
+                    savePageState();
                 });
 
-                promptSelect.addEventListener("change", saveState);
+                promptSelect.addEventListener("change", savePageState);
 
-                // Text persistence
                 const messageText = document.getElementById('messageText');
-                const TEXT_KEY = 'ai_page_text';
-                function saveText() {
-                    try {
-                        localStorage.setItem(TEXT_KEY, JSON.stringify({ message: messageText.value }));
-                    } catch(e) {}
-                }
-                function restoreText() {
-                    try {
-                        const saved = JSON.parse(localStorage.getItem(TEXT_KEY) || '{}');
-                        if (saved.message) messageText.value = saved.message;
-                    } catch(e) {}
-                }
                 if (messageText) {
-                    messageText.addEventListener('input', saveText);
+                    messageText.addEventListener('input', savePageText);
                 }
 
                 await loadLanguages();
                 await loadPrompts(null, null);
-                restoreSelections();
-                restoreText();
+                restorePageState();
+                restorePageText();
             });
 
             window.onload = function () {
                 console.log('Initializing WebSocket with client_id:', client_id);
+                restoreInterfaceLanguage();
                 initWebSocket();
                 // MediaRecorder инициализируется при первом нажатии на кнопку записи
                 document.getElementById("selectLang").dispatchEvent(new Event("change"));
                 initAccordionForMessages();
                 updateVoiceStatus(getVoiceStatusText('ready'));
-                
+
                 // Инициализация чекбокса think-блоков
                 const speakThinkCheckbox = document.getElementById('speakThinkContent');
                 speakThinkCheckbox.addEventListener('change', function() {

@@ -27,6 +27,30 @@
                 return sessionId ? `dlsid_${encodeURIComponent(sessionId)}` : 'dlsid_missing';
             }
 
+            // Interface language persistence (shared across all AI pages)
+            const INTERFACE_LANG_KEY = 'ai_interface_language';
+            function saveInterfaceLanguage() {
+                try {
+                    const selectLang = document.getElementById('selectLang');
+                    if (selectLang) {
+                        const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
+                        localStorage.setItem(INTERFACE_LANG_KEY, lang);
+                    }
+                } catch (e) {}
+            }
+            function restoreInterfaceLanguage() {
+                try {
+                    const savedLang = localStorage.getItem(INTERFACE_LANG_KEY);
+                    if (!savedLang) return;
+                    const selectLang = document.getElementById('selectLang');
+                    if (!selectLang) return;
+                    const option = Array.from(selectLang.options).find(o => o.getAttribute('language') === savedLang);
+                    if (option) {
+                        selectLang.selectedIndex = option.index;
+                    }
+                } catch (e) {}
+            }
+
             // Функции голосового управления
             function toggleVoiceControls() {
                 const voiceControls = document.getElementById('voiceControls');
@@ -425,8 +449,7 @@
                 var input = document.getElementById("taskText");
                 var progLng = document.querySelector("#selectProgLng").value;
                 var preprompt = document.querySelector("#selectPrompt").value;
-                var sharedPreprompt = sharedPromptSelect ? sharedPromptSelect.value : "";
-                
+
                 if (!input.value.trim()) {
                     return;
                 }
@@ -434,17 +457,14 @@
                     updateVoiceStatus(getVoiceStatusText('select_prog_lang'));
                     return;
                 }
-                
-                // Используем общий препромпт, если он выбран, иначе обычный
-                var effectivePreprompt = sharedPreprompt || preprompt;
-                
+
                 ws.send(JSON.stringify({
                     type: '3',
                     message: input.value,
                     value: value,
                     language: language,
                     progLng: progLng,
-                    preprompt: effectivePreprompt,
+                    preprompt: preprompt,
                     code: document.getElementById("codeText").value
                 }));
 
@@ -452,6 +472,7 @@
                 notEnter = true;
                 updateVoiceStatus(getVoiceStatusText('messageSent'));
                 input.value = '';
+                savePageText();
             }
 
             // Инициализация WebSocket
@@ -663,13 +684,12 @@
                 var codeInput = document.getElementById("codeText");
                 var progLng = document.querySelector("#selectProgLng").value;
                 var preprompt = document.querySelector("#selectPrompt").value;
-                var sharedPreprompt = sharedPromptSelect ? sharedPromptSelect.value : "";
 
                 if (!value) {
                     alert("Сегодня нет доступных моделей. Повторите позже.");
                     return;
                 }
-                
+
                 if (!taskInput.value.trim() && !codeInput.value.trim()) {
                     alert("Пожалуйста, введите условие задачи или код программы");
                     return;
@@ -678,10 +698,7 @@
                     alert("Выберите язык программирования перед отправкой");
                     return;
                 }
-                
-                // Используем общий препромпт, если он выбран, иначе обычный
-                var effectivePreprompt = sharedPreprompt || preprompt;
-                
+
                 ws.send(JSON.stringify({
                     type: '3',
                     message: taskInput.value,
@@ -689,13 +706,14 @@
                     language: language,
                     progLng: progLng,
                     code: codeInput.value,
-                    preprompt: effectivePreprompt
+                    preprompt: preprompt
                 }));
 
                 setRequestLock(true);
                 notEnter = true;
                 taskInput.value = '';
                 codeInput.value = '';
+                savePageText();
             }
 
             // ОРИГИНАЛЬНАЯ функция clearContext - НЕ ТРОГАТЬ
@@ -778,6 +796,9 @@
                 findError: "В чём ошибка?",
                 enterHint: "При нажатии на Enter будет отправляться вопрос (для переноса строки Enter+Shift)",
                 preprompt: "Препромпт",
+                task: "Задача:",
+                codetx: "Код программы:",
+                taskplace: "Вставьте сюда условие задачи",
                 chooseLanguage: "Выберите язык",
                 chooseTheme: "Выберите тему",
                 voiceMode: "Голосовой режим",
@@ -827,6 +848,9 @@
                 findError: "What's the error?",
                 enterHint: "Press Enter to send the question (Shift+Enter for a new line)",
                 preprompt: "Preprompt",
+                task: "Task:",
+                codetx: "Program code:",
+                taskplace: "Paste the task condition here",
                 chooseLanguage: "Choose language",
                 chooseTheme: "Choose theme",
                 voiceMode: "Voice mode",
@@ -875,6 +899,9 @@
                 findError: "Quelle est l'erreur?",
                 enterHint: "Appuyez sur Entrée pour envoyer la question (Shift+Enter pour une nouvelle ligne)",
                 preprompt: "Pré-promp",
+                task: "Tâche :",
+                codetx: "Code du programme :",
+                taskplace: "Collez ici l'énoncé de la tâche",
                 chooseLanguage: "Choisir la langue",
                 chooseTheme: "Choisir le thème",
                 voiceMode: "Mode vocal",
@@ -959,6 +986,7 @@
                 const speakThinkLabel = document.getElementById("speakThinkLabel");
                 if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
 
+                saveInterfaceLanguage();
                 updateVoiceStatus(getVoiceStatusText('readyForVoice'));
             });
 
@@ -1176,23 +1204,65 @@
                     selectFirstIfSingle(promptSelect);
                 }
 
-                // Загрузка общих (shared) препромптов
+                // Persistence keys (per page)
+                const PAGE_STATE_KEY = 'ai_page_state_problem';
+                const PAGE_TEXT_KEY = 'ai_text_find_error';
 
-                async function loadSharedPrompts(languageId) {
-                    if (!sharedPromptSelect) return;
-                    const url = languageId ? `/ai/api/shared-prompts/?language_id=${languageId}` : "/ai/api/shared-prompts";
-                    const sharedPrompts = await fetchData(url);
-                    sharedPromptSelect.innerHTML = '<option value="">Выберите общий препромпт</option>';
-                    if (sharedPrompts && sharedPrompts.length > 0) {
-                        sharedPrompts.forEach(sp => {
-                            const option = new Option(sp.prompt_name, sp.id);
-                            sharedPromptSelect.appendChild(option);
-                        });
-                        if (sharedPromptSection) sharedPromptSection.style.display = "flex";
-                    } else {
-                        if (sharedPromptSection) sharedPromptSection.style.display = "none";
-                    }
-                    selectFirstIfSingle(sharedPromptSelect);
+                function savePageState() {
+                    try {
+                        const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
+                        state.progLng = languageSelect.value;
+                        state.topic = topicSelect.value;
+                        state.prompt = promptSelect.value;
+                        localStorage.setItem(PAGE_STATE_KEY, JSON.stringify(state));
+                    } catch(e) {}
+                }
+
+                function restorePageState() {
+                    try {
+                        const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
+                        if (!state.progLng) return;
+                        const langOpt = Array.from(languageSelect.options).find(o => o.value === state.progLng);
+                        if (!langOpt) return;
+                        languageSelect.value = state.progLng;
+                        languageSelect.dispatchEvent(new Event('change'));
+                        if (state.topic) {
+                            setTimeout(() => {
+                                const topicOpt = Array.from(topicSelect.options).find(o => o.value === state.topic);
+                                if (topicOpt) {
+                                    topicSelect.value = state.topic;
+                                    topicSelect.dispatchEvent(new Event('change'));
+                                    if (state.prompt) {
+                                        setTimeout(() => {
+                                            const promptOpt = Array.from(promptSelect.options).find(o => o.value === state.prompt);
+                                            if (promptOpt) promptSelect.value = state.prompt;
+                                        }, 50);
+                                    }
+                                }
+                            }, 50);
+                        }
+                    } catch(e) {}
+                }
+
+                function savePageText() {
+                    try {
+                        const taskText = document.getElementById('taskText');
+                        const codeText = document.getElementById('codeText');
+                        localStorage.setItem(PAGE_TEXT_KEY, JSON.stringify({
+                            task: taskText ? taskText.value : '',
+                            code: codeText ? codeText.value : ''
+                        }));
+                    } catch(e) {}
+                }
+
+                function restorePageText() {
+                    try {
+                        const saved = JSON.parse(localStorage.getItem(PAGE_TEXT_KEY) || '{}');
+                        const taskText = document.getElementById('taskText');
+                        const codeText = document.getElementById('codeText');
+                        if (saved.task && taskText) taskText.value = saved.task;
+                        if (saved.code && codeText) codeText.value = saved.code;
+                    } catch(e) {}
                 }
 
                 languageSelect.addEventListener("change", async () => {
@@ -1205,7 +1275,7 @@
                     } else {
                         await loadPrompts(null, null);
                     }
-                    saveState();
+                    savePageState();
                 });
 
                 topicSelect.addEventListener("change", async () => {
@@ -1213,47 +1283,31 @@
                     promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
                     const languageId = parseInt(languageSelect.value);
                     await loadPrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
-                    saveState();
+                    savePageState();
                 });
 
-                promptSelect.addEventListener("change", saveState);
+                promptSelect.addEventListener("change", savePageState);
 
-                // Text persistence
                 const taskText = document.getElementById('taskText');
                 const codeText = document.getElementById('codeText');
-                const TEXT_KEY = 'ai_page_text';
-                function saveText() {
-                    try {
-                        localStorage.setItem(TEXT_KEY, JSON.stringify({
-                            task: taskText ? taskText.value : '',
-                            code: codeText ? codeText.value : ''
-                        }));
-                    } catch(e) {}
-                }
-                function restoreText() {
-                    try {
-                        const saved = JSON.parse(localStorage.getItem(TEXT_KEY) || '{}');
-                        if (saved.task && taskText) taskText.value = saved.task;
-                        if (saved.code && codeText) codeText.value = saved.code;
-                    } catch(e) {}
-                }
-                if (taskText) taskText.addEventListener('input', saveText);
-                if (codeText) codeText.addEventListener('input', saveText);
+                if (taskText) taskText.addEventListener('input', savePageText);
+                if (codeText) codeText.addEventListener('input', savePageText);
 
                 await loadLanguages();
                 await loadPrompts(null, null);
-                restoreSelections();
-                restoreText();
+                restorePageState();
+                restorePageText();
             });
 
             window.onload = function () {
                 console.log('Initializing WebSocket with client_id:', client_id);
+                restoreInterfaceLanguage();
                 initWebSocket();
                 // MediaRecorder инициализируется при первом нажатии на кнопку записи
                 document.getElementById("selectLang").dispatchEvent(new Event("change"));
                 initAccordionForMessages();
                 updateVoiceStatus(getVoiceStatusText('ready'));
-                
+
                 // Инициализация чекбокса think-блоков
                 const speakThinkCheckbox = document.getElementById('speakThinkContent');
                 speakThinkCheckbox.addEventListener('change', function() {
