@@ -136,12 +136,12 @@ class AIAdminSite(admin.AdminSite):
 
             if request.user.is_authenticated and (not request.user.has_usable_password()):
                 if not _is_admin_set_password_path(request.path) and request.method == "GET":
-                    next_path = urlencode({"next": request.get_full_path()}, safe="/?=&")[5:]
-                    return redirect(f"/ai/admin/set-password/?{next_path}")
+                    next_query = urlencode({"next": request.get_full_path()})
+                    return redirect(f"/ai/admin/set-password/?{next_query}")
 
             if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
-                next_path = urlencode({"next": request.get_full_path()}, safe="/?=&")[5:]
-                return redirect(f"/ai/admin/login/?{next_path}")
+                next_query = urlencode({"next": request.get_full_path()})
+                return redirect(f"/ai/admin/login/?{next_query}")
 
             response = wrapped_view(request, *args, **kwargs)
 
