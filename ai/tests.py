@@ -229,12 +229,14 @@ class AdminExternalAuthTests(TestCase):
         from ai.admin.site import ai_admin_site
         from django.contrib.auth.models import Group
         from ai.constants import PROMPT_DEVELOPER_GROUP
+        from ai.models import ExternalDLAccount
         group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         user = self.user_model.objects.create_user(
             username="12345",
             password="initial-pass",
         )
         user.groups.add(group)
+        ExternalDLAccount.objects.create(user=user, external_user_id="12345")
         request = self._request(user_id="12345")
         request.user = user
         self.assertTrue(ai_admin_site.has_permission(request))

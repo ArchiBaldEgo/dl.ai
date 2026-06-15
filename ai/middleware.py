@@ -182,10 +182,10 @@ class ExternalAuthMiddleware:
 
         # Auto-provision user if needed. We do this for /ai/admin/...
         # paths too, even though the admin views have their own
-        # permission checks: the admin's has_permission() compares
-        # request.user.username against the external_id from the
-        # DLSID chain, and that comparison only works when the local
-        # session has been rebound to the user the API just confirmed.
+        # permission checks: the admin's has_permission() verifies
+        # that request.user matches the user the DLSID chain just
+        # authenticated, and that rebind only works when we go all
+        # the way through provisioning.
         try:
             user, created = get_or_create_user_from_external(user_info)
             if user:
@@ -201,6 +201,10 @@ class ExternalAuthMiddleware:
                     csrf.rotate_token(request)
                     # Устанавливаем маркер свежей аутентификации для админки
                     request.session["admin_fresh_auth"] = True
+                # Stash the freshly-provisioned user so downstream
+                # code (notably AIAdminSite.has_permission) can verify
+                # the request user matches the DLSID chain.
+                request._ai_provisioned_user = user
                 if created:
                     logger.info(f"New user provisioned: {user.username} (external_id={user_info.get('userId')})")
         except Exception as e:

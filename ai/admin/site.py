@@ -36,6 +36,41 @@ def _is_admin_set_password_path(path: str) -> bool:
     return normalized == "/ai/admin/set-password"
 
 
+def _session_matches_external_id(request, external_id: str) -> bool:
+    """Return True iff ``request.user`` is the user provisioned for
+    ``external_id`` by ExternalAuthMiddleware.
+
+    Username is NOT a reliable key: ``get_or_create_user_from_external``
+    may have set it to ``login`` (a nickname), ``user_<id>`` (numeric
+    fallback), or a suffixed variant — none of which is the literal
+    ``userId`` from the external API. The trustworthy link is the
+    ``ExternalDLAccount.external_user_id`` row, and the most efficient
+    check is the one the middleware itself can stash on the request.
+    """
+    if not external_id:
+        return False
+    user = getattr(request, "user", None)
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    provisioned = getattr(request, "_ai_provisioned_user", None)
+    if provisioned is not None and getattr(provisioned, "pk", None) is not None:
+        return getattr(user, "pk", None) == provisioned.pk
+    # Fallback: middleware didn't tag the request (e.g. set-password
+    # view was entered via a form POST). Compare against the
+    # ExternalDLAccount row that the API just confirmed.
+    from ..models import ExternalDLAccount
+    try:
+        account = (
+            ExternalDLAccount.objects
+            .select_related("user")
+            .filter(external_user_id=str(external_id))
+            .first()
+        )
+    except Exception:
+        return False
+    return bool(account and account.user_id == getattr(user, "pk", None))
+
+
 def _redirect_to_dl(request):
     url = os.getenv("EXTERNAL_AUTH_REDIRECT_URL", "https://dl.gsu.by")
     return redirect(url)
@@ -72,7 +107,7 @@ class AIAdminSite(admin.AdminSite):
         # DLSID — which is exactly the bug we are fixing here.
         if not external_id:
             return False
-        if str(user.username) != str(external_id):
+        if not _session_matches_external_id(request, external_id):
             return False
         return can_access_admin(user)
 
