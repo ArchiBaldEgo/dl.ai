@@ -133,15 +133,26 @@ class AIAdminSite(admin.AdminSite):
         return None
 
     def login(self, request, extra_context=None):
-        """Block the built-in admin login form — the only entry is DLSID.
+        """Route the user to the admin entry point.
 
-        Forward the original ``?next=`` to dl.gsu.by so the user comes
-        back to the page they were trying to reach once they re-auth on
-        the main site.
+        The only supported sign-in path is the DLSID cookie set by
+        dl.gsu.by, so:
+
+        * If the request already carries an external id (DLSID / DLID /
+          uid query) the user is "signed in" from dl.gsu.by's point of
+          view — we redirect to ``?next=`` (or the admin index) without
+          rendering a local login form.
+        * Otherwise we bounce to dl.gsu.by with the original ``?next=``
+          preserved, so the user lands back on the admin page after
+          authenticating on the main site.
         """
         from django.utils.http import urlencode
         from ..http_utils import safe_relative_url
+
         next_url = safe_relative_url(request.GET.get("next"), "/ai/admin/")
+        if get_external_user_id_from_request(request):
+            return redirect(next_url)
+
         url = os.getenv("EXTERNAL_AUTH_REDIRECT_URL", "https://dl.gsu.by")
         separator = "&" if "?" in url else "?"
         return redirect(f"{url}{separator}{urlencode({'next': next_url})}")
