@@ -81,6 +81,19 @@ def _parse_shared_prompt_id(prompt_id):
         return None
 
 
+def _resolve_prompt_id_for_log(prompt_id):
+    """Return an integer id for logging from either a shared or regular prompt id."""
+    if not prompt_id:
+        return None
+    shared_pk = _parse_shared_prompt_id(prompt_id)
+    if shared_pk is not None:
+        return shared_pk
+    try:
+        return int(prompt_id)
+    except (ValueError, TypeError):
+        return None
+
+
 @sync_to_async
 def _resolve_context_names(prog_lng_id, topic_id, prompt_id, ui_language=""):
     """Return (programming_language_name, topic_name, prompt_name) for logging."""
@@ -322,7 +335,7 @@ class MyConsumer(AsyncWebsocketConsumer):
                 programming_language_name=prog_lng_name,
                 topic_id=int(topic_id) if topic_id else None,
                 topic_name=topic_name,
-                prompt_id=int(prompt_id) if prompt_id else None,
+                prompt_id=_resolve_prompt_id_for_log(prompt_id),
                 prompt_name=prompt_name,
             )
             # Обработка модели AI
