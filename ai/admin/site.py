@@ -15,7 +15,6 @@ from .permissions import (
     can_access_logs,
     can_access_model_status,
     can_access_prompt_admin,
-    external_id_matches_session,
     is_prompt_developer_user,
     is_staff_or_superuser,
 )
@@ -59,13 +58,15 @@ class AIAdminSite(admin.AdminSite):
         # we redirect them away anyway, so no point in checking.
         if _is_admin_login_path(request.path) or _is_admin_logout_path(request.path):
             return False
+        # The set-password page is allowed if the user came in with an
+        # external id but does not yet have a Django-side password.
         if _is_admin_set_password_path(request.path):
-            # set-password needs an external id to know which account to
-            # set the password for, but no session match is required.
             return bool(get_external_user_id_from_request(request))
+        # For every other admin page the user must have a verified
+        # external id (DLSID / DLID / uid query) on the current request.
+        # The DLSID chain on dl.gsu.by is the source of truth; we trust
+        # whatever cookie / query the upstream reverse-proxy forwards.
         if not get_external_user_id_from_request(request):
-            return False
-        if not external_id_matches_session(request):
             return False
         return can_access_admin(user)
 
@@ -73,20 +74,22 @@ class AIAdminSite(admin.AdminSite):
         wrapped_view = super().admin_view(view, cacheable)
 
         def inner(request, *args, **kwargs):
-            # Drop the user back to dl.gsu.by when the external id is
-            # gone or points to a different person than the local session.
-            external_id = get_external_user_id_from_request(request)
+            # Bounce the user back to dl.gsu.by if the DLSID chain is
+            # broken on this request. The login / set-password pages
+            # are exempt: login is the entry, set-password is what we
+            # send the user to when the cookie is present but the
+            # local password is missing.
             if (
                 request.user.is_authenticated
                 and not _is_admin_login_path(request.path)
                 and not _is_admin_set_password_path(request.path)
-                and (not external_id or not external_id_matches_session(request))
+                and not get_external_user_id_from_request(request)
             ):
                 auth_logout(request)
                 return _redirect_to_dl(request)
 
             if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
-                if external_id and external_id_matches_session(request):
+                if get_external_user_id_from_request(request):
                     if is_prompt_developer_user(request.user) or is_staff_or_superuser(request.user):
                         request.session["admin_fresh_auth"] = True
 

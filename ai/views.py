@@ -14,7 +14,6 @@ from django.views.decorators.http import require_http_methods
 from django.conf import settings
 from .model_health import get_available_model_options
 from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
-from .admin.permissions import external_id_matches_session
 from .auth_backends import (
     ADMIN_EXTERNAL_AUTH_BACKEND,
     create_admin_user_with_password,
@@ -72,7 +71,7 @@ def _is_ai_app_enabled():
 
 
 def _has_page_access(request):
-    """Require a verified external user id and a matching Django session.
+    """Require a verified external user id and an active Django session.
 
     The external user id can come from any of:
     * ``request.user_info`` (filled in by ``ExternalAuthMiddleware`` after
@@ -82,19 +81,18 @@ def _has_page_access(request):
     * one of the recognized cookies (``userId`` / ``user_id`` / ``userid`` /
       ``DLID``).
 
-    We additionally enforce that the session-bound Django user is the
-    same person as the one holding the cookie / query parameter —
-    otherwise a stale session would still grant access to /ai/...
+    If no external id is present on the request the user has not signed
+    in on the main site yet, so we refuse access. We do NOT verify that
+    the local Django username matches the external id — dl.gsu.by is
+    the source of truth, the local session just follows whatever cookie
+    the upstream reverse-proxy forwards.
     """
     user = getattr(request, "user", None)
     if not user or not user.is_authenticated:
         return False
     if getattr(user, "is_active", True) is False:
         return False
-    external_id = get_external_user_id_from_request(request)
-    if not external_id:
-        return False
-    return external_id_matches_session(request)
+    return bool(get_external_user_id_from_request(request))
 
 
 def _render_ai_page(request, template_name):

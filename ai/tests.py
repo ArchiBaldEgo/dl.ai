@@ -68,12 +68,13 @@ class ChatViewTests(SimpleTestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_chat_view_rejects_session_mismatch(self):
-        # Session-bound user "alice" but DLSID holds "bob" → 403.
+        # Authenticated Django session but no DLSID / DLID / uid at all
+        # on the request → 403.
         request = self.factory.get("/ai/chat/")
         request.user = SimpleNamespace(is_authenticated=True, is_active=True, username="alice")
         request.session = {}
-        request.user_info = {"userId": "bob"}
-        request.COOKIES = {"userId": "bob"}
+        request.user_info = None
+        request.COOKIES = {}
         with patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)), \
              patch("ai.views.get_available_model_options", return_value=[]):
             response = chat_view(request)
@@ -149,10 +150,11 @@ class AdminExternalAuthTests(TestCase):
             username="other-user",
             password="initial-pass",
         )
-        request = self._request(user_id="12345")
+        # Request has no user_info, no uid, no DLID cookie — i.e. the
+        # DLSID chain is broken. has_permission must refuse, regardless
+        # of the local session.
+        request = self._request(user_id=None)
         request.user = user
-        # The request claims to be user "12345" via DLSID, but the local
-        # session belongs to "other-user" → has_permission must refuse.
         self.assertFalse(ai_admin_site.has_permission(request))
 
     def test_has_permission_accepts_matching_prompt_developer(self):

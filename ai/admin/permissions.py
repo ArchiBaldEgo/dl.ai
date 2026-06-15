@@ -1,6 +1,5 @@
 """Permission helpers shared across AI admin views and model admins."""
 
-from ..auth_backends import get_external_user_id_from_request
 from ..constants import PROMPT_DEVELOPER_GROUP
 
 
@@ -46,36 +45,6 @@ def can_access_prompt_admin(request):
 
 def can_access_logs(request):
     return request.user.is_authenticated and is_staff_or_superuser(request.user)
-
-
-def has_external_session(request):
-    """True if the request carries a fresh external user_info from middleware."""
-    user = getattr(request, "user", None)
-    if not user or not user.is_authenticated:
-        return False
-    if getattr(user, "is_active", True) is False:
-        return False
-    user_info = getattr(request, "user_info", None)
-    if not user_info:
-        return False
-    return bool(get_external_user_id_from_request(request))
-
-
-def external_id_matches_session(request):
-    """True if request.user.username matches the external user_id from cookies/user_info.
-
-    Used to refuse access when the Django session belongs to a different person
-    than the one holding the DLSID cookie on the current request.
-    """
-    user = getattr(request, "user", None)
-    if not user or not user.is_authenticated:
-        return False
-    if getattr(user, "is_active", True) is False:
-        return False
-    external_id = get_external_user_id_from_request(request)
-    if not external_id:
-        return False
-    return user.username == external_id
 
 
 def filter_app_list_for_user(app_list, request):
