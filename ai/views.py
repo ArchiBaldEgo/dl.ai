@@ -80,14 +80,26 @@ def _has_page_access(request):
     session-bound Django user is the same person as the one holding the
     cookie — otherwise a stale session would still grant access to /ai/...
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
     user = getattr(request, "user", None)
+    user_info = getattr(request, "user_info", None)
+    external_id = get_external_user_id_from_request(request)
+    logger.info(
+        "_has_page_access path=%s user=%s user_info=%s external_id=%s",
+        request.path,
+        getattr(user, "username", None) if user else None,
+        user_info,
+        external_id,
+    )
     if not user or not user.is_authenticated:
         return False
     if getattr(user, "is_active", True) is False:
         return False
-    if not getattr(request, "user_info", None):
+    if not user_info:
         return False
-    if not get_external_user_id_from_request(request):
+    if not external_id:
         return False
     return external_id_matches_session(request)
 

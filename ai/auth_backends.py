@@ -20,19 +20,41 @@ def normalize_external_user_id(value):
 
 
 def get_external_user_id_from_request(request):
+    """Return the external userId for the current request.
+
+    Lookup order:
+    1. ``request.user_info`` (filled in by ``ExternalAuthMiddleware`` from
+       the JSON returned by ``EXTERNAL_AUTH_API_URL``).
+    2. The query parameters ``uid`` / ``userId`` — the dl.gsu.by toolbar
+       embeds the user id directly in the link (e.g. ``/ai/chat/?uid=...``).
+    3. A cookie. Defaults to ``userId`` (overridable via
+       ``EXTERNAL_USER_ID_COOKIE_NAME``), with ``user_id`` and ``userid`` as
+       fallbacks. ``DLID`` is also accepted because that is the actual cookie
+       the legacy main site sets for the dl.gsu.by user id.
+    """
     user_info = getattr(request, "user_info", None) or {}
     external_user_id = normalize_external_user_id(user_info.get("userId"))
     if external_user_id:
         return external_user_id
 
+    for query_key in ("uid", "userId"):
+        external_user_id = normalize_external_user_id(
+            request.GET.get(query_key, "")
+        )
+        if external_user_id:
+            return external_user_id
+
     cookie_names = [
         os.getenv("EXTERNAL_USER_ID_COOKIE_NAME", "userId"),
         "user_id",
         "userid",
+        "DLID",
+        "dlid",
     ]
+    cookies = getattr(request, "COOKIES", None) or {}
     for cookie_name in dict.fromkeys(name for name in cookie_names if name):
         external_user_id = normalize_external_user_id(
-            unquote(request.COOKIES.get(cookie_name, ""))
+            unquote(cookies.get(cookie_name, ""))
         )
         if external_user_id:
             return external_user_id
