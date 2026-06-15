@@ -16,10 +16,10 @@ from .permissions import (
     can_access_model_status,
     can_access_prompt_admin,
     external_id_matches_session,
-    has_external_session,
     is_prompt_developer_user,
     is_staff_or_superuser,
 )
+from ..auth_backends import get_external_user_id_from_request
 
 
 def _is_admin_login_path(path: str) -> bool:
@@ -51,18 +51,19 @@ class AIAdminSite(admin.AdminSite):
 
     def has_permission(self, request):
         user = getattr(request, "user", None)
-        if not user or not user.is_authenticated or not user.is_active:
+        if not user or not user.is_authenticated:
             return False
-        # Login / logout / set-password pages are reachable without
-        # user_info: middleware treats the whole admin tree as an
-        # optional auth path, so DLSID may be absent on first load.
+        if getattr(user, "is_active", True) is False:
+            return False
+        # Login / logout pages are reachable without an external id —
+        # we redirect them away anyway, so no point in checking.
         if _is_admin_login_path(request.path) or _is_admin_logout_path(request.path):
             return False
         if _is_admin_set_password_path(request.path):
-            # set-password needs user_info to know which account to set
-            # the password for, but no session match is required.
-            return has_external_session(request)
-        if not has_external_session(request):
+            # set-password needs an external id to know which account to
+            # set the password for, but no session match is required.
+            return bool(get_external_user_id_from_request(request))
+        if not get_external_user_id_from_request(request):
             return False
         if not external_id_matches_session(request):
             return False
@@ -72,15 +73,20 @@ class AIAdminSite(admin.AdminSite):
         wrapped_view = super().admin_view(view, cacheable)
 
         def inner(request, *args, **kwargs):
-            # Drop the user back to dl.gsu.by when the DLSID is gone or
-            # points to a different person than the local session.
-            if request.user.is_authenticated and not _is_admin_login_path(request.path):
-                if not has_external_session(request) or not external_id_matches_session(request):
-                    auth_logout(request)
-                    return _redirect_to_dl(request)
+            # Drop the user back to dl.gsu.by when the external id is
+            # gone or points to a different person than the local session.
+            external_id = get_external_user_id_from_request(request)
+            if (
+                request.user.is_authenticated
+                and not _is_admin_login_path(request.path)
+                and not _is_admin_set_password_path(request.path)
+                and (not external_id or not external_id_matches_session(request))
+            ):
+                auth_logout(request)
+                return _redirect_to_dl(request)
 
             if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
-                if has_external_session(request) and external_id_matches_session(request):
+                if external_id and external_id_matches_session(request):
                     if is_prompt_developer_user(request.user) or is_staff_or_superuser(request.user):
                         request.session["admin_fresh_auth"] = True
 
