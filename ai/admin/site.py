@@ -58,15 +58,21 @@ class AIAdminSite(admin.AdminSite):
         # we redirect them away anyway, so no point in checking.
         if _is_admin_login_path(request.path) or _is_admin_logout_path(request.path):
             return False
+        external_id = get_external_user_id_from_request(request)
         # The set-password page is allowed if the user came in with an
         # external id but does not yet have a Django-side password.
         if _is_admin_set_password_path(request.path):
-            return bool(get_external_user_id_from_request(request))
+            return bool(external_id)
         # For every other admin page the user must have a verified
-        # external id (DLSID / DLID / uid query) on the current request.
-        # The DLSID chain on dl.gsu.by is the source of truth; we trust
-        # whatever cookie / query the upstream reverse-proxy forwards.
-        if not get_external_user_id_from_request(request):
+        # external id (DLSID / DLID / uid query) on the current request,
+        # AND the local session must belong to the same user that the
+        # external API just authenticated. Otherwise a stale Django
+        # session from a different account (e.g. a superuser from
+        # yesterday) would silently get admin access on someone else's
+        # DLSID — which is exactly the bug we are fixing here.
+        if not external_id:
+            return False
+        if str(user.username) != str(external_id):
             return False
         return can_access_admin(user)
 

@@ -82,7 +82,7 @@ class ChatViewTests(SimpleTestCase):
 
 
 @override_settings(SESSION_ENGINE="django.contrib.sessions.backends.signed_cookies")
-class ExternalAuthMiddlewareTests(SimpleTestCase):
+class ExternalAuthMiddlewareTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.middleware = ExternalAuthMiddleware(lambda req: HttpResponse("ok"))
@@ -101,16 +101,54 @@ class ExternalAuthMiddlewareTests(SimpleTestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response["Location"], "https://dl.gsu.by")
 
-    def test_authenticated_user_skips_external_auth(self):
+    def test_authenticated_user_without_dlsid_is_redirected(self):
+        # A live Django session alone is NOT enough — the user must
+        # also have a DLSID. Otherwise a stale session cookie from a
+        # superuser would grant access under someone else's identity.
         request = self.factory.get("/ai/chat/")
         self._add_session(request)
         request.user = SimpleNamespace(is_authenticated=True, pk=1)
 
-        with patch("ai.middleware.fetch_external_user_info") as fetch_user_info:
+        response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "https://dl.gsu.by")
+
+    def test_session_is_rebound_when_dlsid_belongs_to_different_user(self):
+        # Stale Django session belongs to pk=1 (e.g. a former superuser),
+        # but the current DLSID authenticates user 42. Middleware must
+        # rebind the session so the local user matches the external one.
+        from django.contrib.auth.models import User
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        from ai.models import ExternalDLAccount
+
+        stale = User.objects.create_user(
+            username="stale-superuser",
+            password="x",
+            is_superuser=True,
+            is_staff=True,
+        )
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = stale
+        request.COOKIES["DLSID"] = "session-123"
+        # Seed the prompt_developer group and a fresh user so the real
+        # provisioning path (not a mock) can run end-to-end.
+        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        fresh = User.objects.create_user(username="alice", password="x")
+        ExternalDLAccount.objects.create(user=fresh, external_user_id="42")
+
+        with patch(
+            "ai.middleware.fetch_external_user_info",
+            return_value={"userId": 42, "login": "alice", "firstName": "Alice"},
+        ):
             response = self.middleware(request)
 
         self.assertEqual(response.status_code, 200)
-        fetch_user_info.assert_not_called()
+        # After middleware the request must be bound to the fresh user,
+        # not the stale superuser.
+        self.assertEqual(request.user.pk, fresh.pk)
+        self.assertEqual(request.user.username, "alice")
 
     def test_cached_user_info_skips_external_call(self):
         request = self.factory.get("/ai/admin/")
@@ -155,6 +193,27 @@ class AdminExternalAuthTests(TestCase):
         # of the local session.
         request = self._request(user_id=None)
         request.user = user
+        self.assertFalse(ai_admin_site.has_permission(request))
+
+    def test_has_permission_rejects_stale_session_under_other_dlsid(self):
+        # The local session is bound to user 99, but the DLSID chain
+        # on the current request authenticates user 12345. This is
+        # exactly the cross-account bug: a stale superuser session
+        # must NOT grant access on someone else's DLSID.
+        from ai.admin.site import ai_admin_site
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        from django.contrib.auth.models import Group
+        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        stale = self.user_model.objects.create_user(
+            username="99",
+            password="initial-pass",
+            is_superuser=True,
+            is_staff=True,
+        )
+        legit = self.user_model.objects.create_user(username="12345", password="initial-pass")
+        legit.groups.add(group)
+        request = self._request(user_id="12345")
+        request.user = stale
         self.assertFalse(ai_admin_site.has_permission(request))
 
     def test_has_permission_accepts_matching_prompt_developer(self):

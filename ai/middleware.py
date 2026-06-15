@@ -134,13 +134,16 @@ class ExternalAuthMiddleware:
         if self._is_skipped_path(request_path):
             return self.get_response(request)
 
-        user = getattr(request, "user", None)
-        if user is not None and getattr(user, "is_authenticated", False):
-            self._attach_cached_user_info(request)
-            return self.get_response(request)
-
+        # An already-authenticated Django session does NOT mean the
+        # request is fresh — the DLSID chain might have changed (user
+        # signed in as someone else on dl.gsu.by) or a stale session
+        # cookie from a different account could be sitting in the
+        # browser. Always revalidate against the external API and
+        # rebind the local session to the user the API just confirmed.
         raw_session_id = request.COOKIES.get(self.session_cookie_name)
         if not raw_session_id:
+            # No DLSID at all — anything other than admin entry points
+            # redirects to dl.gsu.by.
             return self._redirect_or_optional(request, request_path)
 
         session_id = unquote(raw_session_id)
@@ -155,6 +158,11 @@ class ExternalAuthMiddleware:
                 self._store_cached_user_info(request, session_id, user_info)
             logger.info(f"API response: {user_info}")
         except ExternalAuthUnauthorized:
+            # DLSID is no longer valid — drop the local session and
+            # bounce the user back to dl.gsu.by so they re-authenticate.
+            from django.contrib.auth import logout as auth_logout
+            if request.user.is_authenticated:
+                auth_logout(request)
             return self._redirect_or_optional(request, request_path)
         except ExternalAuthMisconfigured as exc:
             logger.error(f"External auth misconfigured: {exc}")
@@ -179,7 +187,10 @@ class ExternalAuthMiddleware:
         try:
             user, created = get_or_create_user_from_external(user_info)
             if user:
-                # Avoid rotating CSRF/session on every request when already authenticated.
+                # Always rebind the session to the user the API just
+                # confirmed. This is the only way to defend against
+                # a stale Django session (e.g. a superuser from
+                # yesterday) being reused under a different DLSID.
                 if not request.user.is_authenticated or request.user.pk != user.pk:
                     login(request, user, backend='django.contrib.auth.backends.ModelBackend')
                     csrf.rotate_token(request)
