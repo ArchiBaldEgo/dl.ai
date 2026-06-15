@@ -12,7 +12,7 @@ from django.utils import timezone
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from ai.admin import PromptAdmin, PromptForm, _external_admin_entry_response
+from ai.admin import PromptAdmin, PromptForm
 from ai.middleware import ExternalAuthMiddleware
 from ai.i18n import get_localized_name, get_ui_language_suffix
 from ai.models import AIRequestLog, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic
@@ -23,12 +23,20 @@ class ChatViewTests(SimpleTestCase):
     def setUp(self):
         self.factory = RequestFactory()
 
+    def _chat_request(self, user=None):
+        request = self.factory.get("/ai/chat/")
+        request.user = user if user is not None else SimpleNamespace(
+            is_authenticated=True, is_active=True, username="chat-user",
+        )
+        request.session = {}
+        request.user_info = {"userId": "chat-user"}
+        request.COOKIES = {"userId": "chat-user"}
+        return request
+
     @patch("ai.views.AIAppSettings.get_solo", side_effect=ProgrammingError)
     @patch("ai.views.get_available_model_options", return_value=[])
     def test_chat_view_does_not_fail_when_ai_settings_table_missing(self, _mock_models, _mock_get_solo):
-        request = self.factory.get("/ai/chat/")
-        request.user = SimpleNamespace(is_authenticated=True)
-        request.session = {}
+        request = self._chat_request()
         with patch("ai.views.render", return_value=HttpResponse("ok")):
             response = chat_view(request)
         self.assertEqual(response.status_code, 200)
@@ -36,9 +44,7 @@ class ChatViewTests(SimpleTestCase):
     @patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=False))
     @patch("ai.views.get_available_model_options", return_value=[])
     def test_chat_view_returns_404_when_ai_app_disabled(self, _mock_models, _mock_get_solo):
-        request = self.factory.get("/ai/chat/")
-        request.user = SimpleNamespace(is_authenticated=True)
-        request.session = {}
+        request = self._chat_request()
         response = chat_view(request)
         self.assertEqual(response.status_code, 404)
 
@@ -47,6 +53,30 @@ class ChatViewTests(SimpleTestCase):
         request.user = SimpleNamespace(is_authenticated=False)
         request.session = {}
         response = chat_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_chat_view_requires_matching_user_info(self):
+        # No user_info at all → 403.
+        request = self.factory.get("/ai/chat/")
+        request.user = SimpleNamespace(is_authenticated=True, is_active=True, username="alice")
+        request.session = {}
+        request.user_info = None
+        request.COOKIES = {}
+        with patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)), \
+             patch("ai.views.get_available_model_options", return_value=[]):
+            response = chat_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_chat_view_rejects_session_mismatch(self):
+        # Session-bound user "alice" but DLSID holds "bob" → 403.
+        request = self.factory.get("/ai/chat/")
+        request.user = SimpleNamespace(is_authenticated=True, is_active=True, username="alice")
+        request.session = {}
+        request.user_info = {"userId": "bob"}
+        request.COOKIES = {"userId": "bob"}
+        with patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)), \
+             patch("ai.views.get_available_model_options", return_value=[]):
+            response = chat_view(request)
         self.assertEqual(response.status_code, 403)
 
 
@@ -59,13 +89,16 @@ class ExternalAuthMiddlewareTests(SimpleTestCase):
     def _add_session(self, request):
         SessionMiddleware(lambda req: None).process_request(request)
 
-    def test_test_panel_login_skips_external_auth(self):
+    def test_test_panel_login_no_longer_skips_external_auth(self):
         request = self.factory.get("/ai/test-panel/login/")
         self._add_session(request)
 
         response = self.middleware(request)
 
-        self.assertEqual(response.status_code, 200)
+        # Middleware now treats /ai/test-panel/login/ as a regular path:
+        # no DLSID, no user_info → 302 redirect to dl.gsu.by.
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "https://dl.gsu.by")
 
     def test_authenticated_user_skips_external_auth(self):
         request = self.factory.get("/ai/chat/")
@@ -105,36 +138,36 @@ class AdminExternalAuthTests(TestCase):
         request.user_info = {"userId": user_id}
         return request
 
-    def test_existing_external_user_auto_logs_into_admin(self):
+    def test_has_permission_rejects_anonymous(self):
+        from ai.admin.site import ai_admin_site
+        request = self._request()
+        self.assertFalse(ai_admin_site.has_permission(request))
+
+    def test_has_permission_rejects_session_user_mismatch(self):
+        from ai.admin.site import ai_admin_site
+        user = self.user_model.objects.create_user(
+            username="other-user",
+            password="initial-pass",
+        )
+        request = self._request(user_id="12345")
+        request.user = user
+        # The request claims to be user "12345" via DLSID, but the local
+        # session belongs to "other-user" → has_permission must refuse.
+        self.assertFalse(ai_admin_site.has_permission(request))
+
+    def test_has_permission_accepts_matching_prompt_developer(self):
+        from ai.admin.site import ai_admin_site
+        from django.contrib.auth.models import Group
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         user = self.user_model.objects.create_user(
             username="12345",
             password="initial-pass",
         )
-        request = self._request()
-
-        response = _external_admin_entry_response(request)
-
-        self.assertIsNone(response)
-        self.assertEqual(request.session[SESSION_KEY], str(user.pk))
-        self.assertTrue(request.session["admin_fresh_auth"])
-
-    def test_existing_mapped_external_user_keeps_valid_admin_session(self):
-        user = self.user_model.objects.create_user(
-            username="external-login",
-            password="initial-pass",
-        )
-        ExternalDLAccount.objects.create(
-            user=user,
-            external_user_id="12345",
-            external_login="external-login",
-        )
-        request = self._request(path="/ai/admin/ai/prompt/add/")
+        user.groups.add(group)
+        request = self._request(user_id="12345")
         request.user = user
-
-        response = _external_admin_entry_response(request)
-
-        self.assertIsNone(response)
-        self.assertTrue(request.session["admin_fresh_auth"])
+        self.assertTrue(ai_admin_site.has_permission(request))
 
     def test_new_external_user_sets_password_once_and_is_created(self):
         request = self._request(
@@ -203,6 +236,82 @@ class AdminExternalAuthTests(TestCase):
         self.assertEqual(self.user_model.objects.filter(username="13579").count(), 0)
 
 
+class AdminPermissionsTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        from django.contrib.auth.models import Group
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+
+    def test_prompt_developer_cannot_view_shared_prompt_module(self):
+        from ai.admin.models import SharedPromptAdmin
+        from django.contrib.admin.sites import AdminSite
+        user = self.user_model.objects.create_user(username="alice", password="x")
+        user.groups.add(self.pd_group)
+        request = self.factory.get("/ai/admin/ai/sharedprompt/")
+        request.user = user
+        admin = SharedPromptAdmin(SharedPrompt, AdminSite())
+        self.assertFalse(admin.has_module_permission(request))
+
+    def test_staff_user_can_view_shared_prompt_module(self):
+        from ai.admin.models import SharedPromptAdmin
+        from django.contrib.admin.sites import AdminSite
+        user = self.user_model.objects.create_user(
+            username="bob", password="x", is_staff=True,
+        )
+        request = self.factory.get("/ai/admin/ai/sharedprompt/")
+        request.user = user
+        admin = SharedPromptAdmin(SharedPrompt, AdminSite())
+        self.assertTrue(admin.has_module_permission(request))
+
+    def test_app_list_hides_staff_only_models_for_prompt_developer(self):
+        from ai.admin.site import ai_admin_site
+        from ai.admin.permissions import filter_app_list_for_user
+        from ai.models import Prompt as PromptModel, SharedPrompt as SharedPromptModel
+        from django.contrib.auth import get_user_model as get_user
+        User = get_user()
+        user = self.user_model.objects.create_user(username="carol", password="x")
+        user.groups.add(self.pd_group)
+        request = self.factory.get("/ai/admin/")
+        request.user = user
+        request._ai_admin_registry = ai_admin_site._registry
+        app_list = [
+            {
+                "app_label": "ai",
+                "name": "AI",
+                "app_url": "/ai/admin/ai/",
+                "models": [
+                    {"object_name": "Prompt", "name": "Prompt",
+                     "admin_url": "/ai/admin/ai/prompt/", "add_url": "",
+                     "view_only": False, "_model_cls": PromptModel},
+                    {"object_name": "SharedPrompt", "name": "SharedPrompt",
+                     "admin_url": "/ai/admin/ai/sharedprompt/", "add_url": "",
+                     "view_only": False, "_model_cls": SharedPromptModel},
+                ],
+            },
+            {
+                "app_label": "auth",
+                "name": "Auth",
+                "app_url": "/ai/admin/auth/",
+                "models": [
+                    {"object_name": "User", "name": "User",
+                     "admin_url": "/ai/admin/auth/user/", "add_url": "",
+                     "view_only": False, "_model_cls": User},
+                ],
+            },
+        ]
+        filtered = filter_app_list_for_user(app_list, request)
+        # Non-AI app (auth) without a custom link for this user must be dropped.
+        labels = [app["app_label"] for app in filtered]
+        self.assertNotIn("auth", labels)
+        # The AI app must keep Prompt, drop SharedPrompt.
+        ai_app = next(app for app in filtered if app["app_label"] == "ai")
+        names = [m["object_name"] for m in ai_app["models"]]
+        self.assertIn("Prompt", names)
+        self.assertNotIn("SharedPrompt", names)
+
+
 class PromptAdminAccessTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
@@ -253,6 +362,8 @@ class PromptAdminAccessTests(TestCase):
         query_params = query_params or {}
         request = self.factory.get("/ai/admin/ai/prompt/", data=query_params)
         request.user = user
+        request.user_info = {"userId": user.username}
+        request.COOKIES = {"userId": user.username}
         return request
 
     def test_prompt_developer_can_edit_owned_or_assigned_prompt(self):
@@ -501,6 +612,8 @@ class ProblemDataApiUiLanguageTests(TestCase):
             params["ui_language"] = ui_language
         request = self.factory.get("/ai/api/problem-data/", data=params)
         request.user = self.user
+        request.user_info = {"userId": self.user.username}
+        request.COOKIES = {"userId": self.user.username}
         return request
 
     def test_problem_data_localizes_topic_and_prompt_names(self):

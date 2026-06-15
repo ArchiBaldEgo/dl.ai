@@ -26,7 +26,6 @@ from ai.views import (
     get_prompts,
     get_shared_prompts,
     get_problem_data,
-    prompt_developer_login_view,
     health_view,
     set_password_view,
 )
@@ -35,7 +34,6 @@ urlpatterns = [
     path('health', health_view, name='health'),
     path('ai/admin/', include(get_ai_admin_urls())),
     path('', include('ai.urls')),
-    path('ai/test-panel/login/', prompt_developer_login_view, name='prompt_developer_login_view_fallback'),
     path('ai/api/languages/', get_languages, name='get_languages'),
     path('ai/api/topics/', get_topics, name='get_topics'),
     path('ai/api/shared-prompts/', get_shared_prompts, name='get_shared_prompts'),

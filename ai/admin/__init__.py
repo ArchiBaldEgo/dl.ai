@@ -29,7 +29,6 @@ from .model_status import (
     admin_model_status_refresh_view,
 )
 from .my_prompt import admin_my_prompt_view
-from .auth import _external_admin_entry_response
 
 __all__ = [
     "ai_admin_site",
@@ -49,7 +48,6 @@ __all__ = [
     "admin_model_status_refresh_view",
     "admin_my_prompt_view",
     "admin_request_logs_view",
-    "_external_admin_entry_response",
 ]
 
 # Register AI models on the custom admin site so they appear in /ai/admin/.

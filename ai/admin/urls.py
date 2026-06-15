@@ -8,7 +8,6 @@ from .arm import (
     admin_arm_find_error_start_view,
     admin_arm_find_error_status_view,
 )
-from .auth import _admin_logout_view
 from .logs import admin_request_logs_view, admin_request_log_detail_view
 from .model_status import (
     admin_model_status_view,
@@ -25,7 +24,6 @@ def get_ai_admin_urls():
     This function is called by DjangoTest.urls when wiring admin URLs.
     """
     custom_urls = [
-        path("logout/", _admin_logout_view, name="logout"),
         path("set-password/", set_password_view, name="set_password_view"),
         path("arm/find-error/start/", ai_admin_site.admin_view(admin_arm_find_error_start_view), name="ai_arm_find_error_start"),
         path("arm/find-error/status/", ai_admin_site.admin_view(admin_arm_find_error_status_view), name="ai_arm_find_error_status"),

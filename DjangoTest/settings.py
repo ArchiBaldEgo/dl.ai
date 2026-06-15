@@ -30,6 +30,7 @@ DB_USER = os.getenv("DB_USER")
 DB_NAME = os.getenv("DB_NAME", "dl_ai")
 DB_HOST = os.getenv("DB_HOST", "db")
 DB_PORT = os.getenv("DB_PORT", "5432")
+DB_ENGINE = os.getenv("DB_ENGINE", "django.db.backends.postgresql")
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
@@ -155,7 +156,7 @@ else:
     SESSION_COOKIE_SECURE = False
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
+        'ENGINE': DB_ENGINE,
         'NAME': DB_NAME,
         'USER': DB_USER,
         'PASSWORD': DB_PASSWORD,

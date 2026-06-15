@@ -1,7 +1,7 @@
 import os
 
 import tempfile
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import login
 from django.shortcuts import redirect, render
 from django.http import JsonResponse
 from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound
@@ -14,6 +14,7 @@ from django.views.decorators.http import require_http_methods
 from django.conf import settings
 from .model_health import get_available_model_options
 from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
+from .admin.permissions import external_id_matches_session
 from .auth_backends import (
     ADMIN_EXTERNAL_AUTH_BACKEND,
     create_admin_user_with_password,
@@ -71,13 +72,24 @@ def _is_ai_app_enabled():
 
 
 def _has_page_access(request):
+    """Require a fresh external user_info and a matching Django session.
+
+    The middleware only attaches ``request.user_info`` when it could verify the
+    DLSID cookie against EXTERNAL_AUTH_API_URL on this request, so reaching
+    here implies the cookie is valid. We additionally enforce that the
+    session-bound Django user is the same person as the one holding the
+    cookie — otherwise a stale session would still grant access to /ai/...
+    """
     user = getattr(request, "user", None)
-    return bool(
-        user
-        and user.is_authenticated
-        or get_external_user_id_from_request(request)
-        or getattr(request, "user_info", None)
-    )
+    if not user or not user.is_authenticated:
+        return False
+    if getattr(user, "is_active", True) is False:
+        return False
+    if not getattr(request, "user_info", None):
+        return False
+    if not get_external_user_id_from_request(request):
+        return False
+    return external_id_matches_session(request)
 
 
 def _render_ai_page(request, template_name):
@@ -102,48 +114,6 @@ def _render_ai_page(request, template_name):
     })
 
 
-def prompt_developer_login_view(request):
-    default_next = "/ai/admin/arm/find-error/"
-    next_url = _safe_relative_url(request.GET.get("next"), default_next)
-    back_url = _safe_relative_url(request.GET.get("back"), "/")
-
-    # Test-panel entry should always require explicit credentials.
-    if request.method != "POST" and request.user.is_authenticated:
-        logout(request)
-
-    error_message = ""
-
-    if request.method == "POST":
-        next_url = _safe_relative_url(request.POST.get("next"), default_next)
-        back_url = _safe_relative_url(request.POST.get("back"), "/")
-        username = (request.POST.get("username") or "").strip()
-        password = request.POST.get("password") or ""
-
-        user = authenticate(request, username=username, password=password)
-        if user and user.is_active and user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists():
-            request.session["ai_testpanel_back_url"] = back_url
-            login(request, user)
-            csrf.rotate_token(request)
-            return redirect(next_url)
-
-        error_message = "Неверный логин/пароль или у пользователя нет группы prompt_developer."
-
-    request.session["ai_testpanel_back_url"] = back_url
-
-    response = render(
-        request,
-        "ai/test-panel-login.html",
-        {
-            "error_message": error_message,
-            "next_url": next_url,
-            "back_url": back_url,
-        },
-    )
-    response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    response["Pragma"] = "no-cache"
-    return response
-
-
 def set_password_view(request):
     """Allow an externally authenticated admin user to set a first password."""
     next_url = _safe_relative_url(
@@ -162,18 +132,8 @@ def set_password_view(request):
         )
 
     is_admin_registration = request.path.startswith("/ai/admin/set-password/") and bool(external_user_id)
-
     if is_admin_registration:
         target_user = get_admin_user_by_external_id(external_user_id)
-    elif request.user.is_authenticated and request.user.is_active:
-        target_user = request.user
-    elif external_user_id:
-        try:
-            target_user = ExternalDLAccount.objects.select_related("user").get(
-                external_user_id=str(external_user_id)
-            ).user
-        except ExternalDLAccount.DoesNotExist:
-            target_user = None
 
     if request.method == "POST":
         new_password = request.POST.get("new_password") or ""
@@ -186,31 +146,26 @@ def set_password_view(request):
             request.session["admin_fresh_auth"] = True
             return redirect(next_url)
 
-        if not is_admin_registration and (not target_user or not target_user.is_active):
-            error_message = "Не удалось найти пользователя для установки пароля."
-        elif not is_admin_registration and target_user.has_usable_password():
+        if not is_admin_registration:
+            error_message = "Установка пароля вне админки больше не поддерживается."
+        elif is_admin_registration and target_user and getattr(target_user, "is_active", True) is False:
+            error_message = "Учётная запись заблокирована."
+        elif is_admin_registration and target_user and target_user.has_usable_password():
             error_message = "Пользователь уже имеет пароль. Используйте обычный вход."
         elif new_password != new_password_confirm:
             error_message = "Пароли не совпадают."
         elif len(new_password) < 8:
             error_message = "Пароль должен быть не менее 8 символов."
         else:
-            if is_admin_registration:
-                if target_user:
-                    target_user.set_password(new_password)
-                    target_user.save(update_fields=["password"])
-                    ensure_prompt_developer_group(target_user)
-                else:
-                    target_user = create_admin_user_with_password(external_user_id, new_password)
-                login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
-                csrf.rotate_token(request)
-                request.session["admin_fresh_auth"] = True
-            else:
+            if target_user:
                 target_user.set_password(new_password)
-                target_user.save()
-                login(request, target_user, backend='django.contrib.auth.backends.ModelBackend')
-                csrf.rotate_token(request)
-                request.session["ai_testpanel_back_url"] = "/"
+                target_user.save(update_fields=["password"])
+                ensure_prompt_developer_group(target_user)
+            else:
+                target_user = create_admin_user_with_password(external_user_id, new_password)
+            login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
+            csrf.rotate_token(request)
+            request.session["admin_fresh_auth"] = True
             return redirect(next_url)
 
         response = render(

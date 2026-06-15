@@ -31,8 +31,16 @@ def _normalize_path(path: str | None) -> str:
 
 
 def _is_optional_auth_path(path: str) -> bool:
+    """Paths where a missing DLSID does not trigger a redirect to dl.gsu.by.
+
+    Only used for the admin login/logout/set-password entry points, where
+    the user must be able to reach the form before they have authenticated
+    against the external API. The legacy test-panel entry was removed; all
+    other /ai/... paths require a valid DLSID + EXTERNAL_AUTH_API_URL
+    verification on every request.
+    """
     normalized = _normalize_path(path)
-    return normalized == "/ai/test-panel/login" or _is_admin_path(normalized)
+    return _is_admin_path(normalized)
 
 
 class CsrfSessionFallbackMiddleware:
