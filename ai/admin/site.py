@@ -1,5 +1,6 @@
 """Custom admin site for the AI app (replaces monkey-patching admin.site)."""
 
+import logging
 import os
 
 from django.contrib import admin
@@ -19,6 +20,8 @@ from .permissions import (
     is_staff_or_superuser,
 )
 from ..auth_backends import get_external_user_id_from_request
+
+logger = logging.getLogger(__name__)
 
 
 def _is_admin_login_path(path: str) -> bool:
@@ -86,8 +89,10 @@ class AIAdminSite(admin.AdminSite):
     def has_permission(self, request):
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated:
+            logger.info("has_permission: anonymous → False")
             return False
         if getattr(user, "is_active", True) is False:
+            logger.info("has_permission: inactive user → False")
             return False
         # Login / logout pages are reachable without an external id —
         # we redirect them away anyway, so no point in checking.
@@ -106,10 +111,25 @@ class AIAdminSite(admin.AdminSite):
         # yesterday) would silently get admin access on someone else's
         # DLSID — which is exactly the bug we are fixing here.
         if not external_id:
+            logger.info("has_permission: no external_id → False")
             return False
         if not _session_matches_external_id(request, external_id):
+            logger.info(
+                "has_permission: session/user mismatch → False "
+                "(user=%s pk=%s external_id=%s provisioned=%s)",
+                getattr(user, "username", "?"),
+                getattr(user, "pk", "?"),
+                external_id,
+                getattr(getattr(request, "_ai_provisioned_user", None), "pk", "?"),
+            )
             return False
-        return can_access_admin(user)
+        if not can_access_admin(user):
+            logger.info(
+                "has_permission: can_access_admin=False for user=%s",
+                getattr(user, "username", "?"),
+            )
+            return False
+        return True
 
     def admin_view(self, view, cacheable=False):
         wrapped_view = super().admin_view(view, cacheable)
