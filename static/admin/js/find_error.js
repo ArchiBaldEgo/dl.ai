@@ -1129,6 +1129,11 @@
                     }
                 }
 
+                function setSelectEnabled(selectElement, enabled) {
+                    if (!selectElement) return;
+                    selectElement.disabled = !enabled;
+                }
+
                 function selectFirstIfSingle(selectElement) {
                     if (selectElement && selectElement.options.length === 1) {
                         selectElement.selectedIndex = 0;
@@ -1155,6 +1160,7 @@
                         problemTopicSelect.appendChild(option);
                     });
                     selectFirstIfSingle(problemTopicSelect);
+                    setSelectEnabled(problemTopicSelect, languageId !== null && languageId !== undefined && problemTopicSelect.options.length > 1);
                 }
 
                 function filterPrompts(prompts, languageId, topicId) {
@@ -1197,6 +1203,8 @@
                         problemPromptSelect.appendChild(option);
                     });
                     selectFirstIfSingle(problemPromptSelect);
+                    const hasTopic = topicId !== null && topicId !== undefined && topicId !== "";
+                    setSelectEnabled(problemPromptSelect, hasTopic && problemPromptSelect.options.length > 1);
                 }
 
                 function savePageState() {
@@ -1261,6 +1269,8 @@
                     const languageId = parseInt(problemLanguageSelect.value);
                     problemTopicSelect.innerHTML = '<option value="">Выберите тему</option>';
                     problemPromptSelect.innerHTML = '<option value="">Выберите промпт</option>';
+                    setSelectEnabled(problemTopicSelect, false);
+                    setSelectEnabled(problemPromptSelect, false);
                     if (!isNaN(languageId)) {
                         populateTopics(languageId);
                         populatePrompts(languageId, null);
@@ -1274,6 +1284,7 @@
                     const topicId = parseInt(problemTopicSelect.value);
                     problemPromptSelect.innerHTML = '<option value="">Выберите промпт</option>';
                     const languageId = parseInt(problemLanguageSelect.value);
+                    setSelectEnabled(problemPromptSelect, false);
                     populatePrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
                     savePageState();
                 });
@@ -1353,6 +1364,8 @@
 
                 await fetchProblemData();
                 populateLanguages(problemData.languages);
+                setSelectEnabled(problemTopicSelect, false);
+                setSelectEnabled(problemPromptSelect, false);
                 populatePrompts(null, null);
                 restorePageState();
                 restoreSharedText();

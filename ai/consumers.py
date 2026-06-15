@@ -69,6 +69,18 @@ def _resolve_user_for_log(user):
     return user, username, external_id, full_name
 
 
+def _parse_shared_prompt_id(prompt_id):
+    """Return shared prompt pk if prompt_id is 'shared_<pk>', else None."""
+    if not isinstance(prompt_id, str):
+        return None
+    if not prompt_id.startswith("shared_"):
+        return None
+    try:
+        return int(prompt_id.split("_", 1)[1])
+    except (ValueError, IndexError):
+        return None
+
+
 @sync_to_async
 def _resolve_context_names(prog_lng_id, topic_id, prompt_id, ui_language=""):
     """Return (programming_language_name, topic_name, prompt_name) for logging."""
@@ -87,10 +99,16 @@ def _resolve_context_names(prog_lng_id, topic_id, prompt_id, ui_language=""):
     except Topic.DoesNotExist:
         pass
     try:
-        if prompt_id:
+        shared_pk = _parse_shared_prompt_id(prompt_id)
+        if shared_pk is not None:
+            prompt = SharedPrompt.objects.get(id=shared_pk)
+        elif prompt_id:
             prompt = Prompt.objects.select_related("shared_prompt").get(id=prompt_id)
+        else:
+            prompt = None
+        if prompt is not None:
             prompt_name = get_localized_name(prompt, ui_language, "prompt_name")
-    except Prompt.DoesNotExist:
+    except (Prompt.DoesNotExist, SharedPrompt.DoesNotExist):
         pass
     return prog_lng_name, topic_name, prompt_name
 
@@ -126,9 +144,13 @@ def _update_log_after_response(log, end_time, response, modell):
 @sync_to_async
 def getPromptText(prompt_id, ui_language="", programming_language_name=""):
     try:
+        shared_pk = _parse_shared_prompt_id(prompt_id)
+        if shared_pk is not None:
+            prompt = SharedPrompt.objects.get(id=shared_pk)
+            return prompt.get_effective_text(ui_language, programming_language_name)
         prompt = Prompt.objects.select_related('shared_prompt').get(id=prompt_id)
         return prompt.get_effective_text(ui_language, programming_language_name)
-    except Prompt.DoesNotExist:
+    except (Prompt.DoesNotExist, SharedPrompt.DoesNotExist):
         return None
     except Exception as e:
         print(f"Database error: {str(e)}")
