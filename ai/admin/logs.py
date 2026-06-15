@@ -8,6 +8,7 @@ from django.http import HttpResponseForbidden
 from django.template.response import TemplateResponse
 from django.utils.http import urlencode
 
+from ..constants import MOSCOW_TZ
 from ..models import AIRequestLog
 from .permissions import can_access_logs
 
@@ -16,19 +17,18 @@ class AIRequestLogAdmin(admin.ModelAdmin):
     list_display = (
         "sent_at_display",
         "received_at_display",
-        "user_full_name",
-        "external_user_id",
-        "model_names_display",
+        "sender_display",
         "programming_language_name",
         "topic_name_display",
         "prompt_name",
+        "model_names_display",
         "status",
-        "source",
         "duration_seconds_display",
     )
-    list_filter = ("status", "source", "programming_language_name", "sent_at")
+    list_filter = ("status", "programming_language_name", "sent_at")
     search_fields = (
         "external_user_id",
+        "username",
         "user_full_name",
         "message",
         "programming_language_name",
@@ -59,9 +59,17 @@ class AIRequestLogAdmin(admin.ModelAdmin):
         return _format_moscow_datetime(obj.received_at)
     received_at_display.short_description = "Получен"
 
+    def sender_display(self, obj):
+        name = obj.user_full_name or obj.username or ""
+        ext_id = obj.external_user_id
+        if name and ext_id:
+            return f"{name} (id: {ext_id})"
+        return name or ext_id or "—"
+    sender_display.short_description = "Кто отправлял"
+
     def model_names_display(self, obj):
-        return ", ".join(obj.model_names or [])
-    model_names_display.short_description = "Модели"
+        return ", ".join(obj.model_names or []) or "—"
+    model_names_display.short_description = "Модель"
 
     def programming_language_name(self, obj):
         return obj.programming_language_name or "—"
@@ -79,7 +87,7 @@ class AIRequestLogAdmin(admin.ModelAdmin):
         if obj.duration_seconds is None:
             return "—"
         return str(round(obj.duration_seconds))
-    duration_seconds_display.short_description = "Длительность, с"
+    duration_seconds_display.short_description = "Время ответа, с"
 
 
 def _format_moscow_datetime(value):
@@ -144,6 +152,7 @@ def admin_request_logs_view(request):
         "status_choices": AIRequestLog.STATUS_CHOICES,
         "source_choices": AIRequestLog.SOURCE_CHOICES,
         "filters_query": filters_query_str,
+        "moscow_tz": MOSCOW_TZ,
         "filters": {
             "status": status,
             "source": source,
@@ -165,5 +174,6 @@ def admin_request_log_detail_view(request, log_id):
         **ai_admin_site.each_context(request),
         "title": "DL.AI: Детали запроса",
         "log": log,
+        "moscow_tz": MOSCOW_TZ,
     }
     return TemplateResponse(request, "admin/ai/airequestlog_detail.html", context)

@@ -241,6 +241,22 @@ class AdminExternalAuthTests(TestCase):
         request.user = user
         self.assertTrue(ai_admin_site.has_permission(request))
 
+    def test_get_admin_user_uses_external_account_not_username(self):
+        """A username matching the external id must not win over ExternalDLAccount."""
+        from ai.auth_backends import get_admin_user_by_external_id
+        from ai.models import ExternalDLAccount
+
+        # A colliding username with a password: the old lookup returned this
+        # user and caused an admin <-> set-password redirect loop.
+        self.user_model.objects.create_user(username="186638", password="pass-123")
+        # The real user mapped by the external API.
+        real_user = self.user_model.objects.create_user(username="real-186638")
+        ExternalDLAccount.objects.create(user=real_user, external_user_id="186638")
+
+        resolved = get_admin_user_by_external_id("186638")
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.pk, real_user.pk)
+
     def test_new_external_user_sets_password_once_and_is_created(self):
         request = self._request(
             method="post",

@@ -43,7 +43,7 @@
   .ai-logs-table th {
     background: var(--darkened-bg);
   }
-  .ai-logs-table tr:nth-child(even) {
+  .ai-logs-table tr:nth-child(even of .ai-log-row) {
     background: var(--darkened-bg);
   }
   .ai-logs-status-success {
@@ -68,42 +68,96 @@
     text-align: center;
     color: var(--body-quiet-color);
   }
-  .ai-logs-message {
-    max-width: 300px;
-    white-space: pre-wrap;
-    overflow-wrap: break-word;
-    font-size: 12px;
-    max-height: 120px;
-    overflow: auto;
-  }
-  .ai-logs-models {
-    font-size: 12px;
-    max-width: 200px;
-  }
   .ai-log-row {
     cursor: pointer;
   }
   .ai-log-row:hover {
     background: var(--selected-row);
   }
+  .ai-log-row.ai-log-row-expanded {
+    background: var(--selected-row);
+  }
+  .ai-log-detail-row {
+    display: none;
+  }
+  .ai-log-detail-row.ai-log-detail-visible {
+    display: table-row;
+  }
+  .ai-log-detail-cell {
+    padding: 0;
+    border: 1px solid var(--hairline-color);
+    background: var(--darkened-bg);
+  }
+  .ai-log-detail-inner {
+    padding: 16px;
+  }
+  .ai-log-detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .ai-log-detail-block h3 {
+    margin: 0 0 8px;
+    font-size: 14px;
+  }
+  .ai-log-detail-block pre {
+    background: var(--body-bg);
+    border: 1px solid var(--hairline-color);
+    border-radius: 4px;
+    padding: 12px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 400px;
+    overflow: auto;
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .ai-log-detail-actions {
+    margin-top: 12px;
+    display: flex;
+    gap: 8px;
+  }
+  .ai-log-detail-hint {
+    color: var(--body-quiet-color);
+    font-size: 12px;
+    margin-bottom: 8px;
+  }
+  @media (max-width: 900px) {
+    .ai-log-detail-grid {
+      grid-template-columns: 1fr;
+    }
+  }
 </style>
 
 <script>
-  document.querySelectorAll('.ai-log-row').forEach(function (row) {
-    row.addEventListener('click', function () {
-      const url = row.dataset.detailUrl;
-      if (url) {
-        window.location.href = url;
-      }
+  document.addEventListener('click', function (event) {
+    const row = event.target.closest('.ai-log-row');
+    if (!row) return;
+
+    const detailRow = row.nextElementSibling;
+    if (!detailRow || !detailRow.classList.contains('ai-log-detail-row')) return;
+
+    const isVisible = detailRow.classList.contains('ai-log-detail-visible');
+
+    // Close any open detail rows inside the same table.
+    row.closest('table').querySelectorAll('.ai-log-detail-visible').forEach(function (openRow) {
+      openRow.classList.remove('ai-log-detail-visible');
     });
+    row.closest('table').querySelectorAll('.ai-log-row-expanded').forEach(function (openRow) {
+      openRow.classList.remove('ai-log-row-expanded');
+    });
+
+    if (!isVisible) {
+      detailRow.classList.add('ai-log-detail-visible');
+      row.classList.add('ai-log-row-expanded');
+    }
   });
 </script>
 
 <div class="ai-logs-wrap">
-  <div style="display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 16px;">
-    <h1>{{ title }}</h1>
-    <a class="button" href="/ai/admin/ai/airequestlog/">Открыть в Django admin</a>
-  </div>
+  <h1>{{ title }}</h1>
 
   <form method="get" class="ai-logs-filters">
     <div class="filter-field">
@@ -112,15 +166,6 @@
         <option value="">Все</option>
         {% for key, label in status_choices %}
           <option value="{{ key }}" {% if filters.status == key %}selected{% endif %}>{{ label }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="filter-field">
-      <label for="id_source">Источник</label>
-      <select id="id_source" name="source">
-        <option value="">Все</option>
-        {% for key, label in source_choices %}
-          <option value="{{ key }}" {% if filters.source == key %}selected{% endif %}>{{ label }}</option>
         {% endfor %}
       </select>
     </div>
@@ -146,44 +191,63 @@
     </div>
   </form>
 
+  {% load tz %}
   {% if page_obj.object_list %}
     <table class="ai-logs-table">
       <thead>
         <tr>
           <th>Отправлен</th>
           <th>Получен</th>
-          <th>Пользователь</th>
-          <th>Модели</th>
+          <th>Кто отправлял</th>
           <th>Язык программирования</th>
           <th>Тема</th>
           <th>Препромпт</th>
-          <th>Источник</th>
+          <th>Модель</th>
           <th>Статус</th>
-          <th>Длительность, с</th>
-          <th>Сообщение</th>
+          <th>Время ответа, с</th>
         </tr>
       </thead>
       <tbody>
+        {% timezone moscow_tz %}
         {% for log in page_obj.object_list %}
-          <tr class="ai-log-row" data-detail-url="/ai/admin/ai/airequestlog/{{ log.id }}/">
+          <tr class="ai-log-row">
             <td>{{ log.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>{{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>
               {% if log.user_full_name %}{{ log.user_full_name }}{% endif %}
               {% if log.external_user_id %}<br><small>id: {{ log.external_user_id }}</small>{% endif %}
             </td>
-            <td class="ai-logs-models">{{ log.model_names|join:", " }}</td>
             <td>{{ log.programming_language_name|default:"—" }}</td>
             <td>{{ log.topic_name|default:"—" }}</td>
             <td>{{ log.prompt_name|default:"—" }}</td>
-            <td>{{ log.get_source_display }}</td>
+            <td>{{ log.model_names|join:", "|default:"—" }}</td>
             <td class="{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">
               {{ log.get_status_display }}
             </td>
             <td>{{ log.duration_seconds|floatformat:0|default:"—" }}</td>
-            <td class="ai-logs-message">{{ log.message|default:"—" }}</td>
+          </tr>
+          <tr class="ai-log-detail-row">
+            <td colspan="9" class="ai-log-detail-cell">
+              <div class="ai-log-detail-inner">
+                <div class="ai-log-detail-hint">Нажмите на строку повторно, чтобы скрыть.</div>
+                <div class="ai-log-detail-grid">
+                  <div class="ai-log-detail-block">
+                    <h3>Текст, который отправил пользователь</h3>
+                    <pre>{{ log.message|default:"(пусто)" }}</pre>
+                  </div>
+                  <div class="ai-log-detail-block">
+                    <h3>Текст, который ответила модель</h3>
+                    <pre>{{ log.response_text|default:"(пусто)" }}</pre>
+                  </div>
+                </div>
+                <div class="ai-log-detail-actions">
+                  <a class="button" href="/ai/admin/ai/airequestlog/{{ log.id }}/">Открыть детали</a>
+                </div>
+              </div>
+            </td>
           </tr>
         {% endfor %}
+        {% endtimezone %}
       </tbody>
     </table>
 

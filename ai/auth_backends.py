@@ -69,15 +69,17 @@ def ensure_prompt_developer_group(user):
 
 
 def get_admin_user_by_external_id(external_user_id):
+    """Return the Django user mapped to ``external_user_id``.
+
+    ``ExternalDLAccount`` is the single source of truth for the dl.gsu.by
+    user mapping. A Django username matching the external id is NOT used
+    as a shortcut: such a username can belong to a completely different
+    account and caused an infinite redirect loop between ``/ai/admin/``
+    and ``/ai/admin/set-password/``.
+    """
     external_user_id = normalize_external_user_id(external_user_id)
     if not external_user_id:
         return None
-
-    User = get_user_model()
-    try:
-        return User.objects.get(username=external_user_id)
-    except User.DoesNotExist:
-        pass
 
     from .models import ExternalDLAccount
 
