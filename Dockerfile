@@ -10,18 +10,25 @@ ARG NO_PROXY
 # рассинхронизируются и вызывают Hash Sum mismatch. No-Cache=True форсирует
 # получение свежих индексов/пакетов через прокси.
 RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
+    rm -rf /var/lib/apt/lists/partial /var/cache/apt/archives/partial && \
     apt-get update \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::http::Pipeline-Depth=0 \
+        -o Acquire::https::Pipeline-Depth=0 \
+        -o Acquire::Languages=none \
         -o Acquire::Retries=5 \
         -o Acquire::http::No-Cache=True \
         -o Acquire::https::No-Cache=True && \
-    apt-get install -y --no-install-recommends \
+    apt-get install -y --no-install-recommends --fix-missing \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::http::Pipeline-Depth=0 \
+        -o Acquire::https::Pipeline-Depth=0 \
+        -o Acquire::Languages=none \
         -o Acquire::Retries=10 \
         -o Acquire::http::Timeout=300 \
-        -o Acquire::http::No-Cache=True \
+        -o Acquire::https::No-Cache=True \
         -o Acquire::https::No-Cache=True \
         ca-certificates curl gnupg tini libpq-dev \
         fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 \
@@ -35,12 +42,18 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
     apt-get update \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::http::Pipeline-Depth=0 \
+        -o Acquire::https::Pipeline-Depth=0 \
+        -o Acquire::Languages=none \
         -o Acquire::Retries=5 \
         -o Acquire::http::No-Cache=True \
         -o Acquire::https::No-Cache=True && \
-    apt-get install -y --no-install-recommends \
+    apt-get install -y --no-install-recommends --fix-missing \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::http::Pipeline-Depth=0 \
+        -o Acquire::https::Pipeline-Depth=0 \
+        -o Acquire::Languages=none \
         -o Acquire::Retries=5 \
         -o Acquire::http::No-Cache=True \
         -o Acquire::https::No-Cache=True \
@@ -76,15 +89,22 @@ ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
 RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
+    rm -rf /var/lib/apt/lists/partial /var/cache/apt/archives/partial && \
     apt-get update \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::http::Pipeline-Depth=0 \
+        -o Acquire::https::Pipeline-Depth=0 \
+        -o Acquire::Languages=none \
         -o Acquire::Retries=5 \
         -o Acquire::http::No-Cache=True \
         -o Acquire::https::No-Cache=True && \
-    apt-get install -y --no-install-recommends \
+    apt-get install -y --no-install-recommends --fix-missing \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::http::Pipeline-Depth=0 \
+        -o Acquire::https::Pipeline-Depth=0 \
+        -o Acquire::Languages=none \
         -o Acquire::Retries=10 \
         -o Acquire::http::Timeout=300 \
         -o Acquire::http::No-Cache=True \
