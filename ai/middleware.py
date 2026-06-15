@@ -180,10 +180,12 @@ class ExternalAuthMiddleware:
 
         request.user_info = user_info
 
-        if _is_admin_path(request.path):
-            return self.get_response(request)
-
-        # Auto-provision user if needed
+        # Auto-provision user if needed. We do this for /ai/admin/...
+        # paths too, even though the admin views have their own
+        # permission checks: the admin's has_permission() compares
+        # request.user.username against the external_id from the
+        # DLSID chain, and that comparison only works when the local
+        # session has been rebound to the user the API just confirmed.
         try:
             user, created = get_or_create_user_from_external(user_info)
             if user:
@@ -191,7 +193,10 @@ class ExternalAuthMiddleware:
                 # confirmed. This is the only way to defend against
                 # a stale Django session (e.g. a superuser from
                 # yesterday) being reused under a different DLSID.
-                if not request.user.is_authenticated or request.user.pk != user.pk:
+                current = getattr(request, "user", None)
+                current_pk = getattr(current, "pk", None) if current is not None else None
+                is_authed = bool(getattr(current, "is_authenticated", False))
+                if not is_authed or current_pk != user.pk:
                     login(request, user, backend='django.contrib.auth.backends.ModelBackend')
                     csrf.rotate_token(request)
                     # Устанавливаем маркер свежей аутентификации для админки

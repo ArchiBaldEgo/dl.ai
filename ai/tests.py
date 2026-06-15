@@ -86,6 +86,7 @@ class ExternalAuthMiddlewareTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.middleware = ExternalAuthMiddleware(lambda req: HttpResponse("ok"))
+        self.user_model = get_user_model()
 
     def _add_session(self, request):
         SessionMiddleware(lambda req: None).process_request(request)
@@ -151,6 +152,14 @@ class ExternalAuthMiddlewareTests(TestCase):
         self.assertEqual(request.user.username, "alice")
 
     def test_cached_user_info_skips_external_call(self):
+        # Even for admin paths the middleware now provisions a local
+        # user, so seed the prompt_developer group and the user.
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        from ai.models import ExternalDLAccount
+        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        u = self.user_model.objects.create_user(username="user_42", password="x")
+        ExternalDLAccount.objects.create(user=u, external_user_id="42")
+
         request = self.factory.get("/ai/admin/")
         self._add_session(request)
         request.COOKIES["DLSID"] = "session-123"
