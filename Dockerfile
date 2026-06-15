@@ -4,31 +4,50 @@ FROM python:3.11-bookworm AS builder
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
-# Все системные зависимости за один RUN (быстрее)
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    rm -f /etc/apt/apt.conf.d/docker-clean && \
-    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache && \
+# Все системные зависимости за один RUN
+# NOTE: apt-кэш НЕ используется (mount type=cache убран), потому что при
+# обязательном корпоративном прокси кэшированные apt-индексы и .deb часто
+# рассинхронизируются и вызывают Hash Sum mismatch. No-Cache=True форсирует
+# получение свежих индексов/пакетов через прокси.
+RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
     apt-get update \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
-        -o Acquire::Retries=5 && \
+        -o Acquire::Retries=5 \
+        -o Acquire::http::No-Cache=True \
+        -o Acquire::https::No-Cache=True && \
     apt-get install -y --no-install-recommends \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
         -o Acquire::Retries=10 \
         -o Acquire::http::Timeout=300 \
+        -o Acquire::http::No-Cache=True \
+        -o Acquire::https::No-Cache=True \
         ca-certificates curl gnupg tini libpq-dev \
         fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 \
         libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 libgbm1 \
         libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 \
         libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
         libxkbcommon0 libxrandr2 xdg-utils && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
     curl --proxy "$HTTP_PROXY" -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y --no-install-recommends -o Acquire::Retries=5 nodejs
+    apt-get update \
+        -o Acquire::http::Proxy="$HTTP_PROXY" \
+        -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::Retries=5 \
+        -o Acquire::http::No-Cache=True \
+        -o Acquire::https::No-Cache=True && \
+    apt-get install -y --no-install-recommends \
+        -o Acquire::http::Proxy="$HTTP_PROXY" \
+        -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::Retries=5 \
+        -o Acquire::http::No-Cache=True \
+        -o Acquire::https::No-Cache=True \
+        nodejs && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 # ffmpeg НЕ ставим из apt — он приходит pip-пакетом imageio-ffmpeg (см. requirements.txt)
-# docker-clean удалён + keep-cache: скачанные .deb остаются в кэше между пересборками
-# Acquire::Retries=5 + Timeout=60: терпим обрывы и медленный прокси GSU
 # Виртуальное окружение Python
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -56,25 +75,28 @@ FROM python:3.11-slim-bookworm
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    rm -f /etc/apt/apt.conf.d/docker-clean && \
-    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache && \
+RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
     apt-get update \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
-        -o Acquire::Retries=5 && \
+        -o Acquire::Retries=5 \
+        -o Acquire::http::No-Cache=True \
+        -o Acquire::https::No-Cache=True && \
     apt-get install -y --no-install-recommends \
         -o Acquire::http::Proxy="$HTTP_PROXY" \
         -o Acquire::https::Proxy="$HTTPS_PROXY" \
         -o Acquire::Retries=10 \
         -o Acquire::http::Timeout=300 \
+        -o Acquire::http::No-Cache=True \
+        -o Acquire::https::No-Cache=True \
         ca-certificates curl fonts-liberation libasound2 libatk-bridge2.0-0 \
         libatk1.0-0 libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 \
         libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 \
         libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
-        libxkbcommon0 libxrandr2 xdg-utils
-# curl нужен healthcheck в compose; ffmpeg убран; retries/keep-cache как в билдере
+        libxkbcommon0 libxrandr2 xdg-utils && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+# curl нужен healthcheck в compose; ffmpeg убран; retries/No-Cache как в билдере
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /usr/bin/tini /usr/bin/tini
 COPY --from=builder /usr/bin/node /usr/local/bin/node
