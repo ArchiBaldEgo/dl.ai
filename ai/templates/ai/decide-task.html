@@ -11,7 +11,7 @@
 {% block solve_selected %}selected{% endblock %}
 
 {% block form_content %}
-    <textarea type="text" id="messageText"
+    <textarea type="text" id="messageText" data-node-id="{{ node_id }}" data-compiler-name="{{ compiler_name }}"
         placeholder="Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)"
         autocomplete="off"></textarea>
 {% endblock %}
@@ -26,4 +26,11 @@
         <select id="selectPrompt">
         </select>
     </div>
+{% endblock %}
+
+{% block extra_body_script %}
+<script>
+    window.AI_TASK_NODE_ID = document.getElementById('messageText').dataset.nodeId || '';
+    window.AI_COMPILER_NAME = document.getElementById('messageText').dataset.compilerName || '';
+</script>
 {% endblock %}

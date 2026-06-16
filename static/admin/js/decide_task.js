@@ -792,6 +792,8 @@
             Russian: {
                 send: "Отправить",
                 clear: "Очистить контекст",
+                taskLoadError: "Не удалось загрузить условие задачи",
+                taskNotFound: "Задача не найдена",
                 placeholder: "Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)\nПример форматирования кода:\n```\nprint('Hello, world!')\n```",
                 adminPanel: "Админ-Панель",
                 testPanel: "Тест-панель",
@@ -842,6 +844,8 @@
             English: {
                 send: "Send",
                 clear: "Clear Context",
+                taskLoadError: "Failed to load task statement",
+                taskNotFound: "Task not found",
                 placeholder: "Ask a question (preferably in English to avoid errors), for nice formatting wrap the code in ```\nExample of code formatting:\n```\nprint('Hello, world!')\n```",
                 adminPanel: "Admin Panel",
                 testPanel: "Test Panel",
@@ -891,6 +895,8 @@
             French: {
                 send: "Envoyer",
                 clear: "Effacer le contexte",
+                taskLoadError: "Impossible de charger l'énoncé de la tâche",
+                taskNotFound: "Tâche non trouvée",
                 placeholder: "Posez une question (de préférence en anglais pour éviter les erreurs), pour un bon formatage, encadrez le code dans ```\nExemple de formatage du code:\n```\nprint('Hello, world!')\n```",
                 adminPanel: "Panneau Admin",
                 testPanel: "Panneau Test",
@@ -1336,6 +1342,60 @@
                     updateVoiceStatus(getVoiceStatusText('readyForVoice'));
                 });
 
+                function decodeCompilerName(encoded) {
+                    if (!encoded) return '';
+                    try {
+                        return atob(encoded).trim().toLowerCase();
+                    } catch (e) {
+                        return '';
+                    }
+                }
+
+                function findLanguageIdByName(languages, compilerName) {
+                    if (!compilerName || !languages) return null;
+                    return languages.find(lang =>
+                        lang.language_name && lang.language_name.toLowerCase().includes(compilerName)
+                    )?.id || null;
+                }
+
+                async function loadTaskFromUrl() {
+                    const nodeId = window.AI_TASK_NODE_ID || '';
+                    if (!nodeId) return;
+
+                    try {
+                        const url = new URL('/ai/api/task-info/', window.location.origin);
+                        url.searchParams.set('nodeId', nodeId);
+                        url.searchParams.set('removeHtmlTags', 'true');
+                        const response = await fetch(url.toString());
+                        if (response.status === 404) {
+                            updateVoiceStatus(getUiString('taskNotFound', 'Задача не найдена'));
+                            return;
+                        }
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}`);
+                        }
+                        const data = await response.json();
+                        const statement = data.statement || '';
+                        const messageText = document.getElementById('messageText');
+                        if (messageText) {
+                            messageText.value = statement;
+                            saveSharedText();
+                        }
+
+                        const compilerName = decodeCompilerName(window.AI_COMPILER_NAME);
+                        const matchedLanguageId = findLanguageIdByName(problemData?.languages, compilerName);
+                        if (matchedLanguageId) {
+                            problemLanguageSelect.value = matchedLanguageId;
+                            populateTopics(matchedLanguageId);
+                            populatePrompts(matchedLanguageId, null);
+                            savePageState();
+                        }
+                    } catch (error) {
+                        console.error('Error loading task statement:', error);
+                        updateVoiceStatus(getUiString('taskLoadError', 'Не удалось загрузить условие задачи'));
+                    }
+                }
+
                 await fetchProblemData();
                 populateLanguages(problemData.languages);
                 setSelectEnabled(problemTopicSelect, false);
@@ -1343,6 +1403,7 @@
                 populatePrompts(null, null);
                 restorePageState();
                 restoreSharedText();
+                await loadTaskFromUrl();
             });
 
             window.onload = function () {

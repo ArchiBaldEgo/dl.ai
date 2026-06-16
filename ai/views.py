@@ -223,7 +223,13 @@ def chat_view(request):
 
 
 def decide_task_view(request):
-    return _render_ai_page(request, 'ai/decide-task.html')
+    response = _render_ai_page(request, 'ai/decide-task.html')
+    # _render_ai_page may return an HttpResponse (forbidden/disabled) instead of
+    # a TemplateResponse, so only inject context when we have a real template response.
+    if hasattr(response, "context_data"):
+        response.context_data["node_id"] = request.GET.get("nid", "")
+        response.context_data["compiler_name"] = request.GET.get("compiler_b64", "")
+    return response
 
 
 def find_error_view(request):

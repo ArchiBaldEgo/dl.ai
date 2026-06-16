@@ -220,7 +220,8 @@ def run_model_health_check(force=False):
                 is_available = _is_healthy_response(response_text)
                 # Model handlers only return text/tokens, not the raw status code.
                 # We try to recover the HTTP code from error messages when possible.
-                last_http_code = None if is_available else _extract_http_code_from_message(response_text)
+                # For healthy responses we assume the HTTP status was 200.
+                last_http_code = 200 if is_available else _extract_http_code_from_message(response_text)
 
                 _save_availability(
                     window_date=window_date,
