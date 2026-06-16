@@ -4,6 +4,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.contrib.auth.models import Group
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import SimpleTestCase, RequestFactory, TestCase, override_settings
+from pathlib import Path
 import json
 
 from django.http import HttpResponse
@@ -838,3 +839,44 @@ class DLApiClientEncodingTests(SimpleTestCase):
         payload = json.dumps({"statement": "Hello, world!"}, ensure_ascii=False)
         result = self._decode(payload)
         self.assertEqual(result["statement"], "Hello, world!")
+
+    def test_repairs_mixed_cp866_payload_with_replacement_chars(self):
+        """A payload with U+FFFD mixed with cp1251 codepoints must not crash.
+
+        Some PDF-derived responses contain Unicode replacement characters
+        alongside the CP866-via-cp1251 mojibake. The repair must drop the
+        replacement chars and still recover readable Cyrillic.
+        """
+        # "Привет мир!" as CP866 bytes interpreted as cp1251 codepoints,
+        # plus a trailing U+FFFD.
+        garbled = "ЏаЁўҐв ¬Ёа!" + chr(0xFFFD)
+        payload = json.dumps({"statement": garbled}, ensure_ascii=False)
+        result = self._decode(payload)
+        # The result should contain Cyrillic and no replacement characters.
+        self.assertNotIn(chr(0xFFFD), result["statement"])
+        self.assertIn("Привет", result["statement"])
+        self.assertIn("мир", result["statement"])
+
+    def test_repairs_real_curl_captured_payload(self):
+        """The captured /restapi/get-task-info payload decodes correctly."""
+        curl_path = Path(__file__).resolve().parent.parent / "curl.txt"
+        if not curl_path.exists():
+            self.skipTest("curl.txt fixture not found")
+
+        raw = curl_path.read_bytes()
+        # The first line of the file is the JSON response.
+        json_bytes = raw.split(b"\n")[0]
+
+        class FakeResponse:
+            content = json_bytes
+
+        result = _decode_response_json(FakeResponse())
+        self.assertEqual(result["taskId"], 221905)
+        self.assertEqual(result["name"], "Прибытие короля")
+        self.assertIn(
+            "XXVII Командный чемпионат школьников Санкт-Петербурга",
+            result["statement"],
+        )
+        # The statement is long and should contain plenty of Cyrillic.
+        cyrillic = sum(1 for c in result["statement"] if "Ѐ" <= c <= "ӿ")
+        self.assertGreater(cyrillic, 1000)
