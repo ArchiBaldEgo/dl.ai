@@ -139,11 +139,66 @@ def _looks_like_utf8_as_cp1251(text: str) -> bool:
     return matches / max(cyrillic, 1) > 0.5
 
 
+def _looks_like_cp866_as_cp1251(text: str) -> bool:
+    """Detect CP866 bytes that were decoded/presented as cp1251 codepoints.
+
+    The resulting text is encodable as cp1251, but contains many characters
+    from the cp1251 high-byte range (bytes 0x80-0xBF) that are not part of
+    ordinary Russian text. Legitimate Russian punctuation like guillemets,
+    dashes and the letter ё are ignored so they do not trigger a false repair.
+    """
+    try:
+        text.encode("cp1251")
+    except UnicodeEncodeError:
+        return False
+
+    non_ascii = sum(1 for c in text if c > "")
+    if non_ascii == 0:
+        return False
+
+    allowed_punctuation = set("–—«»„\"\"‘’‚‹›")
+    artifact_count = 0
+    for c in text:
+        if c <= "" or c == "ё" or c in allowed_punctuation:
+            continue
+        b = c.encode("cp1251")[0]
+        if 0x80 <= b <= 0xBF:
+            artifact_count += 1
+
+    return artifact_count >= 5 and artifact_count / non_ascii > 0.3
+
+
+def _try_repair_cp866_as_cp1251(text: str) -> str | None:
+    """Try to repair text that is CP866 bytes presented as cp1251 codepoints.
+
+    Some PDF statements on dl.gsu.by extract Russian text using what looks
+    like CP866 glyphs, but the API returns those bytes interpreted as cp1251
+    Unicode characters. Re-encoding as cp1251 and decoding as cp866 recovers
+    the original Cyrillic.
+    """
+    try:
+        return text.encode("cp1251").decode("cp866")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return None
+
+
+def _repair_response_strings(obj: Any) -> Any:
+    """Recursively repair CP866-via-cp1251 mojibake in decoded JSON values."""
+    if isinstance(obj, dict):
+        return {k: _repair_response_strings(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_repair_response_strings(v) for v in obj]
+    if isinstance(obj, str) and _looks_like_cp866_as_cp1251(obj):
+        return _try_repair_cp866_as_cp1251(obj) or obj
+    return obj
+
+
 def _decode_response_json(response: requests.Response) -> dict[str, Any]:
     """Decode DL API JSON response with robust encoding detection.
 
-    Tries UTF-8 first, falls back to cp1251, and also repairs the common
-    'UTF-8 bytes decoded as cp1251' mojibake pattern.
+    Tries UTF-8 first, falls back to cp1251, repairs the common
+    'UTF-8 bytes decoded as cp1251' mojibake pattern, and also tries the
+    CP866-via-cp1251 repair used by some PDF-derived statements.
     """
     content = response.content
     candidates: list[str] = []
@@ -166,6 +221,17 @@ def _decode_response_json(response: requests.Response) -> dict[str, Any]:
         candidates.append(content.decode("cp1251", errors="replace"))
     except UnicodeDecodeError:
         pass
+
+    # Add the CP866-via-cp1251 repair candidate when the text shows the
+    # signature of this particular mojibake pattern. Quality scoring then
+    # selects the best readable version.
+    repaired = [
+        fixed
+        for candidate in candidates
+        if _looks_like_cp866_as_cp1251(candidate)
+        and (fixed := _try_repair_cp866_as_cp1251(candidate)) is not None
+    ]
+    candidates.extend(repaired)
 
     if not candidates:
         raise DLServerError("Не удалось декодировать ответ DL API")
@@ -205,9 +271,14 @@ def _decode_response_json(response: requests.Response) -> dict[str, Any]:
     text = max(candidates, key=_quality)
 
     try:
-        return json.loads(text)
+        data = json.loads(text)
     except ValueError as exc:
         raise DLServerError("DL API вернул некорректный JSON") from exc
+
+    # If the whole-response repair did not fire (for example because a non-cp1251
+    # character appeared elsewhere in the payload), repair individual string
+    # fields that still carry the CP866-via-cp1251 signature.
+    return _repair_response_strings(data)
 
 
 def fetch_task_info(

@@ -17,6 +17,7 @@ from ai.middleware import ExternalAuthMiddleware
 from ai.i18n import get_localized_name, get_ui_language_suffix
 from ai.models import AIRequestLog, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic
 from ai.views import chat_view, get_problem_data, get_prompts, set_password_view
+from ai.dl_api_client import _decode_response_json
 
 
 class ChatViewTests(SimpleTestCase):
@@ -798,3 +799,42 @@ class ModelClientRegistryTests(SimpleTestCase):
         self.assertIsNotNone(registry.get("DeepSeek_R1"))
         self.assertIsNotNone(registry.get("Meta_Llama_3_1_70B_Instruct"))
         self.assertIsNotNone(registry.get("Mixtral_8x22b"))
+
+
+class DLApiClientEncodingTests(SimpleTestCase):
+    """Unit tests for DL API response decoding and mojibake repair."""
+
+    def _decode(self, text: str, encoding: str = "utf-8") -> dict:
+        class FakeResponse:
+            content = text.encode(encoding)
+
+        return _decode_response_json(FakeResponse())
+
+    def test_repairs_cp866_bytes_presented_as_cp1251(self):
+        garbled = (
+            "XXVII Љ®¬­¤­л© зҐ¬ЇЁ®­­в иЄ®«м­­ЁЄ®ў "
+            "‘­Єв-ЏҐўҐаЎгаЈ Ї® Їа®Ја¬¬Ёа®ў­Ё®"
+        )
+        payload = json.dumps({"statement": garbled}, ensure_ascii=False)
+        result = self._decode(payload)
+        repaired = result["statement"]
+
+        self.assertNotEqual(repaired, garbled)
+        cyrillic = sum(1 for c in repaired if "Ѐ" <= c <= "ӿ")
+        self.assertGreater(cyrillic, 30)
+        self.assertIn("XXVII", repaired)
+        self.assertTrue(repaired.startswith("XXVII "))
+
+    def test_does_not_corrupt_valid_utf8_cyrillic(self):
+        normal = (
+            "XXVII Командный чемпионат школьников "
+            "Санкт-Петербург по программированию"
+        )
+        payload = json.dumps({"statement": normal}, ensure_ascii=False)
+        result = self._decode(payload)
+        self.assertEqual(result["statement"], normal)
+
+    def test_leaves_ascii_text_unchanged(self):
+        payload = json.dumps({"statement": "Hello, world!"}, ensure_ascii=False)
+        result = self._decode(payload)
+        self.assertEqual(result["statement"], "Hello, world!")
