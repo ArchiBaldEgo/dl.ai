@@ -32,6 +32,8 @@ def _serialize_model_status_rows_for_api(rows):
             "window_date": window_date.isoformat() if window_date else "",
             "checked_at_msk": checked_at_msk,
             "is_current_window": bool(row.get("is_current_window")),
+            "last_http_code": row.get("last_http_code") if row.get("last_http_code") is not None else None,
+            "last_http_code_label": row.get("last_http_code_label") or "",
         })
     return serialized
 

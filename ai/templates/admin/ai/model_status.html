@@ -94,6 +94,8 @@
         <tr>
           <th>Модель</th>
           <th>Состояние</th>
+          <th>Код ответа</th>
+          <th>Расшифровка</th>
           <th>Дата окна</th>
           <th>Проверено</th>
         </tr>
@@ -112,6 +114,8 @@
                 <span class="badge down">Неактивна</span>
               {% endif %}
             </td>
+            <td>{{ row.last_http_code|default:"—" }}</td>
+            <td>{{ row.last_http_code_label|default:"—" }}</td>
             <td>
               {% if row.window_date %}
                 {{ row.window_date }}
@@ -202,6 +206,8 @@
         tr.innerHTML = [
           `<td><div>${escapeHtml(row.title)}</div><div class="quiet">${escapeHtml(row.key)}</div></td>`,
           `<td>${statusBadge}</td>`,
+          `<td>${row.last_http_code !== null && row.last_http_code !== undefined ? escapeHtml(String(row.last_http_code)) : '-'}</td>`,
+          `<td>${escapeHtml(row.last_http_code_label || '—')}</td>`,
           `<td>${windowDateCell}</td>`,
           `<td>${row.checked_at_msk ? escapeHtml(row.checked_at_msk) : '-'}</td>`,
         ].join('');

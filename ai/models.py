@@ -216,6 +216,7 @@ class AIModelAvailability(models.Model):
     window_date = models.DateField(db_index=True)
     checked_at = models.DateTimeField(auto_now=True)
     response_time_ms = models.PositiveIntegerField(null=True, blank=True)
+    last_http_code = models.PositiveSmallIntegerField(null=True, blank=True)
     last_message = models.TextField(blank=True, default="")
 
     class Meta:

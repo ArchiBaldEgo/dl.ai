@@ -1,3 +1,4 @@
+import json
 import os
 
 import tempfile
@@ -23,6 +24,16 @@ from .auth_backends import (
     normalize_external_user_id,
 )
 from .constants import PROMPT_DEVELOPER_GROUP
+from .dl_api_client import (
+    DLApiError,
+    DLApiUnavailable,
+    DLForbiddenError,
+    DLServerError,
+    DLTaskNotFoundError,
+    DLUnauthorizedError,
+    fetch_task_info,
+    fetch_task_solution,
+)
 from .http_utils import safe_relative_url
 from .i18n import get_language_instruction, get_localized_name, get_localized_text
 from .querysets import prompt_queryset_for_user
@@ -309,13 +320,95 @@ def asset_view(request, asset_path):
 
     return FileResponse(open(asset_full_path, "rb"))
 
+@require_http_methods(["GET"])
+def get_task_info_view(request):
+    """Proxy task metadata from the external DL REST API.
+
+    Query parameters:
+        nodeId (int, required): DL node identifier.
+        removeHtmlTags (bool, default True): strip HTML from texts.
+    """
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+
+    try:
+        node_id = int(request.GET.get("nodeId", ""))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "nodeId обязателен и должен быть числом"}, status=400)
+
+    remove_html_tags = request.GET.get("removeHtmlTags", "true").strip().lower() not in ("false", "0", "")
+
+    try:
+        data = fetch_task_info(node_id, remove_html_tags=remove_html_tags)
+    except DLTaskNotFoundError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLApiUnavailable as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLServerError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+
+    return JsonResponse(data)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def get_task_solution_view(request):
+    """Proxy sample solution content from the external DL REST API.
+
+    Request body (JSON):
+        taskId (int, required): DL task identifier.
+        fileExtension (str, required): solution file extension, e.g. .pas, .cpp, .py.
+        sessionId (str, optional): DL session id; falls back to request session/cookie.
+    """
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+
+    try:
+        body = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Некорректный JSON в теле запроса"}, status=400)
+
+    try:
+        task_id = int(body.get("taskId"))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "taskId обязателен и должен быть числом"}, status=400)
+
+    file_extension = (body.get("fileExtension") or "").strip()
+    if not file_extension:
+        return JsonResponse({"error": "fileExtension обязателен"}, status=400)
+
+    session_id = body.get("sessionId", "").strip()
+    if not session_id:
+        session_id = request.session.get("external_session_id", "").strip()
+    if not session_id:
+        cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
+        session_id = request.COOKIES.get(cookie_name, "").strip()
+    if not session_id:
+        return JsonResponse({"error": "sessionId обязателен"}, status=400)
+
+    try:
+        data = fetch_task_solution(session_id, task_id, file_extension)
+    except DLUnauthorizedError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLForbiddenError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLTaskNotFoundError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLApiUnavailable as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLServerError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+
+    return JsonResponse(data)
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 def transcribe_audio(request):
     audio_file = request.FILES.get('audio')
     if not audio_file:
         return JsonResponse({'success': False, 'error': 'No audio file provided'})
-    
+
     language = request.POST.get('language', 'Russian')
     
     # Сохраняется временный файл

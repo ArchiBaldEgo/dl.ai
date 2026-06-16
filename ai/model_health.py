@@ -52,6 +52,22 @@ _ERROR_MARKERS = (
 )
 
 _TWO_RE = re.compile(r"(^|\D)2(\D|$)")
+_HTTP_CODE_RE = re.compile(r"\b(\d{3})\b")
+
+_HTTP_CODE_LABELS = {
+    200: "OK",
+    400: "Неправильный запрос",
+    401: "Не авторизован",
+    402: "Требуется оплата",
+    403: "Доступ запрещён",
+    404: "Не найдено",
+    408: "Таймаут запроса",
+    429: "Слишком много запросов",
+    500: "Внутренняя ошибка сервера",
+    502: "Ошибка шлюза",
+    503: "Сервис недоступен",
+    504: "Таймаут шлюза",
+}
 
 
 def get_health_window_date(now=None):
@@ -87,6 +103,35 @@ def _is_healthy_response(response_text):
     return low in {"два", "two"}
 
 
+def _extract_http_code_from_message(message):
+    """Try to recover an HTTP status code from a model error message."""
+    if not message:
+        return None
+    match = _HTTP_CODE_RE.search(message)
+    if match:
+        code = int(match.group(1))
+        if 100 <= code < 600:
+            return code
+    return None
+
+
+def get_http_code_label(code):
+    """Return a short Russian description for an HTTP status code."""
+    if code is None:
+        return "Нет ответа / сетевая ошибка"
+    if code in _HTTP_CODE_LABELS:
+        return _HTTP_CODE_LABELS[code]
+    if 200 <= code < 300:
+        return "Успешный ответ"
+    if 300 <= code < 400:
+        return "Перенаправление"
+    if 400 <= code < 500:
+        return "Ошибка в запросе"
+    if 500 <= code < 600:
+        return "Ошибка сервера"
+    return f"Неизвестный код ({code})"
+
+
 def get_runtime_model_handlers():
     handlers = {}
     for key in MODEL_CATALOG_KEYS:
@@ -99,7 +144,7 @@ def get_runtime_model_handlers():
     return handlers
 
 
-def _save_availability(window_date, key, title, is_available, response_time_ms, last_message):
+def _save_availability(window_date, key, title, is_available, response_time_ms, last_message, last_http_code=None):
     AIModelAvailability.objects.update_or_create(
         model_key=key,
         window_date=window_date,
@@ -107,6 +152,7 @@ def _save_availability(window_date, key, title, is_available, response_time_ms, 
             "model_title": title,
             "is_available": is_available,
             "response_time_ms": response_time_ms,
+            "last_http_code": last_http_code,
             "last_message": (last_message or "")[:2000],
         },
     )
@@ -159,6 +205,7 @@ def run_model_health_check(force=False):
                     is_available=False,
                     response_time_ms=None,
                     last_message="Handler not found",
+                    last_http_code=None,
                 )
                 continue
 
@@ -171,6 +218,9 @@ def run_model_health_check(force=False):
                 elapsed_ms = int((perf_counter() - started) * 1000)
                 response_text = _extract_response_text(result)
                 is_available = _is_healthy_response(response_text)
+                # Model handlers only return text/tokens, not the raw status code.
+                # We try to recover the HTTP code from error messages when possible.
+                last_http_code = None if is_available else _extract_http_code_from_message(response_text)
 
                 _save_availability(
                     window_date=window_date,
@@ -179,6 +229,7 @@ def run_model_health_check(force=False):
                     is_available=is_available,
                     response_time_ms=elapsed_ms,
                     last_message=response_text,
+                    last_http_code=last_http_code,
                 )
             except Exception as exc:
                 elapsed_ms = int((perf_counter() - started) * 1000)
@@ -189,6 +240,7 @@ def run_model_health_check(force=False):
                     is_available=False,
                     response_time_ms=elapsed_ms,
                     last_message=f"Health check exception: {exc}",
+                    last_http_code=None,
                 )
 
         AIModelHealthRun.objects.filter(pk=run.pk).update(
@@ -336,6 +388,7 @@ def get_model_status_rows():
         key = item["key"]
         row = current_rows.get(key) or latest_rows.get(key)
         is_active = bool(row and row.is_available)
+        last_http_code = row.last_http_code if row else None
 
         result.append(
             {
@@ -346,6 +399,8 @@ def get_model_status_rows():
                 "window_date": row.window_date if row else None,
                 "checked_at": row.checked_at if row else None,
                 "is_current_window": bool(row and row.window_date == current_window),
+                "last_http_code": last_http_code,
+                "last_http_code_label": get_http_code_label(last_http_code),
             }
         )
 
