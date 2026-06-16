@@ -74,61 +74,6 @@
   .ai-log-row:hover {
     background: var(--selected-row);
   }
-  .ai-log-row.ai-log-row-expanded {
-    background: var(--selected-row);
-  }
-  .ai-log-detail-row {
-    display: none;
-  }
-  .ai-log-detail-row.ai-log-detail-visible {
-    display: table-row;
-  }
-  .ai-log-detail-cell {
-    padding: 0;
-    border: 1px solid var(--hairline-color);
-    background: var(--darkened-bg);
-  }
-  .ai-log-detail-inner {
-    padding: 16px;
-  }
-  .ai-log-detail-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-  }
-  .ai-log-detail-block h3 {
-    margin: 0 0 8px;
-    font-size: 14px;
-  }
-  .ai-log-detail-block pre {
-    background: var(--body-bg);
-    border: 1px solid var(--hairline-color);
-    border-radius: 4px;
-    padding: 12px;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    max-height: 400px;
-    overflow: auto;
-    margin: 0;
-    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-    font-size: 13px;
-    line-height: 1.45;
-  }
-  .ai-log-detail-actions {
-    margin-top: 12px;
-    display: flex;
-    gap: 8px;
-  }
-  .ai-log-detail-hint {
-    color: var(--body-quiet-color);
-    font-size: 12px;
-    margin-bottom: 8px;
-  }
-  @media (max-width: 900px) {
-    .ai-log-detail-grid {
-      grid-template-columns: 1fr;
-    }
-  }
 </style>
 
 <script>
@@ -136,22 +81,9 @@
     const row = event.target.closest('.ai-log-row');
     if (!row) return;
 
-    const detailRow = row.nextElementSibling;
-    if (!detailRow || !detailRow.classList.contains('ai-log-detail-row')) return;
-
-    const isVisible = detailRow.classList.contains('ai-log-detail-visible');
-
-    // Close any open detail rows inside the same table.
-    row.closest('table').querySelectorAll('.ai-log-detail-visible').forEach(function (openRow) {
-      openRow.classList.remove('ai-log-detail-visible');
-    });
-    row.closest('table').querySelectorAll('.ai-log-row-expanded').forEach(function (openRow) {
-      openRow.classList.remove('ai-log-row-expanded');
-    });
-
-    if (!isVisible) {
-      detailRow.classList.add('ai-log-detail-visible');
-      row.classList.add('ai-log-row-expanded');
+    const url = row.dataset.detailUrl;
+    if (url) {
+      window.location.href = url;
     }
   });
 </script>
@@ -220,7 +152,7 @@
       <tbody>
         {% timezone moscow_tz %}
         {% for log in page_obj.object_list %}
-          <tr class="ai-log-row">
+          <tr class="ai-log-row" data-detail-url="{% url 'ai_request_log_detail' log.id %}">
             <td>{{ log.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>{{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>
@@ -236,26 +168,6 @@
             </td>
             <td>{{ log.get_mode_display|default:"—" }}</td>
             <td>{{ log.duration_seconds|floatformat:0|default:"—" }}</td>
-          </tr>
-          <tr class="ai-log-detail-row">
-            <td colspan="10" class="ai-log-detail-cell">
-              <div class="ai-log-detail-inner">
-                <div class="ai-log-detail-hint">Нажмите на строку повторно, чтобы скрыть.</div>
-                <div class="ai-log-detail-grid">
-                  <div class="ai-log-detail-block">
-                    <h3>Текст, который отправил пользователь</h3>
-                    <pre>{{ log.message|default:"(пусто)" }}</pre>
-                  </div>
-                  <div class="ai-log-detail-block">
-                    <h3>Текст, который ответила модель</h3>
-                    <pre>{{ log.response_text|default:"(пусто)" }}</pre>
-                  </div>
-                </div>
-                <div class="ai-log-detail-actions">
-                  <a class="button" href="/ai/admin/ai/airequestlog/{{ log.id }}/">Открыть детали</a>
-                </div>
-              </div>
-            </td>
           </tr>
         {% endfor %}
         {% endtimezone %}

@@ -241,3 +241,50 @@ curl -I https://dl.gsu.by/ai/static/admin/js/chat_template.js
 ```
 
 Ожидается `HTTP 200` и корректные MIME-типы (`text/css`, `application/javascript`/`text/javascript`).
+
+---
+
+## Для разработчиков
+
+Полная техническая документация находится в [`doc/Документация для разработчика.md`](doc/Документация%20для%20разработчика.md). Общая инструкция для разработчиков — в [`DOCX.md`](../DOCX.md#инструкция-для-разработчика).
+
+### Локальный запуск без Docker
+
+Требования: Python 3.11+, PostgreSQL 14+.
+
+```bash
+cp .env.example .env
+# Установите DB_HOST=127.0.0.1 и параметры базы в .env
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python manage.py migrate
+python manage.py runserver 0.0.0.0:8000
+```
+
+Приложение будет доступно на `http://127.0.0.1:8000/ai/...`.
+
+### Локальный запуск в Docker
+
+```bash
+cp .env.example .env
+# Установите DB_HOST=db и остальные параметры в .env
+docker compose --env-file .env up -d --build
+docker compose --env-file .env exec -T web python manage.py migrate
+docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
+```
+
+### Тестирование и проверки
+
+```bash
+python manage.py test ai
+python manage.py check
+python manage.py makemigrations --check
+python manage.py collectstatic --noinput
+```
+
+### Git workflow
+
+- Каждый разработчик работает в отдельной ветке, названной по фамилии.
+- По готовности открывается Pull Request в `main`.
+- Перед PR убедитесь, что тесты проходят и документация обновлена.
