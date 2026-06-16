@@ -1359,30 +1359,36 @@
                 }
 
                 async function loadTaskFromUrl() {
-                    const nodeId = window.AI_TASK_NODE_ID || '';
-                    if (!nodeId) return;
+                    const messageText = document.getElementById('messageText');
+                    const nodeId = window.AI_TASK_NODE_ID || (messageText && messageText.dataset.nodeId) || '';
+                    const compilerNameEncoded = window.AI_COMPILER_NAME || (messageText && messageText.dataset.compilerName) || '';
+                    console.log('loadTaskFromUrl: nodeId=', nodeId, 'compiler_b64=', compilerNameEncoded);
+                    if (!nodeId) return false;
 
                     try {
                         const url = new URL('/ai/api/task-info/', window.location.origin);
                         url.searchParams.set('nodeId', nodeId);
                         url.searchParams.set('removeHtmlTags', 'true');
+                        console.log('Fetching task info:', url.toString());
                         const response = await fetch(url.toString());
+                        console.log('Task info response status:', response.status);
                         if (response.status === 404) {
                             updateVoiceStatus(getUiString('taskNotFound', 'Задача не найдена'));
-                            return;
+                            return false;
                         }
                         if (!response.ok) {
-                            throw new Error(`HTTP ${response.status}`);
+                            const errorText = await response.text();
+                            throw new Error(`HTTP ${response.status}: ${errorText}`);
                         }
                         const data = await response.json();
-                        const statement = data.statement || '';
-                        const messageText = document.getElementById('messageText');
+                        console.log('Task info data:', data);
+                        const statement = data.statement || data.currentStatement || '';
                         if (messageText) {
                             messageText.value = statement;
                             saveSharedText();
                         }
 
-                        const compilerName = decodeCompilerName(window.AI_COMPILER_NAME);
+                        const compilerName = decodeCompilerName(compilerNameEncoded);
                         const matchedLanguageId = findLanguageIdByName(problemData?.languages, compilerName);
                         if (matchedLanguageId) {
                             problemLanguageSelect.value = matchedLanguageId;
@@ -1390,9 +1396,11 @@
                             populatePrompts(matchedLanguageId, null);
                             savePageState();
                         }
+                        return true;
                     } catch (error) {
                         console.error('Error loading task statement:', error);
                         updateVoiceStatus(getUiString('taskLoadError', 'Не удалось загрузить условие задачи'));
+                        return false;
                     }
                 }
 
@@ -1402,8 +1410,10 @@
                 setSelectEnabled(problemPromptSelect, false);
                 populatePrompts(null, null);
                 restorePageState();
-                restoreSharedText();
-                await loadTaskFromUrl();
+                const taskLoaded = await loadTaskFromUrl();
+                if (!taskLoaded) {
+                    restoreSharedText();
+                }
             });
 
             window.onload = function () {

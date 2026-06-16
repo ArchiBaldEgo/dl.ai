@@ -120,21 +120,34 @@ def _raise_for_status(response: requests.Response) -> None:
         raise DLServerError(f"Ошибка сервера DL (код {response.status_code})")
 
 
-def fetch_task_info(node_id: int, remove_html_tags: bool = True) -> dict[str, Any]:
+def fetch_task_info(
+    node_id: int,
+    session_id: str | None = None,
+    remove_html_tags: bool = True,
+) -> dict[str, Any]:
     """Fetch task metadata (name, taskId, statement) by nodeId.
 
+    The external DL API needs the caller's session to authorize the request,
+    so ``session_id`` is forwarded as the ``sessionId`` query parameter.
+
     Raises:
+        DLUnauthorizedError: when the session is missing/invalid (401).
+        DLForbiddenError: when the user cannot access this task (403).
         DLTaskNotFoundError: when the task does not exist (404).
         DLApiUnavailable: when the DL API cannot be reached.
         DLServerError: on unexpected 5xx responses.
     """
+    params: dict[str, Any] = {
+        "nodeId": node_id,
+        "removeHtmlTags": remove_html_tags,
+    }
+    if session_id:
+        params["sessionId"] = session_id
+
     response = _dl_request(
         "GET",
         "/restapi/get-task-info",
-        params={
-            "nodeId": node_id,
-            "removeHtmlTags": remove_html_tags,
-        },
+        params=params,
     )
 
     _raise_for_status(response)

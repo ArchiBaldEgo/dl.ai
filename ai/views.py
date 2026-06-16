@@ -106,7 +106,7 @@ def _has_page_access(request):
     return bool(get_external_user_id_from_request(request))
 
 
-def _render_ai_page(request, template_name):
+def _render_ai_page(request, template_name, extra_context=None):
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
     if not _is_ai_app_enabled():
@@ -122,10 +122,13 @@ def _render_ai_page(request, template_name):
         rest = [item for item in available_models if item["key"] not in _WEB_PRIORITY_MODELS]
         available_models = ordered_priority + rest
     external_session_id = request.session.get('external_session_id')
-    return render(request, template_name, {
+    context = {
         'available_models': available_models,
         'external_session_id': external_session_id,
-    })
+    }
+    if extra_context:
+        context.update(extra_context)
+    return render(request, template_name, context)
 
 
 def set_password_view(request):
@@ -223,13 +226,14 @@ def chat_view(request):
 
 
 def decide_task_view(request):
-    response = _render_ai_page(request, 'ai/decide-task.html')
-    # _render_ai_page may return an HttpResponse (forbidden/disabled) instead of
-    # a TemplateResponse, so only inject context when we have a real template response.
-    if hasattr(response, "context_data"):
-        response.context_data["node_id"] = request.GET.get("nid", "")
-        response.context_data["compiler_name"] = request.GET.get("compiler_b64", "")
-    return response
+    return _render_ai_page(
+        request,
+        'ai/decide-task.html',
+        extra_context={
+            "node_id": request.GET.get("nid", ""),
+            "compiler_name": request.GET.get("compiler_b64", ""),
+        },
+    )
 
 
 def find_error_view(request):
@@ -344,8 +348,19 @@ def get_task_info_view(request):
 
     remove_html_tags = request.GET.get("removeHtmlTags", "true").strip().lower() not in ("false", "0", "")
 
+    session_id = request.GET.get("sessionId", "").strip()
+    if not session_id:
+        session_id = request.session.get("external_session_id", "").strip()
+    if not session_id:
+        cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
+        session_id = request.COOKIES.get(cookie_name, "").strip()
+
     try:
-        data = fetch_task_info(node_id, remove_html_tags=remove_html_tags)
+        data = fetch_task_info(node_id, session_id=session_id, remove_html_tags=remove_html_tags)
+    except DLUnauthorizedError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLForbiddenError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
     except DLTaskNotFoundError as exc:
         return JsonResponse({"error": str(exc)}, status=exc.status_code)
     except DLApiUnavailable as exc:
