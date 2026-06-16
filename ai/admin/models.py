@@ -243,9 +243,9 @@ class PromptAdmin(admin.ModelAdmin):
 
 class SharedPromptAdmin(admin.ModelAdmin):
     form = SharedPromptForm
-    list_display = ('prompt_name', 'language_list', 'updated_at', 'owner_username')
+    list_display = ('prompt_name', 'mode', 'language_list', 'updated_at', 'owner_username')
     list_display_links = ('prompt_name',)
-    list_filter = ('programming_languages',)
+    list_filter = ('mode', 'programming_languages')
     search_fields = ('prompt_name', 'prompt_text')
     autocomplete_fields = ('owner', 'editors')
     filter_horizontal = ('programming_languages', 'editors')
@@ -278,6 +278,7 @@ class SharedPromptAdmin(admin.ModelAdmin):
         return (
             (None, {"fields": (
                 "prompt_name", "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
+                "mode",
                 "prompt_text", "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
                 "programming_languages",
             )}),

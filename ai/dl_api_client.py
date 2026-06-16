@@ -4,6 +4,7 @@ Provides helpers to fetch task information and sample solutions.
 Reuses the same SSL/proxy settings as the external auth flow.
 """
 
+import json
 import os
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -120,6 +121,18 @@ def _raise_for_status(response: requests.Response) -> None:
         raise DLServerError(f"Ошибка сервера DL (код {response.status_code})")
 
 
+def _decode_response_json(response: requests.Response) -> dict[str, Any]:
+    """Decode DL API JSON response, falling back to cp1251 on UTF-8 decode errors."""
+    try:
+        text = response.content.decode("utf-8")
+    except UnicodeDecodeError:
+        text = response.content.decode("cp1251", errors="replace")
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise DLServerError("DL API вернул некорректный JSON") from exc
+
+
 def fetch_task_info(
     node_id: int,
     session_id: str | None = None,
@@ -152,10 +165,7 @@ def fetch_task_info(
 
     _raise_for_status(response)
 
-    try:
-        return response.json()
-    except ValueError as exc:
-        raise DLServerError("DL API вернул некорректный JSON") from exc
+    return _decode_response_json(response)
 
 
 def fetch_task_solution(session_id: str, task_id: int, file_extension: str) -> dict[str, Any]:
@@ -180,7 +190,4 @@ def fetch_task_solution(session_id: str, task_id: int, file_extension: str) -> d
 
     _raise_for_status(response)
 
-    try:
-        return response.json()
-    except ValueError as exc:
-        raise DLServerError("DL API вернул некорректный JSON") from exc
+    return _decode_response_json(response)

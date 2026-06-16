@@ -43,6 +43,7 @@ def shared_prompt(obj, ui_language=""):
         "prompt_text": obj.prompt_text,
         "effective_text": obj.get_effective_text(ui_language, ""),
         "language_ids": list(obj.programming_languages.values_list("id", flat=True)),
+        "mode": obj.mode or "",
     }
 
 

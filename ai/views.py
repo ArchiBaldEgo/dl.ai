@@ -276,7 +276,7 @@ def get_shared_prompts(request):
 
     ui_language = request.GET.get('ui_language', 'Русский')
     language_id = request.GET.get('language_id')
-    qs = SharedPrompt.objects.prefetch_related('programming_languages')
+    qs = SharedPrompt.objects.prefetch_related('programming_languages').filter(mode__isnull=True)
 
     if language_id:
         # Фильтруем: либо общий препромпт привязан к этому языку, либо без привязки (для всех)
@@ -312,7 +312,7 @@ def get_problem_data(request):
     ]
     shared_prompts = [
         serialize_shared_prompt(sp, ui_language)
-        for sp in SharedPrompt.objects.prefetch_related('programming_languages')
+        for sp in SharedPrompt.objects.prefetch_related('programming_languages').filter(mode__isnull=True)
     ]
 
     return JsonResponse({

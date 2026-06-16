@@ -11,19 +11,25 @@ from ..model_health import (
     get_available_model_options,
     get_health_window_date,
 )
-from ..models import ProgrammingLanguage, Prompt, Topic
+from ..models import ProgrammingLanguage, Prompt, SharedPrompt, Topic
 from ..serializers import programming_language as serialize_programming_language, prompt as serialize_prompt, topic as serialize_topic
 from .permissions import can_access_arm
 
 
-def _build_find_error_message(task_text, code_text, prog_lang_name, prompt_text, ui_language):
-    message = (
-        "У меня есть задача по программированию, я написал для нее код на языке "
-        f"{prog_lang_name}, код не работает, найди пожалуйста ошибку. "
-        f"Задача: {task_text}. Код: {code_text}."
-    )
+def _build_find_error_message(task_text, code_text, prog_lang_name, topic_name, prompt_text, ui_language):
+    try:
+        default_prompt = SharedPrompt.objects.get(mode="find_error")
+        message = default_prompt.get_effective_text(
+            ui_language, prog_lang_name, topic_name, task_text, code_text
+        )
+    except SharedPrompt.DoesNotExist:
+        message = (
+            "У меня есть задача по программированию, я написал для нее код на языке "
+            f"{prog_lang_name}, код не работает, найди пожалуйста ошибку. "
+            f"Задача: {task_text}. Код: {code_text}."
+        )
     if prompt_text:
-        message += f". Препромпт: {prompt_text}"
+        message += f"\n\nПрепромпт: {prompt_text}"
     message += get_language_instruction(ui_language)
     return message
 
@@ -64,8 +70,14 @@ def _prepare_arm_run_payload(form_state, user=None):
         .select_related("shared_prompt")
         .first()
     )
+    topic_name_localized = (
+        get_localized_name(topic, form_state["selected_language_ui"], "topic_name")
+        if topic else ""
+    )
     prompt_text = (
-        prompt_obj.get_effective_text(form_state["selected_language_ui"], prog_lng_name)
+        prompt_obj.get_effective_text(
+            form_state["selected_language_ui"], prog_lng_name, topic_name_localized
+        )
         if prompt_obj else ""
     )
 
@@ -73,6 +85,7 @@ def _prepare_arm_run_payload(form_state, user=None):
         task_text=task_text,
         code_text=code_text,
         prog_lang_name=prog_lng_name,
+        topic_name=topic_name_localized,
         prompt_text=prompt_text,
         ui_language=form_state["selected_language_ui"],
     )

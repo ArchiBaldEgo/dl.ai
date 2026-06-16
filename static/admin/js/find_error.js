@@ -457,6 +457,7 @@
                 var language = document.querySelector("#selectLang").value;
                 var input = document.getElementById("taskText");
                 var progLng = document.querySelector("#selectProgLng").value;
+                var topic = document.querySelector("#selectTheme").value;
                 var preprompt = document.querySelector("#selectPrompt").value;
 
                 if (!input.value.trim()) {
@@ -473,6 +474,7 @@
                     value: value,
                     language: language,
                     progLng: progLng,
+                    topic: topic,
                     preprompt: preprompt,
                     code: document.getElementById("codeText").value
                 }));
@@ -692,6 +694,7 @@
                 var taskInput = document.getElementById("taskText");
                 var codeInput = document.getElementById("codeText");
                 var progLng = document.querySelector("#selectProgLng").value;
+                var topic = document.querySelector("#selectTheme").value;
                 var preprompt = document.querySelector("#selectPrompt").value;
 
                 if (!value) {
@@ -714,6 +717,7 @@
                     value: value,
                     language: language,
                     progLng: progLng,
+                    topic: topic,
                     code: codeInput.value,
                     preprompt: preprompt
                 }));

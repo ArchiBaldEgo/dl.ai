@@ -457,6 +457,7 @@
                 var language = document.querySelector("#selectLang").value;
                 var input = document.getElementById("messageText");
                 var progLng = document.querySelector("#selectProgLng").value;
+                var topic = document.querySelector("#selectTheme").value;
                 var preprompt = document.querySelector("#selectPrompt").value;
 
                 if (!input.value.trim()) {
@@ -473,6 +474,7 @@
                     value: value,
                     language: language,
                     progLng: progLng,
+                    topic: topic,
                     preprompt: preprompt
                 }));
 
@@ -690,6 +692,7 @@
                 var language = document.querySelector("#selectLang").value;
                 var input = document.getElementById("messageText");
                 var progLng = document.querySelector("#selectProgLng").value;
+                var topic = document.querySelector("#selectTheme").value;
                 var preprompt = document.querySelector("#selectPrompt").value;
 
                 if (!value) {
@@ -712,6 +715,7 @@
                     value: value,
                     language: language,
                     progLng: progLng,
+                    topic: topic,
                     preprompt: preprompt
                 }));
                 setRequestLock(true);

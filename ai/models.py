@@ -63,20 +63,40 @@ class Topic(models.Model):
         return get_localized_name(self, "", "topic_name")
 
 
-# Общий (shared) препромпт - не привязан к конкретному языку программирования.
-# Текст может содержать placeholder {language}, который заменяется на имя языка при использовании.
+SHARED_PROMPT_MODE_CHOICES = (
+    ("", "—"),
+    ("chat", "Chat"),
+    ("solve", "Solve"),
+    ("find_error", "Find error"),
+)
+
+
+# Общий (shared) препромпт - не привязан к конкретному языку программирования или теме.
+# Текст может содержать placeholder {language}/{язык}, который заменяется на имя языка,
+# и {topic}/{тема}, который заменяется на название темы при использовании.
 class SharedPrompt(models.Model):
     prompt_name = models.CharField(max_length=255)
     prompt_name_ru = models.CharField(max_length=255, blank=True, default="")
     prompt_name_en = models.CharField(max_length=255, blank=True, default="")
     prompt_name_fr = models.CharField(max_length=255, blank=True, default="")
-    prompt_text = models.TextField()
+    prompt_text = models.TextField(
+        help_text="Доступные плейсхолдеры: {language}/{язык} - язык программирования, {topic}/{тема} - тема."
+    )
     prompt_text_ru = models.TextField(blank=True, default="")
     prompt_text_en = models.TextField(blank=True, default="")
     prompt_text_fr = models.TextField(blank=True, default="")
     # Языки, для которых этот общий препромпт доступен (blank = для всех)
     programming_languages = models.ManyToManyField(
         ProgrammingLanguage, blank=True, related_name="shared_prompts"
+    )
+    # Системный режим: если указан, препромпт используется как default-шаблон для режима.
+    mode = models.CharField(
+        max_length=16,
+        blank=True,
+        choices=SHARED_PROMPT_MODE_CHOICES,
+        null=True,
+        verbose_name="Системный режим",
+        help_text="Если указан, препромпт используется как системный шаблон для соответствующего режима.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -96,17 +116,31 @@ class SharedPrompt(models.Model):
     def __str__(self):
         return f"[Общий] {get_localized_name(self, '', 'prompt_name')}"
 
-    def get_effective_text(self, ui_language="", programming_language_name=""):
+    def get_effective_text(self, ui_language="", programming_language_name="", topic_name="", message="", code=""):
         base = get_localized_text(self, ui_language, "prompt_text") or self.prompt_text
         if programming_language_name:
             base = base.replace("{language}", programming_language_name)
             base = base.replace("{язык}", programming_language_name)
+        if topic_name:
+            base = base.replace("{topic}", topic_name)
+            base = base.replace("{тема}", topic_name)
+        if "{message}" in base:
+            base = base.replace("{message}", message or "")
+        if "{code}" in base:
+            base = base.replace("{code}", code or "")
         return base
 
     class Meta:
         db_table = 'ai_sharedprompt'
         verbose_name = 'Общий препромпт'
         verbose_name_plural = 'Общие препромпты'
+        constraints = [
+            models.UniqueConstraint(
+                fields=["mode"],
+                condition=models.Q(mode__isnull=False) & ~models.Q(mode=""),
+                name="unique_sharedprompt_mode_when_set",
+            ),
+        ]
 
 class Prompt(models.Model):
     topic = models.ForeignKey(Topic, on_delete=models.CASCADE, null=True, blank=True)
@@ -118,7 +152,7 @@ class Prompt(models.Model):
     prompt_name_ru = models.CharField(max_length=255, blank=True, default="")
     prompt_name_en = models.CharField(max_length=255, blank=True, default="")
     prompt_name_fr = models.CharField(max_length=255, blank=True, default="")
-    # Ссылка на общий препромпт (если есть - текст берётся из него с подстановкой языка)
+    # Ссылка на общий препромпт (если есть - текст берётся из него с подстановкой языка и темы)
     shared_prompt = models.ForeignKey(
         SharedPrompt, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="language_prompts"
@@ -138,17 +172,24 @@ class Prompt(models.Model):
         related_name="editable_prompts",
     )
 
-    def get_effective_text(self, ui_language: str = "", programming_language_name: str = ""):
-        """Возвращает итоговый текст препромпта с учётом UI-языка и языка программирования."""
+    def get_effective_text(self, ui_language: str = "", programming_language_name: str = "", topic_name: str = "", message: str = "", code: str = ""):
+        """Возвращает итоговый текст препромпта с учётом UI-языка, языка программирования и темы."""
         if self.prompt_text_override:
             base = self.prompt_text_override
         elif self.shared_prompt:
-            base = self.shared_prompt.get_effective_text(ui_language, programming_language_name)
+            base = self.shared_prompt.get_effective_text(ui_language, programming_language_name, topic_name, message, code)
         else:
             base = get_localized_text(self, ui_language, "prompt_text") or self.prompt_text
         if programming_language_name:
             base = base.replace("{language}", programming_language_name)
             base = base.replace("{язык}", programming_language_name)
+        if topic_name:
+            base = base.replace("{topic}", topic_name)
+            base = base.replace("{тема}", topic_name)
+        if "{message}" in base:
+            base = base.replace("{message}", message or "")
+        if "{code}" in base:
+            base = base.replace("{code}", code or "")
         return base
 
     def __str__(self):

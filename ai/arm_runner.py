@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from django.utils.html import strip_tags
 
+from .model_clients.exceptions import humanize_model_error
 from .model_health import get_runtime_model_handlers
 from .models import AIRequestLog, ExternalDLAccount
 
@@ -48,87 +49,6 @@ def _extract_model_response(response):
         return str(response_text or ""), tokens
 
     return str(response or ""), 0
-
-
-_ARM_ERROR_PATTERNS = (
-    # (sequence of substrings, friendly message)
-    (
-        ("неправильный запрос", "код 400", "error 400", "status 400", "bad request"),
-        "Ошибка запроса к модели (400). Обычно это значит, что запрос слишком длинный, "
-        "содержит неподдерживаемый формат или лишние спецсимволы. "
-        "Попробуйте сократить условие/код и отправить снова.",
-    ),
-    (
-        ("код 401", "error 401", "status 401", "unauthorized", "не авториз"),
-        "Ошибка авторизации модели (401). Проверьте API-ключ/токен и права доступа к модели.",
-    ),
-    (
-        ("код 403", "error 403", "status 403", "forbidden", "доступ запрещ"),
-        "Доступ к модели запрещен (403). У текущего ключа нет нужных прав или доступ ограничен политикой сервиса.",
-    ),
-    (
-        ("код 404", "error 404", "status 404", "not found", "не найден"),
-        "Модель не найдена (404). Возможно, имя модели устарело или эта модель сейчас недоступна у провайдера.",
-    ),
-    (
-        ("код 429", "error 429", "status 429", "rate limit", "превышен лимит", "все боты заняты"),
-        "Сервис модели ограничил частоту запросов (429). Подождите немного и запустите проверку снова.",
-    ),
-    (
-        ("таймаут", "timeout", "timed out", "код 408", "status 408"),
-        "Модель не ответила вовремя (таймаут). Попробуйте повторить запрос позже или сократить объем задачи/кода.",
-    ),
-    (
-        (
-            "код 500", "error 500", "status 500",
-            "код 502", "error 502", "status 502",
-            "код 503", "error 503", "status 503",
-            "код 504", "error 504", "status 504",
-            "bad gateway", "gateway", "server error", "ошибка сервера",
-            "временно недоступ", "инициализируется слишком долго",
-        ),
-        "Сервис модели временно недоступен (5xx). Это серверная ошибка провайдера, попробуйте позже.",
-    ),
-    (
-        (
-            "отсутствует подключение к интернету", "отсутствует интернет",
-            "connectionerror", "failed to resolve", "name resolution",
-            "max retries exceeded", "httpsconnectionpool", "не удалось подключ",
-        ),
-        "Ошибка подключения к сервису модели. Проверьте сеть/прокси и доступность внешнего API.",
-    ),
-)
-
-_CONNECTION_ERROR_MARKERS = _ARM_ERROR_PATTERNS[-1][0]
-_SERVER_ERROR_MARKERS = _ARM_ERROR_PATTERNS[-2][0]
-
-
-def _humanize_arm_model_error(raw_text):
-    text = (raw_text or "").strip()
-    if not text:
-        return "", ""
-
-    low = text.lower()
-
-    # Long natural-language responses from models should not be interpreted as transport errors.
-    if len(low) > 350 and not low.startswith(("ошибка", "error", "exception", "traceback")):
-        return text, text
-
-    for markers, friendly_text in _ARM_ERROR_PATTERNS:
-        if any(marker in low for marker in markers):
-            detailed_text = friendly_text
-            if text and text != friendly_text:
-                detailed_text += f"\n\nТехническая деталь: {text}"
-            return friendly_text, detailed_text
-
-    if low.startswith("ошибка api") or "api (код" in low:
-        return (
-            "Сервис модели вернул ошибку API. Проверьте параметры запроса и повторите попытку чуть позже.",
-            f"Сервис модели вернул ошибку API. Проверьте параметры запроса и повторите попытку чуть позже.\n\n"
-            f"Техническая деталь: {text}",
-        )
-
-    return text, text
 
 
 def _build_report(results):
@@ -245,7 +165,7 @@ def _run_job_worker(run_id, message, selected_model_keys, user_id):
                 response_text, tokens = _extract_model_response(response)
 
                 cleaned_text = strip_tags(response_text).strip()
-                friendly_text, detailed_text = _humanize_arm_model_error(cleaned_text)
+                friendly_text, detailed_text = humanize_model_error(cleaned_text, include_detail=True)
                 short_response = friendly_text[:300] + ("..." if len(friendly_text) > 300 else "")
                 is_ok = bool(friendly_text) and "ошибка" not in friendly_text.lower()[:25]
                 result_item = {
@@ -259,7 +179,7 @@ def _run_job_worker(run_id, message, selected_model_keys, user_id):
                 }
             except Exception as exc:
                 exc_text = str(exc)
-                friendly_text, detailed_text = _humanize_arm_model_error(exc_text)
+                friendly_text, detailed_text = humanize_model_error(exc_text, include_detail=True)
                 result_item = {
                     "model_key": model["key"],
                     "model_title": model["title"],

@@ -13,6 +13,7 @@ django.setup()
 
 from .i18n import get_language_instruction, get_localized_name
 from .model_clients import registry
+from .model_clients.exceptions import humanize_model_error
 from .model_clients.history import conversation_history
 from .models import AIRequestLog, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic
 from asgiref.sync import sync_to_async
@@ -165,29 +166,52 @@ def _update_log_after_response(log, end_time, response, modell):
 
 
 @sync_to_async
-def getPromptText(prompt_id, ui_language="", programming_language_name=""):
+def getPromptText(prompt_id, ui_language="", programming_language_name="", topic_name="", message="", code=""):
     try:
         shared_pk = _parse_shared_prompt_id(prompt_id)
         if shared_pk is not None:
             prompt = SharedPrompt.objects.get(id=shared_pk)
-            return prompt.get_effective_text(ui_language, programming_language_name)
+            return prompt.get_effective_text(ui_language, programming_language_name, topic_name, message, code)
         prompt = Prompt.objects.select_related('shared_prompt').get(id=prompt_id)
-        return prompt.get_effective_text(ui_language, programming_language_name)
+        return prompt.get_effective_text(ui_language, programming_language_name, topic_name, message, code)
     except (Prompt.DoesNotExist, SharedPrompt.DoesNotExist):
         return None
     except Exception as e:
         print(f"Database error: {str(e)}")
         return None
 
+
 @sync_to_async
-def getProgLng(language_id):
+def _get_default_shared_prompt(mode):
     try:
-        return ProgrammingLanguage.objects.get(id=language_id).language_name
-    except ProgrammingLanguage.DoesNotExist:
+        return SharedPrompt.objects.get(mode=mode)
+    except SharedPrompt.DoesNotExist:
         return None
-    except Exception as e:
-        print(f"Database error: {str(e)}")
-        return None
+
+
+def _build_solve_message(ui_language, prog_lng_name, topic_name, message):
+    if ui_language == "English":
+        return f"I have a programming problem in {prog_lng_name}, topic {topic_name}. Solve it.\n\nProblem:\n{message}"
+    if ui_language == "Français":
+        return f"J'ai un problème de programmation en {prog_lng_name}, sujet {topic_name}. Résolvez-le.\n\nProblème:\n{message}"
+    return f"У меня есть задача по программированию на языке {prog_lng_name}, тема {topic_name}. Реши задачу.\n\nЗадача:\n{message}"
+
+
+def _build_find_error_message(ui_language, prog_lng_name, topic_name, message, code):
+    if ui_language == "English":
+        return (
+            f"I have a programming problem in {prog_lng_name}, topic {topic_name}. I wrote code, but it does not work. "
+            f"Find the error.\n\nProblem:\n{message}\n\nCode:\n{code}"
+        )
+    if ui_language == "Français":
+        return (
+            f"J'ai un problème de programmation en {prog_lng_name}, sujet {topic_name}. J'ai écrit du code, mais il ne fonctionne pas. "
+            f"Trouvez l'erreur.\n\nProblème:\n{message}\n\nCode:\n{code}"
+        )
+    return (
+        f"У меня есть задача по программированию на языке {prog_lng_name}, тема {topic_name}. Я написал код, но он не работает. "
+        f"Найди ошибку.\n\nЗадача:\n{message}\n\nКод:\n{code}"
+    )
 
 
 @sync_to_async
@@ -287,29 +311,45 @@ class MyConsumer(AsyncWebsocketConsumer):
 
             self.old_language = language
 
+            # Определяем контекст (язык программирования, тема, препромпт) для подстановки в препромпт и лога
+            prog_lng_id = data.get("progLng") if type in ("2", "3") else None
+            topic_id = data.get("topic") if type in ("2", "3") else None
+            prompt_id = data.get("preprompt")
+            prog_lng_name, topic_name, prompt_name = await _resolve_context_names(
+                prog_lng_id, topic_id, prompt_id, language
+            )
+
             # Обработка специальных типов сообщений
             if type == "1":
                 preprompt = data.get('preprompt', '')
                 if preprompt:
-                    promptText = await getPromptText(preprompt, language, "")
+                    promptText = await getPromptText(preprompt, language, "", topic_name)
                     if promptText and (not hasattr(self, 'last_prompt') or self.last_prompt != promptText):
                         message = f"{message}\n\nПрепромпт: {promptText}"
                         self.last_prompt = promptText
             elif type == "2":
-                progLng = await getProgLng(data.get('progLng'))
-                promptText = await getPromptText(data.get('preprompt'), language, progLng or "")
-                message = f"У меня есть задача по программированию, решай ее на языке {progLng}\n{message}"
-                if promptText and (not hasattr(self, 'last_prompt') or self.last_prompt != promptText):
-                    message += f". Препромпт: {promptText}"
-                    self.last_prompt = promptText
+                promptText = await getPromptText(prompt_id, language, prog_lng_name or "", topic_name)
+                default_prompt = await _get_default_shared_prompt("solve")
+                if default_prompt:
+                    message = default_prompt.get_effective_text(
+                        language, prog_lng_name or "", topic_name, message, ""
+                    )
+                else:
+                    message = _build_solve_message(language, prog_lng_name or "", topic_name, message)
+                if promptText:
+                    message += f"\n\nПрепромпт: {promptText}"
             elif type == "3":
-                progLng = await getProgLng(data.get('progLng'))
                 code = data.get('code', '')
-                promptText = await getPromptText(data.get('preprompt'), language, progLng or "")
-                message = f"У меня есть задача по программированию, я написал для нее код на языке {progLng}, код не работает, найди пожалуйста ошибку. Задача: {message}. Код: {code}."
-                if promptText and (not hasattr(self, 'last_prompt') or self.last_prompt != promptText):
-                    message += f". Препромпт: {promptText}"
-                    self.last_prompt = promptText
+                promptText = await getPromptText(prompt_id, language, prog_lng_name or "", topic_name)
+                default_prompt = await _get_default_shared_prompt("find_error")
+                if default_prompt:
+                    message = default_prompt.get_effective_text(
+                        language, prog_lng_name or "", topic_name, message, code
+                    )
+                else:
+                    message = _build_find_error_message(language, prog_lng_name or "", topic_name, message, code)
+                if promptText:
+                    message += f"\n\nПрепромпт: {promptText}"
 
             
             # Время отправки запроса
@@ -322,13 +362,6 @@ class MyConsumer(AsyncWebsocketConsumer):
             # Создаём запись лога перед вызовом модели
             log_user, log_username, log_external_id, log_full_name = await _resolve_user_for_log(
                 self.scope.get("user")
-            )
-
-            prog_lng_id = data.get("progLng") if type in ("2", "3") else None
-            topic_id = data.get("topic") if type in ("2", "3") else None
-            prompt_id = data.get("preprompt")
-            prog_lng_name, topic_name, prompt_name = await _resolve_context_names(
-                prog_lng_id, topic_id, prompt_id, language
             )
 
             log = await sync_to_async(AIRequestLog.objects.create)(
@@ -373,13 +406,15 @@ class MyConsumer(AsyncWebsocketConsumer):
             except Exception as e:
                 print(f"Error in AI model processing: {str(e)}")
                 error_text = str(e)
-                response = f"Ошибка при обработке запроса: {error_text}"
+                friendly, detailed = humanize_model_error(error_text, include_detail=True)
+                response = f"Ошибка при обработке запроса: {friendly}"
                 end_time = timezone.now()
                 log.status = AIRequestLog.STATUS_ERROR
-                log.error_message = error_text[:2000]
+                log.error_message = detailed[:2000]
+                log.response_text = friendly[:5000]
                 log.received_at = end_time
                 log.duration_seconds = (end_time - start_time).total_seconds()
-                await sync_to_async(log.save)(update_fields=["status", "error_message", "received_at", "duration_seconds"])
+                await sync_to_async(log.save)(update_fields=["status", "error_message", "response_text", "received_at", "duration_seconds"])
 
 
             # Время отправки ответа
