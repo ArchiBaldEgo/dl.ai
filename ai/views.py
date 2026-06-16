@@ -7,6 +7,7 @@ from django.shortcuts import redirect, render
 from django.http import JsonResponse
 from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound
 from django.db import ProgrammingError, models
+from django.db.models import Q
 from django.contrib.staticfiles import finders
 from django.middleware import csrf
 from functools import wraps
@@ -276,7 +277,7 @@ def get_shared_prompts(request):
 
     ui_language = request.GET.get('ui_language', 'Русский')
     language_id = request.GET.get('language_id')
-    qs = SharedPrompt.objects.prefetch_related('programming_languages').filter(mode__isnull=True)
+    qs = SharedPrompt.objects.prefetch_related('programming_languages').filter(Q(mode__isnull=True) | Q(mode=''))
 
     if language_id:
         # Фильтруем: либо общий препромпт привязан к этому языку, либо без привязки (для всех)
@@ -312,7 +313,7 @@ def get_problem_data(request):
     ]
     shared_prompts = [
         serialize_shared_prompt(sp, ui_language)
-        for sp in SharedPrompt.objects.prefetch_related('programming_languages').filter(mode__isnull=True)
+        for sp in SharedPrompt.objects.prefetch_related('programming_languages').filter(Q(mode__isnull=True) | Q(mode=''))
     ]
 
     return JsonResponse({

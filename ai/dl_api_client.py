@@ -121,12 +121,89 @@ def _raise_for_status(response: requests.Response) -> None:
         raise DLServerError(f"Ошибка сервера DL (код {response.status_code})")
 
 
+def _looks_like_utf8_as_cp1251(text: str) -> bool:
+    """Detect the classic 'UTF-8 bytes decoded as cp1251' mojibake pattern."""
+    import re
+
+    # When UTF-8 Cyrillic bytes are decoded as cp1251, the leading bytes of
+    # 2-byte sequences (0xD0-0xDF) become uppercase Р-Я, and the leading bytes
+    # of 3-byte sequences (0xE0-0xEF) become lowercase а-п.
+    lead_chars = "РСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмноп"
+    # Look for a lead char immediately followed by any non-ASCII char
+    # (the continuation byte decoded as cp1251).
+    pattern = re.compile(f"[{lead_chars}][^\\x00-\\x7f]")
+    matches = len(pattern.findall(text))
+    if matches < 3:
+        return False
+    cyrillic = sum(1 for c in text if "Ѐ" <= c <= "ӿ")
+    return matches / max(cyrillic, 1) > 0.5
+
+
 def _decode_response_json(response: requests.Response) -> dict[str, Any]:
-    """Decode DL API JSON response, falling back to cp1251 on UTF-8 decode errors."""
+    """Decode DL API JSON response with robust encoding detection.
+
+    Tries UTF-8 first, falls back to cp1251, and also repairs the common
+    'UTF-8 bytes decoded as cp1251' mojibake pattern.
+    """
+    content = response.content
+    candidates: list[str] = []
+
     try:
-        text = response.content.decode("utf-8")
+        text = content.decode("utf-8")
     except UnicodeDecodeError:
-        text = response.content.decode("cp1251", errors="replace")
+        text = None
+    else:
+        candidates.append(text)
+        if _looks_like_utf8_as_cp1251(text):
+            try:
+                fixed = text.encode("cp1251").decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                pass
+            else:
+                candidates.append(fixed)
+
+    try:
+        candidates.append(content.decode("cp1251", errors="replace"))
+    except UnicodeDecodeError:
+        pass
+
+    if not candidates:
+        raise DLServerError("Не удалось декодировать ответ DL API")
+
+    def _quality(t: str) -> float:
+        import re
+
+        cyrillic = sum(1 for c in t if "Ѐ" <= c <= "ӿ")
+        latin = sum(1 for c in t if c.isascii() and c.isalpha())
+        digits = sum(1 for c in t if c.isdigit())
+        spaces = sum(1 for c in t if c.isspace())
+        punctuation = sum(
+            1
+            for c in t
+            if c in ".,;:!?()[]{}\"'–—-=+/*_…«»"
+        )
+        # Penalize the UTF-8-as-cp1251 mojibake signature pattern.
+        lead_chars = "РСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмноп"
+        mojibake_pattern = re.compile(f"[{lead_chars}][^\\x00-\\x7f]")
+        mojibake_matches = len(mojibake_pattern.findall(t))
+        # Penalize stray high-byte symbols typical of mojibake.
+        suspicious = sum(
+            1
+            for c in t
+            if c > "" and not ("Ѐ" <= c <= "ӿ" or c in "–—«»…\"'")
+        )
+        return (
+            cyrillic * 2
+            + latin
+            + digits
+            + spaces
+            + punctuation
+            - mojibake_matches * 3
+            - suspicious * 2
+        )
+
+    text = max(candidates, key=_quality)
+
     try:
         return json.loads(text)
     except ValueError as exc:
