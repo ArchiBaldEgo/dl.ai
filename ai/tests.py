@@ -10,13 +10,23 @@ import json
 from django.http import HttpResponse
 from django.db import ProgrammingError
 from django.utils import timezone
-from unittest.mock import patch
+from asgiref.sync import sync_to_async
+from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
 
 from ai.admin import PromptAdmin, PromptForm
 from ai.middleware import ExternalAuthMiddleware
 from ai.i18n import get_localized_name, get_ui_language_suffix
 from ai.models import AIRequestLog, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic
+from ai.services import (
+    ConversationHistory,
+    LogWriter,
+    MessageComposer,
+    ModelCaller,
+    PromptResolver,
+    get_user_identity_for_log,
+)
+from ai.throttling import RateLimiter, get_request_user_id, rate_limited
 from ai.views import chat_view, get_problem_data, get_prompts, set_password_view
 from ai.dl_api_client import _decode_response_json
 
@@ -880,3 +890,158 @@ class DLApiClientEncodingTests(SimpleTestCase):
         # The statement is long and should contain plenty of Cyrillic.
         cyrillic = sum(1 for c in result["statement"] if "Ѐ" <= c <= "ӿ")
         self.assertGreater(cyrillic, 1000)
+
+
+class ConversationHistoryTests(TestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.history = ConversationHistory(max_messages=4)
+
+    def test_get_returns_empty_list_for_unknown_user(self):
+        self.assertEqual(self.history.get("user-1"), [])
+
+    def test_add_exchange_appends_messages(self):
+        self.history.add_exchange("user-1", "hello", "hi")
+        self.assertEqual(
+            self.history.get("user-1"),
+            [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+            ],
+        )
+
+    def test_history_caps_at_max_messages(self):
+        self.history.add_exchange("user-1", "a", "A")
+        self.history.add_exchange("user-1", "b", "B")
+        self.history.add_exchange("user-1", "c", "C")
+        # max_messages=4, so after three exchanges (6 messages) we keep the last 4:
+        # [assistant A, user b, assistant B, user c, assistant C] -> capped to 4
+        # -> [user b, assistant B, user c, assistant C]
+        history = self.history.get("user-1")
+        self.assertEqual(len(history), 4)
+        self.assertEqual(history[0]["content"], "b")
+
+    def test_reset_clears_history(self):
+        self.history.add_exchange("user-1", "hello", "hi")
+        self.history.reset("user-1")
+        self.assertEqual(self.history.get("user-1"), [])
+
+
+class MessageComposerTests(TestCase):
+    def setUp(self):
+        self.composer = MessageComposer()
+
+    async def test_chat_mode_appends_prompt_when_provided(self):
+        data = {
+            "type": "1",
+            "message": "hello",
+            "preprompt": "shared_999",
+            "language": "English",
+        }
+        with patch.object(
+            self.composer.resolver,
+            "resolve_text",
+            new=AsyncMock(return_value="Think step by step."),
+        ):
+            message, mode = await self.composer.compose(data)
+        self.assertEqual(message, "hello\n\nПрепромпт: Think step by step.")
+        self.assertEqual(mode, AIRequestLog.MODE_CHAT)
+
+    async def test_solve_mode_uses_default_message_when_no_shared_prompt(self):
+        data = {
+            "type": "2",
+            "message": "sum numbers",
+            "language": "English",
+            "programming_language_name": "Python",
+            "topic_name": "Loops",
+        }
+        with patch.object(
+            self.composer.resolver,
+            "resolve_text",
+            new=AsyncMock(return_value=None),
+        ):
+            with patch("ai.services.message_composer.get_default_shared_prompt", new=AsyncMock(return_value=None)):
+                message, mode = await self.composer.compose(data)
+        self.assertIn("Python", message)
+        self.assertIn("Loops", message)
+        self.assertIn("sum numbers", message)
+        self.assertEqual(mode, AIRequestLog.MODE_SOLVE)
+
+
+class ModelCallerTests(SimpleTestCase):
+    async def test_returns_error_for_unknown_model(self):
+        result = await ModelCaller().call("hi", "client", "Unknown_Model")
+        self.assertTrue(result.is_error)
+        self.assertIn("не найдена", result.response_text)
+
+    async def test_returns_success_for_known_model(self):
+        registry_mock = MagicMock()
+        registry_mock.get.return_value = True
+        registry_mock.handler.return_value = AsyncMock(return_value=("answer", 42))
+        registry_mock.title.return_value = "Test Model"
+
+        result = await ModelCaller(registry_mock).call("hi", "client", "Known")
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.response_text, "answer")
+        self.assertEqual(result.tokens, 42)
+        self.assertEqual(result.model_title, "Test Model")
+
+
+class RateLimiterTests(SimpleTestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.limit = 2
+        self.limiter = RateLimiter(ws_limit=self.limit, http_limit=self.limit, window_seconds=60)
+
+    def test_allows_requests_under_limit(self):
+        self.assertTrue(self.limiter.is_allowed_ws("user-1"))
+        self.assertTrue(self.limiter.is_allowed_ws("user-1"))
+
+    def test_blocks_requests_over_limit(self):
+        self.limiter.is_allowed_ws("user-1")
+        self.limiter.is_allowed_ws("user-1")
+        self.assertFalse(self.limiter.is_allowed_ws("user-1"))
+
+    def test_limits_are_isolated_by_user(self):
+        self.limiter.is_allowed_ws("user-1")
+        self.limiter.is_allowed_ws("user-1")
+        self.assertTrue(self.limiter.is_allowed_ws("user-2"))
+
+    def test_rate_limited_decorator_returns_429_when_over_limit(self):
+        request = RequestFactory().get("/ai/api/prompts/")
+        request.user = SimpleNamespace(is_authenticated=True, pk=1)
+        request.user_info = {"userId": "1"}
+        request.headers = {"Accept": "application/json"}
+
+        custom_limiter = RateLimiter(ws_limit=2, http_limit=2, window_seconds=60)
+
+        @rate_limited
+        def sample_view(request):
+            return HttpResponse("ok")
+
+        with patch("ai.throttling.rate_limiter", custom_limiter):
+            sample_view(request)
+            sample_view(request)
+            response = sample_view(request)
+        self.assertEqual(response.status_code, 429)
+
+
+class UserIdentityForLogTests(TestCase):
+    def test_extracts_external_id_from_user_with_account(self):
+        user = get_user_model().objects.create_user(
+            username="local",
+            password="test-pass",
+            first_name="First",
+            last_name="Last",
+        )
+        ExternalDLAccount.objects.create(user=user, external_user_id="ext-42", external_login="local")
+        identity = get_user_identity_for_log(user, None)
+        self.assertEqual(identity["external_user_id"], "ext-42")
+        self.assertEqual(identity["user_full_name"], "First Last")
+
+    def test_extracts_from_external_info_string(self):
+        identity = get_user_identity_for_log("ext-42", {"firstName": "Alice", "lastName": "Smith"})
+        self.assertEqual(identity["external_user_id"], "ext-42")
+        self.assertEqual(identity["user_full_name"], "Alice Smith")

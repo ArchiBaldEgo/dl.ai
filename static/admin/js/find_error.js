@@ -601,6 +601,15 @@
                 }
             }
 
+            function escapeHtml(unsafe) {
+                return unsafe
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;');
+            }
+
             function parseThinkTag(inputText) {
                 const thinkStartTag = '<think>';
                 const thinkEndTag = '</think>';
@@ -609,27 +618,20 @@
                 if (startIdx === -1 || endIdx === -1) {
                     return {
                         thinkContent: '',
-                        remainingText: inputText
-                            .replace(/</g, '&lt;')
-                            .replace(/>/g, '&gt;')
-                            .trim()
+                        remainingText: escapeHtml(inputText).trim()
                     };
                 }
                 const thinkContent = inputText.substring(
                     startIdx + thinkStartTag.length,
                     endIdx
                 );
-                let remainingText =
+                const remainingText =
                     inputText.substring(0, startIdx) +
                     inputText.substring(endIdx + thinkEndTag.length);
-                remainingText = remainingText
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .trim();
 
                 return {
-                    thinkContent: thinkContent.trim(),
-                    remainingText: remainingText
+                    thinkContent: escapeHtml(thinkContent).trim(),
+                    remainingText: escapeHtml(remainingText).trim()
                 };
             }
 

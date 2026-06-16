@@ -38,6 +38,7 @@ from .dl_api_client import (
 from .http_utils import safe_relative_url
 from .i18n import get_language_instruction, get_localized_name, get_localized_text
 from .querysets import prompt_queryset_for_user
+from .throttling import rate_limited
 from .serializers import (
     programming_language as serialize_programming_language,
     prompt as serialize_prompt,
@@ -141,13 +142,21 @@ def set_password_view(request):
     error_message = ""
     subtitle = "Для входа в админку введите пароль. Это однократная регистрация."
     target_user = None
+
+    # Only accept an external id that has been validated by the external auth
+    # middleware. Query-parameter uid/userId is not trustworthy on its own.
     external_user_id = get_external_user_id_from_request(request)
     if not external_user_id:
-        external_user_id = normalize_external_user_id(
+        # Fall back to the explicit hidden form field, but only when the
+        # request already has a user_info from the DLSID flow.
+        user_info = getattr(request, "user_info", None) or {}
+        candidate = normalize_external_user_id(
             request.POST.get("external_user_id")
             or request.GET.get("uid")
             or request.GET.get("userId")
         )
+        if candidate and candidate == normalize_external_user_id(user_info.get("userId")):
+            external_user_id = candidate
 
     is_admin_registration = request.path.startswith("/ai/admin/set-password/") and bool(external_user_id)
     if is_admin_registration:
@@ -424,12 +433,18 @@ def get_task_solution_view(request):
     return JsonResponse(data)
 
 
-@csrf_exempt
+@prompt_developer_access_required
+@rate_limited
 @require_http_methods(["POST"])
 def transcribe_audio(request):
     audio_file = request.FILES.get('audio')
     if not audio_file:
         return JsonResponse({'success': False, 'error': 'No audio file provided'})
+
+    # Prevent abuse via oversized uploads.
+    max_size_mb = getattr(settings, "AI_TRANSCRIBE_MAX_SIZE_MB", 10)
+    if audio_file.size and audio_file.size > max_size_mb * 1024 * 1024:
+        return JsonResponse({'success': False, 'error': f'Audio file too large (max {max_size_mb} MB)'})
 
     language = request.POST.get('language', 'Russian')
     

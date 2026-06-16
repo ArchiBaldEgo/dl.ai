@@ -1,12 +1,15 @@
 """Bot-pool based Web DeepSeek clients."""
 
 import json
+import logging
 from typing import Tuple
 
 import requests
 
 from .config import BOT_POOL_URL
 from .exceptions import safe_parse_response
+
+logger = logging.getLogger(__name__)
 
 
 def _post_to_bot_pool(payload: dict, timeout_seconds: int = 120) -> requests.Response:
@@ -31,8 +34,7 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
     max_attempts = 4
     for attempt in range(1, max_attempts + 1):
         response = await __import__("asyncio").to_thread(_post_to_bot_pool, payload, 120)
-        print(f"Response Status: {response.status_code} (attempt {attempt}/{max_attempts})")
-        print(f"Response Content: {response.text}")
+        logger.debug("Bot pool response status: %s (attempt %s/%s)", response.status_code, attempt, max_attempts)
 
         if response.status_code == 200:
             obj, error_message = safe_parse_response(response.text)

@@ -12,10 +12,18 @@ DATABASES = {
 
 # Disable background schedulers during tests
 START_MODEL_HEALTH_SCHEDULER = False
+AI_DISABLE_HEALTH_SCHEDULER = "1"
 
 # Ensure channels layer is in-memory for tests
 CHANNEL_LAYERS = {
     'default': {
         'BACKEND': 'channels.layers.InMemoryChannelLayer',
+    }
+}
+
+# Use LocMem cache for tests so Redis is not required.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
     }
 }

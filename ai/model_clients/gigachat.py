@@ -1,11 +1,20 @@
 """GigaChat (Sber) client used by the legacy audio/chat flow."""
 
 import json
+import logging
+import os
 from typing import Optional
 
 import requests
 
 from .config import SECRET
+
+logger = logging.getLogger(__name__)
+
+
+def _gigachat_verify_ssl() -> bool:
+    """Return False only when ``SKIP_SSL_VERIFICATION`` is explicitly enabled for dev."""
+    return not os.getenv("SKIP_SSL_VERIFICATION", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def get_gigachat_token() -> Optional[str]:
@@ -28,7 +37,7 @@ def get_gigachat_token() -> Optional[str]:
         headers=headers,
         data=payload,
         auth=HTTPBasicAuth("client_id", SECRET),
-        verify=False,
+        verify=_gigachat_verify_ssl(),
         timeout=30,
     )
     if response.status_code == 200:
@@ -51,15 +60,19 @@ async def send_prompt_async(msg: str, access_token: str) -> str:
         "Authorization": f"Bearer {access_token}",
     }
     response = await __import__("asyncio").to_thread(
-        requests.post, url, headers=headers, data=payload, verify=False
+        requests.post,
+        url,
+        headers=headers,
+        data=payload,
+        verify=_gigachat_verify_ssl(),
     )
     response_content = response.content.decode("utf-8")
     try:
         return response.json()["choices"][0]["message"]["content"]
     except json.JSONDecodeError as e:
-        print(f"Ошибка при декодировании JSON: {e}")
-        print(f"Содержимое ответа: {response_content}")
+        logger.warning("JSON decode error: %s", e)
+        logger.debug("Response content: %s", response_content)
         return "Что-то пошло не так с обработкой JSON."
     except Exception as e:
-        print(f"Общая ошибка: {e}")
+        logger.warning("Unexpected error in GigaChat call: %s", e)
         return "Что-то пошло не так."

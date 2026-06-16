@@ -99,10 +99,15 @@ class AIAdminSite(admin.AdminSite):
         if _is_admin_login_path(request.path) or _is_admin_logout_path(request.path):
             return False
         external_id = get_external_user_id_from_request(request)
-        # The set-password page is allowed if the user came in with an
-        # external id but does not yet have a Django-side password.
+        # The set-password page is allowed only when the request carries a
+        # DLSID-validated external id and the local session belongs to the
+        # provisioned user. Without this check an attacker could pass an
+        # arbitrary uid/userId query parameter and set a password for that
+        # external account.
         if _is_admin_set_password_path(request.path):
-            return bool(external_id)
+            if not external_id:
+                return False
+            return _session_matches_external_id(request, external_id)
         # For every other admin page the user must have a verified
         # external id (DLSID / DLID / uid query) on the current request,
         # AND the local session must belong to the same user that the

@@ -146,6 +146,45 @@ The health scheduler runs once per day for the 04:00 MSK window. It starts autom
 - ARM: `ai/admin/arm.py`, `ai/arm_runner.py`, `ai/templates/admin/ai/arm_find_error.html`.
 - Bot pool: `bot/README.md`, `bot/api/server.js`, `bot/api/botManager.js`, `bot/worker/bot.js`.
 
+## Coding standards and architecture principles
+
+When modifying code in this repository, follow SOLID, DRY, and KISS. The audit found several violations; new code must not reintroduce them.
+
+### DRY (Don't Repeat Yourself)
+
+- Do not copy-paste large blocks of JavaScript between `static/admin/js/chat_template.js`, `decide_task.js`, and `find_error.js`. Shared behavior (voice controls, accordion rendering, markdown conversion, WebSocket helpers, localization) must live in `static/admin/js/ai-common.js` and be imported or reused by page-specific scripts.
+- Do not duplicate placeholder substitution logic between `Prompt.get_effective_text()` and `SharedPrompt.get_effective_text()` in `ai/models.py`. Use a shared helper such as `replace_placeholders(base, language, topic, message, code)`.
+- Do not duplicate message-building logic for chat / solve / find-error modes across `ai/consumers.py` and `ai/admin/arm.py`. Centralize prompt/message composition in a dedicated service module.
+- Do not duplicate model-client wrappers in `ai/model_clients/sambanova.py`. Prefer a factory or generic caller that receives the model name and parameters.
+- Avoid re-implementing error detection in multiple places; reuse `humanize_model_error` and `safe_parse_response` from `ai/model_clients/exceptions.py`.
+
+### KISS (Keep It Simple, Stupid)
+
+- Keep WebSocket consumer logic focused. Move prompt resolution, message building, logging, and model invocation out of `ai/consumers.py` into dedicated services (`AuthService`, `PromptResolver`, `MessageComposer`, `ModelCaller`, `LogWriter`).
+- Avoid module-level side effects such as `django.setup()` in consumers or `load_dotenv()` in middleware `__init__`. Environment loading is handled in `DjangoTest/settings.py`.
+- Do not hardcode timezone offsets (e.g. `+ timedelta(hours=3)`). Use `MOSCOW_TZ` from `ai/constants.py` and `timezone.localtime()`.
+- Prefer standard Django / Channels patterns over custom reinvention.
+- Remove unused globals and aliases (e.g. `current_tokens`, `_safe_relative_url`) when refactoring.
+- Move large inline scripts from templates (e.g. `ai/templates/admin/ai/arm_find_error.html`) into `static/admin/js/` files.
+
+### SOLID
+
+- **Single Responsibility:** each module, class, and function should do one thing. Consumers orchestrate; services execute; external API clients only talk to APIs.
+- **Open/Closed:** new chat modes and AI models should be added by registering a handler or entry in a registry, not by editing `if type == "1" / "2" / "3"` blocks in `ai/consumers.py`.
+- **Liskov Substitution:** custom auth backends must honor the Django base interface and must not silently bypass required DLSID validation.
+- **Interface Segregation:** avoid "god modules" such as `ai/utils.py` that re-export everything. Import from the actual module that owns the code.
+- **Dependency Inversion:** high-level code (`consumers`, `views`) should depend on abstractions (`registry`, service classes), not concrete model-client implementations.
+
+### Security baseline
+
+- Never use `verify=False` for HTTPS requests in production. `SKIP_SSL_VERIFICATION` is only for local development and must be clearly documented.
+- Never mark endpoints `@csrf_exempt` without strong authentication. `ai/views.transcribe_audio` must require authentication.
+- Never log full external API responses, session tokens, or `user_info` at INFO level.
+- Do not expose the bot pool (port 3000) to public networks; keep it on `127.0.0.1` or an internal Docker network.
+- Static files in production must be served by nginx, not by Django's `static()` helper.
+- Escape any user/model-generated HTML before inserting it into the DOM. Think-block content in particular must not be assigned to `innerHTML` unescaped.
+- Admin set-password flow must accept `external_user_id` only when it has been validated by `ExternalAuthMiddleware` and matches the provisioned Django user (`_session_matches_external_id`).
+
 ## Notes from existing docs
 
 - Branch workflow for students: each student works in a separate branch named after their surname and opens a PR to `main`. (from `README.md`)

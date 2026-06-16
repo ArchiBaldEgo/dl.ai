@@ -409,8 +409,14 @@ def get_model_status_rows():
 
 
 def get_available_model_options():
-    ensure_model_health_for_current_window()
+    """Return the list of available models for the current health window.
 
+    This function is intentionally read-only: it does not trigger a synchronous
+    health check. The daily scheduler and manual refresh are responsible for
+    populating ``AIModelAvailability`` rows. If the current window has no data,
+    we fall back to the most recent completed window so users still see a list
+    while the scheduler catches up.
+    """
     ordered_keys = MODEL_CATALOG_KEYS
     titles = {key: registry.title(key) for key in MODEL_CATALOG_KEYS}
 
