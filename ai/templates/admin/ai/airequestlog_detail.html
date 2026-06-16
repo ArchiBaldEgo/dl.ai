@@ -15,6 +15,7 @@
     <div><strong>Препромпт:</strong> {{ log.prompt_name|default:"—" }}</div>
     <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
     <div><strong>Статус:</strong> {{ log.get_status_display }}</div>
+    <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
     <div><strong>Время ответа:</strong> {{ log.duration_seconds|floatformat:0|default:"—" }} с</div>
   </div>
   {% endtimezone %}

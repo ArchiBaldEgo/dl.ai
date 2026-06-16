@@ -250,6 +250,18 @@ class AIRequestLog(models.Model):
         (SOURCE_ARM, "ARM"),
     )
 
+    MODE_CHAT = "chat"
+    MODE_SOLVE = "solve"
+    MODE_FIND_ERROR = "find_error"
+    MODE_ARM = "arm"
+
+    MODE_CHOICES = (
+        (MODE_CHAT, "Чат"),
+        (MODE_SOLVE, "Решить задачу"),
+        (MODE_FIND_ERROR, "Найти ошибку"),
+        (MODE_ARM, "ARM"),
+    )
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -262,6 +274,7 @@ class AIRequestLog(models.Model):
     user_full_name = models.CharField(max_length=500, blank=True)
     client_id = models.CharField(max_length=255, blank=True)
     source = models.CharField(max_length=32, choices=SOURCE_CHOICES, default=SOURCE_WEBSOCKET)
+    mode = models.CharField(max_length=16, choices=MODE_CHOICES, blank=True, default="")
     sent_at = models.DateTimeField()
     received_at = models.DateTimeField(null=True, blank=True)
     duration_seconds = models.FloatField(null=True, blank=True)

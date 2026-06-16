@@ -198,6 +198,7 @@ def _run_job_worker(run_id, message, selected_model_keys, user_id):
             external_user_id=external_id,
             user_full_name=full_name,
             source=AIRequestLog.SOURCE_ARM,
+            mode=AIRequestLog.MODE_ARM,
             sent_at=start_time,
             model_names=models_titles,
             message=message,

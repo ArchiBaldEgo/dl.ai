@@ -94,6 +94,16 @@ def _resolve_prompt_id_for_log(prompt_id):
         return None
 
 
+def _mode_from_message_type(message_type):
+    """Map WebSocket message type to AIRequestLog mode."""
+    mapping = {
+        "1": AIRequestLog.MODE_CHAT,
+        "2": AIRequestLog.MODE_SOLVE,
+        "3": AIRequestLog.MODE_FIND_ERROR,
+    }
+    return mapping.get(str(message_type), "")
+
+
 @sync_to_async
 def _resolve_context_names(prog_lng_id, topic_id, prompt_id, ui_language=""):
     """Return (programming_language_name, topic_name, prompt_name) for logging."""
@@ -328,6 +338,7 @@ class MyConsumer(AsyncWebsocketConsumer):
                 user_full_name=log_full_name,
                 client_id=self.client_id,
                 source=AIRequestLog.SOURCE_WEBSOCKET,
+                mode=_mode_from_message_type(type),
                 sent_at=start_time,
                 model_names=[value],
                 message=message,

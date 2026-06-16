@@ -170,6 +170,15 @@
       </select>
     </div>
     <div class="filter-field">
+      <label for="id_mode">Режим</label>
+      <select id="id_mode" name="mode">
+        <option value="">Все</option>
+        {% for key, label in mode_choices %}
+          <option value="{{ key }}" {% if filters.mode == key %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="filter-field">
       <label for="id_model">Модель</label>
       <input id="id_model" type="text" name="model" value="{{ filters.model }}" placeholder="Название модели">
     </div>
@@ -204,6 +213,7 @@
           <th>Препромпт</th>
           <th>Модель</th>
           <th>Статус</th>
+          <th>Режим</th>
           <th>Время ответа, с</th>
         </tr>
       </thead>
@@ -224,10 +234,11 @@
             <td class="{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">
               {{ log.get_status_display }}
             </td>
+            <td>{{ log.get_mode_display|default:"—" }}</td>
             <td>{{ log.duration_seconds|floatformat:0|default:"—" }}</td>
           </tr>
           <tr class="ai-log-detail-row">
-            <td colspan="9" class="ai-log-detail-cell">
+            <td colspan="10" class="ai-log-detail-cell">
               <div class="ai-log-detail-inner">
                 <div class="ai-log-detail-hint">Нажмите на строку повторно, чтобы скрыть.</div>
                 <div class="ai-log-detail-grid">

@@ -23,9 +23,10 @@ class AIRequestLogAdmin(admin.ModelAdmin):
         "prompt_name",
         "model_names_display",
         "status",
+        "mode_display",
         "duration_seconds_display",
     )
-    list_filter = ("status", "programming_language_name", "sent_at")
+    list_filter = ("status", "mode", "programming_language_name", "sent_at")
     search_fields = (
         "external_user_id",
         "username",
@@ -89,6 +90,10 @@ class AIRequestLogAdmin(admin.ModelAdmin):
         return str(round(obj.duration_seconds))
     duration_seconds_display.short_description = "Время ответа, с"
 
+    def mode_display(self, obj):
+        return obj.get_mode_display() or "—"
+    mode_display.short_description = "Режим"
+
 
 def _format_moscow_datetime(value):
     if not value:
@@ -108,6 +113,7 @@ def admin_request_logs_view(request):
 
     status = request.GET.get("status", "").strip()
     source = request.GET.get("source", "").strip()
+    mode = request.GET.get("mode", "").strip()
     model = request.GET.get("model", "").strip()
     user_q = request.GET.get("user", "").strip()
     date_from = request.GET.get("date_from", "").strip()
@@ -115,11 +121,14 @@ def admin_request_logs_view(request):
 
     status_values = dict(AIRequestLog.STATUS_CHOICES)
     source_values = dict(AIRequestLog.SOURCE_CHOICES)
+    mode_values = dict(AIRequestLog.MODE_CHOICES)
 
     if status in status_values:
         qs = qs.filter(status=status)
     if source in source_values:
         qs = qs.filter(source=source)
+    if mode in mode_values:
+        qs = qs.filter(mode=mode)
     if model:
         qs = qs.filter(model_names__contains=[model])
     if user_q:
@@ -151,11 +160,13 @@ def admin_request_logs_view(request):
         "page_obj": page_obj,
         "status_choices": AIRequestLog.STATUS_CHOICES,
         "source_choices": AIRequestLog.SOURCE_CHOICES,
+        "mode_choices": AIRequestLog.MODE_CHOICES,
         "filters_query": filters_query_str,
         "moscow_tz": MOSCOW_TZ,
         "filters": {
             "status": status,
             "source": source,
+            "mode": mode,
             "model": model,
             "user": user_q,
             "date_from": date_from,

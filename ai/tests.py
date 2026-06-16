@@ -748,6 +748,7 @@ class AIRequestLogModelTests(TestCase):
             user_full_name=self.user.get_full_name(),
             client_id="client-1",
             source=AIRequestLog.SOURCE_WEBSOCKET,
+            mode=AIRequestLog.MODE_CHAT,
             sent_at=timezone.now(),
             model_names=["DeepSeek-R1"],
             message="hello",
@@ -762,6 +763,8 @@ class AIRequestLogModelTests(TestCase):
         self.assertEqual(log.user_full_name, "Log User")
         self.assertEqual(log.model_names, ["DeepSeek-R1"])
         self.assertEqual(log.status, AIRequestLog.STATUS_SUCCESS)
+        self.assertEqual(log.mode, AIRequestLog.MODE_CHAT)
+        self.assertEqual(log.get_mode_display(), "Чат")
         self.assertEqual(log.programming_language_name, "Python")
         self.assertEqual(log.topic_name, "Loops")
         self.assertEqual(log.prompt_name, "Helper")
