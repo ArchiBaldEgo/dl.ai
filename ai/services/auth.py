@@ -33,7 +33,7 @@ class WebSocketAuthService:
         yet).
         """
         user = self._get_scope_user(consumer.scope)
-        if user is not None and not isinstance(user, AnonymousUser):
+        if user is not None:
             if not await self._is_app_enabled():
                 return None, None
             return user, getattr(consumer.scope, "user_info", None)
