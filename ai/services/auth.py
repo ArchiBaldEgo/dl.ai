@@ -3,7 +3,6 @@
 from typing import Any
 
 from asgiref.sync import sync_to_async
-from django.contrib.auth.models import AnonymousUser
 
 from ..external_auth import (
     ExternalAuthMisconfigured,
@@ -55,6 +54,8 @@ class WebSocketAuthService:
         return user_info.get("userId"), user_info
 
     def _get_scope_user(self, scope: dict) -> Any | None:
+        from django.contrib.auth.models import AnonymousUser
+
         user = scope.get("user")
         if user is None or isinstance(user, AnonymousUser):
             return None

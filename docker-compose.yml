@@ -32,6 +32,7 @@ services:
       start_period: 30s
     depends_on:
       - db
+      - redis
     networks:
       - shared-network
 
@@ -46,6 +47,21 @@ services:
       POSTGRES_DB: "${DB_NAME:-dl_ai}"
     networks:
       - shared-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: dl_ai_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - shared-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   nginx:
     image: nginx:latest
@@ -65,6 +81,8 @@ services:
 volumes:
   postgres_data:
     name: "${POSTGRES_VOLUME_NAME:-dlai_postgres_data}"
+  redis_data:
+    name: "${REDIS_VOLUME_NAME:-dlai_redis_data}"
   static_volume:
   bot_node_modules:
   bot_puppeteer_cache:
