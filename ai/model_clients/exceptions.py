@@ -72,6 +72,8 @@ def extract_api_error_text(response_text: str) -> str:
         return "Превышен лимит запросов. Попробуйте позже."
     if response_text.startswith("5") or response_text.startswith("http 5"):
         return "Ошибка сервера API. Попробуйте позже."
+    if response_text == "402":
+        return f"Ошибка API (код {response_text}): закончились кредиты у провайдера модели. Пополните баланс, чтобы продолжить."
     return f"Ошибка API (код {response_text})."
 
 
@@ -86,6 +88,10 @@ _MODEL_ERROR_PATTERNS = (
     (
         ("код 401", "error 401", "status 401", "unauthorized", "не авториз"),
         "Ошибка авторизации модели (401). Проверьте API-ключ/токен и права доступа к модели.",
+    ),
+    (
+        ("код 402", "error 402", "status 402", "credits_exhausted", "закончились кредиты", "payment required"),
+        "Закончились кредиты у провайдера модели (402). Пополните баланс, чтобы продолжить.",
     ),
     (
         ("код 403", "error 403", "status 403", "forbidden", "доступ запрещ"),

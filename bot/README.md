@@ -128,7 +128,7 @@ BOT_PASSWORD=your_password
 
 ```bash
 docker network create shared-network   # один раз, если ещё нет
-docker compose -f docker-compose.linux.yml up -d --build
+docker compose --env-file ../.env up -d --build
 ```
 
 Логи:
@@ -138,7 +138,7 @@ docker logs -f bot_pool_api
 
 Остановка:
 ```bash
-docker compose -f docker-compose.linux.yml down
+docker compose --env-file ../.env down
 ```
 
 ### Локально (без Docker)

@@ -37,8 +37,21 @@ function createServer({ botManager, config, logger }) {
   app.use(express.json({ limit: '2mb' }));
 
   app.get('/health', (req, res) => {
-    // Report only actually live bots (closed window/page/browser should disappear from /health).
-    res.json({ ok: true, bots: botManager.list({ onlyAlive: true, includeNotAutorized: false }) });
+    // Report all live bots, including not-authorized ones so the operator can see login failures.
+    const bots = botManager.list({ onlyAlive: true, includeNotAutorized: true });
+    const counts = { ready: 0, busy: 0, starting: 0, not_autorized: 0, failed: 0 };
+    for (const b of bots) {
+      if (counts[b.state] !== undefined) counts[b.state] += 1;
+    }
+    res.json({
+      ok: true,
+      ready_count: counts.ready,
+      busy_count: counts.busy,
+      starting_count: counts.starting,
+      not_autorized_count: counts.not_autorized,
+      failed_count: counts.failed,
+      bots,
+    });
   });
 
   // Minimal OpenAI-like endpoint
