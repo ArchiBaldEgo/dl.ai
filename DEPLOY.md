@@ -39,6 +39,28 @@ nano .env
 - `ALL_PROXY` (опционально; некоторые утилиты/библиотеки читают именно его)
 - `NO_PROXY` (опционально)
 - `PROXY` (опционально)
+- `REDIS_URL` (обязательно для production)
+- `REDIS_VOLUME_NAME` (опционально; имя Docker volume для Redis)
+
+### Redis
+
+После рефакторинга WebSocket consumer'а и внедрения rate limiting проект использует Redis через Django cache для:
+
+- общей истории диалогов между несколькими Daphne/Gunicorn воркерами,
+- корректной работы rate limiting между воркерами.
+
+**Без Redis в multi-worker конфигурации:**
+
+- история диалогов будет теряться при перезапуске процесса,
+- разные воркеры увидят разную историю,
+- rate limiting не будет работать (счётчики разные в каждом процессе).
+
+**Значение `REDIS_URL`:**
+
+- Внутри Docker Compose (по умолчанию): `redis://redis:6379/1`
+- При локальном запуске без Docker: `redis://127.0.0.1:6379/1`
+
+Если `REDIS_URL` не задан, Django использует `LocMemCache`. Это допустимо только для разработки с одним процессом. **Для production `REDIS_URL` обязателен.**
 
 Рекомендуемые для продакшена переменные:
 
@@ -57,6 +79,8 @@ nano .env
 - `USE_X_FORWARDED_PROTO=1` (если TLS терминируется на nginx/прокси)
 
 Если прокси вам не нужен (или имя прокси не резолвится на сервере), оставьте `HTTP_PROXY/HTTPS_PROXY/PROXY` пустыми или удалите эти строки.
+
+> **Обязательно:** убедитесь, что в `.env` есть строка `REDIS_URL=redis://redis:6379/1`. Без неё в production rate limiting и общая история диалогов работать не будут.
 
 Если AI-токены у вас есть, тоже заполните их.
 
@@ -101,6 +125,7 @@ docker compose ps
 docker compose --env-file .env up -d --build
 docker compose --env-file .env exec -T web python manage.py migrate
 docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
+docker compose exec -T redis redis-cli ping
 docker compose ps
 ```
 
@@ -110,6 +135,7 @@ docker compose ps
 AI_NGINX_BIND=127.0.0.1 AI_NGINX_PORT=8081 docker compose --env-file .env up -d --build
 docker compose --env-file .env exec -T web python manage.py migrate
 docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
+docker compose exec -T redis redis-cli ping
 docker compose ps
 ```
 
@@ -119,6 +145,7 @@ docker compose ps
 docker compose --env-file .env up -d --build
 docker compose --env-file .env exec -T web python manage.py migrate
 docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
+docker compose exec -T redis redis-cli ping
 docker compose ps
 ```
 
@@ -141,6 +168,10 @@ export AI_NGINX_PORT=8081
 Локально на сервере (внутри него):
 
 ```bash
+# Проверить, что Redis отвечает (должен вернуть PONG)
+docker compose exec -T redis redis-cli ping
+
+# Проверить, что веб-часть отвечает
 curl -I http://127.0.0.1:8081/ai/chat/
 ```
 
@@ -269,9 +300,11 @@ python manage.py runserver 0.0.0.0:8000
 ```bash
 cp .env.example .env
 # Установите DB_HOST=db и остальные параметры в .env
+# REDIS_URL уже прописан как redis://redis:6379/1 в .env.example
 docker compose --env-file .env up -d --build
 docker compose --env-file .env exec -T web python manage.py migrate
 docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
+docker compose exec -T redis redis-cli ping
 ```
 
 ### Тестирование и проверки

@@ -81,6 +81,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'ai.throttling.RateLimitMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'ai.middleware.ExternalAuthMiddleware',
@@ -214,4 +215,26 @@ STATICFILES_DIRS = [
     BASE_DIR / 'static',
 ]
 
-STATIC_ROOT = "/app/staticfiles/" 
+STATIC_ROOT = "/app/staticfiles/"
+
+# Cache backend: Redis when REDIS_URL is set, otherwise LocMem for development.
+REDIS_URL = os.getenv("REDIS_URL", "")
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        }
+    }
+
+# Rate limiting settings (requests per window_seconds).
+AI_RATE_LIMIT_ENABLED = _env_bool("AI_RATE_LIMIT_ENABLED", default=True)
+AI_WS_RATE_LIMIT = int(os.getenv("AI_WS_RATE_LIMIT", "120"))
+AI_HTTP_RATE_LIMIT = int(os.getenv("AI_HTTP_RATE_LIMIT", "60"))
+AI_RATE_LIMIT_WINDOW = int(os.getenv("AI_RATE_LIMIT_WINDOW", "60"))

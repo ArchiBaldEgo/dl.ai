@@ -7,6 +7,7 @@
 
   {% timezone moscow_tz %}
   <div class="ai-log-meta">
+    <div><strong>Статус:</strong> {{ log.get_status_display }}</div>
     <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y:H:i:s" }}</div>
     <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</div>
     <div><strong>Кто отправлял:</strong> {{ log.user_full_name|default:log.username|default:log.external_user_id|default:"—" }}</div>
@@ -14,22 +15,21 @@
     <div><strong>Тема:</strong> {{ log.topic_name|default:"—" }}</div>
     <div><strong>Препромпт:</strong> {{ log.prompt_name|default:"—" }}</div>
     <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
-    <div><strong>Статус:</strong> {{ log.get_status_display }}</div>
     <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
     <div><strong>Время ответа:</strong> {{ log.duration_seconds|floatformat:0|default:"—" }} с</div>
   </div>
   {% endtimezone %}
+
+  {% if log.error_message %}
+    <h2>Ошибка</h2>
+    <pre class="ai-log-block ai-log-error">{{ log.error_message }}</pre>
+  {% endif %}
 
   <h2>Текст, который отправил пользователь</h2>
   <pre class="ai-log-block">{{ log.message|default:"(пусто)" }}</pre>
 
   <h2>Текст, который ответила модель</h2>
   <pre class="ai-log-block">{{ log.response_text|default:"(пусто)" }}</pre>
-
-  {% if log.error_message %}
-    <h2>Ошибка</h2>
-    <pre class="ai-log-block ai-log-error">{{ log.error_message }}</pre>
-  {% endif %}
 
   <div class="ai-log-actions">
     <a class="button" href="/ai/admin/ai/airequestlog/">← Назад к логам</a>

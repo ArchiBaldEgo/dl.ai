@@ -1,452 +1,239 @@
+"""WebSocket consumer for AI chat."""
+
 import json
 import logging
-import os
-from datetime import timedelta
-from urllib.parse import unquote
 
-import django
 from channels.generic.websocket import AsyncWebsocketConsumer
 from django.utils import timezone
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'DjangoTest.settings')
-django.setup()
-
-from .i18n import get_language_instruction, get_localized_name
+from .constants import MOSCOW_TZ
 from .model_clients import registry
 from .model_clients.exceptions import humanize_model_error
-from .model_clients.history import conversation_history
-from .models import AIRequestLog, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic
-from asgiref.sync import sync_to_async
-from .external_auth import (
-    ExternalAuthMisconfigured,
-    ExternalAuthUnauthorized,
-    ExternalAuthUnavailable,
-    fetch_external_user_info,
-    get_external_session_cookie_name,
+from .services import (
+    LogWriter,
+    MessageComposer,
+    ModelCaller,
+    PromptResolver,
+    WebSocketAuthService,
+    conversation_history,
+    resolve_external_account,
 )
+from .throttling import rate_limiter
 
-current_tokens = 0
 logger = logging.getLogger(__name__)
 
 
-_LEGACY_ALIASES = {
-    "DeepSeek_R1": "DeepSeek_R1_Distill_Llama_70B",
-    "DeepSeek-R1": "DeepSeek_R1_Distill_Llama_70B",
-    "DeepSeek-R1-Distill-Llama-70B": "DeepSeek_R1_Distill_Llama_70B",
-    "DeepSeek-V3.1": "DeepSeek_V3_1",
-    "DeepSeek-V3.1-cb": "DeepSeek_V3_1_cb",
-    "DeepSeek-V3.2": "DeepSeek_V3_2",
-    "Llama_3_1_Tulu_3_405B": "Meta_Llama_3_3_70B_Instruct",
-    "Meta_Llama_3_1_70B_Instruct": "Meta_Llama_3_3_70B_Instruct",
-    "Meta-Llama-3.3-70B-Instruct": "Meta_Llama_3_3_70B_Instruct",
-    "Llama-4-Maverick-17B-128E-Instruct": "Llama_4_Maverick_17B_128E_Instruct",
-    "MiniMax-M2.5": "MiniMax_M2_5",
-    "MiniMax-M2.7": "MiniMax_M2_7",
-    "gemma-3-12b-it": "Gemma_3_12b_it",
-    "gpt-oss-120b": "Gpt_oss_120b",
-    "QwQ_32B": "DeepSeek_R1_Distill_Llama_70B",
-    "Mixtral_8x7B": "Llama_4_Maverick_17B_128E_Instruct",
-    "Mixtral_8x22b": "Llama_4_Maverick_17B_128E_Instruct",
-}
+class ResponseFormatter:
+    """Format outgoing WebSocket messages."""
 
+    def format_think(self, timestamp_str: str, text: str) -> str:
+        return f"<think>{timestamp_str} {text}</think>"
 
-def _resolve_legacy_alias(value: str) -> str:
-    return _LEGACY_ALIASES.get(value, value)
+    def format_user_processing(self, timestamp_str: str, message: str) -> str:
+        return f"<think>{timestamp_str} Обрабатываю запрос пользователя. Вы: {message}</think>"
 
-
-@sync_to_async
-def _resolve_user_for_log(user):
-    """Return (user, username, external_user_id, full_name) for logging."""
-    if not user or not getattr(user, "is_authenticated", False):
-        return None, "", "", ""
-
-    username = getattr(user, "username", "") or ""
-    full_name = (user.get_full_name() or "").strip() or username
-    external_id = username
-    try:
-        external_id = user.external_dl_account.external_user_id
-    except (ExternalDLAccount.DoesNotExist, AttributeError):
-        pass
-    return user, username, external_id, full_name
-
-
-def _parse_shared_prompt_id(prompt_id):
-    """Return shared prompt pk if prompt_id is 'shared_<pk>', else None."""
-    if not isinstance(prompt_id, str):
-        return None
-    if not prompt_id.startswith("shared_"):
-        return None
-    try:
-        return int(prompt_id.split("_", 1)[1])
-    except (ValueError, IndexError):
-        return None
-
-
-def _resolve_prompt_id_for_log(prompt_id):
-    """Return an integer id for logging from either a shared or regular prompt id."""
-    if not prompt_id:
-        return None
-    shared_pk = _parse_shared_prompt_id(prompt_id)
-    if shared_pk is not None:
-        return shared_pk
-    try:
-        return int(prompt_id)
-    except (ValueError, TypeError):
-        return None
-
-
-def _mode_from_message_type(message_type):
-    """Map WebSocket message type to AIRequestLog mode."""
-    mapping = {
-        "1": AIRequestLog.MODE_CHAT,
-        "2": AIRequestLog.MODE_SOLVE,
-        "3": AIRequestLog.MODE_FIND_ERROR,
-    }
-    return mapping.get(str(message_type), "")
-
-
-@sync_to_async
-def _resolve_context_names(prog_lng_id, topic_id, prompt_id, ui_language=""):
-    """Return (programming_language_name, topic_name, prompt_name) for logging."""
-    prog_lng_name = ""
-    topic_name = ""
-    prompt_name = ""
-    try:
-        if prog_lng_id:
-            prog_lng_name = ProgrammingLanguage.objects.values_list("language_name", flat=True).get(id=prog_lng_id)
-    except ProgrammingLanguage.DoesNotExist:
-        pass
-    try:
-        if topic_id:
-            topic = Topic.objects.get(id=topic_id)
-            topic_name = get_localized_name(topic, ui_language, "topic_name")
-    except Topic.DoesNotExist:
-        pass
-    try:
-        shared_pk = _parse_shared_prompt_id(prompt_id)
-        if shared_pk is not None:
-            prompt = SharedPrompt.objects.get(id=shared_pk)
-        elif prompt_id:
-            prompt = Prompt.objects.select_related("shared_prompt").get(id=prompt_id)
-        else:
-            prompt = None
-        if prompt is not None:
-            prompt_name = get_localized_name(prompt, ui_language, "prompt_name")
-    except (Prompt.DoesNotExist, SharedPrompt.DoesNotExist):
-        pass
-    return prog_lng_name, topic_name, prompt_name
-
-
-@sync_to_async
-def _update_log_after_response(log, end_time, response, modell):
-    """Update AIRequestLog after a model response."""
-    if isinstance(response, tuple):
-        response_text = response[0] if len(response) > 0 else ""
-        tokens = response[1] if len(response) > 1 else 0
-    else:
-        response_text = response
-        tokens = 0
-
-    log.received_at = end_time
-    log.duration_seconds = (end_time - log.sent_at).total_seconds() if log.sent_at else None
-    log.model_names = [modell] if modell else log.model_names
-    log.response_text = str(response_text or "")[:5000]
-    log.tokens = tokens or 0
-
-    error_markers = (
-        "ошибка", "error", "таймаут", "timeout", "не удалось", "failed",
-        "недоступ", "unavailable", "превышен лимит", "rate limit",
-    )
-    text_sample = str(response_text or "").lower()[:100]
-    if any(marker in text_sample for marker in error_markers):
-        log.status = AIRequestLog.STATUS_ERROR
-    else:
-        log.status = AIRequestLog.STATUS_SUCCESS
-    log.save(update_fields=["received_at", "duration_seconds", "model_names", "response_text", "tokens", "status"])
-
-
-@sync_to_async
-def getPromptText(prompt_id, ui_language="", programming_language_name="", topic_name="", message="", code=""):
-    try:
-        shared_pk = _parse_shared_prompt_id(prompt_id)
-        if shared_pk is not None:
-            prompt = SharedPrompt.objects.get(id=shared_pk)
-            return prompt.get_effective_text(ui_language, programming_language_name, topic_name, message, code)
-        prompt = Prompt.objects.select_related('shared_prompt').get(id=prompt_id)
-        return prompt.get_effective_text(ui_language, programming_language_name, topic_name, message, code)
-    except (Prompt.DoesNotExist, SharedPrompt.DoesNotExist):
-        return None
-    except Exception as e:
-        print(f"Database error: {str(e)}")
-        return None
-
-
-@sync_to_async
-def _get_default_shared_prompt(mode):
-    try:
-        return SharedPrompt.objects.get(mode=mode)
-    except SharedPrompt.DoesNotExist:
-        return None
-
-
-def _build_solve_message(ui_language, prog_lng_name, topic_name, message):
-    if ui_language == "English":
-        return f"I have a programming problem in {prog_lng_name}, topic {topic_name}. Solve it.\n\nProblem:\n{message}"
-    if ui_language == "Français":
-        return f"J'ai un problème de programmation en {prog_lng_name}, sujet {topic_name}. Résolvez-le.\n\nProblème:\n{message}"
-    return f"У меня есть задача по программированию на языке {prog_lng_name}, тема {topic_name}. Реши задачу.\n\nЗадача:\n{message}"
-
-
-def _build_find_error_message(ui_language, prog_lng_name, topic_name, message, code):
-    if ui_language == "English":
+    def format_success(
+        self,
+        timestamp_str: str,
+        model_title: str,
+        duration: str,
+        response_text: str,
+        tokens: int | str = 0,
+    ) -> str:
         return (
-            f"I have a programming problem in {prog_lng_name}, topic {topic_name}. I wrote code, but it does not work. "
-            f"Find the error.\n\nProblem:\n{message}\n\nCode:\n{code}"
+            f"<think>{timestamp_str} Запрос успешно обработан</think>\n"
+            f"Модель: {model_title}\n"
+            f"Время обработки запроса: {duration}\n"
+            f"Потрачено токенов: {tokens}\n"
+            f"{response_text}"
         )
-    if ui_language == "Français":
-        return (
-            f"J'ai un problème de programmation en {prog_lng_name}, sujet {topic_name}. J'ai écrit du code, mais il ne fonctionne pas. "
-            f"Trouvez l'erreur.\n\nProblème:\n{message}\n\nCode:\n{code}"
-        )
-    return (
-        f"У меня есть задача по программированию на языке {prog_lng_name}, тема {topic_name}. Я написал код, но он не работает. "
-        f"Найди ошибку.\n\nЗадача:\n{message}\n\nКод:\n{code}"
-    )
 
+    def format_simple_success(self, timestamp_str: str, response_text: str) -> str:
+        return f"<think>{timestamp_str} Запрос успешно обработан</think>\n{response_text}"
 
-@sync_to_async
-def is_ai_app_enabled():
-    from .models import AIAppSettings
-    return AIAppSettings.get_solo().is_enabled
-
-#функция проверки сессии через внешний API
-def check_session(session_id):
-    try:
-        return fetch_external_user_info(session_id)
-    except (ExternalAuthMisconfigured, ExternalAuthUnauthorized, ExternalAuthUnavailable) as exc:
-        logger.error(f"Session check error: {exc}")
-        return None
+    def format_duration(self, total_seconds: float) -> str:
+        if total_seconds < 60:
+            return f"{total_seconds:.3f} сек"
+        minutes = int(total_seconds // 60)
+        seconds = total_seconds % 60
+        return f"{minutes} мин {seconds:.3f} сек"
 
 
 class MyConsumer(AsyncWebsocketConsumer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.auth_service = WebSocketAuthService()
+        self.prompt_resolver = PromptResolver()
+        self.composer = MessageComposer(self.prompt_resolver)
+        self.caller = ModelCaller(registry)
+        self.log_writer = LogWriter()
+        self.formatter = ResponseFormatter()
+
     async def connect(self):
-        cookies = self.scope.get('cookies', {})
-        user = self.scope.get("user")
-        if user is not None and getattr(user, "is_authenticated", False):
-            self.user_id = getattr(user, "username", None) or str(getattr(user, "pk", ""))
-            if not await is_ai_app_enabled():
-                await self.close(code=4403)
-                return
-            self.client_id = self.scope['url_route']['kwargs']['client_id']
-            await self.accept()
-            print(f"WebSocket connected for client {self.client_id}, user_id={self.user_id}")
-            return
-
-        session_cookie_name = get_external_session_cookie_name()
-        raw_session_id = cookies.get(session_cookie_name)
-        if not raw_session_id:
+        user, user_info = await self.auth_service.authenticate(self)
+        if user is None:
             await self.close(code=4403)
             return
 
-        session_id = unquote(raw_session_id)
-
-        session = self.scope.get("session")
-        user_info = None
-        if session is not None:
-            cached_session_id = session.get("external_session_id")
-            cached_user_info = session.get("external_user_info")
-            if cached_session_id == session_id and isinstance(cached_user_info, dict) and cached_user_info:
-                user_info = cached_user_info
-
-        if user_info is None:
-            user_info = await sync_to_async(check_session)(session_id)
-            if user_info and session is not None:
-                session["external_session_id"] = session_id
-                session["external_user_info"] = user_info
-                session.modified = True
-                await sync_to_async(session.save)()
-
-        if not user_info:
-            await self.close(code=4403)
-            return
-
-        # Сохраняем user_id для возможного использования
-        self.user_id = user_info.get('userId')
-
-        if not await is_ai_app_enabled():
-            await self.close(code=4403)
-            return
-
-        self.client_id = self.scope['url_route']['kwargs']['client_id']
+        self.user = user
+        self.user_info = user_info
+        self.external_account = await resolve_external_account(user) if user and not isinstance(user, str) else None
+        self.user_id = self._extract_user_id(user, user_info, self.external_account)
+        self.client_id = self.scope["url_route"]["kwargs"]["client_id"]
         await self.accept()
-        print(f"WebSocket connected for client {self.client_id}, user_id={self.user_id}")
+        logger.debug("WebSocket connected for client %s, user_id=%s", self.client_id, self.user_id)
+
+    def _extract_user_id(self, user, user_info, external_account=None) -> str:
+        if isinstance(user, str):
+            return user
+        if external_account is not None:
+            return external_account.external_user_id
+        return str(getattr(user, "pk", "") or getattr(user, "username", "") or "")
+
+    def _get_identity_for_log(self) -> dict:
+        user = self.user
+        user_info = self.user_info
+        result = {
+            "user": None,
+            "username": "",
+            "external_user_id": "",
+            "user_full_name": "",
+        }
+        if user is None:
+            return result
+
+        if isinstance(user, str):
+            result["external_user_id"] = user
+            result["username"] = user
+            if user_info:
+                first = (user_info.get("firstName") or "").strip()
+                last = (user_info.get("lastName") or "").strip()
+                result["user_full_name"] = f"{first} {last}".strip() or user
+            return result
+
+        if getattr(user, "is_authenticated", False):
+            result["user"] = user
+            result["username"] = getattr(user, "username", "") or ""
+            result["user_full_name"] = (user.get_full_name() or "").strip() or result["username"]
+            if self.external_account is not None:
+                result["external_user_id"] = self.external_account.external_user_id
+            else:
+                result["external_user_id"] = result["username"]
+
+        return result
 
     async def disconnect(self, close_code):
-        print(f"Connection closed for client {self.client_id}")
+        logger.debug("Connection closed for client %s", getattr(self, "client_id", "unknown"))
 
     async def receive(self, text_data):
-
         try:
             data = json.loads(text_data)
-            print(f"Received data: {data}")
-
-            # Обработка нажатия кнопки Clear Context
-            if data.get('action') == 'clear_context':
-                conversation_history.reset(self.client_id)
-                self.old_language = None
-                # Отправляем простое сообщение без тегов think
-                await self.send(text_data="Контекст очищен")
-                return
-
-            type = data.get('type', '1')
-            message = data.get('message', '')
-            language = data.get('language', 'Russian')
-            value = data.get("value", "DeepSeek_R1")
-
-            print(f"Processing message: type={type}, language={language}, model={value}")
-
-            # Обработка языка
-            if hasattr(self, 'old_language') and self.old_language != language:
-                message += get_language_instruction(language)
-
-            self.old_language = language
-
-            # Определяем контекст (язык программирования, тема, препромпт) для подстановки в препромпт и лога
-            prog_lng_id = data.get("progLng") if type in ("2", "3") else None
-            topic_id = data.get("topic") if type in ("2", "3") else None
-            prompt_id = data.get("preprompt")
-            prog_lng_name, topic_name, prompt_name = await _resolve_context_names(
-                prog_lng_id, topic_id, prompt_id, language
-            )
-
-            # Обработка специальных типов сообщений
-            if type == "1":
-                preprompt = data.get('preprompt', '')
-                if preprompt:
-                    promptText = await getPromptText(preprompt, language, "", topic_name)
-                    if promptText and (not hasattr(self, 'last_prompt') or self.last_prompt != promptText):
-                        message = f"{message}\n\nПрепромпт: {promptText}"
-                        self.last_prompt = promptText
-            elif type == "2":
-                promptText = await getPromptText(prompt_id, language, prog_lng_name or "", topic_name)
-                default_prompt = await _get_default_shared_prompt("solve")
-                if default_prompt:
-                    message = default_prompt.get_effective_text(
-                        language, prog_lng_name or "", topic_name, message, ""
-                    )
-                else:
-                    message = _build_solve_message(language, prog_lng_name or "", topic_name, message)
-                if promptText:
-                    message += f"\n\nПрепромпт: {promptText}"
-            elif type == "3":
-                code = data.get('code', '')
-                promptText = await getPromptText(prompt_id, language, prog_lng_name or "", topic_name)
-                default_prompt = await _get_default_shared_prompt("find_error")
-                if default_prompt:
-                    message = default_prompt.get_effective_text(
-                        language, prog_lng_name or "", topic_name, message, code
-                    )
-                else:
-                    message = _build_find_error_message(language, prog_lng_name or "", topic_name, message, code)
-                if promptText:
-                    message += f"\n\nПрепромпт: {promptText}"
-
-            
-            # Время отправки запроса
-            start_time = timezone.now()
-            start_str = (start_time + timedelta(hours=3)).strftime("%H:%M:%S")
-
-            # Отправляем сообщение пользователю
-            await self.send(text_data=f"<think> {start_str} Обрабатываю запрос пользователя</think> Вы: {message}")
-
-            # Создаём запись лога перед вызовом модели
-            log_user, log_username, log_external_id, log_full_name = await _resolve_user_for_log(
-                self.scope.get("user")
-            )
-
-            log = await sync_to_async(AIRequestLog.objects.create)(
-                user=log_user,
-                username=log_username,
-                external_user_id=log_external_id,
-                user_full_name=log_full_name,
-                client_id=self.client_id,
-                source=AIRequestLog.SOURCE_WEBSOCKET,
-                mode=_mode_from_message_type(type),
-                sent_at=start_time,
-                model_names=[value],
-                message=message,
-                programming_language_id=int(prog_lng_id) if prog_lng_id else None,
-                programming_language_name=prog_lng_name,
-                topic_id=int(topic_id) if topic_id else None,
-                topic_name=topic_name,
-                prompt_id=_resolve_prompt_id_for_log(prompt_id),
-                prompt_name=prompt_name,
-            )
-            # Обработка модели AI
-            response = "Что-то пошло не так. Попробуйте еще раз."
-            modell = value
-
-            normalized_value = registry.get(value) and value or _resolve_legacy_alias(value)
-
-            try:
-                handler = registry.handler(normalized_value)
-                if handler:
-                    modell = registry.title(normalized_value)
-                    response = await handler(message, self.client_id)
-                    await _update_log_after_response(log, timezone.now(), response, modell)
-                else:
-                    response = f"Модель {value} не найдена. Используйте доступные модели."
-                    end_time = timezone.now()
-                    log.status = AIRequestLog.STATUS_ERROR
-                    log.error_message = response[:2000]
-                    log.received_at = end_time
-                    log.duration_seconds = (end_time - start_time).total_seconds()
-                    await sync_to_async(log.save)(update_fields=["status", "error_message", "received_at", "duration_seconds"])
-
-            except Exception as e:
-                print(f"Error in AI model processing: {str(e)}")
-                error_text = str(e)
-                friendly, detailed = humanize_model_error(error_text, include_detail=True)
-                response = f"Ошибка при обработке запроса: {friendly}"
-                end_time = timezone.now()
-                log.status = AIRequestLog.STATUS_ERROR
-                log.error_message = detailed[:2000]
-                log.response_text = friendly[:5000]
-                log.received_at = end_time
-                log.duration_seconds = (end_time - start_time).total_seconds()
-                await sync_to_async(log.save)(update_fields=["status", "error_message", "response_text", "received_at", "duration_seconds"])
-
-
-            # Время отправки ответа
-            end_time = timezone.now()
-            end_str = (end_time + timedelta(hours=3)).strftime("%H:%M:%S")
-
-            # Время обработки
-            time_diff = end_time - start_time
-            total_seconds = time_diff.total_seconds()
-
-            if total_seconds < 60:
-                duration = f"{total_seconds:.3f} сек"
-            else:
-                minutes = int(total_seconds // 60)
-                seconds = total_seconds % 60
-                duration = f"{minutes} мин {seconds:.3f} сек"
-
-            # Отправляем ответ
-            if isinstance(response, tuple):
-                response_text = response[0] if len(response) > 0 else "Пустой ответ от модели."
-                response_tokens = response[1] if len(response) > 1 else '0'
-                await self.send(text_data=f'''<think> {end_str} Запрос успешно обработан</think>
-                Модель: {modell}
-                Время обработки запроса: {duration}
-                Потрачено токенов: {response_tokens}
-                {response_text}''')
-            else:
-                await self.send(text_data=f'''<think> {end_str} Запрос успешно обработан</think>
-                {response}''')
-
-        except json.JSONDecodeError as e:
+        except json.JSONDecodeError:
             await self.send(text_data="Ошибка: Неверный формат JSON")
-        except Exception as e:
-            print(f"Unexpected error: {str(e)}")
-            await self.send(text_data="Что-то пошло не так. Очистка контекста, введите новый запрос.")
+            return
+
+        logger.debug("Received data: %s", data)
+
+        if data.get("action") == "clear_context":
+            conversation_history.reset(self.client_id)
+            self.old_language = None
+            await self.send(text_data="Контекст очищен")
+            return
+
+        if not self._check_rate_limit():
+            await self.send(text_data="Слишком много сообщений. Попробуйте позже.")
+            return
+
+        try:
+            await self._handle_message(data)
+        except Exception as exc:
+            logger.exception("Unexpected error handling WebSocket message")
+            friendly, _ = humanize_model_error(str(exc), include_detail=False)
+            await self.send(text_data=f"Что-то пошло не так. {friendly}")
+
+    def _check_rate_limit(self) -> bool:
+        if not self.user_id:
+            return True
+        return rate_limiter.is_allowed_ws(self.user_id)
+
+    async def _handle_message(self, data: dict):
+        message_type = str(data.get("type", "1"))
+        language = data.get("language", "Russian")
+        model_key = data.get("value", "DeepSeek_R1")
+
+        prog_lng_id = data.get("progLng") if message_type in ("2", "3") else None
+        topic_id = data.get("topic") if message_type in ("2", "3") else None
+        prompt_id = data.get("preprompt")
+
+        prog_lng_name, topic_name, prompt_name = await self.prompt_resolver.resolve_context_names(
+            prog_lng_id, topic_id, prompt_id, language
+        )
+
+        compose_data = {
+            **data,
+            "topic_name": topic_name,
+            "programming_language_name": prog_lng_name or "",
+        }
+        message, log_mode = await self.composer.compose(compose_data, getattr(self, "old_language", None))
+        self.old_language = language
+
+        start_time = timezone.now()
+        start_str = timezone.localtime(start_time, MOSCOW_TZ).strftime("%H:%M:%S")
+        await self.send(text_data=self.formatter.format_user_processing(start_str, message))
+
+        identity = self._get_identity_for_log()
+        log = await self.log_writer.create(
+            user=identity["user"],
+            username=identity["username"],
+            external_user_id=identity["external_user_id"],
+            user_full_name=identity["user_full_name"],
+            client_id=self.client_id,
+            source="websocket",
+            mode=log_mode,
+            sent_at=start_time,
+            model_names=[model_key],
+            message=message,
+            programming_language_id=int(prog_lng_id) if prog_lng_id else None,
+            programming_language_name=prog_lng_name,
+            topic_id=int(topic_id) if topic_id else None,
+            topic_name=topic_name,
+            prompt_id=self._resolve_prompt_id_for_log(prompt_id),
+            prompt_name=prompt_name,
+        )
+
+        result = await self.caller.call(message, self.client_id, model_key)
+        end_time = timezone.now()
+
+        if result.is_error:
+            await self.log_writer.update_error(log, result.response_text, result.error_message, end_time)
+        else:
+            await self.log_writer.update_success(
+                log, result.response_text, result.tokens, result.model_title, end_time
+            )
+
+        end_str = timezone.localtime(end_time, MOSCOW_TZ).strftime("%H:%M:%S")
+        duration = self.formatter.format_duration((end_time - start_time).total_seconds())
+
+        if result.is_error:
+            await self.send(text_data=self.formatter.format_simple_success(end_str, result.response_text))
+        else:
+            await self.send(
+                text_data=self.formatter.format_success(
+                    end_str,
+                    result.model_title,
+                    duration,
+                    result.response_text,
+                    result.tokens,
+                )
+            )
+
+    def _resolve_prompt_id_for_log(self, prompt_id):
+        if not prompt_id:
+            return None
+        shared_pk = self.prompt_resolver.parse_shared_prompt_id(prompt_id)
+        if shared_pk is not None:
+            return shared_pk
+        try:
+            return int(prompt_id)
+        except (ValueError, TypeError):
+            return None

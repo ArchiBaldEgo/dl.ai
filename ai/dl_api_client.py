@@ -6,6 +6,7 @@ Reuses the same SSL/proxy settings as the external auth flow.
 
 import json
 import os
+import re
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -121,29 +122,156 @@ def _raise_for_status(response: requests.Response) -> None:
         raise DLServerError(f"Ошибка сервера DL (код {response.status_code})")
 
 
+# Map every Unicode character that exists in the cp1251 code page back to
+# its byte value, and build the set of characters that correspond to the
+# UTF-8 continuation byte range (0x80-0xBF). These are used to detect and
+# reverse the CP866-via-cp1251 mojibake pattern where CP866 glyphs were
+# interpreted as cp1251 bytes.
+_CP1251_UNICODE_TO_BYTE: dict[str, int] = {}
+_CP1251_CONTINUATION_CHARS: set[str] = set()
+for _b in range(256):
+    try:
+        _ch = bytes([_b]).decode("cp1251")
+        _CP1251_UNICODE_TO_BYTE[_ch] = _b
+        if 0x80 <= _b <= 0xBF:
+            _CP1251_CONTINUATION_CHARS.add(_ch)
+    except UnicodeDecodeError:
+        pass
+
+
+# Leading cp1251 characters produced by UTF-8 leading bytes 0xD0-0xDF
+# (uppercase Р-Я) and 0xE0-0xEF (lowercase а-п).
+_UTF8_LEAD_CHARS: set[str] = set("РСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмноп")
+
+
 def _looks_like_utf8_as_cp1251(text: str) -> bool:
     """Detect the classic 'UTF-8 bytes decoded as cp1251' mojibake pattern."""
-    import re
-
-    # When UTF-8 Cyrillic bytes are decoded as cp1251, the leading bytes of
-    # 2-byte sequences (0xD0-0xDF) become uppercase Р-Я, and the leading bytes
-    # of 3-byte sequences (0xE0-0xEF) become lowercase а-п.
-    lead_chars = "РСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмноп"
-    # Look for a lead char immediately followed by any non-ASCII char
-    # (the continuation byte decoded as cp1251).
-    pattern = re.compile(f"[{lead_chars}][^\\x00-\\x7f]")
-    matches = len(pattern.findall(text))
+    # A UTF-8 2-byte sequence starts with a lead byte (cp1251 becomes one of
+    # the lead chars) followed by a continuation byte (0x80-0xBF). We only
+    # count a lead/continuation pair when the second character actually maps to
+    # a cp1251 byte in the continuation range, so ordinary Cyrillic text is
+    # not flagged.
+    matches = 0
+    for i in range(len(text) - 1):
+        if text[i] in _UTF8_LEAD_CHARS and text[i + 1] in _CP1251_CONTINUATION_CHARS:
+            matches += 1
     if matches < 3:
         return False
     cyrillic = sum(1 for c in text if "Ѐ" <= c <= "ӿ")
     return matches / max(cyrillic, 1) > 0.5
 
 
+def _looks_like_cp866_as_cp1251(text: str) -> bool:
+    """Detect CP866 bytes that were decoded/presented as cp1251 codepoints.
+
+    The text consists of cp1251 codepoints, but contains many characters from
+    the cp1251 high-byte range (bytes 0x80-0xBF) that are not part of ordinary
+    Russian text. Legitimate Russian punctuation like guillemets, dashes and
+    the letter ё are ignored so they do not trigger a false repair.
+    """
+    non_ascii = sum(1 for c in text if c > "")
+    if non_ascii == 0:
+        return False
+
+    allowed_punctuation = set("–—«»„\"\"‘’‚‹›")
+    artifact_count = 0
+    for c in text:
+        if c <= "" or c == "ё" or c in allowed_punctuation:
+            continue
+        b = _CP1251_UNICODE_TO_BYTE.get(c)
+        if b is not None and 0x80 <= b <= 0xBF:
+            artifact_count += 1
+
+    return artifact_count >= 5 and artifact_count / non_ascii > 0.3
+
+
+def _repair_cp866_via_cp1251(text: str) -> str:
+    """Repair CP866 bytes that were presented as cp1251 codepoints.
+
+    Some PDF statements on dl.gsu.by extract Russian text using CP866 glyphs,
+    but the API returns those bytes interpreted as cp1251 Unicode characters.
+    For each character we map it back to the original cp1251 byte, then decode
+    that byte as CP866. Characters that do not exist in cp1251 are kept as-is;
+    Unicode replacement characters are dropped.
+    """
+    out = []
+    for c in text:
+        if c == chr(0xFFFD):
+            continue
+        if c <= "":
+            out.append(c)
+            continue
+        b = _CP1251_UNICODE_TO_BYTE.get(c)
+        if b is not None:
+            out.append(bytes([b]).decode("cp866"))
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def _quality(t: str) -> float:
+    """Score readability of a candidate decoded response.
+
+    Higher is better. Rewards Cyrillic, Latin letters, digits, spaces and
+    common punctuation; penalizes the UTF-8-as-cp1251 mojibake signature and
+    stray high-byte symbols typical of mojibake.
+    """
+    cyrillic = sum(1 for c in t if "Ѐ" <= c <= "ӿ")
+    latin = sum(1 for c in t if c.isascii() and c.isalpha())
+    digits = sum(1 for c in t if c.isdigit())
+    spaces = sum(1 for c in t if c.isspace())
+    punctuation = sum(
+        1
+        for c in t
+        if c in ".,;:!?()[]{}\"'–—-=+/*_…«»"
+    )
+    # Penalize the UTF-8-as-cp1251 mojibake signature pattern: a UTF-8 lead
+    # char followed by a character that maps to a cp1251 continuation byte.
+    mojibake_matches = 0
+    for i in range(len(t) - 1):
+        if t[i] in _UTF8_LEAD_CHARS and t[i + 1] in _CP1251_CONTINUATION_CHARS:
+            mojibake_matches += 1
+    # Penalize stray high-byte symbols typical of mojibake.
+    suspicious = sum(
+        1
+        for c in t
+        if c > "" and not ("Ѐ" <= c <= "ӿ" or c in "–—«»…\"'")
+    )
+    return (
+        cyrillic * 2
+        + latin
+        + digits
+        + spaces
+        + punctuation
+        - mojibake_matches * 3
+        - suspicious * 2
+    )
+
+
+def _repair_response_strings(obj: Any) -> Any:
+    """Recursively repair CP866-via-cp1251 mojibake in decoded JSON values.
+
+    Individual string values are repaired only when they carry the
+    CP866-via-cp1251 signature. This avoids corrupting legitimate Cyrillic
+    fields that may sit next to corrupted PDF-derived fields in the same
+    response.
+    """
+    if isinstance(obj, dict):
+        return {k: _repair_response_strings(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_repair_response_strings(v) for v in obj]
+    if isinstance(obj, str) and _looks_like_cp866_as_cp1251(obj):
+        return _repair_cp866_via_cp1251(obj)
+    return obj
+
+
 def _decode_response_json(response: requests.Response) -> dict[str, Any]:
     """Decode DL API JSON response with robust encoding detection.
 
-    Tries UTF-8 first, falls back to cp1251, and also repairs the common
-    'UTF-8 bytes decoded as cp1251' mojibake pattern.
+    Tries UTF-8 first, falls back to cp1251, repairs the common
+    'UTF-8 bytes decoded as cp1251' mojibake pattern, then repairs individual
+    JSON string values that show the CP866-via-cp1251 signature used by some
+    PDF-derived statements.
     """
     content = response.content
     candidates: list[str] = []
@@ -170,44 +298,16 @@ def _decode_response_json(response: requests.Response) -> dict[str, Any]:
     if not candidates:
         raise DLServerError("Не удалось декодировать ответ DL API")
 
-    def _quality(t: str) -> float:
-        import re
-
-        cyrillic = sum(1 for c in t if "Ѐ" <= c <= "ӿ")
-        latin = sum(1 for c in t if c.isascii() and c.isalpha())
-        digits = sum(1 for c in t if c.isdigit())
-        spaces = sum(1 for c in t if c.isspace())
-        punctuation = sum(
-            1
-            for c in t
-            if c in ".,;:!?()[]{}\"'–—-=+/*_…«»"
-        )
-        # Penalize the UTF-8-as-cp1251 mojibake signature pattern.
-        lead_chars = "РСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмноп"
-        mojibake_pattern = re.compile(f"[{lead_chars}][^\\x00-\\x7f]")
-        mojibake_matches = len(mojibake_pattern.findall(t))
-        # Penalize stray high-byte symbols typical of mojibake.
-        suspicious = sum(
-            1
-            for c in t
-            if c > "" and not ("Ѐ" <= c <= "ӿ" or c in "–—«»…\"'")
-        )
-        return (
-            cyrillic * 2
-            + latin
-            + digits
-            + spaces
-            + punctuation
-            - mojibake_matches * 3
-            - suspicious * 2
-        )
-
     text = max(candidates, key=_quality)
 
     try:
-        return json.loads(text)
+        data = json.loads(text)
     except ValueError as exc:
         raise DLServerError("DL API вернул некорректный JSON") from exc
+
+    # Repair corrupted string fields individually so that a clean Cyrillic
+    # field next to a corrupted statement is not damaged.
+    return _repair_response_strings(data)
 
 
 def fetch_task_info(
