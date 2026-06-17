@@ -182,7 +182,15 @@ def run_model_health_check(force=False):
             return False
 
         if run is None:
-            run = AIModelHealthRun(window_date=window_date)
+            run, _ = AIModelHealthRun.objects.get_or_create(
+                window_date=window_date,
+                defaults={
+                    "status": AIModelHealthRun.STATUS_RUNNING,
+                    "started_at": now,
+                    "finished_at": None,
+                    "error_message": "",
+                },
+            )
 
         run.status = AIModelHealthRun.STATUS_RUNNING
         run.started_at = now
