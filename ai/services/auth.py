@@ -104,8 +104,13 @@ def resolve_external_account(user: Any):
         return None
 
 
-def get_user_identity_for_log(user: Any, user_info: dict | None) -> dict:
-    """Return identity fields for AIRequestLog from a user or external info."""
+def get_user_identity_for_log(user: Any, user_info: dict | None, external_account=None) -> dict:
+    """Return identity fields for AIRequestLog from a user or external info.
+
+    ``external_account`` is the user's ``ExternalDLAccount`` instance if
+    already resolved. Passing it avoids a synchronous DB query when this
+    function is called from an async context.
+    """
     result = {
         "user": None,
         "username": "",
@@ -128,10 +133,13 @@ def get_user_identity_for_log(user: Any, user_info: dict | None) -> dict:
         result["user"] = user
         result["username"] = getattr(user, "username", "") or ""
         result["user_full_name"] = (user.get_full_name() or "").strip() or result["username"]
-        try:
-            from ..models import ExternalDLAccount
-            result["external_user_id"] = user.external_dl_account.external_user_id
-        except (ExternalDLAccount.DoesNotExist, AttributeError):
-            result["external_user_id"] = result["username"]
+        if external_account is not None:
+            result["external_user_id"] = external_account.external_user_id
+        else:
+            try:
+                from ..models import ExternalDLAccount
+                result["external_user_id"] = user.external_dl_account.external_user_id
+            except (ExternalDLAccount.DoesNotExist, AttributeError):
+                result["external_user_id"] = result["username"]
 
     return result
