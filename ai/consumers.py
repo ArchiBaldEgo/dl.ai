@@ -16,7 +16,7 @@ from .services import (
     PromptResolver,
     WebSocketAuthService,
     conversation_history,
-    get_user_identity_for_log,
+    resolve_external_account,
 )
 from .throttling import rate_limiter
 
@@ -77,20 +77,50 @@ class MyConsumer(AsyncWebsocketConsumer):
 
         self.user = user
         self.user_info = user_info
-        self.user_id = self._extract_user_id(user, user_info)
+        self.external_account = await resolve_external_account(user) if user and not isinstance(user, str) else None
+        self.user_id = self._extract_user_id(user, user_info, self.external_account)
         self.client_id = self.scope["url_route"]["kwargs"]["client_id"]
         await self.accept()
         logger.debug("WebSocket connected for client %s, user_id=%s", self.client_id, self.user_id)
 
-    def _extract_user_id(self, user, user_info) -> str:
+    def _extract_user_id(self, user, user_info, external_account=None) -> str:
         if isinstance(user, str):
             return user
-        if hasattr(user, "external_dl_account"):
-            try:
-                return user.external_dl_account.external_user_id
-            except Exception:
-                pass
+        if external_account is not None:
+            return external_account.external_user_id
         return str(getattr(user, "pk", "") or getattr(user, "username", "") or "")
+
+    def _get_identity_for_log(self) -> dict:
+        user = self.user
+        user_info = self.user_info
+        result = {
+            "user": None,
+            "username": "",
+            "external_user_id": "",
+            "user_full_name": "",
+        }
+        if user is None:
+            return result
+
+        if isinstance(user, str):
+            result["external_user_id"] = user
+            result["username"] = user
+            if user_info:
+                first = (user_info.get("firstName") or "").strip()
+                last = (user_info.get("lastName") or "").strip()
+                result["user_full_name"] = f"{first} {last}".strip() or user
+            return result
+
+        if getattr(user, "is_authenticated", False):
+            result["user"] = user
+            result["username"] = getattr(user, "username", "") or ""
+            result["user_full_name"] = (user.get_full_name() or "").strip() or result["username"]
+            if self.external_account is not None:
+                result["external_user_id"] = self.external_account.external_user_id
+            else:
+                result["external_user_id"] = result["username"]
+
+        return result
 
     async def disconnect(self, close_code):
         logger.debug("Connection closed for client %s", getattr(self, "client_id", "unknown"))
@@ -151,7 +181,7 @@ class MyConsumer(AsyncWebsocketConsumer):
         start_str = timezone.localtime(start_time, MOSCOW_TZ).strftime("%H:%M:%S")
         await self.send(text_data=self.formatter.format_user_processing(start_str, message))
 
-        identity = get_user_identity_for_log(self.user, self.user_info)
+        identity = self._get_identity_for_log()
         log = await self.log_writer.create(
             user=identity["user"],
             username=identity["username"],
