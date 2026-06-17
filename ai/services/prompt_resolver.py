@@ -3,7 +3,6 @@
 from asgiref.sync import sync_to_async
 
 from ..i18n import get_localized_name
-from ..models import ProgrammingLanguage, Prompt, SharedPrompt, Topic
 
 
 def parse_shared_prompt_id(prompt_id) -> int | None:
@@ -33,6 +32,8 @@ class PromptResolver:
         code: str = "",
     ) -> str | None:
         """Return effective prompt text or None if prompt not found."""
+        from ..models import Prompt, SharedPrompt
+
         shared_pk = parse_shared_prompt_id(prompt_id)
         try:
             if shared_pk is not None:
@@ -62,6 +63,8 @@ class PromptResolver:
         ui_language: str = "",
     ) -> tuple[str, str, str]:
         """Return (programming_language_name, topic_name, prompt_name) for logging."""
+        from ..models import ProgrammingLanguage, Prompt, SharedPrompt, Topic
+
         prog_lng_name = ""
         topic_name = ""
         prompt_name = ""
@@ -90,21 +93,26 @@ class PromptResolver:
 
     @sync_to_async
     def _get_programming_language_name(self, prog_lng_id) -> str:
+        from ..models import ProgrammingLanguage
         return ProgrammingLanguage.objects.values_list("language_name", flat=True).get(id=prog_lng_id)
 
     @sync_to_async
     def _get_topic(self, topic_id):
+        from ..models import Topic
         return Topic.objects.get(id=topic_id)
 
     @sync_to_async
     def _get_shared_prompt(self, shared_pk: int):
+        from ..models import SharedPrompt
         return SharedPrompt.objects.get(id=shared_pk)
 
     @sync_to_async
     def _get_prompt(self, pk: int):
+        from ..models import Prompt
         return Prompt.objects.select_related("shared_prompt").get(id=pk)
 
     async def _resolve_prompt(self, prompt_id):
+        from ..models import Prompt, SharedPrompt
         shared_pk = parse_shared_prompt_id(prompt_id)
         if shared_pk is not None:
             return await self._get_shared_prompt(shared_pk)
@@ -117,7 +125,8 @@ class PromptResolver:
 
 
 @sync_to_async
-def get_default_shared_prompt(mode: str) -> SharedPrompt | None:
+def get_default_shared_prompt(mode: str):
+    from ..models import SharedPrompt
     try:
         return SharedPrompt.objects.get(mode=mode)
     except SharedPrompt.DoesNotExist:

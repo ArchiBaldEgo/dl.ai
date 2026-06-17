@@ -11,7 +11,6 @@ from ..external_auth import (
     fetch_external_user_info,
     get_external_session_cookie_name,
 )
-from ..models import AIAppSettings, ExternalDLAccount
 
 
 class WebSocketAuthService:
@@ -91,12 +90,14 @@ class WebSocketAuthService:
 
     @sync_to_async
     def _is_app_enabled(self) -> bool:
+        from ..models import AIAppSettings
         return AIAppSettings.get_solo().is_enabled
 
 
 @sync_to_async
-def resolve_external_account(user: Any) -> ExternalDLAccount | None:
+def resolve_external_account(user: Any):
     """Return the ExternalDLAccount for a Django User, if any."""
+    from ..models import ExternalDLAccount
     try:
         return user.external_dl_account
     except (ExternalDLAccount.DoesNotExist, AttributeError):
@@ -128,6 +129,7 @@ def get_user_identity_for_log(user: Any, user_info: dict | None) -> dict:
         result["username"] = getattr(user, "username", "") or ""
         result["user_full_name"] = (user.get_full_name() or "").strip() or result["username"]
         try:
+            from ..models import ExternalDLAccount
             result["external_user_id"] = user.external_dl_account.external_user_id
         except (ExternalDLAccount.DoesNotExist, AttributeError):
             result["external_user_id"] = result["username"]

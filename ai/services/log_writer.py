@@ -1,11 +1,7 @@
 """AIRequestLog writing service for the WebSocket consumer."""
 
-from datetime import timedelta
-
 from asgiref.sync import sync_to_async
 from django.utils import timezone
-
-from ..models import AIRequestLog
 
 
 _ERROR_MARKERS = (
@@ -45,7 +41,9 @@ class LogWriter:
         topic_name: str,
         prompt_id: int | None,
         prompt_name: str,
-    ) -> AIRequestLog:
+    ):
+        from ..models import AIRequestLog
+
         return AIRequestLog.objects.create(
             user=user,
             username=username,
@@ -66,7 +64,9 @@ class LogWriter:
         )
 
     @sync_to_async
-    def update_success(self, log: AIRequestLog, response_text: str, tokens: int, model_title: str, end_time=None) -> None:
+    def update_success(self, log, response_text: str, tokens: int, model_title: str, end_time=None) -> None:
+        from ..models import AIRequestLog
+
         if end_time is None:
             end_time = timezone.now()
 
@@ -96,11 +96,13 @@ class LogWriter:
     @sync_to_async
     def update_error(
         self,
-        log: AIRequestLog,
+        log,
         friendly: str,
         detailed: str,
         end_time=None,
     ) -> None:
+        from ..models import AIRequestLog
+
         if end_time is None:
             end_time = timezone.now()
 

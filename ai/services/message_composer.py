@@ -1,8 +1,7 @@
 """Message composition for WebSocket chat modes."""
 
 from ..i18n import get_language_instruction
-from ..models import AIRequestLog
-from .prompt_resolver import PromptResolver, get_default_shared_prompt, parse_shared_prompt_id
+from .prompt_resolver import PromptResolver, get_default_shared_prompt
 
 
 class ModeMessageBuilder:
@@ -15,9 +14,10 @@ class ModeMessageBuilder:
 
 
 class ChatModeBuilder(ModeMessageBuilder):
-    mode = AIRequestLog.MODE_CHAT
-
     async def build(self, data: dict, resolver: PromptResolver) -> str:
+        from ..models import AIRequestLog
+
+        self.mode = AIRequestLog.MODE_CHAT
         message = data.get("message", "")
         language = data.get("language", "Russian")
         preprompt = data.get("preprompt", "")
@@ -31,9 +31,10 @@ class ChatModeBuilder(ModeMessageBuilder):
 
 
 class SolveModeBuilder(ModeMessageBuilder):
-    mode = AIRequestLog.MODE_SOLVE
-
     async def build(self, data: dict, resolver: PromptResolver) -> str:
+        from ..models import AIRequestLog
+
+        self.mode = AIRequestLog.MODE_SOLVE
         language = data.get("language", "Russian")
         message = data.get("message", "")
         prog_lng_name = data.get("programming_language_name", "")
@@ -60,9 +61,10 @@ class SolveModeBuilder(ModeMessageBuilder):
 
 
 class FindErrorModeBuilder(ModeMessageBuilder):
-    mode = AIRequestLog.MODE_FIND_ERROR
-
     async def build(self, data: dict, resolver: PromptResolver) -> str:
+        from ..models import AIRequestLog
+
+        self.mode = AIRequestLog.MODE_FIND_ERROR
         language = data.get("language", "Russian")
         message = data.get("message", "")
         code = data.get("code", "")
@@ -104,12 +106,6 @@ _MODE_BUILDERS: dict[str, type[ModeMessageBuilder]] = {
     "3": FindErrorModeBuilder,
 }
 
-_MODE_KEY_TO_LOG_MODE = {
-    "1": AIRequestLog.MODE_CHAT,
-    "2": AIRequestLog.MODE_SOLVE,
-    "3": AIRequestLog.MODE_FIND_ERROR,
-}
-
 
 class MessageComposer:
     """Compose the final message sent to the AI model based on request data."""
@@ -137,8 +133,9 @@ class MessageComposer:
             return message, ""
 
         composed = await builder.build(data, self.resolver)
-        log_mode = _MODE_KEY_TO_LOG_MODE.get(message_type, "")
+        log_mode = builder.mode
         return composed, log_mode
 
     def mode_from_message_type(self, message_type) -> str:
-        return _MODE_KEY_TO_LOG_MODE.get(str(message_type), "")
+        builder = self._builders.get(str(message_type))
+        return builder.mode if builder else ""
