@@ -31,10 +31,27 @@ class RateLimiter:
     """Simple per-user sliding-window rate limiter backed by Django cache."""
 
     def __init__(self, ws_limit=None, http_limit=None, window_seconds=None):
-        defaults = _get_limits()
-        self.ws_limit = ws_limit if ws_limit is not None else defaults[0]
-        self.http_limit = http_limit if http_limit is not None else defaults[1]
-        self.window_seconds = window_seconds if window_seconds is not None else defaults[2]
+        self._ws_limit = ws_limit
+        self._http_limit = http_limit
+        self._window_seconds = window_seconds
+
+    @property
+    def ws_limit(self) -> int:
+        if self._ws_limit is None:
+            self._ws_limit = _get_limits()[0]
+        return self._ws_limit
+
+    @property
+    def http_limit(self) -> int:
+        if self._http_limit is None:
+            self._http_limit = _get_limits()[1]
+        return self._http_limit
+
+    @property
+    def window_seconds(self) -> int:
+        if self._window_seconds is None:
+            self._window_seconds = _get_limits()[2]
+        return self._window_seconds
 
     def _check(self, prefix: str, user_id: str, limit: int) -> bool:
         if not user_id:
@@ -59,6 +76,7 @@ class RateLimiter:
 
 
 # Global instance used by consumers and middleware.
+# Settings are resolved lazily so this can be imported before django.setup().
 rate_limiter = RateLimiter()
 
 
