@@ -25,17 +25,17 @@ logger = logging.getLogger(__name__)
 
 
 def _is_admin_login_path(path: str) -> bool:
-    normalized = (path or "/").rstrip("/") or "/"
+    normalized = (path or "/").split("?")[0].rstrip("/") or "/"
     return normalized == "/ai/admin/login"
 
 
 def _is_admin_logout_path(path: str) -> bool:
-    normalized = (path or "/").rstrip("/") or "/"
+    normalized = (path or "/").split("?")[0].rstrip("/") or "/"
     return normalized == "/ai/admin/logout"
 
 
 def _is_admin_set_password_path(path: str) -> bool:
-    normalized = (path or "/").rstrip("/") or "/"
+    normalized = (path or "/").split("?")[0].rstrip("/") or "/"
     return normalized == "/ai/admin/set-password"
 
 
@@ -97,7 +97,7 @@ class AIAdminSite(admin.AdminSite):
         # Login / logout pages are reachable without an external id —
         # we redirect them away anyway, so no point in checking.
         if _is_admin_login_path(request.path) or _is_admin_logout_path(request.path):
-            return False
+            return True
         external_id = get_external_user_id_from_request(request)
         # The set-password page is allowed only when the request carries a
         # DLSID-validated external id and the local session belongs to the
