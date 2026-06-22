@@ -4,6 +4,10 @@ FROM python:3.11-bookworm AS builder
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
+# Separate proxy for npm/Puppeteer Chromium download. May contain credentials,
+# so it is used only inside the builder stage and does not leak to the runtime image.
+ARG NPM_HTTP_PROXY
+ARG NPM_HTTPS_PROXY
 # Все системные зависимости за один RUN
 # NOTE: apt-кэш НЕ используется (mount type=cache убран), потому что при
 # обязательном корпоративном прокси кэшированные apt-индексы и .deb часто
@@ -75,10 +79,10 @@ COPY bot/package.json bot/package-lock.json ./
 # puppeteer 20.9.0 не имеет CLI `puppeteer` — Chromium качает его postinstall (install.js)
 # во время npm ci. Задаём PUPPETEER_CACHE_DIR и прокси, чтобы скачалось в /opt/puppeteer-cache.
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
-    npm config set proxy "$HTTP_PROXY" && \
-    npm config set https-proxy "$HTTPS_PROXY" && \
+    npm config set proxy "$NPM_HTTP_PROXY" && \
+    npm config set https-proxy "$NPM_HTTPS_PROXY" && \
     PUPPETEER_CACHE_DIR=/opt/puppeteer-cache \
-    HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="$HTTPS_PROXY" \
+    HTTP_PROXY="$NPM_HTTP_PROXY" HTTPS_PROXY="$NPM_HTTPS_PROXY" \
     npm ci --omit=dev --no-audit --no-fund && \
     mkdir -p /opt/puppeteer-runtime && \
     cp -r /opt/puppeteer-cache/. /opt/puppeteer-runtime/

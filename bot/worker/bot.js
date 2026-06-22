@@ -58,6 +58,20 @@ function cleanEnvStr(v) {
     return s.trim();
 }
 
+function resolveProxy() {
+    // Names used historically by the standalone bot runner.
+    let server = cleanEnvStr(process.env.BOT_PROXY);
+    let user = cleanEnvStr(process.env.BOT_PROXY_USER);
+    let pass = cleanEnvStr(process.env.BOT_PROXY_PASS);
+    if (!server) {
+        // Names already used in the root .env for Puppeteer/Chromium.
+        server = cleanEnvStr(process.env.PUPPETEER_PROXY_SERVER);
+        user = cleanEnvStr(process.env.PUPPETEER_PROXY_USERNAME);
+        pass = cleanEnvStr(process.env.PUPPETEER_PROXY_PASSWORD);
+    }
+    return { server, user, pass };
+}
+
 class Bot {
     constructor({ id }) {
         this.id = id;
@@ -104,15 +118,16 @@ class Bot {
 
         const headless = "new";//toBool(process.env.HEADLESS, false);
         //const executablePath = resolveChromePath();
-		let proxyServer = cleanEnvStr(process.env.BOT_PROXY);
-		const proxyUser = cleanEnvStr(process.env.BOT_PROXY_USER);
-		const proxyPass = cleanEnvStr(process.env.BOT_PROXY_PASS);
-		if (proxyServer && proxyUser) {
-			const host = proxyServer.replace(/^https?:\/\//, '');
-			const upstream = `http://${encodeURIComponent(proxyUser)}:${encodeURIComponent(proxyPass)}@${host}`;
-			this._localProxy = await proxyChain.anonymizeProxy(upstream);
-			proxyServer = this._localProxy;
-		}
+        const { server: proxyServerRaw, user: proxyUser, pass: proxyPass } = resolveProxy();
+        let proxyServer = proxyServerRaw;
+        log(`[bot#${this.id}] proxy configured: ${proxyServer ? 'yes' : 'no'}`);
+        if (proxyServer && proxyUser) {
+            const host = proxyServer.replace(/^https?:\/\//, '');
+            const upstream = `http://${encodeURIComponent(proxyUser)}:${encodeURIComponent(proxyPass)}@${host}`;
+            this._localProxy = await proxyChain.anonymizeProxy(upstream);
+            proxyServer = this._localProxy;
+            log(`[bot#${this.id}] anonymized proxy: ${proxyServer}`);
+        }
 
         const launchOpts = {
             headless,
@@ -140,6 +155,7 @@ class Bot {
             ] // for minimize ram usage
         };
         //if (executablePath) launchOpts.executablePath = executablePath;
+        log(`[bot#${this.id}] launching chrome with args: ${launchOpts.args.join(' ')}`);
 
         this.browser = await puppeteerExtra.launch(launchOpts);
         this.browser.on('disconnected', () => {

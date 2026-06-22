@@ -4,9 +4,13 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
+        # Keep apt/pip on direct connection (HTTP_PROXY/HTTPS_PROXY are empty in .env).
         HTTP_PROXY: "${HTTP_PROXY:-}"
         HTTPS_PROXY: "${HTTPS_PROXY:-}"
         NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,db,nginx,.local}"
+        # Puppeteer Chromium download needs the real corporate proxy.
+        NPM_HTTP_PROXY: "${RUNTIME_HTTP_PROXY:-}"
+        NPM_HTTPS_PROXY: "${RUNTIME_HTTPS_PROXY:-}"
     container_name: dl_ai_web
     restart: unless-stopped
     volumes:
@@ -23,12 +27,16 @@ services:
       HTTP_PROXY: "${HTTP_PROXY:-}"
       HTTPS_PROXY: "${HTTPS_PROXY:-}"
       NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,db,nginx,.local}"
+      # Puppeteer proxy vars already live in .env; map them to the names bot/worker/bot.js reads.
+      BOT_PROXY: "${PUPPETEER_PROXY_SERVER:-}"
+      BOT_PROXY_USER: "${PUPPETEER_PROXY_USERNAME:-}"
+      BOT_PROXY_PASS: "${PUPPETEER_PROXY_PASSWORD:-}"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null && curl -fsS http://localhost:3000/health >/dev/null"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null && python3 -c \"import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://localhost:3000/health', timeout=5)); sys.exit(0 if d.get('ok') and d.get('ready_count',0) > 0 else 1)\""]
       interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
     depends_on:
       - db
       - redis
