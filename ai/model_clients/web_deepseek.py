@@ -24,6 +24,32 @@ def _post_to_bot_pool(payload: dict, timeout_seconds: int = 120) -> requests.Res
         )
 
 
+def restart_bot_pool(timeout_seconds: int = 30) -> bool:
+    """Ask the bot pool to restart its workers (автоподъём).
+
+    Returns True if the pool acknowledged the restart, False on network/HTTP
+    failure. Never raises — callers (the health check) treat a failed restart
+    as "still down" and log it.
+    """
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.post(
+                f"{BOT_POOL_URL}/api/restart",
+                json={},
+                headers={"Content-Type": "application/json"},
+                timeout=timeout_seconds,
+            )
+        if response.status_code < 300:
+            logger.info("Bot pool restart acknowledged: %s", response.text[:200])
+            return True
+        logger.warning("Bot pool restart returned HTTP %s", response.status_code)
+        return False
+    except Exception as exc:
+        logger.warning("Bot pool restart failed: %s", exc)
+        return False
+
+
 async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tuple[str, int]:
     payload = {
         "model": "deepseek",

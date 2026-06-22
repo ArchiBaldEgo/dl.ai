@@ -238,3 +238,6 @@ AI_RATE_LIMIT_ENABLED = _env_bool("AI_RATE_LIMIT_ENABLED", default=True)
 AI_WS_RATE_LIMIT = int(os.getenv("AI_WS_RATE_LIMIT", "120"))
 AI_HTTP_RATE_LIMIT = int(os.getenv("AI_HTTP_RATE_LIMIT", "60"))
 AI_RATE_LIMIT_WINDOW = int(os.getenv("AI_RATE_LIMIT_WINDOW", "60"))
+
+# When Web DeepSeek is detected as down, restart the bot/ pool and re-check once.
+AI_WEB_DEEPSEEK_AUTORECOVERY = _env_bool("AI_WEB_DEEPSEEK_AUTORECOVERY", default=True)

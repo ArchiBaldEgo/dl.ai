@@ -1045,3 +1045,344 @@ class UserIdentityForLogTests(TestCase):
         identity = get_user_identity_for_log("ext-42", {"firstName": "Alice", "lastName": "Smith"})
         self.assertEqual(identity["external_user_id"], "ext-42")
         self.assertEqual(identity["user_full_name"], "Alice Smith")
+
+
+class ModelCapabilitiesTests(SimpleTestCase):
+    """ТЗ B: registry.capabilities shape and per-model annotations."""
+
+    def test_reasoning_models_are_marked_reasoning(self):
+        from ai.model_clients import registry
+
+        for key in ("DeepSeek_R1_Distill_Llama_70B", "Web_DeepSeek_Thinking", "DeepSeek_R1"):
+            caps = registry.capabilities(key)
+            self.assertTrue(caps["reasoning"], f"{key} should be reasoning")
+            self.assertTrue(caps["text"])
+            self.assertFalse(caps["vision"])
+
+    def test_plain_text_models_are_not_reasoning(self):
+        from ai.model_clients import registry
+
+        caps = registry.capabilities("DeepSeek_V3_1")
+        self.assertFalse(caps["reasoning"])
+        self.assertTrue(caps["text"])
+        self.assertFalse(caps["vision"])
+
+    def test_unknown_key_gets_conservative_default(self):
+        from ai.model_clients import registry
+
+        caps = registry.capabilities("does_not_exist")
+        self.assertEqual(caps, {"text": True, "vision": False, "reasoning": False})
+
+    def test_every_entry_exposes_three_boolean_capabilities(self):
+        from ai.model_clients import registry
+
+        for key in registry.keys():
+            caps = registry.capabilities(key)
+            self.assertEqual(set(caps.keys()), {"text", "vision", "reasoning"})
+            for value in caps.values():
+                self.assertIsInstance(value, bool)
+
+
+class TokenBudgetTests(TestCase):
+    """ТЗ C: get_token_budget_rows spent/remaining math."""
+
+    def test_spent_remaining_and_clamp(self):
+        from datetime import date
+        from ai.models import AIModelTokenBudget as Budget
+        from ai.token_budget import get_token_budget_rows
+
+        issued = date(2026, 6, 1)
+        Budget.objects.create(label="SambaNova", total_limit=1000, issued_at=issued)
+        # 600 spent since issued_at, 200 before -> only 600 counts.
+        AIRequestLog.objects.create(sent_at=timezone.now(), tokens=600)
+        AIRequestLog.objects.create(
+            sent_at=timezone.make_aware(timezone.datetime(2026, 5, 1)),
+            tokens=200,
+        )
+
+        rows = get_token_budget_rows()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["label"], "SambaNova")
+        self.assertEqual(row["total_limit"], 1000)
+        self.assertEqual(row["spent"], 600)
+        self.assertEqual(row["remaining"], 400)
+
+    def test_remaining_clamps_to_zero_when_over_budget(self):
+        from datetime import date
+        from ai.models import AIModelTokenBudget as Budget
+        from ai.token_budget import get_token_budget_rows
+
+        Budget.objects.create(label="DeepSeek", total_limit=100, issued_at=date(2026, 6, 1))
+        AIRequestLog.objects.create(sent_at=timezone.now(), tokens=300)
+
+        rows = get_token_budget_rows()
+        self.assertEqual(rows[0]["spent"], 300)
+        self.assertEqual(rows[0]["remaining"], 0)
+
+
+class ArmReportTests(SimpleTestCase):
+    """ТЗ D: _build_summary / _build_report aggregation and ordering."""
+
+    def _result(self, key, status, duration, tokens=0):
+        return {
+            "model_key": key,
+            "model_title": key,
+            "status": status,
+            "duration": duration,
+            "tokens": tokens,
+        }
+
+    def test_summary_aggregates_and_sorts_by_percent_then_duration(self):
+        from ai.arm_runner import _build_summary
+
+        results = [
+            self._result("A", "ok", 3.0, tokens=10),
+            self._result("B", "error", 1.0, tokens=5),
+            self._result("A", "ok", 5.0, tokens=20),
+        ]
+        summary = _build_summary(results)
+        # A: 2/2 solved = 100%, avg (3+5)/2 = 4.0, tokens 30
+        # B: 0/1 solved = 0%, avg 1.0, tokens 5
+        self.assertEqual(summary[0]["model_key"], "A")
+        self.assertEqual(summary[0]["solved"], 2)
+        self.assertEqual(summary[0]["total"], 2)
+        self.assertEqual(summary[0]["percent_solved"], 100.0)
+        self.assertEqual(summary[0]["avg_duration"], 4.0)
+        self.assertEqual(summary[0]["tokens"], 30)
+        self.assertEqual(summary[1]["model_key"], "B")
+        self.assertEqual(summary[1]["percent_solved"], 0.0)
+
+    def test_summary_tiebreak_orders_by_fastest_average_duration(self):
+        from ai.arm_runner import _build_summary
+
+        results = [
+            self._result("Slow", "ok", 5.0),
+            self._result("Fast", "ok", 2.0),
+        ]
+        summary = _build_summary(results)
+        # Both 100% solved; faster average wins.
+        self.assertEqual(summary[0]["model_key"], "Fast")
+        self.assertEqual(summary[1]["model_key"], "Slow")
+
+    def test_build_report_none_for_empty_results(self):
+        from ai.arm_runner import _build_report
+
+        self.assertIsNone(_build_report([]))
+
+    def test_build_report_includes_summary_and_counts(self):
+        from ai.arm_runner import _build_report
+
+        results = [
+            self._result("A", "ok", 2.0, tokens=10),
+            self._result("B", "error", 4.0, tokens=7),
+        ]
+        report = _build_report(results)
+        self.assertEqual(report["models_total"], 2)
+        self.assertEqual(report["success_count"], 1)
+        self.assertEqual(report["error_count"], 1)
+        self.assertEqual(report["tokens_total"], 17)
+        self.assertEqual(report["fastest_model"], "A")
+        self.assertIn("summary", report)
+        self.assertEqual(len(report["summary"]), 2)
+
+
+class AutorecoveryTests(TestCase):
+    """ТЗ E: _maybe_autorecover_web_deepseek gating, annotation, and never-raise."""
+
+    def _down_row(self, window_date, key="Web_DeepSeek"):
+        from ai.models import AIModelAvailability
+        return AIModelAvailability.objects.create(
+            model_key=key,
+            model_title="Web DeepSeek",
+            is_available=False,
+            window_date=window_date,
+            last_message="down",
+        )
+
+    @override_settings(AI_WEB_DEEPSEEK_AUTORECOVERY=False)
+    def test_disabled_flag_skips_restart_even_when_down(self):
+        from ai.model_health import _maybe_autorecover_web_deepseek, get_health_window_date
+
+        window_date = get_health_window_date()
+        row = self._down_row(window_date)
+        with patch("ai.model_health.restart_bot_pool") as mock_restart:
+            _maybe_autorecover_web_deepseek({}, window_date)
+            mock_restart.assert_not_called()
+        row.refresh_from_db()
+        self.assertEqual(row.last_message, "down")
+
+    def test_restart_failure_annotates_pool_unavailable(self):
+        from ai.model_health import _maybe_autorecover_web_deepseek, get_health_window_date
+
+        window_date = get_health_window_date()
+        row = self._down_row(window_date)
+        with patch("ai.model_health.restart_bot_pool", return_value=False):
+            _maybe_autorecover_web_deepseek({}, window_date)
+        row.refresh_from_db()
+        self.assertIn("Автоподъём не удался", row.last_message)
+
+    def test_restart_success_annotates_ok(self):
+        from ai.model_health import _maybe_autorecover_web_deepseek, get_health_window_date
+
+        window_date = get_health_window_date()
+        row = self._down_row(window_date)
+        with patch("ai.model_health.restart_bot_pool", return_value=True), \
+                patch("ai.model_health._check_one_model", return_value=True), \
+                patch("ai.model_health.time.sleep"):
+            _maybe_autorecover_web_deepseek({}, window_date)
+        row.refresh_from_db()
+        self.assertIn("[автоподъём: ок]", row.last_message)
+
+    def test_no_restart_when_web_deepseek_is_up(self):
+        from ai.models import AIModelAvailability
+        from ai.model_health import _maybe_autorecover_web_deepseek, get_health_window_date
+
+        window_date = get_health_window_date()
+        for key in ("Web_DeepSeek", "Web_DeepSeek_Thinking"):
+            AIModelAvailability.objects.create(
+                model_key=key, model_title=key, is_available=True, window_date=window_date,
+            )
+        with patch("ai.model_health.restart_bot_pool") as mock_restart:
+            _maybe_autorecover_web_deepseek({}, window_date)
+            mock_restart.assert_not_called()
+
+
+class ModelHealthGuardTests(TestCase):
+    """Serialization guard for run_model_health_check (multi-worker prod safety).
+
+    The cold-boot race: N Daphne workers booting at once all see no
+    AIModelHealthRun row for the window. get_or_create on the unique
+    window_date lets only one process create; the rest must observe the
+    winner's RUNNING/COMPLETED status and bail out without sweeping.
+    """
+
+    def _window(self):
+        from ai.model_health import get_health_window_date
+        return get_health_window_date()
+
+    def test_bails_out_when_a_recent_running_run_exists(self):
+        from ai.model_health import run_model_health_check
+        from ai.models import AIModelHealthRun
+
+        AIModelHealthRun.objects.create(
+            window_date=self._window(),
+            status=AIModelHealthRun.STATUS_RUNNING,
+            started_at=timezone.now(),
+            finished_at=None,
+            error_message="",
+        )
+        # If the guard works, get_runtime_model_handlers is never called
+        # (the function returns inside the atomic block before the sweep).
+        with patch("ai.model_health.get_runtime_model_handlers") as mock_handlers:
+            result = run_model_health_check(force=False)
+            mock_handlers.assert_not_called()
+        self.assertFalse(result)
+
+    def test_bails_out_when_a_completed_run_exists(self):
+        from ai.model_health import run_model_health_check
+        from ai.models import AIModelHealthRun
+
+        AIModelHealthRun.objects.create(
+            window_date=self._window(),
+            status=AIModelHealthRun.STATUS_COMPLETED,
+            started_at=timezone.now(),
+            finished_at=timezone.now(),
+            error_message="",
+        )
+        with patch("ai.model_health.get_runtime_model_handlers") as mock_handlers:
+            result = run_model_health_check(force=False)
+            mock_handlers.assert_not_called()
+        self.assertFalse(result)
+
+    def test_cold_start_creates_run_and_completes_without_real_api(self):
+        from ai.model_health import get_health_window_date, run_model_health_check
+        from ai.models import AIModelHealthRun
+
+        # No existing row -> this process becomes the creator and sweeps.
+        # Empty handlers => _check_one_model persists "Handler not found" rows
+        # without making any real network call.
+        with patch("ai.model_health.get_runtime_model_handlers", return_value={}), \
+                patch("ai.model_health._maybe_autorecover_web_deepseek"):
+            result = run_model_health_check(force=False)
+        self.assertTrue(result)
+        run = AIModelHealthRun.objects.get(window_date=get_health_window_date())
+        self.assertEqual(run.status, AIModelHealthRun.STATUS_COMPLETED)
+
+    def test_force_does_not_double_run_a_recent_running_run(self):
+        """force=True may re-run COMPLETED/stale runs, but must NOT bypass an
+        actively-running (<45min) run. This is the cross-process TOCTOU guard:
+        two concurrent --force / admin-refresh invocations only do a racy
+        read-only pre-check, so the row lock inside run_model_health_check is
+        the real serialization point — this guard must hold even for force.
+        """
+        from ai.model_health import run_model_health_check
+        from ai.models import AIModelHealthRun
+
+        AIModelHealthRun.objects.create(
+            window_date=self._window(),
+            status=AIModelHealthRun.STATUS_RUNNING,
+            started_at=timezone.now(),
+            finished_at=None,
+            error_message="",
+        )
+        with patch("ai.model_health.get_runtime_model_handlers") as mock_handlers:
+            result = run_model_health_check(force=True)
+            mock_handlers.assert_not_called()
+        self.assertFalse(result)
+
+    def test_force_does_run_a_stale_running_run(self):
+        """A RUNNING run started >45min ago is treated as stuck and force=True
+        IS allowed to re-run it (that is what --force is for)."""
+        from datetime import timedelta
+        from ai.model_health import run_model_health_check
+        from ai.models import AIModelHealthRun
+
+        AIModelHealthRun.objects.create(
+            window_date=self._window(),
+            status=AIModelHealthRun.STATUS_RUNNING,
+            started_at=timezone.now() - timedelta(minutes=60),
+            finished_at=None,
+            error_message="",
+        )
+        with patch("ai.model_health.get_runtime_model_handlers", return_value={}), \
+                patch("ai.model_health._maybe_autorecover_web_deepseek"):
+            result = run_model_health_check(force=True)
+        self.assertTrue(result)
+
+    def test_force_runs_a_completed_run(self):
+        from ai.model_health import run_model_health_check
+        from ai.models import AIModelHealthRun
+
+        AIModelHealthRun.objects.create(
+            window_date=self._window(),
+            status=AIModelHealthRun.STATUS_COMPLETED,
+            started_at=timezone.now(),
+            finished_at=timezone.now(),
+            error_message="",
+        )
+        with patch("ai.model_health.get_runtime_model_handlers", return_value={}), \
+                patch("ai.model_health._maybe_autorecover_web_deepseek"):
+            result = run_model_health_check(force=True)
+        self.assertTrue(result)
+
+    def test_autorecovery_never_raises_when_bot_pool_unreachable(self):
+        """When restart_bot_pool() returns False, _maybe_autorecover tries to
+        annotate the down models. A transient DB error there must not escape
+        (docstring: 'Never raises'), so the surrounding health run is not
+        flipped to FAILED."""
+        from ai.model_health import _maybe_autorecover_web_deepseek
+        from ai.models import AIModelAvailability
+
+        window = self._window()
+        AIModelAvailability.objects.create(
+            window_date=window,
+            model_key="Web_DeepSeek",
+            model_title="t",
+            is_available=False,
+            last_message="down",
+        )
+        with patch("ai.model_health.restart_bot_pool", return_value=False), \
+                patch("ai.model_health._save_availability", side_effect=Exception("DB down")):
+            # Must not raise.
+            _maybe_autorecover_web_deepseek({}, window)

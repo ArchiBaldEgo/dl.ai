@@ -94,6 +94,36 @@ def get_request_user_id(request) -> str:
     return ""
 
 
+RATE_LIMIT_MESSAGE = "Слишком много запросов. Попробуйте позже."
+
+
+def _is_ajax_request(request) -> bool:
+    """Return True for fetch/XHR/AJAX requests that expect a JSON response.
+
+    Used so the rate limiter always answers API-style callers with JSON
+    (preventing ``JSON.parse`` errors on the frontend) and only falls back to
+    plain text for browser navigations.
+    """
+    accept = (request.headers.get("Accept") or "").lower()
+    if "application/json" in accept:
+        return True
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return True
+    if request.headers.get("Sec-Fetch-Mode") == "cors":
+        return True
+    if request.path.startswith("/ai/api/"):
+        return True
+    return False
+
+
+def _rate_limit_response(request):
+    """Build the 429 response in the format the caller can parse."""
+    if _is_ajax_request(request):
+        return JsonResponse({"error": RATE_LIMIT_MESSAGE}, status=429)
+    from django.http import HttpResponse
+    return HttpResponse(RATE_LIMIT_MESSAGE, status=429)
+
+
 def rate_limited(view_func: Callable) -> Callable:
     """Decorator that applies the HTTP rate limit to a view."""
     @wraps(view_func)
@@ -101,10 +131,7 @@ def rate_limited(view_func: Callable) -> Callable:
         user_id = get_request_user_id(request)
         if user_id and not rate_limiter.is_allowed_http(user_id):
             logger.warning(f"HTTP rate limit exceeded for user {user_id}")
-            if request.headers.get("Accept") == "application/json" or request.path.startswith("/ai/api/"):
-                return JsonResponse({"error": "Слишком много запросов. Попробуйте позже."}, status=429)
-            from django.http import HttpResponse
-            return HttpResponse("Слишком много запросов. Попробуйте позже.", status=429)
+            return _rate_limit_response(request)
         return view_func(request, *args, **kwargs)
     return _wrapped
 
@@ -123,9 +150,6 @@ class RateLimitMiddleware:
         user_id = get_request_user_id(request)
         if user_id and not rate_limiter.is_allowed_http(user_id):
             logger.warning(f"HTTP rate limit exceeded for user {user_id}")
-            if request.headers.get("Accept") == "application/json" or request.path.startswith("/ai/api/"):
-                return JsonResponse({"error": "Слишком много запросов. Попробуйте позже."}, status=429)
-            from django.http import HttpResponse
-            return HttpResponse("Слишком много запросов. Попробуйте позже.", status=429)
+            return _rate_limit_response(request)
 
         return self.get_response(request)

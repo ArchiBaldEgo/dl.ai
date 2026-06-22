@@ -38,7 +38,6 @@ from .dl_api_client import (
 from .http_utils import safe_relative_url
 from .i18n import get_language_instruction, get_localized_name, get_localized_text
 from .querysets import prompt_queryset_for_user
-from .throttling import rate_limited
 from .serializers import (
     programming_language as serialize_programming_language,
     prompt as serialize_prompt,
@@ -434,7 +433,6 @@ def get_task_solution_view(request):
 
 
 @prompt_developer_access_required
-@rate_limited
 @require_http_methods(["POST"])
 def transcribe_audio(request):
     audio_file = request.FILES.get('audio')

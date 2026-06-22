@@ -8,6 +8,8 @@ from asgiref.sync import async_to_sync
 from django.db import close_old_connections, transaction
 from django.utils import timezone
 
+from django.conf import settings
+
 from .constants import MOSCOW_TZ
 from .models import AIModelAvailability, AIModelHealthRun
 HEALTHCHECK_PROMPT = "Ответь только одной цифрой без пояснений: 1+1=?"
@@ -19,6 +21,11 @@ _manual_refresh_lock = threading.Lock()
 _manual_refresh_started = False
 
 from .model_clients import registry
+from .model_clients.web_deepseek import restart_bot_pool
+
+# Web DeepSeek models served by the bot/ pool — candidates for auto-recovery.
+WEB_DEEPSEEK_KEYS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
+_AUTORECOVERY_BACKOFF_SECONDS = 8
 
 # Health checks only exercise the models defined in the registry below.
 MODEL_CATALOG_KEYS = [
@@ -158,6 +165,128 @@ def _save_availability(window_date, key, title, is_available, response_time_ms, 
     )
 
 
+def _check_one_model(key, title, handler_info, window_date):
+    """Run the healthcheck prompt against one model and persist availability.
+
+    Returns True if the model answered healthily, False otherwise.
+    """
+    if not handler_info:
+        _save_availability(
+            window_date=window_date,
+            key=key,
+            title=title,
+            is_available=False,
+            response_time_ms=None,
+            last_message="Handler not found",
+            last_http_code=None,
+        )
+        return False
+
+    started = perf_counter()
+    try:
+        result = async_to_sync(handler_info["handler"])(
+            HEALTHCHECK_PROMPT,
+            f"health-{window_date.isoformat()}-{key}",
+        )
+        elapsed_ms = int((perf_counter() - started) * 1000)
+        response_text = _extract_response_text(result)
+        is_available = _is_healthy_response(response_text)
+        # Model handlers only return text/tokens, not the raw status code.
+        # We try to recover the HTTP code from error messages when possible.
+        # For healthy responses we assume the HTTP status was 200.
+        last_http_code = 200 if is_available else _extract_http_code_from_message(response_text)
+
+        _save_availability(
+            window_date=window_date,
+            key=key,
+            title=title,
+            is_available=is_available,
+            response_time_ms=elapsed_ms,
+            last_message=response_text,
+            last_http_code=last_http_code,
+        )
+        return is_available
+    except Exception as exc:
+        elapsed_ms = int((perf_counter() - started) * 1000)
+        _save_availability(
+            window_date=window_date,
+            key=key,
+            title=title,
+            is_available=False,
+            response_time_ms=elapsed_ms,
+            last_message=f"Health check exception: {exc}",
+            last_http_code=None,
+        )
+        return False
+
+
+def _maybe_autorecover_web_deepseek(handlers, window_date):
+    """Restart the bot pool and re-check Web DeepSeek if it is down.
+
+    Gated by ``AI_WEB_DEEPSEEK_AUTORECOVERY`` (default True). Only acts when at
+    least one Web DeepSeek model is unavailable; restarts the pool once, waits
+    briefly, re-checks the down models, and annotates ``last_message`` with the
+    auto-recovery outcome. Never raises.
+    """
+    if not getattr(settings, "AI_WEB_DEEPSEEK_AUTORECOVERY", True):
+        return
+
+    down_keys = []
+    for key in WEB_DEEPSEEK_KEYS:
+        row = AIModelAvailability.objects.filter(
+            window_date=window_date, model_key=key
+        ).first()
+        if not row or not row.is_available:
+            down_keys.append(key)
+
+    if not down_keys:
+        return
+
+    logger.info("Web DeepSeek down (%s); attempting bot-pool auto-recovery", down_keys)
+    restarted = restart_bot_pool()
+    if not restarted:
+        # Annotate the down models, but never let a transient DB error here
+        # escape — the docstring says "Never raises", and the per-model rows
+        # were already persisted during the sweep; a DB hiccup now must not
+        # flip the whole health run to FAILED. Mirrors the re-check branch.
+        try:
+            for key in down_keys:
+                _save_availability(
+                    window_date=window_date,
+                    key=key,
+                    title=registry.title(key),
+                    is_available=False,
+                    response_time_ms=None,
+                    last_message="Автоподъём не удался: бот-пул недоступен",
+                    last_http_code=None,
+                )
+        except Exception:
+            logger.warning("Failed to annotate bot-pool restart failure", exc_info=True)
+        return
+
+    # Give the freshly spawned bot a moment to come up before re-checking.
+    time.sleep(_AUTORECOVERY_BACKOFF_SECONDS)
+
+    for key in down_keys:
+        title = registry.title(key)
+        handler_info = handlers.get(key)
+        is_up = _check_one_model(key, title, handler_info, window_date)
+        # Annotate the result so operators can see auto-recovery happened.
+        # The availability row was already persisted by _check_one_model; this
+        # is a cosmetic annotation only, so a transient DB error here must never
+        # escape and flip the whole health run to FAILED (per docstring).
+        try:
+            row = AIModelAvailability.objects.filter(
+                window_date=window_date, model_key=key
+            ).first()
+            if row:
+                suffix = " [автоподъём: ок]" if is_up else " [автоподъём: модель всё ещё недоступна]"
+                row.last_message = (row.last_message or "")[:1900] + suffix
+                row.save(update_fields=["last_message"])
+        except Exception:
+            logger.warning("Failed to annotate auto-recovery outcome for %s", key, exc_info=True)
+
+
 def run_model_health_check(force=False):
     window_date = get_health_window_date()
     now = timezone.now()
@@ -169,20 +298,15 @@ def run_model_health_check(force=False):
             .first()
         )
 
-        if run and run.status == AIModelHealthRun.STATUS_COMPLETED and not force:
-            return False
-
-        if (
-            run
-            and run.status == AIModelHealthRun.STATUS_RUNNING
-            and run.started_at
-            and run.started_at > now - timedelta(minutes=45)
-            and not force
-        ):
-            return False
-
         if run is None:
-            run, _ = AIModelHealthRun.objects.get_or_create(
+            # Cold start: no row for this window yet. get_or_create on the
+            # unique window_date guarantees exactly ONE process wins the create
+            # race (a loser's INSERT raises IntegrityError and get_or_create
+            # re-gets the winner's row). Only the creator may proceed to the
+            # sweep; everyone else observes the winner's RUNNING status below
+            # and bails. Without this, N Daphne workers booting at once would
+            # all sweep + auto-recover the bot pool concurrently.
+            run, created = AIModelHealthRun.objects.get_or_create(
                 window_date=window_date,
                 defaults={
                     "status": AIModelHealthRun.STATUS_RUNNING,
@@ -191,6 +315,26 @@ def run_model_health_check(force=False):
                     "error_message": "",
                 },
             )
+        else:
+            created = False
+
+        if not created:
+            if run.status == AIModelHealthRun.STATUS_COMPLETED and not force:
+                return False
+            # An actively-running run (started <45min ago) must never be
+            # double-run, NOT EVEN with force=True. force is for re-running a
+            # COMPLETED or a stale (>45min) run; letting it bypass this guard
+            # would let two concurrent --force / admin-refresh invocations
+            # (which only do a racy read-only pre-check before calling us) both
+            # sweep the 12 models and both call restart_bot_pool concurrently.
+            # The row lock we hold here is the real serialization point, so this
+            # guard is what actually prevents the cross-process race.
+            if (
+                run.status == AIModelHealthRun.STATUS_RUNNING
+                and run.started_at
+                and run.started_at > now - timedelta(minutes=45)
+            ):
+                return False
 
         run.status = AIModelHealthRun.STATUS_RUNNING
         run.started_at = now
@@ -204,53 +348,9 @@ def run_model_health_check(force=False):
         for key in MODEL_CATALOG_KEYS:
             title = registry.title(key)
             handler_info = handlers.get(key)
+            _check_one_model(key, title, handler_info, window_date)
 
-            if not handler_info:
-                _save_availability(
-                    window_date=window_date,
-                    key=key,
-                    title=title,
-                    is_available=False,
-                    response_time_ms=None,
-                    last_message="Handler not found",
-                    last_http_code=None,
-                )
-                continue
-
-            started = perf_counter()
-            try:
-                result = async_to_sync(handler_info["handler"])(
-                    HEALTHCHECK_PROMPT,
-                    f"health-{window_date.isoformat()}-{key}",
-                )
-                elapsed_ms = int((perf_counter() - started) * 1000)
-                response_text = _extract_response_text(result)
-                is_available = _is_healthy_response(response_text)
-                # Model handlers only return text/tokens, not the raw status code.
-                # We try to recover the HTTP code from error messages when possible.
-                # For healthy responses we assume the HTTP status was 200.
-                last_http_code = 200 if is_available else _extract_http_code_from_message(response_text)
-
-                _save_availability(
-                    window_date=window_date,
-                    key=key,
-                    title=title,
-                    is_available=is_available,
-                    response_time_ms=elapsed_ms,
-                    last_message=response_text,
-                    last_http_code=last_http_code,
-                )
-            except Exception as exc:
-                elapsed_ms = int((perf_counter() - started) * 1000)
-                _save_availability(
-                    window_date=window_date,
-                    key=key,
-                    title=title,
-                    is_available=False,
-                    response_time_ms=elapsed_ms,
-                    last_message=f"Health check exception: {exc}",
-                    last_http_code=None,
-                )
+        _maybe_autorecover_web_deepseek(handlers, window_date)
 
         AIModelHealthRun.objects.filter(pk=run.pk).update(
             status=AIModelHealthRun.STATUS_COMPLETED,
@@ -317,17 +417,6 @@ def trigger_model_health_refresh_async():
         return True
 
 
-def ensure_model_health_for_current_window():
-    window_date = get_health_window_date()
-    is_ready = AIModelHealthRun.objects.filter(
-        window_date=window_date,
-        status=AIModelHealthRun.STATUS_COMPLETED,
-    ).exists()
-
-    if not is_ready:
-        run_model_health_check(force=False)
-
-
 def _seconds_until_next_4am_moscow(now=None):
     current = (now or timezone.now()).astimezone(MOSCOW_TZ)
     next_run = current.replace(hour=4, minute=0, second=0, microsecond=0)
@@ -338,6 +427,14 @@ def _seconds_until_next_4am_moscow(now=None):
 
 def _scheduler_loop():
     while True:
+        # Daemon threads never fire request_started/request_finished, so Django's
+        # automatic connection recycling does not run here. CONN_MAX_AGE is unset
+        # (default 0), so without this the thread would hold one DB connection
+        # across the up-to-24h sleep; if Postgres closed the idle server-side
+        # connection, the next 04:00 MSK iteration's first query would raise
+        # OperationalError. Start each iteration with a fresh connection,
+        # mirroring _manual_refresh_worker, and close it before sleeping.
+        close_old_connections()
         try:
             run_model_health_check(force=False)
             wait_seconds = _seconds_until_next_4am_moscow()
@@ -346,7 +443,7 @@ def _scheduler_loop():
             # DB/network can be temporarily unavailable during startup.
             # Retry sooner instead of waiting for the next daily window.
             wait_seconds = 300
-
+        close_old_connections()
         time.sleep(wait_seconds)
 
 
@@ -367,7 +464,10 @@ def start_model_health_scheduler():
 
 
 def get_all_model_options():
-    return [{"key": key, "title": registry.title(key)} for key in MODEL_CATALOG_KEYS]
+    return [
+        {"key": key, "title": registry.title(key), "capabilities": registry.capabilities(key)}
+        for key in MODEL_CATALOG_KEYS
+    ]
 
 
 def get_model_status_rows():
@@ -403,6 +503,7 @@ def get_model_status_rows():
             {
                 "key": key,
                 "title": item["title"],
+                "capabilities": item.get("capabilities") or registry.capabilities(key),
                 "is_active": is_active,
                 "status_label": "Активна" if is_active else "Неактивна",
                 "window_date": row.window_date if row else None,
@@ -459,7 +560,7 @@ def get_available_model_options():
             }
 
     return [
-        {"key": key, "title": titles[key]}
+        {"key": key, "title": titles[key], "capabilities": registry.capabilities(key)}
         for key in ordered_keys
         if key in available_rows
     ]

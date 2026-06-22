@@ -46,13 +46,8 @@ class AiConfig(AppConfig):
         elif not any(name in executable for name in ("daphne", "gunicorn", "uvicorn")):
             return
 
-        from .model_health import start_model_health_scheduler, ensure_model_health_for_current_window
+        from .model_health import start_model_health_scheduler
+        # The scheduler thread performs the first health check immediately (in
+        # its own daemon thread, so it never blocks app startup) and then waits
+        # for the next 04:00 MSK window. No synchronous warm-up is needed here.
         start_model_health_scheduler()
-        # Trigger one non-blocking health check at startup only if there is no
-        # completed data for the current window. The scheduler loop will retry on
-        # the next daily window anyway; this just warms the cache quickly.
-        try:
-            ensure_model_health_for_current_window()
-        except Exception:
-            logger = logging.getLogger(__name__)
-            logger.exception("Initial model health warm-up failed")

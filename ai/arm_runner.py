@@ -12,7 +12,7 @@ from django.utils.html import strip_tags
 
 from .model_clients.exceptions import humanize_model_error
 from .model_health import get_runtime_model_handlers
-from .models import AIRequestLog, ExternalDLAccount
+from .models import AIModelTestResult, AIModelTestRun, AIRequestLog, ExternalDLAccount
 
 
 User = get_user_model()
@@ -42,6 +42,13 @@ def _to_int(value, default=0):
         return default
 
 
+def _to_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _extract_model_response(response):
     if isinstance(response, tuple):
         response_text = response[0] if len(response) > 0 else ""
@@ -51,6 +58,53 @@ def _extract_model_response(response):
     return str(response or ""), 0
 
 
+def _build_summary(results):
+    """Per-model aggregation: % solved (desc), avg duration (asc).
+
+    For a single-message run each model has one result, so percent_solved is
+    binary (100/0). The structure scales to batch runs (one result per task per
+    model): solved = ok-count, total = result-count for that model.
+    """
+    by_model = {}
+    for item in results:
+        key = item.get("model_key") or item.get("model_title") or "?"
+        bucket = by_model.setdefault(
+            key,
+            {
+                "model_key": item.get("model_key", ""),
+                "model_title": item.get("model_title", ""),
+                "solved": 0,
+                "total": 0,
+                "durations": [],
+                "tokens": 0,
+            },
+        )
+        bucket["total"] += 1
+        if item.get("status") == "ok":
+            bucket["solved"] += 1
+        bucket["durations"].append(_to_float(item.get("duration")))
+        bucket["tokens"] += _to_int(item.get("tokens"))
+
+    summary = []
+    for bucket in by_model.values():
+        total = bucket["total"] or 1
+        durations = bucket["durations"] or [0.0]
+        summary.append(
+            {
+                "model_key": bucket["model_key"],
+                "model_title": bucket["model_title"],
+                "solved": bucket["solved"],
+                "total": bucket["total"],
+                "percent_solved": round(bucket["solved"] / total * 100, 1),
+                "avg_duration": round(sum(durations) / len(durations), 2),
+                "tokens": bucket["tokens"],
+            }
+        )
+
+    summary.sort(key=lambda row: (-row["percent_solved"], row["avg_duration"]))
+    return summary
+
+
 def _build_report(results):
     if not results:
         return None
@@ -58,7 +112,7 @@ def _build_report(results):
     success_count = sum(1 for item in results if item.get("status") == "ok")
     error_count = len(results) - success_count
     tokens_total = sum(_to_int(item.get("tokens"), 0) for item in results)
-    fastest = min(results, key=lambda item: float(item.get("duration") or 0.0))
+    fastest = min(results, key=lambda item: _to_float(item.get("duration")))
 
     return {
         "models_total": len(results),
@@ -66,7 +120,8 @@ def _build_report(results):
         "error_count": error_count,
         "tokens_total": tokens_total,
         "fastest_model": fastest.get("model_title") or "-",
-        "fastest_duration": float(fastest.get("duration") or 0.0),
+        "fastest_duration": _to_float(fastest.get("duration")),
+        "summary": _build_summary(results),
     }
 
 
@@ -80,7 +135,40 @@ def _update_job(run_id, **updates):
         job["updated_at_ts"] = time.time()
 
 
-def _run_job_worker(run_id, message, selected_model_keys, user_id):
+def _resolve_user(user_id):
+    user = None
+    username = ""
+    external_id = ""
+    full_name = ""
+    try:
+        user = User.objects.get(pk=user_id)
+        username = user.username
+        full_name = (user.get_full_name() or "").strip() or username
+        try:
+            external_id = user.external_dl_account.external_user_id
+        except (ExternalDLAccount.DoesNotExist, AttributeError):
+            external_id = username
+    except User.DoesNotExist:
+        pass
+    return user, username, external_id, full_name
+
+
+def _run_job_worker(
+    run_id,
+    message,
+    selected_model_keys,
+    user_id,
+    *,
+    programming_language_id=None,
+    programming_language_name="",
+    topic_id=None,
+    topic_name="",
+    prompt_id=None,
+    prompt_name="",
+):
+    test_run = None
+    log = None
+    start_time = timezone.now()
     try:
         handlers = get_runtime_model_handlers()
         ordered_models = []
@@ -95,22 +183,23 @@ def _run_job_worker(run_id, message, selected_model_keys, user_id):
                     }
                 )
 
-        start_time = timezone.now()
         models_titles = [m["title"] for m in ordered_models]
-        user = None
-        username = ""
-        external_id = ""
-        full_name = ""
-        try:
-            user = User.objects.get(pk=user_id)
-            username = user.username
-            full_name = (user.get_full_name() or "").strip() or username
-            try:
-                external_id = user.external_dl_account.external_user_id
-            except (ExternalDLAccount.DoesNotExist, AttributeError):
-                external_id = username
-        except User.DoesNotExist:
-            pass
+        user, username, external_id, full_name = _resolve_user(user_id)
+
+        test_run = AIModelTestRun.objects.create(
+            run_id=run_id,
+            user=user,
+            status=AIModelTestRun.STATUS_RUNNING,
+            started_at=start_time,
+            message=message,
+            total_models=len(ordered_models),
+            programming_language_id=programming_language_id,
+            programming_language_name=programming_language_name or "",
+            topic_id=topic_id,
+            topic_name=topic_name or "",
+            prompt_id=prompt_id,
+            prompt_name=prompt_name or "",
+        )
 
         log = AIRequestLog.objects.create(
             user=user,
@@ -138,11 +227,16 @@ def _run_job_worker(run_id, message, selected_model_keys, user_id):
                 current_model_key="",
                 current_model_title="",
             )
+            end_time = timezone.now()
             AIRequestLog.objects.filter(pk=log.pk).update(
-                received_at=timezone.now(),
+                received_at=end_time,
                 duration_seconds=0,
                 status=AIRequestLog.STATUS_ERROR,
                 error_message="Выбранные модели недоступны",
+            )
+            AIModelTestRun.objects.filter(pk=test_run.pk).update(
+                status=AIModelTestRun.STATUS_FAILED,
+                finished_at=end_time,
             )
             return
 
@@ -168,55 +262,125 @@ def _run_job_worker(run_id, message, selected_model_keys, user_id):
                 friendly_text, detailed_text = humanize_model_error(cleaned_text, include_detail=True)
                 short_response = friendly_text[:300] + ("..." if len(friendly_text) > 300 else "")
                 is_ok = bool(friendly_text) and "ошибка" not in friendly_text.lower()[:25]
+                status = "ok" if is_ok else "error"
+                duration = round(perf_counter() - started, 2)
                 result_item = {
                     "model_key": model["key"],
                     "model_title": model["title"],
-                    "duration": round(perf_counter() - started, 2),
+                    "duration": duration,
                     "tokens": tokens,
                     "short_response": short_response,
-                    "status": "ok" if is_ok else "error",
+                    "status": status,
                     "raw_response": detailed_text,
                 }
             except Exception as exc:
                 exc_text = str(exc)
                 friendly_text, detailed_text = humanize_model_error(exc_text, include_detail=True)
+                duration = round(perf_counter() - started, 2)
+                status = "error"
                 result_item = {
                     "model_key": model["key"],
                     "model_title": model["title"],
-                    "duration": round(perf_counter() - started, 2),
+                    "duration": duration,
                     "tokens": 0,
                     "short_response": friendly_text or f"Ошибка вызова модели: {exc_text}",
-                    "status": "error",
+                    "status": status,
                     "raw_response": detailed_text,
                 }
 
+            # Persist the per-model result row (source of truth for reports).
+            AIModelTestResult.objects.update_or_create(
+                run=test_run,
+                model_key=model["key"],
+                defaults={
+                    "model_title": model["title"],
+                    "status": status,
+                    "duration_seconds": duration,
+                    "tokens": result_item["tokens"],
+                    "short_response": result_item["short_response"],
+                    "raw_response": (result_item["raw_response"] or "")[:8000],
+                },
+            )
+
             with _jobs_lock:
                 job = _jobs.get(run_id)
-                if not job:
-                    return
+                evicted = job is None
+                if not evicted:
+                    job.setdefault("results", []).append(result_item)
+                    job["completed_models"] = index
+                    if index < total:
+                        next_model = ordered_models[index]
+                        job["current_model_key"] = next_model["key"]
+                        job["current_model_title"] = next_model["title"]
+                    else:
+                        job["current_model_key"] = ""
+                        job["current_model_title"] = ""
+                    job["updated_at_ts"] = time.time()
 
-                job.setdefault("results", []).append(result_item)
-                job["completed_models"] = index
-                if index < total:
-                    next_model = ordered_models[index]
-                    job["current_model_key"] = next_model["key"]
-                    job["current_model_title"] = next_model["title"]
-                else:
-                    job["current_model_key"] = ""
-                    job["current_model_title"] = ""
-                job["updated_at_ts"] = time.time()
+            if evicted:
+                # In-memory job evicted mid-run; mark the persisted run terminal
+                # so the DB (source of truth) is not orphaned. DB writes are done
+                # outside the lock to avoid holding _jobs_lock across DB round-trips
+                # (it is shared with the polling get_arm_run_snapshot).
+                end_time = timezone.now()
+                AIModelTestRun.objects.filter(pk=test_run.pk).update(
+                    status=AIModelTestRun.STATUS_FAILED,
+                    finished_at=end_time,
+                    error_message="ARM job evicted while running",
+                )
+                if log is not None:
+                    AIRequestLog.objects.filter(pk=log.pk).update(
+                        received_at=end_time,
+                        status=AIRequestLog.STATUS_ERROR,
+                        error_message="ARM job evicted while running",
+                    )
+                return
 
         with _jobs_lock:
             job = _jobs.get(run_id)
-            if not job:
-                return
+            evicted = job is None
+            if not evicted:
+                job["report"] = _build_report(job.get("results") or [])
+                job["status"] = "completed"
+                job["updated_at_ts"] = time.time()
+                results = list(job.get("results") or [])
+                report = job["report"]
+        # NOTE: results/report captured under the lock; DB writes use them below.
 
-            job["report"] = _build_report(job.get("results") or [])
-            job["status"] = "completed"
-            job["updated_at_ts"] = time.time()
+        if evicted:
+            # Job evicted after the last model but before the final update:
+            # per-model rows are already in the DB. Rebuild the report from the
+            # DB and persist COMPLETED so the run is not orphaned in RUNNING.
+            # Done outside the lock to avoid holding _jobs_lock across DB reads
+            # (test_run.results.all()) and writes.
+            end_time = timezone.now()
+            db_results = [
+                {
+                    "model_key": r.model_key,
+                    "model_title": r.model_title,
+                    "duration": r.duration_seconds or 0.0,
+                    "tokens": r.tokens or 0,
+                    "short_response": r.short_response,
+                    "status": r.status,
+                    "raw_response": r.raw_response,
+                }
+                for r in test_run.results.all()
+            ]
+            db_report = _build_report(db_results)
+            if log is not None:
+                AIRequestLog.objects.filter(pk=log.pk).update(
+                    received_at=end_time,
+                    duration_seconds=(end_time - start_time).total_seconds(),
+                    status=AIRequestLog.STATUS_SUCCESS,
+                )
+            AIModelTestRun.objects.filter(pk=test_run.pk).update(
+                status=AIModelTestRun.STATUS_COMPLETED,
+                finished_at=end_time,
+                report=db_report or {},
+            )
+            return
 
         end_time = timezone.now()
-        results = job.get("results") or []
         response_summary = json.dumps(
             [
                 {
@@ -235,6 +399,11 @@ def _run_job_worker(run_id, message, selected_model_keys, user_id):
             response_text=response_summary[:5000],
             status=AIRequestLog.STATUS_SUCCESS,
         )
+        AIModelTestRun.objects.filter(pk=test_run.pk).update(
+            status=AIModelTestRun.STATUS_COMPLETED,
+            finished_at=end_time,
+            report=report or {},
+        )
 
     except Exception as exc:
         _update_job(
@@ -244,12 +413,18 @@ def _run_job_worker(run_id, message, selected_model_keys, user_id):
             current_model_key="",
             current_model_title="",
         )
-        if "log" in locals():
-            end_time = timezone.now()
+        end_time = timezone.now()
+        if log is not None:
             AIRequestLog.objects.filter(pk=log.pk).update(
                 received_at=end_time,
-                duration_seconds=(end_time - start_time).total_seconds() if "start_time" in locals() else None,
+                duration_seconds=(end_time - start_time).total_seconds(),
                 status=AIRequestLog.STATUS_ERROR,
+                error_message=str(exc)[:2000],
+            )
+        if test_run is not None:
+            AIModelTestRun.objects.filter(pk=test_run.pk).update(
+                status=AIModelTestRun.STATUS_FAILED,
+                finished_at=end_time,
                 error_message=str(exc)[:2000],
             )
 
@@ -294,6 +469,14 @@ def start_arm_sequential_run(
     worker = threading.Thread(
         target=_run_job_worker,
         args=(run_id, message, valid_model_keys, user_id),
+        kwargs={
+            "programming_language_id": programming_language_id,
+            "programming_language_name": programming_language_name,
+            "topic_id": topic_id,
+            "topic_name": topic_name,
+            "prompt_id": prompt_id,
+            "prompt_name": prompt_name,
+        },
         name=f"arm-sequential-run-{run_id[:8]}",
         daemon=True,
     )
@@ -302,12 +485,64 @@ def start_arm_sequential_run(
     return run_id, ""
 
 
+def _snapshot_from_test_run(test_run):
+    results_qs = test_run.results.all().order_by("model_title")
+    results = [
+        {
+            "model_key": r.model_key,
+            "model_title": r.model_title,
+            "duration": r.duration_seconds or 0.0,
+            "tokens": r.tokens or 0,
+            "short_response": r.short_response,
+            "status": r.status,
+            "raw_response": r.raw_response,
+        }
+        for r in results_qs
+    ]
+    report = _build_report(results)
+    status_map = {
+        AIModelTestRun.STATUS_RUNNING: "running",
+        AIModelTestRun.STATUS_COMPLETED: "completed",
+        AIModelTestRun.STATUS_FAILED: "failed",
+    }
+    current_key = ""
+    current_title = ""
+    if results and test_run.status == AIModelTestRun.STATUS_RUNNING:
+        # Best-effort "current model" hint from in-memory job if still present.
+        with _jobs_lock:
+            job = _jobs.get(test_run.run_id)
+            if job:
+                current_key = job.get("current_model_key", "")
+                current_title = job.get("current_model_title", "")
+    is_failed = test_run.status == AIModelTestRun.STATUS_FAILED
+    return {
+        "run_id": test_run.run_id,
+        "status": status_map.get(test_run.status, test_run.status),
+        "error_message": test_run.error_message or ("ARM процесс завершился с ошибкой" if is_failed else ""),
+        "total_models": test_run.total_models or len(results),
+        "completed_models": len(results),
+        "current_model_key": current_key,
+        "current_model_title": current_title,
+        "results": results,
+        "report": report,
+        "created_at_ts": test_run.started_at.timestamp() if test_run.started_at else 0.0,
+        "updated_at_ts": test_run.finished_at.timestamp() if test_run.finished_at else 0.0,
+    }
+
+
 def get_arm_run_snapshot(run_id):
     if not run_id:
         return None
 
+    # Live in-memory job takes precedence while the run is in flight.
     with _jobs_lock:
         job = _jobs.get(run_id)
-        if not job:
-            return None
-        return copy.deepcopy(job)
+        if job:
+            return copy.deepcopy(job)
+
+    # Source of truth for completed/evicted runs: the database.
+    try:
+        test_run = AIModelTestRun.objects.get(run_id=run_id)
+    except AIModelTestRun.DoesNotExist:
+        return None
+    return _snapshot_from_test_run(test_run)

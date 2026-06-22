@@ -343,3 +343,130 @@ class AIRequestLog(models.Model):
 
     def __str__(self):
         return f"{self.sent_at} — {self.user_full_name or self.username or self.external_user_id}"
+
+
+class AIModelTokenBudget(models.Model):
+    """Manually maintained token budget for an AI provider/account.
+
+    The total limit and its issue date are set by an admin (the upstream APIs
+    do not always expose them). Spent tokens are aggregated from
+    ``AIRequestLog.tokens`` for logs with ``sent_at >= issued_at``; attribution
+    per provider is approximate until a per-model/per-provider token field is
+    introduced.
+    """
+
+    label = models.CharField(
+        max_length=128,
+        unique=True,
+        help_text="Provider/account name, e.g. «SambaNova» or «DeepSeek».",
+    )
+    total_limit = models.PositiveBigIntegerField(help_text="Total token allowance.")
+    issued_at = models.DateField(help_text="Date the allowance was issued/reset.")
+    notes = models.TextField(blank=True, default="")
+
+    class Meta:
+        db_table = "ai_ai_model_token_budget"
+        verbose_name = "AI model token budget"
+        verbose_name_plural = "AI model token budgets"
+        ordering = ("label",)
+
+    def __str__(self):
+        return f"{self.label} ({self.total_limit} от {self.issued_at})"
+
+
+class AIModelTestRun(models.Model):
+    """A persisted ARM multi-model run.
+
+    The in-memory job dict in ``ai/arm_runner.py`` is still used for live
+    progress, but this model is the source of truth for completed runs and
+    powers the per-model / per-topic summary tables. One run corresponds to one
+    prompt sent to one or more models (a batch-over-tasks runner would create
+    one run per task and aggregate across runs).
+    """
+
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+
+    STATUS_CHOICES = (
+        (STATUS_RUNNING, "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
+    )
+
+    run_id = models.CharField(max_length=64, unique=True, db_index=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ai_model_test_runs",
+    )
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING)
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    message = models.TextField(blank=True, default="")
+    error_message = models.TextField(blank=True, default="")
+    report = models.JSONField(default=dict, blank=True)
+    total_models = models.PositiveSmallIntegerField(default=0)
+    # Context selected by the user (mirrors AIRequestLog context fields).
+    programming_language_id = models.IntegerField(null=True, blank=True)
+    programming_language_name = models.CharField(max_length=255, blank=True, default="")
+    topic_id = models.IntegerField(null=True, blank=True)
+    topic_name = models.CharField(max_length=255, blank=True, default="")
+    prompt_id = models.IntegerField(null=True, blank=True)
+    prompt_name = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        db_table = "ai_ai_model_test_run"
+        verbose_name = "AI model test run"
+        verbose_name_plural = "AI model test runs"
+        ordering = ("-started_at",)
+
+    def __str__(self):
+        return f"{self.run_id} ({self.status})"
+
+
+class AIModelTestResult(models.Model):
+    """Per-model result row within an `AIModelTestRun`.
+
+    `status` is "ok"/"error" (matches the in-memory result_item shape); this is
+    what the ARM summary table aggregates (percent solved, average response
+    time) across runs.
+    """
+
+    STATUS_OK = "ok"
+    STATUS_ERROR = "error"
+
+    STATUS_CHOICES = (
+        (STATUS_OK, "OK"),
+        (STATUS_ERROR, "Error"),
+    )
+
+    run = models.ForeignKey(
+        AIModelTestRun,
+        on_delete=models.CASCADE,
+        related_name="results",
+    )
+    model_key = models.CharField(max_length=128, db_index=True)
+    model_title = models.CharField(max_length=255)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_OK)
+    duration_seconds = models.FloatField(null=True, blank=True)
+    tokens = models.PositiveIntegerField(null=True, blank=True)
+    short_response = models.TextField(blank=True, default="")
+    raw_response = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "ai_ai_model_test_result"
+        verbose_name = "AI model test result"
+        verbose_name_plural = "AI model test results"
+        ordering = ("model_title",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("run", "model_key"),
+                name="ai_model_test_result_run_model_uniq",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.run.run_id} / {self.model_title} — {self.status}"

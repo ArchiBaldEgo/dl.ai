@@ -18,8 +18,10 @@ async function main() {
     });
 
     const app = createServer({ botManager, config, logger });
-    const server = app.listen(config.port, () => {
-        logger.log(`listening on :${config.port}`);
+    // Bind to loopback only: the bot pool is an internal service consumed by
+    // Django over localhost. It must never be reachable from public networks.
+    const server = app.listen(config.port, '127.0.0.1', () => {
+        logger.log(`listening on 127.0.0.1:${config.port}`);
         logger.log(`MAX_BOT_COUNT=${config.maxBotCount}`);
     });
 

@@ -136,6 +136,14 @@ async function sendAudioToServer(audioBlob) {
             }
         });
         
+        if (!response.ok) {
+        
+            updateVoiceStatus(getVoiceStatusText(response.status === 429 ? 'rate_limited' : 'server_error'));
+        
+            return;
+        
+        }
+        
         const data = await response.json();
         
         if (data.success && data.text) {
@@ -768,6 +776,7 @@ const localization = {
             recording_error: "Ошибка записи",
             recognition_failed: "Не удалось распознать речь",
             server_error: "Ошибка связи с сервером",
+            rate_limited: "Слишком много запросов. Попробуйте позже.",
             microphone_denied: "Разрешите доступ к микрофону",
             microphone_not_found: "Микрофон не найден",
             max_time_exceeded: "Превышено время записи"
@@ -816,6 +825,7 @@ const localization = {
             recording_error: "Recording error",
             recognition_failed: "Recognition failed",
             server_error: "Server connection error",
+            rate_limited: "Too many requests. Please try again later.",
             microphone_denied: "Microphone access denied",
             microphone_not_found: "Microphone not found",
             max_time_exceeded: "Max recording time exceeded"
@@ -863,6 +873,7 @@ const localization = {
             recording_error: "Erreur d'enregistrement",
             recognition_failed: "Échec de reconnaissance",
             server_error: "Erreur de connexion au serveur",
+            rate_limited: "Trop de requêtes. Réessayez plus tard.",
             microphone_denied: "Accès au micro refusé",
             microphone_not_found: "Microphone introuvable",
             max_time_exceeded: "Durée d'enregistrement dépassée"

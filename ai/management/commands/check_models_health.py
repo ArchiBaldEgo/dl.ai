@@ -1,6 +1,10 @@
 from django.core.management.base import BaseCommand, CommandError
 
-from ai.model_health import get_model_status_rows, run_model_health_check
+from ai.model_health import (
+    get_model_status_rows,
+    is_model_health_refresh_running,
+    run_model_health_check,
+)
 
 
 class Command(BaseCommand):
@@ -14,8 +18,20 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        force = options["force"]
+        # --force bypasses the in-run STATUS_RUNNING guard inside
+        # run_model_health_check, so a concurrent run (daily scheduler or admin
+        # refresh) would race the auto-recovery restart. Refuse to force while a
+        # run is already in progress rather than double-restart the bot pool.
+        if force and is_model_health_refresh_running():
+            self.stdout.write(self.style.WARNING(
+                "A health check is already running; skipping --force to avoid a "
+                "concurrent bot-pool restart. Retry shortly."
+            ))
+            return
+
         try:
-            updated = run_model_health_check(force=options["force"])
+            updated = run_model_health_check(force=force)
             rows = get_model_status_rows()
         except Exception as exc:
             raise CommandError(f"Model health check failed: {exc}") from exc

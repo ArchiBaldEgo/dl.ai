@@ -175,6 +175,21 @@
     background: color-mix(in srgb, var(--body-bg) 94%, var(--hairline-color));
   }
 
+  .arm-summary-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+  }
+  .arm-summary-table th,
+  .arm-summary-table td {
+    border-bottom: 1px solid var(--hairline-color);
+    padding: 8px 10px;
+    text-align: left;
+  }
+  .arm-summary-table th {
+    font-weight: 600;
+  }
+
   .arm-result {
     border: 1px solid var(--hairline-color);
     border-radius: 6px;
@@ -481,6 +496,34 @@
         <li>Самая быстрая: {{ report.fastest_model }} ({{ report.fastest_duration }} сек)</li>
       {% endif %}
     </ul>
+    <div id="armSummaryWrap">
+      {% if report.summary %}
+        <h3>Итоговая таблица по моделям</h3>
+        <p class="arm-section-note">Сортировка: процент решённых ↓, среднее время ответа ↑</p>
+        <table class="arm-summary-table">
+          <thead>
+            <tr>
+              <th>Модель</th>
+              <th>% решённых</th>
+              <th>Среднее время, сек</th>
+              <th>Токены</th>
+              <th>Статус</th>
+            </tr>
+          </thead>
+          <tbody id="armSummaryBody">
+            {% for row in report.summary %}
+              <tr>
+                <td>{{ row.model_title }}</td>
+                <td>{{ row.percent_solved }}</td>
+                <td>{{ row.avg_duration }}</td>
+                <td>{{ row.tokens }}</td>
+                <td>{{ row.solved }}/{{ row.total }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </div>
   </div>
 
   <div id="armResultsCard" class="arm-card"{% if not results %} style="display: none;"{% endif %}>
@@ -767,6 +810,8 @@
       if (!report) {
         reportList.innerHTML = '';
         reportCard.style.display = 'none';
+        const summaryWrap = document.getElementById('armSummaryWrap');
+        if (summaryWrap) summaryWrap.innerHTML = '';
         return;
       }
 
@@ -778,7 +823,30 @@
         `Суммарно токенов: ${Number(report.tokens_total || 0)}`,
         `Самая быстрая: ${report.fastest_model || '-'} (${fastestDuration} сек)`,
       ].map(function (line) { return `<li>${escapeHtml(line)}</li>`; }).join('');
+      renderSummary(report.summary || []);
       reportCard.style.display = 'block';
+    }
+
+    function renderSummary(summary) {
+      const wrap = document.getElementById('armSummaryWrap');
+      if (!wrap) return;
+      if (!Array.isArray(summary) || summary.length === 0) {
+        wrap.innerHTML = '';
+        return;
+      }
+      const head = '<thead><tr><th>Модель</th><th>% решённых</th><th>Среднее время, сек</th><th>Токены</th><th>Статус</th></tr></thead>';
+      const body = summary.map(function (row) {
+        return '<tr>'
+          + `<td>${escapeHtml(row.model_title || '')}</td>`
+          + `<td>${escapeHtml(String(row.percent_solved))}</td>`
+          + `<td>${escapeHtml(String(row.avg_duration))}</td>`
+          + `<td>${Number(row.tokens || 0)}</td>`
+          + `<td>${escapeHtml((row.solved || 0) + '/' + (row.total || 0))}</td>`
+          + '</tr>';
+      }).join('');
+      wrap.innerHTML = '<h3>Итоговая таблица по моделям</h3>'
+        + '<p class="arm-section-note">Сортировка: процент решённых ↓, среднее время ответа ↑</p>'
+        + `<table class="arm-summary-table">${head}<tbody>${body}</tbody></table>`;
     }
 
     function renderResults(results) {

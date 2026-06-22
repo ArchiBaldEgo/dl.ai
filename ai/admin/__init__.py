@@ -6,9 +6,10 @@ DjangoTest.urls through ai.admin.urls.get_ai_admin_urls().
 from django.contrib.auth import get_user_model
 
 from .site import ai_admin_site
-from ..models import AIAppSettings, ProgrammingLanguage, Prompt, SharedPrompt, Topic
+from ..models import AIAppSettings, AIModelTokenBudget, ProgrammingLanguage, Prompt, SharedPrompt, Topic
 from .models import (
     AIAppSettingsAdmin,
+    AIModelTokenBudgetAdmin,
     ProgrammingLanguageAdmin,
     TopicAdmin,
     PromptAdmin,
@@ -33,6 +34,7 @@ from .my_prompt import admin_my_prompt_view
 __all__ = [
     "ai_admin_site",
     "AIAppSettingsAdmin",
+    "AIModelTokenBudgetAdmin",
     "ProgrammingLanguageAdmin",
     "TopicAdmin",
     "PromptAdmin",
@@ -52,6 +54,7 @@ __all__ = [
 
 # Register AI models on the custom admin site so they appear in /ai/admin/.
 ai_admin_site.register(AIAppSettings, AIAppSettingsAdmin)
+ai_admin_site.register(AIModelTokenBudget, AIModelTokenBudgetAdmin)
 ai_admin_site.register(ProgrammingLanguage, ProgrammingLanguageAdmin)
 ai_admin_site.register(Topic, TopicAdmin)
 ai_admin_site.register(Prompt, PromptAdmin)

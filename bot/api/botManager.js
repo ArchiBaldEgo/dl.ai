@@ -198,6 +198,35 @@ class BotManager {
         if (this._reapTimer) clearInterval(this._reapTimer);
         await Promise.allSettled(this._bots.map((b) => b.close()));
     }
+
+    async restartAll() {
+        // "Автоподъём": close every bot (kills the underlying browsers) and
+        // respawn a fresh one so the pool recovers from a stuck/dead state.
+        // Waits for any in-flight spawn first so we don't race init() with close().
+        this.log('[pool] restartAll requested');
+
+        if (this._spawning) {
+            try {
+                await this._spawning;
+            } catch {
+                /* spawn failure is handled below by respawning */
+            }
+        }
+
+        const bots = this._bots.splice(0);
+        await Promise.allSettled(bots.map((b) => b.close()));
+        if (bots.length) this.log(`[pool] restartAll closed ${bots.length} bot(s)`);
+
+        // Spawn one fresh bot immediately; the rest spawn on demand.
+        try {
+            this.ensureSpawnIfNeeded();
+        } catch (e) {
+            this.err(`[pool] restartAll spawn failed: ${e?.stack || e}`);
+            throw e;
+        }
+
+        return { closed: bots.length };
+    }
 }
 
 module.exports = { BotManager, BotState };

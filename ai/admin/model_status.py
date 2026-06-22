@@ -13,7 +13,8 @@ from ..model_health import (
     is_model_health_refresh_running,
     trigger_model_health_refresh_async,
 )
-from .permissions import can_access_arm, can_access_model_status
+from ..token_budget import get_token_budget_rows
+from .permissions import can_access_model_status
 
 
 def _serialize_model_status_rows_for_api(rows):
@@ -27,6 +28,7 @@ def _serialize_model_status_rows_for_api(rows):
         serialized.append({
             "key": row.get("key") or "",
             "title": row.get("title") or "",
+            "capabilities": row.get("capabilities") or {"text": True, "vision": False, "reasoning": False},
             "is_active": bool(row.get("is_active")),
             "status_label": row.get("status_label") or "",
             "window_date": window_date.isoformat() if window_date else "",
@@ -59,6 +61,7 @@ def admin_model_status_view(request):
         "title": "AI: Состояние моделей",
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "model_status_rows": get_model_status_rows(),
+        "token_budget_rows": _serialize_token_budget_rows_for_api(get_token_budget_rows()),
         "refresh_message": refresh_message,
         "refresh_error": refresh_error,
         "refresh_in_progress": is_model_health_refresh_running(),
@@ -67,6 +70,31 @@ def admin_model_status_view(request):
         "arm_model_status_state_url": "/ai/admin/arm/models/state/",
     }
     return TemplateResponse(request, "admin/ai/model_status.html", context)
+
+
+def _budget_pct(spent: int, total: int) -> int:
+    """Clamped 0..100 progress percentage for a budget row."""
+    if total <= 0:
+        return 0
+    return min(100, round(spent * 100 / total))
+
+
+def _serialize_token_budget_rows_for_api(rows):
+    serialized = []
+    for row in rows:
+        issued_at = row.get("issued_at")
+        spent = int(row.get("spent") or 0)
+        total = int(row.get("total_limit") or 0)
+        serialized.append({
+            "label": row.get("label") or "",
+            "total_limit": total,
+            "issued_at": issued_at.isoformat() if issued_at else "",
+            "spent": spent,
+            "remaining": int(row.get("remaining") or 0),
+            "pct": _budget_pct(spent, total),
+            "notes": row.get("notes") or "",
+        })
+    return serialized
 
 
 def admin_model_status_state_view(request):
@@ -82,11 +110,12 @@ def admin_model_status_state_view(request):
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "refresh_in_progress": is_model_health_refresh_running(),
         "model_status_rows": _serialize_model_status_rows_for_api(rows),
+        "token_budget_rows": _serialize_token_budget_rows_for_api(get_token_budget_rows()),
     })
 
 
 def admin_model_status_refresh_view(request):
-    if not can_access_arm(request):
+    if not can_access_model_status(request):
         return HttpResponseForbidden("Access denied")
 
     if request.method != "POST":

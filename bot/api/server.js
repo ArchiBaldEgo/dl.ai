@@ -185,6 +185,18 @@ function createServer({ botManager, config, logger }) {
     }
   });
 
+  // "Автоподъём": close all bot workers and respawn a fresh one. Used by the
+  // Django health check when Web DeepSeek is detected as down.
+  app.post('/api/restart', async (req, res) => {
+    try {
+      const result = await botManager.restartAll();
+      res.json({ ok: true, ...result });
+    } catch (e) {
+      err(`[pool] /api/restart failed: ${e?.stack || e}`);
+      res.status(500).json({ ok: false, reason: e?.message || 'restart failed' });
+    }
+  });
+
   app.use((req, res) => {
     res.status(404).json({ ok: false, reason: 'not_found' });
   });

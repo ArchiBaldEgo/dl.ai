@@ -36,7 +36,7 @@ class WebSocketAuthService:
         if user is not None:
             if not await self._is_app_enabled():
                 return None, None
-            return user, getattr(consumer.scope, "user_info", None)
+            return user, consumer.scope.get("user_info")
 
         raw_session_id = consumer.scope.get("cookies", {}).get(self.session_cookie_name)
         if not raw_session_id:

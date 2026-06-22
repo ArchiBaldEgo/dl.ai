@@ -8,7 +8,7 @@ from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
 from django.http import HttpResponse
 
-from ..models import AIAppSettings, ProgrammingLanguage, Prompt, SharedPrompt, Topic
+from ..models import AIAppSettings, AIModelTokenBudget, ProgrammingLanguage, Prompt, SharedPrompt, Topic
 from ..querysets import prompt_queryset_for_user
 from .forms import PromptForm, SharedPromptForm
 from .permissions import can_access_logs, is_prompt_developer_user, is_staff_or_superuser
@@ -304,3 +304,12 @@ class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 
 class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
     """User management restricted to staff/superuser in the AI admin site."""
+
+
+class AIModelTokenBudgetAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    list_display = ("label", "total_limit", "issued_at", "notes")
+    list_display_links = ("label",)
+    search_fields = ("label", "notes")
+    fieldsets = (
+        (None, {"fields": ("label", "total_limit", "issued_at", "notes")}),
+    )

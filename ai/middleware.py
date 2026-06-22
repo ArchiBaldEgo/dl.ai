@@ -1,7 +1,6 @@
 import os
 from urllib.parse import unquote
 
-from dotenv import load_dotenv
 from django.conf import settings
 from django.contrib.auth import login
 from django.http import JsonResponse, HttpResponseRedirect
@@ -67,7 +66,6 @@ class CsrfSessionFallbackMiddleware:
 class ExternalAuthMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
-        load_dotenv()
         self.api_url = get_external_auth_api_url()
         self.session_cookie_name = get_external_session_cookie_name()
         self.redirect_url = os.getenv("EXTERNAL_AUTH_REDIRECT_URL", "https://dl.gsu.by")
@@ -156,7 +154,7 @@ class ExternalAuthMiddleware:
             else:
                 user_info = fetch_external_user_info(session_id, api_url=self.api_url)
                 self._store_cached_user_info(request, session_id, user_info)
-            logger.info(f"API response: {user_info}")
+            logger.debug("External user_info fetched (userId=%s)", (user_info or {}).get("userId"))
         except ExternalAuthUnauthorized:
             # DLSID is no longer valid — drop the local session and
             # bounce the user back to dl.gsu.by so they re-authenticate.

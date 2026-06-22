@@ -178,6 +178,8 @@ def admin_arm_find_error_view(request):
     from ..http_utils import safe_relative_url
     arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
     context = {
+        **ai_admin_site.each_context(request),
+        "title": "ARM: В чем ошибка",
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "arm_back_url": arm_back_url,
         "languages": languages,

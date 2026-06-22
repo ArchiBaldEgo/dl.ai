@@ -31,7 +31,9 @@
                 <select id="select">
                     {% if available_models %}
                         {% for model in available_models %}
-                            <option value="{{ model.key }}">{{ model.title }}</option>
+                            <option value="{{ model.key }}">
+                                {{ model.title }}{% if model.capabilities.reasoning %} · думающая{% endif %}
+                            </option>
                         {% endfor %}
                     {% else %}
                         <option value="" selected disabled>Сегодня нет доступных моделей</option>
