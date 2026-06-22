@@ -2,7 +2,32 @@
 
 {% block content %}
 <style>
-  .arm-wrap { max-width: 1280px; margin: 0 auto; color: var(--body-fg); }
+  .arm-wrap {
+    max-width: 1280px;
+    margin: 0 auto;
+    color: var(--body-fg);
+  }
+
+  .arm-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .arm-title-block h1 {
+    margin: 0 0 6px;
+    font-size: 28px;
+    line-height: 1.2;
+  }
+
+  .arm-subtitle {
+    color: var(--body-quiet-color);
+    margin: 0;
+    font-size: 14px;
+  }
+
   .arm-card {
     background: var(--body-bg);
     border: 1px solid var(--hairline-color);
@@ -11,91 +36,305 @@
     margin-bottom: 16px;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
   }
-  .arm-note { color: var(--body-quiet-color); font-size: 13px; margin: 6px 0 0; }
-  .arm-error { color: #b42318; font-weight: 600; }
-  .arm-success { color: #067647; font-weight: 600; }
-  .arm-progress.active { color: var(--body-quiet-color); margin: 8px 0; }
-  .arm-table { width: 100%; border-collapse: collapse; }
-  .arm-table th, .arm-table td { border-bottom: 1px solid var(--hairline-color); padding: 8px 10px; text-align: left; }
-  .arm-table th { font-size: 12px; text-transform: uppercase; color: var(--body-quiet-color); }
-  .arm-tasks td, .arm-tasks th { vertical-align: middle; }
-  .arm-models { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
-  .arm-models label { display: flex; gap: 6px; align-items: center; }
-  .badge { display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; }
-  .badge.solved { background: rgba(18, 183, 106, 0.16); color: #067647; }
-  .badge.failed { background: rgba(240, 68, 56, 0.14); color: #b42318; }
-  .badge.skipped { background: rgba(100, 116, 139, 0.16); color: var(--body-quiet-color); }
-  .arm-submit { margin-top: 14px; }
-  details.solution { border: 1px solid var(--hairline-color); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
-  details.solution > summary { cursor: pointer; font-weight: 600; }
-  details.solution pre { white-space: pre-wrap; word-wrap: break-word; background: var(--body-bg); border: 1px solid var(--hairline-color); border-radius: 6px; padding: 10px; margin-top: 8px; max-height: 420px; overflow: auto; }
-  .arm-summary-grid { display: flex; gap: 20px; flex-wrap: wrap; }
-  .arm-summary-grid div { font-size: 14px; }
-  .arm-summary-grid strong { font-size: 18px; display: block; }
+
+  .arm-section-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .arm-section-head h2 {
+    margin: 0;
+    font-size: 18px;
+    line-height: 1.3;
+  }
+
+  .arm-section-note {
+    margin: 4px 0 0;
+    color: var(--body-quiet-color);
+    font-size: 13px;
+  }
+
+  .arm-summary-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 4px;
+  }
+  .arm-summary-table th,
+  .arm-summary-table td {
+    border-bottom: 1px solid var(--hairline-color);
+    padding: 8px 10px;
+    text-align: left;
+  }
+  .arm-summary-table th {
+    font-weight: 600;
+    color: var(--body-quiet-color);
+  }
+  .arm-summary-table td.arm-col-num {
+    text-align: right;
+    white-space: nowrap;
+  }
+  .arm-tasks td,
+  .arm-tasks th {
+    vertical-align: middle;
+  }
+
+  .arm-models {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  .arm-model {
+    border: 1px solid var(--hairline-color);
+    border-radius: 6px;
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color));
+  }
+
+  .arm-error {
+    color: #b42318;
+    font-weight: 600;
+    margin-top: 10px;
+  }
+
+  .arm-success {
+    color: #067647;
+    font-weight: 600;
+    margin-top: 10px;
+  }
+
+  .arm-status-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .arm-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid #9ca3af;
+    border-top-color: #2563eb;
+    border-radius: 50%;
+    animation: arm-spin 0.8s linear infinite;
+    display: none;
+  }
+
+  .arm-status-line.active .arm-spinner {
+    display: inline-block;
+  }
+
+  @keyframes arm-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .arm-report {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .arm-report li {
+    border: 1px solid var(--hairline-color);
+    border-radius: 6px;
+    padding: 10px;
+    background: color-mix(in srgb, var(--body-bg) 94%, var(--hairline-color));
+    font-size: 14px;
+  }
+
+  .arm-badge {
+    border-radius: 999px;
+    padding: 3px 9px;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .arm-badge.solved { color: #166534; background: #dcfce7; }
+  .arm-badge.failed { color: #991b1b; background: #fee2e2; }
+  .arm-badge.skipped { color: #475467; background: #f1f5f9; }
+
+  .arm-result {
+    border: 1px solid var(--hairline-color);
+    border-radius: 6px;
+    padding: 0;
+    margin-bottom: 8px;
+    overflow: hidden;
+  }
+  .arm-result:nth-child(even) {
+    background: color-mix(in srgb, var(--body-bg) 95%, var(--hairline-color));
+  }
+  .arm-result.solved { border-left: 4px solid #16a34a; }
+  .arm-result.failed { border-left: 4px solid #dc2626; }
+  .arm-result.skipped { border-left: 4px solid #94a3b8; }
+
+  .arm-result summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 12px 14px;
+  }
+  .arm-result summary::-webkit-details-marker { display: none; }
+
+  .arm-result-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  .arm-result-title { font-weight: 700; }
+  .arm-meta {
+    color: var(--body-quiet-color);
+    font-size: 12px;
+    margin-top: 4px;
+  }
+
+  .arm-result-body {
+    border-top: 1px solid var(--hairline-color);
+    padding: 12px 14px 14px;
+  }
+  .arm-result-body pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    line-height: 1.45;
+    max-height: 420px;
+    overflow: auto;
+  }
+
+  .arm-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .arm-empty {
+    color: var(--body-quiet-color);
+    border: 1px dashed var(--hairline-color);
+    border-radius: 6px;
+    padding: 16px;
+  }
+
+  @media (max-width: 700px) {
+    .arm-header { flex-direction: column; }
+    .arm-result-top { align-items: flex-start; flex-direction: column; }
+  }
 </style>
 
 <div class="arm-wrap">
-  {% include "admin/ai/_ai_back_nav.html" %}
-  <h1>ARM: Пакетное решение</h1>
-  <p class="arm-note">Каждой доступной модели отправляется условие каждой выбранной задачи; ответ сравнивается с образцовым решением dl.gsu.by (get-solution). Проверка <strong>приближённая</strong> (сравнение текста, не запуск тестов) — семантически верное, но стилистически другое решение может быть отмечено как «не решено».</p>
-
-  <div class="arm-card">
-    <h2>Задачи</h2>
-    <p class="arm-note">Источник задач — таблица «Задачи (DL)» (<a href="/ai/admin/ai/task/">изменить</a>). Отметьте задачи или запустите по всем активным. Для получения образца требуется <code>task_id</code> и <code>file_extension</code> (заполните через «Обновить из DL» и поле расширения).</p>
-    <form id="armSolveForm" method="post" onsubmit="return false;">
-      {% csrf_token %}
-      <table class="arm-table arm-tasks">
-        <thead>
-          <tr>
-            <th><input type="checkbox" id="armSelectAllTasks" title="Выбрать все"></th>
-            <th>node id</th>
-            <th>Название</th>
-            <th>Тема</th>
-            <th>Язык</th>
-            <th>.ext</th>
-            <th>Готово</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for t in tasks %}
-            <tr>
-              <td><input type="checkbox" name="task_ids" value="{{ t.id }}" class="arm-task-check"></td>
-              <td>{{ t.node_id }}</td>
-              <td>{{ t.name|default:"—" }}</td>
-              <td>{{ t.topic_name|default:"—" }}</td>
-              <td>{{ t.prog_lang_name|default:"—" }}</td>
-              <td>{{ t.file_extension|default:"—" }}</td>
-              <td>
-                {% if t.has_statement and t.has_sample_inputs %}<span class="badge solved">ок</span>{% else %}<span class="badge skipped">нет образца</span>{% endif %}
-              </td>
-            </tr>
-          {% empty %}
-            <tr><td colspan="7"><p class="arm-note">Нет активных задач. Добавьте задачи в таблицу «Задачи (DL)».</p></td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
-
-      <h2 style="margin-top:18px;">Модели</h2>
-      <p class="arm-note">Без отметки запускается по всем доступным моделям (health-check).</p>
-      <div class="arm-models">
-        {% for m in model_options %}
-          <label><input type="checkbox" name="models" value="{{ m.key }}" class="arm-model-check"> {{ m.title }}</label>
-        {% empty %}
-          <p class="arm-note">Нет доступных моделей. Обновите «Состояние моделей».</p>
-        {% endfor %}
-      </div>
-
-      <input type="hidden" name="interface_language" value="Русский">
-      <div class="arm-submit">
-        <button type="submit" class="default" id="armSolveSubmit">Запустить пакет</button>
-      </div>
-    </form>
-    <div id="armSolveError" class="arm-error" style="margin-top:10px;"></div>
-    <div id="armSolveProgress" class="arm-progress"></div>
+  <div class="arm-header">
+    <div class="arm-title-block">
+      {% include "admin/ai/_ai_back_nav.html" %}
+      <h1>ARM: Пакетное решение</h1>
+      <p class="arm-subtitle">Каждой доступной модели отправляется условие каждой выбранной задачи; ответ сравнивается с образцовым решением dl.gsu.by (get-solution). Проверка <strong>приближённая</strong> (сравнение текста, не запуск тестов).</p>
+    </div>
   </div>
 
-  <div id="armSolveReport"></div>
-  <div id="armSolveResults"></div>
+  <form id="armSolveForm" method="post" onsubmit="return false;">
+    {% csrf_token %}
+    <section class="arm-card">
+      <div class="arm-section-head">
+        <div>
+          <h2>Задачи</h2>
+          <p class="arm-section-note">Источник — таблица «Задачи (DL)» (<a href="/ai/admin/ai/task/">изменить</a>). Отметьте задачи или запустите по всем активным. Для получения образца требуется <code>task_id</code> и <code>file_extension</code>.</p>
+        </div>
+      </div>
+
+      {% if tasks %}
+        <table class="arm-summary-table arm-tasks">
+          <thead>
+            <tr>
+              <th><input type="checkbox" id="armSelectAllTasks" title="Выбрать все"></th>
+              <th>node id</th>
+              <th>Название</th>
+              <th>Тема</th>
+              <th>Язык</th>
+              <th>.ext</th>
+              <th>Готово</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in tasks %}
+              <tr>
+                <td><input type="checkbox" name="task_ids" value="{{ t.id }}" class="arm-task-check"></td>
+                <td>{{ t.node_id }}</td>
+                <td>{{ t.name|default:"—" }}</td>
+                <td>{{ t.topic_name|default:"—" }}</td>
+                <td>{{ t.prog_lang_name|default:"—" }}</td>
+                <td>{{ t.file_extension|default:"—" }}</td>
+                <td>
+                  {% if t.has_statement and t.has_sample_inputs %}<span class="arm-badge solved">ок</span>{% else %}<span class="arm-badge skipped">нет образца</span>{% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="arm-empty">Нет активных задач. Добавьте задачи в таблицу «Задачи (DL)» и активируйте их.</div>
+      {% endif %}
+
+      <div class="arm-section-head" style="margin-top:18px;">
+        <div>
+          <h2>Модели</h2>
+          <p class="arm-section-note">Без отметки запускается по всем доступным моделям (health-check).</p>
+        </div>
+      </div>
+      {% if model_options %}
+        <div class="arm-models">
+          {% for m in model_options %}
+            <label class="arm-model">
+              <input type="checkbox" name="models" value="{{ m.key }}" class="arm-model-check"> {{ m.title }}
+            </label>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="arm-empty">Нет доступных моделей. Обновите «Состояние моделей».</div>
+      {% endif %}
+
+      <input type="hidden" name="interface_language" value="Русский">
+      <div id="armSolveError" class="arm-error"{% if not error_message %} style="display:none;"{% endif %}>{{ error_message }}</div>
+      <div id="armSolveProgress" class="arm-success arm-status-line" style="display:none;">
+        <span class="arm-spinner" aria-hidden="true"></span>
+        <span class="arm-progress-text"></span>
+      </div>
+      <div class="arm-actions">
+        <button type="submit" class="default" id="armSolveSubmit">Запустить пакет</button>
+      </div>
+    </section>
+  </form>
+
+  <section id="armSolveReportCard" class="arm-card"{% if not report %} style="display:none;"{% endif %}>
+    <div class="arm-section-head">
+      <div>
+        <h2>Сводка</h2>
+        <p class="arm-section-note">Результаты последнего запуска</p>
+      </div>
+    </div>
+    <ul id="armSolveReportList" class="arm-report"></ul>
+    <div id="armSolvePerModelWrap"></div>
+    <div id="armSolvePerTopicWrap" style="margin-top:16px;"></div>
+  </section>
+
+  <section id="armSolveResultsCard" class="arm-card"{% if not results %} style="display:none;"{% endif %}>
+    <div class="arm-section-head">
+      <div>
+        <h2>Ответы моделей</h2>
+        <p class="arm-section-note">Откройте строку, чтобы увидеть полный ответ</p>
+      </div>
+    </div>
+    <div id="armSolveResults"></div>
+  </section>
 </div>
 
 {{ active_run_snapshot|json_script:"arm-solve-initial-run" }}
@@ -106,7 +345,11 @@
     const submitBtn = document.getElementById('armSolveSubmit');
     const errorEl = document.getElementById('armSolveError');
     const progressEl = document.getElementById('armSolveProgress');
-    const reportEl = document.getElementById('armSolveReport');
+    const reportCard = document.getElementById('armSolveReportCard');
+    const reportList = document.getElementById('armSolveReportList');
+    const perModelWrap = document.getElementById('armSolvePerModelWrap');
+    const perTopicWrap = document.getElementById('armSolvePerTopicWrap');
+    const resultsCard = document.getElementById('armSolveResultsCard');
     const resultsEl = document.getElementById('armSolveResults');
     const selectAll = document.getElementById('armSelectAllTasks');
     const startUrl = '{{ arm_solve_start_url }}';
@@ -114,12 +357,6 @@
     let currentRunId = '';
     let pollTimer = null;
 
-    function setError(text) { errorEl.textContent = text || ''; }
-    function setProgress(text, active) {
-      progressEl.textContent = text || '';
-      progressEl.className = active ? 'arm-progress active' : 'arm-progress';
-    }
-    function setSubmitDisabled(disabled) { submitBtn.disabled = disabled; }
     function getCsrfToken() {
       const input = form.querySelector('input[name="csrfmiddlewaretoken"]');
       return (document.cookie.split('; ').find(function (r) { return r.startsWith('csrftoken='); }) || '').split('=').slice(1).join('=') || (input ? input.value : '');
@@ -129,51 +366,81 @@
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
     }
+    function setSubmitDisabled(disabled) {
+      submitBtn.disabled = disabled;
+      submitBtn.textContent = disabled ? 'Выполняется...' : 'Запустить пакет';
+    }
+    function setError(text) {
+      if (!text) { errorEl.textContent = ''; errorEl.style.display = 'none'; return; }
+      errorEl.textContent = text; errorEl.style.display = 'block';
+    }
+    function setProgress(text, active) {
+      const span = progressEl.querySelector('.arm-progress-text');
+      if (span) { span.textContent = text || ''; }
+      if (text) {
+        progressEl.style.display = 'flex';
+        progressEl.classList.toggle('active', !!active);
+      } else {
+        progressEl.style.display = 'none';
+        progressEl.classList.remove('active');
+      }
+    }
     function verdictBadge(v) {
       const labels = { solved: 'Решено', failed: 'Не решено', skipped: 'Пропущено' };
       const cls = v === 'solved' ? 'solved' : (v === 'failed' ? 'failed' : 'skipped');
-      return '<span class="badge ' + cls + '">' + escapeHtml(labels[v] || v) + '</span>';
+      return '<span class="arm-badge ' + cls + '">' + escapeHtml(labels[v] || v) + '</span>';
     }
-    function renderBucketTable(rows, labelHeader) {
-      if (!rows || !rows.length) { return '<p class="arm-note">Нет данных.</p>'; }
+    function renderBucketTable(rows, labelHeader, wrapEl) {
+      if (!rows || !rows.length) { wrapEl.innerHTML = ''; return; }
       const head = '<thead><tr><th>' + labelHeader + '</th><th>% решённых</th><th>Среднее время, сек</th><th>Токены</th><th>Решено / Всего</th></tr></thead>';
       const body = rows.map(function (r) {
         return '<tr><td>' + escapeHtml(r.label) + '</td>'
-          + '<td>' + escapeHtml(r.percent_solved) + '</td>'
-          + '<td>' + escapeHtml(r.avg_duration) + '</td>'
-          + '<td>' + escapeHtml(r.tokens) + '</td>'
-          + '<td>' + escapeHtml(r.solved) + ' / ' + escapeHtml(r.total) + '</td></tr>';
+          + '<td class="arm-col-num">' + escapeHtml(r.percent_solved) + '</td>'
+          + '<td class="arm-col-num">' + escapeHtml(r.avg_duration) + '</td>'
+          + '<td class="arm-col-num">' + escapeHtml(r.tokens) + '</td>'
+          + '<td class="arm-col-num">' + escapeHtml(r.solved) + ' / ' + escapeHtml(r.total) + '</td></tr>';
       }).join('');
-      return '<table class="arm-table">' + head + '<tbody>' + body + '</tbody></table>';
+      wrapEl.innerHTML = '<table class="arm-summary-table">' + head + '<tbody>' + body + '</tbody></table>';
     }
     function renderReport(report) {
-      if (!report) { reportEl.innerHTML = ''; return; }
-      const summary = '<div class="arm-summary-grid">'
-        + '<div>Всего пар<strong>' + escapeHtml(report.total_pairs) + '</strong></div>'
-        + '<div>Решено<strong>' + escapeHtml(report.solved) + '</strong></div>'
-        + '<div>Не решено<strong>' + escapeHtml(report.failed) + '</strong></div>'
-        + '<div>Пропущено<strong>' + escapeHtml(report.skipped) + '</strong></div>'
-        + '<div>Токенов<strong>' + escapeHtml(report.tokens_total) + '</strong></div>'
-        + '</div>';
-      reportEl.innerHTML = ''
-        + '<div class="arm-card"><h2>Итог по моделям</h2>' + renderBucketTable(report.per_model, 'Модель') + '</div>'
-        + '<div class="arm-card"><h2>Итог по темам</h2>' + renderBucketTable(report.per_topic, 'Тема') + '</div>'
-        + '<div class="arm-card"><h2>Сводка</h2>' + summary + '</div>';
+      if (!report) { reportCard.style.display = 'none'; reportList.innerHTML = ''; perModelWrap.innerHTML = ''; perTopicWrap.innerHTML = ''; return; }
+      reportList.innerHTML = [
+        'Всего пар: ' + escapeHtml(report.total_pairs),
+        'Решено: ' + escapeHtml(report.solved),
+        'Не решено: ' + escapeHtml(report.failed),
+        'Пропущено: ' + escapeHtml(report.skipped),
+        'Токенов: ' + escapeHtml(report.tokens_total),
+      ].map(function (line) { return '<li>' + line + '</li>'; }).join('');
+      perModelWrap.innerHTML = '<h3>Итог по моделям</h3><p class="arm-section-note">Сортировка: процент решённых ↓, среднее время ответа ↑</p>';
+      renderBucketTable(report.per_model, 'Модель', perModelWrap);
+      perTopicWrap.innerHTML = '<h3>Итог по темам</h3>';
+      renderBucketTable(report.per_topic, 'Тема', perTopicWrap);
+      reportCard.style.display = 'block';
     }
     function renderResults(results) {
-      if (!results || !results.length) { resultsEl.innerHTML = ''; return; }
-      const html = results.map(function (r) {
-        const head = verdictBadge(r.verdict) + ' '
-          + '#' + escapeHtml(r.task_node_id) + ' ' + escapeHtml(r.task_name || '')
-          + ' — ' + escapeHtml(r.model_title)
-          + ' | ' + escapeHtml(r.duration) + ' сек | ' + escapeHtml(r.tokens) + ' ток.';
-        // raw_response is rendered inside <pre> via textContent (set below) to
-        // guarantee no HTML injection — never innerHTML.
-        return '<details class="solution"><summary>' + head + '</summary><pre class="raw"></pre></details>';
-      }).join('');
-      resultsEl.innerHTML = '<div class="arm-card"><h2>Ответы моделей</h2>' + html + '</div>';
-      const pres = resultsEl.querySelectorAll('details.solution pre.raw');
-      results.forEach(function (r, i) { if (pres[i]) { pres[i].textContent = r.raw_response || r.short_response || ''; } });
+      if (!results || !results.length) { resultsEl.innerHTML = ''; resultsCard.style.display = 'none'; return; }
+      resultsEl.innerHTML = '';
+      results.forEach(function (r) {
+        const cls = r.verdict === 'solved' ? 'solved' : (r.verdict === 'failed' ? 'failed' : 'skipped');
+        const card = document.createElement('details');
+        card.className = 'arm-result ' + cls;
+        // Summary markup is built from static template + escaped dynamic values;
+        // raw_response is injected below via textContent (never innerHTML).
+        card.innerHTML = [
+          '<summary>',
+          '<div class="arm-result-top">',
+          '<span class="arm-result-title">#' + escapeHtml(r.task_node_id) + ' ' + escapeHtml(r.task_name || '') + ' — ' + escapeHtml(r.model_title || '') + '</span>',
+          verdictBadge(r.verdict),
+          '</div>',
+          '<div class="arm-meta">' + escapeHtml(r.duration) + ' сек | ' + escapeHtml(r.tokens) + ' ток.</div>',
+          '</summary>',
+          '<div class="arm-result-body"><pre></pre></div>',
+        ].join('');
+        const pre = card.querySelector('pre');
+        if (pre) { pre.textContent = r.raw_response || r.short_response || ''; }
+        resultsEl.appendChild(card);
+      });
+      resultsCard.style.display = 'block';
     }
     function applyRunSnapshot(run) {
       if (!run) { return; }
@@ -184,6 +451,7 @@
         const total = run.total_pairs != null ? run.total_pairs : 0;
         const cur = run.current_task_name ? (' · ' + run.current_task_name + ' / ' + (run.current_model_title || '')) : '';
         setProgress('Выполняется: ' + done + ' / ' + total + cur, true);
+        setSubmitDisabled(true);
       } else if (run.status === 'completed') {
         setProgress('Завершено.', false);
         setSubmitDisabled(false);
@@ -243,10 +511,14 @@
         setSubmitDisabled(false);
       }
     });
+    // Surface a server-rendered error (e.g. "процесс не найден") without the
+    // now-removed |tojson filter — read the auto-escaped text content directly.
+    const serverError = errorEl ? errorEl.textContent.trim() : '';
+    if (serverError) { setError(serverError); }
+
     const initialEl = document.getElementById('arm-solve-initial-run');
     let initialRun = null;
     try { initialRun = JSON.parse(initialEl ? initialEl.textContent : '{}') || {}; } catch (e) { initialRun = {}; }
-    {% if error_message %}setError({{ error_message|tojson }});{% endif %}
     if (initialRun && initialRun.run_id) {
       currentRunId = initialRun.run_id;
       applyRunSnapshot(initialRun);

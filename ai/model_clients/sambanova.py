@@ -35,6 +35,9 @@ from .exceptions import (
 from .history import conversation_history
 
 
+logger = logging.getLogger(__name__)
+
+
 def _append_history(user_id, message: str, response_text: str) -> None:
     conversation_history.add_exchange(user_id, message, response_text)
 

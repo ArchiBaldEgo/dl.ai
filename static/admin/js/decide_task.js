@@ -483,7 +483,8 @@
                     language: language,
                     progLng: progLng,
                     topic: topic,
-                    preprompt: preprompt
+                    preprompt: preprompt,
+                    nodeId: window.AI_TASK_NODE_ID || ''
                 }));
 
                 setRequestLock(true);
@@ -726,7 +727,8 @@
                     language: language,
                     progLng: progLng,
                     topic: topic,
-                    preprompt: preprompt
+                    preprompt: preprompt,
+                    nodeId: window.AI_TASK_NODE_ID || ''
                 }));
                 setRequestLock(true);
                 notEnter = true;

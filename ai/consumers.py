@@ -1,8 +1,10 @@
 """WebSocket consumer for AI chat."""
 
+import asyncio
 import json
 import logging
 
+from asgiref.sync import sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 from django.utils import timezone
 
@@ -16,6 +18,7 @@ from .services import (
     PromptResolver,
     WebSocketAuthService,
     conversation_history,
+    ensure_task,
     resolve_external_account,
 )
 from .throttling import rate_limiter
@@ -156,6 +159,18 @@ class MyConsumer(AsyncWebsocketConsumer):
             return True
         return rate_limiter.is_allowed_ws(self.user_id)
 
+    @staticmethod
+    def _parse_node_id(raw) -> int | None:
+        """Coerce a WS message nodeId into a positive int, or None."""
+        try:
+            text = str(raw or "").strip()
+            if not text:
+                return None
+            value = int(text)
+            return value if value > 0 else None
+        except (ValueError, TypeError):
+            return None
+
     async def _handle_message(self, data: dict):
         message_type = str(data.get("type", "1"))
         language = data.get("language", "Russian")
@@ -164,6 +179,19 @@ class MyConsumer(AsyncWebsocketConsumer):
         prog_lng_id = data.get("progLng") if message_type in ("2", "3") else None
         topic_id = data.get("topic") if message_type in ("2", "3") else None
         prompt_id = data.get("preprompt")
+
+        # Auto-register a DL Task row when a solve request carries a nodeId
+        # (the /ai/solve-problem/ page). Fire-and-forget — never blocks the chat
+        # and never raises into the message flow.
+        node_id = self._parse_node_id(data.get("nodeId"))
+        if node_id:
+            session_id = self.auth_service.get_session_id(self.scope)
+            asyncio.create_task(sync_to_async(ensure_task)(
+                node_id,
+                programming_language_id=int(prog_lng_id) if prog_lng_id else None,
+                topic_id=int(topic_id) if topic_id else None,
+                session_id=session_id,
+            ))
 
         prog_lng_name, topic_name, prompt_name = await self.prompt_resolver.resolve_context_names(
             prog_lng_id, topic_id, prompt_id, language

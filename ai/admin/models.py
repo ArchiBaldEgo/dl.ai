@@ -16,6 +16,7 @@ from ..dl_api_client import (
     DLApiError,
     fetch_task_info,
 )
+from ..services.task_registry import apply_dl_task_info
 
 User = get_user_model()
 
@@ -364,9 +365,7 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                     level="WARNING",
                 )
                 continue
-            task.task_id = data.get("taskId") or task.task_id
-            task.name = (data.get("name") or "")[:512] or task.name
-            task.statement = data.get("statement") or task.statement
+            apply_dl_task_info(task, data)
             task.save(update_fields=["task_id", "name", "statement"])
             updated += 1
         self.message_user(request, f"Обновлено из DL: {updated}, ошибок: {failed}.")

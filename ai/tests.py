@@ -1902,3 +1902,103 @@ class BatchRunnerIntegrationTests(TestCase):
         self.assertEqual(snapshot["run_type"], "batch")
         self.assertEqual(snapshot["report"]["per_model"][0]["solved"], 2)
         self.assertEqual(snapshot["report"]["per_model"][0]["total"], 2)
+
+
+class SambanovaLoggerTests(SimpleTestCase):
+    """sambanova.py must define a module-level logger — its absence made every
+    SambaNova model FAIL health-check with `name 'logger' is not defined`."""
+
+    def test_module_defines_logger(self):
+        import logging as _logging
+        from ai.model_clients import sambanova
+        self.assertTrue(hasattr(sambanova, "logger"))
+        self.assertIsInstance(sambanova.logger, _logging.Logger)
+        # The functions referenced by the registry must import cleanly.
+        self.assertTrue(callable(sambanova.ask_DeepSeek_V3_2_async))
+        self.assertTrue(callable(sambanova.ask_Gpt_oss_120b_async))
+
+
+class TaskRegistryTests(TestCase):
+    """Auto-registration of DL tasks solved via the chat page."""
+
+    def setUp(self):
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.other_lang = ProgrammingLanguage.objects.create(language_name="Python")
+        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+
+    def test_apply_dl_task_info_sets_truthy_fields_only(self):
+        from ai.models import Task
+        from ai.services import apply_dl_task_info
+        t = Task.objects.create(node_id=1, name="old", statement="old stmt", task_id=11)
+        apply_dl_task_info(t, {"taskId": 22, "name": "Новое название", "statement": "Новое условие"})
+        self.assertEqual(t.task_id, 22)
+        self.assertEqual(t.name, "Новое название")
+        self.assertEqual(t.statement, "Новое условие")
+        # Empty values must not clobber existing fields.
+        apply_dl_task_info(t, {"taskId": None, "name": "", "statement": ""})
+        self.assertEqual(t.task_id, 22)
+        self.assertEqual(t.name, "Новое название")
+        self.assertEqual(t.statement, "Новое условие")
+
+    def test_ensure_task_creates_inactive_and_fills_from_dl(self):
+        from ai.models import Task
+        from ai.services import ensure_task
+        dl_data = {"taskId": 777, "name": "Сумма", "statement": "Даны a и b, верните a+b"}
+        with patch("ai.services.task_registry.fetch_task_info", return_value=dl_data):
+            task = ensure_task(
+                42, programming_language_id=self.lang.id, topic_id=self.topic.id, session_id="DLSID-1"
+            )
+        self.assertIsNotNone(task)
+        self.assertEqual(task.node_id, 42)
+        self.assertFalse(task.active)  # auto-registered tasks are inactive until operator readies them
+        self.assertEqual(task.programming_language_id, self.lang.id)
+        self.assertEqual(task.topic_id, self.topic.id)
+        self.assertEqual(task.task_id, 777)
+        self.assertEqual(task.name, "Сумма")
+        self.assertEqual(task.statement, "Даны a и b, верните a+b")
+        self.assertEqual(Task.objects.filter(node_id=42).count(), 1)
+
+    def test_ensure_task_without_session_creates_without_dl(self):
+        from ai.services import ensure_task
+        with patch("ai.services.task_registry.fetch_task_info") as mocked:
+            task = ensure_task(7, programming_language_id=self.lang.id, topic_id=self.topic.id, session_id=None)
+        self.assertIsNotNone(task)
+        self.assertFalse(task.active)
+        self.assertEqual(task.name, "")
+        self.assertEqual(task.statement, "")
+        self.assertIsNone(task.task_id)
+        mocked.assert_not_called()  # no DL fetch without a session
+
+    def test_ensure_task_existing_updates_assignments_no_dl(self):
+        from ai.models import Task
+        from ai.services import ensure_task
+        Task.objects.create(
+            node_id=9, name="exists", statement="stmt", task_id=5,
+            programming_language=self.lang, topic=self.topic, file_extension=".pas", active=True,
+        )
+        with patch("ai.services.task_registry.fetch_task_info") as mocked:
+            task = ensure_task(
+                9, programming_language_id=self.other_lang.id, topic_id=None, session_id="DLSID"
+            )
+        self.assertEqual(task.node_id, 9)
+        # Local assignments refreshed to the latest solve request; active unchanged.
+        self.assertEqual(task.programming_language_id, self.other_lang.id)
+        self.assertTrue(task.active)
+        # No DL fetch for an already-existing task.
+        mocked.assert_not_called()
+
+    def test_ensure_task_swallows_dl_errors(self):
+        from ai.services import ensure_task
+        from ai.dl_api_client import DLApiError
+        with patch("ai.services.task_registry.fetch_task_info", side_effect=DLApiError("boom")):
+            task = ensure_task(100, programming_language_id=self.lang.id, topic_id=None, session_id="DLSID")
+        # Task still created; DL fields just left blank. No exception propagated.
+        self.assertIsNotNone(task)
+        self.assertEqual(task.node_id, 100)
+        self.assertEqual(task.name, "")
+
+    def test_ensure_task_never_raises(self):
+        from ai.services import ensure_task
+        with patch("ai.models.Task.objects.get_or_create", side_effect=RuntimeError("db down")):
+            result = ensure_task(200, session_id="DLSID")
+        self.assertIsNone(result)  # registration must never break the chat

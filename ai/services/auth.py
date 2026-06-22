@@ -67,6 +67,17 @@ class WebSocketAuthService:
 
         return unquote(raw)
 
+    def get_session_id(self, scope: dict) -> str | None:
+        """Return the decoded DL session id (DLSID) from the WS scope cookies.
+
+        Used by the consumer to forward the caller's session to DL API helpers
+        (e.g. task auto-registration) when no Django user session is available.
+        """
+        raw = scope.get("cookies", {}).get(self.session_cookie_name)
+        if not raw:
+            return None
+        return self._decode_session_id(raw)
+
     async def _resolve_user_info(self, scope: dict, session_id: str) -> dict | None:
         session = scope.get("session")
         if session is not None:
