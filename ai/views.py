@@ -1,5 +1,6 @@
 import json
 import os
+import logging
 
 import tempfile
 from django.contrib.auth import login
@@ -14,7 +15,7 @@ from functools import wraps
 from django.views.decorators.csrf import csrf_exempt       
 from django.views.decorators.http import require_http_methods  
 from django.conf import settings
-from .model_health import get_available_model_options
+from .model_health import get_available_model_options, trigger_model_health_refresh_async
 from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
 from .auth_backends import (
     ADMIN_EXTERNAL_AUTH_BACKEND,
@@ -47,6 +48,8 @@ from .serializers import (
 )
 
 _WEB_PRIORITY_MODELS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
+
+logger = logging.getLogger(__name__)
 
 
 def health_view(request):
@@ -113,6 +116,18 @@ def _render_ai_page(request, template_name, extra_context=None):
     if not _is_ai_app_enabled():
         return HttpResponseNotFound("AI app is disabled")
     available_models = get_available_model_options()
+    # Self-heal: an empty list means the current 04:00 MSK window was scanned
+    # while the upstream key/balance was broken and every model got marked
+    # down. Fixing the key does not auto re-check (the scheduler only runs at
+    # 04:00 MSK and force=False bails on a COMPLETED window), so without this
+    # the chat page stays empty until the next daily window or a manual admin
+    # refresh. Kick a non-blocking forced sweep; its in-process + DB guards
+    # prevent concurrent runs, so repeated page loads don't stack sweeps.
+    if not available_models:
+        try:
+            trigger_model_health_refresh_async()
+        except Exception:
+            logger.exception("Failed to trigger model health self-heal refresh")
     if available_models:
         priority_map = {item["key"]: item for item in available_models}
         ordered_priority = [

@@ -11,8 +11,28 @@ from django.http import JsonResponse
 logger = logging.getLogger(__name__)
 
 DEFAULT_WS_LIMIT = 120
-DEFAULT_HTTP_LIMIT = 60
+DEFAULT_HTTP_LIMIT = 200
+DEFAULT_POLL_LIMIT = 300
 DEFAULT_WINDOW = 60
+
+# Read-only GET status endpoints that pages poll in the background (model-status
+# state every ~8s, ARM run progress every 1.5s while a run is active). These are
+# cheap, auth-gated, and harmless — they must NOT count against the per-user
+# action budget, otherwise a user watching an ARM run (~40 polls/min) plus a few
+# real actions blows past the limit and gets 429 on everything. They get their
+# own generous counter so there is still a bound.
+_POLL_PATHS = frozenset(
+    {
+        "/ai/admin/arm/models/state/",
+        "/ai/admin/arm/find-error/status/",
+    }
+)
+
+
+def _is_poll_request(request) -> bool:
+    """True for read-only background polling endpoints (excluded from the main
+    per-user HTTP counter; counted in a separate high-limit poll counter)."""
+    return request.method == "GET" and request.path in _POLL_PATHS
 
 
 def _get_limits():
@@ -30,10 +50,11 @@ def _identity_key(prefix: str, user_id: str) -> str:
 class RateLimiter:
     """Simple per-user sliding-window rate limiter backed by Django cache."""
 
-    def __init__(self, ws_limit=None, http_limit=None, window_seconds=None):
+    def __init__(self, ws_limit=None, http_limit=None, window_seconds=None, poll_limit=None):
         self._ws_limit = ws_limit
         self._http_limit = http_limit
         self._window_seconds = window_seconds
+        self._poll_limit = poll_limit
 
     @property
     def ws_limit(self) -> int:
@@ -46,6 +67,12 @@ class RateLimiter:
         if self._http_limit is None:
             self._http_limit = _get_limits()[1]
         return self._http_limit
+
+    @property
+    def poll_limit(self) -> int:
+        if self._poll_limit is None:
+            self._poll_limit = getattr(settings, "AI_HTTP_POLL_RATE_LIMIT", DEFAULT_POLL_LIMIT)
+        return self._poll_limit
 
     @property
     def window_seconds(self) -> int:
@@ -73,6 +100,9 @@ class RateLimiter:
 
     def is_allowed_http(self, user_id: str) -> bool:
         return self._check("http", user_id, self.http_limit)
+
+    def is_allowed_poll(self, user_id: str) -> bool:
+        return self._check("poll", user_id, self.poll_limit)
 
 
 # Global instance used by consumers and middleware.
@@ -148,7 +178,18 @@ class RateLimitMiddleware:
             return self.get_response(request)
 
         user_id = get_request_user_id(request)
-        if user_id and not rate_limiter.is_allowed_http(user_id):
+        if not user_id:
+            return self.get_response(request)
+
+        # Read-only polling endpoints get their own high-limit counter so they
+        # don't starve the per-user action budget (see _POLL_PATHS).
+        if _is_poll_request(request):
+            if not rate_limiter.is_allowed_poll(user_id):
+                logger.warning(f"HTTP poll rate limit exceeded for user {user_id}")
+                return _rate_limit_response(request)
+            return self.get_response(request)
+
+        if not rate_limiter.is_allowed_http(user_id):
             logger.warning(f"HTTP rate limit exceeded for user {user_id}")
             return _rate_limit_response(request)
 

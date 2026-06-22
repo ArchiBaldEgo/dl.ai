@@ -6,6 +6,14 @@ from ..models import ProgrammingLanguage, Prompt, SharedPrompt, Topic
 
 
 class PromptForm(forms.ModelForm):
+    # NOTE: ``programming_language`` is NOT a field on the Prompt model — a
+    # Prompt only links to a Topic, which in turn carries the language. This
+    # declared form field exists so the admin change form can offer a language
+    # <select> that drives the topic <select> (see prompt_language_topic.js).
+    # It MUST stay declared here: PromptAdmin.get_fieldsets lists it, and for
+    # read-only users PromptAdmin.programming_language (the display method in
+    # models.py) renders it. Remove either side and the readonly/fieldset
+    # rendering raises FieldError / "Unable to lookup …".
     programming_language = forms.ModelChoiceField(
         queryset=ProgrammingLanguage.objects.none(),
         required=False,
@@ -50,7 +58,6 @@ class PromptForm(forms.ModelForm):
         self.fields["programming_language"].widget.attrs["data-topics-url"] = "/ai/api/topics/"
 
         selected_language_id = self._resolve_selected_language_id()
-        self.fields["topic"].queryset = Topic.objects.none()
         if selected_language_id:
             self.fields["topic"].queryset = Topic.objects.filter(
                 programming_language_id=selected_language_id
@@ -58,7 +65,12 @@ class PromptForm(forms.ModelForm):
         elif self.instance.pk and self.instance.topic_id:
             self.fields["topic"].queryset = Topic.objects.filter(pk=self.instance.topic_id)
         else:
-            self.fields["topic"].widget.attrs["disabled"] = "disabled"
+            # No language chosen yet. Offer every topic (not none()+disabled)
+            # so the field stays usable without JS: prompt_language_topic.js
+            # filters client-side on language change, and clean() validates
+            # topic<->language consistency server-side. Hard-disabling here
+            # made topic assignment impossible if the JS failed to load.
+            self.fields["topic"].queryset = Topic.objects.all().order_by("topic_name")
 
         if not self.is_bound and selected_language_id:
             self.fields["programming_language"].initial = selected_language_id
@@ -86,8 +98,16 @@ class PromptForm(forms.ModelForm):
         topic = cleaned_data.get("topic")
         programming_language = cleaned_data.get("programming_language")
 
+        # A topic always belongs to exactly one programming language, so if
+        # the user picked a topic but left the language <select> empty (e.g.
+        # the cascade JS did not load / did not set it), infer the language
+        # from the topic instead of rejecting a semantically valid submission.
         if topic and not programming_language:
-            self.add_error("programming_language", "Выберите язык программирования.")
+            if topic.programming_language_id:
+                cleaned_data["programming_language"] = topic.programming_language
+                programming_language = topic.programming_language
+            else:
+                self.add_error("programming_language", "Выберите язык программирования.")
         if topic and programming_language and topic.programming_language_id != programming_language.id:
             self.add_error("topic", "Тема не относится к выбранному языку программирования.")
         return cleaned_data

@@ -742,6 +742,29 @@ class ProblemDataApiUiLanguageTests(TestCase):
         self.assertEqual(data_ru["topics"][0]["name"], "Русская тема")
         self.assertEqual(data_ru["prompts"][0]["name"], "Русский промпт")
 
+    def test_prompt_name_falls_back_to_russian_when_en_missing(self):
+        """When an admin has not filled prompt_name_en, the English UI must
+        fall back to the Russian/base name (not disappear). This is the data
+        situation behind 'preprompt names don't translate to English' — the
+        localization pipeline is correct; the English names simply need to be
+        entered in the admin (prompt_name_en field)."""
+        pl = ProgrammingLanguage.objects.create(language_name="Python")
+        topic = Topic.objects.create(
+            topic_name="Base topic",
+            topic_name_en="English topic",
+            programming_language=pl,
+        )
+        Prompt.objects.create(
+            topic=topic,
+            prompt_name="Русский оригинал",
+            prompt_name_en="",  # no English translation entered
+            prompt_text="text",
+        )
+
+        data_en = json.loads(get_problem_data(self._request("English")).content)
+        # English name missing -> falls back to the base (Russian) name.
+        self.assertEqual(data_en["prompts"][0]["name"], "Русский оригинал")
+
 
 class AIRequestLogModelTests(TestCase):
     def setUp(self):
@@ -1026,6 +1049,77 @@ class RateLimiterTests(SimpleTestCase):
             sample_view(request)
             response = sample_view(request)
         self.assertEqual(response.status_code, 429)
+
+    def test_poll_counter_is_separate_from_http_counter(self):
+        from django.core.cache import cache
+        from ai.throttling import RateLimiter
+
+        cache.clear()
+        # http_limit=2, poll_limit=5 — poll requests must not consume the
+        # action budget and get their own (higher) bound.
+        limiter = RateLimiter(ws_limit=2, http_limit=2, window_seconds=60, poll_limit=5)
+        # Saturate the poll counter beyond the http limit.
+        for _ in range(3):
+            self.assertTrue(limiter.is_allowed_poll("user-1"))
+        # The http (action) counter is untouched: still 2 actions allowed.
+        self.assertTrue(limiter.is_allowed_http("user-1"))
+        self.assertTrue(limiter.is_allowed_http("user-1"))
+        self.assertFalse(limiter.is_allowed_http("user-1"))
+
+    def test_poll_request_path_detected(self):
+        from ai.throttling import _is_poll_request
+
+        def mk(method, path):
+            req = RequestFactory().get(path) if method == "GET" else RequestFactory().post(path)
+            req.method = method
+            return req
+
+        self.assertTrue(_is_poll_request(mk("GET", "/ai/admin/arm/models/state/")))
+        self.assertTrue(_is_poll_request(mk("GET", "/ai/admin/arm/find-error/status/")))
+        # Non-poll paths and non-GET methods are not poll requests.
+        self.assertFalse(_is_poll_request(mk("GET", "/ai/api/problem-data/")))
+        self.assertFalse(_is_poll_request(mk("POST", "/ai/admin/arm/find-error/status/")))
+
+
+class RateLimitMiddlewarePollTests(SimpleTestCase):
+    """The middleware must route read-only polling endpoints through the
+    separate poll counter so background polling never 429s real actions."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def _request(self, path, method="GET"):
+        request = RequestFactory().get(path) if method == "GET" else RequestFactory().post(path)
+        request.method = method
+        request.user = SimpleNamespace(is_authenticated=True, pk=1)
+        request.user_info = {"userId": "1"}
+        request.COOKIES = {"userId": "1"}
+        request.headers = {"Accept": "application/json"}
+        return request
+
+    def test_poll_requests_do_not_consume_http_action_budget(self):
+        from ai.throttling import RateLimitMiddleware, RateLimiter
+
+        custom_limiter = RateLimiter(ws_limit=2, http_limit=2, window_seconds=60, poll_limit=10)
+        calls = {"n": 0}
+
+        def get_response(request):
+            calls["n"] += 1
+            return HttpResponse("ok")
+
+        middleware = RateLimitMiddleware(get_response)
+        middleware.enabled = True
+        with patch("ai.throttling.rate_limiter", custom_limiter):
+            # 5 poll requests — all pass (poll_limit=10) and don't touch http.
+            for _ in range(5):
+                self.assertEqual(middleware(self._request("/ai/admin/arm/models/state/")).status_code, 200)
+            # Action budget (http_limit=2) is still fully available.
+            self.assertEqual(middleware(self._request("/ai/api/problem-data/")).status_code, 200)
+            self.assertEqual(middleware(self._request("/ai/api/problem-data/")).status_code, 200)
+            # 3rd action now 429s — proves polls did not consume it.
+            self.assertEqual(middleware(self._request("/ai/api/problem-data/")).status_code, 429)
+        self.assertEqual(calls["n"], 7)
 
 
 class UserIdentityForLogTests(TestCase):
@@ -1386,3 +1480,228 @@ class ModelHealthGuardTests(TestCase):
                 patch("ai.model_health._save_availability", side_effect=Exception("DB down")):
             # Must not raise.
             _maybe_autorecover_web_deepseek({}, window)
+
+
+class HealthClassifierTests(SimpleTestCase):
+    """Robust healthcheck classifier: a correct answer wins unless the reply is
+    a definite API/client error. Loose stems (недоступ/подключени/ошибка) no
+    longer flip a healthy '2' to down."""
+
+    def _healthy(self, text):
+        from ai.model_health import _is_healthy_response
+        return _is_healthy_response(text)
+
+    def test_plain_digit_is_healthy(self):
+        self.assertTrue(self._healthy("2"))
+        self.assertTrue(self._healthy(" 2 "))
+
+    def test_correct_answer_with_loose_marker_word_still_healthy(self):
+        # Regression: previously "недоступ" stem marked this down even though
+        # the model answered correctly.
+        self.assertTrue(self._healthy("Никаких ошибок нет, ответ: 2"))
+        self.assertTrue(self._healthy("Подключение установлено. 2"))
+
+    def test_word_form_with_punctuation_is_healthy(self):
+        self.assertTrue(self._healthy("два."))
+        self.assertTrue(self._healthy("two."))
+        self.assertTrue(self._healthy("Two"))
+
+    def test_wrong_digit_is_unhealthy(self):
+        self.assertFalse(self._healthy("12"))
+        self.assertFalse(self._healthy("3"))
+
+    def test_empty_is_unhealthy(self):
+        self.assertFalse(self._healthy(""))
+        self.assertFalse(self._healthy(None))
+
+    def test_definite_api_error_is_unhealthy_even_with_digit_nearby(self):
+        self.assertFalse(self._healthy("Ошибка API (код 402): закончились кредиты"))
+        # "2 минуты" must not rescue a rate-limit reply.
+        self.assertFalse(self._healthy("rate limit, подождите 2 минуты"))
+        self.assertFalse(self._healthy("Бот не авторизован"))
+        self.assertFalse(self._healthy("Таймаут при подключении к серверу. Попробуйте позже."))
+
+
+class HealthCheckTransientTests(SimpleTestCase):
+    """Retry-decision helpers (no DB needed): transient detection + invoke."""
+
+    def test_timeout_is_transient(self):
+        from ai.model_health import _looks_transient
+        self.assertTrue(_looks_transient("Таймаут при подключении к серверу. Попробуйте позже."))
+        self.assertTrue(_looks_transient("Бот инициализируется слишком долго."))
+        self.assertTrue(_looks_transient(""))
+
+    def test_definite_api_error_is_not_transient(self):
+        from ai.model_health import _looks_transient
+        self.assertFalse(_looks_transient("Ошибка API (код 402): закончились кредиты"))
+        self.assertFalse(_looks_transient("Бот не авторизован"))
+
+    def test_exception_is_transient(self):
+        from ai.model_health import _looks_transient
+        self.assertTrue(_looks_transient("", exc=Exception("boom")))
+
+    def test_invoke_returns_text_and_no_exc_on_success(self):
+        from datetime import date
+        from ai.model_health import _invoke_healthcheck
+
+        async def handler(prompt, conv_id):
+            return ("2", 1)
+
+        text, elapsed, exc = _invoke_healthcheck(handler, date(2026, 1, 1), "K")
+        self.assertEqual(text, "2")
+        self.assertIsNone(exc)
+        self.assertGreaterEqual(elapsed, 0)
+
+    def test_invoke_returns_exc_on_failure(self):
+        from datetime import date
+        from ai.model_health import _invoke_healthcheck
+
+        async def handler(prompt, conv_id):
+            raise RuntimeError("network down")
+
+        text, elapsed, exc = _invoke_healthcheck(handler, date(2026, 1, 1), "K")
+        self.assertEqual(text, "")
+        self.assertIsInstance(exc, RuntimeError)
+
+
+class HealthCheckRetryTests(TestCase):
+    """One retry on transient failure so a cold-start timeout on a now-working
+    model is not persisted as down. Definite API errors are not retried."""
+
+    def _window(self):
+        from ai.model_health import get_health_window_date
+        return get_health_window_date()
+
+    def test_retries_once_on_transient_timeout_then_marks_up(self):
+        from ai.model_health import _check_one_model
+
+        state = {"n": 0}
+
+        async def handler(prompt, conv_id):
+            state["n"] += 1
+            if state["n"] == 1:
+                return ("Таймаут при подключении к серверу. Попробуйте позже.", "0")
+            return ("2", 1)
+
+        handler_info = {"handler": handler, "title": "Test"}
+        with patch("ai.model_health.time.sleep"):
+            result = _check_one_model("TestKey", "Test", handler_info, self._window())
+        self.assertTrue(result)
+        self.assertEqual(state["n"], 2)
+
+    def test_does_not_retry_on_definite_api_error(self):
+        from ai.model_health import _check_one_model
+
+        state = {"n": 0}
+
+        async def handler(prompt, conv_id):
+            state["n"] += 1
+            return ("Ошибка API (код 402): закончились кредиты", "0")
+
+        handler_info = {"handler": handler, "title": "Test"}
+        with patch("ai.model_health.time.sleep"):
+            result = _check_one_model("TestKey", "Test", handler_info, self._window())
+        self.assertFalse(result)
+        self.assertEqual(state["n"], 1)
+
+
+class ChatViewSelfHealTests(SimpleTestCase):
+    """When no model is available for the current window, the chat page kicks a
+    non-blocking forced sweep so a freshly-fixed key/balance recovers without
+    waiting for 04:00 MSK or a manual --force."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def _chat_request(self):
+        request = self.factory.get("/ai/chat/")
+        request.user = SimpleNamespace(is_authenticated=True, is_active=True, username="u")
+        request.session = {}
+        request.user_info = {"userId": "u"}
+        request.COOKIES = {"userId": "u"}
+        return request
+
+    def test_empty_models_triggers_async_refresh(self):
+        request = self._chat_request()
+        with patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)), \
+             patch("ai.views.get_available_model_options", return_value=[]), \
+             patch("ai.views.trigger_model_health_refresh_async") as mock_trigger, \
+             patch("ai.views.render", return_value=HttpResponse("ok")):
+            response = chat_view(request)
+        self.assertEqual(response.status_code, 200)
+        mock_trigger.assert_called_once()
+
+    def test_populated_models_does_not_trigger_refresh(self):
+        request = self._chat_request()
+        models = [{"key": "DeepSeek_V3_1", "title": "DeepSeek-V3.1", "capabilities": {}}]
+        with patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)), \
+             patch("ai.views.get_available_model_options", return_value=models), \
+             patch("ai.views.trigger_model_health_refresh_async") as mock_trigger, \
+             patch("ai.views.render", return_value=HttpResponse("ok")):
+            response = chat_view(request)
+        self.assertEqual(response.status_code, 200)
+        mock_trigger.assert_not_called()
+
+
+class TranslatePromptsCommandTests(TestCase):
+    """translate_prompts: fill only empty _en/_fr fields, preserve placeholders,
+    and --dry-run must not write."""
+
+    def _echo_handler(self):
+        async def handler(prompt, conv_id):
+            # Echo the protected payload back so placeholder restore is exercised.
+            marker = "\n\nТекст:\n"
+            idx = prompt.find(marker)
+            payload = prompt[idx + len(marker):] if idx >= 0 else prompt
+            return (payload, 0)
+        return handler
+
+    def _run(self, *args):
+        from io import StringIO
+        from django.core.management import call_command
+        out = StringIO()
+        call_command("translate_prompts", *args, stdout=out)
+        return out.getvalue()
+
+    def setUp(self):
+        from ai.models import SharedPrompt, Prompt, Topic
+        self.shared = SharedPrompt.objects.create(
+            prompt_name="Решить задачу",
+            prompt_text="Реши задачу на {language} по теме {тема}. Код: {code}",
+            prompt_name_en="",
+            prompt_text_en="already-en",
+            prompt_name_fr="",
+            prompt_text_fr="",
+        )
+
+    def test_fills_only_empty_fields_and_preserves_placeholders(self):
+        with patch("ai.management.commands.translate_prompts.registry.handler",
+                   return_value=self._echo_handler()):
+            self._run()
+
+        self.shared.refresh_from_db()
+        # Empty name fields were translated (echoed back).
+        self.assertEqual(self.shared.prompt_name_en, "Решить задачу")
+        self.assertEqual(self.shared.prompt_name_fr, "Решить задачу")
+        # Non-empty _en text was NOT overwritten.
+        self.assertEqual(self.shared.prompt_text_en, "already-en")
+        # Empty _fr text was filled, with placeholders restored verbatim.
+        self.assertIn("{language}", self.shared.prompt_text_fr)
+        self.assertIn("{тема}", self.shared.prompt_text_fr)
+        self.assertIn("{code}", self.shared.prompt_text_fr)
+        self.assertNotIn("@@PH", self.shared.prompt_text_fr)
+
+    def test_dry_run_does_not_write(self):
+        with patch("ai.management.commands.translate_prompts.registry.handler",
+                   return_value=self._echo_handler()):
+            self._run("--dry-run")
+        self.shared.refresh_from_db()
+        self.assertEqual(self.shared.prompt_name_en, "")
+        self.assertEqual(self.shared.prompt_name_fr, "")
+
+    def test_unsupported_language_raises(self):
+        from django.core.management import CommandError
+        with patch("ai.management.commands.translate_prompts.registry.handler",
+                   return_value=self._echo_handler()):
+            with self.assertRaises(CommandError):
+                self._run("--languages", "de")

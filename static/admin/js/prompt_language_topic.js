@@ -66,20 +66,12 @@
         });
       })
       .catch(function () {
-        const hasLanguage = Boolean(languageSelect.value);
-        topicSelect.disabled = !hasLanguage;
-        if (!hasLanguage) {
-          topicSelect.innerHTML = "";
-          topicSelect.appendChild(buildPlaceholder("Сначала выберите язык"));
-        }
-        languageSelect.addEventListener("change", function () {
-          if (!languageSelect.value) {
-            topicSelect.value = "";
-            topicSelect.disabled = true;
-            return;
-          }
-          topicSelect.disabled = false;
-        });
+        // Topics API unreachable: keep the server-rendered <option>s intact so
+        // the field stays usable. The server renders every topic when no
+        // language is chosen (PromptForm.__init__), and clean() validates
+        // topic<->language consistency server-side, so we only need to make
+        // sure the select is not left disabled.
+        topicSelect.disabled = false;
       });
   }
 

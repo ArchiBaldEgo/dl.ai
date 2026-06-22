@@ -59,7 +59,12 @@ ai_admin_site.register(ProgrammingLanguage, ProgrammingLanguageAdmin)
 ai_admin_site.register(Topic, TopicAdmin)
 ai_admin_site.register(Prompt, PromptAdmin)
 ai_admin_site.register(SharedPrompt, SharedPromptAdmin)
-ai_admin_site.register(AIRequestLog, AIRequestLogAdmin)
+# NOTE: AIRequestLog is intentionally NOT registered as a ModelAdmin. Its
+# changelist URL (/ai/admin/ai/airequestlog/) is served by the custom
+# admin_request_logs_view (ai/admin/urls.py), which renders the richer
+# request_logs.html UI. Registering it too shadowed that view and left the
+# ModelAdmin's add/change/delete orphaned. The "Логи запросов" nav row points
+# at the custom view.
 
 User = get_user_model()
 ai_admin_site.register(User, RestrictedUserAdmin)

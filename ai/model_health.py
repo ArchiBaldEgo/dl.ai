@@ -43,22 +43,46 @@ MODEL_CATALOG_KEYS = [
     "Gpt_oss_120b",
 ]
 
-_ERROR_MARKERS = (
-    "ошибка",
-    "не авторизован",
-    "таймаут",
-    "недоступ",
-    "превышен лимит",
-    "подключени",
+# Concrete error signatures the model clients actually return on a failed call.
+# We deliberately do NOT use loose stems like "ошибка"/"недоступ"/"подключени"/
+# "таймаут" here: a healthy reasoning-model reply to the one-digit healthcheck
+# prompt can still contain those words ("ошибки нет", "если таймаут…"), which
+# caused false negatives. These specific phrases never appear in a genuine
+# "2"-only reply, so a present correct answer wins unless one of them shows up.
+_DEFINITE_ERROR_MARKERS = (
+    "ошибка api",
+    "таймаут при подключении",
+    "бот не авторизован",
     "неправильный запрос",
-    "пустой ответ",
-    "not found",
-    "unauthorized",
-    "timeout",
+    "все боты заняты",
+    "бот инициализируется слишком долго",
+    "закончились кредиты",
+    "требуется оплата",
+    "код 402",
+    "превышен лимит",
     "rate limit",
+    "unauthorized",
+    "не авторизован",
+    "not found",
+    "пустой ответ",
+    "timeout",
+)
+
+# Transient failures worth one retry before marking a model down — a slow
+# cold-start of a now-working provider should not flip is_available to False.
+_TRANSIENT_MARKERS = (
+    "таймаут",
+    "timeout",
+    "инициализируется",
+    "пустой ответ",
+    "подключении",
+    "temporarily",
+    "временно",
 )
 
 _TWO_RE = re.compile(r"(^|\D)2(\D|$)")
+_WORD_ANSWER_RE = re.compile(r"^(два|two)\b", re.IGNORECASE)
+_TRANSIENT_RETRY_DELAY = 5.0
 _HTTP_CODE_RE = re.compile(r"\b(\d{3})\b")
 
 _HTTP_CODE_LABELS = {
@@ -97,17 +121,30 @@ def _extract_response_text(result):
 
 
 def _is_healthy_response(response_text):
+    """A reply is healthy iff it carries the correct answer, UNLESS it is a
+    definite client/API error string.
+
+    The correct answer (digit ``2`` or word form ``два``/``two``) is checked
+    AFTER the definite-error markers so that a healthy reply which happens to
+    contain an error word (reasoning models narrating "ошибки нет, ответ 2")
+    is not marked down. Definite API errors ("Ошибка API (код 402)", "rate
+    limit") are still detected first, so a rate-limit message containing "2
+    минуты" stays unhealthy.
+    """
     if not response_text:
         return False
 
     low = response_text.lower().strip()
-    if any(marker in low for marker in _ERROR_MARKERS):
+    if any(marker in low for marker in _DEFINITE_ERROR_MARKERS):
         return False
 
     if _TWO_RE.search(response_text):
         return True
 
-    return low in {"два", "two"}
+    if _WORD_ANSWER_RE.match(low):
+        return True
+
+    return False
 
 
 def _extract_http_code_from_message(message):
@@ -165,10 +202,49 @@ def _save_availability(window_date, key, title, is_available, response_time_ms, 
     )
 
 
+def _looks_transient(response_text, exc=None):
+    """Heuristic: did the call fail in a way worth one retry before giving up?
+
+    Cold-start timeouts, "bot initializing too long", empty replies and
+    connection exceptions all qualify. Definite API errors (401/402/rate
+    limit) do NOT — retrying those just burns time and tokens.
+    """
+    if exc is not None:
+        return True
+    if not response_text:
+        return True
+    low = response_text.lower()
+    return any(marker in low for marker in _TRANSIENT_MARKERS)
+
+
+def _invoke_healthcheck(handler, window_date, key):
+    """Call a model handler with the healthcheck prompt.
+
+    Returns ``(response_text, elapsed_ms, exc)`` where exactly one of
+    ``response_text``/``exc`` is populated.
+    """
+    started = perf_counter()
+    try:
+        result = async_to_sync(handler)(
+            HEALTHCHECK_PROMPT,
+            f"health-{window_date.isoformat()}-{key}",
+        )
+        elapsed_ms = int((perf_counter() - started) * 1000)
+        return _extract_response_text(result), elapsed_ms, None
+    except Exception as exc:
+        elapsed_ms = int((perf_counter() - started) * 1000)
+        return "", elapsed_ms, exc
+
+
 def _check_one_model(key, title, handler_info, window_date):
     """Run the healthcheck prompt against one model and persist availability.
 
     Returns True if the model answered healthily, False otherwise.
+
+    A first attempt that fails in a transient way (cold-start timeout, empty
+    reply, connection error) gets ONE retry after a short backoff, so a
+    now-working provider is not marked down because its first call was slow.
+    Definite API errors (401/402/rate limit) are not retried.
     """
     if not handler_info:
         _save_availability(
@@ -182,32 +258,16 @@ def _check_one_model(key, title, handler_info, window_date):
         )
         return False
 
-    started = perf_counter()
-    try:
-        result = async_to_sync(handler_info["handler"])(
-            HEALTHCHECK_PROMPT,
-            f"health-{window_date.isoformat()}-{key}",
-        )
-        elapsed_ms = int((perf_counter() - started) * 1000)
-        response_text = _extract_response_text(result)
-        is_available = _is_healthy_response(response_text)
-        # Model handlers only return text/tokens, not the raw status code.
-        # We try to recover the HTTP code from error messages when possible.
-        # For healthy responses we assume the HTTP status was 200.
-        last_http_code = 200 if is_available else _extract_http_code_from_message(response_text)
+    handler = handler_info["handler"]
+    response_text, elapsed_ms, exc = _invoke_healthcheck(handler, window_date, key)
+    is_available = exc is None and _is_healthy_response(response_text)
 
-        _save_availability(
-            window_date=window_date,
-            key=key,
-            title=title,
-            is_available=is_available,
-            response_time_ms=elapsed_ms,
-            last_message=response_text,
-            last_http_code=last_http_code,
-        )
-        return is_available
-    except Exception as exc:
-        elapsed_ms = int((perf_counter() - started) * 1000)
+    if not is_available and _looks_transient(response_text, exc):
+        time.sleep(_TRANSIENT_RETRY_DELAY)
+        response_text, elapsed_ms, exc = _invoke_healthcheck(handler, window_date, key)
+        is_available = exc is None and _is_healthy_response(response_text)
+
+    if exc is not None:
         _save_availability(
             window_date=window_date,
             key=key,
@@ -218,6 +278,22 @@ def _check_one_model(key, title, handler_info, window_date):
             last_http_code=None,
         )
         return False
+
+    # Model handlers only return text/tokens, not the raw status code.
+    # We try to recover the HTTP code from error messages when possible.
+    # For healthy responses we assume the HTTP status was 200.
+    last_http_code = 200 if is_available else _extract_http_code_from_message(response_text)
+
+    _save_availability(
+        window_date=window_date,
+        key=key,
+        title=title,
+        is_available=is_available,
+        response_time_ms=elapsed_ms,
+        last_message=response_text,
+        last_http_code=last_http_code,
+    )
+    return is_available
 
 
 def _maybe_autorecover_web_deepseek(handlers, window_date):

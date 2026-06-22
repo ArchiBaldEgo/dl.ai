@@ -384,10 +384,12 @@
       <p class="arm-subtitle">Проверка задачи и кода доступными моделями</p>
     </div>
     <div class="arm-top-actions">
-      <a class="button" href="/ai/admin/">В админку</a>
+      <a class="button" href="{% url 'admin:index' %}">В админку</a>
+      {% if show_prompt_link %}
+        <a class="button" href="{{ prompt_admin_url }}">Все препромпты</a>
+      {% endif %}
       {% if is_prompt_developer %}
         <a class="button" href="{{ my_prompt_url }}">Мой препромпт</a>
-        <a class="button" href="{{ prompt_admin_url }}">Все препромпты</a>
       {% endif %}
     </div>
   </div>

@@ -32,7 +32,8 @@
   <pre class="ai-log-block">{{ log.response_text|default:"(пусто)" }}</pre>
 
   <div class="ai-log-actions">
-    <a class="button" href="/ai/admin/ai/airequestlog/">← Назад к логам</a>
+    {% include "admin/ai/_ai_back_nav.html" %}
+    <a class="button" href="{% url 'ai_request_logs' %}">← Назад к логам</a>
   </div>
 </div>
 

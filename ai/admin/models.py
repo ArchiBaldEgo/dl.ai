@@ -16,20 +16,6 @@ from .permissions import can_access_logs, is_prompt_developer_user, is_staff_or_
 User = get_user_model()
 
 
-class PromptInline(admin.TabularInline):
-    model = Prompt
-    form = PromptForm
-    extra = 0
-    fields = ('prompt_name',)
-    classes = ('collapse',)
-
-    def get_queryset(self, request):
-        return prompt_queryset_for_user(
-            super().get_queryset(request).select_related("owner"),
-            request.user,
-        )
-
-
 class TopicInline(admin.TabularInline):
     model = Topic
     extra = 1
@@ -110,7 +96,8 @@ class PromptAdmin(admin.ModelAdmin):
     search_fields = ('prompt_name', 'prompt_text', 'owner__username', '=owner__id')
     autocomplete_fields = ("owner", "editors")
     actions = ("export_prompts_csv",)
-    date_hierarchy = "created_at" if any(field.name == "created_at" for field in Prompt._meta.fields) else None
+    # Prompt has no created_at field, so date_hierarchy is intentionally None.
+    date_hierarchy = None
 
     def get_queryset(self, request):
         queryset = (
@@ -224,6 +211,10 @@ class PromptAdmin(admin.ModelAdmin):
     programming_language_name.admin_order_field = "topic__programming_language__language_name"
 
     def programming_language(self, obj):
+        # Display method for the read-only rendering of the declared
+        # ``programming_language`` form field (see PromptForm). These two are
+        # coupled — remove the declared field and this method breaks the
+        # readonly/fieldset path with FieldError.
         return self.programming_language_name(obj)
     programming_language.short_description = "Programming language"
 
@@ -237,7 +228,8 @@ class PromptAdmin(admin.ModelAdmin):
     owner_username.short_description = "Owner"
 
     def short_prompt_text(self, obj):
-        return f"{obj.prompt_text[:100]}..." if len(obj.prompt_text) > 100 else obj.prompt_text
+        text = obj.prompt_text or ""
+        return f"{text[:100]}..." if len(text) > 100 else text
     short_prompt_text.short_description = "Prompt Text"
 
 
@@ -248,7 +240,10 @@ class SharedPromptAdmin(admin.ModelAdmin):
     list_filter = ('mode', 'programming_languages')
     search_fields = ('prompt_name', 'prompt_text')
     autocomplete_fields = ('owner', 'editors')
-    filter_horizontal = ('programming_languages', 'editors')
+    # 'editors' is rendered by autocomplete_fields above (autocomplete wins in
+    # Django's formfield_for_manytomany), so only 'programming_languages' uses
+    # the horizontal filter widget — listing 'editors' here was dead config.
+    filter_horizontal = ('programming_languages',)
 
     def language_list(self, obj):
         langs = obj.programming_languages.all()

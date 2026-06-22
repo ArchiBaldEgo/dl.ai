@@ -980,7 +980,11 @@
         function getUiString(key, defaultValue = '') {
             const selectLang = document.getElementById('selectLang');
             const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-            return (localization[lang] && localization[lang][key]) || defaultValue;
+            const dict = localization[lang] || {};
+            // Most UI strings live at the top level of the language dict. A few
+            // (select_prog_lang) are nested under voiceStatus; fall back there so
+            // they still localize instead of returning the Russian default.
+            return dict[key] || (dict.voiceStatus && dict.voiceStatus[key]) || defaultValue;
         }
 
             function initAccordionForMessages() {

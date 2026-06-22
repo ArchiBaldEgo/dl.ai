@@ -93,7 +93,7 @@
 </style>
 
 <div class="status-wrap">
-  <a href="/ai/admin/">&larr; Назад в админку</a>
+  {% include "admin/ai/_ai_back_nav.html" %}
   <h1>AI: Состояние моделей</h1>
 
   <div class="status-card">
@@ -104,9 +104,11 @@
         <button id="refreshModelsBtn" type="button" class="default">Обновить состояние моделей</button>
       </form>
       <a class="button" href="{{ arm_find_error_url }}">Перейти в ARM</a>
+      {% if show_prompt_link %}
+        <a class="button" href="{{ prompt_admin_url }}">Все препромпты</a>
+      {% endif %}
       {% if is_prompt_developer %}
         <a class="button" href="{{ my_prompt_url }}">Мой препромпт</a>
-        <a class="button" href="{{ prompt_admin_url }}">Все препромпты</a>
       {% endif %}
     </div>
 
