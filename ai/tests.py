@@ -1177,44 +1177,6 @@ class ModelCapabilitiesTests(SimpleTestCase):
                 self.assertIsInstance(value, bool)
 
 
-class TokenBudgetTests(TestCase):
-    """ТЗ C: get_token_budget_rows spent/remaining math."""
-
-    def test_spent_remaining_and_clamp(self):
-        from datetime import date
-        from ai.models import AIModelTokenBudget as Budget
-        from ai.token_budget import get_token_budget_rows
-
-        issued = date(2026, 6, 1)
-        Budget.objects.create(label="SambaNova", total_limit=1000, issued_at=issued)
-        # 600 spent since issued_at, 200 before -> only 600 counts.
-        AIRequestLog.objects.create(sent_at=timezone.now(), tokens=600)
-        AIRequestLog.objects.create(
-            sent_at=timezone.make_aware(timezone.datetime(2026, 5, 1)),
-            tokens=200,
-        )
-
-        rows = get_token_budget_rows()
-        self.assertEqual(len(rows), 1)
-        row = rows[0]
-        self.assertEqual(row["label"], "SambaNova")
-        self.assertEqual(row["total_limit"], 1000)
-        self.assertEqual(row["spent"], 600)
-        self.assertEqual(row["remaining"], 400)
-
-    def test_remaining_clamps_to_zero_when_over_budget(self):
-        from datetime import date
-        from ai.models import AIModelTokenBudget as Budget
-        from ai.token_budget import get_token_budget_rows
-
-        Budget.objects.create(label="DeepSeek", total_limit=100, issued_at=date(2026, 6, 1))
-        AIRequestLog.objects.create(sent_at=timezone.now(), tokens=300)
-
-        rows = get_token_budget_rows()
-        self.assertEqual(rows[0]["spent"], 300)
-        self.assertEqual(rows[0]["remaining"], 0)
-
-
 class ArmReportTests(SimpleTestCase):
     """ТЗ D: _build_summary / _build_report aggregation and ordering."""
 
@@ -1322,7 +1284,9 @@ class AutorecoveryTests(TestCase):
         window_date = get_health_window_date()
         row = self._down_row(window_date)
         with patch("ai.model_health.restart_bot_pool", return_value=True), \
-                patch("ai.model_health._check_one_model", return_value=True), \
+                patch("ai.model_health._check_one_model",
+                      return_value={"is_available": True, "last_message": "2",
+                                    "last_http_code": 200, "response_time_ms": 1}), \
                 patch("ai.model_health.time.sleep"):
             _maybe_autorecover_web_deepseek({}, window_date)
         row.refresh_from_db()
@@ -1586,7 +1550,8 @@ class HealthCheckRetryTests(TestCase):
         handler_info = {"handler": handler, "title": "Test"}
         with patch("ai.model_health.time.sleep"):
             result = _check_one_model("TestKey", "Test", handler_info, self._window())
-        self.assertTrue(result)
+        self.assertTrue(result["is_available"])
+        self.assertEqual(result["last_http_code"], 200)
         self.assertEqual(state["n"], 2)
 
     def test_does_not_retry_on_definite_api_error(self):
@@ -1601,7 +1566,8 @@ class HealthCheckRetryTests(TestCase):
         handler_info = {"handler": handler, "title": "Test"}
         with patch("ai.model_health.time.sleep"):
             result = _check_one_model("TestKey", "Test", handler_info, self._window())
-        self.assertFalse(result)
+        self.assertFalse(result["is_available"])
+        self.assertEqual(result["last_http_code"], 402)
         self.assertEqual(state["n"], 1)
 
 
@@ -1705,3 +1671,234 @@ class TranslatePromptsCommandTests(TestCase):
                    return_value=self._echo_handler()):
             with self.assertRaises(CommandError):
                 self._run("--languages", "de")
+
+
+class BatchGradingTests(SimpleTestCase):
+    """Batch-solve ARM grading: normalize_solution / grade_solution."""
+
+    def test_identical_after_whitespace_and_case_normalization(self):
+        from ai.arm_runner import grade_solution
+        self.assertEqual(
+            grade_solution("Program A;\nBegin\n  Writeln(1);\nEnd.", "program a; begin writeln(1); end."),
+            "solved",
+        )
+
+    def test_pascal_brace_and_paren_comments_stripped(self):
+        from ai.arm_runner import grade_solution
+        sample = "{ this is a comment } program a; begin writeln(1); end."
+        model = "(* another *) program a; begin writeln(1); end."
+        self.assertEqual(grade_solution(model, sample), "solved")
+
+    def test_c_line_and_block_comments_stripped(self):
+        from ai.arm_runner import grade_solution
+        sample = "#include <stdio.h>\nint main(){return 0;}"
+        model = "// leading comment\nint main(){ /* x */ return 0; }"
+        self.assertEqual(grade_solution(model, sample), "solved")
+
+    def test_different_solution_is_failed(self):
+        from ai.arm_runner import grade_solution
+        # Substantially different solutions fall below the similarity threshold.
+        # (A single-token diff like return 42 vs return 0 is intentionally NOT
+        #  enough to fail — grading is approximate, see CLAUDE.md.)
+        self.assertEqual(
+            grade_solution("print('hello world')", "int main(){return 0;}"),
+            "failed",
+        )
+
+    def test_empty_sample_is_skipped(self):
+        from ai.arm_runner import grade_solution
+        self.assertEqual(grade_solution("anything", ""), "skipped")
+
+    def test_empty_model_is_failed(self):
+        from ai.arm_runner import grade_solution
+        self.assertEqual(grade_solution("", "int main(){return 0;}"), "failed")
+
+
+class HealthCheckOutputTests(SimpleTestCase):
+    """`check_models_health --force` live per-model console line formatting."""
+
+    def _capture(self, detail):
+        from io import StringIO
+        from ai.management.commands.check_models_health import Command
+
+        cmd = Command()
+        out = StringIO()
+        cmd.stdout = out
+        cmd._print_model_detail(detail)
+        return out.getvalue()
+
+    def test_healthy_model_prints_200_and_response(self):
+        line = self._capture({
+            "title": "DeepSeek V3", "is_available": True,
+            "last_http_code": 200, "response_time_ms": 850,
+            "last_message": "2",
+        })
+        self.assertIn("DeepSeek V3", line)
+        self.assertIn("HTTP 200", line)
+        self.assertIn("OK", line)
+        self.assertIn("850ms", line)
+        self.assertIn("| 2", line)
+
+    def test_down_model_prints_error_code_and_message(self):
+        line = self._capture({
+            "title": "GigaChat", "is_available": False,
+            "last_http_code": 402, "response_time_ms": 120,
+            "last_message": "Ошибка API (код 402): закончились кредиты",
+        })
+        self.assertIn("HTTP 402", line)
+        self.assertIn("FAIL", line)
+        self.assertIn("закончились кредиты", line)
+
+    def test_missing_code_shows_dash(self):
+        line = self._capture({
+            "title": "Bot", "is_available": False,
+            "last_http_code": None, "response_time_ms": None,
+            "last_message": "Health check exception: timeout",
+        })
+        self.assertIn("HTTP —", line)
+        self.assertIn("| — |", line)
+
+
+class BatchReportTests(SimpleTestCase):
+    """Batch-solve ARM report: per-model / per-topic aggregation + ordering."""
+
+    def _item(self, model, topic, verdict, duration, tokens=0):
+        return {
+            "model_key": model, "model_title": model,
+            "topic_name": topic, "verdict": verdict,
+            "duration": duration, "tokens": tokens,
+        }
+
+    def test_per_model_and_per_topic_with_skipped_excluded(self):
+        from ai.arm_runner import _build_batch_report
+
+        results = [
+            self._item("A", "Линейные", "solved", 2.0, 10),
+            self._item("A", "Циклы", "failed", 4.0, 10),
+            self._item("A", "Линейные", "skipped", 1.0, 2),
+            self._item("B", "Линейные", "solved", 5.0, 20),
+            self._item("B", "Циклы", "solved", 3.0, 20),
+        ]
+        report = _build_batch_report(results)
+        # Top-level counts: 3 solved, 1 failed, 1 skipped, 5 total.
+        self.assertEqual(report["total_pairs"], 5)
+        self.assertEqual(report["solved"], 3)
+        self.assertEqual(report["failed"], 1)
+        self.assertEqual(report["skipped"], 1)
+
+        # Per-model: A has 1 solved / 2 non-skipped = 50%, B 2/2 = 100%.
+        per_model = {row["label"]: row for row in report["per_model"]}
+        self.assertEqual(per_model["A"]["solved"], 1)
+        self.assertEqual(per_model["A"]["total"], 2)
+        self.assertEqual(per_model["A"]["percent_solved"], 50.0)
+        self.assertEqual(per_model["B"]["percent_solved"], 100.0)
+        # Sorted by % desc -> B first.
+        self.assertEqual(report["per_model"][0]["label"], "B")
+
+        # Per-topic: skipped excluded. Линейные: A solved + B solved + A skipped
+        # -> 2 solved / 2 total = 100%. Циклы: A failed + B solved -> 1/2 = 50%.
+        per_topic = {row["label"]: row for row in report["per_topic"]}
+        self.assertEqual(per_topic["Линейные"]["percent_solved"], 100.0)
+        self.assertEqual(per_topic["Циклы"]["percent_solved"], 50.0)
+
+
+class TaskModelTests(TestCase):
+    """Task model basics (DL task reference for batch-solve ARM)."""
+
+    def test_node_id_unique_and_str(self):
+        from django.db import transaction
+        from ai.models import Task
+        Task.objects.create(node_id=12345, name="Сумма двух чисел")
+        # Wrap the expected unique violation in a savepoint so the TestCase's
+        # outer transaction is not left broken for subsequent tests.
+        with transaction.atomic():
+            with self.assertRaises(Exception):
+                Task.objects.create(node_id=12345)
+        t = Task.objects.get(node_id=12345)
+        self.assertEqual(str(t), "Сумма двух чисел")
+        t2 = Task.objects.create(node_id=99)
+        self.assertEqual(str(t2), "DL #99")
+
+    def test_active_default_true(self):
+        from ai.models import Task
+        t = Task.objects.create(node_id=555)
+        self.assertTrue(t.active)
+
+
+class BatchRunnerIntegrationTests(TestCase):
+    """End-to-end batch solve with mocked handlers + DL sample fetch.
+
+    Calls ``_run_batch_job_worker`` directly (synchronously, same thread) rather
+    than going through the daemon thread in ``start_batch_solve_run``: the real
+    thread runs on a separate DB connection which a TestCase's per-test
+    transaction would hide. The worker function is the unit that owns the
+    handler calls, grading, persistence and report — exercising it directly is a
+    faithful, deterministic test of that logic.
+    """
+
+    def setUp(self):
+        from ai.models import Task
+        self.user = get_user_model().objects.create_user(username="batcher", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=1001, task_id=2001, name="A", statement="Сложите a и b",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.t2 = Task.objects.create(
+            node_id=1002, task_id=2002, name="B", statement="Выведите n",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+    def test_batch_run_records_solved_verdicts(self):
+        import time as _t
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun, Task
+
+        sample = "program a; begin writeln(1); end."
+
+        async def fake_handler(messages, conv_id):
+            return ("program a; begin writeln(1); end.", 12)
+
+        ordered_models = [{"key": "FakeModel", "title": "FakeModel", "handler": fake_handler}]
+        tasks_qs = Task.objects.filter(pk__in=[self.t1.id, self.t2.id]).select_related(
+            "topic", "programming_language"
+        )
+        run_id = "test-batch-run-1"
+
+        # Pre-seed the in-memory job so the worker can record live progress and
+        # build the final report from it (mirrors start_batch_solve_run).
+        now_ts = _t.time()
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 1,
+            "total_pairs": 2, "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "FakeModel", "current_model_title": "FakeModel",
+            "current_task_node_id": "", "current_task_name": "",
+            "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        try:
+            with patch("ai.dl_api_client.fetch_task_solution",
+                       lambda sid, tid, ext: {"content": sample}):
+                arm_runner._run_batch_job_worker(
+                    run_id, tasks_qs, ordered_models, self.user.id, "DLSID-1",
+                    ui_language="Русский",
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        self.assertEqual(run.run_type, AIModelTestRun.RUN_TYPE_BATCH)
+
+        results = list(AIModelTestResult.objects.filter(run=run))
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(r.verdict == "solved" for r in results))
+        self.assertTrue(all(r.task_id in (self.t1.id, self.t2.id) for r in results))
+
+        # DB-fallback snapshot rebuilds the batch report from persisted rows.
+        snapshot = arm_runner.get_arm_run_snapshot(run_id)
+        self.assertEqual(snapshot["run_type"], "batch")
+        self.assertEqual(snapshot["report"]["per_model"][0]["solved"], 2)
+        self.assertEqual(snapshot["report"]["per_model"][0]["total"], 2)

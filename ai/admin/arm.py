@@ -5,15 +5,26 @@ from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonRespo
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 
-from ..arm_runner import get_arm_run_snapshot, start_arm_sequential_run
+from ..arm_runner import get_arm_run_snapshot, start_arm_sequential_run, start_batch_solve_run
 from ..i18n import get_language_instruction, get_localized_name
 from ..model_health import (
     get_available_model_options,
     get_health_window_date,
 )
-from ..models import ProgrammingLanguage, Prompt, SharedPrompt, Topic
+from ..models import ProgrammingLanguage, Prompt, SharedPrompt, Task, Topic
 from ..serializers import programming_language as serialize_programming_language, prompt as serialize_prompt, topic as serialize_topic
 from .permissions import can_access_arm
+
+
+def _resolve_session_id(request):
+    """Resolve the caller's DL session id (DLSID flow), mirroring get_task_info_view."""
+    import os
+
+    session_id = request.session.get("external_session_id", "").strip()
+    if not session_id:
+        cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
+        session_id = request.COOKIES.get(cookie_name, "").strip()
+    return session_id
 
 
 def _build_find_error_message(task_text, code_text, prog_lang_name, topic_name, prompt_text, ui_language):
@@ -241,6 +252,129 @@ def admin_arm_find_error_status_view(request):
     if not run_snapshot:
         return JsonResponse(
             {"ok": False, "message": "ARM процесс не найден или уже завершен"},
+            status=404,
+        )
+
+    return JsonResponse({"ok": True, "run": run_snapshot})
+
+
+# ---------------------------------------------------------------------------
+# Batch-solve ARM: send each available model the statement of every active
+# Task, grade against the DL sample solution, report per-model / per-topic.
+# ---------------------------------------------------------------------------
+
+def admin_arm_solve_view(request):
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    active_run_id = (request.GET.get("run_id") or "").strip()
+    active_run_snapshot = None
+    results = []
+    report = None
+    error_message = ""
+
+    if active_run_id:
+        active_run_snapshot = get_arm_run_snapshot(active_run_id)
+        if active_run_snapshot:
+            results = active_run_snapshot.get("results") or []
+            report = active_run_snapshot.get("report")
+            if active_run_snapshot.get("status") == "failed":
+                error_message = active_run_snapshot.get("error_message") or "Batch solve завершился с ошибкой"
+        else:
+            error_message = "Процесс не найден или уже завершен"
+
+    tasks = [
+        {
+            "id": t.id,
+            "node_id": t.node_id,
+            "task_id": t.task_id,
+            "name": t.name,
+            "topic_name": t.topic.topic_name if t.topic else "",
+            "prog_lang_name": t.programming_language.language_name if t.programming_language else "",
+            "file_extension": t.file_extension,
+            "has_statement": bool(t.statement),
+            "has_sample_inputs": bool(t.task_id and t.file_extension),
+        }
+        for t in Task.objects.filter(active=True).select_related("topic", "programming_language").order_by("-created_at")
+    ]
+
+    from ..http_utils import safe_relative_url
+    arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
+    context = {
+        **ai_admin_site.each_context(request),
+        "title": "ARM: Пакетное решение",
+        "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
+        "arm_back_url": arm_back_url,
+        "tasks": tasks,
+        "model_options": get_available_model_options(),
+        "results": results,
+        "report": report,
+        "error_message": error_message,
+        "arm_solve_start_url": "/ai/admin/arm/solve/start/",
+        "arm_solve_status_url": "/ai/admin/arm/solve/status/",
+        "active_run_id": active_run_id,
+        "active_run_snapshot": active_run_snapshot or {},
+    }
+    return TemplateResponse(request, "admin/ai/arm_solve.html", context)
+
+
+def admin_arm_solve_start_view(request):
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    task_ids = request.POST.getlist("task_ids")
+    model_keys = request.POST.getlist("models")
+    ui_language = request.POST.get("interface_language", "Русский")
+
+    session_id = _resolve_session_id(request)
+    if not session_id:
+        return JsonResponse(
+            {"ok": False, "message": "Нет DLSID — требуется авторизация на dl.gsu.by для получения образцовых решений."},
+            status=400,
+        )
+
+    # Normalize to ints; empty list means "all active tasks".
+    task_id_ints = []
+    for raw in task_ids:
+        try:
+            task_id_ints.append(int(raw))
+        except (ValueError, TypeError):
+            continue
+
+    run_id, start_error = start_batch_solve_run(
+        task_id_ints or None,
+        model_keys,
+        request.user.id,
+        session_id,
+        ui_language=ui_language,
+    )
+    if not run_id:
+        return JsonResponse(
+            {"ok": False, "message": start_error or "Не удалось запустить batch solve"},
+            status=400,
+        )
+
+    return JsonResponse({"ok": True, "run_id": run_id, "run": get_arm_run_snapshot(run_id)})
+
+
+def admin_arm_solve_status_view(request):
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "GET":
+        return HttpResponseNotAllowed(["GET"])
+
+    run_id = (request.GET.get("run_id") or "").strip()
+    if not run_id:
+        return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
+
+    run_snapshot = get_arm_run_snapshot(run_id)
+    if not run_snapshot:
+        return JsonResponse(
+            {"ok": False, "message": "Процесс не найден или уже завершен"},
             status=404,
         )
 

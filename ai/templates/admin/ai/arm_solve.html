@@ -1,0 +1,257 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<style>
+  .arm-wrap { max-width: 1280px; margin: 0 auto; color: var(--body-fg); }
+  .arm-card {
+    background: var(--body-bg);
+    border: 1px solid var(--hairline-color);
+    border-radius: 8px;
+    padding: 18px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  }
+  .arm-note { color: var(--body-quiet-color); font-size: 13px; margin: 6px 0 0; }
+  .arm-error { color: #b42318; font-weight: 600; }
+  .arm-success { color: #067647; font-weight: 600; }
+  .arm-progress.active { color: var(--body-quiet-color); margin: 8px 0; }
+  .arm-table { width: 100%; border-collapse: collapse; }
+  .arm-table th, .arm-table td { border-bottom: 1px solid var(--hairline-color); padding: 8px 10px; text-align: left; }
+  .arm-table th { font-size: 12px; text-transform: uppercase; color: var(--body-quiet-color); }
+  .arm-tasks td, .arm-tasks th { vertical-align: middle; }
+  .arm-models { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  .arm-models label { display: flex; gap: 6px; align-items: center; }
+  .badge { display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; }
+  .badge.solved { background: rgba(18, 183, 106, 0.16); color: #067647; }
+  .badge.failed { background: rgba(240, 68, 56, 0.14); color: #b42318; }
+  .badge.skipped { background: rgba(100, 116, 139, 0.16); color: var(--body-quiet-color); }
+  .arm-submit { margin-top: 14px; }
+  details.solution { border: 1px solid var(--hairline-color); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+  details.solution > summary { cursor: pointer; font-weight: 600; }
+  details.solution pre { white-space: pre-wrap; word-wrap: break-word; background: var(--body-bg); border: 1px solid var(--hairline-color); border-radius: 6px; padding: 10px; margin-top: 8px; max-height: 420px; overflow: auto; }
+  .arm-summary-grid { display: flex; gap: 20px; flex-wrap: wrap; }
+  .arm-summary-grid div { font-size: 14px; }
+  .arm-summary-grid strong { font-size: 18px; display: block; }
+</style>
+
+<div class="arm-wrap">
+  {% include "admin/ai/_ai_back_nav.html" %}
+  <h1>ARM: Пакетное решение</h1>
+  <p class="arm-note">Каждой доступной модели отправляется условие каждой выбранной задачи; ответ сравнивается с образцовым решением dl.gsu.by (get-solution). Проверка <strong>приближённая</strong> (сравнение текста, не запуск тестов) — семантически верное, но стилистически другое решение может быть отмечено как «не решено».</p>
+
+  <div class="arm-card">
+    <h2>Задачи</h2>
+    <p class="arm-note">Источник задач — таблица «Задачи (DL)» (<a href="/ai/admin/ai/task/">изменить</a>). Отметьте задачи или запустите по всем активным. Для получения образца требуется <code>task_id</code> и <code>file_extension</code> (заполните через «Обновить из DL» и поле расширения).</p>
+    <form id="armSolveForm" method="post" onsubmit="return false;">
+      {% csrf_token %}
+      <table class="arm-table arm-tasks">
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="armSelectAllTasks" title="Выбрать все"></th>
+            <th>node id</th>
+            <th>Название</th>
+            <th>Тема</th>
+            <th>Язык</th>
+            <th>.ext</th>
+            <th>Готово</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for t in tasks %}
+            <tr>
+              <td><input type="checkbox" name="task_ids" value="{{ t.id }}" class="arm-task-check"></td>
+              <td>{{ t.node_id }}</td>
+              <td>{{ t.name|default:"—" }}</td>
+              <td>{{ t.topic_name|default:"—" }}</td>
+              <td>{{ t.prog_lang_name|default:"—" }}</td>
+              <td>{{ t.file_extension|default:"—" }}</td>
+              <td>
+                {% if t.has_statement and t.has_sample_inputs %}<span class="badge solved">ок</span>{% else %}<span class="badge skipped">нет образца</span>{% endif %}
+              </td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="7"><p class="arm-note">Нет активных задач. Добавьте задачи в таблицу «Задачи (DL)».</p></td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <h2 style="margin-top:18px;">Модели</h2>
+      <p class="arm-note">Без отметки запускается по всем доступным моделям (health-check).</p>
+      <div class="arm-models">
+        {% for m in model_options %}
+          <label><input type="checkbox" name="models" value="{{ m.key }}" class="arm-model-check"> {{ m.title }}</label>
+        {% empty %}
+          <p class="arm-note">Нет доступных моделей. Обновите «Состояние моделей».</p>
+        {% endfor %}
+      </div>
+
+      <input type="hidden" name="interface_language" value="Русский">
+      <div class="arm-submit">
+        <button type="submit" class="default" id="armSolveSubmit">Запустить пакет</button>
+      </div>
+    </form>
+    <div id="armSolveError" class="arm-error" style="margin-top:10px;"></div>
+    <div id="armSolveProgress" class="arm-progress"></div>
+  </div>
+
+  <div id="armSolveReport"></div>
+  <div id="armSolveResults"></div>
+</div>
+
+{{ active_run_snapshot|json_script:"arm-solve-initial-run" }}
+
+<script>
+  (function () {
+    const form = document.getElementById('armSolveForm');
+    const submitBtn = document.getElementById('armSolveSubmit');
+    const errorEl = document.getElementById('armSolveError');
+    const progressEl = document.getElementById('armSolveProgress');
+    const reportEl = document.getElementById('armSolveReport');
+    const resultsEl = document.getElementById('armSolveResults');
+    const selectAll = document.getElementById('armSelectAllTasks');
+    const startUrl = '{{ arm_solve_start_url }}';
+    const statusUrl = '{{ arm_solve_status_url }}';
+    let currentRunId = '';
+    let pollTimer = null;
+
+    function setError(text) { errorEl.textContent = text || ''; }
+    function setProgress(text, active) {
+      progressEl.textContent = text || '';
+      progressEl.className = active ? 'arm-progress active' : 'arm-progress';
+    }
+    function setSubmitDisabled(disabled) { submitBtn.disabled = disabled; }
+    function getCsrfToken() {
+      const input = form.querySelector('input[name="csrfmiddlewaretoken"]');
+      return (document.cookie.split('; ').find(function (r) { return r.startsWith('csrftoken='); }) || '').split('=').slice(1).join('=') || (input ? input.value : '');
+    }
+    function escapeHtml(value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+    }
+    function verdictBadge(v) {
+      const labels = { solved: 'Решено', failed: 'Не решено', skipped: 'Пропущено' };
+      const cls = v === 'solved' ? 'solved' : (v === 'failed' ? 'failed' : 'skipped');
+      return '<span class="badge ' + cls + '">' + escapeHtml(labels[v] || v) + '</span>';
+    }
+    function renderBucketTable(rows, labelHeader) {
+      if (!rows || !rows.length) { return '<p class="arm-note">Нет данных.</p>'; }
+      const head = '<thead><tr><th>' + labelHeader + '</th><th>% решённых</th><th>Среднее время, сек</th><th>Токены</th><th>Решено / Всего</th></tr></thead>';
+      const body = rows.map(function (r) {
+        return '<tr><td>' + escapeHtml(r.label) + '</td>'
+          + '<td>' + escapeHtml(r.percent_solved) + '</td>'
+          + '<td>' + escapeHtml(r.avg_duration) + '</td>'
+          + '<td>' + escapeHtml(r.tokens) + '</td>'
+          + '<td>' + escapeHtml(r.solved) + ' / ' + escapeHtml(r.total) + '</td></tr>';
+      }).join('');
+      return '<table class="arm-table">' + head + '<tbody>' + body + '</tbody></table>';
+    }
+    function renderReport(report) {
+      if (!report) { reportEl.innerHTML = ''; return; }
+      const summary = '<div class="arm-summary-grid">'
+        + '<div>Всего пар<strong>' + escapeHtml(report.total_pairs) + '</strong></div>'
+        + '<div>Решено<strong>' + escapeHtml(report.solved) + '</strong></div>'
+        + '<div>Не решено<strong>' + escapeHtml(report.failed) + '</strong></div>'
+        + '<div>Пропущено<strong>' + escapeHtml(report.skipped) + '</strong></div>'
+        + '<div>Токенов<strong>' + escapeHtml(report.tokens_total) + '</strong></div>'
+        + '</div>';
+      reportEl.innerHTML = ''
+        + '<div class="arm-card"><h2>Итог по моделям</h2>' + renderBucketTable(report.per_model, 'Модель') + '</div>'
+        + '<div class="arm-card"><h2>Итог по темам</h2>' + renderBucketTable(report.per_topic, 'Тема') + '</div>'
+        + '<div class="arm-card"><h2>Сводка</h2>' + summary + '</div>';
+    }
+    function renderResults(results) {
+      if (!results || !results.length) { resultsEl.innerHTML = ''; return; }
+      const html = results.map(function (r) {
+        const head = verdictBadge(r.verdict) + ' '
+          + '#' + escapeHtml(r.task_node_id) + ' ' + escapeHtml(r.task_name || '')
+          + ' — ' + escapeHtml(r.model_title)
+          + ' | ' + escapeHtml(r.duration) + ' сек | ' + escapeHtml(r.tokens) + ' ток.';
+        // raw_response is rendered inside <pre> via textContent (set below) to
+        // guarantee no HTML injection — never innerHTML.
+        return '<details class="solution"><summary>' + head + '</summary><pre class="raw"></pre></details>';
+      }).join('');
+      resultsEl.innerHTML = '<div class="arm-card"><h2>Ответы моделей</h2>' + html + '</div>';
+      const pres = resultsEl.querySelectorAll('details.solution pre.raw');
+      results.forEach(function (r, i) { if (pres[i]) { pres[i].textContent = r.raw_response || r.short_response || ''; } });
+    }
+    function applyRunSnapshot(run) {
+      if (!run) { return; }
+      renderReport(run.report || null);
+      renderResults(run.results || []);
+      if (run.status === 'running') {
+        const done = run.completed_pairs != null ? run.completed_pairs : 0;
+        const total = run.total_pairs != null ? run.total_pairs : 0;
+        const cur = run.current_task_name ? (' · ' + run.current_task_name + ' / ' + (run.current_model_title || '')) : '';
+        setProgress('Выполняется: ' + done + ' / ' + total + cur, true);
+      } else if (run.status === 'completed') {
+        setProgress('Завершено.', false);
+        setSubmitDisabled(false);
+      } else if (run.status === 'failed') {
+        setProgress('', false);
+        setError(run.error_message || 'Batch solve завершился с ошибкой');
+        setSubmitDisabled(false);
+      }
+    }
+    async function pollRunStatus() {
+      if (!currentRunId) { return; }
+      try {
+        const response = await fetch(statusUrl + '?run_id=' + encodeURIComponent(currentRunId), {
+          method: 'GET', credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) { throw new Error(data.message || 'Не удалось получить статус'); }
+        applyRunSnapshot(data.run || {});
+        if (data.run && data.run.status === 'running') { pollTimer = window.setTimeout(pollRunStatus, 2000); }
+      } catch (error) {
+        setError(error.message || 'Ошибка обновления статуса');
+        setSubmitDisabled(false);
+      }
+    }
+    if (selectAll) {
+      selectAll.addEventListener('change', function () {
+        document.querySelectorAll('.arm-task-check').forEach(function (c) { c.checked = selectAll.checked; });
+      });
+    }
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      if (submitBtn.disabled) { return; }
+      if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
+      setSubmitDisabled(true);
+      setError('');
+      renderReport(null);
+      renderResults([]);
+      setProgress('Запускаем batch solve...', true);
+      const body = new URLSearchParams(new FormData(form));
+      try {
+        const response = await fetch(startUrl, {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
+          body: body.toString(),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) { throw new Error(data.message || 'Не удалось запустить batch solve'); }
+        currentRunId = data.run_id || '';
+        if (currentRunId && window.history && window.history.replaceState) {
+          window.history.replaceState({}, '', window.location.pathname + '?run_id=' + encodeURIComponent(currentRunId));
+        }
+        applyRunSnapshot(data.run || {});
+        if (data.run && data.run.status === 'running') { pollRunStatus(); }
+      } catch (error) {
+        setError(error.message || 'Ошибка запуска batch solve');
+        setProgress('');
+        setSubmitDisabled(false);
+      }
+    });
+    const initialEl = document.getElementById('arm-solve-initial-run');
+    let initialRun = null;
+    try { initialRun = JSON.parse(initialEl ? initialEl.textContent : '{}') || {}; } catch (e) { initialRun = {}; }
+    {% if error_message %}setError({{ error_message|tojson }});{% endif %}
+    if (initialRun && initialRun.run_id) {
+      currentRunId = initialRun.run_id;
+      applyRunSnapshot(initialRun);
+      if (initialRun.status === 'running') { setSubmitDisabled(true); pollRunStatus(); }
+    }
+  })();
+</script>
+{% endblock %}

@@ -63,6 +63,55 @@ class Topic(models.Model):
         return get_localized_name(self, "", "topic_name")
 
 
+class Task(models.Model):
+    """Локальная ссылка на задачу dl.gsu.by для batch-solve ARM.
+
+    Оператор вводит DL ``node_id`` (уникальный идентификатор узла задачи на
+    dl.gsu.by); название и условие тянутся из внешнего API через
+    ``fetch_task_info`` (action ``refresh_from_dl`` в админке). Тему и язык
+    программирования оператор назначает локально — они нужны для подстановки в
+    solve-промпт и для группировки отчёта по темам. ``file_extension`` задаётся
+    вручную (например ``.pas``/``.cpp``/``.py``), т.к. из локального
+    ``ProgrammingLanguage`` (отображаемое имя) его не вывести, а он требуется для
+    ``fetch_task_solution``.
+    """
+
+    node_id = models.PositiveIntegerField(
+        unique=True, db_index=True, verbose_name="DL node id",
+        help_text="Идентификатор узла задачи на dl.gsu.by (nodeId).",
+    )
+    task_id = models.PositiveIntegerField(
+        null=True, blank=True, db_index=True, verbose_name="DL task id",
+        help_text="Заполняется из get-task-info (поле taskId).",
+    )
+    name = models.CharField(max_length=512, blank=True, default="", verbose_name="Название")
+    statement = models.TextField(blank=True, default="", verbose_name="Условие")
+    topic = models.ForeignKey(
+        Topic, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="tasks", verbose_name="Тема",
+    )
+    programming_language = models.ForeignKey(
+        ProgrammingLanguage, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="tasks", verbose_name="Язык программирования",
+    )
+    file_extension = models.CharField(
+        max_length=16, blank=True, default="", verbose_name="Расширение файла",
+        help_text="Например .pas, .cpp, .py — используется для get-solution.",
+    )
+    active = models.BooleanField(default=True, db_index=True, verbose_name="Активна")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "ai_task"
+        verbose_name = "Задача (DL)"
+        verbose_name_plural = "Задачи (DL)"
+        ordering = ("-created_at",)
+
+    def __str__(self):
+        return self.name or f"DL #{self.node_id}"
+
+
 SHARED_PROMPT_MODE_CHOICES = (
     ("", "—"),
     ("chat", "Chat"),
@@ -345,43 +394,15 @@ class AIRequestLog(models.Model):
         return f"{self.sent_at} — {self.user_full_name or self.username or self.external_user_id}"
 
 
-class AIModelTokenBudget(models.Model):
-    """Manually maintained token budget for an AI provider/account.
-
-    The total limit and its issue date are set by an admin (the upstream APIs
-    do not always expose them). Spent tokens are aggregated from
-    ``AIRequestLog.tokens`` for logs with ``sent_at >= issued_at``; attribution
-    per provider is approximate until a per-model/per-provider token field is
-    introduced.
-    """
-
-    label = models.CharField(
-        max_length=128,
-        unique=True,
-        help_text="Provider/account name, e.g. «SambaNova» or «DeepSeek».",
-    )
-    total_limit = models.PositiveBigIntegerField(help_text="Total token allowance.")
-    issued_at = models.DateField(help_text="Date the allowance was issued/reset.")
-    notes = models.TextField(blank=True, default="")
-
-    class Meta:
-        db_table = "ai_ai_model_token_budget"
-        verbose_name = "AI model token budget"
-        verbose_name_plural = "AI model token budgets"
-        ordering = ("label",)
-
-    def __str__(self):
-        return f"{self.label} ({self.total_limit} от {self.issued_at})"
-
-
 class AIModelTestRun(models.Model):
     """A persisted ARM multi-model run.
 
     The in-memory job dict in ``ai/arm_runner.py`` is still used for live
     progress, but this model is the source of truth for completed runs and
-    powers the per-model / per-topic summary tables. One run corresponds to one
-    prompt sent to one or more models (a batch-over-tasks runner would create
-    one run per task and aggregate across runs).
+    powers the per-model / per-topic summary tables. ``run_type`` distinguishes
+    the single-prompt find-error runner (``single``) from the batch-over-tasks
+    solver (``batch``); the latter keeps one run for many (task, model) pairs and
+    stores the per-task topic/language snapshot on each ``AIModelTestResult``.
     """
 
     STATUS_RUNNING = "running"
@@ -394,7 +415,18 @@ class AIModelTestRun(models.Model):
         (STATUS_FAILED, "Failed"),
     )
 
+    RUN_TYPE_SINGLE = "single"
+    RUN_TYPE_BATCH = "batch"
+
+    RUN_TYPE_CHOICES = (
+        (RUN_TYPE_SINGLE, "Single (find-error)"),
+        (RUN_TYPE_BATCH, "Batch (solve)"),
+    )
+
     run_id = models.CharField(max_length=64, unique=True, db_index=True)
+    run_type = models.CharField(
+        max_length=16, choices=RUN_TYPE_CHOICES, default=RUN_TYPE_SINGLE, db_index=True,
+    )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True, blank=True,
@@ -431,7 +463,11 @@ class AIModelTestResult(models.Model):
 
     `status` is "ok"/"error" (matches the in-memory result_item shape); this is
     what the ARM summary table aggregates (percent solved, average response
-    time) across runs.
+    time) across runs. For batch-solve runs (`run.run_type == "batch"`) `task`
+    links the row to a `Task`, `verdict` is the grading result
+    ("solved"/"failed"/"skipped"), and the `*_snapshot` fields freeze the task's
+    topic/programming-language at run time (the operator may reassign them
+    later). `verdict` is NULL for legacy single find-error rows.
     """
 
     STATUS_OK = "ok"
@@ -442,18 +478,41 @@ class AIModelTestResult(models.Model):
         (STATUS_ERROR, "Error"),
     )
 
+    VERDICT_SOLVED = "solved"
+    VERDICT_FAILED = "failed"
+    VERDICT_SKIPPED = "skipped"
+
+    VERDICT_CHOICES = (
+        (VERDICT_SOLVED, "Решено"),
+        (VERDICT_FAILED, "Не решено"),
+        (VERDICT_SKIPPED, "Пропущено"),
+    )
+
     run = models.ForeignKey(
         AIModelTestRun,
         on_delete=models.CASCADE,
         related_name="results",
     )
+    task = models.ForeignKey(
+        Task,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="test_results",
+    )
     model_key = models.CharField(max_length=128, db_index=True)
     model_title = models.CharField(max_length=255)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_OK)
+    verdict = models.CharField(
+        max_length=8, choices=VERDICT_CHOICES, null=True, blank=True, db_index=True,
+    )
     duration_seconds = models.FloatField(null=True, blank=True)
     tokens = models.PositiveIntegerField(null=True, blank=True)
     short_response = models.TextField(blank=True, default="")
     raw_response = models.TextField(blank=True, default="")
+    # Snapshot of the task's topic / programming language at run time (batch runs).
+    topic_id_snapshot = models.IntegerField(null=True, blank=True)
+    topic_name_snapshot = models.CharField(max_length=255, blank=True, default="")
+    prog_lang_snapshot = models.CharField(max_length=255, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -462,8 +521,17 @@ class AIModelTestResult(models.Model):
         verbose_name_plural = "AI model test results"
         ordering = ("model_title",)
         constraints = [
+            # One row per (run, model, task) for batch runs.
+            models.UniqueConstraint(
+                fields=("run", "model_key", "task"),
+                name="ai_model_test_result_run_model_task_uniq",
+            ),
+            # Legacy single find-error rows have task IS NULL — keep them unique
+            # per (run, model_key). Postgres treats NULLs as distinct, so this
+            # partial constraint only applies to the legacy shape.
             models.UniqueConstraint(
                 fields=("run", "model_key"),
+                condition=models.Q(task__isnull=True),
                 name="ai_model_test_result_run_model_uniq",
             ),
         ]

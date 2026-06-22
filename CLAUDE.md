@@ -94,7 +94,7 @@ python manage.py check_models_health --force
 - `ai/` — the only Django app.
   - `ai/views.py` — page views, API endpoints (`/ai/api/problem-data/`, `/ai/api/prompts/`, `/ai/api/languages/`, `/ai/api/topics/`, `/ai/api/shared-prompts/`, `/ai/api/task-info/`, `/ai/api/task-solution/`), `health`, password setup, test-panel login, audio transcription. API URLconf is split: page/asset routes in `ai/urls.py`, API/admin routes wired in `DjangoTest/urls.py` via `ai/admin/urls.py`.
   - `ai/consumers.py` — Channels WebSocket consumer (`/ai/chat/ws/<client_id>`, see `ai/routing.py`). Thin orchestrator: delegates auth, prompt resolution, message composition, model invocation, and logging to the `ai/services/` layer. Legacy model aliases are resolved in `ModelCaller`.
-  - `ai/models.py` — `ProgrammingLanguage`, `Topic`, `Prompt`, `SharedPrompt`, `AIRequestLog`, `ExternalDLAccount`, `AIModelAvailability`, `AIModelHealthRun`, `AIModelTokenBudget` (admin-maintained token allowance; spent aggregated from `AIRequestLog.tokens` via `ai/token_budget.py`), etc. Model capability metadata (Text/Vision/Reasoning) lives on the registry entries in `ai/model_clients/registry.py`, not in the DB.
+  - `ai/models.py` — `ProgrammingLanguage`, `Topic`, `Task` (DL task reference for batch-solve ARM), `Prompt`, `SharedPrompt`, `AIRequestLog`, `ExternalDLAccount`, `AIModelAvailability`, `AIModelHealthRun`, `AIModelTestRun` (`run_type` single/batch), `AIModelTestResult`, etc. Model capability metadata (Text/Vision/Reasoning) lives on the registry entries in `ai/model_clients/registry.py`, not in the DB.
   - `ai/querysets.py` — `prompt_queryset_for_user`, the single shared ACL helper for prompt visibility (superusers/staff see all; prompt developers see owned + editor prompts).
   - `ai/serializers.py` / `ai/i18n.py` — lightweight serializers and UI-language localization (`name_ru`, `name_en`, `name_fr`).
   - `ai/middleware.py` — `ExternalAuthMiddleware` validates the `DLSID` cookie and auto-provisions local users; `CsrfSessionFallbackMiddleware` migrates old cookie-based CSRF tokens into the session. External-auth logic lives in `ai/external_auth.py` (error classes `ExternalAuthMisconfigured` / `ExternalAuthUnavailable` / `ExternalAuthUnauthorized`, `fetch_external_user_info`, cookie/url helpers) and is reused by both the middleware and the WebSocket auth service.
@@ -155,10 +155,9 @@ Supported UI languages are Russian (`Русский`), English (`English`), and 
 - `CACHES` (configured in `DjangoTest/settings.py`) uses Redis when `REDIS_URL` is set, otherwise Django `LocMemCache` for local dev. The cache backs both the rate limiter (`ai/throttling.py`) and the shared conversation history (`ai/model_clients/history.py`, `ConversationHistory`) — so history survives process restarts and is shared across Daphne workers in production.
 - Per-user rate limiting is on by default (`AI_RATE_LIMIT_ENABLED`); see defaults above. `RateLimitMiddleware` already enforces the HTTP limit on every `/ai/` path, so do NOT also wrap such views in `@rate_limited` — it double-counts the same per-user counter. The 429 response is JSON for any AJAX/fetch caller (`Accept: application/json`, `X-Requested-With`, `Sec-Fetch-Mode: cors`, or `/ai/api/` paths) and plain text only for browser navigations — frontend fetch sites must guard `response.ok` before `response.json()`.
 
-### Token budget and model capabilities
+### Model capabilities
 
 - Model capability annotations (Text/Vision/Reasoning) are declared per registry entry in `ai/model_clients/registry.py` (`capabilities(key)`) and surfaced on the «Состояние моделей» page and in the chat model selector (reasoning models get a «думающая» marker). Add new capabilities there, not in the DB.
-- Token budget (`AIModelTokenBudget`, `ai/token_budget.py`) is admin-maintained: an admin sets the total limit + issue date; spent tokens are aggregated from `AIRequestLog.tokens` since `issued_at`. Attribution per provider is approximate until a per-model/per-provider token field exists — `ai/token_budget.py` is the single place to make it exact.
 
 ### Model availability
 
@@ -168,7 +167,9 @@ When Web DeepSeek (`Web_DeepSeek` / `Web_DeepSeek_Thinking`) is found down, the 
 
 ### ARM persistence and reporting
 
-ARM runs are persisted: `AIModelTestRun` (one per run) + `AIModelTestResult` (one per model). `ai/arm_runner.py` keeps an in-memory job for live progress but the DB is the source of truth for completed/evicted runs (`get_arm_run_snapshot` falls back to it). The report (`_build_report`) includes a `summary` table per model — % solved (desc), average response time (asc), tokens — rendered on `/ai/admin/arm/find-error/`. The batch-over-all-tasks and «pull erroneous solutions from DL» parts of the ARM spec are not implemented (they depend on the unbuilt DL-API); the DB/report schema is ready for them.
+ARM runs are persisted: `AIModelTestRun` (one per run, `run_type` single/batch) + `AIModelTestResult` (one per model for single runs, one per (model, task) for batch runs). `ai/arm_runner.py` keeps an in-memory job for live progress but the DB is the source of truth for completed/evicted runs (`get_arm_run_snapshot` falls back to it). The find-error report (`_build_report` / `_build_summary`) includes a `summary` table per model — % solved (desc), average response time (asc), tokens — rendered on `/ai/admin/arm/find-error/`.
+
+Batch-solve ARM (`run_type="batch"`, `/ai/admin/arm/solve/`) sends each available model the statement of every active `Task`, grades the model's solution against the DL sample solution (`fetch_task_solution`), and records `verdict` (solved/failed/skipped) + `duration_seconds` per (task, model) in `AIModelTestResult`. Grading is approximate (`normalize_solution` + `difflib` ratio ≥ `SOLVE_RATIO_THRESHOLD`, not a real test run). The report (`_build_batch_report` via `_per_bucket`) renders per-model and per-topic tables (% solved, avg time) plus an overall model table sorted by % solved desc / avg time asc. The operator sources tasks from DL by `node_id` (`TaskAdmin.refresh_from_dl` → `fetch_task_info` fills name/statement/task_id) and assigns topic / programming language / `file_extension` locally. Requires the admin's DLSID at run start (DL sample fetches use the captured session id).
 
 ### Important files to read when working on...
 

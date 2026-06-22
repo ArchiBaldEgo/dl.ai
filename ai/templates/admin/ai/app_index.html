@@ -1,16 +1,14 @@
-{% extends "admin/base_site.html" %}
+{% extends "admin/app_index.html" %}
 {% load i18n %}
 
-{% block breadcrumbs %}
-<div class="breadcrumbs">
-  <a href="{% url 'admin:index' %}">{% translate 'Home' %}</a>
-  &rsaquo;
-  {{ title }}
-</div>
-{% endblock %}
+{% comment %}Per-app admin index (/ai/admin/ai/). Inherits the stock app_list
+rendering and breadcrumbs from admin/app_index.html -> admin/index.html. The
+stock app_index empties the sidebar; we override it with the same #content-
+related AI-tools module as the dashboard, so the hub is consistent on every
+admin page and inherits the stock gutter/responsive CSS.{% endcomment %}
 
-{% block content %}
-<div id="content-main">
-  {% include "admin/ai/_ai_app_list.html" with app_list=app_list show_changelinks=True %}
+{% block sidebar %}
+<div id="content-related">
+  {% include "admin/ai/_ai_sidebar_tools.html" %}
 </div>
 {% endblock %}

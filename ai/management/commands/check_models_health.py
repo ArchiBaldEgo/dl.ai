@@ -17,6 +17,21 @@ class Command(BaseCommand):
             help="Force re-check even if current window was already completed",
         )
 
+    def _print_model_detail(self, detail):
+        """Live per-model console output: HTTP code (or 200) + model response."""
+        title = detail.get("title") or detail.get("key") or "?"
+        code = detail.get("last_http_code")
+        code_str = str(code) if code is not None else "—"
+        state = "OK" if detail.get("is_available") else "FAIL"
+        ms = detail.get("response_time_ms")
+        ms_str = f"{ms}ms" if ms is not None else "—"
+        message = (detail.get("last_message") or "").replace("\n", " ").strip()
+        if len(message) > 200:
+            message = message[:200] + "…"
+        self.stdout.write(
+            f"- {title}: HTTP {code_str} | {state} | {ms_str} | {message}"
+        )
+
     def handle(self, *args, **options):
         force = options["force"]
         # --force bypasses the in-run STATUS_RUNNING guard inside
@@ -31,7 +46,7 @@ class Command(BaseCommand):
             return
 
         try:
-            updated = run_model_health_check(force=force)
+            updated = run_model_health_check(force=force, on_model_checked=self._print_model_detail)
             rows = get_model_status_rows()
         except Exception as exc:
             raise CommandError(f"Model health check failed: {exc}") from exc

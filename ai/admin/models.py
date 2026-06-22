@@ -8,10 +8,14 @@ from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
 from django.http import HttpResponse
 
-from ..models import AIAppSettings, AIModelTokenBudget, ProgrammingLanguage, Prompt, SharedPrompt, Topic
+from ..models import AIAppSettings, ProgrammingLanguage, Prompt, SharedPrompt, Task, Topic
 from ..querysets import prompt_queryset_for_user
 from .forms import PromptForm, SharedPromptForm
 from .permissions import can_access_logs, is_prompt_developer_user, is_staff_or_superuser
+from ..dl_api_client import (
+    DLApiError,
+    fetch_task_info,
+)
 
 User = get_user_model()
 
@@ -301,10 +305,69 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
     """User management restricted to staff/superuser in the AI admin site."""
 
 
-class AIModelTokenBudgetAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
-    list_display = ("label", "total_limit", "issued_at", "notes")
-    list_display_links = ("label",)
-    search_fields = ("label", "notes")
+class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Admin for the local Task table used by batch-solve ARM.
+
+    The operator enters the DL ``node_id`` and assigns a topic / programming
+    language / ``file_extension`` locally. ``name``/``statement``/``task_id``
+    are DL-owned (fetched via ``refresh_from_dl``) and shown read-only.
+    """
+
+    list_display = ("node_id", "name", "topic", "programming_language", "file_extension", "active", "updated_at")
+    list_display_links = ("node_id", "name")
+    list_filter = ("active", "topic", "topic__programming_language")
+    list_editable = ("file_extension", "active")
+    search_fields = ("node_id", "task_id", "name", "statement")
+    autocomplete_fields = ("topic", "programming_language")
+    readonly_fields = ("name", "statement", "task_id", "created_at", "updated_at")
+    actions = ("refresh_from_dl",)
+
     fieldsets = (
-        (None, {"fields": ("label", "total_limit", "issued_at", "notes")}),
+        (None, {"fields": ("node_id", "task_id", "name", "statement")}),
+        ("Локальная привязка", {"fields": ("topic", "programming_language", "file_extension", "active")}),
+        ("Метаданные", {"fields": ("created_at", "updated_at")}),
     )
+
+    def get_readonly_fields(self, request, obj=None):
+        # node_id is editable only on add; once set it identifies the DL task.
+        base = list(self.readonly_fields)
+        if obj is not None:
+            base.append("node_id")
+        return base
+
+    def refresh_from_dl(self, request, queryset):
+        """Fetch name/statement/task_id from DL for the selected tasks.
+
+        Requires the admin's session to carry a valid DL session id (DLSID
+        flow), exactly like ``get_task_info_view``.
+        """
+        import os
+
+        session_id = request.session.get("external_session_id", "").strip()
+        if not session_id:
+            cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
+            session_id = request.COOKIES.get(cookie_name, "").strip()
+        if not session_id:
+            self.message_user(request, "Нет DLSID — обновление из DL невозможно.", level="ERROR")
+            return
+
+        updated = 0
+        failed = 0
+        for task in queryset:
+            try:
+                data = fetch_task_info(task.node_id, session_id=session_id, remove_html_tags=True)
+            except DLApiError as exc:
+                failed += 1
+                self.message_user(
+                    request,
+                    f"DL #{task.node_id}: не удалось обновить ({exc}).",
+                    level="WARNING",
+                )
+                continue
+            task.task_id = data.get("taskId") or task.task_id
+            task.name = (data.get("name") or "")[:512] or task.name
+            task.statement = data.get("statement") or task.statement
+            task.save(update_fields=["task_id", "name", "statement"])
+            updated += 1
+        self.message_user(request, f"Обновлено из DL: {updated}, ошибок: {failed}.")
+    refresh_from_dl.short_description = "Обновить название и условие из DL"

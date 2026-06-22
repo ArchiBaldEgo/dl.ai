@@ -1,19 +1,17 @@
-{% extends "admin/base_site.html" %}
-{% load i18n static %}
+{% extends "admin/index.html" %}
+{% load i18n %}
 
-{% block coltype %}colMS{% endblock %}
-{% block bodyclass %}{{ block.super }} dashboard{% endblock %}
-{% block nav-breadcrumbs %}{% endblock %}
+{% comment %}AI admin dashboard. Extends the stock admin/index.html so the main
+column renders the standard permission-filtered app_list (every registered
+ModelAdmin the user can see, with Add/Change links and proper dashboard.css)
+and the left nav-sidebar stays hidden (no duplicate list). The custom
+non-ModelAdmin tool pages are consolidated into the right #content-related
+sidebar -- one place for all AI admin pages. Wrapping the tools in
+#content-related makes them inherit the stock gutter + responsive CSS, so no
+custom CSS is needed.{% endcomment %}
 
-{% block content %}
-<style>
-  #content-main { max-width: 900px; }
-</style>
-
-<div id="content-main">
-  <p>{% translate 'Select an admin page to work on.' %}</p>
-  {# All admin pages in one place: custom tool pages + every registered
-     ModelAdmin the current user can access (permission-filtered app_list). #}
-  {% include "admin/ai/_ai_app_list.html" with app_list=app_list show_changelinks=True %}
+{% block sidebar %}
+<div id="content-related">
+  {% include "admin/ai/_ai_sidebar_tools.html" %}
 </div>
 {% endblock %}

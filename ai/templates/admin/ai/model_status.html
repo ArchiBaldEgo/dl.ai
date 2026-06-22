@@ -74,18 +74,6 @@
     color: var(--body-quiet-color);
     text-decoration: line-through;
   }
-  .budget-bar {
-    width: 160px;
-    height: 8px;
-    background: rgba(100, 116, 139, 0.18);
-    border-radius: 999px;
-    overflow: hidden;
-  }
-  .budget-bar-fill {
-    height: 100%;
-    background: #067647;
-    border-radius: 999px;
-  }
   .quiet {
     color: var(--body-quiet-color);
     font-size: 12px;
@@ -180,47 +168,6 @@
       </tbody>
     </table>
   </div>
-
-  <div class="status-card">
-    <h2>Бюджет токенов</h2>
-    <p class="quiet">Общий лимит и дата выдачи задаются в админке (AI model token budgets). Потрачено — сумма токенов из логов с даты выдачи. Атрибуция по провайдерам приближённая.</p>
-    <div id="tokenBudgetWrap">
-      {% if token_budget_rows %}
-        <table class="status-table">
-          <thead>
-            <tr>
-              <th>Бюджет</th>
-              <th>Общий лимит</th>
-              <th>Дата выдачи</th>
-              <th>Потрачено</th>
-              <th>Осталось</th>
-              <th>Прогресс</th>
-            </tr>
-          </thead>
-          <tbody id="tokenBudgetRowsBody">
-            {% for row in token_budget_rows %}
-              <tr>
-                <td>{{ row.label }}</td>
-                <td>{{ row.total_limit }}</td>
-                <td>{{ row.issued_at }}</td>
-                <td>{{ row.spent }}</td>
-                <td>{{ row.remaining }}</td>
-                <td>
-                  {% if row.total_limit %}
-                    <div class="budget-bar"><div class="budget-bar-fill" style="width: {{ row.pct }}%;"></div></div>
-                  {% else %}
-                    —
-                  {% endif %}
-                </td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      {% else %}
-        <p class="quiet">Бюджеты пока не заведены. Добавьте запись «AI model token budgets» в админке.</p>
-      {% endif %}
-    </div>
-  </div>
 </div>
 
 <script>
@@ -309,37 +256,6 @@
       });
     }
 
-    function renderTokenBudgetRows(rows) {
-      const wrap = document.getElementById('tokenBudgetWrap');
-      if (!wrap) return;
-      if (!rows || !rows.length) {
-        wrap.innerHTML = '<p class="quiet">Бюджеты пока не заведены. Добавьте запись «AI model token budgets» в админке.</p>';
-        return;
-      }
-      const head = '<thead><tr><th>Бюджет</th><th>Общий лимит</th><th>Дата выдачи</th><th>Потрачено</th><th>Осталось</th><th>Прогресс</th></tr></thead>';
-      const body = rows.map(function (row) {
-        const total = Number(row.total_limit || 0);
-        const spent = Number(row.spent || 0);
-        // Prefer the server-provided pct (computed in Python) so the async
-        // refresh matches the initial server render exactly — avoids a 1%
-        // drift from Python round() (banker's) vs JS Math.round (half-up) on
-        // half-integer values. Fall back to recomputation only if absent.
-        const serverPct = Number(row.pct);
-        const pct = Number.isFinite(serverPct)
-          ? Math.min(100, Math.max(0, serverPct))
-          : (total > 0 ? Math.min(100, Math.round((spent / total) * 100)) : 0);
-        return '<tr>'
-          + `<td>${escapeHtml(row.label || '')}</td>`
-          + `<td>${total}</td>`
-          + `<td>${escapeHtml(row.issued_at || '')}</td>`
-          + `<td>${spent}</td>`
-          + `<td>${Number(row.remaining || 0)}</td>`
-          + `<td><div class="budget-bar"><div class="budget-bar-fill" style="width: ${pct}%;"></div></div></td>`
-          + '</tr>';
-      }).join('');
-      wrap.innerHTML = `<table class="status-table">${head}<tbody>${body}</tbody></table>`;
-    }
-
     function schedulePoll(delayMs) {
       if (pollTimer) {
         window.clearTimeout(pollTimer);
@@ -368,7 +284,6 @@
         }
 
         renderStatusRows(data.model_status_rows || []);
-        renderTokenBudgetRows(data.token_budget_rows || []);
 
         const nextRefreshInProgress = Boolean(data.refresh_in_progress);
         setInProgressHint(nextRefreshInProgress);

@@ -1,8 +1,8 @@
 {% load i18n %}
-{# Shared back-to-hub link for custom AI admin tool pages. Reverses the admin
-   index URL instead of hardcoding /ai/admin/ so it survives mount-point
-   changes. Pages with a more specific "back" target (e.g. log detail → logs
-   list) add that link alongside this one. #}
+{% comment %}Shared back-to-hub link for custom AI admin tool pages. Reverses
+the admin index URL instead of hardcoding /ai/admin/ so it survives mount-point
+changes. Pages with a more specific "back" target (e.g. log detail -> logs
+list) add that link alongside this one.{% endcomment %}
 <div class="ai-back-nav">
   <a href="{% url 'admin:index' %}">&larr; {% translate 'Back to admin' %}</a>
 </div>

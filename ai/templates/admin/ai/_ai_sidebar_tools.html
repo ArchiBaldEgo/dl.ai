@@ -1,0 +1,25 @@
+{% load i18n %}
+{% comment %}Shared AI tool links for the admin dashboard sidebar (the right
+"content-related" column). These are the custom (non-ModelAdmin) admin pages;
+the registered ModelAdmins are rendered by the stock admin app_list in the main
+column, so they are NOT duplicated here. Permission-gated via each_context.{% endcomment %}
+{% if is_prompt_developer or show_arm_link or show_model_status_link or show_logs_link %}
+<div class="module" id="ai-tools-module">
+  <h2>{% translate 'AI tools' %}</h2>
+  <ul>
+    {% if is_prompt_developer %}
+      <li><a href="{{ my_prompt_url }}">{% translate 'My prompt' %}</a></li>
+    {% endif %}
+    {% if show_arm_link %}
+      <li><a href="{{ arm_find_error_url }}">{% translate 'Find the error (ARM)' %}</a></li>
+      <li><a href="{{ arm_solve_url }}">{% translate 'Batch solve (ARM)' %}</a></li>
+    {% endif %}
+    {% if show_model_status_link %}
+      <li><a href="{{ arm_model_status_url }}">{% translate 'Model status' %}</a></li>
+    {% endif %}
+    {% if show_logs_link %}
+      <li><a href="{{ ai_logs_url }}">{% translate 'Request logs' %}</a></li>
+    {% endif %}
+  </ul>
+</div>
+{% endif %}

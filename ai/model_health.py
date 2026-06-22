@@ -239,7 +239,10 @@ def _invoke_healthcheck(handler, window_date, key):
 def _check_one_model(key, title, handler_info, window_date):
     """Run the healthcheck prompt against one model and persist availability.
 
-    Returns True if the model answered healthily, False otherwise.
+    Returns a detail dict ``{key, title, is_available, last_http_code,
+    last_message, response_time_ms}`` so callers (the management command, the
+    auto-recovery path) can surface per-model HTTP code + response text without
+    re-reading the DB.
 
     A first attempt that fails in a transient way (cold-start timeout, empty
     reply, connection error) gets ONE retry after a short backoff, so a
@@ -256,7 +259,14 @@ def _check_one_model(key, title, handler_info, window_date):
             last_message="Handler not found",
             last_http_code=None,
         )
-        return False
+        return {
+            "key": key,
+            "title": title,
+            "is_available": False,
+            "last_http_code": None,
+            "last_message": "Handler not found",
+            "response_time_ms": None,
+        }
 
     handler = handler_info["handler"]
     response_text, elapsed_ms, exc = _invoke_healthcheck(handler, window_date, key)
@@ -268,16 +278,24 @@ def _check_one_model(key, title, handler_info, window_date):
         is_available = exc is None and _is_healthy_response(response_text)
 
     if exc is not None:
+        message = f"Health check exception: {exc}"
         _save_availability(
             window_date=window_date,
             key=key,
             title=title,
             is_available=False,
             response_time_ms=elapsed_ms,
-            last_message=f"Health check exception: {exc}",
+            last_message=message,
             last_http_code=None,
         )
-        return False
+        return {
+            "key": key,
+            "title": title,
+            "is_available": False,
+            "last_http_code": None,
+            "last_message": message,
+            "response_time_ms": elapsed_ms,
+        }
 
     # Model handlers only return text/tokens, not the raw status code.
     # We try to recover the HTTP code from error messages when possible.
@@ -293,7 +311,14 @@ def _check_one_model(key, title, handler_info, window_date):
         last_message=response_text,
         last_http_code=last_http_code,
     )
-    return is_available
+    return {
+        "key": key,
+        "title": title,
+        "is_available": is_available,
+        "last_http_code": last_http_code,
+        "last_message": response_text,
+        "response_time_ms": elapsed_ms,
+    }
 
 
 def _maybe_autorecover_web_deepseek(handlers, window_date):
@@ -346,7 +371,8 @@ def _maybe_autorecover_web_deepseek(handlers, window_date):
     for key in down_keys:
         title = registry.title(key)
         handler_info = handlers.get(key)
-        is_up = _check_one_model(key, title, handler_info, window_date)
+        detail = _check_one_model(key, title, handler_info, window_date)
+        is_up = detail["is_available"]
         # Annotate the result so operators can see auto-recovery happened.
         # The availability row was already persisted by _check_one_model; this
         # is a cosmetic annotation only, so a transient DB error here must never
@@ -363,7 +389,7 @@ def _maybe_autorecover_web_deepseek(handlers, window_date):
             logger.warning("Failed to annotate auto-recovery outcome for %s", key, exc_info=True)
 
 
-def run_model_health_check(force=False):
+def run_model_health_check(force=False, on_model_checked=None):
     window_date = get_health_window_date()
     now = timezone.now()
 
@@ -424,7 +450,12 @@ def run_model_health_check(force=False):
         for key in MODEL_CATALOG_KEYS:
             title = registry.title(key)
             handler_info = handlers.get(key)
-            _check_one_model(key, title, handler_info, window_date)
+            detail = _check_one_model(key, title, handler_info, window_date)
+            if on_model_checked is not None:
+                try:
+                    on_model_checked(detail)
+                except Exception:
+                    logger.warning("on_model_checked callback failed for %s", key, exc_info=True)
 
         _maybe_autorecover_web_deepseek(handlers, window_date)
 

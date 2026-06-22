@@ -251,6 +251,7 @@ class AIAdminSite(admin.AdminSite):
         context["show_prompt_link"] = can_access_prompt_admin(request)
         context["show_logs_link"] = can_access_logs(request)
         context["arm_find_error_url"] = "/ai/admin/arm/find-error/"
+        context["arm_solve_url"] = "/ai/admin/arm/solve/"
         context["arm_model_status_url"] = "/ai/admin/arm/models/"
         context["arm_model_status_refresh_url"] = "/ai/admin/arm/models/refresh/"
         context["arm_model_status_state_url"] = "/ai/admin/arm/models/state/"
