@@ -1,0 +1,149 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script src="{% static 'admin/js/prompt_regression.js' %}" defer></script>
+{% endblock %}
+
+{% block content %}
+<style>
+  .prt-wrap { max-width: 1280px; margin: 0 auto; color: var(--body-fg); }
+  .prt-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+  .prt-title-block h1 { margin: 0 0 6px; font-size: 28px; line-height: 1.2; }
+  .prt-subtitle { color: var(--body-quiet-color); margin: 0; font-size: 14px; }
+  .prt-card { background: var(--body-bg); border: 1px solid var(--hairline-color); border-radius: 8px; padding: 18px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+  .prt-section-head h2 { margin: 0 0 4px; font-size: 18px; }
+  .prt-section-note { color: var(--body-quiet-color); font-size: 13px; margin: 0 0 14px; }
+  .prt-form label { font-weight: 600; display: block; margin: 10px 0 4px; }
+  .prt-form select, .prt-form input[type="text"] { padding: 6px 8px; border: 1px solid var(--hairline-color); border-radius: 4px; min-width: 320px; }
+  .prt-models { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 6px; }
+  .prt-model { display: inline-flex; align-items: center; gap: 6px; font-weight: 400; }
+  .prt-cases { max-height: 340px; overflow-y: auto; border: 1px solid var(--hairline-color); border-radius: 4px; padding: 8px 12px; }
+  .prt-case { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-weight: 400; }
+  .prt-case .prt-case-meta { color: var(--body-quiet-color); font-size: 12px; }
+  .prt-error { color: #c93b3b; font-weight: 600; margin: 10px 0; }
+  .prt-status-line { display: none; align-items: center; gap: 10px; margin: 10px 0; color: var(--body-quiet-color); }
+  .prt-status-line.active { display: flex; }
+  .prt-spinner { width: 16px; height: 16px; border: 2px solid var(--hairline-color); border-top-color: var(--body-fg); border-radius: 50%; display: inline-block; animation: prt-spin 0.8s linear infinite; }
+  @keyframes prt-spin { to { transform: rotate(360deg); } }
+  .prt-summary-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  .prt-summary-table th, .prt-summary-table td { border: 1px solid var(--hairline-color); padding: 6px 10px; text-align: left; font-size: 13px; }
+  .prt-summary-table th { background: var(--darkened-bg); }
+  .prt-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+  .prt-badge.match { background: #e3f4e3; color: #1a7d1a; }
+  .prt-badge.mismatch { background: #fde3e3; color: #c93b3b; }
+  .prt-badge.skipped { background: #eee; color: var(--body-quiet-color); }
+  .prt-result { border: 1px solid var(--hairline-color); border-radius: 6px; margin-bottom: 10px; }
+  .prt-result > summary { cursor: pointer; padding: 10px 12px; list-style: none; }
+  .prt-result > summary::-webkit-details-marker { display: none; }
+  .prt-result-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .prt-result-title { font-weight: 600; }
+  .prt-result-hint { color: var(--body-quiet-color); font-size: 12px; }
+  .prt-result-body { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 10px 12px; border-top: 1px solid var(--hairline-color); }
+  .prt-result-body h4 { margin: 0 0 4px; font-size: 13px; color: var(--body-quiet-color); }
+  .prt-result-body pre { white-space: pre-wrap; word-break: break-word; background: var(--darkened-bg); border: 1px solid var(--hairline-color); border-radius: 4px; padding: 8px; max-height: 320px; overflow: auto; margin: 0; font-size: 12px; }
+  .prt-empty { color: var(--body-quiet-color); }
+  .prt-actions { margin-top: 14px; display: flex; gap: 10px; align-items: center; }
+  .button { display: inline-block; padding: 6px 14px; border: 1px solid var(--hairline-color); border-radius: 4px; background: var(--darkened-bg); color: var(--body-fg); text-decoration: none; }
+  .button.default { background: var(--button-bg); color: var(--button-fg); border-color: transparent; }
+</style>
+
+<div class="prt-wrap">
+  <div class="prt-header">
+    <div class="prt-title-block">
+      <h1>Регрессионные тесты промптов</h1>
+      <p class="prt-subtitle">Прогон одной модели по набору тест-кейсов с эталонными реакциями. Окно моделей: {{ health_window_date }}.</p>
+    </div>
+    <div class="prt-actions">
+      <a class="button" href="{% url 'admin:index' %}">В админку</a>
+      <a class="button" href="{% url 'ai_arm_find_error' %}">ARM: поиск ошибок</a>
+    </div>
+  </div>
+
+  <div class="prt-card">
+    <div class="prt-section-head">
+      <h2>Запуск прогона</h2>
+      <p class="prt-section-note">Выберите тестируемый промпт, модель и набор кейсов. После правки промпта повторите запуск — отклонения от эталона появятся в отчёте.</p>
+    </div>
+    <form id="prtRunForm" method="post" class="prt-form">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="run_regression">
+
+      <label for="prt_prompt">Тестируемый промпт (необязательно)</label>
+      <select id="prt_prompt" name="prompt">
+        <option value="">— без промпта (только режимный базовый) —</option>
+        {% for p in prompt_options %}
+          <option value="{{ p.id }}">{{ p.name }}{% if p.topic_id %} (тема #{{ p.topic_id }}){% endif %}</option>
+        {% endfor %}
+      </select>
+
+      <label for="prt_interface_language">Язык интерфейса</label>
+      <select id="prt_interface_language" name="interface_language">
+        <option value="Русский" selected>Русский</option>
+        <option value="English">English</option>
+        <option value="Français">Français</option>
+      </select>
+
+      <label>Модель</label>
+      <div class="prt-models" id="prt_models">
+        {% for model in model_options %}
+          <label class="prt-model">
+            <input type="checkbox" name="models" value="{{ model.key }}">
+            {{ model.title }}
+          </label>
+        {% endfor %}
+        {% if not model_options %}<span class="prt-empty">Нет доступных моделей. Обновите «Состояние моделей».</span>{% endif %}
+      </div>
+
+      <label>Тест-кейсы (пусто = все активные)</label>
+      <div class="prt-cases" id="prt_cases">
+        {% for c in test_cases %}
+          <label class="prt-case">
+            <input type="checkbox" name="cases" value="{{ c.id }}">
+            <span>{{ c.name }}</span>
+            <span class="prt-case-meta">[{{ c.mode }} · {{ c.comparator }}{% if not c.has_expected %} · нет эталона{% endif %}]</span>
+          </label>
+        {% endfor %}
+        {% if not test_cases %}<span class="prt-empty">Нет активных тест-кейсов. Создайте их в разделе «Тест-кейсы промптов».</span>{% endif %}
+      </div>
+
+      <div id="prtRunError" class="prt-error" {% if not error_message %}style="display:none"{% endif %}>{{ error_message }}</div>
+      <div id="prtRunProgress" class="prt-status-line">
+        <span class="prt-spinner" aria-hidden="true"></span>
+        <span class="prt-progress-text"></span>
+      </div>
+      <div class="prt-actions">
+        <button id="prtRunSubmitBtn" type="submit" class="default">Запустить прогон</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="prtReportCard" class="prt-card" {% if not report %}style="display: none"{% endif %}>
+    <div class="prt-section-head"><h2>Отчёт</h2></div>
+    <ul id="prtReportList">
+      {% if report %}
+        <li>Всего кейсов: {{ report.total }}</li>
+        <li>Совпадает: {{ report.matched }}</li>
+        <li>Отклонений: {{ report.mismatched }}</li>
+        <li>Пропущено: {{ report.skipped }}</li>
+        <li>Суммарно токенов: {{ report.tokens_total }}</li>
+      {% endif %}
+    </ul>
+    <div id="prtMismatchesWrap"></div>
+  </div>
+
+  <div id="prtResultsCard" class="prt-card" {% if not results %}style="display: none"{% endif %}>
+    <div class="prt-section-head"><h2>Результаты по кейсам</h2></div>
+    <div id="prtResultsList"></div>
+  </div>
+</div>
+
+{{ active_run_snapshot|json_script:"prompt-regression-initial-run" }}
+<script>
+  window.PROMPT_REGRESSION_CONFIG = {
+    startUrl: "{{ prompt_regression_start_url }}",
+    statusUrl: "{{ prompt_regression_status_url }}",
+  };
+</script>
+{% endblock %}

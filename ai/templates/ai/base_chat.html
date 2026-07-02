@@ -68,6 +68,11 @@
                 </div>
             </div>
             <div class="panel-date">11.03.2026</div>
+            {% if token_usage %}
+            <div class="token-usage" title="Суммарно токенов за сегодня по всем моделям (млн)">
+                Токенов сегодня: {{ token_usage.used_display }}{% if token_usage.limit_display %} / {{ token_usage.limit_display }}{% endif %}
+            </div>
+            {% endif %}
         </div>
         <hr/>
 

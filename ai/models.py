@@ -538,3 +538,187 @@ class AIModelTestResult(models.Model):
 
     def __str__(self):
         return f"{self.run.run_id} / {self.model_title} — {self.status}"
+
+
+# ---------------------------------------------------------------------------
+# Prompt regression tests (golden-master suite).
+#
+# A `PromptTestCase` is a fixed fixture: an input (task statement / code /
+# message) plus the expected (golden) model reaction. A `PromptTestRun` is one
+# pass of a single model over a set of cases with a chosen prompt under test;
+# `PromptTestResult` stores the per-case actual response and the deterministic
+# comparison verdict against the golden text. This mirrors the ARM run/result
+# pair but is keyed by (run, test_case) and driven by an editable prompt.
+# ---------------------------------------------------------------------------
+
+PROMPT_TEST_MODE_CHOICES = (
+    ("solve", "Solve"),
+    ("find_error", "Find error"),
+    ("chat", "Chat"),
+)
+
+PROMPT_TEST_COMPARATOR_CHOICES = (
+    ("ratio", "ratio (difflib)"),
+    ("contains_all", "contains_all (все строки эталона)"),
+    ("exact", "exact (нормализованное равенство)"),
+    ("set", "set (равенство множеств строк)"),
+)
+
+
+class PromptTestCase(models.Model):
+    """Один тест-кейс регрессионного набора промпта: ввод + эталон + компаратор.
+
+    ``input_text`` — условие задачи (solve), код с ошибкой (find_error) или
+    сообщение пользователя (chat). ``expected_text`` — образцовая реакция
+    модели: решение / ошибки по одной на строку (contains_all) / ожидаемый
+    ответ. ``comparator`` задаёт способ детерминированного сравнения (см.
+    ``ai/grading.py``). Тема и язык программирования нужны для подстановки
+    плейсхолдеров в тестируемый промпт.
+    """
+
+    name = models.CharField(max_length=255, verbose_name="Название")
+    mode = models.CharField(
+        max_length=16, choices=PROMPT_TEST_MODE_CHOICES, db_index=True,
+        verbose_name="Режим",
+    )
+    programming_language = models.ForeignKey(
+        ProgrammingLanguage, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="prompt_test_cases", verbose_name="Язык программирования",
+    )
+    topic = models.ForeignKey(
+        Topic, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="prompt_test_cases", verbose_name="Тема",
+    )
+    input_text = models.TextField(verbose_name="Ввод (условие / код / сообщение)")
+    expected_text = models.TextField(blank=True, default="", verbose_name="Эталон")
+    comparator = models.CharField(
+        max_length=16, choices=PROMPT_TEST_COMPARATOR_CHOICES, default="ratio",
+        verbose_name="Компаратор",
+    )
+    match_threshold = models.FloatField(
+        null=True, blank=True, verbose_name="Порог ratio",
+        help_text="Для компаратора ratio (по умолчанию 0.85).",
+    )
+    ui_language = models.CharField(max_length=16, default="Русский", verbose_name="Язык интерфейса")
+    active = models.BooleanField(default=True, db_index=True, verbose_name="Активен")
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="owned_prompt_test_cases", verbose_name="Владелец",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "ai_prompttestcase"
+        verbose_name = "Тест-кейс промпта"
+        verbose_name_plural = "Тест-кейсы промптов"
+        ordering = ("-created_at",)
+
+    def __str__(self):
+        return self.name or f"Тест-кейс #{self.id}"
+
+
+class PromptTestRun(models.Model):
+    """Один прогон регрессионных тестов: одна модель × набор кейсов × промпт.
+
+    Живой прогресс хранится in-memory в ``ai/prompt_test_runner.py``; эта модель
+    — источник правды для завершённых/вытесненных прогонов и основа отчётов.
+    """
+
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+
+    STATUS_CHOICES = (
+        (STATUS_RUNNING, "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
+    )
+
+    run_id = models.CharField(max_length=64, unique=True, db_index=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING, db_index=True)
+    model_key = models.CharField(max_length=128, db_index=True)
+    model_title = models.CharField(max_length=255, blank=True, default="")
+    prompt_id = models.IntegerField(null=True, blank=True, db_index=True)
+    prompt_name = models.CharField(max_length=255, blank=True, default="")
+    ui_language = models.CharField(max_length=16, default="Русский")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="prompt_test_runs",
+    )
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default="")
+    report = models.JSONField(default=dict, blank=True)
+    total_cases = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        db_table = "ai_prompttest_run"
+        verbose_name = "Прогон регрессионных тестов промпта"
+        verbose_name_plural = "Прогоны регрессионных тестов промптов"
+        ordering = ("-started_at",)
+
+    def __str__(self):
+        return f"{self.run_id} ({self.status})"
+
+
+class PromptTestResult(models.Model):
+    """Строка на (прогон × кейс): фактический ответ и verdict vs эталона."""
+
+    STATUS_OK = "ok"
+    STATUS_ERROR = "error"
+
+    STATUS_CHOICES = (
+        (STATUS_OK, "OK"),
+        (STATUS_ERROR, "Error"),
+    )
+
+    VERDICT_MATCH = "match"
+    VERDICT_MISMATCH = "mismatch"
+    VERDICT_SKIPPED = "skipped"
+
+    VERDICT_CHOICES = (
+        (VERDICT_MATCH, "Совпадает"),
+        (VERDICT_MISMATCH, "Отклонение"),
+        (VERDICT_SKIPPED, "Пропущен"),
+    )
+
+    run = models.ForeignKey(
+        PromptTestRun, on_delete=models.CASCADE, related_name="results",
+    )
+    test_case = models.ForeignKey(
+        PromptTestCase, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="test_results",
+    )
+    model_key = models.CharField(max_length=128, db_index=True)
+    model_title = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_OK)
+    verdict = models.CharField(
+        max_length=16, choices=VERDICT_CHOICES, default=VERDICT_MISMATCH, db_index=True,
+    )
+    actual_response = models.TextField(blank=True, default="")
+    expected_snapshot = models.TextField(blank=True, default="")
+    diff_hint = models.CharField(max_length=255, blank=True, default="")
+    duration_seconds = models.FloatField(null=True, blank=True)
+    tokens = models.PositiveIntegerField(null=True, blank=True)
+    # Snapshot of the case at run time (operator may reassign topic/lang later).
+    case_name_snapshot = models.CharField(max_length=255, blank=True, default="")
+    mode_snapshot = models.CharField(max_length=16, blank=True, default="")
+    topic_name_snapshot = models.CharField(max_length=255, blank=True, default="")
+    prog_lang_snapshot = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "ai_prompt_test_result"
+        verbose_name = "Результат регрессионного теста промпта"
+        verbose_name_plural = "Результаты регрессионных тестов промптов"
+        ordering = ("case_name_snapshot",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("run", "test_case"),
+                name="ai_prompt_test_result_run_case_uniq",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.run.run_id} / {self.case_name_snapshot or self.model_title} — {self.verdict}"

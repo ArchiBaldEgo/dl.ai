@@ -8,7 +8,16 @@ from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
 from django.http import HttpResponse
 
-from ..models import AIAppSettings, ProgrammingLanguage, Prompt, SharedPrompt, Task, Topic
+from ..models import (
+    AIAppSettings,
+    ProgrammingLanguage,
+    Prompt,
+    PromptTestCase,
+    PromptTestRun,
+    SharedPrompt,
+    Task,
+    Topic,
+)
 from ..querysets import prompt_queryset_for_user
 from .forms import PromptForm, SharedPromptForm
 from .permissions import can_access_logs, is_prompt_developer_user, is_staff_or_superuser
@@ -370,3 +379,44 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
             updated += 1
         self.message_user(request, f"Обновлено из DL: {updated}, ошибок: {failed}.")
     refresh_from_dl.short_description = "Обновить название и условие из DL"
+
+
+class PromptTestCaseAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Admin for prompt regression test fixtures (input + golden + comparator).
+
+    Staff-only: a test case encodes the expected model reaction and is part of
+    the regression oracle, so only staff/superusers may edit it.
+    """
+
+    list_display = ("name", "mode", "topic", "programming_language", "comparator", "active", "updated_at")
+    list_display_links = ("name",)
+    list_filter = ("mode", "active", "topic", "comparator")
+    list_editable = ("active",)
+    search_fields = ("name", "input_text", "expected_text")
+    autocomplete_fields = ("topic", "programming_language")
+    readonly_fields = ("created_at", "updated_at")
+
+    fieldsets = (
+        (None, {"fields": ("name", "mode", "active")}),
+        ("Ввод и эталон", {"fields": ("input_text", "expected_text", "comparator", "match_threshold")}),
+        ("Привязка", {"fields": ("topic", "programming_language", "ui_language", "owner")}),
+        ("Метаданные", {"fields": ("created_at", "updated_at")}),
+    )
+
+
+class PromptTestRunAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Read-only admin for prompt regression runs (the rich UI is the custom page)."""
+
+    list_display = ("run_id", "model_title", "prompt_name", "status", "total_cases", "started_at", "finished_at")
+    list_filter = ("status", "model_key")
+    search_fields = ("run_id", "model_title", "prompt_name", "error_message")
+    readonly_fields = (
+        "run_id", "status", "model_key", "model_title", "prompt_id", "prompt_name",
+        "ui_language", "user", "started_at", "finished_at", "error_message", "report", "total_cases",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
