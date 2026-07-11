@@ -456,6 +456,106 @@ def get_task_solution_view(request):
     return JsonResponse(data)
 
 
+@csrf_exempt
+@require_http_methods(["POST"])
+def send_solution_view(request):
+    """Submit AI-generated code to DL for automated testing.
+
+    Request body (JSON):
+        nodeId (int, required): DL node id to submit to.
+        code (str, required): solution source code.
+        fileExtension (str, required): e.g. .pas, .cpp, .py.
+        sessionId (str, optional): falls back to session/cookie.
+    """
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+
+    try:
+        body = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Некорректный JSON"}, status=400)
+
+    try:
+        node_id = int(body.get("nodeId"))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "nodeId обязателен и должен быть числом"}, status=400)
+
+    code = (body.get("code") or "").strip()
+    if not code:
+        return JsonResponse({"error": "code обязателен"}, status=400)
+
+    file_extension = (body.get("fileExtension") or "").strip()
+    if not file_extension:
+        return JsonResponse({"error": "fileExtension обязателен"}, status=400)
+
+    session_id = body.get("sessionId", "").strip()
+    if not session_id:
+        session_id = request.session.get("external_session_id", "").strip()
+    if not session_id:
+        cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
+        session_id = request.COOKIES.get(cookie_name, "").strip()
+    if not session_id:
+        return JsonResponse({"error": "sessionId обязателен"}, status=400)
+
+    try:
+        from .dl_api_client import send_solution_to_dl
+        data = send_solution_to_dl(session_id, node_id, code, file_extension)
+    except DLUnauthorizedError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLApiUnavailable as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLServerError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+
+    return JsonResponse(data)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def get_solution_result_view(request):
+    """Poll DL for the result of a submitted solution.
+
+    Request body (JSON):
+        queueId (int, required): id returned by send-solution.
+        sessionId (str, optional): falls back to session/cookie.
+    """
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+
+    try:
+        body = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Некорректный JSON"}, status=400)
+
+    try:
+        queue_id = int(body.get("queueId"))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "queueId обязателен и должен быть числом"}, status=400)
+
+    session_id = body.get("sessionId", "").strip()
+    if not session_id:
+        session_id = request.session.get("external_session_id", "").strip()
+    if not session_id:
+        cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
+        session_id = request.COOKIES.get(cookie_name, "").strip()
+    if not session_id:
+        return JsonResponse({"error": "sessionId обязателен"}, status=400)
+
+    try:
+        from .dl_api_client import get_solution_result_from_dl
+        data = get_solution_result_from_dl(session_id, queue_id)
+    except DLUnauthorizedError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLTaskNotFoundError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLApiUnavailable as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLServerError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+
+    return JsonResponse(data)
+
+
 @prompt_developer_access_required
 @require_http_methods(["POST"])
 def transcribe_audio(request):

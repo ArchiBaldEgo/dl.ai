@@ -404,3 +404,96 @@ def fetch_task_solution(session_id: str, task_id: int, file_extension: str) -> d
     _raise_for_status(response)
 
     return _decode_response_json(response)
+
+
+def send_solution_to_dl(
+    session_id: str,
+    node_id: int,
+    code: str,
+    file_extension: str,
+) -> dict[str, Any]:
+    """Submit code to DL for automated testing.
+
+    POST /restapi/send-solution → {"queueId": N, "message": "..."}
+
+    Returns the raw JSON response. Raises DLUnauthorizedError (401),
+    DLServerError (500), DLApiUnavailable on network failure.
+    """
+    response = _dl_request(
+        "POST",
+        "/restapi/send-solution",
+        json={
+            "sessionId": session_id,
+            "nodeId": node_id,
+            "code": code,
+            "fileExtension": file_extension,
+        },
+    )
+
+    _raise_for_status(response)
+    return _decode_response_json(response)
+
+
+def get_solution_result_from_dl(
+    session_id: str,
+    queue_id: int,
+) -> dict[str, Any]:
+    """Poll DL for the result of a submitted solution.
+
+    POST /restapi/get-solution-result → {"isFinished": bool, "comment": "..."}
+
+    Returns the raw JSON response. Raises DLUnauthorizedError (401),
+    DLTaskNotFoundError (404), DLServerError (500), DLApiUnavailable.
+    """
+    response = _dl_request(
+        "POST",
+        "/restapi/get-solution-result",
+        json={
+            "sessionId": session_id,
+            "queueId": queue_id,
+        },
+    )
+
+    _raise_for_status(response)
+    return _decode_response_json(response)
+
+
+def get_solutions_from_dl(
+    session_id: str,
+    course_id: int,
+    node_id: int,
+    *,
+    extension: str = "",
+    include_correct: bool = True,
+    include_incorrect: bool = True,
+    start_date: str = "",
+    end_date: str = "",
+) -> dict[str, Any]:
+    """Fetch list of solutions for a task from DL.
+
+    POST /restapi/get-solutions → {"solutions": [{queueId, userId, code, result, report, isCorrect}, ...]}
+
+    Regular users get only their own solutions; admins/editors get all.
+    """
+    payload: dict[str, Any] = {
+        "sessionId": session_id,
+        "courseId": course_id,
+        "nodeId": node_id,
+        "includeCorrect": include_correct,
+        "includeIncorrect": include_incorrect,
+    }
+    if extension:
+        payload["extension"] = extension
+    if start_date:
+        payload["startDate"] = start_date
+    if end_date:
+        payload["endDate"] = end_date
+
+    response = _dl_request(
+        "POST",
+        "/restapi/get-solutions",
+        json=payload,
+    )
+
+    _raise_for_status(response)
+    return _decode_response_json(response)

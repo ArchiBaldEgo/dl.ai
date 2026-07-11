@@ -28,6 +28,8 @@ from ai.views import (
     get_problem_data,
     get_task_info_view,
     get_task_solution_view,
+    send_solution_view,
+    get_solution_result_view,
     health_view,
     set_password_view,
 )
@@ -43,5 +45,7 @@ urlpatterns = [
     path('ai/api/problem-data/', get_problem_data, name='get_problem_data'),
     path('ai/api/task-info/', get_task_info_view, name='get_task_info'),
     path('ai/api/task-solution/', get_task_solution_view, name='get_task_solution'),
+    path('ai/api/send-solution/', send_solution_view, name='send_solution'),
+    path('ai/api/solution-result/', get_solution_result_view, name='get_solution_result'),
 
 ] + static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
