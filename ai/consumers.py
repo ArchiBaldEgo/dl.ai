@@ -227,6 +227,8 @@ class MyConsumer(AsyncWebsocketConsumer):
             topic_name=topic_name,
             prompt_id=self._resolve_prompt_id_for_log(prompt_id),
             prompt_name=prompt_name,
+            task_node_id=node_id,
+            task_name="",  # filled by resolve_context_names if available
         )
 
         result = await self.caller.call(message, self.client_id, model_key)

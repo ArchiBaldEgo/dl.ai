@@ -20,6 +20,7 @@ class AIRequestLogAdmin(admin.ModelAdmin):
         "sender_display",
         "programming_language_name",
         "topic_name_display",
+        "task_display",
         "prompt_name",
         "model_names_display",
         "status",
@@ -35,6 +36,7 @@ class AIRequestLogAdmin(admin.ModelAdmin):
         "programming_language_name",
         "topic_name",
         "prompt_name",
+        "task_name",
     )
     date_hierarchy = "sent_at"
     ordering = ("-sent_at",)
@@ -61,12 +63,16 @@ class AIRequestLogAdmin(admin.ModelAdmin):
     received_at_display.short_description = "Получен"
 
     def sender_display(self, obj):
+        """Return sender full name with DL ID as a clickable link."""
         name = obj.user_full_name or obj.username or ""
-        ext_id = obj.external_user_id
+        ext_id = obj.external_user_id or ""
         if name and ext_id:
-            return f"{name} (id: {ext_id})"
-        return name or ext_id or "—"
+            return f'{name} <a href="https://dl.gsu.by/report.asp?id={ext_id}" target="_blank" rel="noopener">[{ext_id}]</a>'
+        if ext_id:
+            return f'<a href="https://dl.gsu.by/report.asp?id={ext_id}" target="_blank" rel="noopener">[{ext_id}]</a>'
+        return name or "—"
     sender_display.short_description = "Кто отправлял"
+    sender_display.allow_tags = True
 
     def model_names_display(self, obj):
         return ", ".join(obj.model_names or []) or "—"
@@ -79,6 +85,15 @@ class AIRequestLogAdmin(admin.ModelAdmin):
     def topic_name_display(self, obj):
         return obj.topic_name or "—"
     topic_name_display.short_description = "Тема"
+
+    def task_display(self, obj):
+        """Return task name as a link to DL fullTaskviewer."""
+        if obj.task_node_id:
+            name = obj.task_name or str(obj.task_node_id)
+            return f'<a href="https://dl.gsu.by/admin/fullTaskviewer.asp?nid={obj.task_node_id}" target="_blank" rel="noopener">{name}</a>'
+        return obj.task_name or "—"
+    task_display.short_description = "Задача"
+    task_display.allow_tags = True
 
     def prompt_name(self, obj):
         return obj.prompt_name or "—"

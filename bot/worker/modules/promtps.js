@@ -194,6 +194,7 @@ async function waitLastOuterHtmlStable(page, xpath, {
     pollMs = 1000,
     stableTicks = 3,
     visible = true,
+    minContentLength = 0,
 } = {}) {
     const start = Date.now();
 
@@ -205,6 +206,14 @@ async function waitLastOuterHtmlStable(page, xpath, {
 
     while (Date.now() - start < timeoutMs) {
         const cur = await getLastOuterHtmlByXPath(page, xpath);
+
+        // Reject empty/too-short answers — DeepSeek hasn't started generating yet.
+        if (minContentLength > 0 && (!cur || cur.length < minContentLength)) {
+            sameCount = 0;
+            prev = cur;
+            await sleep(pollMs);
+            continue;
+        }
 
         if (cur && cur === prev) {
             sameCount++;
@@ -299,10 +308,12 @@ async function sendMessage(ctx, payload = {}) {
         // Wait for the answer to stabilize — DeepSeek streams tokens, so we
         // need enough stable ticks to ensure generation is truly complete.
         // 3 ticks × 1500ms = 4.5s of stability required before reading.
+        // Also wait until the answer has actual content (non-empty HTML).
         const answer = await waitLastOuterHtmlStable(page, data.xpaths.chat.answer[currentService], {
             timeoutMs: 180000,
             pollMs: 1500,
             stableTicks: 4,
+            minContentLength: 10, // reject empty or near-empty answers
         });
         const inner = deepseekHtmlToApiMarkdown(answer);
 

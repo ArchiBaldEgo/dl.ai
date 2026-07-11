@@ -387,6 +387,10 @@ class AIRequestLog(models.Model):
     prompt_id = models.IntegerField(null=True, blank=True)
     prompt_name = models.CharField(max_length=255, blank=True)
 
+    # DL task context (for solve / find-error modes with a DL task)
+    task_node_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    task_name = models.CharField(max_length=512, blank=True, default="")
+
     class Meta:
         db_table = "ai_airequestlog"
         verbose_name = "AI request log"

@@ -41,6 +41,8 @@ class LogWriter:
         topic_name: str,
         prompt_id: int | None,
         prompt_name: str,
+        task_node_id: int | None = None,
+        task_name: str = "",
     ):
         from ..models import AIRequestLog
 
@@ -61,6 +63,8 @@ class LogWriter:
             topic_name=topic_name,
             prompt_id=prompt_id,
             prompt_name=prompt_name,
+            task_node_id=task_node_id,
+            task_name=task_name,
         )
 
     @sync_to_async

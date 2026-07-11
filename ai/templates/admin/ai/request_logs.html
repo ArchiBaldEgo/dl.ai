@@ -143,6 +143,7 @@
           <th>Кто отправлял</th>
           <th>Язык программирования</th>
           <th>Тема</th>
+          <th>Задача</th>
           <th>Препромпт</th>
           <th>Модель</th>
           <th>Статус</th>
@@ -158,10 +159,17 @@
             <td>{{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>
               {% if log.user_full_name %}{{ log.user_full_name }}{% endif %}
-              {% if log.external_user_id %}<br><small>id: {{ log.external_user_id }}</small>{% endif %}
+              {% if log.external_user_id %}<br><small><a href="https://dl.gsu.by/report.asp?id={{ log.external_user_id }}" target="_blank" rel="noopener">{{ log.external_user_id }}</a></small>{% endif %}
             </td>
             <td>{{ log.programming_language_name|default:"—" }}</td>
             <td>{{ log.topic_name|default:"—" }}</td>
+            <td>
+              {% if log.task_node_id %}
+                <a href="https://dl.gsu.by/admin/fullTaskviewer.asp?nid={{ log.task_node_id }}" target="_blank" rel="noopener">{{ log.task_name|default:log.task_node_id }}</a>
+              {% else %}
+                {{ log.task_name|default:"—" }}
+              {% endif %}
+            </td>
             <td>{{ log.prompt_name|default:"—" }}</td>
             <td>{{ log.model_names|join:", "|default:"—" }}</td>
             <td class="{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">
