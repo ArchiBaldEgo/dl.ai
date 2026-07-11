@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from .site import ai_admin_site
 from ..models import (
     AIAppSettings,
+    ExternalDLAccount,
     ProgrammingLanguage,
     Prompt,
     PromptTestCase,
@@ -18,6 +19,7 @@ from ..models import (
 )
 from .models import (
     AIAppSettingsAdmin,
+    ExternalDLAccountAdmin,
     ProgrammingLanguageAdmin,
     TopicAdmin,
     PromptAdmin,
@@ -88,6 +90,7 @@ ai_admin_site.register(Prompt, PromptAdmin)
 ai_admin_site.register(SharedPrompt, SharedPromptAdmin)
 ai_admin_site.register(PromptTestCase, PromptTestCaseAdmin)
 ai_admin_site.register(PromptTestRun, PromptTestRunAdmin)
+ai_admin_site.register(ExternalDLAccount, ExternalDLAccountAdmin)
 # NOTE: AIRequestLog is intentionally NOT registered as a ModelAdmin. Its
 # changelist URL (/ai/admin/ai/airequestlog/) is served by the custom
 # admin_request_logs_view (ai/admin/urls.py), which renders the richer

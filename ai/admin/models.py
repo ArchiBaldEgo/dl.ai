@@ -10,6 +10,7 @@ from django.http import HttpResponse
 
 from ..models import (
     AIAppSettings,
+    ExternalDLAccount,
     ProgrammingLanguage,
     Prompt,
     PromptTestCase,
@@ -359,6 +360,26 @@ class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         if not is_staff_or_superuser(request.user):
             return False
         return False
+
+
+class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Admin for viewing external DL accounts (dl.gsu.by user info)."""
+    list_display = ("external_user_id", "external_login", "external_first_name",
+                    "external_last_name", "user_link", "created_at", "updated_at")
+    list_display_links = ("external_user_id",)
+    list_filter = ("created_at", "updated_at")
+    search_fields = ("external_user_id", "external_login",
+                     "external_first_name", "external_last_name",
+                     "user__username")
+    readonly_fields = ("created_at", "updated_at")
+    raw_id_fields = ("user",)
+
+    def user_link(self, obj):
+        if obj.user:
+            return obj.user.username
+        return "-"
+    user_link.short_description = "Django user"
+    user_link.admin_order_field = "user__username"
 
 
 class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):

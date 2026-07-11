@@ -89,10 +89,26 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
     
     Returns:
         (user, created) tuple where created=True if user was newly created
+    
+    After extracting names from user_info, also calls
+    /restapi/get-id-user-info?userId=<id> to enrich first/last name
+    when the initial payload lacks them.
     """
     external_user_id = str(user_info.get('userId'))
     external_login = _extract_external_login(user_info)
     external_first_name, external_last_name = _extract_first_last_name(user_info)
+    
+    # Enrich from /restapi/get-id-user-info when names are missing.
+    if external_user_id and not (external_first_name and external_last_name):
+        try:
+            from .dl_api_client import fetch_user_names
+            names = fetch_user_names(external_user_id)
+            if not external_first_name and names.get("first_name"):
+                external_first_name = names["first_name"]
+            if not external_last_name and names.get("last_name"):
+                external_last_name = names["last_name"]
+        except Exception as exc:
+            logger.warning("fetch_user_names failed for userId=%s: %s", external_user_id, exc)
     
     if not external_user_id or external_user_id == "None":
         logger.error(f"Invalid user_info: userId={external_user_id}")

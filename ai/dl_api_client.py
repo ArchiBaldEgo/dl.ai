@@ -310,6 +310,42 @@ def _decode_response_json(response: requests.Response) -> dict[str, Any]:
     return _repair_response_strings(data)
 
 
+def fetch_user_names(user_id: int | str, timeout: int = 10) -> dict[str, str]:
+    """Fetch firstName / lastName by userId from the DL REST API.
+
+    GET /restapi/get-id-user-info?userId=<id> → {"firstName": "...", "lastName": "..."}
+
+    Returns a dict with "first_name" and "last_name" keys (empty strings on
+    failure). Never raises — callers use this as a best-effort enrichment step
+    during user provisioning.
+    """
+    if not user_id:
+        return {"first_name": "", "last_name": ""}
+
+    try:
+        response = _dl_request(
+            "GET",
+            "/restapi/get-id-user-info",
+            params={"userId": str(user_id)},
+            timeout=timeout,
+        )
+    except DLApiUnavailable:
+        return {"first_name": "", "last_name": ""}
+
+    if response.status_code != 200:
+        return {"first_name": "", "last_name": ""}
+
+    try:
+        data = response.json()
+    except ValueError:
+        return {"first_name": "", "last_name": ""}
+
+    return {
+        "first_name": (data.get("firstName") or "").strip(),
+        "last_name": (data.get("lastName") or "").strip(),
+    }
+
+
 def fetch_task_info(
     node_id: int,
     session_id: str | None = None,
