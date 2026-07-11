@@ -67,55 +67,18 @@ def _extract_model_response(response):
 # may be marked FAILED. This is reflected in the UI.
 # ---------------------------------------------------------------------------
 
-SOLVE_RATIO_THRESHOLD = 0.85
+# Grading helpers (normalization + difflib ratio) live in the shared grading
+# module and are re-exported here so legacy ``from ai.arm_runner import ...`` stays
+# valid (ai/tests.py imports grade_solution / normalize_solution).
+from .grading import (
+    SOLVE_RATIO_THRESHOLD,
+    grade_solution,
+    normalize_solution,
+)
 
 _VERDICT_SOLVED = "solved"
 _VERDICT_FAILED = "failed"
 _VERDICT_SKIPPED = "skipped"
-
-import re as _re
-import difflib as _difflib
-
-# Comment patterns removed during solution normalization. Order matters: block
-# comments are stripped before line comments. Pascal uses { ... } and (* ... *);
-# C-like uses /* ... */ and //; Python/shell use #.
-_PASCAL_BRACE_COMMENT = _re.compile(r"\{.*?\}", _re.DOTALL)
-_PASCAL_PAREN_COMMENT = _re.compile(r"\(\*.*?\*\)", _re.DOTALL)
-_C_BLOCK_COMMENT = _re.compile(r"/\*.*?\*/", _re.DOTALL)
-_LINE_COMMENT = _re.compile(r"(//|#).*?$", _re.MULTILINE)
-_WHITESPACE = _re.compile(r"\s+")
-
-
-def normalize_solution(text):
-    """Strip comments, lowercase and collapse whitespace for fuzzy comparison."""
-    if not text:
-        return ""
-    out = _PASCAL_BRACE_COMMENT.sub(" ", text)
-    out = _PASCAL_PAREN_COMMENT.sub(" ", out)
-    out = _C_BLOCK_COMMENT.sub(" ", out)
-    out = _LINE_COMMENT.sub(" ", out)
-    out = _WHITESPACE.sub(" ", out).strip().lower()
-    return out
-
-
-def grade_solution(model_text, sample_text, threshold=SOLVE_RATIO_THRESHOLD):
-    """Approximate verdict: solved / failed / skipped.
-
-    - empty sample  -> SKIPPED (no oracle to compare against)
-    - empty model   -> FAILED (model produced nothing)
-    - normalized equal -> SOLVED
-    - difflib ratio >= threshold -> SOLVED, else FAILED
-    """
-    sample_norm = normalize_solution(sample_text)
-    if not sample_norm:
-        return _VERDICT_SKIPPED
-    model_norm = normalize_solution(model_text)
-    if not model_norm:
-        return _VERDICT_FAILED
-    if model_norm == sample_norm:
-        return _VERDICT_SOLVED
-    ratio = _difflib.SequenceMatcher(None, model_norm, sample_norm).ratio()
-    return _VERDICT_SOLVED if ratio >= threshold else _VERDICT_FAILED
 
 
 def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский"):

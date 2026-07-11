@@ -43,6 +43,13 @@ def can_access_prompt_admin(request):
     return is_prompt_developer_user(request.user)
 
 
+def can_access_prompt_regression(request):
+    """Regression-tests page: same access policy as ARM (staff/super OR prompt developer)."""
+    if not request.user.is_authenticated:
+        return False
+    return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+
+
 def can_access_logs(request):
     return request.user.is_authenticated and is_staff_or_superuser(request.user)
 

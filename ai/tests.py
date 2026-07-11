@@ -2002,3 +2002,228 @@ class TaskRegistryTests(TestCase):
         with patch("ai.models.Task.objects.get_or_create", side_effect=RuntimeError("db down")):
             result = ensure_task(200, session_id="DLSID")
         self.assertIsNone(result)  # registration must never break the chat
+
+
+class PromptGradingTests(SimpleTestCase):
+    """Prompt-regression comparators in ai/grading.py::compare_response."""
+
+    def test_ratio_identical_is_match(self):
+        from ai.grading import compare_response
+        verdict, hint, missing = compare_response(
+            "program a; begin writeln(1); end.",
+            "program a; begin writeln(1); end.",
+            comparator="ratio",
+        )
+        self.assertEqual(verdict, "match")
+        self.assertEqual(missing, [])
+
+    def test_ratio_different_is_mismatch(self):
+        from ai.grading import compare_response
+        verdict, hint, missing = compare_response(
+            "print('hello world')", "int main(){return 0;}", comparator="ratio",
+        )
+        self.assertEqual(verdict, "mismatch")
+        self.assertIn("ratio", hint)
+
+    def test_ratio_threshold_respected(self):
+        from ai.grading import compare_response
+        # Very close text: ratio is high but below 0.999.
+        verdict, _hint, _missing = compare_response(
+            "program a; begin writeln(1); end.",
+            "program a; begin writeln(2); end.",
+            comparator="ratio",
+            threshold=0.99,
+        )
+        self.assertEqual(verdict, "mismatch")
+
+    def test_contains_all_match(self):
+        from ai.grading import compare_response
+        expected = "В строке 5 нет точки с запятой\nпеременная x не объявлена"
+        actual = "В коде в строке 5 нет точки с запятой. Также переменная x не объявлена."
+        verdict, hint, missing = compare_response(actual, expected, comparator="contains_all")
+        self.assertEqual(verdict, "match")
+        self.assertEqual(missing, [])
+
+    def test_contains_all_mismatch_lists_missing(self):
+        from ai.grading import compare_response
+        expected = "ошибка деления на ноль\nнет точки с запятой"
+        actual = "В коде ошибка деления на ноль."
+        verdict, hint, missing = compare_response(actual, expected, comparator="contains_all")
+        self.assertEqual(verdict, "mismatch")
+        self.assertIn("нет точки с запятой", missing)
+        self.assertIn("отсутствуют", hint)
+
+    def test_exact_match_and_mismatch(self):
+        from ai.grading import compare_response
+        self.assertEqual(
+            compare_response("Program A;\nBegin\n  Writeln(1);\nEnd.",
+                             "program a; begin writeln(1); end.", comparator="exact")[0],
+            "match",
+        )
+        self.assertEqual(
+            compare_response("return 0", "return 1", comparator="exact")[0],
+            "mismatch",
+        )
+
+    def test_set_match_and_mismatch(self):
+        from ai.grading import compare_response
+        self.assertEqual(
+            compare_response("a\nb\nc", "c\nb\na", comparator="set")[0], "match",
+        )
+        verdict, hint, missing = compare_response("a\nb", "a\nb\nc", comparator="set")
+        self.assertEqual(verdict, "mismatch")
+        self.assertIn("c", missing)
+
+    def test_empty_expected_is_skipped(self):
+        from ai.grading import compare_response
+        self.assertEqual(compare_response("anything", "", comparator="ratio")[0], "skipped")
+
+    def test_empty_actual_is_mismatch(self):
+        from ai.grading import compare_response
+        verdict, hint, _missing = compare_response("", "int main(){return 0;}", comparator="ratio")
+        self.assertEqual(verdict, "mismatch")
+        self.assertIn("пустой", hint)
+
+
+class PromptRegressionRunnerTests(TestCase):
+    """ai/prompt_test_runner.py: per-case verdicts + DB fallback snapshot."""
+
+    def setUp(self):
+        from ai.models import PromptTestCase
+        self.user = get_user_model().objects.create_user(username="prompt-tester", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.case_match = PromptTestCase.objects.create(
+            name="Solve match", mode="solve",
+            input_text="Сложите a и b",
+            expected_text="program a; begin writeln(1); end.",
+            comparator="ratio",
+            programming_language=self.lang, topic=self.topic,
+        )
+        self.case_mismatch = PromptTestCase.objects.create(
+            name="Solve mismatch", mode="solve",
+            input_text="Выведите n",
+            expected_text="int main(){return 0;}",
+            comparator="ratio",
+            programming_language=self.lang, topic=self.topic,
+        )
+
+    def _run_worker(self, run_id, cases, handler_response):
+        import time as _t
+        from ai import prompt_test_runner
+
+        async def fake_handler(messages, conv_id):
+            return handler_response, 12
+
+        model = {"key": "FakeModel", "title": "FakeModel", "handler": fake_handler}
+        now_ts = _t.time()
+        prompt_test_runner._jobs[run_id] = {
+            "run_id": run_id, "status": "running", "error_message": "",
+            "total_cases": len(cases), "completed_cases": 0, "current_case_name": cases[0].name if cases else "",
+            "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        try:
+            prompt_test_runner._run_job_worker(
+                run_id, cases, model, self.user.id,
+                prompt_id=None, ui_language="Русский",
+            )
+        finally:
+            prompt_test_runner._jobs.pop(run_id, None)
+
+    def test_run_records_match_and_mismatch_verdicts(self):
+        from ai.models import PromptTestResult, PromptTestRun
+        run_id = "test-prompt-run-1"
+        # Handler returns the golden solution: matches case_match, mismatches case_mismatch.
+        self._run_worker(run_id, [self.case_match, self.case_mismatch],
+                         "program a; begin writeln(1); end.")
+
+        run = PromptTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, PromptTestRun.STATUS_COMPLETED)
+
+        results = {r.test_case_id: r for r in PromptTestResult.objects.filter(run=run)}
+        self.assertEqual(results[self.case_match.id].verdict, PromptTestResult.VERDICT_MATCH)
+        self.assertEqual(results[self.case_mismatch.id].verdict, PromptTestResult.VERDICT_MISMATCH)
+
+        # DB-fallback snapshot rebuilds the report from persisted rows.
+        from ai import prompt_test_runner
+        snapshot = prompt_test_runner.get_prompt_test_run_snapshot(run_id)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["report"]["total"], 2)
+        self.assertEqual(snapshot["report"]["matched"], 1)
+        self.assertEqual(snapshot["report"]["mismatched"], 1)
+        self.assertEqual(len(snapshot["report"]["mismatches"]), 1)
+        self.assertEqual(snapshot["report"]["mismatches"][0]["case_name"], "Solve mismatch")
+
+    def test_skipped_when_expected_empty(self):
+        from ai.models import PromptTestCase, PromptTestResult, PromptTestRun
+        case = PromptTestCase.objects.create(
+            name="No oracle", mode="solve", input_text="stmt", expected_text="",
+            comparator="ratio", programming_language=self.lang, topic=self.topic,
+        )
+        run_id = "test-prompt-run-2"
+        self._run_worker(run_id, [case], "program a; begin writeln(1); end.")
+        run = PromptTestRun.objects.get(run_id=run_id)
+        result = PromptTestResult.objects.get(run=run, test_case=case)
+        self.assertEqual(result.verdict, PromptTestResult.VERDICT_SKIPPED)
+
+
+class TokenUsageTests(TestCase):
+    """Daily global token-usage banner (Codeforces-style, single unit)."""
+
+    def setUp(self):
+        from ai.token_usage import invalidate_daily_tokens_cache
+        from django.core.cache import cache
+        cache.clear()
+        invalidate_daily_tokens_cache()
+        self.factory = RequestFactory()
+
+    def _make_log(self, tokens, sent_at):
+        user = get_user_model().objects.create_user(username=f"u{tokens}{sent_at}")
+        return AIRequestLog.objects.create(
+            user=user,
+            sent_at=sent_at,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            mode=AIRequestLog.MODE_CHAT,
+            tokens=tokens,
+        )
+
+    def test_format_millions_single_unit(self):
+        from ai.token_usage import _format_millions
+        # 159814 -> 0.16 (millions, 3-decimal rounding, trailing zeros stripped)
+        self.assertEqual(_format_millions(1_900_000), "1.9")
+        self.assertEqual(_format_millions(0), "0")
+        self.assertEqual(_format_millions(None), "0")
+        # Used value: rounding to 3 decimals, in the same unit as the limit.
+        self.assertEqual(_format_millions(159_814), "0.16")
+
+    def test_daily_tokens_sums_only_today_msk(self):
+        from datetime import timedelta
+        from ai.token_usage import _msk_day_start, get_daily_tokens_used
+        today_start = _msk_day_start()
+        self._make_log(1_000, today_start + timedelta(hours=1))
+        self._make_log(2_500, today_start + timedelta(hours=5))
+        # Yesterday (before the MSK day boundary) must be excluded.
+        self._make_log(999_999, today_start - timedelta(hours=2))
+        used = get_daily_tokens_used()
+        self.assertEqual(used, 3_500)
+
+    @override_settings(AI_DAILY_TOKEN_LIMIT=1_900_000)
+    def test_payload_includes_used_and_limit_in_millions(self):
+        from datetime import timedelta
+        from ai.token_usage import _msk_day_start, get_daily_token_usage
+        today_start = _msk_day_start()
+        self._make_log(159_814, today_start + timedelta(hours=1))
+        payload = get_daily_token_usage()
+        self.assertEqual(payload["limit"], 1_900_000)
+        self.assertEqual(payload["limit_display"], "1.9")
+        self.assertEqual(payload["used"], 159_814)
+        # Both sides render in the same unit (millions).
+        self.assertEqual(payload["used_display"], "0.16")
+
+    @override_settings(AI_DAILY_TOKEN_LIMIT=0)
+    def test_payload_hides_limit_when_disabled(self):
+        from ai.token_usage import get_daily_token_usage
+        payload = get_daily_token_usage()
+        self.assertEqual(payload["limit"], 0)
+        self.assertEqual(payload["limit_display"], "")

@@ -26,6 +26,7 @@ from .auth_backends import (
     normalize_external_user_id,
 )
 from .constants import PROMPT_DEVELOPER_GROUP
+from .token_usage import get_daily_token_usage
 from .dl_api_client import (
     DLApiError,
     DLApiUnavailable,
@@ -138,9 +139,17 @@ def _render_ai_page(request, template_name, extra_context=None):
         rest = [item for item in available_models if item["key"] not in _WEB_PRIORITY_MODELS]
         available_models = ordered_priority + rest
     external_session_id = request.session.get('external_session_id')
+    # The token-usage banner is a non-essential enhancement; it must never
+    # break the chat page (mirrors the get_solo/ProgrammingError guard above).
+    try:
+        token_usage = get_daily_token_usage()
+    except Exception:
+        logger.exception("Failed to compute daily token usage")
+        token_usage = None
     context = {
         'available_models': available_models,
         'external_session_id': external_session_id,
+        'token_usage': token_usage,
     }
     if extra_context:
         context.update(extra_context)

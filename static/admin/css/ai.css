@@ -866,6 +866,16 @@ form {
     pointer-events: none;
 }
 
+.token-usage {
+    position: absolute;
+    right: 20px;
+    bottom: 26px;
+    font-size: 12px;
+    color: #6a6a6a;
+    opacity: 0.7;
+    pointer-events: auto;
+}
+
 hr {
     margin: 0;
     color: #ccc;

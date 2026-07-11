@@ -241,3 +241,10 @@ AI_RATE_LIMIT_WINDOW = int(os.getenv("AI_RATE_LIMIT_WINDOW", "60"))
 
 # When Web DeepSeek is detected as down, restart the bot/ pool and re-check once.
 AI_WEB_DEEPSEEK_AUTORECOVERY = _env_bool("AI_WEB_DEEPSEEK_AUTORECOVERY", default=True)
+
+# Global daily token budget shown on the chat page (Codeforces-style banner).
+# 0 disables the limit side (only the used count is shown). Both numbers render
+# in the same unit (millions), e.g. "0.159 / 1.9".
+AI_DAILY_TOKEN_LIMIT = int(os.getenv("AI_DAILY_TOKEN_LIMIT", "1900000"))
+# Cache TTL (seconds) for the daily token-usage aggregate query.
+AI_TOKEN_USAGE_TTL = int(os.getenv("AI_TOKEN_USAGE_TTL", "60"))

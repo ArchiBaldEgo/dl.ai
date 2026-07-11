@@ -6,12 +6,23 @@ DjangoTest.urls through ai.admin.urls.get_ai_admin_urls().
 from django.contrib.auth import get_user_model
 
 from .site import ai_admin_site
-from ..models import AIAppSettings, ProgrammingLanguage, Prompt, SharedPrompt, Task, Topic
+from ..models import (
+    AIAppSettings,
+    ProgrammingLanguage,
+    Prompt,
+    PromptTestCase,
+    PromptTestRun,
+    SharedPrompt,
+    Task,
+    Topic,
+)
 from .models import (
     AIAppSettingsAdmin,
     ProgrammingLanguageAdmin,
     TopicAdmin,
     PromptAdmin,
+    PromptTestCaseAdmin,
+    PromptTestRunAdmin,
     RestrictedUserAdmin,
     SharedPromptAdmin,
     TaskAdmin,
@@ -33,6 +44,11 @@ from .model_status import (
     admin_model_status_refresh_view,
 )
 from .my_prompt import admin_my_prompt_view
+from .prompt_regression import (
+    admin_prompt_regression_view,
+    admin_prompt_regression_start_view,
+    admin_prompt_regression_status_view,
+)
 
 __all__ = [
     "ai_admin_site",
@@ -40,6 +56,8 @@ __all__ = [
     "ProgrammingLanguageAdmin",
     "TopicAdmin",
     "PromptAdmin",
+    "PromptTestCaseAdmin",
+    "PromptTestRunAdmin",
     "SharedPromptAdmin",
     "TaskAdmin",
     "PromptForm",
@@ -55,6 +73,9 @@ __all__ = [
     "admin_model_status_state_view",
     "admin_model_status_refresh_view",
     "admin_my_prompt_view",
+    "admin_prompt_regression_view",
+    "admin_prompt_regression_start_view",
+    "admin_prompt_regression_status_view",
     "admin_request_logs_view",
 ]
 
@@ -65,6 +86,8 @@ ai_admin_site.register(Task, TaskAdmin)
 ai_admin_site.register(Topic, TopicAdmin)
 ai_admin_site.register(Prompt, PromptAdmin)
 ai_admin_site.register(SharedPrompt, SharedPromptAdmin)
+ai_admin_site.register(PromptTestCase, PromptTestCaseAdmin)
+ai_admin_site.register(PromptTestRun, PromptTestRunAdmin)
 # NOTE: AIRequestLog is intentionally NOT registered as a ModelAdmin. Its
 # changelist URL (/ai/admin/ai/airequestlog/) is served by the custom
 # admin_request_logs_view (ai/admin/urls.py), which renders the richer
