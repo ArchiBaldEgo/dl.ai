@@ -252,19 +252,30 @@ async function sendMessage(ctx, payload = {}) {
         let currentService = payload.model;
         let isUsetThinking = payload.thinking;
         let uid = payload.user_id;
-        
-        await page.goto(data.services[currentService])
-        
+
+        hist[uid] ??= [];
+
+        // Only navigate to a fresh chat page for the first message in a conversation.
+        // DeepSeek maintains its own server-side context; re-navigating would reset
+        // the conversation and lose all prior context.
+        if (hist[uid].length === 0) {
+            await page.goto(data.services[currentService]);
+        }
+
         let sendingData = {
             "role": "user",
             "content": payload.message
         }
 
-        hist[uid] ??= [];
         hist[uid].push(sendingData);
 
-        const pretty = JSON.stringify(hist[uid]);
+        // Send only the user's message text — NOT the entire conversation history.
+        // DeepSeek keeps its own conversation context server-side; sending a JSON
+        // array of previous messages would confuse the model and corrupt the prompt.
+        const messageText = payload.message;
 
+        // DeepThink toggle: "Enabled" = DeepThink is currently ON (we want to turn it OFF).
+        //                    "Disabled" = DeepThink is currently OFF (we want to turn it ON).
         if (isUsetThinking) {
             await clickIfExists(page, data.xpaths.chat.thinkingButtonDisabled[currentService]);
         }
@@ -282,7 +293,7 @@ async function sendMessage(ctx, payload = {}) {
         }
         }
 
-        await waitAndTypeX(page, data.xpaths.chat.inputLabel[currentService], pretty);
+        await waitAndTypeX(page, data.xpaths.chat.inputLabel[currentService], messageText);
         await waitAndClickX(page, data.xpaths.chat.sendMessageButton[currentService]);
 
         await waitLastOuterHtmlStable(page, data.xpaths.chat.fullAnswer[currentService]);

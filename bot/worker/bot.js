@@ -131,6 +131,7 @@ class Bot {
 
         const launchOpts = {
             headless,
+            protocolTimeout: 120000, // 2 min — prevents Input.insertText/dispatchKeyEvent timeouts on slow pages
             args: [
 				...(proxyServer ? [`--proxy-server=${proxyServer}`] : []),
 				...(headless ? ['--disable-gpu'] : []),
