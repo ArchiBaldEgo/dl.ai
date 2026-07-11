@@ -385,8 +385,8 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
     """User management restricted to staff/superuser in the AI admin site."""
 
-    list_display = ("last_name", "first_name", "username", "email", "is_staff_badge")
-    list_display_links = ("username",)
+    list_display = ("last_name", "first_name", "dl_id", "email", "is_staff_badge")
+    list_display_links = ("dl_id",)
     list_filter = ("is_staff", "is_superuser", "groups")
     search_fields = ("username", "first_name", "last_name", "email")
     ordering = ("last_name", "first_name")
@@ -400,13 +400,14 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
     is_staff_badge.short_description = "Role"
     is_staff_badge.admin_order_field = "is_staff"
 
-    def username(self, obj):
-        """Strip 'user_' prefix from display — it's noise."""
+    def dl_id(self, obj):
+        """Display the DL user ID, stripping the 'user_' prefix."""
         name = obj.username or ""
         if name.startswith("user_"):
             return name[5:]
         return name
-    username.short_description = "DL ID"
+    dl_id.short_description = "DL ID"
+    dl_id.admin_order_field = "username"
 
 
 class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
