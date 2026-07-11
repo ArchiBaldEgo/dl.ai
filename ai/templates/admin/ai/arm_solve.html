@@ -237,7 +237,7 @@
     <div class="arm-title-block">
       {% include "admin/ai/_ai_back_nav.html" %}
       <h1>ARM: Пакетное решение</h1>
-      <p class="arm-subtitle">Каждой доступной модели отправляется условие каждой выбранной задачи; ответ сравнивается с образцовым решением dl.gsu.by (get-solution). Проверка <strong>приближённая</strong> (сравнение текста, не запуск тестов).</p>
+      <p class="arm-subtitle">Каждой доступной модели отправляется условие каждой выбранной задачи; ответ проверяется через DL (send-solution) или приближённым сравнением текста (difflib) — выберите режим ниже.</p>
     </div>
   </div>
 
@@ -303,6 +303,15 @@
       {% endif %}
 
       <input type="hidden" name="interface_language" value="Русский">
+      <div class="arm-section-head" style="margin-top:18px;">
+        <div>
+          <h2>Опции проверки</h2>
+          <p class="arm-section-note">Если включено — код решения отправляется на реальное тестирование в DL (send-solution / get-solution-result). Если выключено — используется приближённое сравнение текста (difflib).</p>
+        </div>
+      </div>
+      <label class="arm-model" style="margin-bottom:12px;">
+        <input type="checkbox" name="dl_test" value="1" checked id="armDlTest"> Тестировать на DL
+      </label>
       <div id="armSolveError" class="arm-error"{% if not error_message %} style="display:none;"{% endif %}>{{ error_message }}</div>
       <div id="armSolveProgress" class="arm-success arm-status-line" style="display:none;">
         <span class="arm-spinner" aria-hidden="true"></span>

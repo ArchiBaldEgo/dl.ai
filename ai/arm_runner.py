@@ -707,6 +707,7 @@ def _run_batch_job_worker(
     session_id,
     *,
     ui_language="Русский",
+    dl_test=True,
 ):
     """Daemon worker for a batch-solve run.
 
@@ -823,8 +824,8 @@ def _run_batch_job_worker(
                         # Extract pure code from the AI response (strip markdown fences).
                         code_only = _extract_code_from_response(cleaned_text)
 
-                        # Try real DL testing first; fall back to difflib grading.
-                        if code_only and task.file_extension and session_id:
+                        # Try real DL testing first (if enabled); fall back to difflib.
+                        if dl_test and code_only and task.file_extension and session_id:
                             dl_verdict, dl_comment = _test_solution_on_dl(
                                 session_id, task.node_id, code_only, task.file_extension
                             )
@@ -971,7 +972,7 @@ def _batch_results_from_db(test_run):
     return results
 
 
-def start_batch_solve_run(task_ids, model_keys, user_id, session_id, *, ui_language="Русский"):
+def start_batch_solve_run(task_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True):
     """Start a batch-solve ARM run over the given tasks × models.
 
     Returns (run_id, error_message). ``task_ids`` / ``model_keys`` empty means
@@ -1026,7 +1027,7 @@ def start_batch_solve_run(task_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, tasks_qs, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )

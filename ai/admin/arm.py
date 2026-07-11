@@ -328,8 +328,14 @@ def admin_arm_solve_start_view(request):
     task_ids = request.POST.getlist("task_ids")
     model_keys = request.POST.getlist("models")
     ui_language = request.POST.get("interface_language", "Русский")
+    dl_test = request.POST.get("dl_test") == "1"
 
     session_id = _resolve_session_id(request)
+    if dl_test and not session_id:
+        return JsonResponse(
+            {"ok": False, "message": "Нет DLSID — требуется авторизация на dl.gsu.by для тестирования решений."},
+            status=400,
+        )
     if not session_id:
         return JsonResponse(
             {"ok": False, "message": "Нет DLSID — требуется авторизация на dl.gsu.by для получения образцовых решений."},
@@ -350,6 +356,7 @@ def admin_arm_solve_start_view(request):
         request.user.id,
         session_id,
         ui_language=ui_language,
+        dl_test=dl_test,
     )
     if not run_id:
         return JsonResponse(
