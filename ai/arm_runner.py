@@ -634,6 +634,71 @@ def start_arm_sequential_run(
     return run_id, ""
 
 
+import re as _re
+
+_CODE_FENCE_RE = _re.compile(r"```(?:[a-zA-Z]*\n)?(.*?)```", _re.DOTALL)
+
+
+def _extract_code_from_response(text):
+    """Extract pure code from an AI response.
+
+    Strips markdown code fences (```cpp\n...\n```) and returns the code inside.
+    If no fences found, returns the whole text (it may be pure code already).
+    """
+    if not text:
+        return ""
+    matches = _CODE_FENCE_RE.findall(text)
+    if matches:
+        # Return the longest code block (likely the solution).
+        return max(matches, key=len).strip()
+    return text.strip()
+
+
+def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0):
+    """Send code to DL for real testing and poll for the result.
+
+    Returns (verdict, comment) where verdict is _VERDICT_SOLVED / _VERDICT_FAILED
+    or None if the DL test could not be performed (network error, auth error, etc).
+    comment is the DL test comment string (may be empty).
+    """
+    from .dl_api_client import send_solution_to_dl, get_solution_result_from_dl
+
+    try:
+        submit_resp = send_solution_to_dl(session_id, node_id, code, file_extension)
+    except Exception:
+        return None, ""
+
+    queue_id = submit_resp.get("queueId")
+    if not queue_id or queue_id <= 0:
+        return None, ""
+
+    # Poll DL for the result.
+    for _ in range(max_polls):
+        time.sleep(poll_interval)
+        try:
+            result = get_solution_result_from_dl(session_id, queue_id)
+        except Exception:
+            return None, ""
+
+        is_finished = result.get("isFinished")
+        comment = result.get("comment", "") or ""
+
+        if is_finished:
+            # DL comment typically says "OK" or contains error details.
+            comment_lower = comment.lower().strip()
+            if comment_lower in ("ok", "ок", "accepted", "correct", "всё верно", ""):
+                return _VERDICT_SOLVED, comment
+            # If comment mentions errors/tests failing → failed.
+            error_markers = ("error", "ошиб", "fail", "неверн", "wrong", "exception", "runtime")
+            if any(m in comment_lower for m in error_markers):
+                return _VERDICT_FAILED, comment
+            # Ambiguous — treat as solved if no error markers.
+            return _VERDICT_SOLVED, comment
+
+    # Timed out waiting for DL.
+    return None, ""
+
+
 def _run_batch_job_worker(
     run_id,
     tasks_qs,
@@ -649,7 +714,7 @@ def _run_batch_job_worker(
     solution is fetched once per task (cached) so the number of DL calls is
     len(tasks), not len(tasks)*len(models).
     """
-    from .dl_api_client import DLApiError, fetch_task_solution
+    from .dl_api_client import DLApiError, fetch_task_solution, send_solution_to_dl, get_solution_result_from_dl
 
     test_run = None
     log = None
@@ -734,6 +799,7 @@ def _run_batch_job_worker(
                 short_response = ""
                 raw_response = ""
                 tokens = 0
+                dl_test_comment = ""
 
                 try:
                     if not sample_text:
@@ -753,11 +819,30 @@ def _run_batch_job_worker(
                         response_text, tokens = _extract_model_response(response)
                         cleaned_text = strip_tags(response_text).strip()
                         friendly, detailed = humanize_model_error(cleaned_text, include_detail=True)
-                        verdict = grade_solution(cleaned_text, sample_text)
+
+                        # Extract pure code from the AI response (strip markdown fences).
+                        code_only = _extract_code_from_response(cleaned_text)
+
+                        # Try real DL testing first; fall back to difflib grading.
+                        if code_only and task.file_extension and session_id:
+                            dl_verdict, dl_comment = _test_solution_on_dl(
+                                session_id, task.node_id, code_only, task.file_extension
+                            )
+                            dl_test_comment = dl_comment
+                            if dl_verdict is not None:
+                                verdict = dl_verdict
+                            else:
+                                # DL test failed/unavailable → fall back to difflib.
+                                verdict = grade_solution(cleaned_text, sample_text)
+                        else:
+                            verdict = grade_solution(cleaned_text, sample_text)
+
                         status = "ok" if verdict != _VERDICT_SKIPPED else "error"
                         short_response = (friendly or cleaned_text)[:300] + (
                             "..." if len(friendly or cleaned_text) > 300 else ""
                         )
+                        if dl_test_comment:
+                            short_response += f"\n[DL: {dl_test_comment[:200]}]"
                         raw_response = detailed or cleaned_text
                 except Exception as exc:
                     exc_text = str(exc)
