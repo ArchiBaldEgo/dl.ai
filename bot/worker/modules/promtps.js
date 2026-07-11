@@ -192,7 +192,7 @@ async function waitForXPathCompat(page, xpath, {
 async function waitLastOuterHtmlStable(page, xpath, {
     timeoutMs = 180000,
     pollMs = 1000,
-    stableTicks = 2, 
+    stableTicks = 3,
     visible = true,
 } = {}) {
     const start = Date.now();
@@ -296,8 +296,14 @@ async function sendMessage(ctx, payload = {}) {
         await waitAndTypeX(page, data.xpaths.chat.inputLabel[currentService], messageText);
         await waitAndClickX(page, data.xpaths.chat.sendMessageButton[currentService]);
 
-        await waitLastOuterHtmlStable(page, data.xpaths.chat.fullAnswer[currentService]);
-        const answer = await waitLastOuterHtmlStable(page, data.xpaths.chat.answer[currentService]);
+        // Wait for the answer to stabilize — DeepSeek streams tokens, so we
+        // need enough stable ticks to ensure generation is truly complete.
+        // 3 ticks × 1500ms = 4.5s of stability required before reading.
+        const answer = await waitLastOuterHtmlStable(page, data.xpaths.chat.answer[currentService], {
+            timeoutMs: 180000,
+            pollMs: 1500,
+            stableTicks: 4,
+        });
         const inner = deepseekHtmlToApiMarkdown(answer);
 
         const answerData = {

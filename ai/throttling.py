@@ -177,6 +177,18 @@ class RateLimitMiddleware:
         if not self.enabled or not request.path.startswith("/ai/"):
             return self.get_response(request)
 
+        # Skip static files — they don't count against the user's action budget.
+        # A single admin page load fetches 10-20 CSS/JS/image assets; counting
+        # those would exhaust the 60-request limit in 3-4 page loads.
+        if request.path.startswith("/ai/assets/") or request.path.startswith("/ai/static/"):
+            return self.get_response(request)
+
+        # Skip admin pages — navigation within /ai/admin/ should not count
+        # against the per-user rate limit. Admin users browsing the admin
+        # site easily generate 50+ requests in a minute just clicking around.
+        if request.path.startswith("/ai/admin/"):
+            return self.get_response(request)
+
         user_id = get_request_user_id(request)
         if not user_id:
             return self.get_response(request)
