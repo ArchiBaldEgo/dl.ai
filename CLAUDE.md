@@ -84,6 +84,13 @@ Source static files live in `static/`, collected output is `staticfiles/`. The w
 ```bash
 python manage.py check_models_health
 python manage.py check_models_health --force
+
+# Auto-translate empty *_en / *_fr fields for Topic, SharedPrompt, Prompt
+python manage.py auto_translate                  # translate all empty fields
+python manage.py auto_translate --model Topic     # only one model
+python manage.py auto_translate --overwrite       # overwrite existing translations
+python manage.py auto_translate --lang fr          # only French
+python manage.py auto_translate --dry-run          # show what would be translated
 ```
 
 ## High-level architecture
@@ -94,26 +101,27 @@ python manage.py check_models_health --force
 - `ai/` — the only Django app.
   - `ai/views.py` — page views, API endpoints (`/ai/api/problem-data/`, `/ai/api/prompts/`, `/ai/api/languages/`, `/ai/api/topics/`, `/ai/api/shared-prompts/`, `/ai/api/task-info/`, `/ai/api/task-solution/`), `health`, password setup, test-panel login, audio transcription. API URLconf is split: page/asset routes in `ai/urls.py`, API/admin routes wired in `DjangoTest/urls.py` via `ai/admin/urls.py`.
   - `ai/consumers.py` — Channels WebSocket consumer (`/ai/chat/ws/<client_id>`, see `ai/routing.py`). Thin orchestrator: delegates auth, prompt resolution, message composition, model invocation, and logging to the `ai/services/` layer. Legacy model aliases are resolved in `ModelCaller`.
-  - `ai/models.py` — `ProgrammingLanguage`, `Topic`, `Task` (DL task reference for batch-solve ARM), `Prompt`, `SharedPrompt`, `AIRequestLog`, `ExternalDLAccount`, `AIModelAvailability`, `AIModelHealthRun`, `AIModelTestRun` (`run_type` single/batch), `AIModelTestResult`, etc. Model capability metadata (Text/Vision/Reasoning) lives on the registry entries in `ai/model_clients/registry.py`, not in the DB.
+  - `ai/models.py` — `ProgrammingLanguage`, `Topic`, `Task` (DL task reference for batch-solve ARM), `Prompt`, `SharedPrompt`, `AIRequestLog`, `ExternalDLAccount`, `AIModelAvailability`, `AIModelHealthRun`, `AIModelTestRun` (`run_type` single/batch), `AIModelTestResult`, `PromptTestCase`, `PromptTestRun` (prompt regression testing), etc. Model capability metadata (Text/Vision/Reasoning) lives on the registry entries in `ai/model_clients/registry.py`, not in the DB.
   - `ai/querysets.py` — `prompt_queryset_for_user`, the single shared ACL helper for prompt visibility (superusers/staff see all; prompt developers see owned + editor prompts).
   - `ai/serializers.py` / `ai/i18n.py` — lightweight serializers and UI-language localization (`name_ru`, `name_en`, `name_fr`).
   - `ai/middleware.py` — `ExternalAuthMiddleware` validates the `DLSID` cookie and auto-provisions local users; `CsrfSessionFallbackMiddleware` migrates old cookie-based CSRF tokens into the session. External-auth logic lives in `ai/external_auth.py` (error classes `ExternalAuthMisconfigured` / `ExternalAuthUnavailable` / `ExternalAuthUnauthorized`, `fetch_external_user_info`, cookie/url helpers) and is reused by both the middleware and the WebSocket auth service.
-  - `ai/dl_api_client.py` — thin client for the external `dl.gsu.by` REST API (task info, sample solutions); reuses the same SSL/proxy settings as external auth. Backs `/ai/api/task-info/` and `/ai/api/task-solution/`.
-  - `ai/external_account.py` — creates/updates Django users and `ExternalDLAccount` from external API payload; ensures all users are added to the `prompt_developer` group.
+  - `ai/dl_api_client.py` — thin client for the external `dl.gsu.by` REST API (task info, sample solutions, user names by ID); reuses the same SSL/proxy settings as external auth. Backs `/ai/api/task-info/` and `/ai/api/task-solution/`. `fetch_user_names(userId)` calls `GET /restapi/get-id-user-info` to enrich `ExternalDLAccount` with `firstName`/`lastName`.
+  - `ai/external_account.py` — creates/updates Django users and `ExternalDLAccount` from external API payload; ensures all users are added to the `prompt_developer` group. When `get-user-info` doesn't return `firstName`/`lastName`, enriches from `fetch_user_names` (`GET /restapi/get-id-user-info?userId=N`).
   - `ai/auth_backends.py` — external admin auth backend and helper functions for prompt-developer group management.
   - `ai/http_utils.py` — `safe_relative_url` for safe redirect targets.
-  - `ai/throttling.py` — per-user rate limiting (`rate_limiter`) for HTTP views and WebSocket messages, backed by the Django cache. Defaults: 120 WS / 60 HTTP messages per 60s, configurable via `AI_WS_RATE_LIMIT` / `AI_HTTP_RATE_LIMIT` / `AI_RATE_LIMIT_WINDOW` / `AI_RATE_LIMIT_ENABLED`.
+  - `ai/throttling.py` — per-user rate limiting (`rate_limiter`) for HTTP views and WebSocket messages, backed by the Django cache. Defaults: 120 WS / 200 HTTP messages per 60s, configurable via `AI_WS_RATE_LIMIT` / `AI_HTTP_RATE_LIMIT` / `AI_RATE_LIMIT_WINDOW` / `AI_RATE_LIMIT_ENABLED`. `RateLimitMiddleware` excludes `/ai/admin/`, `/ai/assets/`, `/ai/static/` from counting — admin page loads fetch 10-20 CSS/JS/image assets each, and counting them would exhaust the per-user budget in 3-4 page navigations.
   - `ai/constants.py` — `MOSCOW_TZ`, `PROMPT_DEVELOPER_GROUP`, `ADMIN_LOGOUT_COOKIE_NAME`, `AI_CACHE_KEY_PREFIX`.
   - `ai/services/` — high-level services consumed by `consumers.py` (and admin code), re-exported from `ai/services/__init__.py`. This is the KISS/SOLID extraction called out below; consumers orchestrate, services execute.
     - `auth.py` — `WebSocketAuthService` (DLSID auth for the WS scope), `get_user_identity_for_log`, `resolve_external_account`.
     - `prompt_resolver.py` — `PromptResolver` (resolves effective prompt text + names, parses `shared_<pk>` ids), `get_default_shared_prompt`.
-    - `message_composer.py` — `MessageComposer` + per-mode builders (`ChatModeBuilder`, `SolveModeBuilder`, …) for chat / solve / find-error message composition.
+    - `message_composer.py` — `MessageComposer` + per-mode builders (`ChatModeBuilder`, `SolveModeBuilder`, …) for chat / solve / find-error message composition. Language instruction (`get_language_instruction`) is appended for every non-Russian message (not only on language change). The «Препромпт» label is localized to «Preprompt» for non-Russian UI languages.
     - `model_caller.py` — `ModelCaller` + `ModelCallResult`; resolves legacy model aliases and invokes the registry, surfacing `humanize_model_error`.
     - `log_writer.py` — `LogWriter` creates/updates `AIRequestLog` records.
     - `conversation_history.py` — compatibility re-export of the shared history store (see `ai/model_clients/history.py`).
+    - `auto_translate.py` — automatic translation of localized fields (`*_en`, `*_fr`) using `deep-translator` (Google Translate). Handles placeholder protection (`{language}`, `{язык}`, `{topic}`), chunking for texts >2000 chars, and proxy bypass for direct Google API access. Used by the `auto_translate` management command and the admin «Автоперевод» action.
   - `ai/admin/` — custom admin site (`ai_admin_site`) mounted under `/ai/admin/`. URL wiring in `urls.py`.
-    - `site.py` — `AIAdminSite`; core permission logic lives here.
-    - `models.py` — `PromptAdmin`, `SharedPromptAdmin`, `TopicAdmin`, `ProgrammingLanguageAdmin`.
+    - `site.py` — `AIAdminSite`; core permission logic lives here. `app_index()` redirects `/ai/admin/ai/` → `/ai/admin/` (per-app index not used).
+    - `models.py` — `PromptAdmin`, `SharedPromptAdmin`, `TopicAdmin`, `ProgrammingLanguageAdmin`, `PromptTestCaseAdmin`, `PromptTestRunAdmin`, `ExternalDLAccountAdmin`, `RestrictedUserAdmin`. Admin action «Автоперевод → EN / FR» on Topic/Prompt/SharedPrompt. `RestrictedUserAdmin` displays DL ID (strips `user_` prefix), reordered columns (last_name, first_name, DL ID, email, role badge).
     - `forms.py` — admin ModelForms (e.g. `PromptForm`) with localized/wide text widgets.
     - `arm.py` — ARM (multi-model check) views: `/ai/admin/arm/find-error/`.
     - `my_prompt.py` — `/ai/admin/prompts/my/` filtered to the current user's prompts.
@@ -127,6 +135,8 @@ python manage.py check_models_health --force
   - `ai/templates/ai/` — user-facing chat/task pages; `ai/templates/admin/ai/` — custom admin templates.
 - `static/admin/js/` — page-specific JS. `chat_template.js` is for the chat page only; `decide_task.js` / `find_error.js` are self-contained for their respective pages (do not load `chat_template.js` on them).
 - `bot/` — Node.js/Puppeteer service exposing an OpenAI-compatible API wrapper around `chat.deepseek.com` (`bot/api/` HTTP server + `bot/worker/` browser workers). Runs inside the same container as Django. See `bot/README.md` for details.
+  - `bot/worker/bot.js` — Puppeteer launch options include `protocolTimeout: 120000` (2 min) to prevent `Input.insertText` / `dispatchKeyEvent` timeouts on slow pages.
+  - `bot/worker/modules/promtps.js` — `sendMessage` sends only the user's message text (not JSON conversation history). `page.goto` is called only for the first message in a conversation (DeepSeek keeps server-side context). Answer stability check uses `stableTicks=4, pollMs=1500` (6 seconds of stable HTML required before reading) to avoid truncated responses. DeepThink toggle logic: `thinking=true` → click `thinkingButtonDisabled` (turn on), `thinking=false` → click `thinkingButtonEnabled` (turn off).
 - `nginx/` — internal nginx config. The external reverse-proxy snippet for `dl.gsu.by` lives at `nginx/external-dl.gsu.by.example.nginx-snippet`.
 - `doc/` — Russian user/admin/superuser/tester/sysadmin documentation (`.docx`) and `Документация для разработчика.md`. `DOCX.md` and `README.md`/`DEPLOY.md` are the canonical developer/deploy references.
 - `static/admin/js/` — page-specific JS. `chat_template.js` is for the chat page only; `decide_task.js` / `find_error.js` are self-contained for their respective pages (do not load `chat_template.js` on them).
@@ -159,6 +169,10 @@ Supported UI languages are Russian (`Русский`), English (`English`), and 
 
 - Model capability annotations (Text/Vision/Reasoning) are declared per registry entry in `ai/model_clients/registry.py` (`capabilities(key)`) and surfaced on the «Состояние моделей» page and in the chat model selector (reasoning models get a «думающая» marker). Add new capabilities there, not in the DB.
 
+### Prompt regression testing
+
+Prompt regression tests (`PromptTestCase`, `PromptTestRun`) allow running a set of test cases against AI models to verify prompt quality. Test cases define input text, expected output, comparator, and match threshold. Runs are executed asynchronously via `ai/prompt_test_runner.py`. The admin pages `/ai/admin/prompt-regression/` (start/status) and the ModelAdmins for `PromptTestCase` / `PromptTestRun` are available to staff/superusers and prompt developers (view-only for developers). Migration `0023_prompt_tests` creates the DB tables.
+
 ### Model availability
 
 The health scheduler runs once per day for the 04:00 MSK window. It starts automatically inside Daphne/Gunicorn/Uvicorn/Django runserver unless `AI_DISABLE_HEALTH_SCHEDULER=1` is set. It queries the handlers registered in `ai/model_clients/registry.py`.
@@ -176,10 +190,12 @@ Batch-solve ARM (`run_type="batch"`, `/ai/admin/arm/solve/`) sends each availabl
 - Auth flow: `ai/middleware.py`, `ai/external_auth.py`, `ai/external_account.py`, `ai/auth_backends.py`, `ai/services/auth.py`, `ai/admin/auth.py`, `ai/admin/permissions.py`.
 - Admin access control: `ai/admin/site.py` (especially `has_permission` and `each_context`), `ai/admin/urls.py`.
 - Prompts / UI language / ACL: `ai/models.py`, `ai/querysets.py`, `ai/serializers.py`, `ai/i18n.py`, `ai/services/prompt_resolver.py`, `ai/views.py` (`get_problem_data`), `static/admin/js/decide_task.js`, `static/admin/js/find_error.js`.
+- Auto-translation: `ai/services/auto_translate.py`, `ai/management/commands/auto_translate.py`.
 - Chat / WebSocket: `ai/consumers.py`, `ai/routing.py`, `ai/services/` (auth / prompt_resolver / message_composer / model_caller / log_writer), `ai/model_clients/` (`registry.py`, `config.py`, `history.py`), `ai/throttling.py`, `ai/templates/ai/base_chat.html`, `static/admin/js/chat_template.js`.
-- DL REST API integration: `ai/dl_api_client.py`, `ai/views.py` (`get_task_info_view`, `get_task_solution_view`).
+- DL REST API integration: `ai/dl_api_client.py` (task info, solutions, user names), `ai/views.py` (`get_task_info_view`, `get_task_solution_view`).
 - ARM: `ai/admin/arm.py`, `ai/arm_runner.py`, `ai/templates/admin/ai/arm_find_error.html`.
-- Bot pool: `bot/README.md`, `bot/api/server.js`, `bot/api/botManager.js`, `bot/worker/bot.js`.
+- Prompt regression: `ai/prompt_test_runner.py`, `ai/admin/prompt_regression.py`, `ai/models.py` (`PromptTestCase`, `PromptTestRun`).
+- Bot pool: `bot/README.md`, `bot/api/server.js`, `bot/api/botManager.js`, `bot/worker/bot.js`, `bot/worker/modules/promtps.js`, `bot/worker/data.json`.
 
 ## Coding standards and architecture principles
 
@@ -226,3 +242,5 @@ When modifying code in this repository, follow SOLID, DRY, and KISS. The audit f
 - The repository does not implement its own login; in production it runs behind the existing `dl.gsu.by` reverse proxy. (from `DEPLOY.md`)
 - For production, set `DEBUG=0`, `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`, `USE_X_FORWARDED_PROTO=1`, and consider `CSRF_COOKIE_DOMAIN`/`SESSION_COOKIE_DOMAIN=.gsu.by` for cross-subdomain sessions. (from `DEPLOY.md`)
 - The DeepSeek-named catalog models are served by SambaNova via `SC_TOKEN` (`ai/model_clients/sambanova.py`); `Web_DeepSeek` / `Web_DeepSeek_Thinking` are served by the free `bot/` pool. `DEEPSEEK_API_TOKEN` is currently not read by any handler — despite the older `bot/README.md` note. Top up the SambaNova balance / rotate `SC_TOKEN` to fix the catalog models; restart the `bot/` pool to fix Web DeepSeek.
+- Auto-translation of localized fields uses `deep-translator` (Google Translate, `requirements.txt: deep-translator==1.11.4`). No API key needed. Run `python manage.py auto_translate` to fill empty `*_en` / `*_fr` fields, or use the admin «Автоперевод» action on Topic/Prompt/SharedPrompt.
+- Language instruction: `get_language_instruction(ui_language)` in `ai/i18n.py` appends a language constraint to the AI message for non-Russian UI languages, ensuring the model replies in the selected language.
