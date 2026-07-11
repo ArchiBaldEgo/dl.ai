@@ -318,6 +318,44 @@ def admin_arm_solve_view(request):
     return TemplateResponse(request, "admin/ai/arm_solve.html", context)
 
 
+def admin_arm_solve_add_task_view(request):
+    """Add a DL task by node_id — fetch from DL and create/update in DB."""
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    node_id_raw = request.POST.get("node_id", "").strip()
+    try:
+        node_id = int(node_id_raw)
+    except (ValueError, TypeError):
+        return JsonResponse({"ok": False, "message": "node_id должен быть числом"}, status=400)
+
+    session_id = _resolve_session_id(request)
+    if not session_id:
+        return JsonResponse(
+            {"ok": False, "message": "Нет DLSID — требуется авторизация на dl.gsu.by."},
+            status=400,
+        )
+
+    from ..services.task_registry import ensure_task
+    task = ensure_task(node_id, session_id=session_id)
+    if task is None:
+        return JsonResponse({"ok": False, "message": "Не удалось создать/найти задачу."}, status=500)
+
+    return JsonResponse({
+        "ok": True,
+        "message": f"Задача #{task.node_id} «{task.name or '—'}» — {'создана' if not task.active else 'обновлена'}",
+        "task": {
+            "id": task.id,
+            "node_id": task.node_id,
+            "name": task.name,
+            "task_id": task.task_id,
+        },
+    })
+
+
 def admin_arm_solve_start_view(request):
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")

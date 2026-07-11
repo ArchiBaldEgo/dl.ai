@@ -302,6 +302,18 @@
         <div class="arm-empty">Нет доступных моделей. Обновите «Состояние моделей».</div>
       {% endif %}
 
+      <div class="arm-section-head" style="margin-top:18px;">
+        <div>
+          <h2>Добавить задачу по DL node ID</h2>
+          <p class="arm-section-note">Введите node ID задачи с dl.gsu.by — условие будет загружено автоматически. Если задачи нет в БД, она будет добавлена.</p>
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
+        <input type="number" name="new_node_id" id="armNewNodeId" placeholder="DL node ID" style="padding:6px 10px; width:160px;">
+        <button type="button" class="button" id="armAddTaskBtn">Добавить задачу</button>
+        <span id="armAddTaskMsg" style="font-size:13px;"></span>
+      </div>
+
       <input type="hidden" name="interface_language" value="Русский">
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
@@ -490,6 +502,50 @@
         document.querySelectorAll('.arm-task-check').forEach(function (c) { c.checked = selectAll.checked; });
       });
     }
+
+    // Add task by DL node ID
+    const addTaskBtn = document.getElementById('armAddTaskBtn');
+    const addTaskMsg = document.getElementById('armAddTaskMsg');
+    const nodeIdInput = document.getElementById('armNewNodeId');
+    if (addTaskBtn) {
+      addTaskBtn.addEventListener('click', async function () {
+        const nodeId = nodeIdInput.value.trim();
+        if (!nodeId) { addTaskMsg.textContent = 'Введите node ID'; return; }
+        addTaskMsg.textContent = 'Загрузка...';
+        addTaskBtn.disabled = true;
+        try {
+          const response = await fetch('/ai/admin/arm/solve/add-task/', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
+            body: 'node_id=' + encodeURIComponent(nodeId),
+          });
+          const data = await response.json();
+          if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка'); }
+          addTaskMsg.style.color = '#067647';
+          addTaskMsg.textContent = '✓ ' + (data.message || 'Добавлено');
+          if (data.task) {
+            // Add row to the tasks table
+            const tbody = document.querySelector('.arm-tasks tbody');
+            if (tbody) {
+              const tr = document.createElement('tr');
+              tr.innerHTML = '<td><input type="checkbox" name="task_ids" value="' + data.task.id + '" class="arm-task-check" checked></td>'
+                + '<td>' + escapeHtml(data.task.node_id) + '</td>'
+                + '<td>' + escapeHtml(data.task.name || '—') + '</td>'
+                + '<td>—</td><td>—</td><td>—</td>'
+                + '<td><span class="arm-badge skipped">нет образца</span></td>';
+              tbody.insertBefore(tr, tbody.firstChild);
+            }
+          }
+          nodeIdInput.value = '';
+        } catch (error) {
+          addTaskMsg.style.color = '#b42318';
+          addTaskMsg.textContent = error.message || 'Ошибка';
+        } finally {
+          addTaskBtn.disabled = false;
+        }
+      });
+    }
+
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
       if (submitBtn.disabled) { return; }
