@@ -163,7 +163,10 @@ class SharedPrompt(models.Model):
     )
 
     def __str__(self):
-        return f"[Общий] {get_localized_name(self, '', 'prompt_name')}"
+        from .i18n import get_shared_prompt_prefix
+        prefix = get_shared_prompt_prefix('')
+        name = get_localized_name(self, '', 'prompt_name')
+        return f"{prefix} {name}"
 
     def get_effective_text(self, ui_language="", programming_language_name="", topic_name="", message="", code=""):
         base = get_localized_text(self, ui_language, "prompt_text") or self.prompt_text

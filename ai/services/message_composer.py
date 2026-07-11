@@ -125,8 +125,13 @@ class MessageComposer:
         message = data.get("message", "")
         language = data.get("language", "Russian")
 
-        if previous_language and previous_language != language:
+        # Always add a language instruction for non-Russian UI languages, so the
+        # AI replies in the user's selected language. The previous-language gate
+        # only suppressed the instruction when the language was unchanged — which
+        # meant the very first message in EN/FR got a Russian reply.
+        if language and language not in ("Russian", "Русский", ""):
             message += get_language_instruction(language)
+            data["message"] = message  # propagate to builders
 
         builder = self._builders.get(message_type)
         if builder is None:

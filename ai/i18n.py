@@ -79,3 +79,16 @@ def get_language_instruction(ui_language: str) -> str:
     if ui_language == "English":
         return ". Communicate with me only in English"
     return ""
+
+
+_SHARED_PROMPT_PREFIX = {
+    "ru": "[Общий]",
+    "en": "[Shared]",
+    "fr": "[Partagé]",
+}
+
+
+def get_shared_prompt_prefix(ui_language: str = "") -> str:
+    """Return the localized prefix for SharedPrompt.__str__."""
+    suffix = get_ui_language_suffix(ui_language)
+    return _SHARED_PROMPT_PREFIX.get(suffix, _SHARED_PROMPT_PREFIX["ru"])
