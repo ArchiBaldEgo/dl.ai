@@ -803,48 +803,48 @@ def _run_batch_job_worker(
                 dl_test_comment = ""
 
                 try:
-                    if not sample_text:
-                        # No oracle for this task -> skip all models.
-                        verdict = _VERDICT_SKIPPED
-                        status = "error"
-                        short_response = "Нет образцового решения (get-solution)"
-                        raw_response = short_response
-                    else:
-                        message = _build_solve_message(
-                            task.statement, prog_lang_name, topic_name, ui_language
-                        )
-                        response = async_to_sync(model["handler"])(
-                            message,
-                            f"admin-batch-{user_id}-{model['key']}-{run_id}-{task.node_id}",
-                        )
-                        response_text, tokens = _extract_model_response(response)
-                        cleaned_text = strip_tags(response_text).strip()
-                        friendly, detailed = humanize_model_error(cleaned_text, include_detail=True)
+                    message = _build_solve_message(
+                        task.statement, prog_lang_name, topic_name, ui_language
+                    )
+                    response = async_to_sync(model["handler"])(
+                        message,
+                        f"admin-batch-{user_id}-{model['key']}-{run_id}-{task.node_id}",
+                    )
+                    response_text, tokens = _extract_model_response(response)
+                    cleaned_text = strip_tags(response_text).strip()
+                    friendly, detailed = humanize_model_error(cleaned_text, include_detail=True)
 
-                        # Extract pure code from the AI response (strip markdown fences).
-                        code_only = _extract_code_from_response(cleaned_text)
+                    # Extract pure code from the AI response (strip markdown fences).
+                    code_only = _extract_code_from_response(cleaned_text)
 
-                        # Try real DL testing first (if enabled); fall back to difflib.
-                        if dl_test and code_only and task.file_extension and session_id:
-                            dl_verdict, dl_comment = _test_solution_on_dl(
-                                session_id, task.node_id, code_only, task.file_extension
-                            )
-                            dl_test_comment = dl_comment
-                            if dl_verdict is not None:
-                                verdict = dl_verdict
-                            else:
-                                # DL test failed/unavailable → fall back to difflib.
-                                verdict = grade_solution(cleaned_text, sample_text)
-                        else:
+                    # Try real DL testing first (if enabled); fall back to difflib.
+                    if dl_test and code_only and task.file_extension and session_id:
+                        dl_verdict, dl_comment = _test_solution_on_dl(
+                            session_id, task.node_id, code_only, task.file_extension
+                        )
+                        dl_test_comment = dl_comment
+                        if dl_verdict is not None:
+                            verdict = dl_verdict
+                        elif sample_text:
+                            # DL test failed → fall back to difflib if we have a sample.
                             verdict = grade_solution(cleaned_text, sample_text)
+                        else:
+                            # No DL result and no sample → can't grade.
+                            verdict = _VERDICT_SKIPPED
+                    elif sample_text:
+                        # DL test disabled but we have a sample → difflib.
+                        verdict = grade_solution(cleaned_text, sample_text)
+                    else:
+                        # No DL test and no sample → can't grade.
+                        verdict = _VERDICT_SKIPPED
 
-                        status = "ok" if verdict != _VERDICT_SKIPPED else "error"
-                        short_response = (friendly or cleaned_text)[:300] + (
-                            "..." if len(friendly or cleaned_text) > 300 else ""
-                        )
-                        if dl_test_comment:
-                            short_response += f"\n[DL: {dl_test_comment[:200]}]"
-                        raw_response = detailed or cleaned_text
+                    status = "ok" if verdict != _VERDICT_SKIPPED else "error"
+                    short_response = (friendly or cleaned_text)[:300] + (
+                        "..." if len(friendly or cleaned_text) > 300 else ""
+                    )
+                    if dl_test_comment:
+                        short_response += f"\n[DL: {dl_test_comment[:200]}]"
+                    raw_response = detailed or cleaned_text
                 except Exception as exc:
                     exc_text = str(exc)
                     friendly, detailed = humanize_model_error(exc_text, include_detail=True)
