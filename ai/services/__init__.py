@@ -1,6 +1,7 @@
 """High-level services used by views, consumers, and admin code."""
 
 from .auth import WebSocketAuthService, get_user_identity_for_log, resolve_external_account
+from .auto_translate import translate_object, translate_text, get_translatable_models
 from .conversation_history import ConversationHistory, conversation_history
 from .log_writer import LogWriter
 from .message_composer import MessageComposer
@@ -12,6 +13,9 @@ __all__ = [
     "WebSocketAuthService",
     "get_user_identity_for_log",
     "resolve_external_account",
+    "translate_object",
+    "translate_text",
+    "get_translatable_models",
     "ConversationHistory",
     "conversation_history",
     "LogWriter",

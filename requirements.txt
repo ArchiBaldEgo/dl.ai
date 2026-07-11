@@ -69,3 +69,4 @@ websockets==14.1
 zope.event==5.0
 zope.interface==7.2
 imageio-ffmpeg
+deep-translator==1.11.4

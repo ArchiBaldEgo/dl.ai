@@ -70,6 +70,23 @@ class TopicAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     fieldsets = (
         (None, {"fields": ("topic_name", "topic_name_ru", "topic_name_en", "topic_name_fr", "programming_language")}),
     )
+    actions = ("auto_translate_selected",)
+
+    @admin.action(description="Автоперевод → EN / FR")
+    def auto_translate_selected(self, request, queryset):
+        from ai.services.auto_translate import translate_object
+        translated, skipped, failed = 0, 0, 0
+        for obj in queryset:
+            results = translate_object(obj, ["topic_name"])
+            for v in results.values():
+                if v.startswith("skipped"):
+                    skipped += 1
+                elif v == "failed":
+                    failed += 1
+                else:
+                    translated += 1
+        msg = f"Переведено: {translated}, пропущено: {skipped}, ошибок: {failed}"
+        self.message_user(request, msg, level=("success" if not failed else "warning"))
 
 
 class PromptUserIdFilter(admin.SimpleListFilter):
@@ -109,7 +126,7 @@ class PromptAdmin(admin.ModelAdmin):
     list_per_page = 25
     search_fields = ('prompt_name', 'prompt_text', 'owner__username', '=owner__id')
     autocomplete_fields = ("owner", "editors")
-    actions = ("export_prompts_csv",)
+    actions = ("export_prompts_csv", "auto_translate_selected")
     # Prompt has no created_at field, so date_hierarchy is intentionally None.
     date_hierarchy = None
 
@@ -217,6 +234,22 @@ class PromptAdmin(admin.ModelAdmin):
         return response
     export_prompts_csv.short_description = "Export selected prompts to CSV"
 
+    @admin.action(description="Автоперевод → EN / FR")
+    def auto_translate_selected(self, request, queryset):
+        from ai.services.auto_translate import translate_object
+        translated, skipped, failed = 0, 0, 0
+        for obj in queryset:
+            results = translate_object(obj, ["prompt_name", "prompt_text"])
+            for v in results.values():
+                if v.startswith("skipped"):
+                    skipped += 1
+                elif v == "failed":
+                    failed += 1
+                else:
+                    translated += 1
+        msg = f"Переведено: {translated}, пропущено: {skipped}, ошибок: {failed}"
+        self.message_user(request, msg, level=("success" if not failed else "warning"))
+
     def programming_language_name(self, obj):
         if obj.topic and obj.topic.programming_language:
             return obj.topic.programming_language.language_name
@@ -258,6 +291,7 @@ class SharedPromptAdmin(admin.ModelAdmin):
     # Django's formfield_for_manytomany), so only 'programming_languages' uses
     # the horizontal filter widget — listing 'editors' here was dead config.
     filter_horizontal = ('programming_languages',)
+    actions = ("auto_translate_selected",)
 
     def language_list(self, obj):
         langs = obj.programming_languages.all()
@@ -267,6 +301,22 @@ class SharedPromptAdmin(admin.ModelAdmin):
     def owner_username(self, obj):
         return obj.owner.username if obj.owner else "-"
     owner_username.short_description = "Owner"
+
+    @admin.action(description="Автоперевод → EN / FR")
+    def auto_translate_selected(self, request, queryset):
+        from ai.services.auto_translate import translate_object
+        translated, skipped, failed = 0, 0, 0
+        for obj in queryset:
+            results = translate_object(obj, ["prompt_name", "prompt_text"])
+            for v in results.values():
+                if v.startswith("skipped"):
+                    skipped += 1
+                elif v == "failed":
+                    failed += 1
+                else:
+                    translated += 1
+        msg = f"Переведено: {translated}, пропущено: {skipped}, ошибок: {failed}"
+        self.message_user(request, msg, level=("success" if not failed else "warning"))
 
     def has_module_permission(self, request):
         return is_staff_or_superuser(request.user)
