@@ -87,6 +87,12 @@ class AIAdminSite(admin.AdminSite):
     app_index_template = "admin/ai/app_index.html"
     site_url = "/ai/chat/"
 
+    def app_index(self, request, extra_context=None):
+        """Redirect /ai/admin/ai/ → /ai/admin/ — we don't use the per-app index,
+        all models are shown on the main admin dashboard."""
+        from django.shortcuts import redirect
+        return redirect("admin:index")
+
     def has_permission(self, request):
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated:

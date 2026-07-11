@@ -452,12 +452,26 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     refresh_from_dl.short_description = "Обновить название и условие из DL"
 
 
-class PromptTestCaseAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+class PromptTestCaseAdmin(admin.ModelAdmin):
     """Admin for prompt regression test fixtures (input + golden + comparator).
 
-    Staff-only: a test case encodes the expected model reaction and is part of
-    the regression oracle, so only staff/superusers may edit it.
+    Available to staff/superusers and prompt developers.
     """
+
+    def has_module_permission(self, request):
+        return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+
+    def has_view_permission(self, request, obj=None):
+        return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+
+    def has_add_permission(self, request):
+        return is_staff_or_superuser(request.user)
+
+    def has_change_permission(self, request, obj=None):
+        return is_staff_or_superuser(request.user)
+
+    def has_delete_permission(self, request, obj=None):
+        return is_staff_or_superuser(request.user)
 
     list_display = ("name", "mode", "topic", "programming_language", "comparator", "active", "updated_at")
     list_display_links = ("name",)
@@ -475,8 +489,17 @@ class PromptTestCaseAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     )
 
 
-class PromptTestRunAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
-    """Read-only admin for prompt regression runs (the rich UI is the custom page)."""
+class PromptTestRunAdmin(admin.ModelAdmin):
+    """Read-only admin for prompt regression runs (the rich UI is the custom page).
+
+    Available to staff/superusers and prompt developers (read-only).
+    """
+
+    def has_module_permission(self, request):
+        return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+
+    def has_view_permission(self, request, obj=None):
+        return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
 
     list_display = ("run_id", "model_title", "prompt_name", "status", "total_cases", "started_at", "finished_at")
     list_filter = ("status", "model_key")
