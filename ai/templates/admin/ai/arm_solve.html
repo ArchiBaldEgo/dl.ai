@@ -317,6 +317,19 @@
       <input type="hidden" name="interface_language" value="Русский">
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
+          <h2>Препромпт</h2>
+          <p class="arm-section-note">Выберите промпт для решения задач. По умолчанию используется системный solve-промпт.</p>
+        </div>
+      </div>
+      <select name="prompt_id" id="armPromptSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
+        <option value="">— Системный (по умолчанию) —</option>
+        {% for p in prompt_options %}
+          <option value="{{ p.id }}">{{ p.name }}</option>
+        {% endfor %}
+      </select>
+
+      <div class="arm-section-head" style="margin-top:18px;">
+        <div>
           <h2>Опции проверки</h2>
           <p class="arm-section-note">Если включено — код решения отправляется на реальное тестирование в DL (send-solution / get-solution-result). Если выключено — используется приближённое сравнение текста (difflib).</p>
         </div>

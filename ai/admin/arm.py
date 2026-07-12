@@ -299,7 +299,22 @@ def admin_arm_solve_view(request):
     ]
 
     from ..http_utils import safe_relative_url
+    from ..models import SharedPrompt, Prompt
     arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
+
+    # Build prompt options: SharedPrompts + Prompts
+    prompt_options = []
+    for sp in SharedPrompt.objects.all().order_by("id"):
+        prompt_options.append({
+            "id": f"shared_{sp.id}",
+            "name": f"[Общий] {sp.prompt_name}",
+        })
+    for p in Prompt.objects.all().order_by("id"):
+        prompt_options.append({
+            "id": str(p.id),
+            "name": p.prompt_name or f"Prompt #{p.id}",
+        })
+
     context = {
         **ai_admin_site.each_context(request),
         "title": "ARM: Пакетное решение",
@@ -307,6 +322,7 @@ def admin_arm_solve_view(request):
         "arm_back_url": arm_back_url,
         "tasks": tasks,
         "model_options": get_available_model_options(),
+        "prompt_options": prompt_options,
         "results": results,
         "report": report,
         "error_message": error_message,
@@ -367,6 +383,7 @@ def admin_arm_solve_start_view(request):
     model_keys = request.POST.getlist("models")
     ui_language = request.POST.get("interface_language", "Русский")
     dl_test = request.POST.get("dl_test") == "1"
+    prompt_id = request.POST.get("prompt_id", "").strip() or None
 
     session_id = _resolve_session_id(request)
     if dl_test and not session_id:
@@ -395,6 +412,7 @@ def admin_arm_solve_start_view(request):
         session_id,
         ui_language=ui_language,
         dl_test=dl_test,
+        prompt_id=prompt_id,
     )
     if not run_id:
         return JsonResponse(

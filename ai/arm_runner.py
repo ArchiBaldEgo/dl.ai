@@ -81,27 +81,53 @@ _VERDICT_FAILED = "failed"
 _VERDICT_SKIPPED = "skipped"
 
 
-def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский"):
-    """Compose the solve prompt for one task (mirrors _build_find_error_message).
+def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None):
+    """Compose the solve prompt for one task.
 
-    Uses the SharedPrompt with mode="solve" if one exists, falling back to a
-    plain Russian instruction. Placeholders {language}/{язык}/{topic}/{тема} are
-    substituted via SharedPrompt.get_effective_text.
+    If prompt_id is given, use that specific SharedPrompt or Prompt.
+    Otherwise fall back to the SharedPrompt with mode="solve", then to a
+    plain Russian instruction.
     """
     from .i18n import get_language_instruction
-    from .models import SharedPrompt
+    from .models import SharedPrompt, Prompt
 
-    try:
-        default_prompt = SharedPrompt.objects.get(mode="solve")
-        message = default_prompt.get_effective_text(
-            ui_language, prog_lang_name, topic_name, task_statement, ""
-        )
-    except SharedPrompt.DoesNotExist:
-        message = (
-            f"Реши задачу по программированию на языке {prog_lang_name}. "
-            f"Выведи только готовое решение (код), без пояснений. "
-            f"Условие задачи: {task_statement}."
-        )
+    message = None
+
+    # Try specific prompt_id first.
+    if prompt_id:
+        # SharedPrompt ids are passed as "shared_<pk>" or just "<pk>".
+        from .services.prompt_resolver import parse_shared_prompt_id
+        shared_pk = parse_shared_prompt_id(prompt_id)
+        if shared_pk is not None:
+            try:
+                sp = SharedPrompt.objects.get(pk=shared_pk)
+                message = sp.get_effective_text(
+                    ui_language, prog_lang_name, topic_name, task_statement, ""
+                )
+            except SharedPrompt.DoesNotExist:
+                pass
+        else:
+            try:
+                p = Prompt.objects.get(pk=int(prompt_id))
+                message = p.get_effective_text(
+                    ui_language, prog_lang_name, topic_name, task_statement, ""
+                )
+            except (Prompt.DoesNotExist, ValueError):
+                pass
+
+    # Fall back to SharedPrompt with mode="solve".
+    if not message:
+        try:
+            default_prompt = SharedPrompt.objects.get(mode="solve")
+            message = default_prompt.get_effective_text(
+                ui_language, prog_lang_name, topic_name, task_statement, ""
+            )
+        except SharedPrompt.DoesNotExist:
+            message = (
+                f"Реши задачу по программированию на языке {prog_lang_name}. "
+                f"Выведи только готовое решение (код), без пояснений. "
+                f"Условие задачи: {task_statement}."
+            )
     message += get_language_instruction(ui_language)
     return message
 
@@ -708,6 +734,7 @@ def _run_batch_job_worker(
     *,
     ui_language="Русский",
     dl_test=True,
+    prompt_id=None,
 ):
     """Daemon worker for a batch-solve run.
 
@@ -804,7 +831,7 @@ def _run_batch_job_worker(
 
                 try:
                     message = _build_solve_message(
-                        task.statement, prog_lang_name, topic_name, ui_language
+                        task.statement, prog_lang_name, topic_name, ui_language, prompt_id
                     )
                     response = async_to_sync(model["handler"])(
                         message,
@@ -976,7 +1003,7 @@ def _batch_results_from_db(test_run):
     return results
 
 
-def start_batch_solve_run(task_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True):
+def start_batch_solve_run(task_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None):
     """Start a batch-solve ARM run over the given tasks × models.
 
     Returns (run_id, error_message). ``task_ids`` / ``model_keys`` empty means
@@ -1031,7 +1058,7 @@ def start_batch_solve_run(task_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, tasks_qs, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language, "dl_test": dl_test},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )
