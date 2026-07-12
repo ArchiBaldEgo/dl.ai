@@ -458,8 +458,14 @@
         const cls = r.verdict === 'solved' ? 'solved' : (r.verdict === 'failed' ? 'failed' : 'skipped');
         const card = document.createElement('details');
         card.className = 'arm-result ' + cls;
-        // Summary markup is built from static template + escaped dynamic values;
-        // raw_response is injected below via textContent (never innerHTML).
+        // Build summary with DL test info visible.
+        var dlInfo = '';
+        // Extract DL info from short_response — it's in [brackets] at the end.
+        var shortText = r.short_response || '';
+        var dlMatch = shortText.match(/\[([^\]]+)\]\s*$/);
+        if (dlMatch) {
+          dlInfo = dlMatch[1];
+        }
         card.innerHTML = [
           '<summary>',
           '<div class="arm-result-top">',
@@ -468,7 +474,10 @@
           '</div>',
           '<div class="arm-meta">' + escapeHtml(r.duration) + ' сек | ' + escapeHtml(r.tokens) + ' ток.</div>',
           '</summary>',
-          '<div class="arm-result-body"><pre></pre></div>',
+          '<div class="arm-result-body">',
+          (dlInfo ? '<div style="padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:13px; background:' + (r.verdict === 'solved' ? '#dcfce7' : '#fee2e2') + ';"><strong>DL тест:</strong> ' + escapeHtml(dlInfo) + '</div>' : ''),
+          '<pre></pre>',
+          '</div>',
         ].join('');
         const pre = card.querySelector('pre');
         if (pre) { pre.textContent = r.raw_response || r.short_response || ''; }
