@@ -829,14 +829,18 @@ def _run_batch_job_worker(
                             # DL test failed → fall back to difflib if we have a sample.
                             verdict = grade_solution(cleaned_text, sample_text)
                         else:
-                            # No DL result and no sample → can't grade.
-                            verdict = _VERDICT_SKIPPED
+                            # No DL result and no sample → mark as "ungraded" (failed),
+                            # but the model DID produce an answer — don't skip it.
+                            verdict = _VERDICT_FAILED
+                            if not dl_test_comment:
+                                dl_test_comment = "DL-тест недоступен, образец отсутствует"
                     elif sample_text:
                         # DL test disabled but we have a sample → difflib.
                         verdict = grade_solution(cleaned_text, sample_text)
                     else:
-                        # No DL test and no sample → can't grade.
-                        verdict = _VERDICT_SKIPPED
+                        # No DL test and no sample → can't grade, but model answered.
+                        verdict = _VERDICT_FAILED
+                        dl_test_comment = "Образец отсутствует, проверка невозможна"
 
                     status = "ok" if verdict != _VERDICT_SKIPPED else "error"
                     short_response = (friendly or cleaned_text)[:300] + (
