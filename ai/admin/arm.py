@@ -302,19 +302,6 @@ def admin_arm_solve_view(request):
     from ..models import SharedPrompt, Prompt
     arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
 
-    # Build prompt options: SharedPrompts + Prompts
-    prompt_options = []
-    for sp in SharedPrompt.objects.all().order_by("id"):
-        prompt_options.append({
-            "id": f"shared_{sp.id}",
-            "name": f"[Общий] {sp.prompt_name}",
-        })
-    for p in Prompt.objects.all().order_by("id"):
-        prompt_options.append({
-            "id": str(p.id),
-            "name": p.prompt_name or f"Prompt #{p.id}",
-        })
-
     context = {
         **ai_admin_site.each_context(request),
         "title": "ARM: Пакетное решение",
@@ -322,7 +309,8 @@ def admin_arm_solve_view(request):
         "arm_back_url": arm_back_url,
         "tasks": tasks,
         "model_options": get_available_model_options(),
-        "prompt_options": prompt_options,
+        "prompt_options": [],
+        "arm_solve_prompts_url": "/ai/admin/arm/solve/prompts/",
         "results": results,
         "report": report,
         "error_message": error_message,
@@ -370,6 +358,53 @@ def admin_arm_solve_add_task_view(request):
             "task_id": task.task_id,
         },
     })
+
+
+def admin_arm_solve_prompts_view(request):
+    """Return filtered prompt options based on selected task IDs."""
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    task_ids = request.GET.getlist("task_ids")
+    task_id_ints = []
+    for raw in task_ids:
+        try:
+            task_id_ints.append(int(raw))
+        except (ValueError, TypeError):
+            continue
+
+    from ..models import SharedPrompt, Prompt, Task
+
+    tasks = Task.objects.filter(pk__in=task_id_ints) if task_id_ints else []
+    topic_ids = set(t.topic_id for t in tasks if t.topic_id)
+    prog_lang_ids = set(t.programming_language_id for t in tasks if t.programming_language_id)
+
+    # If multiple distinct topics or languages → only SharedPrompts (no topic-specific Prompts).
+    multi_topic = len(topic_ids) > 1
+    multi_lang = len(prog_lang_ids) > 1
+
+    prompt_options = []
+
+    # SharedPrompts: include if no language restriction OR language matches.
+    for sp in SharedPrompt.objects.all().order_by("id"):
+        restricted_langs = list(sp.programming_languages.values_list("id", flat=True))
+        if not restricted_langs:
+            # No restriction → always available.
+            prompt_options.append({"id": f"shared_{sp.id}", "name": f"[Общий] {sp.prompt_name}"})
+        elif not multi_lang and prog_lang_ids:
+            # Single language → check if this prompt allows it.
+            if prog_lang_ids.issubset(set(restricted_langs)):
+                prompt_options.append({"id": f"shared_{sp.id}", "name": f"[Общий] {sp.prompt_name}"})
+
+    # Prompts (topic-specific): only if single topic match.
+    if not multi_topic and topic_ids:
+        for p in Prompt.objects.filter(topic_id__in=topic_ids).order_by("id"):
+            prompt_options.append({
+                "id": str(p.id),
+                "name": p.prompt_name or f"Prompt #{p.id}",
+            })
+
+    return JsonResponse({"ok": True, "prompt_options": prompt_options})
 
 
 def admin_arm_solve_start_view(request):

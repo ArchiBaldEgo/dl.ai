@@ -520,6 +520,43 @@
     const addTaskBtn = document.getElementById('armAddTaskBtn');
     const addTaskMsg = document.getElementById('armAddTaskMsg');
     const nodeIdInput = document.getElementById('armNewNodeId');
+    const promptSelect = document.getElementById('armPromptSelect');
+    const promptsUrl = '{{ arm_solve_prompts_url }}';
+
+    // Fetch filtered prompts based on selected tasks.
+    async function refreshPrompts() {
+      const checked = Array.from(document.querySelectorAll('.arm-task-check:checked')).map(function (c) { return c.value; });
+      if (!checked.length) {
+        // No tasks selected → only system default.
+        promptSelect.innerHTML = '<option value="">— Системный (по умолчанию) —</option>';
+        return;
+      }
+      try {
+        const params = checked.map(function (id) { return 'task_ids=' + encodeURIComponent(id); }).join('&');
+        const response = await fetch(promptsUrl + '?' + params, {
+          method: 'GET', credentials: 'same-origin',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        const data = await response.json();
+        if (response.ok && data.ok) {
+          promptSelect.innerHTML = '<option value="">— Системный (по умолчанию) —</option>';
+          (data.prompt_options || []).forEach(function (p) {
+            const opt = document.createElement('option');
+            opt.value = p.id;
+            opt.textContent = p.name;
+            promptSelect.appendChild(opt);
+          });
+        }
+      } catch (e) { /* silent — keep current options */ }
+    }
+
+    // Refresh prompts when task selection changes.
+    document.addEventListener('change', function (event) {
+      if (event.target.classList.contains('arm-task-check')) {
+        refreshPrompts();
+      }
+    });
+
     if (addTaskBtn) {
       addTaskBtn.addEventListener('click', async function () {
         const nodeId = nodeIdInput.value.trim();
