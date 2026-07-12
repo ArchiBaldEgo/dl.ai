@@ -31,6 +31,25 @@ def apply_dl_task_info(task, data):
         task.statement = data["statement"]
 
 
+_LANG_TO_EXTENSION = {
+    "python": ".py",
+    "cmpa": ".cmpa",
+    "ассемблер i86": ".asm",
+    "pascal": ".pas",
+    "verilog": ".v",
+    "c++": ".cpp",
+    "c": ".c",
+}
+
+
+def _guess_extension(prog_lang_name: str) -> str:
+    """Best-effort file extension from a programming language name."""
+    if not prog_lang_name:
+        return ""
+    low = prog_lang_name.lower().strip()
+    return _LANG_TO_EXTENSION.get(low, "")
+
+
 def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session_id=None):
     """Get-or-create a ``Task`` row for a DL node id; best-effort DL fill on create.
 
@@ -42,12 +61,23 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
     not clutter batch-solve "all active" runs while still ungradeable.
     """
     try:
+        # Auto-determine file_extension from programming language if provided.
+        file_ext = ""
+        if programming_language_id is not None:
+            from ..models import ProgrammingLanguage
+            try:
+                pl = ProgrammingLanguage.objects.get(pk=programming_language_id)
+                file_ext = _guess_extension(pl.language_name)
+            except ProgrammingLanguage.DoesNotExist:
+                pass
+
         task, created = Task.objects.get_or_create(
             node_id=node_id,
             defaults={
                 "programming_language_id": programming_language_id,
                 "topic_id": topic_id,
                 "active": False,
+                "file_extension": file_ext,
             },
         )
         if not created:
