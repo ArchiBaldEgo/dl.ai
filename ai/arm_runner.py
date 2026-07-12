@@ -683,46 +683,71 @@ def _extract_code_from_response(text):
 def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0):
     """Send code to DL for real testing and poll for the result.
 
-    Returns (verdict, comment) where verdict is _VERDICT_SOLVED / _VERDICT_FAILED
-    or None if the DL test could not be performed (network error, auth error, etc).
-    comment is the DL test comment string (may be empty).
+    Returns a dict:
+        {
+            "verdict": _VERDICT_SOLVED / _VERDICT_FAILED / None,
+            "comment": str,        # DL comment (test result details)
+            "submit_error": str,   # error message if send-solution failed
+            "queue_id": int,       # DL queue id (0 if submit failed)
+            "code_sent": str,      # the code that was sent to DL
+        }
+    verdict is None if the DL test could not be performed.
     """
     from .dl_api_client import send_solution_to_dl, get_solution_result_from_dl
 
+    result = {
+        "verdict": None,
+        "comment": "",
+        "submit_error": "",
+        "queue_id": 0,
+        "code_sent": code[:5000],
+    }
+
+    # Step 1: submit code to DL.
     try:
         submit_resp = send_solution_to_dl(session_id, node_id, code, file_extension)
-    except Exception:
-        return None, ""
+    except Exception as exc:
+        result["submit_error"] = f"send-solution: {exc}"
+        return result
 
     queue_id = submit_resp.get("queueId")
+    result["queue_id"] = queue_id or 0
     if not queue_id or queue_id <= 0:
-        return None, ""
+        msg = submit_resp.get("message", "")
+        result["submit_error"] = f"send-solution вернул queueId={queue_id}" + (f" ({msg})" if msg else "")
+        return result
 
-    # Poll DL for the result.
+    # Step 2: poll for the result.
     for _ in range(max_polls):
         time.sleep(poll_interval)
         try:
-            result = get_solution_result_from_dl(session_id, queue_id)
-        except Exception:
-            return None, ""
+            poll_resp = get_solution_result_from_dl(session_id, queue_id)
+        except Exception as exc:
+            result["submit_error"] = f"get-solution-result: {exc}"
+            return result
 
-        is_finished = result.get("isFinished")
-        comment = result.get("comment", "") or ""
+        is_finished = poll_resp.get("isFinished")
+        comment = poll_resp.get("comment", "") or ""
 
         if is_finished:
-            # DL comment typically says "OK" or contains error details.
+            result["comment"] = comment
             comment_lower = comment.lower().strip()
+            # Success markers.
             if comment_lower in ("ok", "ок", "accepted", "correct", "всё верно", ""):
-                return _VERDICT_SOLVED, comment
-            # If comment mentions errors/tests failing → failed.
+                result["verdict"] = _VERDICT_SOLVED
+                return result
+            # Error markers.
             error_markers = ("error", "ошиб", "fail", "неверн", "wrong", "exception", "runtime")
             if any(m in comment_lower for m in error_markers):
-                return _VERDICT_FAILED, comment
+                result["verdict"] = _VERDICT_FAILED
+                return result
             # Ambiguous — treat as solved if no error markers.
-            return _VERDICT_SOLVED, comment
+            result["verdict"] = _VERDICT_SOLVED
+            return result
 
     # Timed out waiting for DL.
-    return None, ""
+    result["submit_error"] = f"timeout: DL не ответил за {max_polls * poll_interval}с (queueId={queue_id})"
+    return result
 
 
 def _run_batch_job_worker(
@@ -828,6 +853,9 @@ def _run_batch_job_worker(
                 raw_response = ""
                 tokens = 0
                 dl_test_comment = ""
+                dl_submit_error = ""
+                dl_code_sent = ""
+                dl_queue_id = 0
 
                 try:
                     message = _build_solve_message(
@@ -846,10 +874,15 @@ def _run_batch_job_worker(
 
                     # Try real DL testing first (if enabled); fall back to difflib.
                     if dl_test and code_only and task.file_extension and session_id:
-                        dl_verdict, dl_comment = _test_solution_on_dl(
+                        dl_result = _test_solution_on_dl(
                             session_id, task.node_id, code_only, task.file_extension
                         )
-                        dl_test_comment = dl_comment
+                        dl_test_comment = dl_result.get("comment", "")
+                        dl_submit_error = dl_result.get("submit_error", "")
+                        dl_verdict = dl_result.get("verdict")
+                        dl_code_sent = dl_result.get("code_sent", "")
+                        dl_queue_id = dl_result.get("queue_id", 0)
+
                         if dl_verdict is not None:
                             verdict = dl_verdict
                         elif sample_text:
@@ -864,18 +897,35 @@ def _run_batch_job_worker(
                     elif sample_text:
                         # DL test disabled but we have a sample → difflib.
                         verdict = grade_solution(cleaned_text, sample_text)
+                        dl_code_sent = ""
+                        dl_submit_error = ""
+                        dl_queue_id = 0
                     else:
                         # No DL test and no sample → can't grade, but model answered.
                         verdict = _VERDICT_FAILED
                         dl_test_comment = "Образец отсутствует, проверка невозможна"
+                        dl_code_sent = ""
+                        dl_submit_error = ""
+                        dl_queue_id = 0
 
                     status = "ok" if verdict != _VERDICT_SKIPPED else "error"
                     short_response = (friendly or cleaned_text)[:300] + (
                         "..." if len(friendly or cleaned_text) > 300 else ""
                     )
+                    # Append DL test info to short_response.
+                    dl_info_parts = []
+                    if dl_queue_id > 0:
+                        dl_info_parts.append(f"queueId={dl_queue_id}")
                     if dl_test_comment:
-                        short_response += f"\n[DL: {dl_test_comment[:200]}]"
+                        dl_info_parts.append(f"DL: {dl_test_comment[:200]}")
+                    if dl_submit_error:
+                        dl_info_parts.append(f"ошибка: {dl_submit_error[:200]}")
+                    if dl_info_parts:
+                        short_response += "\n[" + " | ".join(dl_info_parts) + "]"
                     raw_response = detailed or cleaned_text
+                    # Include the code sent to DL in raw_response for full visibility.
+                    if dl_code_sent:
+                        raw_response += f"\n\n--- Код отправлен на DL (nodeId={task.node_id}, ext={task.file_extension}) ---\n{dl_code_sent}"
                 except Exception as exc:
                     exc_text = str(exc)
                     friendly, detailed = humanize_model_error(exc_text, include_detail=True)
