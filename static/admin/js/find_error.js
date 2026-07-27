@@ -243,40 +243,42 @@ function simulateSend() {
     saveSharedText();
 }
 
+// === fetchProblemData — объявлена в области видимости модуля, чтобы
+//     обработчик selectLang change мог её вызвать (исправление бага №2). ===
+async function fetchProblemData() {
+    if (problemData) return problemData;
+    try {
+        const cached = sessionStorage.getItem(PROBLEM_DATA_KEY);
+        if (cached) {
+            problemData = JSON.parse(cached);
+            return problemData;
+        }
+    } catch (e) {}
+
+    try {
+        const uiLang = document.getElementById('selectLang').value || 'Русский';
+        const url = new URL('/ai/api/problem-data/', window.location.origin);
+        url.searchParams.set('ui_language', uiLang);
+        const response = await fetch(url.toString());
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const data = await response.json();
+        problemData = data;
+        try {
+            sessionStorage.setItem(PROBLEM_DATA_KEY, JSON.stringify(data));
+        } catch (e) {}
+        return data;
+    } catch (error) {
+        console.error('Error fetching problem data:', error);
+        return { languages: [], topics: [], prompts: [], shared_prompts: [] };
+    }
+}
+
 // === DOMContentLoaded: загрузка языков, тем, промптов, восстановление состояния ===
 
 document.addEventListener("DOMContentLoaded", async () => {
     problemLanguageSelect = document.getElementById("selectProgLng");
     problemTopicSelect = document.getElementById("selectTheme");
     problemPromptSelect = document.getElementById("selectPrompt");
-
-    async function fetchProblemData() {
-        if (problemData) return problemData;
-        try {
-            const cached = sessionStorage.getItem(PROBLEM_DATA_KEY);
-            if (cached) {
-                problemData = JSON.parse(cached);
-                return problemData;
-            }
-        } catch (e) {}
-
-        try {
-            const uiLang = document.getElementById('selectLang').value || 'Русский';
-            const url = new URL('/ai/api/problem-data/', window.location.origin);
-            url.searchParams.set('ui_language', uiLang);
-            const response = await fetch(url.toString());
-            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-            const data = await response.json();
-            problemData = data;
-            try {
-                sessionStorage.setItem(PROBLEM_DATA_KEY, JSON.stringify(data));
-            } catch (e) {}
-            return data;
-        } catch (error) {
-            console.error('Error fetching problem data:', error);
-            return { languages: [], topics: [], prompts: [], shared_prompts: [] };
-        }
-    }
 
     function setSelectEnabled(selectElement, enabled) {
         if (!selectElement) return;

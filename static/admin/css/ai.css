@@ -157,10 +157,14 @@
         }
 
         #select,
-        #selectType,
-        #selectLang {
+        #selectType {
             font-size: 18px;
             max-width: 77%;
+        }
+        #selectLang {
+            font-size: 18px;
+            width: auto;
+            min-width: 80px;
         }
 
         .blo {
@@ -1466,11 +1470,16 @@ hr {
     }
 
     #select,
-    #selectType,
-    #selectLang {
+    #selectType {
         font-size: 14px;
         max-width: 100%;
         width: 100%;
+        padding: 6px 8px;
+    }
+    #selectLang {
+        font-size: 14px;
+        width: auto;
+        min-width: 80px;
         padding: 6px 8px;
     }
 
@@ -1622,9 +1631,14 @@ hr {
 
 @media (max-width: 480px) {
     #select,
-    #selectType,
+    #selectType {
+        font-size: 13px;
+        padding: 5px 6px;
+    }
     #selectLang {
         font-size: 13px;
+        width: auto;
+        min-width: 80px;
         padding: 5px 6px;
     }
 

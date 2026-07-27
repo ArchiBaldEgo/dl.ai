@@ -158,11 +158,16 @@
 
         #select,
         #selectType,
-        #selectLang,
         #selectProgLng,
         #selectTheme {
             font-size: 18px;
             max-width: 180px;
+        }
+
+        #selectLang {
+            font-size: 18px;
+            width: auto;
+            min-width: 80px;
         }
 
         .blo {
@@ -541,10 +546,14 @@
              font-size: 12px;
              margin-top: 21px;
          }
-         #selectLang,
          #selectPrompt {
              font-size: 18px;
              max-width: 180px;
+         }
+         #selectLang {
+             font-size: 18px;
+             width: auto;
+             min-width: 80px;
          }
          #messages {
              height: 79vh;
@@ -602,10 +611,14 @@
              font-size: 12px;
              margin-top: 13px;
          }
-         #selectLang,
          #selectPrompt {
              font-size: 18px;
              max-width: 180px;
+         }
+         #selectLang {
+             font-size: 18px;
+             width: auto;
+             min-width: 80px;
          }
          #messages {
              height: 70vh;
@@ -735,10 +748,14 @@
              font-size: 10px;
              max-width: 100px;
          }
-         #selectLang,
          #selectPrompt {
              font-size: 18px;
              max-width: 180px;
+         }
+         #selectLang {
+             font-size: 18px;
+             width: auto;
+             min-width: 80px;
          }
         }
 /* Общие препромпты */
@@ -791,11 +808,16 @@
     }
 
     #select,
-    #selectType,
-    #selectLang {
+    #selectType {
         font-size: 14px;
         max-width: 100%;
         width: 100%;
+        padding: 6px 8px;
+    }
+    #selectLang {
+        font-size: 14px;
+        width: auto;
+        min-width: 80px;
         padding: 6px 8px;
     }
 
@@ -944,9 +966,14 @@
 
 @media (max-width: 480px) {
     #select,
-    #selectType,
+    #selectType {
+        font-size: 13px;
+        padding: 5px 6px;
+    }
     #selectLang {
         font-size: 13px;
+        width: auto;
+        min-width: 80px;
         padding: 5px 6px;
     }
 

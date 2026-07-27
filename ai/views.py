@@ -62,6 +62,40 @@ from .serializers import (
 
 _WEB_PRIORITY_MODELS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
 
+def _get_user_top_model_keys(request, limit=2):
+    """Возвращает list of model_key для топ-N моделей пользователя по частоте использования.
+    Считает по AIRequestLog (только success). Сопоставляет title из логов с key из registry.
+    """
+    try:
+        from .models import AIRequestLog
+        from .model_clients import registry
+        from collections import Counter
+
+        # Построить map title → key
+        title_to_key = {}
+        for key in registry._models.keys():
+            title_to_key[registry.title(key)] = key
+
+        # Получить user_id
+        user = getattr(request, 'user', None)
+        user_id = getattr(user, 'pk', None) if user and not isinstance(user, str) else None
+        if not user_id:
+            return []
+
+        # Посчитать частоту моделей для этого пользователя
+        c = Counter()
+        for mns in AIRequestLog.objects.filter(status='success', user_id=user_id).values_list('model_names', flat=True):
+            if mns:
+                for m in mns:
+                    key = title_to_key.get(m)
+                    if key:
+                        c[key] += 1
+
+        return [key for key, _ in c.most_common(limit)]
+    except Exception:
+        return []
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -178,14 +212,28 @@ def _render_ai_page(request, template_name, extra_context=None):
         except Exception:
             logger.exception("Failed to trigger model health self-heal refresh")
     if available_models:
-        priority_map = {item["key"]: item for item in available_models}
-        ordered_priority = [
-            priority_map[key]
+        # Топ-2 модели пользователя по частоте использования — наверх
+        user_top = _get_user_top_model_keys(request, limit=2)
+        model_map = {item["key"]: item for item in available_models}
+
+        # 1. Топ-2 модели юзера (если они доступны сейчас)
+        user_picks = [model_map[k] for k in user_top if k in model_map]
+
+        # 2. Web_DeepSeek приоритет (если не в топе юзера)
+        web_priority = [
+            model_map[key]
             for key in _WEB_PRIORITY_MODELS
-            if key in priority_map
+            if key in model_map and key not in user_top
         ]
-        rest = [item for item in available_models if item["key"] not in _WEB_PRIORITY_MODELS]
-        available_models = ordered_priority + rest
+
+        # 3. Остальные — по алфавиту (title)
+        used_keys = set(user_top) | set(_WEB_PRIORITY_MODELS)
+        rest = sorted(
+            [item for item in available_models if item["key"] not in used_keys],
+            key=lambda x: x["title"].lower(),
+        )
+
+        available_models = user_picks + web_priority + rest
     external_session_id = request.session.get('external_session_id')
     # The token-usage banner is a non-essential enhancement; it must never
     # break the chat page (mirrors the get_solo/ProgrammingError guard above).
