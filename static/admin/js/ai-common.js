@@ -520,8 +520,16 @@ var localization = {
             taskNotFound: "Задача не найдена",
             task: "Задача:",
             codetx: "Код программы:",
-            taskplace: "Вставьте сюда условие задачи"
-        }
+            taskplace: "Вставьте сюда условие задачи",
+            tokensUsed: "Потрачено сегодня",
+            tokensRemaining: "Осталось",
+            tokensNoLimit: "Использовано сегодня"
+        },
+        groqLoading: "Загрузка лимитов...",
+        groqUnavailable: "Лимиты недоступны",
+        groqTokens: "токенов",
+        groqRequests: "запросов/min",
+        groqRemaining: "Осталось"
     },
     English: {
         send: "Send",
@@ -575,8 +583,16 @@ var localization = {
             taskNotFound: "Task not found",
             task: "Task:",
             codetx: "Program code:",
-            taskplace: "Paste the task condition here"
-        }
+            taskplace: "Paste the task condition here",
+            tokensUsed: "Used today",
+            tokensRemaining: "Remaining",
+            tokensNoLimit: "Used today"
+        },
+        groqLoading: "Loading limits...",
+        groqUnavailable: "Limits unavailable",
+        groqTokens: "tokens",
+        groqRequests: "requests/min",
+        groqRemaining: "Remaining"
     },
     French: {
         send: "Envoyer",
@@ -630,8 +646,16 @@ var localization = {
             taskNotFound: "Tâche non trouvée",
             task: "Tâche :",
             codetx: "Code du programme :",
-            taskplace: "Collez ici l'énoncé de la tâche"
-        }
+            taskplace: "Collez ici l'énoncé de la tâche",
+            tokensUsed: "Utilisé aujourd'hui",
+            tokensRemaining: "Restant",
+            tokensNoLimit: "Utilisé aujourd'hui"
+        },
+        groqLoading: "Chargement des limites...",
+        groqUnavailable: "Limites indisponibles",
+        groqTokens: "jetons",
+        groqRequests: "requêtes/min",
+        groqRemaining: "Restant"
     }
 };
 
@@ -941,6 +965,32 @@ function clearContext() {
         alert("Соединение не установлено");
     }
 }
+
+// === Desktop/Mobile mode toggle ===
+function toggleDesktopMode() {
+    var html = document.documentElement;
+    var btn = document.querySelector('.desktop-toggle-btn');
+    if (html.classList.contains('desktop-mode')) {
+        html.classList.remove('desktop-mode');
+        if (btn) btn.textContent = '🖥️';
+        try { localStorage.removeItem('ai_desktop_mode'); } catch(e) {}
+    } else {
+        html.classList.add('desktop-mode');
+        if (btn) btn.textContent = '📱';
+        try { localStorage.setItem('ai_desktop_mode', '1'); } catch(e) {}
+    }
+}
+
+// Restore desktop mode on page load
+(function() {
+    try {
+        if (localStorage.getItem('ai_desktop_mode') === '1') {
+            document.documentElement.classList.add('desktop-mode');
+            var btn = document.querySelector('.desktop-toggle-btn');
+            if (btn) btn.textContent = '📱';
+        }
+    } catch(e) {}
+})();
 
 // === Common: language change handler (pages can extend via selectLang listener) ===
 // Pages register their own additional selectLang change listeners for page-specific UI.

@@ -64,7 +64,23 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
     }
     max_attempts = 5
     for attempt in range(1, max_attempts + 1):
-        response = await __import__("asyncio").to_thread(_post_to_bot_pool, payload, 180)
+        try:
+            response = await __import__("asyncio").to_thread(_post_to_bot_pool, payload, 300)
+        except requests.Timeout:
+            if attempt < max_attempts:
+                wait = min(attempt * 5, 20)
+                logger.warning("Bot pool timeout (300s), retrying in %ss (attempt %s/%s)", wait, attempt, max_attempts)
+                await __import__("asyncio").sleep(wait)
+                continue
+            return "Таймаут при подключении к Web DeepSeek (300с). Попробуйте позже.", 0
+        except requests.ConnectionError as exc:
+            if attempt < max_attempts:
+                wait = min(attempt * 3, 15)
+                logger.warning("Bot pool connection error: %s, retrying in %ss (attempt %s/%s)", exc, wait, attempt, max_attempts)
+                await __import__("asyncio").sleep(wait)
+                continue
+            return f"Ошибка подключения к Web DeepSeek: {exc}", 0
+
         logger.debug("Bot pool response status: %s (attempt %s/%s)", response.status_code, attempt, max_attempts)
 
         if response.status_code == 200:

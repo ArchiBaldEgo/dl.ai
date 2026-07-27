@@ -35,3 +35,4 @@ bot/worker/logs/*
 
 # Claude
 .claude/backups/
+backups/

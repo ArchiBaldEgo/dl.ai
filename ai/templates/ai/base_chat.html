@@ -9,12 +9,12 @@
     <meta http-equiv="X-UA-Compatible" content="ie=edge">
     {% block extra_meta %}{% endblock %}
     {% block css %}
-    <link rel="stylesheet" href="/ai/assets/admin/css/ai.css"/>
+    <link rel="stylesheet" href="/ai/assets/admin/css/ai.css?v={{ request.COOKIES.csrftoken|default:'1' }}"/>
     {% endblock %}
     {% block extra_css %}{% endblock %}
     {% block js %}
-    <script src="/ai/assets/admin/js/ai-common.js" defer></script>
-    <script src="/ai/assets/admin/js/chat_template.js" defer></script>
+    <script src="/ai/assets/admin/js/ai-common.js?v=2" defer></script>
+    <script src="/ai/assets/admin/js/chat_template.js?v=2" defer></script>
     {% endblock %}
     {% block extra_js %}{% endblock %}
     <title>DLAPI</title>
@@ -33,7 +33,7 @@
                     {% if available_models %}
                         {% for model in available_models %}
                             <option value="{{ model.key }}">
-                                {{ model.title }}{% if model.capabilities.reasoning %} · думающая{% endif %}
+                                {{ model.title }}
                             </option>
                         {% endfor %}
                     {% else %}
@@ -102,6 +102,7 @@
             </a>
         </div>
 
+        <button class="desktop-toggle-btn" type="button" onclick="toggleDesktopMode()" title="Переключить desktop/mobile режим">🖥️</button>
         <button class="toggle-button" type="button" aria-label="Open menu">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

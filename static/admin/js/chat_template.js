@@ -140,14 +140,17 @@ window.onload = function() {
         }
 
         widget.style.display = 'block';
-        widget.textContent = 'Загрузка лимитов...';
+        var lang = document.querySelector('#selectLang');
+        var selectedLang = lang ? lang.options[lang.selectedIndex].getAttribute('language') : 'Russian';
+        var loc = localization[selectedLang] || localization.Russian;
+        widget.textContent = loc.groqLoading;
 
         fetch('/ai/api/groq-limits/')
             .then(function(r) { return r.ok ? r.json() : Promise.reject(); })
             .then(function(data) {
                 var limits = data.limits || {};
                 var info = limits[selectedKey];
-                if (!info) { widget.textContent = 'Лимиты временно недоступны'; return; }
+                if (!info) { widget.textContent = loc.groqUnavailable; return; }
                 var remT = info.remaining_tokens;
                 var limT = info.limit_tokens;
                 var remR = info.remaining_requests;
@@ -155,11 +158,11 @@ window.onload = function() {
                 var pct = limT > 0 ? Math.round((remT / limT) * 100) : 0;
                 var color = pct > 50 ? '#4CAF50' : (pct > 20 ? '#FF9800' : '#F44336');
                 widget.innerHTML = '<span style="color:' + color + '; font-weight:bold;">' +
-                    ' Groq: ' + remT + ' / ' + limT + ' токенов (' + pct + '%)' +
-                    ' · ' + remR + ' / ' + limR + ' запросов/min' +
+                    ' Groq: ' + loc.groqRemaining + ': ' + remT + ' / ' + limT + ' ' + loc.groqTokens + ' (' + pct + '%)' +
+                    ' · ' + remR + ' / ' + limR + ' ' + loc.groqRequests +
                     '</span>';
             })
-            .catch(function() { widget.textContent = 'Лимиты недоступны'; });
+            .catch(function() { widget.textContent = loc.groqUnavailable; });
     }
 
     // === Виджет лимитов OpenRouter ===
@@ -183,9 +186,11 @@ window.onload = function() {
         }
 
         widget.style.display = 'block';
+        var lang = document.querySelector('#selectLang');
+        var selectedLang = lang ? lang.options[lang.selectedIndex].getAttribute('language') : 'Russian';
+        var loc = localization[selectedLang] || localization.Russian;
         widget.innerHTML = '<span style="color:#7c3aed; font-weight:bold;">' +
-            'OpenRouter (free): ~' + OR_DAILY_LIMIT + ' запросов/день' +
-            ' · без кредитки' +
+            'OpenRouter (free): ~' + OR_DAILY_LIMIT + ' ' + loc.groqRequests +
             '</span>';
     }
 

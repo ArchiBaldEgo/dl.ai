@@ -127,6 +127,9 @@ async def _ask_openrouter(
         if response.status_code == 429:
             return "Превышен лимит запросов OpenRouter (free tier). Попробуйте позже.", "0"
 
+        if response.status_code == 413:
+            return "Превышен лимит токенов для модели. Попробуйте сократить запрос или выберите другую модель.", "0"
+
         if response.status_code == 401:
             return "OpenRouter API ключ недействителен. Проверьте OPENROUTER_API_KEY.", "0"
 

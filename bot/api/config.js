@@ -15,7 +15,7 @@ module.exports = {
     port: toInt(process.env.PORT, 3000),
     maxBotCount: toInt(process.env.MAX_BOT_COUNT, 3),
     retryAfterSec: toInt(process.env.RETRY_AFTER_SEC, 3),
-    requestTimeoutMs: toInt(process.env.REQUEST_TIMEOUT_MS, 180_000),
+    requestTimeoutMs: toInt(process.env.REQUEST_TIMEOUT_MS, 300_000),
     // worker defaults
     serviceModel: process.env.SERVICE_MODEL || 'deepseek',
     headless: toBool(process.env.HEADLESS, false),

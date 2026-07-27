@@ -33,13 +33,15 @@ logger = logging.getLogger(__name__)
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 # --- Декларативная таблица моделей ---
-# Ключ → (Groq API model name, max_tokens, temperature)
-GROQ_MODELS: dict[str, str] = {
-    "Groq_Llama_3_3_70B": "llama-3.3-70b-versatile",
-    "Groq_Llama_3_1_8B": "llama-3.1-8b-instant",
-    "Groq_Gpt_Oss_120B": "openai/gpt-oss-120b",
-    "Groq_Gpt_Oss_20B": "openai/gpt-oss-20b",
-    "Groq_Qwen_3_6_27B": "qwen/qwen3.6-27b",
+# Ключ → (Groq API model name, max_tokens)
+# max_tokens подобран так, чтобы prompt + max_tokens не превышал TPM-лимит модели.
+#   llama-3.1-8b-instant: TPM=6000 (free tier), поэтому max_tokens=2048
+GROQ_MODELS: dict[str, tuple[str, int]] = {
+    "Groq_Llama_3_3_70B": ("llama-3.3-70b-versatile", 4096),
+    "Groq_Llama_3_1_8B": ("llama-3.1-8b-instant", 2048),
+    "Groq_Gpt_Oss_120B": ("openai/gpt-oss-120b", 4096),
+    "Groq_Gpt_Oss_20B": ("openai/gpt-oss-20b", 4096),
+    "Groq_Qwen_3_6_27B": ("qwen/qwen3.6-27b", 4096),
 }
 
 # In-memory кэш rate-limit заголовков по каждой модели.
@@ -85,11 +87,16 @@ async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = ""
     if not GROQ_TOKEN:
         return "Groq API токен не настроен. Добавьте GROQ_TOKEN в .env", 0
 
+    # max_tokens берётся из GROQ_MODELS; по умолчанию 4096 для обратной совместимости
+    max_tokens = 4096
+    if model_key and model_key in GROQ_MODELS:
+        max_tokens = GROQ_MODELS[model_key][1]
+
     payload = {
         "model": model_name,
         "messages": [{"role": "user", "content": msg}],
         "temperature": 0.7,
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
     }
 
     try:
@@ -109,6 +116,8 @@ async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = ""
         if model_key:
             _update_rate_limit_cache(model_key, response.headers)
 
+        if response.status_code == 413:
+            return "Превышен лимит токенов для модели. Попробуйте сократить запрос или выберите другую модель.", 0
         if response.status_code == 429:
             return "Превышен лимит запросов Groq. Попробуйте позже.", 0
         if response.status_code == 401:
@@ -134,7 +143,7 @@ async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = ""
 
 def _make_groq_handler(model_key: str):
     """Создаёт async-функцию-обработчик для Groq модели по ключу."""
-    groq_model = GROQ_MODELS[model_key]
+    groq_model, _max_tokens = GROQ_MODELS[model_key]
 
     async def handler(msg: str, user_id: int) -> str:
         response, _ = await _ask_groq(groq_model, msg, user_id, model_key)
@@ -166,7 +175,7 @@ async def probe_rate_limits() -> dict[str, dict]:
         timeout=30.0,
         trust_env=False,
     ) as client:
-        for model_key, groq_model in GROQ_MODELS.items():
+        for model_key, (groq_model, _max_tokens) in GROQ_MODELS.items():
             try:
                 payload = {
                     "model": groq_model,

@@ -252,6 +252,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
             saveInterfaceLanguage();
             updateVoiceStatus(getVoiceStatusText('readyForVoice'));
+            }
         });
     }
 });

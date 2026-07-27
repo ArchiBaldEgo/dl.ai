@@ -8,7 +8,9 @@
 
 from typing import Callable, Coroutine, Dict
 
-from . import groq, openrouter, sambanova, web_deepseek
+from . import groq, openrouter, web_deepseek
+# SambaNova models disabled — all commented out
+# from . import sambanova
 
 Handler = Callable[..., Coroutine]
 
@@ -113,41 +115,41 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "capabilities": _TEXT_ONLY,
     },
     "OR_Free_Router": {
-        "title": "OR Free Router (авто)",
+        "title": "OR Free Router",
         "handler": openrouter.ask_OR_Free_Router_async,
         "capabilities": _TEXT_ONLY,
     },
-    # --- SambaNova модели ---
-    "DeepSeek_V3_1": {
-        "title": "Samba DeepSeek-V3.1",
-        "handler": sambanova.ask_DeepSeek_V3_1_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "DeepSeek_V3_2": {
-        "title": "Samba DeepSeek-V3.2",
-        "handler": sambanova.ask_DeepSeek_V3_2_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "Meta_Llama_3_3_70B_Instruct": {
-        "title": "Samba Meta-Llama-3.3-70B-Instruct",
-        "handler": sambanova.ask_Meta_Llama_3_3_70B_Instruct_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "MiniMax_M2_7": {
-        "title": "Samba MiniMax-M2.7",
-        "handler": sambanova.ask_MiniMax_M2_7_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "Gemma_3_12b_it": {
-        "title": "Samba gemma-4-31B-it",
-        "handler": sambanova.ask_Gemma_3_12b_it_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "Gpt_oss_120b": {
-        "title": "Samba gpt-oss-120b",
-        "handler": sambanova.ask_Gpt_oss_120b_async,
-        "capabilities": _TEXT_ONLY,
-    },
+    # --- SambaNova модели отключены ---
+    # "DeepSeek_V3_1": {
+    #     "title": "Samba DeepSeek-V3.1",
+    #     "handler": sambanova.ask_DeepSeek_V3_1_async,
+    #     "capabilities": _TEXT_ONLY,
+    # },
+    # "DeepSeek_V3_2": {
+    #     "title": "Samba DeepSeek-V3.2",
+    #     "handler": sambanova.ask_DeepSeek_V3_2_async,
+    #     "capabilities": _TEXT_ONLY,
+    # },
+    # "Meta_Llama_3_3_70B_Instruct": {
+    #     "title": "Samba Meta-Llama-3.3-70B-Instruct",
+    #     "handler": sambanova.ask_Meta_Llama_3_3_70B_Instruct_async,
+    #     "capabilities": _TEXT_ONLY,
+    # },
+    # "MiniMax_M2_7": {
+    #     "title": "Samba MiniMax-M2.7",
+    #     "handler": sambanova.ask_MiniMax_M2_7_async,
+    #     "capabilities": _TEXT_ONLY,
+    # },
+    # "Gemma_3_12b_it": {
+    #     "title": "Samba gemma-4-31B-it",
+    #     "handler": sambanova.ask_Gemma_3_12b_it_async,
+    #     "capabilities": _TEXT_ONLY,
+    # },
+    # "Gpt_oss_120b": {
+    #     "title": "Samba gpt-oss-120b",
+    #     "handler": sambanova.ask_Gpt_oss_120b_async,
+    #     "capabilities": _TEXT_ONLY,
+    # },
 }
 
 _DEFAULT_CAPABILITIES = _TEXT_ONLY

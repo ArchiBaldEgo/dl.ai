@@ -1428,3 +1428,355 @@ hr {
     color: #2196F3;
     font-weight: bold;
 }
+
+/* ============================================
+   MOBILE RESPONSIVE STYLES
+   Added for phone/tablet adaptation
+   ============================================ */
+
+/* --- Tablets and small screens --- */
+
+/* ============================================
+   MOBILE RESPONSIVE
+   ============================================ */
+@media (max-width: 768px) {
+    body {
+        overflow: auto;
+    }
+
+    #content {
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+        height: auto;
+    }
+
+    .line-panel {
+        flex-direction: column;
+        align-items: stretch;
+        height: auto;
+        padding: 8px 10px;
+        gap: 6px;
+    }
+
+    .line-panel > div:first-child {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    #select,
+    #selectType,
+    #selectLang {
+        font-size: 14px;
+        max-width: 100%;
+        width: 100%;
+        padding: 6px 8px;
+    }
+
+    #groqLimitsWidget,
+    #openrouterLimitsWidget {
+        font-size: 10px !important;
+    }
+
+    .voice-mod-div {
+        flex-direction: row;
+        align-items: center;
+        margin-left: 0;
+        gap: 8px;
+    }
+
+    .voice-mode-btn {
+        margin-top: 0;
+        width: auto;
+        font-size: 13px;
+        padding: 6px 12px;
+        height: 38px;
+    }
+
+    .voice-controls {
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .voice-btn {
+        font-size: 13px;
+        padding: 6px 10px;
+        height: 38px;
+    }
+
+    .think-checkbox {
+        font-size: 12px;
+        margin: 4px 0;
+    }
+
+    .panel-date {
+        position: static;
+        font-size: 11px;
+        opacity: 0.4;
+    }
+
+    .token-usage {
+        position: static;
+        font-size: 11px;
+        opacity: 0.6;
+        margin-bottom: 2px;
+    }
+
+    .blo {
+        flex-direction: column;
+        width: 100%;
+        padding: 0;
+    }
+
+    #messages {
+        width: 100%;
+        height: calc(100vh - 340px);
+        min-height: 200px;
+        margin: 0;
+        font-size: 15px;
+        padding: 8px;
+        box-sizing: border-box;
+    }
+
+    #messages li {
+        font-size: 15px;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+    }
+
+    .dv {
+        width: 100%;
+        padding: 0 8px;
+        box-sizing: border-box;
+    }
+
+    .resize-button {
+        display: none;
+    }
+
+    #messageText {
+        width: 100%;
+        height: 100px;
+        font-size: 15px;
+        margin-top: 4px;
+        box-sizing: border-box;
+    }
+
+    .buttons-block {
+        flex-direction: row;
+        height: auto;
+        margin-top: 6px;
+    }
+
+    .buttons-block button {
+        flex: 1 1 0;
+        padding: 8px 10px;
+        font-size: 14px;
+        margin: 0 4px;
+    }
+
+    .dv button {
+        width: auto;
+        padding: 8px 10px;
+    }
+
+    .sidebar {
+        width: 100%;
+        right: -100%;
+    }
+
+    .sidebar.open {
+        transform: translateX(-100%);
+    }
+
+    .toggle-button {
+        top: 8px;
+        right: 0;
+        height: 40px;
+        width: 40px;
+    }
+
+    .top-dv {
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 6px;
+    }
+
+    .top-dv select {
+        width: 100% !important;
+    }
+
+    .top-preprompt {
+        width: 100%;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 4px;
+    }
+
+    .top-preprompt select {
+        width: 100%;
+    }
+}
+
+@media (max-width: 480px) {
+    #select,
+    #selectType,
+    #selectLang {
+        font-size: 13px;
+        padding: 5px 6px;
+    }
+
+    #messages {
+        height: calc(100vh - 360px);
+        font-size: 14px;
+        padding: 6px;
+    }
+
+    #messages li {
+        font-size: 14px;
+    }
+
+    #messageText {
+        height: 80px;
+        font-size: 14px;
+    }
+
+    .buttons-block button {
+        font-size: 13px;
+        padding: 6px 8px;
+    }
+
+    .voice-mode-btn,
+    .voice-btn {
+        font-size: 12px;
+        height: 34px;
+    }
+
+    .toggle-button {
+        transform: scale(0.85);
+    }
+
+    .top-dv select,
+    #selectProgLng,
+    #selectTheme,
+    #selectPrompt {
+        font-size: 13px;
+    }
+}
+
+/* ============================================
+   DESKTOP-MODE OVERRIDE (phone user requests PC version)
+   ============================================ */
+html.desktop-mode body {
+    overflow: hidden !important;
+}
+html.desktop-mode #content {
+    display: block !important;
+    flex-direction: initial !important;
+    min-height: 100vh;
+    height: 100% !important;
+}
+html.desktop-mode .line-panel {
+    flex-direction: row !important;
+    align-items: center !important;
+    height: auto !important;
+    padding: 0 10px !important;
+    gap: 10px !important;
+}
+html.desktop-mode .line-panel > div:first-child {
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 8px !important;
+}
+html.desktop-mode #select,
+html.desktop-mode #selectType,
+html.desktop-mode #selectLang {
+    font-size: 16px !important;
+    max-width: initial !important;
+    width: auto !important;
+    padding: initial !important;
+}
+html.desktop-mode #groqLimitsWidget,
+html.desktop-mode #openrouterLimitsWidget {
+    font-size: 11px !important;
+}
+html.desktop-mode .voice-mod-div {
+    flex-direction: row !important;
+    align-items: center !important;
+    margin-left: auto !important;
+    gap: 8px !important;
+}
+html.desktop-mode .voice-mode-btn {
+    margin-top: 0 !important;
+    width: auto !important;
+    font-size: 14px !important;
+    padding: 8px 16px !important;
+    height: auto !important;
+}
+html.desktop-mode .voice-controls {
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    gap: 8px !important;
+}
+html.desktop-mode .blo {
+    flex-direction: row !important;
+    height: calc(100vh - 60px) !important;
+}
+html.desktop-mode .blo > ul {
+    width: 70% !important;
+    height: 100% !important;
+}
+html.desktop-mode .dv {
+    width: 28% !important;
+}
+html.desktop-mode .sidebar {
+    display: block !important;
+    width: 250px !important;
+    height: 100vh !important;
+    position: fixed !important;
+    right: 0 !important;
+    top: 0 !important;
+    z-index: 100 !important;
+}
+html.desktop-mode .toggle-button {
+    display: none !important;
+}
+html.desktop-mode #messages {
+    height: calc(100vh - 120px) !important;
+}
+html.desktop-mode .voice-mode-btn,
+html.desktop-mode .voice-btn {
+    font-size: 14px !important;
+    height: auto !important;
+}
+html.desktop-mode .toggle-button {
+    transform: scale(1) !important;
+}
+html.desktop-mode .top-dv select,
+html.desktop-mode #selectProgLng,
+html.desktop-mode #selectTheme,
+html.desktop-mode #selectPrompt {
+    font-size: 14px !important;
+}
+
+/* Desktop-mode toggle button */
+.desktop-toggle-btn {
+    position: fixed;
+    bottom: 8px;
+    right: 8px;
+    z-index: 9999;
+    background: #333;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    opacity: 0.5;
+    transition: opacity 0.2s;
+}
+.desktop-toggle-btn:hover {
+    opacity: 1;
+}

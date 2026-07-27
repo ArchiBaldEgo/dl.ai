@@ -211,16 +211,50 @@ async function waitForXPathCompat(page, xpath, {
   throw new Error(`waitForXPath timeout for xpath: ${xpath}`);
 }
 
+// XPath-селекторы для признаков завершения генерации DeepSeek.
+// Когда генерация идёт — видна кнопка Stop (div с aria-label='stop' или класс stop).
+// Когда генерация завершена — появляется кнопка Regenerate / копировать / etc.
+const STOP_GENERATING_XPATHS = [
+  "//div[contains(@class,'stop') and not(contains(@class,'hidden'))]",
+  "//div[@aria-label='stop' or @aria-label='Stop']",
+  "//button[contains(@class,'stop') or @aria-label='stop' or @aria-label='Stop']",
+  "//div[contains(@class,'ds-button') and .//svg[contains(@class,'stop')]]",
+];
+
+async function isStillGenerating(page) {
+  // Проверяет, идёт ли ещё потоковая генерация (видна ли кнопка Stop).
+  try {
+    for (const xp of STOP_GENERATING_XPATHS) {
+      const found = await page.evaluate((x) => {
+        const res = document.evaluate(x, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+        const node = res.singleNodeValue;
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        return !!(rect && rect.width > 0 && rect.height > 0);
+      }, xp);
+      if (found) return true;
+    }
+  } catch (e) { /* ignore — safer to assume still generating */ }
+  return false;
+}
+
 async function waitLastOuterHtmlStable(page, xpath, {
-    timeoutMs = 180000,
-    pollMs = 1000,
-    stableTicks = 3,
+    timeoutMs = 300000,
+    pollMs = 2000,
+    stableTicks = 6,
     visible = true,
-    minContentLength = 0,
+    minContentLength = 50,
+    checkStopButton = true,
 } = {}) {
     // Ожидание стабилизации HTML-контента: опрашивает outerHTML элемента по XPath,
     // пока он не перестанет меняться stableTicks раз подряд (потоковая генерация завершена).
-    // minContentLength — минимальная длина контента для начала отсчёта стабильности.
+    //
+    // Улучшения:
+    // - checkStopButton: проверяет кнопку Stop в DOM — если видна, генерация продолжается
+    //   (сбрасывает sameCount даже если HTML не менялся в течение паузы).
+    // - minContentLength=50: игнорирует пустые/короткие ответы (< 50 символов).
+    // - timeoutMs=300000 (5 мин): достаточно для длинных ответов.
+    // - stableTicks=6 × pollMs=2000 = 12 секунд стабильности для уверенности.
     const start = Date.now();
 
     // Дожидаемся появления элемента
@@ -228,12 +262,25 @@ async function waitLastOuterHtmlStable(page, xpath, {
 
     let prev = null;
     let sameCount = 0;
+    let lastNonEmpty = null;
 
     while (Date.now() - start < timeoutMs) {
         const cur = await getLastOuterHtmlByXPath(page, xpath);
 
         // Reject empty/too-short answers — DeepSeek hasn't started generating yet.
         if (minContentLength > 0 && (!cur || cur.length < minContentLength)) {
+            sameCount = 0;
+            prev = cur;
+            await sleep(pollMs);
+            continue;
+        }
+
+        // Сохраняем последний валидный контент (на случай timeout вернём его)
+        lastNonEmpty = cur;
+
+        // Проверка кнопки Stop: если видна — генерация ещё идёт,
+        // даже если HTML временно не меняется (пауза в генерации).
+        if (checkStopButton && await isStillGenerating(page)) {
             sameCount = 0;
             prev = cur;
             await sleep(pollMs);
@@ -251,6 +298,13 @@ async function waitLastOuterHtmlStable(page, xpath, {
         }
 
         await sleep(pollMs);
+    }
+
+    // Timeout: если есть какой-то непустой контент — возвращаем его,
+    // иначе бросаем ошибку.
+    if (lastNonEmpty && lastNonEmpty.length >= minContentLength) {
+        log('waitLastOuterHtmlStable: timeout reached, returning last non-empty content (' + lastNonEmpty.length + ' chars)');
+        return lastNonEmpty;
     }
 
     throw new Error(`waitLastOuterHtmlStable timeout for xpath: ${xpath}`);
@@ -355,15 +409,81 @@ async function sendMessage(ctx, payload = {}) {
 
         // Wait for the answer to stabilize — DeepSeek streams tokens, so we
         // need enough stable ticks to ensure generation is truly complete.
-        // 3 ticks × 1500ms = 4.5s of stability required before reading.
-        // Also wait until the answer has actual content (non-empty HTML).
-        const answer = await waitLastOuterHtmlStable(page, data.xpaths.chat.answer[currentService], {
-            timeoutMs: 180000,
-            pollMs: 1500,
-            stableTicks: 4,
-            minContentLength: 10, // reject empty or near-empty answers
-        });
-        const inner = deepseekHtmlToApiMarkdown(answer);
+        // 6 ticks × 2000ms = 12s of stability required before reading.
+        // Also wait until the answer has actual content (min 50 chars HTML).
+        // timeoutMs=300000 (5 min) — enough for long answers.
+        //
+        // Fallback XPath selectors: if the primary selector fails (DeepSeek
+        // changed their HTML), try alternative selectors before giving up.
+        const answerXPaths = [
+            data.xpaths.chat.answer[currentService],
+            // Fallback 1: any element with ds-markdown class inside a message
+            "//div[contains(@class,'ds-message')]//div[contains(@class,'ds-markdown')]",
+            // Fallback 2: any element with ds-markdown class (broader)
+            "//div[contains(@class,'ds-markdown')]",
+            // Fallback 3: any element with markdown class inside a chat message
+            "//div[contains(@class,'message')]//div[contains(@class,'markdown')]",
+        ];
+
+        let answer = null;
+        let answerXpUsed = null;
+        for (const xp of answerXPaths) {
+            try {
+                answer = await waitLastOuterHtmlStable(page, xp, {
+                    timeoutMs: 300000,
+                    pollMs: 2000,
+                    stableTicks: 6,
+                    minContentLength: 50,
+                    checkStopButton: true,
+                });
+                answerXpUsed = xp;
+                break;
+            } catch (e) {
+                log('Answer XPath failed: ' + xp + ' — ' + (e?.message || e));
+            }
+        }
+
+        if (!answer) {
+            return {
+                ok: false,
+                reason: "can't send message",
+                data: { "moreInformation": "All answer XPath selectors failed — DeepSeek UI may have changed" }
+            };
+        }
+
+        let inner = deepseekHtmlToApiMarkdown(answer);
+
+        // Retry on empty or very short response — sometimes DeepSeek returns
+        // an empty container while still generating. Wait and try once more.
+        if (!inner || inner.trim().length < 5) {
+            log('Empty/short response detected (' + (inner?.length || 0) + ' chars), retrying once more...');
+            await sleep(3000);
+            try {
+                const retryAnswer = await waitLastOuterHtmlStable(page, answerXpUsed, {
+                    timeoutMs: 120000,
+                    pollMs: 2000,
+                    stableTicks: 6,
+                    minContentLength: 50,
+                    checkStopButton: true,
+                });
+                const retryInner = deepseekHtmlToApiMarkdown(retryAnswer);
+                if (retryInner && retryInner.trim().length > inner.trim().length) {
+                    inner = retryInner;
+                    answer = retryAnswer;
+                }
+            } catch (e) {
+                log('Retry attempt also failed: ' + (e?.message || e));
+            }
+        }
+
+        // Final check: if still empty, return error
+        if (!inner || !inner.trim()) {
+            return {
+                ok: false,
+                reason: "can't send message",
+                data: { "moreInformation": "DeepSeek returned an empty response after retries" }
+            };
+        }
 
         const answerData = {
             "role": "assistant",

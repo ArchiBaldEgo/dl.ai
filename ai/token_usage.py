@@ -93,18 +93,29 @@ def _format_millions(value):
 
 
 def get_daily_token_usage():
-    """Return the banner payload: ``{used, limit, used_display, limit_display}``.
+    """Return the banner payload with clear consumed/remaining labels.
 
-    ``limit`` is 0 when the budget is disabled; in that case the template
-    renders only the used count.
+    Returns a dict with:
+    - used: raw token count consumed today
+    - limit: raw daily token budget (0 if disabled)
+    - remaining: raw tokens remaining (limit - used, or 0 if no limit)
+    - used_display: human-readable consumed (e.g. "1.2M")
+    - limit_display: human-readable budget (e.g. "1.9M")
+    - remaining_display: human-readable remaining (e.g. "0.7M")
+    - percent: percentage used (0-100, or 0 if no limit)
     """
     used = get_daily_tokens_used()
     limit = get_daily_token_limit()
+    remaining = max(limit - used, 0) if limit > 0 else 0
+    percent = min(int(used / limit * 100), 100) if limit > 0 else 0
     return {
         "used": used,
         "limit": limit,
+        "remaining": remaining,
         "used_display": _format_millions(used),
         "limit_display": _format_millions(limit) if limit > 0 else "",
+        "remaining_display": _format_millions(remaining) if limit > 0 else "",
+        "percent": percent,
     }
 
 
