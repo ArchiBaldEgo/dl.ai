@@ -2227,3 +2227,338 @@ class TokenUsageTests(TestCase):
         payload = get_daily_token_usage()
         self.assertEqual(payload["limit"], 0)
         self.assertEqual(payload["limit_display"], "")
+
+
+# ===================================================================
+# Tests for model sorting (top-2 user models + alphabetical rest)
+# ===================================================================
+
+class ModelSortingTests(SimpleTestCase):
+    """Tests for _get_user_top_model_keys and model sorting in _render_ai_page."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def _make_user(self, pk=1):
+        return SimpleNamespace(
+            is_authenticated=True,
+            is_active=True,
+            username="sort-user",
+            pk=pk,
+        )
+
+    def test_top_model_keys_returns_empty_for_anonymous(self):
+        """No user pk → empty list, no exception."""
+        from ai.views import _get_user_top_model_keys
+        request = self.factory.get("/ai/chat/")
+        request.user = SimpleNamespace(is_authenticated=False, pk=None)
+        result = _get_user_top_model_keys(request, limit=2)
+        self.assertEqual(result, [])
+
+    def test_top_model_keys_returns_empty_for_string_user(self):
+        """String user (no pk) → empty list."""
+        from ai.views import _get_user_top_model_keys
+        request = self.factory.get("/ai/chat/")
+        request.user = "some-session-string"
+        result = _get_user_top_model_keys(request, limit=2)
+        self.assertEqual(result, [])
+
+    def test_top_model_keys_returns_empty_when_no_logs(self):
+        """User with no AIRequestLog entries → empty list."""
+        from ai.views import _get_user_top_model_keys
+        request = self.factory.get("/ai/chat/")
+        request.user = self._make_user(pk=999)
+        result = _get_user_top_model_keys(request, limit=2)
+        self.assertEqual(result, [])
+
+    def test_user_top_models_come_first(self):
+        """User's top-2 models should appear before web priority and alphabetical rest."""
+        from ai.views import _render_ai_page
+        models_data = [
+            {"key": "DeepSeek_V3_1", "title": "DeepSeek V3.1", "capabilities": {}},
+            {"key": "Groq_Llama_3_3_70B", "title": "Groq Llama 3.3 70B", "capabilities": {}},
+            {"key": "Web_DeepSeek", "title": "Web DeepSeek", "capabilities": {}},
+            {"key": "Gemma_3_12b_it", "title": "Gemma 3 12b IT", "capabilities": {}},
+            {"key": "MiniMax_M2_5", "title": "MiniMax M2.5", "capabilities": {}},
+        ]
+        request = self.factory.get("/ai/chat/")
+        request.user = self._make_user(pk=1)
+        request.session = {}
+        request.user_info = {"userId": "sort-user"}
+        request.COOKIES = {"userId": "sort-user"}
+        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["Groq_Llama_3_3_70B", "DeepSeek_V3_1"]),              patch("ai.views.render", return_value="ok") as mock_render,              patch("ai.views.get_daily_token_usage", return_value=None):
+            _render_ai_page(request, "ai/chat.html")
+        context = mock_render.call_args[0][2]
+        keys = [m["key"] for m in context["available_models"]]
+        self.assertEqual(keys[0], "Groq_Llama_3_3_70B")
+        self.assertEqual(keys[1], "DeepSeek_V3_1")
+        self.assertEqual(keys[2], "Web_DeepSeek")
+        self.assertEqual(keys[3], "Gemma_3_12b_it")
+        self.assertEqual(keys[4], "MiniMax_M2_5")
+
+    def test_no_user_top_models_web_priority_then_alphabetical(self):
+        """Without user top models: web priority first, then alphabetical rest."""
+        from ai.views import _render_ai_page
+        models_data = [
+            {"key": "DeepSeek_V3_1", "title": "DeepSeek V3.1", "capabilities": {}},
+            {"key": "Web_DeepSeek", "title": "Web DeepSeek", "capabilities": {}},
+            {"key": "Web_DeepSeek_Thinking", "title": "Web DeepSeek Thinking", "capabilities": {}},
+            {"key": "Gemma_3_12b_it", "title": "Gemma 3 12b IT", "capabilities": {}},
+            {"key": "MiniMax_M2_5", "title": "MiniMax M2.5", "capabilities": {}},
+        ]
+        request = self.factory.get("/ai/chat/")
+        request.user = self._make_user(pk=1)
+        request.session = {}
+        request.user_info = {"userId": "sort-user"}
+        request.COOKIES = {"userId": "sort-user"}
+        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=[]),              patch("ai.views.render", return_value="ok") as mock_render,              patch("ai.views.get_daily_token_usage", return_value=None):
+            _render_ai_page(request, "ai/chat.html")
+        context = mock_render.call_args[0][2]
+        keys = [m["key"] for m in context["available_models"]]
+        self.assertEqual(keys[0], "Web_DeepSeek")
+        self.assertEqual(keys[1], "Web_DeepSeek_Thinking")
+        self.assertEqual(keys[2], "DeepSeek_V3_1")
+        self.assertEqual(keys[3], "Gemma_3_12b_it")
+        self.assertEqual(keys[4], "MiniMax_M2_5")
+
+    def test_web_priority_skipped_when_in_user_top(self):
+        """Web_DeepSeek in user top should NOT appear again in web priority section."""
+        from ai.views import _render_ai_page
+        models_data = [
+            {"key": "Web_DeepSeek", "title": "Web DeepSeek", "capabilities": {}},
+            {"key": "Web_DeepSeek_Thinking", "title": "Web DeepSeek Thinking", "capabilities": {}},
+            {"key": "Gemma_3_12b_it", "title": "Gemma 3 12b IT", "capabilities": {}},
+            {"key": "MiniMax_M2_5", "title": "MiniMax M2.5", "capabilities": {}},
+        ]
+        request = self.factory.get("/ai/chat/")
+        request.user = self._make_user(pk=1)
+        request.session = {}
+        request.user_info = {"userId": "sort-user"}
+        request.COOKIES = {"userId": "sort-user"}
+        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["Web_DeepSeek", "Gemma_3_12b_it"]),              patch("ai.views.render", return_value="ok") as mock_render,              patch("ai.views.get_daily_token_usage", return_value=None):
+            _render_ai_page(request, "ai/chat.html")
+        context = mock_render.call_args[0][2]
+        keys = [m["key"] for m in context["available_models"]]
+        self.assertEqual(keys[0], "Web_DeepSeek")
+        self.assertEqual(keys[1], "Gemma_3_12b_it")
+        self.assertEqual(keys[2], "Web_DeepSeek_Thinking")
+        self.assertEqual(keys[3], "MiniMax_M2_5")
+        self.assertEqual(len(keys), len(set(keys)))
+
+
+# ===================================================================
+# Tests for problem-data API (languages, topics, prompts)
+# ===================================================================
+
+class ProblemDataApiTests(TestCase):
+    """Verify that get_problem_data returns correct data for selection."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(username="pd_user", password="test-pass")
+
+    def _request(self, ui_language=""):
+        params = {}
+        if ui_language:
+            params["ui_language"] = ui_language
+        request = self.factory.get("/ai/api/problem-data/", data=params)
+        request.user = self.user
+        request.user_info = {"userId": self.user.username}
+        request.COOKIES = {"userId": self.user.username}
+        return request
+
+    def test_problem_data_returns_languages(self):
+        ProgrammingLanguage.objects.create(language_name="Python")
+        ProgrammingLanguage.objects.create(language_name="C++")
+        response = get_problem_data(self._request("Russian"))
+        data = json.loads(response.content)
+        lang_names = [l["language_name"] for l in data["languages"]]
+        self.assertIn("Python", lang_names)
+        self.assertIn("C++", lang_names)
+        self.assertGreaterEqual(len(data["languages"]), 2)
+
+    def test_problem_data_returns_topics_filtered_by_language(self):
+        pl1 = ProgrammingLanguage.objects.create(language_name="Python")
+        pl2 = ProgrammingLanguage.objects.create(language_name="C++")
+        Topic.objects.create(topic_name="Loops", programming_language=pl1)
+        Topic.objects.create(topic_name="Arrays", programming_language=pl1)
+        Topic.objects.create(topic_name="Pointers", programming_language=pl2)
+        response = get_problem_data(self._request("Russian"))
+        data = json.loads(response.content)
+        self.assertEqual(len(data["topics"]), 3)
+        # Check topics are linked to correct languages
+        py_topics = [t for t in data["topics"] if t["programming_language"] == pl1.id]
+        self.assertEqual(len(py_topics), 2)
+        cpp_topics = [t for t in data["topics"] if t["programming_language"] == pl2.id]
+        self.assertEqual(len(cpp_topics), 1)
+
+    def test_problem_data_returns_prompts(self):
+        pl = ProgrammingLanguage.objects.create(language_name="Python")
+        topic = Topic.objects.create(topic_name="Loops", programming_language=pl)
+        Prompt.objects.create(topic=topic, prompt_name="Loop helper", prompt_text="Help with loops")
+        response = get_problem_data(self._request("Russian"))
+        data = json.loads(response.content)
+        self.assertGreaterEqual(len(data["prompts"]), 1)
+        self.assertEqual(data["prompts"][0]["prompt_name"], "Loop helper")
+
+    def test_problem_data_requires_auth(self):
+        request = self.factory.get("/ai/api/problem-data/")
+        request.user = AnonymousUser()
+        request.user_info = None
+        request.COOKIES = {}
+        response = get_problem_data(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_problem_data_returns_shared_prompts(self):
+        pl = ProgrammingLanguage.objects.create(language_name="Python")
+        sp = SharedPrompt.objects.create(prompt_name="Common prep", prompt_text="Common text")
+        sp.programming_languages.add(pl)
+        response = get_problem_data(self._request("Russian"))
+        data = json.loads(response.content)
+        self.assertGreaterEqual(len(data["shared_prompts"]), 1)
+        self.assertEqual(data["shared_prompts"][0]["prompt_name"], "Common prep")
+
+    def test_problem_data_response_has_all_keys(self):
+        response = get_problem_data(self._request("Russian"))
+        data = json.loads(response.content)
+        self.assertIn("languages", data)
+        self.assertIn("topics", data)
+        self.assertIn("prompts", data)
+        self.assertIn("shared_prompts", data)
+
+
+# ===================================================================
+# Tests for _get_user_top_model_keys with real AIRequestLog data
+# ===================================================================
+
+class UserTopModelKeysTests(TestCase):
+    """Test _get_user_top_model_keys with real AIRequestLog records."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(
+            username="freq_user", password="test-pass", pk=42,
+        )
+
+    def _make_request(self, user=None):
+        request = self.factory.get("/ai/chat/")
+        request.user = user or self.user
+        request.session = {}
+        return request
+
+    def _make_log(self, model_names, status="success"):
+        AIRequestLog.objects.create(
+            user=self.user,
+            username=self.user.username,
+            external_user_id="42",
+            user_full_name="Freq User",
+            client_id="client-1",
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            mode=AIRequestLog.MODE_CHAT,
+            sent_at=timezone.now(),
+            model_names=model_names,
+            message="test",
+            status=status,
+        )
+
+    def test_returns_most_frequent_models(self):
+        """The most frequently used models should be returned in order."""
+        from ai.views import _get_user_top_model_keys
+        from ai.model_clients import registry
+
+        # Get actual model titles from registry
+        all_keys = list(registry._models.keys())
+        if len(all_keys) < 3:
+            self.skipTest("Need at least 3 models in registry")
+        key_a = all_keys[0]
+        key_b = all_keys[1]
+        key_c = all_keys[2]
+        title_a = registry.title(key_a)
+        title_b = registry.title(key_b)
+        title_c = registry.title(key_c)
+
+        # Create logs: key_a used 3 times, key_b used 2 times, key_c used 1 time
+        for _ in range(3):
+            self._make_log([title_a])
+        for _ in range(2):
+            self._make_log([title_b])
+        for _ in range(1):
+            self._make_log([title_c])
+
+        result = _get_user_top_model_keys(self._make_request(), limit=2)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0], key_a)
+        self.assertEqual(result[1], key_b)
+
+    def test_error_logs_are_excluded(self):
+        """Only success logs should be counted."""
+        from ai.views import _get_user_top_model_keys
+        from ai.model_clients import registry
+
+        all_keys = list(registry._models.keys())
+        if len(all_keys) < 2:
+            self.skipTest("Need at least 2 models in registry")
+        key_a = all_keys[0]
+        title_a = registry.title(key_a)
+
+        # Error log should NOT be counted
+        self._make_log([title_a], status="error")
+        # Success log should be counted
+        self._make_log([title_a], status="success")
+
+        result = _get_user_top_model_keys(self._make_request(), limit=2)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], key_a)
+
+    def test_limit_respected(self):
+        """Should respect the limit parameter."""
+        from ai.views import _get_user_top_model_keys
+        from ai.model_clients import registry
+
+        all_keys = list(registry._models.keys())
+        if len(all_keys) < 5:
+            self.skipTest("Need at least 5 models in registry")
+        for i in range(5):
+            key = all_keys[i]
+            self._make_log([registry.title(key)])
+
+        result = _get_user_top_model_keys(self._make_request(), limit=3)
+        self.assertEqual(len(result), 3)
+
+    def test_other_users_logs_excluded(self):
+        """Logs from other users should NOT affect this user's top models."""
+        from ai.views import _get_user_top_model_keys
+        from ai.model_clients import registry
+
+        all_keys = list(registry._models.keys())
+        if len(all_keys) < 2:
+            self.skipTest("Need at least 2 models in registry")
+        key_a = all_keys[0]
+        key_b = all_keys[1]
+        title_a = registry.title(key_a)
+        title_b = registry.title(key_b)
+
+        # Other user's logs
+        other_user = get_user_model().objects.create_user(
+            username="other_freq_user", password="test-pass", pk=99,
+        )
+        for _ in range(5):
+            AIRequestLog.objects.create(
+                user=other_user,
+                username=other_user.username,
+                external_user_id="99",
+                user_full_name="Other User",
+                client_id="client-2",
+                source=AIRequestLog.SOURCE_WEBSOCKET,
+                mode=AIRequestLog.MODE_CHAT,
+                sent_at=timezone.now(),
+                model_names=[title_b],
+                message="test",
+                status="success",
+            )
+        # This user's logs
+        self._make_log([title_a])
+
+        result = _get_user_top_model_keys(self._make_request(), limit=2)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], key_a)
