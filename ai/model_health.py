@@ -1,3 +1,15 @@
+"""Проверка доступности AI-моделей и планировщик health-check.
+
+Ежедневно в 04:00 МСК запускает проверку всех моделей из MODEL_CATALOG_KEYS:
+отправляет healthcheck-промпт ("1+1=?"), проверяет ответ на "2",
+сохраняет результат в AIModelAvailability.
+
+При недоступности Web DeepSeek моделей — пытается перезапустить бот-пул
+(автоподъём). Поддерживает ручной refresh через trigger_model_health_refresh_async.
+
+Планировщик работает в daemon-потоке, запускается из apps.py.
+"""
+
 import re
 import threading
 import time
@@ -12,6 +24,8 @@ from django.conf import settings
 
 from .constants import MOSCOW_TZ
 from .models import AIModelAvailability, AIModelHealthRun
+
+# Промпт для healthcheck: простой вопрос, ответ — одна цифра "2".
 HEALTHCHECK_PROMPT = "Ответь только одной цифрой без пояснений: 1+1=?"
 
 logger = logging.getLogger(__name__)
@@ -28,20 +42,9 @@ WEB_DEEPSEEK_KEYS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
 _AUTORECOVERY_BACKOFF_SECONDS = 8
 
 # Health checks only exercise the models defined in the registry below.
-MODEL_CATALOG_KEYS = [
-    "Web_DeepSeek",
-    "Web_DeepSeek_Thinking",
-    "DeepSeek_R1_Distill_Llama_70B",
-    "DeepSeek_V3_1",
-    "DeepSeek_V3_1_cb",
-    "DeepSeek_V3_2",
-    "Llama_4_Maverick_17B_128E_Instruct",
-    "Meta_Llama_3_3_70B_Instruct",
-    "MiniMax_M2_5",
-    "MiniMax_M2_7",
-    "Gemma_3_12b_it",
-    "Gpt_oss_120b",
-]
+# Берём список моделей из registry — единый источник истины.
+from .model_clients.registry import registry as _model_registry
+MODEL_CATALOG_KEYS = list(_model_registry.keys())
 
 # Concrete error signatures the model clients actually return on a failed call.
 # We deliberately do NOT use loose stems like "ошибка"/"недоступ"/"подключени"/
@@ -102,6 +105,10 @@ _HTTP_CODE_LABELS = {
 
 
 def get_health_window_date(now=None):
+    """Возвращает дату текущего health-окна (04:00 МСК — граница между днями).
+
+    Если текущее время в МСК раньше 04:00, окно относится к предыдущему дню.
+    """
     current = now or timezone.now()
     moscow_now = current.astimezone(MOSCOW_TZ)
     window_date = moscow_now.date()
@@ -177,6 +184,10 @@ def get_http_code_label(code):
 
 
 def get_runtime_model_handlers():
+    """Возвращает словарь доступных обработчиков моделей {key: {title, handler}}.
+
+    Использует registry из model_clients. Только модели из MODEL_CATALOG_KEYS.
+    """
     handlers = {}
     for key in MODEL_CATALOG_KEYS:
         handler = registry.handler(key)
@@ -390,6 +401,12 @@ def _maybe_autorecover_web_deepseek(handlers, window_date):
 
 
 def run_model_health_check(force=False, on_model_checked=None):
+    """Запускает проверку доступности всех моделей для текущего health-окна.
+
+    force=True — повторная проверка даже если окно уже COMPLETED.
+    on_model_checked — callback, вызывается после каждой модели с detail-словарём.
+    Возвращает True, если проверка была выполнена; False, если пропущена (уже идёт).
+    """
     window_date = get_health_window_date()
     now = timezone.now()
 
@@ -532,6 +549,29 @@ def _seconds_until_next_4am_moscow(now=None):
     return max(int((next_run - current).total_seconds()), 1)
 
 
+def _recover_stale_runs():
+    """Сбрасывает зависшие health run'ы при старте процесса.
+
+    После рестарта контейнера поток health-check умирает, но статус в БД
+    остаётся RUNNING — новые проверки блокируются, думая что уже идёт.
+    Эта функция помечает такие run'ы как FAILED, чтобы планировщик мог
+    запустить свежую проверку в текущем окне.
+    """
+    threshold = timezone.now() - timedelta(minutes=10)
+    stale_runs = AIModelHealthRun.objects.filter(
+        status=AIModelHealthRun.STATUS_RUNNING,
+        started_at__lt=threshold,
+    )
+    count = stale_runs.count()
+    if count:
+        stale_runs.update(
+            status=AIModelHealthRun.STATUS_FAILED,
+            finished_at=timezone.now(),
+            error_message="Recovered: process restarted while run was in progress",
+        )
+        logger.warning("Recovered %d stale health run(s) (were stuck in RUNNING)", count)
+
+
 def _scheduler_loop():
     while True:
         # Daemon threads never fire request_started/request_finished, so Django's
@@ -555,11 +595,22 @@ def _scheduler_loop():
 
 
 def start_model_health_scheduler():
+    """Запускает daemon-поток планировщика health-check (один раз за процесс).
+
+    Перед запуском сбрасывает зависшие health run'ы (см. _recover_stale_runs),
+    которые могли остаться в статусе RUNNING после рестарта контейнера.
+    """
     global _scheduler_started
 
     with _scheduler_lock:
         if _scheduler_started:
             return
+
+        # Сбрасываем зависшие run'ы перед стартом планировщика.
+        try:
+            _recover_stale_runs()
+        except Exception:
+            logger.warning("Failed to recover stale health runs on startup", exc_info=True)
 
         thread = threading.Thread(
             target=_scheduler_loop,
@@ -625,13 +676,10 @@ def get_model_status_rows():
 
 
 def get_available_model_options():
-    """Return the list of available models for the current health window.
+    """Возвращает список доступных моделей для текущего health-окна.
 
-    This function is intentionally read-only: it does not trigger a synchronous
-    health check. The daily scheduler and manual refresh are responsible for
-    populating ``AIModelAvailability`` rows. If the current window has no data,
-    we fall back to the most recent completed window so users still see a list
-    while the scheduler catches up.
+    Только для чтения: не запускает health-check. Если в текущем окне нет данных,
+    берёт последнее окно с доступными моделями (fallback).
     """
     ordered_keys = MODEL_CATALOG_KEYS
     titles = {key: registry.title(key) for key in MODEL_CATALOG_KEYS}

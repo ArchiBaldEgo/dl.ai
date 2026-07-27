@@ -1,4 +1,4 @@
-"""WebSocket authentication service."""
+"""Сервис аутентификации WebSocket-соединений."""
 
 from typing import Any
 
@@ -14,11 +14,10 @@ from ..external_auth import (
 
 
 class WebSocketAuthService:
-    """Authenticate a WebSocket connection using the same DLSID flow as HTTP.
+    """Аутентификация WebSocket через DLSID (тот же поток, что и HTTP).
 
-    The service first trusts a user already placed in ``scope["user"]`` by
-    ``AuthMiddlewareStack``. If no authenticated user is present, it falls back to
-    the ``DLSID`` cookie and validates it against the external DL API.
+    Сначала доверяет пользователю из scope["user"] (от AuthMiddlewareStack).
+    Если его нет — извлекает DLSID-куку и проверяет через внешний API dl.gsu.by.
     """
 
     def __init__(self):

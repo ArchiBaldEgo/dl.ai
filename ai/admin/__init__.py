@@ -30,7 +30,7 @@ from .models import (
     TaskAdmin,
 )
 from .forms import PromptForm, SharedPromptForm
-from .logs import AIRequestLogAdmin, admin_request_log_detail_view, admin_request_logs_view
+from .logs import AIRequestLogAdmin, admin_request_log_detail_view, admin_request_logs_view, resend_request_view
 from ..models import AIRequestLog
 from .arm import (
     admin_arm_find_error_view,
@@ -79,6 +79,7 @@ __all__ = [
     "admin_prompt_regression_start_view",
     "admin_prompt_regression_status_view",
     "admin_request_logs_view",
+    "resend_request_view",
 ]
 
 # Register AI models on the custom admin site so they appear in /ai/admin/.

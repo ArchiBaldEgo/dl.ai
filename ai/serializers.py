@@ -1,9 +1,14 @@
-"""Lightweight serializers for AI app API responses."""
+"""Лёгкие сериализаторы для API-ответов AI-приложения.
+
+Преобразуют ORM-объекты в словари для JsonResponse. Поддерживают локализацию
+имён через get_localized_name. Не используют DRF — простые функции.
+"""
 
 from .i18n import get_localized_name
 
 
 def programming_language(language):
+    """Сериализует ProgrammingLanguage в словарь (id, language_name, name)."""
     return {
         "id": language.id,
         "language_name": language.language_name,
@@ -12,6 +17,7 @@ def programming_language(language):
 
 
 def topic(obj, ui_language=""):
+    """Сериализует Topic в словарь с локализованным названием."""
     return {
         "id": obj.id,
         "topic_name": obj.topic_name,
@@ -21,6 +27,7 @@ def topic(obj, ui_language=""):
 
 
 def prompt(obj, ui_language=""):
+    """Сериализует Prompt в словарь, включая effective_text с подстановкой плейсхолдеров."""
     return {
         "id": obj.id,
         "topic_id": obj.topic_id,
@@ -36,6 +43,7 @@ def prompt(obj, ui_language=""):
 
 
 def shared_prompt(obj, ui_language=""):
+    """Сериализует SharedPrompt в словарь, включая список language_ids и mode."""
     return {
         "id": obj.id,
         "prompt_name": obj.prompt_name,
@@ -48,6 +56,7 @@ def shared_prompt(obj, ui_language=""):
 
 
 def shared_prompt_with_dates(obj, ui_language=""):
+    """Сериализует SharedPrompt с дополнительными полями created_at и updated_at."""
     data = shared_prompt(obj, ui_language)
     data["created_at"] = obj.created_at.isoformat() if obj.created_at else None
     data["updated_at"] = obj.updated_at.isoformat() if obj.updated_at else None

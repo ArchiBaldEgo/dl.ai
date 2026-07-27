@@ -1,3 +1,14 @@
+"""Бэкенды аутентификации и вспомогательные функции для внешней авторизации.
+
+Содержит:
+- AdminExternalAuthBackend: бэкенд Django для входа в админку по external userId.
+- normalize_external_user_id: нормализация внешнего ID пользователя.
+- get_external_user_id_from_request: извлечение external userId из запроса.
+- ensure_prompt_developer_group: добавление пользователя в группу prompt_developer.
+- get_admin_user_by_external_id: поиск Django-пользователя по external ID.
+- create_admin_user_with_password: создание пользователя с паролем (первичная регистрация).
+"""
+
 import os
 from urllib.parse import unquote
 
@@ -12,6 +23,7 @@ ADMIN_EXTERNAL_AUTH_BACKEND = "ai.auth_backends.AdminExternalAuthBackend"
 
 
 def normalize_external_user_id(value):
+    """Нормализует внешний ID пользователя: strip, пустые значения → ''."""
     value = "" if value is None else str(value)
     value = value.strip()
     if not value or value == "None":
@@ -37,12 +49,9 @@ def get_external_user_id_from_request(request):
     if external_user_id:
         return external_user_id
 
-    for query_key in ("uid", "userId"):
-        external_user_id = normalize_external_user_id(
-            request.GET.get(query_key, "")
-        )
-        if external_user_id:
-            return external_user_id
+    # NOTE: Query-params (?uid=, ?userId=) are intentionally NOT trusted
+    # as identity sources — they allowed impersonation via /ai/chat/?uid=admin.
+    # Only DLSID-validated user_info and signed cookies are accepted.
 
     cookie_names = [
         os.getenv("EXTERNAL_USER_ID_COOKIE_NAME", "userId"),
@@ -63,6 +72,7 @@ def get_external_user_id_from_request(request):
 
 
 def ensure_prompt_developer_group(user):
+    """Добавляет пользователя в группу prompt_developer (создаёт группу при необходимости)."""
     group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
     user.groups.add(group)
     return group
@@ -92,6 +102,11 @@ def get_admin_user_by_external_id(external_user_id):
 
 
 def create_admin_user_with_password(external_user_id, password):
+    """Создаёт Django-пользователя с заданным паролем для внешнего ID.
+
+    Если пользователь уже существует, но не имеет пароля — устанавливает пароль.
+    Добавляет пользователя в группу prompt_developer.
+    """
     external_user_id = normalize_external_user_id(external_user_id)
     if not external_user_id:
         raise ValueError("userId is required")
@@ -110,9 +125,10 @@ def create_admin_user_with_password(external_user_id, password):
 
 
 class AdminExternalAuthBackend(BaseBackend):
-    """
-    Authenticates already-authorized site users in Django Admin by external userId.
-    The first password registration is handled by the admin set-password view.
+    """Бэкенд аутентификации Django Admin по внешнему userId (dl.gsu.by).
+
+    Первичная регистрация пароля выполняется через set-password view.
+    Этот бэкенд используется для входа уже зарегистрированных пользователей.
     """
 
     def authenticate(self, request, external_user_id=None, **kwargs):

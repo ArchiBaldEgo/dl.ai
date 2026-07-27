@@ -587,7 +587,7 @@
             const tbody = document.querySelector('.arm-tasks tbody');
             if (tbody) {
               const tr = document.createElement('tr');
-              tr.innerHTML = '<td><input type="checkbox" name="task_ids" value="' + data.task.id + '" class="arm-task-check" checked></td>'
+              tr.innerHTML = '<td><input type="checkbox" name="task_ids" value="' + escapeHtml(String(data.task.id)) + '" class="arm-task-check" checked></td>'
                 + '<td>' + escapeHtml(data.task.node_id) + '</td>'
                 + '<td>' + escapeHtml(data.task.name || '—') + '</td>'
                 + '<td>—</td><td>—</td><td>—</td>'

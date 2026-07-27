@@ -1,4 +1,19 @@
+/**
+ * Модуль отправки сообщений через UI сайта DeepSeek (Puppeteer-автоматизация).
+ *
+ * Основная функция: sendMessage(ctx, payload) — вводит текст в поле ввода,
+ * нажимает кнопку отправки, ждёт стабилизации ответа (потоковая генерация токенов),
+ * извлекает HTML ответа и конвертирует его в Markdown (deepseekHtmlToApiMarkdown).
+ *
+ * Содержит хелперы для работы с XPath, ожидания стабилизации контента,
+ * декодирования HTML-сущностей и конвертации HTML → Markdown.
+ *
+ * XPath-селекторы загружаются из data.json (data.xpaths.chat.*).
+ */
+
 const data = require("../data.json")
+
+const { log, error } = require('../utils/logger');
 
 const { waitAndType,
 	waitAndTypeX,
@@ -14,6 +29,7 @@ const { sleep } = require('../utils/helpers');
 const { hist } = require('../hist');
 
 function decodeHtmlEntities(s) {
+  // Декодирование HTML-сущностей (&nbsp;, &amp;, &#xNN;, &#NN; и т.д.) в обычные символы.
   return String(s ?? '')
     .replace(/&nbsp;/g, ' ')
     .replace(/&apos;/g, "'")
@@ -43,6 +59,12 @@ function extractCodeFromPreInner(preInnerHtml) {
 }
 
 function deepseekHtmlToApiMarkdown(html) {
+  // Конвертация HTML-ответа DeepSeek в Markdown.
+  // 1) Извлечение code blocks в плейсхолдеры (чтобы не сломать при чистке тегов).
+  // 2) Преобразование ссылок, форматирования, заголовков, списков.
+  // 3) Удаление остальных тегов, декодирование сущностей.
+  // 4) Восстановление code blocks из плейсхолдеров.
+  // 5) Нормализация пробелов и пустых строк.
   let s = stripOuterDiv(html);
 
   // 1) Вырезаем code blocks в плейсхолдеры, чтобы дальнейшая чистка не сломала их
@@ -196,6 +218,9 @@ async function waitLastOuterHtmlStable(page, xpath, {
     visible = true,
     minContentLength = 0,
 } = {}) {
+    // Ожидание стабилизации HTML-контента: опрашивает outerHTML элемента по XPath,
+    // пока он не перестанет меняться stableTicks раз подряд (потоковая генерация завершена).
+    // minContentLength — минимальная длина контента для начала отсчёта стабильности.
     const start = Date.now();
 
     // Дожидаемся появления элемента
@@ -250,6 +275,16 @@ async function getDeepseekLastAnswerHtml(ctx, data, {
 }
 
 async function sendMessage(ctx, payload = {}) {
+    // Отправка сообщения через UI сайта DeepSeek.
+    // payload: { model, thinking, user_id, message }
+    // Возвращает Markdown-стрроку с ответом модели или { ok: false, reason: ... }.
+    //
+    // Логика:
+    // 1) При первом сообщении в диалоге — переход на страницу чата.
+    // 2) Включение/выключение DeepThink (thinking mode) по необходимости.
+    // 3) Ввод текста в поле ввода, нажатие кнопки отправки.
+    // 4) Ожидание стабилизации ответа (потоковая генерация токенов).
+    // 5) Конвертация HTML ответа в Markdown.
     const page = ctx?.page;
 
     if (!page) 
@@ -303,7 +338,20 @@ async function sendMessage(ctx, payload = {}) {
         }
 
         await waitAndTypeX(page, data.xpaths.chat.inputLabel[currentService], messageText);
-        await waitAndClickX(page, data.xpaths.chat.sendMessageButton[currentService]);
+
+        // Try clicking the send button via XPath. If the primary selector fails
+        // (DeepSeek UI changed), fall back to pressing Enter in the textarea.
+        const sendClicked = await waitAndClickX(page, data.xpaths.chat.sendMessageButton[currentService]);
+        if (!sendClicked) {
+            log('Send button not found via XPath, falling back to Enter key');
+            try {
+                const textarea = await waitForXPathCompat(page, data.xpaths.chat.inputLabel[currentService], { timeout: 10000 });
+                await textarea.press('Enter');
+            } catch (e2) {
+                // Last resort: page-level keyboard Enter
+                await page.keyboard.press('Enter');
+            }
+        }
 
         // Wait for the answer to stabilize — DeepSeek streams tokens, so we
         // need enough stable ticks to ensure generation is truly complete.

@@ -1,1458 +1,526 @@
-// Глобальные переменные
-            var ws = null;
-            var client_id = resolveClientId();
-            var notEnter = false;
-            var requestInFlight = false;
-            
-            // Голосовые переменные для MediaRecorder
-            var mediaRecorder = null;
-            var audioChunks = [];
-            var isListening = false;
-            var audioStream = null;
-            var speechSynthesis = window.speechSynthesis;
-            var currentUtterance = null;
-            var speakThinkEnabled = true;
-            
-            // Таймер для автоматической остановки записи
-            var recordingTimeout = null;
-            var MAX_RECORDING_TIME = 30000;
+/**
+ * Фронтенд страницы «Реши задачу» — WebSocket-чат с AI для решения задач dl.gsu.by.
+ *
+ * Общие функции (cookies, CSRF, voice, accordion, markdown, localization, resize,
+ * sidebar, Enter handler, clearContext, initWebSocket default) берутся из ai-common.js,
+ * который подключается ПЕРЕД этим файлом.
+ *
+ * Здесь только специфичная для «Реши задачу» логика:
+ * - Данные задачи: языки, темы, промпты (problemData).
+ * - override initWebSocket() — type=2 и accordion logic в onmessage.
+ * - override sendMessage() / simulateSend() — progLng, topic, preprompt, nodeId.
+ * - selectLang change handler — обновление UI элементов, reload problem data.
+ * - DOMContentLoaded — загрузка данных задачи, заполнение селектов, restorePageState.
+ * - window.onload — init для decide_task.
+ */
 
-            // Данные задачи: языки, темы и препромпты (shared между обработчиками)
-            let problemData = null;
-            const PROBLEM_DATA_KEY = 'ai_problem_data_cache';
-            const PAGE_STATE_KEY = 'ai_page_state_problem';
-            const SHARED_TEXT_KEY = 'ai_text_shared';
-            let problemLanguageSelect = null;
-            let problemTopicSelect = null;
-            let problemPromptSelect = null;
+// === Специфичные для «Реши задачу» переменные ===
+let problemData = null;
+const PROBLEM_DATA_KEY = 'ai_problem_data_cache';
+const PAGE_STATE_KEY = 'ai_page_state_problem';
+let problemLanguageSelect = null;
+let problemTopicSelect = null;
+let problemPromptSelect = null;
 
-            function getCookieValue(name) {
-                const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-                return match ? decodeURIComponent(match[1]) : '';
-            }
+// === override initWebSocket — type=2, accordion в onmessage ===
+function initWebSocket() {
+    try {
+        var wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        var wsUrl = wsProtocol + '//' + window.location.host + '/ai/chat/ws/' + client_id + window.location.search;
 
-            function resolveClientId() {
-                const sessionId = getCookieValue('DLSID');
-                return sessionId ? `dlsid_${encodeURIComponent(sessionId)}` : 'dlsid_missing';
-            }
+        console.log('Connecting to WebSocket:', wsUrl);
+        ws = new WebSocket(wsUrl);
 
-            // Interface language persistence (shared across all AI pages)
-            const INTERFACE_LANG_KEY = 'ai_interface_language';
-            function saveInterfaceLanguage() {
-                try {
-                    const selectLang = document.getElementById('selectLang');
-                    if (selectLang) {
-                        const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-                        localStorage.setItem(INTERFACE_LANG_KEY, lang);
-                    }
-                } catch (e) {}
-            }
-            function restoreInterfaceLanguage() {
-                try {
-                    const savedLang = localStorage.getItem(INTERFACE_LANG_KEY);
-                    if (!savedLang) return;
-                    const selectLang = document.getElementById('selectLang');
-                    if (!selectLang) return;
-                    const option = Array.from(selectLang.options).find(o => o.getAttribute('language') === savedLang);
-                    if (option) {
-                        selectLang.selectedIndex = option.index;
-                    }
-                } catch (e) {}
-            }
-
-            // Функции голосового управления
-            function toggleVoiceControls() {
-                const voiceControls = document.getElementById('voiceControls');
-                if (voiceControls.style.display === 'flex') {
-                    voiceControls.style.display = 'none';
-                    if (speechSynthesis.speaking) {
-                        speechSynthesis.cancel();
-                        updateVoiceStatus(getVoiceStatusText('speechStopped'));
-                        document.getElementById('voiceOutputBtn').classList.remove('speaking');
-                    }
-                    if (isListening && mediaRecorder && mediaRecorder.state === 'recording') {
-                        stopMediaRecording();
-                    }
-                } else {
-                    voiceControls.style.display = 'flex';
-                }
-            }
-
-            // Инициализация MediaRecorder
-            async function initMediaRecorder() {
-                try {
-                    audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    
-                    mediaRecorder = new MediaRecorder(audioStream);
-                    audioChunks = [];
-                    
-                    mediaRecorder.ondataavailable = (event) => {
-                        if (event.data.size > 0) {
-                            audioChunks.push(event.data);
-                        }
-                    };
-                    
-                    mediaRecorder.onstop = () => {
-                        if (audioChunks.length > 0) {
-                            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                            sendAudioToServer(audioBlob);
-                        }
-                        
-                        if (audioStream) {
-                            audioStream.getTracks().forEach(track => track.stop());
-                            audioStream = null;
-                        }
-                        
-                        if (recordingTimeout) {
-                            clearTimeout(recordingTimeout);
-                            recordingTimeout = null;
-                        }
-                        
-                        isListening = false;
-                        updateVoiceUI();
-                    };
-                    
-                    mediaRecorder.onerror = (event) => {
-                        console.error('MediaRecorder error:', event.error);
-                        updateVoiceStatus(getVoiceStatusText('error') + getVoiceStatusText('recording_error'));
-                        isListening = false;
-                        updateVoiceUI();
-                        
-                        if (audioStream) {
-                            audioStream.getTracks().forEach(track => track.stop());
-                            audioStream = null;
-                        }
-                    };
-                    
-                    return true;
-                } catch (error) {
-                    console.error('Microphone access error:', error);
-                    if (error.name === 'NotAllowedError') {
-                        updateVoiceStatus(getVoiceStatusText('microphone_denied'));
-                    } else if (error.name === 'NotFoundError') {
-                        updateVoiceStatus(getVoiceStatusText('microphone_not_found'));
-                    } else {
-                        updateVoiceStatus(getVoiceStatusText('notSupported'));
-                    }
-                    return false;
-                }
-            }
-
-            // Отправка аудио на сервер для распознавания
-            async function sendAudioToServer(audioBlob) {
-                updateVoiceStatus(getVoiceStatusText('recognizing'));
-                
-                const formData = new FormData();
-                formData.append('audio', audioBlob, 'recording.webm');
-                
-                const langSelect = document.getElementById('selectLang');
-                const selectedLang = langSelect.options[langSelect.selectedIndex].getAttribute('language');
-                formData.append('language', selectedLang);
-                
-                try {
-                    const response = await fetch('/ai/transcribe/', {
-                        method: 'POST',
-                        body: formData,
-                        headers: {
-                            'X-CSRFToken': getCsrfToken()
-                        }
-                    });
-                    
-                    if (!response.ok) {
-                    
-                        updateVoiceStatus(getVoiceStatusText(response.status === 429 ? 'rate_limited' : 'server_error'));
-                    
-                        return;
-                    
-                    }
-                    
-                    const data = await response.json();
-                    
-                    if (data.success && data.text) {
-                        document.getElementById('messageText').value = data.text;
-                        updateVoiceStatus(getVoiceStatusText('recognized') + data.text);
-                        
-                        if (document.getElementById('messageText').value.trim()) {
-                            simulateSend();
-                        }
-                    } else {
-                        updateVoiceStatus(getVoiceStatusText('recognition_failed'));
-                    }
-                } catch (error) {
-                    console.error('Transcription error:', error);
-                    updateVoiceStatus(getVoiceStatusText('server_error'));
-                }
-            }
-
-            // Запуск записи
-            async function startMediaRecording() {
-                if (mediaRecorder && mediaRecorder.state === 'recording') {
-                    return;
-                }
-                
-                if (speechSynthesis.speaking) {
-                    speechSynthesis.cancel();
-                    updateVoiceStatus(getVoiceStatusText('speechStopped'));
-                    document.getElementById('voiceOutputBtn').classList.remove('speaking');
-                }
-                
-                const success = await initMediaRecorder();
-                if (!success) return;
-                
-                mediaRecorder.start();
-                isListening = true;
-                updateVoiceUI();
-                updateVoiceStatus(getVoiceStatusText('listening'));
-                
-                recordingTimeout = setTimeout(() => {
-                    if (mediaRecorder && mediaRecorder.state === 'recording') {
-                        stopMediaRecording();
-                        updateVoiceStatus(getVoiceStatusText('max_time_exceeded'));
-                    }
-                }, MAX_RECORDING_TIME);
-            }
-
-            // Остановка записи
-            function stopMediaRecording() {
-                if (mediaRecorder && mediaRecorder.state === 'recording') {
-                    mediaRecorder.stop();
-                }
-            }
-
-            // Функция для получения CSRF токена
-            function getCsrfToken() {
-                const cookies = document.cookie.split(';');
-                for (let cookie of cookies) {
-                    const [name, value] = cookie.trim().split('=');
-                    if (name === 'csrftoken') return value;
-                }
-                return '';
-            }
-
-            function getSpeechLanguage(lang) {
-                const languageMap = {
-                    'Russian': 'ru-RU',
-                    'English': 'en-US',
-                    'French': 'fr-FR'
-                };
-                return languageMap[lang] || 'en-US';
-            }
-
-            function getSpeechSynthesisLanguage(lang) {
-                const languageMap = {
-                    'Russian': 'ru-RU',
-                    'English': 'en-US',
-                    'French': 'fr-FR'
-                };
-                return languageMap[lang] || 'en-US';
-            }
-
-            function toggleVoiceInput() {
-                if (isListening) {
-                    stopMediaRecording();
-                } else {
-                    startMediaRecording();
-                }
-            }
-
-            function speakLastResponse() {
-                const messages = document.getElementById('messages');
-                const assistantMessages = messages.querySelectorAll('.msg-assistant');
-                
-                if (assistantMessages.length === 0) {
-                    updateVoiceStatus(getVoiceStatusText('noResponse'));
-                    return;
-                }
-                
-                if (isListening) {
-                    stopMediaRecording();
-                }
-                
-                const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
-                const panel = lastAssistantMessage.querySelector('.panel');
-                let text = '';
-                
-                if (panel) {
-                    text = panel.innerText || panel.textContent || '';
-                } else {
-                    text = lastAssistantMessage.innerText || lastAssistantMessage.textContent || '';
-                }
-                
-                if (!text.trim()) {
-                    updateVoiceStatus(getVoiceStatusText('textEmpty'));
-                    return;
-                }
-                
-                if (speechSynthesis.speaking) {
-                    speechSynthesis.cancel();
-                    updateVoiceStatus(getVoiceStatusText('speechStopped'));
-                    document.getElementById('voiceOutputBtn').classList.remove('speaking');
-                    return;
-                }
-                
-                speakText(text);
-            }
-
-            function speakText(text) {
-                if (speechSynthesis.speaking) {
-                    speechSynthesis.cancel();
-                }
-                
-                const cleanText = cleanSpeechText(text);
-                
-                if (!cleanText.trim()) {
-                    updateVoiceStatus(getVoiceStatusText('noText'));
-                    return;
-                }
-                
-                const langSelect = document.getElementById('selectLang');
-                const selectedLang = langSelect.options[langSelect.selectedIndex].getAttribute('language');
-                
-                currentUtterance = new SpeechSynthesisUtterance(cleanText);
-                currentUtterance.lang = getSpeechSynthesisLanguage(selectedLang);
-                currentUtterance.rate = 0.9;
-                currentUtterance.pitch = 1;
-                
-                currentUtterance.onstart = function() {
-                    updateVoiceStatus(getVoiceStatusText('speaking'));
-                    document.getElementById('voiceOutputBtn').classList.add('speaking');
-                };
-                
-                currentUtterance.onend = function() {
-                    updateVoiceStatus(getVoiceStatusText('speechEnd'));
-                    document.getElementById('voiceOutputBtn').classList.remove('speaking');
-                };
-                
-                currentUtterance.onerror = function(event) {
-                    updateVoiceStatus(getVoiceStatusText('speechError'));
-                    document.getElementById('voiceOutputBtn').classList.remove('speaking');
-                };
-                
-                speechSynthesis.speak(currentUtterance);
-            }
-
-            function cleanSpeechText(text) {
-                if (!text) return '';
-
-                let cleanText = text;
-
-                if (speakThinkEnabled) {
-                    cleanText = cleanText.replace(/Показать:.*?(Скрыть:|$)/g, '');
-                    cleanText = cleanText.replace(/Скрыть:.*?(Показать:|$)/g, '');
-                    cleanText = cleanText.replace(/<[^>]*>/g, '');
-                    return cleanText.trim();
-                }
-
-                cleanText = cleanText.replace(/<think>[\s\S]*?<\/think>/g, '');
-
-                const technicalPatterns = [
-                    /^\d{2}:\d{2}:\d{2}\s+Запрос успешно обработан\s*$/gm,
-                    /^\d{2}:\d{2}:\d{2}\s+Request processed successfully\s*$/gm,
-                    /Модель:\s*.+/gi,
-                    /Время обработки запроса:\s*.+сек/gi,
-                    /Потрачено токенов:\s*\d+/gi,
-                    /^Скрыть:\s*(Ассистент|Assistant|Vous)\s*$/gim,
-                    /^Показать:\s*(Ассистент|Assistant|Vous)\s*$/gim,
-                    /^\d{2}:\d{2}:\d{2}\s*$/gm
-                ];
-
-                technicalPatterns.forEach(pattern => {
-                    cleanText = cleanText.replace(pattern, '');
-                });
-
-                cleanText = cleanText.replace(/Показать:.*?(Скрыть:|$)/g, '');
-                cleanText = cleanText.replace(/Скрыть:.*?(Показать:|$)/g, '');
-
-                cleanText = cleanText.replace(/<[^>]*>/g, '');
-
-                const servicePatterns = [
-                    /\b(?:Ассистент|Assistant|Vous|Вы|User|Пользователь)\s*:\s*/gi,
-                    /\b(?:Скрыть|Показать|Hide|Show)\s*:\s*/gi,
-                    /\bЗапрос успешно обработан\b/gi,
-                    /\bRequest processed successfully\b/gi,
-                    /\bОбрабатываю запрос пользователя\b/gi,
-                    /\bProcessing user request\b/gi,
-                    /\bКонтекст очищен\b/gi,
-                    /\bContext cleared\b/gi,
-                    /\bСоединение установлено\b/gi,
-                    /\bConnection established\b/gi,
-                    /\bГотов к работе\b/gi,
-                    /\bReady to work\b/gi,
-                    /\bСообщение отправлено\b/gi,
-                    /\bMessage sent\b/gi
-                ];
-
-                servicePatterns.forEach(pattern => {
-                    cleanText = cleanText.replace(pattern, '');
-                });
-
-                cleanText = cleanText.replace(/\n\s*\n/g, '\n');
-                cleanText = cleanText.replace(/\s+/g, ' ').trim();
-
-                return cleanText;
-            }
-
-            function stopSpeech() {
-                if (speechSynthesis.speaking) {
-                    speechSynthesis.cancel();
-                    updateVoiceStatus(getVoiceStatusText('speechStopped'));
-                }
-                if (isListening && mediaRecorder && mediaRecorder.state === 'recording') {
-                    stopMediaRecording();
-                }
-                document.getElementById('voiceOutputBtn').classList.remove('speaking');
-            }
-
-            function updateVoiceUI() {
-                const voiceBtn = document.getElementById('voiceInputBtn');
-                const voiceIndicator = document.getElementById('voiceIndicator');
-                
-                if (voiceBtn) {
-                    if (isListening) {
-                        voiceBtn.classList.add('recording');
-                    } else {
-                        voiceBtn.classList.remove('recording');
-                    }
-                }
-                
-                if (voiceIndicator) {
-                    if (isListening) {
-                        voiceIndicator.classList.add('active');
-                    } else {
-                        voiceIndicator.classList.remove('active');
-                    }
-                }
-            }
-
-            function updateVoiceStatus(message) {
-                const voiceStatus = document.getElementById('voiceStatus');
-                if (voiceStatus) {
-                    voiceStatus.textContent = message;
-                }
-            }
-
-            function setRequestLock(isLocked) {
-                requestInFlight = isLocked;
-                const sendBtn = document.querySelector("button[type='submit']");
-                if (sendBtn) {
-                    sendBtn.disabled = isLocked;
-                }
-            }
-
-            function isTerminalAiMessage(payload) {
-                const text = String(payload || "").toLowerCase();
-                return text.includes("запрос успешно обработан")
-                    || text.includes("request processed successfully")
-                    || text.includes("ошибка при обработке запроса")
-                    || text.includes("что-то пошло не так")
-                    || text.includes("неверный формат json")
-                    || text.includes("контекст очищен")
-                    || text.includes("context cleared");
-            }
-
-            function simulateSend() {
-                if (!ws || ws.readyState !== WebSocket.OPEN) {
-                    updateVoiceStatus(getVoiceStatusText('connectionError'));
-                    return;
-                }
-
-                if (requestInFlight) {
-                    updateVoiceStatus(getVoiceStatusText('waitForModel'));
-                    return;
-                }
-                
-                var value = document.querySelector("#select").value;
-                var language = document.querySelector("#selectLang").value;
-                var input = document.getElementById("messageText");
-                var progLng = document.querySelector("#selectProgLng").value;
-                var topic = document.querySelector("#selectTheme").value;
-                var preprompt = document.querySelector("#selectPrompt").value;
-
-                if (!input.value.trim()) {
-                    return;
-                }
-                if (!progLng) {
-                    updateVoiceStatus(getVoiceStatusText('select_prog_lang'));
-                    return;
-                }
-
-                ws.send(JSON.stringify({
-                    type: '2',
-                    message: input.value,
-                    value: value,
-                    language: language,
-                    progLng: progLng,
-                    topic: topic,
-                    preprompt: preprompt,
-                    nodeId: window.AI_TASK_NODE_ID || ''
-                }));
-
-                setRequestLock(true);
-                notEnter = true;
-                updateVoiceStatus(getVoiceStatusText('messageSent'));
-                input.value = '';
-                saveSharedText();
-            }
-
-            // Инициализация WebSocket
-            function initWebSocket() {
-                try {
-                    var wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                    var wsUrl = `${wsProtocol}//${window.location.host}/ai/chat/ws/${client_id}${window.location.search}`;
-                    
-                    console.log('Connecting to WebSocket:', wsUrl);
-                    ws = new WebSocket(wsUrl);
-
-                    ws.onopen = function(event) {
-                        console.log('WebSocket connection established');
-                        updateVoiceStatus(getVoiceStatusText('connectionEstablished'));
-                    };
-
-                    ws.onmessage = function (event) {
-                        var messages = document.getElementById('messages');
-                        var message = document.createElement('li');
-                        var inThinkTag = document.createElement('div');
-                        inThinkTag.classList.add('think');
-                        inThinkTag.innerHTML = parseThinkTag(event.data).thinkContent;
-                        var mainMess = document.createElement('div');
-                        mainMess.innerHTML = parseThinkTag(event.data).remainingText;
-                        const mainMessText = mainMess.innerText || "";
-                        const parsedHTML = convertMarkdownToHTML(mainMessText);
-                        const messageContent = document.createElement('div');
-                        messageContent.innerHTML = parsedHTML;
-                        
-                        // Accordion logic
-                        const allMessages = messages.querySelectorAll(':scope > li');
-                        const roles = [];
-                        for (let i = 0; i < allMessages.length; i++) {
-                            if (i % 2 === 0) roles.push('user');
-                            else roles.push('assistant');
-                        }
-                        
-                        allMessages.forEach(function (li, idx) {
-                            if (!li.classList.contains('accordion-li') && !li.querySelector('.accordion')) {
-                                li.classList.add('accordion-li');
-                                const role = roles[idx] || 'other';
-                                li.classList.remove('msg-user', 'msg-assistant');
-                                if (role === 'user') li.classList.add('msg-user');
-                                if (role === 'assistant') li.classList.add('msg-assistant');
-                                
-                                const btn = document.createElement('button');
-                                btn.className = 'accordion';
-                                if (role === 'user') btn.classList.add('accordion-user');
-                                if (role === 'assistant') btn.classList.add('accordion-assistant');
-                                
-                                const selectLang = document.getElementById('selectLang');
-                                const langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-                                const roleLabels = {
-                                    Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други' },
-                                    English: { user: 'You', assistant: 'Assistant', other: 'Others' },
-                                    French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
-                                };
-                                
-                                function getRoleLabel(role, lang) {
-                                    return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
-                                }
-                                
-                                btn.textContent = `Показать: ${getRoleLabel(role, langAttr)}`;
-                                const panel = document.createElement('div');
-                                panel.className = 'panel';
-                                
-                                while (li.firstChild) {
-                                    panel.appendChild(li.firstChild);
-                                }
-                                li.appendChild(btn);
-                                li.appendChild(panel);
-                                
-                                btn.addEventListener('click', function () {
-                                    panel.classList.toggle('open');
-                                    btn.classList.toggle('active');
-                                    btn.textContent = panel.classList.contains('open')
-                                        ? `Скрыть: ${getRoleLabel(role, langAttr)}`
-                                        : `Показать: ${getRoleLabel(role, langAttr)}`;
-                                });
-                            }
-                        });
-                        
-                        if (parseThinkTag(event.data).thinkContent) {
-                            message.appendChild(inThinkTag);
-                        }
-                        message.appendChild(messageContent);
-                        messages.appendChild(message);
-                        messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
-
-                        if (isTerminalAiMessage(event.data)) {
-                            setRequestLock(false);
-                            notEnter = false;
-                        }
-                        
-                        initAccordionForMessages();
-                        collapseAllExceptLast();
-                    };
-
-                    ws.onerror = function(error) {
-                        console.error('WebSocket error:', error);
-                        updateVoiceStatus(getVoiceStatusText('wsError'));
-                        setRequestLock(false);
-                        notEnter = false;
-                    };
-
-                    ws.onclose = function(event) {
-                        console.log('WebSocket connection closed');
-                        updateVoiceStatus(getVoiceStatusText('connectionClosed'));
-                        setRequestLock(false);
-                        notEnter = false;
-                    };
-
-                } catch (error) {
-                    console.error('Error initializing WebSocket:', error);
-                }
-            }
-
-            function escapeHtml(unsafe) {
-                return unsafe
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .replace(/"/g, '&quot;')
-                    .replace(/'/g, '&#039;');
-            }
-
-            function parseThinkTag(inputText) {
-                const thinkStartTag = '<think>';
-                const thinkEndTag = '</think>';
-                const startIdx = inputText.indexOf(thinkStartTag);
-                const endIdx = inputText.indexOf(thinkEndTag);
-                if (startIdx === -1 || endIdx === -1) {
-                    return {
-                        thinkContent: '',
-                        remainingText: escapeHtml(inputText).trim()
-                    };
-                }
-                const thinkContent = inputText.substring(
-                    startIdx + thinkStartTag.length,
-                    endIdx
-                );
-                const remainingText =
-                    inputText.substring(0, startIdx) +
-                    inputText.substring(endIdx + thinkEndTag.length);
-
-                return {
-                    thinkContent: escapeHtml(thinkContent).trim(),
-                    remainingText: escapeHtml(remainingText).trim()
-                };
-            }
-
-            function convertMarkdownToHTML(markdown) {
-                markdown = markdown.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-                let codeBlocks = [];
-                markdown = markdown.replace(/```([^\`]*)```/g, (match, code) => {
-                    const codeId = `%%CODEBLOCK${codeBlocks.length}%%`;
-                    codeBlocks.push(code);
-                    return codeId;
-                });
-                let inlineCodeBlocks = [];
-                markdown = markdown.replace(/`([^`]+)`/g, (match, code) => {
-                    const codeId = `%%INLINECODE${inlineCodeBlocks.length}%%`;
-                    inlineCodeBlocks.push(code);
-                    return codeId;
-                });
-                markdown = markdown.replace(/^(#{1,6})\s*(.+)$/gm, (match, hashes, content) => {
-                    const level = hashes.length;
-                    return `<h${level}>${content}</h${level}>`;
-                });
-                markdown = markdown.replace(/\*\*([^\*]+)\*\*/g, '<strong>$1</strong>');
-                markdown = markdown.replace(/\_\_([^\_]+)\_\_/g, '<strong>$1</strong>');
-                markdown = markdown.replace(/\*([^\*]+)\*/g, '<em>$1</em>');
-                markdown = markdown.replace(/\_([^\_]+)\_/g, '<em>$1</em>');
-                markdown = markdown.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-                markdown = markdown.replace(/^\s*\*\s*(.+)$/gm, '<ul><li>$1</li></ul>');
-                markdown = markdown.replace(/^\s*\d+\.\s*(.+)$/gm, '<ol><li>$1</li></ol>');
-                markdown = markdown.replace(/!\[([^\]]+)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" />');
-                markdown = markdown.replace(/\n/g, '<br />');
-                markdown = markdown.replace(/%%CODEBLOCK(\d+)%%/g, (match, index) => {
-                    return `<pre><code>${codeBlocks[index]}</code></pre>`;
-                });
-                markdown = markdown.replace(/%%INLINECODE(\d+)%%/g, (match, index) => {
-                    return `<code>${inlineCodeBlocks[index]}</code>`;
-                });
-                return markdown;
-            }
-
-            function sendMessage(event) {
-                event.preventDefault();
-                if (!ws) {
-                    console.log("WebSocket is not initialized");
-                    alert("Соединение не установлено. Пожалуйста, подождите...");
-                    return;
-                }
-                
-                if (ws.readyState !== WebSocket.OPEN) {
-                    console.log("WebSocket is not open. State:", ws.readyState);
-                    alert("Соединение не установлено. Пожалуйста, подождите...");
-                    return;
-                }
-
-                if (requestInFlight) {
-                    alert("Дождитесь ответа модели перед новым запросом.");
-                    return;
-                }
-                
-                var value = document.querySelector("#select").value;
-                var language = document.querySelector("#selectLang").value;
-                var input = document.getElementById("messageText");
-                var progLng = document.querySelector("#selectProgLng").value;
-                var topic = document.querySelector("#selectTheme").value;
-                var preprompt = document.querySelector("#selectPrompt").value;
-
-                if (!value) {
-                    alert("Сегодня нет доступных моделей. Повторите позже.");
-                    return;
-                }
-
-                if (!input.value.trim()) {
-                    alert("Пожалуйста, введите сообщение");
-                    return;
-                }
-                if (!progLng) {
-                    alert("Выберите язык программирования перед отправкой");
-                    return;
-                }
-
-                ws.send(JSON.stringify({
-                    type: '2',
-                    message: input.value,
-                    value: value,
-                    language: language,
-                    progLng: progLng,
-                    topic: topic,
-                    preprompt: preprompt,
-                    nodeId: window.AI_TASK_NODE_ID || ''
-                }));
-                setRequestLock(true);
-                notEnter = true;
-                input.value = '';
-                saveSharedText();
-            }
-
-            // ОРИГИНАЛЬНАЯ функция clearContext - НЕ ТРОГАТЬ
-            function clearContext() {
-                if (!ws) {
-                    console.log("WebSocket is not initialized");
-                    return;
-                }
-                
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ action: 'clear_context' }));
-                    
-                    // Также очищаем локально сообщения
-                    var messages = document.getElementById('messages');
-                    messages.innerHTML = '';
-                    
-                    // Показываем сообщение об очистке
-                    var clearMessage = document.createElement('li');
-                    clearMessage.innerHTML = '<div style="color: green;">Контекст очищен</div>';
-                    messages.appendChild(clearMessage);
-                    messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
-                    
-                } else {
-                    console.log("WebSocket is not open. State:", ws.readyState);
-                    alert("Соединение не установлено");
-                }
-            }
-
-            // Обработка клавиши Enter
-            document.addEventListener("keydown", function (event) {
-                const checkbox = document.querySelector(".inp");
-                if (event.key === "Enter" && (!checkbox || checkbox.checked) && !event.shiftKey && !notEnter) {
-                    sendMessage(event);
-                }
-            });
-
-            const toggleButton = document.querySelector('.toggle-button');
-            const sidebar = document.querySelector('.sidebar');
-
-            if (toggleButton && sidebar) {
-                toggleButton.addEventListener('click', () => {
-                    sidebar.classList.toggle('open');
-                });
-            }
-
-            let isResizing = false;
-
-            function startResize(event) {
-                isResizing = true;
-                window.addEventListener('mousemove', resize);
-                window.addEventListener('mouseup', stopResize);
-            }
-
-            function resize(event) {
-                if (isResizing) {
-                    const container = document.querySelector('form');
-                    const newWidth = container.getBoundingClientRect().right - event.clientX;
-                    const minWidth = 500;
-                    if (newWidth > minWidth) {
-                        container.style.width = `${newWidth}px`;
-                    }
-                }
-            }
-
-            function stopResize() {
-                isResizing = false;
-                window.removeEventListener('mousemove', resize);
-                window.removeEventListener('mouseup', stopResize);
-            }
-
-            const localization = {
-            Russian: {
-                send: "Отправить",
-                clear: "Очистить контекст",
-                taskLoadError: "Не удалось загрузить условие задачи",
-                taskNotFound: "Задача не найдена",
-                placeholder: "Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)\nПример форматирования кода:\n```\nprint('Hello, world!')\n```",
-                adminPanel: "Админ-Панель",
-                testPanel: "Тест-панель",
-                chat: "Чат с DLAI",
-                decideTask: "Реши задачу",
-                findError: "В чём ошибка?",
-                enterHint: "При нажатии на Enter будет отправляться вопрос (для переноса строки Enter+Shift)",
-                preprompt: "Препромпт",
-                chooseLanguage: "Выберите язык",
-                chooseTheme: "Выберите тему",
-                choosePrompt: "Выберите промпт",
-                voiceMode: "Голосовой режим",
-                voiceInput: "Голосовой ввод",
-                voiceOutput: "Озвучить ответ",
-                speakThinkLabel: "Озвучивать дополнительную информацию",
-                voiceStatus: {
-                    listening: "Запись голоса",
-                    recognized: "Распознано: ",
-                    recognizing: "Распознаю...",
-                    error: "Ошибка: ",
-                    readyForVoice: "Готов к голосовому вводу",
-                    notSupported: "Голосовой ввод не поддерживается вашим браузером или нет микрофона",
-                    startError: "Ошибка запуска записи",
-                    noResponse: "Нет ответов для озвучивания",
-                    textEmpty: "Текст для озвучивания пуст",
-                    noText: "Нет текста для озвучивания",
-                    speaking: "Озвучиваю...",
-                    speechEnd: "Озвучивание завершено",
-                    speechError: "Ошибка озвучивания",
-                    speechStopped: "Озвучивание остановлено",
-                    connectionError: "Ошибка: соединение не установлено",
-                    waitForModel: "Дождитесь ответа модели перед новым запросом",
-                    messageSent: "Сообщение отправлено",
-                    connectionEstablished: "Соединение установлено.",
-                    connectionClosed: "Соединение закрыто",
-                    wsError: "Ошибка соединения",
-                    ready: 'Готов к работе. Нажмите "Голосовой режим" для активации голосовых функций.',
-                    recording_error: "Ошибка записи",
-                    recognition_failed: "Не удалось распознать речь",
-                    server_error: "Ошибка связи с сервером",
-                    rate_limited: "Слишком много запросов. Попробуйте позже.",
-                    microphone_denied: "Разрешите доступ к микрофону",
-                    microphone_not_found: "Микрофон не найден",
-                    max_time_exceeded: "Превышено время записи",
-                    select_prog_lang: "Выберите язык программирования"
-                }
-            },
-    
-            English: {
-                send: "Send",
-                clear: "Clear Context",
-                taskLoadError: "Failed to load task statement",
-                taskNotFound: "Task not found",
-                placeholder: "Ask a question (preferably in English to avoid errors), for nice formatting wrap the code in ```\nExample of code formatting:\n```\nprint('Hello, world!')\n```",
-                adminPanel: "Admin Panel",
-                testPanel: "Test Panel",
-                chat: "Chat with DLAI",
-                decideTask: "Solve the task",
-                findError: "What's the error?",
-                enterHint: "Press Enter to send the question (Shift+Enter for a new line)",
-                preprompt: "Preprompt",
-                chooseLanguage: "Choose language",
-                chooseTheme: "Choose theme",
-                choosePrompt: "Choose prompt",
-                voiceMode: "Voice mode",
-                voiceInput: "Voice input",
-                voiceOutput: "Speak answer",
-                speakThinkLabel: "Voice extra information",
-                voiceStatus: {
-                    listening: "Voice recording",
-                    recognized: "Recognized: ",
-                    recognizing: "Recognizing...",
-                    error: "Error: ",
-                    readyForVoice: "Ready for voice input",
-                    notSupported: "Voice input not supported in your browser or no microphone",
-                    startError: "Error starting recording",
-                    noResponse: "No responses to speak",
-                    textEmpty: "Text to speak is empty",
-                    noText: "No text to speak",
-                    speaking: "Speaking...",
-                    speechEnd: "Speaking finished",
-                    speechError: "Speech error",
-                    speechStopped: "Speech stopped",
-                    connectionError: "Error: connection not established",
-                    waitForModel: "Wait for model response before new request",
-                    messageSent: "Message sent",
-                    connectionEstablished: "Connection established.",
-                    connectionClosed: "Connection closed",
-                    wsError: "Connection error",
-                    ready: 'Ready. Click "Voice mode" to activate voice features.',
-                    recording_error: "Recording error",
-                    recognition_failed: "Recognition failed",
-                    server_error: "Server connection error",
-                    rate_limited: "Too many requests. Please try again later.",
-                    microphone_denied: "Microphone access denied",
-                    microphone_not_found: "Microphone not found",
-                    max_time_exceeded: "Max recording time exceeded",
-                    select_prog_lang: "Select programming language"
-                }
-            },
-            French: {
-                send: "Envoyer",
-                clear: "Effacer le contexte",
-                taskLoadError: "Impossible de charger l'énoncé de la tâche",
-                taskNotFound: "Tâche non trouvée",
-                placeholder: "Posez une question (de préférence en anglais pour éviter les erreurs), pour un bon formatage, encadrez le code dans ```\nExemple de formatage du code:\n```\nprint('Hello, world!')\n```",
-                adminPanel: "Panneau Admin",
-                testPanel: "Panneau Test",
-                chat: "Chat avec DLAI",
-                decideTask: "Résoudre la tâche",
-                findError: "Quelle est l'erreur?",
-                enterHint: "Appuyez sur Entrée pour envoyer la question (Shift+Enter pour une nouvelle ligne)",
-                preprompt: "Pré-promp",
-                chooseLanguage: "Choisir la langue",
-                chooseTheme: "Choisir le thème",
-                choosePrompt: "Choisir le pré-promp",
-                voiceMode: "Mode vocal",
-                voiceInput: "Saisie vocale",
-                voiceOutput: "Lire la réponse",
-                speakThinkLabel: "Informations supplémentaires vocales",
-                voiceStatus: {
-                    listening: "Enregistrement vocal",
-                    recognized: "Reconnu : ",
-                    recognizing: "Reconnaissance...",
-                    error: "Erreur : ",
-                    readyForVoice: "Prêt pour la saisie vocale",
-                    notSupported: "Saisie vocale non supportée par votre navigateur ou pas de microphone",
-                    startError: "Erreur de démarrage de l'enregistrement",
-                    noResponse: "Aucune réponse à lire",
-                    textEmpty: "Texte à lire vide",
-                    noText: "Pas de texte à lire",
-                    speaking: "Lecture...",
-                    speechEnd: "Lecture terminée",
-                    speechError: "Erreur de lecture",
-                    speechStopped: "Lecture arrêtée",
-                    connectionError: "Erreur : connexion non établie",
-                    waitForModel: "Attendez la réponse du modèle avant une nouvelle requête",
-                    messageSent: "Message envoyé",
-                    connectionEstablished: "Connexion établie.",
-                    connectionClosed: "Connexion fermée",
-                    wsError: "Erreur de connexion",
-                    ready: 'Prêt. Cliquez sur "Mode vocal" pour activer les fonctions vocales.',
-                    recording_error: "Erreur d'enregistrement",
-                    recognition_failed: "Échec de reconnaissance",
-                    server_error: "Erreur de connexion au serveur",
-                    rate_limited: "Trop de requêtes. Réessayez plus tard.",
-                    microphone_denied: "Accès au micro refusé",
-                    microphone_not_found: "Microphone introuvable",
-                    max_time_exceeded: "Durée d'enregistrement dépassée",
-                    select_prog_lang: "Sélectionnez le langage de programmation"
-                }
-            }
+        ws.onopen = function(event) {
+            console.log('WebSocket connection established');
+            updateVoiceStatus(getVoiceStatusText('connectionEstablished'));
         };
 
-        function getVoiceStatusText(key, param = '') {
-            const selectLang = document.getElementById('selectLang');
-            const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-            const msg = localization[lang]?.voiceStatus?.[key];
-            return (msg || localization.Russian.voiceStatus[key] || key) + param;
-        }
+        ws.onmessage = function(event) {
+            var messages = document.getElementById('messages');
+            var message = document.createElement('li');
+            var parsed = parseThinkTag(event.data);
+            var inThinkTag = document.createElement('div');
+            inThinkTag.classList.add('think');
+            inThinkTag.innerHTML = parsed.thinkContent;
 
-        function getUiString(key, defaultValue = '') {
-            const selectLang = document.getElementById('selectLang');
-            const lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-            const dict = localization[lang] || {};
-            // Most UI strings live at the top level of the language dict. A few
-            // (select_prog_lang) are nested under voiceStatus; fall back there so
-            // they still localize instead of returning the Russian default.
-            return dict[key] || (dict.voiceStatus && dict.voiceStatus[key]) || defaultValue;
-        }
+            var mainMess = document.createElement('div');
+            mainMess.innerHTML = parsed.remainingText;
+            var mainMessText = mainMess.innerText || "";
+            var parsedHTML = convertMarkdownToHTML(mainMessText);
+            var messageContent = document.createElement('div');
+            messageContent.innerHTML = parsedHTML;
 
-            function initAccordionForMessages() {
-                const messages = document.getElementById('messages');
-                const allMessages = messages.querySelectorAll(':scope > li');
-                const roles = [];
-                for (let i = 0; i < allMessages.length; i++) {
-                    if (i % 2 === 0) roles.push('user');
-                    else roles.push('assistant');
-                }
-                
-                const selectLang = document.getElementById('selectLang');
-                const langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-                const roleLabels = {
-                    Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други' },
-                    English: { user: 'You', assistant: 'Assistant', other: 'Others' },
-                    French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
-                };
-                
-                function getRoleLabel(role, lang) {
-                    return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
-                }
-                
-                allMessages.forEach(function (li, idx) {
-                    if (!li.classList.contains('accordion-li')) {
-                        li.classList.add('accordion-li');
-                        const role = roles[idx] || 'other';
-                        li.classList.remove('msg-user', 'msg-assistant');
-                        
-                        const btn = document.createElement('button');
-                        if (role === 'user') li.classList.add('msg-user');
-                        if (role === 'assistant') li.classList.add('msg-assistant');
-                        btn.className = 'accordion';
-                        if (role === 'user') btn.classList.add('accordion-user');
-                        if (role === 'assistant') btn.classList.add('accordion-assistant');
-                        btn.textContent = `Показать: ${getRoleLabel(role, langAttr)}`;
-                        
-                        const panel = document.createElement('div');
-                        panel.className = 'panel';
-                        
-                        while (li.firstChild) {
-                            panel.appendChild(li.firstChild);
-                        }
-                        li.appendChild(btn);
-                        li.appendChild(panel);
-                        
-                        btn.addEventListener('click', function () {
-                            panel.classList.toggle('open');
-                            btn.classList.toggle('active');
-                            btn.textContent = panel.classList.contains('open')
-                                ? `Скрыть: ${getRoleLabel(role, langAttr)}`
-                                : `Показать: ${getRoleLabel(role, langAttr)}`;
-                        });
-                    }
-                });
-                
-                if (allMessages.length > 0) {
-                    const lastLi = allMessages[allMessages.length - 1];
-                    const lastBtn = lastLi.querySelector('.accordion');
-                    const lastPanel = lastLi.querySelector('.panel');
-                    if (lastBtn && lastPanel) {
-                        lastPanel.classList.add('open');
-                        lastBtn.classList.add('active');
-                        const lastRole = roles[allMessages.length - 1] || 'other';
-                        lastBtn.textContent = `Скрыть: ${getRoleLabel(lastRole, langAttr)}`;
-                    }
-                }
-                
-                window._accordionRoles = roles;
+            if (parsed.thinkContent) message.appendChild(inThinkTag);
+            message.appendChild(messageContent);
+            messages.appendChild(message);
+            messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
+
+            if (isTerminalAiMessage(event.data)) {
+                setRequestLock(false);
+                notEnter = false;
             }
 
-            function updateAccordionLabels() {
-                const selectLang = document.getElementById('selectLang');
-                const langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-                const roleLabels = {
-                    Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други' },
-                    English: { user: 'You', assistant: 'Assistant', other: 'Others' },
-                    French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
-                };
-                
-                function getRoleLabel(role, lang) {
-                    return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
-                }
-                
-                const allMessages = document.getElementById('messages').querySelectorAll('li');
-                const roles = window._accordionRoles || [];
-                allMessages.forEach(function (li, idx) {
-                    const btn = li.querySelector('.accordion');
-                    const panel = li.querySelector('.panel');
-                    if (btn && panel) {
-                        const role = roles[idx] || 'other';
-                        btn.textContent = panel.classList.contains('open')
-                            ? `Скрыть: ${getRoleLabel(role, langAttr)}`
-                            : `Показать: ${getRoleLabel(role, langAttr)}`;
-                    }
-                });
-            }
+            initAccordionForMessages();
+            collapseAllExceptLast();
+        };
 
-            function collapseAllExceptLast() {
-                const allMessages = document.getElementById('messages').querySelectorAll('li');
-                const selectLang = document.getElementById('selectLang');
-                const langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-                const roleLabels = {
-                    Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други' },
-                    English: { user: 'You', assistant: 'Assistant', other: 'Others' },
-                    French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
-                };
-                
-                const roles = window._accordionRoles || [];
-                function getRoleLabel(role, lang) {
-                    return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
-                }
-                
-                allMessages.forEach((li, idx) => {
-                    const btn = li.querySelector('.accordion');
-                    const panel = li.querySelector('.panel');
-                    const role = roles[idx] || 'other';
-                    if (btn && panel) {
-                        if (idx === allMessages.length - 1) {
-                            panel.classList.add('open');
-                            btn.classList.add('active');
-                            btn.textContent = `Скрыть: ${getRoleLabel(role, langAttr)}`;
-                        } else {
-                            panel.classList.remove('open');
-                            btn.classList.remove('active');
-                            btn.textContent = `Показать: ${getRoleLabel(role, langAttr)}`;
-                        }
-                    }
-                });
-            }
+        ws.onerror = function(error) {
+            console.error('WebSocket error:', error);
+            updateVoiceStatus(getVoiceStatusText('wsError'));
+            setRequestLock(false);
+            notEnter = false;
+        };
 
-            // Загрузка языков, тем и промптов
-            document.addEventListener("DOMContentLoaded", async () => {
-                problemLanguageSelect = document.getElementById("selectProgLng");
-                problemTopicSelect = document.getElementById("selectTheme");
-                problemPromptSelect = document.getElementById("selectPrompt");
+        ws.onclose = function(event) {
+            console.log('WebSocket connection closed');
+            updateVoiceStatus(getVoiceStatusText('connectionClosed'));
+            setRequestLock(false);
+            notEnter = false;
+        };
+    } catch (error) {
+        console.error('Error initializing WebSocket:', error);
+    }
+}
 
-                async function fetchProblemData() {
-                    if (problemData) return problemData;
-                    try {
-                        const cached = sessionStorage.getItem(PROBLEM_DATA_KEY);
-                        if (cached) {
-                            problemData = JSON.parse(cached);
-                            return problemData;
-                        }
-                    } catch (e) {}
+// === override sendMessage — с progLng, topic, preprompt, nodeId ===
+function sendMessage(event) {
+    event.preventDefault();
+    if (!ws) {
+        console.log("WebSocket is not initialized");
+        alert("Соединение не установлено. Пожалуйста, подождите...");
+        return;
+    }
 
-                    try {
-                        const uiLang = document.getElementById('selectLang').value || 'Русский';
-                        const url = new URL('/ai/api/problem-data/', window.location.origin);
-                        url.searchParams.set('ui_language', uiLang);
-                        const response = await fetch(url.toString());
-                        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-                        const data = await response.json();
-                        problemData = data;
-                        try {
-                            sessionStorage.setItem(PROBLEM_DATA_KEY, JSON.stringify(data));
-                        } catch (e) {}
-                        return data;
-                    } catch (error) {
-                        console.error('Error fetching problem data:', error);
-                        return { languages: [], topics: [], prompts: [], shared_prompts: [] };
-                    }
-                }
+    if (ws.readyState !== WebSocket.OPEN) {
+        console.log("WebSocket is not open. State:", ws.readyState);
+        alert("Соединение не установлено. Пожалуйста, подождите...");
+        return;
+    }
 
-                function setSelectEnabled(selectElement, enabled) {
-                    if (!selectElement) return;
-                    selectElement.disabled = !enabled;
-                }
+    if (requestInFlight) {
+        alert("Дождитесь ответа модели перед новым запросом.");
+        return;
+    }
 
-                function selectFirstIfSingle(selectElement) {
-                    if (selectElement && selectElement.options.length === 1) {
-                        selectElement.selectedIndex = 0;
-                    }
-                }
+    var value = document.querySelector("#select").value;
+    var language = document.querySelector("#selectLang").value;
+    var input = document.getElementById("messageText");
+    var progLng = document.querySelector("#selectProgLng").value;
+    var topic = document.querySelector("#selectTheme").value;
+    var preprompt = document.querySelector("#selectPrompt").value;
 
-                function populateLanguages(languages) {
-                    problemLanguageSelect.innerHTML = '<option value="">' + getUiString('select_prog_lang', 'Выберите язык программирования') + '</option>';
-                    if (languages && languages.length > 0) {
-                        languages.forEach(lang => {
-                            const option = new Option(lang.language_name, lang.id);
-                            problemLanguageSelect.appendChild(option);
-                        });
-                    }
-                    selectFirstIfSingle(problemLanguageSelect);
-                }
+    if (!value) {
+        alert("Сегодня нет доступных моделей. Повторите позже.");
+        return;
+    }
 
-                function populateTopics(languageId) {
-                    problemTopicSelect.innerHTML = '<option value="">' + getUiString('chooseTheme', 'Выберите тему') + '</option>';
-                    const topics = (problemData && problemData.topics) || [];
-                    const filteredTopics = topics.filter(topic => topic.programming_language == languageId);
-                    filteredTopics.forEach(topic => {
-                        const option = new Option(topic.name || topic.topic_name, topic.id);
-                        problemTopicSelect.appendChild(option);
-                    });
-                    selectFirstIfSingle(problemTopicSelect);
-                    setSelectEnabled(problemTopicSelect, languageId !== null && languageId !== undefined && problemTopicSelect.options.length > 1);
-                }
+    if (!input.value.trim()) {
+        alert("Пожалуйста, введите сообщение");
+        return;
+    }
+    if (!progLng) {
+        alert("Выберите язык программирования перед отправкой");
+        return;
+    }
 
-                function filterPrompts(prompts, languageId, topicId) {
-                    const languageValue = languageId ? String(languageId) : "";
-                    const topicValue = topicId ? String(topicId) : "";
-                    return prompts.filter(prompt => {
-                        const hasTopic = prompt.topic_id !== null && prompt.topic_id !== undefined && prompt.topic_id !== "";
-                        if (!hasTopic) return true;
-                        if (topicValue) return String(prompt.topic_id) === topicValue;
-                        if (!languageValue) return false;
-                        return String(prompt.topic__programming_language) === languageValue;
-                    });
-                }
+    ws.send(JSON.stringify({
+        type: '2',
+        message: input.value,
+        value: value,
+        language: language,
+        progLng: progLng,
+        topic: topic,
+        preprompt: preprompt,
+        nodeId: window.AI_TASK_NODE_ID || ''
+    }));
+    setRequestLock(true);
+    notEnter = true;
+    // НЕ очищаем поле ввода в режиме «Реши задачу» — условие задачи
+    // должно сохраняться при смене модели ИИ (пользовательские жалобы).
+    saveSharedText();
+}
 
-                function populatePrompts(languageId, topicId) {
-                    problemPromptSelect.innerHTML = '<option value="">' + getUiString('choosePrompt', 'Выберите промпт') + '</option>';
-                    if (!problemData) return;
-                    let allPrompts = (problemData.prompts || []).slice();
+// === override simulateSend — с progLng, topic, preprompt, nodeId ===
+function simulateSend() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        updateVoiceStatus(getVoiceStatusText('connectionError'));
+        return;
+    }
 
-                    if (languageId) {
-                        const langIdStr = String(languageId);
-                        const shared = (problemData.shared_prompts || []).filter(sp => {
-                            const ids = sp.language_ids || [];
-                            return ids.length === 0 || ids.includes(languageId) || ids.includes(langIdStr);
-                        });
-                        shared.forEach(sp => {
-                            allPrompts.push({
-                                id: `shared_${sp.id}`,
-                                prompt_name: `[Общий] ${sp.name || sp.prompt_name}`,
-                                name: `[Общий] ${sp.name || sp.prompt_name}`,
-                                topic_id: null,
-                                topic__programming_language: langIdStr
-                            });
-                        });
-                    }
+    if (requestInFlight) {
+        updateVoiceStatus(getVoiceStatusText('waitForModel'));
+        return;
+    }
 
-                    const filteredPrompts = filterPrompts(allPrompts, languageId, topicId);
-                    filteredPrompts.forEach(prompt => {
-                        const option = new Option(prompt.name || prompt.prompt_name, prompt.id);
-                        problemPromptSelect.appendChild(option);
-                    });
-                    selectFirstIfSingle(problemPromptSelect);
-                    const hasTopic = topicId !== null && topicId !== undefined && topicId !== "";
-                    setSelectEnabled(problemPromptSelect, hasTopic && problemPromptSelect.options.length > 1);
-                }
+    var value = document.querySelector("#select").value;
+    var language = document.querySelector("#selectLang").value;
+    var input = document.getElementById("messageText");
+    var progLng = document.querySelector("#selectProgLng").value;
+    var topic = document.querySelector("#selectTheme").value;
+    var preprompt = document.querySelector("#selectPrompt").value;
 
-                function savePageState() {
-                    try {
-                        const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
-                        state.progLng = problemLanguageSelect.value;
-                        state.topic = problemTopicSelect.value;
-                        state.prompt = problemPromptSelect.value;
-                        localStorage.setItem(PAGE_STATE_KEY, JSON.stringify(state));
-                    } catch(e) {}
-                }
+    if (!input.value.trim()) {
+        return;
+    }
+    if (!progLng) {
+        updateVoiceStatus(getVoiceStatusText('select_prog_lang'));
+        return;
+    }
 
-                function restorePageState() {
-                    try {
-                        const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
-                        if (!state.progLng) return;
-                        const langOpt = Array.from(problemLanguageSelect.options).find(o => o.value === state.progLng);
-                        if (!langOpt) return;
+    ws.send(JSON.stringify({
+        type: '2',
+        message: input.value,
+        value: value,
+        language: language,
+        progLng: progLng,
+        topic: topic,
+        preprompt: preprompt,
+        nodeId: window.AI_TASK_NODE_ID || ''
+    }));
 
-                        const languageId = parseInt(state.progLng);
-                        problemLanguageSelect.value = state.progLng;
-                        populateTopics(languageId);
-                        populatePrompts(languageId, null);
+    setRequestLock(true);
+    notEnter = true;
+    updateVoiceStatus(getVoiceStatusText('messageSent'));
+    // НЕ очищаем поле ввода в режиме «Реши задачу» — условие задачи
+    // должно сохраняться при смене модели ИИ.
+    saveSharedText();
+}
 
-                        if (state.topic) {
-                            const topicOpt = Array.from(problemTopicSelect.options).find(o => o.value === state.topic);
-                            if (topicOpt) {
-                                problemTopicSelect.value = state.topic;
-                                const topicId = parseInt(state.topic);
-                                populatePrompts(languageId, isNaN(topicId) ? null : topicId);
-                                if (state.prompt) {
-                                    const promptOpt = Array.from(problemPromptSelect.options).find(o => o.value === state.prompt);
-                                    if (promptOpt) problemPromptSelect.value = state.prompt;
-                                }
-                            }
-                        }
-                    } catch(e) {}
-                }
+// === selectLang change handler — специфичный для decide_task ===
+document.addEventListener("DOMContentLoaded", function() {
+    var selectLangEl = document.getElementById("selectLang");
+    if (selectLangEl) {
+        selectLangEl.addEventListener("change", async function () {
+            var selectedLang = this.options[this.selectedIndex].getAttribute("language");
 
-                function saveSharedText() {
-                    try {
-                        const messageText = document.getElementById('messageText');
-                        const saved = JSON.parse(localStorage.getItem(SHARED_TEXT_KEY) || '{}');
-                        if (messageText) saved.message = messageText.value;
-                        localStorage.setItem(SHARED_TEXT_KEY, JSON.stringify(saved));
-                    } catch(e) {}
-                }
+            var submitBtn = document.querySelector("button[type='submit']");
+            if (submitBtn) submitBtn.textContent = localization[selectedLang].send;
 
-                function restoreSharedText() {
-                    try {
-                        const saved = JSON.parse(localStorage.getItem(SHARED_TEXT_KEY) || '{}');
-                        const messageText = document.getElementById('messageText');
-                        if (messageText && saved.message !== undefined) messageText.value = saved.message;
-                    } catch(e) {}
-                }
+            var clearBtn = document.querySelector("button[onclick='clearContext()']");
+            if (clearBtn) clearBtn.textContent = localization[selectedLang].clear;
 
-                problemLanguageSelect.addEventListener("change", () => {
-                    const languageId = parseInt(problemLanguageSelect.value);
-                    problemTopicSelect.innerHTML = '<option value="">Выберите тему</option>';
-                    problemPromptSelect.innerHTML = '<option value="">Выберите промпт</option>';
-                    setSelectEnabled(problemTopicSelect, false);
-                    setSelectEnabled(problemPromptSelect, false);
-                    if (!isNaN(languageId)) {
-                        populateTopics(languageId);
-                        populatePrompts(languageId, null);
-                    } else {
-                        populatePrompts(null, null);
-                    }
-                    savePageState();
-                });
+            var messageTextEl = document.getElementById("messageText");
+            if (messageTextEl) messageTextEl.setAttribute("placeholder", localization[selectedLang].placeholder);
 
-                problemTopicSelect.addEventListener("change", () => {
-                    const topicId = parseInt(problemTopicSelect.value);
-                    problemPromptSelect.innerHTML = '<option value="">Выберите промпт</option>';
-                    const languageId = parseInt(problemLanguageSelect.value);
-                    setSelectEnabled(problemPromptSelect, false);
-                    populatePrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
-                    savePageState();
-                });
+            var sidebarHeader = document.querySelector(".sidebar-header");
+            if (sidebarHeader) sidebarHeader.textContent = localization[selectedLang].adminPanel;
 
-                problemPromptSelect.addEventListener("change", savePageState);
+            var testPanelLink = document.getElementById("testPanelLink");
+            if (testPanelLink) testPanelLink.textContent = localization[selectedLang].testPanel;
 
-                const messageText = document.getElementById('messageText');
-                if (messageText) messageText.addEventListener('input', saveSharedText);
+            var selectType1 = document.querySelector("#selectType option:nth-child(1)");
+            if (selectType1) selectType1.textContent = localization[selectedLang].chat;
+            var selectType2 = document.querySelector("#selectType option:nth-child(2)");
+            if (selectType2) selectType2.textContent = localization[selectedLang].decideTask;
+            var selectType3 = document.querySelector("#selectType option:nth-child(3)");
+            if (selectType3) selectType3.textContent = localization[selectedLang].findError;
 
-                document.getElementById("selectLang").addEventListener("change", async function () {
-                    const selectedLang = this.options[this.selectedIndex].getAttribute("language");
-                    const submitBtn = document.querySelector("button[type='submit']");
-                    if (submitBtn) submitBtn.textContent = localization[selectedLang].send;
-                    const clearBtn = document.querySelector("button[onclick='clearContext()']");
-                    if (clearBtn) clearBtn.textContent = localization[selectedLang].clear;
-                    const messageText = document.getElementById("messageText");
-                    if (messageText) messageText.setAttribute("placeholder", localization[selectedLang].placeholder);
-                    const sidebarHeader = document.querySelector(".sidebar-header");
-                    if (sidebarHeader) sidebarHeader.textContent = localization[selectedLang].adminPanel;
-                    const testPanelLink = document.getElementById("testPanelLink");
-                    if (testPanelLink) {
-                        testPanelLink.textContent = localization[selectedLang].testPanel;
-                    }
-                    const selectType1 = document.querySelector("#selectType option:nth-child(1)");
-                    if (selectType1) selectType1.textContent = localization[selectedLang].chat;
-                    const selectType2 = document.querySelector("#selectType option:nth-child(2)");
-                    if (selectType2) selectType2.textContent = localization[selectedLang].decideTask;
-                    const selectType3 = document.querySelector("#selectType option:nth-child(3)");
-                    if (selectType3) selectType3.textContent = localization[selectedLang].findError;
-                    const checkTextEl = document.querySelector(".check-text");
-                    if (checkTextEl) {
-                        checkTextEl.textContent = localization[selectedLang].enterHint;
-                    }
-                    const prepromptEl = document.querySelector(".preprompt");
-                    if (prepromptEl) {
-                        prepromptEl.textContent = localization[selectedLang].preprompt;
-                    }
-                    updateAccordionLabels();
+            var checkTextEl = document.querySelector(".check-text");
+            if (checkTextEl) checkTextEl.textContent = localization[selectedLang].enterHint;
 
-                    const voiceModeBtn = document.getElementById("voiceModeBtn");
-                    if (voiceModeBtn) voiceModeBtn.textContent = localization[selectedLang].voiceMode;
+            var prepromptEl = document.querySelector(".preprompt");
+            if (prepromptEl) prepromptEl.textContent = localization[selectedLang].preprompt;
 
-                    const voiceInputBtn = document.getElementById("voiceInputBtn");
-                    if (voiceInputBtn) voiceInputBtn.textContent = localization[selectedLang].voiceInput;
+            updateAccordionLabels();
 
-                    const voiceOutputBtn = document.getElementById("voiceOutputBtn");
-                    if (voiceOutputBtn) voiceOutputBtn.textContent = localization[selectedLang].voiceOutput;
+            var voiceModeBtn = document.getElementById("voiceModeBtn");
+            if (voiceModeBtn) voiceModeBtn.textContent = localization[selectedLang].voiceMode;
 
-                    const speakThinkLabel = document.getElementById("speakThinkLabel");
-                    if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
+            var voiceInputBtn = document.getElementById("voiceInputBtn");
+            if (voiceInputBtn) voiceInputBtn.textContent = localization[selectedLang].voiceInput;
 
-                    // Reload topics/prompts in the selected UI language
-                    sessionStorage.removeItem(PROBLEM_DATA_KEY);
-                    problemData = null;
-                    await fetchProblemData();
-                    const languageId = parseInt(problemLanguageSelect.value);
-                    populateLanguages(problemData.languages);
-                    if (!isNaN(languageId)) {
-                        populateTopics(languageId);
-                        populatePrompts(languageId, null);
-                    } else {
-                        populateTopics(null);
-                        populatePrompts(null, null);
-                    }
+            var voiceOutputBtn = document.getElementById("voiceOutputBtn");
+            if (voiceOutputBtn) voiceOutputBtn.textContent = localization[selectedLang].voiceOutput;
 
-                    saveInterfaceLanguage();
-                    updateVoiceStatus(getVoiceStatusText('readyForVoice'));
-                });
+            var speakThinkLabel = document.getElementById("speakThinkLabel");
+            if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
 
-                function decodeCompilerName(encoded) {
-                    if (!encoded) return '';
-                    try {
-                        return atob(encoded).trim().toLowerCase();
-                    } catch (e) {
-                        return '';
-                    }
-                }
-
-                function findLanguageIdByName(languages, compilerName) {
-                    if (!compilerName || !languages) return null;
-                    return languages.find(lang =>
-                        lang.language_name && lang.language_name.toLowerCase().includes(compilerName)
-                    )?.id || null;
-                }
-
-                async function loadTaskFromUrl() {
-                    const messageText = document.getElementById('messageText');
-                    const nodeId = window.AI_TASK_NODE_ID || (messageText && messageText.dataset.nodeId) || '';
-                    const compilerNameEncoded = window.AI_COMPILER_NAME || (messageText && messageText.dataset.compilerName) || '';
-                    console.log('loadTaskFromUrl: nodeId=', nodeId, 'compiler_b64=', compilerNameEncoded);
-                    if (!nodeId) return false;
-
-                    try {
-                        const url = new URL('/ai/api/task-info/', window.location.origin);
-                        url.searchParams.set('nodeId', nodeId);
-                        url.searchParams.set('removeHtmlTags', 'true');
-                        console.log('Fetching task info:', url.toString());
-                        const response = await fetch(url.toString());
-                        console.log('Task info response status:', response.status);
-                        if (response.status === 404) {
-                            updateVoiceStatus(getUiString('taskNotFound', 'Задача не найдена'));
-                            return false;
-                        }
-                        if (!response.ok) {
-                            const errorText = await response.text();
-                            throw new Error(`HTTP ${response.status}: ${errorText}`);
-                        }
-                        const data = await response.json();
-                        console.log('Task info data:', data);
-                        const statement = data.statement || data.currentStatement || '';
-                        if (messageText) {
-                            messageText.value = statement;
-                            saveSharedText();
-                        }
-
-                        const compilerName = decodeCompilerName(compilerNameEncoded);
-                        const matchedLanguageId = findLanguageIdByName(problemData?.languages, compilerName);
-                        if (matchedLanguageId) {
-                            problemLanguageSelect.value = matchedLanguageId;
-                            populateTopics(matchedLanguageId);
-                            populatePrompts(matchedLanguageId, null);
-                            savePageState();
-                        }
-                        return true;
-                    } catch (error) {
-                        console.error('Error loading task statement:', error);
-                        updateVoiceStatus(getUiString('taskLoadError', 'Не удалось загрузить условие задачи'));
-                        return false;
-                    }
-                }
-
-                await fetchProblemData();
-                populateLanguages(problemData.languages);
-                setSelectEnabled(problemTopicSelect, false);
-                setSelectEnabled(problemPromptSelect, false);
+            // Reload topics/prompts in the selected UI language
+            sessionStorage.removeItem(PROBLEM_DATA_KEY);
+            problemData = null;
+            await fetchProblemData();
+            var languageId = parseInt(problemLanguageSelect.value);
+            populateLanguages(problemData.languages);
+            if (!isNaN(languageId)) {
+                populateTopics(languageId);
+                populatePrompts(languageId, null);
+            } else {
+                populateTopics(null);
                 populatePrompts(null, null);
-                restorePageState();
-                const taskLoaded = await loadTaskFromUrl();
-                if (!taskLoaded) {
-                    restoreSharedText();
-                }
+            }
+
+            saveInterfaceLanguage();
+            updateVoiceStatus(getVoiceStatusText('readyForVoice'));
+        });
+    }
+});
+
+// === DOMContentLoaded — загрузка данных задачи, заполнение селектов ===
+document.addEventListener("DOMContentLoaded", async () => {
+    problemLanguageSelect = document.getElementById("selectProgLng");
+    problemTopicSelect = document.getElementById("selectTheme");
+    problemPromptSelect = document.getElementById("selectPrompt");
+
+    async function fetchProblemData() {
+        if (problemData) return problemData;
+        try {
+            var cached = sessionStorage.getItem(PROBLEM_DATA_KEY);
+            if (cached) {
+                problemData = JSON.parse(cached);
+                return problemData;
+            }
+        } catch (e) {}
+
+        try {
+            var uiLang = document.getElementById('selectLang').value || 'Русский';
+            var url = new URL('/ai/api/problem-data/', window.location.origin);
+            url.searchParams.set('ui_language', uiLang);
+            var response = await fetch(url.toString());
+            if (!response.ok) throw new Error('HTTP error! status: ' + response.status);
+            var data = await response.json();
+            problemData = data;
+            try {
+                sessionStorage.setItem(PROBLEM_DATA_KEY, JSON.stringify(data));
+            } catch (e) {}
+            return data;
+        } catch (error) {
+            console.error('Error fetching problem data:', error);
+            return { languages: [], topics: [], prompts: [], shared_prompts: [] };
+        }
+    }
+
+    function setSelectEnabled(selectElement, enabled) {
+        if (!selectElement) return;
+        selectElement.disabled = !enabled;
+    }
+
+    function selectFirstIfSingle(selectElement) {
+        if (selectElement && selectElement.options.length === 1) {
+            selectElement.selectedIndex = 0;
+        }
+    }
+
+    function populateLanguages(languages) {
+        problemLanguageSelect.innerHTML = '<option value="">' + getUiString('select_prog_lang', 'Выберите язык программирования') + '</option>';
+        if (languages && languages.length > 0) {
+            languages.forEach(function(lang) {
+                var option = new Option(lang.language_name, lang.id);
+                problemLanguageSelect.appendChild(option);
             });
+        }
+        selectFirstIfSingle(problemLanguageSelect);
+    }
 
-            window.onload = function () {
-                console.log('Initializing WebSocket with client_id:', client_id);
-                restoreInterfaceLanguage();
-                initWebSocket();
-                // MediaRecorder инициализируется при первом нажатии на кнопку записи
-                document.getElementById("selectLang").dispatchEvent(new Event("change"));
-                initAccordionForMessages();
-                updateVoiceStatus(getVoiceStatusText('ready'));
+    function populateTopics(languageId) {
+        problemTopicSelect.innerHTML = '<option value="">' + getUiString('chooseTheme', 'Выберите тему') + '</option>';
+        var topics = (problemData && problemData.topics) || [];
+        var filteredTopics = topics.filter(function(topic) { return topic.programming_language == languageId; });
+        filteredTopics.forEach(function(topic) {
+            var option = new Option(topic.name || topic.topic_name, topic.id);
+            problemTopicSelect.appendChild(option);
+        });
+        selectFirstIfSingle(problemTopicSelect);
+        setSelectEnabled(problemTopicSelect, languageId !== null && languageId !== undefined && problemTopicSelect.options.length > 1);
+    }
 
-                // Инициализация чекбокса think-блоков
-                const speakThinkCheckbox = document.getElementById('speakThinkContent');
-                if (speakThinkCheckbox) {
-                    speakThinkCheckbox.addEventListener('change', function() {
-                        speakThinkEnabled = this.checked;
-                    });
+    function filterPrompts(prompts, languageId, topicId) {
+        var languageValue = languageId ? String(languageId) : "";
+        var topicValue = topicId ? String(topicId) : "";
+        return prompts.filter(function(prompt) {
+            var hasTopic = prompt.topic_id !== null && prompt.topic_id !== undefined && prompt.topic_id !== "";
+            if (!hasTopic) return true;
+            if (topicValue) return String(prompt.topic_id) === topicValue;
+            if (!languageValue) return false;
+            return String(prompt.topic__programming_language) === languageValue;
+        });
+    }
+
+    function populatePrompts(languageId, topicId) {
+        problemPromptSelect.innerHTML = '<option value="">' + getUiString('choosePrompt', 'Выберите промпт') + '</option>';
+        if (!problemData) return;
+        var allPrompts = (problemData.prompts || []).slice();
+
+        if (languageId) {
+            var langIdStr = String(languageId);
+            var shared = (problemData.shared_prompts || []).filter(function(sp) {
+                var ids = sp.language_ids || [];
+                return ids.length === 0 || ids.includes(languageId) || ids.includes(langIdStr);
+            });
+            shared.forEach(function(sp) {
+                allPrompts.push({
+                    id: 'shared_' + sp.id,
+                    prompt_name: '[Общий] ' + (sp.name || sp.prompt_name),
+                    name: '[Общий] ' + (sp.name || sp.prompt_name),
+                    topic_id: null,
+                    topic__programming_language: langIdStr
+                });
+            });
+        }
+
+        var filteredPrompts = filterPrompts(allPrompts, languageId, topicId);
+        filteredPrompts.forEach(function(prompt) {
+            var option = new Option(prompt.name || prompt.prompt_name, prompt.id);
+            problemPromptSelect.appendChild(option);
+        });
+        selectFirstIfSingle(problemPromptSelect);
+        var hasTopic = topicId !== null && topicId !== undefined && topicId !== "";
+        setSelectEnabled(problemPromptSelect, hasTopic && problemPromptSelect.options.length > 1);
+    }
+
+    function savePageState() {
+        try {
+            var state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
+            state.progLng = problemLanguageSelect.value;
+            state.topic = problemTopicSelect.value;
+            state.prompt = problemPromptSelect.value;
+            localStorage.setItem(PAGE_STATE_KEY, JSON.stringify(state));
+        } catch(e) {}
+    }
+
+    function restorePageState() {
+        try {
+            var state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
+            if (!state.progLng) return;
+            var langOpt = Array.from(problemLanguageSelect.options).find(function(o) { return o.value === state.progLng; });
+            if (!langOpt) return;
+
+            var languageId = parseInt(state.progLng);
+            problemLanguageSelect.value = state.progLng;
+            populateTopics(languageId);
+            populatePrompts(languageId, null);
+
+            if (state.topic) {
+                var topicOpt = Array.from(problemTopicSelect.options).find(function(o) { return o.value === state.topic; });
+                if (topicOpt) {
+                    problemTopicSelect.value = state.topic;
+                    var topicId = parseInt(state.topic);
+                    populatePrompts(languageId, isNaN(topicId) ? null : topicId);
+                    if (state.prompt) {
+                        var promptOpt = Array.from(problemPromptSelect.options).find(function(o) { return o.value === state.prompt; });
+                        if (promptOpt) problemPromptSelect.value = state.prompt;
+                    }
                 }
-            };
+            }
+        } catch(e) {}
+    }
+
+    problemLanguageSelect.addEventListener("change", function() {
+        var languageId = parseInt(problemLanguageSelect.value);
+        problemTopicSelect.innerHTML = '<option value="">Выберите тему</option>';
+        problemPromptSelect.innerHTML = '<option value="">Выберите промпт</option>';
+        setSelectEnabled(problemTopicSelect, false);
+        setSelectEnabled(problemPromptSelect, false);
+        if (!isNaN(languageId)) {
+            populateTopics(languageId);
+            populatePrompts(languageId, null);
+        } else {
+            populatePrompts(null, null);
+        }
+        savePageState();
+    });
+
+    problemTopicSelect.addEventListener("change", function() {
+        var topicId = parseInt(problemTopicSelect.value);
+        problemPromptSelect.innerHTML = '<option value="">Выберите промпт</option>';
+        var languageId = parseInt(problemLanguageSelect.value);
+        setSelectEnabled(problemPromptSelect, false);
+        populatePrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
+        savePageState();
+    });
+
+    problemPromptSelect.addEventListener("change", savePageState);
+
+    var messageText = document.getElementById('messageText');
+    if (messageText) messageText.addEventListener('input', saveSharedText);
+
+    function decodeCompilerName(encoded) {
+        if (!encoded) return '';
+        try {
+            return atob(encoded).trim().toLowerCase();
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function findLanguageIdByName(languages, compilerName) {
+        if (!compilerName || !languages) return null;
+        return languages.find(function(lang) {
+            return lang.language_name && lang.language_name.toLowerCase().includes(compilerName);
+        })?.id || null;
+    }
+
+    async function loadTaskFromUrl() {
+        var messageTextEl = document.getElementById('messageText');
+        var nodeId = window.AI_TASK_NODE_ID || (messageTextEl && messageTextEl.dataset.nodeId) || '';
+        var compilerNameEncoded = window.AI_COMPILER_NAME || (messageTextEl && messageTextEl.dataset.compilerName) || '';
+        console.log('loadTaskFromUrl: nodeId=', nodeId, 'compiler_b64=', compilerNameEncoded);
+        if (!nodeId) return false;
+
+        try {
+            var url = new URL('/ai/api/task-info/', window.location.origin);
+            url.searchParams.set('nodeId', nodeId);
+            url.searchParams.set('removeHtmlTags', 'true');
+            console.log('Fetching task info:', url.toString());
+            var response = await fetch(url.toString());
+            console.log('Task info response status:', response.status);
+            if (response.status === 404) {
+                updateVoiceStatus(getUiString('taskNotFound', 'Задача не найдена'));
+                return false;
+            }
+            if (!response.ok) {
+                var errorText = await response.text();
+                throw new Error('HTTP ' + response.status + ': ' + errorText);
+            }
+            var data = await response.json();
+            console.log('Task info data:', data);
+            var statement = data.statement || data.currentStatement || '';
+            if (messageTextEl) {
+                messageTextEl.value = statement;
+                saveSharedText();
+            }
+
+            var compilerName = decodeCompilerName(compilerNameEncoded);
+            var matchedLanguageId = findLanguageIdByName(problemData?.languages, compilerName);
+            if (matchedLanguageId) {
+                problemLanguageSelect.value = matchedLanguageId;
+                populateTopics(matchedLanguageId);
+                populatePrompts(matchedLanguageId, null);
+                savePageState();
+            }
+            return true;
+        } catch (error) {
+            console.error('Error loading task statement:', error);
+            updateVoiceStatus(getUiString('taskLoadError', 'Не удалось загрузить условие задачи'));
+            return false;
+        }
+    }
+
+    await fetchProblemData();
+    populateLanguages(problemData.languages);
+    setSelectEnabled(problemTopicSelect, false);
+    setSelectEnabled(problemPromptSelect, false);
+    populatePrompts(null, null);
+    restorePageState();
+    var taskLoaded = await loadTaskFromUrl();
+    if (!taskLoaded) {
+        restoreSharedText();
+    }
+});
+
+// === window.onload — init для decide_task ===
+window.onload = function () {
+    console.log('Initializing WebSocket with client_id:', client_id);
+    restoreInterfaceLanguage();
+    initWebSocket();
+    document.getElementById("selectLang").dispatchEvent(new Event("change"));
+    initAccordionForMessages();
+    updateVoiceStatus(getVoiceStatusText('ready'));
+
+    var speakThinkCheckbox = document.getElementById('speakThinkContent');
+    if (speakThinkCheckbox) {
+        speakThinkCheckbox.addEventListener('change', function() {
+            speakThinkEnabled = this.checked;
+        });
+    }
+};

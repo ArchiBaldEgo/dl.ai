@@ -1,5 +1,9 @@
-"""
-External DL account model and utilities for user provisioning.
+"""Модель внешнего DL-аккаунта и утилиты для пользовательского provisioning.
+
+Связывает Django User с внешним аккаунтом dl.gsu.by через ExternalDLAccount.
+При первом входе автоматически создаёт пользователя с непаролем (unusable password),
+генерирует уникальный username на основе логина dl.gsu.by,
+добавляет в группу prompt_developer и обогащает first/last name из API.
 """
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
@@ -12,7 +16,7 @@ User = get_user_model()
 
 
 def _find_available_username(base_username: str) -> str:
-    """Find an available username by appending numeric suffix if needed."""
+    """Подбирает свободный username: если base занят, добавляет _1, _2, ..."""
     if not User.objects.filter(username=base_username).exists():
         return base_username
     
@@ -25,7 +29,7 @@ def _find_available_username(base_username: str) -> str:
 
 
 def _extract_external_login(user_info: dict) -> str:
-    """Extract a login/nickname from API payload using known candidate keys."""
+    """Извлекает логин/никнейм из ответа API dl.gsu.by по известным ключам."""
     for key in ("login", "username", "userName", "nickname", "nick"):
         value = (user_info.get(key) or "").strip()
         if value:
@@ -38,6 +42,11 @@ def _normalize_name(value) -> str:
 
 
 def _extract_first_last_name(user_info: dict) -> tuple[str, str]:
+    """Извлекает имя и фамилию из ответа API dl.gsu.by.
+
+    Проверяет множество вариантов ключей (firstName, first_name, givenName и т.д.).
+    Если отдельные поля отсутствуют, пытается разобрать fullName / name.
+    """
     first_name = ""
     last_name = ""
 
@@ -78,21 +87,17 @@ def _extract_first_last_name(user_info: dict) -> tuple[str, str]:
 
 
 def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
-    """
-    Get or create Django User from external DL API response.
-    
-    Args:
-        user_info: Response from dl.gsu.by/restapi/get-user-info containing:
-                   - userId (int) - required
-                   - login (str) - optional
-                   - other fields (courseID, nodeId, taskId, etc.)
-    
-    Returns:
-        (user, created) tuple where created=True if user was newly created
-    
-    After extracting names from user_info, also calls
-    /restapi/get-id-user-info?userId=<id> to enrich first/last name
-    when the initial payload lacks them.
+    """Создаёт или находит Django-пользователя по ответу внешнего API dl.gsu.by.
+
+    Шаги:
+    1. Извлекает userId, login, firstName, lastName из user_info.
+    2. При необходимости обогащает имена через /restapi/get-id-user-info.
+    3. Ищет существующего пользователя по ExternalDLAccount.external_user_id.
+    4. Если не найден — создаёт User + ExternalDLAccount.
+    5. Обновляет username/first_name/last_name при изменении.
+    6. Добавляет пользователя в группу prompt_developer.
+
+    Возвращает (user, created), где created=True если пользователь создан.
     """
     external_user_id = str(user_info.get('userId'))
     external_login = _extract_external_login(user_info)

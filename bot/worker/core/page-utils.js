@@ -1,8 +1,20 @@
+/**
+ * Утилиты для работы со страницей Puppeteer: ожидание и взаимодействие с элементами.
+ *
+ * Содержит функции для поиска элементов по CSS-селектору и XPath,
+ * ожидания появления, клика и ввода текста. Совместим со старым API
+ * page.waitForXPath и новым (через document.evaluate).
+ *
+ * Все функции имеют timeout (30с по умолчанию) для fail-fast,
+ * чтобы bot manager мог переключиться на другой бот.
+ */
+
 const { log, error } = require('../utils/logger');
 const { sleep } = require('../utils/helpers');
-const TIMEOUT = 60000;
+const TIMEOUT = 30000; // 30с — fail fast, чтобы bot manager мог переключиться на другой бот
 
 async function queryXPath(page, xpath) {
+	// Поиск элемента по XPath. Совместим со старым API page.$x и новым (evaluateHandle + document.evaluate).
 	if (typeof page.$x === 'function') {
 		const elements = await page.$x(xpath);
 		if (!elements.length) return null;
@@ -26,6 +38,8 @@ async function queryXPath(page, xpath) {
 }
 
 async function waitForXPathCompat(page, xpath, opts = {}) {
+	// Ожидание появления элемента по XPath. Использует page.waitForXPath если доступно,
+	// иначе опрашивает через queryXPath каждые 250мс.
 	if (typeof page.waitForXPath === 'function') {
 		return page.waitForXPath(xpath, opts);
 	}

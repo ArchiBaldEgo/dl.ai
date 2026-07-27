@@ -1,4 +1,9 @@
-"""Admin forms for AI models."""
+"""Формы для админки AI-приложения.
+
+PromptForm: форма для редактирования промпта с каскадным выбором
+язык программирования → тема (через prompt_language_topic.js).
+SharedPromptForm: форма для общих препромптов.
+"""
 
 from django import forms
 

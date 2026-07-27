@@ -1,14 +1,8 @@
-"""Global daily token-usage statistic.
+"""Глобальная статистика дневного использования токенов.
 
-Surfaces a Codeforces-style "tokens used today / limit" banner on the chat
-page. Both numbers are shown in the same unit (millions) per the product
-decision — e.g. ``0.159 / 1.9`` rather than mixing ``159 814`` with ``1.9M``.
-
-The used count is the sum of ``AIRequestLog.tokens`` for the current Moscow
-day. It is cached briefly (``AI_TOKEN_USAGE_TTL``) so a chat-page render never
-triggers a full-table aggregate; the day boundary is computed in MSK to match
-the rest of the app (``MOSCOW_TZ``, never a hardcoded ``+ timedelta(hours=3)``
-— see CLAUDE.md).
+Отображает баннер на странице чата: «использовано сегодня / лимит»
+в единых единицах (миллионах). Сумма AIRequestLog.tokens за текущий
+Московский день, с краткосрочным кэшированием.
 """
 
 from datetime import datetime

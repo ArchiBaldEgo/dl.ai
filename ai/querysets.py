@@ -1,4 +1,8 @@
-"""Shared queryset helpers for the AI app."""
+"""Общие хелперы queryset для AI-приложения.
+
+Содержит функцию prompt_queryset_for_user для фильтрации промптов по правам
+пользователя (владелец/редактор/суперпользователь).
+"""
 
 from django.db.models import Q
 
@@ -6,10 +10,11 @@ from .models import Prompt
 
 
 def prompt_queryset_for_user(queryset, user):
-    """Return prompts visible to the given user.
+    """Возвращает промпты, видимые данному пользователю.
 
-    Superusers/staff see all prompts. Prompt developers see prompts they own
-    or are editors of. Anonymous users see nothing.
+    Суперпользователи и staff видят все промпты. Разработчики промптов видят
+    только те, которыми владеют или редакторами которых являются.
+    Анонимные пользователи не видят ничего.
     """
     if not user or not getattr(user, "is_authenticated", False):
         return queryset.none()

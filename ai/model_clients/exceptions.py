@@ -1,4 +1,9 @@
-"""Shared error-handling helpers for AI model clients."""
+"""Общие хелперы обработки ошибок для клиентов AI-моделей.
+
+Содержит функции для классификации сетевых ошибок, извлечения контента
+из ответов API (SambaNova-style choices), и преобразования технических
+ошибок API в понятные русские сообщения (humanize_model_error).
+"""
 
 from typing import Tuple, Optional
 

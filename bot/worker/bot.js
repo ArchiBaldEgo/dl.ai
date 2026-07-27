@@ -1,5 +1,19 @@
 'use strict';
 
+/**
+ * Puppeteer-бот для взаимодействия с Web DeepSeek через браузерную автоматизацию.
+ *
+ * Класс Bot управляет жизненным циклом Puppeteer-сессии:
+ * - init(): запуск Chrome (с stealth-плагином, опциональным прокси), логин на сайте.
+ * - sendMessage(): отправка сообщения через UI сайта (через modules/promtps.js).
+ * - close(): закрытие браузера и прокси.
+ *
+ * Поддерживает авто-восстановление: при закрытии страницы создаётся новая и
+ * выполняется повторный логин. Определяет отключение браузера через _disconnected.
+ *
+ * Используется bot/api/server.js (HTTP API) и bot/api/botManager.js (управление пулом ботов).
+ */
+
 const proxyChain = require('proxy-chain');
 
 const fs = require('fs');
@@ -59,7 +73,7 @@ function cleanEnvStr(v) {
 }
 
 function resolveProxy() {
-    // Names used historically by the standalone bot runner.
+    // Имена переменных из исторического standalone-раннера.
     let server = cleanEnvStr(process.env.BOT_PROXY);
     let user = cleanEnvStr(process.env.BOT_PROXY_USER);
     let pass = cleanEnvStr(process.env.BOT_PROXY_PASS);
@@ -73,6 +87,10 @@ function resolveProxy() {
 }
 
 class Bot {
+    /**
+     * Puppeteer-бот для одного сеанса взаимодействия с Web DeepSeek.
+     * Управляет браузером, страницей, логином и отправкой сообщений.
+     */
     constructor({ id }) {
         this.id = id;
         this.browser = null;
@@ -114,6 +132,7 @@ class Bot {
     }
 
     async init() {
+        // Инициализация: запуск Chrome, настройка stealth-плагина, прокси, логин.
         ensureStealth();
 
         const headless = "new";//toBool(process.env.HEADLESS, false);
@@ -131,7 +150,7 @@ class Bot {
 
         const launchOpts = {
             headless,
-            protocolTimeout: 120000, // 2 min — prevents Input.insertText/dispatchKeyEvent timeouts on slow pages
+            protocolTimeout: 180000, // 3 min — prevents Input.insertText/dispatchKeyEvent timeouts on slow pages
             args: [
 				...(proxyServer ? [`--proxy-server=${proxyServer}`] : []),
 				...(headless ? ['--disable-gpu'] : []),
@@ -181,7 +200,8 @@ class Bot {
     }
 
     isAlive() {
-        // If puppeteer got a disconnect event, this bot is dead.
+        // Проверка жив ли бот: браузер подключён, страница не закрыта.
+        // Если puppeteer получил disconnect — бот мёртв.
         if (this._disconnected) return false;
         const b = this.browser;
         if (!b) return false;
@@ -210,17 +230,33 @@ class Bot {
         p.on('error', (err) => error(`[bot#${this.id}] page error: ${err?.stack || err}`));
         p.on('close', () => {
             error(`[bot#${this.id}] page closed`);
-            // If page was closed manually, consider bot dead and let API reap it.
             if (!this._closed) {
                 this._disconnected = true;
-                // Best-effort close to avoid leaving a background Chrome process.
-                void this.close().catch(() => { });
+                void this.close().catch(() => {});
             }
         });
     }
 
+    async _ensurePage() {
+        // If page was closed/crashed, create a fresh one and re-login.
+        if (!this.page || (typeof this.page.isClosed === 'function' && this.page.isClosed())) {
+            log(`[bot#${this.id}] page lost, creating new page and re-login`);
+            const pages = await this.browser.pages().catch(() => []);
+            this.page = pages[0] ?? (await this.browser.newPage());
+            await this.page.setViewport(getViewport()).catch(() => {});
+            this._attachPageEvents(this.page);
+            this._isLoggedIn = false;
+            await this._login();
+        }
+    }
+
     async sendMessage(payload) {
+        // Отправка сообщения через UI сайта DeepSeek.
+        // Авто-восстановление: если страница закрыта/упала — создаётся новая и выполняется повторный логин.
         if (!this.page) throw new Error('bot page is not initialized');
+
+        // Auto-recovery: if page was closed/crashed, recreate and re-login.
+        await this._ensurePage();
 
         // Safety: if session expired or init didn't finish properly, enforce login before messaging.
         if (!this._isLoggedIn) {

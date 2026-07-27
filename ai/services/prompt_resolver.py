@@ -1,4 +1,4 @@
-"""Prompt resolution service for WebSocket consumer."""
+"""Сервис резолвинга промптов для WebSocket consumer."""
 
 from asgiref.sync import sync_to_async
 
@@ -18,7 +18,7 @@ def parse_shared_prompt_id(prompt_id) -> int | None:
 
 
 class PromptResolver:
-    """Resolve prompt text and related names for a WebSocket request."""
+    """Резолвит текст промпта и связанные имена (язык, тема) для WebSocket-запроса."""
 
     parse_shared_prompt_id = staticmethod(parse_shared_prompt_id)
 

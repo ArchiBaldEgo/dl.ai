@@ -26,7 +26,10 @@ _WHITESPACE = re.compile(r"\s+")
 
 
 def normalize_solution(text: str) -> str:
-    """Strip comments, lowercase and collapse whitespace for fuzzy comparison."""
+    """Нормализует текст решения: удаляет комментарии, приводит к нижнему регистру, сжимает пробелы.
+
+    Поддерживает комментарии Pascal ({...}, (*...*)), C-стиля (/*...*/, //) и Python/shell (#).
+    """
     if not text:
         return ""
     out = _PASCAL_BRACE_COMMENT.sub(" ", text)
@@ -38,12 +41,12 @@ def normalize_solution(text: str) -> str:
 
 
 def grade_solution(model_text: str, sample_text: str, threshold: float = SOLVE_RATIO_THRESHOLD) -> str:
-    """Approximate ARM verdict: solved / failed / skipped.
+    """Приблизительная оценка решения для ARM: solved / failed / skipped.
 
-    - empty sample  -> SKIPPED (no oracle to compare against)
-    - empty model   -> FAILED (model produced nothing)
-    - normalized equal -> SOLVED
-    - difflib ratio >= threshold -> SOLVED, else FAILED
+    - пустой эталон → SKIPPED (нет с чем сравнивать)
+    - пустой ответ модели → FAILED
+    - нормализованное равенство → SOLVED
+    - difflib ratio >= threshold → SOLVED, иначе FAILED
     """
     sample_norm = normalize_solution(sample_text)
     if not sample_norm:
@@ -103,11 +106,18 @@ def compare_response(
     comparator: str = COMPARATOR_RATIO,
     threshold: float | None = None,
 ) -> Tuple[str, str, List[str]]:
-    """Compare a model response to the golden expected text.
+    """Сравнивает ответ модели с эталонным текстом (для регрессионных тестов промпта).
 
-    Returns ``(verdict, hint, missing)``. An empty ``expected_text`` always
-    yields ``skipped`` (no oracle). An empty model response is a ``mismatch``
-    (except when the expected text is also empty -> skipped).
+    Возвращает ``(verdict, hint, missing)``:
+    - verdict: "match" | "mismatch" | "skipped"
+    - hint: короткое описание причины несовпадения
+    - missing: список отсутствующих строк (только для contains_all)
+
+    Поддерживаемые компараторы:
+    - ratio: difflib SequenceMatcher, порог по умолчанию 0.85
+    - contains_all: каждая строка эталона должна быть подстрокой ответа
+    - exact: нормализованное равенство
+    - set: равенство множеств нормализованных строк
     """
     expected_norm = normalize_solution(expected_text)
     if not expected_norm:

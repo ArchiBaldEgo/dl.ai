@@ -4,6 +4,40 @@ from django.utils import timezone
 
 from .i18n import get_localized_name, get_localized_text
 
+"""Модели данных AI-приложения.
+
+Содержит модели для:
+- Промптов (SharedPrompt, Prompt) с поддержкой мультиязычности и плейсхолдеров.
+- Тем и языков программирования (Topic, ProgrammingLanguage).
+- Задач dl.gsu.by (Task) для batch-solve ARM.
+- Журнала запросов к AI-моделям (AIRequestLog).
+- Проверки доступности моделей (AIModelHealthRun, AIModelAvailability).
+- Результатов тестирования моделей (AIModelTestRun, AIModelTestResult).
+- Регрессионных тестов промптов (PromptTestCase, PromptTestRun, PromptTestResult).
+- Глобальных настроек приложения (AIAppSettings).
+- Связи пользователей с внешними аккаунтами dl.gsu.by (ExternalDLAccount).
+"""
+
+
+def replace_placeholders(base, language="", topic="", message="", code=""):
+    """Подстановка плейсхолдеров в текст промпта.
+
+    Заменяет {language}/{язык} на имя языка программирования,
+    {topic}/{тема} на название темы, {message} на сообщение пользователя,
+    {code} на код для анализа. Используется и для Prompt, и для SharedPrompt.
+    """
+    if language:
+        base = base.replace("{language}", language)
+        base = base.replace("{язык}", language)
+    if topic:
+        base = base.replace("{topic}", topic)
+        base = base.replace("{тема}", topic)
+    if "{message}" in base:
+        base = base.replace("{message}", message or "")
+    if "{code}" in base:
+        base = base.replace("{code}", code or "")
+    return base
+
 
 class ExternalDLAccount(models.Model):
     """Link between Django User and external DL (dl.gsu.by) account."""
@@ -46,6 +80,11 @@ class ExternalDLAccount(models.Model):
 
 
 class ProgrammingLanguage(models.Model):
+    """Язык программирования, используемый в темах и задачах.
+
+    Связан с Topic (один ко многим) и используется для подстановки плейсхолдера
+    {language} в тексты промптов.
+    """
     language_name = models.CharField(max_length=255,)
 
     def __str__(self):
@@ -53,6 +92,11 @@ class ProgrammingLanguage(models.Model):
 
 
 class Topic(models.Model):
+    """Тема (раздел) в рамках языка программирования.
+
+    Поддерживает мультиязычные названия (ru/en/fr). Используется для подстановки
+    плейсхолдера {topic} в промпты и для группировки задач в ARM-отчётах.
+    """
     topic_name = models.CharField(max_length=255)
     topic_name_ru = models.CharField(max_length=255, blank=True, default="")
     topic_name_en = models.CharField(max_length=255, blank=True, default="")
@@ -124,6 +168,13 @@ SHARED_PROMPT_MODE_CHOICES = (
 # Текст может содержать placeholder {language}/{язык}, который заменяется на имя языка,
 # и {topic}/{тема}, который заменяется на название темы при использовании.
 class SharedPrompt(models.Model):
+    """Общий (shared) препромпт — не привязан к конкретному языку программирования или теме.
+
+    Текст может содержать плейсхолдеры {language}/{язык} и {topic}/{тема},
+    которые заменяются на имя языка и название темы при использовании.
+    Если указан mode (chat/solve/find_error), препромпт используется как
+    системный шаблон по умолчанию для соответствующего режима.
+    """
     prompt_name = models.CharField(max_length=255)
     prompt_name_ru = models.CharField(max_length=255, blank=True, default="")
     prompt_name_en = models.CharField(max_length=255, blank=True, default="")
@@ -170,17 +221,7 @@ class SharedPrompt(models.Model):
 
     def get_effective_text(self, ui_language="", programming_language_name="", topic_name="", message="", code=""):
         base = get_localized_text(self, ui_language, "prompt_text") or self.prompt_text
-        if programming_language_name:
-            base = base.replace("{language}", programming_language_name)
-            base = base.replace("{язык}", programming_language_name)
-        if topic_name:
-            base = base.replace("{topic}", topic_name)
-            base = base.replace("{тема}", topic_name)
-        if "{message}" in base:
-            base = base.replace("{message}", message or "")
-        if "{code}" in base:
-            base = base.replace("{code}", code or "")
-        return base
+        return replace_placeholders(base, programming_language_name, topic_name, message, code)
 
     class Meta:
         db_table = 'ai_sharedprompt'
@@ -195,6 +236,13 @@ class SharedPrompt(models.Model):
         ]
 
 class Prompt(models.Model):
+    """Промпт, привязанный к конкретной теме.
+
+    Может ссылаться на SharedPrompt (shared_prompt) — в этом случае итоговый текст
+    берётся из общего препромпта с подстановкой языка и темы. Если задан
+    prompt_text_override, он переопределяет текст общего препромпта.
+    Поддерживает мультиязычные названия и тексты (ru/en/fr).
+    """
     topic = models.ForeignKey(Topic, on_delete=models.CASCADE, null=True, blank=True)
     prompt_text = models.TextField()
     prompt_text_ru = models.TextField(blank=True, default="")
@@ -232,17 +280,7 @@ class Prompt(models.Model):
             base = self.shared_prompt.get_effective_text(ui_language, programming_language_name, topic_name, message, code)
         else:
             base = get_localized_text(self, ui_language, "prompt_text") or self.prompt_text
-        if programming_language_name:
-            base = base.replace("{language}", programming_language_name)
-            base = base.replace("{язык}", programming_language_name)
-        if topic_name:
-            base = base.replace("{topic}", topic_name)
-            base = base.replace("{тема}", topic_name)
-        if "{message}" in base:
-            base = base.replace("{message}", message or "")
-        if "{code}" in base:
-            base = base.replace("{code}", code or "")
-        return base
+        return replace_placeholders(base, programming_language_name, topic_name, message, code)
 
     def __str__(self):
         # Возвращаем локализованное имя промпта вместо полного текста
@@ -255,6 +293,11 @@ class Prompt(models.Model):
 
 
 class AIAppSettings(models.Model):
+    """Глобальная настройка приложения AI (singleton-модель).
+
+    Хранит флаг включения/выключения AI-функциональности.
+    Модель имеет фиксированный pk=1 — только одна строка в таблице.
+    """
     is_enabled = models.BooleanField(default=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -277,6 +320,11 @@ class AIAppSettings(models.Model):
 
 
 class AIModelHealthRun(models.Model):
+    """Один прогон проверки доступности всех AI-моделей за конкретную дату.
+
+    Запускается планировщиком в ai/model_health.py (ежедневно в 04:00 МСК).
+    Содержит сводный статус и временные метки начала/окончания.
+    """
     STATUS_RUNNING = "running"
     STATUS_COMPLETED = "completed"
     STATUS_FAILED = "failed"
@@ -303,6 +351,12 @@ class AIModelHealthRun(models.Model):
 
 
 class AIModelAvailability(models.Model):
+    """Запись о доступности конкретной AI-модели за определённую дату.
+
+    Создаётся в рамках AIModelHealthRun. Хранит флаг доступности, время отклика,
+    HTTP-код последней проверки и сообщение об ошибке (если есть).
+    Одна запись на (model_key, window_date).
+    """
     model_key = models.CharField(max_length=128, db_index=True)
     model_title = models.CharField(max_length=255)
     is_available = models.BooleanField(default=False)
@@ -328,6 +382,13 @@ class AIModelAvailability(models.Model):
 
 
 class AIRequestLog(models.Model):
+    """Журнал запросов к AI-моделям через WebSocket или ARM.
+
+    Фиксирует кто, когда, в каком режиме (chat/solve/find_error/arm),
+    к какой модели обращался, сколько токенов потрачено, какой получен ответ
+    и контекст запроса (язык программирования, тема, промпт, DL-задача).
+    Используется для отчётов и отладки.
+    """
     STATUS_SUCCESS = "success"
     STATUS_ERROR = "error"
 

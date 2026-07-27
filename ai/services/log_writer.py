@@ -1,4 +1,4 @@
-"""AIRequestLog writing service for the WebSocket consumer."""
+"""Сервис записи логов AIRequestLog из WebSocket consumer."""
 
 from asgiref.sync import sync_to_async
 from django.utils import timezone
@@ -19,7 +19,11 @@ _ERROR_MARKERS = (
 
 
 class LogWriter:
-    """Create and update AIRequestLog records from the WebSocket consumer."""
+    """Создание и обновление записей AIRequestLog из WebSocket consumer.
+
+    Методы обёрнуты в sync_to_async для безопасного вызова из async-кода.
+    Автоматически определяет ошибки по маркерам в тексте ответа.
+    """
 
     @sync_to_async
     def create(
@@ -80,11 +84,16 @@ class LogWriter:
         log.response_text = str(response_text or "")[:5000]
         log.tokens = tokens or 0
 
-        text_sample = str(response_text or "").lower()[:100]
-        if any(marker in text_sample for marker in _ERROR_MARKERS):
+        # Empty response is an error, not a success.
+        if not (response_text or "").strip():
             log.status = AIRequestLog.STATUS_ERROR
+            log.error_message = "Модель вернула пустой ответ"
         else:
-            log.status = AIRequestLog.STATUS_SUCCESS
+            text_sample = str(response_text or "").lower()[:100]
+            if any(marker in text_sample for marker in _ERROR_MARKERS):
+                log.status = AIRequestLog.STATUS_ERROR
+            else:
+                log.status = AIRequestLog.STATUS_SUCCESS
 
         log.save(
             update_fields=[

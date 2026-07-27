@@ -1,10 +1,9 @@
-"""Auto-registration of DL tasks solved via the chat page.
+"""Авто-регистрация DL-задач, решаемых через страницу чата.
 
-When a user solves a DL task on the ``/ai/solve-problem/`` page, the WebSocket
-consumer calls :func:`ensure_task` so the task appears in the local ``Task``
-table and becomes available (once the operator fills ``file_extension`` and
-activates it) for batch-solve ARM. The DL field extraction is shared with
-``TaskAdmin.refresh_from_dl`` via :func:`apply_dl_task_info` (DRY).
+Когда пользователь решает DL-задачу на /ai/solve-problem/, WebSocket consumer
+вызывает ensure_task, чтобы задача появилась в локальной таблице Task
+и стала доступна для batch-solve ARM. Извлечение полей DL — общее с
+TaskAdmin.refresh_from_dl через apply_dl_task_info (DRY).
 """
 
 import logging

@@ -1,4 +1,9 @@
-"""Custom admin site for the AI app (replaces monkey-patching admin.site)."""
+"""Кастомный admin-site для AI-приложения (заменяет стандартный admin.site).
+
+Реализует DLSID-аутентификацию: вход через dl.gsu.by, проверка соответствия
+сессии внешнему ID, редирект на set-password при первом входе.
+Фильтрация видимых моделей по правам пользователя (через permissions.py).
+"""
 
 import logging
 import os
@@ -81,6 +86,15 @@ def _redirect_to_dl(request):
 
 
 class AIAdminSite(admin.AdminSite):
+    """Кастомный AdminSite для AI-приложения.
+
+    Особенности:
+    - Аутентификация через DLSID (dl.gsu.by), а не через стандартную форму.
+    - Проверка соответствия сессии внешнему ID (_session_matches_external_id).
+    - Редирект на set-password при отсутствии пароля.
+    - Фильтрация моделей в sidebar по правам пользователя (filter_app_list_for_user).
+    - Кастомные ссылки на ARM, статусы моделей, регрессионные тесты, логи.
+    """
     site_header = "AI Admin"
     site_title = "AI Admin"
     index_template = "admin/ai/index.html"

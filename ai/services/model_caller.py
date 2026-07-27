@@ -1,4 +1,4 @@
-"""Model invocation service for the WebSocket consumer."""
+"""Сервис вызова AI-моделей из WebSocket consumer."""
 
 from typing import Any
 

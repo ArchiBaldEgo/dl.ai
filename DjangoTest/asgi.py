@@ -1,10 +1,11 @@
 """
-ASGI config for DjangoTest project.
+ASGI-конфигурация проекта DjangoTest.
 
-It exposes the ASGI callable as a module-level variable named ``application``.
+Объединяет HTTP (Django) и WebSocket (Channels) в одном ProtocolTypeRouter.
+WebSocket-маршруты определены в ai.routing (AI-чат).
 
-For more information on this file, see
-https://docs.djangoproject.com/en/5.1/howto/deployment/asgi/
+Важно: get_asgi_application() вызывается ДО импорта ai.routing,
+чтобы app registry был готов к загрузке моделей.
 """
 
 import os
@@ -21,13 +22,16 @@ django_asgi_app = get_asgi_application()
 from channels.routing import ProtocolTypeRouter, URLRouter
 from channels.auth import AuthMiddlewareStack
 from channels.sessions import SessionMiddlewareStack
+from channels.security.websocket import AllowedHostsOriginValidator
 from ai.routing import websocket_urlpatterns
 
 application = ProtocolTypeRouter({
     "http": django_asgi_app,
     "websocket": SessionMiddlewareStack(
         AuthMiddlewareStack(
-            URLRouter(websocket_urlpatterns)
+            AllowedHostsOriginValidator(
+                URLRouter(websocket_urlpatterns)
+            )
         )
     ),
 })

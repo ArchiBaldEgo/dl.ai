@@ -1,4 +1,8 @@
-"""High-level services used by views, consumers, and admin code."""
+"""Высокоуровневые сервисы для views, consumers и admin-кода.
+
+Объединяет: аутентификацию WebSocket, композицию сообщений, вызов моделей,
+резолвинг промптов, логирование, историю диалогов, авто-перевод, регистрацию DL-задач.
+"""
 
 from .auth import WebSocketAuthService, get_user_identity_for_log, resolve_external_account
 from .auto_translate import translate_object, translate_text, get_translatable_models

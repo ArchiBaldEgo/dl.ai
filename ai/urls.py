@@ -1,3 +1,4 @@
+"""URL-маршруты AI-приложения для основных страниц и API."""
 from django.urls import path
 from . import views
 

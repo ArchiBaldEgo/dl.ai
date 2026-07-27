@@ -1,4 +1,9 @@
-"""Custom URL wiring for the AI admin site."""
+"""URL-маршруты кастомного AI admin site.
+
+Содержит кастомные пути для ARM (find-error, solve), статуса моделей,
+регрессионных тестов промптов, логов запросов и личных промптов.
+Стандартные admin URL подключаются через ai_admin_site.get_urls().
+"""
 
 from django.urls import include, path
 
@@ -13,7 +18,7 @@ from .arm import (
     admin_arm_solve_add_task_view,
     admin_arm_solve_prompts_view,
 )
-from .logs import admin_request_logs_view, admin_request_log_detail_view
+from .logs import admin_request_logs_view, admin_request_log_detail_view, resend_request_view
 from .model_status import (
     admin_model_status_view,
     admin_model_status_refresh_view,
@@ -51,6 +56,7 @@ def get_ai_admin_urls():
         path("prompt-regression/", ai_admin_site.admin_view(admin_prompt_regression_view), name="ai_prompt_regression"),
         path("prompts/my/", ai_admin_site.admin_view(admin_my_prompt_view), name="ai_my_prompt"),
         path("ai/airequestlog/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
+        path("ai/airequestlog/<int:log_id>/resend/", ai_admin_site.admin_view(resend_request_view), name="ai_request_log_resend"),
         path("ai/airequestlog/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),
     ]
     return [

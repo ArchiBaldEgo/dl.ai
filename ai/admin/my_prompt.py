@@ -1,4 +1,8 @@
-""""My prompts" helper view for prompt developers."""
+"""Хелпер-view «Мои промпты» для разработчиков промптов.
+
+Показывает только промпты, владельцем или редактором которых является
+текущий пользователь. Доступ через /ai/admin/prompts/my/?mine=1.
+"""
 
 from django.http import HttpResponse, HttpResponseForbidden
 

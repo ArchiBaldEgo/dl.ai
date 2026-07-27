@@ -1,3 +1,13 @@
+"""Management-команда: проверка доступности AI-моделей.
+
+Запускает health-check для текущего окна (04:00 МСК) и сохраняет результаты
+в AIModelAvailability. Поддерживает --force для повторной проверки.
+
+Usage:
+    python manage.py check_models_health
+    python manage.py check_models_health --force
+"""
+
 from django.core.management.base import BaseCommand, CommandError
 
 from ai.model_health import (
@@ -8,6 +18,7 @@ from ai.model_health import (
 
 
 class Command(BaseCommand):
+    """Запускает проверку доступности всех моделей и выводит результаты."""
     help = "Run model health checks for current 04:00 MSK window and persist availability"
 
     def add_arguments(self, parser):

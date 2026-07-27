@@ -1,8 +1,14 @@
-"""Model client registry used by the WebSocket consumer and health checker."""
+"""Реестр AI-моделей, используемый WebSocket consumer и health-checker.
+
+Сопоставляет внутренние ключи моделей (DeepSeek_V3_1, Web_DeepSeek, ...)
+с их обработчиками (async-функциями), отображаемыми названиями и capabilities
+(text/vision/reasoning). ModelRegistry — основной API для получения
+обработчика модели по ключу.
+"""
 
 from typing import Callable, Coroutine, Dict
 
-from . import gigachat, huggingface, sambanova, web_deepseek
+from . import groq, openrouter, sambanova, web_deepseek
 
 Handler = Callable[..., Coroutine]
 
@@ -13,56 +19,7 @@ _REASONING = {"text": True, "vision": False, "reasoning": True}
 
 
 _MODELS: Dict[str, Dict[str, object]] = {
-    "DeepSeek_R1_Distill_Llama_70B": {
-        "title": "DeepSeek-R1-Distill-Llama-70B",
-        "handler": sambanova.ask_DeepSeek_R1_Distill_Llama_70B_async,
-        "capabilities": _REASONING,
-    },
-    "DeepSeek_V3_1": {
-        "title": "DeepSeek-V3.1",
-        "handler": sambanova.ask_DeepSeek_V3_1_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "DeepSeek_V3_1_cb": {
-        "title": "DeepSeek-V3.1-cb",
-        "handler": sambanova.ask_DeepSeek_V3_1_cb_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "DeepSeek_V3_2": {
-        "title": "DeepSeek-V3.2",
-        "handler": sambanova.ask_DeepSeek_V3_2_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "Llama_4_Maverick_17B_128E_Instruct": {
-        "title": "Llama-4-Maverick-17B-128E-Instruct",
-        "handler": sambanova.ask_Llama_4_Maverick_17B_128E_Instruct_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "Meta_Llama_3_3_70B_Instruct": {
-        "title": "Meta-Llama-3.3-70B-Instruct",
-        "handler": sambanova.ask_Meta_Llama_3_3_70B_Instruct_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "MiniMax_M2_5": {
-        "title": "MiniMax-M2.5",
-        "handler": sambanova.ask_MiniMax_M2_5_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "MiniMax_M2_7": {
-        "title": "MiniMax-M2.7",
-        "handler": sambanova.ask_MiniMax_M2_7_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "Gemma_3_12b_it": {
-        "title": "gemma-3-12b-it",
-        "handler": sambanova.ask_Gemma_3_12b_it_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "Gpt_oss_120b": {
-        "title": "gpt-oss-120b",
-        "handler": sambanova.ask_Gpt_oss_120b_async,
-        "capabilities": _TEXT_ONLY,
-    },
+    # --- Web DeepSeek (бот-пул через Puppeteer) — бесплатные, идут первыми ---
     "Web_DeepSeek": {
         "title": "Web DeepSeek",
         "handler": web_deepseek.ask_Web_DeepSeek_async,
@@ -73,35 +30,122 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "handler": web_deepseek.ask_Web_DeepSeek_Thinking_async,
         "capabilities": _REASONING,
     },
-    # Legacy/alias handlers kept for runtime backward compatibility.
-    "DeepSeek_R1": {
-        "title": "DeepSeek-R1",
-        "handler": sambanova.ask_DeepSeek_R1_async,
+    # --- Groq (бесплатные модели, OpenAI-совместимый API) ---
+    "Groq_Llama_3_3_70B": {
+        "title": "Groq Llama 3.3 70B",
+        "handler": groq.ask_Groq_Llama_3_3_70B_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "Groq_Llama_3_1_8B": {
+        "title": "Groq Llama 3.1 8B",
+        "handler": groq.ask_Groq_Llama_3_1_8B_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "Groq_Gpt_Oss_120B": {
+        "title": "Groq GPT-OSS 120B",
+        "handler": groq.ask_Groq_Gpt_Oss_120B_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "Groq_Gpt_Oss_20B": {
+        "title": "Groq GPT-OSS 20B",
+        "handler": groq.ask_Groq_Gpt_Oss_20B_async,
+        "capabilities": _TEXT_ONLY,
+    },
+"Groq_Qwen_3_6_27B": {
+        "title": "Groq Qwen 3.6 27B",
+        "handler": groq.ask_Groq_Qwen_3_6_27B_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    # --- OpenRouter (бесплатные модели) ---
+    "OR_Nemotron_Ultra_550B": {
+        "title": "OR Nemotron Ultra 550B",
+        "handler": openrouter.ask_OR_Nemotron_Ultra_550B_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "OR_Ling_3_Flash": {
+        "title": "OR Ling 3.0 Flash",
+        "handler": openrouter.ask_OR_Ling_3_Flash_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "OR_Gemma_4_31B": {
+        "title": "OR Gemma 4 31B",
+        "handler": openrouter.ask_OR_Gemma_4_31B_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "OR_Gemma_4_26B": {
+        "title": "OR Gemma 4 26B",
+        "handler": openrouter.ask_OR_Gemma_4_26B_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "OR_Nemotron_Super_120B": {
+        "title": "OR Nemotron Super 120B",
+        "handler": openrouter.ask_OR_Nemotron_Super_120B_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "OR_North_Mini_Code": {
+        "title": "OR North Mini Code",
+        "handler": openrouter.ask_OR_North_Mini_Code_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "OR_Nemotron_Nano_30B_Reasoning": {
+        "title": "OR Nemotron Nano 30B Reasoning",
+        "handler": openrouter.ask_OR_Nemotron_Nano_30B_Reasoning_async,
         "capabilities": _REASONING,
     },
-    "Meta_Llama_3_1_70B_Instruct": {
-        "title": "Meta-Llama-3.1-70B-Instruct",
-        "handler": sambanova.ask_Meta_Llama_3_1_70B_Instruct_async,
+    "OR_Nemotron_Nano_30B": {
+        "title": "OR Nemotron Nano 30B",
+        "handler": openrouter.ask_OR_Nemotron_Nano_30B_async,
         "capabilities": _TEXT_ONLY,
     },
-    "Mixtral_8x22b": {
-        "title": "Mixtral-8x22b",
-        "handler": sambanova.ask_Mixtral_8x22b_async,
+    "OR_GPT_OSS_20B": {
+        "title": "OR GPT-OSS 20B",
+        "handler": openrouter.ask_OR_GPT_OSS_20B_async,
         "capabilities": _TEXT_ONLY,
     },
-    "Mistral_Nemo_Instruct": {
-        "title": "Mistral-Nemo-Instruct",
-        "handler": huggingface.ask_Mistral_Nemo_Instruct_async,
+    "OR_Nemotron_Nano_12B_VL": {
+        "title": "OR Nemotron Nano 12B VL",
+        "handler": openrouter.ask_OR_Nemotron_Nano_12B_VL_async,
+        "capabilities": {"text": True, "vision": True, "reasoning": False},
+    },
+    "OR_Nemotron_Nano_9B": {
+        "title": "OR Nemotron Nano 9B",
+        "handler": openrouter.ask_OR_Nemotron_Nano_9B_async,
         "capabilities": _TEXT_ONLY,
     },
-    "Gemma_7b": {
-        "title": "Gemma-7b",
-        "handler": huggingface.ask_Gemma_7b_async,
+    "OR_Free_Router": {
+        "title": "OR Free Router (авто)",
+        "handler": openrouter.ask_OR_Free_Router_async,
         "capabilities": _TEXT_ONLY,
     },
-    "GigaChat": {
-        "title": "GigaChat-Pro",
-        "handler": gigachat.send_prompt_async,
+    # --- SambaNova модели ---
+    "DeepSeek_V3_1": {
+        "title": "Samba DeepSeek-V3.1",
+        "handler": sambanova.ask_DeepSeek_V3_1_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "DeepSeek_V3_2": {
+        "title": "Samba DeepSeek-V3.2",
+        "handler": sambanova.ask_DeepSeek_V3_2_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "Meta_Llama_3_3_70B_Instruct": {
+        "title": "Samba Meta-Llama-3.3-70B-Instruct",
+        "handler": sambanova.ask_Meta_Llama_3_3_70B_Instruct_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "MiniMax_M2_7": {
+        "title": "Samba MiniMax-M2.7",
+        "handler": sambanova.ask_MiniMax_M2_7_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "Gemma_3_12b_it": {
+        "title": "Samba gemma-4-31B-it",
+        "handler": sambanova.ask_Gemma_3_12b_it_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "Gpt_oss_120b": {
+        "title": "Samba gpt-oss-120b",
+        "handler": sambanova.ask_Gpt_oss_120b_async,
         "capabilities": _TEXT_ONLY,
     },
 }
@@ -110,7 +154,7 @@ _DEFAULT_CAPABILITIES = _TEXT_ONLY
 
 
 class ModelRegistry:
-    """Registry mapping internal model keys to callable handlers."""
+    """Реестр AI-моделей: сопоставляет ключ → {title, handler, capabilities}."""
 
     def __init__(self, models: Dict[str, Dict[str, object]]):
         self._models = dict(models)

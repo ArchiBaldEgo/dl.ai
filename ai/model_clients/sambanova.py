@@ -1,6 +1,12 @@
-"""SambaNova model clients (DeepSeek, Llama, MiniMax, Gemma, GPT-OSS)."""
+"""Клиенты моделей SambaNova (DeepSeek, Llama, MiniMax, Gemma, GPT-OSS).
 
-import json
+Каждая функция — async-обработчик, принимающий (messages, user_id) и
+возвращающий (response_text, tokens). Использует SambaNova API (SC_TOKEN).
+
+Архитектура: generic _ask_sambanova_model_async() + декларативная таблица
+SAMBANOVA_MODELS. Внешние функции-обёртки генерируются автоматически.
+"""
+
 import logging
 from asyncio import TimeoutError as AsyncTimeoutError
 from typing import Tuple, Optional
@@ -34,12 +40,59 @@ from .exceptions import (
 )
 from .history import conversation_history
 
-
 logger = logging.getLogger(__name__)
 
+SAMBANOVA_API_URL = "https://api.sambanova.ai/v1/chat/completions"
 
-def _append_history(user_id, message: str, response_text: str) -> None:
-    conversation_history.add_exchange(user_id, message, response_text)
+
+# --- Декларативная таблица моделей ---
+# Ключ → (config_name, max_tokens, temperature, response_field)
+# response_field: "content" (default) или "reasoning" (для GPT-OSS)
+SAMBANOVA_MODELS: dict[str, dict] = {
+    "DeepSeek_R1_Distill_Llama_70B": {
+        "model": SAMBANOVA_MODEL_DEEPSEEK_R1_DISTILL_LLAMA_70B,
+        "max_tokens": 9000,
+        "temperature": 0.7,
+    },
+    "DeepSeek_V3_1": {
+        "model": SAMBANOVA_MODEL_DEEPSEEK_V3_1,
+        "max_tokens": 9000,
+        "temperature": 0.7,
+    },
+    "DeepSeek_V3_1_cb": {
+        "model": SAMBANOVA_MODEL_DEEPSEEK_V3_1_CB,
+        "max_tokens": 9000,
+    },
+    "DeepSeek_V3_2": {
+        "model": SAMBANOVA_MODEL_DEEPSEEK_V3_2,
+        "max_tokens": 9000,
+    },
+    "Llama_4_Maverick_17B_128E_Instruct": {
+        "model": SAMBANOVA_MODEL_LLAMA_4_MAVERICK_17B_128E_INSTRUCT,
+        "max_tokens": 9000,
+    },
+    "Meta_Llama_3_3_70B_Instruct": {
+        "model": SAMBANOVA_MODEL_META_LLAMA_3_3_70B_INSTRUCT,
+        "max_tokens": 9000,
+    },
+    "MiniMax_M2_5": {
+        "model": SAMBANOVA_MODEL_MINIMAX_M2_5,
+        "max_tokens": 9000,
+    },
+    "MiniMax_M2_7": {
+        "model": SAMBANOVA_MODEL_MINIMAX_M2_7,
+        "max_tokens": 9000,
+    },
+    "Gemma_3_12b_it": {
+        "model": SAMBANOVA_MODEL_GEMMA_3_12B_IT,
+        "max_tokens": 9000,
+    },
+    "Gpt_oss_120b": {
+        "model": SAMBANOVA_MODEL_GPT_OSS,
+        "max_tokens": 8192,
+        "response_field": "reasoning",  # GPT-OSS может вернуть reasoning вместо content
+    },
+}
 
 
 def _log_response(response, max_len: int = 500) -> None:
@@ -62,8 +115,23 @@ async def _ask_sambanova_model_async(
     max_tokens: int = 9000,
     temperature: Optional[float] = None,
     timeout: float = 30.0,
+    response_field: str = "content",
+    use_wait_for: bool = False,
 ) -> Tuple[str, Optional[int]]:
-    """Generic SambaNova chat completion wrapper with history management."""
+    """Generic SambaNova chat completion wrapper with history management.
+
+    Args:
+        messages: Текст сообщения пользователя.
+        user_id: ID пользователя (для истории).
+        model_name: Имя модели на стороне SambaNova.
+        max_tokens: Лимит токенов ответа.
+        temperature: Температура генерации (None = не указывать).
+        timeout: Таймаут запроса в секундах.
+        response_field: Поле для извлечения ответа ("content" или "reasoning").
+        use_wait_for: Использовать asyncio.wait_for (для legacy DeepSeek-R1).
+    """
+    import asyncio
+
     history = conversation_history.get(user_id)
     history.append({"role": "user", "content": messages})
 
@@ -76,17 +144,33 @@ async def _ask_sambanova_model_async(
         payload["temperature"] = temperature
 
     try:
-        response = await __import__("asyncio").to_thread(
-            requests.post,
-            "https://api.sambanova.ai/v1/chat/completions",
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {SC_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            proxies=proxies,
-            timeout=timeout,
-        )
+        if use_wait_for:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    requests.post,
+                    SAMBANOVA_API_URL,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {SC_TOKEN}",
+                        "Content-Type": "application/json",
+                    },
+                    proxies=proxies,
+                    timeout=30,
+                ),
+                timeout=timeout,
+            )
+        else:
+            response = await asyncio.to_thread(
+                requests.post,
+                SAMBANOVA_API_URL,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {SC_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                proxies=proxies,
+                timeout=timeout,
+            )
 
         _log_response(response)
 
@@ -102,10 +186,20 @@ async def _ask_sambanova_model_async(
             return "Неожиданный формат ответа от сервера.", "0"
 
         completion_tokens = obj.get("usage", {}).get("completion_tokens", 0)
-        assistant_content = extract_choice_content(obj)
+
+        # Извлекаем ответ: content (по умолчанию) или reasoning (GPT-OSS)
+        message = obj["choices"][0].get("message", {})
+        if response_field == "reasoning":
+            assistant_content = message.get("content") or message.get("reasoning") or "Пустой ответ от модели."
+        else:
+            assistant_content = extract_choice_content(obj)
+
         conversation_history.append(user_id, {"role": "assistant", "content": assistant_content})
         return assistant_content, completion_tokens
 
+    except AsyncTimeoutError:
+        logger.warning("SambaNova request timeout after %s seconds", timeout)
+        return f"Таймаут запроса ({timeout} сек). Сервер долго не отвечает. Попробуйте позже или уменьшите запрос.", "0"
     except requests.exceptions.ConnectionError as e:
         logger.warning("Connection error: %s", e)
         return classify_network_error(e), "0"
@@ -115,6 +209,10 @@ async def _ask_sambanova_model_async(
     except requests.exceptions.RequestException as e:
         logger.warning("Request error: %s", e)
         return "Ошибка при подключении к серверу API.", "0"
+    except KeyError as e:
+        if is_missing_choices_error(e):
+            return "Ошибка в ответе от сервера AI.", "0"
+        raise
     except Exception as e:
         logger.exception("Unexpected error in SambaNova call")
         if is_network_error(e):
@@ -125,70 +223,52 @@ async def _ask_sambanova_model_async(
         return "Что-то пошло не так. Контекст очищен, введите новый запрос.", "0"
 
 
-async def ask_DeepSeek_R1_Distill_Llama_70B_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    return await _ask_sambanova_model_async(
-        messages,
-        user_id,
-        SAMBANOVA_MODEL_DEEPSEEK_R1_DISTILL_LLAMA_70B,
-        max_tokens=9000,
-        temperature=0.7,
-    )
+# --- Автогенерация функций для каждой модели ---
+# Вместо 13 ручных ask_*_async функций, генерируем их из таблицы.
+# Это устраняет дублирование (DRY) и добавление новой модели = 1 строка в таблице.
+
+def _make_handler(model_key: str):
+    """Создаёт async-функцию-обработчик для модели по ключу из SAMBANOVA_MODELS."""
+    cfg = SAMBANOVA_MODELS[model_key]
+
+    async def handler(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+        return await _ask_sambanova_model_async(
+            messages,
+            user_id,
+            cfg["model"],
+            max_tokens=cfg["max_tokens"],
+            temperature=cfg.get("temperature"),
+            response_field=cfg.get("response_field", "content"),
+        )
+
+    handler.__name__ = f"ask_{model_key}_async"
+    handler.__qualname__ = handler.__name__
+    handler.__doc__ = f"SambaNova {model_key} → {cfg['model']}"
+    return handler
 
 
-async def ask_DeepSeek_V3_1_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    return await _ask_sambanova_model_async(
-        messages,
-        user_id,
-        SAMBANOVA_MODEL_DEEPSEEK_V3_1,
-        max_tokens=9000,
-        temperature=0.7,
-    )
+# Экспортируем функции с ожидаемыми именами
+ask_DeepSeek_R1_Distill_Llama_70B_async = _make_handler("DeepSeek_R1_Distill_Llama_70B")
+ask_DeepSeek_V3_1_async = _make_handler("DeepSeek_V3_1")
+ask_DeepSeek_V3_1_cb_async = _make_handler("DeepSeek_V3_1_cb")
+ask_DeepSeek_V3_2_async = _make_handler("DeepSeek_V3_2")
+ask_Llama_4_Maverick_17B_128E_Instruct_async = _make_handler("Llama_4_Maverick_17B_128E_Instruct")
+ask_Meta_Llama_3_3_70B_Instruct_async = _make_handler("Meta_Llama_3_3_70B_Instruct")
+ask_MiniMax_M2_5_async = _make_handler("MiniMax_M2_5")
+ask_MiniMax_M2_7_async = _make_handler("MiniMax_M2_7")
+ask_Gemma_3_12b_it_async = _make_handler("Gemma_3_12b_it")
+ask_Gpt_oss_120b_async = _make_handler("Gpt_oss_120b")
 
 
-async def ask_DeepSeek_V3_1_cb_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    return await _ask_sambanova_model_async(messages, user_id, SAMBANOVA_MODEL_DEEPSEEK_V3_1_CB, max_tokens=9000)
-
-
-async def ask_DeepSeek_V3_2_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    return await _ask_sambanova_model_async(messages, user_id, SAMBANOVA_MODEL_DEEPSEEK_V3_2, max_tokens=9000)
-
-
-async def ask_Llama_4_Maverick_17B_128E_Instruct_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    return await _ask_sambanova_model_async(
-        messages,
-        user_id,
-        SAMBANOVA_MODEL_LLAMA_4_MAVERICK_17B_128E_INSTRUCT,
-        max_tokens=9000,
-    )
-
-
-async def ask_Meta_Llama_3_3_70B_Instruct_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    return await _ask_sambanova_model_async(
-        messages,
-        user_id,
-        SAMBANOVA_MODEL_META_LLAMA_3_3_70B_INSTRUCT,
-        max_tokens=9000,
-    )
-
-
-async def ask_MiniMax_M2_5_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    return await _ask_sambanova_model_async(messages, user_id, SAMBANOVA_MODEL_MINIMAX_M2_5, max_tokens=9000)
-
-
-async def ask_MiniMax_M2_7_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    return await _ask_sambanova_model_async(messages, user_id, SAMBANOVA_MODEL_MINIMAX_M2_7, max_tokens=9000)
-
-
-async def ask_Gemma_3_12b_it_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    return await _ask_sambanova_model_async(messages, user_id, SAMBANOVA_MODEL_GEMMA_3_12B_IT, max_tokens=9000)
-
+# --- Legacy функции (для обратной совместимости) ---
 
 async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25.0) -> Tuple[str, Optional[int]]:
-    """Legacy DeepSeek-R1 entry point kept for backward compatibility.
+    """Legacy DeepSeek-R1 entry point — использует env-configurable alias.
 
-    Note: This uses the env-configurable ``SAMBANOVA_MODEL_DEEPSEEK`` alias
-    (default DeepSeek-V3.1).  Newer code should use the explicit model helpers.
+    Отличие: asyncio.wait_for для кастомного timeout, stream=False в payload.
     """
+    import asyncio
+
     history = conversation_history.get(user_id)
     history.append({"role": "user", "content": messages})
 
@@ -201,10 +281,10 @@ async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25
     }
 
     try:
-        response = await __import__("asyncio").wait_for(
-            __import__("asyncio").to_thread(
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
                 requests.post,
-                "https://api.sambanova.ai/v1/chat/completions",
+                SAMBANOVA_API_URL,
                 json=payload,
                 headers={
                     "Authorization": f"Bearer {SC_TOKEN}",
@@ -248,86 +328,16 @@ async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25
         return "Что-то пошло не так. Контекст очищен, введите новый запрос.", "0"
 
 
-async def ask_Gpt_oss_120b_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    history = conversation_history.get(user_id)
-    history.append({"role": "user", "content": messages})
-
-    payload = {
-        "model": SAMBANOVA_MODEL_GPT_OSS,
-        "messages": history,
-        "max_tokens": 8192,
-    }
-
-    try:
-        response = await __import__("asyncio").to_thread(
-            requests.post,
-            "https://api.sambanova.ai/v1/chat/completions",
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {SC_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            proxies=proxies,
-            timeout=30,
-        )
-
-        _log_response(response)
-
-        if response.status_code != 200:
-            return extract_api_error_text(str(response.status_code)), "0"
-
-        obj, error_message = safe_parse_response(response.text)
-        if obj is None:
-            return error_message, "0"
-
-        completion_tokens = obj.get("usage", {}).get("completion_tokens", 0)
-        message = obj["choices"][0].get("message", {})
-        assistant_content = message.get("content") or message.get("reasoning") or "Пустой ответ от модели."
-        conversation_history.append(user_id, {"role": "assistant", "content": assistant_content})
-        return assistant_content, completion_tokens
-
-    except requests.exceptions.ConnectionError as e:
-        logger.warning("Connection error: %s", e)
-        return classify_network_error(e), "0"
-    except requests.exceptions.Timeout:
-        return "Таймаут при подключении к серверу. Попробуйте позже.", "0"
-    except requests.exceptions.RequestException as e:
-        logger.warning("Request error: %s", e)
-        return "Ошибка при подключении к серверу API.", "0"
-    except KeyError as e:
-        if is_missing_choices_error(e):
-            return "Ошибка в ответе от сервера AI.", "0"
-        raise
-    except Exception as e:
-        logger.exception("Unexpected error in GPT-OSS call")
-        if is_network_error(e):
-            return "Ошибка подключения. Ваш контекст сохранен, попробуйте позже.", "0"
-        conversation_history.reset(user_id)
-        return "Что-то пошло не так. Контекст очищен, введите новый запрос.", "0"
-
-
 async def ask_Meta_Llama_3_1_70B_Instruct_async(messages: str, user_id: int) -> str:
-    """Legacy Meta-Llama alias kept for backward compatibility.
-
-    It routes to the currently configured Meta-Llama model.
-    """
+    """Legacy Meta-Llama alias — маршрутизирует на текущий Meta config."""
     response, _tokens = await _ask_sambanova_model_async(
-        messages,
-        user_id,
-        SAMBANOVA_MODEL_META,
-        max_tokens=9000,
+        messages, user_id, SAMBANOVA_MODEL_META, max_tokens=9000,
     )
     return response
 
 
 async def ask_Mixtral_8x22b_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    """Legacy Mixtral alias kept for backward compatibility.
-
-    It routes to the currently configured fallback model.
-    """
+    """Legacy Mixtral alias — маршрутизирует на fallback config."""
     return await _ask_sambanova_model_async(
-        messages,
-        user_id,
-        SAMBANOVA_MODEL_MIXTRAL_ALIAS,
-        max_tokens=9000,
+        messages, user_id, SAMBANOVA_MODEL_MIXTRAL_ALIAS, max_tokens=9000,
     )

@@ -1,4 +1,8 @@
-"""Constants used across the AI app."""
+"""Константы, используемые throughout AI-приложение.
+
+Определяет имя группы RBAC для разработчиков промптов, имя cookie для logout
+из админки, часовую зону Москвы (для планировщика) и префикс ключей кэша.
+"""
 
 from zoneinfo import ZoneInfo
 

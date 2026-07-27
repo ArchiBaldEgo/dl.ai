@@ -10,10 +10,22 @@
     <div><strong>Статус:</strong> {{ log.get_status_display }}</div>
     <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y:H:i:s" }}</div>
     <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</div>
-    <div><strong>Кто отправлял:</strong> {{ log.user_full_name|default:log.username|default:log.external_user_id|default:"—" }}</div>
+    <div><strong>Кто отправлял:</strong>
+      {% if log.external_user_id %}
+        <a href="https://dl.gsu.by/report.asp?id={{ log.external_user_id }}" target="_blank" rel="noopener">{{ log.user_full_name|default:log.username|default:log.external_user_id }}</a>
+      {% else %}
+        {{ log.user_full_name|default:log.username|default:"—" }}
+      {% endif %}
+    </div>
     <div><strong>Язык программирования:</strong> {{ log.programming_language_name|default:"—" }}</div>
     <div><strong>Тема:</strong> {{ log.topic_name|default:"—" }}</div>
-    <div><strong>Препромпт:</strong> {{ log.prompt_name|default:"—" }}</div>
+    <div><strong>Препромпт:</strong>
+      {% if log.prompt_id %}
+        <a href="/ai/admin/ai/prompt/{{ log.prompt_id }}/change/" target="_blank" rel="noopener">{{ log.prompt_name|default:"—" }}</a>
+      {% else %}
+        {{ log.prompt_name|default:"—" }}
+      {% endif %}
+    </div>
     <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
     <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
     <div><strong>Время ответа:</strong> {{ log.duration_seconds|floatformat:0|default:"—" }} с</div>
@@ -34,7 +46,9 @@
   <div class="ai-log-actions">
     {% include "admin/ai/_ai_back_nav.html" %}
     <a class="button" href="{% url 'ai_request_logs' %}">← Назад к логам</a>
+    <button type="button" id="resend-btn" class="default" data-log-id="{{ log.id }}">Повторить запрос</button>
   </div>
+  {% csrf_token %}
 </div>
 
 <style>
@@ -68,5 +82,98 @@
     display: flex;
     gap: 8px;
   }
+  #resend-btn {
+    margin-left: auto;
+  }
+  .resend-status {
+    margin-top: 12px;
+    padding: 10px 14px;
+    border-radius: 4px;
+    display: none;
+  }
+  .resend-status.success {
+    background: #e6f4ea;
+    color: #067647;
+    display: block;
+  }
+  .resend-status.error {
+    background: #fef2f2;
+    color: #b42318;
+    display: block;
+  }
 </style>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    const btn = document.getElementById('resend-btn');
+    if (!btn) return;
+
+    btn.addEventListener('click', function () {
+      const logId = btn.dataset.logId;
+      const resendUrl = '/ai/admin/ai/airequestlog/' + logId + '/resend/';
+
+      // Disable button and show loading state.
+      btn.disabled = true;
+      btn.textContent = 'Отправка...';
+
+      // Create status container if it doesn't exist.
+      let statusDiv = document.querySelector('.resend-status');
+      if (!statusDiv) {
+        statusDiv = document.createElement('div');
+        statusDiv.className = 'resend-status';
+        btn.parentElement.insertAdjacentElement('afterend', statusDiv);
+      }
+      statusDiv.className = 'resend-status';
+      statusDiv.textContent = '';
+      statusDiv.style.display = 'none';
+
+      // Get CSRF token from the DOM (rendered by {% csrf_token %}).
+      const csrfInput = document.querySelector('input[name="csrfmiddlewaretoken"]');
+      const csrftoken = csrfInput ? csrfInput.value : '';
+
+      fetch(resendUrl, {
+        method: 'POST',
+        headers: {
+          'X-CSRFToken': csrftoken,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+      })
+      .then(function (response) {
+        return response.json();
+      })
+      .then(function (data) {
+        btn.disabled = false;
+        btn.textContent = 'Повторить запрос';
+        if (data.success) {
+          statusDiv.className = 'resend-status success';
+          statusDiv.textContent = 'Запрос успешно отправлен. ';
+          if (data.new_log_id) {
+            const link = document.createElement('a');
+            link.href = '/ai/admin/ai/airequestlog/' + data.new_log_id + '/';
+            link.textContent = 'Открыть новый лог →';
+            link.style.marginLeft = '8px';
+            statusDiv.appendChild(link);
+          }
+        } else {
+          statusDiv.className = 'resend-status error';
+          statusDiv.textContent = 'Ошибка: ' + (data.error || 'Неизвестная ошибка');
+          if (data.new_log_id) {
+            const link = document.createElement('a');
+            link.href = '/ai/admin/ai/airequestlog/' + data.new_log_id + '/';
+            link.textContent = 'Открыть лог ошибки →';
+            link.style.marginLeft = '8px';
+            statusDiv.appendChild(link);
+          }
+        }
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        btn.textContent = 'Повторить запрос';
+        statusDiv.className = 'resend-status error';
+        statusDiv.textContent = 'Сетевая ошибка: ' + err.message;
+      });
+    });
+  });
+</script>
 {% endblock %}

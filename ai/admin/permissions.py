@@ -1,9 +1,10 @@
-"""Permission helpers shared across AI admin views and model admins."""
+"""Хелперы проверки прав доступа для AI admin views и ModelAdmin."""
 
 from ..constants import PROMPT_DEVELOPER_GROUP
 
 
 def is_prompt_developer_user(user):
+    """Проверяет, входит ли пользователь в группу prompt_developer."""
     if not user or not getattr(user, "is_authenticated", False):
         return False
     if getattr(user, "is_active", True) is False:
@@ -12,6 +13,7 @@ def is_prompt_developer_user(user):
 
 
 def is_staff_or_superuser(user):
+    """Проверяет, является ли пользователь staff или суперпользователем."""
     if not user:
         return False
     if getattr(user, "is_active", True) is False:
@@ -20,22 +22,26 @@ def is_staff_or_superuser(user):
 
 
 def can_access_admin(user):
+    """Доступ к админке: staff/superuser ИЛИ prompt_developer."""
     return is_staff_or_superuser(user) or is_prompt_developer_user(user)
 
 
 def can_access_arm(request):
+    """Доступ к ARM: staff/superuser ИЛИ prompt_developer."""
     if not request.user.is_authenticated:
         return False
     return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
 
 
 def can_access_model_status(request):
+    """Доступ к статусу моделей: только staff/superuser."""
     if not request.user.is_authenticated:
         return False
     return request.user.is_superuser or request.user.is_staff
 
 
 def can_access_prompt_admin(request):
+    """Доступ к управлению промптами: staff/superuser ИЛИ prompt_developer."""
     if not request.user.is_authenticated:
         return False
     if is_staff_or_superuser(request.user):
@@ -51,14 +57,16 @@ def can_access_prompt_regression(request):
 
 
 def can_access_logs(request):
+    """Доступ к логам запросов: только staff/superuser."""
     return request.user.is_authenticated and is_staff_or_superuser(request.user)
 
 
 def filter_app_list_for_user(app_list, request):
-    """Return app_list with models the current user cannot access stripped out.
+    """Фильтрует список приложений в sidebar по правам пользователя.
 
-    Apps that end up with no visible models and no custom links are dropped
-    entirely so they do not render as empty sections in the sidebar.
+    Скрывает модели, к которым у пользователя нет доступа (has_module_permission).
+    Пустые non-AI приложения удаляются целиком. AI-приложение оставляется,
+    если видны кастомные ссылки (ARM и т.д.), даже без видимых моделей.
     """
     if not app_list:
         return app_list

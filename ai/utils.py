@@ -1,7 +1,7 @@
-"""Backward-compatible shim re-exporting legacy model helpers.
+"""Обратная совместимость: реэкспорт старых хелперов для работы с AI-моделями.
 
-New code should import from ``ai.model_clients`` directly. This module is kept
-only to satisfy old imports until all callers are migrated.
+Новый код должен импортировать напрямую из ``ai.model_clients``.
+Этот модуль сохранён только для обратной совместимости со старыми импортами.
 """
 
 from .model_clients.config import (

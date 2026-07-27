@@ -1,3 +1,12 @@
+"""Промежуточное ПО (middleware) для внешней аутентификации и CSRF.
+
+ExternalAuthMiddleware: проверяет DLSID-куку, обращается к внешнему API
+(dl.gsu.by) для получения информации о пользователе, автосоздаёт Django-пользователя
+и привязывает сессию. При невалидном DLSID — редирект на dl.gsu.by.
+
+CsrfSessionFallbackMiddleware: восстанавливает CSRF-токен из сессии при отсутствии куки.
+"""
+
 import os
 from urllib.parse import unquote
 
@@ -20,29 +29,34 @@ logger = logging.getLogger(__name__)
 
 
 def _is_admin_path(path):
+    """Проверяет, является ли путь путём админки (/ai/admin или /ai/admin/...)."""
     normalized = (path or "/").rstrip("/") or "/"
     return normalized == "/ai/admin" or normalized.startswith("/ai/admin/")
 
 
 def _normalize_path(path: str | None) -> str:
+    """Нормализует путь: убирает trailing slash, пустой путь возвращает как '/'."""
     normalized = (path or "/").rstrip("/") or "/"
     return normalized
 
 
 def _is_optional_auth_path(path: str) -> bool:
-    """Paths where a missing DLSID does not trigger a redirect to dl.gsu.by.
+    """Пути, где отсутствие DLSID не вызывает редирект на dl.gsu.by.
 
-    Only used for the admin login/logout/set-password entry points, where
-    the user must be able to reach the form before they have authenticated
-    against the external API. The legacy test-panel entry was removed; all
-    other /ai/... paths require a valid DLSID + EXTERNAL_AUTH_API_URL
-    verification on every request.
+    Только для точек входа админки (login/logout/set-password), где пользователь
+    должен иметь доступ к форме до аутентификации через внешний API.
     """
     normalized = _normalize_path(path)
     return _is_admin_path(normalized)
 
 
 class CsrfSessionFallbackMiddleware:
+    """Восстанавливает CSRF-токен из сессии при отсутствии куки.
+
+    При CSRF_USE_SESSIONS=True Django хранит токен в сессии. Если кука
+    отсутствует (например, после очистки куки), middleware восстанавливает
+    токен из сессии, чтобы формы продолжали работать.
+    """
     def __init__(self, get_response):
         self.get_response = get_response
         self.use_sessions = bool(getattr(settings, "CSRF_USE_SESSIONS", False))
@@ -64,6 +78,18 @@ class CsrfSessionFallbackMiddleware:
 
 
 class ExternalAuthMiddleware:
+    """Промежуточное ПО внешней аутентификации через dl.gsu.by.
+
+    Поток:
+    1. Извлекает DLSID-куку из запроса.
+    2. Если DLSID отсутствует — редирект на dl.gsu.by (кроме админских путей).
+    3. Проверяет DLSID через внешний API (fetch_external_user_info).
+    4. Автосоздаёт Django-пользователя через get_or_create_user_from_external.
+    5. Привязывает сессию к подтверждённому пользователю (защита от stale-сессий).
+    6. Кэширует user_info в сессии для повторных запросов.
+
+    Результат работы доступен через request.user_info и request._ai_provisioned_user.
+    """
     def __init__(self, get_response):
         self.get_response = get_response
         self.api_url = get_external_auth_api_url()
@@ -76,7 +102,7 @@ class ExternalAuthMiddleware:
         logger.info(f"Middleware init: skip_paths={self.skip_paths}")
 
     def _build_skip_paths(self, raw_paths: str) -> list[str]:
-        default_paths = ["/health", "/ai/assets/"]
+        default_paths = ["/health", "/ai/assets/", "/ai/api/groq-limits"]
         entries = [*default_paths, *[p.strip() for p in raw_paths.split(",") if p.strip()]]
         normalized = []
         for path in entries:

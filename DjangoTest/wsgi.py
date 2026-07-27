@@ -1,10 +1,8 @@
 """
-WSGI config for DjangoTest project.
+WSGI-конфигурация проекта DjangoTest (для gunicorn/uvicorn).
 
-It exposes the WSGI callable as a module-level variable named ``application``.
-
-For more information on this file, see
-https://docs.djangoproject.com/en/5.1/howto/deployment/wsgi/
+Используется только при развёртывании без Channels (без WebSocket).
+Для WebSocket использовать ASGI (asgi.py).
 """
 
 import os

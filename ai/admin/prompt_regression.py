@@ -1,8 +1,8 @@
-"""Prompt regression tests admin views (page / start / status trio).
+"""Регрессионные тесты промптов: admin views (страница / запуск / статус).
 
-Mirrors the ARM admin trio in ai/admin/arm.py: a page view that loads a run
-snapshot from ?run_id= and renders the form + report, a POST start endpoint that
-launches a run, and a GET status endpoint polled for progress.
+Аналог ARM admin trio: страница с формой + отчёт, POST-эндпоинт запуска,
+GET-эндпоинт статуса для polling. Запускает одну модель на наборе
+PromptTestCase с выбранным промптом и сравнивает ответ с эталоном.
 """
 
 from .site import ai_admin_site

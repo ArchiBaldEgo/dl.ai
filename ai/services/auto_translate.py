@@ -1,9 +1,8 @@
-"""Auto-translate localized fields (name_en, name_fr, text_en, text_fr)
-using deep-translator (Google Translate) — fast, free, no API key.
+"""Авто-перевод локализованных полей (name_en, name_fr, text_en, text_fr)
+через deep-translator (Google Translate) — быстро, бесплатно, без API-ключа.
 
-Used by the management command ``auto_translate`` and the admin action
-``translate_selected`` to fill empty ``*_en`` / ``*_fr`` fields from the
-Russian (or base) source.
+Используется management-командой auto_translate и admin-action translate_selected
+для заполнения пустых *_en / *_fr полей из русского (или базового) источника.
 """
 
 import logging

@@ -1,6 +1,24 @@
+/**
+ * HTTP API сервер бот-пула для Web DeepSeek.
+ *
+ * Предоставляет два эндпоинта:
+ * - POST /v1/chat/completions — OpenAI-совместимый API (для model_clients/web_deepseek.py).
+ * - POST /api/send — упрощённый API (message + model → content).
+ *
+ * Также:
+ * - GET /health — статус бот-пула (количество готовых/занятых/недоступных ботов).
+ * - POST /api/restart — автоподъём: перезапуск всех ботов (используется health-checker'ом).
+ *
+ * Управление пулом ботов делегируется в botManager (получается извне).
+ */
+
 const express = require('express');
 const { makeChatCompletion, makeOpenAIError } = require('./openaiFormat');
 
+/**
+ * Обёртка для таймаута промиса — отклоняет через ms мс.
+ * Используется для ограничения времени ожидания ответа от бота.
+ */
 function withTimeout(promise, ms) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('Request timeout')), ms);
@@ -17,6 +35,9 @@ function withTimeout(promise, ms) {
   });
 }
 
+/**
+ * Извлекает последнее сообщение пользователя из массива messages (OpenAI format).
+ */
 function extractLastUserMessage(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -25,10 +46,19 @@ function extractLastUserMessage(messages) {
   return '';
 }
 
+/**
+ * Определяет conversation_id из тела запроса, заголовка или user_id.
+ * Используется для маршрутизации сообщений в Puppeteer-сессию бота.
+ */
 function getConversationId(req, body) {
   return body?.conversation_id || req.header('x-conversation-id') || body?.user_id || 'default';
 }
 
+/**
+ * Создаёт Express-приложение с API бот-пула.
+ * @param {object} params - { botManager, config, logger }
+ * @returns {Express} app — Express-приложение
+ */
 function createServer({ botManager, config, logger }) {
   const log = logger?.log ?? (() => {});
   const err = logger?.error ?? (() => {});

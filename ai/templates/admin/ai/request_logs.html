@@ -2,94 +2,182 @@
 
 {% block content %}
 <style>
-  .ai-logs-wrap {
-    max-width: 1400px;
-  }
+  .ai-logs-wrap { max-width: 100%; }
   .ai-logs-filters {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    align-items: flex-end;
-    margin-bottom: 16px;
+    display: flex; flex-wrap: wrap; gap: 12px;
+    align-items: flex-end; margin-bottom: 16px;
   }
-  .ai-logs-filters .filter-field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  .ai-logs-filters .filter-field { display: flex; flex-direction: column; gap: 4px; }
+  .ai-logs-filters label { font-weight: 600; font-size: 12px; }
+  .ai-logs-filters input, .ai-logs-filters select {
+    padding: 6px 8px; border: 1px solid var(--border-color);
+    border-radius: 4px; background: var(--body-bg); color: var(--body-fg);
   }
-  .ai-logs-filters label {
-    font-weight: 600;
-    font-size: 12px;
+  .ai-logs-table { width: 100%; border-collapse: collapse; }
+  .ai-logs-table th, .ai-logs-table td {
+    border: 1px solid var(--hairline-color); padding: 8px 10px;
+    text-align: left; vertical-align: top;
   }
-  .ai-logs-filters input,
-  .ai-logs-filters select {
-    padding: 6px 8px;
-    border: 1px solid var(--border-color);
-    border-radius: 4px;
-    background: var(--body-bg);
-    color: var(--body-fg);
-  }
-  .ai-logs-table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-  .ai-logs-table th,
-  .ai-logs-table td {
-    border: 1px solid var(--hairline-color);
-    padding: 10px;
-    text-align: left;
-    vertical-align: top;
-  }
-  .ai-logs-table th {
-    background: var(--darkened-bg);
-  }
-  .ai-logs-table tr:nth-child(even of .ai-log-row) {
-    background: var(--darkened-bg);
-  }
-  .ai-logs-status-success {
-    color: #067647;
-    font-weight: 600;
-  }
-  .ai-logs-status-error {
-    color: #b42318;
-    font-weight: 600;
-  }
+  .ai-logs-table th { background: var(--darkened-bg); }
+  .ai-logs-status-success { color: #067647; font-weight: 600; }
+  .ai-logs-status-error { color: #b42318; font-weight: 600; }
   .ai-logs-paginator {
-    margin-top: 16px;
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    flex-wrap: wrap;
+    margin-top: 16px; display: flex; gap: 8px;
+    align-items: center; flex-wrap: wrap;
   }
   .ai-logs-empty {
-    padding: 24px;
-    border: 1px dashed var(--hairline-color);
-    border-radius: 6px;
-    text-align: center;
-    color: var(--body-quiet-color);
+    padding: 24px; border: 1px dashed var(--hairline-color);
+    border-radius: 6px; text-align: center; color: var(--body-quiet-color);
   }
-  .ai-log-row {
-    cursor: pointer;
+  .ai-log-row { cursor: pointer; }
+  .ai-log-row:hover { background: var(--selected-row); }
+  .ai-log-response-preview {
+    max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; color: var(--body-quiet-color); font-size: 12px;
   }
-  .ai-log-row:hover {
-    background: var(--selected-row);
+  .ai-log-clickable {
+    cursor: pointer; text-decoration: underline;
+    text-decoration-style: dotted; text-decoration-color: var(--body-quiet-color);
+  }
+  .ai-log-clickable:hover { text-decoration-style: solid; color: var(--link-fg); }
+
+  /* === Аккордеон-раскрытие записи === */
+  .ai-log-detail-row { display: none; }
+  .ai-log-detail-row.open { display: table-row; }
+  .ai-log-detail-cell {
+    padding: 0 !important;
+    border-left: 3px solid var(--hairline-color);
+    background: var(--darkened-bg);
+  }
+  .ai-log-detail-content {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    padding: 12px 16px;
+  }
+  .ai-log-detail-section {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--hairline-color);
+  }
+  .ai-log-detail-section h4 {
+    margin: 0 0 6px 0; font-size: 12px; font-weight: 700;
+    color: var(--body-quiet-color); text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .ai-log-detail-section pre {
+    margin: 0; white-space: pre-wrap; word-wrap: break-word;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px; line-height: 1.4; max-height: 300px; overflow: auto;
+  }
+  .ai-log-detail-section .ai-log-error-text { color: #b42318; }
+  .ai-log-detail-meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 4px 16px;
+    font-size: 12px;
+  }
+  .ai-log-detail-meta div { padding: 2px 0; }
+  .ai-log-detail-meta strong { color: var(--body-quiet-color); }
+  .ai-log-detail-actions {
+    grid-column: 1 / -1;
+    padding: 8px 12px;
+    display: flex; gap: 8px; flex-wrap: wrap;
+    border-top: 2px solid var(--hairline-color);
+  }
+  .ai-log-detail-actions form { display: inline; }
+  .ai-log-detail-actions button {
+    padding: 4px 12px; font-size: 12px; cursor: pointer;
+    border: 1px solid var(--border-color); border-radius: 4px;
+    background: var(--body-bg); color: var(--body-fg);
+  }
+  .ai-log-detail-actions button:hover { background: var(--selected-row); }
+  .ai-log-detail-actions .resend-btn { border-color: #4a90d9; color: #4a90d9; }
+  .ai-log-detail-actions .resend-btn:hover { background: #4a90d9; color: #fff; }
+
+  @media (max-width: 800px) {
+    .ai-log-detail-content { grid-template-columns: 1fr; }
   }
 </style>
 
 <script>
+  const FILTER_KEY = 'ai_logs_filters';
+  const FILTER_FIELDS = ['status', 'mode', 'model', 'user', 'task', 'date_from', 'date_to'];
+
+  // Restore filters from localStorage on page load.
+  document.addEventListener('DOMContentLoaded', function () {
+    const params = new URLSearchParams(window.location.search);
+    const hasFilters = FILTER_FIELDS.some(f => params.has(f) && params.get(f));
+    if (!hasFilters) {
+      try {
+        const saved = JSON.parse(localStorage.getItem(FILTER_KEY) || '{}');
+        let restored = false;
+        FILTER_FIELDS.forEach(function (name) {
+          const el = document.getElementById('id_' + name);
+          if (el && saved[name]) { el.value = saved[name]; restored = true; }
+        });
+        if (restored) {
+          document.querySelector('.ai-logs-filters').submit();
+          return;
+        }
+      } catch (e) {}
+    }
+    const form = document.querySelector('.ai-logs-filters');
+    if (form) {
+      form.addEventListener('submit', function () {
+        const data = {};
+        FILTER_FIELDS.forEach(function (name) {
+          const el = document.getElementById('id_' + name);
+          if (el) data[name] = el.value;
+        });
+        localStorage.setItem(FILTER_KEY, JSON.stringify(data));
+      });
+    }
+  });
+
+  // Click-to-filter + accordion toggle.
   document.addEventListener('click', function (event) {
+    // Click-to-filter cells.
+    const filterCell = event.target.closest('[data-filter-name]');
+    if (filterCell) {
+      event.stopPropagation();
+      event.preventDefault();
+      const filterName = filterCell.dataset.filterName;
+      const filterValue = filterCell.dataset.filterValue;
+      const el = document.getElementById('id_' + filterName);
+      if (el) {
+        el.value = filterValue;
+        const data = {};
+        FILTER_FIELDS.forEach(function (name) {
+          const f = document.getElementById('id_' + name);
+          if (f) data[name] = f.value;
+        });
+        localStorage.setItem(FILTER_KEY, JSON.stringify(data));
+        document.querySelector('.ai-logs-filters').submit();
+      }
+      return;
+    }
+
+    // Accordion toggle — click on row to expand/collapse detail.
     const row = event.target.closest('.ai-log-row');
     if (!row) return;
+    if (event.target.tagName === 'A') return;  // don't toggle on links
+    if (event.target.closest('.ai-log-detail-row')) return;  // don't toggle from detail
 
-    const url = row.dataset.detailUrl;
-    if (url) {
-      window.location.href = url;
+    const detailRow = row.nextElementSibling;
+    if (!detailRow || !detailRow.classList.contains('ai-log-detail-row')) return;
+
+    const isOpen = detailRow.classList.contains('open');
+    // Close all other open rows.
+    document.querySelectorAll('.ai-log-detail-row.open').forEach(function (r) {
+      r.classList.remove('open');
+    });
+    if (!isOpen) {
+      detailRow.classList.add('open');
     }
   });
 </script>
 
 <div class="ai-logs-wrap">
-  {% include "admin/ai/_ai_back_nav.html" %}
   <h1>{{ title }}</h1>
 
   <form method="get" class="ai-logs-filters">
@@ -113,11 +201,25 @@
     </div>
     <div class="filter-field">
       <label for="id_model">Модель</label>
-      <input id="id_model" type="text" name="model" value="{{ filters.model }}" placeholder="Название модели">
+      <select id="id_model" name="model">
+        <option value="">Все</option>
+        {% for mc in model_choices %}
+          <option value="{{ mc.key }}" {% if filters.model == mc.key %}selected{% endif %}>{{ mc.title }}</option>
+        {% endfor %}
+      </select>
     </div>
     <div class="filter-field">
       <label for="id_user">Пользователь</label>
       <input id="id_user" type="text" name="user" value="{{ filters.user }}" placeholder="ID, логин или ФИО">
+    </div>
+    <div class="filter-field">
+      <label for="id_task">Задача</label>
+      <select id="id_task" name="task">
+        <option value="">Все</option>
+        {% for tc in task_choices %}
+          <option value="{{ tc.node_id }}" {% if filters.task|stringformat:"s" == tc.node_id|stringformat:"s" %}selected{% endif %}>{{ tc.name }}</option>
+        {% endfor %}
+      </select>
     </div>
     <div class="filter-field">
       <label for="id_date_from">С</label>
@@ -141,42 +243,142 @@
           <th>Отправлен</th>
           <th>Получен</th>
           <th>Кто отправлял</th>
-          <th>Язык программирования</th>
+          <th>Язык</th>
           <th>Тема</th>
           <th>Задача</th>
           <th>Препромпт</th>
           <th>Модель</th>
           <th>Статус</th>
           <th>Режим</th>
-          <th>Время ответа, с</th>
+          <th>с</th>
+          <th>Ответ</th>
         </tr>
       </thead>
       <tbody>
         {% timezone moscow_tz %}
         {% for log in page_obj.object_list %}
-          <tr class="ai-log-row" data-detail-url="{% url 'ai_request_log_detail' log.id %}">
+          {# === Основная строка (кликабельная — раскрывает детали) === #}
+          <tr class="ai-log-row" data-log-id="{{ log.id }}">
             <td>{{ log.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>{{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>
-              {% if log.user_full_name %}{{ log.user_full_name }}{% endif %}
-              {% if log.external_user_id %}<br><small><a href="https://dl.gsu.by/report.asp?id={{ log.external_user_id }}" target="_blank" rel="noopener">{{ log.external_user_id }}</a></small>{% endif %}
+              {% if log.external_user_id %}
+                <a href="https://dl.gsu.by/report.asp?id={{ log.external_user_id }}" target="_blank" rel="noopener">{{ log.user_full_name|default:log.username|default:log.external_user_id }}</a>
+              {% else %}
+                {{ log.user_full_name|default:log.username|default:"—" }}
+              {% endif %}
             </td>
             <td>{{ log.programming_language_name|default:"—" }}</td>
             <td>{{ log.topic_name|default:"—" }}</td>
             <td>
               {% if log.task_node_id %}
-                <a href="https://dl.gsu.by/admin/fullTaskviewer.asp?nid={{ log.task_node_id }}" target="_blank" rel="noopener">{{ log.task_name|default:log.task_node_id }}</a>
+                <span class="ai-log-clickable" data-filter-name="task" data-filter-value="{{ log.task_node_id }}"><a href="https://dl.gsu.by/admin/fullTaskviewer.asp?nid={{ log.task_node_id }}" target="_blank" rel="noopener">{{ log.task_name|default:log.task_node_id }}</a></span>
               {% else %}
                 {{ log.task_name|default:"—" }}
               {% endif %}
             </td>
-            <td>{{ log.prompt_name|default:"—" }}</td>
-            <td>{{ log.model_names|join:", "|default:"—" }}</td>
-            <td class="{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">
-              {{ log.get_status_display }}
+            <td>
+              {% if log.prompt_id %}
+                <a href="/ai/admin/ai/prompt/{{ log.prompt_id }}/change/" target="_blank" rel="noopener">{{ log.prompt_name|default:"—" }}</a>
+              {% else %}
+                {{ log.prompt_name|default:"—" }}
+              {% endif %}
             </td>
-            <td>{{ log.get_mode_display|default:"—" }}</td>
+            <td>
+              {% for mn in log.model_names %}
+                {% if forloop.first %}
+                  <span class="ai-log-clickable" data-filter-name="model" data-filter-value="{{ mn }}">{{ mn }}</span>
+                {% else %}
+                  , <span class="ai-log-clickable" data-filter-name="model" data-filter-value="{{ mn }}">{{ mn }}</span>
+                {% endif %}
+              {% endfor %}
+              {% if not log.model_names %}—{% endif %}
+            </td>
+            <td class="{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">
+              <span class="ai-log-clickable" data-filter-name="status" data-filter-value="{{ log.status }}">{{ log.get_status_display }}</span>
+            </td>
+            <td>
+              <span class="ai-log-clickable" data-filter-name="mode" data-filter-value="{{ log.mode }}">{{ log.get_mode_display|default:"—" }}</span>
+            </td>
             <td>{{ log.duration_seconds|floatformat:0|default:"—" }}</td>
+            <td>
+              <div class="ai-log-response-preview" title="{{ log.response_text|default:'' }}">{{ log.response_text|truncatechars:80|default:"—" }}</div>
+            </td>
+          </tr>
+
+          {# === Скрытая строка с деталями (аккордеон) === #}
+          <tr class="ai-log-detail-row">
+            <td class="ai-log-detail-cell" colspan="12">
+              <div class="ai-log-detail-content">
+
+                {# Левая колонка: метаданные + текст запроса #}
+                <div class="ai-log-detail-section">
+                  <h4>Параметры запроса</h4>
+                  <div class="ai-log-detail-meta">
+                    <div><strong>ID:</strong> {{ log.id }}</div>
+                    <div><strong>Источник:</strong> {{ log.get_source_display|default:"—" }}</div>
+                    <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
+                    <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
+                    <div><strong>Статус:</strong> {{ log.get_status_display }}</div>
+                    <div><strong>Время ответа:</strong> {{ log.duration_seconds|floatformat:2|default:"—" }} с</div>
+                    <div><strong>Токенов:</strong> {{ log.tokens|default:"—" }}</div>
+                    <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y:H:i:s" }}</div>
+                    <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</div>
+                    <div><strong>Кто:</strong>
+                      {% if log.external_user_id %}
+                        <a href="https://dl.gsu.by/report.asp?id={{ log.external_user_id }}" target="_blank" rel="noopener">{{ log.user_full_name|default:log.username }} [{{ log.external_user_id }}]</a>
+                      {% else %}
+                        {{ log.user_full_name|default:log.username|default:"—" }}
+                      {% endif %}
+                    </div>
+                    <div><strong>Язык:</strong> {{ log.programming_language_name|default:"—" }}</div>
+                    <div><strong>Тема:</strong> {{ log.topic_name|default:"—" }}</div>
+                    <div><strong>Задача:</strong>
+                      {% if log.task_node_id %}
+                        <a href="https://dl.gsu.by/admin/fullTaskviewer.asp?nid={{ log.task_node_id }}" target="_blank" rel="noopener">{{ log.task_name|default:log.task_node_id }}</a>
+                      {% else %}
+                        {{ log.task_name|default:"—" }}
+                      {% endif %}
+                    </div>
+                    <div><strong>Препромпт:</strong>
+                      {% if log.prompt_id %}
+                        <a href="/ai/admin/ai/prompt/{{ log.prompt_id }}/change/" target="_blank" rel="noopener">{{ log.prompt_name|default:"—" }}</a>
+                      {% else %}
+                        {{ log.prompt_name|default:"—" }}
+                      {% endif %}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="ai-log-detail-section">
+                  <h4>Текст запроса</h4>
+                  <pre>{{ log.message|default:"(пусто)" }}</pre>
+                </div>
+
+                {# Правая колонка: ответ модели + ошибки #}
+                <div class="ai-log-detail-section">
+                  <h4>Ответ модели</h4>
+                  <pre>{{ log.response_text|default:"(пусто)" }}</pre>
+                </div>
+
+                {% if log.error_message %}
+                <div class="ai-log-detail-section">
+                  <h4>Ошибка</h4>
+                  <pre class="ai-log-error-text">{{ log.error_message }}</pre>
+                </div>
+                {% endif %}
+
+                {# Действия === #}
+                <div class="ai-log-detail-actions">
+                  <form method="post" action="{% url 'ai_request_log_resend' log.id %}">
+                    {% csrf_token %}
+                    <button type="submit" class="resend-btn">↻ Повторить запрос</button>
+                  </form>
+                  <a class="button" href="{% url 'ai_request_log_detail' log.id %}">Открыть на отдельной странице →</a>
+                </div>
+
+              </div>
+            </td>
           </tr>
         {% endfor %}
         {% endtimezone %}

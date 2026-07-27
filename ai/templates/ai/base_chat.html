@@ -13,6 +13,7 @@
     {% endblock %}
     {% block extra_css %}{% endblock %}
     {% block js %}
+    <script src="/ai/assets/admin/js/ai-common.js" defer></script>
     <script src="/ai/assets/admin/js/chat_template.js" defer></script>
     {% endblock %}
     {% block extra_js %}{% endblock %}
@@ -39,6 +40,8 @@
                         <option value="" selected disabled>Сегодня нет доступных моделей</option>
                     {% endif %}
                 </select>
+                <div id="groqLimitsWidget" style="display:none; font-size:11px; color:#888; margin-top:2px;"></div>
+                <div id="openrouterLimitsWidget" style="display:none; font-size:11px; color:#888; margin-top:2px;"></div>
                 <select id="selectType" onchange="goToAiPage(this)">
                     <option data-link="/ai/chat/" {% block chat_selected %}{% endblock %}>Чат с DLAI</option>
                     <option data-link="/ai/solve-problem/" {% block solve_selected %}{% endblock %}>Реши задачу</option>
@@ -68,11 +71,6 @@
                 </div>
             </div>
             <div class="panel-date">11.03.2026</div>
-            {% if token_usage %}
-            <div class="token-usage" title="Суммарно токенов за сегодня по всем моделям (млн)">
-                Токенов сегодня: {{ token_usage.used_display }}{% if token_usage.limit_display %} / {{ token_usage.limit_display }}{% endif %}
-            </div>
-            {% endif %}
         </div>
         <hr/>
 

@@ -21,6 +21,7 @@ staticfiles/
 # Docker
 *.env
 .env.*
+.env
 
 # IDE
 .vscode/

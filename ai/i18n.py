@@ -1,4 +1,9 @@
-"""UI-language localization helpers for AI app models."""
+"""Хелперы локализации UI для моделей AI-приложения.
+
+Поддерживает три языка интерфейса: Русский, English, Français.
+Предоставляет функции для получения локализованных имён и текстов полей
+моделей (Prompt, Topic, SharedPrompt) на основе выбранного языка UI.
+"""
 
 from typing import Any
 

@@ -1,4 +1,4 @@
-"""Model health status admin views."""
+"""Страница статуса AI-моделей в админке."""
 
 from .site import ai_admin_site
 from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse

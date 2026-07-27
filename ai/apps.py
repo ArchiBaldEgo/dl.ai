@@ -1,3 +1,10 @@
+"""Конфигурация Django-приложения ai.
+
+При ready() подключает сигнал post_migrate для создания группы prompt_developer
+и запускает планировщик проверки доступности моделей (если не отключён
+через AI_DISABLE_HEALTH_SCHEDULER и запущен через daphne/gunicorn/uvicorn/runserver).
+"""
+
 import os
 import sys
 
@@ -6,7 +13,11 @@ from django.db.models.signals import post_migrate
 
 
 def ensure_default_groups(sender, **kwargs):
-    # Ensure required RBAC groups exist in every environment.
+    """Создаёт RBAC-группу prompt_developer и назначает ей права на Prompt.
+
+    Вызывается через сигнал post_migrate после применения миграций.
+    Гарантирует наличие группы в любой среде (dev, staging, prod).
+    """
     from django.contrib.auth.models import Group, Permission
     from django.contrib.contenttypes.models import ContentType
 
@@ -22,6 +33,13 @@ def ensure_default_groups(sender, **kwargs):
 
 
 class AiConfig(AppConfig):
+    """Конфигурация приложения ai.
+
+    В методе ready() регистрирует обработчик post_migrate для создания
+    группы prompt_developer и запускает фоновый планировщик проверки
+    доступности AI-моделей (model_health). Планировщик запускается только
+    в основном процессе (не в autoreloader) и только для daphne/gunicorn/uvicorn/runserver.
+    """
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'ai'
 

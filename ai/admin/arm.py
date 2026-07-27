@@ -1,4 +1,10 @@
-"""ARM (multi-model check) admin views."""
+"""ARM (AI Run Manager) — admin views для запуска и мониторинга тестирования моделей.
+
+Содержит views для:
+- Find-error: запуск одной модели на задачу+код, проверка через DL.
+- Batch solve: запуск набора задач × набор моделей с проверкой через DL API.
+- Статус прогонов (polling для фронтенда).
+"""
 
 from .site import ai_admin_site
 from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse

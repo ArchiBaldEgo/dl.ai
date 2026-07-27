@@ -1,8 +1,12 @@
-"""Small HTTP helpers used across the AI app."""
+"""Небольшие HTTP-хелперы для AI-приложения."""
 
 
 def safe_relative_url(candidate, fallback):
-    """Return a relative URL if it is safe, otherwise the fallback."""
+    """Возвращает относительный URL, если он безопасен, иначе fallback.
+
+    Защита от open-redirect: принимает только пути, начинающиеся с '/'
+    и не начинающиеся с '//' (протокол-относительный URL).
+    """
     value = (candidate or "").strip()
     if value.startswith("/") and not value.startswith("//"):
         return value

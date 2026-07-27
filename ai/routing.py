@@ -1,3 +1,8 @@
+"""Маршрутизация WebSocket-соединений для AI-приложения.
+
+URL: /ai/chat/ws/<client_id> — где client_id уникальный идентификатор
+клиентского соединения (генерируется фронтендом для каждого таба/окна).
+"""
 from channels.routing import ProtocolTypeRouter, URLRouter
 from channels.auth import AuthMiddlewareStack
 from django.urls import re_path

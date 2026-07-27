@@ -1,5 +1,19 @@
+/**
+ * Менеджер пула Puppeteer-ботов для Web DeepSeek.
+ *
+ * BotManager управляет жизненным циклом пула ботов:
+ * - Создание ботов (до maxBotCount).
+ * - Auto-spawn: если нет живых ботов — спавнит новый каждые 10с.
+ * - Reap: каждые 5с удаляет мёртвые боты (упавший браузер/страница).
+ * - acquireReadyBot(): занимает готовый бот для обработки запроса.
+ * - restartAll(): автоподъём — закрытие всех ботов и спавн нового.
+ *
+ * Состояния бота: STARTING → READY → BUSY → READY (или FAILED / NOT_AUTORIZED).
+ */
+
 const path = require('path');
 
+/** Состояния бота в пуле. */
 const BotState = Object.freeze({
     STARTING: 'starting',
     READY: 'ready',
@@ -17,6 +31,11 @@ function loadWorkerFactory() {
     return mod.createBot;
 }
 
+/**
+ * Обёртка над Bot (worker/bot.js) для управления состоянием в пуле.
+ * Отслеживает state (STARTING/READY/BUSY/FAILED/NOT_AUTORIZED),
+ * делегирует init/sendMessage/close внутреннему _impl.
+ */
 class BotWrapper {
     constructor({ id, createBot, sharedHist }) {
         this.id = id;
@@ -83,6 +102,9 @@ class BotWrapper {
     }
 }
 
+/**
+ * Менеджер пула ботов: создание, поиск готовых, авто-spawn, reap мёртвых, restart.
+ */
 class BotManager {
     constructor({ maxBotCount, sharedHist, logger }) {
         this.maxBotCount = maxBotCount;
@@ -97,6 +119,19 @@ class BotManager {
 
         this._reapTimer = setInterval(() => this._reapDeadBots(), 5000);
         if (typeof this._reapTimer?.unref === 'function') this._reapTimer.unref();
+
+        // Auto-spawn: ensure at least 1 bot is always trying to start.
+        this._autoSpawnTimer = setInterval(() => this._autoSpawn(), 10000);
+        if (typeof this._autoSpawnTimer?.unref === 'function') this._autoSpawnTimer.unref();
+    }
+
+    _autoSpawn() {
+        if (this._spawning) return;
+        const aliveCount = this._bots.filter(b => b.state !== BotState.FAILED && b.state !== BotState.NOT_AUTORIZED).length;
+        if (aliveCount === 0 && this.canSpawn()) {
+            this.log('[pool] auto-spawn: no alive bots, spawning new one');
+            this.ensureSpawnIfNeeded();
+        }
     }
 
     _reapDeadBots() {
@@ -196,6 +231,7 @@ class BotManager {
 
     async shutdown() {
         if (this._reapTimer) clearInterval(this._reapTimer);
+        if (this._autoSpawnTimer) clearInterval(this._autoSpawnTimer);
         await Promise.allSettled(this._bots.map((b) => b.close()));
     }
 

@@ -1,11 +1,11 @@
-"""Message composition for WebSocket chat modes."""
+"""Композиция сообщений для режимов WebSocket-чата (chat/solve/find_error)."""
 
 from ..i18n import get_language_instruction
 from .prompt_resolver import PromptResolver, get_default_shared_prompt
 
 
 class ModeMessageBuilder:
-    """Base class for composing a user message for a specific chat mode."""
+    """Базовый класс для построения сообщения в конкретном режиме чата."""
 
     mode: str = ""
 

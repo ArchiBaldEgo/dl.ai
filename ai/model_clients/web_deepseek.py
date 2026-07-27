@@ -1,4 +1,9 @@
-"""Bot-pool based Web DeepSeek clients."""
+"""Клиенты Web DeepSeek через бот-пул (Puppeteer-based).
+
+Web DeepSeek и Web DeepSeek Thinking обращаются к внешнему бот-пулу
+(bot/api/server.js) через HTTP API. Бот-пул управляет Puppeteer-сессиями
+на сайте DeepSeek. Поддерживает автоперезапуск (restart_bot_pool).
+"""
 
 import json
 import logging
@@ -57,9 +62,9 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
         "thinking": thinking,
         "message": msg,
     }
-    max_attempts = 4
+    max_attempts = 5
     for attempt in range(1, max_attempts + 1):
-        response = await __import__("asyncio").to_thread(_post_to_bot_pool, payload, 120)
+        response = await __import__("asyncio").to_thread(_post_to_bot_pool, payload, 180)
         logger.debug("Bot pool response status: %s (attempt %s/%s)", response.status_code, attempt, max_attempts)
 
         if response.status_code == 200:
@@ -68,8 +73,10 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
                 return error_message, 0
             return obj["data"]["content"], 0
 
-        if response.status_code in (503, 504) and attempt < max_attempts:
-            await __import__("asyncio").sleep(attempt * 2)
+        if response.status_code in (500, 502, 503, 504) and attempt < max_attempts:
+            wait = min(attempt * 3, 15)
+            logger.warning("Bot pool returned %s, retrying in %ss (attempt %s/%s)", response.status_code, wait, attempt, max_attempts)
+            await __import__("asyncio").sleep(wait)
             continue
 
         if response.status_code == 400:

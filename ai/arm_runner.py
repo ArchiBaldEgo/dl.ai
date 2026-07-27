@@ -1,3 +1,15 @@
+"""ARM (AI Run Manager) — запуск и мониторинг тестирования AI-моделей.
+
+Поддерживает два режима:
+- Single (find-error): одна модель × один запрос, результаты в памяти и в БД.
+- Batch (solve): набор задач × набор моделей, с проверкой через DL API
+  (отправка кода на dl.gsu.by) или через difflib-сравнение с образцовым решением.
+
+In-memory job-словарь (_jobs) хранит живой прогресс; AIModelTestRun/AIModelTestResult
+в БД — источник правды для завершённых прогонов. Старые job-ы чистятся через
+_prune_old_jobs (TTL 6 часов).
+"""
+
 import copy
 import json
 import threading
@@ -17,12 +29,15 @@ from .models import AIModelTestResult, AIModelTestRun, AIRequestLog, ExternalDLA
 
 User = get_user_model()
 
+# In-memory хранилище активных и завершённых job-ов. Ключ — run_id (UUID hex).
 _jobs_lock = threading.Lock()
 _jobs = {}
+# Максимальное время хранения завершённого job-а в памяти (6 часов).
 _MAX_JOB_AGE_SECONDS = 6 * 60 * 60
 
 
 def _prune_old_jobs(now_ts):
+    """Удаляет завершённые job-ы старше _MAX_JOB_AGE_SECONDS из памяти."""
     stale_job_ids = []
     for run_id, job in _jobs.items():
         if job.get("status") not in {"completed", "failed"}:
@@ -341,6 +356,12 @@ def _run_job_worker(
     prompt_id=None,
     prompt_name="",
 ):
+    """Фоновый worker для single-run (find-error): последовательно вызывает модели.
+
+    Создаёт AIModelTestRun и AIRequestLog в БД, перебирает модели по одной,
+    сохраняет результат каждой в AIModelTestResult и в in-memory job.
+    При evict (job удалён из памяти) — помечает прогон как failed в БД.
+    """
     test_run = None
     log = None
     start_time = timezone.now()
@@ -543,10 +564,12 @@ def _run_job_worker(
             ]
             db_report = _build_report(db_results)
             if log is not None:
+                any_ok = any(r.get("status") == "ok" for r in db_results)
                 AIRequestLog.objects.filter(pk=log.pk).update(
                     received_at=end_time,
                     duration_seconds=(end_time - start_time).total_seconds(),
-                    status=AIRequestLog.STATUS_SUCCESS,
+                    status=AIRequestLog.STATUS_SUCCESS if any_ok else AIRequestLog.STATUS_ERROR,
+                    error_message="" if any_ok else "Все модели вернули пустой ответ",
                 )
             AIModelTestRun.objects.filter(pk=test_run.pk).update(
                 status=AIModelTestRun.STATUS_COMPLETED,
@@ -572,7 +595,7 @@ def _run_job_worker(
             received_at=end_time,
             duration_seconds=(end_time - start_time).total_seconds(),
             response_text=response_summary[:5000],
-            status=AIRequestLog.STATUS_SUCCESS,
+            status=AIRequestLog.STATUS_SUCCESS if any(r.get("status") == "ok" for r in results) else AIRequestLog.STATUS_ERROR,
         )
         AIModelTestRun.objects.filter(pk=test_run.pk).update(
             status=AIModelTestRun.STATUS_COMPLETED,
@@ -616,6 +639,10 @@ def start_arm_sequential_run(
     prompt_id=None,
     prompt_name="",
 ):
+    """Запускает single-run ARM в фоновом потоке.
+
+    Возвращает (run_id, error_message). Если error_message непустой — run_id=None.
+    """
     handlers = get_runtime_model_handlers()
     valid_model_keys = [key for key in selected_model_keys if key in handlers]
     if not valid_model_keys:
@@ -997,10 +1024,11 @@ def _run_batch_job_worker(
             report = _build_batch_report(db_results)
 
         end_time = timezone.now()
+        any_ok_batch = any(r.get("status") == "ok" for r in (results if not evicted else db_results))
         AIRequestLog.objects.filter(pk=log.pk).update(
             received_at=end_time,
             duration_seconds=(end_time - start_time).total_seconds(),
-            status=AIRequestLog.STATUS_SUCCESS,
+            status=AIRequestLog.STATUS_SUCCESS if any_ok_batch else AIRequestLog.STATUS_ERROR,
         )
         AIModelTestRun.objects.filter(pk=test_run.pk).update(
             status=AIModelTestRun.STATUS_COMPLETED,
@@ -1054,6 +1082,13 @@ def _batch_results_from_db(test_run):
 
 
 def start_batch_solve_run(task_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None):
+    """Запускает batch-solve ARM: задачи × модели в фоновом потоке.
+
+    Возвращает (run_id, error_message). Пустые task_ids/model_keys означают
+    «все активные задачи»/«все доступные модели».
+    dl_test=True — отправка кода на dl.gsu.by для реальной проверки;
+    dl_test=False — только difflib-сравнение с образцовым решением.
+    """
     """Start a batch-solve ARM run over the given tasks × models.
 
     Returns (run_id, error_message). ``task_ids`` / ``model_keys`` empty means
@@ -1190,6 +1225,11 @@ def _snapshot_from_test_run(test_run):
 
 
 def get_arm_run_snapshot(run_id):
+    """Возвращает снимок состояния ARM-прогона по run_id.
+
+    Сначала ищет in-memory job (живой прогресс), затем — в БД (AIModelTestRun).
+    Возвращает None, если прогон не найден.
+    """
     if not run_id:
         return None
 

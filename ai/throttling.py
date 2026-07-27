@@ -1,4 +1,9 @@
-"""Per-user rate limiting for HTTP views and WebSocket messages."""
+"""Ограничение частоты запросов (rate limiting) для HTTP и WebSocket.
+
+Реализует скользящее окно на Django cache для каждого пользователя.
+Раздельные лимиты для WebSocket, HTTP-действий и poll-запросов (фоновых
+опросов статуса ARM/моделей). Poll-запросы не расходуют основной лимит.
+"""
 
 import logging
 from functools import wraps
@@ -48,7 +53,11 @@ def _identity_key(prefix: str, user_id: str) -> str:
 
 
 class RateLimiter:
-    """Simple per-user sliding-window rate limiter backed by Django cache."""
+    """Ограничитель частоты запросов на пользователя (sliding window на Django cache).
+
+    Использует три отдельных счётчика: ws (WebSocket), http (действия), poll (фоновые опросы).
+    При сбое cache — разрешает запрос (fail-open).
+    """
 
     def __init__(self, ws_limit=None, http_limit=None, window_seconds=None, poll_limit=None):
         self._ws_limit = ws_limit
@@ -85,12 +94,17 @@ class RateLimiter:
             return True
         key = _identity_key(prefix, str(user_id))
         try:
-            current = cache.get(key, 0)
-            if not isinstance(current, int):
-                current = 0
-            current += 1
-            cache.set(key, current, timeout=self.window_seconds)
+            # Atomic increment: cache.incr returns the new value.
+            # On first use, cache.add sets initial=1 atomically.
+            current = cache.incr(key)
+            if current == 1:
+                # First request in window — set the TTL.
+                cache.set(key, 1, timeout=self.window_seconds)
             return current <= limit
+        except ValueError:
+            # Key doesn't exist yet — create it atomically.
+            cache.add(key, 1, timeout=self.window_seconds)
+            return True
         except Exception:
             logger.exception("Rate limiter cache failure; allowing request")
             return True
@@ -167,7 +181,13 @@ def rate_limited(view_func: Callable) -> Callable:
 
 
 class RateLimitMiddleware:
-    """Middleware that enforces rate limits on all /ai/ HTTP requests."""
+    """Middleware для ограничения частоты HTTP-запросов к /ai/.
+
+    Применяет rate limit ко всем /ai/ запросам, кроме:
+    - статических файлов (/ai/assets/, /ai/static/)
+    - страниц админки (/ai/admin/)
+    - poll-запросов (имеют отдельный лимит)
+    """
 
     def __init__(self, get_response):
         self.get_response = get_response

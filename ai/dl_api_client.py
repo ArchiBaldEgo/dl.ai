@@ -1,7 +1,15 @@
-"""Thin client for the external dl.gsu.by REST API.
+"""Клиент для внешнего REST API dl.gsu.by.
 
-Provides helpers to fetch task information and sample solutions.
-Reuses the same SSL/proxy settings as the external auth flow.
+Предоставляет функции для:
+- Получения информации о задачах (fetch_task_info).
+- Получения образцовых решений (fetch_task_solution).
+- Отправки решений на проверку (send_solution_to_dl, get_solution_result_from_dl).
+- Получения списка решений (get_solutions_from_dl).
+- Получения имён пользователей (fetch_user_names).
+
+Содержит робустную логику декодирования ответов: автодетект mojibake
+(UTF-8-as-cp1251, CP866-via-cp1251) и восстановление корректного текста.
+Все ошибки обёрнуты в типизированные исключения (DLApiError и подклассы).
 """
 
 import json

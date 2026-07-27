@@ -1,3 +1,14 @@
+"""Представления (views) AI-приложения.
+
+Содержит:
+- Страницы чата, решения задач и поиска ошибок (chat_view, decide_task_view, find_error_view).
+- API-эндпоинты для получения языков, тем, промптов, данных задач dl.gsu.by.
+- Прокси-эндпоинты к DL API (получение задач, отправка решений, проверка результатов).
+- Транскрипцию аудио через Google Speech Recognition.
+- Установку пароля для внешних пользователей (set_password_view).
+- Проверку доступа (prompt_developer_access_required, _has_page_access).
+"""
+
 import json
 import os
 import logging
@@ -12,9 +23,10 @@ from django.db.models import Q
 from django.contrib.staticfiles import finders
 from django.middleware import csrf
 from functools import wraps
-from django.views.decorators.csrf import csrf_exempt       
+
 from django.views.decorators.http import require_http_methods  
 from django.conf import settings
+from .throttling import rate_limited
 from .model_health import get_available_model_options, trigger_model_health_refresh_async
 from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
 from .auth_backends import (
@@ -54,7 +66,36 @@ logger = logging.getLogger(__name__)
 
 
 def health_view(request):
+    """Простой health-check эндпоинт: возвращает {"ok": true}."""
     return JsonResponse({"ok": True})
+
+
+@require_http_methods(["GET"])
+def get_groq_limits_view(request):
+    """API: возвращает текущие rate-limit-ы по всем Groq моделям.
+
+    Данные берутся из in-memory кэша в ai.model_clients.groq._rate_limit_cache,
+    который обновляется при каждом запросе к Groq API (см. _update_rate_limit_cache).
+
+    Если в кэше есть данные — отдаёт их. Если данных ещё нет (контейнер только
+    запущен) — запускает фоновый probe (probe_rate_limits) и возвращает пустой
+    словарь, чтобы фронтенд мог показать «загрузка…» и повторить через минуту.
+    """
+    from .model_clients.groq import get_rate_limits, probe_rate_limits
+    import asyncio
+
+    cache = get_rate_limits()
+    if not cache:
+        # Нет данных — пробиваем лёгким запросом (неблокирующий)
+        try:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(probe_rate_limits())
+            loop.close()
+            cache = get_rate_limits()
+        except Exception:
+            pass
+
+    return JsonResponse({"limits": cache})
 
 try:
     import speech_recognition as sr
@@ -63,10 +104,10 @@ except ImportError:
     SPEECH_RECOGNITION_AVAILABLE = False
 
 
-_safe_relative_url = safe_relative_url
 
 
 def prompt_developer_access_required(view_func):
+    """Декоратор: разрешает доступ только суперпользователям и членам группы prompt_developer."""
     @wraps(view_func)
     def _wrapped(request, *args, **kwargs):
         user = getattr(request, "user", None)
@@ -80,6 +121,7 @@ def prompt_developer_access_required(view_func):
 
 
 def _is_ai_app_enabled():
+    """Проверяет, включено ли AI-приложение (через AIAppSettings). Возвращает True при ошибке БД."""
     try:
         return AIAppSettings.get_solo().is_enabled
     except ProgrammingError:
@@ -112,6 +154,12 @@ def _has_page_access(request):
 
 
 def _render_ai_page(request, template_name, extra_context=None):
+    """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
+
+    Проверяет доступ, загружает список доступных моделей (с self-heal при пустом списке),
+    сортирует модели по приоритету (Web_DeepSeek первыми), добавляет информацию
+    о daily token usage и external_session_id.
+    """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
     if not _is_ai_app_enabled():
@@ -156,9 +204,11 @@ def _render_ai_page(request, template_name, extra_context=None):
     return render(request, template_name, context)
 
 
+@rate_limited
+@require_http_methods(["GET", "POST"])
 def set_password_view(request):
     """Allow an externally authenticated admin user to set a first password."""
-    next_url = _safe_relative_url(
+    next_url = safe_relative_url(
         request.POST.get("next") if request.method == "POST" else request.GET.get("next"),
         "/ai/admin/",
     )
@@ -255,10 +305,12 @@ def set_password_view(request):
 
 
 def chat_view(request):
+    """Страница чата с AI-моделью."""
     return _render_ai_page(request, 'ai/chat.html')
 
 
 def decide_task_view(request):
+    """Страница решения задачи: принимает node_id и compiler_name из query-параметров."""
     return _render_ai_page(
         request,
         'ai/decide-task.html',
@@ -270,10 +322,14 @@ def decide_task_view(request):
 
 
 def find_error_view(request):
+    """Страница поиска ошибок в коде с помощью AI."""
     return _render_ai_page(request, 'ai/find-error.html')
 
 
 def get_languages(request):
+    """API: возвращает список всех языков программирования."""
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
     languages = [
         serialize_programming_language(lang)
         for lang in ProgrammingLanguage.objects.order_by('language_name')
@@ -282,6 +338,9 @@ def get_languages(request):
 
 
 def get_topics(request):
+    """API: возвращает список всех тем с локализованными названиями."""
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
     ui_language = request.GET.get('ui_language', 'Русский')
     topics = [
         serialize_topic(topic, ui_language)
@@ -291,6 +350,7 @@ def get_topics(request):
 
 
 def get_prompts(request):
+    """API: возвращает список промптов, доступных текущему пользователю."""
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
 
@@ -357,6 +417,9 @@ def get_problem_data(request):
 
 
 def asset_view(request, asset_path):
+    """Отдаёт статический файл из Django staticfiles по пути (для AI-страниц)."""
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
     asset_full_path = finders.find(asset_path)
     if not asset_full_path or not os.path.isfile(asset_full_path):
         raise Http404("Asset not found")
@@ -388,23 +451,27 @@ def get_task_info_view(request):
         cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
         session_id = request.COOKIES.get(cookie_name, "").strip()
 
+    # Sanitize session_id — reject if it contains path separators or URL characters
+    # that could be used for SSRF or injection into DL API requests.
+    if session_id and any(c in session_id for c in '\/\n\r\t '):
+        return JsonResponse({"error": "Invalid session id format"}, status=400)
+
     try:
         data = fetch_task_info(node_id, session_id=session_id, remove_html_tags=remove_html_tags)
-    except DLUnauthorizedError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLForbiddenError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLTaskNotFoundError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLApiUnavailable as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLServerError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLUnauthorizedError:
+        return JsonResponse({"error": "Authorization required"}, status=401)
+    except DLForbiddenError:
+        return JsonResponse({"error": "Access denied"}, status=403)
+    except DLTaskNotFoundError:
+        return JsonResponse({"error": "Task not found"}, status=404)
+    except DLApiUnavailable:
+        return JsonResponse({"error": "API temporarily unavailable"}, status=503)
+    except DLServerError:
+        return JsonResponse({"error": "Server error"}, status=502)
 
     return JsonResponse(data)
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def get_task_solution_view(request):
     """Proxy sample solution content from the external DL REST API.
@@ -442,21 +509,20 @@ def get_task_solution_view(request):
 
     try:
         data = fetch_task_solution(session_id, task_id, file_extension)
-    except DLUnauthorizedError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLForbiddenError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLTaskNotFoundError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLApiUnavailable as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLServerError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLUnauthorizedError:
+        return JsonResponse({"error": "Authorization required"}, status=401)
+    except DLForbiddenError:
+        return JsonResponse({"error": "Access denied"}, status=403)
+    except DLTaskNotFoundError:
+        return JsonResponse({"error": "Task not found"}, status=404)
+    except DLApiUnavailable:
+        return JsonResponse({"error": "API temporarily unavailable"}, status=503)
+    except DLServerError:
+        return JsonResponse({"error": "Server error"}, status=502)
 
     return JsonResponse(data)
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def send_solution_view(request):
     """Submit AI-generated code to DL for automated testing.
@@ -500,17 +566,16 @@ def send_solution_view(request):
     try:
         from .dl_api_client import send_solution_to_dl
         data = send_solution_to_dl(session_id, node_id, code, file_extension)
-    except DLUnauthorizedError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLApiUnavailable as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLServerError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLUnauthorizedError:
+        return JsonResponse({"error": "Authorization required"}, status=401)
+    except DLApiUnavailable:
+        return JsonResponse({"error": "API temporarily unavailable"}, status=503)
+    except DLServerError:
+        return JsonResponse({"error": "Server error"}, status=502)
 
     return JsonResponse(data)
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def get_solution_result_view(request):
     """Poll DL for the result of a submitted solution.
@@ -544,14 +609,14 @@ def get_solution_result_view(request):
     try:
         from .dl_api_client import get_solution_result_from_dl
         data = get_solution_result_from_dl(session_id, queue_id)
-    except DLUnauthorizedError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLTaskNotFoundError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLApiUnavailable as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
-    except DLServerError as exc:
-        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except DLUnauthorizedError:
+        return JsonResponse({"error": "Authorization required"}, status=401)
+    except DLTaskNotFoundError:
+        return JsonResponse({"error": "Task not found"}, status=404)
+    except DLApiUnavailable:
+        return JsonResponse({"error": "API temporarily unavailable"}, status=503)
+    except DLServerError:
+        return JsonResponse({"error": "Server error"}, status=502)
 
     return JsonResponse(data)
 
@@ -567,6 +632,17 @@ def transcribe_audio(request):
     max_size_mb = getattr(settings, "AI_TRANSCRIBE_MAX_SIZE_MB", 10)
     if audio_file.size and audio_file.size > max_size_mb * 1024 * 1024:
         return JsonResponse({'success': False, 'error': f'Audio file too large (max {max_size_mb} MB)'})
+
+    # Validate MIME type — only allow audio formats we process.
+    allowed_content_types = {'audio/webm', 'audio/ogg', 'audio/wav', 'audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/x-wav', 'application/octet-stream'}
+    if audio_file.content_type and audio_file.content_type not in allowed_content_types:
+        return JsonResponse({'success': False, 'error': f'Unsupported audio format: {audio_file.content_type}'})
+
+    # Validate file extension as secondary check.
+    allowed_extensions = {'.webm', '.ogg', '.wav', '.mp3', '.mp4', '.m4a'}
+    file_ext = os.path.splitext(audio_file.name)[1].lower()
+    if file_ext and file_ext not in allowed_extensions:
+        return JsonResponse({'success': False, 'error': f'Unsupported file extension: {file_ext}'})
 
     language = request.POST.get('language', 'Russian')
     

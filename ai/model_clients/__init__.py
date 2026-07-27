@@ -1,6 +1,6 @@
-"""AI model client registry and public exports.
+"""Реестр AI-моделей и публичные экспорты model_clients.
 
-Example:
+Пример использования:
     >>> from ai.model_clients import registry
     >>> handler = registry.get("DeepSeek_V3_1")
     >>> response = await handler("hello", user_id=42)

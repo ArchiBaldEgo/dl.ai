@@ -1,4 +1,4 @@
-"""HuggingFace InferenceClient model clients."""
+"""Клиенты моделей через HuggingFace InferenceClient (Mistral, Gemma)."""
 
 from huggingface_hub import InferenceClient
 

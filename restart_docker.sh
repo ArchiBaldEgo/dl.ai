@@ -1,9 +1,9 @@
 #!/bin/bash
 
-PROJECT_DIR="~/v0.9"
+PROJECT_DIR="/home/vlad/v0.9"
 
 while true; do
-    # Вычисляем время до следующего 3:55
+    # Вычисляем время до следующего 3:55 UTC
     current_epoch=$(date +%s)
     target_epoch=$(date -d "today 03:55" +%s 2>/dev/null || date -d "03:55" +%s)
 
@@ -20,6 +20,11 @@ while true; do
 
     # Теперь настало 3:55 – выполняем перезапуск
     echo "$(date): Запускаю перезапуск контейнеров..."
-    cd "$PROJECT_DIR" && docker compose down && docker compose up -d
+    cd "$PROJECT_DIR" && docker compose down && docker compose up -d --build
+    # Ждём пока web поднимется
+    sleep 30
+    # Накатываем миграции и статику
+    cd "$PROJECT_DIR" && docker compose exec -T web python manage.py migrate
+    cd "$PROJECT_DIR" && docker compose exec -T web python manage.py collectstatic --noinput
     echo "$(date): Перезапуск завершён."
 done

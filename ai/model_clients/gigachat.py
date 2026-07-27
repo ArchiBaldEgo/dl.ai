@@ -1,4 +1,4 @@
-"""GigaChat (Sber) client used by the legacy audio/chat flow."""
+"""Клиент GigaChat (Сбер) для legacy audio/chat потока."""
 
 import json
 import logging

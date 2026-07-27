@@ -1,4 +1,9 @@
-"""ModelAdmin classes for AI models."""
+"""ModelAdmin классы для моделей AI-приложения.
+
+Содержит админ-конфигурацию для Prompt, SharedPrompt, Topic, ProgrammingLanguage,
+Task, AIRequestLog, AIModelTestRun, PromptTestCase, PromptTestRun и др.
+Включает кастомные actions (экспорт CSV, refresh DL-задач) и ACL-проверки.
+"""
 
 import csv
 

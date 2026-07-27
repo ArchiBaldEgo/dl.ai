@@ -1,3 +1,15 @@
+"""Внешняя аутентификация через dl.gsu.by REST API.
+
+Проверяет DLSID-куку через POST-запрос к EXTERNAL_AUTH_API_URL
+(по умолчанию https://dl.gsu.by/restapi/get-user-info).
+Возвращает информацию о пользователе (userId, login, firstName, lastName).
+
+Возможные ошибки:
+- ExternalAuthMisconfigured: неверная конфигурация (нет URL, нет session_id).
+- ExternalAuthUnauthorized: DLSID невалиден (HTTP 401).
+- ExternalAuthUnavailable: API недоступен (сеть/таймаут/некорректный JSON).
+"""
+
 import os
 from typing import Any
 
@@ -8,22 +20,27 @@ DEFAULT_EXTERNAL_SESSION_COOKIE_NAME = "DLSID"
 
 
 class ExternalAuthError(RuntimeError):
+    """Базовая ошибка внешней аутентификации."""
     pass
 
 
 class ExternalAuthMisconfigured(ExternalAuthError):
+    """Ошибка конфигурации: нет URL или session_id."""
     pass
 
 
 class ExternalAuthUnavailable(ExternalAuthError):
+    """API недоступен: сеть, таймаут, некорректный JSON."""
     pass
 
 
 class ExternalAuthUnauthorized(ExternalAuthError):
+    """DLSID невалиден — требуется повторная аутентификация на dl.gsu.by."""
     pass
 
 
 def get_external_auth_api_url() -> str:
+    """Возвращает URL внешнего API аутентификации (из env или по умолчанию)."""
     raw = os.getenv("EXTERNAL_AUTH_API_URL")
     if raw is None:
         return DEFAULT_EXTERNAL_AUTH_API_URL
@@ -32,6 +49,7 @@ def get_external_auth_api_url() -> str:
 
 
 def get_external_session_cookie_name() -> str:
+    """Возвращает имя куки сессии dl.gsu.by (DLSID по умолчанию)."""
     raw = os.getenv("EXTERNAL_SESSION_COOKIE_NAME")
     if raw:
         value = raw.strip()
@@ -46,6 +64,11 @@ def fetch_external_user_info(
     api_url: str | None = None,
     timeout: int = 10,
 ) -> dict[str, Any]:
+    """Запрашивает информацию о пользователе у внешнего API dl.gsu.by по DLSID.
+
+    POST на EXTERNAL_AUTH_API_URL с {sessionId, removeHtmlTags: true}.
+    Возвращает JSON-ответ (userId, login, firstName, lastName, ...).
+    """
     if not session_id:
         raise ExternalAuthMisconfigured("session_id is required")
     resolved_api_url = (api_url or get_external_auth_api_url()).strip()

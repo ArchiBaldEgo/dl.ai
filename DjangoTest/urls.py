@@ -1,18 +1,12 @@
 """
-URL configuration for DjangoTest project.
+URL-маршруты проекта DjangoTest.
 
-The `urlpatterns` list routes URLs to views. For more information please see:
-    https://docs.djangoproject.com/en/5.1/topics/http/urls/
-Examples:
-Function views
-    1. Add an import:  from my_app import views
-    2. Add a URL to urlpatterns:  path('', views.home, name='home')
-Class-based views
-    1. Add an import:  from other_app.views import Home
-    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
-Including another URLconf
-    1. Import the include() function: from django.urls import include, path
-    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
+Содержит:
+- health-check эндпоинт (/health)
+- AI admin (/ai/admin/) с кастомным admin site
+- AI app URLs (страницы чата, решения задач, поиска ошибок)
+- AI API эндпоинты (языки, темы, промпты, данные задач dl.gsu.by)
+- static files
 """
 from django.conf import settings
 from django.conf.urls.static import static
@@ -30,6 +24,7 @@ from ai.views import (
     get_task_solution_view,
     health_view,
     set_password_view,
+    get_groq_limits_view,
 )
 
 urlpatterns = [
@@ -43,5 +38,6 @@ urlpatterns = [
     path('ai/api/problem-data/', get_problem_data, name='get_problem_data'),
     path('ai/api/task-info/', get_task_info_view, name='get_task_info'),
     path('ai/api/task-solution/', get_task_solution_view, name='get_task_solution'),
+    path('ai/api/groq-limits/', get_groq_limits_view, name='get_groq_limits'),
 
 ] + static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)

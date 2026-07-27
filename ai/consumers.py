@@ -1,4 +1,9 @@
-"""WebSocket consumer for AI chat."""
+"""WebSocket consumer для AI-чата на Django Channels.
+
+Обрабатывает входящие WebSocket-сообщения: аутентификацию, rate limiting,
+композицию промпта, вызов AI-модели и форматирование ответа.
+Поддерживает режимы chat, solve (с node_id из dl.gsu.by) и find_error.
+"""
 
 import asyncio
 import json
@@ -27,7 +32,12 @@ logger = logging.getLogger(__name__)
 
 
 class ResponseFormatter:
-    """Format outgoing WebSocket messages."""
+    """Форматирование исходящих WebSocket-сообщений для пользователя.
+
+    Методы формируют текстовые сообщения с временными метками,
+    информацией о модели, времени обработки и потраченных токенах.
+    Формат: «⏱timestamp текст» — единый протокол с фронтендом.
+    """
 
     def format_think(self, timestamp_str: str, text: str) -> str:
         return f"<think>{timestamp_str} {text}</think>"
@@ -63,6 +73,20 @@ class ResponseFormatter:
 
 
 class MyConsumer(AsyncWebsocketConsumer):
+    """Основной WebSocket consumer для AI-чата.
+
+    Поток обработки:
+    1. connect() — аутентификация через WebSocketAuthService, извлечение user_id.
+    2. receive() — парсинг JSON, проверка rate limit, маршрутизация в _handle_message.
+    3. _handle_message() — композиция промпта через MessageComposer, вызов модели
+       через ModelCaller, логирование через LogWriter, форматирование ответа.
+
+    Поддерживаемые действия:
+    - clear_context: сброс истории диалога (conversation_history).
+    - type 1: обычный чат.
+    - type 2: решение задачи (с progLng, topic, nodeId).
+    - type 3: поиск ошибки в коде.
+    """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.auth_service = WebSocketAuthService()
@@ -233,6 +257,12 @@ class MyConsumer(AsyncWebsocketConsumer):
 
         result = await self.caller.call(message, self.client_id, model_key)
         end_time = timezone.now()
+
+        # Treat empty response as an error, not a success.
+        if not result.is_error and not (result.response_text or "").strip():
+            result.is_error = True
+            result.error_message = "Модель вернула пустой ответ"
+            result.response_text = "Модель вернула пустой ответ"
 
         if result.is_error:
             await self.log_writer.update_error(log, result.response_text, result.error_message, end_time)

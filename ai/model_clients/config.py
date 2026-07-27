@@ -1,4 +1,8 @@
-"""Centralized configuration for external AI model APIs."""
+"""Централизованная конфигурация внешних AI API (ключи, URL, прокси).
+
+Загружает .env из корня проекта. Содержит токены для SambaNova, HuggingFace,
+GigaChat, DeepSeek и URL бот-пула (Web DeepSeek).
+"""
 
 import os
 from pathlib import Path
@@ -14,6 +18,7 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 SC_TOKEN = os.getenv("SC_TOKEN")
 MIST_TOKEN = os.getenv("MIST_TOKEN")
 GROQ_TOKEN = os.getenv("GROQ_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 DEEPSEEK_API_TOKEN = os.getenv("DEEPSEEK_API_TOKEN") or os.getenv("DEEPSEEK_API_KEY")
 
 BOT_POOL_URL = os.getenv("BOT_POOL_URL", "http://localhost:3000").rstrip("/")

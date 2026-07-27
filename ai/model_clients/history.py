@@ -1,4 +1,9 @@
-"""Redis-backed conversation history for stateful model clients."""
+"""История диалогов на Redis (через Django cache) для stateful-клиентов моделей.
+
+Заменяет старый in-memory словарь. Хранит до max_messages сообщений
+для каждого пользователя с TTL 24 часа. Переживает рестарт процесса
+и работает across multiple workers.
+"""
 
 from typing import Any
 
@@ -11,11 +16,11 @@ DEFAULT_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 
 
 class ConversationHistory:
-    """Conversation history backed by Django's configured cache (Redis in production).
+    """История диалогов на Django cache (Redis в production).
 
-    This is a drop-in replacement for the legacy in-memory ``hist`` dictionary.
-    It caps each conversation at ``max_messages`` and stores history in a shared
-    cache so it survives process restarts and works across multiple workers.
+    Drop-in замена старого in-memory словаря. Ограничивает длину истории
+    до max_messages и хранит в общем кэше, чтобы переживать рестарты
+    и работать across multiple workers.
     """
 
     def __init__(
