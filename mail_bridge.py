@@ -183,52 +183,90 @@ def run_command(cmd: str) -> str:
 
 
 def process_command(subject: str, body: str, sender: str) -> str:
-    """Обработка команды из письма. Возвращает текст результата для ответа."""
+    """Обработка команды из письма. Возвращает текст результата для ответа.
+    Ответы написаны простым языком для обычных пользователей.
+    """
     subject_lower = subject.lower().strip()
     log(f"Processing command: '{subject_lower}' from {sender}")
 
     if subject_lower == "restart":
         send_tg(f"📧 Получена команда RESTART от {sender}\n🔄 Перезапускаю проект...")
-        output = run_command(
+        run_command(
             "docker compose down && docker compose up -d --build && sleep 30 && "
             "docker compose exec -T web python manage.py migrate && "
             "docker compose exec -T web python manage.py collectstatic --noinput"
         )
-        result = f"✅ Перезапуск выполнен:\n\n{output[:3000]}"
-        send_tg(result)
+        health = run_command("curl -sf http://localhost:8000/health 2>&1 || echo FAIL")
+        if "ok" in health and "FAIL" not in health:
+            result = "Проект перезапущен и работает нормально."
+        else:
+            result = "Проект перезапущен, но пока не отвечает. Возможно, нужно подождать пару минут или обратиться к разработчику."
+        send_tg(f"✅ Перезапуск от {sender}: {result}")
         return result
 
     if subject_lower == "backup":
         send_tg(f"📧 Получена команда BACKUP от {sender}\n📦 Делаю бэкап...")
-        output = run_command("bash /home/vlad/v0.9/backup_runner.sh --now 2>&1 || true")
-        result = f"✅ Бэкап выполнен:\n\n{output[:3000]}"
-        send_tg(result)
+        ts = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+        bf = f"/home/vlad/v0.9/backups/dl_ai_db_{ts}.sql.gz"
+        out = run_command(f"docker exec dl_ai_db pg_dump -U vlad -d dl_ai --no-owner --no-acl 2>/dev/null | gzip > {bf} && echo OK || echo FAIL")
+        if "OK" in out:
+            sz = run_command(f"du -h {bf} | cut -f1").strip()
+            result = f"Бэкап создан успешно.\nФайл: {os.path.basename(bf)}\nРазмер: {sz}"
+        else:
+            result = "Не удалось создать бэкап. Возможно, база данных недоступна."
+        send_tg(f"📦 Бэкап от {sender}: {result}")
         return result
 
     if subject_lower == "health":
-        output = run_command("curl -sf http://localhost:8000/health 2>&1 || echo 'HEALTH FAILED'")
-        result = f"Health check:\n\n{output}"
-        send_tg(f"📧 Health check от {sender}:\n```\n{output}\n```")
+        out = run_command("curl -sf http://localhost:8000/health 2>&1 || echo FAIL")
+        if "ok" in out and "FAIL" not in out:
+            result = "Проект работает. Всё в порядке."
+        else:
+            result = "Проект сейчас не отвечает. Возможно, требуется перезапуск — отправьте письмо с темой restart."
+        send_tg(f"📧 Health check от {sender}: {result}")
         return result
 
     if subject_lower == "status":
-        output = run_command('docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" 2>&1')
-        result = f"Статус контейнеров:\n\n{output}"
-        send_tg(f"📧 Статус контейнеров:\n```\n{output}\n```")
+        out = run_command('docker ps --format "{{.Names}}\t{{.Status}}" 2>&1')
+        services = {
+            "dl_ai_web": "Веб-сайт",
+            "dl_ai_db": "База данных",
+            "dl_ai_redis": "Кэш",
+            "dl_ai_nginx": "Прокси",
+        }
+        parts = []
+        all_ok = True
+        for line in out.strip().splitlines():
+            if "\t" not in line:
+                continue
+            name, status = line.split("\t", 1)
+            label = services.get(name.strip(), name.strip())
+            if "Up" in status and "healthy" in status.lower():
+                parts.append(f"✅ {label} — работает")
+            elif "Up" in status:
+                parts.append(f"⚠️ {label} — запущен, но ещё проверяется")
+                all_ok = False
+            else:
+                parts.append(f"❌ {label} — не работает")
+                all_ok = False
+        if all_ok and parts:
+            result = "Всё работает:\n\n" + "\n".join(parts)
+        elif parts:
+            result = "Статус сервисов:\n\n" + "\n".join(parts) + "\n\nЧасть сервисов не работает. Можно отправить письмо с темой restart."
+        else:
+            result = "Не удалось получить статус сервисов. Возможно, система не запущена."
+        send_tg(f"📧 Status от {sender}:\n{result}")
         return result
 
     if subject_lower == "make":
-        # Команда make — читаем тело письма и пересылаем в Telegram как задачу
         task_text = body.strip() if body.strip() else "(пустое тело письма)"
-        msg = f"📧 Задача от {sender}\nТема: {subject}\n\n{task_text[:4000]}"
-        send_tg(msg)
-        result = f"✅ Задача принята и переслана в Telegram:\n\n{task_text[:1000]}"
-        return result
+        send_tg(f"📧 Задача от {sender}\n\n{task_text[:4000]}")
+        return "Задача принята и передана разработчику. Спасибо!"
 
     # Произвольный текст — пересылаем в Telegram
     text = f"📧 Письмо от {sender}\nТема: {subject}\n\n{body[:3000]}"
     send_tg(text)
-    return "Письмо переслано в Telegram."
+    return "Письмо переслано разработчику."
 
 
 def check_mail():
