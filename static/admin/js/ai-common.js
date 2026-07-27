@@ -31,6 +31,82 @@ var MAX_RECORDING_TIME = 30000;
 // Persistence keys
 var INTERFACE_LANG_KEY = 'ai_interface_language';
 var SHARED_TEXT_KEY = 'ai_text_shared';
+var SELECTIONS_KEY = 'ai_user_selections';
+
+// Селекты, которые сохраняем и восстанавливаем
+var PERSISTED_SELECT_IDS = [
+    'select',        // модель
+    'selectLang',    // язык интерфейса
+    'selectType',    // тип страницы (чат/решить/ошибка)
+    'selectProgLng', // язык программирования
+    'selectTheme',   // тема
+    'selectPrompt',  // препромпт
+];
+
+// Сохранение всех селектов в localStorage
+function saveSelections() {
+    try {
+        var saved = JSON.parse(localStorage.getItem(SELECTIONS_KEY) || '{}');
+        for (var i = 0; i < PERSISTED_SELECT_IDS.length; i++) {
+            var el = document.getElementById(PERSISTED_SELECT_IDS[i]);
+            if (el && el.selectedIndex >= 0) {
+                saved[PERSISTED_SELECT_IDS[i]] = el.selectedIndex;
+            }
+        }
+        // Голосовой режим
+        var voiceBtn = document.getElementById('voiceModeBtn');
+        if (voiceBtn) {
+            var voiceControls = document.getElementById('voiceControls');
+            saved._voiceMode = voiceControls && voiceControls.style.display !== 'none' ? 1 : 0;
+        }
+        // Node ID задачи (если есть data-атрибут)
+        var msgText = document.getElementById('messageText');
+        if (msgText && msgText.dataset.nodeId) {
+            saved._nodeId = msgText.dataset.nodeId;
+        }
+        localStorage.setItem(SELECTIONS_KEY, JSON.stringify(saved));
+    } catch (e) {}
+}
+
+// Восстановление всех селектов из localStorage
+function restoreSelections() {
+    try {
+        var saved = JSON.parse(localStorage.getItem(SELECTIONS_KEY) || '{}');
+        for (var i = 0; i < PERSISTED_SELECT_IDS.length; i++) {
+            var el = document.getElementById(PERSISTED_SELECT_IDS[i]);
+            if (el && saved[PERSISTED_SELECT_IDS[i]] !== undefined) {
+                var idx = saved[PERSISTED_SELECT_IDS[i]];
+                if (idx >= 0 && idx < el.options.length) {
+                    el.selectedIndex = idx;
+                }
+            }
+        }
+        // Голосовой режим
+        if (saved._voiceMode === 1) {
+            var voiceControls = document.getElementById('voiceControls');
+            if (voiceControls && voiceControls.style.display === 'none') {
+                toggleVoiceControls();
+            }
+        }
+    } catch (e) {}
+}
+
+// Сохранение при изменении любого селекта
+function initSelectionPersistence() {
+    for (var i = 0; i < PERSISTED_SELECT_IDS.length; i++) {
+        var el = document.getElementById(PERSISTED_SELECT_IDS[i]);
+        if (el) {
+            el.addEventListener('change', saveSelections);
+        }
+    }
+    // Сохраняем голосовой режим при переключении
+    var voiceBtn = document.getElementById('voiceModeBtn');
+    if (voiceBtn) {
+        voiceBtn.addEventListener('click', function() {
+            setTimeout(saveSelections, 100);
+        });
+    }
+}
 
 // === Cookie / CSRF / Session helpers ===
 
@@ -685,6 +761,7 @@ function saveInterfaceLanguage() {
             var lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
             localStorage.setItem(INTERFACE_LANG_KEY, lang);
         }
+        saveSelections();
     } catch (e) {}
 }
 

@@ -507,11 +507,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 window.onload = function () {
     console.log('Initializing WebSocket with client_id:', client_id);
     restoreInterfaceLanguage();
+    restoreSelections();
     initWebSocket();
     // MediaRecorder инициализируется при первом нажатии на кнопку записи
     document.getElementById("selectLang").dispatchEvent(new Event("change"));
     initAccordionForMessages();
     updateVoiceStatus(getVoiceStatusText('ready'));
+    initSelectionPersistence();
 
     // Инициализация чекбокса think-блоков
     const speakThinkCheckbox = document.getElementById('speakThinkContent');

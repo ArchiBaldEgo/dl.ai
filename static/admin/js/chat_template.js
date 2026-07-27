@@ -107,11 +107,13 @@ document.getElementById("selectLang").addEventListener("change", function() {
 window.onload = function() {
     console.log('Initializing WebSocket with client_id:', client_id);
     restoreInterfaceLanguage();
+    restoreSelections();
     initWebSocket();
     document.getElementById("selectLang").dispatchEvent(new Event("change"));
     initAccordionForMessages();
     restoreSharedText();
     updateVoiceStatus(getVoiceStatusText('ready'));
+    initSelectionPersistence();
 
     var speakThinkCheckbox = document.getElementById('speakThinkContent');
     if (speakThinkCheckbox) {
