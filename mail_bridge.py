@@ -2,15 +2,19 @@
 """
 mail_bridge.py — Мост: email → команды → выполнение + ответ по почте + Telegram.
 
-Читает непрочитанные письма с IMAP-ящика, ищет команды в теме письма,
-выполняет их, отправляет ответ тому кто прислал письмо (SMTP),
+Читает непрочитанные письма с IMAP-ящика (приёмника), ищет команды
+в теме письма, выполняет их, отправляет ответ отправителю (SMTP)
 и дублирует результат в Telegram.
+
+Ящик-приёмник настраивается в .env (MAIL_BRIDGE_IMAP_* / MAIL_BRIDGE_SMTP_*).
+Отправитель (dolinsky@gsu.by) указывается в MAIL_BRIDGE_ALLOWED_SENDERS.
 
 Команды (в теме письма):
   restart  — перезапуск проекта
   backup   — сделать бэкап БД
   health   — проверить состояние
   status   — статус контейнеров
+  make     — тело письма пересылается в Telegram как задача/хотелка
   <любой текст> — переслать в Telegram
 
 Запуск: nohup python3 /home/vlad/v0.9/mail_bridge.py &>/dev/null &
@@ -211,6 +215,14 @@ def process_command(subject: str, body: str, sender: str) -> str:
         output = run_command('docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" 2>&1')
         result = f"Статус контейнеров:\n\n{output}"
         send_tg(f"📧 Статус контейнеров:\n```\n{output}\n```")
+        return result
+
+    if subject_lower == "make":
+        # Команда make — читаем тело письма и пересылаем в Telegram как задачу
+        task_text = body.strip() if body.strip() else "(пустое тело письма)"
+        msg = f"📧 Задача от {sender}\nТема: {subject}\n\n{task_text[:4000]}"
+        send_tg(msg)
+        result = f"✅ Задача принята и переслана в Telegram:\n\n{task_text[:1000]}"
         return result
 
     # Произвольный текст — пересылаем в Telegram
