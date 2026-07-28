@@ -114,7 +114,7 @@ window.onload = function() {
     restoreSharedText();
     updateVoiceStatus(getVoiceStatusText('ready'));
     initSelectionPersistence();
-    initTokenUsageWidget();
+    initModelLimitsWidget();
 
     var speakThinkCheckbox = document.getElementById('speakThinkContent');
     if (speakThinkCheckbox) {
@@ -125,96 +125,4 @@ window.onload = function() {
 
     var messageText = document.getElementById('messageText');
     if (messageText) messageText.addEventListener('input', saveSharedText);
-
-    // === Виджет лимитов токенов Groq ===
-    var groqLimitsTimer = null;
-
-    function updateGroqLimitsWidget() {
-        var modelSelect = document.getElementById('select');
-        if (!modelSelect) return;
-        var selectedKey = modelSelect.value || '';
-        var widget = document.getElementById('groqLimitsWidget');
-        if (!widget) return;
-
-        if (selectedKey.indexOf('Groq_') !== 0) {
-            widget.style.display = 'none';
-            if (groqLimitsTimer) { clearInterval(groqLimitsTimer); groqLimitsTimer = null; }
-            return;
-        }
-
-        widget.style.display = 'block';
-        var lang = document.querySelector('#selectLang');
-        var selectedLang = lang ? lang.options[lang.selectedIndex].getAttribute('language') : 'Russian';
-        var loc = localization[selectedLang] || localization.Russian;
-        widget.textContent = loc.groqLoading;
-
-        fetch('/ai/api/groq-limits/')
-            .then(function(r) { return r.ok ? r.json() : Promise.reject(); })
-            .then(function(data) {
-                var limits = data.limits || {};
-                var info = limits[selectedKey];
-                if (!info) { widget.textContent = loc.groqUnavailable; return; }
-                var remT = info.remaining_tokens;
-                var limT = info.limit_tokens;
-                var remR = info.remaining_requests;
-                var limR = info.limit_requests;
-                var pct = limT > 0 ? Math.round((remT / limT) * 100) : 0;
-                var color = pct > 50 ? '#4CAF50' : (pct > 20 ? '#FF9800' : '#F44336');
-                widget.innerHTML = '<span style="color:' + color + '; font-weight:bold;">' +
-                    ' Groq: ' + loc.groqRemaining + ': ' + remT + ' / ' + limT + ' ' + loc.groqTokens + ' (' + pct + '%)' +
-                    ' · ' + remR + ' / ' + limR + ' ' + loc.groqRequests +
-                    '</span>';
-            })
-            .catch(function() { widget.textContent = loc.groqUnavailable; });
-    }
-
-    // === Виджет лимитов OpenRouter ===
-    var orLimitsTimer = null;
-    // OpenRouter free: ~20 запросов/день на модель, без credit card.
-    // API не отдаёт rate-limit заголовки, поэтому показываем статичные лимиты.
-    var OR_DAILY_LIMIT = 20;
-    var OR_FREE_LABEL = 'OpenRouter (бесплатно)';
-
-    function updateOpenRouterLimitsWidget() {
-        var modelSelect = document.getElementById('select');
-        if (!modelSelect) return;
-        var selectedKey = modelSelect.value || '';
-        var widget = document.getElementById('openrouterLimitsWidget');
-        if (!widget) return;
-
-        if (selectedKey.indexOf('OR_') !== 0) {
-            widget.style.display = 'none';
-            if (orLimitsTimer) { clearInterval(orLimitsTimer); orLimitsTimer = null; }
-            return;
-        }
-
-        widget.style.display = 'block';
-        var lang = document.querySelector('#selectLang');
-        var selectedLang = lang ? lang.options[lang.selectedIndex].getAttribute('language') : 'Russian';
-        var loc = localization[selectedLang] || localization.Russian;
-        widget.innerHTML = '<span style="color:#7c3aed; font-weight:bold;">' +
-            'OpenRouter (free): ~' + OR_DAILY_LIMIT + ' ' + loc.groqRequests +
-            '</span>';
-    }
-
-    var modelSelectEl = document.getElementById('select');
-    if (modelSelectEl) {
-        modelSelectEl.addEventListener('change', function() {
-            updateGroqLimitsWidget();
-            updateOpenRouterLimitsWidget();
-            var selectedKey = this.value || '';
-            if (selectedKey.indexOf('Groq_') === 0) {
-                if (!groqLimitsTimer) groqLimitsTimer = setInterval(updateGroqLimitsWidget, 60000);
-            } else {
-                if (groqLimitsTimer) { clearInterval(groqLimitsTimer); groqLimitsTimer = null; }
-            }
-            if (selectedKey.indexOf('OR_') === 0) {
-                if (!orLimitsTimer) orLimitsTimer = setInterval(updateOpenRouterLimitsWidget, 60000);
-            } else {
-                if (orLimitsTimer) { clearInterval(orLimitsTimer); orLimitsTimer = null; }
-            }
-        });
-        updateGroqLimitsWidget();
-        updateOpenRouterLimitsWidget();
-    }
 };

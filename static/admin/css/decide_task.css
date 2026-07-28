@@ -821,8 +821,7 @@
         padding: 6px 8px;
     }
 
-    #groqLimitsWidget,
-    #openrouterLimitsWidget {
+    #modelLimitsWidget {
         font-size: 10px !important;
     }
 

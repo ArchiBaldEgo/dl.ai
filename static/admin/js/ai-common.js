@@ -28,10 +28,13 @@ var speakThinkEnabled = true;
 var recordingTimeout = null;
 var MAX_RECORDING_TIME = 30000;
 
-// Persistence keys
-var INTERFACE_LANG_KEY = 'ai_interface_language';
+// Persistence keys.
+// Selections live in a cookie (ai_state) so the server can read them (e.g. to
+// reopen the last tab) and they survive a localStorage reset. Task text and
+// program code stay in localStorage (ai_text_shared) — too large for a cookie.
 var SHARED_TEXT_KEY = 'ai_text_shared';
-var SELECTIONS_KEY = 'ai_user_selections';
+var AI_STATE_COOKIE = 'ai_state';
+var AI_STATE_MAX_AGE = 31536000; // 1 year
 
 // Селекты, которые сохраняем и восстанавливаем
 var PERSISTED_SELECT_IDS = [
@@ -43,50 +46,65 @@ var PERSISTED_SELECT_IDS = [
     'selectPrompt',  // препромпт
 ];
 
-// Сохранение всех селектов в localStorage
-function saveSelections() {
+// === ai_state cookie (selections): {tab, lang, model, progLng, topic, prompt, voiceMode} ===
+
+function getAiState() {
     try {
-        var saved = JSON.parse(localStorage.getItem(SELECTIONS_KEY) || '{}');
-        for (var i = 0; i < PERSISTED_SELECT_IDS.length; i++) {
-            var el = document.getElementById(PERSISTED_SELECT_IDS[i]);
-            if (el && el.selectedIndex >= 0) {
-                saved[PERSISTED_SELECT_IDS[i]] = el.selectedIndex;
-            }
+        var m = document.cookie.match(new RegExp('(?:^|; )' + AI_STATE_COOKIE + '=([^;]*)'));
+        if (m && m[1]) return JSON.parse(decodeURIComponent(m[1])) || {};
+    } catch (e) {}
+    return {};
+}
+
+function setAiState(partial) {
+    try {
+        var merged = getAiState();
+        for (var k in partial) {
+            if (partial.hasOwnProperty(k)) merged[k] = partial[k];
         }
-        // Голосовой режим
-        var voiceBtn = document.getElementById('voiceModeBtn');
-        if (voiceBtn) {
-            var voiceControls = document.getElementById('voiceControls');
-            saved._voiceMode = voiceControls && voiceControls.style.display !== 'none' ? 1 : 0;
-        }
-        // Node ID задачи (если есть data-атрибут)
-        var msgText = document.getElementById('messageText');
-        if (msgText && msgText.dataset.nodeId) {
-            saved._nodeId = msgText.dataset.nodeId;
-        }
-        localStorage.setItem(SELECTIONS_KEY, JSON.stringify(saved));
+        document.cookie = AI_STATE_COOKIE + '=' + encodeURIComponent(JSON.stringify(merged)) +
+            '; path=/; max-age=' + AI_STATE_MAX_AGE + '; SameSite=Lax';
     } catch (e) {}
 }
 
-// Восстановление всех селектов из localStorage
+// Сохранение всех селектов в куку ai_state (по значениям, не индексам)
+function saveSelections() {
+    try {
+        var st = {};
+        var el;
+        if ((el = document.getElementById('select'))) st.model = el.value;
+        if ((el = document.getElementById('selectLang')) && el.selectedIndex >= 0) {
+            st.lang = el.options[el.selectedIndex].getAttribute('language');
+        }
+        if ((el = document.getElementById('selectType')) && el.selectedIndex >= 0) {
+            var opt = el.options[el.selectedIndex];
+            st.tab = opt ? (opt.getAttribute('data-link') || '') : '';
+        }
+        if ((el = document.getElementById('selectProgLng'))) st.progLng = el.value;
+        if ((el = document.getElementById('selectTheme'))) st.topic = el.value;
+        if ((el = document.getElementById('selectPrompt'))) st.prompt = el.value;
+        var voiceControls = document.getElementById('voiceControls');
+        st.voiceMode = (voiceControls && voiceControls.style.display !== 'none') ? 1 : 0;
+        setAiState(st);
+    } catch (e) {}
+}
+
+// Восстановление селектов из куки ai_state.
+// progLng/topic/prompt восстанавливаются page-specific restorePageState() после
+// заполнения селектов; здесь — модель, голосовой режим (язык — в restoreInterfaceLanguage).
 function restoreSelections() {
     try {
-        var saved = JSON.parse(localStorage.getItem(SELECTIONS_KEY) || '{}');
-        for (var i = 0; i < PERSISTED_SELECT_IDS.length; i++) {
-            var el = document.getElementById(PERSISTED_SELECT_IDS[i]);
-            if (el && saved[PERSISTED_SELECT_IDS[i]] !== undefined) {
-                var idx = saved[PERSISTED_SELECT_IDS[i]];
-                if (idx >= 0 && idx < el.options.length) {
-                    el.selectedIndex = idx;
-                }
+        var st = getAiState();
+        if (st.model) {
+            var sel = document.getElementById('select');
+            if (sel) {
+                var opt = Array.from(sel.options).find(function(o) { return o.value === st.model; });
+                if (opt) sel.selectedIndex = opt.index;
             }
         }
-        // Голосовой режим
-        if (saved._voiceMode === 1) {
+        if (st.voiceMode === 1) {
             var voiceControls = document.getElementById('voiceControls');
-            if (voiceControls && voiceControls.style.display === 'none') {
-                toggleVoiceControls();
-            }
+            if (voiceControls && voiceControls.style.display === 'none') toggleVoiceControls();
         }
     } catch (e) {}
 }
@@ -597,14 +615,13 @@ var localization = {
             task: "Задача:",
             codetx: "Код программы:",
             taskplace: "Вставьте сюда условие задачи",
-            tokensUsed: "Потрачено сегодня",
-            tokensRemaining: "Осталось",
-            tokensNoLimit: "Использовано сегодня"
+            tokensRemaining: "Осталось"
         },
         groqLoading: "Загрузка лимитов...",
         groqUnavailable: "Лимиты недоступны",
         groqTokens: "токенов",
         groqRequests: "запросов/min",
+        groqRequestsDaily: "запросов/день",
         groqRemaining: "Осталось"
     },
     English: {
@@ -660,14 +677,13 @@ var localization = {
             task: "Task:",
             codetx: "Program code:",
             taskplace: "Paste the task condition here",
-            tokensUsed: "Used today",
-            tokensRemaining: "Remaining",
-            tokensNoLimit: "Used today"
+            tokensRemaining: "Remaining"
         },
         groqLoading: "Loading limits...",
         groqUnavailable: "Limits unavailable",
         groqTokens: "tokens",
         groqRequests: "requests/min",
+        groqRequestsDaily: "requests/day",
         groqRemaining: "Remaining"
     },
     French: {
@@ -723,14 +739,13 @@ var localization = {
             task: "Tâche :",
             codetx: "Code du programme :",
             taskplace: "Collez ici l'énoncé de la tâche",
-            tokensUsed: "Utilisé aujourd'hui",
-            tokensRemaining: "Restant",
-            tokensNoLimit: "Utilisé aujourd'hui"
+            tokensRemaining: "Restant"
         },
         groqLoading: "Chargement des limites...",
         groqUnavailable: "Limites indisponibles",
         groqTokens: "jetons",
         groqRequests: "requêtes/min",
+        groqRequestsDaily: "requêtes/jour",
         groqRemaining: "Restant"
     }
 };
@@ -752,14 +767,13 @@ function getUiString(key, defaultValue) {
     return dict[key] || (dict.voiceStatus && dict.voiceStatus[key]) || defaultValue;
 }
 
-// === Interface language persistence ===
+// === Interface language persistence (in the ai_state cookie) ===
 
 function saveInterfaceLanguage() {
     try {
         var selectLang = document.getElementById('selectLang');
-        if (selectLang) {
-            var lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-            localStorage.setItem(INTERFACE_LANG_KEY, lang);
+        if (selectLang && selectLang.selectedIndex >= 0) {
+            setAiState({ lang: selectLang.options[selectLang.selectedIndex].getAttribute('language') });
         }
         saveSelections();
     } catch (e) {}
@@ -767,7 +781,7 @@ function saveInterfaceLanguage() {
 
 function restoreInterfaceLanguage() {
     try {
-        var savedLang = localStorage.getItem(INTERFACE_LANG_KEY);
+        var savedLang = getAiState().lang;
         if (!savedLang) return;
         var selectLang = document.getElementById('selectLang');
         if (!selectLang) return;
@@ -1043,59 +1057,85 @@ function clearContext() {
     }
 }
 
-// === Desktop/Mobile mode toggle ===
-function toggleDesktopMode() {
-    var html = document.documentElement;
-    var btn = document.querySelector('.desktop-toggle-btn');
-    if (html.classList.contains('desktop-mode')) {
-        html.classList.remove('desktop-mode');
-        if (btn) btn.textContent = '🖥️';
-        try { localStorage.removeItem('ai_desktop_mode'); } catch(e) {}
-    } else {
-        html.classList.add('desktop-mode');
-        if (btn) btn.textContent = '📱';
-        try { localStorage.setItem('ai_desktop_mode', '1'); } catch(e) {}
-    }
-}
-
-// Restore desktop mode on page load
-(function() {
-    try {
-        if (localStorage.getItem('ai_desktop_mode') === '1') {
-            document.documentElement.classList.add('desktop-mode');
-            var btn = document.querySelector('.desktop-toggle-btn');
-            if (btn) btn.textContent = '📱';
-        }
-    } catch(e) {}
-})();
-
 // === Common: language change handler (pages can extend via selectLang listener) ===
 // Pages register their own additional selectLang change listeners for page-specific UI.
 
-// === Common: token usage widget ===
-function initTokenUsageWidget() {
-    var widget = document.getElementById('tokenUsageWidget');
-    if (!widget) return;
-    var used = widget.dataset.used;
-    var limit = widget.dataset.limit;
-    var remaining = widget.dataset.remaining;
-    var percent = parseInt(widget.dataset.percent || '0', 10);
-    var hasLimit = widget.dataset.hasLimit === '1';
-    if (!used) { widget.style.display = 'none'; return; }
+// === Common: model limits widget (remaining tokens/requests for the selected API model) ===
+// Shows remaining tokens for Groq (rate-limit headers), ~N requests/day for OpenRouter
+// (free API exposes no headers), and nothing for completely-free / Web_DeepSeek models.
+var _modelLimitsTimer = null;
+var OR_DAILY_LIMIT = 20;
 
+function _currentLoc() {
     var selectLang = document.getElementById('selectLang');
     var langAttr = selectLang ? selectLang.options[selectLang.selectedIndex].getAttribute('language') : 'Russian';
-    var loc = (localization[langAttr] || localization.Russian).voiceStatus;
+    return localization[langAttr] || localization.Russian;
+}
 
-    var color = percent > 80 ? '#F44336' : (percent > 50 ? '#FF9800' : '#4CAF50');
-    if (hasLimit && limit) {
-        widget.innerHTML = '<span style="color:' + color + '; font-weight:bold;">' +
-            loc.tokensUsed + ': ' + used + 'M / ' + limit + 'M' +
-            (percent > 0 ? ' (' + percent + '%)' : '') +
+function updateModelLimitsWidget() {
+    var modelSelect = document.getElementById('select');
+    var widget = document.getElementById('modelLimitsWidget');
+    if (!modelSelect || !widget) return;
+    var selectedKey = modelSelect.value || '';
+    var loc = _currentLoc();
+
+    // Only API-keyed providers (Groq, OpenRouter) show a remaining counter.
+    // Completely-free / Web_DeepSeek models are hidden.
+    var isGroq = selectedKey.indexOf('Groq_') === 0;
+    var isOpenRouter = selectedKey.indexOf('OR_') === 0;
+    if (!isGroq && !isOpenRouter) {
+        widget.style.display = 'none';
+        if (_modelLimitsTimer) { clearInterval(_modelLimitsTimer); _modelLimitsTimer = null; }
+        return;
+    }
+
+    widget.style.display = 'block';
+
+    if (isOpenRouter) {
+        // OpenRouter free API exposes no rate-limit headers; show the static daily cap.
+        widget.innerHTML = '<span style="color:#7c3aed; font-weight:bold;">' +
+            loc.groqRemaining + ': ~' + OR_DAILY_LIMIT + ' ' + loc.groqRequestsDaily +
             '</span>';
-    } else {
-        widget.innerHTML = '<span style="color:#4CAF50; font-weight:bold;">' +
-            loc.tokensNoLimit + ': ' + used + 'M' +
-            '</span>';
+        return;
+    }
+
+    // Groq: fetch the rate-limit cache populated by the backend after each request.
+    widget.textContent = loc.groqLoading;
+    fetch('/ai/api/groq-limits/')
+        .then(function(r) { return r.ok ? r.json() : Promise.reject(); })
+        .then(function(data) {
+            var info = (data.limits || {})[selectedKey];
+            if (!info) { widget.textContent = loc.groqUnavailable; return; }
+            var remT = info.remaining_tokens;
+            var limT = info.limit_tokens;
+            var remR = info.remaining_requests;
+            var limR = info.limit_requests;
+            var pct = limT > 0 ? Math.round((remT / limT) * 100) : 0;
+            var color = pct > 50 ? '#4CAF50' : (pct > 20 ? '#FF9800' : '#F44336');
+            widget.innerHTML = '<span style="color:' + color + '; font-weight:bold;">' +
+                loc.groqRemaining + ': ' + remT + ' / ' + limT + ' ' + loc.groqTokens +
+                ' (' + pct + '%)' +
+                ' · ' + remR + ' / ' + limR + ' ' + loc.groqRequests +
+                '</span>';
+        })
+        .catch(function() { widget.textContent = loc.groqUnavailable; });
+}
+
+function initModelLimitsWidget() {
+    var modelSelect = document.getElementById('select');
+    if (!modelSelect) return;
+    modelSelect.addEventListener('change', function() {
+        updateModelLimitsWidget();
+        var selectedKey = this.value || '';
+        if (selectedKey.indexOf('Groq_') === 0) {
+            // Groq headers refresh after each request; poll to keep the counter live.
+            if (!_modelLimitsTimer) _modelLimitsTimer = setInterval(updateModelLimitsWidget, 60000);
+        } else {
+            if (_modelLimitsTimer) { clearInterval(_modelLimitsTimer); _modelLimitsTimer = null; }
+        }
+    });
+    updateModelLimitsWidget();
+    if ((modelSelect.value || '').indexOf('Groq_') === 0) {
+        if (!_modelLimitsTimer) _modelLimitsTimer = setInterval(updateModelLimitsWidget, 60000);
     }
 }

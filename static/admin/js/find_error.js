@@ -14,7 +14,6 @@
 // === Специфичные для «В чём ошибка?» переменные ===
 let problemData = null;
 const PROBLEM_DATA_KEY = 'ai_problem_data_cache';
-const PAGE_STATE_KEY = 'ai_page_state_problem';
 let problemLanguageSelect = null;
 let problemTopicSelect = null;
 let problemPromptSelect = null;
@@ -365,17 +364,17 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     function savePageState() {
         try {
-            const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
-            state.progLng = problemLanguageSelect.value;
-            state.topic = problemTopicSelect.value;
-            state.prompt = problemPromptSelect.value;
-            localStorage.setItem(PAGE_STATE_KEY, JSON.stringify(state));
+            setAiState({
+                progLng: problemLanguageSelect.value,
+                topic: problemTopicSelect.value,
+                prompt: problemPromptSelect.value
+            });
         } catch(e) {}
     }
 
     function restorePageState() {
         try {
-            const state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
+            const state = getAiState();
             if (!state.progLng) return;
             const langOpt = Array.from(problemLanguageSelect.options).find(o => o.value === state.progLng);
             if (!langOpt) return;
@@ -520,7 +519,7 @@ window.onload = function () {
     initAccordionForMessages();
     updateVoiceStatus(getVoiceStatusText('ready'));
     initSelectionPersistence();
-    initTokenUsageWidget();
+    initModelLimitsWidget();
 
     // Инициализация чекбокса think-блоков
     const speakThinkCheckbox = document.getElementById('speakThinkContent');

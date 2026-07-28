@@ -38,7 +38,6 @@ from .auth_backends import (
     normalize_external_user_id,
 )
 from .constants import PROMPT_DEVELOPER_GROUP
-from .token_usage import get_daily_token_usage
 from .dl_api_client import (
     DLApiError,
     DLApiUnavailable,
@@ -82,9 +81,21 @@ def _get_user_top_model_keys(request, limit=2):
         if not user_id:
             return []
 
+        # Срез по epoch: если у AIAppSettings задан favorites_epoch, учитываем
+        # только успешные запросы новее этой даты. Это даёт разовый сброс счётчика
+        # фаворитов для всех (нет записей новее epoch → user_top пуст → строгий
+        # алфавит), без удаления логов; новые запросы снова набирают топ-2.
+        qs = AIRequestLog.objects.filter(status='success', user_id=user_id)
+        try:
+            epoch = AIAppSettings.get_solo().favorites_epoch
+        except Exception:
+            epoch = None
+        if epoch:
+            qs = qs.filter(sent_at__gte=epoch)
+
         # Посчитать частоту моделей для этого пользователя
         c = Counter()
-        for mns in AIRequestLog.objects.filter(status='success', user_id=user_id).values_list('model_names', flat=True):
+        for mns in qs.values_list('model_names', flat=True):
             if mns:
                 for m in mns:
                     key = title_to_key.get(m)
@@ -207,12 +218,31 @@ def _get_last_update_date():
         return None
 
 
+def _read_ai_state(request):
+    """Parse the ``ai_state`` cookie (user selections) into a dict, or ``{}``.
+
+    The cookie is written by the frontend (``static/admin/js/ai-common.js``) and
+    carries the last active tab, interface language and selected model/topic/
+    prompt so the server can pre-render the right language and redirect to the
+    last tab (see :func:`ai_root_view`). Malformed cookies are ignored.
+    """
+    import json
+    raw = request.COOKIES.get("ai_state") or ""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
 def _render_ai_page(request, template_name, extra_context=None):
     """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
 
-    Проверяет доступ, загружает список доступных моделей (с self-heal при пустом списке),
-    сортирует модели по приоритету (Web_DeepSeek первыми), добавляет информацию
-    о daily token usage и external_session_id.
+    Проверяет доступ, загружает список доступных моделей (с self-heal при пустом
+    списке), сортирует их (топ-2 фаворита пользователя → Web_DeepSeek приоритет →
+    алфавит), и добавляет external_session_id + сохранённый из куки язык.
     """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
@@ -232,41 +262,57 @@ def _render_ai_page(request, template_name, extra_context=None):
         except Exception:
             logger.exception("Failed to trigger model health self-heal refresh")
     if available_models:
-        # Web_DeepSeek приоритет — наверх
+        # Топ-2 фаворита пользователя (по частоте использования) — наверх.
+        user_top = _get_user_top_model_keys(request, limit=2)
         model_map = {item["key"]: item for item in available_models}
+        user_picks = [model_map[k] for k in user_top if k in model_map]
 
-        # Web_DeepSeek приоритет (первыми, если доступны)
+        # Web_DeepSeek приоритет (первыми, если доступны и не в фаворитах)
         web_priority = [
             model_map[key]
             for key in _WEB_PRIORITY_MODELS
-            if key in model_map
+            if key in model_map and key not in user_top
         ]
 
         # Остальные — по алфавиту (title)
-        used_keys = set(_WEB_PRIORITY_MODELS)
+        used_keys = set(user_top) | set(_WEB_PRIORITY_MODELS)
         rest = sorted(
             [item for item in available_models if item["key"] not in used_keys],
             key=lambda x: x["title"].lower(),
         )
 
-        available_models = web_priority + rest
+        available_models = user_picks + web_priority + rest
+    saved_state = _read_ai_state(request)
     external_session_id = request.session.get('external_session_id')
-    # The token-usage banner is a non-essential enhancement; it must never
-    # break the chat page (mirrors the get_solo/ProgrammingError guard above).
-    try:
-        token_usage = get_daily_token_usage()
-    except Exception:
-        logger.exception("Failed to compute daily token usage")
-        token_usage = None
     context = {
         'available_models': available_models,
         'external_session_id': external_session_id,
-        'token_usage': token_usage,
         'last_update_date': _get_last_update_date(),
+        'saved_lang': saved_state.get('lang') or '',
     }
     if extra_context:
         context.update(extra_context)
     return render(request, template_name, context)
+
+
+def ai_root_view(request):
+    """``/ai/`` — redirect to the user's last active tab from the ``ai_state`` cookie.
+
+    Falls back to the chat page when the cookie is absent or holds an unknown
+    tab, so the entry point always lands somewhere useful.
+    """
+    from django.shortcuts import redirect
+
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+    tab_map = {
+        "solve": "/ai/solve-problem/",
+        "find_error": "/ai/find-error/",
+    }
+    saved = _read_ai_state(request)
+    tab = saved.get("tab") or ""
+    target = tab_map.get(tab, "/ai/chat/")
+    return redirect(target)
 
 
 @rate_limited

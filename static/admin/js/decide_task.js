@@ -17,7 +17,6 @@
 // === Специфичные для «Реши задачу» переменные ===
 let problemData = null;
 const PROBLEM_DATA_KEY = 'ai_problem_data_cache';
-const PAGE_STATE_KEY = 'ai_page_state_problem';
 let problemLanguageSelect = null;
 let problemTopicSelect = null;
 let problemPromptSelect = null;
@@ -377,17 +376,17 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     function savePageState() {
         try {
-            var state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
-            state.progLng = problemLanguageSelect.value;
-            state.topic = problemTopicSelect.value;
-            state.prompt = problemPromptSelect.value;
-            localStorage.setItem(PAGE_STATE_KEY, JSON.stringify(state));
+            setAiState({
+                progLng: problemLanguageSelect.value,
+                topic: problemTopicSelect.value,
+                prompt: problemPromptSelect.value
+            });
         } catch(e) {}
     }
 
     function restorePageState() {
         try {
-            var state = JSON.parse(localStorage.getItem(PAGE_STATE_KEY) || '{}');
+            var state = getAiState();
             if (!state.progLng) return;
             var langOpt = Array.from(problemLanguageSelect.options).find(function(o) { return o.value === state.progLng; });
             if (!langOpt) return;
@@ -525,7 +524,7 @@ window.onload = function () {
     initAccordionForMessages();
     updateVoiceStatus(getVoiceStatusText('ready'));
     initSelectionPersistence();
-    initTokenUsageWidget();
+    initModelLimitsWidget();
 
     var speakThinkCheckbox = document.getElementById('speakThinkContent');
     if (speakThinkCheckbox) {

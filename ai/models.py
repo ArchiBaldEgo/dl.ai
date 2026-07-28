@@ -300,6 +300,13 @@ class AIAppSettings(models.Model):
     """
     is_enabled = models.BooleanField(default=True)
     updated_at = models.DateTimeField(auto_now=True)
+    # Дата-отсечка для счётчика «фаворитов» (топ-2 моделей по частоте использования).
+    # Успешные AIRequestLog старше этой даты не учитываются при ранжировании,
+    # что даёт разовый сброс фаворитов для всех пользователей (нет записей новее
+    # epoch → строгий алфавит) без удаления логов; новые запросы снова набирают
+    # топ-2. См. ai/views.py::_get_user_top_model_keys и management-команду
+    # reset_favorites_epoch.
+    favorites_epoch = models.DateTimeField(null=True, blank=True, default=timezone.now)
 
     class Meta:
         verbose_name = "AI app setting"
