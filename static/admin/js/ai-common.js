@@ -249,8 +249,10 @@ function initProblemSelectors() {
             selectPrompt.appendChild(option);
         });
         selectFirstIfSingle(selectPrompt);
-        const hasTopic = topicId !== null && topicId !== undefined && topicId !== "";
-        setSelectEnabled(selectPrompt, hasTopic && selectPrompt.options.length > 1);
+        // Общие промпты (topic_id=null) не требуют темы — селектор препромптов
+        // доступен, пока есть хоть один выбираемый промпт, даже если тема не
+        // выбрана (например, у C++ нет тем).
+        setSelectEnabled(selectPrompt, selectPrompt.options.length > 1);
     }
 
     function savePageState() {
