@@ -493,6 +493,9 @@ document.addEventListener("DOMContentLoaded", async () => {
             populatePrompts(null, null);
         }
 
+        // Пере-применяем сохранённые progLng/topic/prompt к перелокализованным селектам
+        // (значения-иды языка-независимы); иначе repopulate сбрасывает выбор в дефолт.
+        restorePageState();
         saveInterfaceLanguage();
         updateVoiceStatus(getVoiceStatusText('readyForVoice'));
         }

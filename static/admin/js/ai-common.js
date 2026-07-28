@@ -775,7 +775,6 @@ function saveInterfaceLanguage() {
         if (selectLang && selectLang.selectedIndex >= 0) {
             setAiState({ lang: selectLang.options[selectLang.selectedIndex].getAttribute('language') });
         }
-        saveSelections();
     } catch (e) {}
 }
 

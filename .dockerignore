@@ -37,3 +37,5 @@ bot/.cache/
 bot/.puppeteer-cache/
 bot/chrome*
 bot/chromium*
+
+.claude/

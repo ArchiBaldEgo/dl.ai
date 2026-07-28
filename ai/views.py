@@ -12,15 +12,20 @@
 import json
 import os
 import logging
+import threading
+import time
+import asyncio
 
 import tempfile
 from django.contrib.auth import login
 from django.shortcuts import redirect, render
 from django.http import JsonResponse
-from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound
+from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound, HttpResponseNotModified
 from django.db import ProgrammingError, models
 from django.db.models import Q
 from django.contrib.staticfiles import finders
+from django.utils.http import http_date
+from django.views.static import was_modified_since
 from django.middleware import csrf
 from functools import wraps
 
@@ -59,7 +64,6 @@ from .serializers import (
     topic as serialize_topic,
 )
 
-_WEB_PRIORITY_MODELS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
 
 def _get_user_top_model_keys(request, limit=2):
     """Возвращает list of model_key для топ-N моделей пользователя по частоте использования.
@@ -115,6 +119,33 @@ def health_view(request):
     return JsonResponse({"ok": True})
 
 
+_groq_probe_lock = threading.Lock()
+_groq_last_probe = 0.0
+
+
+def _run_groq_probe():
+    """Фоновый прогрев rate-limit кэша Groq (неблокирующий для HTTP-запроса)."""
+    try:
+        from .model_clients.groq import probe_rate_limits
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(probe_rate_limits())
+        finally:
+            loop.close()
+    except Exception:
+        logger.exception("Background Groq rate-limit probe failed")
+
+
+def _maybe_kick_groq_probe():
+    """Запускает фоновый probe не чаще раза в 60с (дебаунс)."""
+    global _groq_last_probe
+    with _groq_probe_lock:
+        if time.time() - _groq_last_probe < 60:
+            return
+        _groq_last_probe = time.time()
+    threading.Thread(target=_run_groq_probe, daemon=True).start()
+
+
 @require_http_methods(["GET"])
 def get_groq_limits_view(request):
     """API: возвращает текущие rate-limit-ы по всем Groq моделям.
@@ -122,23 +153,17 @@ def get_groq_limits_view(request):
     Данные берутся из in-memory кэша в ai.model_clients.groq._rate_limit_cache,
     который обновляется при каждом запросе к Groq API (см. _update_rate_limit_cache).
 
-    Если в кэше есть данные — отдаёт их. Если данных ещё нет (контейнер только
-    запущен) — запускает фоновый probe (probe_rate_limits) и возвращает пустой
-    словарь, чтобы фронтенд мог показать «загрузка…» и повторить через минуту.
+    Если в кэше есть данные — отдаёт их сразу. Если данных ещё нет (контейнер только
+    запущен) — запускает НЕблокирующий фоновый probe (probe_rate_limits) и возвращает
+    текущий (возможно пустой) кэш, чтобы фронтенд показал «загрузка…» и повторил через
+    минуту (initModelLimitsWidget опрашивает раз в 60с). Дебаунс 60с предотвращает
+    спам probe-ами при параллельных запросах.
     """
-    from .model_clients.groq import get_rate_limits, probe_rate_limits
-    import asyncio
+    from .model_clients.groq import get_rate_limits
 
     cache = get_rate_limits()
     if not cache:
-        # Нет данных — пробиваем лёгким запросом (неблокирующий)
-        try:
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(probe_rate_limits())
-            loop.close()
-            cache = get_rate_limits()
-        except Exception:
-            pass
+        _maybe_kick_groq_probe()
 
     return JsonResponse({"limits": cache})
 
@@ -267,21 +292,15 @@ def _render_ai_page(request, template_name, extra_context=None):
         model_map = {item["key"]: item for item in available_models}
         user_picks = [model_map[k] for k in user_top if k in model_map]
 
-        # Web_DeepSeek приоритет (первыми, если доступны и не в фаворитах)
-        web_priority = [
-            model_map[key]
-            for key in _WEB_PRIORITY_MODELS
-            if key in model_map and key not in user_top
-        ]
-
-        # Остальные — по алфавиту (title)
-        used_keys = set(user_top) | set(_WEB_PRIORITY_MODELS)
+        # Остальные — строго по алфавиту (title). Без отдельного приоритета
+        # Web_DeepSeek: фавориты наверху, далее алфавит (включая Web_DeepSeek).
+        used_keys = set(user_top)
         rest = sorted(
             [item for item in available_models if item["key"] not in used_keys],
             key=lambda x: x["title"].lower(),
         )
 
-        available_models = user_picks + web_priority + rest
+        available_models = user_picks + rest
     saved_state = _read_ai_state(request)
     external_session_id = request.session.get('external_session_id')
     context = {
@@ -292,7 +311,11 @@ def _render_ai_page(request, template_name, extra_context=None):
     }
     if extra_context:
         context.update(extra_context)
-    return render(request, template_name, context)
+    response = render(request, template_name, context)
+    # HTML не кэшируется — браузер всегда видит свежий ?v= ассетов и подгружает
+    # обновлённый JS/CSS после деплоя (ассеты ревалидируются через asset_view).
+    response["Cache-Control"] = "no-cache"
+    return response
 
 
 def ai_root_view(request):
@@ -421,13 +444,12 @@ def chat_view(request):
 
 
 def decide_task_view(request):
-    """Страница решения задачи: принимает node_id и compiler_name из query-параметров."""
+    """Страница решения задачи: принимает node_id из query-параметров."""
     return _render_ai_page(
         request,
         'ai/decide-task.html',
         extra_context={
             "node_id": request.GET.get("nid", ""),
-            "compiler_name": request.GET.get("compiler_b64", ""),
         },
     )
 
@@ -528,14 +550,26 @@ def get_problem_data(request):
 
 
 def asset_view(request, asset_path):
-    """Отдаёт статический файл из Django staticfiles по пути (для AI-страниц)."""
+    """Отдаёт статический файл из Django staticfiles по пути (для AI-страниц).
+
+    Ассеты ревалидируются браузером (Cache-Control: no-cache + Last-Modified + 304),
+    поэтому после деплоя браузер подхватывает обновлённый JS/CSS даже без ?v=-бампа.
+    """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
     asset_full_path = finders.find(asset_path)
     if not asset_full_path or not os.path.isfile(asset_full_path):
         raise Http404("Asset not found")
 
-    return FileResponse(open(asset_full_path, "rb"))
+    statobj = os.stat(asset_full_path)
+    mtime = statobj.st_mtime
+    if not was_modified_since(request.META.get("HTTP_IF_MODIFIED_SINCE"), mtime):
+        return HttpResponseNotModified()
+
+    response = FileResponse(open(asset_full_path, "rb"))
+    response["Cache-Control"] = "no-cache"
+    response["Last-Modified"] = http_date(mtime)
+    return response
 
 @require_http_methods(["GET"])
 def get_task_info_view(request):

@@ -6,6 +6,7 @@ from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import SimpleTestCase, RequestFactory, TestCase, override_settings
 from pathlib import Path
 import json
+import time
 
 from django.http import HttpResponse
 from django.db import ProgrammingError
@@ -177,6 +178,8 @@ class ExternalAuthMiddlewareTests(TestCase):
         request.COOKIES["DLSID"] = "session-123"
         request.session["external_session_id"] = "session-123"
         request.session["external_user_info"] = {"userId": "42"}
+        # Свежий кэш (< TTL) — ревалидация DLSID не требуется.
+        request.session["external_user_info_fetched_at"] = time.time()
 
         with patch("ai.middleware.fetch_external_user_info") as fetch_user_info:
             response = self.middleware(request)
@@ -184,6 +187,76 @@ class ExternalAuthMiddlewareTests(TestCase):
         self.assertEqual(response.status_code, 200)
         fetch_user_info.assert_not_called()
         self.assertEqual(request.user_info, {"userId": "42"})
+
+    def test_stale_cached_user_info_revalidates_dlsid(self):
+        # Кэш старше TTL → middleware заново проверяет DLSID через внешний API.
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        from ai.models import ExternalDLAccount
+        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        u = self.user_model.objects.create_user(username="user_42b", password="x")
+        ExternalDLAccount.objects.create(user=u, external_user_id="42")
+
+        request = self.factory.get("/ai/admin/")
+        self._add_session(request)
+        request.COOKIES["DLSID"] = "session-123"
+        request.session["external_session_id"] = "session-123"
+        request.session["external_user_info"] = {"userId": "42"}
+        # Протухший кэш: fetched_at далеко в прошлом → (now - fetched_at) >= TTL.
+        request.session["external_user_info_fetched_at"] = time.time() - 3600
+
+        with patch(
+            "ai.middleware.fetch_external_user_info",
+            return_value={"userId": "42", "login": "alice"},
+        ) as fetch_user_info:
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        fetch_user_info.assert_called_once()
+        # Кэш обновлён свежим user_info и свежим timestamp.
+        self.assertEqual(request.session["external_user_info"], {"userId": "42", "login": "alice"})
+
+    def test_unavailable_external_api_falls_back_to_stale_cache(self):
+        # dl.gsu.by недоступен, но есть свежий кэш → graceful degradation,
+        # доступ сохраняется (не 503).
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        from ai.models import ExternalDLAccount
+        from ai.external_auth import ExternalAuthUnavailable
+        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        u = self.user_model.objects.create_user(username="user_42c", password="x")
+        ExternalDLAccount.objects.create(user=u, external_user_id="42")
+
+        request = self.factory.get("/ai/admin/")
+        self._add_session(request)
+        request.COOKIES["DLSID"] = "session-123"
+        request.session["external_session_id"] = "session-123"
+        request.session["external_user_info"] = {"userId": "42"}
+        # Протухший кэш провоцирует ревалидацию, которая упадёт с Unavailable.
+        request.session["external_user_info_fetched_at"] = time.time() - 3600
+
+        with patch(
+            "ai.middleware.fetch_external_user_info",
+            side_effect=ExternalAuthUnavailable("dl.gsu.by down"),
+        ):
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(request.user_info, {"userId": "42"})
+
+    def test_unavailable_external_api_returns_503_without_cache(self):
+        # dl.gsu.by недоступен И кэша нет → 503 (некому предоставить доступ).
+        from ai.external_auth import ExternalAuthUnavailable
+
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.COOKIES["DLSID"] = "session-123"
+
+        with patch(
+            "ai.middleware.fetch_external_user_info",
+            side_effect=ExternalAuthUnavailable("dl.gsu.by down"),
+        ):
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 503)
 
 
 class AdminExternalAuthTests(TestCase):
@@ -2211,7 +2284,7 @@ class ModelSortingTests(SimpleTestCase):
         self.assertEqual(result, [])
 
     def test_user_top_models_come_first(self):
-        """User's top-2 models should appear before web priority and alphabetical rest."""
+        """User's top-2 models first, then the rest strictly alphabetical (no web priority)."""
         from ai.views import _render_ai_page
         models_data = [
             {"key": "DeepSeek_V3_1", "title": "DeepSeek V3.1", "capabilities": {}},
@@ -2225,18 +2298,18 @@ class ModelSortingTests(SimpleTestCase):
         request.session = {}
         request.user_info = {"userId": "sort-user"}
         request.COOKIES = {"userId": "sort-user"}
-        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["Groq_Llama_3_3_70B", "DeepSeek_V3_1"]),              patch("ai.views.render", return_value="ok") as mock_render:
+        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["Groq_Llama_3_3_70B", "DeepSeek_V3_1"]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
             _render_ai_page(request, "ai/chat.html")
         context = mock_render.call_args[0][2]
         keys = [m["key"] for m in context["available_models"]]
         self.assertEqual(keys[0], "Groq_Llama_3_3_70B")
         self.assertEqual(keys[1], "DeepSeek_V3_1")
-        self.assertEqual(keys[2], "Web_DeepSeek")
-        self.assertEqual(keys[3], "Gemma_3_12b_it")
-        self.assertEqual(keys[4], "MiniMax_M2_5")
+        self.assertEqual(keys[2], "Gemma_3_12b_it")
+        self.assertEqual(keys[3], "MiniMax_M2_5")
+        self.assertEqual(keys[4], "Web_DeepSeek")
 
-    def test_no_user_top_models_web_priority_then_alphabetical(self):
-        """Without user top models: web priority first, then alphabetical rest."""
+    def test_no_user_top_models_strictly_alphabetical(self):
+        """Without user top models: everything strictly alphabetical by title."""
         from ai.views import _render_ai_page
         models_data = [
             {"key": "DeepSeek_V3_1", "title": "DeepSeek V3.1", "capabilities": {}},
@@ -2250,18 +2323,18 @@ class ModelSortingTests(SimpleTestCase):
         request.session = {}
         request.user_info = {"userId": "sort-user"}
         request.COOKIES = {"userId": "sort-user"}
-        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=[]),              patch("ai.views.render", return_value="ok") as mock_render:
+        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=[]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
             _render_ai_page(request, "ai/chat.html")
         context = mock_render.call_args[0][2]
         keys = [m["key"] for m in context["available_models"]]
-        self.assertEqual(keys[0], "Web_DeepSeek")
-        self.assertEqual(keys[1], "Web_DeepSeek_Thinking")
-        self.assertEqual(keys[2], "DeepSeek_V3_1")
-        self.assertEqual(keys[3], "Gemma_3_12b_it")
-        self.assertEqual(keys[4], "MiniMax_M2_5")
+        self.assertEqual(keys[0], "DeepSeek_V3_1")
+        self.assertEqual(keys[1], "Gemma_3_12b_it")
+        self.assertEqual(keys[2], "MiniMax_M2_5")
+        self.assertEqual(keys[3], "Web_DeepSeek")
+        self.assertEqual(keys[4], "Web_DeepSeek_Thinking")
 
-    def test_web_priority_skipped_when_in_user_top(self):
-        """Web_DeepSeek in user top should NOT appear again in web priority section."""
+    def test_user_top_first_no_duplicates(self):
+        """User's top models first, the rest strictly alphabetical, no duplicate keys."""
         from ai.views import _render_ai_page
         models_data = [
             {"key": "Web_DeepSeek", "title": "Web DeepSeek", "capabilities": {}},
@@ -2274,14 +2347,14 @@ class ModelSortingTests(SimpleTestCase):
         request.session = {}
         request.user_info = {"userId": "sort-user"}
         request.COOKIES = {"userId": "sort-user"}
-        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["Web_DeepSeek", "Gemma_3_12b_it"]),              patch("ai.views.render", return_value="ok") as mock_render:
+        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["Web_DeepSeek", "Gemma_3_12b_it"]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
             _render_ai_page(request, "ai/chat.html")
         context = mock_render.call_args[0][2]
         keys = [m["key"] for m in context["available_models"]]
         self.assertEqual(keys[0], "Web_DeepSeek")
         self.assertEqual(keys[1], "Gemma_3_12b_it")
-        self.assertEqual(keys[2], "Web_DeepSeek_Thinking")
-        self.assertEqual(keys[3], "MiniMax_M2_5")
+        self.assertEqual(keys[2], "MiniMax_M2_5")
+        self.assertEqual(keys[3], "Web_DeepSeek_Thinking")
         self.assertEqual(len(keys), len(set(keys)))
 
 

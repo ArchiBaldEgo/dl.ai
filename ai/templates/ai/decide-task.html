@@ -1,37 +1,27 @@
 {% extends "ai/base_chat.html" %}
 
 {% block extra_css %}
-    <link rel="stylesheet" href="/ai/assets/admin/css/decide_task.css"/>
+    <link rel="stylesheet" href="/ai/assets/admin/css/decide_task.css?v=4"/>
 {% endblock %}
 
 {% block js %}
-    <script src="/ai/assets/admin/js/ai-common.js?v=3" defer></script>
-    <script src="/ai/assets/admin/js/decide_task.js?v=3" defer></script>
+    <script src="/ai/assets/admin/js/ai-common.js?v=4" defer></script>
+    <script src="/ai/assets/admin/js/decide_task.js?v=4" defer></script>
 {% endblock %}
 
 {% block solve_selected %}selected{% endblock %}
 
 {% block form_content %}
-    <textarea type="text" id="messageText" data-node-id="{{ node_id }}" data-compiler-name="{{ compiler_name }}"
+    <textarea type="text" id="messageText" data-node-id="{{ node_id }}"
         placeholder="Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)"
         autocomplete="off"></textarea>
 {% endblock %}
 
 {% block top_dv %}
-    <select id="selectProgLng">
-    </select>
-    <select id="selectTheme">
-    </select>
-    <div class="top-preprompt">
-        <div class="preprompt">Препромпт:</div>
-        <select id="selectPrompt">
-        </select>
-    </div>
 {% endblock %}
 
 {% block extra_body_script %}
 <script>
     window.AI_TASK_NODE_ID = document.getElementById('messageText').dataset.nodeId || '';
-    window.AI_COMPILER_NAME = document.getElementById('messageText').dataset.compilerName || '';
 </script>
 {% endblock %}

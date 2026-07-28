@@ -2,7 +2,9 @@
 # Git post-merge hook — срабатывает после git pull (когда был merge).
 # Синхронизирует таблицу UpdateLog с новыми коммитами.
 #
-# Работает на хосте (где есть git), подключается к Docker-контейнеру web.
+# Работает на хосте (где есть git), подключается к Docker-контейнеру web,
+# в котором теперь установлен git и примонтирован .git — sync_update_log
+# читает git log прямо в контейнере (без /tmp-обмена между хостом и контейнером).
 
 cd "$(git rev-parse --show-toplevel)"
 
@@ -13,75 +15,5 @@ if ! docker compose ps --status=running web 2>/dev/null | grep -q "dl_ai_web"; t
 fi
 
 echo "[post-merge] Синхронизация UpdateLog с новыми коммитами..."
-
-git log --pretty=format:"%h|%ad|%an|%s" --date=short > /tmp/git_commits_for_sync.txt
-
-docker compose exec -T web python -c "
-import os, django
-from datetime import datetime
-
-os.environ['DJANGO_SETTINGS_MODULE'] = 'DjangoTest.settings'
-django.setup()
-
-from ai.models import UpdateLog
-
-commits = []
-try:
-    with open('/tmp/git_commits_for_sync.txt') as f:
-        for line in f:
-            parts = line.strip().split('|', 3)
-            if len(parts) == 4:
-                commits.append(parts)
-except FileNotFoundError:
-    print('[post-merge] Файл с коммитами не найден — пропускаю')
-    exit(0)
-
-PREFIX_MAP = {
-    'feat:': 'Нововведение',
-    'fix:': 'Исправление',
-    'chore:': 'Обслуживание',
-    'docs:': 'Документация',
-    'test:': 'Тесты',
-    'refactor:': 'Рефакторинг',
-    'style:': 'Стиль',
-    'perf:': 'Производительность',
-    'ci:': 'CI/CD',
-    'build:': 'Сборка',
-    'ux:': 'UX улучшение',
-}
-
-def translate(msg):
-    lower = msg.lower()
-    for prefix, russian in PREFIX_MAP.items():
-        if lower.startswith(prefix):
-            rest = msg[len(prefix):].strip()
-            return f'{russian}: {rest}'
-    return msg
-
-existing_hashes = set(
-    UpdateLog.objects.exclude(commit_hash='').values_list('commit_hash', flat=True)
-)
-
-created = 0
-for commit_hash, date_str, author, message in commits:
-    if commit_hash in existing_hashes:
-        continue
-    try:
-        commit_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-    except ValueError:
-        continue
-    UpdateLog.objects.create(
-        commit_date=commit_date,
-        description=translate(message),
-        author=author,
-        commit_hash=commit_hash,
-    )
-    created += 1
-
-if created:
-    print(f'[post-merge] Добавлено {created} новых коммитов в UpdateLog')
-else:
-    print('[post-merge] Новых коммитов нет — таблица UpdateLog актуальна')
-" 2>&1
-
+docker compose exec -T web python manage.py sync_update_log
 echo "[post-merge] Готово"

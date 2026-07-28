@@ -6,54 +6,13 @@
  * который подключается ПЕРЕД этим файлом.
  *
  * Здесь только специфичная для «Реши задачу» логика:
- * - Данные задачи: языки, темы, промпты (problemData).
  * - override initWebSocket() — type=2 и accordion logic в onmessage.
- * - override sendMessage() / simulateSend() — progLng, topic, preprompt, nodeId.
- * - selectLang change handler — обновление UI элементов, reload problem data.
- * - DOMContentLoaded — загрузка данных задачи, заполнение селектов, restorePageState.
+ * - override sendMessage() / simulateSend() — nodeId (язык/тема/препромт на этой
+ *   странице не выбираются; условие задачи подставляется из DL-ссылки через loadTaskFromUrl).
+ * - selectLang change handler — обновление UI элементов.
+ * - DOMContentLoaded — автозагрузка условия задачи из DL-ссылки (loadTaskFromUrl).
  * - window.onload — init для decide_task.
  */
-
-// === Специфичные для «Реши задачу» переменные ===
-let problemData = null;
-const PROBLEM_DATA_KEY = 'ai_problem_data_cache';
-let problemLanguageSelect = null;
-let problemTopicSelect = null;
-let problemPromptSelect = null;
-
-// === fetchProblemData — объявлена в области видимости модуля, чтобы
-//     обработчик selectLang change мог её вызвать (исправление бага №2). ===
-async function fetchProblemData() {
-    if (problemData) return problemData;
-    try {
-        var cached = sessionStorage.getItem(PROBLEM_DATA_KEY);
-        if (cached) {
-            var parsed = JSON.parse(cached);
-            // Only use cache if it has actual data (non-empty languages)
-            if (parsed && parsed.languages && parsed.languages.length > 0) {
-                problemData = parsed;
-                return problemData;
-            }
-        }
-    } catch (e) {}
-
-    try {
-        var uiLang = document.getElementById('selectLang').value || 'Русский';
-        var url = new URL('/ai/api/problem-data/', window.location.origin);
-        url.searchParams.set('ui_language', uiLang);
-        var response = await fetch(url.toString());
-        if (!response.ok) throw new Error('HTTP error! status: ' + response.status);
-        var data = await response.json();
-        problemData = data;
-        try {
-            sessionStorage.setItem(PROBLEM_DATA_KEY, JSON.stringify(data));
-        } catch (e) {}
-        return data;
-    } catch (error) {
-        console.error('Error fetching problem data:', error);
-        return { languages: [], topics: [], prompts: [], shared_prompts: [] };
-    }
-}
 
 // === override initWebSocket — type=2, accordion в onmessage ===
 function initWebSocket() {
@@ -116,7 +75,8 @@ function initWebSocket() {
     }
 }
 
-// === override sendMessage — с progLng, topic, preprompt, nodeId ===
+// === override sendMessage — с nodeId (язык/тема/препромт убраны: на этой
+//     странице они не выбираются) ===
 function sendMessage(event) {
     event.preventDefault();
     if (!ws) {
@@ -139,9 +99,6 @@ function sendMessage(event) {
     var value = document.querySelector("#select").value;
     var language = document.querySelector("#selectLang").value;
     var input = document.getElementById("messageText");
-    var progLng = document.querySelector("#selectProgLng").value;
-    var topic = document.querySelector("#selectTheme").value;
-    var preprompt = document.querySelector("#selectPrompt").value;
 
     if (!value) {
         alert("Сегодня нет доступных моделей. Повторите позже.");
@@ -152,19 +109,12 @@ function sendMessage(event) {
         alert("Пожалуйста, введите сообщение");
         return;
     }
-    if (!progLng) {
-        alert("Выберите язык программирования перед отправкой");
-        return;
-    }
 
     ws.send(JSON.stringify({
         type: '2',
         message: input.value,
         value: value,
         language: language,
-        progLng: progLng,
-        topic: topic,
-        preprompt: preprompt,
         nodeId: window.AI_TASK_NODE_ID || ''
     }));
     setRequestLock(true);
@@ -174,7 +124,7 @@ function sendMessage(event) {
     saveSharedText();
 }
 
-// === override simulateSend — с progLng, topic, preprompt, nodeId ===
+// === override simulateSend — с nodeId (язык/тема/препромт убраны) ===
 function simulateSend() {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         updateVoiceStatus(getVoiceStatusText('connectionError'));
@@ -189,15 +139,8 @@ function simulateSend() {
     var value = document.querySelector("#select").value;
     var language = document.querySelector("#selectLang").value;
     var input = document.getElementById("messageText");
-    var progLng = document.querySelector("#selectProgLng").value;
-    var topic = document.querySelector("#selectTheme").value;
-    var preprompt = document.querySelector("#selectPrompt").value;
 
     if (!input.value.trim()) {
-        return;
-    }
-    if (!progLng) {
-        updateVoiceStatus(getVoiceStatusText('select_prog_lang'));
         return;
     }
 
@@ -206,9 +149,6 @@ function simulateSend() {
         message: input.value,
         value: value,
         language: language,
-        progLng: progLng,
-        topic: topic,
-        preprompt: preprompt,
         nodeId: window.AI_TASK_NODE_ID || ''
     }));
 
@@ -269,207 +209,27 @@ document.addEventListener("DOMContentLoaded", function() {
             var speakThinkLabel = document.getElementById("speakThinkLabel");
             if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
 
-            // Reload topics/prompts in the selected UI language
-            sessionStorage.removeItem(PROBLEM_DATA_KEY);
-            problemData = null;
-            await fetchProblemData();
-            var languageId = parseInt(problemLanguageSelect.value);
-            populateLanguages(problemData.languages);
-            if (!isNaN(languageId)) {
-                populateTopics(languageId);
-                populatePrompts(languageId, null);
-            } else {
-                populateTopics(null);
-                populatePrompts(null, null);
-            }
-
             saveInterfaceLanguage();
             updateVoiceStatus(getVoiceStatusText('readyForVoice'));
-            }
         });
     }
 });
 
-// === DOMContentLoaded — загрузка данных задачи, заполнение селектов ===
+// === DOMContentLoaded — автозагрузка условия задачи из DL-ссылки ===
 document.addEventListener("DOMContentLoaded", async () => {
-    problemLanguageSelect = document.getElementById("selectProgLng");
-    problemTopicSelect = document.getElementById("selectTheme");
-    problemPromptSelect = document.getElementById("selectPrompt");
-
-    function setSelectEnabled(selectElement, enabled) {
-        if (!selectElement) return;
-        selectElement.disabled = !enabled;
-    }
-
-    function selectFirstIfSingle(selectElement) {
-        if (selectElement && selectElement.options.length === 1) {
-            selectElement.selectedIndex = 0;
-        }
-    }
-
-    function populateLanguages(languages) {
-        problemLanguageSelect.innerHTML = '<option value="">' + getUiString('select_prog_lang', 'Выберите язык программирования') + '</option>';
-        if (languages && languages.length > 0) {
-            languages.forEach(function(lang) {
-                var option = new Option(lang.language_name, lang.id);
-                problemLanguageSelect.appendChild(option);
-            });
-        }
-        selectFirstIfSingle(problemLanguageSelect);
-    }
-
-    function populateTopics(languageId) {
-        problemTopicSelect.innerHTML = '<option value="">' + getUiString('chooseTheme', 'Выберите тему') + '</option>';
-        var topics = (problemData && problemData.topics) || [];
-        var filteredTopics = topics.filter(function(topic) { return topic.programming_language == languageId; });
-        filteredTopics.forEach(function(topic) {
-            var option = new Option(topic.name || topic.topic_name, topic.id);
-            problemTopicSelect.appendChild(option);
-        });
-        selectFirstIfSingle(problemTopicSelect);
-        setSelectEnabled(problemTopicSelect, languageId !== null && languageId !== undefined && problemTopicSelect.options.length > 1);
-    }
-
-    function filterPrompts(prompts, languageId, topicId) {
-        var languageValue = languageId ? String(languageId) : "";
-        var topicValue = topicId ? String(topicId) : "";
-        return prompts.filter(function(prompt) {
-            var hasTopic = prompt.topic_id !== null && prompt.topic_id !== undefined && prompt.topic_id !== "";
-            if (!hasTopic) return true;
-            if (topicValue) return String(prompt.topic_id) === topicValue;
-            if (!languageValue) return false;
-            return String(prompt.topic__programming_language) === languageValue;
-        });
-    }
-
-    function populatePrompts(languageId, topicId) {
-        problemPromptSelect.innerHTML = '<option value="">' + getUiString('choosePrompt', 'Выберите промпт') + '</option>';
-        if (!problemData) return;
-        var allPrompts = (problemData.prompts || []).slice();
-
-        if (languageId) {
-            var langIdStr = String(languageId);
-            var shared = (problemData.shared_prompts || []).filter(function(sp) {
-                var ids = sp.language_ids || [];
-                return ids.length === 0 || ids.includes(languageId) || ids.includes(langIdStr);
-            });
-            shared.forEach(function(sp) {
-                allPrompts.push({
-                    id: 'shared_' + sp.id,
-                    prompt_name: '[Общий] ' + (sp.name || sp.prompt_name),
-                    name: '[Общий] ' + (sp.name || sp.prompt_name),
-                    topic_id: null,
-                    topic__programming_language: langIdStr
-                });
-            });
-        }
-
-        var filteredPrompts = filterPrompts(allPrompts, languageId, topicId);
-        filteredPrompts.forEach(function(prompt) {
-            var option = new Option(prompt.name || prompt.prompt_name, prompt.id);
-            problemPromptSelect.appendChild(option);
-        });
-        selectFirstIfSingle(problemPromptSelect);
-        var hasTopic = topicId !== null && topicId !== undefined && topicId !== "";
-        setSelectEnabled(problemPromptSelect, hasTopic && problemPromptSelect.options.length > 1);
-    }
-
-    function savePageState() {
-        try {
-            setAiState({
-                progLng: problemLanguageSelect.value,
-                topic: problemTopicSelect.value,
-                prompt: problemPromptSelect.value
-            });
-        } catch(e) {}
-    }
-
-    function restorePageState() {
-        try {
-            var state = getAiState();
-            if (!state.progLng) return;
-            var langOpt = Array.from(problemLanguageSelect.options).find(function(o) { return o.value === state.progLng; });
-            if (!langOpt) return;
-
-            var languageId = parseInt(state.progLng);
-            problemLanguageSelect.value = state.progLng;
-            populateTopics(languageId);
-            populatePrompts(languageId, null);
-
-            if (state.topic) {
-                var topicOpt = Array.from(problemTopicSelect.options).find(function(o) { return o.value === state.topic; });
-                if (topicOpt) {
-                    problemTopicSelect.value = state.topic;
-                    var topicId = parseInt(state.topic);
-                    populatePrompts(languageId, isNaN(topicId) ? null : topicId);
-                    if (state.prompt) {
-                        var promptOpt = Array.from(problemPromptSelect.options).find(function(o) { return o.value === state.prompt; });
-                        if (promptOpt) problemPromptSelect.value = state.prompt;
-                    }
-                }
-            }
-        } catch(e) {}
-    }
-
-    problemLanguageSelect.addEventListener("change", function() {
-        var languageId = parseInt(problemLanguageSelect.value);
-        problemTopicSelect.innerHTML = '<option value="">Выберите тему</option>';
-        problemPromptSelect.innerHTML = '<option value="">Выберите промпт</option>';
-        setSelectEnabled(problemTopicSelect, false);
-        setSelectEnabled(problemPromptSelect, false);
-        if (!isNaN(languageId)) {
-            populateTopics(languageId);
-            populatePrompts(languageId, null);
-        } else {
-            populatePrompts(null, null);
-        }
-        savePageState();
-    });
-
-    problemTopicSelect.addEventListener("change", function() {
-        var topicId = parseInt(problemTopicSelect.value);
-        problemPromptSelect.innerHTML = '<option value="">Выберите промпт</option>';
-        var languageId = parseInt(problemLanguageSelect.value);
-        setSelectEnabled(problemPromptSelect, false);
-        populatePrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
-        savePageState();
-    });
-
-    problemPromptSelect.addEventListener("change", savePageState);
-
     var messageText = document.getElementById('messageText');
     if (messageText) messageText.addEventListener('input', saveSharedText);
-
-    function decodeCompilerName(encoded) {
-        if (!encoded) return '';
-        try {
-            return atob(encoded).trim().toLowerCase();
-        } catch (e) {
-            return '';
-        }
-    }
-
-    function findLanguageIdByName(languages, compilerName) {
-        if (!compilerName || !languages) return null;
-        return languages.find(function(lang) {
-            return lang.language_name && lang.language_name.toLowerCase().includes(compilerName);
-        })?.id || null;
-    }
 
     async function loadTaskFromUrl() {
         var messageTextEl = document.getElementById('messageText');
         var nodeId = window.AI_TASK_NODE_ID || (messageTextEl && messageTextEl.dataset.nodeId) || '';
-        var compilerNameEncoded = window.AI_COMPILER_NAME || (messageTextEl && messageTextEl.dataset.compilerName) || '';
-        console.log('loadTaskFromUrl: nodeId=', nodeId, 'compiler_b64=', compilerNameEncoded);
         if (!nodeId) return false;
 
         try {
             var url = new URL('/ai/api/task-info/', window.location.origin);
             url.searchParams.set('nodeId', nodeId);
             url.searchParams.set('removeHtmlTags', 'true');
-            console.log('Fetching task info:', url.toString());
             var response = await fetch(url.toString());
-            console.log('Task info response status:', response.status);
             if (response.status === 404) {
                 updateVoiceStatus(getUiString('taskNotFound', 'Задача не найдена'));
                 return false;
@@ -479,20 +239,10 @@ document.addEventListener("DOMContentLoaded", async () => {
                 throw new Error('HTTP ' + response.status + ': ' + errorText);
             }
             var data = await response.json();
-            console.log('Task info data:', data);
             var statement = data.statement || data.currentStatement || '';
             if (messageTextEl) {
                 messageTextEl.value = statement;
                 saveSharedText();
-            }
-
-            var compilerName = decodeCompilerName(compilerNameEncoded);
-            var matchedLanguageId = findLanguageIdByName(problemData?.languages, compilerName);
-            if (matchedLanguageId) {
-                problemLanguageSelect.value = matchedLanguageId;
-                populateTopics(matchedLanguageId);
-                populatePrompts(matchedLanguageId, null);
-                savePageState();
             }
             return true;
         } catch (error) {
@@ -502,12 +252,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
     }
 
-    await fetchProblemData();
-    populateLanguages(problemData.languages);
-    setSelectEnabled(problemTopicSelect, false);
-    setSelectEnabled(problemPromptSelect, false);
-    populatePrompts(null, null);
-    restorePageState();
     var taskLoaded = await loadTaskFromUrl();
     if (!taskLoaded) {
         restoreSharedText();

@@ -113,14 +113,15 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
         -o Acquire::http::Timeout=300 \
         -o Acquire::http::No-Cache=True \
         -o Acquire::https::No-Cache=True \
-        ca-certificates curl fonts-liberation libasound2 libatk-bridge2.0-0 \
+        ca-certificates curl git fonts-liberation libasound2 libatk-bridge2.0-0 \
         libatk1.0-0 libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 \
         libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 \
         libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
         libxkbcommon0 libxrandr2 xdg-utils && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
-# curl нужен healthcheck в compose; ffmpeg убран; retries/No-Cache как в билдере
+# curl нужен healthcheck в compose; git — для sync_update_log (читает git log из
+# примонтированного .git, см. CMD); ffmpeg убран; retries/No-Cache как в билдере
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /usr/bin/tini /usr/bin/tini
 COPY --from=builder /usr/bin/node /usr/local/bin/node
@@ -135,4 +136,4 @@ ENV PATH="/opt/venv/bin:$PATH" \
 WORKDIR /app
 EXPOSE 8000 3000
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["bash", "-c", "exec node /app/bot/api/index.js & exec daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application & wait -n"]
+CMD ["bash", "-c", "python manage.py sync_update_log || true; exec node /app/bot/api/index.js & exec daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application & wait -n"]

@@ -55,11 +55,29 @@ class SolveModeBuilder(ModeMessageBuilder):
         return base
 
     def _build_default_message(self, ui_language, prog_lng_name, topic_name, message):
+        # Клауза «на языке X, тема Y» — только когда поля заданы. На /ai/solve-problem/
+        # язык/тема больше не выбираются и поля приходят пустыми — клауза опускается,
+        # чтобы не получить «на языке , тема .».
+        if prog_lng_name and topic_name:
+            clause = {
+                "Russian": f" на языке {prog_lng_name}, тема {topic_name}",
+                "English": f" in {prog_lng_name}, topic {topic_name}",
+                "Français": f" en {prog_lng_name}, sujet {topic_name}",
+            }
+        elif prog_lng_name:
+            clause = {
+                "Russian": f" на языке {prog_lng_name}",
+                "English": f" in {prog_lng_name}",
+                "Français": f" en {prog_lng_name}",
+            }
+        else:
+            clause = {"Russian": "", "English": "", "Français": ""}
+        c = clause.get(ui_language, clause["Russian"])
         if ui_language == "English":
-            return f"I have a programming problem in {prog_lng_name}, topic {topic_name}. Solve it.\n\nProblem:\n{message}"
+            return f"I have a programming problem{c}. Solve it.\n\nProblem:\n{message}"
         if ui_language == "Français":
-            return f"J'ai un problème de programmation en {prog_lng_name}, sujet {topic_name}. Résolvez-le.\n\nProblème:\n{message}"
-        return f"У меня есть задача по программированию на языке {prog_lng_name}, тема {topic_name}. Реши задачу.\n\nЗадача:\n{message}"
+            return f"J'ai un problème de programmation{c}. Résolvez-le.\n\nProblème:\n{message}"
+        return f"У меня есть задача по программированию{c}. Реши задачу.\n\nЗадача:\n{message}"
 
 
 class FindErrorModeBuilder(ModeMessageBuilder):

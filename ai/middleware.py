@@ -8,6 +8,7 @@ CsrfSessionFallbackMiddleware: восстанавливает CSRF-токен и
 """
 
 import os
+import time
 from urllib.parse import unquote
 
 from django.conf import settings
@@ -99,6 +100,13 @@ class ExternalAuthMiddleware:
         self.skip_paths = self._build_skip_paths(skip_paths)
         self.cache_session_key = "external_session_id"
         self.cache_user_key = "external_user_info"
+        self.cache_fetched_at_key = "external_user_info_fetched_at"
+        # How long a cached user_info is trusted without revalidating the DLSID
+        # against dl.gsu.by (seconds). Default 60s; 0 = always revalidate.
+        try:
+            self.auth_cache_ttl = int(os.getenv("AI_AUTH_CACHE_TTL", "60"))
+        except (TypeError, ValueError):
+            self.auth_cache_ttl = 60
         logger.info(f"Middleware init: skip_paths={self.skip_paths}")
 
     def _build_skip_paths(self, raw_paths: str) -> list[str]:
@@ -136,11 +144,21 @@ class ExternalAuthMiddleware:
         if isinstance(cached_user_info, dict) and cached_user_info:
             request.user_info = cached_user_info
 
+    def _cached_fetched_at(self, request) -> float:
+        """Unix-таймштамп последнего успешного fetch_external_user_info (0 если нет)."""
+        if not hasattr(request, "session"):
+            return 0.0
+        try:
+            return float(request.session.get(self.cache_fetched_at_key, 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
     def _store_cached_user_info(self, request, session_id: str, user_info: dict) -> None:
         if not hasattr(request, "session"):
             return
         request.session[self.cache_session_key] = session_id
         request.session[self.cache_user_key] = user_info
+        request.session[self.cache_fetched_at_key] = time.time()
         request.session.modified = True
 
     def _redirect_or_optional(self, request, request_path: str):
@@ -175,9 +193,12 @@ class ExternalAuthMiddleware:
 
         try:
             cached_user_info = self._get_cached_user_info(request, session_id)
-            if cached_user_info:
+            fetched_at = self._cached_fetched_at(request)
+            if cached_user_info and (time.time() - fetched_at) < self.auth_cache_ttl:
+                # Свежий кэш (< TTL) — используем без повторной проверки DLSID.
                 user_info = cached_user_info
             else:
+                # Кэша нет либо он протух (> TTL) — ревалидируем DLSID через внешний API.
                 user_info = fetch_external_user_info(session_id, api_url=self.api_url)
                 self._store_cached_user_info(request, session_id, user_info)
             logger.debug("External user_info fetched (userId=%s)", (user_info or {}).get("userId"))
@@ -197,10 +218,16 @@ class ExternalAuthMiddleware:
                 status=500,
             )
         except ExternalAuthUnavailable as exc:
+            # dl.gsu.by недоступен — падаем на stale-кэш (graceful degradation):
+            # пользуемся последним подтверждённым user_info, не закрывая доступ.
             logger.error(f"Request to external API failed: {exc}")
-            if _is_optional_auth_path(request_path):
+            cached_user_info = self._get_cached_user_info(request, session_id)
+            if cached_user_info:
+                user_info = cached_user_info
+            elif _is_optional_auth_path(request_path):
                 return self.get_response(request)
-            return JsonResponse({"error": "Authentication service unavailable"}, status=503)
+            else:
+                return JsonResponse({"error": "Authentication service unavailable"}, status=503)
 
         request.user_info = user_info
 

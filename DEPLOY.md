@@ -199,10 +199,19 @@ git pull
 docker compose --env-file .env up -d --build
 docker compose --env-file .env exec -T web python manage.py migrate
 docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
+docker compose --env-file .env exec -T web python manage.py sync_update_log
 ```
 
-После `git pull` срабатывает **post-merge hook** — он автоматически
-добавляет новые коммиты в таблицу `UpdateLog` (раздел «Обновления» в админке).
+Последняя строка (`sync_update_log`) заносит новые коммиты в таблицу `UpdateLog`
+(раздел «Обновления» в админке `/ai/admin/updates/`). Начиная с этой версии
+`sync_update_log` **также запускается автоматически при старте контейнера**
+(см. `CMD` в `Dockerfile`), поэтому таблица обновляется сразу после пересборки —
+явный вызов нужен только если вы хотите подтянуть коммиты без перезапуска.
+
+Дополнительно таблица `UpdateLog` синхронизируется git-хуками:
+- **post-merge** — после `git pull` автоматически добавляет новые коммиты в `UpdateLog`.
+- **pre-push** — перед `git push` синхронизирует `UpdateLog` с локальными коммитами.
+
 Если хуки не установлены, выполните один раз: `bash scripts/setup_hooks.sh`.
 
 Если вы используете прод-порт 8081:
@@ -212,7 +221,7 @@ git pull
 AI_NGINX_BIND=127.0.0.1 AI_NGINX_PORT=8081 docker compose --env-file .env up -d --build
 docker compose --env-file .env exec -T web python manage.py migrate
 docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
-
+docker compose --env-file .env exec -T web python manage.py sync_update_log
 ```
 
 ---

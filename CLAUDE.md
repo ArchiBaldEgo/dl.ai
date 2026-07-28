@@ -47,7 +47,15 @@ git pull
 docker compose --env-file .env up -d --build
 docker compose --env-file .env exec -T web python manage.py migrate
 docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
+docker compose --env-file .env exec -T web python manage.py sync_update_log
 ```
+
+`sync_update_log` (new commits → `UpdateLog` table for the `/ai/admin/updates/` page)
+also **auto-runs on container startup** via the `Dockerfile` `CMD`
+(`python manage.py sync_update_log || true; exec …`), so the updates table refreshes
+right after `up -d --build`. The explicit call above is only needed to pull commits
+without restarting; the `post-merge`/`pre-push` git hooks also keep it in sync on
+`git pull`/`git push`.
 
 ### Tests
 
@@ -77,7 +85,7 @@ There is no linting configuration (ruff/flake8/eslint) checked in.
 python manage.py collectstatic --noinput
 ```
 
-Source static files live in `static/`, collected output is `staticfiles/`. The web container serves them through nginx (`/ai/static/` maps to `/app/staticfiles/`).
+Source static files live in `static/`, collected output is `staticfiles/`. The web container serves them through nginx (`/ai/static/` maps to `/app/staticfiles/`). AI-page assets served by `asset_view` (`/ai/assets/...`) use HTTP revalidation — `Last-Modified` + `If-Modified-Since` → `304 Not Modified` with `Cache-Control: no-cache` — so browsers pick up updated JS/CSS after a deploy even without a `?v=` bump; the HTML pages themselves also send `Cache-Control: no-cache`.
 
 ### Management commands
 
@@ -105,6 +113,12 @@ python manage.py run_prompt_tests --model <key> [--prompt <id>] [--cases 1,2,3]
 # model handler (default DeepSeek_V3_1 via SambaNova/SC_TOKEN) — fills only empty
 # fields unless --overwrite. Complements auto_translate (Google/deep-translator).
 python manage.py translate_prompts [--overwrite]
+
+# Reset the model-favorites cutoff (AIAppSettings.favorites_epoch = now) for all
+# users. After this, _get_user_top_model_keys counts only successful AIRequestLog
+# rows newer than the epoch, so every user's model list goes strictly alphabetical
+# until new successful requests rebuild their top-2. Logs are not deleted.
+python manage.py reset_favorites_epoch
 ```
 
 ## High-level architecture
@@ -113,12 +127,12 @@ python manage.py translate_prompts [--overwrite]
 
 - `DjangoTest/` — project settings, root URLconf, ASGI/WSGI entrypoints.
 - `ai/` — the only Django app.
-  - `ai/views.py` — page views, API endpoints (`/ai/api/problem-data/`, `/ai/api/prompts/`, `/ai/api/languages/`, `/ai/api/topics/`, `/ai/api/shared-prompts/`, `/ai/api/task-info/`, `/ai/api/task-solution/`, `/ai/api/groq-limits/` — surfaces Groq rate-limit headers), `health`, password setup, test-panel login, audio transcription. API URLconf is split: page/asset routes in `ai/urls.py`, API/admin routes wired in `DjangoTest/urls.py` via `ai/admin/urls.py`.
+  - `ai/views.py` — page views, API endpoints (`/ai/api/problem-data/`, `/ai/api/prompts/`, `/ai/api/languages/`, `/ai/api/topics/`, `/ai/api/shared-prompts/`, `/ai/api/task-info/`, `/ai/api/task-solution/`, `/ai/api/groq-limits/` — surfaces Groq rate-limit headers), `health`, password setup, test-panel login, audio transcription. API URLconf is split: page/asset routes in `ai/urls.py`, API/admin routes wired in `DjangoTest/urls.py` via `ai/admin/urls.py`. `_render_ai_page` orders the model selector: the user's top-2 models (`_get_user_top_model_keys`, gated by `AIAppSettings.favorites_epoch`) first, then the rest strictly alphabetical by title (no `Web_DeepSeek` priority). `/ai/api/groq-limits/` warms the Groq rate-limit cache via a debounced (60 s) non-blocking background thread (`_maybe_kick_groq_probe`) instead of blocking the request. `asset_view` serves `/ai/assets/` with HTTP revalidation (`Last-Modified` + `If-Modified-Since` → `304 Not Modified`, `Cache-Control: no-cache`), and `_render_ai_page` sends `Cache-Control: no-cache` on HTML so post-deploy asset/JS changes are picked up without a `?v=` bump.
   - `ai/consumers.py` — Channels WebSocket consumer (`/ai/chat/ws/<client_id>`, see `ai/routing.py`). Thin orchestrator: delegates auth, prompt resolution, message composition, model invocation, and logging to the `ai/services/` layer. Legacy model aliases are resolved in `ModelCaller`.
-  - `ai/models.py` — `ProgrammingLanguage`, `Topic`, `Task` (DL task reference for batch-solve ARM), `Prompt`, `SharedPrompt`, `AIRequestLog`, `ExternalDLAccount`, `AIModelAvailability`, `AIModelHealthRun`, `AIModelTestRun` (`run_type` single/batch), `AIModelTestResult`, `PromptTestCase`, `PromptTestRun` (prompt regression testing), `UpdateLog` (commit history rows synced from git for the «Обновления» page), etc. Model capability metadata (Text/Vision/Reasoning) lives on the registry entries in `ai/model_clients/registry.py`, not in the DB.
+  - `ai/models.py` — `ProgrammingLanguage`, `Topic`, `Task` (DL task reference for batch-solve ARM), `Prompt`, `SharedPrompt`, `AIRequestLog`, `ExternalDLAccount`, `AIModelAvailability`, `AIModelHealthRun`, `AIModelTestRun` (`run_type` single/batch), `AIModelTestResult`, `PromptTestCase`, `PromptTestRun` (prompt regression testing), `UpdateLog` (commit history rows synced from git for the «Обновления» page), `AIAppSettings` (singleton via `get_solo()`; holds `favorites_epoch` — the cutoff date gating `_get_user_top_model_keys`, migration `0027_favorites_epoch`), etc. Model capability metadata (Text/Vision/Reasoning) lives on the registry entries in `ai/model_clients/registry.py`, not in the DB.
   - `ai/querysets.py` — `prompt_queryset_for_user`, the single shared ACL helper for prompt visibility (superusers/staff see all; prompt developers see owned + editor prompts).
   - `ai/serializers.py` / `ai/i18n.py` — lightweight serializers and UI-language localization (`name_ru`, `name_en`, `name_fr`).
-  - `ai/middleware.py` — `ExternalAuthMiddleware` validates the `DLSID` cookie and auto-provisions local users; `CsrfSessionFallbackMiddleware` migrates old cookie-based CSRF tokens into the session. External-auth logic lives in `ai/external_auth.py` (error classes `ExternalAuthMisconfigured` / `ExternalAuthUnavailable` / `ExternalAuthUnauthorized`, `fetch_external_user_info`, cookie/url helpers) and is reused by both the middleware and the WebSocket auth service.
+  - `ai/middleware.py` — `ExternalAuthMiddleware` validates the `DLSID` cookie and auto-provisions local users; `CsrfSessionFallbackMiddleware` migrates old cookie-based CSRF tokens into the session. `ExternalAuthMiddleware` caches the resolved `user_info` in the session with a TTL (`AI_AUTH_CACHE_TTL`, default 60 s; `external_user_info_fetched_at` timestamp) — a fresh cache is trusted without revalidating the `DLSID` against `dl.gsu.by`, and a stale cache is revalidated. On `ExternalAuthUnavailable` (`dl.gsu.by` down) it falls back to the last cached `user_info` (graceful degradation) rather than returning `503` — `503` only when there is no cache and the path is not optional. External-auth logic lives in `ai/external_auth.py` (error classes `ExternalAuthMisconfigured` / `ExternalAuthUnavailable` / `ExternalAuthUnauthorized`, `fetch_external_user_info`, cookie/url helpers) and is reused by both the middleware and the WebSocket auth service.
   - `ai/dl_api_client.py` — thin client for the external `dl.gsu.by` REST API (task info, sample solutions, user names by ID); reuses the same SSL/proxy settings as external auth. Backs `/ai/api/task-info/` and `/ai/api/task-solution/`. `fetch_user_names(userId)` calls `GET /restapi/get-id-user-info` to enrich `ExternalDLAccount` with `firstName`/`lastName`.
   - `ai/external_account.py` — creates/updates Django users and `ExternalDLAccount` from external API payload; ensures all users are added to the `prompt_developer` group. When `get-user-info` doesn't return `firstName`/`lastName`, enriches from `fetch_user_names` (`GET /restapi/get-id-user-info?userId=N`).
   - `ai/auth_backends.py` — external admin auth backend and helper functions for prompt-developer group management.
@@ -130,7 +144,7 @@ python manage.py translate_prompts [--overwrite]
   - `ai/services/` — high-level services consumed by `consumers.py` (and admin code), re-exported from `ai/services/__init__.py`. This is the KISS/SOLID extraction called out below; consumers orchestrate, services execute.
     - `auth.py` — `WebSocketAuthService` (DLSID auth for the WS scope), `get_user_identity_for_log`, `resolve_external_account`.
     - `prompt_resolver.py` — `PromptResolver` (resolves effective prompt text + names, parses `shared_<pk>` ids), `get_default_shared_prompt`.
-    - `message_composer.py` — `MessageComposer` + per-mode builders (`ChatModeBuilder`, `SolveModeBuilder`, …) for chat / solve / find-error message composition. Language instruction (`get_language_instruction`) is appended for every non-Russian message (not only on language change). The «Препромпт» label is localized to «Preprompt» for non-Russian UI languages.
+    - `message_composer.py` — `MessageComposer` + per-mode builders (`ChatModeBuilder`, `SolveModeBuilder`, …) for chat / solve / find-error message composition. Language instruction (`get_language_instruction`) is appended for every non-Russian message (not only on language change). The «Препромпт» label is localized to «Preprompt» for non-Russian UI languages. `SolveModeBuilder._build_default_message` includes the «in language X, topic Y» clause only when those fields are non-empty — on `/ai/solve-problem/` the language/topic are no longer selected (the task statement is auto-loaded from the DL link), so the clause is omitted to avoid «in language , topic .».
     - `model_caller.py` — `ModelCaller` + `ModelCallResult`; resolves legacy model aliases and invokes the registry, surfacing `humanize_model_error`.
     - `log_writer.py` — `LogWriter` creates/updates `AIRequestLog` records.
     - `conversation_history.py` — compatibility re-export of the shared history store (see `ai/model_clients/history.py`).
@@ -165,7 +179,7 @@ python manage.py translate_prompts [--overwrite]
 
 ### Authentication and permissions
 
-- External auth: `ExternalAuthMiddleware` reads `DLSID` cookie, calls `EXTERNAL_AUTH_API_URL`, and either redirects unauthenticated users to the main site or provisions a local Django user.
+- External auth: `ExternalAuthMiddleware` reads `DLSID` cookie, calls `EXTERNAL_AUTH_API_URL`, and either redirects unauthenticated users to the main site or provisions a local Django user. The resolved `user_info` is cached in the session for `AI_AUTH_CACHE_TTL` seconds (default 60; `0` = always revalidate), so a fresh cache serves the request without hitting `dl.gsu.by`. If `dl.gsu.by` is unreachable (`ExternalAuthUnavailable`), the middleware falls back to the last cached `user_info` (graceful degradation) instead of failing closed — only returning `503` when no cache exists and the path is not optional.
 - Admin access: only `staff`/`superuser` users have access to the full Django admin (`/ai/admin/`). All normal users are added to the `prompt_developer` group on creation and can access ARM, "My prompt", and "All prompts" inside the custom admin area.
 - Test-panel login (`/ai/test-panel/login/`) is a separate password-based entry for prompt developers.
 
@@ -207,7 +221,7 @@ Batch-solve ARM (`run_type="batch"`, `/ai/admin/arm/solve/`) sends each availabl
 
 ### Update log
 
-`UpdateLog` (migrations `0025_add_update_log` / `0026_populate_update_log`) stores the project's commit history in the DB so the superuser-only `/ai/admin/updates/` page can render it with search and date filtering without hitting git at request time. The table is kept in sync by the `sync_update_log` management command (also exposed as an admin action), which reads `git log` from the current branch and maps English commit messages to Russian descriptions. The «last update» date shown on the admin index is cached under `ai_last_update_date` and invalidated instantly by the `post_save`/`post_delete` signal in `ai/signals.py`. The git `pre-push` hook (installed via `scripts/setup_hooks.sh` from `scripts/hooks/`) can trigger a `sync_update_log` run on push.
+`UpdateLog` (migrations `0025_add_update_log` / `0026_populate_update_log`) stores the project's commit history in the DB so the superuser-only `/ai/admin/updates/` page can render it with search and date filtering without hitting git at request time. The table is kept in sync by the `sync_update_log` management command (also exposed as an admin action), which reads `git log` from the current branch and maps English commit messages to Russian descriptions. The «last update» date shown on the admin index is cached under `ai_last_update_date` and invalidated instantly by the `post_save`/`post_delete` signal in `ai/signals.py`. `sync_update_log` is **auto-run on container startup** — the `Dockerfile` `CMD` prepends `python manage.py sync_update_log || true;` (the runtime image ships `git` and has `.git` bind-mounted, so `subprocess.run(["git","log",...])` works in-container), so the updates table refreshes right after every `up -d --build`. The git `post-merge`/`pre-push` hooks (installed via `scripts/setup_hooks.sh` from `scripts/hooks/`) also trigger a `sync_update_log` run on `git pull`/`git push` by calling `docker compose exec -T web python manage.py sync_update_log`.
 
 ### Important files to read when working on...
 

@@ -93,6 +93,7 @@ cp .env.example .env
 docker compose up -d --build --no-cache
 docker compose exec -T web python manage.py migrate
 docker compose exec -T web python manage.py collectstatic --noinput
+docker compose exec -T web python manage.py sync_update_log
 ```
 
 Остановка:
@@ -126,6 +127,14 @@ Hooks работают только на хосте (где есть `git`), п�
 В админке есть раздел **«Обновления»** (`/ai/admin/updates/`) — доступен только супер-админам.
 Содержит таблицу всех коммитов: дата, содержание (на русском), автор.
 Доступны фильтрация по автору, диапазону дат и текстовый поиск.
+
+Таблица `UpdateLog` синхронизируется с `git log` командой `sync_update_log`.
+Начиная с этой версии она **запускается автоматически при старте контейнера**
+(см. `CMD` в `Dockerfile`), поэтому новые коммиты подтягиваются сразу после
+`docker compose up -d --build`. Явный вызов
+(`docker compose exec -T web python manage.py sync_update_log`) нужен только чтобы
+подтянуть коммиты без перезапуска контейнера; git-хуки (`post-merge`/`pre-push`)
+синхронизируют её и при `git pull`/`git push`.
 
 Дата последнего обновления отображается на главной странице чата
 (правый нижний угол, формат `dd.mm.yyyy`) и синхронизируется с последней записью в `UpdateLog`.
