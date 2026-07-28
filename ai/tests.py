@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from ai.admin import PromptAdmin, PromptForm
 from ai.middleware import ExternalAuthMiddleware
 from ai.i18n import get_localized_name, get_ui_language_suffix
-from ai.models import AIRequestLog, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic
+from ai.models import AIRequestLog, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic, UpdateLog
 from ai.services import (
     ConversationHistory,
     LogWriter,
@@ -2562,3 +2562,214 @@ class UserTopModelKeysTests(TestCase):
         result = _get_user_top_model_keys(self._make_request(), limit=2)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0], key_a)
+
+
+# ===================================================================
+# Tests for admin Updates section (UpdateLog)
+# ===================================================================
+
+class UpdateLogAdminTests(TestCase):
+    """Tests for the admin updates view: access control, filtering, search."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        # Очищаем данные от миграции 0026, чтобы тесты были изолированы
+        UpdateLog.objects.all().delete()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="upd_admin", password="***", email="admin@test.com",
+        )
+        self.normal_user = get_user_model().objects.create_user(
+            username="upd_normal", password="***",
+        )
+        # Add to prompt_developer group (non-superuser staff-like)
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        self.normal_user.groups.add(group)
+
+        # Create some test data
+        self.u1 = UpdateLog.objects.create(
+            commit_date="2026-07-27", description="Нововведение: test feature",
+            author="whmi1", commit_hash="abc123",
+        )
+        self.u2 = UpdateLog.objects.create(
+            commit_date="2026-07-11", description="Исправление: bug fix",
+            author="Archi", commit_hash="def456",
+        )
+        self.u3 = UpdateLog.objects.create(
+            commit_date="2026-06-22", description="fix build v2",
+            author="ArchiBaldEgo", commit_hash="ghi789",
+        )
+
+    def _make_request(self, user=None, params=None):
+        request = self.factory.get("/ai/admin/updates/", data=params or {})
+        request.user = user or self.superuser
+        request.user_info = {"userId": getattr(user, "username", "test")}
+        request.COOKIES = {"userId": getattr(user, "username", "test")}
+        request.session = {"admin_fresh_auth": True}
+        return request
+
+    def _call_view(self, request):
+        """Call admin_updates_view bypassing admin_view decorator checks."""
+        from ai.admin.updates import admin_updates_view
+        # The view is wrapped by admin_view which checks DLSID auth.
+        # We need to bypass that for testing — call the inner function directly.
+        import ai.admin.site as site_module
+        original_admin_view = site_module.ai_admin_site.admin_view
+
+        # Temporarily replace admin_view with a passthrough
+        def passthrough_admin_view(view, cacheable=False):
+            return view
+        site_module.ai_admin_site.admin_view = passthrough_admin_view
+
+        # Re-import to get the unwrapped view
+        import importlib
+        import ai.admin.updates as updates_module
+        importlib.reload(updates_module)
+        response = updates_module.admin_updates_view(request)
+
+        # Restore
+        site_module.ai_admin_site.admin_view = original_admin_view
+        return response
+
+    def test_superuser_can_access(self):
+        """Superuser should see the updates page."""
+        from ai.admin.updates import admin_updates_view
+        response = self._call_view(self._make_request(self.superuser))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Обновления")
+
+    def test_non_superuser_forbidden(self):
+        """Non-superuser should get 403."""
+        from ai.admin.updates import admin_updates_view
+        response = self._call_view(self._make_request(self.normal_user))
+        self.assertEqual(response.status_code, 403)
+
+    def test_filter_by_author(self):
+        """Filtering by author should return only that author's commits."""
+        request = self._make_request(self.superuser, {"author": "Archi"})
+        response = self._call_view(request)
+        self.assertEqual(response.status_code, 200)
+        # The filtered results should contain Archi's commit
+        self.assertContains(response, "Archi")
+        # Total count should be 1 (only Archi's commit)
+        self.assertContains(response, "записей: 1")
+
+    def test_search_by_description(self):
+        """Text search should match description."""
+        from ai.admin.updates import admin_updates_view
+        request = self._make_request(self.superuser, {"q": "test feature"})
+        response = self._call_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "test feature")
+        self.assertNotContains(response, "bug fix")
+
+    def test_filter_by_date_range(self):
+        """Date range filter should narrow results."""
+        request = self._make_request(self.superuser, {
+            "date_from": "2026-07-01", "date_to": "2026-07-31",
+        })
+        response = self._call_view(request)
+        self.assertEqual(response.status_code, 200)
+        # Should include whmi1 (2026-07-27) and Archi (2026-07-11)
+        self.assertContains(response, "whmi1")
+        self.assertContains(response, "Archi")
+        # Total count should be 2 (both in July)
+        self.assertContains(response, "записей: 2")
+
+    def test_pagination_works(self):
+        """Page parameter should not crash."""
+        from ai.admin.updates import admin_updates_view
+        request = self._make_request(self.superuser, {"page": "1"})
+        response = self._call_view(request)
+        self.assertEqual(response.status_code, 200)
+
+    def test_combined_filter(self):
+        """Author + date + search combined should work."""
+        from ai.admin.updates import admin_updates_view
+        request = self._make_request(self.superuser, {
+            "author": "Archi", "date_from": "2026-07-01", "q": "bug",
+        })
+        response = self._call_view(request)
+        self.assertEqual(response.status_code, 200)
+
+    def test_empty_results(self):
+        """Search with no matches should show 'no records' message."""
+        from ai.admin.updates import admin_updates_view
+        request = self._make_request(self.superuser, {"q": "nonexistent_xyz"})
+        response = self._call_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Нет записей")
+
+
+class UpdateLogModelTests(TestCase):
+    """Tests for the UpdateLog model itself."""
+
+    def setUp(self):
+        UpdateLog.objects.all().delete()
+
+    def test_ordering_newest_first(self):
+        """UpdateLog should be ordered by commit_date descending."""
+        UpdateLog.objects.create(
+            commit_date="2026-06-01", description="old", author="A", commit_hash="old1",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-07-28", description="new", author="B", commit_hash="new1",
+        )
+        first = UpdateLog.objects.first()
+        self.assertEqual(first.commit_hash, "new1")
+
+    def test_str_representation(self):
+        """__str__ should contain date, author, and truncated description."""
+        entry = UpdateLog.objects.create(
+            commit_date="2026-07-28", description="A" * 100, author="whmi1", commit_hash="h1",
+        )
+        s = str(entry)
+        self.assertIn("2026-07-28", s)
+        self.assertIn("whmi1", s)
+        # Description truncated to 80 chars in __str__
+        self.assertIn("A" * 80, s)
+        self.assertNotIn("A" * 81, s)
+
+
+class LastUpdateDateCacheTests(TestCase):
+    """Tests for _get_last_update_date with caching."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        UpdateLog.objects.all().delete()
+
+    def test_returns_none_when_empty(self):
+        """No UpdateLog records → None."""
+        from ai.views import _get_last_update_date
+        result = _get_last_update_date()
+        self.assertIsNone(result)
+
+    def test_returns_date_when_populated(self):
+        """Most recent commit_date should be returned."""
+        from ai.views import _get_last_update_date
+        UpdateLog.objects.create(
+            commit_date="2026-07-28", description="test", author="A", commit_hash="h1",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-06-01", description="old", author="B", commit_hash="h2",
+        )
+        result = _get_last_update_date()
+        self.assertEqual(str(result), "2026-07-28")
+
+    def test_caches_result(self):
+        """Second call should use cache (no DB hit)."""
+        from ai.views import _get_last_update_date
+        from django.core.cache import cache
+        UpdateLog.objects.create(
+            commit_date="2026-07-28", description="test", author="A", commit_hash="h1",
+        )
+        # First call populates cache
+        result1 = _get_last_update_date()
+        self.assertEqual(str(result1), "2026-07-28")
+        # Delete all records — second call should still return cached value
+        UpdateLog.objects.all().delete()
+        result2 = _get_last_update_date()
+        self.assertEqual(str(result2), "2026-07-28")
+        # Clean up
+        cache.clear()

@@ -188,11 +188,21 @@ def _has_page_access(request):
 
 
 def _get_last_update_date():
-    """Return the commit_date of the most recent UpdateLog entry, or None."""
+    """Return the commit_date of the most recent UpdateLog entry, or None.
+
+    Cached for 5 minutes to avoid a DB hit on every page render.
+    """
+    from django.core.cache import cache
+    cache_key = "ai_last_update_date"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached if cached else None
     try:
         from .models import UpdateLog
         entry = UpdateLog.objects.first()
-        return entry.commit_date if entry else None
+        result = entry.commit_date if entry else None
+        cache.set(cache_key, result or "", 300)  # 5 minutes
+        return result
     except Exception:
         return None
 
