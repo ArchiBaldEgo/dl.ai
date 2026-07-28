@@ -40,7 +40,6 @@
                         <option value="" selected disabled>Сегодня нет доступных моделей</option>
                     {% endif %}
                 </select>
-                <div id="modelLimitsWidget" style="display:none; font-size:11px; color:#888; margin-top:2px;"></div>
                 <select id="selectType" onchange="goToAiPage(this)">
                     <option data-link="/ai/chat/" {% block chat_selected %}{% endblock %}>Чат с DLAI</option>
                     <option data-link="/ai/solve-problem/" {% block solve_selected %}{% endblock %}>Реши задачу</option>
@@ -69,6 +68,7 @@
                     <label for="speakThinkContent" id="speakThinkLabel">Озвучивать think-блоки</label>
                 </div>
             </div>
+            <div id="modelLimitsWidget"></div>
             <div class="panel-date">Последнее обновление: {{ last_update_date|date:"d.m.Y" }}</div>
         </div>
         <hr/>

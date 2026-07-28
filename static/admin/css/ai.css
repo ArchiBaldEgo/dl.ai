@@ -891,6 +891,24 @@ form {
     pointer-events: auto;
 }
 
+/* Виджет лимитов модели («Осталось: X/Y токенов … запросов»).
+   Прямой потомок .line-panel, стоит над .panel-date (bottom:26px vs 8px).
+   position:absolute убирает его из потока — селекторы языка/модели/режима
+   остаются в одну строку. display:none по умолчанию; updateModelLimitsWidget()
+   в ai-common.js выставляет style.display='block' для Groq/OR-моделей. */
+#modelLimitsWidget {
+    display: none;
+    position: absolute;
+    right: 20px;
+    bottom: 26px;
+    font-size: 12px;
+    color: #6a6a6a;
+    font-weight: bold;
+    pointer-events: none;
+    max-width: 55%;
+    text-align: right;
+}
+
 hr {
     margin: 0;
     color: #ccc;
@@ -1496,6 +1514,9 @@ hr {
 
     #modelLimitsWidget {
         font-size: 10px !important;
+        position: static;
+        max-width: 100%;
+        text-align: left;
     }
 
     .voice-mod-div {

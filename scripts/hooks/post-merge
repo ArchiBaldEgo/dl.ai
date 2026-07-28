@@ -2,18 +2,27 @@
 # Git post-merge hook — срабатывает после git pull (когда был merge).
 # Синхронизирует таблицу UpdateLog с новыми коммитами.
 #
-# Работает на хосте (где есть git), подключается к Docker-контейнеру web,
-# в котором теперь установлен git и примонтирован .git — sync_update_log
-# читает git log прямо в контейнере (без /tmp-обмена между хостом и контейнером).
+# Работает на хосте (где есть git), подключается к Docker-контейнеру web
+# по имени контейнера (container_name=dl_ai_web в docker-compose.yml) — это
+# не зависит от compose project name/cwd. В контейнере установлен git и
+# примонтирован .git (volume `.: /app`), поэтому sync_update_log читает
+# git log прямо в контейнере и видит свежий HEAD без перезапуска.
 
 cd "$(git rev-parse --show-toplevel)"
 
-# Проверяем, что Docker-контейнер запущен
-if ! docker compose ps --status=running web 2>/dev/null | grep -q "dl_ai_web"; then
-    echo "[post-merge] Docker-контейнер web не запущен — пропускаю синхронизацию UpdateLog"
+CONTAINER="dl_ai_web"
+
+# Надёжная проверка «контейнер запущен» по имени (без поиска compose-проекта).
+if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
+    echo "[post-merge] Контейнер $CONTAINER не запущен — пропускаю синхронизацию UpdateLog"
     exit 0
 fi
 
 echo "[post-merge] Синхронизация UpdateLog с новыми коммитами..."
-docker compose exec -T web python manage.py sync_update_log
-echo "[post-merge] Готово"
+if docker exec "$CONTAINER" python manage.py sync_update_log; then
+    echo "[post-merge] Готово"
+else
+    echo "[post-merge] ОШИБКА: sync_update_log завершился с ошибкой (см. вывод выше)"
+fi
+# Не блокируем git-операцию при сбое синхронизации.
+exit 0

@@ -2,18 +2,27 @@
 # Git pre-push hook — срабатывает перед git push.
 # Синхронизирует таблицу UpdateLog с коммитами, которые будут отправлены.
 #
-# Работает на хосте (где есть git), подключается к Docker-контейнеру web,
-# в котором теперь установлен git и примонтирован .git — sync_update_log
-# читает git log прямо в контейнере (без /tmp-обмена между хостом и контейнером).
+# Работает на хосте (где есть git), подключается к Docker-контейнеру web
+# по имени контейнера (container_name=dl_ai_web в docker-compose.yml) — это
+# не зависит от compose project name/cwd. В контейнере установлен git и
+# примонтирован .git (volume `.: /app`), поэтому sync_update_log читает
+# git log прямо в контейнере и видит локальные коммиты до отправки.
 
 cd "$(git rev-parse --show-toplevel)"
 
-# Проверяем, что Docker-контейнер запущен
-if ! docker compose ps --status=running web 2>/dev/null | grep -q "dl_ai_web"; then
-    echo "[pre-push] Docker-контейнер web не запущен — пропускаю синхронизацию UpdateLog"
+CONTAINER="dl_ai_web"
+
+# Надёжная проверка «контейнер запущен» по имени (без поиска compose-проекта).
+if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
+    echo "[pre-push] Контейнер $CONTAINER не запущен — пропускаю синхронизацию UpdateLog"
     exit 0
 fi
 
 echo "[pre-push] Синхронизация UpdateLog с новыми коммитами..."
-docker compose exec -T web python manage.py sync_update_log
-echo "[pre-push] Готово"
+if docker exec "$CONTAINER" python manage.py sync_update_log; then
+    echo "[pre-push] Готово"
+else
+    echo "[pre-push] ОШИБКА: sync_update_log завершился с ошибкой (см. вывод выше)"
+fi
+# Не блокируем git-операцию при сбое синхронизации.
+exit 0
