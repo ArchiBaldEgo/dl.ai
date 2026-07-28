@@ -42,10 +42,22 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
         libxkbcommon0 libxrandr2 xdg-utils && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
-    curl --proxy "$HTTP_PROXY" -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    # NodeSource repo is NOT reachable directly from the build host (unlike
+    # deb.debian.org), so route the setup + nodejs install through the corporate
+    # proxy (NPM_HTTP_PROXY — the same one that reaches the npm registry and
+    # Chromium). Download the script to a file first: the old `curl | bash -`
+    # pipe masked a failed fetch (bash exits 0 on empty input) and silently fell
+    # back to Debian's nodejs, which ships without npm -> "npm: not found".
+    printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' \
+        "$NPM_HTTP_PROXY" "$NPM_HTTPS_PROXY" > /etc/apt/apt.conf.d/99-nodesource-proxy && \
+    export http_proxy="$NPM_HTTP_PROXY" https_proxy="$NPM_HTTPS_PROXY" && \
+    curl --proxy "$NPM_HTTP_PROXY" -fsSL -o /tmp/nodesource-setup.sh \
+        https://deb.nodesource.com/setup_20.x && \
+    bash /tmp/nodesource-setup.sh && \
+    rm -f /tmp/nodesource-setup.sh && \
     apt-get update \
-        -o Acquire::http::Proxy="$HTTP_PROXY" \
-        -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::http::Proxy="$NPM_HTTP_PROXY" \
+        -o Acquire::https::Proxy="$NPM_HTTPS_PROXY" \
         -o Acquire::http::Pipeline-Depth=0 \
         -o Acquire::https::Pipeline-Depth=0 \
         -o Acquire::Languages=none \
@@ -53,8 +65,8 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
         -o Acquire::http::No-Cache=True \
         -o Acquire::https::No-Cache=True && \
     apt-get install -y --no-install-recommends --fix-missing \
-        -o Acquire::http::Proxy="$HTTP_PROXY" \
-        -o Acquire::https::Proxy="$HTTPS_PROXY" \
+        -o Acquire::http::Proxy="$NPM_HTTP_PROXY" \
+        -o Acquire::https::Proxy="$NPM_HTTPS_PROXY" \
         -o Acquire::http::Pipeline-Depth=0 \
         -o Acquire::https::Pipeline-Depth=0 \
         -o Acquire::Languages=none \
@@ -62,6 +74,8 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
         -o Acquire::http::No-Cache=True \
         -o Acquire::https::No-Cache=True \
         nodejs && \
+    { command -v npm >/dev/null 2>&1 || { echo "ERROR: npm not installed — NodeSource setup failed (is deb.nodesource.com reachable via NPM_HTTP_PROXY?)"; exit 1; }; } && \
+    rm -f /etc/apt/apt.conf.d/99-nodesource-proxy && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 # ffmpeg НЕ ставим из apt — он приходит pip-пакетом imageio-ffmpeg (см. requirements.txt)
