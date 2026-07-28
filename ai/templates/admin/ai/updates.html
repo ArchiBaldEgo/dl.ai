@@ -30,7 +30,7 @@
     <input type="date" name="date_from" value="{{ date_from }}" placeholder="{% trans 'С' %}" style="padding: 4px 8px;">
     <input type="date" name="date_to" value="{{ date_to }}" placeholder="{% trans 'По' %}" style="padding: 4px 8px;">
     <button type="submit" class="default" style="padding: 4px 16px;">{% trans 'Фильтровать' %}</button>
-    <a href="{% url 'admin:ai_updates' %}" class="button" style="padding: 4px 16px;">{% trans 'Сбросить' %}</a>
+    <a href="{% url 'ai_updates' %}" class="button" style="padding: 4px 16px;">{% trans 'Сбросить' %}</a>
   </form>
 
   <!-- Commits table -->
