@@ -173,6 +173,18 @@
             min-width: 80px;
         }
 
+        /* Язык / модель / режим — в одну строку. Без этого #modelLimitsWidget
+           (display:block из updateModelLimitsWidget) ломал инлайн-поток и уносил
+           #selectType (режим) на новую строку. Flex-рядок блокирует виджет как
+           flex-элемент — переноса нет. Мобильный media-query ниже переопределяет
+           на column. */
+        .line-panel > div:first-child {
+            display: flex;
+            align-items: center;
+            flex-wrap: nowrap;
+            gap: 6px;
+        }
+
         .blo {
             display: flex;
             justify-content: space-between;

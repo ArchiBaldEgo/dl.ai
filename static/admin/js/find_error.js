@@ -498,7 +498,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         restorePageState();
         saveInterfaceLanguage();
         updateVoiceStatus(getVoiceStatusText('readyForVoice'));
-        }
     });
 
     await fetchProblemData();
