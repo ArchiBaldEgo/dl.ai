@@ -187,6 +187,16 @@ def _has_page_access(request):
     return bool(get_external_user_id_from_request(request))
 
 
+def _get_last_update_date():
+    """Return the commit_date of the most recent UpdateLog entry, or None."""
+    try:
+        from .models import UpdateLog
+        entry = UpdateLog.objects.first()
+        return entry.commit_date if entry else None
+    except Exception:
+        return None
+
+
 def _render_ai_page(request, template_name, extra_context=None):
     """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
 
@@ -246,6 +256,7 @@ def _render_ai_page(request, template_name, extra_context=None):
         'available_models': available_models,
         'external_session_id': external_session_id,
         'token_usage': token_usage,
+        'last_update_date': _get_last_update_date(),
     }
     if extra_context:
         context.update(extra_context)

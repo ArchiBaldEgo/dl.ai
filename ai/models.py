@@ -790,3 +790,25 @@ class PromptTestResult(models.Model):
 
     def __str__(self):
         return f"{self.run.run_id} / {self.case_name_snapshot or self.model_title} — {self.verdict}"
+
+
+class UpdateLog(models.Model):
+    """Журнал обновлений проекта.
+
+    Записи добавляются перед git add/git push. Каждая запись — описание
+    изменений на русском языке, дата и автор коммита.
+    """
+    commit_date = models.DateField(verbose_name="Дата")
+    description = models.TextField(verbose_name="Содержание обновления")
+    author = models.CharField(max_length=255, verbose_name="Автор")
+    commit_hash = models.CharField(max_length=40, blank=True, default="", verbose_name="Хэш коммита")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "ai_update_log"
+        verbose_name = "Обновление"
+        verbose_name_plural = "Обновления"
+        ordering = ("-commit_date", "-created_at", "-id")
+
+    def __str__(self):
+        return f"{self.commit_date} — {self.author} — {self.description[:80]}"

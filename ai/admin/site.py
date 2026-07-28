@@ -282,6 +282,8 @@ class AIAdminSite(admin.AdminSite):
         context["my_prompt_url"] = "/ai/admin/prompts/my/"
         context["my_prompt_change_url"] = get_my_prompt_admin_url(request)
         context["ai_logs_url"] = "/ai/admin/ai/airequestlog/"
+        context["show_updates_link"] = is_staff
+        context["updates_url"] = "/ai/admin/updates/"
         return context
 
 

@@ -1,0 +1,75 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block title %}{% trans "Обновления" %}{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">{% trans 'Home' %}</a>
+  &rsaquo; {% trans "Обновления" %}
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  <h1>{% trans "Обновления" %}</h1>
+  <p class="paginator">
+    {% blocktrans with total=total_count %}Всего записей: {{ total }}{% endblocktrans %}
+  </p>
+
+  <!-- Filter / Search form -->
+  <form method="get" class="ai-updates-filter" style="margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+    <input type="text" name="q" value="{{ search_query }}" placeholder="{% trans 'Поиск по описанию или автору' %}"
+           style="padding: 4px 8px; min-width: 200px;">
+    <select name="author" style="padding: 4px 8px;">
+      <option value="">— {% trans "Все авторы" %} —</option>
+      {% for author in authors %}
+        <option value="{{ author }}" {% if author == selected_author %}selected{% endif %}>{{ author }}</option>
+      {% endfor %}
+    </select>
+    <input type="date" name="date_from" value="{{ date_from }}" placeholder="{% trans 'С' %}" style="padding: 4px 8px;">
+    <input type="date" name="date_to" value="{{ date_to }}" placeholder="{% trans 'По' %}" style="padding: 4px 8px;">
+    <button type="submit" class="default" style="padding: 4px 16px;">{% trans 'Фильтровать' %}</button>
+    <a href="{% url 'admin:ai_updates' %}" class="button" style="padding: 4px 16px;">{% trans 'Сбросить' %}</a>
+  </form>
+
+  <!-- Commits table -->
+  <table style="width: 100%; border-collapse: collapse;">
+    <thead>
+      <tr>
+        <th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd; width: 120px;">{% trans "Дата" %}</th>
+        <th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">{% trans "Содержание" %}</th>
+        <th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd; width: 180px;">{% trans "Автор" %}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for entry in page_obj.object_list %}
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">{{ entry.commit_date|date:"d.m.Y" }}</td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">{{ entry.description }}</td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">{{ entry.author }}</td>
+      </tr>
+      {% empty %}
+      <tr>
+        <td colspan="3" style="padding: 16px; text-align: center; color: #999;">{% trans "Нет записей" %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <!-- Pagination -->
+  {% if page_obj.has_other_pages %}
+  <div class="pagination" style="margin-top: 20px;">
+    {% if page_obj.has_previous %}
+      <a href="?page={{ page_obj.previous_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_author %}&author={{ selected_author }}{% endif %}{% if date_from %}&date_from={{ date_from }}{% endif %}{% if date_to %}&date_to={{ date_to }}{% endif %}"
+         style="margin-right: 8px;">&laquo; {% trans "Назад" %}</a>
+    {% endif %}
+    <span>{% trans "Страница" %} {{ page_obj.number }} {% trans "из" %} {{ page_obj.paginator.num_pages }}</span>
+    {% if page_obj.has_next %}
+      <a href="?page={{ page_obj.next_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_author %}&author={{ selected_author }}{% endif %}{% if date_from %}&date_from={{ date_from }}{% endif %}{% if date_to %}&date_to={{ date_to }}{% endif %}"
+         style="margin-left: 8px;">{% trans "Вперёд" %} &raquo;</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

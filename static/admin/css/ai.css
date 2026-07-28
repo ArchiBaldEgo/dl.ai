@@ -865,8 +865,9 @@ form {
     right: 20px;
     bottom: 8px;
     font-size: 12px;
-    color: #9a9a9a;
-    opacity: 0.45;
+    color: #333;
+    opacity: 0.8;
+    font-weight: bold;
     pointer-events: none;
 }
 
@@ -1523,7 +1524,7 @@ hr {
     .panel-date {
         position: static;
         font-size: 11px;
-        opacity: 0.4;
+        opacity: 0.8;
     }
 
     .token-usage {
