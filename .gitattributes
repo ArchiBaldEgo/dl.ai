@@ -1,0 +1,27 @@
+# Normalize all text files to LF in the repo, regardless of checkout OS.
+# Prevents CRLF/LF churn when mixing Windows git.exe (autocrlf=true) and WSL git.
+# gitattributes takes precedence over core.autocrlf, so Windows git.exe will also
+# check out text files as LF after this.
+* text=auto eol=lf
+
+# Binaries — never touch line endings.
+*.docx binary
+*.xlsx binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.otf binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.mp3 binary
+*.wav binary
+*.mp4 binary
