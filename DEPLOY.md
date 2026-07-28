@@ -19,6 +19,16 @@ cd dl.ai
 git pull
 ```
 
+### Установка git hooks (обязательно после clone)
+
+```bash
+bash scripts/setup_hooks.sh
+```
+
+Устанавливает:
+- **post-merge** — после `git pull` автоматически добавляет новые коммиты в БД (раздел «Обновления» в админке).
+- **pre-push** — перед `git push` синхронизирует таблицу обновлений с локальными коммитами.
+
 ## 2. Создать `.env`
 
 Скопируйте шаблон:
@@ -190,6 +200,10 @@ docker compose --env-file .env up -d --build
 docker compose --env-file .env exec -T web python manage.py migrate
 docker compose --env-file .env exec -T web python manage.py collectstatic --noinput
 ```
+
+После `git pull` срабатывает **post-merge hook** — он автоматически
+добавляет новые коммиты в таблицу `UpdateLog` (раздел «Обновления» в админке).
+Если хуки не установлены, выполните один раз: `bash scripts/setup_hooks.sh`.
 
 Если вы используете прод-порт 8081:
 
