@@ -9,6 +9,7 @@
 """
 
 import subprocess
+import sys
 from datetime import datetime
 
 from django.core.management.base import BaseCommand
@@ -22,10 +23,22 @@ def _git_log():
     """
     import os
     env = dict(os.environ, TZ="Europe/Moscow")
-    result = subprocess.run(
-        ["git", "log", "--pretty=format:%h|%ad|%an|%s", "--date=format:%Y-%m-%d"],
-        capture_output=True, text=True, check=True, env=env,
-    )
+    # В Docker-контейнере репозиторий примонтирован с хоста (volume `.: /app`)
+    # и принадлежит другому uid — git блокирует его как «dubious ownership»
+    # (exit 128). safe.directory=* отключает эту проверку для текущего вызова,
+    # не трогая глобальный git-конфиг контейнера (который бы слетел при
+    # пересоздании контейнера). subprocess.run вызывает git списком без shell,
+    # поэтому '*' передаётся буквально (без glob-раскрытия).
+    try:
+        result = subprocess.run(
+            ["git", "-c", "safe.directory=*", "log",
+             "--pretty=format:%h|%ad|%an|%s", "--date=format:%Y-%m-%d"],
+            capture_output=True, text=True, check=True, env=env,
+        )
+    except subprocess.CalledProcessError as exc:
+        # Покажем реальный stderr git'а, а не глухой traceback с одним retcode.
+        sys.stderr.write(exc.stderr or "")
+        raise
     commits = []
     for line in result.stdout.strip().splitlines():
         parts = line.split("|", 3)
