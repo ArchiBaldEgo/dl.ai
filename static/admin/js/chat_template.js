@@ -114,6 +114,7 @@ window.onload = function() {
     restoreSharedText();
     updateVoiceStatus(getVoiceStatusText('ready'));
     initSelectionPersistence();
+    initTokenUsageWidget();
 
     var speakThinkCheckbox = document.getElementById('speakThinkContent');
     if (speakThinkCheckbox) {

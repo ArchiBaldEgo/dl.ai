@@ -1071,3 +1071,31 @@ function toggleDesktopMode() {
 
 // === Common: language change handler (pages can extend via selectLang listener) ===
 // Pages register their own additional selectLang change listeners for page-specific UI.
+
+// === Common: token usage widget ===
+function initTokenUsageWidget() {
+    var widget = document.getElementById('tokenUsageWidget');
+    if (!widget) return;
+    var used = widget.dataset.used;
+    var limit = widget.dataset.limit;
+    var remaining = widget.dataset.remaining;
+    var percent = parseInt(widget.dataset.percent || '0', 10);
+    var hasLimit = widget.dataset.hasLimit === '1';
+    if (!used) { widget.style.display = 'none'; return; }
+
+    var selectLang = document.getElementById('selectLang');
+    var langAttr = selectLang ? selectLang.options[selectLang.selectedIndex].getAttribute('language') : 'Russian';
+    var loc = (localization[langAttr] || localization.Russian).voiceStatus;
+
+    var color = percent > 80 ? '#F44336' : (percent > 50 ? '#FF9800' : '#4CAF50');
+    if (hasLimit && limit) {
+        widget.innerHTML = '<span style="color:' + color + '; font-weight:bold;">' +
+            loc.tokensUsed + ': ' + used + 'M / ' + limit + 'M' +
+            (percent > 0 ? ' (' + percent + '%)' : '') +
+            '</span>';
+    } else {
+        widget.innerHTML = '<span style="color:#4CAF50; font-weight:bold;">' +
+            loc.tokensNoLimit + ': ' + used + 'M' +
+            '</span>';
+    }
+}

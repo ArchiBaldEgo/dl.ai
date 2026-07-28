@@ -232,28 +232,24 @@ def _render_ai_page(request, template_name, extra_context=None):
         except Exception:
             logger.exception("Failed to trigger model health self-heal refresh")
     if available_models:
-        # Топ-2 модели пользователя по частоте использования — наверх
-        user_top = _get_user_top_model_keys(request, limit=2)
+        # Web_DeepSeek приоритет — наверх
         model_map = {item["key"]: item for item in available_models}
 
-        # 1. Топ-2 модели юзера (если они доступны сейчас)
-        user_picks = [model_map[k] for k in user_top if k in model_map]
-
-        # 2. Web_DeepSeek приоритет (если не в топе юзера)
+        # Web_DeepSeek приоритет (первыми, если доступны)
         web_priority = [
             model_map[key]
             for key in _WEB_PRIORITY_MODELS
-            if key in model_map and key not in user_top
+            if key in model_map
         ]
 
-        # 3. Остальные — по алфавиту (title)
-        used_keys = set(user_top) | set(_WEB_PRIORITY_MODELS)
+        # Остальные — по алфавиту (title)
+        used_keys = set(_WEB_PRIORITY_MODELS)
         rest = sorted(
             [item for item in available_models if item["key"] not in used_keys],
             key=lambda x: x["title"].lower(),
         )
 
-        available_models = user_picks + web_priority + rest
+        available_models = web_priority + rest
     external_session_id = request.session.get('external_session_id')
     # The token-usage banner is a non-essential enhancement; it must never
     # break the chat page (mirrors the get_solo/ProgrammingError guard above).

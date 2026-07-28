@@ -94,7 +94,6 @@ volumes:
   bot_node_modules:
   bot_puppeteer_cache:
 
-
 networks:
   shared-network:
     name: "${DOCKER_NETWORK_NAME:-dlai-network}"

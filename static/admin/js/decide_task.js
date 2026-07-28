@@ -29,8 +29,12 @@ async function fetchProblemData() {
     try {
         var cached = sessionStorage.getItem(PROBLEM_DATA_KEY);
         if (cached) {
-            problemData = JSON.parse(cached);
-            return problemData;
+            var parsed = JSON.parse(cached);
+            // Only use cache if it has actual data (non-empty languages)
+            if (parsed && parsed.languages && parsed.languages.length > 0) {
+                problemData = parsed;
+                return problemData;
+            }
         }
     } catch (e) {}
 
@@ -521,6 +525,7 @@ window.onload = function () {
     initAccordionForMessages();
     updateVoiceStatus(getVoiceStatusText('ready'));
     initSelectionPersistence();
+    initTokenUsageWidget();
 
     var speakThinkCheckbox = document.getElementById('speakThinkContent');
     if (speakThinkCheckbox) {

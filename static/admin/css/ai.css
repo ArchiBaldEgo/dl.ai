@@ -871,6 +871,16 @@ form {
     pointer-events: none;
 }
 
+.panel-tokens {
+    position: absolute;
+    right: 20px;
+    bottom: 26px;
+    font-size: 12px;
+    color: #6a6a6a;
+    font-weight: bold;
+    pointer-events: none;
+}
+
 .token-usage {
     position: absolute;
     right: 20px;

@@ -16,10 +16,15 @@ from ai.models import UpdateLog
 
 
 def _git_log():
-    """Возвращает список коммитов: (hash, date, author, message)."""
+    """Возвращает список коммитов: (hash, date, author, message).
+
+    Date конвертируется в Московский часовой пояс (Europe/Moscow).
+    """
+    import os
+    env = dict(os.environ, TZ="Europe/Moscow")
     result = subprocess.run(
-        ["git", "log", "--pretty=format:%h|%ad|%an|%s", "--date=short"],
-        capture_output=True, text=True, check=True,
+        ["git", "log", "--pretty=format:%h|%ad|%an|%s", "--date=format:%Y-%m-%d"],
+        capture_output=True, text=True, check=True, env=env,
     )
     commits = []
     for line in result.stdout.strip().splitlines():

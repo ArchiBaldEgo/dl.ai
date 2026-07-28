@@ -70,6 +70,13 @@
                     <label for="speakThinkContent" id="speakThinkLabel">Озвучивать think-блоки</label>
                 </div>
             </div>
+            <div class="panel-tokens" id="tokenUsageWidget"
+                data-used="{{ token_usage.used_display|default:'' }}"
+                data-limit="{{ token_usage.limit_display|default:'' }}"
+                data-remaining="{{ token_usage.remaining_display|default:'' }}"
+                data-percent="{{ token_usage.percent|default:0 }}"
+                data-has-limit="{% if token_usage.limit %}1{% else %}0{% endif %}"
+            ></div>
             <div class="panel-date">Последнее обновление: {{ last_update_date|date:"d.m.Y" }}</div>
         </div>
         <hr/>
