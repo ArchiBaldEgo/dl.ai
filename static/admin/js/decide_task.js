@@ -7,12 +7,25 @@
  *
  * Здесь только специфичная для «Реши задачу» логика:
  * - override initWebSocket() — type=2 и accordion logic в onmessage.
- * - override sendMessage() / simulateSend() — nodeId (язык/тема/препромт на этой
- *   странице не выбираются; условие задачи подставляется из DL-ссылки через loadTaskFromUrl).
- * - selectLang change handler — обновление UI элементов.
- * - DOMContentLoaded — автозагрузка условия задачи из DL-ссылки (loadTaskFromUrl).
+ * - override sendMessage() / simulateSend() — nodeId + progLng/topic/preprompt
+ *   (выбор языка/темы/препромта теперь есть на этой странице; условие задачи
+ *   подставляется из DL-ссылки через loadTaskFromUrl). Селекторы опциональны.
+ * - selectLang change handler — обновление UI элементов + перелокализация селекторов.
+ * - DOMContentLoaded — initProblemSelectors (общая логика из ai-common.js) +
+ *   автозагрузка условия задачи из DL-ссылки (loadTaskFromUrl).
  * - window.onload — init для decide_task.
  */
+
+// Селекторы языка программирования / темы / препромпта — общая логика в ai-common.js.
+// Файловая переменная, чтобы обработчик selectLang change (отдельная DOMContentLoaded)
+// мог дёрнуть repopulateOnUiLanguageChange().
+let problemSelectors = null;
+
+// Безопасное чтение значения селектора (на случай рассинхрона версий JS/шаблона).
+function getSelectorValue(id) {
+    var el = document.getElementById(id);
+    return el ? el.value : "";
+}
 
 // === override initWebSocket — type=2, accordion в onmessage ===
 function initWebSocket() {
@@ -99,6 +112,9 @@ function sendMessage(event) {
     var value = document.querySelector("#select").value;
     var language = document.querySelector("#selectLang").value;
     var input = document.getElementById("messageText");
+    var progLng = getSelectorValue("selectProgLng");
+    var topic = getSelectorValue("selectTheme");
+    var preprompt = getSelectorValue("selectPrompt");
 
     if (!value) {
         alert("Сегодня нет доступных моделей. Повторите позже.");
@@ -115,6 +131,9 @@ function sendMessage(event) {
         message: input.value,
         value: value,
         language: language,
+        progLng: progLng,
+        topic: topic,
+        preprompt: preprompt,
         nodeId: window.AI_TASK_NODE_ID || ''
     }));
     setRequestLock(true);
@@ -139,6 +158,9 @@ function simulateSend() {
     var value = document.querySelector("#select").value;
     var language = document.querySelector("#selectLang").value;
     var input = document.getElementById("messageText");
+    var progLng = getSelectorValue("selectProgLng");
+    var topic = getSelectorValue("selectTheme");
+    var preprompt = getSelectorValue("selectPrompt");
 
     if (!input.value.trim()) {
         return;
@@ -149,6 +171,9 @@ function simulateSend() {
         message: input.value,
         value: value,
         language: language,
+        progLng: progLng,
+        topic: topic,
+        preprompt: preprompt,
         nodeId: window.AI_TASK_NODE_ID || ''
     }));
 
@@ -209,10 +234,19 @@ document.addEventListener("DOMContentLoaded", function() {
             var speakThinkLabel = document.getElementById("speakThinkLabel");
             if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
 
+            // Перелокализация селекторов языка/темы/препромпта в новом UI-языке.
+            if (problemSelectors) await problemSelectors.repopulateOnUiLanguageChange();
             saveInterfaceLanguage();
             updateVoiceStatus(getVoiceStatusText('readyForVoice'));
         });
     }
+});
+
+// === DOMContentLoaded — инициализация селекторов языка/темы/препромпта ===
+// Общая логика в ai-common.js (initProblemSelectors): populate + change handlers
+// + savePageState/restorePageState. Возвращает handle для repopulateOnUiLanguageChange.
+document.addEventListener("DOMContentLoaded", function() {
+    problemSelectors = initProblemSelectors();
 });
 
 // === DOMContentLoaded — автозагрузка условия задачи из DL-ссылки ===

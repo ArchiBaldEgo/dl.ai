@@ -126,6 +126,226 @@ function initSelectionPersistence() {
     }
 }
 
+// === Selectors: programming language / topic / prompt (shared by find-error & solve-problem) ===
+// Логика выбора языка программирования / темы / препромпта вынесена из find_error.js,
+// чтобы /ai/solve-problem/ переиспользовал её без копипасты (DRY, см. CLAUDE.md).
+// Состояние (progLng/topic/prompt) сохраняется в куке ai_state через savePageState.
+var PROBLEM_DATA_KEY = 'ai_problem_data_cache';
+var problemData = null;
+
+async function fetchProblemData() {
+    if (problemData) return problemData;
+    try {
+        const cached = sessionStorage.getItem(PROBLEM_DATA_KEY);
+        if (cached) {
+            const parsed = JSON.parse(cached);
+            // Only use cache if it has actual data (non-empty languages)
+            if (parsed && parsed.languages && parsed.languages.length > 0) {
+                problemData = parsed;
+                return problemData;
+            }
+        }
+    } catch (e) {}
+
+    try {
+        const uiLang = document.getElementById('selectLang').value || 'Русский';
+        const url = new URL('/ai/api/problem-data/', window.location.origin);
+        url.searchParams.set('ui_language', uiLang);
+        const response = await fetch(url.toString());
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const data = await response.json();
+        problemData = data;
+        try {
+            sessionStorage.setItem(PROBLEM_DATA_KEY, JSON.stringify(data));
+        } catch (e) {}
+        return data;
+    } catch (error) {
+        console.error('Error fetching problem data:', error);
+        return { languages: [], topics: [], prompts: [], shared_prompts: [] };
+    }
+}
+
+// Инициализирует селекторы #selectProgLng/#selectTheme/#selectPrompt на странице.
+// Если хоть одного элемента нет (например, на /ai/chat/) — no-op, возвращает null.
+// Возвращает handle с repopulateOnUiLanguageChange() для перелокализации при смене UI-языка.
+function initProblemSelectors() {
+    var selectProgLng = document.getElementById('selectProgLng');
+    var selectTheme = document.getElementById('selectTheme');
+    var selectPrompt = document.getElementById('selectPrompt');
+    if (!selectProgLng || !selectTheme || !selectPrompt) return null;
+
+    function setSelectEnabled(selectElement, enabled) {
+        if (!selectElement) return;
+        selectElement.disabled = !enabled;
+    }
+
+    function selectFirstIfSingle(selectElement) {
+        if (selectElement && selectElement.options.length === 1) {
+            selectElement.selectedIndex = 0;
+        }
+    }
+
+    function populateLanguages(languages) {
+        selectProgLng.innerHTML = '<option value="">' + getUiString('select_prog_lang', 'Выберите язык программирования') + '</option>';
+        if (languages && languages.length > 0) {
+            languages.forEach(lang => {
+                const option = new Option(lang.language_name, lang.id);
+                selectProgLng.appendChild(option);
+            });
+        }
+        selectFirstIfSingle(selectProgLng);
+    }
+
+    function populateTopics(languageId) {
+        selectTheme.innerHTML = '<option value="">' + getUiString('chooseTheme', 'Выберите тему') + '</option>';
+        const topics = (problemData && problemData.topics) || [];
+        const filteredTopics = topics.filter(topic => topic.programming_language == languageId);
+        filteredTopics.forEach(topic => {
+            const option = new Option(topic.name || topic.topic_name, topic.id);
+            selectTheme.appendChild(option);
+        });
+        selectFirstIfSingle(selectTheme);
+        setSelectEnabled(selectTheme, languageId !== null && languageId !== undefined && selectTheme.options.length > 1);
+    }
+
+    function filterPrompts(prompts, languageId, topicId) {
+        const languageValue = languageId ? String(languageId) : "";
+        const topicValue = topicId ? String(topicId) : "";
+
+        return prompts.filter(prompt => {
+            const hasTopic = prompt.topic_id !== null && prompt.topic_id !== undefined && prompt.topic_id !== "";
+            if (!hasTopic) return true;
+            if (topicValue) return String(prompt.topic_id) === topicValue;
+            if (!languageValue) return false;
+            return String(prompt.topic__programming_language) === languageValue;
+        });
+    }
+
+    function populatePrompts(languageId, topicId) {
+        selectPrompt.innerHTML = '<option value="">' + getUiString('choosePrompt', 'Выберите промпт') + '</option>';
+        if (!problemData) return;
+        let allPrompts = (problemData.prompts || []).slice();
+
+        if (languageId) {
+            const langIdStr = String(languageId);
+            const shared = (problemData.shared_prompts || []).filter(sp => {
+                const ids = sp.language_ids || [];
+                return ids.length === 0 || ids.includes(languageId) || ids.includes(langIdStr);
+            });
+            shared.forEach(sp => {
+                allPrompts.push({
+                    id: `shared_${sp.id}`,
+                    prompt_name: `[Общий] ${sp.name || sp.prompt_name}`,
+                    name: `[Общий] ${sp.name || sp.prompt_name}`,
+                    topic_id: null,
+                    topic__programming_language: langIdStr
+                });
+            });
+        }
+
+        const filteredPrompts = filterPrompts(allPrompts, languageId, topicId);
+        filteredPrompts.forEach(prompt => {
+            const option = new Option(prompt.name || prompt.prompt_name, prompt.id);
+            selectPrompt.appendChild(option);
+        });
+        selectFirstIfSingle(selectPrompt);
+        const hasTopic = topicId !== null && topicId !== undefined && topicId !== "";
+        setSelectEnabled(selectPrompt, hasTopic && selectPrompt.options.length > 1);
+    }
+
+    function savePageState() {
+        try {
+            setAiState({
+                progLng: selectProgLng.value,
+                topic: selectTheme.value,
+                prompt: selectPrompt.value
+            });
+        } catch(e) {}
+    }
+
+    function restorePageState() {
+        try {
+            const state = getAiState();
+            if (!state.progLng) return;
+            const langOpt = Array.from(selectProgLng.options).find(o => o.value === state.progLng);
+            if (!langOpt) return;
+
+            const languageId = parseInt(state.progLng);
+            selectProgLng.value = state.progLng;
+            populateTopics(languageId);
+            populatePrompts(languageId, null);
+
+            if (state.topic) {
+                const topicOpt = Array.from(selectTheme.options).find(o => o.value === state.topic);
+                if (topicOpt) {
+                    selectTheme.value = state.topic;
+                    const topicId = parseInt(state.topic);
+                    populatePrompts(languageId, isNaN(topicId) ? null : topicId);
+                    if (state.prompt) {
+                        const promptOpt = Array.from(selectPrompt.options).find(o => o.value === state.prompt);
+                        if (promptOpt) selectPrompt.value = state.prompt;
+                    }
+                }
+            }
+        } catch(e) {}
+    }
+
+    selectProgLng.addEventListener("change", () => {
+        const languageId = parseInt(selectProgLng.value);
+        selectTheme.innerHTML = '<option value="">Выберите тему</option>';
+        selectPrompt.innerHTML = '<option value="">Выберите промпт</option>';
+        setSelectEnabled(selectTheme, false);
+        setSelectEnabled(selectPrompt, false);
+        if (!isNaN(languageId)) {
+            populateTopics(languageId);
+            populatePrompts(languageId, null);
+        } else {
+            populatePrompts(null, null);
+        }
+        savePageState();
+    });
+
+    selectTheme.addEventListener("change", () => {
+        const topicId = parseInt(selectTheme.value);
+        selectPrompt.innerHTML = '<option value="">Выберите промпт</option>';
+        const languageId = parseInt(selectProgLng.value);
+        setSelectEnabled(selectPrompt, false);
+        populatePrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
+        savePageState();
+    });
+
+    selectPrompt.addEventListener("change", savePageState);
+
+    // Первичная загрузка + восстановление состояния (асинхронно, без await —
+    // поведение совпадает с прежним inline-кодом find_error.js).
+    (async () => {
+        await fetchProblemData();
+        populateLanguages(problemData.languages);
+        setSelectEnabled(selectTheme, false);
+        setSelectEnabled(selectPrompt, false);
+        populatePrompts(null, null);
+        restorePageState();
+    })();
+
+    return {
+        repopulateOnUiLanguageChange: async () => {
+            sessionStorage.removeItem(PROBLEM_DATA_KEY);
+            problemData = null;
+            await fetchProblemData();
+            const languageId = parseInt(selectProgLng.value);
+            populateLanguages(problemData.languages);
+            if (!isNaN(languageId)) {
+                populateTopics(languageId);
+                populatePrompts(languageId, null);
+            } else {
+                populateTopics(null);
+                populatePrompts(null, null);
+            }
+            restorePageState();
+        }
+    };
+}
+
 // === Cookie / CSRF / Session helpers ===
 
 function getCookieValue(name) {

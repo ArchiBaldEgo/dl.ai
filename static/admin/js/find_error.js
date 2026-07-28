@@ -2,21 +2,16 @@
  * Фронтенд страницы «В чём ошибка?» — WebSocket-чат с AI для поиска ошибок в коде.
  *
  * Общие функции (cookies, CSRF, voice, accordion, markdown, localization, etc.)
- * берутся из ai-common.js. Этот файл содержит только переопределения:
+ * берутся из ai-common.js. Включая логику селекторов языка программирования /
+ * темы / препромпта (initProblemSelectors / fetchProblemData) — она расшарена
+ * с decide_task.js (DRY, см. CLAUDE.md). Этот файл содержит только переопределения:
  * - initWebSocket() — type=3 и accordion logic в onmessage
  * - sendMessage() — taskText, codeText, progLng, topic, preprompt, type=3
  * - simulateSend() — taskText, codeText, progLng, type=3
  * - selectLang change handler — специфичный для find_error
- * - DOMContentLoaded — fetchProblemData, populateLanguages, populateTopics, populatePrompts, etc.
+ * - DOMContentLoaded — initProblemSelectors + input listeners + selectLang handler
  * - window.onload — init для find_error
  */
-
-// === Специфичные для «В чём ошибка?» переменные ===
-let problemData = null;
-const PROBLEM_DATA_KEY = 'ai_problem_data_cache';
-let problemLanguageSelect = null;
-let problemTopicSelect = null;
-let problemPromptSelect = null;
 
 // === Переопределение initWebSocket (type=3, accordion logic в onmessage) ===
 
@@ -242,188 +237,11 @@ function simulateSend() {
     saveSharedText();
 }
 
-// === fetchProblemData — объявлена в области видимости модуля, чтобы
-//     обработчик selectLang change мог её вызвать (исправление бага №2). ===
-async function fetchProblemData() {
-    if (problemData) return problemData;
-    try {
-        const cached = sessionStorage.getItem(PROBLEM_DATA_KEY);
-        if (cached) {
-            const parsed = JSON.parse(cached);
-            // Only use cache if it has actual data (non-empty languages)
-            if (parsed && parsed.languages && parsed.languages.length > 0) {
-                problemData = parsed;
-                return problemData;
-            }
-        }
-    } catch (e) {}
-
-    try {
-        const uiLang = document.getElementById('selectLang').value || 'Русский';
-        const url = new URL('/ai/api/problem-data/', window.location.origin);
-        url.searchParams.set('ui_language', uiLang);
-        const response = await fetch(url.toString());
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        const data = await response.json();
-        problemData = data;
-        try {
-            sessionStorage.setItem(PROBLEM_DATA_KEY, JSON.stringify(data));
-        } catch (e) {}
-        return data;
-    } catch (error) {
-        console.error('Error fetching problem data:', error);
-        return { languages: [], topics: [], prompts: [], shared_prompts: [] };
-    }
-}
-
-// === DOMContentLoaded: загрузка языков, тем, промптов, восстановление состояния ===
+// === DOMContentLoaded: initProblemSelectors + input listeners + selectLang handler ===
 
 document.addEventListener("DOMContentLoaded", async () => {
-    problemLanguageSelect = document.getElementById("selectProgLng");
-    problemTopicSelect = document.getElementById("selectTheme");
-    problemPromptSelect = document.getElementById("selectPrompt");
-
-    function setSelectEnabled(selectElement, enabled) {
-        if (!selectElement) return;
-        selectElement.disabled = !enabled;
-    }
-
-    function selectFirstIfSingle(selectElement) {
-        if (selectElement && selectElement.options.length === 1) {
-            selectElement.selectedIndex = 0;
-        }
-    }
-
-    function populateLanguages(languages) {
-        problemLanguageSelect.innerHTML = '<option value="">' + getUiString('select_prog_lang', 'Выберите язык программирования') + '</option>';
-        if (languages && languages.length > 0) {
-            languages.forEach(lang => {
-                const option = new Option(lang.language_name, lang.id);
-                problemLanguageSelect.appendChild(option);
-            });
-        }
-        selectFirstIfSingle(problemLanguageSelect);
-    }
-
-    function populateTopics(languageId) {
-        problemTopicSelect.innerHTML = '<option value="">' + getUiString('chooseTheme', 'Выберите тему') + '</option>';
-        const topics = (problemData && problemData.topics) || [];
-        const filteredTopics = topics.filter(topic => topic.programming_language == languageId);
-        filteredTopics.forEach(topic => {
-            const option = new Option(topic.name || topic.topic_name, topic.id);
-            problemTopicSelect.appendChild(option);
-        });
-        selectFirstIfSingle(problemTopicSelect);
-        setSelectEnabled(problemTopicSelect, languageId !== null && languageId !== undefined && problemTopicSelect.options.length > 1);
-    }
-
-    function filterPrompts(prompts, languageId, topicId) {
-        const languageValue = languageId ? String(languageId) : "";
-        const topicValue = topicId ? String(topicId) : "";
-
-        return prompts.filter(prompt => {
-            const hasTopic = prompt.topic_id !== null && prompt.topic_id !== undefined && prompt.topic_id !== "";
-            if (!hasTopic) return true;
-            if (topicValue) return String(prompt.topic_id) === topicValue;
-            if (!languageValue) return false;
-            return String(prompt.topic__programming_language) === languageValue;
-        });
-    }
-
-    function populatePrompts(languageId, topicId) {
-        problemPromptSelect.innerHTML = '<option value="">' + getUiString('choosePrompt', 'Выберите промпт') + '</option>';
-        if (!problemData) return;
-        let allPrompts = (problemData.prompts || []).slice();
-
-        if (languageId) {
-            const langIdStr = String(languageId);
-            const shared = (problemData.shared_prompts || []).filter(sp => {
-                const ids = sp.language_ids || [];
-                return ids.length === 0 || ids.includes(languageId) || ids.includes(langIdStr);
-            });
-            shared.forEach(sp => {
-                allPrompts.push({
-                    id: `shared_${sp.id}`,
-                    prompt_name: `[Общий] ${sp.name || sp.prompt_name}`,
-                    name: `[Общий] ${sp.name || sp.prompt_name}`,
-                    topic_id: null,
-                    topic__programming_language: langIdStr
-                });
-            });
-        }
-
-        const filteredPrompts = filterPrompts(allPrompts, languageId, topicId);
-        filteredPrompts.forEach(prompt => {
-            const option = new Option(prompt.name || prompt.prompt_name, prompt.id);
-            problemPromptSelect.appendChild(option);
-        });
-        selectFirstIfSingle(problemPromptSelect);
-        const hasTopic = topicId !== null && topicId !== undefined && topicId !== "";
-        setSelectEnabled(problemPromptSelect, hasTopic && problemPromptSelect.options.length > 1);
-    }
-
-    function savePageState() {
-        try {
-            setAiState({
-                progLng: problemLanguageSelect.value,
-                topic: problemTopicSelect.value,
-                prompt: problemPromptSelect.value
-            });
-        } catch(e) {}
-    }
-
-    function restorePageState() {
-        try {
-            const state = getAiState();
-            if (!state.progLng) return;
-            const langOpt = Array.from(problemLanguageSelect.options).find(o => o.value === state.progLng);
-            if (!langOpt) return;
-
-            const languageId = parseInt(state.progLng);
-            problemLanguageSelect.value = state.progLng;
-            populateTopics(languageId);
-            populatePrompts(languageId, null);
-
-            if (state.topic) {
-                const topicOpt = Array.from(problemTopicSelect.options).find(o => o.value === state.topic);
-                if (topicOpt) {
-                    problemTopicSelect.value = state.topic;
-                    const topicId = parseInt(state.topic);
-                    populatePrompts(languageId, isNaN(topicId) ? null : topicId);
-                    if (state.prompt) {
-                        const promptOpt = Array.from(problemPromptSelect.options).find(o => o.value === state.prompt);
-                        if (promptOpt) problemPromptSelect.value = state.prompt;
-                    }
-                }
-            }
-        } catch(e) {}
-    }
-
-    problemLanguageSelect.addEventListener("change", () => {
-        const languageId = parseInt(problemLanguageSelect.value);
-        problemTopicSelect.innerHTML = '<option value="">Выберите тему</option>';
-        problemPromptSelect.innerHTML = '<option value="">Выберите промпт</option>';
-        setSelectEnabled(problemTopicSelect, false);
-        setSelectEnabled(problemPromptSelect, false);
-        if (!isNaN(languageId)) {
-            populateTopics(languageId);
-            populatePrompts(languageId, null);
-        } else {
-            populatePrompts(null, null);
-        }
-        savePageState();
-    });
-
-    problemTopicSelect.addEventListener("change", () => {
-        const topicId = parseInt(problemTopicSelect.value);
-        problemPromptSelect.innerHTML = '<option value="">Выберите промпт</option>';
-        const languageId = parseInt(problemLanguageSelect.value);
-        setSelectEnabled(problemPromptSelect, false);
-        populatePrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
-        savePageState();
-    });
-
-    problemPromptSelect.addEventListener("change", savePageState);
+    // Селекторы языка программирования / темы / препромпта — общая логика в ai-common.js (DRY).
+    var problemSelectors = initProblemSelectors();
 
     const taskText = document.getElementById('taskText');
     const codeText = document.getElementById('codeText');
@@ -479,33 +297,13 @@ document.addEventListener("DOMContentLoaded", async () => {
         const speakThinkLabel = document.getElementById("speakThinkLabel");
         if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
 
-        // Reload topics/prompts in the selected UI language
-        sessionStorage.removeItem(PROBLEM_DATA_KEY);
-        problemData = null;
-        await fetchProblemData();
-        const languageId = parseInt(problemLanguageSelect.value);
-        populateLanguages(problemData.languages);
-        if (!isNaN(languageId)) {
-            populateTopics(languageId);
-            populatePrompts(languageId, null);
-        } else {
-            populateTopics(null);
-            populatePrompts(null, null);
-        }
-
-        // Пере-применяем сохранённые progLng/topic/prompt к перелокализованным селектам
-        // (значения-иды языка-независимы); иначе repopulate сбрасывает выбор в дефолт.
-        restorePageState();
+        // Перелокализация селекторов языка/темы/препромпта в новом UI-языке
+        // (значения-иды языка-независимы; restorePageState пере-применяет выбор).
+        if (problemSelectors) await problemSelectors.repopulateOnUiLanguageChange();
         saveInterfaceLanguage();
         updateVoiceStatus(getVoiceStatusText('readyForVoice'));
     });
 
-    await fetchProblemData();
-    populateLanguages(problemData.languages);
-    setSelectEnabled(problemTopicSelect, false);
-    setSelectEnabled(problemPromptSelect, false);
-    populatePrompts(null, null);
-    restorePageState();
     restoreSharedText();
 });
 

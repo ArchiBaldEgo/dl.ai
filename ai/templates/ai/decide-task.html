@@ -1,12 +1,12 @@
 {% extends "ai/base_chat.html" %}
 
 {% block extra_css %}
-    <link rel="stylesheet" href="/ai/assets/admin/css/decide_task.css?v=4"/>
+    <link rel="stylesheet" href="/ai/assets/admin/css/decide_task.css?v=5"/>
 {% endblock %}
 
 {% block js %}
-    <script src="/ai/assets/admin/js/ai-common.js?v=4" defer></script>
-    <script src="/ai/assets/admin/js/decide_task.js?v=4" defer></script>
+    <script src="/ai/assets/admin/js/ai-common.js?v=5" defer></script>
+    <script src="/ai/assets/admin/js/decide_task.js?v=5" defer></script>
 {% endblock %}
 
 {% block solve_selected %}selected{% endblock %}
@@ -18,6 +18,15 @@
 {% endblock %}
 
 {% block top_dv %}
+    <select id="selectProgLng">
+    </select>
+    <select id="selectTheme">
+    </select>
+    <div class="top-preprompt">
+        <div class="preprompt">Препромпт:</div>
+        <select id="selectPrompt">
+        </select>
+    </div>
 {% endblock %}
 
 {% block extra_body_script %}
