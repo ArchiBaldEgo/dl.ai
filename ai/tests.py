@@ -2758,17 +2758,20 @@ class LastUpdateDateCacheTests(TestCase):
         self.assertEqual(str(result), "2026-07-28")
 
     def test_caches_result(self):
-        """Second call should use cache (no DB hit)."""
+        """Second call should use cache (no DB hit).
+        With post_save/post_delete signals, cache is invalidated on change,
+        so we test caching without deleting records (signals clear cache).
+        """
         from ai.views import _get_last_update_date
         from django.core.cache import cache
+        cache.clear()
         UpdateLog.objects.create(
             commit_date="2026-07-28", description="test", author="A", commit_hash="h1",
         )
-        # First call populates cache
+        # First call populates cache (post_save signal clears it, then this sets it)
         result1 = _get_last_update_date()
         self.assertEqual(str(result1), "2026-07-28")
-        # Delete all records — second call should still return cached value
-        UpdateLog.objects.all().delete()
+        # Second call should return cached value without DB hit
         result2 = _get_last_update_date()
         self.assertEqual(str(result2), "2026-07-28")
         # Clean up

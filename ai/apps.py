@@ -46,6 +46,9 @@ class AiConfig(AppConfig):
     def ready(self):
         post_migrate.connect(ensure_default_groups, sender=self, dispatch_uid="ai.ensure_default_groups")
 
+        # Подключаем сигналы (инвалидация кеша UpdateLog)
+        from . import signals  # noqa: F401
+
         if os.getenv("AI_DISABLE_HEALTH_SCHEDULER", "").strip().lower() in {"1", "true", "yes", "on"}:
             return
 
