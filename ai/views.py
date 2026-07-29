@@ -25,6 +25,7 @@ from django.http import FileResponse, Http404, HttpResponseForbidden, HttpRespon
 from django.db import ProgrammingError, models
 from django.db.models import Q
 from django.contrib.staticfiles import finders
+from django.utils.html import strip_tags
 from django.utils.http import http_date
 from django.views.static import was_modified_since
 from django.middleware import csrf
@@ -614,6 +615,25 @@ def get_task_info_view(request):
         return JsonResponse({"error": "API temporarily unavailable"}, status=503)
     except DLServerError:
         return JsonResponse({"error": "Server error"}, status=502)
+
+    # DL's own HTML stripping (removeHtmlTags=true) sometimes yields an empty
+    # statement for tasks whose condition is wrapped in non-trivial HTML, while
+    # the raw (non-stripped) response carries the text. Retry without DL-side
+    # stripping and strip HTML ourselves so the condition still loads on
+    # /ai/solve-problem/. Only triggers when the stripped statement is empty —
+    # existing non-empty results are unchanged.
+    if remove_html_tags and not (data.get("statement") or "").strip() \
+            and not (data.get("currentStatement") or "").strip():
+        try:
+            raw = fetch_task_info(node_id, session_id=session_id, remove_html_tags=False)
+            raw_statement = (raw.get("statement") or raw.get("currentStatement") or "").strip()
+            if raw_statement:
+                stripped = strip_tags(raw_statement).strip()
+                if stripped:
+                    data["statement"] = stripped
+        except (DLUnauthorizedError, DLForbiddenError, DLTaskNotFoundError,
+                DLApiUnavailable, DLServerError):
+            pass  # keep the original (empty-statement) response
 
     return JsonResponse(data)
 
