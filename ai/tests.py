@@ -946,6 +946,22 @@ class DLApiClientEncodingTests(SimpleTestCase):
         result = self._decode(payload)
         self.assertEqual(result["statement"], "Hello, world!")
 
+    def test_preserves_utf8_nbsp_spaces_in_english_statement(self):
+        """English statements that use non-breaking spaces (U+00A0) for spacing
+        must not be turned into the '┬а' mojibake.
+
+        nbsp is UTF-8 bytes [0xC2, 0xA0]; the cp1251 candidate decodes those as
+        Cyrillic В + nbsp and used to win scoring (В gets the +2 Cyrillic
+        bonus), after which the CP866 repair converted В+nbsp into '┬а'.
+        """
+        statement = "International\xa0Olympiad\xa0in\xa0Informatics"
+        payload = json.dumps({"statement": statement}, ensure_ascii=False)
+        result = self._decode(payload)
+        self.assertNotIn("┬а", result["statement"])
+        self.assertNotIn("В\xa0", result["statement"])
+        self.assertIn("International", result["statement"])
+        self.assertIn("Olympiad", result["statement"])
+
     def test_repairs_mixed_cp866_payload_with_replacement_chars(self):
         """A payload with U+FFFD mixed with cp1251 codepoints must not crash.
 

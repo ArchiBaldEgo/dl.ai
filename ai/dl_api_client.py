@@ -184,7 +184,7 @@ def _looks_like_cp866_as_cp1251(text: str) -> bool:
     allowed_punctuation = set("–—«»„\"\"‘’‚‹›")
     artifact_count = 0
     for c in text:
-        if c <= "" or c == "ё" or c in allowed_punctuation:
+        if c <= "" or c == "ё" or c == "\xa0" or c in allowed_punctuation:
             continue
         b = _CP1251_UNICODE_TO_BYTE.get(c)
         if b is not None and 0x80 <= b <= 0xBF:
@@ -239,6 +239,16 @@ def _quality(t: str) -> float:
     for i in range(len(t) - 1):
         if t[i] in _UTF8_LEAD_CHARS and t[i + 1] in _CP1251_CONTINUATION_CHARS:
             mojibake_matches += 1
+    # Penalize the nbsp-mojibake pair: a UTF-8 non-breaking space is bytes
+    # [0xC2, 0xA0]; when these are decoded as cp1251 they become В (Cyrillic
+    # В) + nbsp. Without this penalty the cp1251 candidate outscores the
+    # correct UTF-8 candidate (В gets the +2 Cyrillic bonus) for English text
+    # that uses nbsp for spacing, and a later CP866 repair turns В+nbsp into
+    # ┬а ("...┬аOlympiad┬а...").
+    nbsp_mojibake = 0
+    for i in range(len(t) - 1):
+        if t[i] == "В" and t[i + 1] == "\xa0":
+            nbsp_mojibake += 1
     # Penalize stray high-byte symbols typical of mojibake.
     suspicious = sum(
         1
@@ -252,6 +262,7 @@ def _quality(t: str) -> float:
         + spaces
         + punctuation
         - mojibake_matches * 3
+        - nbsp_mojibake * 3
         - suspicious * 2
     )
 
