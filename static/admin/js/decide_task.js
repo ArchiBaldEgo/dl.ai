@@ -21,6 +21,12 @@
 // мог дёрнуть repopulateOnUiLanguageChange().
 let problemSelectors = null;
 
+// True, если пользователь вручную правил поле условия задачи. Программная
+// установка .value событие 'input' не генерирует, поэтому флаг взводится только
+// на реальный ввод с клавиатуры — и используется, чтобы не затирать правки
+// пользователя при перезагрузке условия после смены языка интерфейса.
+let userEditedTaskText = false;
+
 // Безопасное чтение значения селектора (на случай рассинхрона версий JS/шаблона).
 function getSelectorValue(id) {
     var el = document.getElementById(id);
@@ -237,6 +243,14 @@ document.addEventListener("DOMContentLoaded", function() {
             // Перелокализация селекторов языка/темы/препромпта в новом UI-языке.
             if (problemSelectors) await problemSelectors.repopulateOnUiLanguageChange();
             saveInterfaceLanguage();
+
+            // Условие задачи должно следовать за выбранным языком интерфейса:
+            // перезагружаем его в новом языке. Не затираем поле, если пользователь
+            // уже вручную его правил (userEditedTaskText).
+            if (window.AI_TASK_NODE_ID && !userEditedTaskText) {
+                await loadTaskFromUrl();
+            }
+
             updateVoiceStatus(getVoiceStatusText('readyForVoice'));
         });
     }
@@ -252,7 +266,18 @@ document.addEventListener("DOMContentLoaded", function() {
 // === DOMContentLoaded — автозагрузка условия задачи из DL-ссылки ===
 document.addEventListener("DOMContentLoaded", async () => {
     var messageText = document.getElementById('messageText');
-    if (messageText) messageText.addEventListener('input', saveSharedText);
+    if (messageText) messageText.addEventListener('input', function () {
+        userEditedTaskText = true;
+        saveSharedText();
+    });
+
+    function currentUiLanguage() {
+        var selectLangEl = document.getElementById('selectLang');
+        if (selectLangEl && selectLangEl.selectedIndex >= 0) {
+            return selectLangEl.options[selectLangEl.selectedIndex].getAttribute('language') || 'Russian';
+        }
+        return 'Russian';
+    }
 
     async function loadTaskFromUrl() {
         var messageTextEl = document.getElementById('messageText');
@@ -263,6 +288,9 @@ document.addEventListener("DOMContentLoaded", async () => {
             var url = new URL('/ai/api/task-info/', window.location.origin);
             url.searchParams.set('nodeId', nodeId);
             url.searchParams.set('removeHtmlTags', 'true');
+            // Текст задачи должен быть на языке интерфейса, выбранном на странице
+            // (русский/английский/французский): сервер переведёт условие в этот язык.
+            url.searchParams.set('ui_language', currentUiLanguage());
             var response = await fetch(url.toString());
             if (response.status === 404) {
                 updateVoiceStatus(getUiString('taskNotFound', 'Задача не найдена'));

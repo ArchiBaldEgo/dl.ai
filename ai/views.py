@@ -635,7 +635,53 @@ def get_task_info_view(request):
                 DLApiUnavailable, DLServerError):
             pass  # keep the original (empty-statement) response
 
+    # Translate the task statement into the page's UI language. DL returns
+    # statements in Russian, so for the English/French UI languages we
+    # translate server-side via Google Translate (deep-translator, no API key)
+    # and cache per (node_id, lang, source hash) so a page reload or a language
+    # toggle reuses the cached translation instead of re-hitting Google.
+    # Russian (and any unmapped value) is returned as-is.
+    ui_language = request.GET.get("ui_language", "Русский").strip()
+    target_lang = _TASK_TRANSLATION_LANG_MAP.get(ui_language)
+    if target_lang:
+        statement = (data.get("statement") or data.get("currentStatement") or "").strip()
+        if statement:
+            data["statement"] = _translate_task_statement(node_id, statement, target_lang)
+
     return JsonResponse(data)
+
+
+# UI language (as used across the app: Russian/English/French) → deep-translator
+# target code. Russian needs no translation (DL already serves the statement in
+# Russian); the other two are translated via Google Translate on demand.
+_TASK_TRANSLATION_LANG_MAP = {"English": "en", "French": "fr"}
+
+
+def _translate_task_statement(node_id: int, text: str, target_lang: str) -> str:
+    """Return ``text`` translated to ``target_lang`` (en/fr), cached per node.
+
+    The cache key includes a short hash of the source text, so a statement that
+    changes on the DL side is re-translated immediately rather than serving a
+    stale cached translation. If translation fails (Google error / unsupported
+    text), the original Russian ``text`` is returned unchanged — the page still
+    shows the condition, just not translated.
+    """
+    import hashlib
+    from django.core.cache import cache
+    from .constants import AI_CACHE_KEY_PREFIX
+    from .services.auto_translate import translate_text
+
+    source_hash = hashlib.md5(text.encode("utf-8")).hexdigest()[:8]
+    cache_key = f"{AI_CACHE_KEY_PREFIX}:task_stmt:{node_id}:{target_lang}:{source_hash}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    translated = translate_text(text, target_lang)
+    if not translated:
+        return text  # graceful fallback: keep the original statement
+    cache.set(cache_key, translated, timeout=60 * 60 * 24 * 30)  # 30 days
+    return translated
 
 
 @require_http_methods(["POST"])
