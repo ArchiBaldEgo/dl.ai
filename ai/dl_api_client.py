@@ -357,12 +357,17 @@ def fetch_user_names(user_id: int | str, timeout: int = 10) -> dict[str, str]:
 def fetch_task_info(
     node_id: int,
     session_id: str | None = None,
-    remove_html_tags: bool = True,
+    remove_html_tags: bool | None = True,
 ) -> dict[str, Any]:
     """Fetch task metadata (name, taskId, statement) by nodeId.
 
     The external DL API needs the caller's session to authorize the request,
     so ``session_id`` is forwarded as the ``sessionId`` query parameter.
+
+    ``remove_html_tags`` controls the ``removeHtmlTags`` query parameter:
+    ``True``/``False`` send it as-is; ``None`` omits the parameter so DL
+    returns its default (raw, non-stripped) response — used as a fallback when
+    DL's own stripping yields an empty ``statement``.
 
     Raises:
         DLUnauthorizedError: when the session is missing/invalid (401).
@@ -373,8 +378,9 @@ def fetch_task_info(
     """
     params: dict[str, Any] = {
         "nodeId": node_id,
-        "removeHtmlTags": remove_html_tags,
     }
+    if remove_html_tags is not None:
+        params["removeHtmlTags"] = remove_html_tags
     if session_id:
         params["sessionId"] = session_id
 

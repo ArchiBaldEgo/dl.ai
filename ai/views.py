@@ -617,15 +617,15 @@ def get_task_info_view(request):
         return JsonResponse({"error": "Server error"}, status=502)
 
     # DL's own HTML stripping (removeHtmlTags=true) sometimes yields an empty
-    # statement for tasks whose condition is wrapped in non-trivial HTML, while
-    # the raw (non-stripped) response carries the text. Retry without DL-side
-    # stripping and strip HTML ourselves so the condition still loads on
-    # /ai/solve-problem/. Only triggers when the stripped statement is empty —
-    # existing non-empty results are unchanged.
+    # statement for tasks whose condition is nonetheless visible on the DL site
+    # (DL's stripper fails on the markup). Re-fetch omitting removeHtmlTags so DL
+    # returns its default (raw, HTML) response, then strip HTML server-side so
+    # the condition still loads on /ai/solve-problem/. Only triggers when the
+    # stripped statement is empty — existing non-empty results are unchanged.
     if remove_html_tags and not (data.get("statement") or "").strip() \
             and not (data.get("currentStatement") or "").strip():
         try:
-            raw = fetch_task_info(node_id, session_id=session_id, remove_html_tags=False)
+            raw = fetch_task_info(node_id, session_id=session_id, remove_html_tags=None)
             raw_statement = (raw.get("statement") or raw.get("currentStatement") or "").strip()
             if raw_statement:
                 stripped = strip_tags(raw_statement).strip()
