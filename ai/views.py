@@ -15,6 +15,7 @@ import logging
 import threading
 import time
 import asyncio
+from urllib.parse import unquote
 
 import tempfile
 from django.contrib.auth import login
@@ -594,7 +595,7 @@ def get_task_info_view(request):
         session_id = request.session.get("external_session_id", "").strip()
     if not session_id:
         cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
-        session_id = request.COOKIES.get(cookie_name, "").strip()
+        session_id = unquote(request.COOKIES.get(cookie_name, "").strip())
 
     # Sanitize session_id — reject if it contains path separators or URL characters
     # that could be used for SSRF or injection into DL API requests.
@@ -648,7 +649,7 @@ def get_task_solution_view(request):
         session_id = request.session.get("external_session_id", "").strip()
     if not session_id:
         cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
-        session_id = request.COOKIES.get(cookie_name, "").strip()
+        session_id = unquote(request.COOKIES.get(cookie_name, "").strip())
     if not session_id:
         return JsonResponse({"error": "sessionId обязателен"}, status=400)
 
@@ -704,7 +705,7 @@ def send_solution_view(request):
         session_id = request.session.get("external_session_id", "").strip()
     if not session_id:
         cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
-        session_id = request.COOKIES.get(cookie_name, "").strip()
+        session_id = unquote(request.COOKIES.get(cookie_name, "").strip())
     if not session_id:
         return JsonResponse({"error": "sessionId обязателен"}, status=400)
 
@@ -747,7 +748,7 @@ def get_solution_result_view(request):
         session_id = request.session.get("external_session_id", "").strip()
     if not session_id:
         cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
-        session_id = request.COOKIES.get(cookie_name, "").strip()
+        session_id = unquote(request.COOKIES.get(cookie_name, "").strip())
     if not session_id:
         return JsonResponse({"error": "sessionId обязателен"}, status=400)
 

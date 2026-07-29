@@ -10,7 +10,6 @@
 #   5. Повторяет
 #
 # Запуск: nohup /home/vlad/v0.9/backup_runner.sh &>/dev/null &
-# или через restart_docker.sh (добавить строку запуска)
 #
 
 set -euo pipefail

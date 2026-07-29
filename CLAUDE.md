@@ -172,7 +172,7 @@ python manage.py reset_favorites_epoch
 - `nginx/` — internal nginx config. The external reverse-proxy snippet for `dl.gsu.by` lives at `nginx/external-dl.gsu.by.example.nginx-snippet`.
 - `doc/` — Russian user/admin/superuser/tester/sysadmin documentation (`.docx`) and `Документация для разработчика.md`. `DOCX.md` and `README.md`/`DEPLOY.md` are the canonical developer/deploy references.
 - `mail_bridge.py` — standalone script (not part of the Django app) that polls an IMAP inbox for emails from allowed senders (`MAIL_BRIDGE_ALLOWED_SENDERS`, e.g. `dolinsky@gsu.by`), parses the subject as a command, executes it, replies to the sender over SMTP, and mirrors the result to Telegram. Commands: `restart`, `backup`, `health`, `status`, `make` (forwards email body to Telegram as a task/хотелка), or any other text (forwards to Telegram). Configured via `MAIL_BRIDGE_IMAP_*` / `MAIL_BRIDGE_SMTP_*` / Telegram env vars; intended to run via `nohup` on the prod host. Documented in `README.md`/`DEPLOY.md`.
-- `scripts/` — operational shell scripts: `setup_hooks.sh` (installs the git `pre-push` hook from `scripts/hooks/`), `backup_runner.sh` (weekly DB backup), `health_check.sh`, `restart_docker.sh`. `backups/` is git-ignored.
+- `scripts/` — operational shell scripts: `setup_hooks.sh` (installs the git `pre-push` hook from `scripts/hooks/`), `backup_runner.sh` (weekly DB backup), `health_check.sh`. `backups/` is git-ignored.
 - `static/admin/js/` — page-specific JS. `chat_template.js` is for the chat page only; `decide_task.js` / `find_error.js` are self-contained for their respective pages (do not load `chat_template.js` on them).
 - `bot/` — Node.js/Puppeteer service exposing an OpenAI-compatible API wrapper around `chat.deepseek.com`. Runs inside the same container as Django. See `bot/README.md` for details.
 - `nginx/` — internal nginx config. The external reverse-proxy snippet for `dl.gsu.by` lives at `nginx/external-dl.gsu.by.example.nginx-snippet`.
@@ -235,7 +235,7 @@ Batch-solve ARM (`run_type="batch"`, `/ai/admin/arm/solve/`) sends each availabl
 - Prompt regression: `ai/prompt_test_runner.py`, `ai/admin/prompt_regression.py`, `ai/management/commands/run_prompt_tests.py`, `ai/grading.py`, `ai/models.py` (`PromptTestCase`, `PromptTestRun`).
 - Update log: `ai/models.py` (`UpdateLog`), `ai/admin/updates.py`, `ai/management/commands/sync_update_log.py`, `ai/signals.py`, `scripts/setup_hooks.sh`, `scripts/hooks/`.
 - Bot pool: `bot/README.md`, `bot/api/server.js`, `bot/api/botManager.js`, `bot/worker/bot.js`, `bot/worker/modules/promtps.js`, `bot/worker/data.json`.
-- Email→ops bridge: `mail_bridge.py` (IMAP/SMTP/Telegram, restart/backup/health/status/make commands), `scripts/backup_runner.sh`, `scripts/health_check.sh`, `scripts/restart_docker.sh`.
+- Email→ops bridge: `mail_bridge.py` (IMAP/SMTP/Telegram, restart/backup/health/status/make commands), `scripts/backup_runner.sh`, `scripts/health_check.sh`.
 
 ## Coding standards and architecture principles
 
