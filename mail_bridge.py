@@ -17,7 +17,7 @@ mail_bridge.py — Мост: email → команды → выполнение +
   make     — тело письма пересылается в Telegram как задача/хотелка
   <любой текст> — переслать в Telegram
 
-Запуск: nohup python3 /home/vlad/v0.9/mail_bridge.py &>/dev/null &
+Запуск: nohup python3 /home/archi/v0.9/mail_bridge.py &>/dev/null &
 """
 
 import imaplib
@@ -35,7 +35,7 @@ import urllib.parse
 from pathlib import Path
 
 # === Конфиг ===
-PROJECT_DIR = Path("/home/vlad/v0.9")
+PROJECT_DIR = Path("/home/archi/v0.9")
 ENV_FILE = PROJECT_DIR / ".env"
 
 # IMAP (чтение)
@@ -114,10 +114,16 @@ def send_email_reply(to_addr: str, original_subject: str, body: str):
         msg["Date"] = email.utils.formatdate(localtime=False)
         msg["Message-ID"] = email.utils.make_msgid(domain=SMTP_USER.split("@")[-1] if "@" in SMTP_USER else "gsu.by")
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as srv:
+        # 465 — неявный SSL (SMTP_SSL), 587/25 — STARTTLS после EHLO.
+        if SMTP_PORT == 465:
+            smtp_ctx = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
+        else:
+            smtp_ctx = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+        with smtp_ctx as srv:
             srv.ehlo()
-            srv.starttls()
-            srv.ehlo()
+            if SMTP_PORT != 465:
+                srv.starttls()
+                srv.ehlo()
             srv.login(SMTP_USER, SMTP_PASS)
             srv.sendmail(SMTP_USER, [to_addr], msg.as_string())
 
@@ -207,8 +213,8 @@ def process_command(subject: str, body: str, sender: str) -> str:
     if subject_lower == "backup":
         send_tg(f"📧 Получена команда BACKUP от {sender}\n📦 Делаю бэкап...")
         ts = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
-        bf = f"/home/vlad/v0.9/backups/dl_ai_db_{ts}.sql.gz"
-        out = run_command(f"docker exec dl_ai_db pg_dump -U vlad -d dl_ai --no-owner --no-acl 2>/dev/null | gzip > {bf} && echo OK || echo FAIL")
+        bf = f"/home/archi/v0.9/backups/dl_ai_db_{ts}.sql.gz"
+        out = run_command(f"docker exec dl_ai_db pg_dump -U archi -d dl_ai --no-owner --no-acl 2>/dev/null | gzip > {bf} && echo OK || echo FAIL")
         if "OK" in out:
             sz = run_command(f"du -h {bf} | cut -f1").strip()
             result = f"Бэкап создан успешно.\nФайл: {os.path.basename(bf)}\nРазмер: {sz}"
