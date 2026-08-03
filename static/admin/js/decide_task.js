@@ -263,56 +263,60 @@ document.addEventListener("DOMContentLoaded", function() {
     problemSelectors = initProblemSelectors();
 });
 
-// === DOMContentLoaded — автозагрузка условия задачи из DL-ссылки ===
+// === Автозагрузка условия задачи из DL-ссылки ===
+// Объявлено на уровне модуля (а не внутри замыкания DOMContentLoaded), чтобы
+// обработчик selectLang change (другое замыкание, ниже) и синтетический change
+// в window.onload могли вызывать loadTaskFromUrl() — иначе ReferenceError и
+// условие не перезагружалось при смене языка интерфейса.
+function currentUiLanguage() {
+    var selectLangEl = document.getElementById('selectLang');
+    if (selectLangEl && selectLangEl.selectedIndex >= 0) {
+        return selectLangEl.options[selectLangEl.selectedIndex].getAttribute('language') || 'Russian';
+    }
+    return 'Russian';
+}
+
+async function loadTaskFromUrl() {
+    var messageTextEl = document.getElementById('messageText');
+    var nodeId = window.AI_TASK_NODE_ID || (messageTextEl && messageTextEl.dataset.nodeId) || '';
+    if (!nodeId) return false;
+
+    try {
+        var url = new URL('/ai/api/task-info/', window.location.origin);
+        url.searchParams.set('nodeId', nodeId);
+        url.searchParams.set('removeHtmlTags', 'true');
+        // Текст задачи должен быть на языке интерфейса, выбранном на странице
+        // (русский/английский/французский): сервер переведёт условие в этот язык.
+        url.searchParams.set('ui_language', currentUiLanguage());
+        var response = await fetch(url.toString());
+        if (response.status === 404) {
+            updateVoiceStatus(getUiString('taskNotFound', 'Задача не найдена'));
+            return false;
+        }
+        if (!response.ok) {
+            var errorText = await response.text();
+            throw new Error('HTTP ' + response.status + ': ' + errorText);
+        }
+        var data = await response.json();
+        var statement = data.statement || data.currentStatement || '';
+        if (messageTextEl) {
+            messageTextEl.value = statement;
+            saveSharedText();
+        }
+        return true;
+    } catch (error) {
+        console.error('Error loading task statement:', error);
+        updateVoiceStatus(getUiString('taskLoadError', 'Не удалось загрузить условие задачи'));
+        return false;
+    }
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
     var messageText = document.getElementById('messageText');
     if (messageText) messageText.addEventListener('input', function () {
         userEditedTaskText = true;
         saveSharedText();
     });
-
-    function currentUiLanguage() {
-        var selectLangEl = document.getElementById('selectLang');
-        if (selectLangEl && selectLangEl.selectedIndex >= 0) {
-            return selectLangEl.options[selectLangEl.selectedIndex].getAttribute('language') || 'Russian';
-        }
-        return 'Russian';
-    }
-
-    async function loadTaskFromUrl() {
-        var messageTextEl = document.getElementById('messageText');
-        var nodeId = window.AI_TASK_NODE_ID || (messageTextEl && messageTextEl.dataset.nodeId) || '';
-        if (!nodeId) return false;
-
-        try {
-            var url = new URL('/ai/api/task-info/', window.location.origin);
-            url.searchParams.set('nodeId', nodeId);
-            url.searchParams.set('removeHtmlTags', 'true');
-            // Текст задачи должен быть на языке интерфейса, выбранном на странице
-            // (русский/английский/французский): сервер переведёт условие в этот язык.
-            url.searchParams.set('ui_language', currentUiLanguage());
-            var response = await fetch(url.toString());
-            if (response.status === 404) {
-                updateVoiceStatus(getUiString('taskNotFound', 'Задача не найдена'));
-                return false;
-            }
-            if (!response.ok) {
-                var errorText = await response.text();
-                throw new Error('HTTP ' + response.status + ': ' + errorText);
-            }
-            var data = await response.json();
-            var statement = data.statement || data.currentStatement || '';
-            if (messageTextEl) {
-                messageTextEl.value = statement;
-                saveSharedText();
-            }
-            return true;
-        } catch (error) {
-            console.error('Error loading task statement:', error);
-            updateVoiceStatus(getUiString('taskLoadError', 'Не удалось загрузить условие задачи'));
-            return false;
-        }
-    }
 
     var taskLoaded = await loadTaskFromUrl();
     if (!taskLoaded) {

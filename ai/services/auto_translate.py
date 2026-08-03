@@ -64,22 +64,19 @@ def _strip_extra(text: str) -> str:
 def _translate_chunk(text: str, google_lang: str) -> str:
     """Translate a single chunk (must be <= 5000 chars).
 
-    Temporarily clears proxy env vars so Google Translate is reached directly
-    (corporate proxy may truncate long POST bodies).
+    Routed through the corporate proxy (``config.proxies``) — the same proxy
+    Groq/OpenRouter use — so Google Translate is reachable from the dl.gsu.by
+    network, where a direct connection to translate.google.com is blocked.
+    ``source="auto"`` lets Google detect the source language, so the rare
+    non-Russian task statement is handled too; ru→{en,fr} still works as before.
+    In local dev (no ``PROXY`` set) ``config.proxies`` is ``None`` and requests
+    falls back to env-var proxies / direct connection, so nothing breaks.
     """
-    import os
     from deep_translator import GoogleTranslator
+    from ai.model_clients import config
 
-    saved = {}
-    for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-        if var in os.environ:
-            saved[var] = os.environ.pop(var)
-
-    try:
-        translator = GoogleTranslator(source="ru", target=google_lang)
-        return translator.translate(text) or ""
-    finally:
-        os.environ.update(saved)
+    translator = GoogleTranslator(source="auto", target=google_lang, proxies=config.proxies)
+    return translator.translate(text) or ""
 
 
 def _split_by_paragraphs(text: str, max_len: int = 4500) -> list:

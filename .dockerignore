@@ -38,4 +38,19 @@ bot/.puppeteer-cache/
 bot/chrome*
 bot/chromium*
 
+# Non-runtime files — not needed in the web image (collectstatic rebuilds
+# staticfiles in-container via the static_volume; doc/*.docx and *.md are not
+# served; scripts/ and backups/ run on the host, not in the container).
+staticfiles/
+doc/
+docs/
+backups/
+scripts/
+test_db.sqlite3
+*.md
+Dockerfile
+docker-compose.yml
+.dockerignore
+.github/
+
 .claude/
