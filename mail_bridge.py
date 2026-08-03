@@ -52,6 +52,12 @@ SMTP_PASS = os.getenv("MAIL_BRIDGE_SMTP_PASS", "")
 
 ALLOWED_SENDERS = [s.strip().lower() for s in os.getenv("MAIL_BRIDGE_ALLOWED_SENDERS", "").split(",") if s.strip()]
 
+# База данных (для команды backup) — берём из .env проекта, чтобы pg_dump
+# использовал ту же роль, что и Django (DB_USER), а не захардкоженное имя.
+DB_CONTAINER = "dl_ai_db"
+DB_NAME = os.getenv("DB_NAME", "dl_ai")
+DB_USER = os.getenv("DB_USER", "vlad")
+
 # Telegram
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "834440…Myec")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "690979160")
@@ -77,6 +83,8 @@ if ENV_FILE.exists():
     SMTP_USER = os.getenv("MAIL_BRIDGE_SMTP_USER", SMTP_USER)
     SMTP_PASS = os.getenv("MAIL_BRIDGE_SMTP_PASS", SMTP_PASS)
     ALLOWED_SENDERS = [s.strip().lower() for s in os.getenv("MAIL_BRIDGE_ALLOWED_SENDERS", "").split(",") if s.strip()]
+    DB_NAME = os.getenv("DB_NAME", DB_NAME)
+    DB_USER = os.getenv("DB_USER", DB_USER)
     TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", TG_BOT_TOKEN)
     TG_CHAT_ID = os.getenv("TG_CHAT_ID", TG_CHAT_ID)
 
@@ -214,7 +222,7 @@ def process_command(subject: str, body: str, sender: str) -> str:
         send_tg(f"📧 Получена команда BACKUP от {sender}\n📦 Делаю бэкап...")
         ts = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
         bf = f"/home/archi/v0.9/backups/dl_ai_db_{ts}.sql.gz"
-        out = run_command(f"docker exec dl_ai_db pg_dump -U archi -d dl_ai --no-owner --no-acl 2>/dev/null | gzip > {bf} && echo OK || echo FAIL")
+        out = run_command(f"docker exec {DB_CONTAINER} pg_dump -U {DB_USER} -d {DB_NAME} --no-owner --no-acl 2>/dev/null | gzip > {bf} && echo OK || echo FAIL")
         if "OK" in out:
             sz = run_command(f"du -h {bf} | cut -f1").strip()
             result = f"Бэкап создан успешно.\nФайл: {os.path.basename(bf)}\nРазмер: {sz}"
