@@ -26,11 +26,13 @@ services:
     env_file:
       - .env
       - ./bot/.env
-    environment:
-      # Puppeteer proxy vars already live in .env; map them to the names bot/worker/bot.js reads.
-      BOT_PROXY: "${PUPPETEER_PROXY_SERVER:-}"
-      BOT_PROXY_USER: "${PUPPETEER_PROXY_USERNAME:-}"
-      BOT_PROXY_PASS: "${PUPPETEER_PROXY_PASSWORD:-}"
+    # NOTE: do NOT remap PUPPETEER_PROXY_* -> BOT_PROXY* here.
+    # `environment:` overrides `env_file:`, so an explicit mapping with an empty
+    # fallback ("${PUPPETEER_PROXY_SERVER:-}") wipes the BOT_PROXY* values that
+    # bot/.env provides, leaving the browser with NO proxy -> login can't reach
+    # chat.deepseek.com -> 401 not_autorized. bot/worker/bot.js resolveProxy()
+    # already falls back to PUPPETEER_PROXY_* when BOT_PROXY is empty, so both
+    # naming schemes work without any mapping here.
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null && python3 -c \"import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://localhost:3000/health', timeout=5)); sys.exit(0 if d.get('ok') and d.get('ready_count',0) > 0 else 1)\""]
       interval: 30s
