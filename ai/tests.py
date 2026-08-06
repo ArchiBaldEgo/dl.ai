@@ -882,30 +882,37 @@ class ModelClientRegistryTests(SimpleTestCase):
     def test_registry_contains_expected_models(self):
         from ai.model_clients import registry
 
-        expected_keys = {
-            "DeepSeek_R1_Distill_Llama_70B",
-            "DeepSeek_V3_1",
-            "DeepSeek_V3_1_cb",
-            "DeepSeek_V3_2",
-            "Llama_4_Maverick_17B_128E_Instruct",
-            "Meta_Llama_3_3_70B_Instruct",
-            "MiniMax_M2_5",
-            "MiniMax_M2_7",
-            "Gemma_3_12b_it",
-            "Gpt_oss_120b",
-            "Web_DeepSeek",
-            "Web_DeepSeek_Thinking",
-        }
-        for key in expected_keys:
+        # Default (always-on) providers: Web DeepSeek pool.
+        for key in ("Web_DeepSeek", "Web_DeepSeek_Thinking"):
             self.assertIsNotNone(registry.get(key), f"Missing registry entry for {key}")
             self.assertTrue(callable(registry.handler(key)))
 
-    def test_registry_includes_backward_compatible_aliases(self):
-        from ai.model_clients import registry
+    def test_sambanova_models_complete(self):
+        # SambaNova is gated behind AI_ENABLE_SAMBANOVA (off by default at import
+        # time), so the global registry won't contain it — verify the builder
+        # function returns all 10 declared models via a local registry instance.
+        from ai.model_clients.registry import _sambanova_models, ModelRegistry
 
-        self.assertIsNotNone(registry.get("DeepSeek_R1"))
-        self.assertIsNotNone(registry.get("Meta_Llama_3_1_70B_Instruct"))
-        self.assertIsNotNone(registry.get("Mixtral_8x22b"))
+        samba = ModelRegistry(_sambanova_models())
+        expected = {
+            "DeepSeek_R1_Distill_Llama_70B", "DeepSeek_V3_1", "DeepSeek_V3_1_cb",
+            "DeepSeek_V3_2", "Llama_4_Maverick_17B_128E_Instruct",
+            "Meta_Llama_3_3_70B_Instruct", "MiniMax_M2_5", "MiniMax_M2_7",
+            "Gemma_3_12b_it", "Gpt_oss_120b",
+        }
+        self.assertEqual(set(samba.keys()), expected)
+        for key in expected:
+            self.assertIsNotNone(samba.get(key), f"Missing sambanova entry for {key}")
+            self.assertTrue(callable(samba.handler(key)))
+
+    def test_model_caller_resolves_backward_compatible_aliases(self):
+        # Legacy aliases live in ModelCaller._resolve_legacy_alias, NOT in the
+        # registry (see CLAUDE.md: «legacy aliases resolved in ModelCaller»).
+        from ai.services.model_caller import _resolve_legacy_alias
+
+        self.assertEqual(_resolve_legacy_alias("DeepSeek_R1"), "DeepSeek_R1_Distill_Llama_70B")
+        self.assertEqual(_resolve_legacy_alias("Meta_Llama_3_1_70B_Instruct"), "Meta_Llama_3_3_70B_Instruct")
+        self.assertEqual(_resolve_legacy_alias("Mixtral_8x22b"), "Llama_4_Maverick_17B_128E_Instruct")
 
 
 class DLApiClientEncodingTests(SimpleTestCase):
@@ -1059,7 +1066,7 @@ class MessageComposerTests(TestCase):
             new=AsyncMock(return_value="Think step by step."),
         ):
             message, mode = await self.composer.compose(data)
-        self.assertEqual(message, "hello\n\nПрепромпт: Think step by step.")
+        self.assertEqual(message, "hello\n\nRespond only in English.\n\nPreprompt: Think step by step.")
         self.assertEqual(mode, AIRequestLog.MODE_CHAT)
 
     async def test_solve_mode_uses_default_message_when_no_shared_prompt(self):
@@ -1237,12 +1244,16 @@ class ModelCapabilitiesTests(SimpleTestCase):
 
     def test_reasoning_models_are_marked_reasoning(self):
         from ai.model_clients import registry
+        from ai.model_clients.registry import _sambanova_models, ModelRegistry
 
-        for key in ("DeepSeek_R1_Distill_Llama_70B", "Web_DeepSeek_Thinking", "DeepSeek_R1"):
-            caps = registry.capabilities(key)
-            self.assertTrue(caps["reasoning"], f"{key} should be reasoning")
-            self.assertTrue(caps["text"])
-            self.assertFalse(caps["vision"])
+        # Web_DeepSeek_Thinking is in the default (always-on) registry.
+        self.assertTrue(registry.capabilities("Web_DeepSeek_Thinking")["reasoning"])
+        # SambaNova reasoning model — via a local registry (gated globally).
+        samba = ModelRegistry(_sambanova_models())
+        caps = samba.capabilities("DeepSeek_R1_Distill_Llama_70B")
+        self.assertTrue(caps["reasoning"], "DeepSeek_R1_Distill_Llama_70B should be reasoning")
+        self.assertTrue(caps["text"])
+        self.assertFalse(caps["vision"])
 
     def test_plain_text_models_are_not_reasoning(self):
         from ai.model_clients import registry

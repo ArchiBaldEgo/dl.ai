@@ -4,7 +4,15 @@ const path = require('path');
 const data = require('../data.json');
 
 const { error } = require('../utils/logger');
-const { waitAndTypeX, waitAndClickX, waitForXPathCompat } = require('../core/page-utils');
+const { sleep } = require('../utils/helpers');
+const {
+    waitAndType,
+    waitAndClick,
+    waitAndClickX,
+    waitForXPathCompat,
+    elementExists,
+    clickIfExists,
+} = require('../core/page-utils');
 const { toBool } = require('../utils/env');
 
 const LOG_DIR = path.join(__dirname, '../logs');
@@ -52,102 +60,201 @@ function getTimeoutMs() {
     return Number.isFinite(raw) && raw > 0 ? raw : 45000;
 }
 
-async function login(ctx, payload = {}) {
-    const page = ctx?.page;
+/**
+ * Авторизация DeepSeek выполняется ТОЛЬКО через Google (кнопка «Войти с помощью
+ * Google», обычных полей логина/пароля на сайте нет). Поэтому поток входа:
+ *   1. открыть страницу входа DeepSeek;
+ *   2. нажать «Войти с помощью Google»;
+ *   3. дождаться страницы accounts.google.com (popup или переход в той же вкладке);
+ *   4. ввести email, нажать «Далее»;
+ *   5. ввести пароль, нажать «Далее»;
+ *   6. при необходимости подтвердить доступ (экран согласия);
+ *   7. дождаться возврата на chat.deepseek.com и появления поля чата.
+ *
+ * Постоянный Chrome-профиль (userDataDir в bot.js) хранит сессию Google, поэтому
+ * повторный логин обычно не требуется — см. checkAlreadyAuthorized().
+ */
 
-    if (!page) 
-        return { 
-            ok: false, 
-            reason: 'ctx.page is missing',
-            data: {
-                "isAuthorized": false
+async function waitForGooglePage(browser, originalPage, timeoutMs) {
+    // Google OAuth открывается либо в popup, либо в той же вкладке. Опрашиваем оба.
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        // Тот же таб?
+        try {
+            const u = originalPage.url();
+            if (u && u.includes('accounts.google.com')) return originalPage;
+        } catch (_) {}
+
+        // Popup?
+        try {
+            const targets = browser.targets();
+            for (const t of targets) {
+                let u = '';
+                try { u = t.url(); } catch (_) {}
+                if (u && u.includes('accounts.google.com') && t.type() === 'page') {
+                    const p = await t.page();
+                    if (p) return p;
+                }
             }
-        };
+        } catch (_) {}
+
+        await sleep(300);
+    }
+    return null;
+}
+
+/**
+ * Быстрый путь: если в постоянном профиле уже есть живая сессия, то после
+ * открытия chat.deepseek.com сразу появится поле чата — логин не нужен.
+ */
+async function checkAlreadyAuthorized(ctx, payload = {}) {
+    const page = ctx?.page;
+    if (!page) return false;
 
     const currentService = payload.model;
-    const timeWait = getTimeoutMs();
-    const loginUrl = data?.loginUrls?.[currentService];
-    const loginXPath = data?.xpaths?.auth?.loginLabel?.[currentService];
-    const passwordXPath = data?.xpaths?.auth?.passwordLabel?.[currentService];
-    // authButton может быть строкой (один XPath) или списком (приоритетный порядок,
-    // первый успешно кликнутый выигрывает) — чтобы на sign_in не попасть в OAuth-кнопку.
-    const authButtonRaw = data?.xpaths?.auth?.authButton?.[currentService];
-    const authButtonXPaths = Array.isArray(authButtonRaw)
-        ? authButtonRaw
-        : (authButtonRaw ? [authButtonRaw] : []);
-    const incorrectPassXPath = data?.xpaths?.auth?.incorrectPassMessage?.[currentService];
+    const chatUrl =
+        data?.xpaths?.auth?.chatUrl?.[currentService] ||
+        data?.services?.[currentService] ||
+        'https://chat.deepseek.com/';
+    const chatInputXPath = data?.xpaths?.chat?.inputLabel?.[currentService] || '//textarea';
 
-    if (!loginUrl || !loginXPath || !passwordXPath || !authButtonXPaths.length) {
+    try {
+        await page.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: getTimeoutMs() });
+        // Поле ввода чата означает, что мы залогинены.
+        await waitForXPathCompat(page, chatInputXPath, { timeout: 15000 });
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
+async function login(ctx, payload = {}) {
+    const browser = ctx?.browser;
+    const page = ctx?.page;
+
+    if (!page || !browser) {
         return {
             ok: false,
-            reason: 'missing auth selectors or login url for service',
+            reason: 'ctx.page/browser отсутствует',
+            data: { isAuthorized: false },
         };
     }
 
+    const currentService = payload.model;
+    const timeWait = getTimeoutMs();
+    const loginUrl =
+        data?.xpaths?.auth?.loginUrl?.[currentService] || data?.loginUrls?.[currentService];
+    const googleButtonRaw = data?.xpaths?.auth?.googleButton?.[currentService];
+    const googleButtonXPaths = Array.isArray(googleButtonRaw)
+        ? googleButtonRaw
+        : googleButtonRaw
+        ? [googleButtonRaw]
+        : [];
+    const emailSel = data?.xpaths?.auth?.googleEmailInput?.[currentService];
+    const emailNextSel = data?.xpaths?.auth?.googleEmailNext?.[currentService];
+    const passSel = data?.xpaths?.auth?.googlePasswordInput?.[currentService];
+    const passNextSel = data?.xpaths?.auth?.googlePasswordNext?.[currentService];
+    const consentRaw = data?.xpaths?.auth?.googleConsent?.[currentService];
+    const consentSelectors = Array.isArray(consentRaw)
+        ? consentRaw
+        : consentRaw
+        ? [consentRaw]
+        : [];
+    const googleErrorXPath = data?.xpaths?.auth?.googleError?.[currentService];
+    const chatInputXPath = data?.xpaths?.chat?.inputLabel?.[currentService] || '//textarea';
+
+    if (!loginUrl || !googleButtonXPaths.length || !emailSel || !passSel) {
+        return { ok: false, reason: 'нет селекторов Google OAuth для сервиса' };
+    }
+
     try {
-        await ctx.page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: timeWait });
+        // 1. Страница входа DeepSeek.
+        await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: timeWait });
 
-        const loginOk = await waitAndTypeX(page, loginXPath, payload.username);
-        if (!loginOk) {
-            await writeAuthDebugArtifacts(page, 'login_field_missing');
-            return { ok: false, reason: 'login field not found' };
-        }
-
-        const passOk = await waitAndTypeX(page, passwordXPath, payload.password);
-        if (!passOk) {
-            await writeAuthDebugArtifacts(page, 'password_field_missing');
-            return { ok: false, reason: 'password field not found' };
-        }
-
-        const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: timeWait })
-            .then(() => 'nav')
-            .catch(() => 'nav_timeout');
-
-        const badPromise = waitForXPathCompat(ctx.page, incorrectPassXPath, { timeout: timeWait })
-            .then(() => 'bad')
-            .catch(() => 'bad_timeout');
-
-        // Перебираем кандидаты authButton по приоритету — кликаем первый найденный.
+        // 2. Кнопка «Войти с помощью Google».
         let clickOk = false;
-        for (const xp of authButtonXPaths) {
+        for (const xp of googleButtonXPaths) {
             clickOk = await waitAndClickX(page, xp);
             if (clickOk) break;
         }
         if (!clickOk) {
-            await writeAuthDebugArtifacts(page, 'auth_button_missing');
-            return { ok: false, reason: 'click failed' };
+            await writeAuthDebugArtifacts(page, 'google_button_missing');
+            return { ok: false, reason: 'кнопка «Войти с помощью Google» не найдена' };
         }
 
-        const winner = await Promise.race([navPromise, badPromise]);
+        // 3. Ждём страницу Google.
+        const googlePage = await waitForGooglePage(browser, page, timeWait);
+        if (!googlePage) {
+            await writeAuthDebugArtifacts(page, 'google_page_missing');
+            return { ok: false, reason: 'страница авторизации Google не открылась' };
+        }
 
-        if (winner === 'bad') {
-            return {
-                ok: false,
-                reason: "incorrect password or account don't reggered"
+        // 4. Email.
+        const emailOk = await waitAndType(googlePage, emailSel, payload.username);
+        if (!emailOk) {
+            await writeAuthDebugArtifacts(googlePage, 'google_email_missing');
+            return { ok: false, reason: 'поле email на странице Google не найдено (возможно, экран выбора аккаунта)' };
+        }
+        await waitAndClick(googlePage, emailNextSel);
+
+        // 5. Пароль.
+        const passOk = await waitAndType(googlePage, passSel, payload.password);
+        if (!passOk) {
+            await writeAuthDebugArtifacts(googlePage, 'google_password_missing');
+            return { ok: false, reason: 'поле пароля Google не появилось (возможно, неверный email или блокировка)' };
+        }
+        await waitAndClick(googlePage, passNextSel);
+
+        // 6. Ждём исход: возврат на DeepSeek (успех) / экран согласия / ошибка Google.
+        const deadline = Date.now() + timeWait;
+        let settled = false;
+        let clickedConsentOnce = false;
+        while (Date.now() < deadline && !settled) {
+            await sleep(800);
+
+            // Успех — на исходной вкладке DeepSeek появилось поле чата.
+            try {
+                if (await elementExists(page, chatInputXPath)) {
+                    settled = true;
+                    break;
+                }
+            } catch (_) {}
+
+            // Ошибка Google (неверный пароль / «не безопасно» / блокировка).
+            if (googleErrorXPath) {
+                try {
+                    if (await elementExists(googlePage, googleErrorXPath)) {
+                        await writeAuthDebugArtifacts(googlePage, 'google_error');
+                        return {
+                            ok: false,
+                            reason: 'Google отклонил вход: неверный пароль или сработала защита от автоматизации',
+                        };
+                    }
+                } catch (_) {} // popup мог закрыться
             }
+
+            // Экран согласия — кликаем «Разрешить/Allow/Продолжить».
+            try {
+                for (const sel of consentSelectors) {
+                    if (await clickIfExists(googlePage, sel)) {
+                        clickedConsentOnce = true;
+                        break;
+                    }
+                }
+            } catch (_) {}
         }
 
-        // DeepSeek (SPA) often does not trigger a full navigation after login.
-        // Treat a navigation timeout as SUCCESS only if we actually reached the chat UI.
-        const chatInputXPath =
-            data?.xpaths?.chat?.inputLabel?.[currentService] ||
-            '//textarea';
-        try {
-            await waitForXPathCompat(ctx.page, chatInputXPath, { timeout: timeWait });
-        } catch {
-            await writeAuthDebugArtifacts(page, 'chat_input_missing');
+        if (!settled) {
+            await writeAuthDebugArtifacts(page, 'login_timeout');
             return {
                 ok: false,
-                reason: 'login did not reach chat UI (input not found)'
+                reason: clickedConsentOnce
+                    ? 'вход не завершён за отведённое время после подтверждения доступа'
+                    : 'вход не завершён за отведённое время',
             };
         }
 
-        return {
-            ok: true,
-            data: {
-                "isAuthorized": true
-            }
-        }
+        return { ok: true, data: { isAuthorized: true } };
     } catch (er) {
         const msg = er?.message || String(er);
         const stack = er?.stack || '';
@@ -160,7 +267,7 @@ async function login(ctx, payload = {}) {
         try { title = await page.title(); } catch (_) {}
         try {
             html = await page.content();
-            html = String(html).slice(0, 4000); // чтобы не заспамить лог
+            html = String(html).slice(0, 4000);
         } catch (_) {}
 
         await writeAuthDebugArtifacts(page, 'exception');
@@ -173,12 +280,13 @@ async function login(ctx, payload = {}) {
 
         return {
             ok: false,
-            reason: `login exception: ${msg}`,
-            data: { moreInformation: stack || msg, url, title }
+            reason: `исключение входа: ${msg}`,
+            data: { moreInformation: stack || msg, url, title },
         };
     }
 }
 
 module.exports = {
-    login
+    login,
+    checkAlreadyAuthorized,
 };

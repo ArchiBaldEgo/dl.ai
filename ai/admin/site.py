@@ -96,8 +96,8 @@ class AIAdminSite(admin.AdminSite):
     - Фильтрация моделей в sidebar по правам пользователя (filter_app_list_for_user).
     - Кастомные ссылки на ARM, статусы моделей, регрессионные тесты, логи.
     """
-    site_header = "AI Admin"
-    site_title = "AI Admin"
+    site_header = "ИИ-админка DL.AI"
+    site_title = "ИИ-админка DL.AI"
     index_template = "admin/ai/index.html"
     app_index_template = "admin/ai/app_index.html"
     site_url = "/ai/chat/"

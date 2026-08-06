@@ -198,6 +198,26 @@ def _sambanova_models() -> Dict[str, Dict[str, object]]:
             "handler": sambanova.ask_Gpt_oss_120b_async,
             "capabilities": _TEXT_ONLY,
         },
+        "DeepSeek_R1_Distill_Llama_70B": {
+            "title": "Samba DeepSeek-R1-Distill-Llama-70B",
+            "handler": sambanova.ask_DeepSeek_R1_Distill_Llama_70B_async,
+            "capabilities": _REASONING,
+        },
+        "DeepSeek_V3_1_cb": {
+            "title": "Samba DeepSeek-V3.1 (cloud buffer)",
+            "handler": sambanova.ask_DeepSeek_V3_1_cb_async,
+            "capabilities": _TEXT_ONLY,
+        },
+        "Llama_4_Maverick_17B_128E_Instruct": {
+            "title": "Samba Llama-4-Maverick-17B-128E-Instruct",
+            "handler": sambanova.ask_Llama_4_Maverick_17B_128E_Instruct_async,
+            "capabilities": _TEXT_ONLY,
+        },
+        "MiniMax_M2_5": {
+            "title": "Samba MiniMax-M2.5",
+            "handler": sambanova.ask_MiniMax_M2_5_async,
+            "capabilities": _TEXT_ONLY,
+        },
     }
 
 

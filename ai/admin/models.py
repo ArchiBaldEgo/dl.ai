@@ -96,7 +96,7 @@ class TopicAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 
 
 class PromptUserIdFilter(admin.SimpleListFilter):
-    title = "userId"
+    title = "ID владельца"
     parameter_name = "user_id"
 
     def lookups(self, request, model_admin):
@@ -197,7 +197,7 @@ class PromptAdmin(admin.ModelAdmin):
         if request.user.is_superuser:
             return (
                 (None, {"fields": main_fields}),
-                ("Access", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
+                ("Доступ", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
             )
         return ((None, {"fields": main_fields}),)
 
@@ -238,7 +238,7 @@ class PromptAdmin(admin.ModelAdmin):
                 prompt.prompt_text,
             ])
         return response
-    export_prompts_csv.short_description = "Export selected prompts to CSV"
+    export_prompts_csv.short_description = "Экспорт выбранных промптов в CSV"
 
     @admin.action(description="Автоперевод → EN / FR")
     def auto_translate_selected(self, request, queryset):
@@ -260,7 +260,7 @@ class PromptAdmin(admin.ModelAdmin):
         if obj.topic and obj.topic.programming_language:
             return obj.topic.programming_language.language_name
         return "-"
-    programming_language_name.short_description = "Language"
+    programming_language_name.short_description = "Язык программирования"
     programming_language_name.admin_order_field = "topic__programming_language__language_name"
 
     def programming_language(self, obj):
@@ -269,21 +269,21 @@ class PromptAdmin(admin.ModelAdmin):
         # coupled — remove the declared field and this method breaks the
         # readonly/fieldset path with FieldError.
         return self.programming_language_name(obj)
-    programming_language.short_description = "Programming language"
+    programming_language.short_description = "Язык программирования"
 
     def owner_user_id(self, obj):
         return obj.owner_id or "-"
-    owner_user_id.short_description = "userId"
+    owner_user_id.short_description = "ID владельца"
     owner_user_id.admin_order_field = "owner_id"
 
     def owner_username(self, obj):
         return obj.owner.username if obj.owner else "-"
-    owner_username.short_description = "Owner"
+    owner_username.short_description = "Владелец"
 
     def short_prompt_text(self, obj):
         text = obj.prompt_text or ""
         return f"{text[:100]}..." if len(text) > 100 else text
-    short_prompt_text.short_description = "Prompt Text"
+    short_prompt_text.short_description = "Текст промпта"
 
 
 class SharedPromptAdmin(admin.ModelAdmin):
@@ -306,7 +306,7 @@ class SharedPromptAdmin(admin.ModelAdmin):
 
     def owner_username(self, obj):
         return obj.owner.username if obj.owner else "-"
-    owner_username.short_description = "Owner"
+    owner_username.short_description = "Владелец"
 
     @admin.action(description="Автоперевод → EN / FR")
     def auto_translate_selected(self, request, queryset):
@@ -383,7 +383,7 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         if obj.user:
             return obj.user.username
         return "-"
-    user_link.short_description = "Django user"
+    user_link.short_description = "Локальный пользователь"
     user_link.admin_order_field = "user__username"
 
 
@@ -402,7 +402,7 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
         if obj.is_staff:
             return "🔵"
         return ""
-    is_staff_badge.short_description = "Role"
+    is_staff_badge.short_description = "Роль"
     is_staff_badge.admin_order_field = "is_staff"
 
     def dl_id(self, obj):
@@ -411,7 +411,7 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
         if name.startswith("user_"):
             return name[5:]
         return name
-    dl_id.short_description = "DL ID"
+    dl_id.short_description = "ID в dl.gsu.by"
     dl_id.admin_order_field = "username"
 
 

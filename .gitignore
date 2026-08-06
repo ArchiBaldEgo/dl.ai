@@ -33,6 +33,10 @@ staticfiles/
 WebDeepseek/worker/logs/
 WebDeepseek/worker/logs/*
 
+# Bot Chrome profiles (содержат сессию Google — чувствительные данные)
+WebDeepseek/worker/.chrome-profiles/
+WebDeepseek/worker/.chrome-profiles/*
+
 # Claude
 .claude/
 .claude/backups/

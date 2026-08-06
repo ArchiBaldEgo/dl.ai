@@ -116,20 +116,20 @@
     renderLog(run.log || []);
     if (run.status === "running") {
       var c = run.current ? " | Сейчас: " + run.current : "";
-      setRunProgress("Прогон: " + Number(run.completed || 0) + (run.total ? "/" + Number(run.total) : "") + c);
+      setRunProgress("Проверено " + Number(run.completed || 0) + (run.total ? " из " + Number(run.total) : "") + c);
       setRunError("");
       setSubmitDisabled(true);
       return;
     }
     if (run.status === "completed") {
-      setRunProgress("Прогон завершён: " + Number(run.completed || 0) + "/" + Number(run.total || 0));
+      setRunProgress("Проверки завершены: " + Number(run.completed || 0) + " из " + Number(run.total || 0));
       setRunError("");
       setSubmitDisabled(false);
       return;
     }
     if (run.status === "failed") {
       setRunProgress("");
-      setRunError(run.error_message || "Прогон завершился с ошибкой");
+      setRunError(run.error_message || "Проверки завершились с ошибкой");
       setSubmitDisabled(false);
     }
   }
@@ -159,7 +159,7 @@
     if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
     setSubmitDisabled(true);
     setRunError("");
-    setRunProgress("Запускаем тесты…");
+    setRunProgress("Запускаем проверки…");
     renderSummary(null);
     renderResults([]);
     fetch(START_URL, {

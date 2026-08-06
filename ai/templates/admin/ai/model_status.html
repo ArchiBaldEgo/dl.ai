@@ -139,9 +139,9 @@
             </td>
             <td class="cap-cell">
               {% with caps=row.capabilities %}
-                <span class="cap {% if caps.text %}cap-on{% else %}cap-off{% endif %}">Text</span>
-                <span class="cap {% if caps.vision %}cap-on{% else %}cap-off{% endif %}">Vision</span>
-                <span class="cap {% if caps.reasoning %}cap-on{% else %}cap-off{% endif %}">Reasoning</span>
+                <span class="cap {% if caps.text %}cap-on{% else %}cap-off{% endif %}">Текст</span>
+                <span class="cap {% if caps.vision %}cap-on{% else %}cap-off{% endif %}">Зрение</span>
+                <span class="cap {% if caps.reasoning %}cap-on{% else %}cap-off{% endif %}">Рассуждения</span>
               {% endwith %}
             </td>
             <td>{{ row.last_http_code|default:"—" }}</td>
@@ -234,10 +234,11 @@
           : '-';
 
         const caps = row.capabilities || {};
+        const capLabels = { text: 'Текст', vision: 'Зрение', reasoning: 'Рассуждения' };
         const capCell = ['text', 'vision', 'reasoning']
           .map(function (k) {
             const on = !!caps[k];
-            const label = k.charAt(0).toUpperCase() + k.slice(1);
+            const label = capLabels[k] || k;
             return `<span class="cap ${on ? 'cap-on' : 'cap-off'}">${label}</span>`;
           })
           .join(' ');

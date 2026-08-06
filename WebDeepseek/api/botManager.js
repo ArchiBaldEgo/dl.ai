@@ -114,7 +114,6 @@ class BotManager {
 
         this._createBot = loadWorkerFactory();
         this._bots = [];
-        this._nextId = 1;
         this._spawning = null;
 
         this._reapTimer = setInterval(() => this._reapDeadBots(), 5000);
@@ -203,7 +202,14 @@ class BotManager {
         if (!this.canSpawn()) return false;
         if (this._spawning) return true;
 
-        const id = this._nextId++;
+        // Стабильный slot-id: наименьший свободный в [1..maxBotCount], переиспользуется
+        // после смерти бота. Нужен для постоянных Chrome-профилей (userDataDir в bot.js):
+        // новый бот с тем же id подхватывает ту же сессию Google и не логинится заново.
+        const usedIds = new Set(this._bots.map((b) => b.id));
+        let id = 1;
+        while (usedIds.has(id) && id <= this.maxBotCount) id++;
+        if (id > this.maxBotCount) return false;
+
         const bot = new BotWrapper({ id, createBot: this._createBot, sharedHist: this.sharedHist });
         this._bots.push(bot);
 

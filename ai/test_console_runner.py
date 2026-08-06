@@ -424,6 +424,8 @@ def _run_worker(run_id):
                 job["updated_at_ts"] = time.time()
         return
 
+    _append_log(run_id, "▶ Запускаем проверки…")
+
     results_by_key = {}  # (method, class) -> result dict (для аттача трейсбека)
 
     for kind, payload in _parse_test_output(proc.stdout):
@@ -456,6 +458,7 @@ def _run_worker(run_id):
                     job["total"] = payload["ran"]
                     job["_seconds"] = payload["seconds"]
                     job["updated_at_ts"] = time.time()
+            _append_log(run_id, f"Пройдено {payload['ran']} сценариев за {payload['seconds']} с.")
         elif kind == "final":
             with _jobs_lock:
                 job = _jobs.get(run_id)
@@ -472,6 +475,10 @@ def _run_worker(run_id):
                     }
                     job["summary"] = summary
                     job["updated_at_ts"] = time.time()
+            if payload["ok"]:
+                _append_log(run_id, "✅ ИТОГ: все сценарии прошли успешно.")
+            else:
+                _append_log(run_id, "❌ ИТОГ: есть провалы или ошибки — смотрите карточку «Результаты по сценариям».")
         elif kind == "log":
             _append_log(run_id, payload)
 
@@ -486,6 +493,7 @@ def _run_worker(run_id):
                     "Тестовый прогон завершился без итоговой строки (возможно, "
                     "упал импорт/сборка). Смотрите журнал вывода."
                 )
+                _append_log(run_id, "⚠ Не удалось получить итог — проверьте журнал ниже.")
             else:
                 job["status"] = "completed"
             job["updated_at_ts"] = time.time()

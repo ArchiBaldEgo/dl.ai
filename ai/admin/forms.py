@@ -22,7 +22,7 @@ class PromptForm(forms.ModelForm):
     programming_language = forms.ModelChoiceField(
         queryset=ProgrammingLanguage.objects.none(),
         required=False,
-        label="Programming language",
+        label="Язык программирования",
     )
 
     class Meta:

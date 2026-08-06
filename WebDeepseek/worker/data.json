@@ -11,22 +11,45 @@
 
     "xpaths": {
         "auth": {
-            "loginLabel": {
-                "deepseek": "//input[@type='text']"
+            "chatUrl": {
+                "deepseek": "https://chat.deepseek.com/"
             },
-            "passwordLabel": {
-                "deepseek": "//input[@type='password']"
+            "loginUrl": {
+                "deepseek": "https://chat.deepseek.com/sign_in"
             },
-            "authButton": {
+            "googleButton": {
                 "deepseek": [
-                    "//div[contains(@class,'ds-button') and .//span[normalize-space()='Log in' or normalize-space()='Sign in' or normalize-space()='Войти' or normalize-space()='登录']]",
-                    "//button[.//span[normalize-space()='Log in' or normalize-space()='Sign in' or normalize-space()='Войти']]",
-                    "//div[contains(@class,'ds-button') and .//text()[normalize-space()='Log in' or normalize-space()='Sign in' or normalize-space()='Войти']]",
-                    "//div[contains(@class,'ds-button--filled') and contains(@class,'ds-button--primary')]"
+                    "//div[contains(@class,'ds-button') and .//span[contains(text(),'Google')]]",
+                    "//button[.//span[contains(text(),'Google')]]",
+                    "//div[contains(@class,'ds-button') and .//*[contains(text(),'Google')]]",
+                    "//button[.//*[contains(text(),'Google')]]",
+                    "//a[contains(@href,'accounts.google.com') or contains(@data-url,'accounts.google.com')]",
+                    "//*[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'войти с помощью google')]",
+                    "//*[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign in with google')]",
+                    "//*[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'continue with google')]"
                 ]
             },
-            "incorrectPassMessage": {
-                "deepseek": "//div[contains(text(), 'password is incorrect') or contains(text(), 'Incorrect password') or contains(text(), 'Incorrect email or password') or contains(text(), 'Неверный') or contains(text(), 'Неверный пароль') or contains(text(), 'account does not exist') or contains(text(), 'не существует')] | //div[contains(@class,'ds-message--error') and (contains(text(), 'password') or contains(text(), 'Неверный') or contains(text(), 'account'))]"
+            "googleEmailInput": {
+                "deepseek": "input[type='email']"
+            },
+            "googleEmailNext": {
+                "deepseek": "#identifierNext"
+            },
+            "googlePasswordInput": {
+                "deepseek": "input[type='password']"
+            },
+            "googlePasswordNext": {
+                "deepseek": "#passwordNext"
+            },
+            "googleConsent": {
+                "deepseek": [
+                    "#submit_approve_access",
+                    "button[name='approve_access']",
+                    "//button[contains(.,'Разрешить') or contains(.,'Allow') or contains(.,'Продолжить') or contains(.,'Continue') or contains(.,'Подтвердить')]"
+                ]
+            },
+            "googleError": {
+                "deepseek": "//div[contains(@class,'o6cuMc') or contains(@jsname,'B34E7')] | //div[contains(text(),'Wrong password') or contains(text(),'Неверный пароль') or contains(text(),'Couldn') or contains(text(),'не удалось') or contains(text(),'not secure') or contains(text(),'не безопасно')]"
             }
         },
         "register": {

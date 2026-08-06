@@ -45,35 +45,40 @@ class ExternalDLAccount(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='external_dl_account',
+        verbose_name="Пользователь",
     )
     external_user_id = models.CharField(
         max_length=255,
         unique=True,
         db_index=True,
-        help_text="User ID from dl.gsu.by API"
+        help_text="ID пользователя из API dl.gsu.by",
+        verbose_name="ID пользователя dl.gsu.by",
     )
     external_login = models.CharField(
         max_length=255,
-        help_text="Last known login/nickname from dl.gsu.by"
+        help_text="Последний известный логин dl.gsu.by",
+        verbose_name="Логин dl.gsu.by",
     )
     external_first_name = models.CharField(
         max_length=255,
         blank=True,
         default="",
-        help_text="First name from dl.gsu.by"
+        help_text="Имя из dl.gsu.by",
+        verbose_name="Имя",
     )
     external_last_name = models.CharField(
         max_length=255,
         blank=True,
         default="",
-        help_text="Last name from dl.gsu.by"
+        help_text="Фамилия из dl.gsu.by",
+        verbose_name="Фамилия",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
 
     class Meta:
-        verbose_name = "External DL Account"
-        verbose_name_plural = "External DL Accounts"
+        verbose_name = "Внешняя учётная запись DL"
+        verbose_name_plural = "Внешние учётные записи DL"
 
     def __str__(self):
         return f"{self.user.username} (DL: {self.external_login})"
@@ -85,7 +90,11 @@ class ProgrammingLanguage(models.Model):
     Связан с Topic (один ко многим) и используется для подстановки плейсхолдера
     {language} в тексты промптов.
     """
-    language_name = models.CharField(max_length=255,)
+    language_name = models.CharField(max_length=255, verbose_name="Название")
+
+    class Meta:
+        verbose_name = "Язык программирования"
+        verbose_name_plural = "Языки программирования"
 
     def __str__(self):
         return self.language_name
@@ -97,11 +106,18 @@ class Topic(models.Model):
     Поддерживает мультиязычные названия (ru/en/fr). Используется для подстановки
     плейсхолдера {topic} в промпты и для группировки задач в ARM-отчётах.
     """
-    topic_name = models.CharField(max_length=255)
-    topic_name_ru = models.CharField(max_length=255, blank=True, default="")
-    topic_name_en = models.CharField(max_length=255, blank=True, default="")
-    topic_name_fr = models.CharField(max_length=255, blank=True, default="")
-    programming_language = models.ForeignKey(ProgrammingLanguage, on_delete=models.CASCADE, null = True)  # Добавляем связь с языком программирования
+    topic_name = models.CharField(max_length=255, verbose_name="Название")
+    topic_name_ru = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (RU)")
+    topic_name_en = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (EN)")
+    topic_name_fr = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (FR)")
+    programming_language = models.ForeignKey(
+        ProgrammingLanguage, on_delete=models.CASCADE, null=True,
+        verbose_name="Язык программирования",
+    )  # Добавляем связь с языком программирования
+
+    class Meta:
+        verbose_name = "Тема"
+        verbose_name_plural = "Темы"
 
     def __str__(self):
         return get_localized_name(self, "", "topic_name")
@@ -121,11 +137,11 @@ class Task(models.Model):
     """
 
     node_id = models.PositiveIntegerField(
-        unique=True, db_index=True, verbose_name="DL node id",
+        unique=True, db_index=True, verbose_name="ID узла DL",
         help_text="Идентификатор узла задачи на dl.gsu.by (nodeId).",
     )
     task_id = models.PositiveIntegerField(
-        null=True, blank=True, db_index=True, verbose_name="DL task id",
+        null=True, blank=True, db_index=True, verbose_name="ID задачи DL",
         help_text="Заполняется из get-task-info (поле taskId).",
     )
     name = models.CharField(max_length=512, blank=True, default="", verbose_name="Название")
@@ -143,8 +159,8 @@ class Task(models.Model):
         help_text="Например .pas, .cpp, .py — используется для get-solution.",
     )
     active = models.BooleanField(default=True, db_index=True, verbose_name="Активна")
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
 
     class Meta:
         db_table = "ai_task"
@@ -175,19 +191,21 @@ class SharedPrompt(models.Model):
     Если указан mode (chat/solve/find_error), препромпт используется как
     системный шаблон по умолчанию для соответствующего режима.
     """
-    prompt_name = models.CharField(max_length=255)
-    prompt_name_ru = models.CharField(max_length=255, blank=True, default="")
-    prompt_name_en = models.CharField(max_length=255, blank=True, default="")
-    prompt_name_fr = models.CharField(max_length=255, blank=True, default="")
+    prompt_name = models.CharField(max_length=255, verbose_name="Название")
+    prompt_name_ru = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (RU)")
+    prompt_name_en = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (EN)")
+    prompt_name_fr = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (FR)")
     prompt_text = models.TextField(
-        help_text="Доступные плейсхолдеры: {language}/{язык} - язык программирования, {topic}/{тема} - тема."
+        help_text="Доступные плейсхолдеры: {language}/{язык} - язык программирования, {topic}/{тема} - тема.",
+        verbose_name="Текст",
     )
-    prompt_text_ru = models.TextField(blank=True, default="")
-    prompt_text_en = models.TextField(blank=True, default="")
-    prompt_text_fr = models.TextField(blank=True, default="")
+    prompt_text_ru = models.TextField(blank=True, default="", verbose_name="Текст (RU)")
+    prompt_text_en = models.TextField(blank=True, default="", verbose_name="Текст (EN)")
+    prompt_text_fr = models.TextField(blank=True, default="", verbose_name="Текст (FR)")
     # Языки, для которых этот общий препромпт доступен (blank = для всех)
     programming_languages = models.ManyToManyField(
-        ProgrammingLanguage, blank=True, related_name="shared_prompts"
+        ProgrammingLanguage, blank=True, related_name="shared_prompts",
+        verbose_name="Языки программирования",
     )
     # Системный режим: если указан, препромпт используется как default-шаблон для режима.
     mode = models.CharField(
@@ -198,19 +216,21 @@ class SharedPrompt(models.Model):
         verbose_name="Системный режим",
         help_text="Если указан, препромпт используется как системный шаблон для соответствующего режима.",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         null=True,
         blank=True,
         related_name="owned_shared_prompts",
+        verbose_name="Владелец",
     )
     editors = models.ManyToManyField(
         settings.AUTH_USER_MODEL,
         blank=True,
         related_name="editable_shared_prompts",
+        verbose_name="Редакторы",
     )
 
     def __str__(self):
@@ -243,33 +263,39 @@ class Prompt(models.Model):
     prompt_text_override, он переопределяет текст общего препромпта.
     Поддерживает мультиязычные названия и тексты (ru/en/fr).
     """
-    topic = models.ForeignKey(Topic, on_delete=models.CASCADE, null=True, blank=True)
-    prompt_text = models.TextField()
-    prompt_text_ru = models.TextField(blank=True, default="")
-    prompt_text_en = models.TextField(blank=True, default="")
-    prompt_text_fr = models.TextField(blank=True, default="")
-    prompt_name = models.CharField(max_length=255, null = True)
-    prompt_name_ru = models.CharField(max_length=255, blank=True, default="")
-    prompt_name_en = models.CharField(max_length=255, blank=True, default="")
-    prompt_name_fr = models.CharField(max_length=255, blank=True, default="")
+    topic = models.ForeignKey(
+        Topic, on_delete=models.CASCADE, null=True, blank=True,
+        verbose_name="Тема",
+    )
+    prompt_text = models.TextField(verbose_name="Текст")
+    prompt_text_ru = models.TextField(blank=True, default="", verbose_name="Текст (RU)")
+    prompt_text_en = models.TextField(blank=True, default="", verbose_name="Текст (EN)")
+    prompt_text_fr = models.TextField(blank=True, default="", verbose_name="Текст (FR)")
+    prompt_name = models.CharField(max_length=255, null=True, verbose_name="Название")
+    prompt_name_ru = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (RU)")
+    prompt_name_en = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (EN)")
+    prompt_name_fr = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (FR)")
     # Ссылка на общий препромпт (если есть - текст берётся из него с подстановкой языка и темы)
     shared_prompt = models.ForeignKey(
         SharedPrompt, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name="language_prompts"
+        related_name="language_prompts",
+        verbose_name="Общий препромпт",
     )
     # Переопределение текста для конкретного языка (если null - используется shared_prompt.prompt_text)
-    prompt_text_override = models.TextField(null=True, blank=True)
+    prompt_text_override = models.TextField(null=True, blank=True, verbose_name="Переопределение текста")
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
         related_name="owned_prompts",
+        verbose_name="Владелец",
     )
     editors = models.ManyToManyField(
         settings.AUTH_USER_MODEL,
         blank=True,
         related_name="editable_prompts",
+        verbose_name="Редакторы",
     )
 
     def get_effective_text(self, ui_language: str = "", programming_language_name: str = "", topic_name: str = "", message: str = "", code: str = ""):
@@ -289,6 +315,8 @@ class Prompt(models.Model):
 
     class Meta:
         db_table = 'ai_prompt'
+        verbose_name = "Промпт"
+        verbose_name_plural = "Промпты"
 
 
 
@@ -298,19 +326,22 @@ class AIAppSettings(models.Model):
     Хранит флаг включения/выключения AI-функциональности.
     Модель имеет фиксированный pk=1 — только одна строка в таблице.
     """
-    is_enabled = models.BooleanField(default=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    is_enabled = models.BooleanField(default=True, verbose_name="Включено")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
     # Дата-отсечка для счётчика «фаворитов» (топ-2 моделей по частоте использования).
     # Успешные AIRequestLog старше этой даты не учитываются при ранжировании,
     # что даёт разовый сброс фаворитов для всех пользователей (нет записей новее
     # epoch → строгий алфавит) без удаления логов; новые запросы снова набирают
     # топ-2. См. ai/views.py::_get_user_top_model_keys и management-команду
     # reset_favorites_epoch.
-    favorites_epoch = models.DateTimeField(null=True, blank=True, default=timezone.now)
+    favorites_epoch = models.DateTimeField(
+        null=True, blank=True, default=timezone.now,
+        verbose_name="Дата отсечки фаворитов",
+    )
 
     class Meta:
-        verbose_name = "AI app setting"
-        verbose_name_plural = "AI app settings"
+        verbose_name = "Настройки ИИ-приложения"
+        verbose_name_plural = "Настройки ИИ-приложения"
 
     def save(self, *args, **kwargs):
         # Keep a single row for global app state.
@@ -342,15 +373,15 @@ class AIModelHealthRun(models.Model):
         (STATUS_FAILED, "Failed"),
     )
 
-    window_date = models.DateField(unique=True)
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING)
-    started_at = models.DateTimeField(default=timezone.now)
-    finished_at = models.DateTimeField(null=True, blank=True)
-    error_message = models.TextField(blank=True, default="")
+    window_date = models.DateField(unique=True, verbose_name="Окно проверки")
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING, verbose_name="Статус")
+    started_at = models.DateTimeField(default=timezone.now, verbose_name="Начат")
+    finished_at = models.DateTimeField(null=True, blank=True, verbose_name="Завершён")
+    error_message = models.TextField(blank=True, default="", verbose_name="Текст ошибки")
 
     class Meta:
-        verbose_name = "AI model health run"
-        verbose_name_plural = "AI model health runs"
+        verbose_name = "Прогон проверки моделей"
+        verbose_name_plural = "Прогоны проверки моделей"
         ordering = ("-window_date",)
 
     def __str__(self):
@@ -364,18 +395,18 @@ class AIModelAvailability(models.Model):
     HTTP-код последней проверки и сообщение об ошибке (если есть).
     Одна запись на (model_key, window_date).
     """
-    model_key = models.CharField(max_length=128, db_index=True)
-    model_title = models.CharField(max_length=255)
-    is_available = models.BooleanField(default=False)
-    window_date = models.DateField(db_index=True)
-    checked_at = models.DateTimeField(auto_now=True)
-    response_time_ms = models.PositiveIntegerField(null=True, blank=True)
-    last_http_code = models.PositiveSmallIntegerField(null=True, blank=True)
-    last_message = models.TextField(blank=True, default="")
+    model_key = models.CharField(max_length=128, db_index=True, verbose_name="Ключ модели")
+    model_title = models.CharField(max_length=255, verbose_name="Модель")
+    is_available = models.BooleanField(default=False, verbose_name="Доступна")
+    window_date = models.DateField(db_index=True, verbose_name="Окно проверки")
+    checked_at = models.DateTimeField(auto_now=True, verbose_name="Проверена")
+    response_time_ms = models.PositiveIntegerField(null=True, blank=True, verbose_name="Время ответа, мс")
+    last_http_code = models.PositiveSmallIntegerField(null=True, blank=True, verbose_name="Код ответа")
+    last_message = models.TextField(blank=True, default="", verbose_name="Сообщение")
 
     class Meta:
-        verbose_name = "AI model availability"
-        verbose_name_plural = "AI model availability"
+        verbose_name = "Доступность модели"
+        verbose_name_plural = "Доступность моделей"
         ordering = ("model_title",)
         constraints = [
             models.UniqueConstraint(
@@ -430,39 +461,40 @@ class AIRequestLog(models.Model):
         blank=True,
         on_delete=models.SET_NULL,
         related_name="ai_request_logs",
+        verbose_name="Пользователь",
     )
-    external_user_id = models.CharField(max_length=255, blank=True, db_index=True)
-    username = models.CharField(max_length=255, blank=True)
-    user_full_name = models.CharField(max_length=500, blank=True)
-    client_id = models.CharField(max_length=255, blank=True)
-    source = models.CharField(max_length=32, choices=SOURCE_CHOICES, default=SOURCE_WEBSOCKET)
-    mode = models.CharField(max_length=16, choices=MODE_CHOICES, blank=True, default="")
-    sent_at = models.DateTimeField()
-    received_at = models.DateTimeField(null=True, blank=True)
-    duration_seconds = models.FloatField(null=True, blank=True)
-    model_names = models.JSONField(default=list, blank=True)
-    message = models.TextField(blank=True)
-    response_text = models.TextField(blank=True)
-    tokens = models.PositiveIntegerField(null=True, blank=True)
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_SUCCESS)
-    error_message = models.TextField(blank=True)
+    external_user_id = models.CharField(max_length=255, blank=True, db_index=True, verbose_name="ID пользователя dl.gsu.by")
+    username = models.CharField(max_length=255, blank=True, verbose_name="Логин")
+    user_full_name = models.CharField(max_length=500, blank=True, verbose_name="ФИО")
+    client_id = models.CharField(max_length=255, blank=True, verbose_name="ID клиента")
+    source = models.CharField(max_length=32, choices=SOURCE_CHOICES, default=SOURCE_WEBSOCKET, verbose_name="Источник")
+    mode = models.CharField(max_length=16, choices=MODE_CHOICES, blank=True, default="", verbose_name="Режим")
+    sent_at = models.DateTimeField(verbose_name="Отправлен")
+    received_at = models.DateTimeField(null=True, blank=True, verbose_name="Получен")
+    duration_seconds = models.FloatField(null=True, blank=True, verbose_name="Время ответа, с")
+    model_names = models.JSONField(default=list, blank=True, verbose_name="Модели")
+    message = models.TextField(blank=True, verbose_name="Запрос")
+    response_text = models.TextField(blank=True, verbose_name="Ответ модели")
+    tokens = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов")
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_SUCCESS, verbose_name="Статус")
+    error_message = models.TextField(blank=True, verbose_name="Текст ошибки")
 
     # Context selected by the user (programming task pages and ARM)
-    programming_language_id = models.IntegerField(null=True, blank=True)
-    programming_language_name = models.CharField(max_length=255, blank=True)
-    topic_id = models.IntegerField(null=True, blank=True)
-    topic_name = models.CharField(max_length=255, blank=True)
-    prompt_id = models.IntegerField(null=True, blank=True)
-    prompt_name = models.CharField(max_length=255, blank=True)
+    programming_language_id = models.IntegerField(null=True, blank=True, verbose_name="ID языка")
+    programming_language_name = models.CharField(max_length=255, blank=True, verbose_name="Язык программирования")
+    topic_id = models.IntegerField(null=True, blank=True, verbose_name="ID темы")
+    topic_name = models.CharField(max_length=255, blank=True, verbose_name="Тема")
+    prompt_id = models.IntegerField(null=True, blank=True, verbose_name="ID промпта")
+    prompt_name = models.CharField(max_length=255, blank=True, verbose_name="Промпт")
 
     # DL task context (for solve / find-error modes with a DL task)
-    task_node_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
-    task_name = models.CharField(max_length=512, blank=True, default="")
+    task_node_id = models.PositiveIntegerField(null=True, blank=True, db_index=True, verbose_name="ID задачи DL")
+    task_name = models.CharField(max_length=512, blank=True, default="", verbose_name="Задача")
 
     class Meta:
         db_table = "ai_airequestlog"
-        verbose_name = "AI request log"
-        verbose_name_plural = "AI request logs"
+        verbose_name = "Журнал запросов к ИИ"
+        verbose_name_plural = "Журнал запросов к ИИ"
         ordering = ("-sent_at",)
 
     def __str__(self):
@@ -498,35 +530,37 @@ class AIModelTestRun(models.Model):
         (RUN_TYPE_BATCH, "Batch (solve)"),
     )
 
-    run_id = models.CharField(max_length=64, unique=True, db_index=True)
+    run_id = models.CharField(max_length=64, unique=True, db_index=True, verbose_name="ID прогона")
     run_type = models.CharField(
         max_length=16, choices=RUN_TYPE_CHOICES, default=RUN_TYPE_SINGLE, db_index=True,
+        verbose_name="Тип прогона",
     )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True, blank=True,
         on_delete=models.SET_NULL,
         related_name="ai_model_test_runs",
+        verbose_name="Пользователь",
     )
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING)
-    started_at = models.DateTimeField(default=timezone.now)
-    finished_at = models.DateTimeField(null=True, blank=True)
-    message = models.TextField(blank=True, default="")
-    error_message = models.TextField(blank=True, default="")
-    report = models.JSONField(default=dict, blank=True)
-    total_models = models.PositiveSmallIntegerField(default=0)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING, verbose_name="Статус")
+    started_at = models.DateTimeField(default=timezone.now, verbose_name="Начат")
+    finished_at = models.DateTimeField(null=True, blank=True, verbose_name="Завершён")
+    message = models.TextField(blank=True, default="", verbose_name="Сообщение")
+    error_message = models.TextField(blank=True, default="", verbose_name="Текст ошибки")
+    report = models.JSONField(default=dict, blank=True, verbose_name="Отчёт")
+    total_models = models.PositiveSmallIntegerField(default=0, verbose_name="Всего моделей")
     # Context selected by the user (mirrors AIRequestLog context fields).
-    programming_language_id = models.IntegerField(null=True, blank=True)
-    programming_language_name = models.CharField(max_length=255, blank=True, default="")
-    topic_id = models.IntegerField(null=True, blank=True)
-    topic_name = models.CharField(max_length=255, blank=True, default="")
-    prompt_id = models.IntegerField(null=True, blank=True)
-    prompt_name = models.CharField(max_length=255, blank=True, default="")
+    programming_language_id = models.IntegerField(null=True, blank=True, verbose_name="ID языка")
+    programming_language_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Язык программирования")
+    topic_id = models.IntegerField(null=True, blank=True, verbose_name="ID темы")
+    topic_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Тема")
+    prompt_id = models.IntegerField(null=True, blank=True, verbose_name="ID промпта")
+    prompt_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Промпт")
 
     class Meta:
         db_table = "ai_ai_model_test_run"
-        verbose_name = "AI model test run"
-        verbose_name_plural = "AI model test runs"
+        verbose_name = "Прогон тестирования модели"
+        verbose_name_plural = "Прогоны тестирования модели"
         ordering = ("-started_at",)
 
     def __str__(self):
@@ -567,33 +601,36 @@ class AIModelTestResult(models.Model):
         AIModelTestRun,
         on_delete=models.CASCADE,
         related_name="results",
+        verbose_name="Прогон",
     )
     task = models.ForeignKey(
         Task,
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name="test_results",
+        verbose_name="Задача",
     )
-    model_key = models.CharField(max_length=128, db_index=True)
-    model_title = models.CharField(max_length=255)
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_OK)
+    model_key = models.CharField(max_length=128, db_index=True, verbose_name="Ключ модели")
+    model_title = models.CharField(max_length=255, verbose_name="Модель")
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_OK, verbose_name="Статус")
     verdict = models.CharField(
         max_length=8, choices=VERDICT_CHOICES, null=True, blank=True, db_index=True,
+        verbose_name="Вердикт",
     )
-    duration_seconds = models.FloatField(null=True, blank=True)
-    tokens = models.PositiveIntegerField(null=True, blank=True)
-    short_response = models.TextField(blank=True, default="")
-    raw_response = models.TextField(blank=True, default="")
+    duration_seconds = models.FloatField(null=True, blank=True, verbose_name="Время ответа, с")
+    tokens = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов")
+    short_response = models.TextField(blank=True, default="", verbose_name="Краткий ответ")
+    raw_response = models.TextField(blank=True, default="", verbose_name="Полный ответ")
     # Snapshot of the task's topic / programming language at run time (batch runs).
-    topic_id_snapshot = models.IntegerField(null=True, blank=True)
-    topic_name_snapshot = models.CharField(max_length=255, blank=True, default="")
-    prog_lang_snapshot = models.CharField(max_length=255, blank=True, default="")
-    created_at = models.DateTimeField(auto_now_add=True)
+    topic_id_snapshot = models.IntegerField(null=True, blank=True, verbose_name="ID темы (снимок)")
+    topic_name_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Тема (снимок)")
+    prog_lang_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Язык программирования (снимок)")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
 
     class Meta:
         db_table = "ai_ai_model_test_result"
-        verbose_name = "AI model test result"
-        verbose_name_plural = "AI model test results"
+        verbose_name = "Результат тестирования модели"
+        verbose_name_plural = "Результаты тестирования модели"
         ordering = ("model_title",)
         constraints = [
             # One row per (run, model, task) for batch runs.
@@ -680,8 +717,8 @@ class PromptTestCase(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="owned_prompt_test_cases", verbose_name="Владелец",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
 
     class Meta:
         db_table = "ai_prompttestcase"
@@ -710,22 +747,23 @@ class PromptTestRun(models.Model):
         (STATUS_FAILED, "Failed"),
     )
 
-    run_id = models.CharField(max_length=64, unique=True, db_index=True)
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING, db_index=True)
-    model_key = models.CharField(max_length=128, db_index=True)
-    model_title = models.CharField(max_length=255, blank=True, default="")
-    prompt_id = models.IntegerField(null=True, blank=True, db_index=True)
-    prompt_name = models.CharField(max_length=255, blank=True, default="")
-    ui_language = models.CharField(max_length=16, default="Русский")
+    run_id = models.CharField(max_length=64, unique=True, db_index=True, verbose_name="ID прогона")
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING, db_index=True, verbose_name="Статус")
+    model_key = models.CharField(max_length=128, db_index=True, verbose_name="Ключ модели")
+    model_title = models.CharField(max_length=255, blank=True, default="", verbose_name="Модель")
+    prompt_id = models.IntegerField(null=True, blank=True, db_index=True, verbose_name="ID промпта")
+    prompt_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Промпт")
+    ui_language = models.CharField(max_length=16, default="Русский", verbose_name="Язык интерфейса")
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
         related_name="prompt_test_runs",
+        verbose_name="Пользователь",
     )
-    started_at = models.DateTimeField(default=timezone.now)
-    finished_at = models.DateTimeField(null=True, blank=True)
-    error_message = models.TextField(blank=True, default="")
-    report = models.JSONField(default=dict, blank=True)
-    total_cases = models.PositiveSmallIntegerField(default=0)
+    started_at = models.DateTimeField(default=timezone.now, verbose_name="Начат")
+    finished_at = models.DateTimeField(null=True, blank=True, verbose_name="Завершён")
+    error_message = models.TextField(blank=True, default="", verbose_name="Текст ошибки")
+    report = models.JSONField(default=dict, blank=True, verbose_name="Отчёт")
+    total_cases = models.PositiveSmallIntegerField(default=0, verbose_name="Всего кейсов")
 
     class Meta:
         db_table = "ai_prompttest_run"
@@ -760,28 +798,31 @@ class PromptTestResult(models.Model):
 
     run = models.ForeignKey(
         PromptTestRun, on_delete=models.CASCADE, related_name="results",
+        verbose_name="Прогон",
     )
     test_case = models.ForeignKey(
         PromptTestCase, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="test_results",
+        verbose_name="Тест-кейс",
     )
-    model_key = models.CharField(max_length=128, db_index=True)
-    model_title = models.CharField(max_length=255, blank=True, default="")
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_OK)
+    model_key = models.CharField(max_length=128, db_index=True, verbose_name="Ключ модели")
+    model_title = models.CharField(max_length=255, blank=True, default="", verbose_name="Модель")
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_OK, verbose_name="Статус")
     verdict = models.CharField(
         max_length=16, choices=VERDICT_CHOICES, default=VERDICT_MISMATCH, db_index=True,
+        verbose_name="Вердикт",
     )
-    actual_response = models.TextField(blank=True, default="")
-    expected_snapshot = models.TextField(blank=True, default="")
-    diff_hint = models.CharField(max_length=255, blank=True, default="")
-    duration_seconds = models.FloatField(null=True, blank=True)
-    tokens = models.PositiveIntegerField(null=True, blank=True)
+    actual_response = models.TextField(blank=True, default="", verbose_name="Ответ")
+    expected_snapshot = models.TextField(blank=True, default="", verbose_name="Эталон (снимок)")
+    diff_hint = models.CharField(max_length=255, blank=True, default="", verbose_name="Подсказка различий")
+    duration_seconds = models.FloatField(null=True, blank=True, verbose_name="Время ответа, с")
+    tokens = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов")
     # Snapshot of the case at run time (operator may reassign topic/lang later).
-    case_name_snapshot = models.CharField(max_length=255, blank=True, default="")
-    mode_snapshot = models.CharField(max_length=16, blank=True, default="")
-    topic_name_snapshot = models.CharField(max_length=255, blank=True, default="")
-    prog_lang_snapshot = models.CharField(max_length=255, blank=True, default="")
-    created_at = models.DateTimeField(auto_now_add=True)
+    case_name_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Название кейса (снимок)")
+    mode_snapshot = models.CharField(max_length=16, blank=True, default="", verbose_name="Режим (снимок)")
+    topic_name_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Тема (снимок)")
+    prog_lang_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Язык программирования (снимок)")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
 
     class Meta:
         db_table = "ai_prompt_test_result"
@@ -809,7 +850,7 @@ class UpdateLog(models.Model):
     description = models.TextField(verbose_name="Содержание обновления")
     author = models.CharField(max_length=255, verbose_name="Автор")
     commit_hash = models.CharField(max_length=40, blank=True, default="", verbose_name="Хэш коммита")
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
 
     class Meta:
         db_table = "ai_update_log"

@@ -14,6 +14,9 @@
  * Используется WebDeepseek/api/server.js (HTTP API) и WebDeepseek/api/botManager.js (управление пулом ботов).
  */
 
+const fs = require('fs');
+const path = require('path');
+
 const proxyChain = require('proxy-chain');
 
 const puppeteerExtra = require('puppeteer-extra');
@@ -21,9 +24,24 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 
 const { log, error } = require('./utils/logger');
 const { toBool, DEFAULT_SERVICE } = require('./utils/env');
-const { login } = require('./modules/auth');
+const { login, checkAlreadyAuthorized } = require('./modules/auth');
 const { sendMessage: sendMessageViaUi } = require('./modules/promtps');
 const data = require('./data.json');
+
+// Постоянные Chrome-профили: хранят сессию Google, чтобы не логиниться заново
+// при каждом перезапуске бота. Каталог можно переопределить через BOT_PROFILE_DIR.
+function getProfileDir(id) {
+    const root = cleanEnvStr(process.env.BOT_PROFILE_DIR) || path.join(__dirname, '.chrome-profiles');
+    return path.join(root, `bot-${id}`);
+}
+
+// При жёстком падении (OOM-kill) Chrome оставляет SingletonLock/SingletonCookie/
+// SingletonSocket — новый Chrome не сможет захватить профиль. Чистим их перед запуском.
+function cleanStaleLocks(profileDir) {
+    for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+        try { fs.rmSync(path.join(profileDir, name), { force: true }); } catch (_) {}
+    }
+}
 
 // avoid double-registering stealth plugins when multiple bots are created
 let stealthApplied = false;
@@ -111,6 +129,22 @@ class Bot {
         log(`[bot#${this.id}] login ok`);
     }
 
+    async _ensureAuthorized() {
+        // Сначала проверяем сохранённую сессию (постоянный профиль), при неудаче —
+        // полный вход через Google. Используется и при старте, и при восстановлении
+        // страницы: новые вкладки в том же профиле уже имеют сессию Google.
+        const model = process.env.SERVICE_MODEL || DEFAULT_SERVICE;
+        const ctx = { browser: this.browser, page: this.page };
+        const alreadyAuth = await checkAlreadyAuthorized(ctx, { model }).catch(() => false);
+        if (alreadyAuth) {
+            this._isLoggedIn = true;
+            log(`[bot#${this.id}] сессия сохранена в профиле — вход без повторного логина`);
+            return;
+        }
+        log(`[bot#${this.id}] сессия отсутствует — выполняем вход через Google`);
+        await this._login();
+    }
+
     async init() {
         // Инициализация: запуск Chrome, настройка stealth-плагина, прокси, логин.
         ensureStealth();
@@ -127,9 +161,16 @@ class Bot {
             log(`[bot#${this.id}] anonymized proxy: ${proxyServer}`);
         }
 
+        // Постоянный профиль: сессия Google переживает рестарт бота.
+        const profileDir = getProfileDir(this.id);
+        try { fs.mkdirSync(profileDir, { recursive: true }); } catch (_) {}
+        cleanStaleLocks(profileDir);
+        log(`[bot#${this.id}] chrome profile: ${profileDir}`);
+
         const launchOpts = {
             headless,
             protocolTimeout: 180000, // 3 min — prevents Input.insertText/dispatchKeyEvent timeouts on slow pages
+            userDataDir: profileDir,
             args: [
 				...(proxyServer ? [`--proxy-server=${proxyServer}`] : []),
 				...(headless ? ['--disable-gpu'] : []),
@@ -171,8 +212,8 @@ class Bot {
 
         this._attachPageEvents(this.page);
 
-        // Login at bot start (required by your lifecycle)
-        await this._login();
+        // Вход: либо по сохранённой сессии профиля, либо полный Google OAuth.
+        await this._ensureAuthorized();
 
         const model = process.env.SERVICE_MODEL || DEFAULT_SERVICE;
         log(`[bot#${this.id}] init ok (model=${model})`);
@@ -225,7 +266,7 @@ class Bot {
             await this.page.setViewport(getViewport()).catch(() => {});
             this._attachPageEvents(this.page);
             this._isLoggedIn = false;
-            await this._login();
+            await this._ensureAuthorized();
         }
     }
 
@@ -239,7 +280,7 @@ class Bot {
 
         // Safety: if session expired or init didn't finish properly, enforce login before messaging.
         if (!this._isLoggedIn) {
-            await this._login();
+            await this._ensureAuthorized();
         }
 
         const ctx = { browser: this.browser, page: this.page };

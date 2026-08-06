@@ -49,12 +49,9 @@
   <div class="tc-title-block">
     <h1>Тестовая консоль</h1>
     <p class="tc-subtitle">
-      Запуск пакета <code>ai/tests.py</code> ({{ class_count }} классов сценариев) в
-      изолированном тестовом окружении (<code>manage.py test ai --settings=DjangoTest.test_settings --verbosity=2</code>
-      в отдельном subprocess, sqlite/locmem — прод-БД не затрагивается). Имена методов —
-      английские (идентификаторы сценариев); заголовки классов и статусы — на русском.
-      4 теста SambaNova/Groq ожидаются красными — эти провайдеры отключены за флагами
-      <code>AI_ENABLE_SAMBANOVA</code>/<code>AI_ENABLE_GROQ</code>.
+      Здесь запускаются проверки приложения. Тесты выполняются в отдельном окружении
+      и не трогают рабочую базу данных. Имена сценариев — английские (это технические
+      идентификаторы); названия групп и итоговые статусы — на русском.
     </p>
   </div>
 
@@ -68,7 +65,7 @@
         <span class="tc-spinner" aria-hidden="true"></span>
         <span class="tc-progress-text"></span>
       </div>
-      <button id="tcRunSubmitBtn" type="submit" class="default">Запустить тесты</button>
+      <button id="tcRunSubmitBtn" type="submit" class="default">Запустить проверки</button>
     </form>
   </div>
 
