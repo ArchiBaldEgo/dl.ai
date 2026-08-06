@@ -56,6 +56,13 @@ def can_access_prompt_regression(request):
     return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
 
 
+def can_access_test_console(request):
+    """Тестовая консоль: staff/superuser ИЛИ prompt_developer (как ARM)."""
+    if not request.user.is_authenticated:
+        return False
+    return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+
+
 def can_access_logs(request):
     """Доступ к логам запросов: только staff/superuser."""
     return request.user.is_authenticated and is_staff_or_superuser(request.user)

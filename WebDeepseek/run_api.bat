@@ -20,9 +20,9 @@ set "HEADLESS=true"
 set "VIEWPORT_W=800"
 set "VIEWPORT_H=800"
 
-REM Credentials
-set "BOT_USERNAME=zimerfmm@gmail.com"
-set "BOT_PASSWORD=qp123kfn43"
+REM Credentials (placeholders — replace with real values or read from .env)
+set "BOT_USERNAME=your-deepseek-email@example.com"
+set "BOT_PASSWORD=your-deepseek-password"
 
 REM Chrome path: prefer ./worker/chr/chrome.exe, fallback to system Chrome
 

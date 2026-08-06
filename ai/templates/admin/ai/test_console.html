@@ -1,0 +1,98 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script src="{% static 'admin/js/test_console.js' %}" defer></script>
+{% endblock %}
+
+{% block content %}
+<style>
+  .tc-wrap { max-width: 1280px; margin: 0 auto; color: var(--body-fg); }
+  .tc-title-block h1 { margin: 0 0 6px; font-size: 28px; line-height: 1.2; }
+  .tc-subtitle { color: var(--body-quiet-color); margin: 0 0 18px; max-width: 900px; line-height: 1.45; }
+  .tc-card { background: var(--body-bg); border: 1px solid var(--hairline-color);
+             border-radius: 8px; padding: 18px; margin-bottom: 16px;
+             box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+  .tc-card h2 { margin: 0 0 10px; font-size: 18px; }
+  .tc-form p { color: var(--body-quiet-color); line-height: 1.45; }
+  .tc-form code { background: var(--darkened-bg); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  .tc-badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; font-weight:600; min-width: 84px; text-align:center; }
+  .tc-badge.ok { background:#e3f4e3; color:#1a7d1a; }
+  .tc-badge.fail, .tc-badge.error, .tc-badge.unexpected_success { background:#fde3e3; color:#c93b3b; }
+  .tc-badge.skipped { background:#eee; color: var(--body-quiet-color); }
+  .tc-badge.expected_failure { background:#fef3e3; color:#9a6a00; }
+  .tc-spinner { width:16px; height:16px; border:2px solid var(--hairline-color);
+                border-top-color: var(--body-fg); border-radius:50%;
+                display:inline-block; animation: tc-spin 0.8s linear infinite; }
+  @keyframes tc-spin { to { transform: rotate(360deg); } }
+  .tc-status-line { display:none; align-items:center; gap:10px; margin:12px 0; color: var(--body-quiet-color); }
+  .tc-status-line.active { display:flex; }
+  .tc-result-row { display:flex; align-items:center; gap:10px; padding:6px 0;
+                   border-bottom:1px solid var(--hairline-color); font-size:13px; }
+  .tc-result-row .tc-method { font-family: monospace; }
+  .tc-result-row .tc-class-ru { color: var(--body-quiet-color); }
+  .tc-tb { white-space:pre-wrap; background: var(--darkened-bg); border:1px solid var(--hairline-color);
+           border-radius:4px; padding:8px; max-height:320px; overflow:auto; font-size:12px; margin:4px 0 10px; }
+  .tc-log { white-space:pre-wrap; background: var(--darkened-bg); border:1px solid var(--hairline-color);
+            border-radius:4px; padding:10px; max-height:340px; overflow:auto; font-size:12px;
+            font-family: monospace; }
+  .tc-error { color:#c93b3b; font-weight:600; margin:10px 0; }
+  .tc-summary-line { margin: 2px 0; }
+  .button { display:inline-block; padding:6px 14px; border:1px solid var(--hairline-color);
+            border-radius:4px; background: var(--darkened-bg); color: var(--body-fg); text-decoration:none; cursor: pointer; }
+  .button.default { background: var(--button-bg); color: var(--button-fg); border-color:transparent; }
+  .button:disabled { opacity: 0.55; cursor: not-allowed; }
+</style>
+
+<div class="tc-wrap">
+  <div class="tc-title-block">
+    <h1>Тестовая консоль</h1>
+    <p class="tc-subtitle">
+      Запуск пакета <code>ai/tests.py</code> ({{ class_count }} классов сценариев) в
+      изолированном тестовом окружении (<code>manage.py test ai --settings=DjangoTest.test_settings --verbosity=2</code>
+      в отдельном subprocess, sqlite/locmem — прод-БД не затрагивается). Имена методов —
+      английские (идентификаторы сценариев); заголовки классов и статусы — на русском.
+      4 теста SambaNova/Groq ожидаются красными — эти провайдеры отключены за флагами
+      <code>AI_ENABLE_SAMBANOVA</code>/<code>AI_ENABLE_GROQ</code>.
+    </p>
+  </div>
+
+  <div class="tc-card">
+    <form id="tcRunForm" method="post" class="tc-form">
+      {% csrf_token %}
+      <p>Тестовая БД создаётся и удаляется автоматически. Одновременно возможен только
+        один прогон (общая тестовая БД).</p>
+      <div id="tcRunError" class="tc-error" {% if not error_message %}style="display:none"{% endif %}>{{ error_message }}</div>
+      <div id="tcRunProgress" class="tc-status-line">
+        <span class="tc-spinner" aria-hidden="true"></span>
+        <span class="tc-progress-text"></span>
+      </div>
+      <button id="tcRunSubmitBtn" type="submit" class="default">Запустить тесты</button>
+    </form>
+  </div>
+
+  <div id="tcSummaryCard" class="tc-card" style="display:none">
+    <h2>Итог</h2>
+    <div id="tcSummary"></div>
+  </div>
+
+  <div id="tcResultsCard" class="tc-card" style="display:none">
+    <h2>Результаты по сценариям</h2>
+    <div id="tcResultsList"></div>
+  </div>
+
+  <div class="tc-card">
+    <h2>Журнал вывода</h2>
+    <div id="tcLog" class="tc-log"></div>
+  </div>
+</div>
+
+{{ active_run_snapshot|json_script:"test-console-initial-run" }}
+<script>
+  window.TEST_CONSOLE_CONFIG = {
+    startUrl: "{{ test_console_start_url }}",
+    statusUrl: "{{ test_console_status_url }}"
+  };
+</script>
+{% endblock %}

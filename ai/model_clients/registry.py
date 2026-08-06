@@ -4,15 +4,16 @@
 с их обработчиками (async-функциями), отображаемыми названиями и capabilities
 (text/vision/reasoning). ModelRegistry — основной API для получения
 обработчика модели по ключу.
+
+Провайдеры SambaNova и Groq по умолчанию отключены и включаются через
+настройки ``AI_ENABLE_SAMBANOVA`` / ``AI_ENABLE_GROQ`` (см. DjangoTest/settings).
 """
 
 from typing import Callable, Coroutine, Dict
 
+from django.conf import settings
+
 from . import openrouter, web_deepseek, ollama
-# Groq models disabled — all commented out
-# from . import groq
-# SambaNova models disabled — all commented out
-# from . import sambanova
 
 Handler = Callable[..., Coroutine]
 
@@ -34,32 +35,6 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "handler": web_deepseek.ask_Web_DeepSeek_Thinking_async,
         "capabilities": _REASONING,
     },
-    # --- Groq модели отключены ---
-    # "Groq_Llama_3_3_70B": {
-    #     "title": "Groq Llama 3.3 70B",
-    #     "handler": groq.ask_Groq_Llama_3_3_70B_async,
-    #     "capabilities": _TEXT_ONLY,
-    # },
-    # "Groq_Llama_3_1_8B": {
-    #     "title": "Groq Llama 3.1 8B",
-    #     "handler": groq.ask_Groq_Llama_3_1_8B_async,
-    #     "capabilities": _TEXT_ONLY,
-    # },
-    # "Groq_Gpt_Oss_120B": {
-    #     "title": "Groq GPT-OSS 120B",
-    #     "handler": groq.ask_Groq_Gpt_Oss_120B_async,
-    #     "capabilities": _TEXT_ONLY,
-    # },
-    # "Groq_Gpt_Oss_20B": {
-    #     "title": "Groq GPT-OSS 20B",
-    #     "handler": groq.ask_Groq_Gpt_Oss_20B_async,
-    #     "capabilities": _TEXT_ONLY,
-    # },
-    # "Groq_Qwen_3_6_27B": {
-    #     "title": "Groq Qwen 3.6 27B",
-    #     "handler": groq.ask_Groq_Qwen_3_6_27B_async,
-    #     "capabilities": _TEXT_ONLY,
-    # },
     # --- OpenRouter (бесплатные модели) ---
     "OR_Nemotron_Ultra_550B": {
         "title": "OR Nemotron Ultra 550B",
@@ -152,38 +127,86 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "handler": ollama.ask_Ollama_Kimi_K2_6_Cloud_async,
         "capabilities": _TEXT_ONLY,
     },
-    # --- SambaNova модели отключены ---
-    # "DeepSeek_V3_1": {
-    #     "title": "Samba DeepSeek-V3.1",
-    #     "handler": sambanova.ask_DeepSeek_V3_1_async,
-    #     "capabilities": _TEXT_ONLY,
-    # },
-    # "DeepSeek_V3_2": {
-    #     "title": "Samba DeepSeek-V3.2",
-    #     "handler": sambanova.ask_DeepSeek_V3_2_async,
-    #     "capabilities": _TEXT_ONLY,
-    # },
-    # "Meta_Llama_3_3_70B_Instruct": {
-    #     "title": "Samba Meta-Llama-3.3-70B-Instruct",
-    #     "handler": sambanova.ask_Meta_Llama_3_3_70B_Instruct_async,
-    #     "capabilities": _TEXT_ONLY,
-    # },
-    # "MiniMax_M2_7": {
-    #     "title": "Samba MiniMax-M2.7",
-    #     "handler": sambanova.ask_MiniMax_M2_7_async,
-    #     "capabilities": _TEXT_ONLY,
-    # },
-    # "Gemma_3_12b_it": {
-    #     "title": "Samba gemma-4-31B-it",
-    #     "handler": sambanova.ask_Gemma_3_12b_it_async,
-    #     "capabilities": _TEXT_ONLY,
-    # },
-    # "Gpt_oss_120b": {
-    #     "title": "Samba gpt-oss-120b",
-    #     "handler": sambanova.ask_Gpt_oss_120b_async,
-    #     "capabilities": _TEXT_ONLY,
-    # },
 }
+
+
+def _groq_models() -> Dict[str, Dict[str, object]]:
+    """Записи реестра для Groq-провайдера (включается через AI_ENABLE_GROQ)."""
+    from . import groq
+
+    return {
+        "Groq_Llama_3_3_70B": {
+            "title": "Groq Llama 3.3 70B",
+            "handler": groq.ask_Groq_Llama_3_3_70B_async,
+            "capabilities": _TEXT_ONLY,
+        },
+        "Groq_Llama_3_1_8B": {
+            "title": "Groq Llama 3.1 8B",
+            "handler": groq.ask_Groq_Llama_3_1_8B_async,
+            "capabilities": _TEXT_ONLY,
+        },
+        "Groq_Gpt_Oss_120B": {
+            "title": "Groq GPT-OSS 120B",
+            "handler": groq.ask_Groq_Gpt_Oss_120B_async,
+            "capabilities": _TEXT_ONLY,
+        },
+        "Groq_Gpt_Oss_20B": {
+            "title": "Groq GPT-OSS 20B",
+            "handler": groq.ask_Groq_Gpt_Oss_20B_async,
+            "capabilities": _TEXT_ONLY,
+        },
+        "Groq_Qwen_3_6_27B": {
+            "title": "Groq Qwen 3.6 27B",
+            "handler": groq.ask_Groq_Qwen_3_6_27B_async,
+            "capabilities": _TEXT_ONLY,
+        },
+    }
+
+
+def _sambanova_models() -> Dict[str, Dict[str, object]]:
+    """Записи реестра для SambaNova-провайдера (включается через AI_ENABLE_SAMBANOVA)."""
+    from . import sambanova
+
+    return {
+        "DeepSeek_V3_1": {
+            "title": "Samba DeepSeek-V3.1",
+            "handler": sambanova.ask_DeepSeek_V3_1_async,
+            "capabilities": _TEXT_ONLY,
+        },
+        "DeepSeek_V3_2": {
+            "title": "Samba DeepSeek-V3.2",
+            "handler": sambanova.ask_DeepSeek_V3_2_async,
+            "capabilities": _TEXT_ONLY,
+        },
+        "Meta_Llama_3_3_70B_Instruct": {
+            "title": "Samba Meta-Llama-3.3-70B-Instruct",
+            "handler": sambanova.ask_Meta_Llama_3_3_70B_Instruct_async,
+            "capabilities": _TEXT_ONLY,
+        },
+        "MiniMax_M2_7": {
+            "title": "Samba MiniMax-M2.7",
+            "handler": sambanova.ask_MiniMax_M2_7_async,
+            "capabilities": _TEXT_ONLY,
+        },
+        "Gemma_3_12b_it": {
+            "title": "Samba gemma-4-31B-it",
+            "handler": sambanova.ask_Gemma_3_12b_it_async,
+            "capabilities": _TEXT_ONLY,
+        },
+        "Gpt_oss_120b": {
+            "title": "Samba gpt-oss-120b",
+            "handler": sambanova.ask_Gpt_oss_120b_async,
+            "capabilities": _TEXT_ONLY,
+        },
+    }
+
+
+# Условная регистрация отключённых по умолчанию провайдеров.
+if getattr(settings, "AI_ENABLE_GROQ", False):
+    _MODELS.update(_groq_models())
+
+if getattr(settings, "AI_ENABLE_SAMBANOVA", False):
+    _MODELS.update(_sambanova_models())
 
 _DEFAULT_CAPABILITIES = _TEXT_ONLY
 
@@ -199,6 +222,14 @@ class ModelRegistry:
 
     def items(self):
         return self._models.items()
+
+    def title_to_key(self) -> dict:
+        """Вернуть обратный map ``{title: key}`` для всех зарегистрированных моделей.
+
+        Используется вместо прямого доступа к ``_models`` там, где нужен
+        обратный lookup по отображаемому названию (см. ai/views.py).
+        """
+        return {self.title(key): key for key in self._models}
 
     def get(self, key: str):
         return self._models.get(key)

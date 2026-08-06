@@ -1,5 +1,6 @@
 """Клиент GigaChat (Сбер) для legacy audio/chat потока."""
 
+import asyncio
 import json
 import logging
 import os
@@ -59,7 +60,7 @@ async def send_prompt_async(msg: str, access_token: str) -> str:
         "Accept": "application/json",
         "Authorization": f"Bearer {access_token}",
     }
-    response = await __import__("asyncio").to_thread(
+    response = await asyncio.to_thread(
         requests.post,
         url,
         headers=headers,

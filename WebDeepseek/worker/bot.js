@@ -11,18 +11,16 @@
  * Поддерживает авто-восстановление: при закрытии страницы создаётся новая и
  * выполняется повторный логин. Определяет отключение браузера через _disconnected.
  *
- * Используется bot/api/server.js (HTTP API) и bot/api/botManager.js (управление пулом ботов).
+ * Используется WebDeepseek/api/server.js (HTTP API) и WebDeepseek/api/botManager.js (управление пулом ботов).
  */
 
 const proxyChain = require('proxy-chain');
-
-const fs = require('fs');
-const path = require('path');
 
 const puppeteerExtra = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 
 const { log, error } = require('./utils/logger');
+const { toBool, DEFAULT_SERVICE } = require('./utils/env');
 const { login } = require('./modules/auth');
 const { sendMessage: sendMessageViaUi } = require('./modules/promtps');
 const data = require('./data.json');
@@ -33,24 +31,6 @@ function ensureStealth() {
     if (stealthApplied) return;
     puppeteerExtra.use(StealthPlugin());
     stealthApplied = true;
-}
-
-// function resolveChromePath() {
-//     const env = process.env.CHROME_PATH;
-//     if (env && fs.existsSync(env)) return env;
-
-//     const portable = path.resolve(__dirname, 'chr', 'chrome.exe');
-//     if (fs.existsSync(portable)) return portable;
-
-//     return '';
-// }
-
-function toBool(v, def) {
-    if (v === undefined || v === null || v === '') return def;
-    const s = String(v).toLowerCase().trim();
-    if (['1', 'true', 'yes', 'y', 'on'].includes(s)) return true;
-    if (['0', 'false', 'no', 'n', 'off'].includes(s)) return false;
-    return def;
 }
 
 function getViewport() {
@@ -110,7 +90,7 @@ class Bot {
     };
 
     async _login() {
-        const model = process.env.SERVICE_MODEL || 'deepseek';
+        const model = process.env.SERVICE_MODEL || DEFAULT_SERVICE;
         const username = cleanEnvStr(process.env.BOT_USERNAME);
         const password = cleanEnvStr(process.env.BOT_PASSWORD);
         if (!username || !password) {
@@ -135,8 +115,7 @@ class Bot {
         // Инициализация: запуск Chrome, настройка stealth-плагина, прокси, логин.
         ensureStealth();
 
-        const headless = "new";//toBool(process.env.HEADLESS, false);
-        //const executablePath = resolveChromePath();
+        const headless = toBool(process.env.HEADLESS, false) ? 'new' : false;
         const { server: proxyServerRaw, user: proxyUser, pass: proxyPass } = resolveProxy();
         let proxyServer = proxyServerRaw;
         log(`[bot#${this.id}] proxy configured: ${proxyServer ? 'yes' : 'no'}`);
@@ -195,7 +174,7 @@ class Bot {
         // Login at bot start (required by your lifecycle)
         await this._login();
 
-        const model = process.env.SERVICE_MODEL || 'deepseek';
+        const model = process.env.SERVICE_MODEL || DEFAULT_SERVICE;
         log(`[bot#${this.id}] init ok (model=${model})`);
     }
 
@@ -268,8 +247,8 @@ class Bot {
         // Map API payload -> worker UI payload
         // API может прислать model в стиле OpenAI (например "gpt-4o").
         // Для UI-бота нам нужен ключ сервиса из worker/data.json (например "deepseek").
-        const requested = payload?.serviceModel || payload?.model || process.env.SERVICE_MODEL || 'deepseek';
-        const model = (data?.services && data.services[requested]) ? requested : (process.env.SERVICE_MODEL || 'deepseek');
+        const requested = payload?.serviceModel || payload?.model || process.env.SERVICE_MODEL || DEFAULT_SERVICE;
+        const model = (data?.services && data.services[requested]) ? requested : (process.env.SERVICE_MODEL || DEFAULT_SERVICE);
         const uid = payload?.conversationId ?? payload?.raw?.user_id ?? 'default';
         const message = String(payload?.message ?? '');
         const thinking = !!payload?.thinking;

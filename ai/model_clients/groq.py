@@ -26,7 +26,9 @@ from typing import Tuple
 
 import httpx
 
+from ._base import bearer_headers, make_table_handlers
 from .config import GROQ_TOKEN, proxies
+from .exceptions import map_http_error
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +69,7 @@ def _update_rate_limit_cache(model_key: str, headers: httpx.Headers) -> None:
 
 
 def _get_headers() -> dict:
-    return {
-        "Authorization": f"Bearer {GROQ_TOKEN}",
-        "Content-Type": "application/json",
-    }
+    return bearer_headers(GROQ_TOKEN)
 
 
 def _get_proxy():
@@ -116,15 +115,12 @@ async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = ""
         if model_key:
             _update_rate_limit_cache(model_key, response.headers)
 
-        if response.status_code == 413:
-            return "Превышен лимит токенов для модели. Попробуйте сократить запрос или выберите другую модель.", 0
-        if response.status_code == 429:
-            return "Превышен лимит запросов Groq. Попробуйте позже.", 0
-        if response.status_code == 401:
-            return "Groq API ключ недействителен. Проверьте GROQ_TOKEN.", 0
         if response.status_code != 200:
-            logger.warning("Groq API error: status=%s body=%s", response.status_code, response.text[:500])
-            return f"Ошибка Groq API (код {response.status_code}).", 0
+            # Логируем только неспецифические статусы (413/429/401 в оригинале
+            # возвращались без warning — сохраняем это поведение).
+            if response.status_code not in (401, 413, 429):
+                logger.warning("Groq API error: status=%s body=%s", response.status_code, response.text[:500])
+            return map_http_error(response.status_code, "groq"), 0
 
         data = response.json()
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -139,28 +135,27 @@ async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = ""
         return f"Ошибка Groq API: {exc}", 0
 
 
-# --- Автогенерация функций для каждой модели ---
+# --- Автогенерация функций для каждой модели (через _base.make_table_handlers) ---
 
-def _make_groq_handler(model_key: str):
+
+def _groq_handler_factory(model_key: str, cfg: tuple):
     """Создаёт async-функцию-обработчик для Groq модели по ключу."""
-    groq_model, _max_tokens = GROQ_MODELS[model_key]
+    groq_model, _max_tokens = cfg
 
     async def handler(msg: str, user_id: int) -> str:
         response, _ = await _ask_groq(groq_model, msg, user_id, model_key)
         return response
 
-    handler.__name__ = f"ask_{model_key}_async"
-    handler.__qualname__ = handler.__name__
-    handler.__doc__ = f"Groq {model_key} → {groq_model}"
     return handler
 
 
-# Экспортируем функции с ожидаемыми именами
-ask_Groq_Llama_3_3_70B_async = _make_groq_handler("Groq_Llama_3_3_70B")
-ask_Groq_Llama_3_1_8B_async = _make_groq_handler("Groq_Llama_3_1_8B")
-ask_Groq_Gpt_Oss_120B_async = _make_groq_handler("Groq_Gpt_Oss_120B")
-ask_Groq_Gpt_Oss_20B_async = _make_groq_handler("Groq_Gpt_Oss_20B")
-ask_Groq_Qwen_3_6_27B_async = _make_groq_handler("Groq_Qwen_3_6_27B")
+globals().update(
+    make_table_handlers(
+        GROQ_MODELS,
+        _groq_handler_factory,
+        doc_fn=lambda key, cfg: f"Groq {key} → {cfg[0]}",
+    )
+)
 
 
 async def probe_rate_limits() -> dict[str, dict]:

@@ -22,6 +22,7 @@ from .permissions import (
     can_access_model_status,
     can_access_prompt_admin,
     can_access_prompt_regression,
+    can_access_test_console,
     is_prompt_developer_user,
     is_staff_or_superuser,
 )
@@ -272,12 +273,14 @@ class AIAdminSite(admin.AdminSite):
         context["show_prompt_link"] = can_access_prompt_admin(request)
         context["show_logs_link"] = can_access_logs(request)
         context["show_prompt_regression_link"] = can_access_prompt_regression(request)
+        context["show_test_console_link"] = can_access_test_console(request)
         context["arm_find_error_url"] = "/ai/admin/arm/find-error/"
         context["arm_solve_url"] = "/ai/admin/arm/solve/"
         context["arm_model_status_url"] = "/ai/admin/arm/models/"
         context["arm_model_status_refresh_url"] = "/ai/admin/arm/models/refresh/"
         context["arm_model_status_state_url"] = "/ai/admin/arm/models/state/"
         context["prompt_regression_url"] = "/ai/admin/prompt-regression/"
+        context["test_console_url"] = "/ai/admin/test-console/"
         context["prompt_admin_url"] = "/ai/admin/ai/prompt/"
         context["my_prompt_url"] = "/ai/admin/prompts/my/"
         context["my_prompt_change_url"] = get_my_prompt_admin_url(request)

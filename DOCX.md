@@ -932,7 +932,7 @@ Prompt / SharedPrompt	Препромпты и общие шаблоны.	Под�
 WebSocket consumer	Обработка чата, решения задач, поиска ошибок.	Приходит JSON с type, message, value, progLng, topic, preprompt, code.
 Model clients registry	Выбор провайдера по ключу модели.	Новые модели/провайдеры регистрируются в ai/model_clients/registry.py.
 AIRequestLog	Логирование всех запросов.	Каждый запрос и ARM-прогон записываются в лог.
-Bot pool	Web DeepSeek через Puppeteer.	Сервис в bot/; включается, если нет DEEPSEEK_API_TOKEN.
+Bot pool	Web DeepSeek через Puppeteer.	Сервис в WebDeepseek/; документация — docs/web_deepseek_bot.md; включается, если нет DEEPSEEK_API_TOKEN.
 Model health	Ежедневная проверка доступности моделей.	Запускается автоматически в 04:00 МСК; можно отключить AI_DISABLE_HEALTH_SCHEDULER=1.
 
 7. Логи запросов

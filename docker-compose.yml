@@ -19,20 +19,21 @@ services:
     volumes:
       - .:/app
       - static_volume:/app/staticfiles
-      - bot_node_modules:/app/bot/node_modules
-#      - bot_puppeteer_cache:/app/bot/.puppeteer-cache
+      - WebDeepseek_node_modules:/app/WebDeepseek/node_modules
+#      - WebDeepseek_puppeteer_cache:/app/WebDeepseek/.puppeteer-cache
     ports:
       - "8000:8000"
     env_file:
       - .env
-      - ./bot/.env
-    # NOTE: do NOT remap PUPPETEER_PROXY_* -> BOT_PROXY* here.
+    # NOTE: WebDeepseek/.env no longer exists — all bot vars (PORT, MAX_BOT_COUNT,
+    # BOT_USERNAME/BOT_PASSWORD, BOT_PROXY*, etc.) now live in the root .env.
+    # Do NOT remap PUPPETEER_PROXY_* -> BOT_PROXY* via `environment:` here.
     # `environment:` overrides `env_file:`, so an explicit mapping with an empty
-    # fallback ("${PUPPETEER_PROXY_SERVER:-}") wipes the BOT_PROXY* values that
-    # bot/.env provides, leaving the browser with NO proxy -> login can't reach
-    # chat.deepseek.com -> 401 not_autorized. bot/worker/bot.js resolveProxy()
-    # already falls back to PUPPETEER_PROXY_* when BOT_PROXY is empty, so both
-    # naming schemes work without any mapping here.
+    # fallback ("${PUPPETEER_PROXY_SERVER:-}") wipes BOT_PROXY* from .env,
+    # leaving the browser with NO proxy -> login can't reach chat.deepseek.com
+    # -> 401 not_autorized. WebDeepseek/worker/bot.js resolveProxy() already
+    # falls back to PUPPETEER_PROXY_* when BOT_PROXY is empty, so both naming
+    # schemes work without any mapping here.
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null && python3 -c \"import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://localhost:3000/health', timeout=5)); sys.exit(0 if d.get('ok') and d.get('ready_count',0) > 0 else 1)\""]
       interval: 30s
@@ -93,8 +94,8 @@ volumes:
   redis_data:
     name: "${REDIS_VOLUME_NAME:-dlai_redis_data}"
   static_volume:
-  bot_node_modules:
-  bot_puppeteer_cache:
+  WebDeepseek_node_modules:
+  WebDeepseek_puppeteer_cache:
 
 networks:
   shared-network:

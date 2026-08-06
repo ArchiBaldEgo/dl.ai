@@ -15,6 +15,12 @@
 const express = require('express');
 const { makeChatCompletion, makeOpenAIError } = require('./openaiFormat');
 
+// Минимальный серверный таймаут /api/send и /v1/chat/completions (мс).
+// worker waitLastOuterHtmlStable = 300000 мс — меньший серверный таймаут
+// режет длинные ответы DeepThink → HTTP 500 → retry в Django. Поэтому потолок
+// нельзя опускать ниже 300000, даже если REQUEST_TIMEOUT_MS в .env меньше.
+const REQUEST_TIMEOUT_FLOOR_MS = 300000;
+
 /**
  * Обёртка для таймаута промиса — отклоняет через ms мс.
  * Используется для ограничения времени ожидания ответа от бота.
@@ -143,7 +149,7 @@ function createServer({ botManager, config, logger }) {
         raw: body,
       };
 
-      const raw = await withTimeout(bot.sendMessage(payload), Math.max(config.requestTimeoutMs, 300000));
+      const raw = await withTimeout(bot.sendMessage(payload), Math.max(config.requestTimeoutMs, REQUEST_TIMEOUT_FLOOR_MS));
       const content = typeof raw === 'string' ? raw : raw?.content ?? raw?.text ?? '';
       const usage = typeof raw === 'object' ? raw?.usage : undefined;
 
@@ -210,7 +216,7 @@ function createServer({ botManager, config, logger }) {
         message: String(body.message),
         raw: body,
       };
-      const out = await withTimeout(bot.sendMessage(payload), Math.max(config.requestTimeoutMs, 300000));
+      const out = await withTimeout(bot.sendMessage(payload), Math.max(config.requestTimeoutMs, REQUEST_TIMEOUT_FLOOR_MS));
       const content = typeof out === 'string' ? out : out?.content ?? out?.text ?? '';
       res.json({ ok: true, data: { content } });
     } catch (e) {

@@ -1,32 +1,36 @@
 """Клиенты Web DeepSeek через бот-пул (Puppeteer-based).
 
 Web DeepSeek и Web DeepSeek Thinking обращаются к внешнему бот-пулу
-(bot/api/server.js) через HTTP API. Бот-пул управляет Puppeteer-сессиями
+(WebDeepseek/api/server.js) через HTTP API. Бот-пул управляет Puppeteer-сессиями
 на сайте DeepSeek. Поддерживает автоперезапуск (restart_bot_pool).
 """
 
+import asyncio
 import json
 import logging
 from typing import Tuple
 
 import requests
 
+from ._base import proxy_bypass_session
 from .config import BOT_POOL_URL
-from .exceptions import safe_parse_response
+from .exceptions import map_http_error, safe_parse_response
 
 logger = logging.getLogger(__name__)
 
 
 def _post_to_bot_pool(payload: dict, timeout_seconds: int = 120) -> requests.Response:
     """Internal service call must bypass env proxies (HTTP_PROXY/HTTPS_PROXY)."""
-    with requests.Session() as session:
-        session.trust_env = False
+    session = proxy_bypass_session()
+    try:
         return session.post(
             f"{BOT_POOL_URL}/api/send",
             json=payload,
             headers={"Content-Type": "application/json"},
             timeout=timeout_seconds,
         )
+    finally:
+        session.close()
 
 
 def restart_bot_pool(timeout_seconds: int = 30) -> bool:
@@ -36,15 +40,14 @@ def restart_bot_pool(timeout_seconds: int = 30) -> bool:
     failure. Never raises — callers (the health check) treat a failed restart
     as "still down" and log it.
     """
+    session = proxy_bypass_session()
     try:
-        with requests.Session() as session:
-            session.trust_env = False
-            response = session.post(
-                f"{BOT_POOL_URL}/api/restart",
-                json={},
-                headers={"Content-Type": "application/json"},
-                timeout=timeout_seconds,
-            )
+        response = session.post(
+            f"{BOT_POOL_URL}/api/restart",
+            json={},
+            headers={"Content-Type": "application/json"},
+            timeout=timeout_seconds,
+        )
         if response.status_code < 300:
             logger.info("Bot pool restart acknowledged: %s", response.text[:200])
             return True
@@ -53,6 +56,8 @@ def restart_bot_pool(timeout_seconds: int = 30) -> bool:
     except Exception as exc:
         logger.warning("Bot pool restart failed: %s", exc)
         return False
+    finally:
+        session.close()
 
 
 async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tuple[str, int]:
@@ -65,19 +70,19 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
-            response = await __import__("asyncio").to_thread(_post_to_bot_pool, payload, 300)
+            response = await asyncio.to_thread(_post_to_bot_pool, payload, 300)
         except requests.Timeout:
             if attempt < max_attempts:
                 wait = min(attempt * 5, 20)
                 logger.warning("Bot pool timeout (300s), retrying in %ss (attempt %s/%s)", wait, attempt, max_attempts)
-                await __import__("asyncio").sleep(wait)
+                await asyncio.sleep(wait)
                 continue
             return "Таймаут при подключении к Web DeepSeek (300с). Попробуйте позже.", 0
         except requests.ConnectionError as exc:
             if attempt < max_attempts:
                 wait = min(attempt * 3, 15)
                 logger.warning("Bot pool connection error: %s, retrying in %ss (attempt %s/%s)", exc, wait, attempt, max_attempts)
-                await __import__("asyncio").sleep(wait)
+                await asyncio.sleep(wait)
                 continue
             return f"Ошибка подключения к Web DeepSeek: {exc}", 0
 
@@ -101,23 +106,14 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
                 pass
             if "UI may have changed" in reason or "All answer XPath selectors failed" in reason:
                 return ("DeepSeek изменил интерфейс сайта — селекторы bot-пула устарели, "
-                        "нужно обновить bot/worker/data.json."), 0
+                        "нужно обновить WebDeepseek/worker/data.json."), 0
             if attempt < max_attempts:
                 wait = min(attempt * 3, 15)
                 logger.warning("Bot pool returned %s, retrying in %ss (attempt %s/%s)", response.status_code, wait, attempt, max_attempts)
-                await __import__("asyncio").sleep(wait)
+                await asyncio.sleep(wait)
                 continue
 
-        if response.status_code == 400:
-            return "Неправильный запрос", 0
-        if response.status_code == 401:
-            return "Бот не авторизован. Проверьте логин/пароль", 0
-        if response.status_code == 429:
-            return "Все боты заняты", 0
-        if response.status_code >= 503:
-            return "Бот инициализируется слишком долго. Попробуйте позже.", 0
-
-        return f"Ошибка сервиса Web DeepSeek (код {response.status_code}).", 0
+        return map_http_error(response.status_code, "web_deepseek"), 0
 
 
 async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> str:

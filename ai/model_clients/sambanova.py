@@ -13,6 +13,7 @@ from typing import Tuple, Optional
 
 import requests
 
+from ._base import make_table_handlers
 from .config import (
     SAMBANOVA_MODEL_DEEPSEEK,
     SAMBANOVA_MODEL_DEEPSEEK_R1_DISTILL_LLAMA_70B,
@@ -22,11 +23,9 @@ from .config import (
     SAMBANOVA_MODEL_GEMMA_3_12B_IT,
     SAMBANOVA_MODEL_GPT_OSS,
     SAMBANOVA_MODEL_LLAMA_4_MAVERICK_17B_128E_INSTRUCT,
-    SAMBANOVA_MODEL_META,
     SAMBANOVA_MODEL_META_LLAMA_3_3_70B_INSTRUCT,
     SAMBANOVA_MODEL_MINIMAX_M2_5,
     SAMBANOVA_MODEL_MINIMAX_M2_7,
-    SAMBANOVA_MODEL_MIXTRAL_ALIAS,
     SC_TOKEN,
     proxies,
 )
@@ -175,15 +174,15 @@ async def _ask_sambanova_model_async(
         _log_response(response)
 
         if response.status_code != 200:
-            return extract_api_error_text(str(response.status_code)), "0"
+            return extract_api_error_text(str(response.status_code)), 0
 
         obj, error_message = safe_parse_response(response.text)
         if obj is None:
-            return error_message, "0"
+            return error_message, 0
 
         if "choices" not in obj or not obj["choices"]:
             logger.warning("Unexpected response structure: %s", obj)
-            return "Неожиданный формат ответа от сервера.", "0"
+            return "Неожиданный формат ответа от сервера.", 0
 
         completion_tokens = obj.get("usage", {}).get("completion_tokens", 0)
 
@@ -199,65 +198,62 @@ async def _ask_sambanova_model_async(
 
     except AsyncTimeoutError:
         logger.warning("SambaNova request timeout after %s seconds", timeout)
-        return f"Таймаут запроса ({timeout} сек). Сервер долго не отвечает. Попробуйте позже или уменьшите запрос.", "0"
+        return f"Таймаут запроса ({timeout} сек). Сервер долго не отвечает. Попробуйте позже или уменьшите запрос.", 0
     except requests.exceptions.ConnectionError as e:
         logger.warning("Connection error: %s", e)
-        return classify_network_error(e), "0"
+        return classify_network_error(e), 0
     except requests.exceptions.Timeout:
         logger.warning("Timeout connecting to API")
-        return "Таймаут при подключении к серверу. Попробуйте позже.", "0"
+        return "Таймаут при подключении к серверу. Попробуйте позже.", 0
     except requests.exceptions.RequestException as e:
         logger.warning("Request error: %s", e)
-        return "Ошибка при подключении к серверу API.", "0"
+        return "Ошибка при подключении к серверу API.", 0
     except KeyError as e:
         if is_missing_choices_error(e):
-            return "Ошибка в ответе от сервера AI.", "0"
+            return "Ошибка в ответе от сервера AI.", 0
         raise
     except Exception as e:
         logger.exception("Unexpected error in SambaNova call")
         if is_network_error(e):
-            return "Ошибка подключения. Ваш контекст сохранен, попробуйте позже.", "0"
+            return "Ошибка подключения. Ваш контекст сохранен, попробуйте позже.", 0
         if is_missing_choices_error(e):
-            return "Ошибка в ответе от сервера AI.", "0"
+            return "Ошибка в ответе от сервера AI.", 0
         conversation_history.reset(user_id)
-        return "Что-то пошло не так. Контекст очищен, введите новый запрос.", "0"
+        return "Что-то пошло не так. Контекст очищен, введите новый запрос.", 0
 
 
 # --- Автогенерация функций для каждой модели ---
-# Вместо 13 ручных ask_*_async функций, генерируем их из таблицы.
-# Это устраняет дублирование (DRY) и добавление новой модели = 1 строка в таблице.
+# Вместо ручных ask_*_async функций, генерируем их из таблицы через
+# _base.make_table_handlers (DRY): добавление новой модели = 1 строка в таблице.
 
-def _make_handler(model_key: str):
-    """Создаёт async-функцию-обработчик для модели по ключу из SAMBANOVA_MODELS."""
-    cfg = SAMBANOVA_MODELS[model_key]
+
+def _sambanova_handler_factory(model_key: str, cfg: dict):
+    """Создаёт async-обработчик для модели по ключу из SAMBANOVA_MODELS."""
+    model_name = cfg["model"]
+    max_tokens = cfg["max_tokens"]
+    temperature = cfg.get("temperature")
+    response_field = cfg.get("response_field", "content")
 
     async def handler(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
         return await _ask_sambanova_model_async(
             messages,
             user_id,
-            cfg["model"],
-            max_tokens=cfg["max_tokens"],
-            temperature=cfg.get("temperature"),
-            response_field=cfg.get("response_field", "content"),
+            model_name,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_field=response_field,
         )
 
-    handler.__name__ = f"ask_{model_key}_async"
-    handler.__qualname__ = handler.__name__
-    handler.__doc__ = f"SambaNova {model_key} → {cfg['model']}"
     return handler
 
 
-# Экспортируем функции с ожидаемыми именами
-ask_DeepSeek_R1_Distill_Llama_70B_async = _make_handler("DeepSeek_R1_Distill_Llama_70B")
-ask_DeepSeek_V3_1_async = _make_handler("DeepSeek_V3_1")
-ask_DeepSeek_V3_1_cb_async = _make_handler("DeepSeek_V3_1_cb")
-ask_DeepSeek_V3_2_async = _make_handler("DeepSeek_V3_2")
-ask_Llama_4_Maverick_17B_128E_Instruct_async = _make_handler("Llama_4_Maverick_17B_128E_Instruct")
-ask_Meta_Llama_3_3_70B_Instruct_async = _make_handler("Meta_Llama_3_3_70B_Instruct")
-ask_MiniMax_M2_5_async = _make_handler("MiniMax_M2_5")
-ask_MiniMax_M2_7_async = _make_handler("MiniMax_M2_7")
-ask_Gemma_3_12b_it_async = _make_handler("Gemma_3_12b_it")
-ask_Gpt_oss_120b_async = _make_handler("Gpt_oss_120b")
+globals().update(
+    make_table_handlers(
+        SAMBANOVA_MODELS,
+        _sambanova_handler_factory,
+        doc_fn=lambda key, cfg: f"SambaNova {key} → {cfg['model']}",
+    )
+)
 
 
 # --- Legacy функции (для обратной совместимости) ---
@@ -299,14 +295,14 @@ async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25
         _log_response(response)
 
         if response.status_code != 200:
-            return extract_api_error_text(str(response.status_code)), "0"
+            return extract_api_error_text(str(response.status_code)), 0
 
         obj, error_message = safe_parse_response(response.text)
         if obj is None:
-            return error_message, "0"
+            return error_message, 0
 
         if "choices" not in obj or not obj["choices"]:
-            return "Неожиданный формат ответа от сервера.", "0"
+            return "Неожиданный формат ответа от сервера.", 0
 
         completion_tokens = obj.get("usage", {}).get("completion_tokens", 0)
         assistant_content = obj["choices"][0]["message"].get("content", "")
@@ -315,29 +311,14 @@ async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25
 
     except AsyncTimeoutError:
         logger.warning("DeepSeek-R1 request timeout after %s seconds", timeout)
-        return f"Таймаут запроса ({timeout} сек). Сервер долго не отвечает. Попробуйте позже или уменьшите запрос.", "0"
+        return f"Таймаут запроса ({timeout} сек). Сервер долго не отвечает. Попробуйте позже или уменьшите запрос.", 0
     except requests.exceptions.Timeout:
-        return "Таймаут при подключении к серверу. Попробуйте позже.", "0"
+        return "Таймаут при подключении к серверу. Попробуйте позже.", 0
     except Exception as e:
         logger.exception("Unexpected error in DeepSeek-R1 call")
         if is_network_error(e):
-            return "Отсутствует подключение к интернету.", "0"
+            return "Отсутствует подключение к интернету.", 0
         if is_missing_choices_error(e):
-            return "Ошибка в ответе от сервера AI.", "0"
+            return "Ошибка в ответе от сервера AI.", 0
         conversation_history.reset(user_id)
-        return "Что-то пошло не так. Контекст очищен, введите новый запрос.", "0"
-
-
-async def ask_Meta_Llama_3_1_70B_Instruct_async(messages: str, user_id: int) -> str:
-    """Legacy Meta-Llama alias — маршрутизирует на текущий Meta config."""
-    response, _tokens = await _ask_sambanova_model_async(
-        messages, user_id, SAMBANOVA_MODEL_META, max_tokens=9000,
-    )
-    return response
-
-
-async def ask_Mixtral_8x22b_async(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
-    """Legacy Mixtral alias — маршрутизирует на fallback config."""
-    return await _ask_sambanova_model_async(
-        messages, user_id, SAMBANOVA_MODEL_MIXTRAL_ALIAS, max_tokens=9000,
-    )
+        return "Что-то пошло не так. Контекст очищен, введите новый запрос.", 0

@@ -50,17 +50,8 @@ class ConversationHistory:
             history[:] = history[-self.max_messages :]
         cache.set(self._key(user_id), history, timeout=self.ttl_seconds)
 
-    def add_exchange(self, user_id: Any, user_message: str, assistant_message: str) -> None:
-        self.append(user_id, {"role": "user", "content": user_message})
-        self.append(user_id, {"role": "assistant", "content": assistant_message})
-
     def reset(self, user_id: Any) -> None:
         cache.set(self._key(user_id), [], timeout=self.ttl_seconds)
-
-    def clear_all(self) -> None:
-        # Cache backends do not expose key enumeration in a portable way.
-        # This method is kept for interface compatibility only.
-        pass
 
 
 # Global instance used by the WebSocket consumer and model clients.

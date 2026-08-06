@@ -30,8 +30,8 @@ staticfiles/
 *.swo
 
 # Bot logs
-bot/worker/logs/
-bot/worker/logs/*
+WebDeepseek/worker/logs/
+WebDeepseek/worker/logs/*
 
 # Claude
 .claude/

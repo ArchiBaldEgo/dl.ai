@@ -1014,7 +1014,8 @@ class ConversationHistoryTests(TestCase):
         self.assertEqual(self.history.get("user-1"), [])
 
     def test_add_exchange_appends_messages(self):
-        self.history.add_exchange("user-1", "hello", "hi")
+        self.history.append("user-1", {"role": "user", "content": "hello"})
+        self.history.append("user-1", {"role": "assistant", "content": "hi"})
         self.assertEqual(
             self.history.get("user-1"),
             [
@@ -1024,9 +1025,9 @@ class ConversationHistoryTests(TestCase):
         )
 
     def test_history_caps_at_max_messages(self):
-        self.history.add_exchange("user-1", "a", "A")
-        self.history.add_exchange("user-1", "b", "B")
-        self.history.add_exchange("user-1", "c", "C")
+        for user_msg, assistant_msg in (("a", "A"), ("b", "B"), ("c", "C")):
+            self.history.append("user-1", {"role": "user", "content": user_msg})
+            self.history.append("user-1", {"role": "assistant", "content": assistant_msg})
         # max_messages=4, so after three exchanges (6 messages) we keep the last 4:
         # [assistant A, user b, assistant B, user c, assistant C] -> capped to 4
         # -> [user b, assistant B, user c, assistant C]
@@ -1035,7 +1036,8 @@ class ConversationHistoryTests(TestCase):
         self.assertEqual(history[0]["content"], "b")
 
     def test_reset_clears_history(self):
-        self.history.add_exchange("user-1", "hello", "hi")
+        self.history.append("user-1", {"role": "user", "content": "hello"})
+        self.history.append("user-1", {"role": "assistant", "content": "hi"})
         self.history.reset("user-1")
         self.assertEqual(self.history.get("user-1"), [])
 
@@ -2507,7 +2509,7 @@ class UserTopModelKeysTests(TestCase):
         from ai.model_clients import registry
 
         # Get actual model titles from registry
-        all_keys = list(registry._models.keys())
+        all_keys = list(registry.keys())
         if len(all_keys) < 3:
             self.skipTest("Need at least 3 models in registry")
         key_a = all_keys[0]
@@ -2535,7 +2537,7 @@ class UserTopModelKeysTests(TestCase):
         from ai.views import _get_user_top_model_keys
         from ai.model_clients import registry
 
-        all_keys = list(registry._models.keys())
+        all_keys = list(registry.keys())
         if len(all_keys) < 2:
             self.skipTest("Need at least 2 models in registry")
         key_a = all_keys[0]
@@ -2555,7 +2557,7 @@ class UserTopModelKeysTests(TestCase):
         from ai.views import _get_user_top_model_keys
         from ai.model_clients import registry
 
-        all_keys = list(registry._models.keys())
+        all_keys = list(registry.keys())
         if len(all_keys) < 5:
             self.skipTest("Need at least 5 models in registry")
         for i in range(5):
@@ -2570,7 +2572,7 @@ class UserTopModelKeysTests(TestCase):
         from ai.views import _get_user_top_model_keys
         from ai.model_clients import registry
 
-        all_keys = list(registry._models.keys())
+        all_keys = list(registry.keys())
         if len(all_keys) < 2:
             self.skipTest("Need at least 2 models in registry")
         key_a = all_keys[0]
@@ -2612,7 +2614,7 @@ class UserTopModelKeysTests(TestCase):
         from ai.model_clients import registry
         from django.core.cache import cache
 
-        all_keys = list(registry._models.keys())
+        all_keys = list(registry.keys())
         if len(all_keys) < 2:
             self.skipTest("Need at least 2 models in registry")
         key_a = all_keys[0]

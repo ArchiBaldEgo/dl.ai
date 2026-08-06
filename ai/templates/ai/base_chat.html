@@ -31,11 +31,22 @@
                 </select>
                 <select id="select">
                     {% if available_models %}
-                        {% for model in available_models %}
-                            <option value="{{ model.key }}">
-                                {{ model.title }}
-                            </option>
-                        {% endfor %}
+                        {% if favorite_models %}
+                            <optgroup label="Часто используемые">
+                                {% for model in favorite_models %}
+                                    <option value="{{ model.key }}">
+                                        {{ model.title }}
+                                    </option>
+                                {% endfor %}
+                            </optgroup>
+                        {% endif %}
+                        <optgroup label="Все модели">
+                            {% for model in other_models %}
+                                <option value="{{ model.key }}">
+                                    {{ model.title }}
+                                </option>
+                            {% endfor %}
+                        </optgroup>
                     {% else %}
                         <option value="" selected disabled>Сегодня нет доступных моделей</option>
                     {% endif %}

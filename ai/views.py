@@ -67,13 +67,13 @@ from .serializers import (
 )
 
 
-def _get_user_top_model_keys(request, limit=2):
+def _get_user_top_model_keys(request, limit=1):
     """Возвращает list of model_key для топ-N моделей пользователя по частоте использования.
     Считает по AIRequestLog (только success). Сопоставляет title из логов с key из registry.
 
     Результат кешируется per-user на 120 c (ключ ``ai:user_top:{user_id}:{limit}``),
     чтобы не делать per-render scan AIRequestLog, добавленный коммитом ed4d528.
-    Топ-2 пользователя меняется редко; устаревание на 2 минуты незаметно, а перебор
+    Топ-1 пользователя меняется редко; устаревание на 2 минуты незаметно, а перебор
     логов на каждом рендере стартовой страницы был главным регрессором скорости.
     На cache miss перебираются только последние 200 успешных запросов (вместо всей
     истории) — для активных пользователей это убирает скан тысяч строк.
@@ -97,15 +97,13 @@ def _get_user_top_model_keys(request, limit=2):
         if cached is not None:
             return cached
 
-        # Построить map title → key
-        title_to_key = {}
-        for key in registry._models.keys():
-            title_to_key[registry.title(key)] = key
+        # Построить map title → key (через публичный API реестра)
+        title_to_key = registry.title_to_key()
 
         # Срез по epoch: если у AIAppSettings задан favorites_epoch, учитываем
         # только успешные запросы новее этой даты. Это даёт разовый сброс счётчика
         # фаворитов для всех (нет записей новее epoch → user_top пуст → строгий
-        # алфавит), без удаления логов; новые запросы снова набирают топ-2.
+        # алфавит), без удаления логов; новые запросы снова набирают топ-1.
         qs = AIRequestLog.objects.filter(status='success', user_id=user_id)
         try:
             epoch = AIAppSettings.get_solo().favorites_epoch
@@ -142,8 +140,15 @@ _groq_probe_lock = threading.Lock()
 _groq_last_probe = 0.0
 
 
+def _groq_enabled() -> bool:
+    """True, если провайдер Groq включён через ``AI_ENABLE_GROQ``."""
+    return getattr(settings, "AI_ENABLE_GROQ", False)
+
+
 def _run_groq_probe():
     """Фоновый прогрев rate-limit кэша Groq (неблокирующий для HTTP-запроса)."""
+    if not _groq_enabled():
+        return
     try:
         from .model_clients.groq import probe_rate_limits
         loop = asyncio.new_event_loop()
@@ -157,6 +162,8 @@ def _run_groq_probe():
 
 def _maybe_kick_groq_probe():
     """Запускает фоновый probe не чаще раза в 60с (дебаунс)."""
+    if not _groq_enabled():
+        return
     global _groq_last_probe
     with _groq_probe_lock:
         if time.time() - _groq_last_probe < 60:
@@ -177,7 +184,13 @@ def get_groq_limits_view(request):
     текущий (возможно пустой) кэш, чтобы фронтенд показал «загрузка…» и повторил через
     минуту (initModelLimitsWidget опрашивает раз в 60с). Дебаунс 60с предотвращает
     спам probe-ами при параллельных запросах.
+
+    Когда ``AI_ENABLE_GROQ`` выключен (по умолчанию), всегда возвращает
+    ``{"limits": {}}`` и не запускает probe — отключённый провайдер не трогается.
     """
+    if not _groq_enabled():
+        return JsonResponse({"limits": {}})
+
     from .model_clients.groq import get_rate_limits
 
     cache = get_rate_limits()
@@ -285,8 +298,9 @@ def _render_ai_page(request, template_name, extra_context=None):
     """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
 
     Проверяет доступ, загружает список доступных моделей (с self-heal при пустом
-    списке), сортирует их (топ-2 фаворита пользователя → Web_DeepSeek приоритет →
-    алфавит), и добавляет external_session_id + сохранённый из куки язык.
+    списке), сортирует их (топ-1 фаворит пользователя → алфавит) и разбивает на
+    группы favorite_models/other_models для optgroup-разделителя в шаблоне, и
+    добавляет external_session_id + сохранённый из куки язык.
     """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
@@ -306,24 +320,33 @@ def _render_ai_page(request, template_name, extra_context=None):
         except Exception:
             logger.exception("Failed to trigger model health self-heal refresh")
     if available_models:
-        # Топ-2 фаворита пользователя (по частоте использования) — наверх.
-        user_top = _get_user_top_model_keys(request, limit=2)
+        # Топ-1 фаворит пользователя (по частоте использования) — наверх.
+        user_top = _get_user_top_model_keys(request, limit=1)
         model_map = {item["key"]: item for item in available_models}
         user_picks = [model_map[k] for k in user_top if k in model_map]
 
         # Остальные — строго по алфавиту (title). Без отдельного приоритета
-        # Web_DeepSeek: фавориты наверху, далее алфавит (включая Web_DeepSeek).
+        # Web_DeepSeek: фаворит наверху, далее алфавит (включая Web_DeepSeek).
         used_keys = set(user_top)
         rest = sorted(
             [item for item in available_models if item["key"] not in used_keys],
             key=lambda x: x["title"].lower(),
         )
 
+        # Плоский список для обратной совместимости (тесты проверяют порядок).
         available_models = user_picks + rest
+        # Группы для optgroup-разделителя в шаблоне: топ-1 фаворит + остальные.
+        favorite_models = user_picks[:1]
+        other_models = sorted(rest + user_picks[1:], key=lambda x: x["title"].lower())
+    else:
+        favorite_models = []
+        other_models = []
     saved_state = _read_ai_state(request)
     external_session_id = request.session.get('external_session_id')
     context = {
         'available_models': available_models,
+        'favorite_models': favorite_models,
+        'other_models': other_models,
         'external_session_id': external_session_id,
         'last_update_date': _get_last_update_date(),
         'saved_lang': saved_state.get('lang') or '',

@@ -57,7 +57,7 @@
 ## Структура проекта
 
 ```
-bot/
+WebDeepseek/
 ├── api/
 │   ├── index.js         # entrypoint, поднимает Express
 │   ├── server.js        # роуты /v1/chat/completions, /api/send, /health
@@ -77,15 +77,18 @@ bot/
 │   └── utils/
 │       ├── logger.js    # запись в worker/logs/application.log
 │       └── helpers.js   # sleep и т.п.
-├── .env                 # секреты (логин/пароль DeepSeek и настройки пула)
 ├── Dockerfile
 ├── docker-compose.linux.yml
 └── package.json
 ```
 
+> Переменные окружения для bot pool больше не живут в `WebDeepseek/.env` — они консолидированы в корневом `.env` репозитория (см. раздел `Bot pool (Web DeepSeek) worker` в `.env.example`). Локальный `WebDeepseek/.env` больше не читается.
+
 ---
 
 ## Конфигурация (`.env`)
+
+Все переменные bot pool живут в **едином корневом `.env` репозитория** (раньше был отдельный `WebDeepseek/.env`, теперь он не читается). Шаблон — см. раздел `Bot pool (Web DeepSeek) worker` в корневом `.env.example`.
 
 | Переменная | Значение по умолчанию | Описание |
 |---|---|---|
@@ -99,7 +102,7 @@ bot/
 | `BOT_USERNAME` | — | Email от аккаунта DeepSeek (**обязательно**) |
 | `BOT_PASSWORD` | — | Пароль от аккаунта DeepSeek (**обязательно**) |
 
-Пример `.env`:
+Пример (фрагмент корневого `.env`):
 
 ```env
 PORT=3000
@@ -116,7 +119,7 @@ BOT_USERNAME=your_email@gmail.com
 BOT_PASSWORD=your_password
 ```
 
-> ⚠️ Не коммить `.env` в git. Если репа публичная — обязательно ротируй пароль.
+> ⚠️ Не коммить `.env` в git. Если репа публичная — обязательно ротируй пароль. Docker Compose подхватывает корневой `.env` через `--env-file ../.env` (см. «Запуск» ниже).
 
 ---
 
@@ -337,9 +340,9 @@ curl http://localhost:3000/health
 
 ### `401 not_autorized`
 
-- Проверь `BOT_USERNAME`/`BOT_PASSWORD` в `.env` — нет ли лишних пробелов, кавычек, экранирования
+- Проверь `BOT_USERNAME`/`BOT_PASSWORD` в корневом `.env` (раздел `Bot pool (Web DeepSeek) worker`) — нет ли лишних пробелов, кавычек, экранирования
 - Попробуй вручную залогиниться на chat.deepseek.com тем же логином — может, аккаунт временно залочен или DeepSeek просит капчу. Капчу бот не умеет решать.
-- В Docker `.env` загружается из `env_file: .env` — убедись, что файл точно есть в контексте сборки
+- В Docker переменные подхватываются из корневого `.env` через `--env-file ../.env` — убедись, что файл существует в корне репозитория
 
 ### `503 No bots ready. Starting a bot.`
 

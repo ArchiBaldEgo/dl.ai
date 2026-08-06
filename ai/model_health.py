@@ -37,7 +37,7 @@ _manual_refresh_started = False
 from .model_clients import registry
 from .model_clients.web_deepseek import restart_bot_pool
 
-# Web DeepSeek models served by the bot/ pool — candidates for auto-recovery.
+# Web DeepSeek models served by the WebDeepseek/ pool — candidates for auto-recovery.
 WEB_DEEPSEEK_KEYS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
 _AUTORECOVERY_BACKOFF_SECONDS = 8
 

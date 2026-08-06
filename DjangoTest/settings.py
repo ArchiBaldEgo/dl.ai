@@ -273,6 +273,11 @@ AI_WS_RATE_LIMIT = int(os.getenv("AI_WS_RATE_LIMIT", "120"))
 AI_HTTP_RATE_LIMIT = int(os.getenv("AI_HTTP_RATE_LIMIT", "60"))
 AI_RATE_LIMIT_WINDOW = int(os.getenv("AI_RATE_LIMIT_WINDOW", "60"))
 
-# When Web DeepSeek is detected as down, restart the bot/ pool and re-check once.
+# When Web DeepSeek is detected as down, restart the WebDeepseek/ pool and re-check once.
 AI_WEB_DEEPSEEK_AUTORECOVERY = _env_bool("AI_WEB_DEEPSEEK_AUTORECOVERY", default=True)
+
+# Provider gates (default off = current behaviour: providers disabled).
+# When True, the SambaNova / Groq model entries are imported and registered.
+AI_ENABLE_SAMBANOVA = _env_bool("AI_ENABLE_SAMBANOVA", default=False)
+AI_ENABLE_GROQ = _env_bool("AI_ENABLE_GROQ", default=False)
 

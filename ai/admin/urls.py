@@ -31,6 +31,11 @@ from .prompt_regression import (
     admin_prompt_regression_status_view,
 )
 from .site import ai_admin_site
+from .test_console import (
+    admin_test_console_view,
+    admin_test_console_start_view,
+    admin_test_console_status_view,
+)
 from .updates import admin_updates_view
 
 
@@ -55,6 +60,9 @@ def get_ai_admin_urls():
         path("prompt-regression/start/", ai_admin_site.admin_view(admin_prompt_regression_start_view), name="ai_prompt_regression_start"),
         path("prompt-regression/status/", ai_admin_site.admin_view(admin_prompt_regression_status_view), name="ai_prompt_regression_status"),
         path("prompt-regression/", ai_admin_site.admin_view(admin_prompt_regression_view), name="ai_prompt_regression"),
+        path("test-console/start/", ai_admin_site.admin_view(admin_test_console_start_view), name="ai_test_console_start"),
+        path("test-console/status/", ai_admin_site.admin_view(admin_test_console_status_view), name="ai_test_console_status"),
+        path("test-console/", ai_admin_site.admin_view(admin_test_console_view), name="ai_test_console"),
         path("prompts/my/", ai_admin_site.admin_view(admin_my_prompt_view), name="ai_my_prompt"),
         path("updates/", ai_admin_site.admin_view(admin_updates_view), name="ai_updates"),
         path("ai/airequestlog/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),

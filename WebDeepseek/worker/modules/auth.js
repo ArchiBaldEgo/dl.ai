@@ -5,19 +5,12 @@ const data = require('../data.json');
 
 const { error } = require('../utils/logger');
 const { waitAndTypeX, waitAndClickX, waitForXPathCompat } = require('../core/page-utils');
+const { toBool } = require('../utils/env');
 
 const LOG_DIR = path.join(__dirname, '../logs');
 
 function ensureLogDir() {
     if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
-}
-
-function toBool(v, def = false) {
-    if (v === undefined || v === null || v === '') return def;
-    const s = String(v).toLowerCase().trim();
-    if (['1', 'true', 'yes', 'y', 'on'].includes(s)) return true;
-    if (['0', 'false', 'no', 'n', 'off'].includes(s)) return false;
-    return def;
 }
 
 function isAuthDebugEnabled() {
@@ -176,61 +169,6 @@ async function login(ctx, payload = {}) {
     }
 }
 
-async function register(ctx, payload) {
-    const page = ctx?.page;
-
-    if (!page) 
-        return { ok: false, reason: 'ctx.page is missing' };
-
-    try {
-        let currentService = payload.model;
-
-        await ctx.page.goto(data.registerUrls[currentService]);
-
-        await waitAndTypeX(page, data.xpaths.register.emailLabel[currentService], payload.username);
-        await waitAndTypeX(page, data.xpaths.register.passwordLabel[currentService], payload.password);
-        await waitAndTypeX(page, data.xpaths.register.confirmPasswordLabel[currentService], payload.password);
-        await waitAndClickX(page, data.xpaths.register.sendCodeButton[currentService]);
-
-        let code = "123123";
-        //let code = await getCodeByAPI(..., payload.emailApiKey, ...);
-        await waitAndTypeX(page, data.xpaths.register.codeLabel[currentService], code);
-        await waitAndClickX(page, data.xpaths.register.signUpButton[currentService]);
-
-        // тут логика для получения ошибки о том что такая учетка уже создана или возвращение ok = true
-
-        /*const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: timeWait })
-            .then(() => 'nav')
-            .catch(() => 'nav_timeout');
-
-        const badPromise = ctx.page.waitForXPath(data.xpaths.incorrectPassMessage[currentService], {timeout: timeWait})
-            .then(() => 'bad')
-            .catch(() => 'bad_timeout');
-
-        const clickOk = await waitAndClickX(page, data.xpaths.authButton[currentService]);
-        if (!clickOk) 
-            return { ok: false, reason: 'click failed' };
-
-        const winner = await Promise.race([navPromise, badPromise]);
-
-        if (winner === 'bad') {
-            return {
-                ok: false,
-                reason: "incorrect password or account don't reggered"
-            }
-        }*/
-
-        return {
-            ok: true
-        }
-    } catch (er) {
-        return {
-            ok: false
-        }
-    };
-}
-
 module.exports = {
-    login,
-    register
+    login
 };

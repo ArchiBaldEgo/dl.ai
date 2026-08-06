@@ -21,6 +21,7 @@ from typing import Tuple
 
 from ollama import Client
 
+from ._base import make_table_handlers
 from .config import OLLAMA_HOST, OLLAMA_API_KEY
 
 logger = logging.getLogger(__name__)
@@ -110,24 +111,22 @@ async def _ask_ollama(
     return content, int(tokens)
 
 
-# --- Автогенерация функций для каждой модели ---
+# --- Автогенерация функций для каждой модели (через _base.make_table_handlers) ---
 
-def _make_handler(model_key: str):
-    cfg = OLLAMA_MODELS[model_key]
+
+def _ollama_handler_factory(model_key: str, cfg: dict):
+    model_id = cfg["model"]
 
     async def handler(msg: str, user_id: int) -> Tuple[str, int]:
-        return await _ask_ollama(msg, user_id, cfg["model"])
+        return await _ask_ollama(msg, user_id, model_id)
 
-    handler.__name__ = f"ask_{model_key}_async"
-    handler.__qualname__ = handler.__name__
-    handler.__doc__ = cfg["description"]
     return handler
 
 
-# Экспорт
-ask_Ollama_Glm_5_2_Cloud_async = _make_handler("Ollama_Glm_5_2_Cloud")
-ask_Ollama_Gemma_4_Cloud_async = _make_handler("Ollama_Gemma_4_Cloud")
-ask_Ollama_Qwen_3_5_Cloud_async = _make_handler("Ollama_Qwen_3_5_Cloud")
-ask_Ollama_Nemotron_3_Super_Cloud_async = _make_handler("Ollama_Nemotron_3_Super_Cloud")
-ask_Ollama_Kimi_K2_7_Code_Cloud_async = _make_handler("Ollama_Kimi_K2_7_Code_Cloud")
-ask_Ollama_Kimi_K2_6_Cloud_async = _make_handler("Ollama_Kimi_K2_6_Cloud")
+globals().update(
+    make_table_handlers(
+        OLLAMA_MODELS,
+        _ollama_handler_factory,
+        doc_fn=lambda key, cfg: cfg["description"],
+    )
+)

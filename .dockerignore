@@ -32,11 +32,11 @@ ENV/
 *.log
 
 # Bot build artifacts
-bot/node_modules/
-bot/.cache/
-bot/.puppeteer-cache/
-bot/chrome*
-bot/chromium*
+WebDeepseek/node_modules/
+WebDeepseek/.cache/
+WebDeepseek/.puppeteer-cache/
+WebDeepseek/chrome*
+WebDeepseek/chromium*
 
 # Non-runtime files — not needed in the web image (collectstatic rebuilds
 # staticfiles in-container via the static_volume; doc/*.docx and *.md are not

@@ -99,8 +99,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip --proxy="$HTTP_PROXY" && \
     pip install --proxy="$HTTP_PROXY" --default-timeout=100 -r requirements.txt
 # Node.js зависимости
-WORKDIR /app/bot
-COPY bot/package.json bot/package-lock.json ./
+WORKDIR /app/WebDeepseek
+COPY WebDeepseek/package.json WebDeepseek/package-lock.json ./
 # puppeteer 20.9.0 не имеет CLI `puppeteer` — Chromium качает его postinstall (install.js)
 # во время npm ci. Задаём PUPPETEER_CACHE_DIR и прокси, чтобы скачалось в /opt/puppeteer-cache.
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
@@ -119,7 +119,7 @@ FROM apt-base AS runtime
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /usr/bin/node /usr/local/bin/node
 COPY --from=builder /opt/puppeteer-runtime /opt/puppeteer-runtime
-COPY --from=builder /app/bot/node_modules /app/bot/node_modules
+COPY --from=builder /app/WebDeepseek/node_modules /app/WebDeepseek/node_modules
 COPY --from=builder /app /app
 ENV PATH="/opt/venv/bin:$PATH" \
     PUPPETEER_CACHE_DIR=/opt/puppeteer-runtime \
@@ -129,4 +129,4 @@ ENV PATH="/opt/venv/bin:$PATH" \
 WORKDIR /app
 EXPOSE 8000 3000
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["bash", "-c", "python manage.py sync_update_log || true; exec node /app/bot/api/index.js & exec daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application & wait -n"]
+CMD ["bash", "-c", "python manage.py sync_update_log || true; exec node /app/WebDeepseek/api/index.js & exec daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application & wait -n"]

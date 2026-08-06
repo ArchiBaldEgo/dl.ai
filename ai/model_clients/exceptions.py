@@ -82,6 +82,71 @@ def extract_api_error_text(response_text: str) -> str:
     return f"Ошибка API (код {response_text})."
 
 
+# --- HTTP status → friendly Russian message (per-provider) ---
+#
+# Консолидирует почти-дублирующиеся if-лестницы из openrouter/groq/web_deepseek.
+# Сообщения, совпадающие у провайдеров, — общие (413); отличающиеся —
+# индивидуальны по ``provider``. ``map_http_error`` возвращает None только для
+# status == 200 (успех); для любого не-200 всегда есть friendly-fallback.
+
+# 413 — общий для OpenRouter и Groq (одинаковая формулировка в обоих клиентах).
+_TOO_MANY_TOKENS = "Превышен лимит токенов для модели. Попробуйте сократить запрос или выберите другую модель."
+
+
+def map_http_error(status: int, provider: str) -> Optional[str]:
+    """Вернуть понятное русское сообщение об ошибке для HTTP-статуса.
+
+    Args:
+        status: HTTP status code ответа.
+        provider: один из ``"openrouter"``, ``"groq"``, ``"web_deepseek"``
+            (определяет формулировки для 401/429/5xx и generic-fallback).
+
+    Returns:
+        Friendly-сообщение; для ``status == 200`` — None (вызов успешен).
+        Для прочих не-200 — всегда непустая строка (включая generic-fallback
+        ``"Ошибка <provider> API (код N)."``).
+    """
+    if status == 200:
+        return None
+
+    if status == 400 and provider == "web_deepseek":
+        return "Неправильный запрос"
+
+    if status == 401:
+        if provider == "web_deepseek":
+            return "Бот не авторизован. Проверьте логин/пароль"
+        if provider == "openrouter":
+            return "OpenRouter API ключ недействителен. Проверьте OPENROUTER_API_KEY."
+        if provider == "groq":
+            return "Groq API ключ недействителен. Проверьте GROQ_TOKEN."
+
+    if status == 413:
+        # Общее сообщение для OpenRouter/Groq; web_deepseek не использует 413
+        # и попадёт в generic-fallback ниже.
+        if provider in ("openrouter", "groq"):
+            return _TOO_MANY_TOKENS
+
+    if status == 429:
+        if provider == "web_deepseek":
+            return "Все боты заняты"
+        if provider == "openrouter":
+            return "Превышен лимит запросов OpenRouter (free tier). Попробуйте позже."
+        if provider == "groq":
+            return "Превышен лимит запросов Groq. Попробуйте позже."
+
+    if status >= 503 and provider == "web_deepseek":
+        return "Бот инициализируется слишком долго. Попробуйте позже."
+
+    # generic-fallback (формат совпадает с прежними per-провайдер сообщениями).
+    if provider == "openrouter":
+        return f"Ошибка OpenRouter API (код {status})."
+    if provider == "groq":
+        return f"Ошибка Groq API (код {status})."
+    if provider == "web_deepseek":
+        return f"Ошибка сервиса Web DeepSeek (код {status})."
+    return f"Ошибка API (код {status})."
+
+
 _MODEL_ERROR_PATTERNS = (
     # (sequence of substrings, friendly message)
     (

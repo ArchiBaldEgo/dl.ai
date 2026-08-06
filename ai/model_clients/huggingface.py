@@ -1,5 +1,7 @@
 """Клиенты моделей через HuggingFace InferenceClient (Mistral, Gemma)."""
 
+import asyncio
+
 from huggingface_hub import InferenceClient
 
 from .config import HF_TOKEN
@@ -32,7 +34,7 @@ async def ask_Gemma_7b_async(messages: str, user_id: int) -> str:
     history = conversation_history.get(user_id)
     history.append({"role": "user", "content": messages})
     try:
-        response = await __import__("asyncio").to_thread(
+        response = await asyncio.to_thread(
             requests.post,
             "https://api.groq.com/openai/v1/chat/completions",
             json={
