@@ -1,0 +1,137 @@
+/* AI admin chrome: global "Инструменты ИИ" toolbar + compactness overrides.
+   Loaded once via admin/base_site.html{% block extrastyle %} so it applies to
+   every admin page (stock ModelAdmin changelists + custom tool pages).
+
+   Convention: page <style> blocks live in the body and therefore win source
+   order over this file for equal specificity. The compactness overrides below
+   therefore use !important deliberately — they are a single override layer. */
+
+/* ───────────────────────────── Toolbar ───────────────────────────── */
+
+.ai-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2000;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  background: var(--body-bg);
+  border-bottom: 1px solid var(--hairline-color);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.ai-toolbar__group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-toolbar__sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 4px;
+  background: var(--hairline-color);
+  opacity: 0.7;
+}
+
+.ai-toolbar__label {
+  color: var(--body-quiet-color);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 2px;
+  white-space: nowrap;
+}
+
+.ai-tb {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border: 1px solid var(--hairline-color);
+  border-radius: 999px;
+  background: var(--darkened-bg);
+  color: var(--body-fg);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.ai-tb:hover {
+  background: var(--button-bg);
+  color: var(--button-fg);
+  border-color: transparent;
+  text-decoration: none;
+}
+
+/* Current page: render as a non-link (per requirement — links leading to the
+   page the admin is already on must stop being links). No cursor, no hover. */
+.ai-tb--active {
+  background: var(--button-bg);
+  color: var(--button-fg);
+  border-color: transparent;
+  cursor: default;
+  pointer-events: none;
+  opacity: 1;
+}
+
+/* Slim divider inside the brand/home group */
+.ai-tb--home {
+  font-weight: 700;
+}
+
+/* On very narrow viewports let the bar scroll horizontally instead of wrapping
+   too aggressively. */
+@media (max-width: 720px) {
+  .ai-toolbar__label { display: none; }
+  .ai-toolbar__sep { display: none; }
+  .ai-toolbar { gap: 4px; padding: 6px 10px; }
+}
+
+/* ───────────────────── Compactness overrides ───────────────────── */
+
+/* Fill horizontal space instead of centering a narrow column on wide screens.
+   Applies to every custom tool page wrapper. */
+.ai-wrap-full,
+.arm-wrap,
+.prt-wrap,
+.status-wrap,
+.tc-wrap,
+.ai-log-detail {
+  max-width: 100% !important;
+  margin: 0 !important;
+}
+
+/* Tighter page headings — the stock 28px headers eat vertical space. */
+.arm-title-block h1,
+.prt-title-block h1,
+.tc-title-block h1,
+.status-wrap > h1,
+.ai-log-detail > h1 {
+  font-size: 22px !important;
+  margin-top: 0 !important;
+}
+
+/* Slightly lighter cards so more content fits above the fold. */
+.arm-card,
+.prt-card,
+.status-card,
+.tc-card {
+  padding: 14px !important;
+  margin-bottom: 12px !important;
+}
+
+/* Keep tables readable when the page goes full width — let them use the space. */
+.arm-summary-table,
+.status-table,
+.prt-summary-table {
+  width: 100% !important;
+}

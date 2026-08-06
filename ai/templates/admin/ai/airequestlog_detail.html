@@ -44,7 +44,6 @@
   <pre class="ai-log-block">{{ log.response_text|default:"(пусто)" }}</pre>
 
   <div class="ai-log-actions">
-    {% include "admin/ai/_ai_back_nav.html" %}
     <a class="button" href="{% url 'ai_request_logs' %}">← Назад к логам</a>
     <button type="button" id="resend-btn" class="default" data-log-id="{{ log.id }}">Повторить запрос</button>
   </div>

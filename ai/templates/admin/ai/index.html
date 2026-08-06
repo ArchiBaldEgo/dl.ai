@@ -3,15 +3,11 @@
 
 {% comment %}AI admin dashboard. Extends the stock admin/index.html so the main
 column renders the standard permission-filtered app_list (every registered
-ModelAdmin the user can see, with Add/Change links and proper dashboard.css)
-and the left nav-sidebar stays hidden (no duplicate list). The custom
-non-ModelAdmin tool pages are consolidated into the right #content-related
-sidebar -- one place for all AI admin pages. Wrapping the tools in
-#content-related makes them inherit the stock gutter + responsive CSS, so no
-custom CSS is needed.{% endcomment %}
+ModelAdmin the user can see, with Add/Change links and proper dashboard.css).
 
-{% block sidebar %}
-<div id="content-related">
-  {% include "admin/ai/_ai_sidebar_tools.html" %}
-</div>
-{% endblock %}
+The "Инструменты ИИ" hub no longer lives in a right-hand #content-related
+column — it is now the global toolbar injected by admin/base_site.html, so it
+is visible on EVERY admin page (not just the dashboard) and frees this column
+to fill the full width. No sidebar override here on purpose: the stock
+{% block sidebar %} stays empty, so no #content-related column is rendered and
+the app_list uses the full row.{% endcomment %}

@@ -1,0 +1,22 @@
+{% extends "admin/base.html" %}
+{% load static %}
+
+{% comment %}Project-wide admin chrome override. The whole admin is the AI
+AdminSite (ai/admin/site.py), so customising admin/base_site here only affects
+that site — there is no second AdminSite in use.
+
+The "Инструменты ИИ" toolbar is injected right after the stock header by
+appending to {% block header %}. Stock admin pages (changelists, change forms,
+history) override branding/nav-global/usertools but NEVER the header block
+itself, so {{ block.super }} preserves their rendering and the appended
+toolbar shows on every page. {% endcomment %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/css/ai_admin.css' %}">
+{% endblock %}
+
+{% block header %}
+  {{ block.super }}
+  {% include "admin/ai/_ai_toolbar.html" %}
+{% endblock %}

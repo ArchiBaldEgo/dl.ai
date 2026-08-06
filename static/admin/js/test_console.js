@@ -1,7 +1,11 @@
 // Тестовая консоль: запуск прогона + поллинг статуса (зеркало prompt_regression.js).
 // POST start -> {ok, run_id, run}; GET status -> {ok, run}; поллинг setTimeout 1500ms,
-// пока run.status === "running". Все динамические тексты (method/class_ru/traceback/log)
-// вставляются через textContent/escapeHtml — без raw innerHTML.
+// пока run.status === "running".
+//
+// Журнал вывода — массив записей {"text","kind"}: понятный человеческий текст
+// (stage/ok/fail/skip/warn/human/final-ok/final-fail) рисуется крупно и с цветом,
+// технический шум (raw — трейсбеки, вывод логгеров) — приглушённым моноширинным
+// шрифтом. Каждая запись рендерится отдельной строкой через textContent (без raw innerHTML).
 (function () {
   "use strict";
   var config = window.TEST_CONSOLE_CONFIG || {};
@@ -16,12 +20,16 @@
   var runError = document.getElementById("tcRunError");
   var summaryCard = document.getElementById("tcSummaryCard");
   var summaryBox = document.getElementById("tcSummary");
-  var resultsCard = document.getElementById("tcResultsCard");
-  var resultsList = document.getElementById("tcResultsList");
   var logBox = document.getElementById("tcLog");
 
   var currentRunId = "";
   var pollTimer = null;
+
+  // Допустимые виды подсветки журнала (маппятся 1:1 на CSS-классы .tc-log-<kind>).
+  var KNOWN_KINDS = {
+    raw: 1, stage: 1, ok: 1, fail: 1, skip: 1, warn: 1,
+    human: 1, "final-ok": 1, "final-fail": 1
+  };
 
   function escapeHtml(v) {
     return String(v == null ? "" : v)
@@ -53,10 +61,6 @@
     if (t) runProgress.classList.add("active"); else runProgress.classList.remove("active");
   }
 
-  function statusBadge(status, status_ru) {
-    var cls = "tc-badge " + escapeHtml(status || "");
-    return '<span class="' + cls + '">' + escapeHtml(status_ru || status || "") + '</span>';
-  }
   function renderSummary(s) {
     if (!s) { if (summaryCard) summaryCard.style.display = "none"; if (summaryBox) summaryBox.textContent = ""; return; }
     var lines = [
@@ -76,42 +80,32 @@
     }
     if (summaryCard) summaryCard.style.display = "block";
   }
-  function renderResults(results) {
-    if (!resultsList) return;
-    if (!Array.isArray(results) || !results.length) {
-      resultsList.textContent = "";
-      if (resultsCard) resultsCard.style.display = "none";
-      return;
-    }
-    resultsList.textContent = "";
-    results.forEach(function (r) {
-      var row = document.createElement("div");
-      row.className = "tc-result-row";
-      row.innerHTML =
-        statusBadge(r.status, r.status_ru) +
-        '<span class="tc-method"></span>' +
-        '<span class="tc-class-ru"></span>';
-      var methodSpan = row.querySelector(".tc-method");
-      var classSpan = row.querySelector(".tc-class-ru");
-      if (methodSpan) methodSpan.textContent = r.method || "";
-      if (classSpan) classSpan.textContent = r.class_ru || r.class || "";
-      resultsList.appendChild(row);
-      if (r.traceback) {
-        var pre = document.createElement("pre");
-        pre.className = "tc-tb";
-        pre.textContent = r.traceback;
-        resultsList.appendChild(pre);
-      }
-    });
-    if (resultsCard) resultsCard.style.display = "block";
-  }
+
   function renderLog(log) {
-    if (logBox) logBox.textContent = Array.isArray(log) ? log.join("\n") : "";
+    if (!logBox) return;
+    logBox.textContent = "";
+    if (!Array.isArray(log) || !log.length) return;
+    log.forEach(function (entry) {
+      var text, kind;
+      if (entry && typeof entry === "object") {
+        text = entry.text == null ? "" : String(entry.text);
+        kind = entry.kind || "raw";
+      } else {
+        text = entry == null ? "" : String(entry);
+        kind = "raw";
+      }
+      if (!Object.prototype.hasOwnProperty.call(KNOWN_KINDS, kind)) kind = "raw";
+      var line = document.createElement("div");
+      line.className = "tc-log-line " + kind;
+      line.textContent = text;
+      logBox.appendChild(line);
+    });
+    // Держать журнал прокрученным к свежим строкам.
+    logBox.scrollTop = logBox.scrollHeight;
   }
 
   function applyRunSnapshot(run) {
     if (!run) return;
-    renderResults(run.results || []);
     renderSummary(run.summary || null);
     renderLog(run.log || []);
     if (run.status === "running") {
@@ -161,7 +155,7 @@
     setRunError("");
     setRunProgress("Запускаем проверки…");
     renderSummary(null);
-    renderResults([]);
+    renderLog([]);
     fetch(START_URL, {
       method: "POST", credentials: "same-origin",
       headers: {

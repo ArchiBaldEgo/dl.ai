@@ -324,12 +324,13 @@ def _parse_test_output(line_iter):
                 })
             else:
                 # Заголовок с инжектированным контентом (или пустой) → pending.
+                # Саму строку-заголовок в лог не пишем —narратив этого сценария
+                # появится, когда придёт закрывающая bare-строка статуса.
                 pending = {
                     "method": method,
                     "dotted": dotted,
                     "class": _extract_class(dotted, method),
                 }
-                yield ("log", line)
             continue
         m = RAN_RE.match(line)
         if m:
@@ -391,15 +392,49 @@ def start_test_run():
     return run_id, ""
 
 
-def _append_log(run_id, line):
+def _append_log(run_id, text, kind="raw"):
+    """Дополнить Журнал вывода одной строкой.
+
+    Каждая запись — ``{"text", "kind"}``. ``kind`` управляет подсветкой на
+    фронте: понятный человеческий текст (``stage``/``ok``/``fail``/``skip``/
+    ``warn``/``human``/``final-ok``/``final-fail``) рисуется крупно и с цветом,
+    технический шум (``raw`` — трейсбеки, инжектированный вывод логгеров) —
+    приглушённым моноширинным шрифтом. Так человек видит нарратив, а не сырое
+    ``verbosity=2``.
+    """
     with _jobs_lock:
         job = _jobs.get(run_id)
         if job is None:
             return
-        job["log"].append(line)
+        job["log"].append({"text": str(text), "kind": kind})
         if len(job["log"]) > _MAX_LOG_LINES:
             del job["log"][: len(job["log"]) - _MAX_LOG_LINES]
         job["updated_at_ts"] = time.time()
+
+
+# Текстовый маркер и вид подсветки по нормализованному статусу теста.
+_RESULT_MARK = {
+    "ok": ("✓", "ok"),
+    "fail": ("✗", "fail"),
+    "error": ("✗", "fail"),
+    "skipped": ("○", "skip"),
+    "expected_failure": ("◐", "skip"),
+    "unexpected_success": ("✗", "fail"),
+}
+
+
+def _format_test_line(class_ru, method, status, reason=""):
+    """Понятная строка-нарратив одного сценария: маркер + русская группа + метод."""
+    mark, kind = _RESULT_MARK.get(status, ("•", "raw"))
+    base = f"{mark} {class_ru} · {method}"
+    if status == "ok":
+        return base, "ok"
+    if status in ("skipped", "expected_failure"):
+        suffix = STATUS_RU.get(status, status)
+        if reason:
+            suffix += f": {reason}"
+        return f"{base} — {suffix}", kind
+    return f"{base} — {STATUS_RU.get(status, status)}", kind
 
 
 def _run_worker(run_id):
@@ -424,33 +459,35 @@ def _run_worker(run_id):
                 job["updated_at_ts"] = time.time()
         return
 
-    _append_log(run_id, "▶ Запускаем проверки…")
+    _append_log(run_id, "▶ Запускаем проверки…", kind="stage")
 
-    results_by_key = {}  # (method, class) -> result dict (для аттача трейсбека)
 
     for kind, payload in _parse_test_output(proc.stdout):
         if kind == "result":
-            payload["class_ru"] = CLASS_TITLES_RU.get(payload["class"], payload["class"])
-            payload["status_ru"] = STATUS_RU.get(payload["status"], payload["status"])
-            results_by_key[(payload["method"], payload["class"])] = payload
+            class_ru = CLASS_TITLES_RU.get(payload["class"], payload["class"])
+            line_text, line_kind = _format_test_line(
+                class_ru, payload["method"], payload["status"], payload.get("reason", ""),
+            )
+            _append_log(run_id, line_text, kind=line_kind)
             with _jobs_lock:
                 job = _jobs.get(run_id)
                 if job is not None:
-                    job["results"].append(payload)
-                    job["completed"] = len(job["results"])
-                    job["current"] = f"{payload['method']} ({payload['dotted_class']})"
+                    job["completed"] = (job.get("completed") or 0) + 1
+                    job["current"] = f"{class_ru} · {payload['method']}"
                     job["updated_at_ts"] = time.time()
         elif kind == "traceback":
-            r = results_by_key.get((payload["method"], payload["class"]))
-            if r is not None:
-                r["traceback"] = payload["traceback"]
-                with _jobs_lock:
-                    job = _jobs.get(run_id)
-                    if job is not None:
-                        job["updated_at_ts"] = time.time()
-            else:
-                # Не нашли совпадения — трейсбек в raw-лог.
-                _append_log(run_id, payload["traceback"])
+            class_ru = CLASS_TITLES_RU.get(payload["class"], payload["class"])
+            # Понятный заголовок-нарратив, под ним — приглушённый трейсбек.
+            _append_log(
+                run_id,
+                f"Подробности ошибки — {class_ru} · {payload['method']}:",
+                kind="fail",
+            )
+            _append_log(run_id, payload["traceback"], kind="raw")
+            with _jobs_lock:
+                job = _jobs.get(run_id)
+                if job is not None:
+                    job["updated_at_ts"] = time.time()
         elif kind == "summary":
             with _jobs_lock:
                 job = _jobs.get(run_id)
@@ -458,7 +495,11 @@ def _run_worker(run_id):
                     job["total"] = payload["ran"]
                     job["_seconds"] = payload["seconds"]
                     job["updated_at_ts"] = time.time()
-            _append_log(run_id, f"Пройдено {payload['ran']} сценариев за {payload['seconds']} с.")
+            _append_log(
+                run_id,
+                f"Пройдено {payload['ran']} сценариев за {payload['seconds']} с.",
+                kind="human",
+            )
         elif kind == "final":
             with _jobs_lock:
                 job = _jobs.get(run_id)
@@ -476,11 +517,15 @@ def _run_worker(run_id):
                     job["summary"] = summary
                     job["updated_at_ts"] = time.time()
             if payload["ok"]:
-                _append_log(run_id, "✅ ИТОГ: все сценарии прошли успешно.")
+                _append_log(run_id, "✅ ИТОГ: все сценарии прошли успешно.", kind="final-ok")
             else:
-                _append_log(run_id, "❌ ИТОГ: есть провалы или ошибки — смотрите карточку «Результаты по сценариям».")
+                _append_log(
+                    run_id,
+                    "❌ ИТОГ: есть провалы или ошибки — подробности выше, в журнале.",
+                    kind="final-fail",
+                )
         elif kind == "log":
-            _append_log(run_id, payload)
+            _append_log(run_id, payload, kind="raw")
 
     proc.wait()
 
@@ -493,7 +538,7 @@ def _run_worker(run_id):
                     "Тестовый прогон завершился без итоговой строки (возможно, "
                     "упал импорт/сборка). Смотрите журнал вывода."
                 )
-                _append_log(run_id, "⚠ Не удалось получить итог — проверьте журнал ниже.")
+                _append_log(run_id, "⚠ Не удалось получить итог — проверьте журнал ниже.", kind="warn")
             else:
                 job["status"] = "completed"
             job["updated_at_ts"] = time.time()

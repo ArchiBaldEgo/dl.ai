@@ -1,14 +1,8 @@
 {% extends "admin/app_index.html" %}
 {% load i18n %}
 
-{% comment %}Per-app admin index (/ai/admin/ai/). Inherits the stock app_list
-rendering and breadcrumbs from admin/app_index.html -> admin/index.html. The
-stock app_index empties the sidebar; we override it with the same #content-
-related AI-tools module as the dashboard, so the hub is consistent on every
-admin page and inherits the stock gutter/responsive CSS.{% endcomment %}
-
-{% block sidebar %}
-<div id="content-related">
-  {% include "admin/ai/_ai_sidebar_tools.html" %}
-</div>
-{% endblock %}
+{% comment %}Per-app admin index (/ai/admin/ai/). AIAdminSite.app_index redirects
+this URL to admin:index, so this template is effectively never rendered — kept
+for safety in case the redirect is bypassed. The global toolbar
+(admin/base_site.html) already carries the AI tools, so no sidebar override is
+needed.{% endcomment %}

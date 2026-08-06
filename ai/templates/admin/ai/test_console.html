@@ -8,39 +8,52 @@
 
 {% block content %}
 <style>
-  .tc-wrap { max-width: 1280px; margin: 0 auto; color: var(--body-fg); }
-  .tc-title-block h1 { margin: 0 0 6px; font-size: 28px; line-height: 1.2; }
-  .tc-subtitle { color: var(--body-quiet-color); margin: 0 0 18px; max-width: 900px; line-height: 1.45; }
+  .tc-wrap { max-width: 960px; margin: 0 auto; color: var(--body-fg); }
+  .tc-title-block h1 { margin: 0 0 4px; font-size: 22px; line-height: 1.2; }
+  .tc-subtitle { color: var(--body-quiet-color); margin: 0 0 14px; max-width: 900px; line-height: 1.4; font-size: 13px; }
   .tc-card { background: var(--body-bg); border: 1px solid var(--hairline-color);
-             border-radius: 8px; padding: 18px; margin-bottom: 16px;
+             border-radius: 6px; padding: 12px; margin-bottom: 12px;
              box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
-  .tc-card h2 { margin: 0 0 10px; font-size: 18px; }
-  .tc-form p { color: var(--body-quiet-color); line-height: 1.45; }
-  .tc-form code { background: var(--darkened-bg); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
-  .tc-badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; font-weight:600; min-width: 84px; text-align:center; }
-  .tc-badge.ok { background:#e3f4e3; color:#1a7d1a; }
-  .tc-badge.fail, .tc-badge.error, .tc-badge.unexpected_success { background:#fde3e3; color:#c93b3b; }
-  .tc-badge.skipped { background:#eee; color: var(--body-quiet-color); }
-  .tc-badge.expected_failure { background:#fef3e3; color:#9a6a00; }
-  .tc-spinner { width:16px; height:16px; border:2px solid var(--hairline-color);
+  .tc-card h2 { margin: 0 0 8px; font-size: 15px; }
+  .tc-form p { color: var(--body-quiet-color); line-height: 1.4; font-size: 13px; margin: 0 0 8px; }
+  .tc-spinner { width:14px; height:14px; border:2px solid var(--hairline-color);
                 border-top-color: var(--body-fg); border-radius:50%;
                 display:inline-block; animation: tc-spin 0.8s linear infinite; }
   @keyframes tc-spin { to { transform: rotate(360deg); } }
-  .tc-status-line { display:none; align-items:center; gap:10px; margin:12px 0; color: var(--body-quiet-color); }
+  .tc-status-line { display:none; align-items:center; gap:10px; margin:8px 0;
+                    color: var(--body-quiet-color); font-size: 13px; }
   .tc-status-line.active { display:flex; }
-  .tc-result-row { display:flex; align-items:center; gap:10px; padding:6px 0;
-                   border-bottom:1px solid var(--hairline-color); font-size:13px; }
-  .tc-result-row .tc-method { font-family: monospace; }
-  .tc-result-row .tc-class-ru { color: var(--body-quiet-color); }
-  .tc-tb { white-space:pre-wrap; background: var(--darkened-bg); border:1px solid var(--hairline-color);
-           border-radius:4px; padding:8px; max-height:320px; overflow:auto; font-size:12px; margin:4px 0 10px; }
-  .tc-log { white-space:pre-wrap; background: var(--darkened-bg); border:1px solid var(--hairline-color);
-            border-radius:4px; padding:10px; max-height:340px; overflow:auto; font-size:12px;
-            font-family: monospace; }
-  .tc-error { color:#c93b3b; font-weight:600; margin:10px 0; }
-  .tc-summary-line { margin: 2px 0; }
+  .tc-summary-line { margin: 2px 0; font-size: 13px; }
+  .tc-error { color:#c93b3b; font-weight:600; margin:8px 0; font-size: 13px; }
+
+  /* Журнал вывода: понятный человеческий текст — крупно и с цветной полосой слева,
+     технический шум (трейсбеки, вывод логгеров) — приглушенным моноширинным шрифтом. */
+  .tc-log {
+    background: var(--darkened-bg); border:1px solid var(--hairline-color);
+    border-radius:6px; padding:10px 12px; max-height:560px; overflow:auto;
+    font-size:13px; line-height:1.5;
+  }
+  .tc-log-line { padding:1px 0 1px 10px; border-left:3px solid transparent;
+                 white-space:pre-wrap; word-break:break-word; }
+  .tc-log-line.raw { font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+                     font-size:11.5px; color:var(--body-quiet-color); opacity:0.82;
+                     border-left-color: var(--hairline-color); margin-left:6px; }
+  .tc-log-line.stage { font-weight:700; font-size:14px; margin-top:10px;
+                       color: var(--body-fg); border-left-color: var(--body-quiet-color); }
+  .tc-log-line.stage:first-child { margin-top:0; }
+  .tc-log-line.ok { color:#1a7d1a; border-left-color:#1a7d1a; }
+  .tc-log-line.fail { color:#c93b3b; font-weight:600; border-left-color:#c93b3b; }
+  .tc-log-line.skip { color: var(--body-quiet-color); border-left-color:#9a6a00; }
+  .tc-log-line.warn { color:#9a6a00; font-weight:700; border-left-color:#9a6a00; }
+  .tc-log-line.human { font-weight:600; border-left-color:#2563eb; color: var(--body-fg); margin-top:6px; }
+  .tc-log-line.final-ok { font-weight:700; font-size:15px; color:#1a7d1a;
+                          border-left-color:#1a7d1a; margin-top:10px; }
+  .tc-log-line.final-fail { font-weight:700; font-size:15px; color:#c93b3b;
+                            border-left-color:#c93b3b; margin-top:10px; }
+
   .button { display:inline-block; padding:6px 14px; border:1px solid var(--hairline-color);
-            border-radius:4px; background: var(--darkened-bg); color: var(--body-fg); text-decoration:none; cursor: pointer; }
+            border-radius:4px; background: var(--darkened-bg); color: var(--body-fg);
+            text-decoration:none; cursor: pointer; font-size:13px; }
   .button.default { background: var(--button-bg); color: var(--button-fg); border-color:transparent; }
   .button:disabled { opacity: 0.55; cursor: not-allowed; }
 </style>
@@ -49,17 +62,18 @@
   <div class="tc-title-block">
     <h1>Тестовая консоль</h1>
     <p class="tc-subtitle">
-      Здесь запускаются проверки приложения. Тесты выполняются в отдельном окружении
-      и не трогают рабочую базу данных. Имена сценариев — английские (это технические
-      идентификаторы); названия групп и итоговые статусы — на русском.
+      Здесь запускаются проверки приложения — в отдельном окружении, без влияния на
+      рабочую базу. Весь ход прогона описывается по-русски в «Журнале вывода» ниже:
+      каждый сценарий — отдельная строка (зелёная — прошёл, красная — провал,
+      серая — пропущен). Технические подробности ошибок (трейсбеки) показываются
+      приглушённым шрифтом под соответствующей строкой.
     </p>
   </div>
 
   <div class="tc-card">
     <form id="tcRunForm" method="post" class="tc-form">
       {% csrf_token %}
-      <p>Тестовая БД создаётся и удаляется автоматически. Одновременно возможен только
-        один прогон (общая тестовая БД).</p>
+      <p>Тестовая база создаётся и удаляется автоматически. Одновременно возможен только один прогон.</p>
       <div id="tcRunError" class="tc-error" {% if not error_message %}style="display:none"{% endif %}>{{ error_message }}</div>
       <div id="tcRunProgress" class="tc-status-line">
         <span class="tc-spinner" aria-hidden="true"></span>
@@ -72,11 +86,6 @@
   <div id="tcSummaryCard" class="tc-card" style="display:none">
     <h2>Итог</h2>
     <div id="tcSummary"></div>
-  </div>
-
-  <div id="tcResultsCard" class="tc-card" style="display:none">
-    <h2>Результаты по сценариям</h2>
-    <div id="tcResultsList"></div>
   </div>
 
   <div class="tc-card">
