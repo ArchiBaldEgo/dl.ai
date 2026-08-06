@@ -1,18 +1,14 @@
 # syntax=docker/dockerfile:1
-# ==================== БИЛДЕР ====================
-FROM python:3.11-bookworm AS builder
+# ==================== ОБЩИЙ БАЗОВЫЙ СЛОЙ (apt — один раз) ====================
+# Рантайм-зависимости Chromium + git/curl/tini ставятся ОДИН раз и наследуются
+# builder'ом и рантаймом, чтобы не дублировать медленный apt через прокси в каждой
+# стадии. apt-кэш (mount type=cache) НЕ используется намеренно: при обязательном
+# корпоративном прокси кэшированные apt-индексы и .deb часто рассинхронизируются
+# и вызывают Hash Sum mismatch. No-Cache=True форсирует свежие индексы/пакеты.
+FROM python:3.11-slim-bookworm AS apt-base
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
-# Separate proxy for npm/Puppeteer Chromium download. May contain credentials,
-# so it is used only inside the builder stage and does not leak to the runtime image.
-ARG NPM_HTTP_PROXY
-ARG NPM_HTTPS_PROXY
-# Все системные зависимости за один RUN
-# NOTE: apt-кэш НЕ используется (mount type=cache убран), потому что при
-# обязательном корпоративном прокси кэшированные apt-индексы и .deb часто
-# рассинхронизируются и вызывают Hash Sum mismatch. No-Cache=True форсирует
-# получение свежих индексов/пакетов через прокси.
 RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
     rm -rf /var/lib/apt/lists/partial /var/cache/apt/archives/partial && \
     apt-get update \
@@ -32,23 +28,39 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
         -o Acquire::Languages=none \
         -o Acquire::Retries=10 \
         -o Acquire::http::Timeout=300 \
+        -o Acquire::http::No-Cache=True \
         -o Acquire::https::No-Cache=True \
-        -o Acquire::https::No-Cache=True \
-        ca-certificates curl gnupg tini libpq-dev \
+        ca-certificates curl git tini \
         fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 \
         libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 libgbm1 \
         libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 \
         libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
         libxkbcommon0 libxrandr2 xdg-utils && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/* && \
-    # NodeSource repo is NOT reachable directly from the build host (unlike
-    # deb.debian.org), so route the setup + nodejs install through the corporate
-    # proxy (NPM_HTTP_PROXY — the same one that reaches the npm registry and
-    # Chromium). Download the script to a file first: the old `curl | bash -`
-    # pipe masked a failed fetch (bash exits 0 on empty input) and silently fell
-    # back to Debian's nodejs, which ships without npm -> "npm: not found".
-    printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' \
+    rm -rf /var/lib/apt/lists/*
+# curl нужен healthcheck в compose; git — для sync_update_log (читает git log из
+# примонтированного .git, см. CMD); tini — entrypoint; lib* — рантайм-зависимости
+# Chromium для Puppeteer. ffmpeg НЕ ставим из apt — он приходит pip-пакетом
+# imageio-ffmpeg (см. requirements.txt).
+
+# ==================== БИЛДЕР ====================
+# Базируется на apt-base, чтобы переиспользовать уже установленные curl/ca-certificates
+# и не тянуть libpq-dev / lib* (psycopg2-binary — это wheel; puppeteer лишь скачивает
+# архив Chromium, не запуская его — рантайм-либы на этапе сборки не нужны).
+FROM apt-base AS builder
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+# Отдельный прокси для npm/Puppeteer Chromium download и NodeSource. Может содержать
+# credentials, используется только внутри builder-стадии и не утекает в рантайм.
+ARG NPM_HTTP_PROXY
+ARG NPM_HTTPS_PROXY
+# NodeSource repo недоступен напрямую с хоста сборки (в отличие от deb.debian.org),
+# поэтому setup + nodejs идут через корпоративный прокси (NPM_HTTP_PROXY — тот же, что
+# достаёт npm-registry и Chromium). Скрипт сначала скачивается в файл: старый
+# `curl | bash -` маскировал неудачный fetch (bash выходит 0 на пустом вводе) и
+# молча откатывался на debian'овский nodejs без npm -> "npm: not found".
+RUN printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' \
         "$NPM_HTTP_PROXY" "$NPM_HTTPS_PROXY" > /etc/apt/apt.conf.d/99-nodesource-proxy && \
     export http_proxy="$NPM_HTTP_PROXY" https_proxy="$NPM_HTTPS_PROXY" && \
     curl --proxy "$NPM_HTTP_PROXY" -fsSL -o /tmp/nodesource-setup.sh \
@@ -78,7 +90,6 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
     rm -f /etc/apt/apt.conf.d/99-nodesource-proxy && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
-# ffmpeg НЕ ставим из apt — он приходит pip-пакетом imageio-ffmpeg (см. requirements.txt)
 # Виртуальное окружение Python
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -102,42 +113,10 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     cp -r /opt/puppeteer-cache/. /opt/puppeteer-runtime/
 COPY . .
 # ==================== РАНТАЙМ ====================
-FROM python:3.11-slim-bookworm
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
-    rm -rf /var/lib/apt/lists/partial /var/cache/apt/archives/partial && \
-    apt-get update \
-        -o Acquire::http::Proxy="$HTTP_PROXY" \
-        -o Acquire::https::Proxy="$HTTPS_PROXY" \
-        -o Acquire::http::Pipeline-Depth=0 \
-        -o Acquire::https::Pipeline-Depth=0 \
-        -o Acquire::Languages=none \
-        -o Acquire::Retries=5 \
-        -o Acquire::http::No-Cache=True \
-        -o Acquire::https::No-Cache=True && \
-    apt-get install -y --no-install-recommends --fix-missing \
-        -o Acquire::http::Proxy="$HTTP_PROXY" \
-        -o Acquire::https::Proxy="$HTTPS_PROXY" \
-        -o Acquire::http::Pipeline-Depth=0 \
-        -o Acquire::https::Pipeline-Depth=0 \
-        -o Acquire::Languages=none \
-        -o Acquire::Retries=10 \
-        -o Acquire::http::Timeout=300 \
-        -o Acquire::http::No-Cache=True \
-        -o Acquire::https::No-Cache=True \
-        ca-certificates curl git fonts-liberation libasound2 libatk-bridge2.0-0 \
-        libatk1.0-0 libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 \
-        libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 \
-        libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
-        libxkbcommon0 libxrandr2 xdg-utils && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-# curl нужен healthcheck в compose; git — для sync_update_log (читает git log из
-# примонтированного .git, см. CMD); ffmpeg убран; retries/No-Cache как в билдере
+# Базируется на apt-base — рантайм-библиотеки уже стоят, отдельный apt не нужен
+# (раньше тут был второй полный apt-get install lib* через медленный прокси).
+FROM apt-base AS runtime
 COPY --from=builder /opt/venv /opt/venv
-COPY --from=builder /usr/bin/tini /usr/bin/tini
 COPY --from=builder /usr/bin/node /usr/local/bin/node
 COPY --from=builder /opt/puppeteer-runtime /opt/puppeteer-runtime
 COPY --from=builder /app/bot/node_modules /app/bot/node_modules
