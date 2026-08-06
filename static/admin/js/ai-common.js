@@ -845,7 +845,7 @@ var localization = {
         groqRequests: "запросов/min",
         groqRequestsDaily: "запросов/день",
         groqRemaining: "Осталось",
-        loadTimeFooter: "Загрузка: {total} мс (сервер {ttfb} мс)"
+        loadTimeFooter: "Загрузка: {total} мс"
     },
     English: {
         send: "Send",
@@ -908,7 +908,7 @@ var localization = {
         groqRequests: "requests/min",
         groqRequestsDaily: "requests/day",
         groqRemaining: "Remaining",
-        loadTimeFooter: "Load: {total} ms (server {ttfb} ms)"
+        loadTimeFooter: "Load: {total} ms"
     },
     French: {
         send: "Envoyer",
@@ -971,7 +971,7 @@ var localization = {
         groqRequests: "requêtes/min",
         groqRequestsDaily: "requêtes/jour",
         groqRemaining: "Restant",
-        loadTimeFooter: "Chargement : {total} ms (serveur {ttfb} ms)"
+        loadTimeFooter: "Chargement : {total} ms"
     }
 };
 
@@ -1375,15 +1375,13 @@ window.addEventListener('load', function () { setTimeout(updateLoadTimeFooter, 0
 
 function _readNavTiming() {
     function pos(v) { return (typeof v === 'number' && isFinite(v) && v > 0) ? Math.round(v) : 0; }
-    var ttfb = 0, total = 0;
+    var total = 0;
     // Level 2: Navigation Timing entry (значения относительно timeOrigin)
     try {
         var entries = performance.getEntriesByType && performance.getEntriesByType('navigation');
         var nav = entries && entries.length ? entries[0] : null;
         if (nav) {
             var start = pos(nav.startTime); // для navigation-записи это 0
-            // TTFB = время от старта навигации до первого байта ответа.
-            ttfb = Math.max(0, pos(nav.responseStart) - start);
             total = Math.max(0, pos(nav.loadEventEnd) - start);
             // loadEventEnd может быть 0, если тайминг ещё не закрыт — берём domComplete.
             if (!total) {
@@ -1393,21 +1391,18 @@ function _readNavTiming() {
         }
     } catch (e) {}
     // Level 1 fallback: performance.timing (абсолютные таймстампы от navigationStart)
-    if (!ttfb || !total) {
+    if (!total) {
         var t = (typeof performance !== 'undefined' && performance.timing) ? performance.timing : null;
         if (t) {
             var ns = pos(t.navigationStart);
-            if (!ttfb) ttfb = Math.max(0, pos(t.responseStart) - ns);
+            total = Math.max(0, pos(t.loadEventEnd) - ns);
             if (!total) {
-                total = Math.max(0, pos(t.loadEventEnd) - ns);
-                if (!total) {
-                    var end2 = pos(t.domComplete) || pos(t.domContentLoadedEventEnd) || pos(t.responseEnd);
-                    total = end2 ? Math.max(0, end2 - ns) : 0;
-                }
+                var end2 = pos(t.domComplete) || pos(t.domContentLoadedEventEnd) || pos(t.responseEnd);
+                total = end2 ? Math.max(0, end2 - ns) : 0;
             }
         }
     }
-    return { ttfb: ttfb, total: total };
+    return { total: total };
 }
 
 function updateLoadTimeFooter() {
@@ -1416,8 +1411,8 @@ function updateLoadTimeFooter() {
         var lang = 'Russian';
         try { if (typeof getAiState === 'function') lang = getAiState().lang || 'Russian'; } catch (e) {}
         var dict = (localization[lang]) || localization['Russian'] || {};
-        var fmt = dict.loadTimeFooter || 'Загрузка: {total} мс (сервер {ttfb} мс)';
+        var fmt = dict.loadTimeFooter || 'Загрузка: {total} мс';
         var el = document.getElementById('load-time-footer');
-        if (el) el.textContent = fmt.replace('{total}', tm.total).replace('{ttfb}', tm.ttfb);
+        if (el) el.textContent = fmt.replace('{total}', tm.total);
     } catch (e) {}
 }
