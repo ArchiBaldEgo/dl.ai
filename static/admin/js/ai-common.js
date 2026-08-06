@@ -1364,22 +1364,60 @@ function initModelLimitsWidget() {
     }
 }
 
-// === Page load time indicator (per-user, individual) ===
-// Измеряется через Navigation Timing API на событии `load` и пишется в футер
-// #load-time-footer (base_chat.html). ttfb — серверная часть (auth-middleware +
-// per-user топ моделей + рендер), total — полная загрузка страницы. Регистрация
-// через addEventListener, а не window.onload=, т.к. chat_template.js:107
+// === Индикатор времени загрузки страницы (per-user, по центру внизу) ===
+// Navigation Timing API: Level 2 (getEntriesByType('navigation')) с fallback на
+// Level 1 (performance.timing) для старых Safari/Edge.
+// ВАЖНО: loadEventEnd заполняется ТОЛЬКО после завершения события `load`, поэтому
+// чтение отложено через setTimeout(0) — иначе во всех браузерах total = 0.
+// Регистрация через addEventListener, а не window.onload=, т.к. chat_template.js:107
 // перезаписывает window.onload присваиванием.
-window.addEventListener('load', function () {
+window.addEventListener('load', function () { setTimeout(updateLoadTimeFooter, 0); });
+
+function _readNavTiming() {
+    function pos(v) { return (typeof v === 'number' && isFinite(v) && v > 0) ? Math.round(v) : 0; }
+    var ttfb = 0, total = 0;
+    // Level 2: Navigation Timing entry (значения относительно timeOrigin)
     try {
-        var nav = (performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || {};
-        var ttfb = Math.max(0, Math.round((nav.responseStart - nav.requestStart) || 0));
-        var total = Math.max(0, Math.round((nav.loadEventEnd - nav.startTime) || 0));
+        var entries = performance.getEntriesByType && performance.getEntriesByType('navigation');
+        var nav = entries && entries.length ? entries[0] : null;
+        if (nav) {
+            var start = pos(nav.startTime); // для navigation-записи это 0
+            // TTFB = время от старта навигации до первого байта ответа.
+            ttfb = Math.max(0, pos(nav.responseStart) - start);
+            total = Math.max(0, pos(nav.loadEventEnd) - start);
+            // loadEventEnd может быть 0, если тайминг ещё не закрыт — берём domComplete.
+            if (!total) {
+                var end = pos(nav.domComplete) || pos(nav.domContentLoadedEventEnd) || pos(nav.responseEnd);
+                total = end ? Math.max(0, end - start) : 0;
+            }
+        }
+    } catch (e) {}
+    // Level 1 fallback: performance.timing (абсолютные таймстампы от navigationStart)
+    if (!ttfb || !total) {
+        var t = (typeof performance !== 'undefined' && performance.timing) ? performance.timing : null;
+        if (t) {
+            var ns = pos(t.navigationStart);
+            if (!ttfb) ttfb = Math.max(0, pos(t.responseStart) - ns);
+            if (!total) {
+                total = Math.max(0, pos(t.loadEventEnd) - ns);
+                if (!total) {
+                    var end2 = pos(t.domComplete) || pos(t.domContentLoadedEventEnd) || pos(t.responseEnd);
+                    total = end2 ? Math.max(0, end2 - ns) : 0;
+                }
+            }
+        }
+    }
+    return { ttfb: ttfb, total: total };
+}
+
+function updateLoadTimeFooter() {
+    try {
+        var tm = _readNavTiming();
         var lang = 'Russian';
         try { if (typeof getAiState === 'function') lang = getAiState().lang || 'Russian'; } catch (e) {}
         var dict = (localization[lang]) || localization['Russian'] || {};
         var fmt = dict.loadTimeFooter || 'Загрузка: {total} мс (сервер {ttfb} мс)';
         var el = document.getElementById('load-time-footer');
-        if (el) el.textContent = fmt.replace('{total}', total).replace('{ttfb}', ttfb);
+        if (el) el.textContent = fmt.replace('{total}', tm.total).replace('{ttfb}', tm.ttfb);
     } catch (e) {}
-});
+}
