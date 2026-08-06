@@ -69,10 +69,15 @@ async function login(ctx, payload = {}) {
     const loginUrl = data?.loginUrls?.[currentService];
     const loginXPath = data?.xpaths?.auth?.loginLabel?.[currentService];
     const passwordXPath = data?.xpaths?.auth?.passwordLabel?.[currentService];
-    const authButtonXPath = data?.xpaths?.auth?.authButton?.[currentService];
+    // authButton может быть строкой (один XPath) или списком (приоритетный порядок,
+    // первый успешно кликнутый выигрывает) — чтобы на sign_in не попасть в OAuth-кнопку.
+    const authButtonRaw = data?.xpaths?.auth?.authButton?.[currentService];
+    const authButtonXPaths = Array.isArray(authButtonRaw)
+        ? authButtonRaw
+        : (authButtonRaw ? [authButtonRaw] : []);
     const incorrectPassXPath = data?.xpaths?.auth?.incorrectPassMessage?.[currentService];
 
-    if (!loginUrl || !loginXPath || !passwordXPath || !authButtonXPath) {
+    if (!loginUrl || !loginXPath || !passwordXPath || !authButtonXPaths.length) {
         return {
             ok: false,
             reason: 'missing auth selectors or login url for service',
@@ -102,7 +107,12 @@ async function login(ctx, payload = {}) {
             .then(() => 'bad')
             .catch(() => 'bad_timeout');
 
-        const clickOk = await waitAndClickX(page, authButtonXPath);
+        // Перебираем кандидаты authButton по приоритету — кликаем первый найденный.
+        let clickOk = false;
+        for (const xp of authButtonXPaths) {
+            clickOk = await waitAndClickX(page, xp);
+            if (clickOk) break;
+        }
         if (!clickOk) {
             await writeAuthDebugArtifacts(page, 'auth_button_missing');
             return { ok: false, reason: 'click failed' };

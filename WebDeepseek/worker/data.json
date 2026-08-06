@@ -18,10 +18,15 @@
                 "deepseek": "//input[@type='password']"
             },
             "authButton": {
-                "deepseek": "//div[contains(@class,'ds-button--filled') and contains(@class,'ds-button--primary')]"
+                "deepseek": [
+                    "//div[contains(@class,'ds-button') and .//span[normalize-space()='Log in' or normalize-space()='Sign in' or normalize-space()='Войти' or normalize-space()='登录']]",
+                    "//button[.//span[normalize-space()='Log in' or normalize-space()='Sign in' or normalize-space()='Войти']]",
+                    "//div[contains(@class,'ds-button') and .//text()[normalize-space()='Log in' or normalize-space()='Sign in' or normalize-space()='Войти']]",
+                    "//div[contains(@class,'ds-button--filled') and contains(@class,'ds-button--primary')]"
+                ]
             },
             "incorrectPassMessage": {
-                "deepseek": "//div[contains(text(), 'password is incorrect') or contains(text(), 'Неверный')]"
+                "deepseek": "//div[contains(text(), 'password is incorrect') or contains(text(), 'Incorrect password') or contains(text(), 'Incorrect email or password') or contains(text(), 'Неверный') or contains(text(), 'Неверный пароль') or contains(text(), 'account does not exist') or contains(text(), 'не существует')] | //div[contains(@class,'ds-message--error') and (contains(text(), 'password') or contains(text(), 'Неверный') or contains(text(), 'account'))]"
             }
         },
         "register": {
