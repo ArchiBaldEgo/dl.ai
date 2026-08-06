@@ -70,22 +70,37 @@ from .serializers import (
 def _get_user_top_model_keys(request, limit=2):
     """Возвращает list of model_key для топ-N моделей пользователя по частоте использования.
     Считает по AIRequestLog (только success). Сопоставляет title из логов с key из registry.
+
+    Результат кешируется per-user на 120 c (ключ ``ai:user_top:{user_id}:{limit}``),
+    чтобы не делать per-render scan AIRequestLog, добавленный коммитом ed4d528.
+    Топ-2 пользователя меняется редко; устаревание на 2 минуты незаметно, а перебор
+    логов на каждом рендере стартовой страницы был главным регрессором скорости.
+    На cache miss перебираются только последние 200 успешных запросов (вместо всей
+    истории) — для активных пользователей это убирает скан тысяч строк.
     """
     try:
         from .models import AIRequestLog
         from .model_clients import registry
+        from .constants import AI_CACHE_KEY_PREFIX
         from collections import Counter
-
-        # Построить map title → key
-        title_to_key = {}
-        for key in registry._models.keys():
-            title_to_key[registry.title(key)] = key
+        from django.core.cache import cache
 
         # Получить user_id
         user = getattr(request, 'user', None)
         user_id = getattr(user, 'pk', None) if user and not isinstance(user, str) else None
         if not user_id:
             return []
+
+        # Кеш per-user. Пустой результат тоже кешируется (пользователь без логов).
+        cache_key = f"{AI_CACHE_KEY_PREFIX}:user_top:{user_id}:{limit}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # Построить map title → key
+        title_to_key = {}
+        for key in registry._models.keys():
+            title_to_key[registry.title(key)] = key
 
         # Срез по epoch: если у AIAppSettings задан favorites_epoch, учитываем
         # только успешные запросы новее этой даты. Это даёт разовый сброс счётчика
@@ -99,16 +114,18 @@ def _get_user_top_model_keys(request, limit=2):
         if epoch:
             qs = qs.filter(sent_at__gte=epoch)
 
-        # Посчитать частоту моделей для этого пользователя
+        # Посчитать частоту моделей для этого пользователя по последним 200 логам
         c = Counter()
-        for mns in qs.values_list('model_names', flat=True):
+        for mns in qs.order_by('-sent_at').values_list('model_names', flat=True)[:200]:
             if mns:
                 for m in mns:
                     key = title_to_key.get(m)
                     if key:
                         c[key] += 1
 
-        return [key for key, _ in c.most_common(limit)]
+        result = [key for key, _ in c.most_common(limit)]
+        cache.set(cache_key, result, 120)  # 2 минуты
+        return result
     except Exception:
         return []
 

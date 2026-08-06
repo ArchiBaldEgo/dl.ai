@@ -680,7 +680,22 @@ def get_available_model_options():
 
     Только для чтения: не запускает health-check. Если в текущем окне нет данных,
     берёт последнее окно с доступными моделями (fallback).
+
+    Результат кешируется на 30 c (ключ ``ai:available_models``), чтобы не делать
+    1–2 запроса к AIModelAvailability на каждый рендер страницы. Кешируется только
+    непустой результат: пустой список означает сломанное health-окно и должен дойти
+    до self-heal в _render_ai_page (trigger_model_health_refresh_async), поэтому
+    его не кешируем. Инвалидация — сигналом post_save/post_delete на
+    AIModelAvailability (ai/signals.py).
     """
+    from django.core.cache import cache
+    from .constants import AI_CACHE_KEY_PREFIX
+
+    cache_key = f"{AI_CACHE_KEY_PREFIX}:available_models"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     ordered_keys = MODEL_CATALOG_KEYS
     titles = {key: registry.title(key) for key in MODEL_CATALOG_KEYS}
 
@@ -714,8 +729,11 @@ def get_available_model_options():
                 )
             }
 
-    return [
+    result = [
         {"key": key, "title": titles[key], "capabilities": registry.capabilities(key)}
         for key in ordered_keys
         if key in available_rows
     ]
+    if result:
+        cache.set(cache_key, result, 30)  # 30 c
+    return result

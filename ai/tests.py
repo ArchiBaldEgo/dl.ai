@@ -2463,6 +2463,11 @@ class UserTopModelKeysTests(TestCase):
     """Test _get_user_top_model_keys with real AIRequestLog records."""
 
     def setUp(self):
+        from django.core.cache import cache
+        # LocMem-кеш не откатывается между тестами с TestCase, а несколько тестов
+        # ниже используют одного user_id=42 с разным набором логов — без очистки
+        # кеш _get_user_top_model_keys возвращал бы результат предыдущего теста.
+        cache.clear()
         self.factory = RequestFactory()
         self.user = get_user_model().objects.create_user(
             username="freq_user", password="test-pass", pk=42,
@@ -2597,6 +2602,41 @@ class UserTopModelKeysTests(TestCase):
         result = _get_user_top_model_keys(self._make_request(), limit=2)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0], key_a)
+
+    def test_result_is_cached(self):
+        """Результат кешируется per-user (TTL 120 c): повторный вызов без
+        инвалидации возвращает закешированный список; после cache.clear() —
+        пересчитывается по актуальным логам.
+        """
+        from ai.views import _get_user_top_model_keys
+        from ai.model_clients import registry
+        from django.core.cache import cache
+
+        all_keys = list(registry._models.keys())
+        if len(all_keys) < 2:
+            self.skipTest("Need at least 2 models in registry")
+        key_a = all_keys[0]
+        key_b = all_keys[1]
+        title_a = registry.title(key_a)
+        title_b = registry.title(key_b)
+
+        # Сначала key_a — единственный, он и попадёт в топ.
+        for _ in range(2):
+            self._make_log([title_a])
+        result1 = _get_user_top_model_keys(self._make_request(), limit=2)
+        self.assertEqual(result1, [key_a])
+
+        # Добавляем много логов с key_b, но кеш ещё валиден (TTL 120 c) —
+        # повторный вызов должен вернуть закешированный [key_a], не key_b.
+        for _ in range(5):
+            self._make_log([title_b])
+        result2 = _get_user_top_model_keys(self._make_request(), limit=2)
+        self.assertEqual(result2, [key_a])
+
+        # После очистки кеша — пересчёт: теперь key_b встречается чаще.
+        cache.clear()
+        result3 = _get_user_top_model_keys(self._make_request(), limit=2)
+        self.assertEqual(result3[0], key_b)
 
 
 # ===================================================================
@@ -2811,3 +2851,150 @@ class LastUpdateDateCacheTests(TestCase):
         self.assertEqual(str(result2), "2026-07-28")
         # Clean up
         cache.clear()
+
+
+class AvailableModelOptionsCacheTests(TestCase):
+    """Tests for get_available_model_options caching + AIModelAvailability signal.
+
+    Непустой результат кешируется на 30 c; пустой — нет (чтобы self-heal в
+    _render_ai_page продолжал срабатывать). Инвалидация — сигналом
+    post_save/post_delete на AIModelAvailability.
+    """
+
+    def setUp(self):
+        from django.core.cache import cache
+        from ai.models import AIModelAvailability
+        cache.clear()
+        AIModelAvailability.objects.all().delete()
+
+    def _make_row(self, key, window_date):
+        from ai.models import AIModelAvailability
+        return AIModelAvailability.objects.create(
+            model_key=key, model_title=key, is_available=True,
+            window_date=window_date, last_message="ok",
+        )
+
+    def test_caches_nonempty_result(self):
+        from ai.model_health import (
+            get_available_model_options, get_health_window_date, MODEL_CATALOG_KEYS,
+        )
+        from django.core.cache import cache
+        if not MODEL_CATALOG_KEYS:
+            self.skipTest("No models in registry")
+        window_date = get_health_window_date()
+        key = MODEL_CATALOG_KEYS[0]
+        self._make_row(key, window_date)
+        cache.clear()  # create triggered the invalidation signal; be explicit
+
+        result1 = get_available_model_options()
+        self.assertEqual([m["key"] for m in result1], [key])
+
+        # Second call served from cache → no DB queries.
+        with self.assertNumQueries(0):
+            result2 = get_available_model_options()
+        self.assertEqual(result2, result1)
+
+    def test_empty_result_not_cached(self):
+        """Empty window → [] is NOT cached, so self-heal in _render_ai_page still fires."""
+        from ai.model_health import get_available_model_options
+        from ai.constants import AI_CACHE_KEY_PREFIX
+        from django.core.cache import cache
+        cache.clear()
+        result = get_available_model_options()
+        self.assertEqual(result, [])
+        self.assertIsNone(cache.get(f"{AI_CACHE_KEY_PREFIX}:available_models"))
+
+    def test_signal_invalidates_on_new_row(self):
+        from ai.model_health import (
+            get_available_model_options, get_health_window_date, MODEL_CATALOG_KEYS,
+        )
+        from django.core.cache import cache
+        if len(MODEL_CATALOG_KEYS) < 2:
+            self.skipTest("Need at least 2 models in registry")
+        window_date = get_health_window_date()
+        key_a, key_b = MODEL_CATALOG_KEYS[0], MODEL_CATALOG_KEYS[1]
+        self._make_row(key_a, window_date)
+        cache.clear()
+        result1 = get_available_model_options()
+        self.assertEqual([m["key"] for m in result1], [key_a])
+
+        # Adding a second available model triggers post_save → cache invalidated.
+        self._make_row(key_b, window_date)
+        result2 = get_available_model_options()
+        self.assertEqual({m["key"] for m in result2}, {key_a, key_b})
+
+
+# ===================================================================
+# Tests for Ollama provider (cloud models, plain chat, no tools)
+# ===================================================================
+
+class OllamaRegistryTests(SimpleTestCase):
+    """Ollama-модели зарегистрированы в registry с правильными capabilities."""
+
+    OLLAMA_KEYS = [
+        "Ollama_Glm_5_2_Cloud",
+        "Ollama_Gemma_4_Cloud",
+        "Ollama_Qwen_3_5_Cloud",
+        "Ollama_Nemotron_3_Super_Cloud",
+        "Ollama_Kimi_K2_7_Code_Cloud",
+        "Ollama_Kimi_K2_6_Cloud",
+    ]
+
+    def test_registry_contains_ollama_models(self):
+        from ai.model_clients import registry, ollama
+        for key in self.OLLAMA_KEYS:
+            self.assertIsNotNone(registry.get(key), f"Missing registry entry for {key}")
+            self.assertTrue(callable(registry.handler(key)), f"No handler for {key}")
+            self.assertEqual(
+                registry.capabilities(key),
+                {"text": True, "vision": False, "reasoning": False},
+                f"Wrong capabilities for {key}",
+            )
+            self.assertTrue(
+                callable(getattr(ollama, f"ask_{key}_async", None)),
+                f"Missing ollama.ask_{key}_async",
+            )
+
+    def test_ollama_models_table_matches_registry(self):
+        from ai.model_clients import registry, ollama
+        for key in self.OLLAMA_KEYS:
+            self.assertIn(key, ollama.OLLAMA_MODELS)
+            self.assertEqual(registry.handler(key), getattr(ollama, f"ask_{key}_async"))
+
+    def test_module_defines_logger(self):
+        import logging as _logging
+        from ai.model_clients import ollama
+        self.assertTrue(hasattr(ollama, "logger"))
+        self.assertIsInstance(ollama.logger, _logging.Logger)
+
+
+class OllamaHandlerTests(SimpleTestCase):
+    """Handler вызывает ollama.Client.chat и возвращает (content, tokens)."""
+
+    async def test_handler_returns_content_and_tokens(self):
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_resp = MagicMock()
+            mock_resp.message.content = "2"
+            mock_resp.eval_count = 5
+            mock_client.chat.return_value = mock_resp
+
+            result = await ollama.ask_Ollama_Glm_5_2_Cloud_async("1+1=?", "client")
+            self.assertEqual(result, ("2", 5))
+            mock_client.chat.assert_called_once()
+            # Без tools= (обычный чат).
+            _, kwargs = mock_client.chat.call_args
+            self.assertNotIn("tools", kwargs)
+
+    async def test_cloud_guard_without_api_key(self):
+        """Cloud host + пустой OLLAMA_API_KEY → guard-сообщение, без вызова Client."""
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", ""), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            result = await ollama.ask_Ollama_Qwen_3_5_Cloud_async("hi", "client")
+            self.assertIn("Ollama API ключ не настроен", result[0])
+            mock_client_cls.assert_not_called()

@@ -844,7 +844,8 @@ var localization = {
         groqTokens: "токенов",
         groqRequests: "запросов/min",
         groqRequestsDaily: "запросов/день",
-        groqRemaining: "Осталось"
+        groqRemaining: "Осталось",
+        loadTimeFooter: "Загрузка: {total} мс (сервер {ttfb} мс)"
     },
     English: {
         send: "Send",
@@ -906,7 +907,8 @@ var localization = {
         groqTokens: "tokens",
         groqRequests: "requests/min",
         groqRequestsDaily: "requests/day",
-        groqRemaining: "Remaining"
+        groqRemaining: "Remaining",
+        loadTimeFooter: "Load: {total} ms (server {ttfb} ms)"
     },
     French: {
         send: "Envoyer",
@@ -968,7 +970,8 @@ var localization = {
         groqTokens: "jetons",
         groqRequests: "requêtes/min",
         groqRequestsDaily: "requêtes/jour",
-        groqRemaining: "Restant"
+        groqRemaining: "Restant",
+        loadTimeFooter: "Chargement : {total} ms (serveur {ttfb} ms)"
     }
 };
 
@@ -1360,3 +1363,23 @@ function initModelLimitsWidget() {
         if (!_modelLimitsTimer) _modelLimitsTimer = setInterval(updateModelLimitsWidget, 60000);
     }
 }
+
+// === Page load time indicator (per-user, individual) ===
+// Измеряется через Navigation Timing API на событии `load` и пишется в футер
+// #load-time-footer (base_chat.html). ttfb — серверная часть (auth-middleware +
+// per-user топ моделей + рендер), total — полная загрузка страницы. Регистрация
+// через addEventListener, а не window.onload=, т.к. chat_template.js:107
+// перезаписывает window.onload присваиванием.
+window.addEventListener('load', function () {
+    try {
+        var nav = (performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || {};
+        var ttfb = Math.max(0, Math.round((nav.responseStart - nav.requestStart) || 0));
+        var total = Math.max(0, Math.round((nav.loadEventEnd - nav.startTime) || 0));
+        var lang = 'Russian';
+        try { if (typeof getAiState === 'function') lang = getAiState().lang || 'Russian'; } catch (e) {}
+        var dict = (localization[lang]) || localization['Russian'] || {};
+        var fmt = dict.loadTimeFooter || 'Загрузка: {total} мс (сервер {ttfb} мс)';
+        var el = document.getElementById('load-time-footer');
+        if (el) el.textContent = fmt.replace('{total}', total).replace('{ttfb}', ttfb);
+    } catch (e) {}
+});

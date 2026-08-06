@@ -23,6 +23,11 @@ DEEPSEEK_API_TOKEN = os.getenv("DEEPSEEK_API_TOKEN") or os.getenv("DEEPSEEK_API_
 
 BOT_POOL_URL = os.getenv("BOT_POOL_URL", "http://localhost:3000").rstrip("/")
 
+# Ollama (Cloud модели вида '<name>:cloud' требуют bearer-токен; локальный
+# Ollama работает без ключа на http://localhost:11434).
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY") or os.getenv("OLLAMA_TOKEN")
+
 PROXY = os.getenv("PROXY")
 proxies = {"http": PROXY, "https": PROXY} if PROXY else None
 

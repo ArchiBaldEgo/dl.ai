@@ -20,6 +20,7 @@ httpx==0.27.2
 hyperlink==21.0.0
 idna==3.11
 incremental==24.7.2
+ollama>=0.4.0
 psycopg2-binary==2.9.11
 pyasn1==0.6.1
 pyasn1_modules==0.4.1

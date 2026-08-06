@@ -62,7 +62,7 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
         "thinking": thinking,
         "message": msg,
     }
-    max_attempts = 5
+    max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
             response = await __import__("asyncio").to_thread(_post_to_bot_pool, payload, 300)
@@ -89,11 +89,24 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
                 return error_message, 0
             return obj["data"]["content"], 0
 
-        if response.status_code in (500, 502, 503, 504) and attempt < max_attempts:
-            wait = min(attempt * 3, 15)
-            logger.warning("Bot pool returned %s, retrying in %ss (attempt %s/%s)", response.status_code, wait, attempt, max_attempts)
-            await __import__("asyncio").sleep(wait)
-            continue
+        if response.status_code in (500, 502, 503, 504):
+            # Маркер того, что DeepSeek изменил вёрстку — retry бесполезен,
+            # сразу вернём понятную ошибку (экономит ~15 мин 3×300с retry-ей).
+            reason = ""
+            try:
+                obj, _ = safe_parse_response(response.text)
+                if obj:
+                    reason = obj.get("reason") or ""
+            except Exception:
+                pass
+            if "UI may have changed" in reason or "All answer XPath selectors failed" in reason:
+                return ("DeepSeek изменил интерфейс сайта — селекторы bot-пула устарели, "
+                        "нужно обновить bot/worker/data.json."), 0
+            if attempt < max_attempts:
+                wait = min(attempt * 3, 15)
+                logger.warning("Bot pool returned %s, retrying in %ss (attempt %s/%s)", response.status_code, wait, attempt, max_attempts)
+                await __import__("asyncio").sleep(wait)
+                continue
 
         if response.status_code == 400:
             return "Неправильный запрос", 0

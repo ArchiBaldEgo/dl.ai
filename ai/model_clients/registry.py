@@ -8,7 +8,9 @@
 
 from typing import Callable, Coroutine, Dict
 
-from . import groq, openrouter, web_deepseek
+from . import openrouter, web_deepseek, ollama
+# Groq models disabled — all commented out
+# from . import groq
 # SambaNova models disabled — all commented out
 # from . import sambanova
 
@@ -32,32 +34,32 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "handler": web_deepseek.ask_Web_DeepSeek_Thinking_async,
         "capabilities": _REASONING,
     },
-    # --- Groq (бесплатные модели, OpenAI-совместимый API) ---
-    "Groq_Llama_3_3_70B": {
-        "title": "Groq Llama 3.3 70B",
-        "handler": groq.ask_Groq_Llama_3_3_70B_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "Groq_Llama_3_1_8B": {
-        "title": "Groq Llama 3.1 8B",
-        "handler": groq.ask_Groq_Llama_3_1_8B_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "Groq_Gpt_Oss_120B": {
-        "title": "Groq GPT-OSS 120B",
-        "handler": groq.ask_Groq_Gpt_Oss_120B_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "Groq_Gpt_Oss_20B": {
-        "title": "Groq GPT-OSS 20B",
-        "handler": groq.ask_Groq_Gpt_Oss_20B_async,
-        "capabilities": _TEXT_ONLY,
-    },
-"Groq_Qwen_3_6_27B": {
-        "title": "Groq Qwen 3.6 27B",
-        "handler": groq.ask_Groq_Qwen_3_6_27B_async,
-        "capabilities": _TEXT_ONLY,
-    },
+    # --- Groq модели отключены ---
+    # "Groq_Llama_3_3_70B": {
+    #     "title": "Groq Llama 3.3 70B",
+    #     "handler": groq.ask_Groq_Llama_3_3_70B_async,
+    #     "capabilities": _TEXT_ONLY,
+    # },
+    # "Groq_Llama_3_1_8B": {
+    #     "title": "Groq Llama 3.1 8B",
+    #     "handler": groq.ask_Groq_Llama_3_1_8B_async,
+    #     "capabilities": _TEXT_ONLY,
+    # },
+    # "Groq_Gpt_Oss_120B": {
+    #     "title": "Groq GPT-OSS 120B",
+    #     "handler": groq.ask_Groq_Gpt_Oss_120B_async,
+    #     "capabilities": _TEXT_ONLY,
+    # },
+    # "Groq_Gpt_Oss_20B": {
+    #     "title": "Groq GPT-OSS 20B",
+    #     "handler": groq.ask_Groq_Gpt_Oss_20B_async,
+    #     "capabilities": _TEXT_ONLY,
+    # },
+    # "Groq_Qwen_3_6_27B": {
+    #     "title": "Groq Qwen 3.6 27B",
+    #     "handler": groq.ask_Groq_Qwen_3_6_27B_async,
+    #     "capabilities": _TEXT_ONLY,
+    # },
     # --- OpenRouter (бесплатные модели) ---
     "OR_Nemotron_Ultra_550B": {
         "title": "OR Nemotron Ultra 550B",
@@ -117,6 +119,37 @@ _MODELS: Dict[str, Dict[str, object]] = {
     "OR_Free_Router": {
         "title": "OR Free Router",
         "handler": openrouter.ask_OR_Free_Router_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    # --- Ollama (cloud-модели вида <name>:cloud, обычный чат без инструментов) ---
+    "Ollama_Glm_5_2_Cloud": {
+        "title": "Ollama GLM 5.2 Cloud",
+        "handler": ollama.ask_Ollama_Glm_5_2_Cloud_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "Ollama_Gemma_4_Cloud": {
+        "title": "Ollama Gemma 4 Cloud",
+        "handler": ollama.ask_Ollama_Gemma_4_Cloud_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "Ollama_Qwen_3_5_Cloud": {
+        "title": "Ollama Qwen 3.5 Cloud",
+        "handler": ollama.ask_Ollama_Qwen_3_5_Cloud_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "Ollama_Nemotron_3_Super_Cloud": {
+        "title": "Ollama Nemotron 3 Super Cloud",
+        "handler": ollama.ask_Ollama_Nemotron_3_Super_Cloud_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "Ollama_Kimi_K2_7_Code_Cloud": {
+        "title": "Ollama Kimi K2.7 Code Cloud",
+        "handler": ollama.ask_Ollama_Kimi_K2_7_Code_Cloud_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "Ollama_Kimi_K2_6_Cloud": {
+        "title": "Ollama Kimi K2.6 Cloud",
+        "handler": ollama.ask_Ollama_Kimi_K2_6_Cloud_async,
         "capabilities": _TEXT_ONLY,
     },
     # --- SambaNova модели отключены ---

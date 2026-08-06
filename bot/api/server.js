@@ -143,7 +143,7 @@ function createServer({ botManager, config, logger }) {
         raw: body,
       };
 
-      const raw = await withTimeout(bot.sendMessage(payload), config.requestTimeoutMs);
+      const raw = await withTimeout(bot.sendMessage(payload), Math.max(config.requestTimeoutMs, 300000));
       const content = typeof raw === 'string' ? raw : raw?.content ?? raw?.text ?? '';
       const usage = typeof raw === 'object' ? raw?.usage : undefined;
 
@@ -210,7 +210,7 @@ function createServer({ botManager, config, logger }) {
         message: String(body.message),
         raw: body,
       };
-      const out = await withTimeout(bot.sendMessage(payload), config.requestTimeoutMs);
+      const out = await withTimeout(bot.sendMessage(payload), Math.max(config.requestTimeoutMs, 300000));
       const content = typeof out === 'string' ? out : out?.content ?? out?.text ?? '';
       res.json({ ok: true, data: { content } });
     } catch (e) {

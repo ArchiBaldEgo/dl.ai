@@ -1710,3 +1710,17 @@ hr {
         font-size: 13px;
     }
 }
+
+/* Индикатор времени загрузки страницы (футер, per-user) */
+.load-time-footer {
+    position: fixed;
+    right: 8px;
+    bottom: 4px;
+    font-size: 11px;
+    color: #888;
+    opacity: 0.85;
+    pointer-events: none;
+    user-select: none;
+    z-index: 1000;
+    font-variant-numeric: tabular-nums;
+}
