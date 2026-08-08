@@ -2,7 +2,7 @@
 
 Использует официальную Python-библиотеку ``ollama`` (``from ollama import Client``).
 Cloud-модели (glm-5.2:cloud, gemma4:cloud, qwen3.5:cloud, nemotron-3-super:cloud,
-kimi-k2.7-code:cloud, kimi-k2.6:cloud) требуют bearer-токен ``OLLAMA_API_KEY`` и
+kimi-k2.7-code:cloud, kimi-k2.6:cloud, deepseek-v4-flash:cloud) требуют bearer-токен ``OLLAMA_API_KEY`` и
 хост ``https://api.ollama.com``. Локальный Ollama работает без ключа на
 ``http://localhost:11434``.
 
@@ -35,27 +35,31 @@ _OLLAMA_TIMEOUT = 120.0
 OLLAMA_MODELS: dict[str, dict] = {
     "Ollama_Glm_5_2_Cloud": {
         "model": "glm-5.2:cloud",
-        "description": "Ollama GLM 5.2 Cloud — обычный чат",
+        "description": "Ollama GLM 5.2 — обычный чат",
     },
     "Ollama_Gemma_4_Cloud": {
         "model": "gemma4:cloud",
-        "description": "Ollama Gemma 4 Cloud — обычный чат",
+        "description": "Ollama Gemma 4 — обычный чат",
     },
     "Ollama_Qwen_3_5_Cloud": {
         "model": "qwen3.5:cloud",
-        "description": "Ollama Qwen 3.5 Cloud — обычный чат",
+        "description": "Ollama Qwen 3.5 — обычный чат",
     },
     "Ollama_Nemotron_3_Super_Cloud": {
         "model": "nemotron-3-super:cloud",
-        "description": "Ollama Nemotron 3 Super Cloud — обычный чат",
+        "description": "Ollama Nemotron 3 Super — обычный чат",
     },
     "Ollama_Kimi_K2_7_Code_Cloud": {
         "model": "kimi-k2.7-code:cloud",
-        "description": "Ollama Kimi K2.7 Code Cloud — обычный чат",
+        "description": "Ollama Kimi K2.7 Code — обычный чат",
     },
     "Ollama_Kimi_K2_6_Cloud": {
         "model": "kimi-k2.6:cloud",
-        "description": "Ollama Kimi K2.6 Cloud — обычный чат",
+        "description": "Ollama Kimi K2.6 — обычный чат",
+    },
+    "Ollama_DeepSeek_V4_Flash_Cloud": {
+        "model": "deepseek-v4-flash:cloud",
+        "description": "Ollama DeepSeek V4 Flash — обычный чат",
     },
 }
 

@@ -98,33 +98,38 @@ _MODELS: Dict[str, Dict[str, object]] = {
     },
     # --- Ollama (cloud-модели вида <name>:cloud, обычный чат без инструментов) ---
     "Ollama_Glm_5_2_Cloud": {
-        "title": "Ollama GLM 5.2 Cloud",
+        "title": "Ollama GLM 5.2",
         "handler": ollama.ask_Ollama_Glm_5_2_Cloud_async,
         "capabilities": _TEXT_ONLY,
     },
     "Ollama_Gemma_4_Cloud": {
-        "title": "Ollama Gemma 4 Cloud",
+        "title": "Ollama Gemma 4",
         "handler": ollama.ask_Ollama_Gemma_4_Cloud_async,
         "capabilities": _TEXT_ONLY,
     },
     "Ollama_Qwen_3_5_Cloud": {
-        "title": "Ollama Qwen 3.5 Cloud",
+        "title": "Ollama Qwen 3.5",
         "handler": ollama.ask_Ollama_Qwen_3_5_Cloud_async,
         "capabilities": _TEXT_ONLY,
     },
     "Ollama_Nemotron_3_Super_Cloud": {
-        "title": "Ollama Nemotron 3 Super Cloud",
+        "title": "Ollama Nemotron 3 Super",
         "handler": ollama.ask_Ollama_Nemotron_3_Super_Cloud_async,
         "capabilities": _TEXT_ONLY,
     },
     "Ollama_Kimi_K2_7_Code_Cloud": {
-        "title": "Ollama Kimi K2.7 Code Cloud",
+        "title": "Ollama Kimi K2.7 Code",
         "handler": ollama.ask_Ollama_Kimi_K2_7_Code_Cloud_async,
         "capabilities": _TEXT_ONLY,
     },
     "Ollama_Kimi_K2_6_Cloud": {
-        "title": "Ollama Kimi K2.6 Cloud",
+        "title": "Ollama Kimi K2.6",
         "handler": ollama.ask_Ollama_Kimi_K2_6_Cloud_async,
+        "capabilities": _TEXT_ONLY,
+    },
+    "Ollama_DeepSeek_V4_Flash_Cloud": {
+        "title": "Ollama DeepSeek V4 Flash",
+        "handler": ollama.ask_Ollama_DeepSeek_V4_Flash_Cloud_async,
         "capabilities": _TEXT_ONLY,
     },
 }
