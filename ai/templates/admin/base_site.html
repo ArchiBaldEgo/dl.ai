@@ -6,10 +6,13 @@ AdminSite (ai/admin/site.py), so customising admin/base_site here only affects
 that site — there is no second AdminSite in use.
 
 Only the AI admin stylesheet is wired here; the "Инструменты ИИ" hub lives in
-the dashboard right-hand sidebar (admin/ai/_ai_sidebar_tools.html, included
-from admin/ai/index.html), not in the header. NOTE: 'ai' must precede
-'django.contrib.admin' in INSTALLED_APPS so this file is not shadowed by the
-stock admin/base_site.html (APP_DIRS=True returns the first match).{% endcomment %}
+the LEFT navigation sidebar — the tool groups are injected into
+`available_apps`/`ai_nav_tools_apps` by AIAdminSite.each_context and rendered by
+the stock admin/nav_sidebar.html (admin/ai/index.html overrides the nav-sidebar
+block with admin/ai/_ai_nav_sidebar.html for a tools-only dashboard nav). NOTE:
+'ai' must precede 'django.contrib.admin' in INSTALLED_APPS so this file is not
+shadowed by the stock admin/base_site.html (APP_DIRS=True returns the first
+match).{% endcomment %}
 
 {% block extrastyle %}
   {{ block.super }}

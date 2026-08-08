@@ -3,16 +3,14 @@
 
 {% comment %}AI admin dashboard. Extends the stock admin/index.html so the main
 column renders the standard permission-filtered app_list (every registered
-ModelAdmin the user can see, with Add/Change links and proper dashboard.css).
+ModelAdmin the user can see, with Add/Change links and proper dashboard.css) and
+the right #content-related column keeps the stock "Recent actions".
 
-The custom (non-ModelAdmin) AI tool pages live in the right #content-related
-sidebar, grouped by access level (admin/ai/_ai_sidebar_tools.html). We render
-the tools first, then {{ block.super }} keeps the stock "Recent actions"
-module, so both share the right-hand gutter (colMS) using stock CSS.{% endcomment %}
+The AI tools live in the LEFT navigation sidebar (admin/ai/_ai_nav_sidebar.html):
+the stock dashboard empties {% block nav-sidebar %}, so we override it to render
+a tools-only left nav. Other admin pages keep the stock admin/nav_sidebar.html
+which renders `available_apps` = real apps + the AI tool groups injected in
+AIAdminSite.each_context — so the tools appear in the left nav on every page.
+{% endcomment %}
 
-{% block sidebar %}
-<div class="ai-tools-sidebar">
-  {% include "admin/ai/_ai_sidebar_tools.html" %}
-</div>
-{{ block.super }}
-{% endblock %}
+{% block nav-sidebar %}{% include "admin/ai/_ai_nav_sidebar.html" %}{% endblock %}

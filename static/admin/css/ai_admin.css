@@ -1,49 +1,20 @@
-/* AI admin chrome: dashboard "Инструменты ИИ" sidebar + compactness overrides.
+/* AI admin chrome: left nav tools + tool-page compactness overrides.
    Loaded once via admin/base_site.html{% block extrastyle %} so it applies to
    every admin page (stock ModelAdmin changelists + custom tool pages).
+
+   The AI tools are injected into the left #nav-sidebar as fake "app" groups
+   (AIAdminSite.each_context → available_apps / ai_nav_tools_apps) and render via
+   stock admin/app_list.html + nav_sidebar.css, so they need no custom CSS here.
 
    Convention: page <style> blocks live in the body and therefore win source
    order over this file for equal specificity. The compactness overrides below
    therefore use !important deliberately — they are a single override layer. */
 
-/* ─────────────────────── Sidebar (dashboard) ─────────────────────── */
-
-/* The AI tools sidebar sits in the same right-hand gutter as the stock
-   #content-related (colMS, margin-right: 300px). It mirrors #content-related's
-   float so it stacks ABOVE the "Recent actions" module rendered by
-   {{ block.super }} in admin/ai/index.html. */
-.ai-tools-sidebar {
-  float: right;
-  width: 260px;
-  margin-right: -300px;
-  position: relative;
-}
-
-.ai-tools-sidebar .module + .module {
-  margin-top: 16px;
-}
-
-/* The per-group access note under "Администрирование". */
-.ai-sidebar-note {
-  color: var(--body-quiet-color);
-  font-size: 11px;
-  margin: 0 0 6px;
-}
-
-/* Current page: render the matching entry as a non-link (links must not point
-   at the page the admin is already on). */
-.ai-tools-sidebar .ai-sidebar-active > span {
-  color: var(--button-fg);
-  background: var(--button-bg);
-  border-radius: 4px;
-  padding: 2px 6px;
-  font-weight: 700;
-}
-
 /* ─────────────────────── Back-nav (tool pages) ─────────────────────── */
 
-/* Explicit "← Назад в админку" link on custom tool pages — the dashboard tools
-   hub is in the sidebar, so tool pages need a clear way back to admin:index. */
+/* Explicit "← Назад в админку" link on custom tool pages. The left nav also
+   provides navigation on those pages, but this gives a clear, direct way back
+   to admin:index (matches the pre-bb51be2 pattern). */
 .ai-back-nav {
   margin-bottom: 8px;
 }

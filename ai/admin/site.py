@@ -268,26 +268,109 @@ class AIAdminSite(admin.AdminSite):
         is_staff = is_staff_or_superuser(request.user)
         context["is_prompt_developer"] = is_pd
         context["is_staff_or_superuser"] = is_staff
-        context["show_arm_link"] = can_access_arm(request)
-        context["show_model_status_link"] = can_access_model_status(request)
+        show_arm = can_access_arm(request)
+        context["show_arm_link"] = show_arm
+        show_model_status = can_access_model_status(request)
+        context["show_model_status_link"] = show_model_status
         context["show_prompt_link"] = can_access_prompt_admin(request)
-        context["show_logs_link"] = can_access_logs(request)
-        context["show_prompt_regression_link"] = can_access_prompt_regression(request)
-        context["show_test_console_link"] = can_access_test_console(request)
-        context["arm_find_error_url"] = "/ai/admin/arm/find-error/"
-        context["arm_solve_url"] = "/ai/admin/arm/solve/"
-        context["arm_model_status_url"] = "/ai/admin/arm/models/"
+        show_logs = can_access_logs(request)
+        context["show_logs_link"] = show_logs
+        show_prompt_regression = can_access_prompt_regression(request)
+        context["show_prompt_regression_link"] = show_prompt_regression
+        show_test_console = can_access_test_console(request)
+        context["show_test_console_link"] = show_test_console
+        arm_find_error_url = "/ai/admin/arm/find-error/"
+        arm_solve_url = "/ai/admin/arm/solve/"
+        arm_model_status_url = "/ai/admin/arm/models/"
+        context["arm_find_error_url"] = arm_find_error_url
+        context["arm_solve_url"] = arm_solve_url
+        context["arm_model_status_url"] = arm_model_status_url
         context["arm_model_status_refresh_url"] = "/ai/admin/arm/models/refresh/"
         context["arm_model_status_state_url"] = "/ai/admin/arm/models/state/"
-        context["prompt_regression_url"] = "/ai/admin/prompt-regression/"
-        context["test_console_url"] = "/ai/admin/test-console/"
+        prompt_regression_url = "/ai/admin/prompt-regression/"
+        test_console_url = "/ai/admin/test-console/"
+        context["prompt_regression_url"] = prompt_regression_url
+        context["test_console_url"] = test_console_url
         context["prompt_admin_url"] = "/ai/admin/ai/prompt/"
-        context["my_prompt_url"] = "/ai/admin/prompts/my/"
+        my_prompt_url = "/ai/admin/prompts/my/"
+        context["my_prompt_url"] = my_prompt_url
         context["my_prompt_change_url"] = get_my_prompt_admin_url(request)
-        context["ai_logs_url"] = "/ai/admin/ai/airequestlog/"
-        context["show_updates_link"] = is_staff
-        context["updates_url"] = "/ai/admin/updates/"
+        ai_logs_url = "/ai/admin/ai/airequestlog/"
+        context["ai_logs_url"] = ai_logs_url
+        show_updates = is_staff
+        context["show_updates_link"] = show_updates
+        updates_url = "/ai/admin/updates/"
+        context["updates_url"] = updates_url
+
+        # --- AI tools in the left navigation sidebar (#nav-sidebar) ---
+        # The left nav renders `available_apps` (separate from the dashboard's
+        # main `app_list`), so we inject the custom (non-ModelAdmin) tool pages
+        # as fake "app" groups. They then render natively via admin/app_list.html
+        # (with the stock filter + current-page highlight) on every admin page,
+        # without appearing in the dashboard's main model list.
+        tools_apps = self._build_ai_nav_apps(
+            request,
+            tools=[
+                # (group, label, object_name, url, flag)
+                ("Инструменты", "Мой промпт", "AiMyPrompt", my_prompt_url, is_pd),
+                ("Инструменты", "Поиск ошибки (ARM)", "AiArmFindError", arm_find_error_url, show_arm),
+                ("Инструменты", "Пакетное решение (ARM)", "AiArmSolve", arm_solve_url, show_arm),
+                ("Инструменты", "Регрессионные тесты", "AiPromptRegression", prompt_regression_url, show_prompt_regression),
+                ("Инструменты", "Тестовая консоль", "AiTestConsole", test_console_url, show_test_console),
+                ("Администрирование", "Состояние моделей", "AiModelStatus", arm_model_status_url, show_model_status),
+                ("Администрирование", "Журнал запросов", "AiRequestLogs", ai_logs_url, show_logs),
+                ("Администрирование", "Обновления", "AiUpdates", updates_url, show_updates),
+            ],
+        )
+        # Change/tool pages: stock admin/nav_sidebar.html renders available_apps
+        # (real apps + the injected tool groups).
+        context["available_apps"] = list(context["available_apps"]) + tools_apps
+        # Dashboard: a tools-only left nav (admin/ai/_ai_nav_sidebar.html) uses
+        # this so the real apps are not duplicated (they are the dashboard main).
+        context["ai_nav_tools_apps"] = tools_apps
         return context
+
+    def _build_ai_nav_apps(self, request, *, tools):
+        """Build fake "app" groups (for the left nav) from a list of tools.
+
+        ``tools`` is a list of ``(group, label, object_name, url, visible)``
+        tuples. Groups with no visible tool are omitted. The returned dicts mimic
+        ``AdminSite._build_app_dict`` so ``admin/app_list.html`` renders them
+        natively (per-tool ``current-model`` highlight via ``admin_url``).
+        """
+        from django.urls import reverse
+
+        try:
+            group_url = reverse("admin:index", current_app=self.name)
+        except Exception:
+            group_url = "/ai/admin/"
+
+        label_to_key = {"Инструменты": "ai-tools", "Администрирование": "ai-admin"}
+        groups: dict[str, dict] = {}
+        for group, label, object_name, url, visible in tools:
+            if not visible:
+                continue
+            app = groups.get(group)
+            if app is None:
+                app = {
+                    "name": group,
+                    "app_label": label_to_key.get(group, "ai-tools"),
+                    "app_url": group_url,
+                    "has_module_perms": True,
+                    "models": [],
+                }
+                groups[group] = app
+            app["models"].append({
+                "name": label,
+                "object_name": object_name,
+                "admin_url": url,
+                "add_url": None,
+                "perms": {"view": True},
+                "view_only": True,
+            })
+        # Stable order: Инструменты before Администрирование.
+        order = ["Инструменты", "Администрирование"]
+        return [groups[g] for g in order if g in groups]
 
 
 ai_admin_site = AIAdminSite(name="admin")
