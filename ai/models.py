@@ -476,7 +476,7 @@ class AIRequestLog(models.Model):
     message = models.TextField(blank=True, verbose_name="Запрос")
     response_text = models.TextField(blank=True, verbose_name="Ответ модели")
     tokens = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов")
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_SUCCESS, verbose_name="Статус")
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ERROR, verbose_name="Статус")
     error_message = models.TextField(blank=True, verbose_name="Текст ошибки")
 
     # Context selected by the user (programming task pages and ARM)

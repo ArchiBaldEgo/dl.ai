@@ -103,6 +103,7 @@ class LogWriter:
                 "response_text",
                 "tokens",
                 "status",
+                "error_message",
             ]
         )
 

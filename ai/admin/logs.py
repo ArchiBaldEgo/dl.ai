@@ -1,6 +1,8 @@
 """Логи запросов к AI-моделям: admin view и кастомная страница списка."""
 
 import logging
+import os
+from datetime import datetime
 
 from django.contrib import admin
 from django.core.paginator import Paginator
@@ -8,15 +10,43 @@ from django.db.models import Q
 from .site import ai_admin_site
 from django.http import HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
+from django.utils.html import strip_tags
 from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
 from ..constants import MOSCOW_TZ
-from ..models import AIRequestLog
+from ..dl_api_client import (
+    DLApiError,
+    DLApiUnavailable,
+    DLForbiddenError,
+    DLServerError,
+    DLTaskNotFoundError,
+    DLUnauthorizedError,
+    fetch_task_info,
+)
+from ..models import AIRequestLog, Task
 from ..model_health import get_runtime_model_handlers
 from .permissions import can_access_logs
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_date(value: str) -> str:
+    """Return ``value`` only if it is a real ``YYYY-MM-DD`` date, else "".
+
+    Defensive: malformed inputs (including the ``"['']"`` string that the old
+    ``urlencode`` without ``doseq`` leaked into pagination links) never reach the
+    ORM ``__date__gte`` lookup, which would otherwise raise ``ValidationError``
+    and 500 the page.
+    """
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return ""
+    return value
 
 
 class AIRequestLogAdmin(admin.ModelAdmin):
@@ -138,8 +168,8 @@ def admin_request_logs_view(request):
     model = request.GET.get("model", "").strip()
     user_q = request.GET.get("user", "").strip()
     task_q = request.GET.get("task", "").strip()
-    date_from = request.GET.get("date_from", "").strip()
-    date_to = request.GET.get("date_to", "").strip()
+    date_from = _parse_date(request.GET.get("date_from", ""))
+    date_to = _parse_date(request.GET.get("date_to", ""))
 
     status_values = dict(AIRequestLog.STATUS_CHOICES)
     source_values = dict(AIRequestLog.SOURCE_CHOICES)
@@ -175,9 +205,25 @@ def admin_request_logs_view(request):
     page_number = request.GET.get("page")
     page_obj = paginator.get_page(page_number)
 
-    filters_query = request.GET.copy()
-    filters_query.pop("page", None)
-    filters_query_str = urlencode(filters_query)
+    # Build the query string carried by pagination links. ``urlencode`` over a
+    # QueryDict *without* doseq stringifies each value-list (``str(['x'])`` =
+    # "['x']"), which is how the pagination URL used to carry ``date_from=['']``
+    # and 500 page 2. Build a plain dict of non-empty, non-garbage values and
+    # urlencode with doseq=True so list values expand to real parameters.
+    cleaned = {}
+    for key in request.GET:
+        if key == "page":
+            continue
+        for val in request.GET.getlist(key):
+            val = (val or "").strip()
+            if not val:
+                continue
+            # Drop leftover stringified-list garbage ("['']", "['x']") from
+            # stale bookmarks/links; doseq above stops us from generating it.
+            if val.startswith("[") and val.endswith("]"):
+                continue
+            cleaned.setdefault(key, []).append(val)
+    filters_query_str = urlencode(cleaned, doseq=True)
     if filters_query_str:
         filters_query_str += "&"
 
@@ -360,3 +406,98 @@ def resend_request_view(request, log_id):
             "error": str(exc)[:500],
             "new_log_id": new_log.pk,
         }, status=500)
+
+
+def _resolve_dl_session_id(request) -> str:
+    """Resolve the caller's DL session id from the session or DLSID cookie.
+
+    Mirrors ``TaskAdmin.refresh_from_dl`` / ``get_task_info_view`` so the logs
+    page can fetch a task statement from DL when no local ``Task`` cache exists.
+    """
+    session_id = (request.session.get("external_session_id") or "").strip()
+    if not session_id:
+        cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
+        session_id = (request.COOKIES.get(cookie_name, "") or "").strip()
+    return session_id
+
+
+def admin_request_log_task_text_view(request):
+    """Return the text of a task for the in-page «click task → show text» modal.
+
+    GET ``node_id`` (int, required). Prefers the locally cached ``Task.statement``
+    (populated by ``TaskAdmin.refresh_from_dl`` / ``ensure_task``); falls back to a
+    live DL fetch via ``fetch_task_info`` using the caller's DLSID session. Never
+    500s — DL errors map to JSON error responses.
+    """
+    if not can_access_logs(request):
+        return JsonResponse({"ok": False, "error": "Access denied"}, status=403)
+
+    try:
+        node_id = int(request.GET.get("node_id", ""))
+    except (ValueError, TypeError):
+        return JsonResponse(
+            {"ok": False, "error": "node_id обязателен и должен быть числом"},
+            status=400,
+        )
+
+    # 1) Local cache first — fast, no DL dependency.
+    task = Task.objects.filter(node_id=node_id).first()
+    if task and (task.statement or "").strip():
+        return JsonResponse({
+            "ok": True,
+            "name": task.name or str(node_id),
+            "statement": task.statement,
+            "source": "cache",
+        })
+
+    # 2) DL fallback — live fetch using the caller's session.
+    session_id = _resolve_dl_session_id(request)
+    if not session_id:
+        return JsonResponse(
+            {"ok": False, "error": "Нет DLSID — получить условие из DL невозможно"},
+            status=503,
+        )
+
+    try:
+        data = fetch_task_info(node_id, session_id=session_id, remove_html_tags=True)
+    except DLUnauthorizedError:
+        return JsonResponse({"ok": False, "error": "Authorization required"}, status=401)
+    except DLForbiddenError:
+        return JsonResponse({"ok": False, "error": "Access denied"}, status=403)
+    except DLTaskNotFoundError:
+        return JsonResponse({"ok": False, "error": "Задача не найдена"}, status=404)
+    except DLApiUnavailable:
+        return JsonResponse(
+            {"ok": False, "error": "DL API временно недоступен"}, status=503
+        )
+    except DLServerError:
+        return JsonResponse({"ok": False, "error": "Ошибка сервера DL"}, status=502)
+
+    statement = (data.get("statement") or data.get("currentStatement") or "").strip()
+
+    # DL's own HTML stripping sometimes yields an empty statement for tasks whose
+    # condition is visible on the site (DL's stripper fails on the markup). Re-fetch
+    # the raw response and strip HTML server-side. Mirrors get_task_info_view.
+    if not statement:
+        try:
+            raw = fetch_task_info(node_id, session_id=session_id, remove_html_tags=None)
+            raw_statement = (
+                raw.get("statement") or raw.get("currentStatement") or ""
+            ).strip()
+            if raw_statement:
+                statement = strip_tags(raw_statement).strip()
+        except DLApiError:
+            pass  # keep the original (empty) statement
+
+    name = (data.get("name") or "").strip() or str(node_id)
+    if not statement:
+        return JsonResponse(
+            {"ok": False, "error": "У задачи нет текста условия"},
+            status=404,
+        )
+    return JsonResponse({
+        "ok": True,
+        "name": name,
+        "statement": statement,
+        "source": "dl",
+    })

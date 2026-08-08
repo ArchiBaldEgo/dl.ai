@@ -35,11 +35,55 @@
     max-width: 200px; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; color: var(--body-quiet-color); font-size: 12px;
   }
-  .ai-log-clickable {
-    cursor: pointer; text-decoration: underline;
-    text-decoration-style: dotted; text-decoration-color: var(--body-quiet-color);
+  .ai-log-task-link {
+    background: none; border: none; padding: 0;
+    color: var(--link-fg); cursor: pointer;
+    text-decoration: underline; text-decoration-style: dotted;
+    text-decoration-color: var(--body-quiet-color); font: inherit;
   }
-  .ai-log-clickable:hover { text-decoration-style: solid; color: var(--link-fg); }
+  .ai-log-task-link:hover { text-decoration-style: solid; }
+  .ai-log-task-ext {
+    margin-left: 4px; font-size: 11px; text-decoration: none;
+    color: var(--body-quiet-color);
+  }
+  .ai-log-task-ext:hover { color: var(--link-fg); }
+
+  /* === Модалка текста задачи === */
+  .ai-task-modal {
+    display: none; position: fixed; inset: 0; z-index: 1000;
+    background: rgba(0, 0, 0, 0.45);
+    align-items: center; justify-content: center;
+  }
+  .ai-task-modal.open { display: flex; }
+  .ai-task-modal-dialog {
+    background: var(--body-bg); color: var(--body-fg);
+    border: 1px solid var(--border-color); border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    width: min(760px, 92vw); max-height: 86vh; display: flex;
+    flex-direction: column; overflow: hidden;
+  }
+  .ai-task-modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-bottom: 1px solid var(--hairline-color);
+  }
+  .ai-task-modal-header h2 { margin: 0; font-size: 16px; font-weight: 700; }
+  .ai-task-modal-close {
+    background: none; border: none; font-size: 22px; line-height: 1;
+    cursor: pointer; color: var(--body-quiet-color); padding: 0 4px;
+  }
+  .ai-task-modal-close:hover { color: var(--body-fg); }
+  .ai-task-modal-body {
+    padding: 16px; overflow: auto;
+  }
+  .ai-task-modal-body pre {
+    margin: 0; white-space: pre-wrap; word-wrap: break-word;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 13px; line-height: 1.45;
+  }
+  .ai-task-modal-status {
+    padding: 12px 16px; color: var(--body-quiet-color); font-size: 13px;
+  }
+  .ai-task-modal-status.error { color: #b42318; }
 
   /* === Аккордеон-раскрытие записи === */
   .ai-log-detail-row { display: none; }
@@ -103,9 +147,18 @@
   const FILTER_KEY = 'ai_logs_filters';
   const FILTER_FIELDS = ['status', 'mode', 'model', 'user', 'task', 'date_from', 'date_to'];
 
-  // Restore filters from localStorage on page load.
+  // Restore filters from localStorage on page load (unless a hard reset was requested).
   document.addEventListener('DOMContentLoaded', function () {
     const params = new URLSearchParams(window.location.search);
+
+    // Explicit "Сбросить" → drop saved filters and load clean. Without this the
+    // localStorage auto-restore below would immediately re-apply the saved filters
+    // right after the reset link navigated to a clean URL.
+    if (params.get('reset')) {
+      localStorage.removeItem(FILTER_KEY);
+      return;
+    }
+
     const hasFilters = FILTER_FIELDS.some(f => params.has(f) && params.get(f));
     if (!hasFilters) {
       try {
@@ -134,52 +187,91 @@
     }
   });
 
-  // Click-to-filter + accordion toggle.
-  document.addEventListener('click', function (event) {
-    // Click-to-filter cells.
-    const filterCell = event.target.closest('[data-filter-name]');
-    if (filterCell) {
-      event.stopPropagation();
-      event.preventDefault();
-      const filterName = filterCell.dataset.filterName;
-      const filterValue = filterCell.dataset.filterValue;
-      const el = document.getElementById('id_' + filterName);
-      if (el) {
-        el.value = filterValue;
-        const data = {};
-        FILTER_FIELDS.forEach(function (name) {
-          const f = document.getElementById('id_' + name);
-          if (f) data[name] = f.value;
-        });
-        localStorage.setItem(FILTER_KEY, JSON.stringify(data));
-        document.querySelector('.ai-logs-filters').submit();
+  // Accordion toggle + task-text modal.
+  (function () {
+    const modal = document.getElementById('aiTaskModal');
+    const modalTitle = document.getElementById('aiTaskModalTitle');
+    const modalBody = document.getElementById('aiTaskModalBody');
+    const modalStatus = document.getElementById('aiTaskModalStatus');
+
+    function openModal(nodeId) {
+      if (!modal) return;
+      modal.classList.add('open');
+      if (modalTitle) modalTitle.textContent = 'Задача #' + nodeId;
+      if (modalBody) modalBody.textContent = '';
+      if (modalStatus) {
+        modalStatus.textContent = 'Загрузка условия задачи…';
+        modalStatus.classList.remove('error');
       }
-      return;
+      fetch('/ai/admin/ai/airequestlog/task-text/?node_id=' + encodeURIComponent(nodeId))
+        .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, d: d}; }); })
+        .then(function (res) {
+          const d = res.d || {};
+          if (d.ok) {
+            if (modalTitle) modalTitle.textContent = d.name || ('Задача #' + nodeId);
+            // Security: statement may contain HTML/think-blocks — never innerHTML.
+            if (modalBody) modalBody.textContent = d.statement || '';
+            if (modalStatus) modalStatus.textContent = d.source === 'dl'
+              ? 'Из DL (live)' : 'Из локального кэша';
+          } else {
+            if (modalBody) modalBody.textContent = '';
+            if (modalStatus) {
+              modalStatus.textContent = d.error || 'Не удалось загрузить условие';
+              modalStatus.classList.add('error');
+            }
+          }
+        })
+        .catch(function () {
+          if (modalStatus) {
+            modalStatus.textContent = 'Сетевая ошибка при загрузке условия';
+            modalStatus.classList.add('error');
+          }
+        });
     }
 
-    // Accordion toggle — click on row to expand/collapse detail.
-    const row = event.target.closest('.ai-log-row');
-    if (!row) return;
-    if (event.target.tagName === 'A') return;  // don't toggle on links
-    if (event.target.closest('.ai-log-detail-row')) return;  // don't toggle from detail
+    function closeModal() {
+      if (modal) modal.classList.remove('open');
+    }
 
-    const detailRow = row.nextElementSibling;
-    if (!detailRow || !detailRow.classList.contains('ai-log-detail-row')) return;
+    document.addEventListener('click', function (event) {
+      // Task-text modal trigger.
+      const taskLink = event.target.closest('.ai-log-task-link');
+      if (taskLink) {
+        event.stopPropagation();
+        event.preventDefault();
+        openModal(taskLink.dataset.taskNode);
+        return;
+      }
+      if (modal && event.target === modal) { closeModal(); return; }
+      if (event.target.closest('.ai-task-modal-close')) { closeModal(); return; }
 
-    const isOpen = detailRow.classList.contains('open');
-    // Close all other open rows.
-    document.querySelectorAll('.ai-log-detail-row.open').forEach(function (r) {
-      r.classList.remove('open');
+      // Accordion toggle — click on row to expand/collapse detail.
+      const row = event.target.closest('.ai-log-row');
+      if (!row) return;
+      if (event.target.tagName === 'A') return;  // don't toggle on links
+      if (event.target.tagName === 'BUTTON') return;  // don't toggle on the task button
+      if (event.target.closest('.ai-log-detail-row')) return;  // don't toggle from detail
+
+      const detailRow = row.nextElementSibling;
+      if (!detailRow || !detailRow.classList.contains('ai-log-detail-row')) return;
+
+      const isOpen = detailRow.classList.contains('open');
+      document.querySelectorAll('.ai-log-detail-row.open').forEach(function (r) {
+        r.classList.remove('open');
+      });
+      if (!isOpen) {
+        detailRow.classList.add('open');
+      }
     });
-    if (!isOpen) {
-      detailRow.classList.add('open');
-    }
-  });
+
+    document.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') closeModal();
+    });
+  })();
 </script>
 
 <div class="ai-logs-wrap">
   {% include "admin/ai/_ai_back_nav.html" %}
-  <h1>{{ title }}</h1>
 
   <form method="get" class="ai-logs-filters">
     <div class="filter-field">
@@ -232,7 +324,7 @@
     </div>
     <div class="filter-field">
       <button type="submit" class="default">Фильтровать</button>
-      <a class="button" href="{{ request.path }}">Сбросить</a>
+      <a class="button" href="{{ request.path }}?reset=1">Сбросить</a>
     </div>
   </form>
 
@@ -273,7 +365,8 @@
             <td>{{ log.topic_name|default:"—" }}</td>
             <td>
               {% if log.task_node_id %}
-                <span class="ai-log-clickable" data-filter-name="task" data-filter-value="{{ log.task_node_id }}"><a href="https://dl.gsu.by/admin/fullTaskviewer.asp?nid={{ log.task_node_id }}" target="_blank" rel="noopener">{{ log.task_name|default:log.task_node_id }}</a></span>
+                <button type="button" class="ai-log-task-link" data-task-node="{{ log.task_node_id }}">{{ log.task_name|default:log.task_node_id }}</button>
+                <a href="https://dl.gsu.by/admin/fullTaskviewer.asp?nid={{ log.task_node_id }}" target="_blank" rel="noopener" class="ai-log-task-ext" title="Открыть на dl.gsu.by">↗</a>
               {% else %}
                 {{ log.task_name|default:"—" }}
               {% endif %}
@@ -286,20 +379,13 @@
               {% endif %}
             </td>
             <td>
-              {% for mn in log.model_names %}
-                {% if forloop.first %}
-                  <span class="ai-log-clickable" data-filter-name="model" data-filter-value="{{ mn }}">{{ mn }}</span>
-                {% else %}
-                  , <span class="ai-log-clickable" data-filter-name="model" data-filter-value="{{ mn }}">{{ mn }}</span>
-                {% endif %}
-              {% endfor %}
-              {% if not log.model_names %}—{% endif %}
+              {{ log.model_names|join:", "|default:"—" }}
             </td>
             <td class="{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">
-              <span class="ai-log-clickable" data-filter-name="status" data-filter-value="{{ log.status }}">{{ log.get_status_display }}</span>
+              {{ log.get_status_display }}
             </td>
             <td>
-              <span class="ai-log-clickable" data-filter-name="mode" data-filter-value="{{ log.mode }}">{{ log.get_mode_display|default:"—" }}</span>
+              {{ log.get_mode_display|default:"—" }}
             </td>
             <td>{{ log.duration_seconds|floatformat:0|default:"—" }}</td>
             <td>
@@ -397,5 +483,17 @@
   {% else %}
     <div class="ai-logs-empty">Логи не найдены.</div>
   {% endif %}
+
+  {# Модалка текста задачи (открывается по клику на название задачи) #}
+  <div class="ai-task-modal" id="aiTaskModal" role="dialog" aria-modal="true" aria-labelledby="aiTaskModalTitle">
+    <div class="ai-task-modal-dialog">
+      <div class="ai-task-modal-header">
+        <h2 id="aiTaskModalTitle">Задача</h2>
+        <button type="button" class="ai-task-modal-close" aria-label="Закрыть">&times;</button>
+      </div>
+      <div class="ai-task-modal-body"><pre id="aiTaskModalBody"></pre></div>
+      <div class="ai-task-modal-status" id="aiTaskModalStatus"></div>
+    </div>
+  </div>
 </div>
 {% endblock %}

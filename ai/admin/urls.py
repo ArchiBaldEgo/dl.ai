@@ -18,7 +18,12 @@ from .arm import (
     admin_arm_solve_add_task_view,
     admin_arm_solve_prompts_view,
 )
-from .logs import admin_request_logs_view, admin_request_log_detail_view, resend_request_view
+from .logs import (
+    admin_request_log_detail_view,
+    admin_request_log_task_text_view,
+    admin_request_logs_view,
+    resend_request_view,
+)
 from .model_status import (
     admin_model_status_view,
     admin_model_status_refresh_view,
@@ -65,6 +70,7 @@ def get_ai_admin_urls():
         path("test-console/", ai_admin_site.admin_view(admin_test_console_view), name="ai_test_console"),
         path("prompts/my/", ai_admin_site.admin_view(admin_my_prompt_view), name="ai_my_prompt"),
         path("updates/", ai_admin_site.admin_view(admin_updates_view), name="ai_updates"),
+        path("ai/airequestlog/task-text/", ai_admin_site.admin_view(admin_request_log_task_text_view), name="ai_request_log_task_text"),
         path("ai/airequestlog/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
         path("ai/airequestlog/<int:log_id>/resend/", ai_admin_site.admin_view(resend_request_view), name="ai_request_log_resend"),
         path("ai/airequestlog/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),

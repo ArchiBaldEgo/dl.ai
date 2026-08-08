@@ -29,32 +29,6 @@
   vertical-align: middle;
 }
 
-/* ─────────────────────── Dashboard welcome banner ─────────────────── */
-
-/* Short intro card above the stock dashboard app_list. Sits in normal flow
-   above the floating #content-main, so the colMS two-column layout below is
-   untouched. Themed via Django CSS vars (works in light/dark). */
-.ai-dashboard-intro {
-  margin: 0 0 16px;
-  padding: 12px 16px;
-  background: var(--darkened-bg);
-  border: 1px solid var(--hairline-color);
-  border-radius: 6px;
-  color: var(--body-fg);
-}
-.ai-dashboard-intro h2 {
-  margin: 0 0 4px;
-  font-size: 16px;
-  font-weight: 700;
-}
-.ai-dashboard-intro p {
-  margin: 0;
-  color: var(--body-quiet-color);
-  font-size: 13px;
-  line-height: 1.45;
-  max-width: 760px;
-}
-
 /* ─────────────────── Left-nav tool group readability ───────────────── */
 
 /* The injected «Инструменты» / «Администрирование» groups render through the

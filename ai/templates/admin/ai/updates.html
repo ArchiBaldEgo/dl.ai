@@ -13,7 +13,6 @@
 {% block content %}
 <div id="content-main" class="ai-updates-wrap">
   {% include "admin/ai/_ai_back_nav.html" %}
-  <h1>{% trans "Обновления" %}</h1>
   <p class="paginator">
     {% blocktrans with total=total_count %}Всего записей: {{ total }}{% endblocktrans %}
   </p>

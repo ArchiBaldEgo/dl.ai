@@ -1,27 +1,52 @@
 {% extends "admin/index.html" %}
 {% load i18n %}
 
-{% comment %}AI admin dashboard. Extends the stock admin/index.html so the main
-column renders the standard permission-filtered app_list (every registered
-ModelAdmin the user can see, with Add/Change links and proper dashboard.css) and
-the right #content-related column keeps the stock "Recent actions".
+{% comment %}AI admin dashboard. The main column shows ONLY the user's recent
+actions («история пользователя») — the app_list (Раздел ИИ, Пользователи, …) is
+deliberately NOT rendered here: it duplicates the left #nav-sidebar (available_apps
+= real apps + the AI tool groups injected in AIAdminSite.each_context), and the
+user asked to drop that duplication. Navigation stays entirely in the left nav,
+which is always visible on every page.
 
-The left navigation sidebar renders the STOCK admin/nav_sidebar.html, which uses
-`available_apps` = real apps («Раздел ИИ», «Пользователи», …) + the AI tool groups
-injected in AIAdminSite.each_context. So «Раздел ИИ» stays in the left nav on the
-dashboard too (the user asked for it to always be there), alongside the tools.
-The stock dashboard empties {% block nav-sidebar %}; we re-enable it.
+Layout: single column (colM) — content = full-width Recent actions, sidebar
+block emptied. Stock dashboard.css still styles #recent-actions-module /
+.actionlist (loaded by admin/index.html {% block extrastyle %}).{% endcomment %}
 
-A short welcome banner is prepended to {% block content %} (via {{ block.super }})
-so the stock app_list and the two-column colMS layout below it are untouched —
-the intro is a plain block above the floating #content-main.{% endcomment %}
+{% block coltype %}colM{% endblock %}
 
 {% block nav-sidebar %}{% include "admin/nav_sidebar.html" %}{% endblock %}
 
 {% block content %}
-<div class="ai-dashboard-intro">
-  <h2>{% translate "Панель управления ИИ" %}</h2>
-  <p>{% blocktranslate %}Здесь настраиваются промпты, темы, задачи и модели ИИ-сервиса. Инструменты (тестовая консоль, регрессионные тесты, ARM) и раздел «Администрирование» (состояние моделей, журналы, обновления) — в меню слева.{% endblocktranslate %}</p>
+<div id="content-main">
+  <div class="module" id="recent-actions-module">
+    <h2>{% translate 'Recent actions' %}</h2>
+    <h3>{% translate 'My actions' %}</h3>
+    {% load log %}
+    {% get_admin_log 10 as admin_log for_user user %}
+    {% if not admin_log %}
+    <p>{% translate 'None available' %}</p>
+    {% else %}
+    <ul class="actionlist">
+    {% for entry in admin_log %}
+    <li class="{% if entry.is_addition %}addlink{% endif %}{% if entry.is_change %}changelink{% endif %}{% if entry.is_deletion %}deletelink{% endif %}">
+        <span class="visually-hidden">{% if entry.is_addition %}{% translate 'Added:' %}{% elif entry.is_change %}{% translate 'Changed:' %}{% elif entry.is_deletion %}{% translate 'Deleted:' %}{% endif %}</span>
+        {% if entry.is_deletion or not entry.get_admin_url %}
+            {{ entry.object_repr }}
+        {% else %}
+            <a href="{{ entry.get_admin_url }}">{{ entry.object_repr }}</a>
+        {% endif %}
+        <br>
+        {% if entry.content_type %}
+            <span class="mini quiet">{% filter capfirst %}{{ entry.content_type.name }}{% endfilter %}</span>
+        {% else %}
+            <span class="mini quiet">{% translate 'Unknown content' %}</span>
+        {% endif %}
+    </li>
+    {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
 </div>
-{{ block.super }}
 {% endblock %}
+
+{% block sidebar %}{% endblock %}
