@@ -60,6 +60,10 @@ ALLOWED_HOSTS = _env_csv(
 # Application definition
 
 INSTALLED_APPS = [
+    # 'ai' должен идти ДО django.contrib.admin: иначе его собственный
+    # admin/base_site.html (тулбар «Инструменты ИИ» в {% block header %})
+    # затеняется стандартным шаблоном из site-packages при APP_DIRS=True.
+    'ai',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -67,7 +71,6 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'channels',
-    'ai', 
 ]
 
 MIDDLEWARE = [

@@ -5,9 +5,14 @@
 column renders the standard permission-filtered app_list (every registered
 ModelAdmin the user can see, with Add/Change links and proper dashboard.css).
 
-The "Инструменты ИИ" hub no longer lives in a right-hand #content-related
-column — it is now the global toolbar injected by admin/base_site.html, so it
-is visible on EVERY admin page (not just the dashboard) and frees this column
-to fill the full width. No sidebar override here on purpose: the stock
-{% block sidebar %} stays empty, so no #content-related column is rendered and
-the app_list uses the full row.{% endcomment %}
+The custom (non-ModelAdmin) AI tool pages live in the right #content-related
+sidebar, grouped by access level (admin/ai/_ai_sidebar_tools.html). We render
+the tools first, then {{ block.super }} keeps the stock "Recent actions"
+module, so both share the right-hand gutter (colMS) using stock CSS.{% endcomment %}
+
+{% block sidebar %}
+<div class="ai-tools-sidebar">
+  {% include "admin/ai/_ai_sidebar_tools.html" %}
+</div>
+{{ block.super }}
+{% endblock %}

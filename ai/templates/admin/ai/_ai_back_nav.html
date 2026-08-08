@@ -1,0 +1,10 @@
+{% load i18n %}
+{% comment %}Shared back-to-hub link for custom AI admin tool pages. The "Инструменты
+ИИ" hub now lives in the dashboard right-hand sidebar (admin/ai/index.html), so
+tool pages no longer carry the header toolbar — this explicit link reverses the
+admin index URL instead of hardcoding /ai/admin/ so it survives mount-point
+changes. Pages with a more specific "back" target (e.g. log detail -> logs
+list) add that link alongside this one.{% endcomment %}
+<div class="ai-back-nav">
+  <a href="{% url 'admin:index' %}">&larr; {% trans "Назад в админку" %}</a>
+</div>

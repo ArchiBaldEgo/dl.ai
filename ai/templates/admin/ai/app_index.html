@@ -3,6 +3,11 @@
 
 {% comment %}Per-app admin index (/ai/admin/ai/). AIAdminSite.app_index redirects
 this URL to admin:index, so this template is effectively never rendered — kept
-for safety in case the redirect is bypassed. The global toolbar
-(admin/base_site.html) already carries the AI tools, so no sidebar override is
-needed.{% endcomment %}
+for safety in case the redirect is bypassed. Mirrors the dashboard sidebar:
+the AI tools (grouped by access level) in the right #content-related column.{% endcomment %}
+
+{% block sidebar %}
+<div class="ai-tools-sidebar">
+  {% include "admin/ai/_ai_sidebar_tools.html" %}
+</div>
+{% endblock %}
