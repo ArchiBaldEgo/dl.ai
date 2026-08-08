@@ -472,6 +472,14 @@ def _run_worker(run_id):
             with _jobs_lock:
                 job = _jobs.get(run_id)
                 if job is not None:
+                    # Компактная запись для «простого» вида (группировка по классу,
+                    # без имён методов и трейсбеков) — подробный нарратив живёт в log[].
+                    job["results"].append({
+                        "class": payload["class"],
+                        "class_ru": class_ru,
+                        "status": payload["status"],
+                        "reason": payload.get("reason", ""),
+                    })
                     job["completed"] = (job.get("completed") or 0) + 1
                     job["current"] = f"{class_ru} · {payload['method']}"
                     job["updated_at_ts"] = time.time()

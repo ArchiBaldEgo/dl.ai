@@ -21,6 +21,21 @@ def is_staff_or_superuser(user):
     return bool(user.is_superuser or user.is_staff)
 
 
+def is_superuser_user(user):
+    """Проверяет, является ли пользователь суперпользователем.
+
+    Отдельный от ``is_staff_or_superuser`` помощник: некоторые инструменты
+    (регрессионные тесты, тестовая консоль, тест-кейсы промптов) по решению
+    владельца доступны ТОЛЬКО суперпользователю — даже staff без флага
+    ``is_superuser`` их не видит.
+    """
+    if not user:
+        return False
+    if getattr(user, "is_active", True) is False:
+        return False
+    return bool(getattr(user, "is_superuser", False))
+
+
 def can_access_admin(user):
     """Доступ к админке: staff/superuser ИЛИ prompt_developer."""
     return is_staff_or_superuser(user) or is_prompt_developer_user(user)
@@ -50,17 +65,17 @@ def can_access_prompt_admin(request):
 
 
 def can_access_prompt_regression(request):
-    """Regression-tests page: same access policy as ARM (staff/super OR prompt developer)."""
+    """Регрессионные тесты промптов: только суперпользователь."""
     if not request.user.is_authenticated:
         return False
-    return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+    return is_superuser_user(request.user)
 
 
 def can_access_test_console(request):
-    """Тестовая консоль: staff/superuser ИЛИ prompt_developer (как ARM)."""
+    """Тестовая консоль: только суперпользователь."""
     if not request.user.is_authenticated:
         return False
-    return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+    return is_superuser_user(request.user)
 
 
 def can_access_logs(request):

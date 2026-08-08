@@ -51,6 +51,25 @@
   .tc-log-line.final-fail { font-weight:700; font-size:15px; color:#c93b3b;
                             border-left-color:#c93b3b; margin-top:10px; }
 
+  /* Простой вид для не-технического пользователя: крупный итоговый баннер и
+     группировка по классам (без имён методов и трейсбеков). Технический журнал
+     ниже свёрнут в <details>, раскрывается по желанию. */
+  .tc-banner { display:none; padding:14px 16px; border-radius:6px; font-size:18px;
+               font-weight:700; line-height:1.3; margin-bottom:12px; }
+  .tc-banner.ok { display:block; background:#e7f6e7; color:#1a7d1a;
+                  border:1px solid #bfe3bf; }
+  .tc-banner.fail { display:block; background:#fdecec; color:#c93b3b;
+                    border:1px solid #f3c2c2; }
+  .tc-banner small { display:block; font-size:13px; font-weight:500; margin-top:4px; color:var(--body-quiet-color); }
+  .tc-group-row { display:flex; align-items:center; gap:8px; padding:4px 0;
+                  font-size:14px; border-bottom:1px solid var(--hairline-color); }
+  .tc-group-row:last-child { border-bottom:none; }
+  .tc-group-row .tc-gmark { width:20px; text-align:center; font-weight:700; }
+  .tc-group-row .tc-gmark.ok { color:#1a7d1a; }
+  .tc-group-row .tc-gmark.fail { color:#c93b3b; }
+  .tc-group-row .tc-gname { flex:1; }
+  .tc-group-row .tc-gcount { color:var(--body-quiet-color); font-size:13px; white-space:nowrap; }
+
   .button { display:inline-block; padding:6px 14px; border:1px solid var(--hairline-color);
             border-radius:4px; background: var(--darkened-bg); color: var(--body-fg);
             text-decoration:none; cursor: pointer; font-size:13px; }
@@ -60,20 +79,20 @@
 
 <div class="tc-wrap">
   <div class="tc-title-block">
+    {% include "admin/ai/_ai_back_nav.html" %}
     <h1>Тестовая консоль</h1>
     <p class="tc-subtitle">
       Здесь запускаются проверки приложения — в отдельном окружении, без влияния на
-      рабочую базу. Весь ход прогона описывается по-русски в «Журнале вывода» ниже:
-      каждый сценарий — отдельная строка (зелёная — прошёл, красная — провал,
-      серая — пропущен). Технические подробности ошибок (трейсбеки) показываются
-      приглушённым шрифтом под соответствующей строкой.
+      рабочую базу. Сразу после запуска сверху появится короткий итог: прошёл прогон
+      или нет, с разбивкой по разделам. Технические подробности — ниже, под кнопкой
+      «Подробнее».
     </p>
   </div>
 
   <div class="tc-card">
     <form id="tcRunForm" method="post" class="tc-form">
       {% csrf_token %}
-      <p>Тестовая база создаётся и удаляется автоматически. Одновременно возможен только один прогон.</p>
+      <p>Проверки идут в отдельной копии и не затрагивают рабочую базу. Одновременно возможен только один прогон.</p>
       <div id="tcRunError" class="tc-error" {% if not error_message %}style="display:none"{% endif %}>{{ error_message }}</div>
       <div id="tcRunProgress" class="tc-status-line">
         <span class="tc-spinner" aria-hidden="true"></span>
@@ -83,15 +102,19 @@
     </form>
   </div>
 
-  <div id="tcSummaryCard" class="tc-card" style="display:none">
-    <h2>Итог</h2>
-    <div id="tcSummary"></div>
+  <div id="tcSimpleCard" class="tc-card" style="display:none">
+    <div id="tcSimpleBanner" class="tc-banner" role="status" aria-live="polite"></div>
+    <div id="tcSimpleResults"></div>
   </div>
 
-  <div class="tc-card">
-    <h2>Журнал вывода</h2>
-    <div id="tcLog" class="tc-log"></div>
-  </div>
+  <details class="tc-card tc-details">
+    <summary style="cursor:pointer; font-size:15px; font-weight:600;">Подробнее: итог и технический журнал</summary>
+    <div id="tcSummaryCard" style="margin-top:10px;">
+      <h2 style="margin:0 0 6px; font-size:15px;">Итог</h2>
+      <div id="tcSummary"></div>
+    </div>
+    <div id="tcLog" class="tc-log" style="margin-top:12px;"></div>
+  </details>
 </div>
 
 {{ active_run_snapshot|json_script:"test-console-initial-run" }}

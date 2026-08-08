@@ -332,6 +332,12 @@
 
   .arm-link {
     display: inline-block;
+    font-weight: 600;
+    text-decoration: none;
+    margin-bottom: 4px;
+  }
+  .arm-link:hover {
+    text-decoration: underline;
   }
 
   .arm-top-actions {
@@ -379,6 +385,7 @@
 <div class="arm-wrap">
   <div class="arm-header">
     <div class="arm-title-block">
+      {% include "admin/ai/_ai_back_nav.html" %}
       <a class="arm-link" href="{{ arm_back_url }}">← Вернуться в чат</a>
       <h1>ARM: В чем ошибка</h1>
       <p class="arm-subtitle">Проверка задачи и кода доступными моделями</p>

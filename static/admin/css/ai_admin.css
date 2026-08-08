@@ -1,14 +1,84 @@
-/* AI admin chrome: left nav tools + tool-page compactness overrides.
+/* AI admin chrome: header greeting + left nav + tool-page compactness overrides.
    Loaded once via admin/base_site.html{% block extrastyle %} so it applies to
    every admin page (stock ModelAdmin changelists + custom tool pages).
 
-   The AI tools are injected into the left #nav-sidebar as fake "app" groups
-   (AIAdminSite.each_context → available_apps / ai_nav_tools_apps) and render via
-   stock admin/app_list.html + nav_sidebar.css, so they need no custom CSS here.
+   The AI tools and the real «Раздел ИИ» app group render in the left
+   #nav-sidebar via stock admin/app_list.html + nav_sidebar.css (fed by
+   AIAdminSite.each_context → available_apps), so they need no custom CSS here.
 
    Convention: page <style> blocks live in the body and therefore win source
    order over this file for equal specificity. The compactness overrides below
    therefore use !important deliberately — they are a single override layer. */
+
+/* ─────────────────────── Header greeting + role ────────────────────── */
+
+/* Role badge in the stock #user-tools welcome line (admin/base_site.html
+   welcome-msg block). Subtle pill so the role is visible at a glance without
+   fighting the header's own typography. */
+.ai-role-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  background: var(--darkened-bg);
+  border: 1px solid var(--hairline-color);
+  color: var(--body-quiet-color);
+  vertical-align: middle;
+}
+
+/* ─────────────────────── Dashboard welcome banner ─────────────────── */
+
+/* Short intro card above the stock dashboard app_list. Sits in normal flow
+   above the floating #content-main, so the colMS two-column layout below is
+   untouched. Themed via Django CSS vars (works in light/dark). */
+.ai-dashboard-intro {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  background: var(--darkened-bg);
+  border: 1px solid var(--hairline-color);
+  border-radius: 6px;
+  color: var(--body-fg);
+}
+.ai-dashboard-intro h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 700;
+}
+.ai-dashboard-intro p {
+  margin: 0;
+  color: var(--body-quiet-color);
+  font-size: 13px;
+  line-height: 1.45;
+  max-width: 760px;
+}
+
+/* ─────────────────── Left-nav tool group readability ───────────────── */
+
+/* The injected «Инструменты» / «Администрирование» groups render through the
+   stock admin/app_list.html. Their app_url is "#", so the bold `current-app`
+   state never fires — but the caption link still gets the stock `a.section`
+   treatment (header-link colour). Tone it down so group headings read as
+   quiet section labels, not clickable destinations, and add a little air
+   above each group so the tool list is easier to scan. */
+#nav-sidebar .app-ai-tools,
+#nav-sidebar .app-ai-admin {
+  margin-top: 6px;
+}
+#nav-sidebar .app-ai-tools caption a.section:link,
+#nav-sidebar .app-ai-tools caption a.section:visited,
+#nav-sidebar .app-ai-admin caption a.section:link,
+#nav-sidebar .app-ai-admin caption a.section:visited {
+  color: var(--body-quiet-color);
+  font-weight: 700;
+}
+#nav-sidebar .app-ai-tools caption a.section:hover,
+#nav-sidebar .app-ai-admin caption a.section:hover {
+  color: var(--link-fg);
+  text-decoration: none;
+}
 
 /* ─────────────────────── Back-nav (tool pages) ─────────────────────── */
 
@@ -35,17 +105,23 @@
 .prt-wrap,
 .status-wrap,
 .tc-wrap,
-.ai-log-detail {
+.ai-log-detail,
+.ai-logs-wrap,
+.ai-updates-wrap {
   max-width: 100% !important;
   margin: 0 !important;
 }
 
-/* Tighter page headings — the stock 28px headers eat vertical space. */
+/* Tighter page headings — the stock 1.25rem (20px) header eats vertical space
+   and the inline 28px on arm/prt pages is too loud. Unify every tool page to
+   22px with a tight top margin so the back-nav + h1 sit close together. */
 .arm-title-block h1,
 .prt-title-block h1,
 .tc-title-block h1,
 .status-wrap > h1,
-.ai-log-detail > h1 {
+.ai-log-detail > h1,
+.ai-logs-wrap > h1,
+.ai-updates-wrap > h1 {
   font-size: 22px !important;
   margin-top: 0 !important;
 }

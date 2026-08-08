@@ -3,7 +3,8 @@
 
 {% comment %}Per-app admin index (/ai/admin/ai/). AIAdminSite.app_index redirects
 this URL to admin:index, so this template is effectively never rendered — kept
-for safety in case the redirect is bypassed. Mirrors the dashboard: a tools-only
-left nav (admin/ai/_ai_nav_sidebar.html).{% endcomment %}
+for safety in case the redirect is bypassed. Mirrors the dashboard: the stock
+admin/nav_sidebar.html renders real apps + the AI tool groups.
+{% endcomment %}
 
-{% block nav-sidebar %}{% include "admin/ai/_ai_nav_sidebar.html" %}{% endblock %}
+{% block nav-sidebar %}{% include "admin/nav_sidebar.html" %}{% endblock %}

@@ -42,6 +42,7 @@ class AiConfig(AppConfig):
     """
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'ai'
+    verbose_name = 'Раздел ИИ'
 
     def ready(self):
         post_migrate.connect(ensure_default_groups, sender=self, dispatch_uid="ai.ensure_default_groups")

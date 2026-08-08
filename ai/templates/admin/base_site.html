@@ -1,20 +1,25 @@
 {% extends "admin/base.html" %}
-{% load static %}
+{% load static i18n %}
 
 {% comment %}Project-wide admin chrome override. The whole admin is the AI
 AdminSite (ai/admin/site.py), so customising admin/base_site here only affects
 that site — there is no second AdminSite in use.
 
-Only the AI admin stylesheet is wired here; the "Инструменты ИИ" hub lives in
-the LEFT navigation sidebar — the tool groups are injected into
-`available_apps`/`ai_nav_tools_apps` by AIAdminSite.each_context and rendered by
-the stock admin/nav_sidebar.html (admin/ai/index.html overrides the nav-sidebar
-block with admin/ai/_ai_nav_sidebar.html for a tools-only dashboard nav). NOTE:
-'ai' must precede 'django.contrib.admin' in INSTALLED_APPS so this file is not
-shadowed by the stock admin/base_site.html (APP_DIRS=True returns the first
-match).{% endcomment %}
+Wires the AI admin stylesheet and a Russian welcome+role greeting in the stock
+#user-tools header. The AI tools (and the real «Раздел ИИ» app group) live in
+the LEFT navigation sidebar — tool groups are injected into `available_apps`
+by AIAdminSite.each_context and rendered by the stock admin/nav_sidebar.html
+on every page (admin/ai/index.html re-enables that nav-sidebar block on the
+dashboard too). NOTE: 'ai' must precede 'django.contrib.admin' in
+INSTALLED_APPS so this file is not shadowed by the stock admin/base_site.html
+(APP_DIRS=True returns the first match).{% endcomment %}
 
 {% block extrastyle %}
   {{ block.super }}
   <link rel="stylesheet" href="{% static 'admin/css/ai_admin.css' %}">
+{% endblock %}
+
+{% block welcome-msg %}
+  {% if user_display_name %}Здравствуйте, <strong>{{ user_display_name }}</strong>!{% else %}{% translate 'Welcome,' %} <strong>{{ user|default:'' }}</strong>{% endif %}
+  {% if user_role_label %}<span class="ai-role-badge">{{ user_role_label }}</span>{% endif %}
 {% endblock %}

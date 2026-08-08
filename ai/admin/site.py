@@ -266,8 +266,13 @@ class AIAdminSite(admin.AdminSite):
         context = super().each_context(request)
         is_pd = is_prompt_developer_user(request.user)
         is_staff = is_staff_or_superuser(request.user)
+        is_super = bool(getattr(request.user, "is_superuser", False))
         context["is_prompt_developer"] = is_pd
         context["is_staff_or_superuser"] = is_staff
+        context["user_display_name"] = self._user_display_name(request.user)
+        context["user_role_label"] = self._user_role_label(
+            request.user, is_super, is_staff, is_pd,
+        )
         show_arm = can_access_arm(request)
         context["show_arm_link"] = show_arm
         show_model_status = can_access_model_status(request)
@@ -322,13 +327,43 @@ class AIAdminSite(admin.AdminSite):
                 ("Администрирование", "Обновления", "AiUpdates", updates_url, show_updates),
             ],
         )
-        # Change/tool pages: stock admin/nav_sidebar.html renders available_apps
-        # (real apps + the injected tool groups).
+        # Change/tool pages AND the dashboard: stock admin/nav_sidebar.html renders
+        # available_apps (real apps + the injected tool groups), so «Раздел ИИ»
+        # stays in the left nav on every page — including the dashboard.
         context["available_apps"] = list(context["available_apps"]) + tools_apps
-        # Dashboard: a tools-only left nav (admin/ai/_ai_nav_sidebar.html) uses
-        # this so the real apps are not duplicated (they are the dashboard main).
-        context["ai_nav_tools_apps"] = tools_apps
         return context
+
+    @staticmethod
+    def _user_display_name(user):
+        """Человекочитаемое имя для приветствия в шапке админки.
+
+        Предпочитаем полное имя, затем имя+фамилию, иначе username без префикса
+        ``user_`` (DL-провижненные аккаунты — это ``user_<id>``).
+        """
+        if not user or not getattr(user, "is_authenticated", False):
+            return ""
+        full = (getattr(user, "get_full_name", lambda: "")() or "").strip()
+        if full:
+            return full
+        first = (getattr(user, "first_name", "") or "").strip()
+        last = (getattr(user, "last_name", "") or "").strip()
+        if first or last:
+            return f"{first} {last}".strip()
+        username = getattr(user, "get_username", lambda: "")() or ""
+        if username.startswith("user_"):
+            return username[5:]
+        return username
+
+    @staticmethod
+    def _user_role_label(user, is_super, is_staff, is_pd):
+        """Короткая русская метка роли для шапки админки."""
+        if is_super:
+            return "Суперпользователь"
+        if is_staff:
+            return "Администратор"
+        if is_pd:
+            return "Разработчик промптов"
+        return "Пользователь"
 
     def _build_ai_nav_apps(self, request, *, tools):
         """Build fake "app" groups (for the left nav) from a list of tools.
@@ -337,13 +372,17 @@ class AIAdminSite(admin.AdminSite):
         tuples. Groups with no visible tool are omitted. The returned dicts mimic
         ``AdminSite._build_app_dict`` so ``admin/app_list.html`` renders them
         natively (per-tool ``current-model`` highlight via ``admin_url``).
-        """
-        from django.urls import reverse
 
-        try:
-            group_url = reverse("admin:index", current_app=self.name)
-        except Exception:
-            group_url = "/ai/admin/"
+        ``app_url`` is set to ``"#"`` deliberately: the group heading is a label,
+        not a navigation target. The stock ``admin/app_list.html`` adds the
+        ``current-app`` class (which renders the caption bold + header-coloured)
+        when ``app.app_url in request.path`` — pointing it at the admin index
+        would match EVERY admin page (all paths start with ``/ai/admin/``), so
+        both tool groups would stay permanently bold. ``"#"`` never matches the
+        path, so the heading keeps its normal weight and only the active *tool*
+        row highlights via ``current-model``.
+        """
+        group_url = "#"
 
         label_to_key = {"Инструменты": "ai-tools", "Администрирование": "ai-admin"}
         groups: dict[str, dict] = {}

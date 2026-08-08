@@ -845,7 +845,7 @@ var localization = {
         groqRequests: "запросов/min",
         groqRequestsDaily: "запросов/день",
         groqRemaining: "Осталось",
-        loadTimeFooter: "Загрузка: {total} мс"
+        loadTimeFooter: "Загрузка: {total} с"
     },
     English: {
         send: "Send",
@@ -908,7 +908,7 @@ var localization = {
         groqRequests: "requests/min",
         groqRequestsDaily: "requests/day",
         groqRemaining: "Remaining",
-        loadTimeFooter: "Load: {total} ms"
+        loadTimeFooter: "Load: {total} s"
     },
     French: {
         send: "Envoyer",
@@ -971,7 +971,7 @@ var localization = {
         groqRequests: "requêtes/min",
         groqRequestsDaily: "requêtes/jour",
         groqRemaining: "Restant",
-        loadTimeFooter: "Chargement : {total} ms"
+        loadTimeFooter: "Chargement : {total} s"
     }
 };
 
@@ -1411,8 +1411,8 @@ function updateLoadTimeFooter() {
         var lang = 'Russian';
         try { if (typeof getAiState === 'function') lang = getAiState().lang || 'Russian'; } catch (e) {}
         var dict = (localization[lang]) || localization['Russian'] || {};
-        var fmt = dict.loadTimeFooter || 'Загрузка: {total} мс';
+        var fmt = dict.loadTimeFooter || 'Загрузка: {total} с';
         var el = document.getElementById('load-time-footer');
-        if (el) el.textContent = fmt.replace('{total}', tm.total);
+        if (el) el.textContent = fmt.replace('{total}', (tm.total / 1000).toFixed(2));
     } catch (e) {}
 }

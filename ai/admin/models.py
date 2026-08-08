@@ -26,7 +26,7 @@ from ..models import (
 )
 from ..querysets import prompt_queryset_for_user
 from .forms import PromptForm, SharedPromptForm
-from .permissions import can_access_logs, is_prompt_developer_user, is_staff_or_superuser
+from .permissions import can_access_logs, is_prompt_developer_user, is_staff_or_superuser, is_superuser_user
 from ..dl_api_client import (
     DLApiError,
     fetch_task_info,
@@ -484,14 +484,15 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 class PromptTestCaseAdmin(admin.ModelAdmin):
     """Admin for prompt regression test fixtures (input + golden + comparator).
 
-    Available to staff/superusers and prompt developers.
+    Доступ только суперпользователю (тест-кейсы промптов — по решению владельца
+    закрыты от staff/prompt_developer).
     """
 
     def has_module_permission(self, request):
-        return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+        return is_superuser_user(request.user)
 
     def has_view_permission(self, request, obj=None):
-        return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+        return is_superuser_user(request.user)
 
     def has_add_permission(self, request):
         return is_staff_or_superuser(request.user)
@@ -521,14 +522,15 @@ class PromptTestCaseAdmin(admin.ModelAdmin):
 class PromptTestRunAdmin(admin.ModelAdmin):
     """Read-only admin for prompt regression runs (the rich UI is the custom page).
 
-    Available to staff/superusers and prompt developers (read-only).
+    Доступ только суперпользователю (прогоны регрессионных тестов — по решению
+    владельца закрыты от staff/prompt_developer).
     """
 
     def has_module_permission(self, request):
-        return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+        return is_superuser_user(request.user)
 
     def has_view_permission(self, request, obj=None):
-        return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+        return is_superuser_user(request.user)
 
     list_display = ("run_id", "model_title", "prompt_name", "status", "total_cases", "started_at", "finished_at")
     list_filter = ("status", "model_key")
