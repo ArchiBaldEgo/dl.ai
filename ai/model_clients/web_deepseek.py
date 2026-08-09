@@ -19,6 +19,17 @@ from .exceptions import map_http_error, safe_parse_response
 logger = logging.getLogger(__name__)
 
 
+def _retry_after_seconds(response) -> int:
+    """Retry-After header от bot-пула (429/503 — боты заняты/стартуют), 0 если нет."""
+    try:
+        val = int((response.headers.get("Retry-After") or "").strip())
+        if val > 0:
+            return val
+    except (TypeError, ValueError):
+        pass
+    return 0
+
+
 def _post_to_bot_pool(payload: dict, timeout_seconds: int = 120) -> requests.Response:
     """Internal service call must bypass env proxies (HTTP_PROXY/HTTPS_PROXY)."""
     session = proxy_bypass_session()
@@ -94,21 +105,28 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
                 return error_message, 0, True
             return obj["data"]["content"], 0, False
 
-        if response.status_code in (500, 502, 503, 504):
-            # Маркер того, что DeepSeek изменил вёрстку — retry бесполезен,
-            # сразу вернём понятную ошибку (экономит ~15 мин 3×300с retry-ей).
+        if response.status_code in (429, 500, 502, 503, 504):
+            # 429 — все боты pool заняты (pool шлёт Retry-After, ~3с): транзитная
+            # загрузка, короткое ожидание часто даёт боту освободиться — ретраимся.
+            # 5xx — серверная ошибка pool/бота. Особый случай: DeepSeek изменил
+            # вёрстку → селекторы устарели, retry бесполезен. Сразу вернём понятную
+            # ошибку (экономит ~15 мин 3×300с retry-ей).
             reason = ""
-            try:
-                obj, _ = safe_parse_response(response.text)
-                if obj:
-                    reason = obj.get("reason") or ""
-            except Exception:
-                pass
-            if "UI may have changed" in reason or "All answer XPath selectors failed" in reason:
-                return ("DeepSeek изменил интерфейс сайта — селекторы bot-пула устарели, "
-                        "нужно обновить WebDeepseek/worker/data.json."), 0, True
+            if response.status_code != 429:
+                try:
+                    obj, _ = safe_parse_response(response.text)
+                    if obj:
+                        reason = obj.get("reason") or ""
+                except Exception:
+                    pass
+                if "UI may have changed" in reason or "All answer XPath selectors failed" in reason:
+                    return ("DeepSeek изменил интерфейс сайта — селекторы bot-пула устарели, "
+                            "нужно обновить WebDeepseek/worker/data.json."), 0, True
             if attempt < max_attempts:
-                wait = min(attempt * 3, 15)
+                # Уважаем Retry-After (429/503 — бот освобождается/стартует),
+                # иначе мягкий backoff; ограничиваем сверху, чтобы не висеть.
+                wait = _retry_after_seconds(response) or min(attempt * 3, 15)
+                wait = min(wait, 20)
                 logger.warning("Bot pool returned %s, retrying in %ss (attempt %s/%s)", response.status_code, wait, attempt, max_attempts)
                 await asyncio.sleep(wait)
                 continue

@@ -302,7 +302,20 @@ class Bot {
         });
 
         if (typeof out === 'object' && out && out.ok === false) {
-            throw new Error(out.reason || 'sendMessage failed');
+            // Поверх reason докидываем data.moreInformation — в нём живёт диагноз
+            // ("All answer XPath selectors failed — DeepSeek UI may have changed"),
+            // который Django-клиент ищет, чтобы быстро сдаться при смене вёрстки
+            // DeepSeek (иначе 3×300с бессмысленных retry-ов). Сервер проксирует
+            // e.message в { reason }, так что строка доходит до Django.
+            const detail = out?.data?.moreInformation;
+            const detailStr = detail instanceof Error
+                ? `${detail.name}: ${detail.message}`
+                : (detail != null ? String(detail) : '');
+            throw new Error(
+                detailStr
+                    ? `${out.reason || 'sendMessage failed'}: ${detailStr}`
+                    : (out.reason || 'sendMessage failed')
+            );
         }
         return out;
     }

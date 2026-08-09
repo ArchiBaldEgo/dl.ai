@@ -224,27 +224,39 @@ function initProblemSelectors() {
     function populatePrompts(languageId, topicId) {
         selectPrompt.innerHTML = '<option value="">' + getUiString('choosePrompt', 'Выберите промпт') + '</option>';
         if (!problemData) return;
-        let allPrompts = (problemData.prompts || []).slice();
+
+        // Кандидаты в селектор препромптов.
+        // - Язык НЕ выбран: только общие (универсальные, language_ids пустой)
+        //   препромты. Специфичные для языка/темы скрываются, пока пользователь
+        //   не выберет язык.
+        // - Язык выбран (тема может быть и не выбрана): Общие (универсальные +
+        //   привязанные к этому языку) + специфичные для (язык + тема).
+        const langIdStr = languageId ? String(languageId) : '';
+        const sharedList = (problemData.shared_prompts || []).slice();
+        const sharedVisible = sharedList.filter(sp => {
+            const ids = sp.language_ids || [];
+            if (!languageId) return ids.length === 0;            // только универсальные
+            return ids.length === 0 || ids.includes(languageId) || ids.includes(langIdStr);
+        });
+
+        let candidates = [];
+        sharedVisible.forEach(sp => {
+            candidates.push({
+                id: `shared_${sp.id}`,
+                prompt_name: `[Общий] ${sp.name || sp.prompt_name}`,
+                name: `[Общий] ${sp.name || sp.prompt_name}`,
+                topic_id: null,
+                topic__programming_language: langIdStr
+            });
+        });
 
         if (languageId) {
-            const langIdStr = String(languageId);
-            const shared = (problemData.shared_prompts || []).filter(sp => {
-                const ids = sp.language_ids || [];
-                return ids.length === 0 || ids.includes(languageId) || ids.includes(langIdStr);
-            });
-            shared.forEach(sp => {
-                allPrompts.push({
-                    id: `shared_${sp.id}`,
-                    prompt_name: `[Общий] ${sp.name || sp.prompt_name}`,
-                    name: `[Общий] ${sp.name || sp.prompt_name}`,
-                    topic_id: null,
-                    topic__programming_language: langIdStr
-                });
-            });
+            // Специфичные для языка/темы промпты показываем только после выбора языка.
+            const filteredPrompts = filterPrompts((problemData.prompts || []).slice(), languageId, topicId);
+            filteredPrompts.forEach(prompt => { candidates.push(prompt); });
         }
 
-        const filteredPrompts = filterPrompts(allPrompts, languageId, topicId);
-        filteredPrompts.forEach(prompt => {
+        candidates.forEach(prompt => {
             const option = new Option(prompt.name || prompt.prompt_name, prompt.id);
             selectPrompt.appendChild(option);
         });
