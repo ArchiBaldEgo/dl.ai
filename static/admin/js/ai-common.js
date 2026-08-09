@@ -471,6 +471,25 @@ function setRequestLock(isLocked) {
     }
 }
 
+// === Pre-send guard: тема без препромпта ===
+// На страницах «Реши задачу» / «В чём ошибка?» есть селекторы темы (selectTheme)
+// и препромпта (selectPrompt). Если выбрана тема, но препромпт не выбран —
+// переспросить пользователя перед отправкой. Возвращает true, если можно
+// отправлять; false — если пользователь отменил. На страницах без этих
+// селекторов (чат) сразу true.
+function confirmTopicWithoutPreprompt() {
+    var topicEl = document.getElementById('selectTheme');
+    var promptEl = document.getElementById('selectPrompt');
+    if (!topicEl || !promptEl) return true;
+    var topic = (topicEl.value || '').trim();
+    var preprompt = (promptEl.value || '').trim();
+    if (topic && !preprompt) {
+        return confirm(getUiString('topicWithoutPrepromptConfirm',
+            'Выбрана тема, но не выбран препромпт. Отправить запрос с выбранной темой, но без препромпта?'));
+    }
+    return true;
+}
+
 // === Voice: MediaRecorder ===
 
 function toggleVoiceControls() {
@@ -798,6 +817,7 @@ var localization = {
         chooseLanguage: "Выберите язык",
         chooseTheme: "Выберите тему",
         choosePrompt: "Выберите промпт",
+        topicWithoutPrepromptConfirm: "Выбрана тема, но не выбран препромпт. Отправить запрос с выбранной темой, но без препромпта?",
         voiceMode: "Голосовой режим",
         voiceInput: "Голосовой ввод",
         voiceOutput: "Озвучить ответ",
@@ -862,6 +882,7 @@ var localization = {
         chooseLanguage: "Choose language",
         chooseTheme: "Choose theme",
         choosePrompt: "Choose prompt",
+        topicWithoutPrepromptConfirm: "A topic is selected but no preprompt is chosen. Send the request with the selected topic but without a preprompt?",
         voiceMode: "Voice mode",
         voiceInput: "Voice input",
         voiceOutput: "Speak answer",
@@ -926,6 +947,7 @@ var localization = {
         chooseLanguage: "Choisir la langue",
         chooseTheme: "Choisir le thème",
         choosePrompt: "Choisir le pré-promp",
+        topicWithoutPrepromptConfirm: "Un thème est sélectionné mais aucun pré-promp n'est choisi. Envoyer la requête avec le thème sélectionné mais sans pré-promp ?",
         voiceMode: "Mode vocal",
         voiceInput: "Saisie vocale",
         voiceOutput: "Lire la réponse",

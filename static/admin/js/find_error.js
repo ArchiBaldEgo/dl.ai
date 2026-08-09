@@ -172,6 +172,8 @@ function sendMessage(event) {
         return;
     }
 
+    if (!confirmTopicWithoutPreprompt()) return;
+
     ws.send(JSON.stringify({
         type: '3',
         message: taskInput.value,
@@ -217,6 +219,8 @@ function simulateSend() {
         updateVoiceStatus(getVoiceStatusText('select_prog_lang'));
         return;
     }
+
+    if (!confirmTopicWithoutPreprompt()) return;
 
     ws.send(JSON.stringify({
         type: '3',

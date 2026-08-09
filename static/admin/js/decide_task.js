@@ -132,6 +132,8 @@ function sendMessage(event) {
         return;
     }
 
+    if (!confirmTopicWithoutPreprompt()) return;
+
     ws.send(JSON.stringify({
         type: '2',
         message: input.value,
@@ -171,6 +173,8 @@ function simulateSend() {
     if (!input.value.trim()) {
         return;
     }
+
+    if (!confirmTopicWithoutPreprompt()) return;
 
     ws.send(JSON.stringify({
         type: '2',
