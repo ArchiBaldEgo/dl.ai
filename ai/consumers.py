@@ -108,6 +108,15 @@ class MyConsumer(AsyncWebsocketConsumer):
         self.user_id = self._extract_user_id(user, user_info, self.external_account)
         self.client_id = self.scope["url_route"]["kwargs"]["client_id"]
         await self.accept()
+        # Сбрасываем серверный контекст модели при входе на страницу, чтобы
+        # conversation_history (Redis, привязка по client_id) не копился между
+        # визитами и не раздувал расход токенов. По факту им пользуется только
+        # OpenRouter — Groq stateless (шлёт одно сообщение), Web DeepSeek держит
+        # контекст на своей стороне, SambaNova выключен по умолчанию. Кнопка
+        # «Очистить контекст» делает то же самое в любой момент (receive()).
+        # Фронтенд-localStorage при этом НЕ трогается — сохранённый диалог на
+        # экране остаётся, просто модель начинает сессию с чистого контекста.
+        conversation_history.reset(self.client_id)
         logger.debug("WebSocket connected for client %s, user_id=%s", self.client_id, self.user_id)
 
     def _extract_user_id(self, user, user_info, external_account=None) -> str:
