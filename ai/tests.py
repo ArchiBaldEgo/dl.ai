@@ -1112,6 +1112,24 @@ class ModelCallerTests(SimpleTestCase):
         self.assertEqual(result.tokens, 42)
         self.assertEqual(result.model_title, "Test Model")
 
+    async def test_propagates_is_error_from_client_3tuple(self):
+        # Clients signal a 200-OK-but-error body (rate limit, «все боты
+        # заняты», parse failure, …) via a 3rd tuple element. ModelCaller must
+        # propagate it so the consumer routes to update_error — replacing the
+        # old text-marker heuristic that mis-flagged legit answers discussing
+        # «ошибка». A 2-tuple (no 3rd element) stays is_error=False (back-compat).
+        registry_mock = MagicMock()
+        registry_mock.get.return_value = True
+        registry_mock.handler.return_value = AsyncMock(
+            return_value=("Все боты заняты", 0, True)
+        )
+        registry_mock.title.return_value = "Web DeepSeek"
+
+        result = await ModelCaller(registry_mock).call("hi", "client", "Known")
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.response_text, "Все боты заняты")
+        self.assertEqual(result.tokens, 0)
+
 
 class RateLimiterTests(SimpleTestCase):
     def setUp(self):

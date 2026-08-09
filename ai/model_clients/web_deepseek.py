@@ -60,7 +60,7 @@ def restart_bot_pool(timeout_seconds: int = 30) -> bool:
         session.close()
 
 
-async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tuple[str, int]:
+async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tuple[str, int, bool]:
     payload = {
         "model": "deepseek",
         "user_id": user_id,
@@ -77,22 +77,22 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
                 logger.warning("Bot pool timeout (300s), retrying in %ss (attempt %s/%s)", wait, attempt, max_attempts)
                 await asyncio.sleep(wait)
                 continue
-            return "Таймаут при подключении к Web DeepSeek (300с). Попробуйте позже.", 0
+            return "Таймаут при подключении к Web DeepSeek (300с). Попробуйте позже.", 0, True
         except requests.ConnectionError as exc:
             if attempt < max_attempts:
                 wait = min(attempt * 3, 15)
                 logger.warning("Bot pool connection error: %s, retrying in %ss (attempt %s/%s)", exc, wait, attempt, max_attempts)
                 await asyncio.sleep(wait)
                 continue
-            return f"Ошибка подключения к Web DeepSeek: {exc}", 0
+            return f"Ошибка подключения к Web DeepSeek: {exc}", 0, True
 
         logger.debug("Bot pool response status: %s (attempt %s/%s)", response.status_code, attempt, max_attempts)
 
         if response.status_code == 200:
             obj, error_message = safe_parse_response(response.text)
             if obj is None:
-                return error_message, 0
-            return obj["data"]["content"], 0
+                return error_message, 0, True
+            return obj["data"]["content"], 0, False
 
         if response.status_code in (500, 502, 503, 504):
             # Маркер того, что DeepSeek изменил вёрстку — retry бесполезен,
@@ -106,21 +106,19 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
                 pass
             if "UI may have changed" in reason or "All answer XPath selectors failed" in reason:
                 return ("DeepSeek изменил интерфейс сайта — селекторы bot-пула устарели, "
-                        "нужно обновить WebDeepseek/worker/data.json."), 0
+                        "нужно обновить WebDeepseek/worker/data.json."), 0, True
             if attempt < max_attempts:
                 wait = min(attempt * 3, 15)
                 logger.warning("Bot pool returned %s, retrying in %ss (attempt %s/%s)", response.status_code, wait, attempt, max_attempts)
                 await asyncio.sleep(wait)
                 continue
 
-        return map_http_error(response.status_code, "web_deepseek"), 0
+        return map_http_error(response.status_code, "web_deepseek"), 0, True
 
 
-async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> str:
-    response, _ = await _ask_web_deepseek_common(msg, user_id, thinking=True)
-    return response
+async def ask_Web_DeepSeek_Thinking_async(msg: str, user_id: int) -> Tuple[str, int, bool]:
+    return await _ask_web_deepseek_common(msg, user_id, thinking=True)
 
 
-async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> str:
-    response, _ = await _ask_web_deepseek_common(msg, user_id, thinking=False)
-    return response
+async def ask_Web_DeepSeek_async(msg: str, user_id: int) -> Tuple[str, int, bool]:
+    return await _ask_web_deepseek_common(msg, user_id, thinking=False)

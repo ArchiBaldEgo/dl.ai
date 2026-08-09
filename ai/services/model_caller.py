@@ -82,9 +82,16 @@ class ModelCaller:
                 is_error=True,
             )
 
+        is_error = False
         if isinstance(response, tuple):
             response_text = response[0] if len(response) > 0 else ""
             tokens = response[1] if len(response) > 1 else 0
+            # Clients signal a 200-OK-but-error body (rate limit, «все боты
+            # заняты», parse failure, …) via a 3rd tuple element = True. This
+            # is the structured signal that replaces log_writer's text-marker
+            # heuristic (which mis-flagged legit answers discussing «ошибка»).
+            if len(response) > 2:
+                is_error = bool(response[2])
         else:
             response_text = response
             tokens = 0
@@ -93,4 +100,5 @@ class ModelCaller:
             response_text=str(response_text or ""),
             tokens=tokens,
             model_title=title,
+            is_error=is_error,
         )

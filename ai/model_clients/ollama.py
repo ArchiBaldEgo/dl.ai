@@ -12,7 +12,7 @@ kimi-k2.7-code:cloud, kimi-k2.6:cloud, deepseek-v4-flash:cloud) требуют b
 препромпт подставляется на каждое сообщение (как у Groq).
 
 Контракт handler'а (см. ai/services/model_caller.py:75):
-``async def handler(msg: str, client_id: str) -> Tuple[str, int]``.
+``async def handler(msg: str, client_id: str) -> Tuple[str, int, bool]``.
 """
 
 import asyncio
@@ -87,11 +87,11 @@ async def _ask_ollama(
     *,
     temperature: float = 0.7,
     num_predict: int = 4096,
-) -> Tuple[str, int]:
+) -> Tuple[str, int, bool]:
     """Общий обработчик для всех моделей Ollama. Обычный чат без инструментов."""
     # Cloud-эндпоинт требует bearer-токен.
     if "api.ollama.com" in OLLAMA_HOST and not OLLAMA_API_KEY:
-        return "Ollama API ключ не настроен. Добавьте OLLAMA_API_KEY в .env", 0
+        return "Ollama API ключ не настроен. Добавьте OLLAMA_API_KEY в .env", 0, True
 
     try:
         resp = await asyncio.to_thread(_chat_sync, model_id, msg, temperature, num_predict)
@@ -103,16 +103,16 @@ async def _ask_ollama(
             ResponseError = ()
         if ResponseError and isinstance(exc, ResponseError):
             logger.warning("Ollama API error for %s: %s", model_id, exc)
-            return f"Ошибка Ollama API: {exc}", 0
+            return f"Ошибка Ollama API: {exc}", 0, True
         text = str(exc).lower()
         if "timeout" in text or "timed out" in text:
-            return "Таймаут при подключении к Ollama. Попробуйте позже.", 0
+            return "Таймаут при подключении к Ollama. Попробуйте позже.", 0, True
         logger.exception("Ollama request failed for %s: %s", model_id, exc)
-        return f"Ошибка Ollama: {exc}", 0
+        return f"Ошибка Ollama: {exc}", 0, True
 
     content = getattr(getattr(resp, "message", None), "content", "") or ""
     tokens = getattr(resp, "eval_count", 0) or 0
-    return content, int(tokens)
+    return content, int(tokens), False
 
 
 # --- Автогенерация функций для каждой модели (через _base.make_table_handlers) ---
@@ -121,7 +121,7 @@ async def _ask_ollama(
 def _ollama_handler_factory(model_key: str, cfg: dict):
     model_id = cfg["model"]
 
-    async def handler(msg: str, user_id: int) -> Tuple[str, int]:
+    async def handler(msg: str, user_id: int) -> Tuple[str, int, bool]:
         return await _ask_ollama(msg, user_id, model_id)
 
     return handler

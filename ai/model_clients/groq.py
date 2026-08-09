@@ -78,13 +78,13 @@ def _get_proxy():
     return None
 
 
-async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = "") -> Tuple[str, int]:
+async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = "") -> Tuple[str, int, bool]:
     """Общий обработчик для всех моделей Groq.
 
     Отправляет chat completion запрос через OpenAI-совместимый API Groq.
     """
     if not GROQ_TOKEN:
-        return "Groq API токен не настроен. Добавьте GROQ_TOKEN в .env", 0
+        return "Groq API токен не настроен. Добавьте GROQ_TOKEN в .env", 0, True
 
     # max_tokens берётся из GROQ_MODELS; по умолчанию 4096 для обратной совместимости
     max_tokens = 4096
@@ -120,19 +120,19 @@ async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = ""
             # возвращались без warning — сохраняем это поведение).
             if response.status_code not in (401, 413, 429):
                 logger.warning("Groq API error: status=%s body=%s", response.status_code, response.text[:500])
-            return map_http_error(response.status_code, "groq"), 0
+            return map_http_error(response.status_code, "groq"), 0, True
 
         data = response.json()
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         usage = data.get("usage", {})
         total_tokens = usage.get("total_tokens", 0)
-        return content, total_tokens
+        return content, total_tokens, False
 
     except httpx.TimeoutException:
-        return "Таймаут при подключении к Groq API. Попробуйте позже.", 0
+        return "Таймаут при подключении к Groq API. Попробуйте позже.", 0, True
     except Exception as exc:
         logger.exception("Groq API request failed: %s", exc)
-        return f"Ошибка Groq API: {exc}", 0
+        return f"Ошибка Groq API: {exc}", 0, True
 
 
 # --- Автогенерация функций для каждой модели (через _base.make_table_handlers) ---
@@ -142,9 +142,8 @@ def _groq_handler_factory(model_key: str, cfg: tuple):
     """Создаёт async-функцию-обработчик для Groq модели по ключу."""
     groq_model, _max_tokens = cfg
 
-    async def handler(msg: str, user_id: int) -> str:
-        response, _ = await _ask_groq(groq_model, msg, user_id, model_key)
-        return response
+    async def handler(msg: str, user_id: int) -> Tuple[str, int, bool]:
+        return await _ask_groq(groq_model, msg, user_id, model_key)
 
     return handler
 

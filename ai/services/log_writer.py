@@ -4,25 +4,12 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 
-_ERROR_MARKERS = (
-    "ошибка",
-    "error",
-    "таймаут",
-    "timeout",
-    "не удалось",
-    "failed",
-    "недоступ",
-    "unavailable",
-    "превышен лимит",
-    "rate limit",
-)
-
-
 class LogWriter:
     """Создание и обновление записей AIRequestLog из WebSocket consumer.
 
     Методы обёрнуты в sync_to_async для безопасного вызова из async-кода.
-    Автоматически определяет ошибки по маркерам в тексте ответа.
+    Ошибки определяются структурно (is_error из ModelCaller/клиентов);
+    update_success вызывается только для успешных ответов.
     """
 
     @sync_to_async
@@ -84,16 +71,16 @@ class LogWriter:
         log.response_text = str(response_text or "")[:5000]
         log.tokens = tokens or 0
 
-        # Empty response is an error, not a success.
+        # Defense: an empty response is an error, not a success. The consumer
+        # already routes empties to update_error via is_error, but keep the guard.
+        # Real API errors are signalled structurally (is_error from clients) and
+        # also go to update_error — so a non-empty answer here is a genuine success,
+        # even if it happens to discuss «ошибка» in the code being explained.
         if not (response_text or "").strip():
             log.status = AIRequestLog.STATUS_ERROR
             log.error_message = "Модель вернула пустой ответ"
         else:
-            text_sample = str(response_text or "").lower()[:100]
-            if any(marker in text_sample for marker in _ERROR_MARKERS):
-                log.status = AIRequestLog.STATUS_ERROR
-            else:
-                log.status = AIRequestLog.STATUS_SUCCESS
+            log.status = AIRequestLog.STATUS_SUCCESS
 
         log.save(
             update_fields=[

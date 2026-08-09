@@ -100,7 +100,7 @@ async def _ask_openrouter(
     *,
     max_tokens: int = 8000,
     temperature: float = 0.7,
-) -> Tuple[str, Optional[int]]:
+) -> Tuple[str, Optional[int], bool]:
     """Generic OpenRouter chat completion wrapper with history management."""
     import asyncio
 
@@ -129,25 +129,25 @@ async def _ask_openrouter(
             # возвращались без warning — сохраняем это поведение).
             if response.status_code not in (401, 413, 429):
                 logger.warning("OpenRouter API error: status=%s body=%s", response.status_code, response.text[:500])
-            return map_http_error(response.status_code, "openrouter"), 0
+            return map_http_error(response.status_code, "openrouter"), 0, True
 
         obj = response.json()
         if "choices" not in obj or not obj["choices"]:
-            return "Неожиданный формат ответа от OpenRouter.", 0
+            return "Неожиданный формат ответа от OpenRouter.", 0, True
 
         completion_tokens = obj.get("usage", {}).get("completion_tokens", 0)
         assistant_content = obj["choices"][0]["message"].get("content", "")
         conversation_history.append(user_id, {"role": "assistant", "content": assistant_content})
-        return assistant_content, completion_tokens
+        return assistant_content, completion_tokens, False
 
     except requests.exceptions.ConnectionError:
-        return "Ошибка подключения к OpenRouter.", 0
+        return "Ошибка подключения к OpenRouter.", 0, True
     except requests.exceptions.Timeout:
-        return "Таймаут при подключении к OpenRouter. Попробуйте позже.", 0
+        return "Таймаут при подключении к OpenRouter. Попробуйте позже.", 0, True
     except Exception as e:
         logger.exception("Unexpected error in OpenRouter call")
         conversation_history.reset(user_id)
-        return "Что-то пошло не так. Контекст очищен, введите новый запрос.", 0
+        return "Что-то пошло не так. Контекст очищен, введите новый запрос.", 0, True
 
 
 # --- Автогенерация функций для каждой модели (через _base.make_table_handlers) ---
@@ -157,7 +157,7 @@ def _openrouter_handler_factory(model_key: str, cfg: dict):
     model_id = cfg["model"]
     max_tokens = cfg["max_tokens"]
 
-    async def handler(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    async def handler(messages: str, user_id: int) -> Tuple[str, Optional[int], bool]:
         return await _ask_openrouter(messages, user_id, model_id, max_tokens=max_tokens)
 
     return handler
