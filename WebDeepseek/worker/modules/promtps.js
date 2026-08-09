@@ -427,6 +427,7 @@ async function sendMessage(ctx, payload = {}) {
 
         let answer = null;
         let answerXpUsed = null;
+        let inner = '';
         for (const xp of answerXPaths) {
             try {
                 answer = await waitLastOuterHtmlStable(page, xp, {
@@ -436,8 +437,22 @@ async function sendMessage(ctx, payload = {}) {
                     minContentLength: 50,
                     checkStopButton: true,
                 });
-                answerXpUsed = xp;
-                break;
+                // НЕ принимаем структурно-набитый, но текстово-пустой контейнер:
+                // minContentLength проверяет длину outerHTML, а не текста, поэтому
+                // пустой «скелет» ds-markdown (≥50 символов HTML-обёртки, ~1 символ
+                // текста) проходит проверку. Реальный ответ при этом часто живёт в
+                // другом контейнере, который поймает следующий селектор — поэтому
+                // конвертируем и провéряем, что есть настоящий текст, иначе идём
+                // к следующему XPath (это и есть источник «Empty/short response
+                // detected (1 chars)» в логах).
+                inner = deepseekHtmlToApiMarkdown(answer);
+                if (inner && inner.trim().length >= 5) {
+                    answerXpUsed = xp;
+                    break;
+                }
+                log('XPath ' + xp + ' matched an empty skeleton (' + inner.trim().length + ' chars text), trying next selector');
+                answer = null;
+                inner = '';
             } catch (e) {
                 log('Answer XPath failed: ' + xp + ' — ' + (e?.message || e));
             }
@@ -451,28 +466,31 @@ async function sendMessage(ctx, payload = {}) {
             };
         }
 
-        let inner = deepseekHtmlToApiMarkdown(answer);
-
         // Retry on empty or very short response — sometimes DeepSeek returns
-        // an empty container while still generating. Wait and try once more.
+        // an empty container while still generating. Wait and try once more,
+        // перебирая все селекторы (как в основном цикле), а не только последний.
         if (!inner || inner.trim().length < 5) {
             log('Empty/short response detected (' + (inner?.length || 0) + ' chars), retrying once more...');
             await sleep(3000);
-            try {
-                const retryAnswer = await waitLastOuterHtmlStable(page, answerXpUsed, {
-                    timeoutMs: 120000,
-                    pollMs: 2000,
-                    stableTicks: 6,
-                    minContentLength: 50,
-                    checkStopButton: true,
-                });
-                const retryInner = deepseekHtmlToApiMarkdown(retryAnswer);
-                if (retryInner && retryInner.trim().length > inner.trim().length) {
-                    inner = retryInner;
-                    answer = retryAnswer;
+            for (const xp of answerXPaths) {
+                try {
+                    const retryAnswer = await waitLastOuterHtmlStable(page, xp, {
+                        timeoutMs: 120000,
+                        pollMs: 2000,
+                        stableTicks: 6,
+                        minContentLength: 50,
+                        checkStopButton: true,
+                    });
+                    const retryInner = deepseekHtmlToApiMarkdown(retryAnswer);
+                    if (retryInner && retryInner.trim().length >= 5 && retryInner.trim().length > inner.trim().length) {
+                        inner = retryInner;
+                        answer = retryAnswer;
+                        answerXpUsed = xp;
+                        break;
+                    }
+                } catch (e) {
+                    log('Retry XPath failed: ' + xp + ' — ' + (e?.message || e));
                 }
-            } catch (e) {
-                log('Retry attempt also failed: ' + (e?.message || e));
             }
         }
 
