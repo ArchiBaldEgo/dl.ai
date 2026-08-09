@@ -57,11 +57,14 @@
     runError.textContent = m || "";
     runError.style.display = m ? "block" : "none";
   }
-  function setRunProgress(t) {
+  function setRunProgress(t, spinning) {
     if (!runProgress) return;
     var pt = runProgress.querySelector(".tc-progress-text");
     if (pt) pt.textContent = t || "";
     if (t) runProgress.classList.add("active"); else runProgress.classList.remove("active");
+    // Спиннер крутится только пока прогон реально идёт; по завершении колесо
+    // скрывается, а строка статуса с текстом «Проверки завершены» остаётся.
+    if (spinning) runProgress.classList.add("spinning"); else runProgress.classList.remove("spinning");
   }
 
   function renderSummary(s) {
@@ -174,19 +177,19 @@
     renderLog(run.log || []);
     if (run.status === "running") {
       var c = run.current ? " | Сейчас: " + run.current : "";
-      setRunProgress("Проверено " + Number(run.completed || 0) + (run.total ? " из " + Number(run.total) : "") + c);
+      setRunProgress("Проверено " + Number(run.completed || 0) + (run.total ? " из " + Number(run.total) : "") + c, true);
       setRunError("");
       setSubmitDisabled(true);
       return;
     }
     if (run.status === "completed") {
-      setRunProgress("Проверки завершены: " + Number(run.completed || 0) + " из " + Number(run.total || 0));
+      setRunProgress("Проверки завершены: " + Number(run.completed || 0) + " из " + Number(run.total || 0), false);
       setRunError("");
       setSubmitDisabled(false);
       return;
     }
     if (run.status === "failed") {
-      setRunProgress("");
+      setRunProgress("", false);
       setRunError(run.error_message || "Проверки завершились с ошибкой");
       setSubmitDisabled(false);
     }
@@ -217,7 +220,7 @@
     if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
     setSubmitDisabled(true);
     setRunError("");
-    setRunProgress("Запускаем проверки…");
+    setRunProgress("Запускаем проверки…", true);
     renderSummary(null);
     renderSimpleBanner(null);
     renderSimpleResults([]);
@@ -243,7 +246,7 @@
       })
       .catch(function (e) {
         setRunError(e.message || "Ошибка запуска");
-        setRunProgress("");
+        setRunProgress("", false);
         setSubmitDisabled(false);
       });
   });

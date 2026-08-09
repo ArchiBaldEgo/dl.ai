@@ -183,7 +183,10 @@
   });
 
   // Accordion toggle + task-text modal.
-  (function () {
+  // Разметка модалки находится НИЖЕ этого <script> в шаблоне, поэтому поиск
+  // элементов нужно делать после разбора DOM — иначе getElementById вернёт null,
+  // openModal молча выйдет и клик по задаче ничего не сделает.
+  document.addEventListener('DOMContentLoaded', function () {
     const modal = document.getElementById('aiTaskModal');
     const modalTitle = document.getElementById('aiTaskModalTitle');
     const modalBody = document.getElementById('aiTaskModalBody');
@@ -262,7 +265,7 @@
     document.addEventListener('keydown', function (event) {
       if (event.key === 'Escape') closeModal();
     });
-  })();
+  });
 </script>
 
 <div class="ai-logs-wrap">

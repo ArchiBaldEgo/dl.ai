@@ -18,11 +18,14 @@
   .tc-form p { color: var(--body-quiet-color); line-height: 1.4; font-size: 13px; margin: 0 0 8px; }
   .tc-spinner { width:14px; height:14px; border:2px solid var(--hairline-color);
                 border-top-color: var(--body-fg); border-radius:50%;
-                display:inline-block; animation: tc-spin 0.8s linear infinite; }
+                display:none; animation: tc-spin 0.8s linear infinite; }
   @keyframes tc-spin { to { transform: rotate(360deg); } }
   .tc-status-line { display:none; align-items:center; gap:10px; margin:8px 0;
                     color: var(--body-quiet-color); font-size: 13px; }
   .tc-status-line.active { display:flex; }
+  /* Спиннер видим только во время реального выполнения; по завершении строка
+     статуса остаётся (текст «Проверки завершены»), но колесо останавливается. */
+  .tc-status-line.spinning .tc-spinner { display:inline-block; }
   .tc-summary-line { margin: 2px 0; font-size: 13px; }
   .tc-error { color:#c93b3b; font-weight:600; margin:8px 0; font-size: 13px; }
 
@@ -60,7 +63,10 @@
                   border:1px solid #bfe3bf; }
   .tc-banner.fail { display:block; background:#fdecec; color:#c93b3b;
                     border:1px solid #f3c2c2; }
-  .tc-banner small { display:block; font-size:13px; font-weight:500; margin-top:4px; color:var(--body-quiet-color); }
+  /* Фон баннера захардкожен светлый, поэтому subtitle — тёмный фиксированный,
+     иначе в тёмной теме Django admin (где --body-quiet-color почти белый)
+     получается белый текст на белом фоне. */
+  .tc-banner small { display:block; font-size:13px; font-weight:500; margin-top:4px; color:#444; }
   .tc-group-row { display:flex; align-items:center; gap:8px; padding:4px 0;
                   font-size:14px; border-bottom:1px solid var(--hairline-color); }
   .tc-group-row:last-child { border-bottom:none; }
