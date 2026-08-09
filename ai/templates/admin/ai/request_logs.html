@@ -42,11 +42,6 @@
     text-decoration-color: var(--body-quiet-color); font: inherit;
   }
   .ai-log-task-link:hover { text-decoration-style: solid; }
-  .ai-log-task-ext {
-    margin-left: 4px; font-size: 11px; text-decoration: none;
-    color: var(--body-quiet-color);
-  }
-  .ai-log-task-ext:hover { color: var(--link-fg); }
 
   /* === Модалка текста задачи === */
   .ai-task-modal {
@@ -365,8 +360,7 @@
             <td>{{ log.topic_name|default:"—" }}</td>
             <td>
               {% if log.task_node_id %}
-                <button type="button" class="ai-log-task-link" data-task-node="{{ log.task_node_id }}">{{ log.task_name|default:log.task_node_id }}</button>
-                <a href="https://dl.gsu.by/admin/fullTaskviewer.asp?nid={{ log.task_node_id }}" target="_blank" rel="noopener" class="ai-log-task-ext" title="Открыть на dl.gsu.by">↗</a>
+                <button type="button" class="ai-log-task-link" data-task-node="{{ log.task_node_id }}" title="Показать условие задачи">{{ log.task_name|default:log.task_node_id }}</button>
               {% else %}
                 {{ log.task_name|default:"—" }}
               {% endif %}
@@ -422,7 +416,7 @@
                     <div><strong>Тема:</strong> {{ log.topic_name|default:"—" }}</div>
                     <div><strong>Задача:</strong>
                       {% if log.task_node_id %}
-                        <a href="https://dl.gsu.by/admin/fullTaskviewer.asp?nid={{ log.task_node_id }}" target="_blank" rel="noopener">{{ log.task_name|default:log.task_node_id }}</a>
+                        <button type="button" class="ai-log-task-link" data-task-node="{{ log.task_node_id }}" title="Показать условие задачи">{{ log.task_name|default:log.task_node_id }}</button>
                       {% else %}
                         {{ log.task_name|default:"—" }}
                       {% endif %}
