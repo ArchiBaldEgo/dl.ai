@@ -3004,7 +3004,7 @@ class OllamaRegistryTests(SimpleTestCase):
 
 
 class OllamaHandlerTests(SimpleTestCase):
-    """Handler вызывает ollama.Client.chat и возвращает (content, tokens)."""
+    """Handler вызывает ollama.Client.chat и возвращает (content, tokens, is_error)."""
 
     async def test_handler_returns_content_and_tokens(self):
         from ai.model_clients import ollama
@@ -3018,7 +3018,7 @@ class OllamaHandlerTests(SimpleTestCase):
             mock_client.chat.return_value = mock_resp
 
             result = await ollama.ask_Ollama_Glm_5_2_Cloud_async("1+1=?", "client")
-            self.assertEqual(result, ("2", 5))
+            self.assertEqual(result, ("2", 5, False))
             mock_client.chat.assert_called_once()
             # Без tools= (обычный чат).
             _, kwargs = mock_client.chat.call_args
