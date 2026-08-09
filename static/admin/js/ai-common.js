@@ -802,6 +802,7 @@ var localization = {
         voiceInput: "Голосовой ввод",
         voiceOutput: "Озвучить ответ",
         speakThinkLabel: "Озвучивать дополнительную информацию",
+        themeToggle: "Сменить тему",
         voiceStatus: {
             listening: "Запись голоса",
             recognized: "Распознано: ",
@@ -865,6 +866,7 @@ var localization = {
         voiceInput: "Voice input",
         voiceOutput: "Speak answer",
         speakThinkLabel: "Voice extra information",
+        themeToggle: "Toggle theme",
         voiceStatus: {
             listening: "Voice recording",
             recognized: "Recognized: ",
@@ -928,6 +930,7 @@ var localization = {
         voiceInput: "Saisie vocale",
         voiceOutput: "Lire la réponse",
         speakThinkLabel: "Informations supplémentaires vocales",
+        themeToggle: "Changer le thème",
         voiceStatus: {
             listening: "Enregistrement vocal",
             recognized: "Reconnu : ",
@@ -1263,6 +1266,43 @@ if (toggleButton && sidebar) {
         sidebar.classList.toggle('open');
     });
 }
+
+// === Common: theme toggle (light/dark), persisted in localStorage('ai-theme') ===
+// Атрибут data-theme на <html> выставляется инлайн-скриптом в <head> до отрисовки
+// (без FOUC) — по умолчанию 'light'. Здесь только переключаем по клику и храним выбор.
+
+var AI_THEME_KEY = 'ai-theme';
+
+function currentTheme() {
+    var t = document.documentElement.getAttribute('data-theme');
+    return (t === 'dark') ? 'dark' : 'light';
+}
+
+function applyTheme(theme) {
+    if (theme !== 'dark' && theme !== 'light') theme = 'light';
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem(AI_THEME_KEY, theme); } catch (e) {}
+}
+
+function initThemeToggle() {
+    var btn = document.getElementById('themeToggleBtn');
+    if (!btn) return;
+    function updateTitle() {
+        var label = getUiString('themeToggle', 'Сменить тему');
+        btn.setAttribute('title', label);
+        btn.setAttribute('aria-label', label);
+    }
+    btn.addEventListener('click', function() {
+        applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+        updateTitle();
+    });
+    updateTitle();
+    // Перелокализировать подсказку при смене языка интерфейса.
+    var selectLang = document.getElementById('selectLang');
+    if (selectLang) selectLang.addEventListener('change', updateTitle);
+}
+
+document.addEventListener('DOMContentLoaded', initThemeToggle);
 
 // === Common: clearContext (default — pages can override) ===
 

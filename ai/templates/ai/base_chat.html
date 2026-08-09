@@ -7,11 +7,25 @@
     <meta name="viewport"
         content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
     <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <!-- Тема применяется до первой отрисовки (без FOUC): по умолчанию светлая. -->
+    <script>
+    (function () {
+        try {
+            var t = localStorage.getItem('ai-theme');
+            if (t !== 'dark' && t !== 'light') t = 'light';
+            document.documentElement.setAttribute('data-theme', t);
+        } catch (e) {
+            document.documentElement.setAttribute('data-theme', 'light');
+        }
+    })();
+    </script>
     {% block extra_meta %}{% endblock %}
     {% block css %}
     <link rel="stylesheet" href="/ai/assets/admin/css/ai.css?v={{ request.COOKIES.csrftoken|default:'1' }}"/>
     {% endblock %}
     {% block extra_css %}{% endblock %}
+    <!-- Тема подключается ПОСЛЕ страничных CSS, чтобы переменные перепобивали значения. -->
+    <link rel="stylesheet" href="/ai/assets/admin/css/ai_theme.css?v=1"/>
     {% block js %}
     <script src="/ai/assets/admin/js/ai-common.js?v=9" defer></script>
     <script src="/ai/assets/admin/js/chat_template.js?v=3" defer></script>
@@ -56,6 +70,27 @@
                     <option data-link="/ai/solve-problem/" {% block solve_selected %}{% endblock %}>Реши задачу</option>
                     <option data-link="/ai/find-error/" {% block error_selected %}{% endblock %}>В чём ошибка?</option>
                 </select>
+                <button type="button" class="theme-toggle" id="themeToggleBtn"
+                    aria-label="Сменить тему" title="Сменить тему">
+                    <svg class="icon-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+                        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round" aria-hidden="true">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                    </svg>
+                    <svg class="icon-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+                        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="5"/>
+                        <line x1="12" y1="1" x2="12" y2="3"/>
+                        <line x1="12" y1="21" x2="12" y2="23"/>
+                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+                        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                        <line x1="1" y1="12" x2="3" y2="12"/>
+                        <line x1="21" y1="12" x2="23" y2="12"/>
+                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+                        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                </button>
             </div>
             <div class="voice-mod-div">
                 <button type="button" class="voice-mode-btn" id="voiceModeBtn" onclick="toggleVoiceControls()">
@@ -105,7 +140,7 @@
         </div>
 
         <div class="sidebar">
-            <a href="/ai/admin/login/?next=/ai/admin/" style="text-decoration: none; color: black;">
+            <a href="/ai/admin/login/?next=/ai/admin/" class="sidebar-admin-link">
                 <div class="sidebar-header" id="adminPanelLink">
                     Админ-Панель
                 </div>

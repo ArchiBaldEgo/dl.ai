@@ -1,0 +1,222 @@
+/* ==========================================================================
+   ai_theme.css — клиентский переключатель светлой/тёмной темы.
+   Подключается ПОСЛЕ страничных CSS (ai.css / decide_task.css / find_error.css),
+   поэтому правила с теми же селекторами выигрывают по source order.
+   Тема хранится в localStorage('ai-theme'); по умолчанию — светлая.
+   Атрибут data-theme на <html> выставляется инлайн-скриптом в <head> до отрисовки
+   (без FOUC). CSS-переменные меняются только через [data-theme="dark"].
+   ========================================================================== */
+
+/* --- Светлая тема (по умолчанию = текущие значения) --- */
+:root {
+    --bg-body: #ffffff;
+    --bg-panel: #d8d8d8;
+    --bg-surface: #ffffff;          /* #messages, .panel, textarea */
+    --bg-sidebar: #ffffff;
+    --bg-toggle: rgb(207, 205, 205);
+    --bg-toggle-hover: rgb(119, 119, 119);
+    --bg-think: #f0f8ff;
+    --bg-msg-user: #e6f0ff;
+    --bg-msg-assistant: #eaffea;
+    --bg-accordion: #eee;
+    --bg-input: #ffffff;
+    --text-primary: #333333;
+    --text-secondary: #555555;
+    --text-muted: #666666;
+    --text-faint: #6a6a6a;
+    --text-accordion: #444444;
+    --text-panel-date: #333333;
+    --border: #cccccc;
+    --border-soft: rgba(0, 0, 0, 0.1);
+    --shadow: rgba(0, 0, 0, 0.1);
+    --footer-bg: rgba(255, 255, 255, 0.82);
+    --footer-text: #444444;
+    --footer-border: rgba(0, 0, 0, 0.08);
+    --sidebar-link: #000000;
+    --accent-blue: #2196F3;
+    color-scheme: light;
+}
+
+/* --- Тёмная тема --- */
+[data-theme="dark"] {
+    --bg-body: #121212;
+    --bg-panel: #2a2a2a;
+    --bg-surface: #1e1e1e;
+    --bg-sidebar: #242424;
+    --bg-toggle: #3a3a3a;
+    --bg-toggle-hover: #555555;
+    --bg-think: #1c2530;
+    --bg-msg-user: #1e2a3a;
+    --bg-msg-assistant: #1e2a1e;
+    --bg-accordion: #333333;
+    --bg-input: #1e1e1e;
+    --text-primary: #e0e0e0;
+    --text-secondary: #b0b0b0;
+    --text-muted: #aaaaaa;
+    --text-faint: #9a9a9a;
+    --text-accordion: #dddddd;
+    --text-panel-date: #cccccc;
+    --border: #444444;
+    --border-soft: rgba(255, 255, 255, 0.1);
+    --shadow: rgba(0, 0, 0, 0.4);
+    --footer-bg: rgba(20, 20, 20, 0.85);
+    --footer-text: #cccccc;
+    --footer-border: rgba(255, 255, 255, 0.08);
+    --sidebar-link: #e0e0e0;
+    --accent-blue: #5ea8f5;
+    color-scheme: dark;
+}
+
+/* --- Привязка переменных к существующим селекторам --- */
+body {
+    background-color: var(--bg-body);
+    color: var(--text-primary);
+}
+
+h1 { color: var(--text-primary); }
+h2 { color: var(--text-secondary); }
+h3 { color: var(--text-primary); }
+hr { border-color: var(--border); }
+
+.line-panel {
+    background-color: var(--bg-panel);
+}
+
+.resize-button {
+    background-color: var(--bg-panel);
+    color: var(--text-primary);
+    box-shadow: 0 0 5px var(--shadow);
+}
+
+#messages {
+    background-color: var(--bg-surface);
+    border-color: var(--border);
+    box-shadow: 2px 2px 5px var(--shadow);
+}
+
+#messageText,
+.messageText {
+    background-color: var(--bg-input);
+    color: var(--text-primary);
+    border-color: var(--border);
+    box-shadow: 2px 2px 5px var(--shadow);
+}
+
+#messageText::placeholder,
+.messageText::placeholder {
+    color: var(--text-muted);
+}
+
+.think {
+    background-color: var(--bg-think);
+    color: var(--text-primary);
+    box-shadow: 0 4px 8px var(--shadow);
+}
+
+.msg-user {
+    background-color: var(--bg-msg-user);
+}
+
+.msg-assistant {
+    background-color: var(--bg-msg-assistant);
+}
+
+.accordion {
+    background-color: var(--bg-accordion);
+    color: var(--text-accordion);
+}
+
+.panel {
+    background-color: var(--bg-surface);
+}
+
+.sidebar {
+    background-color: var(--bg-sidebar);
+    box-shadow: -2px 0 5px var(--shadow);
+    border-left-color: var(--border-soft);
+}
+
+.sidebar-header {
+    border-bottom-color: var(--border-soft);
+}
+
+/* Ссылка на админ-панель в боковой панели — тема-aware (вместо inline color:black). */
+.sidebar-admin-link {
+    text-decoration: none;
+    color: var(--sidebar-link);
+}
+
+.toggle-button {
+    background-color: var(--bg-toggle);
+}
+
+.toggle-button:hover {
+    background-color: var(--bg-toggle-hover);
+}
+
+.voice-status {
+    color: var(--text-muted);
+}
+
+.panel-date {
+    color: var(--text-panel-date);
+}
+
+.panel-tokens,
+.token-usage,
+#modelLimitsWidget {
+    color: var(--text-faint);
+}
+
+.shared-prompt-label {
+    color: var(--accent-blue);
+}
+
+.load-time-footer {
+    background: var(--footer-bg);
+    color: var(--footer-text);
+    border-top-color: var(--footer-border);
+}
+
+/* Нативные селекты/опции — корректный фон и текст в тёмной теме. */
+select,
+option {
+    background-color: var(--bg-input);
+    color: var(--text-primary);
+}
+
+/* --- Кнопка-переключатель темы --- */
+.theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    margin: 0 0 0 4px;
+    flex-shrink: 0;
+    background-color: var(--bg-toggle);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: none;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+}
+
+.theme-toggle:hover {
+    background-color: var(--bg-toggle-hover);
+}
+
+.theme-toggle svg {
+    width: 20px;
+    height: 20px;
+    pointer-events: none;
+}
+
+/* Какую иконку показывать: луна — в светлой теме (переключить на тёмную),
+   солнце — в тёмной (переключить на светлую). */
+.theme-toggle .icon-sun { display: none; }
+.theme-toggle .icon-moon { display: inline; }
+[data-theme="dark"] .theme-toggle .icon-sun { display: inline; }
+[data-theme="dark"] .theme-toggle .icon-moon { display: none; }
