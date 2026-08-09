@@ -870,7 +870,11 @@ class AIRequestLogModelTests(TestCase):
         log.refresh_from_db()
         self.assertEqual(log.user_full_name, "Log User")
         self.assertEqual(log.model_names, ["DeepSeek-R1"])
-        self.assertEqual(log.status, AIRequestLog.STATUS_SUCCESS)
+        # Миграция 0029: дефолт статуса — error. Запись лога создаётся в момент
+        # отправки запроса (LogWriter.create) без status и считается ошибкой,
+        # пока update_success не закроет её успехом при непустом ответе модели.
+        # Здесь create() без update_* — статус остаётся дефолтным (error).
+        self.assertEqual(log.status, AIRequestLog.STATUS_ERROR)
         self.assertEqual(log.mode, AIRequestLog.MODE_CHAT)
         self.assertEqual(log.get_mode_display(), "Чат")
         self.assertEqual(log.programming_language_name, "Python")
