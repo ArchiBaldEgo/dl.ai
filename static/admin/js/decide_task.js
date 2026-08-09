@@ -48,6 +48,7 @@ function initWebSocket() {
         };
 
         ws.onmessage = function(event) {
+            appendPersistedMessage(event.data);
             var messages = document.getElementById('messages');
             var message = document.createElement('li');
             var parsed = parseThinkTag(event.data);
@@ -334,6 +335,7 @@ window.onload = function () {
     restoreInterfaceLanguage();
     restoreSelections();
     initWebSocket();
+    restorePersistedMessages();
     document.getElementById("selectLang").dispatchEvent(new Event("change"));
     initAccordionForMessages();
     updateVoiceStatus(getVoiceStatusText('ready'));

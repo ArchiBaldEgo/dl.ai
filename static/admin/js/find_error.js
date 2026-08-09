@@ -29,6 +29,7 @@ function initWebSocket() {
         };
 
         ws.onmessage = function (event) {
+            appendPersistedMessage(event.data);
             var messages = document.getElementById('messages');
             var message = document.createElement('li');
             var inThinkTag = document.createElement('div');
@@ -318,6 +319,7 @@ window.onload = function () {
     restoreInterfaceLanguage();
     restoreSelections();
     initWebSocket();
+    restorePersistedMessages();
     // MediaRecorder инициализируется при первом нажатии на кнопку записи
     document.getElementById("selectLang").dispatchEvent(new Event("change"));
     initAccordionForMessages();

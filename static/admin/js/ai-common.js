@@ -1239,6 +1239,7 @@ function initWebSocket() {
         };
 
         ws.onmessage = function(event) {
+            appendPersistedMessage(event.data);
             var messages = document.getElementById('messages');
             var message = document.createElement('li');
             var parsed = parseThinkTag(event.data);
@@ -1338,12 +1339,88 @@ function initThemeToggle() {
 
 document.addEventListener('DOMContentLoaded', initThemeToggle);
 
+// === Conversation persistence across reloads (until «Clear Context») ===
+// Каждое пришедшее по WS сообщение диалога (эхо пользователя «Обрабатываю
+// запрос пользователя. Вы: …» + ответ ИИ «Запрос успешно обработан…») сохраняется
+// в localStorage и восстанавливается после перезагрузки страницы, чтобы переписка
+// не пропадала, пока пользователь не нажмёт «Clear Context». Ключ привязан к
+// пользователю (client_id = dlsid_<DLSID>) и странице (pathname) — у разных
+// страниц (чат / решить / ошибка) и разных пользователей отдельные переписки.
+// Служебные/транзитные сообщения («Контекст очищен», «Слишком много сообщений»,
+// «Что-то пошло не так» и т.п.) не содержат маркеров диалога и не сохраняются.
+var AI_MSGS_KEY_PREFIX = 'ai_msgs_';
+var AI_MSGS_MAX_CHARS = 2000000; // ~2 МБ上限, чтобы не упереться в квоту localStorage
+
+function aiMessagesKey() {
+    var path = (location.pathname || '/').replace(/\/+$/, '') || '/';
+    return AI_MSGS_KEY_PREFIX + client_id + ':' + path;
+}
+
+function loadPersistedMessages() {
+    try {
+        var raw = localStorage.getItem(aiMessagesKey());
+        if (!raw) return [];
+        var arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
+}
+
+function savePersistedMessages(arr) {
+    try {
+        // Не даём хранилищу разрастись сверх квоты: если превысили лимит —
+        // отбрасываем самые старые сообщения, пока не уложимся.
+        var s = JSON.stringify(arr);
+        while (arr.length > 0 && s.length > AI_MSGS_MAX_CHARS) {
+            arr.shift();
+            s = JSON.stringify(arr);
+        }
+        localStorage.setItem(aiMessagesKey(), s);
+    } catch (e) { /* квота / приватный режим — молча пропускаем */ }
+}
+
+// Сохраняем только настоящие реплики диалога: эхо пользователя и ответ ИИ.
+// Транзитные/служебные сообщения этими маркерами не обладают.
+function _isPersistableWsMessage(raw) {
+    var s = String(raw || '');
+    return s.indexOf('Обрабатываю запрос пользователя') !== -1
+        || s.indexOf('Запрос успешно обработан') !== -1;
+}
+
+function appendPersistedMessage(raw) {
+    if (!_isPersistableWsMessage(raw)) return;
+    var arr = loadPersistedMessages();
+    arr.push(String(raw));
+    savePersistedMessages(arr);
+}
+
+function clearPersistedMessages() {
+    try { localStorage.removeItem(aiMessagesKey()); } catch (e) {}
+}
+
+// Воспроизводим сохранённую переписку при загрузке, прогоняя каждое сообщение
+// через тот же onmessage-обработчик, что и при живом приёме — весь страничный
+// рендер (accordion, think-блоки, markdown) переиспользуется без дублей логики.
+// Вызывается из window.onload каждой страницы сразу после initWebSocket().
+function restorePersistedMessages() {
+    try {
+        if (!ws || typeof ws.onmessage !== 'function') return;
+        var arr = loadPersistedMessages();
+        if (!arr.length) return;
+        for (var i = 0; i < arr.length; i++) {
+            ws.onmessage({ data: arr[i] });
+        }
+        var messages = document.getElementById('messages');
+        if (messages) messages.scrollTo({ top: messages.scrollHeight, behavior: 'auto' });
+    } catch (e) { console.error('restorePersistedMessages failed:', e); }
+}
+
 // === Common: clearContext (default — pages can override) ===
 
 function clearContext() {
     if (!ws) return;
     if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ action: 'clear_context' }));
+        clearPersistedMessages();
         var messages = document.getElementById('messages');
         messages.innerHTML = '';
         var clearMessage = document.createElement('li');

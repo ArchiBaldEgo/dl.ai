@@ -109,6 +109,7 @@ window.onload = function() {
     restoreInterfaceLanguage();
     restoreSelections();
     initWebSocket();
+    restorePersistedMessages();
     document.getElementById("selectLang").dispatchEvent(new Event("change"));
     initAccordionForMessages();
     restoreSharedText();

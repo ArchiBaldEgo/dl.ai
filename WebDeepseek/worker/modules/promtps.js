@@ -211,14 +211,20 @@ async function waitForXPathCompat(page, xpath, {
   throw new Error(`waitForXPath timeout for xpath: ${xpath}`);
 }
 
-// XPath-селекторы для признаков завершения генерации DeepSeek.
-// Когда генерация идёт — видна кнопка Stop (div с aria-label='stop' или класс stop).
-// Когда генерация завершена — появляется кнопка Regenerate / копировать / etc.
+// XPath-селекторы для признака «генерация ещё идёт» (видна кнопка Stop).
+// DeepSeek периодически меняет вёрстку кнопки Stop, поэтому здесь широкий набор
+// вариантов (класс stop, aria-label, role=button, SVG с stop-иконкой, текст).
+// Если ни один не совпадает с актуальной кнопкой — isStillGenerating всегда false,
+// и тогда единственный сигнал завершения — подтверждение перечитыванием (confirmMs).
 const STOP_GENERATING_XPATHS = [
   "//div[contains(@class,'stop') and not(contains(@class,'hidden'))]",
-  "//div[@aria-label='stop' or @aria-label='Stop']",
-  "//button[contains(@class,'stop') or @aria-label='stop' or @aria-label='Stop']",
+  "//div[@aria-label='stop' or @aria-label='Stop' or @aria-label='Stop generating' or @aria-label='stop generating']",
+  "//button[contains(@class,'stop') or @aria-label='stop' or @aria-label='Stop' or @aria-label='Stop generating' or @aria-label='stop generating']",
   "//div[contains(@class,'ds-button') and .//svg[contains(@class,'stop')]]",
+  "//div[contains(@class,'ds-button') and .//svg[contains(@class,'icon') and contains(@class,'stop')]]",
+  "//button[contains(@class,'ds-button') and .//svg[contains(@class,'stop')]]",
+  "//*[@role='button' and (contains(@aria-label,'stop') or contains(@aria-label,'Stop') or contains(@class,'stop'))]",
+  "//button[.//text()[contains(.,'Stop') or contains(.,'Остановить') or contains(.,'stop')]]",
 ];
 
 async function isStillGenerating(page) {
@@ -245,6 +251,7 @@ async function waitLastOuterHtmlStable(page, xpath, {
     visible = true,
     minContentLength = 50,
     checkStopButton = true,
+    confirmMs = 0,
 } = {}) {
     // Ожидание стабилизации HTML-контента: опрашивает outerHTML элемента по XPath,
     // пока он не перестанет меняться stableTicks раз подряд (потоковая генерация завершена).
@@ -255,6 +262,11 @@ async function waitLastOuterHtmlStable(page, xpath, {
     // - minContentLength=50: игнорирует пустые/короткие ответы (< 50 символов).
     // - timeoutMs=300000 (5 мин): достаточно для длинных ответов.
     // - stableTicks=6 × pollMs=2000 = 12 секунд стабильности для уверенности.
+    // - confirmMs: ПОДТВЕРЖДЕНИЕ перечитыванием. Когда накопилось stableTicks
+    //   совпадений, ждём ещё confirmMs и перечитываем — если контент вырос, значит
+    //   12с «стабильности» были паузой в генерации, а не завершением (продолжаем
+    //   ждать). Это единственный надёжный сигнал завершения, если селектор кнопки
+    //   Stop устарел — без него ответ обрезается посередине (DeepSeek генерит паузами).
     const start = Date.now();
 
     // Дожидаемся появления элемента
@@ -290,8 +302,24 @@ async function waitLastOuterHtmlStable(page, xpath, {
         if (cur && cur === prev) {
             sameCount++;
 
-            if (sameCount >= stableTicks) return cur;
-        } 
+            if (sameCount >= stableTicks) {
+                // Подтверждение завершения: перечитываем через confirmMs. Если контент
+                // продолжил расти — генерация не закончилась (пауза), продолжаем ждать,
+                // иначе ответ обрежется посередине предложения.
+                if (confirmMs > 0) {
+                    await sleep(confirmMs);
+                    const recheck = await getLastOuterHtmlByXPath(page, xpath);
+                    if (recheck !== cur) {
+                        log('waitLastOuterHtmlStable: content grew after stable window — generation paused, not finished (' + (recheck ? recheck.length : 0) + ' vs ' + cur.length + ' chars)');
+                        prev = recheck;
+                        sameCount = 0;
+                        lastNonEmpty = recheck && recheck.length >= minContentLength ? recheck : lastNonEmpty;
+                        continue;
+                    }
+                }
+                return cur;
+            }
+        }
         else {
             prev = cur;
             sameCount = 0;
@@ -436,6 +464,7 @@ async function sendMessage(ctx, payload = {}) {
                     stableTicks: 6,
                     minContentLength: 50,
                     checkStopButton: true,
+                    confirmMs: 5000,
                 });
                 // НЕ принимаем структурно-набитый, но текстово-пустой контейнер:
                 // minContentLength проверяет длину outerHTML, а не текста, поэтому
@@ -480,6 +509,7 @@ async function sendMessage(ctx, payload = {}) {
                         stableTicks: 6,
                         minContentLength: 50,
                         checkStopButton: true,
+                        confirmMs: 5000,
                     });
                     const retryInner = deepseekHtmlToApiMarkdown(retryAnswer);
                     if (retryInner && retryInner.trim().length >= 5 && retryInner.trim().length > inner.trim().length) {
