@@ -1,28 +1,32 @@
 /**
- * Модуль отправки сообщений через UI сайта DeepSeek (Puppeteer-автоматизация).
+ * Модуль отправки сообщений через UI сайта Kimi (Puppeteer-автоматизация).
  *
- * Основная функция: sendMessage(ctx, payload) — вводит текст в поле ввода,
- * нажимает кнопку отправки, ждёт стабилизации ответа (потоковая генерация токенов),
- * извлекает HTML ответа и конвертирует его в Markdown (deepseekHtmlToApiMarkdown).
- *
- * Содержит хелперы для работы с XPath, ожидания стабилизации контента,
- * декодирования HTML-сущностей и конвертации HTML → Markdown.
+ * Основная функция: sendMessage(ctx, payload) — вводит текст в поле ввода
+ * (contenteditable div, НЕ textarea — поэтому paste-инжект через ClipboardEvent),
+ * нажимает кнопку отправки, ждёт стабилизации ответа (потоковая генерация),
+ * извлекает HTML ответа и конвертирует его в Markdown (kimiHtmlToApiMarkdown).
  *
  * XPath-селекторы загружаются из data.json (data.xpaths.chat.*).
+ *
+ * Главное отличие от DeepSeek: поле ввода Kimi — contenteditable div
+ * [data-testid='msh-chatinput-editor'], element.type() в него ненадёжен, поэтому
+ * текст вставляется через событие paste (ClipboardEvent + DataTransfer) с fallback
+ * на page.keyboard.type. Список сообщений — Virtuoso (виртуализированный),
+ * [data-testid='virtuoso-item-list']; getLastOuterHtmlByXPath берёт последний
+ * snapshot-узел, т.е. текущий ответ ассистента.
  */
 
 const data = require("../data.json")
 
 const { log, error } = require('../utils/logger');
 
-const { waitAndType,
-	waitAndTypeX,
-	waitAndClick,
-	waitAndClickX,
-	elementExists,
-	clickIfExists,
-	getCurrentUrl,
-	isCurrentUrlContains } = require('../core/page-utils')
+const { waitAndTypeX,
+    waitAndClick,
+    waitAndClickX,
+    elementExists,
+    clickIfExists,
+    getCurrentUrl,
+    isCurrentUrlContains } = require('../core/page-utils')
 
 const { sleep } = require('../utils/helpers');
 
@@ -44,10 +48,12 @@ function decodeHtmlEntities(s) {
 }
 
 function stripOuterDiv(html) {
+  // Снимаем один внешний div/section-оберточный тег (Kimi рендерит markdown внутри
+  // обёртки; точный класс уточняется живой инспекцией — см. _TODO_live_inspection в data.json).
   let s = String(html || '').trim();
   return s
-    .replace(/^<div\b[^>]*\bds-markdown\b[^>]*>/i, '')
-    .replace(/<\/div>\s*$/i, '')
+    .replace(/^<(div|section)\b[^>]*>/i, '')
+    .replace(/<\/(div|section)>\s*$/i, '')
     .trim();
 }
 
@@ -58,39 +64,23 @@ function extractCodeFromPreInner(preInnerHtml) {
   return decodeHtmlEntities(raw).replace(/\r\n/g, '\n').trim();
 }
 
-function deepseekHtmlToApiMarkdown(html) {
-  // Конвертация HTML-ответа DeepSeek в Markdown.
+function kimiHtmlToApiMarkdown(html) {
+  // Конвертация HTML-ответа Kimi в Markdown.
   // 1) Извлечение code blocks в плейсхолдеры (чтобы не сломать при чистке тегов).
   // 2) Преобразование ссылок, форматирования, заголовков, списков.
   // 3) Удаление остальных тегов, декодирование сущностей.
-  // 4) Восстановление code blocks из плейсхолдеров.
+  // 4) Восстановление code blocks.
   // 5) Нормализация пробелов и пустых строк.
+  //
+  // TODO(живая инспекция): Kimi использует свой Vue markdown-рендер (Markdown.vue);
+  // уточнить класс обёртки кода (DeepSeek использовал md-code-block + d813de27).
+  // Пока работаем по generic <pre><code class="language-x"> и <pre>, что покрывает
+  // типичный вывод Marked.js/highlight.js.
   let s = stripOuterDiv(html);
 
-  // 1) Вырезаем code blocks в плейсхолдеры, чтобы дальнейшая чистка не сломала их
   const codeBlocks = [];
 
-  s = s.replace(
-    /<div\b[^>]*\bmd-code-block\b[^>]*>[\s\S]*?<pre\b[^>]*>([\s\S]*?)<\/pre>[\s\S]*?<\/div>/gi,
-    (blockHtml, preInner) => {
-      const langMatch =
-        blockHtml.match(/<span[^>]*\bd813de27\b[^>]*>([^<]+)<\/span>/i) ||
-        blockHtml.match(/class="language-([^"]+)"/i);
-
-      const lang = langMatch
-        ? String(langMatch[1] || '').trim().toLowerCase()
-        : '';
-
-      const code = extractCodeFromPreInner(preInner);
-      const fence = lang ? `\`\`\`${lang}\n${code}\n\`\`\`` : `\`\`\`\n${code}\n\`\`\``;
-
-      const token = `@@CODEBLOCK_${codeBlocks.length}@@`;
-      codeBlocks.push(fence);
-      return token;
-    }
-  );
-
-  // 1b) Обычный markdown html: <pre><code class="language-x">...</code></pre>
+  // 1a) <pre><code class="language-x">…</code></pre> — основной generic-формат.
   s = s.replace(
     /<pre\b[^>]*>\s*<code\b([^>]*)>([\s\S]*?)<\/code>\s*<\/pre>/gi,
     (_, codeAttrs, codeInner) => {
@@ -105,8 +95,19 @@ function deepseekHtmlToApiMarkdown(html) {
     }
   );
 
+  // 1b) <pre>…</pre> без вложенного <code> (иногда рендереры кладут текст прямо в pre).
+  s = s.replace(
+    /<pre\b[^>]*>([\s\S]*?)<\/pre>/gi,
+    (_, preInner) => {
+      const code = extractCodeFromPreInner(preInner);
+      const fence = `\`\`\`\n${code}\n\`\`\``;
+      const token = `@@CODEBLOCK_${codeBlocks.length}@@`;
+      codeBlocks.push(fence);
+      return token;
+    }
+  );
+
   // 2) Ссылки
-  // <a href="...">text</a> -> [text](url)
   s = s.replace(/<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href, inner) => {
     const text = decodeHtmlEntities(inner.replace(/<\/?[^>]+>/g, '')).trim();
     const url = decodeHtmlEntities(href).trim();
@@ -129,7 +130,6 @@ function deepseekHtmlToApiMarkdown(html) {
   s = s.replace(/<\/p>/gi, '\n\n');
 
   // 6) Списки
-  // ol start="n" учитываем минимально: превращаем в "1. "
   s = s.replace(/<ol\b[^>]*start="(\d+)"[^>]*>/gi, (_, start) => `\n@@OLSTART_${start}@@\n`);
   s = s.replace(/<ol\b[^>]*>/gi, '\n@@OLSTART_1@@\n');
   s = s.replace(/<\/ol>/gi, '\n');
@@ -137,8 +137,6 @@ function deepseekHtmlToApiMarkdown(html) {
   s = s.replace(/<ul\b[^>]*>/gi, '\n');
   s = s.replace(/<\/ul>/gi, '\n');
 
-  // li: для ul -> "- ", для ol -> "n. " (упрощенно через маркер OLSTART)
-  // Сначала открывающий li
   s = s.replace(/<li\b[^>]*>/gi, '\n- ');
   s = s.replace(/<\/li>/gi, '\n');
 
@@ -149,14 +147,11 @@ function deepseekHtmlToApiMarkdown(html) {
   s = decodeHtmlEntities(s);
 
   // 9) Восстанавливаем нумерацию для OL (упрощенно)
-  // @@OLSTART_n@@ меняем на ничего, а "- " внутри ol можно вручную заменить если надо.
-  // Если хочешь реальную нумерацию — скажи, сделаю полноценный проход.
   s = s.replace(/@@OLSTART_(\d+)@@/g, '');
 
   // 10) Возвращаем code blocks
   for (let i = 0; i < codeBlocks.length; i++) {
     const token = `@@CODEBLOCK_${i}@@`;
-    // гарантируем пустые строки вокруг блоков
     s = s.replace(token, `\n\n${codeBlocks[i]}\n\n`);
   }
 
@@ -211,20 +206,77 @@ async function waitForXPathCompat(page, xpath, {
   throw new Error(`waitForXPath timeout for xpath: ${xpath}`);
 }
 
+// Ввод текста в contenteditable div Kimi. element.type() в contenteditable
+// ненадёжен (Kimi слушает input/paste, а не keystroke-накопление), поэтому
+// вставляем через событие paste (ClipboardEvent + DataTransfer) — доказанный
+// подход для [data-testid='msh-chatinput-editor']. Fallback — page.keyboard.type
+// при сфокусированном элементе.
+async function typeIntoContentEditable(page, cssSelector, text) {
+  const txt = String(text ?? '');
+  let element = null;
+  try {
+    element = await page.waitForSelector(cssSelector, { visible: true, timeout: 15000 });
+    await sleep(300);
+    await element.click();
+    await element.focus();
+    await sleep(200);
+
+    // 1) Paste-инжект — основной путь.
+    const injected = await page.evaluate((sel, t) => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      el.focus();
+      try {
+        const dt = new DataTransfer();
+        dt.setData('text/plain', t);
+        const ev = new ClipboardEvent('paste', {
+          clipboardData: dt,
+          bubbles: true,
+          cancelable: true,
+        });
+        el.dispatchEvent(ev);
+        // Некоторые редакторы слушают beforeinput/input.
+        el.dispatchEvent(new InputEvent('beforeinput', {
+          data: t, inputType: 'insertText', bubbles: true, cancelable: true,
+        }));
+        el.dispatchEvent(new InputEvent('input', {
+          data: t, inputType: 'insertText', bubbles: true,
+        }));
+        return (el.textContent || '').trim().length > 0;
+      } catch (_) {
+        return false;
+      }
+    }, cssSelector, txt);
+
+    if (!injected) {
+      // 2) Fallback — посылаем keystrokes в сфокусированный contenteditable.
+      log('typeIntoContentEditable: paste не заполнил поле, fallback на keyboard.type');
+      await page.keyboard.type(txt, { delay: 0 });
+      await sleep(300);
+    }
+    return true;
+  } catch (err) {
+    error(`typeIntoContentEditable failed: ${err?.message || err}`);
+    return false;
+  } finally {
+    if (element) {
+      try { await element.dispose(); } catch (_) {}
+    }
+  }
+}
+
 // XPath-селекторы для признака «генерация ещё идёт» (видна кнопка Stop).
-// DeepSeek периодически меняет вёрстку кнопки Stop, поэтому здесь широкий набор
-// вариантов (класс stop, aria-label, role=button, SVG с stop-иконкой, текст).
-// Если ни один не совпадает с актуальной кнопкой — isStillGenerating всегда false,
-// и тогда единственный сигнал завершения — подтверждение перечитыванием (confirmMs).
+// Kimi-специфичный класс кнопки Stop неизвестен (TODO — живая инспекция),
+// поэтому держим широкий набор generic-вариантов (aria-label, role=button, текст).
+// Если ни один не совпадает — isStillGenerating всегда false, и единственный
+// сигнал завершения — подтверждение перечитыванием (confirmMs).
 const STOP_GENERATING_XPATHS = [
+  "//*[@data-testid='virtuoso-item-list']//*[contains(@class,'stop') and not(contains(@class,'hidden'))]",
   "//div[contains(@class,'stop') and not(contains(@class,'hidden'))]",
   "//div[@aria-label='stop' or @aria-label='Stop' or @aria-label='Stop generating' or @aria-label='stop generating']",
   "//button[contains(@class,'stop') or @aria-label='stop' or @aria-label='Stop' or @aria-label='Stop generating' or @aria-label='stop generating']",
-  "//div[contains(@class,'ds-button') and .//svg[contains(@class,'stop')]]",
-  "//div[contains(@class,'ds-button') and .//svg[contains(@class,'icon') and contains(@class,'stop')]]",
-  "//button[contains(@class,'ds-button') and .//svg[contains(@class,'stop')]]",
   "//*[@role='button' and (contains(@aria-label,'stop') or contains(@aria-label,'Stop') or contains(@class,'stop'))]",
-  "//button[.//text()[contains(.,'Stop') or contains(.,'Остановить') or contains(.,'stop')]]",
+  "//button[.//text()[contains(.,'Stop') or contains(.,'Остановить') or contains(.,'stop') or contains(.,'停止')]]",
 ];
 
 async function isStillGenerating(page) {
@@ -257,24 +309,24 @@ async function waitLastOuterHtmlStable(page, xpath, {
     // Ожидание стабилизации HTML-контента: опрашивает outerHTML элемента по XPath,
     // пока он не перестанет меняться stableTicks раз подряд (потоковая генерация завершена).
     //
-    // Улучшения:
     // - checkStopButton: проверяет кнопку Stop в DOM — если видна, генерация продолжается
     //   (сбрасывает sameCount даже если HTML не менялся в течение паузы).
     // - minContentLength=50: игнорирует пустые/короткие ответы (< 50 символов).
     // - timeoutMs=300000 (5 мин): бюджет на стабилизацию длинного ответа (.poll-цикл).
     // - appearTimeoutMs=20000 (20с): таймаут ПЕРВОГО появления элемента в DOM
-    //   (waitForXPathCompat). Если за 20с после клика «отправить» контейнер ответа
-    //   не появился — XPath устарел (DeepSeek сменил вёрстку), фейл-фаст к следующему
-    //   fallback-селектору. Раньше тут был тот же timeoutMs=300000 → один устаревший
-    //   селектор ждал 5 мин пустого «не нашлось», а 4 селектора × 300с = 20 мин холостого
-    //   вращения держали все боты BUSY → 429 «Все боты заняты». Реальный ответ
-    //   появляется в DOM за 1-3с, поэтому 20с — щедрый запас, на норм режим не влияет.
+    //   (waitForXPathCompat). Если за 20с после отправки контейнер ответа не появился —
+    //   XPath устарел (Kimi сменил вёрстку), фейл-фаст к следующему fallback-селектору.
+    //   Раньше тут был тот же timeoutMs=300000 → один устаревший селектор ждал 5 мин
+    //   пустого «не нашлось», а 4 селектора × 300с = 20 мин холостого вращения держали
+    //   все боты BUSY → 429 «Все боты заняты». У Kimi answer-XPath и так TODO
+    //   (не откалиброван живой инспекцией) — без этого фикса первый запрос гарантированно
+    //   уйдёт в 5-мин вис. Реальный ответ появляется в DOM за 1-3с, 20с — щедрый запас.
     // - stableTicks=6 × pollMs=2000 = 12 секунд стабильности для уверенности.
     // - confirmMs: ПОДТВЕРЖДЕНИЕ перечитыванием. Когда накопилось stableTicks
     //   совпадений, ждём ещё confirmMs и перечитываем — если контент вырос, значит
     //   12с «стабильности» были паузой в генерации, а не завершением (продолжаем
     //   ждать). Это единственный надёжный сигнал завершения, если селектор кнопки
-    //   Stop устарел — без него ответ обрезается посередине (DeepSeek генерит паузами).
+    //   Stop устарел — без него ответ обрезается посередине.
     const start = Date.now();
 
     // Дожидаемся появления элемента (appearTimeoutMs, НЕ timeoutMs — см. комментарий выше)
@@ -287,7 +339,6 @@ async function waitLastOuterHtmlStable(page, xpath, {
     while (Date.now() - start < timeoutMs) {
         const cur = await getLastOuterHtmlByXPath(page, xpath);
 
-        // Reject empty/too-short answers — DeepSeek hasn't started generating yet.
         if (minContentLength > 0 && (!cur || cur.length < minContentLength)) {
             sameCount = 0;
             prev = cur;
@@ -295,11 +346,8 @@ async function waitLastOuterHtmlStable(page, xpath, {
             continue;
         }
 
-        // Сохраняем последний валидный контент (на случай timeout вернём его)
         lastNonEmpty = cur;
 
-        // Проверка кнопки Stop: если видна — генерация ещё идёт,
-        // даже если HTML временно не меняется (пауза в генерации).
         if (checkStopButton && await isStillGenerating(page)) {
             sameCount = 0;
             prev = cur;
@@ -311,9 +359,6 @@ async function waitLastOuterHtmlStable(page, xpath, {
             sameCount++;
 
             if (sameCount >= stableTicks) {
-                // Подтверждение завершения: перечитываем через confirmMs. Если контент
-                // продолжил расти — генерация не закончилась (пауза), продолжаем ждать,
-                // иначе ответ обрежется посередине предложения.
                 if (confirmMs > 0) {
                     await sleep(confirmMs);
                     const recheck = await getLastOuterHtmlByXPath(page, xpath);
@@ -336,8 +381,6 @@ async function waitLastOuterHtmlStable(page, xpath, {
         await sleep(pollMs);
     }
 
-    // Timeout: если есть какой-то непустой контент — возвращаем его,
-    // иначе бросаем ошибку.
     if (lastNonEmpty && lastNonEmpty.length >= minContentLength) {
         log('waitLastOuterHtmlStable: timeout reached, returning last non-empty content (' + lastNonEmpty.length + ' chars)');
         return lastNonEmpty;
@@ -346,52 +389,33 @@ async function waitLastOuterHtmlStable(page, xpath, {
     throw new Error(`waitLastOuterHtmlStable timeout for xpath: ${xpath}`);
 }
 
-async function getDeepseekLastAnswerHtml(ctx, data, {
-    timeoutMs = 120000,
-    pollMs = 1000,
-    stableTicks = 2,
-} = {}) {
-    const page = ctx?.page;
-    if (!page) throw new Error('ctx.page is required');
-
-    const fullXPath = data.xpaths.chat.fullAnswer.deepseek; // //div[contains(@class,'ds-message')]
-    const ansXPath  = data.xpaths.chat.answer.deepseek;     // //div[contains(@class,'ds-message')]/div[contains(@class,'ds-markdown')]
-
-    // Ждём стабилизацию отдельно для full и answer
-    const fullHtml = await waitLastOuterHtmlStable(page, fullXPath, { timeoutMs, pollMs, stableTicks });
-    const answerHtml = await waitLastOuterHtmlStable(page, ansXPath, { timeoutMs, pollMs, stableTicks });
-
-    return { fullHtml, answerHtml };
-}
-
 async function sendMessage(ctx, payload = {}) {
-    // Отправка сообщения через UI сайта DeepSeek.
+    // Отправка сообщения через UI сайта Kimi.
     // payload: { model, thinking, user_id, message }
-    // Возвращает Markdown-стрроку с ответом модели или { ok: false, reason: ... }.
+    // Возвращает Markdown-строку с ответом модели или { ok: false, reason: ... }.
     //
     // Логика:
     // 1) При первом сообщении в диалоге — переход на страницу чата.
-    // 2) Включение/выключение DeepThink (thinking mode) по необходимости.
-    // 3) Ввод текста в поле ввода, нажатие кнопки отправки.
-    // 4) Ожидание стабилизации ответа (потоковая генерация токенов).
+    // 2) Ввод текста в contenteditable поле (paste-инжект).
+    // 3) Нажатие кнопки отправки (fallback Enter).
+    // 4) Ожидание стабилизации ответа (потоковая генерация).
     // 5) Конвертация HTML ответа в Markdown.
     const page = ctx?.page;
 
-    if (!page) 
-        return { 
-            ok: false, 
+    if (!page)
+        return {
+            ok: false,
             reason: 'ctx.page is missing',
         };
     try {
         let currentService = payload.model;
-        let isUsetThinking = payload.thinking;
         let uid = payload.user_id;
 
         hist[uid] ??= [];
 
         // Only navigate to a fresh chat page for the first message in a conversation.
-        // DeepSeek maintains its own server-side context; re-navigating would reset
-        // the conversation and lose all prior context.
+        // Kimi keeps its own server-side context; re-navigating would reset the
+        // conversation and lose all prior context.
         if (hist[uid].length === 0) {
             await page.goto(data.services[currentService]);
         }
@@ -404,61 +428,61 @@ async function sendMessage(ctx, payload = {}) {
         hist[uid].push(sendingData);
 
         // Send only the user's message text — NOT the entire conversation history.
-        // DeepSeek keeps its own conversation context server-side; sending a JSON
-        // array of previous messages would confuse the model and corrupt the prompt.
         const messageText = payload.message;
 
-        // DeepThink toggle: "Enabled" = DeepThink is currently ON (we want to turn it OFF).
-        //                    "Disabled" = DeepThink is currently OFF (we want to turn it ON).
-        if (isUsetThinking) {
-            await clickIfExists(page, data.xpaths.chat.thinkingButtonDisabled[currentService]);
-        }
-        else {
-            await clickIfExists(page, data.xpaths.chat.thinkingButtonEnabled[currentService]);
-        }
+        // Поле ввода Kimi — contenteditable div, НЕ textarea. Проверяем его наличие
+        // (отсутствие = не залогинены), затем paste-инжектим текст.
+        const inputCss = data?.xpaths?.chat?.inputLabelCss?.[currentService] ||
+            "[data-testid='msh-chatinput-editor']";
+        const inputXPath = data?.xpaths?.chat?.inputLabel?.[currentService] ||
+            "//*[@data-testid='msh-chatinput-editor']";
 
-        if (!(await elementExists(page, data.xpaths.chat.inputLabel[currentService]))) {
+        if (!(await elementExists(page, inputXPath))) {
             return {
-            ok: false,
-            reason: "can't send message",
-            data: {
-                "moreInformation": "Probably user doesn't authorized"
+                ok: false,
+                reason: "can't send message",
+                data: {
+                    "moreInformation": "Probably user doesn't authorized"
+                }
             }
         }
+
+        const typedOk = await typeIntoContentEditable(page, inputCss, messageText);
+        if (!typedOk) {
+            return {
+                ok: false,
+                reason: "can't send message",
+                data: { "moreInformation": "Failed to type into Kimi contenteditable editor" }
+            };
         }
 
-        await waitAndTypeX(page, data.xpaths.chat.inputLabel[currentService], messageText);
-
         // Try clicking the send button via XPath. If the primary selector fails
-        // (DeepSeek UI changed), fall back to pressing Enter in the textarea.
+        // (Kimi UI changed), fall back to pressing Enter in the contenteditable.
         const sendClicked = await waitAndClickX(page, data.xpaths.chat.sendMessageButton[currentService]);
         if (!sendClicked) {
             log('Send button not found via XPath, falling back to Enter key');
             try {
-                const textarea = await waitForXPathCompat(page, data.xpaths.chat.inputLabel[currentService], { timeout: 10000 });
-                await textarea.press('Enter');
-            } catch (e2) {
-                // Last resort: page-level keyboard Enter
+                // Для contenteditable Enter в сфокусированном редакторе = отправка
+                // (Shift+Enter — перенос строки в Kimi Composer).
                 await page.keyboard.press('Enter');
+            } catch (e2) {
+                log('Enter fallback failed: ' + (e2?.message || e2));
             }
         }
 
-        // Wait for the answer to stabilize — DeepSeek streams tokens, so we
-        // need enough stable ticks to ensure generation is truly complete.
+        // Wait for the answer to stabilize — Kimi streams tokens, so we need
+        // enough stable ticks to ensure generation is truly complete.
         // 6 ticks × 2000ms = 12s of stability required before reading.
-        // Also wait until the answer has actual content (min 50 chars HTML).
-        // timeoutMs=300000 (5 min) — enough for long answers.
-        //
-        // Fallback XPath selectors: if the primary selector fails (DeepSeek
-        // changed their HTML), try alternative selectors before giving up.
+        // Fallback XPath selectors: if the primary selector fails (Kimi changed
+        // their HTML), try alternative selectors before giving up.
         const answerXPaths = [
             data.xpaths.chat.answer[currentService],
-            // Fallback 1: any element with ds-markdown class inside a message
-            "//div[contains(@class,'ds-message')]//div[contains(@class,'ds-markdown')]",
-            // Fallback 2: any element with ds-markdown class (broader)
-            "//div[contains(@class,'ds-markdown')]",
-            // Fallback 3: any element with markdown class inside a chat message
-            "//div[contains(@class,'message')]//div[contains(@class,'markdown')]",
+            // Fallback 1: markdown-блок внутри virtuoso-item-list
+            "//*[@data-testid='virtuoso-item-list']//*[contains(@class,'markdown')]",
+            // Fallback 2: content-блок внутри virtuoso-item-list
+            "//*[@data-testid='virtuoso-item-list']//*[contains(@class,'content')]",
+            // Fallback 3: любой markdown-блок (broader)
+            "//div[contains(@class,'markdown')]",
         ];
 
         let answer = null;
@@ -474,15 +498,8 @@ async function sendMessage(ctx, payload = {}) {
                     checkStopButton: true,
                     confirmMs: 5000,
                 });
-                // НЕ принимаем структурно-набитый, но текстово-пустой контейнер:
-                // minContentLength проверяет длину outerHTML, а не текста, поэтому
-                // пустой «скелет» ds-markdown (≥50 символов HTML-обёртки, ~1 символ
-                // текста) проходит проверку. Реальный ответ при этом часто живёт в
-                // другом контейнере, который поймает следующий селектор — поэтому
-                // конвертируем и провéряем, что есть настоящий текст, иначе идём
-                // к следующему XPath (это и есть источник «Empty/short response
-                // detected (1 chars)» в логах).
-                inner = deepseekHtmlToApiMarkdown(answer);
+                // НЕ принимаем структурно-набитый, но текстово-пустой контейнер.
+                inner = kimiHtmlToApiMarkdown(answer);
                 if (inner && inner.trim().length >= 5) {
                     answerXpUsed = xp;
                     break;
@@ -499,13 +516,12 @@ async function sendMessage(ctx, payload = {}) {
             return {
                 ok: false,
                 reason: "can't send message",
-                data: { "moreInformation": "All answer XPath selectors failed — DeepSeek UI may have changed" }
+                data: { "moreInformation": "All answer XPath selectors failed — Kimi UI may have changed" }
             };
         }
 
-        // Retry on empty or very short response — sometimes DeepSeek returns
-        // an empty container while still generating. Wait and try once more,
-        // перебирая все селекторы (как в основном цикле), а не только последний.
+        // Retry on empty or very short response — sometimes Kimi returns
+        // an empty container while still generating.
         if (!inner || inner.trim().length < 5) {
             log('Empty/short response detected (' + (inner?.length || 0) + ' chars), retrying once more...');
             await sleep(3000);
@@ -519,7 +535,7 @@ async function sendMessage(ctx, payload = {}) {
                         checkStopButton: true,
                         confirmMs: 5000,
                     });
-                    const retryInner = deepseekHtmlToApiMarkdown(retryAnswer);
+                    const retryInner = kimiHtmlToApiMarkdown(retryAnswer);
                     if (retryInner && retryInner.trim().length >= 5 && retryInner.trim().length > inner.trim().length) {
                         inner = retryInner;
                         answer = retryAnswer;
@@ -532,12 +548,11 @@ async function sendMessage(ctx, payload = {}) {
             }
         }
 
-        // Final check: if still empty, return error
         if (!inner || !inner.trim()) {
             return {
                 ok: false,
                 reason: "can't send message",
-                data: { "moreInformation": "DeepSeek returned an empty response after retries" }
+                data: { "moreInformation": "Kimi returned an empty response after retries" }
             };
         }
 

@@ -20,6 +20,7 @@ services:
       - .:/app
       - static_volume:/app/staticfiles
       - WebDeepseek_node_modules:/app/WebDeepseek/node_modules
+      - WebKimi_node_modules:/app/WebKimi/node_modules
 #      - WebDeepseek_puppeteer_cache:/app/WebDeepseek/.puppeteer-cache
     ports:
       - "8000:8000"
@@ -35,7 +36,7 @@ services:
     # falls back to PUPPETEER_PROXY_* when BOT_PROXY is empty, so both naming
     # schemes work without any mapping here.
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null && python3 -c \"import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://localhost:3000/health', timeout=5)); sys.exit(0 if d.get('ok') and d.get('ready_count',0) > 0 else 1)\""]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null && python3 -c \"import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://localhost:3000/health', timeout=5)); k=json.load(urllib.request.urlopen('http://localhost:3001/health', timeout=5)); sys.exit(0 if d.get('ok') and d.get('ready_count',0) > 0 and k.get('ok') else 1)\""]
       interval: 30s
       timeout: 10s
       retries: 10
@@ -96,6 +97,7 @@ volumes:
   static_volume:
   WebDeepseek_node_modules:
   WebDeepseek_puppeteer_cache:
+  WebKimi_node_modules:
 
 networks:
   shared-network:

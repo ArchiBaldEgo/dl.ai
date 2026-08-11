@@ -36,9 +36,12 @@ _manual_refresh_started = False
 
 from .model_clients import registry
 from .model_clients.web_deepseek import restart_bot_pool
+from .model_clients.web_kimi import restart_kimi_bot_pool
 
 # Web DeepSeek models served by the WebDeepseek/ pool — candidates for auto-recovery.
 WEB_DEEPSEEK_KEYS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
+# Web Kimi models served by the WebKimi/ pool — candidates for auto-recovery.
+WEB_KIMI_KEYS = ("Web_Kimi",)
 _AUTORECOVERY_BACKOFF_SECONDS = 8
 
 # Health checks only exercise the models defined in the registry below.
@@ -400,6 +403,66 @@ def _maybe_autorecover_web_deepseek(handlers, window_date):
             logger.warning("Failed to annotate auto-recovery outcome for %s", key, exc_info=True)
 
 
+def _maybe_autorecover_kimi(handlers, window_date):
+    """Restart the Kimi bot pool and re-check Web Kimi if it is down.
+
+    Зеркало ``_maybe_autorecover_web_deepseek`` для WebKimi/ пула. Gate
+    ``AI_WEB_KIMI_AUTORECOVERY`` (default True). Only acts when the Web Kimi
+    model is unavailable; restarts the pool once, waits briefly, re-checks the
+    down model, and annotates ``last_message`` with the auto-recovery outcome.
+    Never raises.
+    """
+    if not getattr(settings, "AI_WEB_KIMI_AUTORECOVERY", True):
+        return
+
+    down_keys = []
+    for key in WEB_KIMI_KEYS:
+        row = AIModelAvailability.objects.filter(
+            window_date=window_date, model_key=key
+        ).first()
+        if not row or not row.is_available:
+            down_keys.append(key)
+
+    if not down_keys:
+        return
+
+    logger.info("Web Kimi down (%s); attempting bot-pool auto-recovery", down_keys)
+    restarted = restart_kimi_bot_pool()
+    if not restarted:
+        try:
+            for key in down_keys:
+                _save_availability(
+                    window_date=window_date,
+                    key=key,
+                    title=registry.title(key),
+                    is_available=False,
+                    response_time_ms=None,
+                    last_message="Автоподъём не удался: бот-пул Kimi недоступен",
+                    last_http_code=None,
+                )
+        except Exception:
+            logger.warning("Failed to annotate Kimi bot-pool restart failure", exc_info=True)
+        return
+
+    time.sleep(_AUTORECOVERY_BACKOFF_SECONDS)
+
+    for key in down_keys:
+        title = registry.title(key)
+        handler_info = handlers.get(key)
+        detail = _check_one_model(key, title, handler_info, window_date)
+        is_up = detail["is_available"]
+        try:
+            row = AIModelAvailability.objects.filter(
+                window_date=window_date, model_key=key
+            ).first()
+            if row:
+                suffix = " [автоподъём: ок]" if is_up else " [автоподъём: модель всё ещё недоступна]"
+                row.last_message = (row.last_message or "")[:1900] + suffix
+                row.save(update_fields=["last_message"])
+        except Exception:
+            logger.warning("Failed to annotate Kimi auto-recovery outcome for %s", key, exc_info=True)
+
+
 def run_model_health_check(force=False, on_model_checked=None):
     """Запускает проверку доступности всех моделей для текущего health-окна.
 
@@ -475,6 +538,7 @@ def run_model_health_check(force=False, on_model_checked=None):
                     logger.warning("on_model_checked callback failed for %s", key, exc_info=True)
 
         _maybe_autorecover_web_deepseek(handlers, window_date)
+        _maybe_autorecover_kimi(handlers, window_date)
 
         AIModelHealthRun.objects.filter(pk=run.pk).update(
             status=AIModelHealthRun.STATUS_COMPLETED,

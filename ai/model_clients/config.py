@@ -1,7 +1,7 @@
 """Централизованная конфигурация внешних AI API (ключи, URL, прокси).
 
 Загружает .env из корня проекта. Содержит токены для SambaNova, HuggingFace,
-GigaChat, DeepSeek и URL бот-пула (Web DeepSeek).
+GigaChat, DeepSeek и URL бот-пулов (Web DeepSeek на :3000, Web Kimi на :3001).
 """
 
 import os
@@ -21,6 +21,10 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 DEEPSEEK_API_TOKEN = os.getenv("DEEPSEEK_API_TOKEN") or os.getenv("DEEPSEEK_API_KEY")
 
 BOT_POOL_URL = os.getenv("BOT_POOL_URL", "http://localhost:3000").rstrip("/")
+
+# Web Kimi bot-пул (WebKimi/, loopback :3001). Отдельный от DeepSeek пул —
+# namespaced KIMI_* env, чтобы не коллизировать с PORT/SERVICE_MODEL/BOT_USERNAME.
+KIMI_POOL_URL = os.getenv("KIMI_POOL_URL", "http://localhost:3001").rstrip("/")
 
 # Ollama (Cloud модели вида '<name>:cloud' требуют bearer-токен; локальный
 # Ollama работает без ключа на http://localhost:11434).

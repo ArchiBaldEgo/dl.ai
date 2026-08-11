@@ -98,8 +98,8 @@ def map_http_error(status: int, provider: str) -> Optional[str]:
 
     Args:
         status: HTTP status code ответа.
-        provider: один из ``"openrouter"``, ``"groq"``, ``"web_deepseek"``
-            (определяет формулировки для 401/429/5xx и generic-fallback).
+        provider: один из ``"openrouter"``, ``"groq"``, ``"web_deepseek"``,
+            ``"web_kimi"`` (определяет формулировки для 401/429/5xx и generic-fallback).
 
     Returns:
         Friendly-сообщение; для ``status == 200`` — None (вызов успешен).
@@ -109,11 +109,11 @@ def map_http_error(status: int, provider: str) -> Optional[str]:
     if status == 200:
         return None
 
-    if status == 400 and provider == "web_deepseek":
+    if status == 400 and provider in ("web_deepseek", "web_kimi"):
         return "Неправильный запрос"
 
     if status == 401:
-        if provider == "web_deepseek":
+        if provider in ("web_deepseek", "web_kimi"):
             return "Бот не авторизован. Проверьте логин/пароль"
         if provider == "openrouter":
             return "OpenRouter API ключ недействителен. Проверьте OPENROUTER_API_KEY."
@@ -121,20 +121,20 @@ def map_http_error(status: int, provider: str) -> Optional[str]:
             return "Groq API ключ недействителен. Проверьте GROQ_TOKEN."
 
     if status == 413:
-        # Общее сообщение для OpenRouter/Groq; web_deepseek не использует 413
-        # и попадёт в generic-fallback ниже.
+        # Общее сообщение для OpenRouter/Groq; web-пулы не используют 413
+        # и попадут в generic-fallback ниже.
         if provider in ("openrouter", "groq"):
             return _TOO_MANY_TOKENS
 
     if status == 429:
-        if provider == "web_deepseek":
+        if provider in ("web_deepseek", "web_kimi"):
             return "Все боты заняты"
         if provider == "openrouter":
             return "Превышен лимит запросов OpenRouter (free tier). Попробуйте позже."
         if provider == "groq":
             return "Превышен лимит запросов Groq. Попробуйте позже."
 
-    if status >= 503 and provider == "web_deepseek":
+    if status >= 503 and provider in ("web_deepseek", "web_kimi"):
         return "Бот инициализируется слишком долго. Попробуйте позже."
 
     # generic-fallback (формат совпадает с прежними per-провайдер сообщениями).
@@ -144,6 +144,8 @@ def map_http_error(status: int, provider: str) -> Optional[str]:
         return f"Ошибка Groq API (код {status})."
     if provider == "web_deepseek":
         return f"Ошибка сервиса Web DeepSeek (код {status})."
+    if provider == "web_kimi":
+        return f"Ошибка сервиса Web Kimi (код {status})."
     return f"Ошибка API (код {status})."
 
 

@@ -13,7 +13,7 @@ from typing import Callable, Coroutine, Dict
 
 from django.conf import settings
 
-from . import openrouter, web_deepseek, ollama
+from . import openrouter, web_deepseek, web_kimi, ollama
 
 Handler = Callable[..., Coroutine]
 
@@ -34,6 +34,12 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "title": "Web DeepSeek Thinking",
         "handler": web_deepseek.ask_Web_DeepSeek_Thinking_async,
         "capabilities": _REASONING,
+    },
+    # --- Web Kimi (бот-пул через Puppeteer, kimi.moonshot.cn) ---
+    "Web_Kimi": {
+        "title": "Web Kimi",
+        "handler": web_kimi.ask_Web_Kimi_async,
+        "capabilities": _TEXT_ONLY,
     },
     # --- OpenRouter (бесплатные модели) ---
     "OR_Nemotron_Ultra_550B": {

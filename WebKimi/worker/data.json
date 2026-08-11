@@ -1,0 +1,35 @@
+{
+    "services": {
+        "kimi": "https://kimi.moonshot.cn/"
+    },
+    "loginUrls": {
+        "kimi": "https://kimi.moonshot.cn/"
+    },
+
+    "_TODO_live_inspection": "Селекторы ответа/stop — best-effort из веб-исследования. Перед продой прогнать бот с KIMI_HEADLESS=false, открыть DevTools на чате Kimi и уточнить: (1) data.xpaths.chat.answer — класс markdown-блока ассистента внутри [data-testid='virtuoso-item-list']; (2) data.xpaths.chat.fullAnswer — обёртка; (3) STOP_GENERATING_XPATHS в promtps.js — кнопка Stop; (4) kimiHtmlToApiMarkdown — класс обёртки кода. KIMI_AUTH_DEBUG=true пишет auth-*.html/.png в worker/logs/.",
+
+    "xpaths": {
+        "auth": {
+            "chatUrl": {
+                "kimi": "https://kimi.moonshot.cn/"
+            }
+        },
+        "chat": {
+            "inputLabel": {
+                "kimi": "//*[@data-testid='msh-chatinput-editor']"
+            },
+            "inputLabelCss": {
+                "kimi": "[data-testid='msh-chatinput-editor']"
+            },
+            "sendMessageButton": {
+                "kimi": "//button[@data-testid='msh-chatinput-send-button']"
+            },
+            "answer": {
+                "kimi": "//*[@data-testid='virtuoso-item-list']/*[last()]"
+            },
+            "fullAnswer": {
+                "kimi": "//*[@data-testid='virtuoso-item-list']/*[last()]"
+            }
+        }
+    }
+}

@@ -111,6 +111,16 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm ci --omit=dev --no-audit --no-fund && \
     mkdir -p /opt/puppeteer-runtime && \
     cp -r /opt/puppeteer-cache/. /opt/puppeteer-runtime/
+# Node.js зависимости для Web Kimi bot-пула (WebKimi/) — отдельный install,
+# сервисы независимы (паттерн one-service-per-dir). Зависимости идентичны WebDeepseek.
+WORKDIR /app/WebKimi
+COPY WebKimi/package.json WebKimi/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm config set proxy "$NPM_HTTP_PROXY" && \
+    npm config set https-proxy "$NPM_HTTPS_PROXY" && \
+    PUPPETEER_CACHE_DIR=/opt/puppeteer-cache \
+    HTTP_PROXY="$NPM_HTTP_PROXY" HTTPS_PROXY="$NPM_HTTPS_PROXY" \
+    npm ci --omit=dev --no-audit --no-fund
 COPY . .
 # ==================== РАНТАЙМ ====================
 # Базируется на apt-base — рантайм-библиотеки уже стоят, отдельный apt не нужен
@@ -120,6 +130,7 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /usr/bin/node /usr/local/bin/node
 COPY --from=builder /opt/puppeteer-runtime /opt/puppeteer-runtime
 COPY --from=builder /app/WebDeepseek/node_modules /app/WebDeepseek/node_modules
+COPY --from=builder /app/WebKimi/node_modules /app/WebKimi/node_modules
 COPY --from=builder /app /app
 ENV PATH="/opt/venv/bin:$PATH" \
     PUPPETEER_CACHE_DIR=/opt/puppeteer-runtime \
@@ -127,6 +138,6 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 WORKDIR /app
-EXPOSE 8000 3000
+EXPOSE 8000 3000 3001
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["bash", "-c", "python manage.py sync_update_log || true; exec node /app/WebDeepseek/api/index.js & exec daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application & wait -n"]
+CMD ["bash", "-c", "python manage.py sync_update_log || true; exec node /app/WebDeepseek/api/index.js & exec node /app/WebKimi/api/index.js & exec daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application & wait -n"]
