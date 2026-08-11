@@ -325,6 +325,31 @@ def _update_job(run_id, **updates):
         job["updated_at_ts"] = time.time()
 
 
+def cancel_arm_run(run_id):
+    """Request cancellation of a running ARM job.
+
+    Sets ``cancel_requested=True`` on the in-memory job. The worker checks
+    this flag between task/model iterations and stops early if set.
+    Returns True if the job was found and flagged, False otherwise.
+    """
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return False
+        job["cancel_requested"] = True
+        job["updated_at_ts"] = time.time()
+    return True
+
+
+def _is_cancel_requested(run_id):
+    """Check if cancellation was requested for this job (thread-safe read)."""
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return False
+        return job.get("cancel_requested", False)
+
+
 def _resolve_user(user_id):
     user = None
     username = ""
@@ -759,17 +784,16 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
         if is_finished:
             result["comment"] = comment
             comment_lower = comment.lower().strip()
-            # Success markers.
-            if comment_lower in ("ok", "ок", "accepted", "correct", "всё верно", ""):
+            # Success: DL reports all tests passed.
+            success_markers = (
+                "все тесты", "все тесты успешно", "ок", "ok",
+                "accepted", "correct", "пройдены", "успешно пройден",
+            )
+            if any(m in comment_lower for m in success_markers):
                 result["verdict"] = _VERDICT_SOLVED
-                return result
-            # Error markers.
-            error_markers = ("error", "ошиб", "fail", "неверн", "wrong", "exception", "runtime")
-            if any(m in comment_lower for m in error_markers):
+            else:
+                # Any other finished result = failed (wrong answer, error, etc).
                 result["verdict"] = _VERDICT_FAILED
-                return result
-            # Ambiguous — treat as solved if no error markers.
-            result["verdict"] = _VERDICT_SOLVED
             return result
 
     # Timed out waiting for DL.
@@ -787,6 +811,7 @@ def _run_batch_job_worker(
     ui_language="Русский",
     dl_test=True,
     prompt_id=None,
+    course_id=None,
 ):
     """Daemon worker for a batch-solve run.
 
@@ -830,7 +855,7 @@ def _run_batch_job_worker(
         # Resolve node_ids → Task objects via DL get-task-info + ensure_task.
         tasks = []
         for node_id in node_ids:
-            task = ensure_task(node_id, session_id=session_id)
+            task = ensure_task(node_id, session_id=session_id, course_id=course_id)
             if task is None:
                 continue
             tasks.append(task)
@@ -861,8 +886,12 @@ def _run_batch_job_worker(
 
         sample_cache = {}
         completed = 0
+        cancelled = False
 
         for task in tasks:
+            if _is_cancel_requested(run_id):
+                cancelled = True
+                break
             # Fetch the DL sample solution once per task.
             sample_text = sample_cache.get(task.node_id)
             if sample_text is None and task.task_id and task.file_extension:
@@ -881,8 +910,19 @@ def _run_batch_job_worker(
             prog_lang_name = (
                 task.programming_language.language_name if task.programming_language else ""
             )
+            # Fallback: derive language name from file_extension for DL tree tasks
+            # that have no programming_language set.
+            if not prog_lang_name and task.file_extension:
+                _ext_to_lang = {
+                    ".py": "Python", ".cmpa": "CMPA", ".asm": "Ассемблер i8086",
+                    ".pas": "Pascal", ".v": "Verilog", ".cpp": "C++", ".c": "C",
+                }
+                prog_lang_name = _ext_to_lang.get(task.file_extension, "")
 
             for model in ordered_models:
+                if _is_cancel_requested(run_id):
+                    cancelled = True
+                    break
                 started = perf_counter()
                 verdict = _VERDICT_SKIPPED
                 status = "error"
@@ -1017,6 +1057,8 @@ def _run_batch_job_worker(
             if not evicted:
                 job["report"] = _build_batch_report(job.get("results") or [])
                 job["status"] = "completed"
+                if cancelled:
+                    job["cancelled"] = True
                 job["updated_at_ts"] = time.time()
                 results = list(job.get("results") or [])
                 report = job["report"]
@@ -1036,8 +1078,9 @@ def _run_batch_job_worker(
             status=AIModelTestRun.STATUS_COMPLETED,
             finished_at=end_time,
             report=report or {},
+            error_message=("Прервано пользователем" if cancelled else ""),
         )
-        _update_job(run_id, status="completed")
+        _update_job(run_id, status="completed", cancelled=cancelled)
 
     except Exception as exc:
         _update_job(
@@ -1083,7 +1126,7 @@ def _batch_results_from_db(test_run):
     return results
 
 
-def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None):
+def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None):
     """Запускает batch-solve ARM: задачи из DL дерева × модели в фоновом потоке.
 
     Принимает node_ids — список DL node ID (из дерева задач dl.gsu.by).
@@ -1117,6 +1160,8 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "run_type": "batch",
         "status": "running",
         "error_message": "",
+        "cancel_requested": False,
+        "cancelled": False,
         "total_models": len(ordered_models),
         "total_pairs": total_pairs,
         "completed_pairs": 0,
@@ -1137,7 +1182,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, node_ids, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )

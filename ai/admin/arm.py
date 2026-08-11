@@ -11,7 +11,7 @@ from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonRespo
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 
-from ..arm_runner import get_arm_run_snapshot, start_arm_sequential_run, start_batch_solve_run
+from ..arm_runner import cancel_arm_run, get_arm_run_snapshot, start_arm_sequential_run, start_batch_solve_run
 from ..i18n import get_language_instruction, get_localized_name
 from ..model_health import (
     get_available_model_options,
@@ -319,14 +319,12 @@ def admin_arm_solve_view(request):
 
 
 def admin_arm_solve_load_tree_view(request):
-    """Load tasks from a DL course tree.
+    """Load tasks from a DL course tree (nested, not flattened).
 
-    Accepts course_id (required) and optional root_node_id (if not given,
-    uses get-course-node to find tasksRootId). Calls get-node-tree to fetch
-    the full tree, flattens it, and returns the list of task nodes.
-
-    Each task node is enriched with task info (statement, taskId) via
-    get-task-info, best-effort — failures are skipped silently.
+    Accepts course_id (required). Calls get-course-node to find tasksRootId,
+    then get-node-tree to fetch the full nested tree. Returns the tree as-is
+    (folders + tasks), enriching only leaf task nodes with get-task-info
+    (statement, taskId) — best-effort, failures are skipped silently.
     """
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
@@ -335,25 +333,21 @@ def admin_arm_solve_load_tree_view(request):
         return HttpResponseNotAllowed(["POST"])
 
     import json as _json
+    # Accept both JSON body and form-urlencoded data.
     body = {}
     try:
         body = _json.loads(request.body or b"{}")
     except (ValueError, _json.JSONDecodeError):
-        return JsonResponse({"ok": False, "message": "Некорректный JSON"}, status=400)
+        body = {}
 
-    course_id = body.get("course_id")
-    root_node_id = body.get("root_node_id")
+    course_id = body.get("course_id") or request.POST.get("course_id")
     try:
         course_id = int(course_id) if course_id else None
     except (ValueError, TypeError):
         course_id = None
-    try:
-        root_node_id = int(root_node_id) if root_node_id else None
-    except (ValueError, TypeError):
-        root_node_id = None
 
-    if course_id is None and root_node_id is None:
-        return JsonResponse({"ok": False, "message": "Укажите course_id или root_node_id"}, status=400)
+    if course_id is None:
+        return JsonResponse({"ok": False, "message": "Укажите course_id"}, status=400)
 
     session_id = _resolve_session_id(request)
     if not session_id:
@@ -367,61 +361,80 @@ def admin_arm_solve_load_tree_view(request):
         fetch_course_nodes,
         fetch_node_tree,
         fetch_task_info,
-        flatten_node_tree,
     )
 
+    def _enrich_node(node):
+        """Recursively enrich task leaves with statement/taskId."""
+        if not isinstance(node, dict):
+            return node
+        is_folder = node.get("isFolder", False)
+        if not is_folder:
+            node_id = node.get("nodeId")
+            statement = ""
+            task_id = 0
+            if node_id:
+                try:
+                    info = fetch_task_info(
+                        node_id, session_id=session_id,
+                        remove_html_tags=True, course_id=course_id,
+                    )
+                    statement = info.get("statement") or ""
+                    task_id = info.get("taskId") or 0
+                except (DLApiError, Exception):
+                    pass
+            node["statement"] = statement or ""
+            node["task_id"] = task_id
+            node["has_statement"] = bool(statement)
+        else:
+            node["statement"] = ""
+            node["task_id"] = 0
+            node["has_statement"] = False
+        children = node.get("children")
+        if children:
+            node["children"] = [_enrich_node(c) for c in children]
+        return node
+
+    def _count_tasks(nodes):
+        total = 0
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            if not n.get("isFolder", False):
+                total += 1
+            children = n.get("children")
+            if children:
+                total += _count_tasks(children)
+        return total
+
     try:
-        # Determine root node: explicit > course-derived.
-        if root_node_id is None:
-            course_resp = fetch_course_nodes(session_id, course_id)
-            root_node_id = course_resp.get("tasksRootId")
-            if not root_node_id:
-                return JsonResponse(
-                    {"ok": False, "message": "Не удалось получить tasksRootId для курса."},
-                    status=400,
-                )
-
-        # Fetch the full tree and flatten.
-        # Pass course_id when available — DL uses it for access checks.
-        tree_resp = fetch_node_tree(session_id, root_node_id, course_id=course_id)
-        task_nodes = flatten_node_tree(tree_resp)
-
-        if not task_nodes:
+        # Get tasksRootId from course.
+        course_resp = fetch_course_nodes(session_id, course_id)
+        root_node_id = course_resp.get("tasksRootId")
+        if not root_node_id:
             return JsonResponse(
-                {"ok": False, "message": "В дереве нет задач (только папки или пусто)."},
+                {"ok": False, "message": "Не удалось получить tasksRootId для курса."},
                 status=400,
             )
 
-        # Enrich each task node with get-task-info (best-effort).
-        enriched = []
-        for tn in task_nodes:
-            node_id = tn.get("nodeId")
-            if not node_id:
-                continue
-            name = tn.get("name", "")
-            statement = ""
-            task_id = 0
-            try:
-                info = fetch_task_info(
-                    node_id, session_id=session_id,
-                    remove_html_tags=True, course_id=course_id,
-                )
-                name = info.get("name") or name
-                statement = info.get("statement") or ""
-                task_id = info.get("taskId") or 0
-            except DLApiError:
-                pass
-            except Exception:
-                pass
-            enriched.append({
-                "node_id": node_id,
-                "name": name,
-                "statement": statement[:500] if statement else "",
-                "task_id": task_id,
-                "has_statement": bool(statement),
-            })
+        # Fetch the full nested tree.
+        tree_resp = fetch_node_tree(session_id, root_node_id, course_id=course_id)
+        tree = tree_resp.get("tree", [])
 
-        return JsonResponse({"ok": True, "tasks": enriched})
+        if not tree:
+            return JsonResponse(
+                {"ok": False, "message": "Дерево пусто."},
+                status=400,
+            )
+
+        # Enrich task leaves with get-task-info (best-effort).
+        enriched_tree = [_enrich_node(n) for n in tree]
+        task_count = _count_tasks(enriched_tree)
+
+        return JsonResponse({
+            "ok": True,
+            "tree": enriched_tree,
+            "task_count": task_count,
+        })
 
     except DLApiError as exc:
         return JsonResponse({"ok": False, "message": f"Ошибка DL API: {exc}"}, status=400)
@@ -471,6 +484,11 @@ def admin_arm_solve_start_view(request):
     if isinstance(dl_test, str):
         dl_test = dl_test == "1"
     prompt_id = body.get("prompt_id") or None
+    course_id_raw = body.get("course_id") or request.POST.get("course_id")
+    try:
+        course_id = int(course_id_raw) if course_id_raw else None
+    except (ValueError, TypeError):
+        course_id = None
 
     session_id = _resolve_session_id(request)
     if not session_id:
@@ -501,6 +519,7 @@ def admin_arm_solve_start_view(request):
         ui_language=ui_language,
         dl_test=dl_test,
         prompt_id=prompt_id,
+        course_id=course_id,
     )
     if not run_id:
         return JsonResponse(
@@ -530,3 +549,33 @@ def admin_arm_solve_status_view(request):
         )
 
     return JsonResponse({"ok": True, "run": run_snapshot})
+
+
+def admin_arm_solve_cancel_view(request):
+    """Cancel a running batch-solve ARM job."""
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    import json as _json
+    body = {}
+    try:
+        body = _json.loads(request.body or b"{}")
+    except (ValueError, _json.JSONDecodeError):
+        body = {}
+
+    run_id = body.get("run_id") or request.POST.get("run_id", "")
+    run_id = run_id.strip()
+    if not run_id:
+        return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
+
+    found = cancel_arm_run(run_id)
+    if not found:
+        return JsonResponse(
+            {"ok": False, "message": "Процесс не найден или уже завершен"},
+            status=404,
+        )
+
+    return JsonResponse({"ok": True, "message": "Прерывание запрошено"})

@@ -230,6 +230,28 @@
     .arm-header { flex-direction: column; }
     .arm-result-top { align-items: flex-start; flex-direction: column; }
   }
+
+  .arm-tree { margin: 0; padding: 0; list-style: none; }
+  .arm-tree ul { margin: 0; padding: 0 0 0 20px; list-style: none; }
+  .arm-tree-folder > summary {
+    cursor: pointer; user-select: none;
+    padding: 4px 8px; font-weight: 600;
+    border-radius: 4px;
+  }
+  .arm-tree-folder > summary:hover { background: color-mix(in srgb, var(--body-bg) 90%, var(--hairline-color)); }
+  .arm-tree-task {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px; border-radius: 4px;
+  }
+  .arm-tree-task:hover { background: color-mix(in srgb, var(--body-bg) 90%, var(--hairline-color)); }
+  .arm-tree-task input[type="checkbox"] { margin: 0; }
+  .arm-tree-task-name { flex: 1; }
+  .arm-tree-task-meta { color: var(--body-quiet-color); font-size: 12px; }
+  .arm-tree-badge {
+    border-radius: 999px; padding: 2px 7px; font-size: 11px; font-weight: 700;
+  }
+  .arm-tree-badge.ok { color: #166534; background: #dcfce7; }
+  .arm-tree-badge.no { color: #475467; background: #f1f5f9; }
 </style>
 
 <div class="arm-wrap">
@@ -246,30 +268,17 @@
       <div class="arm-section-head">
         <div>
           <h2>Задачи из дерева DL</h2>
-          <p class="arm-section-note">Введите course_id (курс) или root_node_id (папка) и нажмите «Загрузить дерево». Задачи загружаются из dl.gsu.by через get-node-tree. Отметьте задачи для решения.</p>
+          <p class="arm-section-note">Введите course_id курса и нажмите «Загрузить дерево». Задачи загружаются из dl.gsu.by через get-node-tree. Папки сворачиваемые — раскройте нужные и отметьте задачи.</p>
         </div>
       </div>
 
       <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
-        <input type="number" name="course_id" id="armCourseId" placeholder="Course ID" style="padding:6px 10px; width:140px;">
-        <input type="number" name="root_node_id" id="armRootNodeId" placeholder="Root node ID (необязательно)" style="padding:6px 10px; width:220px;">
+        <input type="number" name="course_id" id="armCourseId" value="1450" placeholder="Course ID" style="padding:6px 10px; width:140px;">
         <button type="button" class="button" id="armLoadTreeBtn">Загрузить дерево</button>
         <span id="armLoadTreeMsg" style="font-size:13px;"></span>
       </div>
 
-      <table class="arm-summary-table arm-tasks" id="armTasksTable" style="display:none;">
-        <thead>
-          <tr>
-            <th><input type="checkbox" id="armSelectAllTasks" title="Выбрать все"></th>
-            <th>ID узла</th>
-            <th>Название</th>
-            <th>Условие</th>
-            <th>Task ID</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-      <div class="arm-empty" id="armTasksEmpty">Загрузите дерево задач из DL, чтобы выбрать задачи для пакетного решения.</div>
+      <div id="armTreeContainer" class="arm-empty">Загрузите дерево задач из DL, чтобы выбрать задачи для пакетного решения.</div>
 
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
@@ -311,6 +320,7 @@
       </div>
       <div class="arm-actions">
         <button type="submit" class="default" id="armSolveSubmit">Запустить пакет</button>
+        <button type="button" class="button" id="armSolveCancelBtn" style="display:none;">Прервать тестирование</button>
       </div>
     </section>
   </form>
@@ -352,7 +362,6 @@
     const perTopicWrap = document.getElementById('armSolvePerTopicWrap');
     const resultsCard = document.getElementById('armSolveResultsCard');
     const resultsEl = document.getElementById('armSolveResults');
-    const selectAll = document.getElementById('armSelectAllTasks');
     const startUrl = '{{ arm_solve_start_url }}';
     const statusUrl = '{{ arm_solve_status_url }}';
     let currentRunId = '';
@@ -386,6 +395,10 @@
         progressEl.classList.remove('active');
       }
     }
+    function stopProgress() {
+      progressEl.style.display = 'none';
+      progressEl.classList.remove('active');
+    }
     function verdictBadge(v) {
       const labels = { solved: 'Решено', failed: 'Не решено', skipped: 'Пропущено' };
       const cls = v === 'solved' ? 'solved' : (v === 'failed' ? 'failed' : 'skipped');
@@ -414,17 +427,32 @@
       ].map(function (line) { return '<li>' + line + '</li>'; }).join('');
       perModelWrap.innerHTML = '<h3>Итог по моделям</h3><p class="arm-section-note">Сортировка: процент решённых ↓, среднее время ответа ↑</p>';
       renderBucketTable(report.per_model, 'Модель', perModelWrap);
-      perTopicWrap.innerHTML = '<h3>Итог по темам</h3>';
-      renderBucketTable(report.per_topic, 'Тема', perTopicWrap);
+      // Show per-topic only if there are real topics (not all "Без темы").
+      const hasRealTopics = (report.per_topic || []).some(function (r) { return r.label && r.label !== 'Без темы'; });
+      if (hasRealTopics) {
+        perTopicWrap.innerHTML = '<h3>Итог по темам</h3>';
+        renderBucketTable(report.per_topic, 'Тема', perTopicWrap);
+      } else {
+        perTopicWrap.innerHTML = '';
+      }
       reportCard.style.display = 'block';
     }
     function renderResults(results) {
       if (!results || !results.length) { resultsEl.innerHTML = ''; resultsCard.style.display = 'none'; return; }
+      // Save which result cards are open before re-rendering.
+      const openKeys = new Set();
+      resultsEl.querySelectorAll('details[open]').forEach(function (d) {
+        const key = d.getAttribute('data-key');
+        if (key) { openKeys.add(key); }
+      });
       resultsEl.innerHTML = '';
       results.forEach(function (r) {
         const cls = r.verdict === 'solved' ? 'solved' : (r.verdict === 'failed' ? 'failed' : 'skipped');
         const card = document.createElement('details');
         card.className = 'arm-result ' + cls;
+        const rkey = (r.task_node_id || '') + ':' + (r.model_key || '');
+        card.setAttribute('data-key', rkey);
+        if (openKeys.has(rkey)) { card.setAttribute('open', ''); }
         // Build summary with DL test info visible.
         var dlInfo = '';
         // Extract DL info from short_response — it's in [brackets] at the end.
@@ -461,14 +489,21 @@
         const total = run.total_pairs != null ? run.total_pairs : 0;
         const cur = run.current_task_name ? (' · ' + run.current_task_name + ' / ' + (run.current_model_title || '')) : '';
         setProgress('Выполняется: ' + done + ' / ' + total + cur, true);
-        setSubmitDisabled(true);
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Выполняется...';
+        setCancelVisible(true);
       } else if (run.status === 'completed') {
-        setProgress('Завершено.', false);
-        setSubmitDisabled(false);
+        const cancelled = run.cancelled || run.error_message === 'Прервано пользователем';
+        if (cancelled) { setProgress('Прервано.', false); } else { stopProgress(); }
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Запустить пакет';
+        setCancelVisible(false);
       } else if (run.status === 'failed') {
-        setProgress('', false);
+        stopProgress();
         setError(run.error_message || 'Batch solve завершился с ошибкой');
-        setSubmitDisabled(false);
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Запустить пакет';
+        setCancelVisible(false);
       }
     }
     async function pollRunStatus() {
@@ -483,86 +518,113 @@
         if (data.run && data.run.status === 'running') { pollTimer = window.setTimeout(pollRunStatus, 2000); }
       } catch (error) {
         setError(error.message || 'Ошибка обновления статуса');
-        setSubmitDisabled(false);
+        stopProgress();
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Запустить пакет';
+        setCancelVisible(false);
       }
     }
-    if (selectAll) {
-      selectAll.addEventListener('change', function () {
-        document.querySelectorAll('.arm-task-check').forEach(function (c) { c.checked = selectAll.checked; });
-      });
-    }
-
     // Load tree from DL
     const loadTreeBtn = document.getElementById('armLoadTreeBtn');
     const loadTreeMsg = document.getElementById('armLoadTreeMsg');
     const courseIdInput = document.getElementById('armCourseId');
-    const rootNodeIdInput = document.getElementById('armRootNodeId');
-    const tasksTable = document.getElementById('armTasksTable');
-    const tasksEmpty = document.getElementById('armTasksEmpty');
-    const tasksTbody = tasksTable.querySelector('tbody');
+    const treeContainer = document.getElementById('armTreeContainer');
     const treeUrl = '{{ arm_solve_tree_url }}';
+    const cancelUrl = '/ai/admin/arm/solve/cancel/';
+    const cancelBtn = document.getElementById('armSolveCancelBtn');
     const promptSelect = document.getElementById('armPromptSelect');
     const promptsUrl = '{{ arm_solve_prompts_url }}';
-    let loadedTasks = [];
 
-    function renderTasksTable(tasks) {
-      loadedTasks = tasks || [];
-      tasksTbody.innerHTML = '';
-      if (!loadedTasks.length) {
-        tasksTable.style.display = 'none';
-        tasksEmpty.style.display = 'block';
-        tasksEmpty.textContent = 'В дереве нет задач.';
-        return;
-      }
-      tasksEmpty.style.display = 'none';
-      tasksTable.style.display = '';
-      loadedTasks.forEach(function (t) {
-        const tr = document.createElement('tr');
-        const statementPreview = t.has_statement
-          ? '<span class="arm-badge solved">есть</span>'
-          : '<span class="arm-badge skipped">нет</span>';
-        tr.innerHTML = '<td><input type="checkbox" name="node_ids" value="' + escapeHtml(String(t.node_id)) + '" class="arm-task-check" checked></td>'
-          + '<td>' + escapeHtml(String(t.node_id)) + '</td>'
-          + '<td>' + escapeHtml(t.name || '—') + '</td>'
-          + '<td>' + statementPreview + '</td>'
-          + '<td>' + escapeHtml(String(t.task_id || '—')) + '</td>';
-        tasksTbody.appendChild(tr);
+    function renderTreeNodes(nodes, container) {
+      nodes.forEach(function (node) {
+        if (node.isFolder) {
+          const details = document.createElement('details');
+          details.className = 'arm-tree-folder';
+          const summary = document.createElement('summary');
+          summary.textContent = node.name || '(папка)';
+          details.appendChild(summary);
+          if (node.children && node.children.length) {
+            const ul = document.createElement('ul');
+            renderTreeNodes(node.children, ul);
+            details.appendChild(ul);
+          }
+          container.appendChild(details);
+        } else {
+          const li = document.createElement('li');
+          li.className = 'arm-tree-task';
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.name = 'node_ids';
+          cb.value = String(node.nodeId);
+          cb.className = 'arm-task-check';
+          cb.checked = false;
+          li.appendChild(cb);
+          const name = document.createElement('span');
+          name.className = 'arm-tree-task-name';
+          name.textContent = node.name || '(без названия)';
+          li.appendChild(name);
+          const badge = document.createElement('span');
+          badge.className = 'arm-tree-badge ' + (node.has_statement ? 'ok' : 'no');
+          badge.textContent = node.has_statement ? 'есть условие' : 'нет условия';
+          li.appendChild(badge);
+          if (node.task_id) {
+            const meta = document.createElement('span');
+            meta.className = 'arm-tree-task-meta';
+            meta.textContent = 'taskId: ' + node.task_id;
+            li.appendChild(meta);
+          }
+          container.appendChild(li);
+        }
       });
     }
 
+    function renderTree(tree) {
+      treeContainer.innerHTML = '';
+      treeContainer.classList.remove('arm-empty');
+      if (!tree || !tree.length) {
+        treeContainer.classList.add('arm-empty');
+        treeContainer.textContent = 'Дерево пусто.';
+        return;
+      }
+      const ul = document.createElement('ul');
+      ul.className = 'arm-tree';
+      renderTreeNodes(tree, ul);
+      treeContainer.appendChild(ul);
+    }
+
+    async function loadTree() {
+      const courseId = courseIdInput.value.trim();
+      if (!courseId) {
+        loadTreeMsg.style.color = '#b42318';
+        loadTreeMsg.textContent = 'Введите course_id';
+        return;
+      }
+      loadTreeMsg.style.color = '';
+      loadTreeMsg.textContent = 'Загрузка дерева...';
+      loadTreeBtn.disabled = true;
+      try {
+        const body = new URLSearchParams();
+        body.set('course_id', courseId);
+        const response = await fetch(treeUrl, {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
+          body: body.toString(),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка загрузки дерева'); }
+        loadTreeMsg.style.color = '#067647';
+        loadTreeMsg.textContent = '✓ Загружено задач: ' + (data.task_count || 0);
+        renderTree(data.tree || []);
+      } catch (error) {
+        loadTreeMsg.style.color = '#b42318';
+        loadTreeMsg.textContent = error.message || 'Ошибка';
+      } finally {
+        loadTreeBtn.disabled = false;
+      }
+    }
+
     if (loadTreeBtn) {
-      loadTreeBtn.addEventListener('click', async function () {
-        const courseId = courseIdInput.value.trim();
-        const rootNodeId = rootNodeIdInput.value.trim();
-        if (!courseId && !rootNodeId) {
-          loadTreeMsg.style.color = '#b42318';
-          loadTreeMsg.textContent = 'Введите course_id или root_node_id';
-          return;
-        }
-        loadTreeMsg.style.color = '';
-        loadTreeMsg.textContent = 'Загрузка дерева...';
-        loadTreeBtn.disabled = true;
-        try {
-          const body = new URLSearchParams();
-          if (courseId) body.set('course_id', courseId);
-          if (rootNodeId) body.set('root_node_id', rootNodeId);
-          const response = await fetch(treeUrl, {
-            method: 'POST', credentials: 'same-origin',
-            headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
-            body: body.toString(),
-          });
-          const data = await response.json();
-          if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка загрузки дерева'); }
-          loadTreeMsg.style.color = '#067647';
-          loadTreeMsg.textContent = '✓ Загружено задач: ' + (data.tasks || []).length;
-          renderTasksTable(data.tasks || []);
-        } catch (error) {
-          loadTreeMsg.style.color = '#b42318';
-          loadTreeMsg.textContent = error.message || 'Ошибка';
-        } finally {
-          loadTreeBtn.disabled = false;
-        }
-      });
+      loadTreeBtn.addEventListener('click', loadTree);
     }
 
     // Fetch filtered prompts based on selected tasks.
@@ -598,6 +660,37 @@
       }
     });
 
+    // Cancel button
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', async function () {
+        if (!currentRunId) { return; }
+        cancelBtn.disabled = true;
+        cancelBtn.textContent = 'Прерывание...';
+        try {
+          const response = await fetch(cancelUrl, {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ run_id: currentRunId }),
+          });
+          const data = await response.json();
+          if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка'); }
+          setProgress('Прерывание запрошено, ожидаем завершения...', true);
+        } catch (error) {
+          setError(error.message || 'Ошибка прерывания');
+          cancelBtn.disabled = false;
+          cancelBtn.textContent = 'Прервать тестирование';
+        }
+      });
+    }
+
+    function setCancelVisible(visible) {
+      if (cancelBtn) {
+        cancelBtn.style.display = visible ? '' : 'none';
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = 'Прервать тестирование';
+      }
+    }
+
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
       if (submitBtn.disabled) { return; }
@@ -624,8 +717,10 @@
         if (data.run && data.run.status === 'running') { pollRunStatus(); }
       } catch (error) {
         setError(error.message || 'Ошибка запуска batch solve');
-        setProgress('');
-        setSubmitDisabled(false);
+        stopProgress();
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Запустить пакет';
+        setCancelVisible(false);
       }
     });
     // Surface a server-rendered error (e.g. "процесс не найден") without the
@@ -640,6 +735,11 @@
       currentRunId = initialRun.run_id;
       applyRunSnapshot(initialRun);
       if (initialRun.status === 'running') { setSubmitDisabled(true); pollRunStatus(); }
+    }
+
+    // Auto-load tree if course_id is pre-filled (default 1450).
+    if (courseIdInput && courseIdInput.value.trim()) {
+      loadTree();
     }
   })();
 </script>

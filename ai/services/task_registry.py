@@ -40,16 +40,42 @@ _LANG_TO_EXTENSION = {
     "c": ".c",
 }
 
+# Path-based extension detection: DL path contains the language spec,
+# e.g. "Программирование [Ассемблер i8086, C-MPA]\...".
+_PATH_KEYWORDS = [
+    ("c-mpa", ".cmpa"),
+    ("cmpa", ".cmpa"),
+    ("ассемблер", ".asm"),
+    ("i8086", ".asm"),
+    ("i86", ".asm"),
+    ("python", ".py"),
+    ("pascal", ".pas"),
+    ("verilog", ".v"),
+    ("c++", ".cpp"),
+]
+
 
 def _guess_extension(prog_lang_name: str) -> str:
-    """Best-effort file extension from a programming language name."""
+    """Best-effort file extension from a programming language name or DL path.
+
+    First tries exact language-name match, then falls back to keyword
+    detection in the path/name (handles "Ассемблер i8086, C-MPA" etc).
+    """
     if not prog_lang_name:
         return ""
     low = prog_lang_name.lower().strip()
-    return _LANG_TO_EXTENSION.get(low, "")
+    # Exact match.
+    ext = _LANG_TO_EXTENSION.get(low, "")
+    if ext:
+        return ext
+    # Keyword detection in path/name.
+    for keyword, file_ext in _PATH_KEYWORDS:
+        if keyword in low:
+            return file_ext
+    return ""
 
 
-def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session_id=None):
+def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session_id=None, course_id=None):
     """Get-or-create a ``Task`` row for a DL node id; best-effort DL fill on create.
 
     Used by the chat consumer when a user solves a DL task. Never raises —
@@ -94,12 +120,17 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
         # Created — best-effort fill name/statement/task_id from DL (once).
         if session_id:
             try:
-                data = fetch_task_info(node_id, session_id=session_id, remove_html_tags=True)
+                data = fetch_task_info(node_id, session_id=session_id, remove_html_tags=True, course_id=course_id)
             except DLApiError:
                 data = None
             if data:
                 apply_dl_task_info(task, data)
-                task.save(update_fields=["task_id", "name", "statement"])
+                # If file_extension is still empty, try to guess from path.
+                if not task.file_extension and data.get("path"):
+                    guessed = _guess_extension(data["path"])
+                    if guessed:
+                        task.file_extension = guessed
+                task.save(update_fields=["task_id", "name", "statement", "file_extension"])
         return task
     except Exception:
         logger.exception("ensure_task failed for node_id=%s", node_id)

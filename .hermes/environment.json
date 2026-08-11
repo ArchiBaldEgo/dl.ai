@@ -1,0 +1,11 @@
+{
+  "name": "Django app (Docker)",
+  "kind": "django",
+  "bootstrap": ["docker exec dl_ai_web python -c 'import django; print(django.VERSION)'"],
+  "build": [],
+  "test": ["docker exec dl_ai_web python manage.py test ai"],
+  "start": "docker exec dl_ai_web python manage.py runserver 0.0.0.0:8000",
+  "port": 8000,
+  "readinessPath": "/",
+  "evidence": ["Detected manage.py", "Docker-based: all commands run inside dl_ai_web container"]
+}
