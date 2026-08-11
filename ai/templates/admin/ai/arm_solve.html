@@ -236,7 +236,7 @@
   <div class="arm-header">
     <div class="arm-title-block">
       {% include "admin/ai/_ai_back_nav.html" %}
-      <p class="arm-subtitle">Каждой доступной модели отправляется условие каждой выбранной задачи; ответ проверяется через DL (send-solution) или приближённым сравнением текста (difflib) — выберите режим ниже.</p>
+      <p class="arm-subtitle">Каждой выбранной модели отправляется условие каждой задачи из дерева DL; ответ проверяется через DL (send-solution / get-solution-result).</p>
     </div>
   </div>
 
@@ -245,8 +245,8 @@
     <section class="arm-card">
       <div class="arm-section-head">
         <div>
-          <h2>Задачи</h2>
-          <p class="arm-section-note">Источник — таблица «Задачи (DL)» (<a href="/ai/admin/ai/task/">изменить</a>). Отметьте задачи или запустите по всем активным. Для получения образца требуется <code>task_id</code> и <code>file_extension</code>.</p>
+          <h2>Задачи из дерева DL</h2>
+          <p class="arm-section-note">Введите course_id (курс) или root_node_id (папка) и нажмите «Загрузить дерево». Задачи загружаются из dl.gsu.by через get-node-tree. Отметьте задачи для решения.</p>
         </div>
       </div>
 
@@ -303,15 +303,7 @@
         {% endfor %}
       </select>
 
-      <div class="arm-section-head" style="margin-top:18px;">
-        <div>
-          <h2>Опции проверки</h2>
-          <p class="arm-section-note">Если включено — код решения отправляется на реальное тестирование в DL (send-solution / get-solution-result). Если выключено — используется приближённое сравнение текста (difflib).</p>
-        </div>
-      </div>
-      <label class="arm-model" style="margin-bottom:12px;">
-        <input type="checkbox" name="dl_test" value="1" checked id="armDlTest"> Тестировать на DL
-      </label>
+      <input type="hidden" name="dl_test" value="1" id="armDlTest">
       <div id="armSolveError" class="arm-error"{% if not error_message %} style="display:none;"{% endif %}>{{ error_message }}</div>
       <div id="armSolveProgress" class="arm-success arm-status-line" style="display:none;">
         <span class="arm-spinner" aria-hidden="true"></span>
@@ -581,7 +573,7 @@
         return;
       }
       try {
-        const params = checked.map(function (id) { return 'task_ids=' + encodeURIComponent(id); }).join('&');
+        const params = checked.map(function (id) { return 'node_ids=' + encodeURIComponent(id); }).join('&');
         const response = await fetch(promptsUrl + '?' + params, {
           method: 'GET', credentials: 'same-origin',
           headers: { 'X-Requested-With': 'XMLHttpRequest' },

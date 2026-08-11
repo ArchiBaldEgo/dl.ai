@@ -290,7 +290,13 @@ def admin_arm_solve_view(request):
             error_message = "Процесс не найден или уже завершен"
 
     from ..http_utils import safe_relative_url
+    from ..models import SharedPrompt
     arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
+
+    prompt_options = [
+        {"id": f"shared_{sp.id}", "name": f"[Общий] {sp.prompt_name}"}
+        for sp in SharedPrompt.objects.all().order_by("id")
+    ]
 
     context = {
         **ai_admin_site.each_context(request),
@@ -298,6 +304,7 @@ def admin_arm_solve_view(request):
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "arm_back_url": arm_back_url,
         "model_options": get_available_model_options(),
+        "prompt_options": prompt_options,
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
         "arm_solve_prompts_url": "/ai/admin/arm/solve/prompts/",
         "results": results,
