@@ -483,7 +483,10 @@ async function sendMessage(ctx, payload = {}) {
                 // к следующему XPath (это и есть источник «Empty/short response
                 // detected (1 chars)» в логах).
                 inner = deepseekHtmlToApiMarkdown(answer);
-                if (inner && inner.trim().length >= 5) {
+                // Короткие ответы («2», «да», «Four», «42») — легитимны, НЕ
+                // отбраковываем: порог 1 символ, а не 5. Скелет-плейсхолдер
+                // даёт 0 текста, реальный ответ — ≥1. (Аналогично Kimi.)
+                if (inner && inner.trim().length >= 1) {
                     answerXpUsed = xp;
                     break;
                 }
@@ -503,10 +506,10 @@ async function sendMessage(ctx, payload = {}) {
             };
         }
 
-        // Retry on empty or very short response — sometimes DeepSeek returns
-        // an empty container while still generating. Wait and try once more,
-        // перебирая все селекторы (как в основном цикле), а не только последний.
-        if (!inner || inner.trim().length < 5) {
+        // Retry on EMPTY response (0 текста) — sometimes DeepSeek returns an
+        // empty container while still generating. Короткие ответы (≥1) НЕ
+        // триггерят retry — «2», «Four», «42» легитимны.
+        if (!inner || inner.trim().length < 1) {
             log('Empty/short response detected (' + (inner?.length || 0) + ' chars), retrying once more...');
             await sleep(3000);
             for (const xp of answerXPaths) {
@@ -520,7 +523,7 @@ async function sendMessage(ctx, payload = {}) {
                         confirmMs: 5000,
                     });
                     const retryInner = deepseekHtmlToApiMarkdown(retryAnswer);
-                    if (retryInner && retryInner.trim().length >= 5 && retryInner.trim().length > inner.trim().length) {
+                    if (retryInner && retryInner.trim().length >= 1 && retryInner.trim().length > inner.trim().length) {
                         inner = retryInner;
                         answer = retryAnswer;
                         answerXpUsed = xp;

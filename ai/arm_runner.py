@@ -779,7 +779,7 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
 
 def _run_batch_job_worker(
     run_id,
-    tasks_qs,
+    node_ids,
     ordered_models,
     user_id,
     session_id,
@@ -790,11 +790,14 @@ def _run_batch_job_worker(
 ):
     """Daemon worker for a batch-solve run.
 
-    Iterates tasks in the outer loop and models in the inner loop. The DL sample
-    solution is fetched once per task (cached) so the number of DL calls is
-    len(tasks), not len(tasks)*len(models).
+    Takes DL node_ids (NOT DB task IDs). For each node_id, fetches task info
+    from DL (get-task-info) and creates/updates a Task in DB via ensure_task.
+    Then iterates tasks in the outer loop and models in the inner loop.
+    The DL sample solution is fetched once per task (cached).
     """
-    from .dl_api_client import DLApiError, fetch_task_solution, send_solution_to_dl, get_solution_result_from_dl
+    from .dl_api_client import DLApiError, fetch_task_info, fetch_task_solution, send_solution_to_dl, get_solution_result_from_dl
+    from .services.task_registry import ensure_task, _guess_extension
+    from .models import ProgrammingLanguage
 
     test_run = None
     log = None
@@ -809,7 +812,7 @@ def _run_batch_job_worker(
             user=user,
             status=AIModelTestRun.STATUS_RUNNING,
             started_at=start_time,
-            message=f"Batch solve: {len(tasks_qs)} задач × {len(ordered_models)} моделей",
+            message=f"Batch solve: {len(node_ids)} задач × {len(ordered_models)} моделей",
             total_models=len(ordered_models),
         )
         log = AIRequestLog.objects.create(
@@ -824,7 +827,14 @@ def _run_batch_job_worker(
             message=f"Batch solve run {run_id}",
         )
 
-        tasks = list(tasks_qs)
+        # Resolve node_ids → Task objects via DL get-task-info + ensure_task.
+        tasks = []
+        for node_id in node_ids:
+            task = ensure_task(node_id, session_id=session_id)
+            if task is None:
+                continue
+            tasks.append(task)
+
         total_pairs = len(tasks) * len(ordered_models)
         _update_job(
             run_id,
@@ -913,22 +923,17 @@ def _run_batch_job_worker(
                         if dl_verdict is not None:
                             verdict = dl_verdict
                         elif sample_text:
-                            # DL test failed → fall back to difflib if we have a sample.
                             verdict = grade_solution(cleaned_text, sample_text)
                         else:
-                            # No DL result and no sample → mark as "ungraded" (failed),
-                            # but the model DID produce an answer — don't skip it.
                             verdict = _VERDICT_FAILED
                             if not dl_test_comment:
                                 dl_test_comment = "DL-тест недоступен, образец отсутствует"
                     elif sample_text:
-                        # DL test disabled but we have a sample → difflib.
                         verdict = grade_solution(cleaned_text, sample_text)
                         dl_code_sent = ""
                         dl_submit_error = ""
                         dl_queue_id = 0
                     else:
-                        # No DL test and no sample → can't grade, but model answered.
                         verdict = _VERDICT_FAILED
                         dl_test_comment = "Образец отсутствует, проверка невозможна"
                         dl_code_sent = ""
@@ -939,7 +944,6 @@ def _run_batch_job_worker(
                     short_response = (friendly or cleaned_text)[:300] + (
                         "..." if len(friendly or cleaned_text) > 300 else ""
                     )
-                    # Append DL test info to short_response.
                     dl_info_parts = []
                     if dl_queue_id > 0:
                         dl_info_parts.append(f"queueId={dl_queue_id}")
@@ -950,7 +954,6 @@ def _run_batch_job_worker(
                     if dl_info_parts:
                         short_response += "\n[" + " | ".join(dl_info_parts) + "]"
                     raw_response = detailed or cleaned_text
-                    # Include the code sent to DL in raw_response for full visibility.
                     if dl_code_sent:
                         raw_response += f"\n\n--- Код отправлен на DL (nodeId={task.node_id}, ext={task.file_extension}) ---\n{dl_code_sent}"
                 except Exception as exc:
@@ -1001,7 +1004,6 @@ def _run_batch_job_worker(
                 with _jobs_lock:
                     job = _jobs.get(run_id)
                     if job is None:
-                        # Evicted mid-run: persist terminal state from DB later.
                         pass
                     else:
                         job.setdefault("results", []).append(result_item)
@@ -1081,18 +1083,13 @@ def _batch_results_from_db(test_run):
     return results
 
 
-def start_batch_solve_run(task_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None):
-    """Запускает batch-solve ARM: задачи × модели в фоновом потоке.
+def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None):
+    """Запускает batch-solve ARM: задачи из DL дерева × модели в фоновом потоке.
 
-    Возвращает (run_id, error_message). Пустые task_ids/model_keys означают
-    «все активные задачи»/«все доступные модели».
+    Принимает node_ids — список DL node ID (из дерева задач dl.gsu.by).
+    Возвращает (run_id, error_message).
     dl_test=True — отправка кода на dl.gsu.by для реальной проверки;
     dl_test=False — только difflib-сравнение с образцовым решением.
-    """
-    """Start a batch-solve ARM run over the given tasks × models.
-
-    Returns (run_id, error_message). ``task_ids`` / ``model_keys`` empty means
-    "all active tasks" / "all currently available models".
     """
     handlers = get_runtime_model_handlers()
     if model_keys:
@@ -1102,13 +1099,10 @@ def start_batch_solve_run(task_ids, model_keys, user_id, session_id, *, ui_langu
     if not valid_model_keys:
         return None, "Нет доступных моделей. Обновите состояние моделей и попробуйте снова."
 
-    tasks_qs = Task.objects.filter(active=True).select_related("topic", "programming_language")
-    if task_ids:
-        tasks_qs = tasks_qs.filter(pk__in=task_ids)
-    if not tasks_qs.exists():
-        return None, "Нет активных задач для запуска."
+    if not node_ids:
+        return None, "Не выбрано ни одной задачи из дерева DL."
     if not session_id:
-        return None, "Нет DLSID — требуется авторизация на dl.gsu.by для получения образцовых решений."
+        return None, "Нет DLSID — требуется авторизация на dl.gsu.by."
 
     ordered_models = [
         {"key": k, "title": handlers[k]["title"], "handler": handlers[k]["handler"]}
@@ -1117,7 +1111,7 @@ def start_batch_solve_run(task_ids, model_keys, user_id, session_id, *, ui_langu
 
     run_id = uuid.uuid4().hex
     now_ts = time.time()
-    total_pairs = tasks_qs.count() * len(ordered_models)
+    total_pairs = len(node_ids) * len(ordered_models)
     job = {
         "run_id": run_id,
         "run_type": "batch",
@@ -1142,7 +1136,7 @@ def start_batch_solve_run(task_ids, model_keys, user_id, session_id, *, ui_langu
 
     worker = threading.Thread(
         target=_run_batch_job_worker,
-        args=(run_id, tasks_qs, ordered_models, user_id, session_id),
+        args=(run_id, node_ids, ordered_models, user_id, session_id),
         kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,

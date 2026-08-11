@@ -621,7 +621,12 @@ def _recover_stale_runs():
     Эта функция помечает такие run'ы как FAILED, чтобы планировщик мог
     запустить свежую проверку в текущем окне.
     """
-    threshold = timezone.now() - timedelta(minutes=10)
+    # 2 минуты — достаточно чтобы отличить реально идущий health-check
+    # (который стартует мгновенно) от зависшего после рестарта контейнера.
+    # 10 минут были слишком долгими: health-check идёт 2-6 минут, и при
+    # перезапуске контейнера в середине проверки новый run блокировался
+    # ещё 10 минут, хотя поток уже давно мёртв.
+    threshold = timezone.now() - timedelta(minutes=2)
     stale_runs = AIModelHealthRun.objects.filter(
         status=AIModelHealthRun.STATUS_RUNNING,
         started_at__lt=threshold,

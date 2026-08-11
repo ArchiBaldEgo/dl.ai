@@ -265,8 +265,8 @@ def admin_arm_find_error_status_view(request):
 
 
 # ---------------------------------------------------------------------------
-# Batch-solve ARM: send each available model the statement of every active
-# Task, grade against the DL sample solution, report per-model / per-topic.
+# Batch-solve ARM: load tasks from DL tree, send each model the statement,
+# test the code via DL (send-solution / get-solution-result).
 # ---------------------------------------------------------------------------
 
 def admin_arm_solve_view(request):
@@ -289,23 +289,7 @@ def admin_arm_solve_view(request):
         else:
             error_message = "Процесс не найден или уже завершен"
 
-    tasks = [
-        {
-            "id": t.id,
-            "node_id": t.node_id,
-            "task_id": t.task_id,
-            "name": t.name,
-            "topic_name": t.topic.topic_name if t.topic else "",
-            "prog_lang_name": t.programming_language.language_name if t.programming_language else "",
-            "file_extension": t.file_extension,
-            "has_statement": bool(t.statement),
-            "has_sample_inputs": bool(t.task_id and t.file_extension),
-        }
-        for t in Task.objects.filter(active=True).select_related("topic", "programming_language").order_by("-created_at")
-    ]
-
     from ..http_utils import safe_relative_url
-    from ..models import SharedPrompt, Prompt
     arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
 
     context = {
@@ -313,9 +297,8 @@ def admin_arm_solve_view(request):
         "title": "ARM: Пакетное решение",
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "arm_back_url": arm_back_url,
-        "tasks": tasks,
         "model_options": get_available_model_options(),
-        "prompt_options": [],
+        "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
         "arm_solve_prompts_url": "/ai/admin/arm/solve/prompts/",
         "results": results,
         "report": report,
@@ -328,19 +311,42 @@ def admin_arm_solve_view(request):
     return TemplateResponse(request, "admin/ai/arm_solve.html", context)
 
 
-def admin_arm_solve_add_task_view(request):
-    """Add a DL task by node_id — fetch from DL and create/update in DB."""
+def admin_arm_solve_load_tree_view(request):
+    """Load tasks from a DL course tree.
+
+    Accepts course_id (required) and optional root_node_id (if not given,
+    uses get-course-node to find tasksRootId). Calls get-node-tree to fetch
+    the full tree, flattens it, and returns the list of task nodes.
+
+    Each task node is enriched with task info (statement, taskId) via
+    get-task-info, best-effort — failures are skipped silently.
+    """
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
 
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
 
-    node_id_raw = request.POST.get("node_id", "").strip()
+    import json as _json
+    body = {}
     try:
-        node_id = int(node_id_raw)
+        body = _json.loads(request.body or b"{}")
+    except (ValueError, _json.JSONDecodeError):
+        return JsonResponse({"ok": False, "message": "Некорректный JSON"}, status=400)
+
+    course_id = body.get("course_id")
+    root_node_id = body.get("root_node_id")
+    try:
+        course_id = int(course_id) if course_id else None
     except (ValueError, TypeError):
-        return JsonResponse({"ok": False, "message": "node_id должен быть числом"}, status=400)
+        course_id = None
+    try:
+        root_node_id = int(root_node_id) if root_node_id else None
+    except (ValueError, TypeError):
+        root_node_id = None
+
+    if course_id is None and root_node_id is None:
+        return JsonResponse({"ok": False, "message": "Укажите course_id или root_node_id"}, status=400)
 
     session_id = _resolve_session_id(request)
     if not session_id:
@@ -349,66 +355,83 @@ def admin_arm_solve_add_task_view(request):
             status=400,
         )
 
-    from ..services.task_registry import ensure_task
-    task = ensure_task(node_id, session_id=session_id)
-    if task is None:
-        return JsonResponse({"ok": False, "message": "Не удалось создать/найти задачу."}, status=500)
+    from ..dl_api_client import (
+        DLApiError,
+        fetch_course_nodes,
+        fetch_node_tree,
+        fetch_task_info,
+        flatten_node_tree,
+    )
 
-    return JsonResponse({
-        "ok": True,
-        "message": f"Задача #{task.node_id} «{task.name or '—'}» — {'создана' if not task.active else 'обновлена'}",
-        "task": {
-            "id": task.id,
-            "node_id": task.node_id,
-            "name": task.name,
-            "task_id": task.task_id,
-        },
-    })
+    try:
+        # Determine root node: explicit > course-derived.
+        if root_node_id is None:
+            course_resp = fetch_course_nodes(session_id, course_id)
+            root_node_id = course_resp.get("tasksRootId")
+            if not root_node_id:
+                return JsonResponse(
+                    {"ok": False, "message": "Не удалось получить tasksRootId для курса."},
+                    status=400,
+                )
+
+        # Fetch the full tree and flatten.
+        # Pass course_id when available — DL uses it for access checks.
+        tree_resp = fetch_node_tree(session_id, root_node_id, course_id=course_id)
+        task_nodes = flatten_node_tree(tree_resp)
+
+        if not task_nodes:
+            return JsonResponse(
+                {"ok": False, "message": "В дереве нет задач (только папки или пусто)."},
+                status=400,
+            )
+
+        # Enrich each task node with get-task-info (best-effort).
+        enriched = []
+        for tn in task_nodes:
+            node_id = tn.get("nodeId")
+            if not node_id:
+                continue
+            name = tn.get("name", "")
+            statement = ""
+            task_id = 0
+            try:
+                info = fetch_task_info(
+                    node_id, session_id=session_id,
+                    remove_html_tags=True, course_id=course_id,
+                )
+                name = info.get("name") or name
+                statement = info.get("statement") or ""
+                task_id = info.get("taskId") or 0
+            except DLApiError:
+                pass
+            except Exception:
+                pass
+            enriched.append({
+                "node_id": node_id,
+                "name": name,
+                "statement": statement[:500] if statement else "",
+                "task_id": task_id,
+                "has_statement": bool(statement),
+            })
+
+        return JsonResponse({"ok": True, "tasks": enriched})
+
+    except DLApiError as exc:
+        return JsonResponse({"ok": False, "message": f"Ошибка DL API: {exc}"}, status=400)
+    except Exception as exc:
+        return JsonResponse({"ok": False, "message": f"Ошибка: {exc}"}, status=500)
 
 
 def admin_arm_solve_prompts_view(request):
-    """Return filtered prompt options based on selected task IDs."""
+    """Return available prompt options (SharedPrompts only — no DB tasks to filter by)."""
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
 
-    task_ids = request.GET.getlist("task_ids")
-    task_id_ints = []
-    for raw in task_ids:
-        try:
-            task_id_ints.append(int(raw))
-        except (ValueError, TypeError):
-            continue
-
-    from ..models import SharedPrompt, Prompt, Task
-
-    tasks = Task.objects.filter(pk__in=task_id_ints) if task_id_ints else []
-    topic_ids = set(t.topic_id for t in tasks if t.topic_id)
-    prog_lang_ids = set(t.programming_language_id for t in tasks if t.programming_language_id)
-
-    # If multiple distinct topics or languages → only SharedPrompts (no topic-specific Prompts).
-    multi_topic = len(topic_ids) > 1
-    multi_lang = len(prog_lang_ids) > 1
+    from ..models import SharedPrompt
 
     prompt_options = []
-
-    # SharedPrompts: include if no language restriction OR language matches.
     for sp in SharedPrompt.objects.all().order_by("id"):
-        restricted_langs = list(sp.programming_languages.values_list("id", flat=True))
-        if not restricted_langs:
-            # No restriction → always available.
-            prompt_options.append({"id": f"shared_{sp.id}", "name": f"[Общий] {sp.prompt_name}"})
-        elif not multi_lang and prog_lang_ids:
-            # Single language → check if this prompt allows it.
-            if prog_lang_ids.issubset(set(restricted_langs)):
-                prompt_options.append({"id": f"shared_{sp.id}", "name": f"[Общий] {sp.prompt_name}"})
-
-    # Prompts (topic-specific): only if single topic match.
-    if not multi_topic and topic_ids:
-        for p in Prompt.objects.filter(topic_id__in=topic_ids).order_by("id"):
-            prompt_options.append({
-                "id": str(p.id),
-                "name": p.prompt_name or f"Prompt #{p.id}",
-            })
+        prompt_options.append({"id": f"shared_{sp.id}", "name": f"[Общий] {sp.prompt_name}"})
 
     return JsonResponse({"ok": True, "prompt_options": prompt_options})
 
@@ -420,34 +443,51 @@ def admin_arm_solve_start_view(request):
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
 
-    task_ids = request.POST.getlist("task_ids")
-    model_keys = request.POST.getlist("models")
-    ui_language = request.POST.get("interface_language", "Русский")
-    dl_test = request.POST.get("dl_test") == "1"
-    prompt_id = request.POST.get("prompt_id", "").strip() or None
+    import json as _json
+    body = {}
+    try:
+        body = _json.loads(request.body or b"{}")
+    except (ValueError, _json.JSONDecodeError):
+        # Fall back to form data
+        body = {
+            "node_ids": request.POST.getlist("node_ids"),
+            "models": request.POST.getlist("models"),
+            "interface_language": request.POST.get("interface_language", "Русский"),
+            "dl_test": request.POST.get("dl_test") == "1",
+            "prompt_id": request.POST.get("prompt_id", "").strip() or None,
+        }
+
+    node_ids = body.get("node_ids") or request.POST.getlist("node_ids")
+    model_keys = body.get("models") or request.POST.getlist("models")
+    ui_language = body.get("interface_language", "Русский")
+    dl_test = body.get("dl_test", False)
+    if isinstance(dl_test, str):
+        dl_test = dl_test == "1"
+    prompt_id = body.get("prompt_id") or None
 
     session_id = _resolve_session_id(request)
-    if dl_test and not session_id:
-        return JsonResponse(
-            {"ok": False, "message": "Нет DLSID — требуется авторизация на dl.gsu.by для тестирования решений."},
-            status=400,
-        )
     if not session_id:
         return JsonResponse(
-            {"ok": False, "message": "Нет DLSID — требуется авторизация на dl.gsu.by для получения образцовых решений."},
+            {"ok": False, "message": "Нет DLSID — требуется авторизация на dl.gsu.by."},
             status=400,
         )
 
-    # Normalize to ints; empty list means "all active tasks".
-    task_id_ints = []
-    for raw in task_ids:
+    # Normalize node_ids to ints.
+    node_id_ints = []
+    for raw in node_ids:
         try:
-            task_id_ints.append(int(raw))
+            node_id_ints.append(int(raw))
         except (ValueError, TypeError):
             continue
 
+    if not node_id_ints:
+        return JsonResponse(
+            {"ok": False, "message": "Не выбрано ни одной задачи из дерева DL."},
+            status=400,
+        )
+
     run_id, start_error = start_batch_solve_run(
-        task_id_ints or None,
+        node_id_ints,
         model_keys,
         request.user.id,
         session_id,

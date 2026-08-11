@@ -6,6 +6,9 @@
 - Отправки решений на проверку (send_solution_to_dl, get_solution_result_from_dl).
 - Получения списка решений (get_solutions_from_dl).
 - Получения имён пользователей (fetch_user_names).
+- Навигации по дереву задач: корневые ноды курса (fetch_course_nodes),
+  список задач в папке (fetch_node_tasks), вложенное дерево (fetch_node_tree),
+  плоское извлечение задач из дерева (flatten_node_tree).
 
 Содержит робустную логику декодирования ответов: автодетект mojibake
 (UTF-8-as-cp1251, CP866-via-cp1251) и восстановление корректного текста.
@@ -369,8 +372,9 @@ def fetch_task_info(
     node_id: int,
     session_id: str | None = None,
     remove_html_tags: bool | None = True,
+    course_id: int | None = None,
 ) -> dict[str, Any]:
-    """Fetch task metadata (name, taskId, statement) by nodeId.
+    """Fetch task metadata (name, taskId, statement, path) by nodeId.
 
     The external DL API needs the caller's session to authorize the request,
     so ``session_id`` is forwarded as the ``sessionId`` query parameter.
@@ -379,6 +383,10 @@ def fetch_task_info(
     ``True``/``False`` send it as-is; ``None`` omits the parameter so DL
     returns its default (raw, non-stripped) response — used as a fallback when
     DL's own stripping yields an empty ``statement``.
+
+    ``course_id`` (optional) enables the ``courseId`` query parameter: when
+    set to a valid course, DL includes the ``path`` field — the full path to
+    the task in the course tree (e.g. "Программирование\\...\\Сложение").
 
     Raises:
         DLUnauthorizedError: when the session is missing/invalid (401).
@@ -394,6 +402,8 @@ def fetch_task_info(
         params["removeHtmlTags"] = remove_html_tags
     if session_id:
         params["sessionId"] = session_id
+    if course_id is not None:
+        params["courseId"] = course_id
 
     response = _dl_request(
         "GET",
@@ -499,6 +509,10 @@ def get_solutions_from_dl(
     POST /restapi/get-solutions → {"solutions": [{queueId, userId, code, result, report, isCorrect}, ...]}
 
     Regular users get only their own solutions; admins/editors get all.
+
+    ``extension`` is the file extension WITHOUT a leading dot (e.g. "cpp",
+    "pas", "java"); when empty, solutions with any extension are returned.
+    Dates use the 'YYYY-MM-DD' or 'YYYY-MM-DD HH:mm:ss' format.
     """
     payload: dict[str, Any] = {
         "sessionId": session_id,
@@ -522,3 +536,116 @@ def get_solutions_from_dl(
 
     _raise_for_status(response)
     return _decode_response_json(response)
+
+
+def fetch_course_nodes(session_id: str, course_id: int) -> dict[str, Any]:
+    """Fetch root node IDs (tasks + theory) for a course.
+
+    POST /restapi/get-course-node → {"tasksRootId": N, "theoryRootId": N}
+
+    Raises DLUnauthorizedError (401), DLForbiddenError (403), DLServerError (500).
+    """
+    response = _dl_request(
+        "POST",
+        "/restapi/get-course-node",
+        json={
+            "sessionId": session_id,
+            "courseId": course_id,
+        },
+    )
+
+    _raise_for_status(response)
+    return _decode_response_json(response)
+
+
+def fetch_node_tasks(
+    session_id: str, node_id: int, course_id: int | None = None
+) -> dict[str, Any]:
+    """Fetch flat list of tasks directly inside a folder (no subfolders).
+
+    POST /restapi/get-node-tasks → {"tasks": [{"nodeId": N, "name": "..."}, ...]}
+
+    ``course_id`` is optional but recommended — DL uses it for access checks
+    when the node belongs to a specific course.
+
+    Raises DLUnauthorizedError (401), DLForbiddenError (403),
+    DLTaskNotFoundError (404), DLServerError (500).
+    """
+    payload: dict[str, Any] = {
+        "sessionId": session_id,
+        "nodeId": node_id,
+    }
+    if course_id is not None:
+        payload["courseId"] = course_id
+    response = _dl_request(
+        "POST",
+        "/restapi/get-node-tasks",
+        json=payload,
+    )
+
+    _raise_for_status(response)
+    return _decode_response_json(response)
+
+
+def fetch_node_tree(
+    session_id: str, node_id: int, course_id: int | None = None
+) -> dict[str, Any]:
+    """Fetch nested tree of all folders and tasks inside a folder.
+
+    POST /restapi/get-node-tree → {"tree": [{nodeId, name, isFolder, children}, ...]}
+
+    ``course_id`` is optional but recommended — DL uses it for access checks
+    when the node belongs to a specific course.
+
+    Raises DLUnauthorizedError (401), DLForbiddenError (403),
+    DLTaskNotFoundError (404), DLServerError (500).
+    """
+    payload: dict[str, Any] = {
+        "sessionId": session_id,
+        "nodeId": node_id,
+    }
+    if course_id is not None:
+        payload["courseId"] = course_id
+    response = _dl_request(
+        "POST",
+        "/restapi/get-node-tree",
+        json=payload,
+    )
+
+    _raise_for_status(response)
+    return _decode_response_json(response)
+
+
+def flatten_node_tree(tree: list | dict) -> list[dict[str, Any]]:
+    """Flatten a nested get-node-tree response into a flat list of task nodes.
+
+    Recursively walks the tree and returns only non-folder leaf nodes
+    (tasks), each as {"nodeId": N, "name": "..."}.
+
+    Accepts either the full response {"tree": [...]} or a bare list of nodes.
+    """
+    if isinstance(tree, dict):
+        nodes = tree.get("tree", [])
+    elif isinstance(tree, list):
+        nodes = tree
+    else:
+        return []
+
+    result: list[dict[str, Any]] = []
+
+    def _walk(items):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            is_folder = item.get("isFolder", False)
+            if not is_folder:
+                result.append({
+                    "nodeId": item.get("nodeId"),
+                    "name": item.get("name", ""),
+                })
+            children = item.get("children")
+            if children:
+                _walk(children)
+
+    _walk(nodes)
+    return result

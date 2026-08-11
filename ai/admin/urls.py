@@ -15,7 +15,7 @@ from .arm import (
     admin_arm_solve_view,
     admin_arm_solve_start_view,
     admin_arm_solve_status_view,
-    admin_arm_solve_add_task_view,
+    admin_arm_solve_load_tree_view,
     admin_arm_solve_prompts_view,
 )
 from .logs import (
@@ -55,7 +55,7 @@ def get_ai_admin_urls():
         path("arm/find-error/status/", ai_admin_site.admin_view(admin_arm_find_error_status_view), name="ai_arm_find_error_status"),
         path("arm/solve/start/", ai_admin_site.admin_view(admin_arm_solve_start_view), name="ai_arm_solve_start"),
         path("arm/solve/status/", ai_admin_site.admin_view(admin_arm_solve_status_view), name="ai_arm_solve_status"),
-        path("arm/solve/add-task/", ai_admin_site.admin_view(admin_arm_solve_add_task_view), name="ai_arm_solve_add_task"),
+        path("arm/solve/load-tree/", ai_admin_site.admin_view(admin_arm_solve_load_tree_view), name="ai_arm_solve_load_tree"),
         path("arm/solve/prompts/", ai_admin_site.admin_view(admin_arm_solve_prompts_view), name="ai_arm_solve_prompts"),
         path("arm/solve/", ai_admin_site.admin_view(admin_arm_solve_view), name="ai_arm_solve"),
         path("arm/models/refresh/", ai_admin_site.admin_view(admin_model_status_refresh_view), name="ai_arm_model_status_refresh"),

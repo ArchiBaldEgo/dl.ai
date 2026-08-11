@@ -1985,9 +1985,7 @@ class BatchRunnerIntegrationTests(TestCase):
             return ("program a; begin writeln(1); end.", 12)
 
         ordered_models = [{"key": "FakeModel", "title": "FakeModel", "handler": fake_handler}]
-        tasks_qs = Task.objects.filter(pk__in=[self.t1.id, self.t2.id]).select_related(
-            "topic", "programming_language"
-        )
+        node_ids = [self.t1.node_id, self.t2.node_id]
         run_id = "test-batch-run-1"
 
         # Pre-seed the in-memory job so the worker can record live progress and
@@ -2006,8 +2004,8 @@ class BatchRunnerIntegrationTests(TestCase):
             with patch("ai.dl_api_client.fetch_task_solution",
                        lambda sid, tid, ext: {"content": sample}):
                 arm_runner._run_batch_job_worker(
-                    run_id, tasks_qs, ordered_models, self.user.id, "DLSID-1",
-                    ui_language="Русский",
+                    run_id, node_ids, ordered_models, self.user.id, "DLSID-1",
+                    ui_language="Русский", dl_test=False,
                 )
         finally:
             arm_runner._jobs.pop(run_id, None)
