@@ -806,3 +806,25 @@ def get_available_model_options():
     if result:
         cache.set(cache_key, result, 30)  # 30 c
     return result
+
+
+# Префиксы ключей моделей, допущенных к /arm/solve/: только Web-бот-пулы и Ollama
+# (нет жёсткого лимита вывода — длинный код не обрежется). OpenRouter/Groq
+# исключены: не вытягивают по токенам пакетную генерацию кода.
+ARM_SOLVE_MODEL_PREFIXES = ("Web_", "Ollama_")
+
+
+def is_arm_solve_model(key):
+    """Допущена ли модель к /arm/solve/ (Web_* и Ollama_*)."""
+    return bool(key) and key.startswith(ARM_SOLVE_MODEL_PREFIXES)
+
+
+def get_arm_solve_model_options():
+    """Доступные модели для /arm/solve/ — только Web_* и Ollama_*.
+
+    Фильтрует get_available_model_options() по префиксам. Чтение только из
+    кеша/БД, health-check не запускает.
+    """
+    return [
+        opt for opt in get_available_model_options() if is_arm_solve_model(opt.get("key"))
+    ]

@@ -37,7 +37,7 @@ _MODELS: Dict[str, Dict[str, object]] = {
     },
     # --- Web Kimi (бот-пул через Puppeteer, kimi.moonshot.cn) ---
     "Web_Kimi": {
-        "title": "Web Kimi",
+        "title": "Web Kimi K2.7",
         "handler": web_kimi.ask_Web_Kimi_async,
         "capabilities": _TEXT_ONLY,
     },

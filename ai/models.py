@@ -621,6 +621,16 @@ class AIModelTestResult(models.Model):
     tokens = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов")
     short_response = models.TextField(blank=True, default="", verbose_name="Краткий ответ")
     raw_response = models.TextField(blank=True, default="", verbose_name="Полный ответ")
+    # Извлечённый чистый код модели (содержимое файла программы) для batch-solve.
+    code = models.TextField(blank=True, default="", verbose_name="Код программы")
+    # Итог DL-тестирования: полный comment из get-solution-result.
+    dl_comment = models.TextField(blank=True, default="", verbose_name="DL: итог тестов")
+    # Ошибка отправки/опроса DL (send-solution / get-solution-result).
+    dl_error = models.TextField(blank=True, default="", verbose_name="DL: ошибка")
+    # DL queue id из send-solution (0 — отправка не удалась).
+    dl_queue_id = models.IntegerField(null=True, blank=True, verbose_name="DL: queueId")
+    # Снимок расширения файла задачи (для имени файла скачивания).
+    file_extension_snapshot = models.CharField(max_length=16, blank=True, default="", verbose_name="Расширение (снимок)")
     # Snapshot of the task's topic / programming language at run time (batch runs).
     topic_id_snapshot = models.IntegerField(null=True, blank=True, verbose_name="ID темы (снимок)")
     topic_name_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Тема (снимок)")

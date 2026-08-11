@@ -1979,8 +1979,6 @@ class BatchRunnerIntegrationTests(TestCase):
         from ai import arm_runner
         from ai.models import AIModelTestResult, AIModelTestRun, Task
 
-        sample = "program a; begin writeln(1); end."
-
         async def fake_handler(messages, conv_id):
             return ("program a; begin writeln(1); end.", 12)
 
@@ -2000,12 +1998,16 @@ class BatchRunnerIntegrationTests(TestCase):
             "results": [], "report": None,
             "created_at_ts": now_ts, "updated_at_ts": now_ts,
         }
+        # Вердикт теперь строго по DL: мокаем _test_solution_on_dl успехом.
+        dl_ok = lambda sid, node_id, code, ext: {
+            "verdict": "solved", "comment": "Все тесты успешно пройдены",
+            "submit_error": "", "queue_id": 1, "code_sent": code,
+        }
         try:
-            with patch("ai.dl_api_client.fetch_task_solution",
-                       lambda sid, tid, ext: {"content": sample}):
+            with patch("ai.arm_runner._test_solution_on_dl", dl_ok):
                 arm_runner._run_batch_job_worker(
                     run_id, node_ids, ordered_models, self.user.id, "DLSID-1",
-                    ui_language="Русский", dl_test=False,
+                    ui_language="Русский", dl_test=True,
                 )
         finally:
             arm_runner._jobs.pop(run_id, None)
@@ -2018,6 +2020,11 @@ class BatchRunnerIntegrationTests(TestCase):
         self.assertEqual(len(results), 2)
         self.assertTrue(all(r.verdict == "solved" for r in results))
         self.assertTrue(all(r.task_id in (self.t1.id, self.t2.id) for r in results))
+        # Код и DL-коммент сохраняются в новых полях.
+        self.assertTrue(all(r.code == "program a; begin writeln(1); end." for r in results))
+        self.assertTrue(all(r.dl_comment == "Все тесты успешно пройдены" for r in results))
+        self.assertTrue(all(r.dl_queue_id == 1 for r in results))
+        self.assertTrue(all(r.file_extension_snapshot == ".pas" for r in results))
 
         # DB-fallback snapshot rebuilds the batch report from persisted rows.
         snapshot = arm_runner.get_arm_run_snapshot(run_id)

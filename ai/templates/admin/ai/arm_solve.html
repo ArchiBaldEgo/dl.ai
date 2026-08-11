@@ -405,8 +405,17 @@
       return '<span class="arm-badge ' + cls + '">' + escapeHtml(labels[v] || v) + '</span>';
     }
     function renderBucketTable(rows, labelHeader, wrapEl) {
-      if (!rows || !rows.length) { wrapEl.innerHTML = ''; return; }
-      const head = '<thead><tr><th>' + labelHeader + '</th><th>% решённых</th><th>Среднее время, сек</th><th>Токены</th><th>Решено / Всего</th></tr></thead>';
+      // Не затираем заголовки (<h3>/<p>) — дописываем таблицу после них.
+      const prev = wrapEl.querySelector('table.arm-summary-table, .arm-bucket-empty');
+      if (prev) { prev.remove(); }
+      if (!rows || !rows.length) {
+        const empty = document.createElement('p');
+        empty.className = 'arm-section-note arm-bucket-empty';
+        empty.textContent = 'нет данных';
+        wrapEl.appendChild(empty);
+        return;
+      }
+      const head = '<thead><tr><th>' + escapeHtml(labelHeader) + '</th><th>% решённых</th><th>Среднее время, сек</th><th>Токены</th><th>Решено / Всего</th></tr></thead>';
       const body = rows.map(function (r) {
         return '<tr><td>' + escapeHtml(r.label) + '</td>'
           + '<td class="arm-col-num">' + escapeHtml(r.percent_solved) + '</td>'
@@ -414,7 +423,7 @@
           + '<td class="arm-col-num">' + escapeHtml(r.tokens) + '</td>'
           + '<td class="arm-col-num">' + escapeHtml(r.solved) + ' / ' + escapeHtml(r.total) + '</td></tr>';
       }).join('');
-      wrapEl.innerHTML = '<table class="arm-summary-table">' + head + '<tbody>' + body + '</tbody></table>';
+      wrapEl.insertAdjacentHTML('beforeend', '<table class="arm-summary-table">' + head + '<tbody>' + body + '</tbody></table>');
     }
     function renderReport(report) {
       if (!report) { reportCard.style.display = 'none'; reportList.innerHTML = ''; perModelWrap.innerHTML = ''; perTopicWrap.innerHTML = ''; return; }
@@ -446,6 +455,7 @@
         if (key) { openKeys.add(key); }
       });
       resultsEl.innerHTML = '';
+      const downloadBase = '/ai/admin/arm/solve/result/';
       results.forEach(function (r) {
         const cls = r.verdict === 'solved' ? 'solved' : (r.verdict === 'failed' ? 'failed' : 'skipped');
         const card = document.createElement('details');
@@ -453,29 +463,66 @@
         const rkey = (r.task_node_id || '') + ':' + (r.model_key || '');
         card.setAttribute('data-key', rkey);
         if (openKeys.has(rkey)) { card.setAttribute('open', ''); }
-        // Build summary with DL test info visible.
-        var dlInfo = '';
-        // Extract DL info from short_response — it's in [brackets] at the end.
-        var shortText = r.short_response || '';
-        var dlMatch = shortText.match(/\[([^\]]+)\]\s*$/);
-        if (dlMatch) {
-          dlInfo = dlMatch[1];
+
+        const dlComment = r.dl_comment || '';
+        const dlError = r.dl_error || '';
+        const dlQueueId = r.dl_queue_id || 0;
+        const code = r.code || '';
+        const resultId = r.result_id || '';
+
+        const summary = document.createElement('summary');
+        const top = document.createElement('div');
+        top.className = 'arm-result-top';
+        const title = document.createElement('span');
+        title.className = 'arm-result-title';
+        title.textContent = '#' + (r.task_node_id || '') + ' ' + (r.task_name || '') + ' — ' + (r.model_title || '');
+        top.appendChild(title);
+        top.insertAdjacentHTML('beforeend', verdictBadge(r.verdict));
+        const meta = document.createElement('div');
+        meta.className = 'arm-meta';
+        meta.textContent = (r.duration != null ? r.duration : '') + ' сек | ' + (r.tokens != null ? r.tokens : '') + ' ток.';
+        summary.appendChild(top);
+        summary.appendChild(meta);
+
+        const body = document.createElement('div');
+        body.className = 'arm-result-body';
+
+        // DL-тест: итог (comment) + queueId + ошибка отправки/опроса.
+        const dlBlock = document.createElement('div');
+        dlBlock.style.cssText = 'padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:13px; background:' + (r.verdict === 'solved' ? '#dcfce7' : '#fee2e2') + ';';
+        let dlHtml = '<strong>DL тест:</strong> ';
+        if (dlComment) { dlHtml += escapeHtml(dlComment); } else { dlHtml += '<span style="color:var(--body-quiet-color);">итог тестов отсутствует</span>'; }
+        if (dlQueueId) { dlHtml += ' <span style="color:var(--body-quiet-color);">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
+        if (dlError) { dlHtml += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
+        dlBlock.innerHTML = dlHtml;
+        body.appendChild(dlBlock);
+
+        const answerLabel = document.createElement('div');
+        answerLabel.style.cssText = 'margin:8px 0 4px; font-weight:600; font-size:13px;';
+        answerLabel.textContent = 'Полный ответ модели:';
+        body.appendChild(answerLabel);
+        const answerPre = document.createElement('pre');
+        answerPre.textContent = r.raw_response || r.short_response || '';
+        body.appendChild(answerPre);
+
+        const codeLabel = document.createElement('div');
+        codeLabel.style.cssText = 'margin:10px 0 4px; font-weight:600; font-size:13px;';
+        codeLabel.textContent = 'Извлечённый код программы:';
+        body.appendChild(codeLabel);
+        const codePre = document.createElement('pre');
+        codePre.textContent = code || '— код не извлечён —';
+        body.appendChild(codePre);
+        if (code && resultId) {
+          const link = document.createElement('a');
+          link.href = downloadBase + encodeURIComponent(resultId) + '/download/';
+          link.className = 'button';
+          link.style.cssText = 'display:inline-block; margin-top:6px; font-size:13px;';
+          link.textContent = 'Скачать код';
+          body.appendChild(link);
         }
-        card.innerHTML = [
-          '<summary>',
-          '<div class="arm-result-top">',
-          '<span class="arm-result-title">#' + escapeHtml(r.task_node_id) + ' ' + escapeHtml(r.task_name || '') + ' — ' + escapeHtml(r.model_title || '') + '</span>',
-          verdictBadge(r.verdict),
-          '</div>',
-          '<div class="arm-meta">' + escapeHtml(r.duration) + ' сек | ' + escapeHtml(r.tokens) + ' ток.</div>',
-          '</summary>',
-          '<div class="arm-result-body">',
-          (dlInfo ? '<div style="padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:13px; background:' + (r.verdict === 'solved' ? '#dcfce7' : '#fee2e2') + ';"><strong>DL тест:</strong> ' + escapeHtml(dlInfo) + '</div>' : ''),
-          '<pre></pre>',
-          '</div>',
-        ].join('');
-        const pre = card.querySelector('pre');
-        if (pre) { pre.textContent = r.raw_response || r.short_response || ''; }
+
+        card.appendChild(summary);
+        card.appendChild(body);
         resultsEl.appendChild(card);
       });
       resultsCard.style.display = 'block';
@@ -532,8 +579,6 @@
     const treeUrl = '{{ arm_solve_tree_url }}';
     const cancelUrl = '/ai/admin/arm/solve/cancel/';
     const cancelBtn = document.getElementById('armSolveCancelBtn');
-    const promptSelect = document.getElementById('armPromptSelect');
-    const promptsUrl = '{{ arm_solve_prompts_url }}';
 
     function renderTreeNodes(nodes, container) {
       nodes.forEach(function (node) {
@@ -627,38 +672,9 @@
       loadTreeBtn.addEventListener('click', loadTree);
     }
 
-    // Fetch filtered prompts based on selected tasks.
-    async function refreshPrompts() {
-      const checked = Array.from(document.querySelectorAll('.arm-task-check:checked')).map(function (c) { return c.value; });
-      if (!checked.length) {
-        promptSelect.innerHTML = '<option value="">— Системный (по умолчанию) —</option>';
-        return;
-      }
-      try {
-        const params = checked.map(function (id) { return 'node_ids=' + encodeURIComponent(id); }).join('&');
-        const response = await fetch(promptsUrl + '?' + params, {
-          method: 'GET', credentials: 'same-origin',
-          headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        });
-        const data = await response.json();
-        if (response.ok && data.ok) {
-          promptSelect.innerHTML = '<option value="">— Системный (по умолчанию) —</option>';
-          (data.prompt_options || []).forEach(function (p) {
-            const opt = document.createElement('option');
-            opt.value = p.id;
-            opt.textContent = p.name;
-            promptSelect.appendChild(opt);
-          });
-        }
-      } catch (e) { /* silent — keep current options */ }
-    }
-
-    // Refresh prompts when task selection changes.
-    document.addEventListener('change', function (event) {
-      if (event.target.classList.contains('arm-task-check')) {
-        refreshPrompts();
-      }
-    });
+    // Промпты уже отрендерены сервером в <select> (SharedPrompt + Prompt через
+    // ACL). Тема из дерева DL не вычисляется, поэтому список не зависит от
+    // выбранных задач — отдельная загрузка не нужна.
 
     // Cancel button
     if (cancelBtn) {

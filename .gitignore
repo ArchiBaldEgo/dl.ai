@@ -47,3 +47,6 @@ WebKimi/worker/.chrome-profiles/*
 .claude/
 .claude/backups/
 backups/
+
+bot/worker/logs/
+bot/worker/logs/*

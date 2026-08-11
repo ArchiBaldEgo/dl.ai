@@ -23,7 +23,7 @@ from django.utils import timezone
 from django.utils.html import strip_tags
 
 from .model_clients.exceptions import humanize_model_error
-from .model_health import get_runtime_model_handlers
+from .model_health import get_runtime_model_handlers, is_arm_solve_model
 from .models import AIModelTestResult, AIModelTestRun, AIRequestLog, ExternalDLAccount, Task
 
 
@@ -71,6 +71,13 @@ def _extract_model_response(response):
         return str(response_text or ""), tokens
 
     return str(response or ""), 0
+
+
+def _is_model_error(response):
+    """Handler'ы возвращают (content, tokens, is_error) — возвращаем флаг ошибки."""
+    if isinstance(response, tuple) and len(response) > 2:
+        return bool(response[2])
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -143,38 +150,13 @@ def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language
                 f"Выведи только готовое решение (код), без пояснений. "
                 f"Условие задачи: {task_statement}."
             )
+    # Гарантия полного входа: если выбранный шаблон промпта не содержал
+    # плейсхолдер {message}, условие задачи могло потеряться — дописываем его
+    # явно, чтобы модели всегда приходил полный текст задачи.
+    if task_statement and task_statement.strip() and task_statement.strip() not in (message or ""):
+        message = (message or "").rstrip() + f"\n\nУсловие задачи:\n{task_statement}"
     message += get_language_instruction(ui_language)
     return message
-
-
-def _extract_sample_solution(data):
-    """Best-effort extraction of the sample solution text from a DL get-solution
-    response. The response shape is not documented in dl_api_client.py, so we
-    try the common keys and fall back to stringifying."""
-    if not data:
-        return ""
-    if isinstance(data, str):
-        return data
-    if isinstance(data, list):
-        # A list of file objects: pick the first non-empty content.
-        for entry in data:
-            if isinstance(entry, dict):
-                text = entry.get("content") or entry.get("solution") or entry.get("text") or ""
-                if text:
-                    return str(text)
-            elif isinstance(entry, str) and entry:
-                return entry
-        return ""
-    if isinstance(data, dict):
-        for key in ("content", "solution", "text", "code", "fileContent", "data"):
-            value = data.get(key)
-            if isinstance(value, str) and value.strip():
-                return value
-            if isinstance(value, list):
-                inner = _extract_sample_solution(value)
-                if inner:
-                    return inner
-    return ""
 
 
 def _build_summary(results):
@@ -330,15 +312,30 @@ def cancel_arm_run(run_id):
 
     Sets ``cancel_requested=True`` on the in-memory job. The worker checks
     this flag between task/model iterations and stops early if set.
-    Returns True if the job was found and flagged, False otherwise.
+
+    Если in-memory job уже потерян (рестарт сервера/падение воркера), а в БД
+    прогон ещё STATUS_RUNNING — помечаем его COMPLETED с «Прервано пользователем»,
+    чтобы фронтенд вышел из «выполняется» без 404. Возвращает True, если нашли
+    живой job или осиротевший DB-прогон; False, если прогона нет вообще.
     """
     with _jobs_lock:
         job = _jobs.get(run_id)
-        if not job:
-            return False
-        job["cancel_requested"] = True
-        job["updated_at_ts"] = time.time()
-    return True
+        if job:
+            job["cancel_requested"] = True
+            job["updated_at_ts"] = time.time()
+            return True
+
+    # In-memory job нет — возможно осиротевший прогон после рестарта.
+    if not run_id:
+        return False
+    updated = AIModelTestRun.objects.filter(
+        run_id=run_id, status=AIModelTestRun.STATUS_RUNNING
+    ).update(
+        status=AIModelTestRun.STATUS_COMPLETED,
+        finished_at=timezone.now(),
+        error_message="Прервано пользователем",
+    )
+    return updated > 0
 
 
 def _is_cancel_requested(run_id):
@@ -818,9 +815,8 @@ def _run_batch_job_worker(
     Takes DL node_ids (NOT DB task IDs). For each node_id, fetches task info
     from DL (get-task-info) and creates/updates a Task in DB via ensure_task.
     Then iterates tasks in the outer loop and models in the inner loop.
-    The DL sample solution is fetched once per task (cached).
+    Вердикт ставится строго по DL-тесту (send-solution / get-solution-result).
     """
-    from .dl_api_client import DLApiError, fetch_task_info, fetch_task_solution, send_solution_to_dl, get_solution_result_from_dl
     from .services.task_registry import ensure_task, _guess_extension
     from .models import ProgrammingLanguage
 
@@ -884,7 +880,6 @@ def _run_batch_job_worker(
             )
             return
 
-        sample_cache = {}
         completed = 0
         cancelled = False
 
@@ -892,19 +887,6 @@ def _run_batch_job_worker(
             if _is_cancel_requested(run_id):
                 cancelled = True
                 break
-            # Fetch the DL sample solution once per task.
-            sample_text = sample_cache.get(task.node_id)
-            if sample_text is None and task.task_id and task.file_extension:
-                try:
-                    sample_data = fetch_task_solution(
-                        session_id, task.task_id, task.file_extension
-                    )
-                    sample_text = _extract_sample_solution(sample_data)
-                except DLApiError:
-                    sample_text = ""
-                except Exception:
-                    sample_text = ""
-                sample_cache[task.node_id] = sample_text
 
             topic_name = task.topic.topic_name if task.topic else ""
             prog_lang_name = (
@@ -924,14 +906,15 @@ def _run_batch_job_worker(
                     cancelled = True
                     break
                 started = perf_counter()
-                verdict = _VERDICT_SKIPPED
+                verdict = _VERDICT_FAILED
                 status = "error"
                 short_response = ""
                 raw_response = ""
+                cleaned_text = ""
                 tokens = 0
+                code_only = ""
                 dl_test_comment = ""
                 dl_submit_error = ""
-                dl_code_sent = ""
                 dl_queue_id = 0
 
                 try:
@@ -945,68 +928,61 @@ def _run_batch_job_worker(
                     response_text, tokens = _extract_model_response(response)
                     cleaned_text = strip_tags(response_text).strip()
                     friendly, detailed = humanize_model_error(cleaned_text, include_detail=True)
+                    # Полный вербатим ответ модели — без обрезки и без добавочного
+                    # DL-блока (код/DL-коммент хранятся в отдельных полях).
+                    raw_response = cleaned_text
 
-                    # Extract pure code from the AI response (strip markdown fences).
-                    code_only = _extract_code_from_response(cleaned_text)
-
-                    # Try real DL testing first (if enabled); fall back to difflib.
-                    if dl_test and code_only and task.file_extension and session_id:
-                        dl_result = _test_solution_on_dl(
-                            session_id, task.node_id, code_only, task.file_extension
+                    # Модель вернула ошибку (таймаут/401/429/…) — кода нет, DL не
+                    # тестируем. Вердикт строго failed (solved — только через DL).
+                    if _is_model_error(response):
+                        verdict = _VERDICT_FAILED
+                        status = "error"
+                        dl_submit_error = (friendly or cleaned_text)[:2000]
+                        short_response = (friendly or cleaned_text)[:300] + (
+                            "..." if len(friendly or cleaned_text) > 300 else ""
                         )
-                        dl_test_comment = dl_result.get("comment", "")
-                        dl_submit_error = dl_result.get("submit_error", "")
-                        dl_verdict = dl_result.get("verdict")
-                        dl_code_sent = dl_result.get("code_sent", "")
-                        dl_queue_id = dl_result.get("queue_id", 0)
+                    else:
+                        # Извлекаем только код модели (без markdown-оградок).
+                        code_only = _extract_code_from_response(cleaned_text)
 
-                        if dl_verdict is not None:
-                            verdict = dl_verdict
-                        elif sample_text:
-                            verdict = grade_solution(cleaned_text, sample_text)
+                        can_run_dl = bool(
+                            dl_test and code_only and task.file_extension and session_id
+                        )
+                        if not code_only:
+                            verdict = _VERDICT_FAILED
+                            dl_test_comment = "Модель не вернула код для тестирования"
+                        elif can_run_dl:
+                            dl_result = _test_solution_on_dl(
+                                session_id, task.node_id, code_only, task.file_extension
+                            )
+                            dl_test_comment = dl_result.get("comment", "") or ""
+                            dl_submit_error = dl_result.get("submit_error", "") or ""
+                            dl_verdict = dl_result.get("verdict")
+                            dl_queue_id = dl_result.get("queue_id", 0) or 0
+                            # solved — только если DL явно подтвердил; иное → failed.
+                            verdict = dl_verdict if dl_verdict is not None else _VERDICT_FAILED
                         else:
                             verdict = _VERDICT_FAILED
-                            if not dl_test_comment:
-                                dl_test_comment = "DL-тест недоступен, образец отсутствует"
-                    elif sample_text:
-                        verdict = grade_solution(cleaned_text, sample_text)
-                        dl_code_sent = ""
-                        dl_submit_error = ""
-                        dl_queue_id = 0
-                    else:
-                        verdict = _VERDICT_FAILED
-                        dl_test_comment = "Образец отсутствует, проверка невозможна"
-                        dl_code_sent = ""
-                        dl_submit_error = ""
-                        dl_queue_id = 0
+                            dl_test_comment = (
+                                "Нет расширения файла/DLSID для тестирования на DL"
+                            )
 
-                    status = "ok" if verdict != _VERDICT_SKIPPED else "error"
-                    short_response = (friendly or cleaned_text)[:300] + (
-                        "..." if len(friendly or cleaned_text) > 300 else ""
-                    )
-                    dl_info_parts = []
-                    if dl_queue_id > 0:
-                        dl_info_parts.append(f"queueId={dl_queue_id}")
-                    if dl_test_comment:
-                        dl_info_parts.append(f"DL: {dl_test_comment[:200]}")
-                    if dl_submit_error:
-                        dl_info_parts.append(f"ошибка: {dl_submit_error[:200]}")
-                    if dl_info_parts:
-                        short_response += "\n[" + " | ".join(dl_info_parts) + "]"
-                    raw_response = detailed or cleaned_text
-                    if dl_code_sent:
-                        raw_response += f"\n\n--- Код отправлен на DL (nodeId={task.node_id}, ext={task.file_extension}) ---\n{dl_code_sent}"
+                        status = "ok" if verdict == _VERDICT_SOLVED else "error"
+                        short_response = (friendly or cleaned_text)[:300] + (
+                            "..." if len(friendly or cleaned_text) > 300 else ""
+                        )
                 except Exception as exc:
                     exc_text = str(exc)
                     friendly, detailed = humanize_model_error(exc_text, include_detail=True)
-                    verdict = _VERDICT_SKIPPED
+                    verdict = _VERDICT_FAILED
                     status = "error"
                     short_response = friendly or f"Ошибка вызова модели: {exc_text}"
-                    raw_response = detailed
+                    raw_response = detailed or cleaned_text
+                    dl_submit_error = exc_text[:2000]
 
                 duration = round(perf_counter() - started, 2)
 
-                AIModelTestResult.objects.update_or_create(
+                result_obj, _ = AIModelTestResult.objects.update_or_create(
                     run=test_run,
                     model_key=model["key"],
                     task=task,
@@ -1017,7 +993,12 @@ def _run_batch_job_worker(
                         "duration_seconds": duration,
                         "tokens": tokens,
                         "short_response": short_response,
-                        "raw_response": (raw_response or "")[:8000],
+                        "raw_response": raw_response or "",
+                        "code": code_only or "",
+                        "dl_comment": dl_test_comment or "",
+                        "dl_error": dl_submit_error or "",
+                        "dl_queue_id": dl_queue_id or 0,
+                        "file_extension_snapshot": task.file_extension or "",
                         "topic_id_snapshot": task.topic_id,
                         "topic_name_snapshot": topic_name,
                         "prog_lang_snapshot": prog_lang_name,
@@ -1025,6 +1006,7 @@ def _run_batch_job_worker(
                 )
 
                 result_item = {
+                    "result_id": result_obj.pk,
                     "task_id": task.id,
                     "task_node_id": task.node_id,
                     "task_name": task.name,
@@ -1036,6 +1018,11 @@ def _run_batch_job_worker(
                     "status": status,
                     "verdict": verdict,
                     "raw_response": raw_response,
+                    "code": code_only,
+                    "dl_comment": dl_test_comment,
+                    "dl_error": dl_submit_error,
+                    "dl_queue_id": dl_queue_id,
+                    "file_extension": task.file_extension or "",
                     "topic_name": topic_name,
                     "prog_lang_name": prog_lang_name,
                 }
@@ -1110,6 +1097,7 @@ def _batch_results_from_db(test_run):
         node_id = r.task.node_id if r.task else ""
         task_name = r.task.name if r.task else ""
         results.append({
+            "result_id": r.pk,
             "task_node_id": node_id,
             "task_name": task_name,
             "model_key": r.model_key,
@@ -1118,8 +1106,13 @@ def _batch_results_from_db(test_run):
             "tokens": r.tokens or 0,
             "short_response": r.short_response,
             "status": r.status,
-            "verdict": r.verdict or _VERDICT_SKIPPED,
+            "verdict": r.verdict or _VERDICT_FAILED,
             "raw_response": r.raw_response,
+            "code": r.code or "",
+            "dl_comment": r.dl_comment or "",
+            "dl_error": r.dl_error or "",
+            "dl_queue_id": r.dl_queue_id or 0,
+            "file_extension": r.file_extension_snapshot or (r.task.file_extension if r.task else ""),
             "topic_name": r.topic_name_snapshot,
             "prog_lang_name": r.prog_lang_snapshot,
         })
@@ -1135,12 +1128,14 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     dl_test=False — только difflib-сравнение с образцовым решением.
     """
     handlers = get_runtime_model_handlers()
+    # В solve допущены только Web_* и Ollama_* (нет жёсткого лимита вывода);
+    # OR_*/Groq отрезаются — не вытягивают по токенам пакетную генерацию кода.
     if model_keys:
-        valid_model_keys = [k for k in model_keys if k in handlers]
+        valid_model_keys = [k for k in model_keys if k in handlers and is_arm_solve_model(k)]
     else:
-        valid_model_keys = list(handlers.keys())
+        valid_model_keys = [k for k in handlers.keys() if is_arm_solve_model(k)]
     if not valid_model_keys:
-        return None, "Нет доступных моделей. Обновите состояние моделей и попробуйте снова."
+        return None, "Нет доступных моделей для solve (Web/Ollama). Обновите состояние моделей и попробуйте снова."
 
     if not node_ids:
         return None, "Не выбрано ни одной задачи из дерева DL."
@@ -1263,6 +1258,28 @@ def _snapshot_from_test_run(test_run):
     }
 
 
+def _mark_orphaned_run_failed(test_run):
+    """Помечает осиротевший RUNNING-прогон как FAILED (самоисцеление).
+
+    Вызывается, когда in-memory job потерян (рестарт сервера/падение воркера),
+    а в БД прогон ещё STATUS_RUNNING — иначе фронтенд вечно видит «выполняется».
+    Мутирует и экземпляр, и строку БД (с защитой по статусу, чтобы не затереть
+    уже завершённый прогон при гонке).
+    """
+    now = timezone.now()
+    AIModelTestRun.objects.filter(
+        pk=test_run.pk, status=AIModelTestRun.STATUS_RUNNING
+    ).update(
+        status=AIModelTestRun.STATUS_FAILED,
+        finished_at=now,
+        error_message="Процесс потерян (перезапуск сервера)",
+    )
+    test_run.status = AIModelTestRun.STATUS_FAILED
+    test_run.finished_at = now
+    test_run.error_message = "Процесс потерян (перезапуск сервера)"
+    return test_run
+
+
 def get_arm_run_snapshot(run_id):
     """Возвращает снимок состояния ARM-прогона по run_id.
 
@@ -1283,4 +1300,9 @@ def get_arm_run_snapshot(run_id):
         test_run = AIModelTestRun.objects.get(run_id=run_id)
     except AIModelTestRun.DoesNotExist:
         return None
+    # In-memory job нет, а прогон ещё RUNNING — осиротевший (рестарт/падение
+    # воркера). Самоисцеление: помечаем FAILED, чтобы фронтенд вышел из
+    # «выполняется» и кнопка/спиннер сбросились.
+    if test_run.status == AIModelTestRun.STATUS_RUNNING:
+        test_run = _mark_orphaned_run_failed(test_run)
     return _snapshot_from_test_run(test_run)

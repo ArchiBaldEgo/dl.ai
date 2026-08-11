@@ -18,6 +18,7 @@ from .arm import (
     admin_arm_solve_load_tree_view,
     admin_arm_solve_prompts_view,
     admin_arm_solve_cancel_view,
+    admin_arm_solve_result_download_view,
 )
 from .logs import (
     admin_request_log_detail_view,
@@ -59,6 +60,7 @@ def get_ai_admin_urls():
         path("arm/solve/load-tree/", ai_admin_site.admin_view(admin_arm_solve_load_tree_view), name="ai_arm_solve_load_tree"),
         path("arm/solve/prompts/", ai_admin_site.admin_view(admin_arm_solve_prompts_view), name="ai_arm_solve_prompts"),
         path("arm/solve/cancel/", ai_admin_site.admin_view(admin_arm_solve_cancel_view), name="ai_arm_solve_cancel"),
+        path("arm/solve/result/<int:result_id>/download/", ai_admin_site.admin_view(admin_arm_solve_result_download_view), name="ai_arm_solve_result_download"),
         path("arm/solve/", ai_admin_site.admin_view(admin_arm_solve_view), name="ai_arm_solve"),
         path("arm/models/refresh/", ai_admin_site.admin_view(admin_model_status_refresh_view), name="ai_arm_model_status_refresh"),
         path("arm/models/state/", ai_admin_site.admin_view(admin_model_status_state_view), name="ai_arm_model_status_state"),

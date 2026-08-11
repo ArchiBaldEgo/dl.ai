@@ -7,17 +7,19 @@
 """
 
 from .site import ai_admin_site
-from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
-from django.shortcuts import redirect
+from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
+from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
 
 from ..arm_runner import cancel_arm_run, get_arm_run_snapshot, start_arm_sequential_run, start_batch_solve_run
 from ..i18n import get_language_instruction, get_localized_name
 from ..model_health import (
+    get_arm_solve_model_options,
     get_available_model_options,
     get_health_window_date,
 )
-from ..models import ProgrammingLanguage, Prompt, SharedPrompt, Task, Topic
+from ..models import AIModelTestResult, ProgrammingLanguage, Prompt, SharedPrompt, Task, Topic
+from ..querysets import prompt_queryset_for_user
 from ..serializers import programming_language as serialize_programming_language, prompt as serialize_prompt, topic as serialize_topic
 from .permissions import can_access_arm
 
@@ -269,6 +271,27 @@ def admin_arm_find_error_status_view(request):
 # test the code via DL (send-solution / get-solution-result).
 # ---------------------------------------------------------------------------
 
+def _arm_solve_prompt_options(user):
+    """Опции промптов для /arm/solve/: SharedPrompt ([Общий]) + topic-bound Prompt ([Тема]).
+
+    Тема из дерева DL не вычисляется, поэтому даём выбрать любой промпт. Prompt
+    фильтруется через ``prompt_queryset_for_user`` (ACL: staff/superuser — все,
+    иначе owner/editor). Возвращает список ``{id, name}``, отсортированный по имени.
+    """
+    options = []
+    for sp in SharedPrompt.objects.all().order_by("prompt_name", "id"):
+        options.append({"id": f"shared_{sp.id}", "name": f"[Общий] {sp.prompt_name}"})
+
+    prompts_qs = prompt_queryset_for_user(Prompt.objects.select_related("topic"), user)
+    for p in prompts_qs.order_by("prompt_name", "id"):
+        topic_name = get_localized_name(p.topic, "Русский", "topic_name") if p.topic else ""
+        label = f"[Тема] {topic_name} — {p.prompt_name}" if topic_name else f"[Тема] {p.prompt_name}"
+        options.append({"id": str(p.id), "name": label})
+
+    options.sort(key=lambda opt: opt["name"])
+    return options
+
+
 def admin_arm_solve_view(request):
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
@@ -290,20 +313,16 @@ def admin_arm_solve_view(request):
             error_message = "Процесс не найден или уже завершен"
 
     from ..http_utils import safe_relative_url
-    from ..models import SharedPrompt
     arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
 
-    prompt_options = [
-        {"id": f"shared_{sp.id}", "name": f"[Общий] {sp.prompt_name}"}
-        for sp in SharedPrompt.objects.all().order_by("id")
-    ]
+    prompt_options = _arm_solve_prompt_options(request.user)
 
     context = {
         **ai_admin_site.each_context(request),
         "title": "ARM: Пакетное решение",
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "arm_back_url": arm_back_url,
-        "model_options": get_available_model_options(),
+        "model_options": get_arm_solve_model_options(),
         "prompt_options": prompt_options,
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
         "arm_solve_prompts_url": "/ai/admin/arm/solve/prompts/",
@@ -443,16 +462,15 @@ def admin_arm_solve_load_tree_view(request):
 
 
 def admin_arm_solve_prompts_view(request):
-    """Return available prompt options (SharedPrompts only — no DB tasks to filter by)."""
+    """Return available prompt options for solve: SharedPrompt ([Общий]) + Prompt ([Тема]).
+
+    Тема из дерева DL не вычисляется, поэтому эндпоинт игнорирует ``node_ids`` и
+    возвращает все доступные пользователю промпты (ACL через ``prompt_queryset_for_user``).
+    """
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
 
-    from ..models import SharedPrompt
-
-    prompt_options = []
-    for sp in SharedPrompt.objects.all().order_by("id"):
-        prompt_options.append({"id": f"shared_{sp.id}", "name": f"[Общий] {sp.prompt_name}"})
-
+    prompt_options = _arm_solve_prompt_options(request.user)
     return JsonResponse({"ok": True, "prompt_options": prompt_options})
 
 
@@ -579,3 +597,28 @@ def admin_arm_solve_cancel_view(request):
         )
 
     return JsonResponse({"ok": True, "message": "Прерывание запрошено"})
+
+
+def admin_arm_solve_result_download_view(request, result_id):
+    """Скачать извлечённый код модели как файл программы.
+
+    Отдаёт ``AIModelTestResult.code`` как ``text/plain`` во вложении. Имя файла —
+    ``task_<node_id><file_extension>`` (расширение из снимка, с ведущей точкой).
+    Файлы на диске не хранятся — содержимое берётся прямо из БД.
+    """
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    result = get_object_or_404(AIModelTestResult, pk=result_id)
+    code = result.code or ""
+    ext = (result.file_extension_snapshot or "").strip()
+    if ext and not ext.startswith("."):
+        ext = f".{ext}"
+    node_id = ""
+    if result.task_id and result.task and result.task.node_id:
+        node_id = str(result.task.node_id)
+    filename = f"task_{node_id}{ext}" if node_id else f"task_result_{result_id}{ext}"
+
+    response = HttpResponse(code, content_type="text/plain; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
