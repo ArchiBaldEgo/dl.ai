@@ -81,9 +81,9 @@ async function checkAlreadyAuthorized(ctx, payload = {}) {
     const chatUrl =
         data?.xpaths?.auth?.chatUrl?.[currentService] ||
         data?.services?.[currentService] ||
-        'https://kimi.moonshot.cn/';
+        'https://www.kimi.com/';
     const chatInputXPath = data?.xpaths?.chat?.inputLabel?.[currentService] ||
-        "//*[@data-testid='msh-chatinput-editor']";
+        "//div[contains(@class,'chat-input-editor') and @role='textbox']";
 
     try {
         await page.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: getTimeoutMs() });

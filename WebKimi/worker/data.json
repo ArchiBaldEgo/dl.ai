@@ -1,34 +1,34 @@
 {
     "services": {
-        "kimi": "https://kimi.moonshot.cn/"
+        "kimi": "https://www.kimi.com/"
     },
     "loginUrls": {
-        "kimi": "https://kimi.moonshot.cn/"
+        "kimi": "https://www.kimi.com/"
     },
 
-    "_TODO_live_inspection": "Селекторы ответа/stop — best-effort из веб-исследования. Перед продой прогнать бот с KIMI_HEADLESS=false, открыть DevTools на чате Kimi и уточнить: (1) data.xpaths.chat.answer — класс markdown-блока ассистента внутри [data-testid='virtuoso-item-list']; (2) data.xpaths.chat.fullAnswer — обёртка; (3) STOP_GENERATING_XPATHS в promtps.js — кнопка Stop; (4) kimiHtmlToApiMarkdown — класс обёртки кода. KIMI_AUTH_DEBUG=true пишет auth-*.html/.png в worker/logs/.",
+    "_live_inspection_2026_08": "Селекторы выверены живой инспекцией через WebKimi/seed.js --diag. Kimi сменил домен (kimi.moonshot.cn -> www.kimi.com) и убрал data-testid. Структура чата: div.chat-content-list > div.chat-content-item.chat-content-item-assistant (последний = текущий ответ) > div.markdown-container > div.markdown (растёт при стриминге). Поле ввода: div.chat-input-editor[role=textbox] (contenteditable). Кнопку отправки намеренно НЕ используем — waitAndClickX жжёт 30с на промахе; Enter в contenteditable отправляет надёжно. Кнопку Stop пока не нашли — завершение определяется confirmMs-перечитыванием (см. promtps.js STOP_GENERATING_XPATHS + waitLastOuterHtmlStable).",
 
     "xpaths": {
         "auth": {
             "chatUrl": {
-                "kimi": "https://kimi.moonshot.cn/"
+                "kimi": "https://www.kimi.com/"
             }
         },
         "chat": {
             "inputLabel": {
-                "kimi": "//*[@data-testid='msh-chatinput-editor']"
+                "kimi": "//div[contains(@class,'chat-input-editor') and @role='textbox']"
             },
             "inputLabelCss": {
-                "kimi": "[data-testid='msh-chatinput-editor']"
+                "kimi": ".chat-input-editor[role='textbox']"
             },
             "sendMessageButton": {
-                "kimi": "//button[@data-testid='msh-chatinput-send-button']"
+                "kimi": ""
             },
             "answer": {
-                "kimi": "//*[@data-testid='virtuoso-item-list']/*[last()]"
+                "kimi": "//div[contains(@class,'chat-content-item-assistant')]//div[contains(@class,'markdown')]"
             },
             "fullAnswer": {
-                "kimi": "//*[@data-testid='virtuoso-item-list']/*[last()]"
+                "kimi": "//div[contains(@class,'chat-content-list')]"
             }
         }
     }

@@ -456,14 +456,18 @@ async function sendMessage(ctx, payload = {}) {
             };
         }
 
-        // Try clicking the send button via XPath. If the primary selector fails
-        // (Kimi UI changed), fall back to pressing Enter in the contenteditable.
-        const sendClicked = await waitAndClickX(page, data.xpaths.chat.sendMessageButton[currentService]);
+        // Отправка: в Kimi намеренно НЕ ищем кнопку отправки по XPath —
+        // data.xpaths.chat.sendMessageButton пуст (""), т.к. реальный селектор
+        // кнопки не выверен, а waitAndClickX жжёт 30с на промахе. Enter в
+        // contenteditable-редакторе Kimi = отправка (Shift+Enter — перенос строки).
+        const sendBtnXPath = data?.xpaths?.chat?.sendMessageButton?.[currentService];
+        let sendClicked = false;
+        if (sendBtnXPath) {
+            sendClicked = await waitAndClickX(page, sendBtnXPath);
+        }
         if (!sendClicked) {
-            log('Send button not found via XPath, falling back to Enter key');
+            if (sendBtnXPath) log('Send button not found via XPath, falling back to Enter key');
             try {
-                // Для contenteditable Enter в сфокусированном редакторе = отправка
-                // (Shift+Enter — перенос строки в Kimi Composer).
                 await page.keyboard.press('Enter');
             } catch (e2) {
                 log('Enter fallback failed: ' + (e2?.message || e2));
@@ -477,11 +481,14 @@ async function sendMessage(ctx, payload = {}) {
         // their HTML), try alternative selectors before giving up.
         const answerXPaths = [
             data.xpaths.chat.answer[currentService],
-            // Fallback 1: markdown-блок внутри virtuoso-item-list
-            "//*[@data-testid='virtuoso-item-list']//*[contains(@class,'markdown')]",
-            // Fallback 2: content-блок внутри virtuoso-item-list
-            "//*[@data-testid='virtuoso-item-list']//*[contains(@class,'content')]",
-            // Fallback 3: любой markdown-блок (broader)
+            // Fallback 1: явно последний assistant-item (getLastOuterHtmlByXPath берёт
+            // последний snapshot-узел в document order — текущий ответ).
+            "//div[contains(@class,'chat-content-item-assistant')][last()]//div[contains(@class,'markdown')]",
+            // Fallback 2: answer-markdown без toolcall/thinking-обёртки
+            "//div[contains(@class,'markdown-container') and not(contains(@class,'toolcall-content-text'))]//div[contains(@class,'markdown')]",
+            // Fallback 3: весь последний assistant-item (конвертер разберёт markdown-блоки внутри)
+            "//div[contains(@class,'chat-content-item-assistant')][last()]",
+            // Fallback 4: любой markdown-блок (broader — крайний случай)
             "//div[contains(@class,'markdown')]",
         ];
 
@@ -498,9 +505,11 @@ async function sendMessage(ctx, payload = {}) {
                     checkStopButton: true,
                     confirmMs: 5000,
                 });
-                // НЕ принимаем структурно-набитый, но текстово-пустой контейнер.
+                // НЕ принимаем структурно-набитый, но текстово-ПУСТОЙ контейнер (0/whitespace).
+                // Короткие ответы («2», «да», «42») — легитимны, НЕ отбраковываем: порог 1 символ,
+                // а не 5. Скелет-плейсхолдер даёт 0 текста, реальный ответ — ≥1.
                 inner = kimiHtmlToApiMarkdown(answer);
-                if (inner && inner.trim().length >= 5) {
+                if (inner && inner.trim().length >= 1) {
                     answerXpUsed = xp;
                     break;
                 }
@@ -520,10 +529,10 @@ async function sendMessage(ctx, payload = {}) {
             };
         }
 
-        // Retry on empty or very short response — sometimes Kimi returns
-        // an empty container while still generating.
-        if (!inner || inner.trim().length < 5) {
-            log('Empty/short response detected (' + (inner?.length || 0) + ' chars), retrying once more...');
+        // Retry on EMPTY response (0 текста) — sometimes Kimi returns an empty
+        // container while still generating. Короткие ответы (≥1) НЕ триггерят retry.
+        if (!inner || inner.trim().length < 1) {
+            log('Empty response detected (' + (inner?.length || 0) + ' chars), retrying once more...');
             await sleep(3000);
             for (const xp of answerXPaths) {
                 try {
@@ -536,7 +545,7 @@ async function sendMessage(ctx, payload = {}) {
                         confirmMs: 5000,
                     });
                     const retryInner = kimiHtmlToApiMarkdown(retryAnswer);
-                    if (retryInner && retryInner.trim().length >= 5 && retryInner.trim().length > inner.trim().length) {
+                    if (retryInner && retryInner.trim().length >= 1 && retryInner.trim().length > inner.trim().length) {
                         inner = retryInner;
                         answer = retryAnswer;
                         answerXpUsed = xp;

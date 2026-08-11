@@ -3,7 +3,9 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "start": "node api/index.js"
+    "start": "node api/index.js",
+    "seed": "node seed.js",
+    "seed:2": "node seed.js --id=2"
   },
   "dependencies": {
     "express": "^4.21.2",

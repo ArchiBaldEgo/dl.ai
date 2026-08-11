@@ -33,9 +33,15 @@ staticfiles/
 WebDeepseek/worker/logs/
 WebDeepseek/worker/logs/*
 
-# Bot Chrome profiles (содержат сессию Google — чувствительные данные)
+# Bot Chrome profiles (содержат сессию сайта — чувствительные данные)
 WebDeepseek/worker/.chrome-profiles/
 WebDeepseek/worker/.chrome-profiles/*
+
+# WebKimi bot pool — те же чувствительные артефакты (сессия Kimi, auth-debug дампы)
+WebKimi/worker/logs/
+WebKimi/worker/logs/*
+WebKimi/worker/.chrome-profiles/
+WebKimi/worker/.chrome-profiles/*
 
 # Claude
 .claude/
