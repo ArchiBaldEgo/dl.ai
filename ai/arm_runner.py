@@ -729,6 +729,14 @@ def _extract_code_from_response(text):
     return text.strip()
 
 
+# Парные ассемблерные расширения курса "[Ассемблер i8086, C-MPA]": DL REST
+# send-solution валидирует расширение против платформ задачи (недокументированный
+# 400, док описывает только 401/500). Если пользователь выбрал .i86 для C-MPA-
+# задачи (или .cmp для i8086-задачи), DL отвечает 400. Эти пары используются для
+# реактивной авто-детекции языка задачи при 400.
+_ASSEMBLER_EXT_PAIR = {".i86": ".cmp", ".cmp": ".i86"}
+
+
 def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0):
     """Send code to DL for real testing and poll for the result.
 
@@ -742,7 +750,7 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
         }
     verdict is None if the DL test could not be performed.
     """
-    from .dl_api_client import send_solution_to_dl, get_solution_result_from_dl
+    from .dl_api_client import send_solution_to_dl, get_solution_result_from_dl, DLServerError
 
     result = {
         "verdict": None,
@@ -755,6 +763,37 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
     # Step 1: submit code to DL.
     try:
         submit_resp = send_solution_to_dl(session_id, node_id, code, file_extension)
+    except DLServerError as exc:
+        msg = str(exc)
+        result["submit_error"] = f"send-solution: {msg}"
+        # 400 от send-solution недокументировано (док описывает только 401/500).
+        # DL принимает несуществующее .cmpa с queueId, но отклоняет .i86 — значит
+        # send-solution валидирует расширение против платформ задачи, и выбранное
+        # расширение для этой задачи не подходит (напр. .i86 для C-MPA-задачи).
+        # Пробуем парное ассемблерное расширение как детекцию языка задачи.
+        if "код 400" in msg and file_extension in _ASSEMBLER_EXT_PAIR:
+            alt = _ASSEMBLER_EXT_PAIR[file_extension]
+            try:
+                alt_resp = send_solution_to_dl(session_id, node_id, code, alt)
+                alt_qid = alt_resp.get("queueId")
+                if alt_qid and alt_qid > 0:
+                    # Парное расширение принято — задача на другом языке. НЕ
+                    # тестируем: код сгенерирован под исходный язык, тестирование
+                    # под парным дало бы ложный вердикт. Сообщаем точный выбор.
+                    result["submit_error"] = (
+                        f"DL отклонил {file_extension} (400), но принял {alt} "
+                        f"(queueId={alt_qid}) — задача на другой язык: выберите {alt} "
+                        f"и перезапустите пакет (код будет перегенерирован под {alt})."
+                    )
+                    result["queue_id"] = 0
+                    return result
+            except Exception:
+                pass
+            result["submit_error"] += (
+                " — DL отклонил расширение для этой задачи (язык выбран неверно: "
+                "для C-MPA выбирайте .cmp, для i8086 — .i86)."
+            )
+        return result
     except Exception as exc:
         result["submit_error"] = f"send-solution: {exc}"
         return result
