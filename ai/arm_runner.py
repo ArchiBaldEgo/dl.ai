@@ -729,15 +729,7 @@ def _extract_code_from_response(text):
     return text.strip()
 
 
-# Парные ассемблерные расширения курса "[Ассемблер i8086, C-MPA]": DL REST
-# send-solution валидирует расширение против платформ задачи (недокументированный
-# 400, док описывает только 401/500). Если пользователь выбрал .i86 для C-MPA-
-# задачи (или .cmp для i8086-задачи), DL отвечает 400. Эти пары используются для
-# реактивной авто-детекции языка задачи при 400.
-_ASSEMBLER_EXT_PAIR = {".i86": ".cmp", ".cmp": ".i86"}
-
-
-def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0):
+def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0):
     """Send code to DL for real testing and poll for the result.
 
     Returns a dict:
@@ -761,39 +753,50 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
     }
 
     # Step 1: submit code to DL.
+    submit_resp = None
     try:
         submit_resp = send_solution_to_dl(session_id, node_id, code, file_extension)
     except DLServerError as exc:
         msg = str(exc)
         result["submit_error"] = f"send-solution: {msg}"
-        # 400 от send-solution недокументировано (док описывает только 401/500).
-        # DL принимает несуществующее .cmpa с queueId, но отклоняет .i86 — значит
-        # send-solution валидирует расширение против платформ задачи, и выбранное
-        # расширение для этой задачи не подходит (напр. .i86 для C-MPA-задачи).
-        # Пробуем парное ассемблерное расширение как детекцию языка задачи.
-        if "код 400" in msg and file_extension in _ASSEMBLER_EXT_PAIR:
-            alt = _ASSEMBLER_EXT_PAIR[file_extension]
+        # 400 от send-solution недокументировано (док описывает только 401/500),
+        # DL не поясняет, какое поле отвергнуто. Ранее предполагалось, что DL
+        # валидирует расширение против платформ задачи, но это опровергнуто
+        # пользователем: и .i86, и .cmp для одной ноды дают 400 при корректном
+        # коде, а язык выбран верно. Значит 400 не про расширение.
+        #
+        # Проверяем эмпирическую гипотезу (выдвинутую пользователем: «с твоим
+        # nodeId — доступ запрещён»): возможно send-solution ждёт не nodeId, а
+        # taskId (get-task-info возвращает оба id). Отправляем task_id в поле
+        # nodeId; если принято — продолжаем поллинг по этому queueId.
+        if "код 400" in msg and task_id and task_id != node_id:
             try:
-                alt_resp = send_solution_to_dl(session_id, node_id, code, alt)
-                alt_qid = alt_resp.get("queueId")
-                if alt_qid and alt_qid > 0:
-                    # Парное расширение принято — задача на другом языке. НЕ
-                    # тестируем: код сгенерирован под исходный язык, тестирование
-                    # под парным дало бы ложный вердикт. Сообщаем точный выбор.
-                    result["submit_error"] = (
-                        f"DL отклонил {file_extension} (400), но принял {alt} "
-                        f"(queueId={alt_qid}) — задача на другой язык: выберите {alt} "
-                        f"и перезапустите пакет (код будет перегенерирован под {alt})."
+                alt_resp = send_solution_to_dl(session_id, task_id, code, file_extension)
+                alt_qid = alt_resp.get("queueId") or 0
+                if alt_qid > 0:
+                    # taskId принят — nodeId был не тем идентификатором.
+                    # Чистим ошибку и идём к поллингу (verdict по реальным тестам).
+                    submit_resp = alt_resp
+                    result["submit_error"] = ""
+                else:
+                    alt_msg = alt_resp.get("message", "")
+                    result["submit_error"] += (
+                        f" | проба taskId={task_id} вместо nodeId: отклонён "
+                        f"(queueId=0{f' ({alt_msg})' if alt_msg else ''})"
                     )
-                    result["queue_id"] = 0
-                    return result
-            except Exception:
-                pass
+            except Exception as alt_exc:
+                result["submit_error"] += f" | проба taskId={task_id} вместо nodeId: {alt_exc}"
+        if not submit_resp:
             result["submit_error"] += (
-                " — DL отклонил расширение для этой задачи (язык выбран неверно: "
-                "для C-MPA выбирайте .cmp, для i8086 — .i86)."
+                " — DL отклонил отправку решения (400). Расширение и nodeId "
+                "переданы по контракту REST API, язык выбран корректно. "
+                "Вероятные причины: задача не принимает отправку через REST API "
+                "(напр. раздел «Программы с подсказками»), у сессии нет прав на "
+                "отправку для этой ноды, либо код не прошёл серверную "
+                f"валидацию. Проверьте задачу вручную на dl.gsu.by "
+                f"(nodeId={node_id}, taskId={task_id})."
             )
-        return result
+            return result
     except Exception as exc:
         result["submit_error"] = f"send-solution: {exc}"
         return result
@@ -1000,7 +1003,8 @@ def _run_batch_job_worker(
                             dl_test_comment = "Модель не вернула код для тестирования"
                         elif can_run_dl:
                             dl_result = _test_solution_on_dl(
-                                session_id, task.node_id, code_only, effective_ext
+                                session_id, task.node_id, code_only, effective_ext,
+                                task_id=task.task_id or 0,
                             )
                             dl_test_comment = dl_result.get("comment", "") or ""
                             dl_submit_error = dl_result.get("submit_error", "") or ""

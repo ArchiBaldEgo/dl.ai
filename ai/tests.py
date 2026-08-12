@@ -2063,7 +2063,7 @@ class BatchRunnerIntegrationTests(TestCase):
             "created_at_ts": now_ts, "updated_at_ts": now_ts,
         }
         # Вердикт теперь строго по DL: мокаем _test_solution_on_dl успехом.
-        dl_ok = lambda sid, node_id, code, ext: {
+        dl_ok = lambda sid, node_id, code, ext, **kw: {
             "verdict": "solved", "comment": "Все тесты успешно пройдены",
             "submit_error": "", "queue_id": 1, "code_sent": code,
         }
@@ -2095,6 +2095,90 @@ class BatchRunnerIntegrationTests(TestCase):
         self.assertEqual(snapshot["run_type"], "batch")
         self.assertEqual(snapshot["report"]["per_model"][0]["solved"], 2)
         self.assertEqual(snapshot["report"]["per_model"][0]["total"], 2)
+
+
+class TestSolutionOnDlTests(SimpleTestCase):
+    """``_test_solution_on_dl``: на 400 от send-solution пробует taskId вместо
+    nodeId (гипотеза пользователя: «с твоим nodeId — доступ запрещён») и при
+    успехе падает в поллинг. Старая подсказка «язык выбран неверно» удалена."""
+
+    def test_400_falls_back_to_task_id_and_polls(self):
+        from ai import arm_runner
+        from ai.dl_api_client import DLServerError
+
+        calls = []
+
+        def fake_send(session_id, node_id, code, file_extension):
+            calls.append(node_id)
+            if node_id == 2606747:
+                raise DLServerError(
+                    "send-solution(nodeId=2606747, fileExtension='.cmp', "
+                    "codeLen=111, codeHead='...'): DL API вернул ошибку "
+                    "(код 400): Bad Request"
+                )
+            # taskId принят
+            return {"queueId": 42, "message": "ok"}
+
+        def fake_poll(session_id, queue_id):
+            return {"isFinished": True, "comment": "Все тесты успешно пройдены"}
+
+        with patch("ai.dl_api_client.send_solution_to_dl", fake_send), \
+                patch("ai.dl_api_client.get_solution_result_from_dl", fake_poll):
+            res = arm_runner._test_solution_on_dl(
+                "SID", 2606747, "code...", ".cmp",
+                max_polls=1, poll_interval=0, task_id=2001,
+            )
+        # Сначала nodeId, затем taskId.
+        self.assertEqual(calls, [2606747, 2001])
+        self.assertEqual(res["queue_id"], 42)
+        self.assertEqual(res["submit_error"], "")
+        self.assertEqual(res["verdict"], "solved")
+        self.assertEqual(res["comment"], "Все тесты успешно пройдены")
+
+    def test_400_both_ids_rejected_reports_honest_error(self):
+        from ai import arm_runner
+        from ai.dl_api_client import DLServerError
+
+        def fake_send(session_id, node_id, code, file_extension):
+            raise DLServerError(
+                f"send-solution(nodeId={node_id}, fileExtension='.cmp', "
+                f"codeLen=111, codeHead='...'): DL API вернул ошибку "
+                f"(код 400): Bad Request"
+            )
+
+        with patch("ai.dl_api_client.send_solution_to_dl", fake_send):
+            res = arm_runner._test_solution_on_dl(
+                "SID", 2606747, "code...", ".cmp", task_id=2001,
+            )
+        self.assertEqual(res["queue_id"], 0)
+        self.assertIn("код 400", res["submit_error"])
+        # Оба идентификатора видны оператору для проверки вручную.
+        self.assertIn("nodeId=2606747", res["submit_error"])
+        self.assertIn("taskId=2001", res["submit_error"])
+        # Старая неверная подсказка о языке удалена.
+        self.assertNotIn("язык выбран неверно", res["submit_error"])
+
+    def test_400_without_task_id_skips_fallback(self):
+        from ai import arm_runner
+        from ai.dl_api_client import DLServerError
+
+        calls = []
+
+        def fake_send(session_id, node_id, code, file_extension):
+            calls.append(node_id)
+            raise DLServerError(
+                f"send-solution(nodeId={node_id}, ...): DL API вернул ошибку "
+                f"(код 400): Bad Request"
+            )
+
+        with patch("ai.dl_api_client.send_solution_to_dl", fake_send):
+            res = arm_runner._test_solution_on_dl(
+                "SID", 2606747, "code...", ".cpp", task_id=0,
+            )
+        # Без taskId fallback не делается — ровно один вызов (по nodeId).
+        self.assertEqual(calls, [2606747])
+        self.assertEqual(res["queue_id"], 0)
+        self.assertIn("код 400", res["submit_error"])
 
 
 class SambanovaLoggerTests(SimpleTestCase):
