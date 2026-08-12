@@ -121,6 +121,29 @@ def _dl_request(method: str, path: str, **kwargs) -> requests.Response:
     return response
 
 
+def _body_snippet(response: requests.Response, limit: int = 300) -> str:
+    """Best-effort short snippet of a response body for error messages.
+
+    Used when DL returns a non-JSON body (HTML error page, empty body, nginx 413
+    page, login redirect, …) so the operator sees what actually came back instead
+    of a bare «некорректный JSON». Whitespace is collapsed; the snippet is bounded.
+    """
+    try:
+        content = response.content
+    except Exception:
+        return ""
+    if not content:
+        return " (пустой ответ)"
+    try:
+        text = content.decode("utf-8", errors="replace")
+    except Exception:
+        text = str(content[:limit])
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return f": {text}"
+
+
 def _raise_for_status(response: requests.Response) -> None:
     """Map common DL API error statuses to typed exceptions."""
     if response.status_code == 401:
@@ -131,6 +154,11 @@ def _raise_for_status(response: requests.Response) -> None:
         raise DLTaskNotFoundError()
     if response.status_code >= 500:
         raise DLServerError(f"Ошибка сервера DL (код {response.status_code})")
+    if response.status_code >= 400:
+        # Прочие 4xx (400/405/413/422/…): DL вернул ошибку запроса, тело часто
+        # HTML (страница nginx/Spring/WAF), а не JSON. Поднимаем ошибку с фрагментом
+        # тела, чтобы не пытаться парсить HTML как JSON в _decode_response_json.
+        raise DLServerError(f"DL API вернул ошибку (код {response.status_code}){_body_snippet(response)}")
 
 
 # Map every Unicode character that exists in the cp1251 code page back to
@@ -325,7 +353,12 @@ def _decode_response_json(response: requests.Response) -> dict[str, Any]:
     try:
         data = json.loads(text)
     except ValueError as exc:
-        raise DLServerError("DL API вернул некорректный JSON") from exc
+        # DL вернул 2xx, но тело не JSON (HTML-страница, пустой ответ, redirect на
+        # логин, WAF-блок…). Без статуса и фрагмента тела ошибку невозможно
+        # диагностировать — поднимаем с контекстом.
+        raise DLServerError(
+            f"DL API вернул некорректный JSON (код {response.status_code}){_body_snippet(response)}"
+        ) from exc
 
     # Repair corrupted string fields individually so that a clean Cyrillic
     # field next to a corrupted statement is not damaged.

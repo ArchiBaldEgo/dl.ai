@@ -6,7 +6,7 @@
         "kimi": "https://www.kimi.com/"
     },
 
-    "_live_inspection_2026_08": "Селекторы выверены живой инспекцией через WebKimi/seed.js --diag. Kimi сменил домен (kimi.moonshot.cn -> www.kimi.com) и убрал data-testid. Структура чата: div.chat-content-list > div.chat-content-item.chat-content-item-assistant (последний = текущий ответ) > div.markdown-container > div.markdown (растёт при стриминге). Поле ввода: div.chat-input-editor[role=textbox] (contenteditable). Кнопку отправки намеренно НЕ используем — waitAndClickX жжёт 30с на промахе; Enter в contenteditable отправляет надёжно. Кнопку Stop пока не нашли — завершение определяется confirmMs-перечитыванием (см. promtps.js STOP_GENERATING_XPATHS + waitLastOuterHtmlStable).",
+    "_live_inspection_2026_08": "ВНИМАНИЕ: эта инспекция УСТАРЕЛА — worker/logs/application.log показывает, что div.markdown теперь совпадает с пустым скелетом ('matched an empty skeleton (1 chars text)'), т.е. Kimi снова сменил вёрстку и текст ответа больше не внутри div.markdown. Селекторы answer.kimi (//div[..markdown..]) поэтому ловят пустоту. Ответ теперь достаётся НЕ по классу, а класс-независимым robust-fallback в promtps.js (getRobustLastAnswerHtml): берётся весь последний «пузырь» ассистента по структурным признакам (class*='assistant' / последний дочерний блок чат-контейнера) и конвертируется целиком. При провале всех селекторов в лог дампится DOM-диагностика (dumpDomDiagnostics) — по ней можно откалибровать answer.kimi заново. Поле ввода: div.chat-input-editor[role=textbox] (contenteditable). Enter в contenteditable отправляет надёжно.",
 
     "xpaths": {
         "auth": {

@@ -244,7 +244,7 @@ async function isStillGenerating(page) {
   return false;
 }
 
-async function waitLastOuterHtmlStable(page, xpath, {
+async function waitLastOuterHtmlStable(page, xpathOrGetter, {
     timeoutMs = 300000,
     appearTimeoutMs = 20000,
     pollMs = 2000,
@@ -275,17 +275,27 @@ async function waitLastOuterHtmlStable(page, xpath, {
     //   12с «стабильности» были паузой в генерации, а не завершением (продолжаем
     //   ждать). Это единственный надёжный сигнал завершения, если селектор кнопки
     //   Stop устарел — без него ответ обрезается посередине (DeepSeek генерит паузами).
+    // xpathOrGetter: либо строка XPath (как раньше), либо async-геттер (page) => html.
+    // Геттер используется класс-независимым robust-fallback (getRobustLastAnswerHtml):
+    // для него появления ждёт сам poll-цикл (minContentLength), waitForXPathCompat не нужен.
+    const isGetter = (typeof xpathOrGetter === 'function');
+    const readNow = isGetter
+        ? () => xpathOrGetter(page)
+        : () => getLastOuterHtmlByXPath(page, xpathOrGetter);
+
     const start = Date.now();
 
-    // Дожидаемся появления элемента (appearTimeoutMs, НЕ timeoutMs — см. комментарий выше)
-    await waitForXPathCompat(page, xpath, { timeoutMs: appearTimeoutMs, visible });
+    // Дожидаемся появления элемента (appearTimeoutMs, НЕ timeoutMs — см. комментарий выше) — только для XPath.
+    if (!isGetter) {
+        await waitForXPathCompat(page, xpathOrGetter, { timeoutMs: appearTimeoutMs, visible });
+    }
 
     let prev = null;
     let sameCount = 0;
     let lastNonEmpty = null;
 
     while (Date.now() - start < timeoutMs) {
-        const cur = await getLastOuterHtmlByXPath(page, xpath);
+        const cur = await readNow();
 
         // Reject empty/too-short answers — DeepSeek hasn't started generating yet.
         if (minContentLength > 0 && (!cur || cur.length < minContentLength)) {
@@ -316,7 +326,7 @@ async function waitLastOuterHtmlStable(page, xpath, {
                 // иначе ответ обрежется посередине предложения.
                 if (confirmMs > 0) {
                     await sleep(confirmMs);
-                    const recheck = await getLastOuterHtmlByXPath(page, xpath);
+                    const recheck = await readNow();
                     if (recheck !== cur) {
                         log('waitLastOuterHtmlStable: content grew after stable window — generation paused, not finished (' + (recheck ? recheck.length : 0) + ' vs ' + cur.length + ' chars)');
                         prev = recheck;
@@ -343,7 +353,7 @@ async function waitLastOuterHtmlStable(page, xpath, {
         return lastNonEmpty;
     }
 
-    throw new Error(`waitLastOuterHtmlStable timeout for xpath: ${xpath}`);
+    throw new Error(`waitLastOuterHtmlStable timeout for xpath: ${isGetter ? '<getter>' : xpathOrGetter}`);
 }
 
 async function getDeepseekLastAnswerHtml(ctx, data, {
@@ -362,6 +372,123 @@ async function getDeepseekLastAnswerHtml(ctx, data, {
     const answerHtml = await waitLastOuterHtmlStable(page, ansXPath, { timeoutMs, pollMs, stableTicks });
 
     return { fullHtml, answerHtml };
+}
+
+async function getRobustLastAnswerHtml(page) {
+  // Класс-независимый robust-fallback: находит последний «пузырь» ответа ассистента
+  // по устойчивым структурным признакам (data-testid, ARIA role, class*='assistant'/
+  // 'message', последний дочерний блок чат-контейнера) и возвращает его outerHTML.
+  // НЕ опирается на конкретные имена классов ('ds-markdown' и т.п.), которые DeepSeek
+  // регулярно меняет — поэтому переживает смену вёрстки. Весь пузырь целиком скарм-
+  // ливается deepseekHtmlToApiMarkdown: она снимет теги и сохранит code blocks.
+  return page.evaluate(() => {
+    const containerSels = [
+      "[data-testid='virtuoso-item-list']",
+      "[data-testid*='chat-list']",
+      "[data-testid*='message-list']",
+      "[data-testid*='conversation']",
+      "[role='log']",
+      "[role='feed']",
+      "[class*='chat-content-list']",
+      "[class*='message-list']",
+      "[class*='chat-list']",
+      "[class*='conversation']",
+    ];
+    let container = null;
+    for (const sel of containerSels) {
+      const el = document.querySelector(sel);
+      if (el && (el.innerText || '').trim().length > 20) { container = el; break; }
+    }
+
+    // «Пузырь» ответа ассистента (по убыванию специфичности). Сайт-специфичные
+    // class*='ds-message' / class*='chat-content-item-assistant' подсказки безвредны
+    // на чужом сайте (просто не совпадают) и полезны на своём.
+    const bubbleSels = [
+      "[data-testid*='assistant']",
+      "[data-testid*='answer']",
+      "[class*='chat-content-item-assistant']",
+      "[class*='ds-message']",
+      "[class*='assistant']",
+      "[class*='answer']",
+      "[role='article']",
+      "[class*='message']",
+    ];
+
+    const pickLastWithText = (root) => {
+      if (!root) return null;
+      for (const sel of bubbleSels) {
+        const nodes = root.querySelectorAll(sel);
+        for (let i = nodes.length - 1; i >= 0; i--) {
+          if ((nodes[i].innerText || '').trim().length > 0) return nodes[i];
+        }
+      }
+      // Крайний случай: последний дочерний блок контейнера с substantial текстом
+      // (user-сообщение идёт выше — последний с текстом = текущий ответ ассистента).
+      const children = Array.from(root.children || []);
+      for (let i = children.length - 1; i >= 0; i--) {
+        if ((children[i].innerText || '').trim().length > 10) return children[i];
+      }
+      return null;
+    };
+
+    const bubble = pickLastWithText(container) || pickLastWithText(document.body);
+    if (!bubble) return '';
+    return bubble.outerHTML || '';
+  });
+}
+
+async function dumpDomDiagnostics(page) {
+  // Когда ВСЕ селекторы ответа (включая robust) провалились — печатаем снимок
+  // структуры DOM в лог, чтобы калибровать селекторы без живого доступа к сайту.
+  try {
+    const diag = await page.evaluate(() => {
+      const trunc = (s, n) => (s && s.length > n ? s.slice(0, n) + '…[' + s.length + ']' : s) || '';
+      const sels = [
+        "[data-testid='virtuoso-item-list']",
+        "[data-testid*='chat']",
+        "[data-testid*='message']",
+        "[data-testid*='answer']",
+        "[data-testid*='assistant']",
+        "[role='log']",
+        "[role='feed']",
+        "[role='article']",
+        "[class*='chat-content']",
+        "[class*='chat-list']",
+        "[class*='message']",
+        "[class*='conversation']",
+        "[class*='ds-message']",
+        "[class*='ds-markdown']",
+        "[class*='markdown']",
+        "[class*='assistant']",
+        "[class*='answer']",
+      ];
+      const candidates = [];
+      for (const sel of sels) {
+        const els = document.querySelectorAll(sel);
+        if (els.length) {
+          const last = els[els.length - 1];
+          candidates.push({
+            sel,
+            count: els.length,
+            tag: last.tagName,
+            cls: trunc(String(last.className || ''), 140),
+            textLen: (last.innerText || '').trim().length,
+            outerHead: trunc(last.outerHTML || '', 500),
+          });
+        }
+      }
+      return {
+        url: location.href,
+        title: document.title,
+        bodyTextLen: (document.body.innerText || '').length,
+        bodyTextTail: trunc(document.body.innerText || '', 600),
+        candidates,
+      };
+    });
+    log('DOM DIAGNOSTICS (all answer selectors failed): ' + JSON.stringify(diag).slice(0, 3500));
+  } catch (e) {
+    log('DOM diagnostics dump failed: ' + (e?.message || e));
+  }
 }
 
 async function sendMessage(ctx, payload = {}) {
@@ -499,10 +626,43 @@ async function sendMessage(ctx, payload = {}) {
         }
 
         if (!answer) {
+            // Robust класс-независимый fallback: XPath-селекторы опираются на имена
+            // классов ('ds-markdown'), которые DeepSeek меняет — тогда они ловят
+            // пустой скелет. Берём вместо этого последний «пузырь» ассистента целиком
+            // по структурным признакам (getRobustLastAnswerHtml) и конвертируем весь
+            // outerHTML — текст ответа + code blocks сохраняются.
+            try {
+                const robustHtml = await waitLastOuterHtmlStable(page, getRobustLastAnswerHtml, {
+                    timeoutMs: 120000,
+                    pollMs: 2000,
+                    stableTicks: 6,
+                    minContentLength: 50,
+                    checkStopButton: true,
+                    confirmMs: 5000,
+                });
+                if (robustHtml) {
+                    inner = deepseekHtmlToApiMarkdown(robustHtml);
+                    if (inner && inner.trim().length >= 1) {
+                        answer = robustHtml;
+                        answerXpUsed = 'robust-fallback';
+                        log('Robust fallback succeeded: extracted answer from generic assistant bubble (' + inner.trim().length + ' chars text)');
+                    } else {
+                        log('Robust fallback matched a bubble but converter yielded empty text');
+                    }
+                }
+            } catch (e) {
+                log('Robust fallback failed: ' + (e?.message || e));
+            }
+        }
+
+        if (!answer) {
+            // Все селекторы (включая robust) провалились — дампим структуру DOM в лог,
+            // чтобы калибровать селекторы без живого доступа к сайту.
+            await dumpDomDiagnostics(page);
             return {
                 ok: false,
                 reason: "can't send message",
-                data: { "moreInformation": "All answer XPath selectors failed — DeepSeek UI may have changed" }
+                data: { "moreInformation": "All answer XPath selectors failed — DeepSeek UI may have changed (DOM diagnostics dumped to worker log)" }
             };
         }
 

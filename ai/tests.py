@@ -1014,6 +1014,70 @@ class DLApiClientEncodingTests(SimpleTestCase):
         cyrillic = sum(1 for c in result["statement"] if "Ѐ" <= c <= "ӿ")
         self.assertGreater(cyrillic, 1000)
 
+    def test_non_json_response_error_includes_status_and_snippet(self):
+        """When DL returns a 2xx with a non-JSON body (HTML error page, empty
+        body, login redirect, …), the error must carry the HTTP status and a
+        body snippet so the operator can diagnose it — not a bare «некорректный
+        JSON»."""
+        from ai.dl_api_client import DLServerError, _decode_response_json
+
+        class FakeResponse:
+            status_code = 200
+            content = b"<!DOCTYPE html><html><body>413 Request Entity Too Large</body></html>"
+
+        with self.assertRaises(DLServerError) as cm:
+            _decode_response_json(FakeResponse())
+        msg = str(cm.exception)
+        self.assertIn("код 200", msg)
+        self.assertIn("413 Request Entity Too Large", msg)
+
+    def test_non_json_empty_response_error_notes_empty_body(self):
+        from ai.dl_api_client import DLServerError, _decode_response_json
+
+        class FakeResponse:
+            status_code = 200
+            content = b""
+
+        with self.assertRaises(DLServerError) as cm:
+            _decode_response_json(FakeResponse())
+        self.assertIn("пустой ответ", str(cm.exception))
+
+    def test_raise_for_status_handles_generic_4xx_with_body(self):
+        """Unmapped 4xx (400/405/413/422) must raise a typed error with the body
+        snippet instead of falling through to JSON parsing of an HTML page."""
+        from ai.dl_api_client import _raise_for_status, DLServerError
+
+        class FakeResponse:
+            status_code = 413
+            content = b"<html>nginx 413 Too Large</html>"
+
+        with self.assertRaises(DLServerError) as cm:
+            _raise_for_status(FakeResponse())
+        msg = str(cm.exception)
+        self.assertIn("413", msg)
+        self.assertIn("nginx 413 Too Large", msg)
+
+    def test_raise_for_status_still_maps_known_statuses(self):
+        from ai.dl_api_client import (
+            _raise_for_status,
+            DLUnauthorizedError,
+            DLForbiddenError,
+            DLTaskNotFoundError,
+            DLServerError,
+        )
+
+        class R:
+            def __init__(self, code, body=b""):
+                self.status_code = code
+                self.content = body
+
+        self.assertRaises(DLUnauthorizedError, _raise_for_status, R(401))
+        self.assertRaises(DLForbiddenError, _raise_for_status, R(403))
+        self.assertRaises(DLTaskNotFoundError, _raise_for_status, R(404))
+        self.assertRaises(DLServerError, _raise_for_status, R(500))
+        # 200 — no raise.
+        _raise_for_status(R(200))
+
 
 class ConversationHistoryTests(TestCase):
     def setUp(self):
