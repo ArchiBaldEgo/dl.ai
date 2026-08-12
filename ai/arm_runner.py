@@ -103,10 +103,12 @@ _VERDICT_FAILED = "failed"
 _VERDICT_SKIPPED = "skipped"
 
 
-def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None):
+def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None, topic_id=None):
     """Compose the solve prompt for one task.
 
     If prompt_id is given, use that specific SharedPrompt or Prompt.
+    If topic_id is given and no prompt_id, try a topic-bound Prompt first
+    (it contains language-specific instructions like C-MPA/ASM syntax rules).
     Otherwise fall back to the SharedPrompt with mode="solve", then to a
     plain Russian instruction.
     """
@@ -136,6 +138,28 @@ def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language
                 )
             except (Prompt.DoesNotExist, ValueError):
                 pass
+
+    # No explicit prompt — try a topic-bound Prompt (language-specific syntax
+    # instructions are critical for C-MPA / ASM i8086 tasks).
+    topic_prompt_text = None
+    if not message and topic_id:
+        topic_prompt = (
+            Prompt.objects.filter(topic_id=topic_id)
+            .order_by("id")
+            .first()
+        )
+        if topic_prompt:
+            topic_prompt_text = topic_prompt.get_effective_text(
+                ui_language, prog_lang_name, topic_name, task_statement, ""
+            )
+
+    # Build the final message. For topic-bound prompts, put the task statement
+    # FIRST so the model sees it even if the prompt is long (ASM-i86-1 is ~5k
+    # chars — Web DeepSeek may not see the end of a long message).
+    if topic_prompt_text and task_statement and task_statement.strip():
+        message = f"Условие задачи:\n{task_statement}\n\n{topic_prompt_text}"
+    elif topic_prompt_text:
+        message = topic_prompt_text
 
     # Fall back to SharedPrompt with mode="solve".
     if not message:
@@ -969,7 +993,8 @@ def _run_batch_job_worker(
 
                 try:
                     message = _build_solve_message(
-                        task.statement, prog_lang_name, topic_name, ui_language, prompt_id
+                        task.statement, prog_lang_name, topic_name, ui_language, prompt_id,
+                        topic_id=task.topic_id,
                     )
                     response = async_to_sync(model["handler"])(
                         message,

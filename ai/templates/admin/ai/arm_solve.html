@@ -626,16 +626,6 @@
           name.className = 'arm-tree-task-name';
           name.textContent = node.name || '(без названия)';
           li.appendChild(name);
-          const badge = document.createElement('span');
-          badge.className = 'arm-tree-badge ' + (node.has_statement ? 'ok' : 'no');
-          badge.textContent = node.has_statement ? 'есть условие' : 'нет условия';
-          li.appendChild(badge);
-          if (node.task_id) {
-            const meta = document.createElement('span');
-            meta.className = 'arm-tree-task-meta';
-            meta.textContent = 'taskId: ' + node.task_id;
-            li.appendChild(meta);
-          }
           container.appendChild(li);
         }
       });

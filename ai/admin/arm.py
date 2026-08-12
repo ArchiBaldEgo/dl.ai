@@ -382,31 +382,22 @@ def admin_arm_solve_load_tree_view(request):
         DLApiError,
         fetch_course_nodes,
         fetch_node_tree,
-        fetch_task_info,
     )
 
     def _enrich_node(node):
-        """Recursively enrich task leaves with statement/taskId."""
+        """Recursively mark task leaves. Statements are NOT fetched here —
+        loading 277 get-task-info requests serially takes minutes and times
+        out. The statement/taskId are fetched on-demand in ensure_task when
+        the batch run starts. Here we only set placeholder fields so the UI
+        can render badges without a statement.
+        """
         if not isinstance(node, dict):
             return node
         is_folder = node.get("isFolder", False)
         if not is_folder:
-            node_id = node.get("nodeId")
-            statement = ""
-            task_id = 0
-            if node_id:
-                try:
-                    info = fetch_task_info(
-                        node_id, session_id=session_id,
-                        remove_html_tags=True, course_id=course_id,
-                    )
-                    statement = info.get("statement") or ""
-                    task_id = info.get("taskId") or 0
-                except (DLApiError, Exception):
-                    pass
-            node["statement"] = statement or ""
-            node["task_id"] = task_id
-            node["has_statement"] = bool(statement)
+            node["statement"] = ""
+            node["task_id"] = 0
+            node["has_statement"] = False
         else:
             node["statement"] = ""
             node["task_id"] = 0

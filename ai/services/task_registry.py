@@ -58,6 +58,7 @@ _PATH_KEYWORDS = [
     ("c-mpa", ".cmp"),
     ("с-мпа", ".cmp"),
     ("cmpa", ".cmp"),
+    ("hlccad", ".cmp"),  # HLCCAD uses C-MPA language
     ("python", ".py"),
     ("pascal", ".pas"),
     ("verilog", ".v"),
@@ -104,6 +105,58 @@ def _guess_extension(prog_lang_name: str) -> str:
     return ""
 
 
+# Mapping from DL path fragments to local Topic names. The DL course tree
+# uses folder names that are close but not identical to Topic.topic_name, so
+# we match by substring. Order matters: more specific patterns first.
+_PATH_TOPIC_KEYWORDS = [
+    # Specific sub-folder names first (both branches share some names like
+    # "Условное вычисление выражений" — we distinguish by the branch prefix).
+    # HLCCAD sub-folders — match before the generic "hlccad" catch-all.
+    ("по логическим функциям", "Логические функции"),
+    ("логические функции", "Логические функции"),
+    ("по таблицам истинности", "Таблицы истинности"),
+    ("таблицам истинности", "Таблицы истинности"),
+    ("комбинационн", "Комбинационные схемы"),
+    ("простые устройства с памятью", "Устройства с памятью"),
+    ("устройства с памятью", "Устройства с памятью"),
+    # Plain ASM/CMPA branch sub-folders
+    ("обработка строк", "Обработка строк"),
+    ("одномерн", "Одномерный массив"),  # "Одномерные числовые массивы"
+    ("цифры числа", "Цифры числа"),
+    ("цифры числ", "Цифры числа"),
+    # "Условное вычисление выражений" appears in both branches.
+    # Distinguish by branch prefix in the path:
+    #   HLCCAD branch → topic 11, plain branch → topic 2.
+    ("hlccad", "HLCCAD - Условное вычисление выражений"),
+    ("условное вычисление выражений", "Условное вычисление выражений"),
+    ("условные вычисления выражений", "Условные вычисления выражений"),
+    # "Простейшая (Программы с подсказками)" — basic ASM tasks (add/sub/mul/
+    # div/cmp). Use the ASM topic as default — it has the i8086 syntax rules.
+    ("программы с подсказками", "Условные вычисления выражений"),
+    ("простейшая", "Условные вычисления выражений"),
+]
+
+
+def _guess_topic_from_path(path: str):
+    """Best-effort: find a local Topic from a DL task path.
+
+    Returns the Topic instance or None. The DL path contains folder names
+    (e.g. "Программирование [Ассемблер i8086, C-MPA]\\Условное вычисление
+    выражений\\...") that correspond to local Topic names. We match by
+    keyword substring (case-insensitive) and then look up the Topic by name.
+    """
+    if not path:
+        return None
+    from ..models import Topic
+    low = path.lower()
+    for keyword, topic_name in _PATH_TOPIC_KEYWORDS:
+        if keyword in low:
+            topic = Topic.objects.filter(topic_name__iexact=topic_name).first()
+            if topic:
+                return topic
+    return None
+
+
 def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session_id=None, course_id=None):
     """Get-or-create a ``Task`` row for a DL node id; best-effort DL fill on create.
 
@@ -142,8 +195,28 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
             if topic_id is not None and task.topic_id != topic_id:
                 task.topic_id = topic_id
                 dirty = True
+            # Backfill missing topic/extension/statement from DL for pre-existing
+            # tasks created before auto-detection was added.
+            if session_id and (not task.topic_id or not task.file_extension or not task.statement):
+                try:
+                    data = fetch_task_info(node_id, session_id=session_id, remove_html_tags=True, course_id=course_id)
+                except DLApiError:
+                    data = None
+                if data:
+                    path = data.get("path", "")
+                    apply_dl_task_info(task, data)
+                    if not task.file_extension and path:
+                        guessed = _guess_extension(path)
+                        if guessed:
+                            task.file_extension = guessed
+                            dirty = True
+                    if not task.topic_id and path:
+                        guessed_topic = _guess_topic_from_path(path)
+                        if guessed_topic:
+                            task.topic_id = guessed_topic.id
+                            dirty = True
             if dirty:
-                task.save(update_fields=["programming_language_id", "topic_id"])
+                task.save(update_fields=["programming_language_id", "topic_id", "file_extension", "name", "statement", "task_id"])
             return task
 
         # Created — best-effort fill name/statement/task_id from DL (once).
@@ -154,12 +227,18 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
                 data = None
             if data:
                 apply_dl_task_info(task, data)
+                path = data.get("path", "")
                 # If file_extension is still empty, try to guess from path.
-                if not task.file_extension and data.get("path"):
-                    guessed = _guess_extension(data["path"])
+                if not task.file_extension and path:
+                    guessed = _guess_extension(path)
                     if guessed:
                         task.file_extension = guessed
-                task.save(update_fields=["task_id", "name", "statement", "file_extension"])
+                # If topic is not set, try to guess from DL path.
+                if not task.topic_id and path:
+                    guessed_topic = _guess_topic_from_path(path)
+                    if guessed_topic:
+                        task.topic_id = guessed_topic.id
+                task.save(update_fields=["task_id", "name", "statement", "file_extension", "topic"])
         return task
     except Exception:
         logger.exception("ensure_task failed for node_id=%s", node_id)
