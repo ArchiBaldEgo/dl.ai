@@ -474,6 +474,22 @@ def fetch_task_solution(session_id: str, task_id: int, file_extension: str) -> d
     return _decode_response_json(response)
 
 
+def _send_solution_payload_context(node_id, code, file_extension) -> str:
+    """Build a diagnostic context string for send-solution failures.
+
+    DL returns a bare «Bad Request» (400) without saying WHICH field it rejected,
+    so we attach the payload context (nodeId, fileExtension, code length and a
+    short head of the code) to the error. This lets the operator tell apart:
+    oversized code (codeLen huge), a non-code payload from a broken extraction
+    (codeHead is prose, not source), or an unsupported fileExtension.
+    """
+    code_head = " ".join((code or "").split())[:120]
+    return (
+        f"send-solution(nodeId={node_id}, fileExtension={file_extension!r}, "
+        f"codeLen={len(code or '')}, codeHead={code_head!r})"
+    )
+
+
 def send_solution_to_dl(
     session_id: str,
     node_id: int,
@@ -498,8 +514,14 @@ def send_solution_to_dl(
         },
     )
 
-    _raise_for_status(response)
-    return _decode_response_json(response)
+    # 400/413/5xx: DL отдаёт голое «Bad Request» без указания поля — прикладываем
+    # контекст payload (nodeId/extension/длина кода/начало кода) для диагностики.
+    # 401/403/404 оставляем типизированными (не оборачиваем).
+    try:
+        _raise_for_status(response)
+        return _decode_response_json(response)
+    except DLServerError as exc:
+        raise DLServerError(f"{_send_solution_payload_context(node_id, code, file_extension)}: {exc}") from exc
 
 
 def get_solution_result_from_dl(
