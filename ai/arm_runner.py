@@ -753,7 +753,7 @@ def _extract_code_from_response(text):
     return text.strip()
 
 
-def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0):
+def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None):
     """Send code to DL for real testing and poll for the result.
 
     Returns a dict:
@@ -763,8 +763,14 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
             "submit_error": str,   # error message if send-solution failed
             "queue_id": int,       # DL queue id (0 if submit failed)
             "code_sent": str,      # the code that was sent to DL
+            "cancelled": bool,     # True if aborted by cancel request
         }
     verdict is None if the DL test could not be performed.
+
+    ``run_id`` (опционально) — id batch-прогона: если передан, цикл поллинга
+    проверяет ``_is_cancel_requested(run_id)`` перед каждой итерацией и
+    прерывается досрочно (отмена срабатывает в пределах одного ``poll_interval``
+    вместо ожидания всех ``max_polls``).
     """
     from .dl_api_client import send_solution_to_dl, get_solution_result_from_dl, DLServerError
 
@@ -774,6 +780,7 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
         "submit_error": "",
         "queue_id": 0,
         "code_sent": code[:5000],
+        "cancelled": False,
     }
 
     # Step 1: submit code to DL.
@@ -786,7 +793,7 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
         # 400 от send-solution недокументировано (док описывает только 401/500),
         # DL не поясняет, какое поле отвергнуто. Ранее предполагалось, что DL
         # валидирует расширение против платформ задачи, но это опровергнуто
-        # пользователем: и .i86, и .cmp для одной ноды дают 400 при корректном
+        # пользователем: и .i86, и .mpc для одной ноды дают 400 при корректном
         # коде, а язык выбран верно. Значит 400 не про расширение.
         #
         # Проверяем эмпирическую гипотезу (выдвинутую пользователем: «с твоим
@@ -834,6 +841,12 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
 
     # Step 2: poll for the result.
     for _ in range(max_polls):
+        # Кооперативная отмена: проверяем флаг перед каждой итерацией поллинга,
+        # иначе прерванный прогон висел бы до max_polls*poll_interval (до 90с).
+        if run_id is not None and _is_cancel_requested(run_id):
+            result["submit_error"] = "cancelled"
+            result["cancelled"] = True
+            return result
         time.sleep(poll_interval)
         try:
             poll_resp = get_solution_result_from_dl(session_id, queue_id)
@@ -968,7 +981,7 @@ def _run_batch_job_worker(
             # DL tree tasks that have no programming_language set.
             if not prog_lang_name and effective_ext:
                 _ext_to_lang = {
-                    ".py": "Python", ".cmp": "C-MPA", ".i86": "Ассемблер i8086",
+                    ".py": "Python", ".mpc": "C-MPA", ".i86": "Ассемблер i8086",
                     ".asm": "Ассемблер i8086",
                     ".pas": "Pascal", ".v": "Verilog", ".cpp": "C++", ".c": "C",
                     ".java": "Java",
@@ -1000,6 +1013,11 @@ def _run_batch_job_worker(
                         message,
                         f"admin-batch-{user_id}-{model['key']}-{run_id}-{task.node_id}",
                     )
+                    # Отмена могла прийти во время LLM-вызова (его самого не
+                    # прервать) — не тратим время на DL-тест и запись пары.
+                    if _is_cancel_requested(run_id):
+                        cancelled = True
+                        break
                     response_text, tokens = _extract_model_response(response)
                     cleaned_text = strip_tags(response_text).strip()
                     friendly, detailed = humanize_model_error(cleaned_text, include_detail=True)
@@ -1030,7 +1048,13 @@ def _run_batch_job_worker(
                             dl_result = _test_solution_on_dl(
                                 session_id, task.node_id, code_only, effective_ext,
                                 task_id=task.task_id or 0,
+                                run_id=run_id,
                             )
+                            # Отмена пришла во время поллинга DL — прерываем без
+                            # записи пары (вердикт не определён).
+                            if dl_result.get("cancelled") or _is_cancel_requested(run_id):
+                                cancelled = True
+                                break
                             dl_test_comment = dl_result.get("comment", "") or ""
                             dl_submit_error = dl_result.get("submit_error", "") or ""
                             dl_verdict = dl_result.get("verdict")

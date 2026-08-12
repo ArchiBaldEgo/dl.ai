@@ -72,13 +72,26 @@
     font-weight: 600;
     color: var(--body-quiet-color);
   }
-  .arm-summary-table td.arm-col-num {
+  .arm-summary-table td.arm-col-num,
+  .arm-summary-table th.arm-col-num {
     text-align: right;
     white-space: nowrap;
+    /* Числовые колонки сжимаются до содержимого (width:1%), а колонка-обозначение
+       занимает остаток — значения не «уезжают» далеко вправо от подписей. */
+    width: 1%;
   }
   .arm-tasks td,
   .arm-tasks th {
     vertical-align: middle;
+  }
+  /* Убрать спиннеры поштучного добавления у поля course_id (он же «nodeId»). */
+  #armCourseId::-webkit-inner-spin-button,
+  #armCourseId::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  #armCourseId {
+    -moz-appearance: textfield;
   }
 
   .arm-models {
@@ -305,26 +318,27 @@
       <input type="hidden" name="interface_language" value="Русский">
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
-          <h2>Препромпт</h2>
-          <p class="arm-section-note">Выберите промпт для решения задач. По умолчанию используется системный solve-промпт.</p>
+          <h2>Язык / расширение для тестирования</h2>
+          <p class="arm-section-note">DL REST send-solution требует расширение файла. Курс может содержать задачи разных языков (например «[Ассемблер i8086, C-MPA]» — каждая задача допускает и .i86, и .mpc), поэтому выберите нужный вручную. Препромт выбирается после расширения — для каждого расширения свой список.</p>
         </div>
       </div>
-      <select name="prompt_id" id="armPromptSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
-        <option value="">— Системный (по умолчанию) —</option>
-        {% for p in prompt_options %}
-          <option value="{{ p.id }}">{{ p.name }}</option>
+      <select name="file_extension" id="armExtensionSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
+        <option value="" disabled selected>— выберите расширение —</option>
+        {% for opt in extension_options %}
+          <option value="{{ opt.value }}">{{ opt.label }}</option>
         {% endfor %}
       </select>
 
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
-          <h2>Язык / расширение для тестирования</h2>
-          <p class="arm-section-note">DL REST send-solution требует расширение файла. Курс может содержать задачи разных языков (например «[Ассемблер i8086, C-MPA]» — каждая задача допускает и .i86, и .cmp), поэтому выберите нужный вручную. «По умолчанию» — авто-определение из задачи.</p>
+          <h2>Препромпт</h2>
+          <p class="arm-section-note">Сначала выберите расширение выше — для каждого расширения свой список препромтов. Отправка без препромта невозможна.</p>
         </div>
       </div>
-      <select name="file_extension" id="armExtensionSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
-        {% for opt in extension_options %}
-          <option value="{{ opt.value }}">{{ opt.label }}</option>
+      <select name="prompt_id" id="armPromptSelect" disabled style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
+        <option value="">— выберите расширение сначала —</option>
+        {% for p in prompt_options %}
+          <option value="{{ p.id }}">{{ p.name }}</option>
         {% endfor %}
       </select>
 
@@ -380,6 +394,9 @@
     const resultsEl = document.getElementById('armSolveResults');
     const startUrl = '{{ arm_solve_start_url }}';
     const statusUrl = '{{ arm_solve_status_url }}';
+    const promptsUrl = '{{ arm_solve_prompts_url }}';
+    const extensionSelect = document.getElementById('armExtensionSelect');
+    const promptSelect = document.getElementById('armPromptSelect');
     let currentRunId = '';
     let pollTimer = null;
 
@@ -431,7 +448,7 @@
         wrapEl.appendChild(empty);
         return;
       }
-      const head = '<thead><tr><th>' + escapeHtml(labelHeader) + '</th><th>% решённых</th><th>Среднее время, сек</th><th>Токены</th><th>Решено / Всего</th></tr></thead>';
+      const head = '<thead><tr><th>' + escapeHtml(labelHeader) + '</th><th class="arm-col-num">% решённых</th><th class="arm-col-num">Среднее время, сек</th><th class="arm-col-num">Токены</th><th class="arm-col-num">Решено / Всего</th></tr></thead>';
       const body = rows.map(function (r) {
         return '<tr><td>' + escapeHtml(r.label) + '</td>'
           + '<td class="arm-col-num">' + escapeHtml(r.percent_solved) + '</td>'
@@ -652,6 +669,13 @@
         loadTreeMsg.textContent = 'Введите course_id';
         return;
       }
+      // 0 = пусто: дерево не грузим, кэш не трогаем (соглашение /arm/solve/).
+      if (parseInt(courseId, 10) === 0) {
+        renderTree([]);
+        loadTreeMsg.style.color = '#6b7280';
+        loadTreeMsg.textContent = 'nodeId = 0 (пусто)';
+        return;
+      }
       loadTreeMsg.style.color = '';
       loadTreeMsg.textContent = 'Загрузка дерева...';
       loadTreeBtn.disabled = true;
@@ -680,9 +704,59 @@
       loadTreeBtn.addEventListener('click', loadTree);
     }
 
-    // Промпты уже отрендерены сервером в <select> (SharedPrompt + Prompt через
-    // ACL). Тема из дерева DL не вычисляется, поэтому список не зависит от
-    // выбранных задач — отдельная загрузка не нужна.
+    // Препромты грузятся с бэкенда по выбранному расширению (/solve/prompts/).
+    // Список зависит от расширения (маппинг расширение→ProgrammingLanguage→
+    // Prompt.topic.programming_language), общие SharedPrompt не предлагаются.
+    function setPromptOptions(options, placeholder) {
+      promptSelect.innerHTML = '';
+      const ph = document.createElement('option');
+      ph.value = '';
+      ph.textContent = placeholder;
+      promptSelect.appendChild(ph);
+      options.forEach(function (opt) {
+        const o = document.createElement('option');
+        o.value = opt.id;
+        o.textContent = opt.name;
+        promptSelect.appendChild(o);
+      });
+      promptSelect.value = '';
+    }
+
+    async function loadPrompts(extension) {
+      if (!extension) {
+        setPromptOptions([], '— выберите расширение сначала —');
+        promptSelect.disabled = true;
+        return;
+      }
+      setPromptOptions([], 'Загрузка препромтов...');
+      promptSelect.disabled = true;
+      try {
+        const response = await fetch(promptsUrl + '?file_extension=' + encodeURIComponent(extension), {
+          method: 'GET', credentials: 'same-origin',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка загрузки препромтов'); }
+        const opts = data.prompt_options || [];
+        if (!opts.length) {
+          setPromptOptions([], '— нет препромтов для этого расширения —');
+          promptSelect.disabled = true;
+          return;
+        }
+        setPromptOptions(opts, '— выберите препромт —');
+        promptSelect.disabled = false;
+      } catch (error) {
+        setPromptOptions([], '— ошибка загрузки препромтов —');
+        setError(error.message || 'Ошибка загрузки препромтов');
+        promptSelect.disabled = true;
+      }
+    }
+
+    if (extensionSelect) {
+      extensionSelect.addEventListener('change', function () {
+        loadPrompts(extensionSelect.value.trim());
+      });
+    }
 
     // Cancel button
     if (cancelBtn) {
@@ -718,6 +792,11 @@
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
       if (submitBtn.disabled) { return; }
+      // Расширение и препромт обязательны (дублирует серверную валидацию).
+      const ext = extensionSelect ? extensionSelect.value.trim() : '';
+      const pid = promptSelect ? promptSelect.value.trim() : '';
+      if (!ext) { setError('Сначала выберите расширение файла.'); return; }
+      if (!pid) { setError('Выберите препромт (после выбора расширения).'); return; }
       if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
       setSubmitDisabled(true);
       setError('');

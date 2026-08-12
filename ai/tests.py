@@ -2112,7 +2112,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
             calls.append(node_id)
             if node_id == 2606747:
                 raise DLServerError(
-                    "send-solution(nodeId=2606747, fileExtension='.cmp', "
+                    "send-solution(nodeId=2606747, fileExtension='.mpc', "
                     "codeLen=111, codeHead='...'): DL API вернул ошибку "
                     "(код 400): Bad Request"
                 )
@@ -2125,7 +2125,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
         with patch("ai.dl_api_client.send_solution_to_dl", fake_send), \
                 patch("ai.dl_api_client.get_solution_result_from_dl", fake_poll):
             res = arm_runner._test_solution_on_dl(
-                "SID", 2606747, "code...", ".cmp",
+                "SID", 2606747, "code...", ".mpc",
                 max_polls=1, poll_interval=0, task_id=2001,
             )
         # Сначала nodeId, затем taskId.
@@ -2141,14 +2141,14 @@ class TestSolutionOnDlTests(SimpleTestCase):
 
         def fake_send(session_id, node_id, code, file_extension):
             raise DLServerError(
-                f"send-solution(nodeId={node_id}, fileExtension='.cmp', "
+                f"send-solution(nodeId={node_id}, fileExtension='.mpc', "
                 f"codeLen=111, codeHead='...'): DL API вернул ошибку "
                 f"(код 400): Bad Request"
             )
 
         with patch("ai.dl_api_client.send_solution_to_dl", fake_send):
             res = arm_runner._test_solution_on_dl(
-                "SID", 2606747, "code...", ".cmp", task_id=2001,
+                "SID", 2606747, "code...", ".mpc", task_id=2001,
             )
         self.assertEqual(res["queue_id"], 0)
         self.assertIn("код 400", res["submit_error"])

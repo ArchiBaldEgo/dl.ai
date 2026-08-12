@@ -7,6 +7,7 @@
 """
 
 from .site import ai_admin_site
+from django.core.cache import cache
 from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
@@ -21,8 +22,12 @@ from ..model_health import (
 from ..models import AIModelTestResult, ProgrammingLanguage, Prompt, SharedPrompt, Task, Topic
 from ..querysets import prompt_queryset_for_user
 from ..serializers import programming_language as serialize_programming_language, prompt as serialize_prompt, topic as serialize_topic
-from ..services.task_registry import EXTENSION_TO_LANG, SOLVE_EXTENSION_CHOICES
+from ..services.task_registry import EXTENSION_TO_LANG, SOLVE_EXTENSION_CHOICES, extension_to_language_ids
+from ..constants import AI_CACHE_KEY_PREFIX
 from .permissions import can_access_arm
+
+# TTL кэша дерева задач курса в Redis (см. admin_arm_solve_load_tree_view).
+_DL_TREE_CACHE_TTL = 30 * 60
 
 
 def _resolve_session_id(request):
@@ -272,18 +277,26 @@ def admin_arm_find_error_status_view(request):
 # test the code via DL (send-solution / get-solution-result).
 # ---------------------------------------------------------------------------
 
-def _arm_solve_prompt_options(user):
-    """Опции промптов для /arm/solve/: SharedPrompt ([Общий]) + topic-bound Prompt ([Тема]).
+def _arm_solve_prompt_options(user, file_extension=None):
+    """Опции препромтов для /arm/solve/: только topic-bound ``Prompt`` (общие
+    ``SharedPrompt`` на solve не предлагаются).
 
-    Тема из дерева DL не вычисляется, поэтому даём выбрать любой промпт. Prompt
-    фильтруется через ``prompt_queryset_for_user`` (ACL: staff/superuser — все,
-    иначе owner/editor). Возвращает список ``{id, name}``, отсортированный по имени.
+    Список зависит от выбранного расширения: промпт привязан к теме (``Prompt.topic``),
+    тема — к языку программирования, а язык → расширение через ``_guess_extension``.
+    При ``file_extension`` отдаются только ``Prompt`` тем, чей язык маппится в это
+    расширение (``extension_to_language_ids``). Без ``file_extension`` — все
+    доступные по ACL промпты (для начального рендера; реальный выбор на клиенте
+    грузится по расширению через ``/solve/prompts/``).
+
+    ACL — ``prompt_queryset_for_user`` (staff/superuser — все, иначе owner/editor).
+    Возвращает список ``{id, name}``, отсортированный по имени.
     """
-    options = []
-    for sp in SharedPrompt.objects.all().order_by("prompt_name", "id"):
-        options.append({"id": f"shared_{sp.id}", "name": f"[Общий] {sp.prompt_name}"})
-
     prompts_qs = prompt_queryset_for_user(Prompt.objects.select_related("topic"), user)
+    if file_extension:
+        lang_ids = extension_to_language_ids(file_extension)
+        prompts_qs = prompts_qs.filter(topic__programming_language_id__in=lang_ids)
+
+    options = []
     for p in prompts_qs.order_by("prompt_name", "id"):
         topic_name = get_localized_name(p.topic, "Русский", "topic_name") if p.topic else ""
         label = f"[Тема] {topic_name} — {p.prompt_name}" if topic_name else f"[Тема] {p.prompt_name}"
@@ -316,7 +329,7 @@ def admin_arm_solve_view(request):
     from ..http_utils import safe_relative_url
     arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
 
-    prompt_options = _arm_solve_prompt_options(request.user)
+    prompt_options = []  # грузится клиентом по выбранному расширению (/solve/prompts/)
 
     context = {
         **ai_admin_site.each_context(request),
@@ -325,8 +338,8 @@ def admin_arm_solve_view(request):
         "arm_back_url": arm_back_url,
         "model_options": get_arm_solve_model_options(),
         "prompt_options": prompt_options,
-        "extension_options": [{"value": "", "label": "По умолчанию (из задачи)"}]
-        + [{"value": ext, "label": f"{ext} — {name}"} for ext, name in SOLVE_EXTENSION_CHOICES],
+        "extension_options": [{"value": ext, "label": f"{ext} — {name}"}
+                             for ext, name in SOLVE_EXTENSION_CHOICES],
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
         "arm_solve_prompts_url": "/ai/admin/arm/solve/prompts/",
         "results": results,
@@ -370,6 +383,22 @@ def admin_arm_solve_load_tree_view(request):
 
     if course_id is None:
         return JsonResponse({"ok": False, "message": "Укажите course_id"}, status=400)
+
+    # 0 = пусто: дерево не грузим, кэш не трогаем (соглашение /arm/solve/).
+    if course_id == 0:
+        return JsonResponse({"ok": True, "tree": [], "task_count": 0})
+
+    # Дерево курса стабильно — кэшируем в Redis по course_id, чтобы не бить в DL
+    # API при каждом открытии. Переключение course_id → другой ключ (старый
+    # остаётся до TTL); инвалидация — по TTL. DLSID нужен только для промаха.
+    tree_cache_key = f"{AI_CACHE_KEY_PREFIX}:dl_tree:{course_id}"
+    cached = cache.get(tree_cache_key)
+    if cached:
+        return JsonResponse({
+            "ok": True,
+            "tree": cached["tree"],
+            "task_count": cached["task_count"],
+        })
 
     session_id = _resolve_session_id(request)
     if not session_id:
@@ -443,6 +472,12 @@ def admin_arm_solve_load_tree_view(request):
         enriched_tree = [_enrich_node(n) for n in tree]
         task_count = _count_tasks(enriched_tree)
 
+        # Кэшируем только непустое дерево (пустое оставляем без кэша, чтобы
+        # повторный запрос мог пере-проверить — вдруг курс обновился).
+        if enriched_tree:
+            cache.set(tree_cache_key, {"tree": enriched_tree, "task_count": task_count},
+                      timeout=_DL_TREE_CACHE_TTL)
+
         return JsonResponse({
             "ok": True,
             "tree": enriched_tree,
@@ -456,15 +491,17 @@ def admin_arm_solve_load_tree_view(request):
 
 
 def admin_arm_solve_prompts_view(request):
-    """Return available prompt options for solve: SharedPrompt ([Общий]) + Prompt ([Тема]).
+    """Return prompt options for solve filtered by the selected file extension.
 
-    Тема из дерева DL не вычисляется, поэтому эндпоинт игнорирует ``node_ids`` и
-    возвращает все доступные пользователю промпты (ACL через ``prompt_queryset_for_user``).
+    Общие ``SharedPrompt`` на solve не предлагаются — только topic-bound ``Prompt``,
+    отфильтрованные по языку программирования, соответствующему расширению
+    (``extension_to_language_ids``). ``file_extension`` передаётся в GET.
     """
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
 
-    prompt_options = _arm_solve_prompt_options(request.user)
+    file_extension = (request.GET.get("file_extension") or "").strip()
+    prompt_options = _arm_solve_prompt_options(request.user, file_extension or None)
     return JsonResponse({"ok": True, "prompt_options": prompt_options})
 
 
@@ -498,8 +535,14 @@ def admin_arm_solve_start_view(request):
         dl_test = dl_test == "1"
     prompt_id = body.get("prompt_id") or None
     # Расширение для DL-тестирования, выбранное пользователем (перекрывает
-    # авто-определение задачи). Пусто → брать из задачи.
+    # авто-определение задачи). Обязательно: на solve расширение выбирается
+    # перед препромтом, «По умолчанию (из задачи)» убрано.
     file_extension = (body.get("file_extension") or request.POST.get("file_extension") or "").strip()
+    if not file_extension:
+        return JsonResponse(
+            {"ok": False, "message": "Не выбрано расширение файла для тестирования."},
+            status=400,
+        )
     # Название языка для препромпта под выбранным расширением.
     prog_lang_name = EXTENSION_TO_LANG.get(file_extension, "")
     course_id_raw = body.get("course_id") or request.POST.get("course_id")
@@ -526,6 +569,13 @@ def admin_arm_solve_start_view(request):
     if not node_id_ints:
         return JsonResponse(
             {"ok": False, "message": "Не выбрано ни одной задачи из дерева DL."},
+            status=400,
+        )
+
+    # Препромт обязателен; общие (shared_*) на solve не принимаются.
+    if not prompt_id or str(prompt_id).startswith("shared_"):
+        return JsonResponse(
+            {"ok": False, "message": "Не выбран препромт (выберите расширение, затем препромт)."},
             status=400,
         )
 
