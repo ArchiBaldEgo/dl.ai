@@ -21,6 +21,7 @@ from ..model_health import (
 from ..models import AIModelTestResult, ProgrammingLanguage, Prompt, SharedPrompt, Task, Topic
 from ..querysets import prompt_queryset_for_user
 from ..serializers import programming_language as serialize_programming_language, prompt as serialize_prompt, topic as serialize_topic
+from ..services.task_registry import EXTENSION_TO_LANG, SOLVE_EXTENSION_CHOICES
 from .permissions import can_access_arm
 
 
@@ -324,6 +325,8 @@ def admin_arm_solve_view(request):
         "arm_back_url": arm_back_url,
         "model_options": get_arm_solve_model_options(),
         "prompt_options": prompt_options,
+        "extension_options": [{"value": "", "label": "По умолчанию (из задачи)"}]
+        + [{"value": ext, "label": f"{ext} — {name}"} for ext, name in SOLVE_EXTENSION_CHOICES],
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
         "arm_solve_prompts_url": "/ai/admin/arm/solve/prompts/",
         "results": results,
@@ -493,6 +496,7 @@ def admin_arm_solve_start_view(request):
             "interface_language": request.POST.get("interface_language", "Русский"),
             "dl_test": request.POST.get("dl_test") == "1",
             "prompt_id": request.POST.get("prompt_id", "").strip() or None,
+            "file_extension": request.POST.get("file_extension", "").strip(),
         }
 
     node_ids = body.get("node_ids") or request.POST.getlist("node_ids")
@@ -502,6 +506,11 @@ def admin_arm_solve_start_view(request):
     if isinstance(dl_test, str):
         dl_test = dl_test == "1"
     prompt_id = body.get("prompt_id") or None
+    # Расширение для DL-тестирования, выбранное пользователем (перекрывает
+    # авто-определение задачи). Пусто → брать из задачи.
+    file_extension = (body.get("file_extension") or request.POST.get("file_extension") or "").strip()
+    # Название языка для препромпта под выбранным расширением.
+    prog_lang_name = EXTENSION_TO_LANG.get(file_extension, "")
     course_id_raw = body.get("course_id") or request.POST.get("course_id")
     try:
         course_id = int(course_id_raw) if course_id_raw else None
@@ -538,6 +547,8 @@ def admin_arm_solve_start_view(request):
         dl_test=dl_test,
         prompt_id=prompt_id,
         course_id=course_id,
+        solve_file_extension=file_extension,
+        solve_prog_lang_name=prog_lang_name,
     )
     if not run_id:
         return JsonResponse(

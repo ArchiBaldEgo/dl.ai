@@ -32,27 +32,56 @@ def apply_dl_task_info(task, data):
 
 _LANG_TO_EXTENSION = {
     "python": ".py",
-    "cmpa": ".cmpa",
-    "ассемблер i86": ".asm",
+    "c-mpa": ".cmp",
+    "cmpa": ".cmp",
+    "с-мпа": ".cmp",
+    "ассемблер i86": ".i86",
+    "ассемблер i8086": ".i86",
+    "ассемблер": ".i86",
     "pascal": ".pas",
     "verilog": ".v",
     "c++": ".cpp",
     "c": ".c",
+    "java": ".java",
 }
 
 # Path-based extension detection: DL path contains the language spec,
 # e.g. "Программирование [Ассемблер i8086, C-MPA]\...".
+# Внимание: папка курса может перечислять несколько языков через запятую
+# ("[Ассемблер i8086, C-MPA]"), поэтому путь неоднозначен — автогадание лишь
+# лучший усилие; окончательное расширение задаёт пользователь на /arm/solve/.
 _PATH_KEYWORDS = [
-    ("c-mpa", ".cmpa"),
-    ("cmpa", ".cmpa"),
-    ("ассемблер", ".asm"),
-    ("i8086", ".asm"),
-    ("i86", ".asm"),
+    ("ассемблер i8086", ".i86"),
+    ("i8086", ".i86"),
+    ("i86", ".i86"),
+    ("ассемблер", ".i86"),
+    ("c-mpa", ".cmp"),
+    ("с-мпа", ".cmp"),
+    ("cmpa", ".cmp"),
     ("python", ".py"),
     ("pascal", ".pas"),
     ("verilog", ".v"),
     ("c++", ".cpp"),
 ]
+
+# Канонический список расширений, принимаемых DL REST send-solution, и
+# соответствующих им названий языков для препромпта. Пользователь выбирает
+# расширение вручную на /arm/solve/ (тема из дерева DL не определяет язык
+# однозначно — курс "[Ассемблер i8086, C-MPA]" содержит задачи обоих языков,
+# причём каждая задача допускает и .cmp, и .i86).
+SOLVE_EXTENSION_CHOICES = [
+    (".pas", "Pascal"),
+    (".cpp", "C++"),
+    (".c", "C"),
+    (".py", "Python"),
+    (".java", "Java"),
+    (".i86", "Ассемблер i8086"),
+    (".cmp", "C-MPA (С-МПА)"),
+    (".v", "Verilog"),
+]
+
+# Обратный map: расширение → название языка (для препромпта в batch-solve).
+EXTENSION_TO_LANG = {ext: name for ext, name in SOLVE_EXTENSION_CHOICES}
 
 
 def _guess_extension(prog_lang_name: str) -> str:

@@ -809,6 +809,8 @@ def _run_batch_job_worker(
     dl_test=True,
     prompt_id=None,
     course_id=None,
+    solve_file_extension="",
+    solve_prog_lang_name="",
 ):
     """Daemon worker for a batch-solve run.
 
@@ -889,17 +891,23 @@ def _run_batch_job_worker(
                 break
 
             topic_name = task.topic.topic_name if task.topic else ""
-            prog_lang_name = (
+            # Расширение для DL-тестирования: ручной выбор пользователя имеет
+            # приоритет над авто-определением задачи (тема из дерева DL не задаёт
+            # язык однозначно — курс "[Ассемблер i8086, C-MPA]" содержит оба).
+            effective_ext = (solve_file_extension or task.file_extension or "").strip()
+            prog_lang_name = solve_prog_lang_name or (
                 task.programming_language.language_name if task.programming_language else ""
             )
-            # Fallback: derive language name from file_extension for DL tree tasks
-            # that have no programming_language set.
-            if not prog_lang_name and task.file_extension:
+            # Fallback: derive language name from effective file_extension for
+            # DL tree tasks that have no programming_language set.
+            if not prog_lang_name and effective_ext:
                 _ext_to_lang = {
-                    ".py": "Python", ".cmpa": "CMPA", ".asm": "Ассемблер i8086",
+                    ".py": "Python", ".cmp": "C-MPA", ".i86": "Ассемблер i8086",
+                    ".asm": "Ассемблер i8086",
                     ".pas": "Pascal", ".v": "Verilog", ".cpp": "C++", ".c": "C",
+                    ".java": "Java",
                 }
-                prog_lang_name = _ext_to_lang.get(task.file_extension, "")
+                prog_lang_name = _ext_to_lang.get(effective_ext, "")
 
             for model in ordered_models:
                 if _is_cancel_requested(run_id):
@@ -946,14 +954,14 @@ def _run_batch_job_worker(
                         code_only = _extract_code_from_response(cleaned_text)
 
                         can_run_dl = bool(
-                            dl_test and code_only and task.file_extension and session_id
+                            dl_test and code_only and effective_ext and session_id
                         )
                         if not code_only:
                             verdict = _VERDICT_FAILED
                             dl_test_comment = "Модель не вернула код для тестирования"
                         elif can_run_dl:
                             dl_result = _test_solution_on_dl(
-                                session_id, task.node_id, code_only, task.file_extension
+                                session_id, task.node_id, code_only, effective_ext
                             )
                             dl_test_comment = dl_result.get("comment", "") or ""
                             dl_submit_error = dl_result.get("submit_error", "") or ""
@@ -964,7 +972,8 @@ def _run_batch_job_worker(
                         else:
                             verdict = _VERDICT_FAILED
                             dl_test_comment = (
-                                "Нет расширения файла/DLSID для тестирования на DL"
+                                "Не задано расширение файла для тестирования на DL "
+                                "(выберите язык/расширение в форме запуска)"
                             )
 
                         status = "ok" if verdict == _VERDICT_SOLVED else "error"
@@ -998,7 +1007,7 @@ def _run_batch_job_worker(
                         "dl_comment": dl_test_comment or "",
                         "dl_error": dl_submit_error or "",
                         "dl_queue_id": dl_queue_id or 0,
-                        "file_extension_snapshot": task.file_extension or "",
+                        "file_extension_snapshot": effective_ext or "",
                         "topic_id_snapshot": task.topic_id,
                         "topic_name_snapshot": topic_name,
                         "prog_lang_snapshot": prog_lang_name,
@@ -1022,7 +1031,7 @@ def _run_batch_job_worker(
                     "dl_comment": dl_test_comment,
                     "dl_error": dl_submit_error,
                     "dl_queue_id": dl_queue_id,
-                    "file_extension": task.file_extension or "",
+                    "file_extension": effective_ext or "",
                     "topic_name": topic_name,
                     "prog_lang_name": prog_lang_name,
                 }
@@ -1119,13 +1128,15 @@ def _batch_results_from_db(test_run):
     return results
 
 
-def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None):
+def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name=""):
     """Запускает batch-solve ARM: задачи из DL дерева × модели в фоновом потоке.
 
     Принимает node_ids — список DL node ID (из дерева задач dl.gsu.by).
     Возвращает (run_id, error_message).
-    dl_test=True — отправка кода на dl.gsu.by для реальной проверки;
-    dl_test=False — только difflib-сравнение с образцовым решением.
+    dl_test=True — отправка кода на dl.gsu.by для реальной проверки.
+    solve_file_extension — расширение, выбранное пользователем для DL-тестирования
+        (перекрывает task.file_extension; пусто → браться из задачи).
+    solve_prog_lang_name — название языка для препромпта под выбранным расширением.
     """
     handlers = get_runtime_model_handlers()
     # В solve допущены только Web_* и Ollama_* (нет жёсткого лимита вывода);
@@ -1177,7 +1188,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, node_ids, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )

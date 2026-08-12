@@ -209,6 +209,10 @@
     line-height: 1.45;
     max-height: 420px;
     overflow: auto;
+    background: var(--darkened-bg);
+    color: var(--body-fg);
+    padding: 8px 10px;
+    border-radius: 4px;
   }
 
   .arm-actions {
@@ -309,6 +313,18 @@
         <option value="">— Системный (по умолчанию) —</option>
         {% for p in prompt_options %}
           <option value="{{ p.id }}">{{ p.name }}</option>
+        {% endfor %}
+      </select>
+
+      <div class="arm-section-head" style="margin-top:18px;">
+        <div>
+          <h2>Язык / расширение для тестирования</h2>
+          <p class="arm-section-note">DL REST send-solution требует расширение файла. Курс может содержать задачи разных языков (например «[Ассемблер i8086, C-MPA]» — каждая задача допускает и .i86, и .cmp), поэтому выберите нужный вручную. «По умолчанию» — авто-определение из задачи.</p>
+        </div>
+      </div>
+      <select name="file_extension" id="armExtensionSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
+        {% for opt in extension_options %}
+          <option value="{{ opt.value }}">{{ opt.label }}</option>
         {% endfor %}
       </select>
 
@@ -488,11 +504,13 @@
         body.className = 'arm-result-body';
 
         // DL-тест: итог (comment) + queueId + ошибка отправки/опроса.
+        // Фиксированный светлый фон → явный тёмный цвет текста, иначе в тёмной
+        // теме админки наследуется белый текст (белый на белом).
         const dlBlock = document.createElement('div');
-        dlBlock.style.cssText = 'padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:13px; background:' + (r.verdict === 'solved' ? '#dcfce7' : '#fee2e2') + ';';
+        dlBlock.style.cssText = 'padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:13px; color:#1f2937; background:' + (r.verdict === 'solved' ? '#dcfce7' : '#fee2e2') + ';';
         let dlHtml = '<strong>DL тест:</strong> ';
-        if (dlComment) { dlHtml += escapeHtml(dlComment); } else { dlHtml += '<span style="color:var(--body-quiet-color);">итог тестов отсутствует</span>'; }
-        if (dlQueueId) { dlHtml += ' <span style="color:var(--body-quiet-color);">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
+        if (dlComment) { dlHtml += escapeHtml(dlComment); } else { dlHtml += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
+        if (dlQueueId) { dlHtml += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
         if (dlError) { dlHtml += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
         dlBlock.innerHTML = dlHtml;
         body.appendChild(dlBlock);
