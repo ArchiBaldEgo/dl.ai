@@ -759,7 +759,7 @@ def _extract_code_from_response(text):
     return text.strip()
 
 
-def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None):
+def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None, course_id=None):
     """Send code to DL for real testing and poll for the result.
 
     Returns a dict:
@@ -777,8 +777,12 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
     проверяет ``_is_cancel_requested(run_id)`` перед каждой итерацией и
     прерывается досрочно (отмена срабатывает в пределах одного ``poll_interval``
     вместо ожидания всех ``max_polls``).
+
+    ``course_id`` (опционально) — если передан, перед send-solution вызывается
+    ``ensure_course_session`` для активации курса в сессии DL (иначе send-solution
+    отдаёт 400 при courseID=0 в сессии).
     """
-    from .dl_api_client import send_solution_to_dl, get_solution_result_from_dl, DLServerError
+    from .dl_api_client import send_solution_to_dl, get_solution_result_from_dl, DLServerError, ensure_course_session
 
     result = {
         "verdict": None,
@@ -788,6 +792,11 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
         "code_sent": code[:5000],
         "cancelled": False,
     }
+
+    # Activate the course in the DL session before send-solution — DL requires
+    # courseID != 0 in the session, otherwise send-solution returns 400.
+    if course_id:
+        ensure_course_session(session_id, course_id, node_id)
 
     # Step 1: submit code to DL.
     submit_resp = None
@@ -896,6 +905,11 @@ def _run_batch_job_worker(
     course_id=None,
     solve_file_extension="",
     solve_prog_lang_name="",
+    programming_language_id=None,
+    programming_language_name="",
+    prompt_name="",
+    topic_id=None,
+    topic_name="",
 ):
     """Daemon worker for a batch-solve run.
 
@@ -922,6 +936,12 @@ def _run_batch_job_worker(
             started_at=start_time,
             message=f"Batch solve: {len(node_ids)} задач × {len(ordered_models)} моделей",
             total_models=len(ordered_models),
+            programming_language_id=programming_language_id,
+            programming_language_name=programming_language_name or "",
+            topic_id=topic_id,
+            topic_name=topic_name or "",
+            prompt_id=prompt_id,
+            prompt_name=prompt_name or "",
         )
         log = AIRequestLog.objects.create(
             user=user,
@@ -933,6 +953,12 @@ def _run_batch_job_worker(
             sent_at=start_time,
             model_names=models_titles,
             message=f"Batch solve run {run_id}",
+            programming_language_id=programming_language_id,
+            programming_language_name=programming_language_name or "",
+            topic_id=topic_id,
+            topic_name=topic_name or "",
+            prompt_id=prompt_id,
+            prompt_name=prompt_name or "",
         )
 
         # Resolve node_ids → Task objects via DL get-task-info + ensure_task.
@@ -1058,6 +1084,7 @@ def _run_batch_job_worker(
                                 session_id, task.node_id, code_only, effective_ext,
                                 task_id=task.task_id or 0,
                                 run_id=run_id,
+                                course_id=course_id,
                             )
                             # Отмена пришла во время поллинга DL — прерываем без
                             # записи пары (вердикт не определён).
@@ -1148,6 +1175,8 @@ def _run_batch_job_worker(
                         job["updated_at_ts"] = time.time()
 
         # Finalize: build report from in-memory results (or DB if evicted).
+        results = []
+        db_results = []
         with _jobs_lock:
             job = _jobs.get(run_id)
             evicted = job is None
@@ -1165,11 +1194,41 @@ def _run_batch_job_worker(
             report = _build_batch_report(db_results)
 
         end_time = timezone.now()
-        any_ok_batch = any(r.get("status") == "ok" for r in (results if not evicted else db_results))
+        if evicted:
+            batch_results = db_results
+        else:
+            batch_results = results
+        any_ok_batch = any(r.get("status") == "ok" for r in batch_results)
+        # Сводный ответ для журнала: per-model вердикты + ошибки (до 5000 символов).
+        batch_summary_parts = []
+        for r in batch_results:
+            verdict = r.get("verdict") or "failed"
+            model_title = r.get("model_title") or r.get("model_key") or "?"
+            task_name = r.get("task_name") or ""
+            node_id = r.get("task_node_id") or ""
+            dl_err = r.get("dl_error") or ""
+            line = f"[{verdict}] {node_id} {task_name} — {model_title}"
+            if dl_err:
+                line += f" :: {dl_err[:200]}"
+            batch_summary_parts.append(line)
+        batch_response_text = "\n".join(batch_summary_parts)[:5000]
+        batch_error_message = ""
+        if not any_ok_batch:
+            # Краткая причина: все пары провалены — собираем уникальные ошибки.
+            unique_errs = []
+            seen = set()
+            for r in batch_results:
+                dl_err = (r.get("dl_error") or "").split("\n")[0][:200]
+                if dl_err and dl_err not in seen:
+                    seen.add(dl_err)
+                    unique_errs.append(dl_err)
+            batch_error_message = "Все пары провалены. Ошибки: " + " | ".join(unique_errs[:5])[:2000]
         AIRequestLog.objects.filter(pk=log.pk).update(
             received_at=end_time,
             duration_seconds=(end_time - start_time).total_seconds(),
             status=AIRequestLog.STATUS_SUCCESS if any_ok_batch else AIRequestLog.STATUS_ERROR,
+            response_text=batch_response_text,
+            error_message=batch_error_message,
         )
         AIModelTestRun.objects.filter(pk=test_run.pk).update(
             status=AIModelTestRun.STATUS_COMPLETED,
@@ -1229,7 +1288,7 @@ def _batch_results_from_db(test_run):
     return results
 
 
-def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name=""):
+def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name=""):
     """Запускает batch-solve ARM: задачи из DL дерева × модели в фоновом потоке.
 
     Принимает node_ids — список DL node ID (из дерева задач dl.gsu.by).
@@ -1289,7 +1348,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, node_ids, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )

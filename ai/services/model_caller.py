@@ -98,10 +98,11 @@ class ModelCaller:
 
         response_text = str(response_text or "")
 
-        # Guard: a non-error response must never be empty. If the handler
-        # returned (content="", is_error=False), substitute a clear message
-        # and mark as error so the user/UI never sees a blank bubble.
-        if not response_text.strip() and not is_error:
+        # Guard: response must NEVER be empty — neither error nor success.
+        # If the handler returned (content="", is_error=True), the error text
+        # itself might be empty (e.g. bot pool returned 200 with empty content
+        # and a generic error). Substitute a clear message in all cases.
+        if not response_text.strip():
             response_text = "Модель вернула пустой ответ. Попробуйте позже."
             is_error = True
 

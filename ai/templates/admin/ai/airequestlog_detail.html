@@ -46,7 +46,7 @@
   <div class="ai-log-actions">
     {% include "admin/ai/_ai_back_nav.html" %}
     <a class="button" href="{% url 'ai_request_logs' %}">← Назад к логам</a>
-    <button type="button" id="resend-btn" class="default" data-log-id="{{ log.id }}">Повторить запрос</button>
+    <button type="button" id="resend-btn" class="default" data-log-id="{{ log.id }}" data-source="{{ log.source }}" data-mode="{{ log.mode }}" data-message="{{ log.message|truncatechars:60 }}">Повторить запрос</button>
   </div>
   {% csrf_token %}
 </div>
@@ -110,7 +110,13 @@
 
     btn.addEventListener('click', function () {
       const logId = btn.dataset.logId;
-      const resendUrl = '/ai/admin/ai/airequestlog/' + logId + '/resend/';
+      const source = btn.dataset.source || '';
+      const mode = btn.dataset.mode || '';
+      const logMessage = btn.dataset.message || '';
+      const isArmBatch = source === 'arm' && mode === 'solve' && logMessage.indexOf('Batch solve run') !== -1;
+      const endpoint = isArmBatch
+        ? '/ai/admin/ai/airequestlog/' + logId + '/rerun-arm/'
+        : '/ai/admin/ai/airequestlog/' + logId + '/resend/';
 
       // Disable button and show loading state.
       btn.disabled = true;
@@ -131,7 +137,7 @@
       const csrfInput = document.querySelector('input[name="csrfmiddlewaretoken"]');
       const csrftoken = csrfInput ? csrfInput.value : '';
 
-      fetch(resendUrl, {
+      fetch(endpoint, {
         method: 'POST',
         headers: {
           'X-CSRFToken': csrftoken,
@@ -145,15 +151,26 @@
       .then(function (data) {
         btn.disabled = false;
         btn.textContent = 'Повторить запрос';
-        if (data.success) {
+        if (data.success || data.run_id) {
           statusDiv.className = 'resend-status success';
-          statusDiv.textContent = 'Запрос успешно отправлен. ';
-          if (data.new_log_id) {
+          if (isArmBatch && data.run_id) {
+            statusDiv.textContent = 'Перезапуск ARM... ';
             const link = document.createElement('a');
-            link.href = '/ai/admin/ai/airequestlog/' + data.new_log_id + '/';
-            link.textContent = 'Открыть новый лог →';
+            link.href = '/ai/admin/arm/solve/?run_id=' + data.run_id;
+            link.textContent = 'Открыть прогон →';
             link.style.marginLeft = '8px';
             statusDiv.appendChild(link);
+            // Auto-redirect to the ARM solve page with the new run_id.
+            window.location.href = '/ai/admin/arm/solve/?run_id=' + data.run_id;
+          } else {
+            statusDiv.textContent = 'Запрос успешно отправлен. ';
+            if (data.new_log_id) {
+              const link = document.createElement('a');
+              link.href = '/ai/admin/ai/airequestlog/' + data.new_log_id + '/';
+              link.textContent = 'Открыть новый лог →';
+              link.style.marginLeft = '8px';
+              statusDiv.appendChild(link);
+            }
           }
         } else {
           statusDiv.className = 'resend-status error';

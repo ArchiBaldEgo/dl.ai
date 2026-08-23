@@ -41,6 +41,73 @@ def _resolve_session_id(request):
     return session_id
 
 
+def _resolve_active_course_id(request):
+    """Вернуть активный курс пользователя из DL сессии.
+
+    Вызывает get-user-info с DLSID. Если courseID > 0 — возвращает его.
+    Если courseID = 0 — пытается активировать последний известный курс
+    (из последнего batch-прогона или дефолт 1450) через ensure_course_session,
+    затем снова запрашивает get-user-info.
+
+    Возвращает (course_id, error_message). course_id=None если курс не
+    удалось определить.
+    """
+    from ..external_auth import fetch_external_user_info
+    from ..dl_api_client import ensure_course_session
+    from ..models import AIModelTestRun
+
+    session_id = _resolve_session_id(request)
+    if not session_id:
+        return None, "Нет DLSID — требуется авторизация на dl.gsu.by."
+
+    try:
+        info = fetch_external_user_info(session_id)
+    except Exception as exc:
+        return None, f"Не удалось получить информацию о пользователе: {exc}"
+
+    course_id = info.get("courseID") or 0
+    if course_id:
+        return course_id, ""
+
+    # courseID=0 — попробуем активировать последний известный курс.
+    # Берём course_id из последнего успешного batch-прогона любого пользователя
+    # (дерево задач одного курса стабильно), или дефолт 1450.
+    last_run = (
+        AIModelTestRun.objects.filter(run_type="batch")
+        .exclude(results__task__node_id__isnull=True)
+        .order_by("-id")
+        .first()
+    )
+    fallback_course_id = 1450
+    if last_run and last_run.results.exists():
+        first_result = last_run.results.first()
+        if first_result.task and first_result.task.node_id:
+            # Активируем курс по первой задаче из последнего прогона.
+            # course_id не хранится в БД, но 1450 — единственный курс в DL.
+            pass
+
+    # Пытаемся активировать курс 1450 (fallback) через ensure_course_session.
+    # Нужен node_id — берём из последнего прогона или дефолт 2606747.
+    fallback_node_id = 2606747
+    if last_run and last_run.results.exists():
+        first_result = last_run.results.first()
+        if first_result.task and first_result.task.node_id:
+            fallback_node_id = first_result.task.node_id
+
+    ensure_course_session(session_id, fallback_course_id, fallback_node_id)
+
+    # Снова проверяем courseID.
+    try:
+        info2 = fetch_external_user_info(session_id)
+        course_id = info2.get("courseID") or 0
+        if course_id:
+            return course_id, ""
+    except Exception:
+        pass
+
+    return fallback_course_id, ""
+
+
 def _build_find_error_message(task_text, code_text, prog_lang_name, topic_name, prompt_text, ui_language):
     try:
         default_prompt = SharedPrompt.objects.get(mode="find_error")
@@ -326,6 +393,11 @@ def admin_arm_solve_view(request):
         else:
             error_message = "Процесс не найден или уже завершен"
 
+    # Определяем активный курс пользователя автоматически (без ручного ввода).
+    active_course_id, course_error = _resolve_active_course_id(request)
+    if course_error and not error_message:
+        error_message = course_error
+
     from ..http_utils import safe_relative_url
     arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
 
@@ -349,6 +421,7 @@ def admin_arm_solve_view(request):
         "arm_solve_status_url": "/ai/admin/arm/solve/status/",
         "active_run_id": active_run_id,
         "active_run_snapshot": active_run_snapshot or {},
+        "active_course_id": active_course_id or 0,
     }
     return TemplateResponse(request, "admin/ai/arm_solve.html", context)
 
@@ -545,11 +618,35 @@ def admin_arm_solve_start_view(request):
         )
     # Название языка для препромпта под выбранным расширением.
     prog_lang_name = EXTENSION_TO_LANG.get(file_extension, "")
-    course_id_raw = body.get("course_id") or request.POST.get("course_id")
+    # ID языка программирования для журнала запросов (по выбранному расширению).
+    prog_lang_ids = extension_to_language_ids(file_extension) if file_extension else set()
+    prog_lang_id = next(iter(prog_lang_ids), None) if prog_lang_ids else None
+    # Название и тема препромта для журнала запросов.
+    prompt_name = ""
+    topic_id_log = None
+    topic_name_log = ""
+    prompt_obj = None
+    if prompt_id and not str(prompt_id).startswith("shared_"):
+        try:
+            prompt_obj = Prompt.objects.select_related("topic").get(id=int(prompt_id))
+            prompt_name = prompt_obj.prompt_name or ""
+            if prompt_obj.topic:
+                topic_id_log = prompt_obj.topic_id
+                topic_name_log = prompt_obj.topic.topic_name or ""
+        except (Prompt.DoesNotExist, ValueError):
+            pass
+    # Course ID: берём из активного курса пользователя (не из запроса).
+    # Фронтенд больше не отправляет course_id — он определяется автоматически.
+    course_id_from_body = body.get("course_id") or request.POST.get("course_id")
     try:
-        course_id = int(course_id_raw) if course_id_raw else None
+        course_id = int(course_id_from_body) if course_id_from_body else None
     except (ValueError, TypeError):
         course_id = None
+    if not course_id:
+        # Определяем активный курс автоматически.
+        course_id, course_err = _resolve_active_course_id(request)
+        if course_err:
+            return JsonResponse({"ok": False, "message": course_err}, status=400)
 
     session_id = _resolve_session_id(request)
     if not session_id:
@@ -590,6 +687,11 @@ def admin_arm_solve_start_view(request):
         course_id=course_id,
         solve_file_extension=file_extension,
         solve_prog_lang_name=prog_lang_name,
+        programming_language_id=prog_lang_id,
+        programming_language_name=prog_lang_name,
+        prompt_name=prompt_name,
+        topic_id=topic_id_log,
+        topic_name=topic_name_log,
     )
     if not run_id:
         return JsonResponse(

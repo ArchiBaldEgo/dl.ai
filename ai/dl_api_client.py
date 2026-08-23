@@ -490,6 +490,41 @@ def _send_solution_payload_context(node_id, code, file_extension) -> str:
     )
 
 
+def ensure_course_session(session_id: str, course_id: int, node_id: int) -> bool:
+    """Activate a course in the DL session so send-solution works.
+
+    DL ties ``courseID`` to the DLSID session: send-solution returns 400 when
+    ``courseID=0`` (user logged in but hasn't "entered" a course). The REST API
+    has no endpoint to set courseID — it's set by visiting a classic DL page.
+
+    ``GET /task.jsp?cid=<course_id>&nid=<node_id>`` with the DLSID cookie
+    activates the course in the session. After this call, get-user-info returns
+    ``courseID=<course_id>`` and send-solution accepts submissions.
+
+    Returns True if the course was activated (or already active), False on
+    failure (network error, 4xx/5xx). Best-effort: callers proceed regardless.
+    """
+    if not course_id or not node_id:
+        return False
+    base_url = _get_dl_base_url()
+    url = urljoin(base_url, f"/task.jsp?cid={course_id}&nid={node_id}")
+    cookies = {"DLSID": session_id}
+    request_kwargs = {
+        "cookies": cookies,
+        "verify": _get_verify_ssl(),
+        "timeout": 15,
+        "allow_redirects": True,
+    }
+    proxies = _get_proxies()
+    if proxies is not None:
+        request_kwargs["proxies"] = proxies
+    try:
+        resp = requests.get(url, **request_kwargs)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
 def send_solution_to_dl(
     session_id: str,
     node_id: int,
