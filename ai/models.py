@@ -447,12 +447,14 @@ class AIRequestLog(models.Model):
     MODE_SOLVE = "solve"
     MODE_FIND_ERROR = "find_error"
     MODE_ARM = "arm"
+    MODE_BATCH_SOLVE = "batch_solve"
 
     MODE_CHOICES = (
         (MODE_CHAT, "Чат"),
         (MODE_SOLVE, "Решить задачу"),
         (MODE_FIND_ERROR, "Найти ошибку"),
         (MODE_ARM, "ARM"),
+        (MODE_BATCH_SOLVE, "Пакетное решение"),
     )
 
     user = models.ForeignKey(
@@ -515,11 +517,13 @@ class AIModelTestRun(models.Model):
     STATUS_RUNNING = "running"
     STATUS_COMPLETED = "completed"
     STATUS_FAILED = "failed"
+    STATUS_CANCELLED = "cancelled"
 
     STATUS_CHOICES = (
         (STATUS_RUNNING, "Running"),
         (STATUS_COMPLETED, "Completed"),
         (STATUS_FAILED, "Failed"),
+        (STATUS_CANCELLED, "Cancelled"),
     )
 
     RUN_TYPE_SINGLE = "single"
@@ -556,6 +560,10 @@ class AIModelTestRun(models.Model):
     topic_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Тема")
     prompt_id = models.IntegerField(null=True, blank=True, verbose_name="ID промпта")
     prompt_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Промпт")
+    # ID курса DL, по которому загружалось дерево задач для batch-прогона.
+    # Сохраняется для отображения в Журнале запросов (режим «Пакетное решение»,
+    # поле «id дерева») и для проброса в send-solution как courseId.
+    course_id = models.IntegerField(null=True, blank=True, verbose_name="ID курса DL")
 
     class Meta:
         db_table = "ai_ai_model_test_run"

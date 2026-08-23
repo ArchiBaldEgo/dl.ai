@@ -1,0 +1,337 @@
+{# Общий CSS + JS мини-таблицы результатов batch-solve.
+   Используется страницей /arm/solve/ (arm_solve.html) и детальной страницей
+   записи Журнала запросов в режиме «Пакетное решение» (airequestlog_detail.html),
+   чтобы рендеринг и CSV-экспорт были идентичны. Единый источник правды —
+   window.ArmBatchResults. #}
+<style>
+  .arm-card {
+    background: var(--body-bg);
+    border: 1px solid var(--hairline-color);
+    border-radius: 8px;
+    padding: 18px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  }
+  .arm-section-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .arm-section-head h2 { margin: 0; font-size: 18px; line-height: 1.3; }
+  .arm-section-note { margin: 4px 0 0; color: var(--body-quiet-color); font-size: 13px; }
+
+  .arm-summary-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  .arm-summary-table th, .arm-summary-table td {
+    border-bottom: 1px solid var(--hairline-color);
+    padding: 8px 10px; text-align: left;
+  }
+  .arm-summary-table th { font-weight: 600; color: var(--body-quiet-color); }
+  .arm-summary-table td.arm-col-num, .arm-summary-table th.arm-col-num {
+    text-align: right; white-space: nowrap; width: 1%;
+  }
+
+  .arm-report {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px; margin: 0; padding: 0; list-style: none;
+  }
+  .arm-report li {
+    border: 1px solid var(--hairline-color); border-radius: 6px; padding: 10px;
+    background: color-mix(in srgb, var(--body-bg) 94%, var(--hairline-color));
+    font-size: 14px;
+  }
+
+  .arm-badge { border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+  .arm-badge.solved { color: #166534; background: #dcfce7; }
+  .arm-badge.failed { color: #991b1b; background: #fee2e2; }
+  .arm-badge.skipped { color: #475467; background: #f1f5f9; }
+
+  .arm-result { border: 1px solid var(--hairline-color); border-radius: 6px; padding: 0; margin-bottom: 8px; overflow: hidden; }
+  .arm-result:nth-child(even) { background: color-mix(in srgb, var(--body-bg) 95%, var(--hairline-color)); }
+  .arm-result.solved { border-left: 4px solid #16a34a; }
+  .arm-result.failed { border-left: 4px solid #dc2626; }
+  .arm-result.skipped { border-left: 4px solid #94a3b8; }
+  .arm-result summary { cursor: pointer; list-style: none; padding: 12px 14px; }
+  .arm-result summary::-webkit-details-marker { display: none; }
+  .arm-result-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .arm-result-title { font-weight: 700; }
+  .arm-meta { color: var(--body-quiet-color); font-size: 12px; margin-top: 4px; }
+  .arm-result-body { border-top: 1px solid var(--hairline-color); padding: 12px 14px 14px; }
+  .arm-result-body pre {
+    margin: 0; white-space: pre-wrap; word-wrap: break-word;
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 13px; line-height: 1.45; max-height: 420px; overflow: auto;
+    background: var(--darkened-bg); color: var(--body-fg); padding: 8px 10px; border-radius: 4px;
+  }
+  .arm-button {
+    display: inline-block; padding: 6px 12px; border: 1px solid var(--hairline-color);
+    border-radius: 6px; background: var(--body-bg); color: var(--body-fg);
+    text-decoration: none; font-size: 13px; cursor: pointer;
+  }
+  .arm-button:hover { background: color-mix(in srgb, var(--body-bg) 90%, var(--hairline-color)); }
+  @media (max-width: 700px) { .arm-result-top { align-items: flex-start; flex-direction: column; } }
+</style>
+
+<script>
+window.ArmBatchResults = (function () {
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+  }
+  function verdictBadge(v) {
+    var labels = { solved: 'Решено', failed: 'Не решено', skipped: 'Пропущено' };
+    var cls = v === 'solved' ? 'solved' : (v === 'failed' ? 'failed' : 'skipped');
+    return '<span class="arm-badge ' + cls + '">' + escapeHtml(labels[v] || v) + '</span>';
+  }
+  function csvCell(value) {
+    var s = String(value == null ? '' : value);
+    // Квотируем ячейку при наличии ; " \n \r — иначе Excel/CSV собьёт строку.
+    if (s.indexOf(';') !== -1 || s.indexOf('"') !== -1 || s.indexOf('\n') !== -1 || s.indexOf('\r') !== -1) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
+
+  function renderBucketTable(rows, labelHeader, wrapEl) {
+    var prev = wrapEl.querySelector('table.arm-summary-table, .arm-bucket-empty');
+    if (prev) { prev.remove(); }
+    if (!rows || !rows.length) {
+      var empty = document.createElement('p');
+      empty.className = 'arm-section-note arm-bucket-empty';
+      empty.textContent = 'нет данных';
+      wrapEl.appendChild(empty);
+      return;
+    }
+    var head = '<thead><tr><th>' + escapeHtml(labelHeader) + '</th><th class="arm-col-num">% решённых</th><th class="arm-col-num">Среднее время, сек</th><th class="arm-col-num">Токены</th><th class="arm-col-num">Решено / Всего</th></tr></thead>';
+    var body = rows.map(function (r) {
+      return '<tr><td>' + escapeHtml(r.label) + '</td>'
+        + '<td class="arm-col-num">' + escapeHtml(r.percent_solved) + '</td>'
+        + '<td class="arm-col-num">' + escapeHtml(r.avg_duration) + '</td>'
+        + '<td class="arm-col-num">' + escapeHtml(r.tokens) + '</td>'
+        + '<td class="arm-col-num">' + escapeHtml(r.solved) + ' / ' + escapeHtml(r.total) + '</td></tr>';
+    }).join('');
+    wrapEl.insertAdjacentHTML('beforeend', '<table class="arm-summary-table">' + head + '<tbody>' + body + '</tbody></table>');
+  }
+
+  // els = {card, list, perModel, perTopic}
+  function renderReport(report, els) {
+    if (!report) {
+      if (els.card) { els.card.style.display = 'none'; }
+      if (els.list) { els.list.innerHTML = ''; }
+      if (els.perModel) { els.perModel.innerHTML = ''; }
+      if (els.perTopic) { els.perTopic.innerHTML = ''; }
+      return;
+    }
+    if (els.list) {
+      els.list.innerHTML = [
+        'Всего пар: ' + escapeHtml(report.total_pairs),
+        'Решено: ' + escapeHtml(report.solved),
+        'Не решено: ' + escapeHtml(report.failed),
+        'Пропущено: ' + escapeHtml(report.skipped),
+        'Токенов: ' + escapeHtml(report.tokens_total),
+      ].map(function (line) { return '<li>' + line + '</li>'; }).join('');
+    }
+    if (els.perModel) {
+      els.perModel.innerHTML = '<h3>Итог по моделям</h3><p class="arm-section-note">Сортировка: процент решённых ↓, среднее время ответа ↑</p>';
+      renderBucketTable(report.per_model, 'Модель', els.perModel);
+    }
+    var hasRealTopics = (report.per_topic || []).some(function (r) { return r.label && r.label !== 'Без темы'; });
+    if (els.perTopic) {
+      if (hasRealTopics) {
+        els.perTopic.innerHTML = '<h3>Итог по темам</h3>';
+        renderBucketTable(report.per_topic, 'Тема', els.perTopic);
+      } else {
+        els.perTopic.innerHTML = '';
+      }
+    }
+    if (els.card) { els.card.style.display = 'block'; }
+  }
+
+  function renderResults(results, resultsEl, resultsCard) {
+    if (!results || !results.length) {
+      if (resultsEl) { resultsEl.innerHTML = ''; }
+      if (resultsCard) { resultsCard.style.display = 'none'; }
+      return;
+    }
+    var openKeys = new Set();
+    if (resultsEl) {
+      resultsEl.querySelectorAll('details[open]').forEach(function (d) {
+        var key = d.getAttribute('data-key');
+        if (key) { openKeys.add(key); }
+      });
+      resultsEl.innerHTML = '';
+    }
+    var downloadBase = '/ai/admin/arm/solve/result/';
+    results.forEach(function (r) {
+      var cls = r.verdict === 'solved' ? 'solved' : (r.verdict === 'failed' ? 'failed' : 'skipped');
+      var card = document.createElement('details');
+      card.className = 'arm-result ' + cls;
+      var rkey = (r.task_node_id || '') + ':' + (r.model_key || '');
+      card.setAttribute('data-key', rkey);
+      if (openKeys.has(rkey)) { card.setAttribute('open', ''); }
+
+      var dlComment = r.dl_comment || '';
+      var dlError = r.dl_error || '';
+      var dlQueueId = r.dl_queue_id || 0;
+      var code = r.code || '';
+      var resultId = r.result_id || '';
+
+      var summary = document.createElement('summary');
+      var top = document.createElement('div');
+      top.className = 'arm-result-top';
+      var title = document.createElement('span');
+      title.className = 'arm-result-title';
+      title.textContent = '#' + (r.task_node_id || '') + ' ' + (r.task_name || '') + ' — ' + (r.model_title || '');
+      top.appendChild(title);
+      top.insertAdjacentHTML('beforeend', verdictBadge(r.verdict));
+      var meta = document.createElement('div');
+      meta.className = 'arm-meta';
+      meta.textContent = (r.duration != null ? r.duration : '') + ' сек | ' + (r.tokens != null ? r.tokens : '') + ' ток.';
+      summary.appendChild(top);
+      summary.appendChild(meta);
+
+      var body = document.createElement('div');
+      body.className = 'arm-result-body';
+
+      var dlBlock = document.createElement('div');
+      dlBlock.style.cssText = 'padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:13px; color:#1f2937; background:' + (r.verdict === 'solved' ? '#dcfce7' : '#fee2e2') + ';';
+      var dlHtml = '<strong>DL тест:</strong> ';
+      if (dlComment) { dlHtml += escapeHtml(dlComment); } else { dlHtml += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
+      if (dlQueueId) { dlHtml += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
+      if (dlError) { dlHtml += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
+      dlBlock.innerHTML = dlHtml;
+      body.appendChild(dlBlock);
+
+      var answerLabel = document.createElement('div');
+      answerLabel.style.cssText = 'margin:8px 0 4px; font-weight:600; font-size:13px;';
+      answerLabel.textContent = 'Полный ответ модели:';
+      body.appendChild(answerLabel);
+      var answerPre = document.createElement('pre');
+      answerPre.textContent = r.raw_response || r.short_response || '';
+      body.appendChild(answerPre);
+
+      var codeLabel = document.createElement('div');
+      codeLabel.style.cssText = 'margin:10px 0 4px; font-weight:600; font-size:13px;';
+      codeLabel.textContent = 'Извлечённый код программы:';
+      body.appendChild(codeLabel);
+      var codePre = document.createElement('pre');
+      codePre.textContent = code || '— код не извлечён —';
+      body.appendChild(codePre);
+      if (code && resultId) {
+        var link = document.createElement('a');
+        link.href = downloadBase + encodeURIComponent(resultId) + '/download/';
+        link.className = 'arm-button';
+        link.style.cssText = 'display:inline-block; margin-top:6px;';
+        link.textContent = 'Скачать код';
+        body.appendChild(link);
+      }
+
+      card.appendChild(summary);
+      card.appendChild(body);
+      if (resultsEl) { resultsEl.appendChild(card); }
+    });
+    if (resultsCard) { resultsCard.style.display = 'block'; }
+  }
+
+  // CSV (tasks × models matrix) с BOM для Excel; + solved, - failed, ? skipped.
+  function downloadResultsCsv(results, runId) {
+    if (!results || !results.length) { return; }
+    var taskMap = {}, taskOrder = [];
+    var modelMap = {}, modelOrder = [];
+    results.forEach(function (r) {
+      var tkey = String(r.task_node_id || '');
+      if (!(tkey in taskMap)) { taskMap[tkey] = { id: tkey, name: r.task_name || '' }; taskOrder.push(tkey); }
+      var mkey = String(r.model_key || r.model_title || '');
+      if (!(mkey in modelMap)) { modelMap[mkey] = r.model_title || mkey; modelOrder.push(mkey); }
+    });
+    var matrix = {};
+    results.forEach(function (r) {
+      var tkey = String(r.task_node_id || '');
+      var mkey = String(r.model_key || r.model_title || '');
+      var v = r.verdict;
+      var symbol = v === 'solved' ? '+' : (v === 'failed' ? '-' : '?');
+      if (!matrix[tkey]) { matrix[tkey] = {}; }
+      matrix[tkey][mkey] = symbol;
+    });
+    var lines = [];
+    var header = ['Node ID', 'Задача'];
+    modelOrder.forEach(function (mkey) { header.push(csvCell(modelMap[mkey])); });
+    lines.push(header.join(';'));
+    taskOrder.forEach(function (tkey) {
+      var t = taskMap[tkey];
+      var row = [csvCell(t.id), csvCell(t.name)];
+      modelOrder.forEach(function (mkey) {
+        row.push(matrix[tkey] && matrix[tkey][mkey] ? matrix[tkey][mkey] : '');
+      });
+      lines.push(row.join(';'));
+    });
+    var csv = '﻿' + lines.join('\r\n');
+    var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'arm_solve_results_' + (runId || 'run') + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  // init(rootEl, snapshot, runId): строит карточки сводки + ответов и рендерит.
+  // snapshot = {results, report, ...}. Возвращает {downloadBtn, ...}.
+  function init(rootEl, snapshot, runId) {
+    if (!rootEl) { return {}; }
+    rootEl.innerHTML = '';
+    snapshot = snapshot || {};
+
+    var reportCard = document.createElement('section');
+    reportCard.className = 'arm-card';
+    var reportHead = document.createElement('div');
+    reportHead.className = 'arm-section-head';
+    var reportHeadLeft = document.createElement('div');
+    var reportH2 = document.createElement('h2'); reportH2.textContent = 'Сводка';
+    var reportNote = document.createElement('p'); reportNote.className = 'arm-section-note'; reportNote.textContent = 'Результаты прогона';
+    reportHeadLeft.appendChild(reportH2); reportHeadLeft.appendChild(reportNote);
+    reportHead.appendChild(reportHeadLeft);
+    var downloadBtn = document.createElement('button');
+    downloadBtn.type = 'button'; downloadBtn.className = 'arm-button';
+    downloadBtn.textContent = 'Скачать результаты (CSV)';
+    downloadBtn.style.fontSize = '13px';
+    downloadBtn.addEventListener('click', function () { downloadResultsCsv(snapshot.results || [], runId); });
+    reportHead.appendChild(downloadBtn);
+    reportCard.appendChild(reportHead);
+
+    var reportList = document.createElement('ul'); reportList.className = 'arm-report';
+    reportCard.appendChild(reportList);
+    var perModelWrap = document.createElement('div'); reportCard.appendChild(perModelWrap);
+    var perTopicWrap = document.createElement('div'); perTopicWrap.style.marginTop = '16px'; reportCard.appendChild(perTopicWrap);
+    rootEl.appendChild(reportCard);
+
+    var resultsCard = document.createElement('section');
+    resultsCard.className = 'arm-card';
+    var resultsHead = document.createElement('div'); resultsHead.className = 'arm-section-head';
+    var resultsH2 = document.createElement('h2'); resultsH2.textContent = 'Ответы моделей';
+    var resultsNote = document.createElement('p'); resultsNote.className = 'arm-section-note'; resultsNote.textContent = 'Откройте строку, чтобы увидеть полный ответ';
+    resultsHead.appendChild(resultsH2); resultsHead.appendChild(resultsNote);
+    resultsCard.appendChild(resultsHead);
+    var resultsEl = document.createElement('div'); resultsCard.appendChild(resultsEl);
+    rootEl.appendChild(resultsCard);
+
+    renderReport(snapshot.report || null, { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap });
+    renderResults(snapshot.results || [], resultsEl, resultsCard);
+
+    var hasResults = (snapshot.results || []).length > 0;
+    downloadBtn.style.display = hasResults ? '' : 'none';
+
+    return { reportCard: reportCard, resultsCard: resultsCard, resultsEl: resultsEl, downloadBtn: downloadBtn };
+  }
+
+  return {
+    escapeHtml: escapeHtml, verdictBadge: verdictBadge, csvCell: csvCell,
+    renderBucketTable: renderBucketTable, renderReport: renderReport,
+    renderResults: renderResults, downloadResultsCsv: downloadResultsCsv, init: init,
+  };
+})();
+</script>

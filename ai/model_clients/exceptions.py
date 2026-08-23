@@ -55,7 +55,14 @@ def safe_parse_response(response_text: str) -> Tuple[Optional[dict], str]:
 
 
 def extract_choice_content(obj: dict) -> str:
-    """Extract assistant content from a SambaNova-style completion response."""
+    """Extract assistant content from a SambaNova-style completion response.
+
+    Returns ``""`` when no content/reasoning_content/reasoning is present —
+    НЕ подставляет плейсхолдер. Раньше возвращала ``"Пустой ответ от модели."``,
+    но эта непустая строка обходила нижестоящие empty-гарды (ModelCaller/
+    consumer) и доходила до пользователя как «успешный» ответ. Теперь пустой
+    ответ детектится вызывающим обработчиком и возвращается как is_error=True.
+    """
     choices = obj.get("choices") or []
     if not choices:
         return ""
@@ -65,9 +72,7 @@ def extract_choice_content(obj: dict) -> str:
         content = message.get("reasoning_content") or ""
     if not content:
         content = message.get("reasoning") or ""
-    if not content:
-        content = "Пустой ответ от модели."
-    return content
+    return content or ""
 
 
 def extract_api_error_text(response_text: str) -> str:

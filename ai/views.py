@@ -815,9 +815,22 @@ def send_solution_view(request):
     if not session_id:
         return JsonResponse({"error": "sessionId обязателен"}, status=400)
 
+    # courseId обязателен по контракту REST API send-solution. Берём из тела,
+    # иначе резолвим активный курс пользователя из DL-сессии.
+    course_id = 0
+    raw_course = body.get("courseId")
+    try:
+        course_id = int(raw_course) if raw_course not in (None, "") else 0
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "courseId должен быть числом"}, status=400)
+    if not course_id:
+        from .admin.arm import _resolve_active_course_id_for_session
+        course_id, _course_err = _resolve_active_course_id_for_session(session_id)
+        course_id = course_id or 0
+
     try:
         from .dl_api_client import send_solution_to_dl
-        data = send_solution_to_dl(session_id, node_id, code, file_extension)
+        data = send_solution_to_dl(session_id, node_id, code, file_extension, course_id=course_id)
     except DLUnauthorizedError:
         return JsonResponse({"error": "Authorization required"}, status=401)
     except DLApiUnavailable:

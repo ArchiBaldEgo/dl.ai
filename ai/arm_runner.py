@@ -335,22 +335,41 @@ def _update_job(run_id, **updates):
 
 
 def cancel_arm_run(run_id):
-    """Request cancellation of a running ARM job.
+    """Request cancellation of a running ARM job — немедленный flip статуса.
 
-    Sets ``cancel_requested=True`` on the in-memory job. The worker checks
-    this flag between task/model iterations and stops early if set.
+    Помимо установки ``cancel_requested=True`` (кооперативная отмена для
+    воркера), сразу переводит in-memory job и БД-прогон в ``cancelled``: UI
+    перестаёт поллить и показывает «Прервано» в пределах одного цикла опроса,
+    не дожидаясь завершения in-flight LLM/DL-вызова. Воркер после возврата
+    блокирующего вызова увидит флаг, отбросит in-flight пару и не перетрёт
+    ``cancelled`` обратно в ``completed`` (guard в finalize).
 
-    Если in-memory job уже потерян (рестарт сервера/падение воркера), а в БД
-    прогон ещё STATUS_RUNNING — помечаем его COMPLETED с «Прервано пользователем»,
-    чтобы фронтенд вышел из «выполняется» без 404. Возвращает True, если нашли
-    живой job или осиротевший DB-прогон; False, если прогона нет вообще.
+    Если in-memory job уже потерян (рестарт/падение воркера), а в БД прогон ещё
+    STATUS_RUNNING — помечаем его CANCELLED с «Прервано пользователем».
+    Возвращает True, если нашли живой job или осиротевший DB-прогон; False, если
+    прогона нет вообще.
     """
     with _jobs_lock:
         job = _jobs.get(run_id)
         if job:
             job["cancel_requested"] = True
+            job["cancelled"] = True
+            job["status"] = "cancelled"
             job["updated_at_ts"] = time.time()
-            return True
+
+    # Немедленно фиксируем отмену в БД — фронтенд читает snapshot и выходит
+    # из «выполняется» без ожидания in-flight вызова.
+    if run_id:
+        AIModelTestRun.objects.filter(
+            run_id=run_id, status=AIModelTestRun.STATUS_RUNNING
+        ).update(
+            status=AIModelTestRun.STATUS_CANCELLED,
+            finished_at=timezone.now(),
+            error_message="Прервано пользователем",
+        )
+
+    if job is not None:
+        return True
 
     # In-memory job нет — возможно осиротевший прогон после рестарта.
     if not run_id:
@@ -358,7 +377,7 @@ def cancel_arm_run(run_id):
     updated = AIModelTestRun.objects.filter(
         run_id=run_id, status=AIModelTestRun.STATUS_RUNNING
     ).update(
-        status=AIModelTestRun.STATUS_COMPLETED,
+        status=AIModelTestRun.STATUS_CANCELLED,
         finished_at=timezone.now(),
         error_message="Прервано пользователем",
     )
@@ -801,23 +820,20 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
     # Step 1: submit code to DL.
     submit_resp = None
     try:
-        submit_resp = send_solution_to_dl(session_id, node_id, code, file_extension)
+        submit_resp = send_solution_to_dl(session_id, node_id, code, file_extension, course_id=course_id)
     except DLServerError as exc:
         msg = str(exc)
         result["submit_error"] = f"send-solution: {msg}"
         # 400 от send-solution недокументировано (док описывает только 401/500),
-        # DL не поясняет, какое поле отвергнуто. Ранее предполагалось, что DL
-        # валидирует расширение против платформ задачи, но это опровергнуто
-        # пользователем: и .i86, и .mpc для одной ноды дают 400 при корректном
-        # коде, а язык выбран верно. Значит 400 не про расширение.
-        #
-        # Проверяем эмпирическую гипотезу (выдвинутую пользователем: «с твоим
-        # nodeId — доступ запрещён»): возможно send-solution ждёт не nodeId, а
-        # taskId (get-task-info возвращает оба id). Отправляем task_id в поле
-        # nodeId; если принято — продолжаем поллинг по этому queueId.
+        # DL не поясняет, какое поле отвергнуто. Контракт REST API требует
+        # courseId в теле — он теперь передаётся; ensure_course_session выше
+        # дополнительно активирует курс в сессии. Если 400 всё равно пришёл,
+        # проверяем эмпирическую гипотезу: возможно send-solution ждёт не nodeId,
+        # а taskId (get-task-info возвращает оба id). Отправляем task_id в поле
+        # nodeId (courseId тот же); если принято — продолжаем поллинг.
         if "код 400" in msg and task_id and task_id != node_id:
             try:
-                alt_resp = send_solution_to_dl(session_id, task_id, code, file_extension)
+                alt_resp = send_solution_to_dl(session_id, task_id, code, file_extension, course_id=course_id)
                 alt_qid = alt_resp.get("queueId") or 0
                 if alt_qid > 0:
                     # taskId принят — nodeId был не тем идентификатором.
@@ -834,13 +850,13 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
                 result["submit_error"] += f" | проба taskId={task_id} вместо nodeId: {alt_exc}"
         if not submit_resp:
             result["submit_error"] += (
-                " — DL отклонил отправку решения (400). Расширение и nodeId "
-                "переданы по контракту REST API, язык выбран корректно. "
-                "Вероятные причины: задача не принимает отправку через REST API "
-                "(напр. раздел «Программы с подсказками»), у сессии нет прав на "
-                "отправку для этой ноды, либо код не прошёл серверную "
+                " — DL отклонил отправку решения (400). courseId/nodeId/"
+                "fileExtension переданы по контракту REST API, язык выбран "
+                "корректно. Вероятные причины: задача не принимает отправку через "
+                "REST API (напр. раздел «Программы с подсказками»), у сессии нет "
+                "прав на отправку для этой ноды, либо код не прошёл серверную "
                 f"валидацию. Проверьте задачу вручную на dl.gsu.by "
-                f"(nodeId={node_id}, taskId={task_id})."
+                f"(nodeId={node_id}, taskId={task_id}, courseId={course_id})."
             )
             return result
     except Exception as exc:
@@ -942,6 +958,7 @@ def _run_batch_job_worker(
             topic_name=topic_name or "",
             prompt_id=prompt_id,
             prompt_name=prompt_name or "",
+            course_id=course_id or None,
         )
         log = AIRequestLog.objects.create(
             user=user,
@@ -949,7 +966,7 @@ def _run_batch_job_worker(
             external_user_id=external_id,
             user_full_name=full_name,
             source=AIRequestLog.SOURCE_ARM,
-            mode=AIRequestLog.MODE_SOLVE,
+            mode=AIRequestLog.MODE_BATCH_SOLVE,
             sent_at=start_time,
             model_names=models_titles,
             message=f"Batch solve run {run_id}",
@@ -1181,10 +1198,15 @@ def _run_batch_job_worker(
             job = _jobs.get(run_id)
             evicted = job is None
             if not evicted:
+                # cancel_arm_run мог уже перевести job в cancelled (мгновенный
+                # flip). Не перетираем отмену обратно в completed — сохраняем
+                # cancelled, чтобы UI корректно показал «Прервано».
+                was_cancelled = cancelled or job.get("cancelled", False)
                 job["report"] = _build_batch_report(job.get("results") or [])
-                job["status"] = "completed"
-                if cancelled:
+                job["status"] = "cancelled" if was_cancelled else "completed"
+                if was_cancelled:
                     job["cancelled"] = True
+                    cancelled = True
                 job["updated_at_ts"] = time.time()
                 results = list(job.get("results") or [])
                 report = job["report"]
@@ -1230,13 +1252,21 @@ def _run_batch_job_worker(
             response_text=batch_response_text,
             error_message=batch_error_message,
         )
-        AIModelTestRun.objects.filter(pk=test_run.pk).update(
-            status=AIModelTestRun.STATUS_COMPLETED,
-            finished_at=end_time,
-            report=report or {},
-            error_message=("Прервано пользователем" if cancelled else ""),
-        )
-        _update_job(run_id, status="completed", cancelled=cancelled)
+        if cancelled:
+            # Прогон уже переведён в STATUS_CANCELLED методом cancel_arm_run
+            # (мгновенный flip). Не перетираем status/finished_at — только
+            # сохраняем частичный report, чтобы он был виден на странице прогона.
+            AIModelTestRun.objects.filter(
+                pk=test_run.pk, status=AIModelTestRun.STATUS_CANCELLED
+            ).update(report=report or {})
+        else:
+            AIModelTestRun.objects.filter(pk=test_run.pk).update(
+                status=AIModelTestRun.STATUS_COMPLETED,
+                finished_at=end_time,
+                report=report or {},
+                error_message="",
+            )
+        _update_job(run_id, status="cancelled" if cancelled else "completed", cancelled=cancelled)
 
     except Exception as exc:
         _update_job(
@@ -1362,6 +1392,7 @@ def _snapshot_from_test_run(test_run):
         AIModelTestRun.STATUS_RUNNING: "running",
         AIModelTestRun.STATUS_COMPLETED: "completed",
         AIModelTestRun.STATUS_FAILED: "failed",
+        AIModelTestRun.STATUS_CANCELLED: "cancelled",
     }
     current_key = ""
     current_title = ""

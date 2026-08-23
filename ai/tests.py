@@ -2108,7 +2108,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
 
         calls = []
 
-        def fake_send(session_id, node_id, code, file_extension):
+        def fake_send(session_id, node_id, code, file_extension, course_id=0):
             calls.append(node_id)
             if node_id == 2606747:
                 raise DLServerError(
@@ -2139,7 +2139,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
         from ai import arm_runner
         from ai.dl_api_client import DLServerError
 
-        def fake_send(session_id, node_id, code, file_extension):
+        def fake_send(session_id, node_id, code, file_extension, course_id=0):
             raise DLServerError(
                 f"send-solution(nodeId={node_id}, fileExtension='.mpc', "
                 f"codeLen=111, codeHead='...'): DL API вернул ошибку "
@@ -2164,7 +2164,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
 
         calls = []
 
-        def fake_send(session_id, node_id, code, file_extension):
+        def fake_send(session_id, node_id, code, file_extension, course_id=0):
             calls.append(node_id)
             raise DLServerError(
                 f"send-solution(nodeId={node_id}, ...): DL API вернул ошибку "
@@ -3186,3 +3186,298 @@ class OllamaHandlerTests(SimpleTestCase):
             result = await ollama.ask_Ollama_Qwen_3_5_Cloud_async("hi", "client")
             self.assertIn("Ollama API ключ не настроен", result[0])
             mock_client_cls.assert_not_called()
+
+
+class SendSolutionCourseIdTests(SimpleTestCase):
+    """``send_solution_to_dl`` должна передавать обязательное по контракту REST
+    API поле ``courseId`` в JSON-теле. Без него dl.gsu.by отдаёт 400 Bad Request
+    (ручная отправка через веб-форму работает, т.к. курс уже в URL страницы)."""
+
+    def test_body_includes_course_id_field(self):
+        from ai import dl_api_client
+
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+            content = b'{"queueId": 42, "message": "ok"}'
+
+        def fake_dl_request(method, path, **kwargs):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = kwargs.get("json")
+            return FakeResponse()
+
+        with patch("ai.dl_api_client._dl_request", fake_dl_request):
+            data = dl_api_client.send_solution_to_dl(
+                "SID-1", 2606747, "program a;", ".mpc", course_id=1450,
+            )
+
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["path"], "/restapi/send-solution")
+        body = captured["json"]
+        self.assertIsNotNone(body)
+        self.assertEqual(body["sessionId"], "SID-1")
+        self.assertEqual(body["nodeId"], 2606747)
+        self.assertEqual(body["code"], "program a;")
+        self.assertEqual(body["fileExtension"], ".mpc")
+        # Ключевое требование контракта: courseId присутствует в теле.
+        self.assertEqual(body["courseId"], 1450)
+        self.assertEqual(data, {"queueId": 42, "message": "ok"})
+
+    def test_default_course_id_is_zero(self):
+        from ai import dl_api_client
+
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+            content = b'{"queueId": 1, "message": "ok"}'
+
+        def fake_dl_request(method, path, **kwargs):
+            captured["json"] = kwargs.get("json")
+            return FakeResponse()
+
+        with patch("ai.dl_api_client._dl_request", fake_dl_request):
+            dl_api_client.send_solution_to_dl("SID", 100, "code", ".cpp")
+
+        # Обратная совместимость: без явного course_id поле всё равно есть (=0).
+        self.assertEqual(captured["json"]["courseId"], 0)
+
+    def test_payload_context_includes_course_id(self):
+        from ai.dl_api_client import _send_solution_payload_context
+
+        ctx = _send_solution_payload_context(2606747, "code...", ".mpc", 1450)
+        self.assertIn("nodeId=2606747", ctx)
+        self.assertIn("courseId=1450", ctx)
+        self.assertIn("fileExtension='.mpc'", ctx)
+
+
+class EmptyResponseDetectionTests(SimpleTestCase):
+    """Пустой ответ модели должен детектиться на уровне провайдера и
+    возвращаться как 3-кортеж ``is_error=True`` — осмысленное сообщение вместо
+    «успеха» с пустым текстом или плейсхолдером, обходящим нижестоящие гарды."""
+
+    def test_extract_choice_content_returns_empty_not_placeholder(self):
+        from ai.model_clients.exceptions import extract_choice_content
+
+        self.assertEqual(extract_choice_content({"choices": [{"message": {"content": ""}}]}), "")
+        self.assertEqual(extract_choice_content({"choices": [{"message": {}}]}), "")
+        self.assertEqual(extract_choice_content({}), "")
+        # Плейсхолдер «Пустой ответ от модели.» удалён — он обходил empty-гарды.
+        for obj in (
+            {"choices": [{"message": {"content": ""}}]},
+            {"choices": [{"message": {}}]},
+            {},
+        ):
+            self.assertNotIn("Пустой ответ", extract_choice_content(obj))
+
+    def test_sambanova_empty_returns_error_3tuple(self):
+        from ai.model_clients import sambanova
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"choices": [{"message": {"content": ""}}], "usage": {"completion_tokens": 0}}'
+
+        with patch("ai.model_clients.sambanova.requests") as mock_req:
+            mock_req.post.return_value = FakeResponse()
+            mock_req.exceptions = __import__("requests").exceptions
+            result = sambanova._ask_sambanova_model_async("hi", 0, "Model", max_tokens=8)
+            content, tokens, is_error = async_to_sync_runner(result)
+        self.assertTrue(is_error)
+        self.assertEqual(tokens, 0)
+        self.assertIn("пустой ответ", content.lower())
+
+    def test_sambanova_nonempty_returns_2tuple_success(self):
+        from ai.model_clients import sambanova
+
+        class FakeResponse:
+            status_code = 200
+            text = ('{"choices": [{"message": {"content": "42"}}], '
+                    '"usage": {"completion_tokens": 3}}')
+
+        with patch("ai.model_clients.sambanova.requests") as mock_req:
+            mock_req.post.return_value = FakeResponse()
+            mock_req.exceptions = __import__("requests").exceptions
+            result = sambanova._ask_sambanova_model_async("hi", 0, "Model", max_tokens=8)
+            content, tokens = async_to_sync_runner(result)
+        self.assertEqual(content, "42")
+        self.assertEqual(tokens, 3)
+
+    def test_groq_empty_returns_error_3tuple(self):
+        from ai.model_clients import groq
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"choices": [{"message": {"content": ""}}], "usage": {"total_tokens": 0}}'
+            headers = {}
+
+            def json(self):
+                import json as _json
+                return _json.loads(self.text)
+
+        async def fake_post(url, **kw):
+            return FakeResponse()
+
+        with patch("ai.model_clients.groq.GROQ_TOKEN", "tok"), \
+                patch("ai.model_clients.groq.httpx.AsyncClient") as mock_cls:
+            mock_client = MagicMock()
+            mock_client.post = fake_post
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_cls.return_value = mock_client
+            result = groq._ask_groq("groq-model", "hi", 0, model_key="Groq_Test")
+            content, tokens, is_error = async_to_sync_runner(result)
+        self.assertTrue(is_error)
+        self.assertEqual(tokens, 0)
+        self.assertIn("пустой ответ", content.lower())
+        self.assertIn("groq-model", content)
+
+
+class BatchSolveModeAndCancelModelTests(SimpleTestCase):
+    """Модельные константы/поля для режима «Пакетное решение» (F4) и
+    мгновенного прерывания (F2): режим лога, статус прогона, поле course_id."""
+
+    def test_ai_request_log_has_batch_solve_mode(self):
+        from ai.models import AIRequestLog
+        self.assertEqual(AIRequestLog.MODE_BATCH_SOLVE, "batch_solve")
+        choices = dict(AIRequestLog.MODE_CHOICES)
+        self.assertIn("batch_solve", choices)
+        self.assertEqual(choices["batch_solve"], "Пакетное решение")
+
+    def test_ai_model_test_run_has_cancelled_status(self):
+        from ai.models import AIModelTestRun
+        self.assertEqual(AIModelTestRun.STATUS_CANCELLED, "cancelled")
+        choices = dict(AIModelTestRun.STATUS_CHOICES)
+        self.assertIn("cancelled", choices)
+
+    def test_ai_model_test_run_has_course_id_field(self):
+        from ai.models import AIModelTestRun
+        field = AIModelTestRun._meta.get_field("course_id")
+        self.assertTrue(field.null)
+        self.assertTrue(field.blank)
+
+
+class BatchLogSnapshotTests(TestCase):
+    """Детал batch-лога в Журнале запросов (F4): ``_is_batch_solve_log``
+    распознаёт batch-прогоны (новый mode=batch_solve и старый mode=solve+
+    sentinel), ``_build_batch_log_snapshot`` собирает снапшот мини-таблицы
+    (run_id, course_id, file_extension, node_ids, results, report) из БД."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun, AIModelTestResult, Task
+        self.user = get_user_model().objects.create_user(username="snap", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=5001, task_id=6001, name="A", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.t2 = Task.objects.create(
+            node_id=5002, task_id=6002, name="B", statement="y",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.run_id = "a" * 32  # 32-hex sentinel-совместимый
+        self.test_run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED,
+            course_id=1450,
+        )
+        for task, verdict in ((self.t1, "solved"), (self.t2, "failed")):
+            AIModelTestResult.objects.create(
+                run=self.test_run, task=task,
+                model_key="FakeModel", model_title="FakeModel",
+                status="ok", verdict=verdict,
+                duration_seconds=1.0, tokens=10,
+                short_response="r", raw_response="raw", code="code",
+                dl_comment="c", dl_queue_id=1,
+                file_extension_snapshot=".pas",
+                topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+            )
+
+    def _make_log(self, mode, message):
+        return AIRequestLog.objects.create(
+            user=self.user, source="arm", mode=mode, message=message,
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+
+    def test_is_batch_solve_log_recognizes_new_and_legacy(self):
+        from ai.admin.logs import _is_batch_solve_log
+        new_log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
+        legacy_log = self._make_log("solve", f"Batch solve run {self.run_id}")
+        plain_log = self._make_log("chat", "hello")
+        self.assertTrue(_is_batch_solve_log(new_log))
+        self.assertTrue(_is_batch_solve_log(legacy_log))
+        self.assertFalse(_is_batch_solve_log(plain_log))
+
+    def test_build_batch_log_snapshot_fields(self):
+        from ai.admin.logs import _build_batch_log_snapshot
+        log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
+        snap = _build_batch_log_snapshot(log)
+        self.assertIsNotNone(snap)
+        self.assertEqual(snap["run_id"], self.run_id)
+        self.assertEqual(snap["course_id"], 1450)
+        self.assertEqual(snap["file_extension"], ".pas")
+        self.assertEqual(sorted(snap["node_ids"]), [5001, 5002])
+        self.assertEqual(len(snap["results"]), 2)
+        # report считается из результатов: 1 решено, 1 не решено.
+        self.assertEqual(snap["report"]["solved"], 1)
+        self.assertEqual(snap["report"]["failed"], 1)
+
+    def test_snapshot_none_when_run_missing(self):
+        from ai.admin.logs import _build_batch_log_snapshot
+        log = self._make_log("batch_solve", f"Batch solve run {'b' * 32}")
+        self.assertIsNone(_build_batch_log_snapshot(log))
+
+
+class ArmCancelImmediateDbFlipTests(TestCase):
+    """F2: ``cancel_arm_run`` сразу переводит AIModelTestRun в STATUS_CANCELLED с
+    finished_at, не дожидаясь in-flight вызова — UI может перестать поллить."""
+
+    def test_cancel_flips_db_status_immediately(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+
+        run_id = "cancel-flip-1"
+        run = AIModelTestRun.objects.create(
+            run_id=run_id, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_RUNNING,
+        )
+        # Эмулируем живой in-memory job (как делает start_batch_solve_run).
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "status": "running", "cancel_requested": False,
+            "cancelled": False, "results": [], "report": None,
+        }
+        try:
+            arm_runner.cancel_arm_run(run_id)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, AIModelTestRun.STATUS_CANCELLED)
+        self.assertIsNotNone(run.finished_at)
+        self.assertEqual(run.error_message, "Прервано пользователем")
+
+    def test_cancel_orphan_run_marks_cancelled(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+
+        run_id = "cancel-orphan-1"
+        AIModelTestRun.objects.create(
+            run_id=run_id, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_RUNNING,
+        )
+        # В памяти job нет — orphan-ветка.
+        self.assertNotIn(run_id, arm_runner._jobs)
+        arm_runner.cancel_arm_run(run_id)
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_CANCELLED)
+        self.assertIsNotNone(run.finished_at)
+
+
+# Хелпер: запустить async-корутину из синхронного test-метода (в sync-методах
+# нет работающего event loop, поэтому asyncio.run безопасен).
+def async_to_sync_runner(coro):
+    import asyncio
+    return asyncio.run(coro)

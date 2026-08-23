@@ -124,6 +124,9 @@ async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = ""
 
         data = response.json()
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if not (content or "").strip():
+            logger.warning("Groq model %s returned empty content", model_name)
+            return f"Модель Groq ({model_name}) вернула пустой ответ. Попробуйте позже.", 0, True
         usage = data.get("usage", {})
         total_tokens = usage.get("total_tokens", 0)
         return content, total_tokens, False

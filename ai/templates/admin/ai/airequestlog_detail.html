@@ -29,6 +29,12 @@
     <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
     <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
     <div><strong>Время ответа:</strong> {{ log.duration_seconds|floatformat:0|default:"—" }} с</div>
+    {% if is_batch_log %}
+      <div><strong>ID:</strong> {{ log.id }}</div>
+      <div><strong>Расширение файлов:</strong> {{ batch_snapshot.file_extension|default:"—" }}</div>
+      <div><strong>Задачи (id):</strong> {{ batch_snapshot.node_ids|join:", "|default:"—" }}</div>
+      <div><strong>ID дерева:</strong> {{ batch_snapshot.course_id|default:"—" }}</div>
+    {% endif %}
   </div>
   {% endtimezone %}
 
@@ -37,11 +43,29 @@
     <pre class="ai-log-block ai-log-error">{{ log.error_message }}</pre>
   {% endif %}
 
-  <h2>Текст, который отправил пользователь</h2>
-  <pre class="ai-log-block">{{ log.message|default:"(пусто)" }}</pre>
+  {% if is_batch_log %}
+    {# Вместо текста запроса/ответа — мини-таблица результатов из /arm/solve/ #}
+    {% include "admin/ai/_ai_batch_results.html" %}
+    {{ batch_snapshot|json_script:"batch-snapshot-data" }}
+    <div id="batch-results-card"></div>
+    <script>
+      (function () {
+        var raw = document.getElementById('batch-snapshot-data');
+        var snapshot = raw ? JSON.parse(raw.textContent) : {};
+        window.ArmBatchResults.init(
+          document.getElementById('batch-results-card'),
+          snapshot,
+          snapshot.run_id || ''
+        );
+      })();
+    </script>
+  {% else %}
+    <h2>Текст, который отправил пользователь</h2>
+    <pre class="ai-log-block">{{ log.message|default:"(пусто)" }}</pre>
 
-  <h2>Текст, который ответила модель</h2>
-  <pre class="ai-log-block">{{ log.response_text|default:"(пусто)" }}</pre>
+    <h2>Текст, который ответила модель</h2>
+    <pre class="ai-log-block">{{ log.response_text|default:"(пусто)" }}</pre>
+  {% endif %}
 
   <div class="ai-log-actions">
     {% include "admin/ai/_ai_back_nav.html" %}
@@ -113,7 +137,7 @@
       const source = btn.dataset.source || '';
       const mode = btn.dataset.mode || '';
       const logMessage = btn.dataset.message || '';
-      const isArmBatch = source === 'arm' && mode === 'solve' && logMessage.indexOf('Batch solve run') !== -1;
+      const isArmBatch = source === 'arm' && (mode === 'batch_solve' || mode === 'solve') && logMessage.indexOf('Batch solve run') !== -1;
       const endpoint = isArmBatch
         ? '/ai/admin/ai/airequestlog/' + logId + '/rerun-arm/'
         : '/ai/admin/ai/airequestlog/' + logId + '/resend/';

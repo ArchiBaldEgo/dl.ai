@@ -29,37 +29,39 @@ required
 application/json
 
         sessionId
-        Type: string
-        required
 
-        Session Id хранится в Url-encoded виде внутри cookies. Он существует и валиден некоторое время после того как человек заходит в аккаунт DL из браузера.
+Type: string
+required
 
-        Выглядит он примерно так: {2DA21836-FD30-433F-B0A3-A4BDA2669B6D}
+Session Id хранится в Url-encoded виде внутри cookies. Он существует и валиден некоторое время после того как человек заходит в аккаунт DL из браузера.
 
-        Для получения вручную нужно:
+Выглядит он примерно так: {2DA21836-FD30-433F-B0A3-A4BDA2669B6D}
 
-            Зайти в devtools браузера
+Для получения вручную нужно:
 
-            Перейти на вкладку Application
+    Зайти в devtools браузера
 
-            Раздел Cookies -> https://dl.gsu.by
+    Перейти на вкладку Application
 
-            Найти DLSID
+    Раздел Cookies -> https://dl.gsu.by
 
-            Включить снизу галочку "Show URL-decoded"
+    Найти DLSID
 
-            Скопировать значение
+    Включить снизу галочку "Show URL-decoded"
 
-        Для получения через JavaScript можно использовать следующий код:
+    Скопировать значение
 
-        function getSessionId() {
-            const match = document.cookie.match('(?:^|; )DLSID=([^;]*)');
-            return match ? decodeURIComponent(match[1]) : null;
-        }
+Для получения через JavaScript можно использовать следующий код:
 
-        console.log(getSessionId());
+function getSessionId() {
+    const match = document.cookie.match('(?:^|; )DLSID=([^;]*)');
+    return match ? decodeURIComponent(match[1]) : null;
+}
 
-        removeHtmlTags
+console.log(getSessionId());
+
+removeHtmlTags
+
         Type: boolean
         default:  
         true
@@ -68,31 +70,6 @@ application/json
 
 Responses
 
-    Type: object
-        canUseAi
-        Type: boolean
-
-        Флаг — разрешено ли использование AI в текущем курсе
-        courseID
-        Type: integer
-
-        Id курса, в которой сейчас находится пользователь
-        currentStatement
-        Type: string
-
-        Текст задачи, в которой сейчас находится пользователь
-        nodeId
-        Type: integer
-
-        Id ноды, в которой сейчас находится пользователь
-        taskId
-        Type: integer
-
-        Id задачи, в которой сейчас находится пользователь
-        userId
-        Type: integer
-
-        Id пользователя
     application/json
     401
 
@@ -119,7 +96,16 @@ requests.post("https://dl.gsu.by/restapi/get-user-info",
   "nodeId": 1,
   "taskId": 1,
   "currentStatement": "string",
-  "canUseAi": true
+  "email": "string",
+  "canUseAi": true,
+  "education": {
+    "form": "string",
+    "schoolId": "string",
+    "schoolKind": "string",
+    "schoolNo": "string",
+    "groupMaskId": "string",
+    "formLetter": "string"
+  }
 }
 
 Успешный ответ с информацией о пользователе
@@ -129,6 +115,7 @@ requests.post("https://dl.gsu.by/restapi/get-user-info",
 Query Parameters
 
     userId
+
     Type: integer
     required
 
@@ -136,15 +123,6 @@ Query Parameters
 
 Responses
 
-    Type: object
-        firstName
-        Type: string
-
-        Имя пользователя
-        lastName
-        Type: string
-
-        Фамилия пользователя
     application/json
     404
 
@@ -182,17 +160,18 @@ requests.get(
 Query Parameters
 
     nodeId
-    Type: integer
-    required
 
-    Id ноды, для которой нужно получить информацию о задаче
-    courseId
-    Type: integer
-    default:  
-    0
+Type: integer
+required
 
-    Id курса. Необходим для получения полного пути к задаче в дереве (поле path)
-    removeHtmlTags
+Id ноды, для которой нужно получить информацию о задаче
+courseId
+Type: integer
+required
+
+Id курса задачи. Необходим для получения полного пути к задаче в дереве, а также ее ограничений и доступных компиляторов.
+removeHtmlTags
+
     Type: boolean
     default:  
     true
@@ -201,23 +180,6 @@ Query Parameters
 
 Responses
 
-    Type: object
-        name
-        Type: string
-
-        Название задачи
-        path
-        Type: string | null
-
-        Полный путь к задаче в дереве курса (например, "Программирование [Ассемблер i8086, C-MPA]\Простейшая (Программы с подсказками)\Сложение"). Возвращается только если в запросе был передан корректный courseId.
-        statement
-        Type: string
-
-        Формулировка задачи
-        taskId
-        Type: integer
-
-        Id задачи
     application/json
     404
 
@@ -228,7 +190,7 @@ Request Example for get/get-task-info
 requests.get("https://dl.gsu.by/restapi/get-task-info",
     params={
       "nodeId": "1",
-      "courseId": "0",
+      "courseId": "1",
       "removeHtmlTags": "true"
     }
 )
@@ -237,7 +199,14 @@ requests.get("https://dl.gsu.by/restapi/get-task-info",
   "name": "string",
   "taskId": 1,
   "statement": "string",
-  "path": null
+  "path": null,
+  "limitation": "string",
+  "compilers": [
+    {
+      "name": "string",
+      "extension": "string"
+    }
+  ]
 }
 
 Успешный ответ с информацией о задаче
@@ -249,42 +218,44 @@ required
 application/json
 
     fileExtension
-    Type: string
-    required
 
-    Расширение файла обязательно с точкой (например .pas, .cpp, .py, .java, можно любое), ищется в папке задачи по маске *sol* c выбранным расширением
-    sessionId
-    Type: string
-    required
+Type: string
+required
 
-    Session Id хранится в Url-encoded виде внутри cookies. Он существует и валиден некоторое время после того как человек заходит в аккаунт DL из браузера.
+Расширение файла обязательно с точкой (например .pas, .cpp, .py, .java, можно любое), ищется в папке задачи по маске *sol* c выбранным расширением
+sessionId
+Type: string
+required
 
-    Выглядит он примерно так: {2DA21836-FD30-433F-B0A3-A4BDA2669B6D}
+Session Id хранится в Url-encoded виде внутри cookies. Он существует и валиден некоторое время после того как человек заходит в аккаунт DL из браузера.
 
-    Для получения вручную нужно:
+Выглядит он примерно так: {2DA21836-FD30-433F-B0A3-A4BDA2669B6D}
 
-        Зайти в devtools браузера
+Для получения вручную нужно:
 
-        Перейти на вкладку Application
+    Зайти в devtools браузера
 
-        Раздел Cookies -> https://dl.gsu.by
+    Перейти на вкладку Application
 
-        Найти DLSID
+    Раздел Cookies -> https://dl.gsu.by
 
-        Включить снизу галочку "Show URL-decoded"
+    Найти DLSID
 
-        Скопировать значение
+    Включить снизу галочку "Show URL-decoded"
 
-    Для получения через JavaScript можно использовать следующий код:
+    Скопировать значение
 
-    function getSessionId() {
-        const match = document.cookie.match('(?:^|; )DLSID=([^;]*)');
-        return match ? decodeURIComponent(match[1]) : null;
-    }
+Для получения через JavaScript можно использовать следующий код:
 
-    console.log(getSessionId());
+function getSessionId() {
+    const match = document.cookie.match('(?:^|; )DLSID=([^;]*)');
+    return match ? decodeURIComponent(match[1]) : null;
+}
 
-    taskId
+console.log(getSessionId());
+
+taskId
+
     Type: integer
     required
 
@@ -292,11 +263,6 @@ application/json
 
 Responses
 
-    Type: object
-        solution
-        Type: string
-
-        Содержимое файла решения
     application/json
     401
 
@@ -346,21 +312,28 @@ required
 application/json
 
     code
-    Type: string
-    required
 
-    Текст исходного кода решения
-    fileExtension
-    Type: string
-    required
+Type: string
+required
 
-    Расширение файла обязательно с точкой (например, .pas, .cpp, .py)
-    nodeId
-    Type: integer
-    required
+Текст исходного кода решения
+courseId
+Type: integer
+required
 
-    Id ноды, куда отправляется решение
-    sessionId
+Id курса, в котором находится нода
+fileExtension
+Type: string
+required
+
+Расширение файла обязательно с точкой (например, .pas, .cpp, .py)
+nodeId
+Type: integer
+required
+
+Id ноды, куда отправляется решение
+sessionId
+
     Type: string
     required
 
@@ -393,25 +366,8 @@ application/json
 
 Responses
 
-    Type: object
-        message
-        Type: string
+application/json
 
-        Сообщение о результате отправки или текст ошибки
-        queueId
-        Type: integer
-
-        Id отправленного решения в очереди тестирования (если 0, значит ошибка)
-    application/json
-    Type: object
-        message
-        Type: string
-
-        Сообщение о результате отправки или текст ошибки
-        queueId
-        Type: integer
-
-        Id отправленного решения в очереди тестирования (если 0, значит ошибка)
     application/json
     401
 
@@ -429,6 +385,7 @@ requests.post("https://dl.gsu.by/restapi/send-solution",
     json={
       "sessionId": "",
       "nodeId": 1,
+      "courseId": 1,
       "code": "",
       "fileExtension": ".cpp"
     }
@@ -448,11 +405,13 @@ required
 application/json
 
     queueId
-    Type: integer
-    required
 
-    Id решения из очереди, возвращенный методом /send-solution
-    sessionId
+Type: integer
+required
+
+Id решения из очереди, возвращенный методом /send-solution
+sessionId
+
     Type: string
     required
 
@@ -485,15 +444,6 @@ application/json
 
 Responses
 
-    Type: object
-        comment
-        Type: string
-
-        Текстовый вердикт проверки (например, "Все тесты успешно пройдены", "не пройден 2-й тест (неверный ответ)" или пустая строка, если проверка еще не завершена)
-        isFinished
-        Type: boolean
-
-        Флаг завершения проверки (false — в очереди или тестируется, true — проверка завершена)
     application/json
     401
 
@@ -532,100 +482,75 @@ required
 application/json
 
     courseId
-    Type: integer
-    required
 
-    Id курса, в контексте которого ищутся решения
-    nodeId
-    Type: integer
-    required
+Type: integer
+required
 
-    Id ноды (задачи)
-    sessionId
-    Type: string
-    required
+Id курса, в контексте которого ищутся решения
+nodeId
+Type: integer
+required
 
-    Session Id хранится в Url-encoded виде внутри cookies. Он существует и валиден некоторое время после того как человек заходит в аккаунт DL из браузера.
+Id ноды (задачи)
+sessionId
+Type: string
+required
 
-    Выглядит он примерно так: {2DA21836-FD30-433F-B0A3-A4BDA2669B6D}
+Session Id хранится в Url-encoded виде внутри cookies. Он существует и валиден некоторое время после того как человек заходит в аккаунт DL из браузера.
 
-    Для получения вручную нужно:
+Выглядит он примерно так: {2DA21836-FD30-433F-B0A3-A4BDA2669B6D}
 
-        Зайти в devtools браузера
+Для получения вручную нужно:
 
-        Перейти на вкладку Application
+    Зайти в devtools браузера
 
-        Раздел Cookies -> https://dl.gsu.by
+    Перейти на вкладку Application
 
-        Найти DLSID
+    Раздел Cookies -> https://dl.gsu.by
 
-        Включить снизу галочку "Show URL-decoded"
+    Найти DLSID
 
-        Скопировать значение
+    Включить снизу галочку "Show URL-decoded"
 
-    Для получения через JavaScript можно использовать следующий код:
+    Скопировать значение
 
-    function getSessionId() {
-        const match = document.cookie.match('(?:^|; )DLSID=([^;]*)');
-        return match ? decodeURIComponent(match[1]) : null;
-    }
+Для получения через JavaScript можно использовать следующий код:
 
-    console.log(getSessionId());
+function getSessionId() {
+    const match = document.cookie.match('(?:^|; )DLSID=([^;]*)');
+    return match ? decodeURIComponent(match[1]) : null;
+}
 
-    endDate
-    Type: stringFormat: date-time
+console.log(getSessionId());
 
-    Конец периода в формате 'YYYY-MM-DD' или 'YYYY-MM-DD HH:mm:ss' (необязательно)
-    extension
-    Type: string
+endDate
+Type: stringFormat: date-time
 
-    Расширение файла без точки (например, cpp, pas, java). Если не указано, вернутся решения с любыми расширениями.
-    includeCorrect
-    Type: boolean
-    default:  
-    true
+Конец периода в формате 'YYYY-MM-DD' или 'YYYY-MM-DD HH:mm:ss' (необязательно)
+extension
+Type: string
 
-    Включать ли в результат решения, прошедшие все тесты. По умолчанию true.
-    includeIncorrect
-    Type: boolean
-    default:  
-    true
+Расширение файла без точки (например, cpp, pas, java). Если не указано, вернутся решения с любыми расширениями.
+includeCorrect
+Type: boolean
+default:  
+true
 
-    Включать ли в результат неверные решения (ошибки, не пройденные тесты). По умолчанию true.
-    startDate
+Включать ли в результат решения, прошедшие все тесты. По умолчанию true.
+includeIncorrect
+Type: boolean
+default:  
+true
+
+Включать ли в результат неверные решения (ошибки, не пройденные тесты). По умолчанию true.
+startDate
+
     Type: stringFormat: date-time
 
     Начало периода в формате 'YYYY-MM-DD' или 'YYYY-MM-DD HH:mm:ss' (необязательно)
 
 Responses
 
-    Type: object
-        solutions
-        Type: array object[]
-            code
-            Type: string
-
-            Исходный код решения
-            isCorrect
-            Type: boolean
-
-            Является ли решение полностью верным
-            queueId
-            Type: integer
-
-            Id в очереди
-            report
-            Type: string
-
-            Текст отчета тестирующей системы (вердикт)
-            result
-            Type: string
-
-            Начисленные баллы за задачу
-            userId
-            Type: integer
-
-            Id пользователя, отправившего решение
     application/json
     401
 
@@ -682,12 +607,19 @@ Body
 required
 application/json
 
-    nodeId
-    Type: integer
-    required
+    courseId
 
-    Id ноды (папки), для которой нужно получить список задач
-    sessionId
+Type: integer
+required
+
+Id курса, в котором находится нода
+nodeId
+Type: integer
+required
+
+Id ноды (папки), для которой нужно получить список задач
+sessionId
+
     Type: string
     required
 
@@ -718,26 +650,8 @@ application/json
 
     console.log(getSessionId());
 
-    courseId
-    Type: integer
-
-    Id курса, в котором находится нода
-
 Responses
 
-    Type: object
-        tasks
-        Type: array object[]
-
-        Список задач, к которым у пользователя есть доступ
-            name
-            Type: string
-
-            Название задачи
-            nodeId
-            Type: integer
-
-            Id ноды задачи
     application/json
     401
 
@@ -782,12 +696,19 @@ Body
 required
 application/json
 
-    nodeId
-    Type: integer
-    required
+    courseId
 
-    Id ноды (папки), для которой нужно получить список задач
-    sessionId
+Type: integer
+required
+
+Id курса, в котором находится нода
+nodeId
+Type: integer
+required
+
+Id ноды (папки), для которой нужно получить список задач
+sessionId
+
     Type: string
     required
 
@@ -818,66 +739,8 @@ application/json
 
     console.log(getSessionId());
 
-    courseId
-    Type: integer
-
-    Id курса, в котором находится нода
-
 Responses
 
-    Type: object
-        tree
-        Type: array object[]
-
-        Дерево задач и папок
-            children
-            Type: array object[]
-
-            Список вложенных нод (если это папка)
-                children
-                Type: array object[]
-
-                Список вложенных нод (если это папка)
-                    children
-                    Type: array object[]
-
-                    Список вложенных нод (если это папка)
-                    isFolder
-                    Type: boolean
-
-                    Является ли эта нода папкой (true) или задачей (false)
-                    name
-                    Type: string
-
-                    Название папки или задачи
-                    nodeId
-                    Type: integer
-
-                    Id ноды
-                isFolder
-                Type: boolean
-
-                Является ли эта нода папкой (true) или задачей (false)
-                name
-                Type: string
-
-                Название папки или задачи
-                nodeId
-                Type: integer
-
-                Id ноды
-            isFolder
-            Type: boolean
-
-            Является ли эта нода папкой (true) или задачей (false)
-            name
-            Type: string
-
-            Название папки или задачи
-            nodeId
-            Type: integer
-
-            Id ноды
     application/json
     401
 
@@ -926,3 +789,80 @@ requests.post("https://dl.gsu.by/restapi/get-node-tree",
 }
 
 Успешный ответ со структурой дерева
+Получить корневые ноды курса​
+
+Возвращает NodeID корня задач и корня теории для переданного courseId.
+Body
+required
+application/json
+
+    courseId
+
+Type: integer
+required
+
+Id курса, для которого нужно получить корневые ноды
+sessionId
+
+    Type: string
+    required
+
+    Session Id хранится в Url-encoded виде внутри cookies. Он существует и валиден некоторое время после того как человек заходит в аккаунт DL из браузера.
+
+    Выглядит он примерно так: {2DA21836-FD30-433F-B0A3-A4BDA2669B6D}
+
+    Для получения вручную нужно:
+
+        Зайти в devtools браузера
+
+        Перейти на вкладку Application
+
+        Раздел Cookies -> https://dl.gsu.by
+
+        Найти DLSID
+
+        Включить снизу галочку "Show URL-decoded"
+
+        Скопировать значение
+
+    Для получения через JavaScript можно использовать следующий код:
+
+    function getSessionId() {
+        const match = document.cookie.match('(?:^|; )DLSID=([^;]*)');
+        return match ? decodeURIComponent(match[1]) : null;
+    }
+
+    console.log(getSessionId());
+
+Responses
+
+    application/json
+    401
+
+    Неавторизован — sessionId отсутствует или недействителен
+    403
+
+    У пользователя нет доступа к указанному курсу
+    500
+
+    Внутренняя ошибка сервера
+
+Request Example for post/get-course-node
+
+requests.post(
+    "https://dl.gsu.by/restapi/get-course-node",
+    headers={
+      "Content-Type": "application/json"
+    },
+    json={
+      "sessionId": "",
+      "courseId": 1
+    }
+)
+
+{
+  "tasksRootId": 1,
+  "theoryRootId": 1
+}
+
+Успешный ответ с корневыми нодами курса

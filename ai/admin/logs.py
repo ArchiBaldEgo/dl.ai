@@ -266,17 +266,82 @@ def admin_request_logs_view(request):
     return TemplateResponse(request, "admin/ai/request_logs.html", context)
 
 
+def _is_batch_solve_log(log):
+    """True для записей batch-solve ARM-прогона (старых mode=solve+sentinel и
+    новых mode=batch_solve). У таких логов вместо текста запроса в деталях
+    рисуется мини-таблица результатов из /arm/solve/."""
+    return (
+        log.source == "arm"
+        and log.mode in ("batch_solve", "solve")
+        and "Batch solve run " in (log.message or "")
+    )
+
+
+def _build_batch_log_snapshot(log):
+    """Собрать snapshot {run_id, course_id, file_extension, node_ids, results,
+    report} для детали batch-solve лога — тот же формат, что потребляет JS
+    мини-таблицы в /arm/solve/. Возвращает None, если прогон/результаты не
+    найдены (тогда детал отрисуется как обычный текстовый лог)."""
+    import re as _re
+    from ..models import AIModelTestRun, AIModelTestResult
+    from ..arm_runner import _batch_results_from_db, _build_batch_report
+
+    m = _re.search(r"Batch solve run ([0-9a-f]{32})", log.message or "")
+    if not m:
+        return None
+    run_id_hex = m.group(1)
+    try:
+        test_run = AIModelTestRun.objects.get(run_id=run_id_hex)
+    except AIModelTestRun.DoesNotExist:
+        return None
+
+    results = _batch_results_from_db(test_run)
+    report = _build_batch_report(results)
+
+    # file_extension — первый непустой снимок из результатов.
+    file_extension = ""
+    node_ids = []
+    seen_nodes = set()
+    for r in results:
+        ext = r.get("file_extension") or ""
+        if ext and not file_extension:
+            file_extension = ext
+        nid = r.get("task_node_id")
+        if nid and nid not in seen_nodes:
+            seen_nodes.add(nid)
+            node_ids.append(nid)
+
+    return {
+        "run_id": run_id_hex,
+        "course_id": test_run.course_id,
+        "file_extension": file_extension,
+        "node_ids": node_ids,
+        "results": results,
+        "report": report,
+    }
+
+
 def admin_request_log_detail_view(request, log_id):
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
 
     log = AIRequestLog.objects.get(pk=log_id)
+
     context = {
         **ai_admin_site.each_context(request),
         "title": "DL.AI: Детали запроса",
         "log": log,
         "moscow_tz": MOSCOW_TZ,
+        "is_batch_log": False,
+        "batch_snapshot": None,
     }
+
+    if _is_batch_solve_log(log):
+        snapshot = _build_batch_log_snapshot(log)
+        if snapshot is not None:
+            context["is_batch_log"] = True
+            context["batch_snapshot"] = snapshot
+
     return TemplateResponse(request, "admin/ai/airequestlog_detail.html", context)
 
 
@@ -301,7 +366,13 @@ def resend_request_view(request, log_id):
     # ARM batch-solve logs have message="Batch solve run <run_id>" and must be
     # rerun as a full batch (same models, tasks, prompt, language) under the
     # caller's own DLSID — a plain resend to one model would be meaningless.
-    if log.source == "arm" and log.mode == "solve" and "Batch solve run " in (log.message or ""):
+    # Старые batch-логи использовали mode="solve" + sentinel; новые —
+    # mode="batch_solve". Принимаем оба.
+    if (
+        log.source == "arm"
+        and log.mode in ("batch_solve", "solve")
+        and "Batch solve run " in (log.message or "")
+    ):
         return _rerun_arm_batch(request, log)
 
     # Resolve the model handler.
@@ -601,7 +672,7 @@ def _rerun_arm_batch(request, log):
         ui_language="Русский",
         dl_test=True,
         prompt_id=prompt_id,
-        course_id=None,
+        course_id=test_run.course_id,
         solve_file_extension=file_extension,
         solve_prog_lang_name=prog_lang_name,
         programming_language_id=prog_lang_id,

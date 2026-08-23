@@ -6,6 +6,8 @@
 - Статус прогонов (polling для фронтенда).
 """
 
+import re
+
 from .site import ai_admin_site
 from django.core.cache import cache
 from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
@@ -41,8 +43,8 @@ def _resolve_session_id(request):
     return session_id
 
 
-def _resolve_active_course_id(request):
-    """Вернуть активный курс пользователя из DL сессии.
+def _resolve_active_course_id_for_session(session_id):
+    """Вернуть активный курс пользователя из DL сессии (по sessionId).
 
     Вызывает get-user-info с DLSID. Если courseID > 0 — возвращает его.
     Если courseID = 0 — пытается активировать последний известный курс
@@ -50,13 +52,13 @@ def _resolve_active_course_id(request):
     затем снова запрашивает get-user-info.
 
     Возвращает (course_id, error_message). course_id=None если курс не
-    удалось определить.
+    удалось определить. Используется как ARM-страницей, так и send_solution_view
+    (единая логика резолва courseId для REST send-solution).
     """
     from ..external_auth import fetch_external_user_info
     from ..dl_api_client import ensure_course_session
     from ..models import AIModelTestRun
 
-    session_id = _resolve_session_id(request)
     if not session_id:
         return None, "Нет DLSID — требуется авторизация на dl.gsu.by."
 
@@ -106,6 +108,11 @@ def _resolve_active_course_id(request):
         pass
 
     return fallback_course_id, ""
+
+
+def _resolve_active_course_id(request):
+    """Тонкая обёртка над _resolve_active_course_id_for_session для HTTP-запроса."""
+    return _resolve_active_course_id_for_session(_resolve_session_id(request))
 
 
 def _build_find_error_message(task_text, code_text, prog_lang_name, topic_name, prompt_text, ui_language):
@@ -766,6 +773,12 @@ def admin_arm_solve_result_download_view(request, result_id):
     result = get_object_or_404(AIModelTestResult, pk=result_id)
     code = result.code or ""
     ext = (result.file_extension_snapshot or "").strip()
+    if ext and not ext.startswith("."):
+        ext = f".{ext}"
+    # Sanitize ext: допускаем только ведущую точку + буквы/цифры — иначе символы
+    # вроде " \r\n могли бы инъецировать в Content-Disposition. node_id — int,
+    # безопасен; filename собирается из проверенных частей.
+    ext = re.sub(r"[^\w.]", "", ext)
     if ext and not ext.startswith("."):
         ext = f".{ext}"
     node_id = ""
