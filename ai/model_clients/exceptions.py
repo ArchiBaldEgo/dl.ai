@@ -212,7 +212,7 @@ def humanize_model_error(raw_text: str, include_detail: bool = False) -> tuple[s
     """
     text = (raw_text or "").strip()
     if not text:
-        return "", ""
+        return "Модель вернула пустой ответ. Попробуйте позже.", "Модель вернула пустой ответ. Попробуйте позже."
 
     low = text.lower()
 

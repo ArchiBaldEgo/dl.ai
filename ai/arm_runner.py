@@ -12,10 +12,13 @@ _prune_old_jobs (TTL 6 часов).
 
 import copy
 import json
+import logging
 import threading
 import time
 import uuid
 from time import perf_counter
+
+logger = logging.getLogger(__name__)
 
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
@@ -501,6 +504,9 @@ def _run_job_worker(
                 response_text, tokens = _extract_model_response(response)
 
                 cleaned_text = strip_tags(response_text).strip()
+                if not cleaned_text:
+                    cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
+                    logger.warning("ARM single-run: model %s returned empty response", model["key"])
                 friendly_text, detailed_text = humanize_model_error(cleaned_text, include_detail=True)
                 short_response = friendly_text[:300] + ("..." if len(friendly_text) > 300 else "")
                 is_ok = bool(friendly_text) and "ошибка" not in friendly_text.lower()[:25]
@@ -1020,6 +1026,9 @@ def _run_batch_job_worker(
                         break
                     response_text, tokens = _extract_model_response(response)
                     cleaned_text = strip_tags(response_text).strip()
+                    if not cleaned_text:
+                        cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
+                        logger.warning("ARM batch: model %s returned empty response for task node_id=%s", model["key"], task.node_id)
                     friendly, detailed = humanize_model_error(cleaned_text, include_detail=True)
                     # Полный вербатим ответ модели — без обрезки и без добавочного
                     # DL-блока (код/DL-коммент хранятся в отдельных полях).

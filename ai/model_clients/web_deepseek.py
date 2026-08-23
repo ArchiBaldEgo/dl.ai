@@ -103,7 +103,14 @@ async def _ask_web_deepseek_common(msg: str, user_id: int, thinking: bool) -> Tu
             obj, error_message = safe_parse_response(response.text)
             if obj is None:
                 return error_message, 0, True
-            return obj["data"]["content"], 0, False
+            content = obj.get("data", {}).get("content", "") or ""
+            if not content.strip():
+                logger.warning("Web DeepSeek returned 200 but empty content (attempt %s/%s)", attempt, max_attempts)
+                if attempt < max_attempts:
+                    await asyncio.sleep(min(attempt * 3, 15))
+                    continue
+                return "Модель Web DeepSeek вернула пустой ответ. Попробуйте позже.", 0, True
+            return content, 0, False
 
         if response.status_code in (429, 500, 502, 503, 504):
             # 429 — все боты pool заняты (pool шлёт Retry-After, ~3с): транзитная

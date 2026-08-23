@@ -136,7 +136,10 @@ async def _ask_openrouter(
             return "Неожиданный формат ответа от OpenRouter.", 0, True
 
         completion_tokens = obj.get("usage", {}).get("completion_tokens", 0)
-        assistant_content = obj["choices"][0]["message"].get("content", "")
+        assistant_content = obj["choices"][0]["message"].get("content", "") or ""
+        if not assistant_content.strip():
+            logger.warning("OpenRouter model %s returned empty content", model_id)
+            return f"Модель OpenRouter ({model_id}) вернула пустой ответ. Попробуйте позже.", 0, True
         conversation_history.append(user_id, {"role": "assistant", "content": assistant_content})
         return assistant_content, completion_tokens, False
 

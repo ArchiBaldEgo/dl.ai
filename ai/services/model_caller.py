@@ -96,8 +96,17 @@ class ModelCaller:
             response_text = response
             tokens = 0
 
+        response_text = str(response_text or "")
+
+        # Guard: a non-error response must never be empty. If the handler
+        # returned (content="", is_error=False), substitute a clear message
+        # and mark as error so the user/UI never sees a blank bubble.
+        if not response_text.strip() and not is_error:
+            response_text = "Модель вернула пустой ответ. Попробуйте позже."
+            is_error = True
+
         return ModelCallResult(
-            response_text=str(response_text or ""),
+            response_text=response_text,
             tokens=tokens,
             model_title=title,
             is_error=is_error,

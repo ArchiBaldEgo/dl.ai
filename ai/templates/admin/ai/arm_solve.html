@@ -361,6 +361,7 @@
         <h2>Сводка</h2>
         <p class="arm-section-note">Результаты последнего запуска</p>
       </div>
+      <button type="button" class="button" id="armSolveDownloadCsvBtn" style="font-size:13px; display:none;">Скачать результаты (CSV)</button>
     </div>
     <ul id="armSolveReportList" class="arm-report"></ul>
     <div id="armSolvePerModelWrap"></div>
@@ -399,6 +400,7 @@
     const promptSelect = document.getElementById('armPromptSelect');
     let currentRunId = '';
     let pollTimer = null;
+    let lastRenderedResults = [];
 
     function getCsrfToken() {
       const input = form.querySelector('input[name="csrfmiddlewaretoken"]');
@@ -566,6 +568,14 @@
       if (!run) { return; }
       renderReport(run.report || null);
       renderResults(run.results || []);
+      lastRenderedResults = run.results || [];
+      // Show download button only when run is done and has results.
+      const downloadBtn = document.getElementById('armSolveDownloadCsvBtn');
+      if (downloadBtn) {
+        const hasResults = (run.results || []).length > 0;
+        const isDone = run.status === 'completed' || run.status === 'failed';
+        downloadBtn.style.display = (hasResults && isDone) ? '' : 'none';
+      }
       if (run.status === 'running') {
         const done = run.completed_pairs != null ? run.completed_pairs : 0;
         const total = run.total_pairs != null ? run.total_pairs : 0;
@@ -787,6 +797,75 @@
         cancelBtn.disabled = false;
         cancelBtn.textContent = 'Прервать тестирование';
       }
+    }
+
+    // ── Download results as CSV (tasks × models matrix) ──
+    function downloadResultsCsv(results) {
+      if (!results || !results.length) { return; }
+      // Build ordered unique lists of tasks and models.
+      var taskMap = {}, taskOrder = [];
+      var modelMap = {}, modelOrder = [];
+      results.forEach(function (r) {
+        var tkey = String(r.task_node_id || '');
+        if (!(tkey in taskMap)) {
+          taskMap[tkey] = { id: tkey, name: r.task_name || '' };
+          taskOrder.push(tkey);
+        }
+        var mkey = String(r.model_key || r.model_title || '');
+        if (!(mkey in modelMap)) {
+          modelMap[mkey] = r.model_title || mkey;
+          modelOrder.push(mkey);
+        }
+      });
+      // Build matrix: task → model → verdict symbol.
+      var matrix = {};
+      results.forEach(function (r) {
+        var tkey = String(r.task_node_id || '');
+        var mkey = String(r.model_key || r.model_title || '');
+        var v = r.verdict;
+        // + solved, - failed, ? skipped/empty.
+        var symbol = v === 'solved' ? '+' : (v === 'failed' ? '-' : '?');
+        if (!matrix[tkey]) { matrix[tkey] = {}; }
+        matrix[tkey][mkey] = symbol;
+      });
+      // CSV with BOM for Excel (UTF-8).
+      var lines = [];
+      var header = ['Node ID', 'Задача'];
+      modelOrder.forEach(function (mkey) { header.push(csvCell(modelMap[mkey])); });
+      lines.push(header.join(';'));
+      taskOrder.forEach(function (tkey) {
+        var t = taskMap[tkey];
+        var row = [csvCell(t.id), csvCell(t.name)];
+        modelOrder.forEach(function (mkey) {
+          row.push(matrix[tkey] && matrix[tkey][mkey] ? matrix[tkey][mkey] : '');
+        });
+        lines.push(row.join(';'));
+      });
+      var csv = '\ufeff' + lines.join('\r\n');
+      var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'arm_solve_results_' + (currentRunId || 'run') + '.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+    function csvCell(value) {
+      var s = String(value == null ? '' : value);
+      if (s.indexOf(';') !== -1 || s.indexOf('"') !== -1 || s.indexOf('\n') !== -1) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    }
+    var downloadCsvBtn = document.getElementById('armSolveDownloadCsvBtn');
+    if (downloadCsvBtn) {
+      downloadCsvBtn.addEventListener('click', function () {
+        // Use the latest results from the last rendered snapshot.
+        // We stored them in a closure variable accessible here.
+        downloadResultsCsv(lastRenderedResults);
+      });
     }
 
     form.addEventListener('submit', async function (event) {

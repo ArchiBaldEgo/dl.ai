@@ -112,6 +112,9 @@ async def _ask_ollama(
 
     content = getattr(getattr(resp, "message", None), "content", "") or ""
     tokens = getattr(resp, "eval_count", 0) or 0
+    if not content.strip():
+        logger.warning("Ollama model %s returned empty content", model_id)
+        return f"Модель Ollama ({model_id}) вернула пустой ответ. Попробуйте позже.", 0, True
     return content, int(tokens), False
 
 
