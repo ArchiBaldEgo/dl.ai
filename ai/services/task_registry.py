@@ -32,9 +32,9 @@ def apply_dl_task_info(task, data):
 
 _LANG_TO_EXTENSION = {
     "python": ".py",
-    "c-mpa": ".cmp",
-    "cmpa": ".cmp",
-    "с-мпа": ".cmp",
+    "c-mpa": ".mpc",
+    "cmpa": ".mpc",
+    "с-мпа": ".mpc",
     "ассемблер i86": ".i86",
     "ассемблер i8086": ".i86",
     "ассемблер": ".i86",
@@ -55,10 +55,10 @@ _PATH_KEYWORDS = [
     ("i8086", ".i86"),
     ("i86", ".i86"),
     ("ассемблер", ".i86"),
-    ("c-mpa", ".cmp"),
-    ("с-мпа", ".cmp"),
-    ("cmpa", ".cmp"),
-    ("hlccad", ".cmp"),  # HLCCAD uses C-MPA language
+    ("c-mpa", ".mpc"),
+    ("с-мпа", ".mpc"),
+    ("cmpa", ".mpc"),
+    ("hlccad", ".mpc"),  # HLCCAD uses C-MPA language
     ("python", ".py"),
     ("pascal", ".pas"),
     ("verilog", ".v"),
@@ -69,7 +69,7 @@ _PATH_KEYWORDS = [
 # соответствующих им названий языков для препромпта. Пользователь выбирает
 # расширение вручную на /arm/solve/ (тема из дерева DL не определяет язык
 # однозначно — курс "[Ассемблер i8086, C-MPA]" содержит задачи обоих языков,
-# причём каждая задача допускает и .cmp, и .i86).
+# причём каждая задача допускает и .mpc, и .i86).
 SOLVE_EXTENSION_CHOICES = [
     (".pas", "Pascal"),
     (".cpp", "C++"),
@@ -78,7 +78,9 @@ SOLVE_EXTENSION_CHOICES = [
     (".java", "Java"),
     (".i86", "Ассемблер i8086"),
     (".asm", "Ассемблер i8086"),
-    (".cmp", "C-MPA (С-МПА)"),
+    # .mpc (не .cmp) — DL REST send-solution принимает именно .mpc
+    # (см. миграцию 0032_cmp_to_mpc).
+    (".mpc", "C-MPA (С-МПА)"),
     (".v", "Verilog"),
 ]
 
@@ -106,6 +108,29 @@ def _guess_extension(prog_lang_name: str) -> str:
         if keyword in low:
             return file_ext
     return ""
+
+
+def extension_to_language_ids(file_extension):
+    """Вернуть id ``ProgrammingLanguage``, чьё расширение совпадает с данным.
+
+    Переиспользует ``_guess_extension`` (DRY): итерирует все ``ProgrammingLanguage``
+    и оставляет те, у кого ``_guess_extension(language_name) == file_extension``.
+    Используется на /arm/solve/ для фильтрации препромтов по выбранному расширению
+    (промпты привязаны к теме, тема — к языку программирования; прямого поля
+    расширения у Prompt нет). Таблица языков мала, поэтому полный scan приемлем.
+
+    Возвращает ``set[int]`` (пустой, если ни один язык не маппится в расширение —
+    значит оператор не завёл ``ProgrammingLanguage`` с нужным именем).
+    """
+    if not file_extension:
+        return set()
+    from ..models import ProgrammingLanguage
+
+    ids = set()
+    for pl in ProgrammingLanguage.objects.all():
+        if _guess_extension(pl.language_name) == file_extension:
+            ids.add(pl.id)
+    return ids
 
 
 # Mapping from DL path fragments to local Topic names. The DL course tree

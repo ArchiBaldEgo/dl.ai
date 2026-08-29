@@ -25,6 +25,7 @@ from .logs import (
     admin_request_log_task_text_view,
     admin_request_logs_view,
     resend_request_view,
+    rerun_arm_batch_view,
 )
 from .model_status import (
     admin_model_status_view,
@@ -77,6 +78,7 @@ def get_ai_admin_urls():
         path("ai/airequestlog/task-text/", ai_admin_site.admin_view(admin_request_log_task_text_view), name="ai_request_log_task_text"),
         path("ai/airequestlog/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
         path("ai/airequestlog/<int:log_id>/resend/", ai_admin_site.admin_view(resend_request_view), name="ai_request_log_resend"),
+        path("ai/airequestlog/<int:log_id>/rerun-arm/", ai_admin_site.admin_view(rerun_arm_batch_view), name="ai_request_log_rerun_arm"),
         path("ai/airequestlog/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),
     ]
     return [

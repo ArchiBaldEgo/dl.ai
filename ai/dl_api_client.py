@@ -504,20 +504,57 @@ def fetch_task_solution(session_id: str, task_id: int, file_extension: str) -> d
     return _decode_response_json(response)
 
 
-def _send_solution_payload_context(node_id, code, file_extension) -> str:
+def _send_solution_payload_context(node_id, code, file_extension, course_id=0) -> str:
     """Build a diagnostic context string for send-solution failures.
 
     DL returns a bare «Bad Request» (400) without saying WHICH field it rejected,
-    so we attach the payload context (nodeId, fileExtension, code length and a
-    short head of the code) to the error. This lets the operator tell apart:
-    oversized code (codeLen huge), a non-code payload from a broken extraction
-    (codeHead is prose, not source), or an unsupported fileExtension.
+    so we attach the payload context (nodeId, courseId, fileExtension, code length
+    and a short head of the code) to the error. This lets the operator tell apart:
+    a missing/zero courseId (the documented required field), oversized code
+    (codeLen huge), a non-code payload from a broken extraction (codeHead is
+    prose, not source), or an unsupported fileExtension.
     """
     code_head = " ".join((code or "").split())[:120]
     return (
-        f"send-solution(nodeId={node_id}, fileExtension={file_extension!r}, "
-        f"codeLen={len(code or '')}, codeHead={code_head!r})"
+        f"send-solution(nodeId={node_id}, courseId={course_id}, "
+        f"fileExtension={file_extension!r}, codeLen={len(code or '')}, "
+        f"codeHead={code_head!r})"
     )
+
+
+def ensure_course_session(session_id: str, course_id: int, node_id: int) -> bool:
+    """Activate a course in the DL session so send-solution works.
+
+    DL ties ``courseID`` to the DLSID session: send-solution returns 400 when
+    ``courseID=0`` (user logged in but hasn't "entered" a course). The REST API
+    has no endpoint to set courseID — it's set by visiting a classic DL page.
+
+    ``GET /task.jsp?cid=<course_id>&nid=<node_id>`` with the DLSID cookie
+    activates the course in the session. After this call, get-user-info returns
+    ``courseID=<course_id>`` and send-solution accepts submissions.
+
+    Returns True if the course was activated (or already active), False on
+    failure (network error, 4xx/5xx). Best-effort: callers proceed regardless.
+    """
+    if not course_id or not node_id:
+        return False
+    base_url = _get_dl_base_url()
+    url = urljoin(base_url, f"/task.jsp?cid={course_id}&nid={node_id}")
+    cookies = {"DLSID": session_id}
+    request_kwargs = {
+        "cookies": cookies,
+        "verify": _get_verify_ssl(),
+        "timeout": 15,
+        "allow_redirects": True,
+    }
+    proxies = _get_proxies()
+    if proxies is not None:
+        request_kwargs["proxies"] = proxies
+    try:
+        resp = requests.get(url, **request_kwargs)
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 
 def send_solution_to_dl(
@@ -525,10 +562,17 @@ def send_solution_to_dl(
     node_id: int,
     code: str,
     file_extension: str,
+    course_id: int = 0,
 ) -> dict[str, Any]:
     """Submit code to DL for automated testing.
 
     POST /restapi/send-solution → {"queueId": N, "message": "..."}
+
+    ``course_id`` — обязательное по контракту REST API поле (Id курса, в котором
+    находится нода). Передаётся в теле как ``courseId``. Без него DL отдаёт 400
+    Bad Request; ручная отправка через веб-форму работает, т.к. курс уже в URL
+    страницы (``cid``). По умолчанию 0 — только для обратной совместимости
+    сигнатуры, все in-tree вызовы должны передавать реальный course_id.
 
     Returns the raw JSON response. Raises DLUnauthorizedError (401),
     DLServerError (500), DLApiUnavailable on network failure.
@@ -541,17 +585,20 @@ def send_solution_to_dl(
             "nodeId": node_id,
             "code": code,
             "fileExtension": file_extension,
+            "courseId": course_id,
         },
     )
 
     # 400/413/5xx: DL отдаёт голое «Bad Request» без указания поля — прикладываем
-    # контекст payload (nodeId/extension/длина кода/начало кода) для диагностики.
-    # 401/403/404 оставляем типизированными (не оборачиваем).
+    # контекст payload (nodeId/courseId/extension/длина кода/начало кода) для
+    # диагностики. 401/403/404 оставляем типизированными (не оборачиваем).
     try:
         _raise_for_status(response)
         return _decode_response_json(response)
     except DLServerError as exc:
-        raise DLServerError(f"{_send_solution_payload_context(node_id, code, file_extension)}: {exc}") from exc
+        raise DLServerError(
+            f"{_send_solution_payload_context(node_id, code, file_extension, course_id)}: {exc}"
+        ) from exc
 
 
 def get_solution_result_from_dl(

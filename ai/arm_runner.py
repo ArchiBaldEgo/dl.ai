@@ -12,10 +12,13 @@ _prune_old_jobs (TTL 6 часов).
 
 import copy
 import json
+import logging
 import threading
 import time
 import uuid
 from time import perf_counter
+
+logger = logging.getLogger(__name__)
 
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
@@ -332,22 +335,41 @@ def _update_job(run_id, **updates):
 
 
 def cancel_arm_run(run_id):
-    """Request cancellation of a running ARM job.
+    """Request cancellation of a running ARM job — немедленный flip статуса.
 
-    Sets ``cancel_requested=True`` on the in-memory job. The worker checks
-    this flag between task/model iterations and stops early if set.
+    Помимо установки ``cancel_requested=True`` (кооперативная отмена для
+    воркера), сразу переводит in-memory job и БД-прогон в ``cancelled``: UI
+    перестаёт поллить и показывает «Прервано» в пределах одного цикла опроса,
+    не дожидаясь завершения in-flight LLM/DL-вызова. Воркер после возврата
+    блокирующего вызова увидит флаг, отбросит in-flight пару и не перетрёт
+    ``cancelled`` обратно в ``completed`` (guard в finalize).
 
-    Если in-memory job уже потерян (рестарт сервера/падение воркера), а в БД
-    прогон ещё STATUS_RUNNING — помечаем его COMPLETED с «Прервано пользователем»,
-    чтобы фронтенд вышел из «выполняется» без 404. Возвращает True, если нашли
-    живой job или осиротевший DB-прогон; False, если прогона нет вообще.
+    Если in-memory job уже потерян (рестарт/падение воркера), а в БД прогон ещё
+    STATUS_RUNNING — помечаем его CANCELLED с «Прервано пользователем».
+    Возвращает True, если нашли живой job или осиротевший DB-прогон; False, если
+    прогона нет вообще.
     """
     with _jobs_lock:
         job = _jobs.get(run_id)
         if job:
             job["cancel_requested"] = True
+            job["cancelled"] = True
+            job["status"] = "cancelled"
             job["updated_at_ts"] = time.time()
-            return True
+
+    # Немедленно фиксируем отмену в БД — фронтенд читает snapshot и выходит
+    # из «выполняется» без ожидания in-flight вызова.
+    if run_id:
+        AIModelTestRun.objects.filter(
+            run_id=run_id, status=AIModelTestRun.STATUS_RUNNING
+        ).update(
+            status=AIModelTestRun.STATUS_CANCELLED,
+            finished_at=timezone.now(),
+            error_message="Прервано пользователем",
+        )
+
+    if job is not None:
+        return True
 
     # In-memory job нет — возможно осиротевший прогон после рестарта.
     if not run_id:
@@ -355,7 +377,7 @@ def cancel_arm_run(run_id):
     updated = AIModelTestRun.objects.filter(
         run_id=run_id, status=AIModelTestRun.STATUS_RUNNING
     ).update(
-        status=AIModelTestRun.STATUS_COMPLETED,
+        status=AIModelTestRun.STATUS_CANCELLED,
         finished_at=timezone.now(),
         error_message="Прервано пользователем",
     )
@@ -501,6 +523,9 @@ def _run_job_worker(
                 response_text, tokens = _extract_model_response(response)
 
                 cleaned_text = strip_tags(response_text).strip()
+                if not cleaned_text:
+                    cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
+                    logger.warning("ARM single-run: model %s returned empty response", model["key"])
                 friendly_text, detailed_text = humanize_model_error(cleaned_text, include_detail=True)
                 short_response = friendly_text[:300] + ("..." if len(friendly_text) > 300 else "")
                 is_ok = bool(friendly_text) and "ошибка" not in friendly_text.lower()[:25]
@@ -753,7 +778,7 @@ def _extract_code_from_response(text):
     return text.strip()
 
 
-def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0):
+def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None, course_id=None):
     """Send code to DL for real testing and poll for the result.
 
     Returns a dict:
@@ -763,10 +788,20 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
             "submit_error": str,   # error message if send-solution failed
             "queue_id": int,       # DL queue id (0 if submit failed)
             "code_sent": str,      # the code that was sent to DL
+            "cancelled": bool,     # True if aborted by cancel request
         }
     verdict is None if the DL test could not be performed.
+
+    ``run_id`` (опционально) — id batch-прогона: если передан, цикл поллинга
+    проверяет ``_is_cancel_requested(run_id)`` перед каждой итерацией и
+    прерывается досрочно (отмена срабатывает в пределах одного ``poll_interval``
+    вместо ожидания всех ``max_polls``).
+
+    ``course_id`` (опционально) — если передан, перед send-solution вызывается
+    ``ensure_course_session`` для активации курса в сессии DL (иначе send-solution
+    отдаёт 400 при courseID=0 в сессии).
     """
-    from .dl_api_client import send_solution_to_dl, get_solution_result_from_dl, DLServerError
+    from .dl_api_client import send_solution_to_dl, get_solution_result_from_dl, DLServerError, ensure_course_session
 
     result = {
         "verdict": None,
@@ -774,28 +809,31 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
         "submit_error": "",
         "queue_id": 0,
         "code_sent": code[:5000],
+        "cancelled": False,
     }
+
+    # Activate the course in the DL session before send-solution — DL requires
+    # courseID != 0 in the session, otherwise send-solution returns 400.
+    if course_id:
+        ensure_course_session(session_id, course_id, node_id)
 
     # Step 1: submit code to DL.
     submit_resp = None
     try:
-        submit_resp = send_solution_to_dl(session_id, node_id, code, file_extension)
+        submit_resp = send_solution_to_dl(session_id, node_id, code, file_extension, course_id=course_id)
     except DLServerError as exc:
         msg = str(exc)
         result["submit_error"] = f"send-solution: {msg}"
         # 400 от send-solution недокументировано (док описывает только 401/500),
-        # DL не поясняет, какое поле отвергнуто. Ранее предполагалось, что DL
-        # валидирует расширение против платформ задачи, но это опровергнуто
-        # пользователем: и .i86, и .cmp для одной ноды дают 400 при корректном
-        # коде, а язык выбран верно. Значит 400 не про расширение.
-        #
-        # Проверяем эмпирическую гипотезу (выдвинутую пользователем: «с твоим
-        # nodeId — доступ запрещён»): возможно send-solution ждёт не nodeId, а
-        # taskId (get-task-info возвращает оба id). Отправляем task_id в поле
-        # nodeId; если принято — продолжаем поллинг по этому queueId.
+        # DL не поясняет, какое поле отвергнуто. Контракт REST API требует
+        # courseId в теле — он теперь передаётся; ensure_course_session выше
+        # дополнительно активирует курс в сессии. Если 400 всё равно пришёл,
+        # проверяем эмпирическую гипотезу: возможно send-solution ждёт не nodeId,
+        # а taskId (get-task-info возвращает оба id). Отправляем task_id в поле
+        # nodeId (courseId тот же); если принято — продолжаем поллинг.
         if "код 400" in msg and task_id and task_id != node_id:
             try:
-                alt_resp = send_solution_to_dl(session_id, task_id, code, file_extension)
+                alt_resp = send_solution_to_dl(session_id, task_id, code, file_extension, course_id=course_id)
                 alt_qid = alt_resp.get("queueId") or 0
                 if alt_qid > 0:
                     # taskId принят — nodeId был не тем идентификатором.
@@ -812,13 +850,13 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
                 result["submit_error"] += f" | проба taskId={task_id} вместо nodeId: {alt_exc}"
         if not submit_resp:
             result["submit_error"] += (
-                " — DL отклонил отправку решения (400). Расширение и nodeId "
-                "переданы по контракту REST API, язык выбран корректно. "
-                "Вероятные причины: задача не принимает отправку через REST API "
-                "(напр. раздел «Программы с подсказками»), у сессии нет прав на "
-                "отправку для этой ноды, либо код не прошёл серверную "
+                " — DL отклонил отправку решения (400). courseId/nodeId/"
+                "fileExtension переданы по контракту REST API, язык выбран "
+                "корректно. Вероятные причины: задача не принимает отправку через "
+                "REST API (напр. раздел «Программы с подсказками»), у сессии нет "
+                "прав на отправку для этой ноды, либо код не прошёл серверную "
                 f"валидацию. Проверьте задачу вручную на dl.gsu.by "
-                f"(nodeId={node_id}, taskId={task_id})."
+                f"(nodeId={node_id}, taskId={task_id}, courseId={course_id})."
             )
             return result
     except Exception as exc:
@@ -834,6 +872,12 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
 
     # Step 2: poll for the result.
     for _ in range(max_polls):
+        # Кооперативная отмена: проверяем флаг перед каждой итерацией поллинга,
+        # иначе прерванный прогон висел бы до max_polls*poll_interval (до 90с).
+        if run_id is not None and _is_cancel_requested(run_id):
+            result["submit_error"] = "cancelled"
+            result["cancelled"] = True
+            return result
         time.sleep(poll_interval)
         try:
             poll_resp = get_solution_result_from_dl(session_id, queue_id)
@@ -877,6 +921,11 @@ def _run_batch_job_worker(
     course_id=None,
     solve_file_extension="",
     solve_prog_lang_name="",
+    programming_language_id=None,
+    programming_language_name="",
+    prompt_name="",
+    topic_id=None,
+    topic_name="",
 ):
     """Daemon worker for a batch-solve run.
 
@@ -903,6 +952,13 @@ def _run_batch_job_worker(
             started_at=start_time,
             message=f"Batch solve: {len(node_ids)} задач × {len(ordered_models)} моделей",
             total_models=len(ordered_models),
+            programming_language_id=programming_language_id,
+            programming_language_name=programming_language_name or "",
+            topic_id=topic_id,
+            topic_name=topic_name or "",
+            prompt_id=prompt_id,
+            prompt_name=prompt_name or "",
+            course_id=course_id or None,
         )
         log = AIRequestLog.objects.create(
             user=user,
@@ -910,10 +966,16 @@ def _run_batch_job_worker(
             external_user_id=external_id,
             user_full_name=full_name,
             source=AIRequestLog.SOURCE_ARM,
-            mode=AIRequestLog.MODE_SOLVE,
+            mode=AIRequestLog.MODE_BATCH_SOLVE,
             sent_at=start_time,
             model_names=models_titles,
             message=f"Batch solve run {run_id}",
+            programming_language_id=programming_language_id,
+            programming_language_name=programming_language_name or "",
+            topic_id=topic_id,
+            topic_name=topic_name or "",
+            prompt_id=prompt_id,
+            prompt_name=prompt_name or "",
         )
 
         # Resolve node_ids → Task objects via DL get-task-info + ensure_task.
@@ -995,8 +1057,16 @@ def _run_batch_job_worker(
                         message,
                         f"admin-batch-{user_id}-{model['key']}-{run_id}-{task.node_id}",
                     )
+                    # Отмена могла прийти во время LLM-вызова (его самого не
+                    # прервать) — не тратим время на DL-тест и запись пары.
+                    if _is_cancel_requested(run_id):
+                        cancelled = True
+                        break
                     response_text, tokens = _extract_model_response(response)
                     cleaned_text = strip_tags(response_text).strip()
+                    if not cleaned_text:
+                        cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
+                        logger.warning("ARM batch: model %s returned empty response for task node_id=%s", model["key"], task.node_id)
                     friendly, detailed = humanize_model_error(cleaned_text, include_detail=True)
                     # Полный вербатим ответ модели — без обрезки и без добавочного
                     # DL-блока (код/DL-коммент хранятся в отдельных полях).
@@ -1025,7 +1095,14 @@ def _run_batch_job_worker(
                             dl_result = _test_solution_on_dl(
                                 session_id, task.node_id, code_only, effective_ext,
                                 task_id=task.task_id or 0,
+                                run_id=run_id,
+                                course_id=course_id,
                             )
+                            # Отмена пришла во время поллинга DL — прерываем без
+                            # записи пары (вердикт не определён).
+                            if dl_result.get("cancelled") or _is_cancel_requested(run_id):
+                                cancelled = True
+                                break
                             dl_test_comment = dl_result.get("comment", "") or ""
                             dl_submit_error = dl_result.get("submit_error", "") or ""
                             dl_verdict = dl_result.get("verdict")
@@ -1110,14 +1187,21 @@ def _run_batch_job_worker(
                         job["updated_at_ts"] = time.time()
 
         # Finalize: build report from in-memory results (or DB if evicted).
+        results = []
+        db_results = []
         with _jobs_lock:
             job = _jobs.get(run_id)
             evicted = job is None
             if not evicted:
+                # cancel_arm_run мог уже перевести job в cancelled (мгновенный
+                # flip). Не перетираем отмену обратно в completed — сохраняем
+                # cancelled, чтобы UI корректно показал «Прервано».
+                was_cancelled = cancelled or job.get("cancelled", False)
                 job["report"] = _build_batch_report(job.get("results") or [])
-                job["status"] = "completed"
-                if cancelled:
+                job["status"] = "cancelled" if was_cancelled else "completed"
+                if was_cancelled:
                     job["cancelled"] = True
+                    cancelled = True
                 job["updated_at_ts"] = time.time()
                 results = list(job.get("results") or [])
                 report = job["report"]
@@ -1127,19 +1211,57 @@ def _run_batch_job_worker(
             report = _build_batch_report(db_results)
 
         end_time = timezone.now()
-        any_ok_batch = any(r.get("status") == "ok" for r in (results if not evicted else db_results))
+        if evicted:
+            batch_results = db_results
+        else:
+            batch_results = results
+        any_ok_batch = any(r.get("status") == "ok" for r in batch_results)
+        # Сводный ответ для журнала: per-model вердикты + ошибки (до 5000 символов).
+        batch_summary_parts = []
+        for r in batch_results:
+            verdict = r.get("verdict") or "failed"
+            model_title = r.get("model_title") or r.get("model_key") or "?"
+            task_name = r.get("task_name") or ""
+            node_id = r.get("task_node_id") or ""
+            dl_err = r.get("dl_error") or ""
+            line = f"[{verdict}] {node_id} {task_name} — {model_title}"
+            if dl_err:
+                line += f" :: {dl_err[:200]}"
+            batch_summary_parts.append(line)
+        batch_response_text = "\n".join(batch_summary_parts)[:5000]
+        batch_error_message = ""
+        if not any_ok_batch:
+            # Краткая причина: все пары провалены — собираем уникальные ошибки.
+            unique_errs = []
+            seen = set()
+            for r in batch_results:
+                dl_err = (r.get("dl_error") or "").split("\n")[0][:200]
+                if dl_err and dl_err not in seen:
+                    seen.add(dl_err)
+                    unique_errs.append(dl_err)
+            batch_error_message = "Все пары провалены. Ошибки: " + " | ".join(unique_errs[:5])[:2000]
         AIRequestLog.objects.filter(pk=log.pk).update(
             received_at=end_time,
             duration_seconds=(end_time - start_time).total_seconds(),
             status=AIRequestLog.STATUS_SUCCESS if any_ok_batch else AIRequestLog.STATUS_ERROR,
+            response_text=batch_response_text,
+            error_message=batch_error_message,
         )
-        AIModelTestRun.objects.filter(pk=test_run.pk).update(
-            status=AIModelTestRun.STATUS_COMPLETED,
-            finished_at=end_time,
-            report=report or {},
-            error_message=("Прервано пользователем" if cancelled else ""),
-        )
-        _update_job(run_id, status="completed", cancelled=cancelled)
+        if cancelled:
+            # Прогон уже переведён в STATUS_CANCELLED методом cancel_arm_run
+            # (мгновенный flip). Не перетираем status/finished_at — только
+            # сохраняем частичный report, чтобы он был виден на странице прогона.
+            AIModelTestRun.objects.filter(
+                pk=test_run.pk, status=AIModelTestRun.STATUS_CANCELLED
+            ).update(report=report or {})
+        else:
+            AIModelTestRun.objects.filter(pk=test_run.pk).update(
+                status=AIModelTestRun.STATUS_COMPLETED,
+                finished_at=end_time,
+                report=report or {},
+                error_message="",
+            )
+        _update_job(run_id, status="cancelled" if cancelled else "completed", cancelled=cancelled)
 
     except Exception as exc:
         _update_job(
@@ -1191,7 +1313,7 @@ def _batch_results_from_db(test_run):
     return results
 
 
-def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name=""):
+def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name=""):
     """Запускает batch-solve ARM: задачи из DL дерева × модели в фоновом потоке.
 
     Принимает node_ids — список DL node ID (из дерева задач dl.gsu.by).
@@ -1251,7 +1373,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, node_ids, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )
@@ -1265,6 +1387,7 @@ def _snapshot_from_test_run(test_run):
         AIModelTestRun.STATUS_RUNNING: "running",
         AIModelTestRun.STATUS_COMPLETED: "completed",
         AIModelTestRun.STATUS_FAILED: "failed",
+        AIModelTestRun.STATUS_CANCELLED: "cancelled",
     }
     current_key = ""
     current_title = ""

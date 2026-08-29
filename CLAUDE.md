@@ -63,9 +63,12 @@ The project follows these rules; keep it that way and extend along them:
 - `grading.py` — shared solution/answer comparator (`normalize_solution`, difflib `ratio`, `SOLVE_RATIO_THRESHOLD`); consumed by `arm_runner.py` (batch-solve) and `prompt_test_runner.py`. Deterministic only — no LLM-as-judge; keep it DRY.
 - `services/` — `WebSocketAuthService` + `get_user_identity_for_log` (auth.py), `PromptResolver` + `get_default_shared_prompt` (prompt_resolver.py), `MessageComposer` + `ChatModeBuilder`/`SolveModeBuilder`/… (message_composer.py), `ModelCaller` + `ModelCallResult` (model_caller.py), `LogWriter` (log_writer.py), `ConversationHistory` re-export (conversation_history.py), `auto_translate` helpers (auto_translate.py), `ensure_task`/`apply_dl_task_info`/`EXTENSION_TO_LANG` (task_registry.py). Consumers orchestrate; services execute.
 - `admin/` — custom `ai_admin_site` at `/ai/admin/`: `site.py` (`AIAdminSite`, `/ai/admin/ai/`→`/ai/admin/` redirect), `models.py` (ModelAdmins + «Автоперевод» action), `forms.py`, `arm.py` (ARM views), `my_prompt.py`, `logs.py`, `model_status.py`, `updates.py` (commit-history page), `prompt_regression.py`, `test_console` views, `auth.py`/`permissions.py`. Core permission logic in `site.py`.
+- `test_console_runner.py` — runner for the admin test console: runs `ai/tests.py` as `manage.py test ai --settings=DjangoTest.test_settings --verbosity=2` in a subprocess (isolated sqlite/locmem test-settings — `setup_test_environment` patches globals, unsafe in a live Daphne thread). In-memory single-flight job (no DB model), mirrors `arm_runner.py`/`prompt_test_runner.py` shape.
 - `model_clients/` — `registry.py` (model id → handler + title + capabilities; default-active: ollama, openrouter, web_deepseek, web_kimi; Groq/SambaNova gated by `AI_ENABLE_GROQ`/`AI_ENABLE_SAMBANOVA`), `_base.py` (shared helpers incl. `BotPoolClient` — the whole Puppeteer-pool protocol), `web_deepseek.py`/`web_kimi.py` (thin `BotPoolClient` configs: `ask_*_async`, `restart_bot_pool`/`restart_kimi_bot_pool`), `config.py` (centralized .env tokens/proxy), `exceptions.py` (`humanize_model_error`, `map_http_error`, `safe_parse_response`), `history.py` (`ConversationHistory`, Redis/Django-cache shared history), plus provider modules `groq.py`/`openrouter.py`/`sambanova.py`/`ollama.py`. Gotcha: `OR_Nemotron_Nano_12B_VL` is the first `vision:true` entry; add capabilities in `registry.py`, not the DB.
 - `model_health.py` — daily 04:00 MSK availability scheduler (auto-starts under Daphne/runserver unless `AI_DISABLE_HEALTH_SCHEDULER=1`); queries registry handlers. When a web pool is down it auto-restarts the pool (`restart_bot_pool` / `restart_kimi_bot_pool`) and re-checks once, gated by `AI_WEB_DEEPSEEK_AUTORECOVERY` / `AI_WEB_KIMI_AUTORECOVERY` (default on). Outcome annotated in `AIModelAvailability.last_message`.
 - `arm_runner.py` — async ARM runner; in-memory live job, but DB (`AIModelTestRun`/`AIModelTestResult`, `run_type` single/batch) is the source of truth (`get_arm_run_snapshot` falls back to it). Uses `EXTENSION_TO_LANG` from `task_registry` for the language-name fallback.
+- Root-level non-`ai/` pieces: `WebDeepseek/` (DeepSeek bot pool, loopback `:3000`), `WebKimi/` (Kimi bot pool, loopback `:3001` — separate `KIMI_*` env namespace to avoid collisions with DeepSeek; login is manual via `seed.js`), `bot/` (LEGACY predecessor of `WebDeepseek/` — only stale `.env` + auth-debug screenshots, NOT referenced by code; safe to ignore, candidate for cleanup), `REST API.md` (docs for the external DL REST API at dl.gsu.by, not the `/ai/` app), `test_arm_solve.py` (standalone ARM-solve smoke script), `mail_bridge.py`/`backup_runner.sh`/`health_check.sh` (email→ops bridge).
+- `templates/` — `ai/templates/ai/` user-facing chat/task pages, `ai/templates/admin/ai/` custom admin templates. Static JS in `static/admin/js/`: `chat_template.js` (chat only), `decide_task.js`/`find_error.js` self-contained (do NOT load `chat_template.js` there).
 
 ## Gotchas invisible from code
 
@@ -75,6 +78,8 @@ The project follows these rules; keep it that way and extend along them:
 - `sync_update_log` auto-runs in the `Dockerfile` `CMD` (`python manage.py sync_update_log || true; exec …`) and via the `post-merge`/`pre-push` git hooks (`scripts/setup_hooks.sh` from `scripts/hooks/`) on `git pull`/`git push` — the `/ai/admin/updates/` table refreshes without a manual run.
 - Web DeepSeek/Web Kimi down → the health check auto-restarts the pool and re-checks once; gated by `AI_WEB_DEEPSEEK_AUTORECOVERY` / `AI_WEB_KIMI_AUTORECOVERY` (default on). Outcome annotated in `AIModelAvailability.last_message`.
 - Model selector orders the user's top-1 favorite (`_get_user_top_model_keys(request, limit=1)`, gated by `AIAppSettings.favorites_epoch`) first, then the rest strictly alphabetical by title.
+- Docker `web` healthcheck polls `:8000/health` AND both bot pools (`:3000/health`, `:3001/health` with `ready_count > 0`) — the container is "healthy" only when Daphne + both pools answer.
+- `AI_HTTP_POLL_RATE_LIMIT` is a separate, higher limit for read-only background polling endpoints (`/ai/admin/arm/models/state/`, `/ai/admin/arm/find-error/status/`) so watching an ARM run / the model-status page does not eat the action budget. The default `AI_HTTP_RATE_LIMIT` still covers every other `/ai/` path.
 - Capability metadata (Text/Vision/Reasoning) lives in `ai/model_clients/registry.py` (`capabilities(key)`), not in the DB.
 - `ai/grading.py` is the shared comparator (DRY) — deterministic difflib ratio, no LLM-as-judge.
 - Use `MOSCOW_TZ` from `ai/constants.py` + `timezone.localtime()`; never hardcode `+ timedelta(hours=3)`.
@@ -86,6 +91,8 @@ The project follows these rules; keep it that way and extend along them:
 - `README.md` — local/Docker run, prompt ACL, update log, daily checks.
 - `DEPLOY.md` — prod `.env`, Redis, reverse proxy, git hooks/workflow.
 - `docs/web_deepseek_bot.md` — Web DeepSeek pool internals (formerly the `WebDeepseek/README.md` content).
+- `WebKimi/` — Kimi bot pool (mirror of `WebDeepseek/`): `api/server.js`/`botManager.js`/`openaiFormat.js`, `worker/bot.js` + `modules/auth.js`/`promtps.js`, `seed.js` (manual one-time login to seed the Chrome profile). No standalone md doc — read the source.
+- `REST API.md` — external DL REST API at dl.gsu.by (consumed by `ai/dl_api_client.py`); NOT the `/ai/` app.
 - `DOCX.md` — Russian user/admin/superuser/tester/sysadmin docs.
 
 ## Tests
@@ -121,6 +128,8 @@ Non-obvious management commands (see `--help` for flags):
 - DL REST API: `ai/dl_api_client.py`, `ai/http_utils.py` (session-id resolution), `ai/views.py` (`get_task_info_view`, `get_task_solution_view`).
 - ARM: `ai/admin/arm.py`, `ai/arm_runner.py`, `ai/grading.py`, `ai/services/task_registry.py` (`apply_dl_task_info`, `EXTENSION_TO_LANG`).
 - Prompt regression: `ai/prompt_test_runner.py`, `ai/admin/prompt_regression.py`, `ai/management/commands/run_prompt_tests.py`, `ai/grading.py`.
+- Test console: `ai/admin/test_console.py`, `ai/test_console_runner.py`, `DjangoTest/test_settings.py`, `ai/tests.py`.
 - Update log: `ai/models.py` (`UpdateLog`), `ai/admin/updates.py`, `ai/management/commands/sync_update_log.py`, `ai/signals.py`, `scripts/hooks/`.
 - Web DeepSeek / Web Kimi pools: `docs/web_deepseek_bot.md`, `ai/model_clients/_base.py` (`BotPoolClient`), `WebDeepseek/api/server.js`, `WebDeepseek/api/botManager.js`, `WebDeepseek/worker/bot.js`, `WebDeepseek/worker/modules/promtps.js`, `WebDeepseek/worker/data.json`, `WebKimi/` (same layout).
+- Ollama provider: `ai/model_clients/ollama.py`, `ai/model_clients/_base.py` (`make_table_handlers`), `ai/model_clients/config.py` (`OLLAMA_HOST`/`OLLAMA_API_KEY`).
 - Email→ops bridge: `mail_bridge.py`, `backup_runner.sh`, `health_check.sh`.

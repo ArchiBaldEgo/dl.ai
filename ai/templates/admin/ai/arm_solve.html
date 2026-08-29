@@ -72,13 +72,26 @@
     font-weight: 600;
     color: var(--body-quiet-color);
   }
-  .arm-summary-table td.arm-col-num {
+  .arm-summary-table td.arm-col-num,
+  .arm-summary-table th.arm-col-num {
     text-align: right;
     white-space: nowrap;
+    /* Числовые колонки сжимаются до содержимого (width:1%), а колонка-обозначение
+       занимает остаток — значения не «уезжают» далеко вправо от подписей. */
+    width: 1%;
   }
   .arm-tasks td,
   .arm-tasks th {
     vertical-align: middle;
+  }
+  /* Убрать спиннеры поштучного добавления у поля course_id (он же «nodeId»). */
+  #armCourseId::-webkit-inner-spin-button,
+  #armCourseId::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  #armCourseId {
+    -moz-appearance: textfield;
   }
 
   .arm-models {
@@ -239,10 +252,13 @@
   .arm-tree ul { margin: 0; padding: 0 0 0 20px; list-style: none; }
   .arm-tree-folder > summary {
     cursor: pointer; user-select: none;
+    display: flex; align-items: center; gap: 8px;
     padding: 4px 8px; font-weight: 600;
     border-radius: 4px;
   }
   .arm-tree-folder > summary:hover { background: color-mix(in srgb, var(--body-bg) 90%, var(--hairline-color)); }
+  .arm-tree-folder-check { margin: 0; cursor: pointer; }
+  .arm-tree-folder-name { flex: 1; }
   .arm-tree-task {
     display: flex; align-items: center; gap: 8px;
     padding: 4px 8px; border-radius: 4px;
@@ -282,6 +298,13 @@
         <span id="armLoadTreeMsg" style="font-size:13px;"></span>
       </div>
 
+      <div id="armTreeToolbar" style="display:none; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; user-select:none;">
+          <input type="checkbox" id="armTreeSelectAll"> Выбрать всё дерево
+        </label>
+        <span id="armTreeSelectedCount" style="color:var(--body-quiet-color); font-size:13px;"></span>
+      </div>
+
       <div id="armTreeContainer" class="arm-empty">Загрузите дерево задач из DL, чтобы выбрать задачи для пакетного решения.</div>
 
       <div class="arm-section-head" style="margin-top:18px;">
@@ -305,26 +328,27 @@
       <input type="hidden" name="interface_language" value="Русский">
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
-          <h2>Препромпт</h2>
-          <p class="arm-section-note">Выберите промпт для решения задач. По умолчанию используется системный solve-промпт.</p>
+          <h2>Язык / расширение для тестирования</h2>
+          <p class="arm-section-note">DL REST send-solution требует расширение файла. Курс может содержать задачи разных языков (например «[Ассемблер i8086, C-MPA]» — каждая задача допускает и .i86, и .mpc), поэтому выберите нужный вручную. Препромт выбирается после расширения — для каждого расширения свой список.</p>
         </div>
       </div>
-      <select name="prompt_id" id="armPromptSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
-        <option value="">— Системный (по умолчанию) —</option>
-        {% for p in prompt_options %}
-          <option value="{{ p.id }}">{{ p.name }}</option>
+      <select name="file_extension" id="armExtensionSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
+        <option value="" disabled selected>— выберите расширение —</option>
+        {% for opt in extension_options %}
+          <option value="{{ opt.value }}">{{ opt.label }}</option>
         {% endfor %}
       </select>
 
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
-          <h2>Язык / расширение для тестирования</h2>
-          <p class="arm-section-note">DL REST send-solution требует расширение файла. Курс может содержать задачи разных языков (например «[Ассемблер i8086, C-MPA]» — каждая задача допускает и .i86, и .cmp), поэтому выберите нужный вручную. «По умолчанию» — авто-определение из задачи.</p>
+          <h2>Препромпт</h2>
+          <p class="arm-section-note">Сначала выберите расширение выше — для каждого расширения свой список препромтов. Отправка без препромта невозможна.</p>
         </div>
       </div>
-      <select name="file_extension" id="armExtensionSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
-        {% for opt in extension_options %}
-          <option value="{{ opt.value }}">{{ opt.label }}</option>
+      <select name="prompt_id" id="armPromptSelect" disabled style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
+        <option value="">— выберите расширение сначала —</option>
+        {% for p in prompt_options %}
+          <option value="{{ p.id }}">{{ p.name }}</option>
         {% endfor %}
       </select>
 
@@ -347,6 +371,7 @@
         <h2>Сводка</h2>
         <p class="arm-section-note">Результаты последнего запуска</p>
       </div>
+      <button type="button" class="button" id="armSolveDownloadCsvBtn" style="font-size:13px; display:none;">Скачать результаты (CSV)</button>
     </div>
     <ul id="armSolveReportList" class="arm-report"></ul>
     <div id="armSolvePerModelWrap"></div>
@@ -366,6 +391,8 @@
 
 {{ active_run_snapshot|json_script:"arm-solve-initial-run" }}
 
+{% include "admin/ai/_ai_batch_results.html" %}
+
 <script>
   (function () {
     const form = document.getElementById('armSolveForm');
@@ -380,17 +407,16 @@
     const resultsEl = document.getElementById('armSolveResults');
     const startUrl = '{{ arm_solve_start_url }}';
     const statusUrl = '{{ arm_solve_status_url }}';
+    const promptsUrl = '{{ arm_solve_prompts_url }}';
+    const extensionSelect = document.getElementById('armExtensionSelect');
+    const promptSelect = document.getElementById('armPromptSelect');
     let currentRunId = '';
     let pollTimer = null;
+    let lastRenderedResults = [];
 
     function getCsrfToken() {
       const input = form.querySelector('input[name="csrfmiddlewaretoken"]');
       return (document.cookie.split('; ').find(function (r) { return r.startsWith('csrftoken='); }) || '').split('=').slice(1).join('=') || (input ? input.value : '');
-    }
-    function escapeHtml(value) {
-      return String(value == null ? '' : value)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
     }
     function setSubmitDisabled(disabled) {
       submitBtn.disabled = disabled;
@@ -415,140 +441,28 @@
       progressEl.style.display = 'none';
       progressEl.classList.remove('active');
     }
-    function verdictBadge(v) {
-      const labels = { solved: 'Решено', failed: 'Не решено', skipped: 'Пропущено' };
-      const cls = v === 'solved' ? 'solved' : (v === 'failed' ? 'failed' : 'skipped');
-      return '<span class="arm-badge ' + cls + '">' + escapeHtml(labels[v] || v) + '</span>';
-    }
-    function renderBucketTable(rows, labelHeader, wrapEl) {
-      // Не затираем заголовки (<h3>/<p>) — дописываем таблицу после них.
-      const prev = wrapEl.querySelector('table.arm-summary-table, .arm-bucket-empty');
-      if (prev) { prev.remove(); }
-      if (!rows || !rows.length) {
-        const empty = document.createElement('p');
-        empty.className = 'arm-section-note arm-bucket-empty';
-        empty.textContent = 'нет данных';
-        wrapEl.appendChild(empty);
-        return;
-      }
-      const head = '<thead><tr><th>' + escapeHtml(labelHeader) + '</th><th>% решённых</th><th>Среднее время, сек</th><th>Токены</th><th>Решено / Всего</th></tr></thead>';
-      const body = rows.map(function (r) {
-        return '<tr><td>' + escapeHtml(r.label) + '</td>'
-          + '<td class="arm-col-num">' + escapeHtml(r.percent_solved) + '</td>'
-          + '<td class="arm-col-num">' + escapeHtml(r.avg_duration) + '</td>'
-          + '<td class="arm-col-num">' + escapeHtml(r.tokens) + '</td>'
-          + '<td class="arm-col-num">' + escapeHtml(r.solved) + ' / ' + escapeHtml(r.total) + '</td></tr>';
-      }).join('');
-      wrapEl.insertAdjacentHTML('beforeend', '<table class="arm-summary-table">' + head + '<tbody>' + body + '</tbody></table>');
-    }
+    // Мини-таблица результатов (сводка + ответы моделей) и CSV-экспорт
+    // вынесены в общий partial _ai_batch_results.html (window.ArmBatchResults) —
+    // тот же рендер используется детальной страницей Журнала запросов в режиме
+    // «Пакетное решение». Локальные обёртки пробрасывают closure-элементы.
     function renderReport(report) {
-      if (!report) { reportCard.style.display = 'none'; reportList.innerHTML = ''; perModelWrap.innerHTML = ''; perTopicWrap.innerHTML = ''; return; }
-      reportList.innerHTML = [
-        'Всего пар: ' + escapeHtml(report.total_pairs),
-        'Решено: ' + escapeHtml(report.solved),
-        'Не решено: ' + escapeHtml(report.failed),
-        'Пропущено: ' + escapeHtml(report.skipped),
-        'Токенов: ' + escapeHtml(report.tokens_total),
-      ].map(function (line) { return '<li>' + line + '</li>'; }).join('');
-      perModelWrap.innerHTML = '<h3>Итог по моделям</h3><p class="arm-section-note">Сортировка: процент решённых ↓, среднее время ответа ↑</p>';
-      renderBucketTable(report.per_model, 'Модель', perModelWrap);
-      // Show per-topic only if there are real topics (not all "Без темы").
-      const hasRealTopics = (report.per_topic || []).some(function (r) { return r.label && r.label !== 'Без темы'; });
-      if (hasRealTopics) {
-        perTopicWrap.innerHTML = '<h3>Итог по темам</h3>';
-        renderBucketTable(report.per_topic, 'Тема', perTopicWrap);
-      } else {
-        perTopicWrap.innerHTML = '';
-      }
-      reportCard.style.display = 'block';
+      ArmBatchResults.renderReport(report, { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap });
     }
     function renderResults(results) {
-      if (!results || !results.length) { resultsEl.innerHTML = ''; resultsCard.style.display = 'none'; return; }
-      // Save which result cards are open before re-rendering.
-      const openKeys = new Set();
-      resultsEl.querySelectorAll('details[open]').forEach(function (d) {
-        const key = d.getAttribute('data-key');
-        if (key) { openKeys.add(key); }
-      });
-      resultsEl.innerHTML = '';
-      const downloadBase = '/ai/admin/arm/solve/result/';
-      results.forEach(function (r) {
-        const cls = r.verdict === 'solved' ? 'solved' : (r.verdict === 'failed' ? 'failed' : 'skipped');
-        const card = document.createElement('details');
-        card.className = 'arm-result ' + cls;
-        const rkey = (r.task_node_id || '') + ':' + (r.model_key || '');
-        card.setAttribute('data-key', rkey);
-        if (openKeys.has(rkey)) { card.setAttribute('open', ''); }
-
-        const dlComment = r.dl_comment || '';
-        const dlError = r.dl_error || '';
-        const dlQueueId = r.dl_queue_id || 0;
-        const code = r.code || '';
-        const resultId = r.result_id || '';
-
-        const summary = document.createElement('summary');
-        const top = document.createElement('div');
-        top.className = 'arm-result-top';
-        const title = document.createElement('span');
-        title.className = 'arm-result-title';
-        title.textContent = '#' + (r.task_node_id || '') + ' ' + (r.task_name || '') + ' — ' + (r.model_title || '');
-        top.appendChild(title);
-        top.insertAdjacentHTML('beforeend', verdictBadge(r.verdict));
-        const meta = document.createElement('div');
-        meta.className = 'arm-meta';
-        meta.textContent = (r.duration != null ? r.duration : '') + ' сек | ' + (r.tokens != null ? r.tokens : '') + ' ток.';
-        summary.appendChild(top);
-        summary.appendChild(meta);
-
-        const body = document.createElement('div');
-        body.className = 'arm-result-body';
-
-        // DL-тест: итог (comment) + queueId + ошибка отправки/опроса.
-        // Фиксированный светлый фон → явный тёмный цвет текста, иначе в тёмной
-        // теме админки наследуется белый текст (белый на белом).
-        const dlBlock = document.createElement('div');
-        dlBlock.style.cssText = 'padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:13px; color:#1f2937; background:' + (r.verdict === 'solved' ? '#dcfce7' : '#fee2e2') + ';';
-        let dlHtml = '<strong>DL тест:</strong> ';
-        if (dlComment) { dlHtml += escapeHtml(dlComment); } else { dlHtml += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
-        if (dlQueueId) { dlHtml += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
-        if (dlError) { dlHtml += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
-        dlBlock.innerHTML = dlHtml;
-        body.appendChild(dlBlock);
-
-        const answerLabel = document.createElement('div');
-        answerLabel.style.cssText = 'margin:8px 0 4px; font-weight:600; font-size:13px;';
-        answerLabel.textContent = 'Полный ответ модели:';
-        body.appendChild(answerLabel);
-        const answerPre = document.createElement('pre');
-        answerPre.textContent = r.raw_response || r.short_response || '';
-        body.appendChild(answerPre);
-
-        const codeLabel = document.createElement('div');
-        codeLabel.style.cssText = 'margin:10px 0 4px; font-weight:600; font-size:13px;';
-        codeLabel.textContent = 'Извлечённый код программы:';
-        body.appendChild(codeLabel);
-        const codePre = document.createElement('pre');
-        codePre.textContent = code || '— код не извлечён —';
-        body.appendChild(codePre);
-        if (code && resultId) {
-          const link = document.createElement('a');
-          link.href = downloadBase + encodeURIComponent(resultId) + '/download/';
-          link.className = 'button';
-          link.style.cssText = 'display:inline-block; margin-top:6px; font-size:13px;';
-          link.textContent = 'Скачать код';
-          body.appendChild(link);
-        }
-
-        card.appendChild(summary);
-        card.appendChild(body);
-        resultsEl.appendChild(card);
-      });
-      resultsCard.style.display = 'block';
+      ArmBatchResults.renderResults(results, resultsEl, resultsCard);
     }
     function applyRunSnapshot(run) {
       if (!run) { return; }
       renderReport(run.report || null);
       renderResults(run.results || []);
+      lastRenderedResults = run.results || [];
+      // Show download button only when run is done and has results.
+      const downloadBtn = document.getElementById('armSolveDownloadCsvBtn');
+      if (downloadBtn) {
+        const hasResults = (run.results || []).length > 0;
+        const isDone = run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
+        downloadBtn.style.display = (hasResults && isDone) ? '' : 'none';
+      }
       if (run.status === 'running') {
         const done = run.completed_pairs != null ? run.completed_pairs : 0;
         const total = run.total_pairs != null ? run.total_pairs : 0;
@@ -557,6 +471,13 @@
         submitBtn.disabled = true;
         submitBtn.textContent = 'Выполняется...';
         setCancelVisible(true);
+      } else if (run.status === 'cancelled') {
+        // Мгновенная отмена: cancel_arm_run уже перевёл прогон в cancelled.
+        // Частичные результаты/report уже отрендерены выше — показываем «Прервано».
+        setProgress('Прервано.', false);
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Запустить пакет';
+        setCancelVisible(false);
       } else if (run.status === 'completed') {
         const cancelled = run.cancelled || run.error_message === 'Прервано пользователем';
         if (cancelled) { setProgress('Прервано.', false); } else { stopProgress(); }
@@ -598,14 +519,72 @@
     const cancelUrl = '/ai/admin/arm/solve/cancel/';
     const cancelBtn = document.getElementById('armSolveCancelBtn');
 
+    // Tri-state выбор поддерева: чекбокс папки переключает всех потомков-листьев,
+    // состояние папки (отмечено/indeterminate/снято) пересчитывается снизу вверх.
+    function updateFolderState(details) {
+      const leaves = details.querySelectorAll('input.arm-task-check');
+      let total = 0, checked = 0;
+      leaves.forEach(function (c) { total++; if (c.checked) { checked++; } });
+      const cb = details.querySelector(':scope > summary > input.arm-tree-folder-check');
+      if (!cb) { return; }
+      cb.checked = total > 0 && checked === total;
+      cb.indeterminate = checked > 0 && checked < total;
+    }
+
+    function refreshAllFolderStates() {
+      // Снизу вверх: сначала листья, потом родители. details могут быть вложены,
+      // поэтому обходим снаружи внутрь — updateFolderState читает все потомки,
+      // включая вложенные листья, так что одного прохода достаточно.
+      treeContainer.querySelectorAll('details.arm-tree-folder').forEach(updateFolderState);
+      updateSelectedCount();
+      syncSelectAllCheckbox();
+    }
+
+    function updateSelectedCount() {
+      const countEl = document.getElementById('armTreeSelectedCount');
+      if (!countEl) { return; }
+      const total = treeContainer.querySelectorAll('input.arm-task-check').length;
+      const checked = treeContainer.querySelectorAll('input.arm-task-check:checked').length;
+      countEl.textContent = total ? ('Выбрано ' + checked + ' из ' + total + ' задач') : '';
+    }
+
+    function syncSelectAllCheckbox() {
+      const master = document.getElementById('armTreeSelectAll');
+      if (!master) { return; }
+      const total = treeContainer.querySelectorAll('input.arm-task-check').length;
+      const checked = treeContainer.querySelectorAll('input.arm-task-check:checked').length;
+      master.checked = total > 0 && checked === total;
+      master.indeterminate = checked > 0 && checked < total;
+    }
+
     function renderTreeNodes(nodes, container) {
       nodes.forEach(function (node) {
         if (node.isFolder) {
           const details = document.createElement('details');
           details.className = 'arm-tree-folder';
           const summary = document.createElement('summary');
-          summary.textContent = node.name || '(папка)';
+
+          // Tri-state чекбокс папки (без name — не сабмитится).
+          const folderCb = document.createElement('input');
+          folderCb.type = 'checkbox';
+          folderCb.className = 'arm-tree-folder-check';
+          // Клик по чекбоксу не должен сворачивать/раскрывать <details>.
+          folderCb.addEventListener('click', function (e) { e.stopPropagation(); });
+          folderCb.addEventListener('change', function () {
+            const checked = folderCb.checked;
+            details.querySelectorAll('input.arm-task-check').forEach(function (c) {
+              c.checked = checked;
+            });
+            refreshAllFolderStates();
+          });
+          summary.appendChild(folderCb);
+
+          const name = document.createElement('span');
+          name.className = 'arm-tree-folder-name';
+          name.textContent = node.name || '(папка)';
+          summary.appendChild(name);
           details.appendChild(summary);
+
           if (node.children && node.children.length) {
             const ul = document.createElement('ul');
             renderTreeNodes(node.children, ul);
@@ -621,6 +600,7 @@
           cb.value = String(node.nodeId);
           cb.className = 'arm-task-check';
           cb.checked = false;
+          cb.addEventListener('change', refreshAllFolderStates);
           li.appendChild(cb);
           const name = document.createElement('span');
           name.className = 'arm-tree-task-name';
@@ -634,15 +614,19 @@
     function renderTree(tree) {
       treeContainer.innerHTML = '';
       treeContainer.classList.remove('arm-empty');
+      const toolbar = document.getElementById('armTreeToolbar');
       if (!tree || !tree.length) {
         treeContainer.classList.add('arm-empty');
         treeContainer.textContent = 'Дерево пусто.';
+        if (toolbar) { toolbar.style.display = 'none'; }
         return;
       }
       const ul = document.createElement('ul');
       ul.className = 'arm-tree';
       renderTreeNodes(tree, ul);
       treeContainer.appendChild(ul);
+      if (toolbar) { toolbar.style.display = 'flex'; }
+      refreshAllFolderStates();
     }
 
     async function loadTree() {
@@ -650,6 +634,13 @@
       if (!courseId) {
         loadTreeMsg.style.color = '#b42318';
         loadTreeMsg.textContent = 'Введите course_id';
+        return;
+      }
+      // 0 = пусто: дерево не грузим, кэш не трогаем (соглашение /arm/solve/).
+      if (parseInt(courseId, 10) === 0) {
+        renderTree([]);
+        loadTreeMsg.style.color = '#6b7280';
+        loadTreeMsg.textContent = 'nodeId = 0 (пусто)';
         return;
       }
       loadTreeMsg.style.color = '';
@@ -680,9 +671,71 @@
       loadTreeBtn.addEventListener('click', loadTree);
     }
 
-    // Промпты уже отрендерены сервером в <select> (SharedPrompt + Prompt через
-    // ACL). Тема из дерева DL не вычисляется, поэтому список не зависит от
-    // выбранных задач — отдельная загрузка не нужна.
+    const selectAllCb = document.getElementById('armTreeSelectAll');
+    if (selectAllCb) {
+      selectAllCb.addEventListener('click', function (e) { e.stopPropagation(); });
+      selectAllCb.addEventListener('change', function () {
+        const checked = selectAllCb.checked;
+        treeContainer.querySelectorAll('input.arm-task-check').forEach(function (c) {
+          c.checked = checked;
+        });
+        refreshAllFolderStates();
+      });
+    }
+
+    // Препромты грузятся с бэкенда по выбранному расширению (/solve/prompts/).
+    // Список зависит от расширения (маппинг расширение→ProgrammingLanguage→
+    // Prompt.topic.programming_language), общие SharedPrompt не предлагаются.
+    function setPromptOptions(options, placeholder) {
+      promptSelect.innerHTML = '';
+      const ph = document.createElement('option');
+      ph.value = '';
+      ph.textContent = placeholder;
+      promptSelect.appendChild(ph);
+      options.forEach(function (opt) {
+        const o = document.createElement('option');
+        o.value = opt.id;
+        o.textContent = opt.name;
+        promptSelect.appendChild(o);
+      });
+      promptSelect.value = '';
+    }
+
+    async function loadPrompts(extension) {
+      if (!extension) {
+        setPromptOptions([], '— выберите расширение сначала —');
+        promptSelect.disabled = true;
+        return;
+      }
+      setPromptOptions([], 'Загрузка препромтов...');
+      promptSelect.disabled = true;
+      try {
+        const response = await fetch(promptsUrl + '?file_extension=' + encodeURIComponent(extension), {
+          method: 'GET', credentials: 'same-origin',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка загрузки препромтов'); }
+        const opts = data.prompt_options || [];
+        if (!opts.length) {
+          setPromptOptions([], '— нет препромтов для этого расширения —');
+          promptSelect.disabled = true;
+          return;
+        }
+        setPromptOptions(opts, '— выберите препромт —');
+        promptSelect.disabled = false;
+      } catch (error) {
+        setPromptOptions([], '— ошибка загрузки препромтов —');
+        setError(error.message || 'Ошибка загрузки препромтов');
+        promptSelect.disabled = true;
+      }
+    }
+
+    if (extensionSelect) {
+      extensionSelect.addEventListener('change', function () {
+        loadPrompts(extensionSelect.value.trim());
+      });
+    }
 
     // Cancel button
     if (cancelBtn) {
@@ -698,7 +751,11 @@
           });
           const data = await response.json();
           if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка'); }
-          setProgress('Прерывание запрошено, ожидаем завершения...', true);
+          // Мгновенная отмена: бэкенд уже перевёл прогон в cancelled. Тянем
+          // свежий snapshot сразу (без ожидания 2с поллинга) и показываем
+          // «Прервано» с частичными результатами.
+          if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
+          pollRunStatus();
         } catch (error) {
           setError(error.message || 'Ошибка прерывания');
           cancelBtn.disabled = false;
@@ -715,9 +772,23 @@
       }
     }
 
+    // ── Download results as CSV (tasks × models matrix) — общий код в partial ──
+    var downloadCsvBtn = document.getElementById('armSolveDownloadCsvBtn');
+    if (downloadCsvBtn) {
+      downloadCsvBtn.addEventListener('click', function () {
+        // Use the latest results from the last rendered snapshot.
+        ArmBatchResults.downloadResultsCsv(lastRenderedResults, currentRunId);
+      });
+    }
+
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
       if (submitBtn.disabled) { return; }
+      // Расширение и препромт обязательны (дублирует серверную валидацию).
+      const ext = extensionSelect ? extensionSelect.value.trim() : '';
+      const pid = promptSelect ? promptSelect.value.trim() : '';
+      if (!ext) { setError('Сначала выберите расширение файла.'); return; }
+      if (!pid) { setError('Выберите препромт (после выбора расширения).'); return; }
       if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
       setSubmitDisabled(true);
       setError('');

@@ -267,17 +267,82 @@ def admin_request_logs_view(request):
     return TemplateResponse(request, "admin/ai/request_logs.html", context)
 
 
+def _is_batch_solve_log(log):
+    """True для записей batch-solve ARM-прогона (старых mode=solve+sentinel и
+    новых mode=batch_solve). У таких логов вместо текста запроса в деталях
+    рисуется мини-таблица результатов из /arm/solve/."""
+    return (
+        log.source == "arm"
+        and log.mode in ("batch_solve", "solve")
+        and "Batch solve run " in (log.message or "")
+    )
+
+
+def _build_batch_log_snapshot(log):
+    """Собрать snapshot {run_id, course_id, file_extension, node_ids, results,
+    report} для детали batch-solve лога — тот же формат, что потребляет JS
+    мини-таблицы в /arm/solve/. Возвращает None, если прогон/результаты не
+    найдены (тогда детал отрисуется как обычный текстовый лог)."""
+    import re as _re
+    from ..models import AIModelTestRun, AIModelTestResult
+    from ..arm_runner import _batch_results_from_db, _build_batch_report
+
+    m = _re.search(r"Batch solve run ([0-9a-f]{32})", log.message or "")
+    if not m:
+        return None
+    run_id_hex = m.group(1)
+    try:
+        test_run = AIModelTestRun.objects.get(run_id=run_id_hex)
+    except AIModelTestRun.DoesNotExist:
+        return None
+
+    results = _batch_results_from_db(test_run)
+    report = _build_batch_report(results)
+
+    # file_extension — первый непустой снимок из результатов.
+    file_extension = ""
+    node_ids = []
+    seen_nodes = set()
+    for r in results:
+        ext = r.get("file_extension") or ""
+        if ext and not file_extension:
+            file_extension = ext
+        nid = r.get("task_node_id")
+        if nid and nid not in seen_nodes:
+            seen_nodes.add(nid)
+            node_ids.append(nid)
+
+    return {
+        "run_id": run_id_hex,
+        "course_id": test_run.course_id,
+        "file_extension": file_extension,
+        "node_ids": node_ids,
+        "results": results,
+        "report": report,
+    }
+
+
 def admin_request_log_detail_view(request, log_id):
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
 
     log = AIRequestLog.objects.get(pk=log_id)
+
     context = {
         **ai_admin_site.each_context(request),
         "title": "DL.AI: Детали запроса",
         "log": log,
         "moscow_tz": MOSCOW_TZ,
+        "is_batch_log": False,
+        "batch_snapshot": None,
     }
+
+    if _is_batch_solve_log(log):
+        snapshot = _build_batch_log_snapshot(log)
+        if snapshot is not None:
+            context["is_batch_log"] = True
+            context["batch_snapshot"] = snapshot
+
     return TemplateResponse(request, "admin/ai/airequestlog_detail.html", context)
 
 
@@ -298,6 +363,18 @@ def resend_request_view(request, log_id):
         log = AIRequestLog.objects.get(pk=log_id)
     except AIRequestLog.DoesNotExist:
         return JsonResponse({"error": "Лог не найден"}, status=404)
+
+    # ARM batch-solve logs have message="Batch solve run <run_id>" and must be
+    # rerun as a full batch (same models, tasks, prompt, language) under the
+    # caller's own DLSID — a plain resend to one model would be meaningless.
+    # Старые batch-логи использовали mode="solve" + sentinel; новые —
+    # mode="batch_solve". Принимаем оба.
+    if (
+        log.source == "arm"
+        and log.mode in ("batch_solve", "solve")
+        and "Batch solve run " in (log.message or "")
+    ):
+        return _rerun_arm_batch(request, log)
 
     # Resolve the model handler.
     handlers = get_runtime_model_handlers()
@@ -492,3 +569,131 @@ def admin_request_log_task_text_view(request):
         "statement": statement,
         "source": "dl",
     })
+
+
+def _rerun_arm_batch(request, log):
+    """Перезапуск batch-solve ARM-прогона под DLSID текущего пользователя.
+
+    Извлекает run_id из ``log.message`` ("Batch solve run <uuid>"), находит
+    ``AIModelTestRun``, восстанавливает параметры (node_ids, model_keys,
+    file_extension, prompt_id, language) из результатов прогона и запускает
+    новый batch через ``start_batch_solve_run`` с session_id текущего юзера.
+    """
+    import re as _re
+    from ..models import AIModelTestRun, AIModelTestResult, Prompt
+    from ..arm_runner import start_batch_solve_run
+    from ..services.task_registry import EXTENSION_TO_LANG, extension_to_language_ids
+
+    if not can_access_logs(request):
+        return JsonResponse({"error": "Access denied"}, status=403)
+
+    # 1. Extract run_id from message.
+    m = _re.search(r"Batch solve run ([0-9a-f]{32})", log.message or "")
+    if not m:
+        return JsonResponse({"error": "Не удалось извлечь run_id из лога"}, status=400)
+    run_id_hex = m.group(1)
+
+    try:
+        test_run = AIModelTestRun.objects.get(run_id=run_id_hex)
+    except AIModelTestRun.DoesNotExist:
+        return JsonResponse({"error": "Прогон ARM не найден в БД"}, status=404)
+
+    # 2. Collect node_ids and model_keys from AIModelTestResult rows.
+    results_qs = AIModelTestResult.objects.select_related("task").filter(run=test_run)
+    if not results_qs.exists():
+        return JsonResponse({"error": "В прогоне нет результатов — нечего перезапускать"}, status=400)
+
+    node_ids = []
+    seen_nodes = set()
+    for r in results_qs:
+        if r.task and r.task.node_id and r.task.node_id not in seen_nodes:
+            seen_nodes.add(r.task.node_id)
+            node_ids.append(r.task.node_id)
+
+    model_keys = list(
+        results_qs.values_list("model_key", flat=True).distinct()
+    )
+
+    if not node_ids:
+        return JsonResponse({"error": "Не найдено задач в результатах прогона"}, status=400)
+    if not model_keys:
+        return JsonResponse({"error": "Не найдено моделей в результатах прогона"}, status=400)
+
+    # 3. File extension from first result snapshot.
+    file_extension = (results_qs.first().file_extension_snapshot or "").strip()
+    if not file_extension:
+        return JsonResponse({"error": "Не найдено расширение файла в результатах прогона"}, status=400)
+
+    # 4. Prompt id from the run (or from the log).
+    prompt_id = test_run.prompt_id or log.prompt_id
+
+    # 5. Language name from extension.
+    prog_lang_name = EXTENSION_TO_LANG.get(file_extension, "")
+    prog_lang_ids = extension_to_language_ids(file_extension) if file_extension else set()
+    prog_lang_id = next(iter(prog_lang_ids), None) if prog_lang_ids else None
+
+    # 6. Prompt name + topic from Prompt.
+    prompt_name = ""
+    topic_id_log = None
+    topic_name_log = ""
+    if prompt_id:
+        try:
+            prompt_obj = Prompt.objects.select_related("topic").get(id=int(prompt_id))
+            prompt_name = prompt_obj.prompt_name or ""
+            if prompt_obj.topic:
+                topic_id_log = prompt_obj.topic_id
+                topic_name_log = prompt_obj.topic.topic_name or ""
+        except (Prompt.DoesNotExist, ValueError):
+            pass
+
+    # 7. Session id from the caller (NOT from the original log).
+    session_id = _resolve_dl_session_id(request)
+    if not session_id:
+        return JsonResponse(
+            {"error": "Нет DLSID — требуется авторизация на dl.gsu.by."},
+            status=400,
+        )
+
+    # 8. Launch the new batch.
+    new_run_id, start_error = start_batch_solve_run(
+        node_ids,
+        model_keys,
+        request.user.id,
+        session_id,
+        ui_language="Русский",
+        dl_test=True,
+        prompt_id=prompt_id,
+        course_id=test_run.course_id,
+        solve_file_extension=file_extension,
+        solve_prog_lang_name=prog_lang_name,
+        programming_language_id=prog_lang_id,
+        programming_language_name=prog_lang_name,
+        prompt_name=prompt_name,
+        topic_id=topic_id_log,
+        topic_name=topic_name_log,
+    )
+    if not new_run_id:
+        return JsonResponse(
+            {"error": start_error or "Не удалось запустить batch solve"},
+            status=400,
+        )
+
+    from ..arm_runner import get_arm_run_snapshot
+    return JsonResponse({
+        "success": True,
+        "run_id": new_run_id,
+        "run": get_arm_run_snapshot(new_run_id),
+        "message": f"Перезапущен: {len(node_ids)} задач × {len(model_keys)} моделей (расширение {file_extension})",
+    })
+
+
+@require_POST
+def rerun_arm_batch_view(request, log_id):
+    """Public entry point for rerun-arm URL — loads the log and delegates."""
+    if not can_access_logs(request):
+        return JsonResponse({"error": "Access denied"}, status=403)
+    try:
+        log = AIRequestLog.objects.get(pk=log_id)
+    except AIRequestLog.DoesNotExist:
+        return JsonResponse({"error": "Лог не найден"}, status=404)
+    return _rerun_arm_batch(request, log)

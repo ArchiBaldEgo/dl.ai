@@ -170,9 +170,22 @@ async def _ask_sambanova_model_async(
         # Извлекаем ответ: content (по умолчанию) или reasoning (GPT-OSS)
         message = obj["choices"][0].get("message", {})
         if response_field == "reasoning":
-            assistant_content = message.get("content") or message.get("reasoning") or "Пустой ответ от модели."
+            assistant_content = message.get("content") or message.get("reasoning") or ""
         else:
             assistant_content = extract_choice_content(obj)
+
+        # Пустой ответ модели — детектим как ошибку (3-кортеж с is_error=True),
+        # иначе пустая строка дойдёт до пользователя как «успех». До этого
+        # extract_choice_content подставляла плейсхолдер «Пустой ответ от модели.»,
+        # который обходил нижестоящие empty-гарды.
+        if not (assistant_content or "").strip():
+            logger.warning("SambaNova model %s returned empty content", model_name)
+            return (
+                "Модель вернула пустой ответ (возможно превышен лимит запросов "
+                "или отказ генерации). Попробуйте позже.",
+                0,
+                True,
+            )
 
         conversation_history.append(user_id, {"role": "assistant", "content": assistant_content})
         return assistant_content, completion_tokens
@@ -215,7 +228,7 @@ def _sambanova_handler_factory(model_key: str, cfg: dict):
     temperature = cfg.get("temperature")
     response_field = cfg.get("response_field", "content")
 
-    async def handler(messages: str, user_id: int) -> Tuple[str, Optional[int]]:
+    async def handler(messages: str, user_id: int) -> Tuple[str, Optional[int], bool]:
         return await _ask_sambanova_model_async(
             messages,
             user_id,

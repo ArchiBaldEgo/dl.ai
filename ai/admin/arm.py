@@ -6,7 +6,10 @@
 - Статус прогонов (polling для фронтенда).
 """
 
+import re
+
 from .site import ai_admin_site
+from django.core.cache import cache
 from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
@@ -22,8 +25,12 @@ from ..models import AIModelTestResult, ProgrammingLanguage, Prompt, SharedPromp
 from ..http_utils import resolve_dl_session_id
 from ..querysets import prompt_queryset_for_user
 from ..serializers import programming_language as serialize_programming_language, prompt as serialize_prompt, topic as serialize_topic
-from ..services.task_registry import EXTENSION_TO_LANG, SOLVE_EXTENSION_CHOICES
+from ..services.task_registry import EXTENSION_TO_LANG, SOLVE_EXTENSION_CHOICES, extension_to_language_ids
+from ..constants import AI_CACHE_KEY_PREFIX
 from .permissions import can_access_arm
+
+# TTL кэша дерева задач курса в Redis (см. admin_arm_solve_load_tree_view).
+_DL_TREE_CACHE_TTL = 30 * 60
 
 
 def _resolve_session_id(request):
@@ -32,6 +39,78 @@ def _resolve_session_id(request):
     if not session_id:
         session_id = resolve_dl_session_id(request)
     return session_id
+
+
+def _resolve_active_course_id_for_session(session_id):
+    """Вернуть активный курс пользователя из DL сессии (по sessionId).
+
+    Вызывает get-user-info с DLSID. Если courseID > 0 — возвращает его.
+    Если courseID = 0 — пытается активировать последний известный курс
+    (из последнего batch-прогона или дефолт 1450) через ensure_course_session,
+    затем снова запрашивает get-user-info.
+
+    Возвращает (course_id, error_message). course_id=None если курс не
+    удалось определить. Используется как ARM-страницей, так и send_solution_view
+    (единая логика резолва courseId для REST send-solution).
+    """
+    from ..external_auth import fetch_external_user_info
+    from ..dl_api_client import ensure_course_session
+    from ..models import AIModelTestRun
+
+    if not session_id:
+        return None, "Нет DLSID — требуется авторизация на dl.gsu.by."
+
+    try:
+        info = fetch_external_user_info(session_id)
+    except Exception as exc:
+        return None, f"Не удалось получить информацию о пользователе: {exc}"
+
+    course_id = info.get("courseID") or 0
+    if course_id:
+        return course_id, ""
+
+    # courseID=0 — попробуем активировать последний известный курс.
+    # Берём course_id из последнего успешного batch-прогона любого пользователя
+    # (дерево задач одного курса стабильно), или дефолт 1450.
+    last_run = (
+        AIModelTestRun.objects.filter(run_type="batch")
+        .exclude(results__task__node_id__isnull=True)
+        .order_by("-id")
+        .first()
+    )
+    fallback_course_id = 1450
+    if last_run and last_run.results.exists():
+        first_result = last_run.results.first()
+        if first_result.task and first_result.task.node_id:
+            # Активируем курс по первой задаче из последнего прогона.
+            # course_id не хранится в БД, но 1450 — единственный курс в DL.
+            pass
+
+    # Пытаемся активировать курс 1450 (fallback) через ensure_course_session.
+    # Нужен node_id — берём из последнего прогона или дефолт 2606747.
+    fallback_node_id = 2606747
+    if last_run and last_run.results.exists():
+        first_result = last_run.results.first()
+        if first_result.task and first_result.task.node_id:
+            fallback_node_id = first_result.task.node_id
+
+    ensure_course_session(session_id, fallback_course_id, fallback_node_id)
+
+    # Снова проверяем courseID.
+    try:
+        info2 = fetch_external_user_info(session_id)
+        course_id = info2.get("courseID") or 0
+        if course_id:
+            return course_id, ""
+    except Exception:
+        pass
+
+    return fallback_course_id, ""
+
+
+def _resolve_active_course_id(request):
+    """Тонкая обёртка над _resolve_active_course_id_for_session для HTTP-запроса."""
+    return _resolve_active_course_id_for_session(_resolve_session_id(request))
 
 
 def _build_find_error_message(task_text, code_text, prog_lang_name, topic_name, prompt_text, ui_language):
@@ -272,18 +351,26 @@ def admin_arm_find_error_status_view(request):
 # test the code via DL (send-solution / get-solution-result).
 # ---------------------------------------------------------------------------
 
-def _arm_solve_prompt_options(user):
-    """Опции промптов для /arm/solve/: SharedPrompt ([Общий]) + topic-bound Prompt ([Тема]).
+def _arm_solve_prompt_options(user, file_extension=None):
+    """Опции препромтов для /arm/solve/: только topic-bound ``Prompt`` (общие
+    ``SharedPrompt`` на solve не предлагаются).
 
-    Тема из дерева DL не вычисляется, поэтому даём выбрать любой промпт. Prompt
-    фильтруется через ``prompt_queryset_for_user`` (ACL: staff/superuser — все,
-    иначе owner/editor). Возвращает список ``{id, name}``, отсортированный по имени.
+    Список зависит от выбранного расширения: промпт привязан к теме (``Prompt.topic``),
+    тема — к языку программирования, а язык → расширение через ``_guess_extension``.
+    При ``file_extension`` отдаются только ``Prompt`` тем, чей язык маппится в это
+    расширение (``extension_to_language_ids``). Без ``file_extension`` — все
+    доступные по ACL промпты (для начального рендера; реальный выбор на клиенте
+    грузится по расширению через ``/solve/prompts/``).
+
+    ACL — ``prompt_queryset_for_user`` (staff/superuser — все, иначе owner/editor).
+    Возвращает список ``{id, name}``, отсортированный по имени.
     """
-    options = []
-    for sp in SharedPrompt.objects.all().order_by("prompt_name", "id"):
-        options.append({"id": f"shared_{sp.id}", "name": f"[Общий] {sp.prompt_name}"})
-
     prompts_qs = prompt_queryset_for_user(Prompt.objects.select_related("topic"), user)
+    if file_extension:
+        lang_ids = extension_to_language_ids(file_extension)
+        prompts_qs = prompts_qs.filter(topic__programming_language_id__in=lang_ids)
+
+    options = []
     for p in prompts_qs.order_by("prompt_name", "id"):
         topic_name = get_localized_name(p.topic, "Русский", "topic_name") if p.topic else ""
         label = f"[Тема] {topic_name} — {p.prompt_name}" if topic_name else f"[Тема] {p.prompt_name}"
@@ -313,10 +400,15 @@ def admin_arm_solve_view(request):
         else:
             error_message = "Процесс не найден или уже завершен"
 
+    # Определяем активный курс пользователя автоматически (без ручного ввода).
+    active_course_id, course_error = _resolve_active_course_id(request)
+    if course_error and not error_message:
+        error_message = course_error
+
     from ..http_utils import safe_relative_url
     arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
 
-    prompt_options = _arm_solve_prompt_options(request.user)
+    prompt_options = []  # грузится клиентом по выбранному расширению (/solve/prompts/)
 
     context = {
         **ai_admin_site.each_context(request),
@@ -325,8 +417,8 @@ def admin_arm_solve_view(request):
         "arm_back_url": arm_back_url,
         "model_options": get_arm_solve_model_options(),
         "prompt_options": prompt_options,
-        "extension_options": [{"value": "", "label": "По умолчанию (из задачи)"}]
-        + [{"value": ext, "label": f"{ext} — {name}"} for ext, name in SOLVE_EXTENSION_CHOICES],
+        "extension_options": [{"value": ext, "label": f"{ext} — {name}"}
+                             for ext, name in SOLVE_EXTENSION_CHOICES],
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
         "arm_solve_prompts_url": "/ai/admin/arm/solve/prompts/",
         "results": results,
@@ -336,6 +428,7 @@ def admin_arm_solve_view(request):
         "arm_solve_status_url": "/ai/admin/arm/solve/status/",
         "active_run_id": active_run_id,
         "active_run_snapshot": active_run_snapshot or {},
+        "active_course_id": active_course_id or 0,
     }
     return TemplateResponse(request, "admin/ai/arm_solve.html", context)
 
@@ -370,6 +463,22 @@ def admin_arm_solve_load_tree_view(request):
 
     if course_id is None:
         return JsonResponse({"ok": False, "message": "Укажите course_id"}, status=400)
+
+    # 0 = пусто: дерево не грузим, кэш не трогаем (соглашение /arm/solve/).
+    if course_id == 0:
+        return JsonResponse({"ok": True, "tree": [], "task_count": 0})
+
+    # Дерево курса стабильно — кэшируем в Redis по course_id, чтобы не бить в DL
+    # API при каждом открытии. Переключение course_id → другой ключ (старый
+    # остаётся до TTL); инвалидация — по TTL. DLSID нужен только для промаха.
+    tree_cache_key = f"{AI_CACHE_KEY_PREFIX}:dl_tree:{course_id}"
+    cached = cache.get(tree_cache_key)
+    if cached:
+        return JsonResponse({
+            "ok": True,
+            "tree": cached["tree"],
+            "task_count": cached["task_count"],
+        })
 
     session_id = _resolve_session_id(request)
     if not session_id:
@@ -443,6 +552,12 @@ def admin_arm_solve_load_tree_view(request):
         enriched_tree = [_enrich_node(n) for n in tree]
         task_count = _count_tasks(enriched_tree)
 
+        # Кэшируем только непустое дерево (пустое оставляем без кэша, чтобы
+        # повторный запрос мог пере-проверить — вдруг курс обновился).
+        if enriched_tree:
+            cache.set(tree_cache_key, {"tree": enriched_tree, "task_count": task_count},
+                      timeout=_DL_TREE_CACHE_TTL)
+
         return JsonResponse({
             "ok": True,
             "tree": enriched_tree,
@@ -456,15 +571,17 @@ def admin_arm_solve_load_tree_view(request):
 
 
 def admin_arm_solve_prompts_view(request):
-    """Return available prompt options for solve: SharedPrompt ([Общий]) + Prompt ([Тема]).
+    """Return prompt options for solve filtered by the selected file extension.
 
-    Тема из дерева DL не вычисляется, поэтому эндпоинт игнорирует ``node_ids`` и
-    возвращает все доступные пользователю промпты (ACL через ``prompt_queryset_for_user``).
+    Общие ``SharedPrompt`` на solve не предлагаются — только topic-bound ``Prompt``,
+    отфильтрованные по языку программирования, соответствующему расширению
+    (``extension_to_language_ids``). ``file_extension`` передаётся в GET.
     """
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
 
-    prompt_options = _arm_solve_prompt_options(request.user)
+    file_extension = (request.GET.get("file_extension") or "").strip()
+    prompt_options = _arm_solve_prompt_options(request.user, file_extension or None)
     return JsonResponse({"ok": True, "prompt_options": prompt_options})
 
 
@@ -498,15 +615,45 @@ def admin_arm_solve_start_view(request):
         dl_test = dl_test == "1"
     prompt_id = body.get("prompt_id") or None
     # Расширение для DL-тестирования, выбранное пользователем (перекрывает
-    # авто-определение задачи). Пусто → брать из задачи.
+    # авто-определение задачи). Обязательно: на solve расширение выбирается
+    # перед препромтом, «По умолчанию (из задачи)» убрано.
     file_extension = (body.get("file_extension") or request.POST.get("file_extension") or "").strip()
+    if not file_extension:
+        return JsonResponse(
+            {"ok": False, "message": "Не выбрано расширение файла для тестирования."},
+            status=400,
+        )
     # Название языка для препромпта под выбранным расширением.
     prog_lang_name = EXTENSION_TO_LANG.get(file_extension, "")
-    course_id_raw = body.get("course_id") or request.POST.get("course_id")
+    # ID языка программирования для журнала запросов (по выбранному расширению).
+    prog_lang_ids = extension_to_language_ids(file_extension) if file_extension else set()
+    prog_lang_id = next(iter(prog_lang_ids), None) if prog_lang_ids else None
+    # Название и тема препромта для журнала запросов.
+    prompt_name = ""
+    topic_id_log = None
+    topic_name_log = ""
+    prompt_obj = None
+    if prompt_id and not str(prompt_id).startswith("shared_"):
+        try:
+            prompt_obj = Prompt.objects.select_related("topic").get(id=int(prompt_id))
+            prompt_name = prompt_obj.prompt_name or ""
+            if prompt_obj.topic:
+                topic_id_log = prompt_obj.topic_id
+                topic_name_log = prompt_obj.topic.topic_name or ""
+        except (Prompt.DoesNotExist, ValueError):
+            pass
+    # Course ID: берём из активного курса пользователя (не из запроса).
+    # Фронтенд больше не отправляет course_id — он определяется автоматически.
+    course_id_from_body = body.get("course_id") or request.POST.get("course_id")
     try:
-        course_id = int(course_id_raw) if course_id_raw else None
+        course_id = int(course_id_from_body) if course_id_from_body else None
     except (ValueError, TypeError):
         course_id = None
+    if not course_id:
+        # Определяем активный курс автоматически.
+        course_id, course_err = _resolve_active_course_id(request)
+        if course_err:
+            return JsonResponse({"ok": False, "message": course_err}, status=400)
 
     session_id = _resolve_session_id(request)
     if not session_id:
@@ -529,6 +676,13 @@ def admin_arm_solve_start_view(request):
             status=400,
         )
 
+    # Препромт обязателен; общие (shared_*) на solve не принимаются.
+    if not prompt_id or str(prompt_id).startswith("shared_"):
+        return JsonResponse(
+            {"ok": False, "message": "Не выбран препромт (выберите расширение, затем препромт)."},
+            status=400,
+        )
+
     run_id, start_error = start_batch_solve_run(
         node_id_ints,
         model_keys,
@@ -540,6 +694,11 @@ def admin_arm_solve_start_view(request):
         course_id=course_id,
         solve_file_extension=file_extension,
         solve_prog_lang_name=prog_lang_name,
+        programming_language_id=prog_lang_id,
+        programming_language_name=prog_lang_name,
+        prompt_name=prompt_name,
+        topic_id=topic_id_log,
+        topic_name=topic_name_log,
     )
     if not run_id:
         return JsonResponse(
@@ -614,6 +773,12 @@ def admin_arm_solve_result_download_view(request, result_id):
     result = get_object_or_404(AIModelTestResult, pk=result_id)
     code = result.code or ""
     ext = (result.file_extension_snapshot or "").strip()
+    if ext and not ext.startswith("."):
+        ext = f".{ext}"
+    # Sanitize ext: допускаем только ведущую точку + буквы/цифры — иначе символы
+    # вроде " \r\n могли бы инъецировать в Content-Disposition. node_id — int,
+    # безопасен; filename собирается из проверенных частей.
+    ext = re.sub(r"[^\w.]", "", ext)
     if ext and not ext.startswith("."):
         ext = f".{ext}"
     node_id = ""
