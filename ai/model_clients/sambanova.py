@@ -15,7 +15,6 @@ import requests
 
 from ._base import make_table_handlers
 from .config import (
-    SAMBANOVA_MODEL_DEEPSEEK,
     SAMBANOVA_MODEL_DEEPSEEK_R1_DISTILL_LLAMA_70B,
     SAMBANOVA_MODEL_DEEPSEEK_V3_1,
     SAMBANOVA_MODEL_DEEPSEEK_V3_1_CB,
@@ -115,7 +114,6 @@ async def _ask_sambanova_model_async(
     temperature: Optional[float] = None,
     timeout: float = 30.0,
     response_field: str = "content",
-    use_wait_for: bool = False,
 ) -> Tuple[str, Optional[int]]:
     """Generic SambaNova chat completion wrapper with history management.
 
@@ -127,12 +125,11 @@ async def _ask_sambanova_model_async(
         temperature: Температура генерации (None = не указывать).
         timeout: Таймаут запроса в секундах.
         response_field: Поле для извлечения ответа ("content" или "reasoning").
-        use_wait_for: Использовать asyncio.wait_for (для legacy DeepSeek-R1).
     """
     import asyncio
 
+    conversation_history.append(user_id, {"role": "user", "content": messages})
     history = conversation_history.get(user_id)
-    history.append({"role": "user", "content": messages})
 
     payload: dict = {
         "model": model_name,
@@ -143,33 +140,17 @@ async def _ask_sambanova_model_async(
         payload["temperature"] = temperature
 
     try:
-        if use_wait_for:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    requests.post,
-                    SAMBANOVA_API_URL,
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {SC_TOKEN}",
-                        "Content-Type": "application/json",
-                    },
-                    proxies=proxies,
-                    timeout=30,
-                ),
-                timeout=timeout,
-            )
-        else:
-            response = await asyncio.to_thread(
-                requests.post,
-                SAMBANOVA_API_URL,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {SC_TOKEN}",
-                    "Content-Type": "application/json",
-                },
-                proxies=proxies,
-                timeout=timeout,
-            )
+        response = await asyncio.to_thread(
+            requests.post,
+            SAMBANOVA_API_URL,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {SC_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            proxies=proxies,
+            timeout=timeout,
+        )
 
         _log_response(response)
 
@@ -254,71 +235,3 @@ globals().update(
         doc_fn=lambda key, cfg: f"SambaNova {key} → {cfg['model']}",
     )
 )
-
-
-# --- Legacy функции (для обратной совместимости) ---
-
-async def ask_DeepSeek_R1_async(messages: str, user_id: int, timeout: float = 25.0) -> Tuple[str, Optional[int]]:
-    """Legacy DeepSeek-R1 entry point — использует env-configurable alias.
-
-    Отличие: asyncio.wait_for для кастомного timeout, stream=False в payload.
-    """
-    import asyncio
-
-    history = conversation_history.get(user_id)
-    history.append({"role": "user", "content": messages})
-
-    payload = {
-        "model": SAMBANOVA_MODEL_DEEPSEEK,
-        "messages": history,
-        "max_tokens": 9000,
-        "temperature": 0.7,
-        "stream": False,
-    }
-
-    try:
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                requests.post,
-                SAMBANOVA_API_URL,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {SC_TOKEN}",
-                    "Content-Type": "application/json",
-                },
-                proxies=proxies,
-                timeout=30,
-            ),
-            timeout=timeout,
-        )
-
-        _log_response(response)
-
-        if response.status_code != 200:
-            return extract_api_error_text(str(response.status_code)), 0
-
-        obj, error_message = safe_parse_response(response.text)
-        if obj is None:
-            return error_message, 0
-
-        if "choices" not in obj or not obj["choices"]:
-            return "Неожиданный формат ответа от сервера.", 0
-
-        completion_tokens = obj.get("usage", {}).get("completion_tokens", 0)
-        assistant_content = obj["choices"][0]["message"].get("content", "")
-        conversation_history.append(user_id, {"role": "assistant", "content": assistant_content})
-        return assistant_content, completion_tokens
-
-    except AsyncTimeoutError:
-        logger.warning("DeepSeek-R1 request timeout after %s seconds", timeout)
-        return f"Таймаут запроса ({timeout} сек). Сервер долго не отвечает. Попробуйте позже или уменьшите запрос.", 0
-    except requests.exceptions.Timeout:
-        return "Таймаут при подключении к серверу. Попробуйте позже.", 0
-    except Exception as e:
-        logger.exception("Unexpected error in DeepSeek-R1 call")
-        if is_network_error(e):
-            return "Отсутствует подключение к интернету.", 0
-        if is_missing_choices_error(e):
-            return "Ошибка в ответе от сервера AI.", 0
-        conversation_history.reset(user_id)
-        return "Что-то пошло не так. Контекст очищен, введите новый запрос.", 0

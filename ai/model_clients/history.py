@@ -37,11 +37,17 @@ class ConversationHistory:
         return f"{self.key_prefix}:{user_id}"
 
     def get(self, user_id: Any) -> list[dict]:
+        """Возвращает копию истории. Не мутируйте результат — используйте append().
+
+        Копия обязательна: под Redis cache.get() и так возвращает
+        десериализованную копию, а под LocMem возврат внутреннего объекта
+        позволял бы вызывающему мутировать состояние незамеченно.
+        """
         history = cache.get(self._key(user_id))
         if not isinstance(history, list):
             history = []
             cache.set(self._key(user_id), history, timeout=self.ttl_seconds)
-        return history
+        return list(history)
 
     def append(self, user_id: Any, message: dict) -> None:
         history = self.get(user_id)

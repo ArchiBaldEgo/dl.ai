@@ -77,11 +77,14 @@ SOLVE_EXTENSION_CHOICES = [
     (".py", "Python"),
     (".java", "Java"),
     (".i86", "Ассемблер i8086"),
+    (".asm", "Ассемблер i8086"),
     (".cmp", "C-MPA (С-МПА)"),
     (".v", "Verilog"),
 ]
 
 # Обратный map: расширение → название языка (для препромпта в batch-solve).
+# Единственный источник этого соответствия (DRY) — arm_runner и админка
+# импортируют EXTENSION_TO_LANG, а не держат свои копии.
 EXTENSION_TO_LANG = {ext: name for ext, name in SOLVE_EXTENSION_CHOICES}
 
 

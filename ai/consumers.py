@@ -24,6 +24,7 @@ from .services import (
     WebSocketAuthService,
     conversation_history,
     ensure_task,
+    get_user_identity_for_log,
     resolve_external_account,
 )
 from .throttling import rate_limiter
@@ -127,36 +128,9 @@ class MyConsumer(AsyncWebsocketConsumer):
         return str(getattr(user, "pk", "") or getattr(user, "username", "") or "")
 
     def _get_identity_for_log(self) -> dict:
-        user = self.user
-        user_info = self.user_info
-        result = {
-            "user": None,
-            "username": "",
-            "external_user_id": "",
-            "user_full_name": "",
-        }
-        if user is None:
-            return result
-
-        if isinstance(user, str):
-            result["external_user_id"] = user
-            result["username"] = user
-            if user_info:
-                first = (user_info.get("firstName") or "").strip()
-                last = (user_info.get("lastName") or "").strip()
-                result["user_full_name"] = f"{first} {last}".strip() or user
-            return result
-
-        if getattr(user, "is_authenticated", False):
-            result["user"] = user
-            result["username"] = getattr(user, "username", "") or ""
-            result["user_full_name"] = (user.get_full_name() or "").strip() or result["username"]
-            if self.external_account is not None:
-                result["external_user_id"] = self.external_account.external_user_id
-            else:
-                result["external_user_id"] = result["username"]
-
-        return result
+        # Единственная реализация — services/auth.get_user_identity_for_log (DRY);
+        # здесь только адаптация к полям consumer'а.
+        return get_user_identity_for_log(self.user, self.user_info, self.external_account)
 
     async def disconnect(self, close_code):
         logger.debug("Connection closed for client %s", getattr(self, "client_id", "unknown"))

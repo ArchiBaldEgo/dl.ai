@@ -104,8 +104,8 @@ async def _ask_openrouter(
     """Generic OpenRouter chat completion wrapper with history management."""
     import asyncio
 
+    conversation_history.append(user_id, {"role": "user", "content": messages})
     history = conversation_history.get(user_id)
-    history.append({"role": "user", "content": messages})
 
     payload = {
         "model": model_id,

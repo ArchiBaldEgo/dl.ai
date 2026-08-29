@@ -108,6 +108,13 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "handler": ollama.ask_Ollama_Glm_5_2_Cloud_async,
         "capabilities": _TEXT_ONLY,
     },
+    "Ollama_Glm_5_3_Flash_Cloud": {
+        "title": "Ollama GLM 5.3 Flash",
+        "handler": ollama.ask_Ollama_Glm_5_3_Flash_Cloud_async,
+        # glm-5.3-flash:cloud стримит отдельное поле ``thinking`` (не think-теги
+        # в content) — помечаем как reasoning, content остаётся чистым.
+        "capabilities": _REASONING,
+    },
     "Ollama_Gemma_4_Cloud": {
         "title": "Ollama Gemma 4",
         "handler": ollama.ask_Ollama_Gemma_4_Cloud_async,

@@ -23,6 +23,8 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
+from django.http import JsonResponse
+
 from .external_auth import get_external_auth_api_url
 
 
@@ -67,6 +69,34 @@ class DLApiUnavailable(DLApiError):
 
     def __init__(self, message: str = "DL API недоступен"):
         super().__init__(message, status_code=503)
+
+
+def dl_error_response(exc: DLApiError, extra: dict | None = None) -> JsonResponse:
+    """Преобразовать исключение DL API в единый JSON error-ответ.
+
+    Единственная точка маппинга DL-исключений на HTTP-статусы и сообщения
+    (DRY: раньше 5 копий этой лестницы жили в views.py и admin/logs.py):
+    DLUnauthorizedError→401, DLForbiddenError→403, DLTaskNotFoundError→404,
+    DLApiUnavailable→503, DLServerError/прочие DLApiError→502.
+
+    ``extra`` дописывает ключи в payload (например, ``{"ok": False}`` для
+    admin-эндпоинтов, где JS проверяет ``d.ok``).
+    """
+    status, message = 502, "Server error"
+    for exc_type, mapped_status, mapped_message in (
+        (DLUnauthorizedError, 401, "Authorization required"),
+        (DLForbiddenError, 403, "Access denied"),
+        (DLTaskNotFoundError, 404, "Task not found"),
+        (DLApiUnavailable, 503, "API temporarily unavailable"),
+        (DLServerError, 502, "Server error"),
+    ):
+        if isinstance(exc, exc_type):
+            status, message = mapped_status, mapped_message
+            break
+    payload = {"error": message}
+    if extra:
+        payload.update(extra)
+    return JsonResponse(payload, status=status)
 
 
 def _get_dl_base_url() -> str:

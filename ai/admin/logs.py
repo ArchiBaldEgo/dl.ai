@@ -1,7 +1,6 @@
 """Логи запросов к AI-моделям: admin view и кастомная страница списка."""
 
 import logging
-import os
 from datetime import datetime
 
 from django.contrib import admin
@@ -22,8 +21,10 @@ from ..dl_api_client import (
     DLServerError,
     DLTaskNotFoundError,
     DLUnauthorizedError,
+    dl_error_response,
     fetch_task_info,
 )
+from ..http_utils import resolve_dl_session_id
 from ..models import AIRequestLog, Task
 from ..model_health import get_runtime_model_handlers
 from .permissions import can_access_logs
@@ -416,8 +417,7 @@ def _resolve_dl_session_id(request) -> str:
     """
     session_id = (request.session.get("external_session_id") or "").strip()
     if not session_id:
-        cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
-        session_id = (request.COOKIES.get(cookie_name, "") or "").strip()
+        session_id = resolve_dl_session_id(request)
     return session_id
 
 
@@ -460,18 +460,9 @@ def admin_request_log_task_text_view(request):
 
     try:
         data = fetch_task_info(node_id, session_id=session_id, remove_html_tags=True)
-    except DLUnauthorizedError:
-        return JsonResponse({"ok": False, "error": "Authorization required"}, status=401)
-    except DLForbiddenError:
-        return JsonResponse({"ok": False, "error": "Access denied"}, status=403)
-    except DLTaskNotFoundError:
-        return JsonResponse({"ok": False, "error": "Задача не найдена"}, status=404)
-    except DLApiUnavailable:
-        return JsonResponse(
-            {"ok": False, "error": "DL API временно недоступен"}, status=503
-        )
-    except DLServerError:
-        return JsonResponse({"ok": False, "error": "Ошибка сервера DL"}, status=502)
+    except (DLUnauthorizedError, DLForbiddenError, DLTaskNotFoundError,
+            DLApiUnavailable, DLServerError) as exc:
+        return dl_error_response(exc, extra={"ok": False})
 
     statement = (data.get("statement") or data.get("currentStatement") or "").strip()
 

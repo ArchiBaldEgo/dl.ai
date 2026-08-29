@@ -31,6 +31,7 @@ from ..dl_api_client import (
     DLApiError,
     fetch_task_info,
 )
+from ..http_utils import resolve_dl_session_id
 from ..services.task_registry import apply_dl_task_info
 
 User = get_user_model()
@@ -451,12 +452,9 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         Requires the admin's session to carry a valid DL session id (DLSID
         flow), exactly like ``get_task_info_view``.
         """
-        import os
-
         session_id = request.session.get("external_session_id", "").strip()
         if not session_id:
-            cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
-            session_id = request.COOKIES.get(cookie_name, "").strip()
+            session_id = resolve_dl_session_id(request)
         if not session_id:
             self.message_user(request, "Нет DLSID — обновление из DL невозможно.", level="ERROR")
             return

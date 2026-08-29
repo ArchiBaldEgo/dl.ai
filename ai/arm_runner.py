@@ -885,7 +885,7 @@ def _run_batch_job_worker(
     Then iterates tasks in the outer loop and models in the inner loop.
     Вердикт ставится строго по DL-тесту (send-solution / get-solution-result).
     """
-    from .services.task_registry import ensure_task, _guess_extension
+    from .services.task_registry import EXTENSION_TO_LANG, ensure_task, _guess_extension
     from .models import ProgrammingLanguage
 
     test_run = None
@@ -966,14 +966,9 @@ def _run_batch_job_worker(
             )
             # Fallback: derive language name from effective file_extension for
             # DL tree tasks that have no programming_language set.
+            # EXTENSION_TO_LANG — канонический map из task_registry (DRY).
             if not prog_lang_name and effective_ext:
-                _ext_to_lang = {
-                    ".py": "Python", ".cmp": "C-MPA", ".i86": "Ассемблер i8086",
-                    ".asm": "Ассемблер i8086",
-                    ".pas": "Pascal", ".v": "Verilog", ".cpp": "C++", ".c": "C",
-                    ".java": "Java",
-                }
-                prog_lang_name = _ext_to_lang.get(effective_ext, "")
+                prog_lang_name = EXTENSION_TO_LANG.get(effective_ext, "")
 
             for model in ordered_models:
                 if _is_cancel_requested(run_id):

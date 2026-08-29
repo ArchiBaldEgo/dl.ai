@@ -1,7 +1,7 @@
 """Централизованная конфигурация внешних AI API (ключи, URL, прокси).
 
-Загружает .env из корня проекта. Содержит токены для SambaNova, HuggingFace,
-GigaChat, DeepSeek и URL бот-пулов (Web DeepSeek на :3000, Web Kimi на :3001).
+Загружает .env из корня проекта. Содержит токены для SambaNova, Groq,
+OpenRouter, Ollama и URL бот-пулов (Web DeepSeek на :3000, Web Kimi на :3001).
 """
 
 import os
@@ -12,13 +12,9 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 load_dotenv(BASE_DIR / ".env")
 
-CLIENT_ID = os.getenv("CLIENT_ID")
-SECRET = os.getenv("SBER_SECRET")
-HF_TOKEN = os.getenv("HF_TOKEN")
 SC_TOKEN = os.getenv("SC_TOKEN")
 GROQ_TOKEN = os.getenv("GROQ_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-DEEPSEEK_API_TOKEN = os.getenv("DEEPSEEK_API_TOKEN") or os.getenv("DEEPSEEK_API_KEY")
 
 BOT_POOL_URL = os.getenv("BOT_POOL_URL", "http://localhost:3000").rstrip("/")
 
@@ -54,11 +50,3 @@ SAMBANOVA_MODEL_MINIMAX_M2_5 = os.getenv("SAMBANOVA_MODEL_MINIMAX_M2_5", "MiniMa
 SAMBANOVA_MODEL_MINIMAX_M2_7 = os.getenv("SAMBANOVA_MODEL_MINIMAX_M2_7", "MiniMax-M2.7")
 SAMBANOVA_MODEL_GEMMA_3_12B_IT = os.getenv("SAMBANOVA_MODEL_GEMMA_3_12B_IT", "gemma-3-12b-it")
 SAMBANOVA_MODEL_GPT_OSS = os.getenv("SAMBANOVA_MODEL_GPT_OSS", "gpt-oss-120b")
-
-# Backward-compatible env names used in older code paths.
-SAMBANOVA_MODEL_DEEPSEEK = os.getenv("SAMBANOVA_MODEL_DEEPSEEK", SAMBANOVA_MODEL_DEEPSEEK_V3_1)
-SAMBANOVA_MODEL_META = os.getenv("SAMBANOVA_MODEL_META", SAMBANOVA_MODEL_META_LLAMA_3_3_70B_INSTRUCT)
-SAMBANOVA_MODEL_MIXTRAL_ALIAS = os.getenv(
-    "SAMBANOVA_MODEL_MIXTRAL_ALIAS",
-    SAMBANOVA_MODEL_LLAMA_4_MAVERICK_17B_128E_INSTRUCT,
-)

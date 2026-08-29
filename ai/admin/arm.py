@@ -19,6 +19,7 @@ from ..model_health import (
     get_health_window_date,
 )
 from ..models import AIModelTestResult, ProgrammingLanguage, Prompt, SharedPrompt, Task, Topic
+from ..http_utils import resolve_dl_session_id
 from ..querysets import prompt_queryset_for_user
 from ..serializers import programming_language as serialize_programming_language, prompt as serialize_prompt, topic as serialize_topic
 from ..services.task_registry import EXTENSION_TO_LANG, SOLVE_EXTENSION_CHOICES
@@ -27,12 +28,9 @@ from .permissions import can_access_arm
 
 def _resolve_session_id(request):
     """Resolve the caller's DL session id (DLSID flow), mirroring get_task_info_view."""
-    import os
-
     session_id = request.session.get("external_session_id", "").strip()
     if not session_id:
-        cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
-        session_id = request.COOKIES.get(cookie_name, "").strip()
+        session_id = resolve_dl_session_id(request)
     return session_id
 
 
@@ -153,7 +151,9 @@ def admin_arm_find_error_view(request):
     ]
     prompts = [
         serialize_prompt(p, selected_language_ui)
-        for p in Prompt.objects.select_related("topic").order_by("prompt_name", "id")
+        for p in prompt_queryset_for_user(
+            Prompt.objects.select_related("topic"), request.user
+        ).order_by("prompt_name", "id")
     ]
 
     selected_models = []

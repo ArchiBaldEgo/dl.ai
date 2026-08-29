@@ -5,7 +5,8 @@
 # стадии. apt-кэш (mount type=cache) НЕ используется намеренно: при обязательном
 # корпоративном прокси кэшированные apt-индексы и .deb часто рассинхронизируются
 # и вызывают Hash Sum mismatch. No-Cache=True форсирует свежие индексы/пакеты.
-FROM python:3.11-slim-bookworm AS apt-base
+# Python 3.13.5 — та же версия, что в локальном .venv и WSL (одна версия везде).
+FROM python:3.13.5-slim-bookworm AS apt-base
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY

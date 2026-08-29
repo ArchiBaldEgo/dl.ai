@@ -1,3 +1,8 @@
+# Тестовый файл: мок-атрибуты на request (``request.user_info = …``,
+# ``request.user = SimpleNamespace(…)``) — штатная Django-идиома (атрибуты
+# выставляет middleware/тест, тайп-чекер про них не знает). Глушим
+# соответствующие проверки pyright/Pylance на весь файл.
+# pyright: basic, reportAttributeAccessIssue=false, reportAssignmentIssue=false
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth import SESSION_KEY, get_user_model
 from django.contrib.auth.models import AnonymousUser
@@ -2191,8 +2196,10 @@ class SambanovaLoggerTests(SimpleTestCase):
         self.assertTrue(hasattr(sambanova, "logger"))
         self.assertIsInstance(sambanova.logger, _logging.Logger)
         # The functions referenced by the registry must import cleanly.
-        self.assertTrue(callable(sambanova.ask_DeepSeek_V3_2_async))
-        self.assertTrue(callable(sambanova.ask_Gpt_oss_120b_async))
+        # getattr, т.к. ask_* генерируются динамически (make_table_handlers)
+        # и статический анализатор их не видит.
+        self.assertTrue(callable(getattr(sambanova, "ask_DeepSeek_V3_2_async")))
+        self.assertTrue(callable(getattr(sambanova, "ask_Gpt_oss_120b_async")))
 
 
 class TaskRegistryTests(TestCase):
@@ -3121,12 +3128,20 @@ class OllamaRegistryTests(SimpleTestCase):
 
     OLLAMA_KEYS = [
         "Ollama_Glm_5_2_Cloud",
+        "Ollama_Glm_5_3_Flash_Cloud",
         "Ollama_Gemma_4_Cloud",
         "Ollama_Qwen_3_5_Cloud",
         "Ollama_Nemotron_3_Super_Cloud",
         "Ollama_Kimi_K2_7_Code_Cloud",
         "Ollama_Kimi_K2_6_Cloud",
+        "Ollama_DeepSeek_V4_Flash_Cloud",
     ]
+
+    # glm-5.3-flash:cloud стримит отдельное поле thinking → reasoning-модель.
+    REASONING_KEYS = {"Ollama_Glm_5_3_Flash_Cloud"}
+
+    def _expected_caps(self, key):
+        return {"text": True, "vision": False, "reasoning": key in self.REASONING_KEYS}
 
     def test_registry_contains_ollama_models(self):
         from ai.model_clients import registry, ollama
@@ -3135,12 +3150,24 @@ class OllamaRegistryTests(SimpleTestCase):
             self.assertTrue(callable(registry.handler(key)), f"No handler for {key}")
             self.assertEqual(
                 registry.capabilities(key),
-                {"text": True, "vision": False, "reasoning": False},
+                self._expected_caps(key),
                 f"Wrong capabilities for {key}",
             )
             self.assertTrue(
                 callable(getattr(ollama, f"ask_{key}_async", None)),
                 f"Missing ollama.ask_{key}_async",
+            )
+
+    def test_ollama_table_and_registry_in_sync(self):
+        """Каждая модель OLLAMA_MODELS есть в registry, и наоборот — без рассинхрона."""
+        from ai.model_clients import registry, ollama
+        table_keys = set(ollama.OLLAMA_MODELS)
+        for key in self.OLLAMA_KEYS:
+            self.assertIn(key, table_keys, f"{key} missing from OLLAMA_MODELS table")
+        for key in table_keys:
+            self.assertIsNotNone(
+                registry.get(key),
+                f"OLLAMA_MODELS entry {key} is not registered in the model registry",
             )
 
     def test_ollama_models_table_matches_registry(self):
@@ -3170,12 +3197,33 @@ class OllamaHandlerTests(SimpleTestCase):
             mock_resp.eval_count = 5
             mock_client.chat.return_value = mock_resp
 
-            result = await ollama.ask_Ollama_Glm_5_2_Cloud_async("1+1=?", "client")
+            # Хендлеры генерируются динамически (make_table_handlers) — getattr,
+            # чтобы линтер не ругался на отсутствующий атрибут.
+            glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
+            result = await glm_5_2("1+1=?", "client")
             self.assertEqual(result, ("2", 5, False))
             mock_client.chat.assert_called_once()
             # Без tools= (обычный чат).
             _, kwargs = mock_client.chat.call_args
             self.assertNotIn("tools", kwargs)
+
+    async def test_glm_5_3_flash_uses_cloud_model_id(self):
+        """GLM 5.3 Flash ходит через ollama.chat с model='glm-5.3-flash:cloud'."""
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_resp = MagicMock()
+            mock_resp.message.content = "ok"
+            mock_resp.eval_count = 1
+            mock_client.chat.return_value = mock_resp
+
+            glm_5_3_flash = getattr(ollama, "ask_Ollama_Glm_5_3_Flash_Cloud_async")
+            result = await glm_5_3_flash("hi", "client")
+            self.assertEqual(result, ("ok", 1, False))
+            _, kwargs = mock_client.chat.call_args
+            self.assertEqual(kwargs.get("model"), "glm-5.3-flash:cloud")
 
     async def test_cloud_guard_without_api_key(self):
         """Cloud host + пустой OLLAMA_API_KEY → guard-сообщение, без вызова Client."""
@@ -3183,6 +3231,7 @@ class OllamaHandlerTests(SimpleTestCase):
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", ""), \
              patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
-            result = await ollama.ask_Ollama_Qwen_3_5_Cloud_async("hi", "client")
+            qwen_3_5 = getattr(ollama, "ask_Ollama_Qwen_3_5_Cloud_async")
+            result = await qwen_3_5("hi", "client")
             self.assertIn("Ollama API ключ не настроен", result[0])
             mock_client_cls.assert_not_called()

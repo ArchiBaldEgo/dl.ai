@@ -15,8 +15,8 @@ import logging
 import threading
 import time
 import asyncio
-from urllib.parse import unquote
 
+import speech_recognition as sr
 import tempfile
 from django.contrib.auth import login
 from django.shortcuts import redirect, render
@@ -46,16 +46,16 @@ from .auth_backends import (
 )
 from .constants import PROMPT_DEVELOPER_GROUP
 from .dl_api_client import (
-    DLApiError,
     DLApiUnavailable,
     DLForbiddenError,
     DLServerError,
     DLTaskNotFoundError,
     DLUnauthorizedError,
+    dl_error_response,
     fetch_task_info,
     fetch_task_solution,
 )
-from .http_utils import safe_relative_url
+from .http_utils import resolve_dl_session_id, safe_relative_url
 from .i18n import get_language_instruction, get_localized_name, get_localized_text
 from .querysets import prompt_queryset_for_user
 from .serializers import (
@@ -198,14 +198,6 @@ def get_groq_limits_view(request):
         _maybe_kick_groq_probe()
 
     return JsonResponse({"limits": cache})
-
-try:
-    import speech_recognition as sr
-    SPEECH_RECOGNITION_AVAILABLE = True
-except ImportError:
-    SPEECH_RECOGNITION_AVAILABLE = False
-
-
 
 
 def prompt_developer_access_required(view_func):
@@ -530,9 +522,13 @@ def get_prompts(request):
         return HttpResponseForbidden("Authentication required")
 
     ui_language = request.GET.get('ui_language', 'Русский')
+    visible = prompt_queryset_for_user(
+        Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt"),
+        request.user,
+    )
     prompts = [
         serialize_prompt(p, ui_language)
-        for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name', 'id')
+        for p in visible.order_by('prompt_name', 'id')
     ]
     return JsonResponse(prompts, safe=False)
 
@@ -576,7 +572,10 @@ def get_problem_data(request):
     ]
     prompts = [
         serialize_prompt(p, ui_language)
-        for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name', 'id')
+        for p in prompt_queryset_for_user(
+            Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt"),
+            request.user,
+        ).order_by('prompt_name', 'id')
     ]
     shared_prompts = [
         serialize_shared_prompt(sp, ui_language)
@@ -635,26 +634,18 @@ def get_task_info_view(request):
     if not session_id:
         session_id = request.session.get("external_session_id", "").strip()
     if not session_id:
-        cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
-        session_id = unquote(request.COOKIES.get(cookie_name, "").strip())
+        session_id = resolve_dl_session_id(request)
 
     # Sanitize session_id — reject if it contains path separators or URL characters
     # that could be used for SSRF or injection into DL API requests.
-    if session_id and any(c in session_id for c in '\/\n\r\t '):
+    if session_id and any(c in session_id for c in "\\/\n\r\t "):
         return JsonResponse({"error": "Invalid session id format"}, status=400)
 
     try:
         data = fetch_task_info(node_id, session_id=session_id, remove_html_tags=remove_html_tags)
-    except DLUnauthorizedError:
-        return JsonResponse({"error": "Authorization required"}, status=401)
-    except DLForbiddenError:
-        return JsonResponse({"error": "Access denied"}, status=403)
-    except DLTaskNotFoundError:
-        return JsonResponse({"error": "Task not found"}, status=404)
-    except DLApiUnavailable:
-        return JsonResponse({"error": "API temporarily unavailable"}, status=503)
-    except DLServerError:
-        return JsonResponse({"error": "Server error"}, status=502)
+    except (DLUnauthorizedError, DLForbiddenError, DLTaskNotFoundError,
+            DLApiUnavailable, DLServerError) as exc:
+        return dl_error_response(exc)
 
     # DL's own HTML stripping (removeHtmlTags=true) sometimes yields an empty
     # statement for tasks whose condition is nonetheless visible on the DL site
@@ -754,23 +745,15 @@ def get_task_solution_view(request):
     if not session_id:
         session_id = request.session.get("external_session_id", "").strip()
     if not session_id:
-        cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
-        session_id = unquote(request.COOKIES.get(cookie_name, "").strip())
+        session_id = resolve_dl_session_id(request)
     if not session_id:
         return JsonResponse({"error": "sessionId обязателен"}, status=400)
 
     try:
         data = fetch_task_solution(session_id, task_id, file_extension)
-    except DLUnauthorizedError:
-        return JsonResponse({"error": "Authorization required"}, status=401)
-    except DLForbiddenError:
-        return JsonResponse({"error": "Access denied"}, status=403)
-    except DLTaskNotFoundError:
-        return JsonResponse({"error": "Task not found"}, status=404)
-    except DLApiUnavailable:
-        return JsonResponse({"error": "API temporarily unavailable"}, status=503)
-    except DLServerError:
-        return JsonResponse({"error": "Server error"}, status=502)
+    except (DLUnauthorizedError, DLForbiddenError, DLTaskNotFoundError,
+            DLApiUnavailable, DLServerError) as exc:
+        return dl_error_response(exc)
 
     return JsonResponse(data)
 
@@ -810,20 +793,15 @@ def send_solution_view(request):
     if not session_id:
         session_id = request.session.get("external_session_id", "").strip()
     if not session_id:
-        cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
-        session_id = unquote(request.COOKIES.get(cookie_name, "").strip())
+        session_id = resolve_dl_session_id(request)
     if not session_id:
         return JsonResponse({"error": "sessionId обязателен"}, status=400)
 
     try:
         from .dl_api_client import send_solution_to_dl
         data = send_solution_to_dl(session_id, node_id, code, file_extension)
-    except DLUnauthorizedError:
-        return JsonResponse({"error": "Authorization required"}, status=401)
-    except DLApiUnavailable:
-        return JsonResponse({"error": "API temporarily unavailable"}, status=503)
-    except DLServerError:
-        return JsonResponse({"error": "Server error"}, status=502)
+    except (DLUnauthorizedError, DLApiUnavailable, DLServerError) as exc:
+        return dl_error_response(exc)
 
     return JsonResponse(data)
 
@@ -853,22 +831,15 @@ def get_solution_result_view(request):
     if not session_id:
         session_id = request.session.get("external_session_id", "").strip()
     if not session_id:
-        cookie_name = os.getenv("EXTERNAL_SESSION_COOKIE_NAME", "DLSID")
-        session_id = unquote(request.COOKIES.get(cookie_name, "").strip())
+        session_id = resolve_dl_session_id(request)
     if not session_id:
         return JsonResponse({"error": "sessionId обязателен"}, status=400)
 
     try:
         from .dl_api_client import get_solution_result_from_dl
         data = get_solution_result_from_dl(session_id, queue_id)
-    except DLUnauthorizedError:
-        return JsonResponse({"error": "Authorization required"}, status=401)
-    except DLTaskNotFoundError:
-        return JsonResponse({"error": "Task not found"}, status=404)
-    except DLApiUnavailable:
-        return JsonResponse({"error": "API temporarily unavailable"}, status=503)
-    except DLServerError:
-        return JsonResponse({"error": "Server error"}, status=502)
+    except (DLUnauthorizedError, DLTaskNotFoundError, DLApiUnavailable, DLServerError) as exc:
+        return dl_error_response(exc)
 
     return JsonResponse(data)
 
