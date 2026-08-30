@@ -23,8 +23,10 @@ The project follows these rules; keep it that way and extend along them:
   green; it guards this rule.
 - **Single source of truth (DRY).** Do not copy an existing helper — import it:
   - solution/answer comparison → `ai/grading.py` (deterministic difflib, no LLM-judge);
-  - prompt visibility → `ai/querysets.py::prompt_queryset_for_user` (every listing of
-    `Prompt` — chat UI, ARM find-error, PromptAdmin — goes through it);
+  - prompt visibility → `ai/querysets.py::prompt_queryset_for_user` (the owner/editor ACL
+    for admin/ARM listings: `PromptAdmin` «mine» mode, ARM find-error). Chat-facing APIs
+    (`get_problem_data`, `get_prompts`) intentionally list ALL prompts to authenticated
+    users — preprompts are student-facing content, like topics;
   - DLSID session-id resolution → `ai/http_utils.py::resolve_dl_session_id`;
   - DL exception → JSON error mapping → `ai/dl_api_client.py::dl_error_response`;
   - extension → language name → `ai/services/task_registry.py::EXTENSION_TO_LANG`
@@ -47,10 +49,10 @@ The project follows these rules; keep it that way and extend along them:
 
 ## ai/ module map
 
-- `views.py` — page views + API endpoints (`/ai/api/problem-data|prompts|languages|topics|shared-prompts|task-info|task-solution|groq-limits/`), `health`, password setup, audio transcription; `_render_ai_page` builds the model selector and self-heals availability via `trigger_model_health_refresh_async()`; `asset_view` serves `/ai/assets/` with HTTP revalidation (304, no `?v=` bump needed). Prompt listings go through `prompt_queryset_for_user` (ACL). Gotcha: `/ai/api/*` routes are wired directly in `DjangoTest/urls.py`; `ai/urls.py` only holds page/asset/transcribe routes, admin routes come via `ai/admin/urls.py` (included at `/ai/admin/`).
+- `views.py` — page views + API endpoints (`/ai/api/problem-data|prompts|languages|topics|shared-prompts|task-info|task-solution|groq-limits/`), `health`, password setup, audio transcription; `_render_ai_page` builds the model selector and self-heals availability via `trigger_model_health_refresh_async()`; `asset_view` serves `/ai/assets/` with HTTP revalidation (304, no `?v=` bump needed). Prompt listings are shown to all authenticated users (no ACL — preprompts are student content). Gotcha: `/ai/api/*` routes are wired directly in `DjangoTest/urls.py`; `ai/urls.py` only holds page/asset/transcribe routes, admin routes come via `ai/admin/urls.py` (included at `/ai/admin/`).
 - `consumers.py` — Channels WS consumer (`/ai/chat/ws/<client_id>`, see `routing.py`); thin orchestrator delegating to `services/`. Gotcha: add chat modes as a `ModeMessageBuilder` subclass, never `if type==…` here; legacy aliases resolved in `ModelCaller`.
 - `models.py` — `ProgrammingLanguage`, `Topic`, `Task`, `Prompt`, `SharedPrompt`, `AIRequestLog`, `ExternalDLAccount`, `AIModelAvailability`, `AIModelHealthRun`, `AIModelTestRun`/`AIModelTestResult`, `PromptTestCase`/`PromptTestRun`, `UpdateLog`, `AIAppSettings` (singleton `get_solo()`, holds `favorites_epoch`). Gotcha: capability metadata (Text/Vision/Reasoning) lives on registry entries, not here.
-- `querysets.py` — `prompt_queryset_for_user`, the single prompt-visibility ACL helper (superusers/staff all; prompt developers owned + editor). Reuse it; do not hand-roll.
+- `querysets.py` — `prompt_queryset_for_user`, the single prompt-visibility ACL helper for admin/ARM listings (superusers/staff all; others owned + editor). Reuse it; do not hand-roll. Gotcha: chat-facing APIs (`get_problem_data`, `get_prompts` in `views.py`) deliberately bypass it — all prompts are shown to authenticated users (prepompts are student content).
 - `serializers.py` / `i18n.py` — lightweight serializers + UI-language localization (`name_ru/en/fr`); `get_language_instruction(ui_language)` appends a non-Russian reply constraint for every non-Russian message.
 - `middleware.py` — `ExternalAuthMiddleware` (validates `DLSID`, caches `user_info` in session for `AI_AUTH_CACHE_TTL` s; falls back to last cache when dl.gsu.by is down, `503` only when no cache and path not optional) and `CsrfSessionFallbackMiddleware`. Gotcha: real external-auth logic lives in `ai/external_auth.py` (`fetch_external_user_info`, `get_external_session_cookie_name`, error classes), reused by WS auth service.
 - `http_utils.py` — `safe_relative_url` (open-redirect guard) and `resolve_dl_session_id` (the only reader of the DLSID cookie outside the middleware).
@@ -116,7 +118,7 @@ Non-obvious management commands (see `--help` for flags):
 - No `verify=False` for HTTPS in production — `SKIP_SSL_VERIFICATION` is local-dev only.
 - Admin set-password flow must accept `external_user_id` only after `ExternalAuthMiddleware` validation and `_session_matches_external_id` match.
 - Do not expose the `WebDeepseek/` (:3000) and `WebKimi/` (:3001) pools to public networks — keep them on `127.0.0.1`/internal Docker network.
-- Prompt listings must go through `prompt_queryset_for_user` — a prompt developer sees only owned/editor prompts everywhere (chat UI, ARM, admin).
+- Admin/ARM prompt listings must go through `prompt_queryset_for_user`; the chat-facing APIs (`get_problem_data`, `get_prompts`) intentionally show all prompts to authenticated users (prepompts are student content, not private data).
 
 ## Files to read when working on…
 

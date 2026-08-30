@@ -57,7 +57,6 @@ from .dl_api_client import (
 )
 from .http_utils import resolve_dl_session_id, safe_relative_url
 from .i18n import get_language_instruction, get_localized_name, get_localized_text
-from .querysets import prompt_queryset_for_user
 from .serializers import (
     programming_language as serialize_programming_language,
     prompt as serialize_prompt,
@@ -522,13 +521,9 @@ def get_prompts(request):
         return HttpResponseForbidden("Authentication required")
 
     ui_language = request.GET.get('ui_language', 'Русский')
-    visible = prompt_queryset_for_user(
-        Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt"),
-        request.user,
-    )
     prompts = [
         serialize_prompt(p, ui_language)
-        for p in visible.order_by('prompt_name', 'id')
+        for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name', 'id')
     ]
     return JsonResponse(prompts, safe=False)
 
@@ -572,10 +567,7 @@ def get_problem_data(request):
     ]
     prompts = [
         serialize_prompt(p, ui_language)
-        for p in prompt_queryset_for_user(
-            Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt"),
-            request.user,
-        ).order_by('prompt_name', 'id')
+        for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name', 'id')
     ]
     shared_prompts = [
         serialize_shared_prompt(sp, ui_language)
