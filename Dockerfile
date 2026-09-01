@@ -42,7 +42,7 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
 # curl нужен healthcheck в compose; git — для sync_update_log (читает git log из
 # примонтированного .git, см. CMD); tini — entrypoint; lib* — рантайм-зависимости
 # Chromium для Puppeteer. ffmpeg НЕ ставим из apt — он приходит pip-пакетом
-# imageio-ffmpeg (см. requirements.txt).
+# imageio-ffmpeg (см. requirements.txt). Node.js НЕ ставим из apt: см. builder.
 
 # ==================== БИЛДЕР ====================
 # Базируется на apt-base, чтобы переиспользовать уже установленные curl/ca-certificates
@@ -52,45 +52,32 @@ FROM apt-base AS builder
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
-# Отдельный прокси для npm/Puppeteer Chromium download и NodeSource. Может содержать
-# credentials, используется только внутри builder-стадии и не утекает в рантайм.
+# Отдельный прокси для npm-registry, Puppeteer Chromium download и nodejs.org.
+# Может содержать credentials, используется только внутри builder-стадии и не
+# утекает в рантайм.
 ARG NPM_HTTP_PROXY
 ARG NPM_HTTPS_PROXY
-# NodeSource repo недоступен напрямую с хоста сборки (в отличие от deb.debian.org),
-# поэтому setup + nodejs идут через корпоративный прокси (NPM_HTTP_PROXY — тот же, что
-# достаёт npm-registry и Chromium). Скрипт сначала скачивается в файл: старый
-# `curl | bash -` маскировал неудачный fetch (bash выходит 0 на пустом вводе) и
-# молча откатывался на debian'овский nodejs без npm -> "npm: not found".
-RUN printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' \
-        "$NPM_HTTP_PROXY" "$NPM_HTTPS_PROXY" > /etc/apt/apt.conf.d/99-nodesource-proxy && \
-    export http_proxy="$NPM_HTTP_PROXY" https_proxy="$NPM_HTTPS_PROXY" && \
-    curl --proxy "$NPM_HTTP_PROXY" -fsSL -o /tmp/nodesource-setup.sh \
-        https://deb.nodesource.com/setup_20.x && \
-    bash /tmp/nodesource-setup.sh && \
-    rm -f /tmp/nodesource-setup.sh && \
-    apt-get update \
-        -o Acquire::http::Proxy="$NPM_HTTP_PROXY" \
-        -o Acquire::https::Proxy="$NPM_HTTPS_PROXY" \
-        -o Acquire::http::Pipeline-Depth=0 \
-        -o Acquire::https::Pipeline-Depth=0 \
-        -o Acquire::Languages=none \
-        -o Acquire::Retries=5 \
-        -o Acquire::http::No-Cache=True \
-        -o Acquire::https::No-Cache=True && \
-    apt-get install -y --no-install-recommends --fix-missing \
-        -o Acquire::http::Proxy="$NPM_HTTP_PROXY" \
-        -o Acquire::https::Proxy="$NPM_HTTPS_PROXY" \
-        -o Acquire::http::Pipeline-Depth=0 \
-        -o Acquire::https::Pipeline-Depth=0 \
-        -o Acquire::Languages=none \
-        -o Acquire::Retries=5 \
-        -o Acquire::http::No-Cache=True \
-        -o Acquire::https::No-Cache=True \
-        nodejs && \
-    { command -v npm >/dev/null 2>&1 || { echo "ERROR: npm not installed — NodeSource setup failed (is deb.nodesource.com reachable via NPM_HTTP_PROXY?)"; exit 1; }; } && \
-    rm -f /etc/apt/apt.conf.d/99-nodesource-proxy && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+# Node.js 20 — официальным tarball с nodejs.org/dist, НЕ из NodeSource и НЕ из
+# apt. NodeSource-репозиторий через корпоративный прокси качает индексы, но
+# падает на скачивании .deb, и `apt-get install --fix-missing nodejs` молча
+# откатывается на дебиановский nodejs 18 без npm ("npm: not found" при exit 0
+# у всех шагов — маскировка падения); дебиановский nodejs 18 не подходит и по
+# engine-требованию: proxy-chain@3.0.0 (в lock-файлах пулов) требует node >=
+# 20.11. Tarball — один файл через тот же прокси, что доставляет npm-registry и
+# Chromium; при сбое curl -f роняет сборку громко, без молчаливых откатов.
+# Версия запинена, sha256 сверяется с официальным SHASUMS256.txt. Бинарник
+# линкуется с libstdc++6/libgcc — они уже есть в базовом slim-образе.
+ARG NODE_VERSION=20.20.2
+RUN ARCH="$(dpkg --print-architecture)" && \
+    [ "$ARCH" = amd64 ] && ARCH=x64; \
+    NODE_TARBALL="node-v${NODE_VERSION}-linux-${ARCH}.tar.gz" && \
+    curl --proxy "$NPM_HTTP_PROXY" -fsSL --retry 5 -o "/tmp/$NODE_TARBALL" \
+        "https://nodejs.org/dist/v${NODE_VERSION}/$NODE_TARBALL" && \
+    curl --proxy "$NPM_HTTP_PROXY" -fsSL --retry 5 "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" \
+        | grep " $NODE_TARBALL\$" | (cd /tmp && sha256sum -c -) && \
+    tar -xzf "/tmp/$NODE_TARBALL" -C /usr/local --strip-components=1 && \
+    rm -f "/tmp/$NODE_TARBALL" && \
+    node -v && npm -v
 # Виртуальное окружение Python
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -128,7 +115,7 @@ COPY . .
 # (раньше тут был второй полный apt-get install lib* через медленный прокси).
 FROM apt-base AS runtime
 COPY --from=builder /opt/venv /opt/venv
-COPY --from=builder /usr/bin/node /usr/local/bin/node
+COPY --from=builder /usr/local/bin/node /usr/local/bin/node
 COPY --from=builder /opt/puppeteer-runtime /opt/puppeteer-runtime
 COPY --from=builder /app/WebDeepseek/node_modules /app/WebDeepseek/node_modules
 COPY --from=builder /app/WebKimi/node_modules /app/WebKimi/node_modules
