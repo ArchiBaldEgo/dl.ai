@@ -19,6 +19,8 @@
   var csrfInput = runForm.querySelector('input[name="csrfmiddlewaretoken"]');
   var submitButton = document.getElementById("tcRunSubmitBtn");
   var runProgress = document.getElementById("tcRunProgress");
+  var progressBar = document.getElementById("tcProgressBar");
+  var progressFill = document.getElementById("tcProgressFill");
   var runError = document.getElementById("tcRunError");
   var summaryCard = document.getElementById("tcSummaryCard");
   var summaryBox = document.getElementById("tcSummary");
@@ -70,6 +72,28 @@
     // Спиннер крутится только пока прогон реально идёт; по завершении колесо
     // скрывается, а строка статуса с текстом «Проверки завершены» остаётся.
     if (spinning) runProgress.classList.add("spinning"); else runProgress.classList.remove("spinning");
+  }
+
+  // AJAX админки всегда ждёт JSON; HTML (например, редирект на логин при
+  // протухшей сессии) даёт сырую ошибку JSON.parse — показываем внятный текст.
+  function parseJsonResponse(response) {
+    var contentType = response.headers.get("content-type") || "";
+    if (contentType.indexOf("application/json") === -1) {
+      return Promise.reject(new Error("Сессия истекла или сервер вернул неожиданный ответ. Обновите страницу и войдите заново."));
+    }
+    return response.json();
+  }
+
+  // Бар прогона: percent (0-100) — заполнение; null — скрыть (total ещё не посчитан).
+  function setProgressBar(percent) {
+    if (!progressBar || !progressFill) return;
+    if (percent === null || percent === undefined) {
+      progressBar.hidden = true;
+      progressFill.style.width = "0%";
+      return;
+    }
+    progressBar.hidden = false;
+    progressFill.style.width = Math.max(0, Math.min(100, percent)) + "%";
   }
 
   function renderSummary(s) {
@@ -182,7 +206,18 @@
     renderLog(run.log || []);
     if (run.status === "running") {
       var c = run.current ? " | Сейчас: " + run.current : "";
-      setRunProgress("Проверено " + Number(run.completed || 0) + (run.total ? " из " + Number(run.total) : "") + c, true);
+      var total = Number(run.total || 0);
+      var completed = Number(run.completed || 0);
+      if (total > 0) {
+        // total известен заранее (worker считает сценарии discovery-ем до
+        // старта сабпроцесса) → честный % и бар, как в /arm/.
+        var percent = Math.min(100, Math.round((completed / total) * 100));
+        setProgressBar(percent);
+        setRunProgress("Проверено " + completed + " из " + total + " · " + percent + "%" + c, true);
+      } else {
+        setProgressBar(null);
+        setRunProgress("Подсчёт сценариев… Проверено " + completed + c, true);
+      }
       setRunError("");
       setSubmitDisabled(true);
       wasRunning = true;
@@ -195,12 +230,14 @@
       loadHistory();
     }
     if (run.status === "completed") {
+      setProgressBar(100);
       setRunProgress("Проверки завершены: " + Number(run.completed || 0) + " из " + Number(run.total || 0), false);
       setRunError("");
       setSubmitDisabled(false);
       return;
     }
     if (run.status === "failed") {
+      setProgressBar(null);
       setRunProgress("", false);
       setRunError(run.error_message || "Проверки завершились с ошибкой");
       setSubmitDisabled(false);
@@ -213,7 +250,7 @@
       method: "GET", credentials: "same-origin",
       headers: { "X-Requested-With": "XMLHttpRequest" }
     })
-      .then(function (r) { return r.json().then(function (d) { return { response: r, data: d }; }); })
+      .then(function (r) { return parseJsonResponse(r).then(function (d) { return { response: r, data: d }; }); })
       .then(function (res) {
         if (!res.response.ok || !res.data.ok) throw new Error(res.data.message || "Не удалось получить статус");
         var run = res.data.run || {};
@@ -232,6 +269,7 @@
     if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
     setSubmitDisabled(true);
     setRunError("");
+    setProgressBar(null);
     setRunProgress("Запускаем проверки…", true);
     renderSummary(null);
     renderSimpleBanner(null);
@@ -246,7 +284,7 @@
       },
       body: new URLSearchParams(new FormData(runForm)).toString()
     })
-      .then(function (r) { return r.json().then(function (d) { return { response: r, data: d }; }); })
+      .then(function (r) { return parseJsonResponse(r).then(function (d) { return { response: r, data: d }; }); })
       .then(function (res) {
         if (!res.response.ok || !res.data.ok) throw new Error(res.data.message || "Не удалось запустить");
         currentRunId = res.data.run_id || "";
@@ -255,6 +293,9 @@
         }
         applyRunSnapshot(res.data.run || {});
         if (res.data.run && res.data.run.status === "running") pollRunStatus();
+        // Прогон должен попасть в меню «Процессы» в шапке сразу, а не на
+        // следующем 15-секундном тике поллинга.
+        document.dispatchEvent(new Event("ai-processes:refresh"));
       })
       .catch(function (e) {
         setRunError(e.message || "Ошибка запуска");
@@ -324,7 +365,7 @@
       method: "GET", credentials: "same-origin",
       headers: { "X-Requested-With": "XMLHttpRequest" }
     })
-      .then(function (r) { return r.json(); })
+      .then(function (r) { return parseJsonResponse(r); })
       .then(function (data) {
         if (!data || !data.ok) throw new Error(data && data.message ? data.message : "Ошибка загрузки");
         historyList.textContent = "";
@@ -362,7 +403,7 @@
       method: "GET", credentials: "same-origin",
       headers: { "X-Requested-With": "XMLHttpRequest" }
     })
-      .then(function (r) { return r.json(); })
+      .then(function (r) { return parseJsonResponse(r); })
       .then(function (data) {
         if (!data || !data.ok) throw new Error(data && data.message ? data.message : "Лог не найден");
         logModalTitle.textContent = data.filename || filename;

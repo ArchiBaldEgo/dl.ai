@@ -61,6 +61,17 @@
     return getCookie("csrftoken") || (csrfInput ? csrfInput.value : "");
   }
 
+  // AJAX админки всегда ждёт JSON; HTML (например, редирект на страницу
+  // логина при протухшей сессии — fetch молча следует за 302) даёт сырую
+  // ошибку JSON.parse. Показываем внятный текст вместо неё.
+  function parseJsonResponse(response) {
+    var contentType = response.headers.get("content-type") || "";
+    if (contentType.indexOf("application/json") === -1) {
+      return Promise.reject(new Error("Сессия истекла или сервер вернул неожиданный ответ. Обновите страницу и войдите заново."));
+    }
+    return response.json();
+  }
+
   function setSubmitDisabled(disabled) {
     if (submitButton) {
       submitButton.disabled = !!disabled;
@@ -219,7 +230,7 @@
       credentials: "same-origin",
       headers: { "X-Requested-With": "XMLHttpRequest" },
     })
-      .then(function (response) { return response.json().then(function (data) { return { response: response, data: data }; }); })
+      .then(function (response) { return parseJsonResponse(response).then(function (data) { return { response: response, data: data }; }); })
       .then(function (res) {
         if (!res.response.ok || !res.data.ok) {
           throw new Error(res.data.message || "Не удалось получить статус прогона");
@@ -261,7 +272,7 @@
       },
       body: body.toString(),
     })
-      .then(function (response) { return response.json().then(function (data) { return { response: response, data: data }; }); })
+      .then(function (response) { return parseJsonResponse(response).then(function (data) { return { response: response, data: data }; }); })
       .then(function (res) {
         if (!res.response.ok || !res.data.ok) {
           throw new Error(res.data.message || "Не удалось запустить прогон");
@@ -275,6 +286,9 @@
         if (res.data.run && res.data.run.status === "running") {
           pollRunStatus();
         }
+        // Прогон должен попасть в меню «Процессы» в шапке сразу, а не на
+        // следующем 15-секундном тике поллинга.
+        document.dispatchEvent(new Event("ai-processes:refresh"));
       })
       .catch(function (error) {
         setRunError(error.message || "Ошибка запуска прогона");

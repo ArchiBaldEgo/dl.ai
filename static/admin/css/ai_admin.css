@@ -162,6 +162,8 @@
   opacity: 0.65;
 }
 
+/* Высоту меню задаёт ai_processes.js (ровно по низу 3-го пункта), поэтому
+   фиксированного max-height здесь нет; скролл по списку — плавный. */
 .ai-processes-menu {
   position: absolute;
   right: 0;
@@ -169,8 +171,9 @@
   margin-top: 6px;
   min-width: 340px;
   max-width: 420px;
-  max-height: 60vh;
+  max-height: 60vh; /* страховка, пока JS не задал точную высоту */
   overflow-y: auto;
+  scroll-behavior: smooth;
   background: var(--body-bg);
   border: 1px solid var(--hairline-color);
   border-radius: 8px;

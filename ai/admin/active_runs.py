@@ -5,9 +5,10 @@
 даёт дропдауну из ``base_site.html`` (ai_processes.js) единый лёгкий список
 прогонов **текущего пользователя**: running — всегда, завершённые — только
 в течение последних минут (окно уведомления о завершении). Каждый админ
-видит только свои прогоны, включая суперпользователя. Обновление состояния
-моделей — глобальный безличный процесс, он живёт на своей странице
-(model_status) и сюда не попадает. Путь под ``/ai/admin/`` —
+видит только свои прогоны, включая суперпользователя. Единственное
+исключение — обновление состояния моделей (model_health): sweep общий и
+без владельца (ручной запуск, планировщик 04:00, self-heal), поэтому его
+запись глобальная и видна каждому админу. Путь под ``/ai/admin/`` —
 RateLimitMiddleware его не считает.
 """
 
@@ -15,7 +16,7 @@ import time
 
 from django.http import HttpResponseForbidden, JsonResponse
 
-from .. import arm_runner, prompt_test_runner, test_console_runner
+from .. import arm_runner, model_health, prompt_test_runner, test_console_runner
 from .permissions import can_access_admin
 
 # Сколько секунд после завершения прогон виден в меню (окно уведомления).
@@ -32,6 +33,7 @@ def admin_active_runs_view(request):
         arm_runner.list_user_runs(user_id, cutoff)
         + prompt_test_runner.list_user_runs(user_id, cutoff)
         + test_console_runner.list_user_runs(user_id, cutoff)
+        + model_health.list_model_refresh_runs(cutoff)
     )
     # Активные — первыми, дальше — от свежих к старым.
     runs.sort(key=lambda r: (r.get("status") != "running", -(r.get("created_at_ts") or 0.0)))

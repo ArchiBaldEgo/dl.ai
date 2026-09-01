@@ -78,6 +78,32 @@
     color: var(--body-quiet-color);
     font-size: 12px;
   }
+  /* Прогресс обновления моделей: тонкий бар + строка N / M · P% (как в /arm/). */
+  .ms-progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--body-fg);
+    font-weight: 600;
+  }
+  .ms-progress[hidden] { display: none; }
+  .ms-progress-bar {
+    flex: 0 1 320px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--darkened-bg);
+    border: 1px solid var(--hairline-color);
+    overflow: hidden;
+  }
+  .ms-progress-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 999px;
+    background: var(--button-bg);
+    transition: width 0.4s ease;
+  }
 </style>
 
 <div class="status-wrap">
@@ -98,7 +124,12 @@
     {% if refresh_error %}
       <div class="status-error">{{ refresh_error }}</div>
     {% endif %}
-    <div id="refreshInProgressHint" class="status-success"{% if not refresh_in_progress %} style="display: none;"{% endif %}>Обновление в процессе. Страница обновляется автоматически.</div>
+    <div id="refreshInProgressHint" class="status-success"{% if not refresh_in_progress %} style="display: none;"{% endif %}>Обновление в процессе. Страница обновляется автоматически.
+      <div id="refreshProgressLine" class="ms-progress" hidden>
+        <div class="ms-progress-bar"><div class="ms-progress-fill" id="msProgressFill"></div></div>
+        <span id="msProgressText"></span>
+      </div>
+    </div>
     <div id="refreshAsyncMessage"></div>
   </div>
 
@@ -170,6 +201,9 @@
     const rowsBody = document.getElementById('modelStatusRowsBody');
     const healthWindowDate = document.getElementById('statusHealthWindowDate');
     const inProgressHint = document.getElementById('refreshInProgressHint');
+    const progressLine = document.getElementById('refreshProgressLine');
+    const progressFill = document.getElementById('msProgressFill');
+    const progressText = document.getElementById('msProgressText');
 
     if (!form || !button || !message || !rowsBody || !healthWindowDate || !inProgressHint) {
       return;
@@ -190,6 +224,32 @@
 
     function setInProgressHint(isVisible) {
       inProgressHint.style.display = isVisible ? 'block' : 'none';
+    }
+
+    // AJAX админки всегда ждёт JSON; HTML (например, редирект на логин при
+    // протухшей сессии) даёт сырую ошибку JSON.parse — показываем внятный текст.
+    async function parseJsonResponse(response) {
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.indexOf('application/json') === -1) {
+        throw new Error('Сессия истекла или сервер вернул неожиданный ответ. Обновите страницу и войдите заново.');
+      }
+      return response.json();
+    }
+
+    // Бар прогресса sweep'а: N / M · P% | Сейчас: <модель>.
+    function renderRefreshProgress(progress) {
+      if (!progressLine || !progressFill || !progressText) return;
+      const total = Number((progress && progress.total) || 0);
+      const completed = Number((progress && progress.completed) || 0);
+      if (!progress || !total) {
+        progressLine.hidden = true;
+        return;
+      }
+      const percent = Math.min(100, Math.round((completed / total) * 100));
+      progressFill.style.width = percent + '%';
+      const current = progress.current ? ' | Сейчас: ' + progress.current : '';
+      progressText.textContent = completed + ' / ' + total + ' · ' + percent + '%' + current;
+      progressLine.hidden = false;
     }
 
     function escapeHtml(value) {
@@ -267,7 +327,7 @@
           },
         });
 
-        const data = await response.json();
+        const data = await parseJsonResponse(response);
         if (!response.ok || !data.ok) {
           throw new Error(data.message || 'Не удалось получить состояние моделей');
         }
@@ -280,6 +340,7 @@
 
         const nextRefreshInProgress = Boolean(data.refresh_in_progress);
         setInProgressHint(nextRefreshInProgress);
+        renderRefreshProgress(nextRefreshInProgress ? (data.refresh_progress || null) : null);
 
         if (refreshInProgress && !nextRefreshInProgress) {
           setMessage('Обновление завершено. Таблица обновлена.', false);
@@ -313,7 +374,7 @@
           body: 'action=refresh_models',
         });
 
-        const data = await response.json();
+        const data = await parseJsonResponse(response);
         if (!response.ok || !data.ok) {
           throw new Error(data.message || 'Не удалось запустить обновление');
         }
@@ -321,6 +382,9 @@
         setMessage(data.message || 'Обновление запущено', false);
         refreshInProgress = Boolean(data.refresh_in_progress);
         setInProgressHint(refreshInProgress);
+        // Обновление моделей — глобальный процесс: даём меню «Процессы» в шапке
+        // узнать о нём сразу, не дожидаясь планового 15-секундного поллинга.
+        document.dispatchEvent(new Event('ai-processes:refresh'));
         fetchState();
       } catch (error) {
         setMessage(error.message || 'Ошибка запуска обновления', true);

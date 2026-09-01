@@ -419,6 +419,16 @@
       const input = form.querySelector('input[name="csrfmiddlewaretoken"]');
       return (document.cookie.split('; ').find(function (r) { return r.startsWith('csrftoken='); }) || '').split('=').slice(1).join('=') || (input ? input.value : '');
     }
+    // AJAX админки всегда ждёт JSON; HTML (например, редирект на страницу
+    // логина при протухшей сессии — fetch молча следует за 302) даёт сырую
+    // ошибку JSON.parse. Показываем внятный текст вместо неё.
+    async function parseJsonResponse(response) {
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.indexOf('application/json') === -1) {
+        throw new Error('Сессия истекла или сервер вернул неожиданный ответ. Обновите страницу и войдите заново.');
+      }
+      return response.json();
+    }
     function setSubmitDisabled(disabled) {
       submitBtn.disabled = disabled;
       submitBtn.textContent = disabled ? 'Выполняется...' : 'Запустить пакет';
@@ -499,7 +509,7 @@
         const response = await fetch(statusUrl + '?run_id=' + encodeURIComponent(currentRunId), {
           method: 'GET', credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' },
         });
-        const data = await response.json();
+        const data = await parseJsonResponse(response);
         if (!response.ok || !data.ok) { throw new Error(data.message || 'Не удалось получить статус'); }
         applyRunSnapshot(data.run || {});
         if (data.run && data.run.status === 'running') { pollTimer = window.setTimeout(pollRunStatus, 2000); }
@@ -655,7 +665,7 @@
           headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
           body: body.toString(),
         });
-        const data = await response.json();
+        const data = await parseJsonResponse(response);
         if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка загрузки дерева'); }
         loadTreeMsg.style.color = '#067647';
         loadTreeMsg.textContent = '✓ Загружено задач: ' + (data.task_count || 0);
@@ -715,7 +725,7 @@
           method: 'GET', credentials: 'same-origin',
           headers: { 'X-Requested-With': 'XMLHttpRequest' },
         });
-        const data = await response.json();
+        const data = await parseJsonResponse(response);
         if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка загрузки препромтов'); }
         const opts = data.prompt_options || [];
         if (!opts.length) {
@@ -750,7 +760,7 @@
             headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
             body: JSON.stringify({ run_id: currentRunId }),
           });
-          const data = await response.json();
+          const data = await parseJsonResponse(response);
           if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка'); }
           // Мгновенная отмена: бэкенд уже перевёл прогон в cancelled. Тянем
           // свежий snapshot сразу (без ожидания 2с поллинга) и показываем
@@ -803,7 +813,7 @@
           headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
           body: body.toString(),
         });
-        const data = await response.json();
+        const data = await parseJsonResponse(response);
         if (!response.ok || !data.ok) { throw new Error(data.message || 'Не удалось запустить batch solve'); }
         currentRunId = data.run_id || '';
         if (currentRunId && window.history && window.history.replaceState) {
@@ -811,6 +821,9 @@
         }
         applyRunSnapshot(data.run || {});
         if (data.run && data.run.status === 'running') { pollRunStatus(); }
+        // Прогон должен попасть в меню «Процессы» в шапке сразу, а не на
+        // следующем 15-секундном тике поллинга.
+        document.dispatchEvent(new Event('ai-processes:refresh'));
       } catch (error) {
         setError(error.message || 'Ошибка запуска batch solve');
         stopProgress();

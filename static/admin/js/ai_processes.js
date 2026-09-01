@@ -1,9 +1,13 @@
 // Личное меню «мои процессы» в шапке админки (base_site.html, welcome-msg).
-// Поллинг /ai/admin/active-runs/ каждые 15 c (+ на visibilitychange): список
-// СВОИХ прогонов (arm solve/find-error, регрессия промптов, тестовая консоль) —
+// Поллинг /ai/admin/active-runs/ каждые 15 c (+ на visibilitychange и сразу при
+// открытии меню): список СВОИХ прогонов (arm solve/find-error, регрессия
+// промптов, тестовая консоль) + глобальная запись обновления моделей —
 // тип, этап, прогресс N/M с процентом; завершённые — 10 минут с бейджем итога.
-// Прогон, завершившийся вдали от своей страницы, получает одноразовый тост со
-// ссылкой на страницу прогона (?run_id=), где результат восстанавливается.
+// Страницы прогонов после успешного старта диспатчат событие
+// «ai-processes:refresh» — процесс появляется в меню сразу.
+// Показаны 3 записи, дальше — плавный скролл. Прогон, завершившийся вдали
+// от своей страницы, получает одноразовый тост со ссылкой на страницу
+// прогона (?run_id=), где результат восстанавливается.
 //
 // Рендер только createElement + textContent — данные модели/этапы приходят
 // от пользователей и моделей, никакого innerHTML с ними (CLAUDE.md: escaping).
@@ -19,7 +23,10 @@
     batch: "ARM: пакетное решение",
     single: "ARM: поиск ошибки",
     prompt_regression: "Регрессия промптов",
-    test_console: "Тестовая консоль"
+    test_console: "Тестовая консоль",
+    // Sweep общий (ручной запуск / планировщик 04:00) — запись глобальная,
+    // без владельца: видна каждому админу.
+    model_refresh: "Обновление моделей"
   };
   var STATUS_LABELS = {
     completed: "Завершён",
@@ -46,6 +53,8 @@
   function openMenu() {
     menu.hidden = false;
     toggle.setAttribute("aria-expanded", "true");
+    // Открыли меню — сразу свежие данные, без ожидания планового тика.
+    poll();
   }
 
   function closeMenu() {
@@ -127,12 +136,22 @@
 
   function renderMenu(runs) {
     menu.textContent = "";
+    // Высота авто, пока пунктов не больше трёх.
+    menu.style.maxHeight = "";
     if (!runs.length) {
       menu.appendChild(el("div", "ai-processes-empty", "Нет активных прогонов"));
       return;
     }
+    var items = [];
     for (var i = 0; i < runs.length; i++) {
-      menu.appendChild(buildItem(runs[i]));
+      var item = buildItem(runs[i]);
+      items.push(item);
+      menu.appendChild(item);
+    }
+    // Показываем 3 записи, остальное — плавный скролл (CSS scroll-behavior).
+    if (items.length > 3) {
+      var third = items[2];
+      menu.style.maxHeight = (third.offsetTop + third.offsetHeight) + "px";
     }
   }
 
@@ -201,6 +220,14 @@
 
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden) { poll(); }
+  });
+  // Страницы прогонов (arm solve/find-error, регрессия, тестовая консоль,
+  // обновление моделей) диспатчат это событие после успешного старта —
+  // процесс попадает в меню сразу, не дожидаясь планового тика.
+  var refreshDebounceTimer = null;
+  document.addEventListener("ai-processes:refresh", function () {
+    if (refreshDebounceTimer) { window.clearTimeout(refreshDebounceTimer); }
+    refreshDebounceTimer = window.setTimeout(poll, 300);
   });
   poll();
   window.setInterval(poll, POLL_INTERVAL_MS);

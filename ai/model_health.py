@@ -14,6 +14,7 @@ import re
 import threading
 import time
 import logging
+import uuid
 from datetime import time as dtime, timedelta
 from time import perf_counter
 from asgiref.sync import async_to_sync
@@ -33,6 +34,14 @@ _scheduler_lock = threading.Lock()
 _scheduler_started = False
 _manual_refresh_lock = threading.Lock()
 _manual_refresh_started = False
+
+# Прогресс текущего/последнего sweep для меню «Процессы» (active_runs.py) и
+# страницы статуса моделей. Sweep общий (ручной запуск, планировщик 04:00,
+# self-heal со страниц) и без владельца — запись глобальная, видна каждому
+# админу. Завершённое состояние живёт до следующего sweep'а; окно показа в
+# меню фильтрует active_runs по since_ts (как у остальных типов прогонов).
+_refresh_progress_lock = threading.Lock()
+_refresh_progress = {}
 
 from .model_clients import registry
 from .model_clients.web_deepseek import restart_bot_pool
@@ -463,6 +472,67 @@ def _maybe_autorecover_kimi(handlers, window_date):
             logger.warning("Failed to annotate Kimi auto-recovery outcome for %s", key, exc_info=True)
 
 
+def _refresh_progress_start():
+    """Инициализирует состояние прогресса sweep'а (вызывается только победителем guard'а)."""
+    now_ts = time.time()
+    with _refresh_progress_lock:
+        _refresh_progress.update({
+            "run_id": uuid.uuid4().hex,
+            "status": "running",
+            "total": len(MODEL_CATALOG_KEYS),
+            "completed": 0,
+            "current": "",
+            "created_at_ts": now_ts,
+            "updated_at_ts": now_ts,
+        })
+
+
+def _refresh_progress_tick(completed, current):
+    with _refresh_progress_lock:
+        _refresh_progress["completed"] = completed
+        _refresh_progress["current"] = current
+        _refresh_progress["updated_at_ts"] = time.time()
+
+
+def _refresh_progress_finish(status):
+    with _refresh_progress_lock:
+        _refresh_progress["status"] = status
+        _refresh_progress["current"] = ""
+        _refresh_progress["updated_at_ts"] = time.time()
+
+
+def get_refresh_progress():
+    """Копия состояния прогресса текущего/последнего sweep'а (для страницы статуса)."""
+    with _refresh_progress_lock:
+        return dict(_refresh_progress)
+
+
+def list_model_refresh_runs(since_ts=0.0):
+    """Запись sweep'а для меню «Процессы» — в форме list_user_runs раннеров.
+
+    Sweep безличный (без user_id) — запись глобальная; running виден всегда,
+    завершённый — только обновлённый не раньше ``since_ts`` (окно уведомлений).
+    """
+    with _refresh_progress_lock:
+        progress = dict(_refresh_progress)
+    if not progress:
+        return []
+    status = progress.get("status", "")
+    if status != "running" and float(progress.get("updated_at_ts") or 0.0) < since_ts:
+        return []
+    return [{
+        "run_id": progress.get("run_id", ""),
+        "run_type": "model_refresh",
+        "page_url": "/ai/admin/arm/models/",
+        "status": status,
+        "completed": int(progress.get("completed") or 0),
+        "total": int(progress.get("total") or 0),
+        "current": progress.get("current", ""),
+        "created_at_ts": float(progress.get("created_at_ts") or 0.0),
+        "updated_at_ts": float(progress.get("updated_at_ts") or 0.0),
+    }]
+
+
 def run_model_health_check(force=False, on_model_checked=None):
     """Запускает проверку доступности всех моделей для текущего health-окна.
 
@@ -527,10 +597,14 @@ def run_model_health_check(force=False, on_model_checked=None):
     try:
         handlers = get_runtime_model_handlers()
 
+        _refresh_progress_start()
+        completed = 0
         for key in MODEL_CATALOG_KEYS:
             title = registry.title(key)
             handler_info = handlers.get(key)
             detail = _check_one_model(key, title, handler_info, window_date)
+            completed += 1
+            _refresh_progress_tick(completed, title)
             if on_model_checked is not None:
                 try:
                     on_model_checked(detail)
@@ -545,6 +619,7 @@ def run_model_health_check(force=False, on_model_checked=None):
             finished_at=timezone.now(),
             error_message="",
         )
+        _refresh_progress_finish("completed")
         return True
 
     except Exception as exc:
@@ -553,6 +628,7 @@ def run_model_health_check(force=False, on_model_checked=None):
             finished_at=timezone.now(),
             error_message=str(exc)[:1000],
         )
+        _refresh_progress_finish("failed")
         return False
 
 

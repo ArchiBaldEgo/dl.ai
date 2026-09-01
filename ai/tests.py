@@ -1640,6 +1640,99 @@ class ModelHealthGuardTests(TestCase):
             _maybe_autorecover_web_deepseek({}, window)
 
 
+class ModelRefreshProgressTests(TestCase):
+    """Прогресс sweep'а обновления моделей (глобальная запись в меню
+    «Процессы» + бар на странице статуса)."""
+
+    def setUp(self):
+        from ai import model_health
+        model_health._refresh_progress.clear()
+
+    def tearDown(self):
+        from ai import model_health
+        model_health._refresh_progress.clear()
+
+    def _run_sweep(self, *extra_patches):
+        from contextlib import ExitStack
+
+        from ai.model_health import run_model_health_check
+        # Пустые handlers: _check_one_model пишет "Handler not found" в БД
+        # без сетевых вызовов (паттерн ModelHealthGuardTests).
+        with ExitStack() as stack:
+            stack.enter_context(patch("ai.model_health.get_runtime_model_handlers", return_value={}))
+            stack.enter_context(patch("ai.model_health._maybe_autorecover_web_deepseek"))
+            stack.enter_context(patch("ai.model_health._maybe_autorecover_kimi"))
+            for extra in extra_patches:
+                stack.enter_context(extra)
+            return run_model_health_check(force=False)
+
+    def test_completed_sweep_updates_progress(self):
+        from ai.model_health import (
+            MODEL_CATALOG_KEYS, get_refresh_progress, list_model_refresh_runs,
+        )
+        self.assertTrue(self._run_sweep())
+        progress = get_refresh_progress()
+        self.assertEqual(progress["status"], "completed")
+        self.assertEqual(progress["total"], len(MODEL_CATALOG_KEYS))
+        self.assertEqual(progress["completed"], progress["total"])
+        self.assertEqual(progress["current"], "")
+        self.assertTrue(progress["run_id"])
+        # Запись для меню: running-окно не фильтрует, свежая завершённая видна.
+        entry = list_model_refresh_runs()[0]
+        self.assertEqual(entry["run_type"], "model_refresh")
+        self.assertEqual(entry["page_url"], "/ai/admin/arm/models/")
+        self.assertEqual(entry["status"], "completed")
+        self.assertEqual(entry["total"], progress["total"])
+
+    def test_failed_sweep_marks_progress_failed(self):
+        from ai.model_health import get_refresh_progress
+        self.assertFalse(self._run_sweep(
+            patch("ai.model_health._check_one_model", side_effect=RuntimeError("boom")),
+        ))
+        progress = get_refresh_progress()
+        self.assertEqual(progress["status"], "failed")
+        self.assertEqual(progress["completed"], 0)
+
+    def test_skipped_sweep_leaves_progress_intact(self):
+        """Ранний return guard'а (уже идёт проверка) не должен перетирать
+        живой прогресс посторонним состоянием."""
+        from ai.model_health import (
+            get_health_window_date, get_refresh_progress, run_model_health_check,
+        )
+        from ai.models import AIModelHealthRun
+        sentinel = {
+            "run_id": "sentinel", "status": "running", "total": 7,
+            "completed": 2, "current": "X", "created_at_ts": 1.0, "updated_at_ts": 2.0,
+        }
+        with patch.dict("ai.model_health._refresh_progress", sentinel, clear=True):
+            AIModelHealthRun.objects.create(
+                window_date=get_health_window_date(),
+                status=AIModelHealthRun.STATUS_RUNNING,
+                started_at=timezone.now(),
+                finished_at=None,
+                error_message="",
+            )
+            with patch("ai.model_health.get_runtime_model_handlers") as mock_handlers:
+                result = run_model_health_check(force=False)
+                mock_handlers.assert_not_called()
+            self.assertFalse(result)
+            # Прогресс живого sweep'а не сбит «пустым» состоянием.
+            self.assertEqual(get_refresh_progress(), sentinel)
+
+    def test_stale_finished_entry_filtered_by_since_ts(self):
+        from ai.model_health import list_model_refresh_runs
+        now_ts = time.time()
+        stale = {
+            "run_id": "stale", "status": "completed", "total": 5, "completed": 5,
+            "current": "", "created_at_ts": now_ts - 4000, "updated_at_ts": now_ts - 4000,
+        }
+        with patch.dict("ai.model_health._refresh_progress", stale, clear=True):
+            # Завершённый старее окна уведомления — не виден.
+            self.assertEqual(list_model_refresh_runs(since_ts=now_ts - 60), [])
+            # Но при нулевом cutoff (внутренние вызовы) — виден.
+            self.assertEqual(len(list_model_refresh_runs()), 1)
+
+
 class HealthClassifierTests(SimpleTestCase):
     """Robust healthcheck classifier: a correct answer wins unless the reply is
     a definite API/client error. Loose stems (недоступ/подключени/ошибка) no
@@ -3834,7 +3927,8 @@ class RequestLogCsvTests(TestCase):
 class ActiveRunsEndpointTests(TestCase):
     """/ai/admin/active-runs/: личное меню «мои процессы» в шапке админки.
     Каждый админ видит только СВОИ прогоны (даже суперпользователь); завершённые
-    видны 10 минут (окно уведомления); обновление моделей не попадает."""
+    видны 10 минут (окно уведомления); обновление моделей — глобальная запись,
+    видимая каждому админу (sweep общий и без владельца)."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -3853,7 +3947,7 @@ class ActiveRunsEndpointTests(TestCase):
 
     def test_user_sees_only_own_runs(self):
         """Свои прогоны всех 4 типов видны, чужие — нет (включая superuser)."""
-        from ai import arm_runner, prompt_test_runner, test_console_runner
+        from ai import arm_runner, model_health, prompt_test_runner, test_console_runner
         from ai.admin.active_runs import admin_active_runs_view
         now_ts = time.time()
         mine = {
@@ -3895,7 +3989,10 @@ class ActiveRunsEndpointTests(TestCase):
         try:
             for run_id, (jobs_dict, job) in injected.items():
                 jobs_dict[run_id] = job
-            response = admin_active_runs_view(self._make_request(self.superuser))
+            # Глобальная запись обновления моделей не должна мешать подсчёту
+            # «ровно по одному своих типов» — изолируем её состояние.
+            with patch.dict(model_health._refresh_progress, {}, clear=True):
+                response = admin_active_runs_view(self._make_request(self.superuser))
             data = json.loads(response.content)
             self.assertTrue(data["ok"])
             by_type = {r["run_type"]: r for r in data["runs"]}
@@ -3960,18 +4057,52 @@ class ActiveRunsEndpointTests(TestCase):
             for run_id in injected:
                 arm_runner._jobs.pop(run_id, None)
 
-    def test_model_health_excluded(self):
-        """Обновление моделей — глобальный безличный процесс, в личное меню
-        не попадает (живёт на странице model_status)."""
+    def test_model_refresh_entry_global(self):
+        """Обновление моделей — глобальная безличная запись: видна каждому
+        админу (включая prompt_developer), с прогрессом N/M; завершённый sweep
+        старше окна уведомления не виден; пустое состояние — записи нет."""
+        import uuid
+
+        from ai import model_health
         from ai.admin.active_runs import admin_active_runs_view
-        with patch(
-            "ai.model_health.is_model_health_refresh_running", return_value=True
-        ):
-            response = admin_active_runs_view(self._make_request(self.superuser))
-            data = json.loads(response.content)
-            self.assertEqual(
-                [r for r in data["runs"] if r["run_type"] == "model_status"], []
-            )
+        now_ts = time.time()
+        running = {
+            "run_id": uuid.uuid4().hex, "status": "running",
+            "total": 12, "completed": 3, "current": "Web_DeepSeek",
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        stale_done = dict(running, status="completed", updated_at_ts=now_ts - 4000)
+        try:
+            # Running sweep виден любому админу, с прогрессом и ссылкой на страницу.
+            with patch.dict(model_health._refresh_progress, running, clear=True):
+                for user in (self.superuser, self.pd_user):
+                    response = admin_active_runs_view(self._make_request(user))
+                    data = json.loads(response.content)
+                    entries = [r for r in data["runs"] if r["run_type"] == "model_refresh"]
+                    self.assertEqual(len(entries), 1, user.username)
+                    entry = entries[0]
+                    self.assertEqual(entry["run_id"], running["run_id"])
+                    self.assertEqual(entry["page_url"], "/ai/admin/arm/models/")
+                    self.assertEqual(entry["status"], "running")
+                    self.assertEqual(entry["completed"], 3)
+                    self.assertEqual(entry["total"], 12)
+                    self.assertEqual(entry["current"], "Web_DeepSeek")
+            # Завершённый старше 10 минут — не виден.
+            with patch.dict(model_health._refresh_progress, stale_done, clear=True):
+                response = admin_active_runs_view(self._make_request(self.superuser))
+                data = json.loads(response.content)
+                self.assertEqual(
+                    [r for r in data["runs"] if r["run_type"] == "model_refresh"], []
+                )
+            # Sweep ещё не было с старта процесса — записи нет.
+            with patch.dict(model_health._refresh_progress, {}, clear=True):
+                response = admin_active_runs_view(self._make_request(self.superuser))
+                data = json.loads(response.content)
+                self.assertEqual(
+                    [r for r in data["runs"] if r["run_type"] == "model_refresh"], []
+                )
+        finally:
+            model_health._refresh_progress.clear()
 
     def test_non_admin_forbidden(self):
         from ai.admin.active_runs import admin_active_runs_view
@@ -4077,6 +4208,48 @@ class TestConsoleRunnerTests(TestCase):
             self.assertEqual(
                 test_console_runner.list_user_runs(self.other_superuser.id), [],
             )
+        finally:
+            test_console_runner._jobs.pop(run_id, None)
+
+    def test_count_test_cases_returns_positive(self):
+        """Реальный discovery: total известен до прогона (для % и бара)."""
+        from ai.test_console_runner import _count_test_cases
+        self.assertGreater(_count_test_cases(), 0)
+
+    def test_count_test_cases_falls_back_to_zero(self):
+        """Ошибка discovery → 0 (фронт рисует indeterminate-бар, не падает)."""
+        from ai import test_console_runner
+        with patch("django.test.runner.DiscoverRunner", side_effect=RuntimeError("boom")):
+            self.assertEqual(test_console_runner._count_test_cases(), 0)
+
+    def test_run_worker_pre_counts_total(self):
+        """Worker считает total до запуска сабпроцесса и кладёт его в job —
+        отсюда фронт берёт % для бара (меню + сама страница консоли)."""
+        import io
+        import threading as threading_mod
+
+        from ai import test_console_runner
+
+        class _FakeProc:
+            stdout = io.StringIO("")
+            returncode = 0
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(threading_mod.Thread, "start", lambda self: self.run()), \
+                    patch("ai.test_console_runner.subprocess.Popen", return_value=_FakeProc()) as mock_popen, \
+                    patch.object(test_console_runner, "_count_test_cases", return_value=17), \
+                    patch.object(test_console_runner, "_log_dir", return_value=Path(tmp)):
+                run_id, err = test_console_runner.start_test_run(self.superuser.id)
+        self.assertEqual(err, "")
+        self.assertTrue(run_id)
+        self.assertTrue(mock_popen.called)
+        try:
+            self.assertEqual(test_console_runner._jobs[run_id]["total"], 17)
+            entry = test_console_runner.list_user_runs(self.superuser.id)[0]
+            self.assertEqual(entry["total"], 17)
         finally:
             test_console_runner._jobs.pop(run_id, None)
 

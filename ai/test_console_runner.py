@@ -22,6 +22,7 @@ module-level ``_jobs`` dict + ``_jobs_lock`` + daemon-воркер + ``get_*_run
 """
 
 import copy
+import logging
 import re
 import subprocess
 import sys
@@ -30,6 +31,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _jobs_lock = threading.Lock()
 _jobs = {}
@@ -381,6 +384,23 @@ def _prune_old_jobs(now_ts):
         _jobs.pop(rid, None)
 
 
+def _count_test_cases():
+    """Число сценариев до старта прогона — для % и бара на фронте.
+
+    Discovery только **импортирует** тестовые модули (``setup_test_environment``
+    не вызывается — это безопасно в live-процессе Daphne, в отличие от запуска
+    тестов). При любой ошибке → 0: фронт рисует indeterminate-бар, как раньше.
+    """
+    try:
+        from django.test.runner import DiscoverRunner
+
+        suite = DiscoverRunner(verbosity=0, interactive=False).build_suite(["ai"])
+        return suite.countTestCases()
+    except Exception:
+        logger.warning("Не удалось заранее посчитать число сценариев", exc_info=True)
+        return 0
+
+
 def start_test_run(user_id):
     """Запускает прогон тестов. Returns (run_id, error_message).
 
@@ -631,6 +651,18 @@ def _run_worker(run_id):
         sys.executable, "manage.py", "test", "ai",
         "--settings=DjangoTest.test_settings", "--verbosity=2",
     ]
+
+    # Предварительный подсчёт сценариев (секунды на discovery) — фронт сразу
+    # рисует % и бар вместо indeterminate-полосы; итоговый total из вывода
+    # unittest совпадает с ним. 0 = не удалось посчитать → indeterminate.
+    total = _count_test_cases()
+    if total:
+        with _jobs_lock:
+            job = _jobs.get(run_id)
+            if job is not None:
+                job["total"] = total
+                job["updated_at_ts"] = time.time()
+
     try:
         proc = subprocess.Popen(
             cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

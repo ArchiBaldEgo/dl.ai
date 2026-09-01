@@ -10,6 +10,7 @@ from ..model_health import (
     get_available_model_options,
     get_health_window_date,
     get_model_status_rows,
+    get_refresh_progress,
     is_model_health_refresh_running,
     trigger_model_health_refresh_async,
 )
@@ -78,10 +79,18 @@ def admin_model_status_state_view(request):
         return HttpResponseNotAllowed(["GET"])
 
     rows = get_model_status_rows()
+    progress = get_refresh_progress()
     return JsonResponse({
         "ok": True,
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "refresh_in_progress": is_model_health_refresh_running(),
+        # Прогресс sweep'а для бара обновления (N / M · %).
+        "refresh_progress": {
+            "status": progress.get("status", ""),
+            "completed": int(progress.get("completed") or 0),
+            "total": int(progress.get("total") or 0),
+            "current": progress.get("current", ""),
+        },
         "model_status_rows": _serialize_model_status_rows_for_api(rows),
     })
 
