@@ -81,6 +81,35 @@
             text-decoration:none; cursor: pointer; font-size:13px; }
   .button.default { background: var(--button-bg); color: var(--button-fg); border-color:transparent; }
   .button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+  /* История прогонов: список дисковых логов (последние 10) + модалка просмотра. */
+  .tc-history-row { display:flex; align-items:center; gap:10px; padding:6px 0;
+                    font-size:13px; border-bottom:1px solid var(--hairline-color); }
+  .tc-history-row:last-child { border-bottom:none; }
+  .tc-history-date { white-space:nowrap; color: var(--body-quiet-color); }
+  .tc-history-meta { flex:1; color: var(--body-quiet-color); overflow:hidden;
+                     text-overflow:ellipsis; white-space:nowrap; }
+  .tc-history-status { font-weight:700; white-space:nowrap; }
+  .tc-history-status.completed { color:#1a7d1a; }
+  .tc-history-status.failed { color:#c93b3b; }
+  .tc-history-status.running { color:#2563eb; }
+  .tc-history-status.interrupted { color:#9a6a00; }
+  .tc-history-empty { color: var(--body-quiet-color); font-size:13px; }
+
+  .tc-log-modal { position:fixed; inset:0; display:flex; align-items:center;
+                  justify-content:center; background:rgba(0,0,0,0.45); z-index:3000; padding:20px; }
+  .tc-log-modal[hidden] { display:none; }
+  .tc-log-modal-dialog { background: var(--body-bg); border:1px solid var(--hairline-color);
+                         border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,0.2);
+                         width:min(900px, 100%); max-height:90vh; display:flex;
+                         flex-direction:column; }
+  .tc-log-modal-header { display:flex; align-items:center; gap:10px;
+                         padding:10px 14px; border-bottom:1px solid var(--hairline-color); }
+  .tc-log-modal-header h2 { flex:1; margin:0; font-size:15px; overflow:hidden;
+                             text-overflow:ellipsis; white-space:nowrap; }
+  #tcLogModalBody { margin:0; padding:12px 14px; overflow:auto; white-space:pre-wrap;
+                    word-break:break-word; font-size:12px; line-height:1.45;
+                    font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 </style>
 
 <div class="tc-wrap">
@@ -121,13 +150,35 @@
     </div>
     <div id="tcLog" class="tc-log" style="margin-top:12px;"></div>
   </details>
+
+  <div class="tc-card">
+    <h2>История прогонов</h2>
+    <p class="tc-subtitle" style="margin:0 0 8px;">
+      На сервере хранятся полные технические логи последних 10 прогонов (включая
+      трейсбеки). Лог появляется здесь сразу после завершения прогона.
+    </p>
+    <div id="tcHistoryList"><p class="tc-history-empty">Загрузка…</p></div>
+  </div>
+
+  <div class="tc-log-modal" id="tcLogModal" hidden>
+    <div class="tc-log-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="tcLogModalTitle">
+      <div class="tc-log-modal-header">
+        <h2 id="tcLogModalTitle"></h2>
+        <a id="tcLogModalDownload" class="button" download>Скачать</a>
+        <button type="button" id="tcLogModalClose" class="button">Закрыть</button>
+      </div>
+      <pre id="tcLogModalBody"></pre>
+    </div>
+  </div>
 </div>
 
 {{ active_run_snapshot|json_script:"test-console-initial-run" }}
 <script>
   window.TEST_CONSOLE_CONFIG = {
     startUrl: "{{ test_console_start_url }}",
-    statusUrl: "{{ test_console_status_url }}"
+    statusUrl: "{{ test_console_status_url }}",
+    logsUrl: "{{ test_console_logs_url }}",
+    logViewUrl: "{{ test_console_log_view_url }}"
   };
 </script>
 {% endblock %}

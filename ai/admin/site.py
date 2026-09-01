@@ -269,8 +269,9 @@ class AIAdminSite(admin.AdminSite):
         is_super = bool(getattr(request.user, "is_superuser", False))
         context["is_prompt_developer"] = is_pd
         context["is_staff_or_superuser"] = is_staff
-        # Суперпользователь: глобальный бейдж активных прогонов + отсутствие
-        # предупреждения «не покидайте страницу» (см. base_site.html, active_runs).
+        # Суперпользователь: отсутствие предупреждения «не покидайте страницу»
+        # в тестовой консоли. Личное меню «мои процессы» в шапке (ai_processes.js
+        # + active_runs) видно всем админам и показывает только свои прогоны.
         context["is_super_user"] = is_super
         context["user_display_name"] = self._user_display_name(request.user)
         context["user_role_label"] = self._user_role_label(

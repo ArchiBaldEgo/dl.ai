@@ -19,86 +19,25 @@ INSTALLED_APPS so this file is not shadowed by the stock admin/base_site.html
   <link rel="stylesheet" href="{% static 'admin/css/ai_admin.css' %}">
 {% endblock %}
 
-{% block welcome-msg %}
-  {% if user_display_name %}Здравствуйте, <strong>{{ user_display_name }}</strong>!{% else %}{% translate 'Welcome,' %} <strong>{{ user|default:'' }}</strong>{% endif %}
-  {% if user_role_label %}<span class="ai-role-badge">{{ user_role_label }}</span>{% endif %}
+{% block extrahead %}
+  {{ block.super }}
+  <script src="{% static 'admin/js/ai_processes.js' %}" defer></script>
 {% endblock %}
 
-{% comment %}Глобальный бейдж активных прогонов (только superuser): прогон живёт
-в фоновом потоке сервера и не прерывается навигацией — бейдж показывает его
-прогресс на любой странице админки и ссылается на страницу прогона (?run_id=),
-где форма восстанавливается из AIModelTestRun/PromptTestRun.run_params.
-Стили — .ai-active-runs-* в static/admin/css/ai_admin.css.{% endcomment %}
-{% block footer %}
-  {{ block.super }}
-  {% if is_super_user %}
-  <div id="ai-active-runs-badge" class="ai-active-runs" hidden></div>
-  <script>
-  (function () {
-    'use strict';
-    var TYPE_LABELS = {
-      batch: 'Пакетное решение',
-      single: 'Поиск ошибки',
-      prompt_regression: 'Регрессионные тесты',
-      test_console: 'Тестовая консоль',
-      model_status: 'Обновление моделей'
-    };
-    var POLL_INTERVAL_MS = 15000;
-    var badge = document.getElementById('ai-active-runs-badge');
-    var running = false;
-
-    function esc(value) {
-      var div = document.createElement('div');
-      div.textContent = String(value == null ? '' : value);
-      return div.innerHTML;
-    }
-
-    function render(allRuns) {
-      // На странице самого прогона прогресс уже отображается — бейдж дублирует.
-      var runs = allRuns.filter(function (run) {
-        return run.page_url !== window.location.pathname;
-      });
-      if (!runs.length) {
-        badge.hidden = true;
-        badge.innerHTML = '';
-        return;
-      }
-      var parts = [];
-      for (var i = 0; i < runs.length; i++) {
-        var run = runs[i];
-        var label = TYPE_LABELS[run.run_type] || run.run_type;
-        var progress = (run.total || 0) > 0 ? (' (' + (run.completed || 0) + '/' + run.total + ')') : '';
-        var line = '<div class="ai-active-runs-item">'
-          + '<span class="ai-active-runs-type">' + esc(label) + progress + '</span>';
-        if (run.current) {
-          line += '<span class="ai-active-runs-current">' + esc(run.current) + '</span>';
-        }
-        if (run.started_by) {
-          line += '<span class="ai-active-runs-user">' + esc(run.started_by) + '</span>';
-        }
-        var url = run.page_url + (run.run_id ? '?run_id=' + encodeURIComponent(run.run_id) : '');
-        line += '<a class="ai-active-runs-link" href="' + esc(url) + '">Открыть →</a></div>';
-        parts.push(line);
-      }
-      badge.innerHTML = parts.join('');
-      badge.hidden = false;
-    }
-
-    function poll() {
-      if (running || document.hidden) { return; }
-      running = true;
-      fetch('/ai/admin/active-runs/', { credentials: 'same-origin' })
-        .then(function (resp) { running = false; return resp.ok ? resp.json() : null; })
-        .then(function (data) { if (data && data.ok) { render(data.runs || []); } })
-        .catch(function () { running = false; });
-    }
-
-    document.addEventListener('visibilitychange', function () {
-      if (!document.hidden) { poll(); }
-    });
-    poll();
-    window.setInterval(poll, POLL_INTERVAL_MS);
-  })();
-  </script>
-  {% endif %}
+{% comment %}Приветствие кликабельно: рядом с именем чип-счётчик «Процессы (N)»
+открывает личное меню прогонов текущего пользователя (ai_processes.js ←
+/ai/admin/active-runs/): тип, этап, прогресс; завершённые — 10 минут, с
+уведомлением-тостом при завершении вдали от страницы прогона. Прогон живёт
+в фоновом потоке сервера и не прерывается навигацией. Стили — .ai-processes-*
+в static/admin/css/ai_admin.css.{% endcomment %}
+{% block welcome-msg %}
+  <span class="ai-processes-wrap">
+    <button type="button" id="aiProcessesToggle" class="ai-processes-toggle"
+            aria-haspopup="true" aria-expanded="false" aria-controls="aiProcessesMenu">
+      {% if user_display_name %}Здравствуйте, <strong>{{ user_display_name }}</strong>!{% else %}{% translate 'Welcome,' %} <strong>{{ user|default:'' }}</strong>{% endif %}
+      {% if user_role_label %}<span class="ai-role-badge">{{ user_role_label }}</span>{% endif %}
+      <span class="ai-processes-chip" id="aiProcessesChip">Процессы (0) ▾</span>
+    </button>
+    <div id="aiProcessesMenu" class="ai-processes-menu" hidden></div>
+  </span>
 {% endblock %}

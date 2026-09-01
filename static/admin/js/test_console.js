@@ -11,6 +11,8 @@
   var config = window.TEST_CONSOLE_CONFIG || {};
   var START_URL = config.startUrl || "/ai/admin/test-console/start/";
   var STATUS_URL = config.statusUrl || "/ai/admin/test-console/status/";
+  var LOGS_URL = config.logsUrl || "/ai/admin/test-console/logs/";
+  var LOG_VIEW_URL = config.logViewUrl || "/ai/admin/test-console/logs/view/";
 
   var runForm = document.getElementById("tcRunForm");
   if (!runForm) return;
@@ -27,6 +29,9 @@
 
   var currentRunId = "";
   var pollTimer = null;
+  // Был ли текущий прогон running в предыдущем снимке — чтобы по завершении
+  // один раз перезагрузить «Историю прогонов» (дисковый лог свежего прогона).
+  var wasRunning = false;
 
   // Допустимые виды подсветки журнала (маппятся 1:1 на CSS-классы .tc-log-<kind>).
   var KNOWN_KINDS = {
@@ -180,7 +185,14 @@
       setRunProgress("Проверено " + Number(run.completed || 0) + (run.total ? " из " + Number(run.total) : "") + c, true);
       setRunError("");
       setSubmitDisabled(true);
+      wasRunning = true;
       return;
+    }
+    // Прогон только что закончился (поллинг видел его running) — обновляем
+    // историю: полный лог нового прогона уже на диске.
+    if (wasRunning) {
+      wasRunning = false;
+      loadHistory();
     }
     if (run.status === "completed") {
       setRunProgress("Проверки завершены: " + Number(run.completed || 0) + " из " + Number(run.total || 0), false);
@@ -261,4 +273,127 @@
     applyRunSnapshot(initialRun);
     if (initialRun.status === "running") pollRunStatus();
   }
+
+  // ─────────────────── История прогонов (дисковые логи) ───────────────────
+
+  var historyList = document.getElementById("tcHistoryList");
+  var logModal = document.getElementById("tcLogModal");
+  var logModalTitle = document.getElementById("tcLogModalTitle");
+  var logModalBody = document.getElementById("tcLogModalBody");
+  var logModalDownload = document.getElementById("tcLogModalDownload");
+  var logModalClose = document.getElementById("tcLogModalClose");
+
+  var HISTORY_STATUS_RU = {
+    completed: "Завершён",
+    failed: "Ошибка",
+    running: "Выполняется",
+    interrupted: "Прерван (перезапуск сервера)"
+  };
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null && text !== "") node.textContent = String(text);
+    return node;
+  }
+
+  // started_at — ISO UTC из заголовка лога; показываем локальное время.
+  function formatStartedAt(iso) {
+    if (!iso) return "";
+    try {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      return d.toLocaleString();
+    } catch (e) { return iso; }
+  }
+
+  function historyMetaText(entry) {
+    var parts = [formatStartedAt(entry.started_at)];
+    if (entry.summary) {
+      var s = entry.summary;
+      parts.push("Сценариев: " + Number(s.ran || 0) +
+        " · Провалов: " + Number(s.failures || 0) + " · Ошибок: " + Number(s.errors || 0) +
+        " · " + Number(s.seconds || 0) + " с");
+    }
+    return parts.join(" — ");
+  }
+
+  function loadHistory() {
+    if (!historyList) return;
+    fetch(LOGS_URL, {
+      method: "GET", credentials: "same-origin",
+      headers: { "X-Requested-With": "XMLHttpRequest" }
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data || !data.ok) throw new Error(data && data.message ? data.message : "Ошибка загрузки");
+        historyList.textContent = "";
+        var logs = data.logs || [];
+        if (!logs.length) {
+          historyList.appendChild(el("p", "tc-history-empty", "Прогонов пока нет — запустите проверки."));
+          return;
+        }
+        logs.forEach(function (entry) {
+          var row = el("div", "tc-history-row");
+          row.appendChild(el("span", "tc-history-date", formatStartedAt(entry.started_at)));
+          row.appendChild(el("span", "tc-history-status " + (entry.status || "interrupted"),
+            HISTORY_STATUS_RU[entry.status] || entry.status));
+          row.appendChild(el("span", "tc-history-meta", historyMetaText(entry)));
+          var viewButton = el("button", "button", "Открыть");
+          viewButton.type = "button";
+          viewButton.addEventListener("click", function () { openLogModal(entry.filename); });
+          row.appendChild(viewButton);
+          var download = el("a", "button", "Скачать");
+          download.href = LOG_VIEW_URL + "?filename=" + encodeURIComponent(entry.filename) + "&download=1";
+          download.setAttribute("download", entry.filename);
+          row.appendChild(download);
+          historyList.appendChild(row);
+        });
+      })
+      .catch(function () {
+        historyList.textContent = "";
+        historyList.appendChild(el("p", "tc-history-empty", "Не удалось загрузить историю прогонов."));
+      });
+  }
+
+  function openLogModal(filename) {
+    if (!logModal || !logModalBody) return;
+    fetch(LOG_VIEW_URL + "?filename=" + encodeURIComponent(filename), {
+      method: "GET", credentials: "same-origin",
+      headers: { "X-Requested-With": "XMLHttpRequest" }
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data || !data.ok) throw new Error(data && data.message ? data.message : "Лог не найден");
+        logModalTitle.textContent = data.filename || filename;
+        logModalBody.textContent = data.content || "";
+        if (logModalDownload) {
+          logModalDownload.href = LOG_VIEW_URL + "?filename=" + encodeURIComponent(data.filename || filename) + "&download=1";
+          logModalDownload.setAttribute("download", data.filename || filename);
+        }
+        logModal.hidden = false;
+        logModalBody.scrollTop = 0;
+        if (logModalClose) logModalClose.focus();
+      })
+      .catch(function (e) {
+        setRunError(e.message || "Не удалось открыть лог");
+      });
+  }
+
+  function closeLogModal() {
+    if (logModal) logModal.hidden = true;
+  }
+
+  if (logModalClose) logModalClose.addEventListener("click", closeLogModal);
+  if (logModal) {
+    logModal.addEventListener("click", function (event) {
+      // Клик по подложке (не по диалогу) закрывает модалку.
+      if (event.target === logModal) closeLogModal();
+    });
+  }
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape" && logModal && !logModal.hidden) closeLogModal();
+  });
+
+  loadHistory();
 })();

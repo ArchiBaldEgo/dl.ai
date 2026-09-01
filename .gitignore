@@ -49,5 +49,8 @@ WebKimi/worker/.chrome-profiles/*
 .claude/backups/
 backups/
 
+# Логи прогонов тестовой консоли (сервер пишет полный raw-вывод)
+logs/
+
 bot/worker/logs/
 bot/worker/logs/*

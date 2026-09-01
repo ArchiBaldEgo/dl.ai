@@ -1,49 +1,38 @@
-"""Глобальный бейдж активных прогонов для суперпользователя.
+"""Личное меню «мои процессы» в шапке админки.
 
-Прогон (batch-solve, find-error, регрессия препромптов, тестовая консоль,
-обновление состояния моделей) живёт в фоновом потоке сервера и не
-прерывается навигацией по админке. Этот endpoint даёт бейджу в
-``base_site.html`` единый лёгкий список всех running-прогонов (без
-results/report) — прогресс и ссылка на страницу. Только superuser; путь под
-``/ai/admin/`` — RateLimitMiddleware его не считает.
+Прогон (batch-solve, find-error, регрессия препромптов, тестовая консоль)
+живёт в фоновом потоке сервера и не прерывается навигацией. Этот endpoint
+даёт дропдауну из ``base_site.html`` (ai_processes.js) единый лёгкий список
+прогонов **текущего пользователя**: running — всегда, завершённые — только
+в течение последних минут (окно уведомления о завершении). Каждый админ
+видит только свои прогоны, включая суперпользователя. Обновление состояния
+моделей — глобальный безличный процесс, он живёт на своей странице
+(model_status) и сюда не попадает. Путь под ``/ai/admin/`` —
+RateLimitMiddleware его не считает.
 """
+
+import time
 
 from django.http import HttpResponseForbidden, JsonResponse
 
-from .. import arm_runner, model_health, prompt_test_runner, test_console_runner
-from ..models import AIModelTestRun, PromptTestRun
+from .. import arm_runner, prompt_test_runner, test_console_runner
+from .permissions import can_access_admin
 
-
-def _annotate_started_by(runs):
-    """Одним bulk-запросом на каждую БД-модель добавляет имя запустившего.
-
-    У User нет поля full_name — собираем из first_name/last_name с fallback
-    на username (как в services/auth.py). Тест-консоль in-memory, без БД —
-    у её прогонов ``started_by`` пустой.
-    """
-    run_ids = [r["run_id"] for r in runs if r["run_id"]]
-    started_by = {}
-    for qs in (
-        AIModelTestRun.objects.filter(run_id__in=run_ids),
-        PromptTestRun.objects.filter(run_id__in=run_ids),
-    ):
-        for run_id, first, last, username in qs.exclude(user__isnull=True).values_list(
-            "run_id", "user__first_name", "user__last_name", "user__username"
-        ):
-            started_by[run_id] = f"{first} {last}".strip() or username
-    for run in runs:
-        run["started_by"] = started_by.get(run["run_id"], "")
-    return runs
+# Сколько секунд после завершения прогон виден в меню (окно уведомления).
+_RECENT_FINISHED_TTL_SECONDS = 600
 
 
 def admin_active_runs_view(request):
-    if not request.user.is_authenticated or not request.user.is_superuser:
+    if not request.user.is_authenticated or not can_access_admin(request.user):
         return HttpResponseForbidden("Access denied")
 
+    user_id = request.user.id
+    cutoff = time.time() - _RECENT_FINISHED_TTL_SECONDS
     runs = (
-        arm_runner.list_running_runs()
-        + prompt_test_runner.list_running_runs()
-        + test_console_runner.list_running_runs()
-        + model_health.list_running_runs()
+        arm_runner.list_user_runs(user_id, cutoff)
+        + prompt_test_runner.list_user_runs(user_id, cutoff)
+        + test_console_runner.list_user_runs(user_id, cutoff)
     )
-    return JsonResponse({"ok": True, "runs": _annotate_started_by(runs)})
+    # Активные — первыми, дальше — от свежих к старым.
+    runs.sort(key=lambda r: (r.get("status") != "running", -(r.get("created_at_ts") or 0.0)))
+    return JsonResponse({"ok": True, "runs": runs})

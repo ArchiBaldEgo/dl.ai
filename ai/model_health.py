@@ -605,25 +605,6 @@ def trigger_model_health_refresh_async():
         return True
 
 
-def list_running_runs():
-    """Краткая сводка running-обновления состояния моделей.
-
-    Для глобального бейджа активных прогонов в админке (superuser): health-sweep
-    (manual refresh / ежедневный 04:00 МСК) не считается по парам, поэтому без
-    прогресса N/M — только факт «выполняется» и ссылка на страницу статуса.
-    """
-    if not is_model_health_refresh_running():
-        return []
-    return [{
-        "run_id": "",
-        "run_type": "model_status",
-        "page_url": "/ai/admin/arm/models/",
-        "completed": 0,
-        "total": 0,
-        "current": "",
-    }]
-
-
 def _seconds_until_next_4am_moscow(now=None):
     current = (now or timezone.now()).astimezone(MOSCOW_TZ)
     next_run = current.replace(hour=4, minute=0, second=0, microsecond=0)

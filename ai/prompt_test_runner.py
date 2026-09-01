@@ -482,6 +482,7 @@ def start_prompt_test_run(case_ids, model_key, user_id, *, prompt_id=None, ui_la
     run_params = {"case_ids": [c.id for c in cases]}
     job = {
         "run_id": run_id,
+        "user_id": user_id,
         "status": "running",
         "error_message": "",
         "total_cases": len(cases),
@@ -561,22 +562,30 @@ def get_prompt_test_run_snapshot(run_id):
     return _snapshot_from_test_run(test_run)
 
 
-def list_running_runs():
-    """Краткие сводки всех running-прогонов регрессии препромптов.
+def list_user_runs(user_id, since_ts=0.0):
+    """Краткие сводки прогонов регрессии препромптов одного пользователя.
 
-    Для глобального бейджа активных прогонов в админке (superuser).
+    Для личного меню «мои процессы» в шапке админки (active_runs.py):
+    running-прогоны — всегда; завершённые — только обновлённые не раньше
+    ``since_ts`` (окно «только что завершился» для уведомления на фронте).
     """
     runs = []
     with _jobs_lock:
         for job in _jobs.values():
-            if job.get("status") != "running":
+            if job.get("user_id") != user_id:
+                continue
+            status = job.get("status", "")
+            if status != "running" and float(job.get("updated_at_ts") or 0.0) < since_ts:
                 continue
             runs.append({
                 "run_id": job.get("run_id", ""),
                 "run_type": "prompt_regression",
                 "page_url": "/ai/admin/prompt-regression/",
+                "status": status,
                 "completed": job.get("completed_cases", 0),
                 "total": job.get("total_cases", 0),
                 "current": job.get("current_case_name", ""),
+                "created_at_ts": float(job.get("created_at_ts") or 0.0),
+                "updated_at_ts": float(job.get("updated_at_ts") or 0.0),
             })
     return runs

@@ -11,6 +11,7 @@ from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import SimpleTestCase, RequestFactory, TestCase, override_settings
 from pathlib import Path
 import json
+import tempfile
 import time
 
 from django.http import HttpResponse
@@ -3830,9 +3831,10 @@ class RequestLogCsvTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
 
-class ActiveRunsBadgeTests(TestCase):
-    """/ai/admin/active-runs/: лёгкий свод всех running-прогонов для бейджа
-    суперпользователя (arm solve/find-error + регрессия + тест-консоль)."""
+class ActiveRunsEndpointTests(TestCase):
+    """/ai/admin/active-runs/: личное меню «мои процессы» в шапке админки.
+    Каждый админ видит только СВОИ прогоны (даже суперпользователь); завершённые
+    видны 10 минут (окно уведомления); обновление моделей не попадает."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -3840,33 +3842,59 @@ class ActiveRunsBadgeTests(TestCase):
             username="badge_admin", password="x", email="a@t.com",
         )
         self.normal_user = get_user_model().objects.create_user(username="badge_user", password="x")
+        self.pd_user = get_user_model().objects.create_user(username="badge_pd", password="x")
+        pd_group, _ = Group.objects.get_or_create(name="prompt_developer")
+        self.pd_user.groups.add(pd_group)
 
     def _make_request(self, user):
         request = self.factory.get("/ai/admin/active-runs/")
         request.user = user
         return request
 
-    def test_superuser_gets_all_run_types(self):
+    def test_user_sees_only_own_runs(self):
+        """Свои прогоны всех 4 типов видны, чужие — нет (включая superuser)."""
         from ai import arm_runner, prompt_test_runner, test_console_runner
         from ai.admin.active_runs import admin_active_runs_view
-        arm_runner._jobs["badge-batch"] = {
-            "run_id": "badge-batch", "run_type": "batch", "status": "running",
-            "completed_pairs": 1, "total_pairs": 3, "current_task_name": "A",
+        now_ts = time.time()
+        mine = {
+            "badge-batch": (arm_runner._jobs, {
+                "run_id": "badge-batch", "user_id": self.superuser.id,
+                "run_type": "batch", "status": "running",
+                "completed_pairs": 1, "total_pairs": 3, "current_task_name": "A",
+                "created_at_ts": now_ts, "updated_at_ts": now_ts,
+            }),
+            "badge-single": (arm_runner._jobs, {
+                "run_id": "badge-single", "user_id": self.superuser.id,
+                "run_type": "single", "status": "running",
+                "completed_models": 0, "total_models": 2,
+                "current_model_title": "FakeModel",
+                "created_at_ts": now_ts, "updated_at_ts": now_ts,
+            }),
+            "badge-reg": (prompt_test_runner._jobs, {
+                "run_id": "badge-reg", "user_id": self.superuser.id,
+                "status": "running",
+                "completed_cases": 1, "total_cases": 4, "current_case_name": "case1",
+                "created_at_ts": now_ts, "updated_at_ts": now_ts,
+            }),
+            "badge-console": (test_console_runner._jobs, {
+                "run_id": "badge-console", "user_id": self.superuser.id,
+                "status": "running",
+                "completed": 1, "total": 2, "current": "ai.tests",
+                "created_at_ts": now_ts, "updated_at_ts": now_ts,
+            }),
         }
-        arm_runner._jobs["badge-single"] = {
-            "run_id": "badge-single", "run_type": "single", "status": "running",
-            "completed_models": 0, "total_models": 2,
-            "current_model_title": "FakeModel",
+        foreign = {
+            "badge-foreign": (arm_runner._jobs, {
+                "run_id": "badge-foreign", "user_id": self.normal_user.id,
+                "run_type": "batch", "status": "running",
+                "completed_pairs": 0, "total_pairs": 5, "current_task_name": "X",
+                "created_at_ts": now_ts, "updated_at_ts": now_ts,
+            }),
         }
-        prompt_test_runner._jobs["badge-reg"] = {
-            "run_id": "badge-reg", "status": "running",
-            "completed_cases": 1, "total_cases": 4, "current_case_name": "case1",
-        }
-        test_console_runner._jobs["badge-console"] = {
-            "run_id": "badge-console", "status": "running",
-            "completed": 1, "total": 2, "current": "ai.tests",
-        }
+        injected = {**mine, **foreign}
         try:
+            for run_id, (jobs_dict, job) in injected.items():
+                jobs_dict[run_id] = job
             response = admin_active_runs_view(self._make_request(self.superuser))
             data = json.loads(response.content)
             self.assertTrue(data["ok"])
@@ -3882,51 +3910,62 @@ class ActiveRunsBadgeTests(TestCase):
             self.assertEqual(by_type["batch"]["completed"], 1)
             self.assertEqual(by_type["batch"]["total"], 3)
             self.assertEqual(by_type["batch"]["current"], "A")
+            self.assertEqual(by_type["batch"]["status"], "running")
+            # Чужой batch-прогон не «перекрывает» свой: ровно один каждого типа.
+            self.assertEqual(len(data["runs"]), 4)
+            self.assertTrue(all(r["status"] == "running" for r in data["runs"]))
         finally:
-            arm_runner._jobs.pop("badge-batch", None)
-            arm_runner._jobs.pop("badge-single", None)
-            prompt_test_runner._jobs.pop("badge-reg", None)
-            test_console_runner._jobs.pop("badge-console", None)
+            for run_id, (jobs_dict, _job) in injected.items():
+                jobs_dict.pop(run_id, None)
 
-    def test_completed_jobs_skipped(self):
-        """Завершённые джобы в бейдж не попадают."""
-        from ai import arm_runner, test_console_runner
+    def test_recently_finished_included_old_excluded(self):
+        """Свежий завершённый прогон виден (окно уведомления), старый — нет;
+        running виден всегда."""
+        from ai import arm_runner
         from ai.admin.active_runs import admin_active_runs_view
-        arm_runner._jobs["badge-done"] = {
-            "run_id": "badge-done", "run_type": "batch", "status": "completed",
-            "completed_pairs": 2, "total_pairs": 2, "current_task_name": "",
-        }
-        test_console_runner._jobs["badge-console-done"] = {
-            "run_id": "badge-console-done", "status": "completed",
-            "completed": 2, "total": 2, "current": "",
+        now_ts = time.time()
+        injected = {
+            "badge-done-fresh": {
+                "run_id": "badge-done-fresh", "user_id": self.superuser.id,
+                "run_type": "batch", "status": "completed",
+                "completed_pairs": 2, "total_pairs": 2, "current_task_name": "",
+                "created_at_ts": now_ts, "updated_at_ts": now_ts,
+            },
+            "badge-done-stale": {
+                "run_id": "badge-done-stale", "user_id": self.superuser.id,
+                "run_type": "batch", "status": "failed",
+                "completed_pairs": 1, "total_pairs": 2, "current_task_name": "",
+                "created_at_ts": now_ts - 4000, "updated_at_ts": now_ts - 4000,
+            },
+            "badge-done-stale-running": {
+                "run_id": "badge-done-stale-running", "user_id": self.superuser.id,
+                "run_type": "single", "status": "running",
+                "completed_models": 0, "total_models": 2, "current_model_title": "M",
+                "created_at_ts": now_ts - 4000, "updated_at_ts": now_ts - 4000,
+            },
         }
         try:
+            for run_id, job in injected.items():
+                arm_runner._jobs[run_id] = job
             response = admin_active_runs_view(self._make_request(self.superuser))
             data = json.loads(response.content)
-            self.assertEqual(data["runs"], [])
+            run_ids = {r["run_id"] for r in data["runs"]}
+            self.assertIn("badge-done-fresh", run_ids)
+            self.assertNotIn("badge-done-stale", run_ids)
+            # Running виден всегда, независимо от свежести.
+            self.assertIn("badge-done-stale-running", run_ids)
+            statuses = {r["run_id"]: r["status"] for r in data["runs"]}
+            self.assertEqual(statuses["badge-done-fresh"], "completed")
         finally:
-            arm_runner._jobs.pop("badge-done", None)
-            test_console_runner._jobs.pop("badge-console-done", None)
+            for run_id in injected:
+                arm_runner._jobs.pop(run_id, None)
 
-    def test_model_health_refresh_included(self):
-        """Обновление состояния моделей (health-sweep) тоже попадает в бейдж."""
+    def test_model_health_excluded(self):
+        """Обновление моделей — глобальный безличный процесс, в личное меню
+        не попадает (живёт на странице model_status)."""
         from ai.admin.active_runs import admin_active_runs_view
         with patch(
             "ai.model_health.is_model_health_refresh_running", return_value=True
-        ):
-            response = admin_active_runs_view(self._make_request(self.superuser))
-            data = json.loads(response.content)
-            model_runs = [r for r in data["runs"] if r["run_type"] == "model_status"]
-            self.assertEqual(len(model_runs), 1)
-            self.assertEqual(model_runs[0]["page_url"], "/ai/admin/arm/models/")
-            # Прогресса N/M у sweep'а нет — только факт «выполняется».
-            self.assertEqual(model_runs[0]["total"], 0)
-
-    def test_model_health_refresh_absent_when_idle(self):
-        """Без идущего health-sweep пункта model_status нет."""
-        from ai.admin.active_runs import admin_active_runs_view
-        with patch(
-            "ai.model_health.is_model_health_refresh_running", return_value=False
         ):
             response = admin_active_runs_view(self._make_request(self.superuser))
             data = json.loads(response.content)
@@ -3934,10 +3973,289 @@ class ActiveRunsBadgeTests(TestCase):
                 [r for r in data["runs"] if r["run_type"] == "model_status"], []
             )
 
-    def test_non_superuser_forbidden(self):
+    def test_non_admin_forbidden(self):
         from ai.admin.active_runs import admin_active_runs_view
         response = admin_active_runs_view(self._make_request(self.normal_user))
         self.assertEqual(response.status_code, 403)
+
+    def test_prompt_developer_allowed_own_list(self):
+        """prompt_developer — полноценный участник: 200 и свой (пустой) список."""
+        from ai.admin.active_runs import admin_active_runs_view
+        response = admin_active_runs_view(self._make_request(self.pd_user))
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["runs"], [])
+
+
+class TestConsoleRunnerTests(TestCase):
+    """Тестовая консоль: «последний прогон» пользователя (10 минут),
+    привязка прогона к user_id, дисковые логи (последние 10, полный
+    raw-вывод, path-traversal барьер) и их admin-endpoint'ы."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="tc_admin", password="x", email="a@t.com",
+        )
+        self.other_superuser = get_user_model().objects.create_superuser(
+            username="tc_other", password="x", email="b@t.com",
+        )
+
+    def _make_job(self, run_id, user_id, status="running", age_seconds=0.0):
+        now_ts = time.time() - age_seconds
+        return {
+            "run_id": run_id, "user_id": user_id, "status": status,
+            "error_message": "",
+            "total": 3,
+            "completed": 3 if status != "running" else 0,
+            "current": "" if status != "running" else "Тесты · test_x",
+            "results": [],
+            "summary": None if status == "running" else {
+                "ran": 3, "seconds": 1.0, "ok": True,
+                "failures": 0, "errors": 0, "skipped": 0,
+            },
+            "log": [],
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+
+    def test_get_latest_run_snapshot_own_fresh_and_running(self):
+        """Свой свежий завершённый и свой running возвращаются (deepcopy);
+        устаревший и чужой — нет."""
+        from ai import test_console_runner
+        injected = {
+            "tc-fresh": self._make_job("tc-fresh", self.superuser.id, status="completed"),
+            "tc-stale": self._make_job(
+                "tc-stale", self.superuser.id, status="completed",
+                age_seconds=test_console_runner._LAST_RUN_TTL_SECONDS + 300,
+            ),
+            "tc-foreign": self._make_job("tc-foreign", self.other_superuser.id, status="completed"),
+            "tc-running": self._make_job(
+                "tc-running", self.superuser.id, status="running",
+                age_seconds=test_console_runner._LAST_RUN_TTL_SECONDS + 300,
+            ),
+        }
+        try:
+            for run_id, job in injected.items():
+                test_console_runner._jobs[run_id] = job
+            fresh = test_console_runner.get_latest_run_snapshot(self.superuser.id)
+            # Свежий завершённый — новее running по created_at? running старее:
+            # берется fresh; deepcopy, не живой дикт.
+            self.assertIn(fresh["run_id"], {"tc-fresh", "tc-running"})
+            self.assertIsInstance(fresh["log"], list)
+            # Устаревший завершённый не возвращается сам по себе: убираем fresh
+            # и running — остаётся только stale/чужой → None.
+            test_console_runner._jobs.pop("tc-fresh")
+            test_console_runner._jobs.pop("tc-running")
+            self.assertIsNone(test_console_runner.get_latest_run_snapshot(self.superuser.id))
+            # Running возвращается всегда, независимо от возраста.
+            test_console_runner._jobs["tc-running"] = injected["tc-running"]
+            latest = test_console_runner.get_latest_run_snapshot(self.superuser.id)
+            self.assertEqual(latest["run_id"], "tc-running")
+        finally:
+            for run_id in list(injected) + ["tc-fresh", "tc-running"]:
+                test_console_runner._jobs.pop(run_id, None)
+
+    def test_start_test_run_stores_user_id(self):
+        """start_test_run(user_id) записывает user_id в job и list_user_runs."""
+        import threading
+
+        from ai import test_console_runner
+        with patch.object(threading.Thread, "start", lambda self: None):
+            run_id, err = test_console_runner.start_test_run(self.superuser.id)
+        self.assertEqual(err, "")
+        self.assertTrue(run_id)
+        try:
+            self.assertEqual(
+                test_console_runner._jobs[run_id]["user_id"], self.superuser.id,
+            )
+            runs = test_console_runner.list_user_runs(self.superuser.id)
+            self.assertEqual([r["run_id"] for r in runs], [run_id])
+            self.assertEqual(runs[0]["run_type"], "test_console")
+            self.assertEqual(runs[0]["page_url"], "/ai/admin/test-console/")
+            self.assertEqual(runs[0]["status"], "running")
+            self.assertEqual(
+                test_console_runner.list_user_runs(self.other_superuser.id), [],
+            )
+        finally:
+            test_console_runner._jobs.pop(run_id, None)
+
+    def test_log_filename_regex_blocks_traversal(self):
+        """_LOG_FILENAME_RE — барьер path-traversal: только канонические имена."""
+        from ai.test_console_runner import _LOG_FILENAME_RE
+        self.assertTrue(_LOG_FILENAME_RE.match("test_console_20260901_120000_ab12cd34.log"))
+        self.assertFalse(_LOG_FILENAME_RE.match("../settings.py.log"))
+        self.assertFalse(_LOG_FILENAME_RE.match("sub/dir.log"))
+        self.assertFalse(_LOG_FILENAME_RE.match("test_console_20260901_120000_ZZZZZZZZ.log"))
+        self.assertFalse(_LOG_FILENAME_RE.match(""))
+        self.assertFalse(_LOG_FILENAME_RE.match("test_console_20260901_120000_ab12cd34.txt"))
+
+    def test_rotate_logs_keeps_last_10(self):
+        """Ротация держит только последние _MAX_LOG_FILES логов (новейшие)."""
+        from ai import test_console_runner as runner
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(12):
+                name = f"test_console_20260901_{i:06d}_ab12cd34.log"
+                (Path(tmp) / name).write_text("x", encoding="utf-8")
+            (Path(tmp) / "unrelated.log").write_text("x", encoding="utf-8")
+            runner._rotate_logs(Path(tmp))
+            remaining = sorted(p.name for p in Path(tmp).iterdir())
+            # Посторонние файлы ротация не трогает.
+            self.assertIn("unrelated.log", remaining)
+            log_names = [n for n in remaining if n != "unrelated.log"]
+            self.assertEqual(len(log_names), runner._MAX_LOG_FILES)
+            # Удалены самые старые (минимальные timestamp-ы).
+            self.assertNotIn("test_console_20260901_000000_ab12cd34.log", log_names)
+            self.assertNotIn("test_console_20260901_000001_ab12cd34.log", log_names)
+            self.assertIn("test_console_20260901_000011_ab12cd34.log", log_names)
+
+    def test_list_disk_logs_metadata(self):
+        """Заголовок/футер парсятся: статус+summary; без футера — interrupted."""
+        from ai import test_console_runner as runner
+        run_id = "ab12cd34" + "ef" * 12
+        with tempfile.TemporaryDirectory() as tmp:
+            stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime(time.time()))
+            full = Path(tmp) / f"test_console_{stamp}_{run_id[:8]}.log"
+            full.write_text(
+                runner._format_log_header(run_id, time.time(), 7) + "\n"
+                "test_x (ai.tests.X) ... ok\n"
+                + runner._format_log_footer("completed", {
+                    "ran": 1, "seconds": 2.5, "ok": True,
+                    "failures": 0, "errors": 0, "skipped": 0,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            interrupted = Path(tmp) / "test_console_20260901_100000_0000ff00.log"
+            interrupted.write_text(
+                runner._format_log_header("0000ff00" + "aa" * 12, time.time(), 7) + "\n"
+                "test_y (ai.tests.Y) ... ",
+                encoding="utf-8",
+            )
+            # Дубликат с run_id running-джобы → статус running.
+            (Path(tmp) / "test_console_20260901_110000_11aa22bb.log").write_text(
+                runner._format_log_header("11aa22bb" + "cc" * 12, time.time(), 7) + "\n",
+                encoding="utf-8",
+            )
+            try:
+                runner._jobs["running-11aa22bb"] = {
+                    "run_id": "11aa22bb" + "cc" * 12,
+                    "user_id": self.superuser.id,
+                    "status": "running",
+                }
+                entries = runner.list_disk_logs(Path(tmp))
+                by_status = {e["status"] for e in entries}
+                self.assertIn("completed", by_status)
+                self.assertIn("interrupted", by_status)
+                self.assertIn("running", by_status)
+                done = next(e for e in entries if e["status"] == "completed")
+                self.assertEqual(done["run_id"], run_id)
+                self.assertTrue(done["summary"]["ok"])
+                self.assertEqual(done["summary"]["ran"], 1)
+                self.assertEqual(done["summary"]["seconds"], 2.5)
+                self.assertTrue(done["filename"].endswith(".log"))
+                # Новые первыми: файл с текущим timestamp позже 100000.
+                names = [e["filename"] for e in entries]
+                self.assertEqual(names, sorted(names, reverse=True))
+                # Чтение по имени работает, traversal отклоняется.
+                text = runner.read_disk_log(done["filename"], Path(tmp))
+                self.assertIn("=== RUN", text)
+                self.assertIsNone(runner.read_disk_log("../settings.py", Path(tmp)))
+                self.assertIsNone(runner.read_disk_log("nope.log", Path(tmp)))
+            finally:
+                runner._jobs.pop("running-11aa22bb", None)
+
+    def test_admin_test_console_view_preloads_last_run(self):
+        """Без ?run_id= страница подгружает последний свой свежий прогон;
+        устаревший/чужой — пусто."""
+        from ai import test_console_runner
+        from ai.admin.test_console import admin_test_console_view
+        injected = {
+            "tc-view-fresh": self._make_job(
+                "tc-view-fresh", self.superuser.id, status="completed",
+            ),
+        }
+        try:
+            for run_id, job in injected.items():
+                test_console_runner._jobs[run_id] = job
+            request = self.factory.get("/ai/admin/test-console/")
+            request.user = self.superuser
+            request.session = {}
+            response = admin_test_console_view(request)
+            self.assertEqual(response.context_data["active_run_snapshot"]["run_id"], "tc-view-fresh")
+            self.assertEqual(response.context_data["active_run_id"], "tc-view-fresh")
+            # Другой пользователь не видит чужой последний прогон.
+            request2 = self.factory.get("/ai/admin/test-console/")
+            request2.user = self.other_superuser
+            request2.session = {}
+            response2 = admin_test_console_view(request2)
+            self.assertEqual(response2.context_data["active_run_snapshot"], {})
+        finally:
+            for run_id in injected:
+                test_console_runner._jobs.pop(run_id, None)
+
+    def test_console_log_endpoints(self):
+        """logs/: список для superuser, 403 для остальных; logs/view/:
+        JSON-контент, ?download=1 → text/plain attachment, traversal → 404."""
+        from ai import test_console_runner as runner
+        from ai.admin.test_console import (
+            admin_test_console_log_view,
+            admin_test_console_logs_view,
+        )
+        filename = "test_console_20260901_120000_ab12cd34.log"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / filename).write_text(
+                "=== RUN ... ===\nok\n", encoding="utf-8",
+            )
+            with patch("ai.test_console_runner._log_dir", return_value=Path(tmp)):
+                super_request = self.factory.get("/ai/admin/test-console/logs/")
+                super_request.user = self.superuser
+                response = admin_test_console_logs_view(super_request)
+                self.assertEqual(response.status_code, 200)
+                data = json.loads(response.content)
+                self.assertTrue(data["ok"])
+                self.assertEqual(data["logs"][0]["filename"], filename)
+
+                # other_superuser — тоже superuser (консоль только для них):
+                # запрет проверяем обычным пользователем.
+                normal_request = self.factory.get("/ai/admin/test-console/logs/")
+                normal_user = get_user_model().objects.create_user(
+                    username="tc_plain", password="x",
+                )
+                normal_request.user = normal_user
+                self.assertEqual(admin_test_console_logs_view(normal_request).status_code, 403)
+
+                view_request = self.factory.get(
+                    "/ai/admin/test-console/logs/view/", {"filename": filename},
+                )
+                view_request.user = self.superuser
+                view_response = admin_test_console_log_view(view_request)
+                self.assertEqual(view_response.status_code, 200)
+                view_data = json.loads(view_response.content)
+                self.assertTrue(view_data["ok"])
+                self.assertIn("=== RUN", view_data["content"])
+
+                download_request = self.factory.get(
+                    "/ai/admin/test-console/logs/view/",
+                    {"filename": filename, "download": "1"},
+                )
+                download_request.user = self.superuser
+                download_response = admin_test_console_log_view(download_request)
+                self.assertEqual(download_response.status_code, 200)
+                self.assertEqual(
+                    download_response["Content-Type"], "text/plain; charset=utf-8",
+                )
+                self.assertIn(
+                    f'attachment; filename="{filename}"',
+                    download_response["Content-Disposition"],
+                )
+
+                traversal_request = self.factory.get(
+                    "/ai/admin/test-console/logs/view/",
+                    {"filename": "../settings.py"},
+                )
+                traversal_request.user = self.superuser
+                traversal_response = admin_test_console_log_view(traversal_request)
+                self.assertEqual(traversal_response.status_code, 404)
 
 
 class ArmFindErrorRestoreTests(TestCase):
@@ -3983,7 +4301,10 @@ class ArmFindErrorRestoreTests(TestCase):
 
 
 class EachContextSuperUserFlagTests(TestCase):
-    """each_context отдаёт is_super_user: бейдж прогонов только суперу."""
+    """each_context отдаёт is_super_user: предупреждение «не покидайте
+    страницу» в тестовой консоли — только для не-суперпользователей
+    (меню «мои процессы» в шапке видно всем и показывает только свои
+    прогоны)."""
 
     def setUp(self):
         self.factory = RequestFactory()

@@ -730,6 +730,7 @@ def start_arm_sequential_run(
     now_ts = time.time()
     job = {
         "run_id": run_id,
+        "user_id": user_id,
         "status": "running",
         "error_message": "",
         "total_models": len(valid_model_keys),
@@ -1388,6 +1389,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     total_pairs = len(node_ids) * len(ordered_models)
     job = {
         "run_id": run_id,
+        "user_id": user_id,
         "run_type": "batch",
         "status": "running",
         "error_message": "",
@@ -1548,16 +1550,20 @@ def get_arm_run_snapshot(run_id):
     return _snapshot_from_test_run(test_run)
 
 
-def list_running_runs():
-    """Краткие сводки всех running-прогонов ARM (single + batch).
+def list_user_runs(user_id, since_ts=0.0):
+    """Краткие сводки прогонов ARM (single + batch) одного пользователя.
 
-    Для глобального бейджа активных прогонов в админке (superuser): лёгкий
-    список без results/report — только прогресс и ссылка на страницу прогона.
+    Для личного меню «мои процессы» в шапке админки (active_runs.py):
+    running-прогоны — всегда; завершённые — только обновлённые не раньше
+    ``since_ts`` (окно «только что завершился» для уведомления на фронте).
     """
     runs = []
     with _jobs_lock:
         for job in _jobs.values():
-            if job.get("status") != "running":
+            if job.get("user_id") != user_id:
+                continue
+            status = job.get("status", "")
+            if status != "running" and float(job.get("updated_at_ts") or 0.0) < since_ts:
                 continue
             is_batch = job.get("run_type") == "batch"
             if is_batch:
@@ -1572,8 +1578,11 @@ def list_running_runs():
                 "run_id": job.get("run_id", ""),
                 "run_type": "batch" if is_batch else "single",
                 "page_url": "/ai/admin/arm/solve/" if is_batch else "/ai/admin/arm/find-error/",
+                "status": status,
                 "completed": completed,
                 "total": total,
                 "current": current,
+                "created_at_ts": float(job.get("created_at_ts") or 0.0),
+                "updated_at_ts": float(job.get("updated_at_ts") or 0.0),
             })
     return runs

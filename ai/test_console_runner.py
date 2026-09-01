@@ -11,6 +11,8 @@ module-level ``_jobs`` dict + ``_jobs_lock`` + daemon-воркер + ``get_*_run
 - Single-flight: Django создаёт/удаляет один общий ``test_test_db.sqlite3`` → два
   параллельных прогона столкнутся. Второй старт пока один бежит — отказ.
 - In-memory only (без DB-модели); evicted job → status view вернёт 404.
+  Полный raw-вывод каждого прогона дублируется на диск (последние 10 логов,
+  ``logs/test_console/``) — переживает рестарт сервера; смотрите list_disk_logs.
 
 Вывод unittest verbosity=2 парсится построчно: инлайн ``test_method (ai.tests.Class)
 ... ok|FAIL|ERROR|skipped`` → per-test result; секции ``===/FAIL:/---/traceback`` →
@@ -26,11 +28,31 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 
 _jobs_lock = threading.Lock()
 _jobs = {}
 _MAX_JOB_AGE_SECONDS = 6 * 60 * 60
 _MAX_LOG_LINES = 500
+# Сколько секунд после завершения последний прогон отдаётся при заходе на
+# страницу тестовой консоли без ?run_id= («недавно закончилось — покажи итог»).
+_LAST_RUN_TTL_SECONDS = 600
+# Дисковые логи прогонов (полный raw-вывод сабпроцесса, включая трейсбеки):
+# BASE_DIR/logs/test_console/, храним последние _MAX_LOG_FILES штук.
+_MAX_LOG_FILES = 10
+_LOG_DIR_NAME = "logs/test_console"
+# Имя файла задаём сами и валидируем им же при чтении — это барьер
+# path-traversal: любой ``../``, подпапка или не-hex хвост не матчится.
+_LOG_FILENAME_RE = re.compile(r"^test_console_\d{8}_\d{6}_[0-9a-f]{8}\.log$")
+_LOG_HEADER_RE = re.compile(
+    r"^=== RUN run_id=(?P<run_id>[0-9a-f]+) started_at=(?P<started_at>\S+) user_id=(?P<user_id>\S*) ===$"
+)
+_LOG_FOOTER_RE = re.compile(
+    r"^=== END status=(?P<status>\w+) ran=(?P<ran>\d+) seconds=(?P<seconds>[\d.]+)"
+    r" ok=(?P<ok>0|1) failures=(?P<failures>\d+) errors=(?P<errors>\d+)"
+    r" skipped=(?P<skipped>\d+) ===$"
+)
 
 
 # Русские названия тестовых классов ai/tests.py (45 шт.). Имена методов
@@ -359,9 +381,10 @@ def _prune_old_jobs(now_ts):
         _jobs.pop(rid, None)
 
 
-def start_test_run():
+def start_test_run(user_id):
     """Запускает прогон тестов. Returns (run_id, error_message).
 
+    ``user_id`` — кто запустил (для личного меню процессов в шапке админки).
     Single-flight: если прогон уже выполняется — отказ (общий test_test_db.sqlite3).
     """
     now_ts = time.time()
@@ -373,6 +396,7 @@ def start_test_run():
         run_id = uuid.uuid4().hex
         _jobs[run_id] = {
             "run_id": run_id,
+            "user_id": user_id,
             "status": "running",
             "error_message": "",
             "total": None,
@@ -437,6 +461,168 @@ def _format_test_line(class_ru, method, status, reason=""):
     return f"{base} — {STATUS_RU.get(status, status)}", kind
 
 
+# ---------------------------------------------------------------------------
+# Дисковые логи прогонов: полный raw-вывод сабпроцесса (включая трейсбеки и
+# шум логгеров, который в in-memory log[] обрезается до _MAX_LOG_LINES).
+# Заголовок/футер маркерные — их парсят list_disk_logs для «Истории прогонов».
+# ---------------------------------------------------------------------------
+
+def _log_dir(log_dir=None):
+    """Каталог логов (по умолчанию BASE_DIR/logs/test_console), создаётся лениво.
+
+    В Docker репозиторий bind-mount'ится в /app — файлы сразу оказываются на
+    хосте. ``log_dir`` (tempdir в тестах) используется как есть.
+    """
+    if log_dir is None:
+        from django.conf import settings
+
+        log_dir = Path(settings.BASE_DIR, *_LOG_DIR_NAME.split("/"))
+    path = Path(log_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _disk_log_path(log_dir, created_at_ts, run_id):
+    """Имя файла: timestamp-префикс → лексикографическая сортировка = хронология."""
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime(created_at_ts))
+    return Path(log_dir) / f"test_console_{stamp}_{run_id[:8]}.log"
+
+
+def _format_log_header(run_id, created_at_ts, user_id):
+    started_at = datetime.fromtimestamp(created_at_ts, tz=timezone.utc).isoformat()
+    return f"=== RUN run_id={run_id} started_at={started_at} user_id={user_id or ''} ==="
+
+
+def _format_log_footer(status, summary):
+    summary = summary or {}
+    return (
+        f"=== END status={status} ran={summary.get('ran') or 0}"
+        f" seconds={summary.get('seconds') or 0.0} ok={1 if summary.get('ok') else 0}"
+        f" failures={summary.get('failures') or 0} errors={summary.get('errors') or 0}"
+        f" skipped={summary.get('skipped') or 0} ==="
+    )
+
+
+def _parse_log_header(line):
+    m = _LOG_HEADER_RE.match(line or "")
+    return m.groupdict() if m else None
+
+
+def _parse_log_footer(line):
+    m = _LOG_FOOTER_RE.match(line or "")
+    return m.groupdict() if m else None
+
+
+def _tee_lines(stream, fh):
+    """Отдаёт строки парсеру и дублирует их в лог-файл (полный raw-вывод).
+
+    Ошибка записи на диск не должна ломать прогон — тихо продолжаем без файла.
+    """
+    for line in stream:
+        if fh is not None:
+            try:
+                fh.write(line)
+                fh.flush()
+            except OSError:
+                pass
+        yield line
+
+
+def _rotate_logs(log_dir):
+    """Держит в каталоге только последние _MAX_LOG_FILES логов."""
+    try:
+        names = sorted(p.name for p in Path(log_dir).iterdir() if _LOG_FILENAME_RE.match(p.name))
+    except OSError:
+        return
+    for name in names[: max(0, len(names) - _MAX_LOG_FILES)]:
+        try:
+            (Path(log_dir) / name).unlink()
+        except OSError:
+            pass
+
+
+def list_disk_logs(log_dir=None):
+    """Список дисковых логов прогонов (новые первыми) для «Истории прогонов».
+
+    Элемент: {filename, run_id, started_at, status, summary, size_bytes}.
+    ``status``: completed/failed — из футера; running — прогон ещё идёт
+    (run_id совпадает с in-memory running job); interrupted — файла-футера
+    нет (сервер перезапустили посреди прогона). ``summary`` — из футера.
+    """
+    try:
+        path_dir = _log_dir(log_dir)
+    except OSError:
+        return []
+    with _jobs_lock:
+        running_ids = {j.get("run_id") for j in _jobs.values() if j.get("status") == "running"}
+    entries = []
+    try:
+        paths = [p for p in path_dir.iterdir() if _LOG_FILENAME_RE.match(p.name)]
+    except OSError:
+        return []
+    for path in sorted(paths, key=lambda p: p.name, reverse=True):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        header = None
+        footer = None
+        for line in text.splitlines():
+            if header is None:
+                header = _parse_log_header(line)
+            footer_parsed = _parse_log_footer(line)
+            if footer_parsed:
+                footer = footer_parsed
+        run_id = (header or {}).get("run_id", "")
+        if footer:
+            status = footer["status"]
+            summary = {
+                "ran": int(footer["ran"]),
+                "seconds": float(footer["seconds"]),
+                "ok": footer["ok"] == "1",
+                "failures": int(footer["failures"]),
+                "errors": int(footer["errors"]),
+                "skipped": int(footer["skipped"]),
+            }
+        elif run_id and run_id in running_ids:
+            status = "running"
+            summary = None
+        else:
+            status = "interrupted"
+            summary = None
+        try:
+            size_bytes = path.stat().st_size
+        except OSError:
+            size_bytes = 0
+        entries.append({
+            "filename": path.name,
+            "run_id": run_id,
+            "started_at": (header or {}).get("started_at", ""),
+            "status": status,
+            "summary": summary,
+            "size_bytes": size_bytes,
+        })
+    return entries
+
+
+def read_disk_log(filename, log_dir=None):
+    """Текст дискового лога по имени файла или None (нет/недопустимое имя).
+
+    ``_LOG_FILENAME_RE`` — барьер path-traversal: неподходящее имя отклоняется
+    до любого обращения к диску.
+    """
+    if not _LOG_FILENAME_RE.match(filename or ""):
+        return None
+    try:
+        path_dir = _log_dir(log_dir)
+    except OSError:
+        return None
+    try:
+        return (path_dir / filename).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
 def _run_worker(run_id):
     from django.conf import settings
 
@@ -459,10 +645,29 @@ def _run_worker(run_id):
                 job["updated_at_ts"] = time.time()
         return
 
+    # Мета для заголовка дискового лога: кто и когда запустил.
+    with _jobs_lock:
+        job_meta = _jobs.get(run_id) or {}
+        user_id = job_meta.get("user_id")
+        created_at_ts = float(job_meta.get("created_at_ts") or time.time())
+
+    # Полный raw-вывод пишем на диск прямо во время прогона (не только в
+    # конце): файл полезен и для упавшего посреди прогона сервера.
+    log_dir = None
+    log_fh = None
+    try:
+        log_dir = _log_dir()
+        log_path = _disk_log_path(log_dir, created_at_ts, run_id)
+        log_fh = open(log_path, "w", encoding="utf-8", errors="replace")
+        log_fh.write(_format_log_header(run_id, created_at_ts, user_id) + "\n")
+    except OSError as exc:
+        log_fh = None
+        _append_log(run_id, f"⚠ Лог прогона не записан на диск: {exc}", kind="warn")
+
     _append_log(run_id, "▶ Запускаем проверки…", kind="stage")
 
 
-    for kind, payload in _parse_test_output(proc.stdout):
+    for kind, payload in _parse_test_output(_tee_lines(proc.stdout, log_fh)):
         if kind == "result":
             class_ru = CLASS_TITLES_RU.get(payload["class"], payload["class"])
             line_text, line_kind = _format_test_line(
@@ -539,17 +744,39 @@ def _run_worker(run_id):
 
     with _jobs_lock:
         job = _jobs.get(run_id)
+        no_summary = False
+        final_status = "failed"
+        final_summary = {}
         if job is not None:
-            if job.get("summary") is None:
+            no_summary = job.get("summary") is None
+            if no_summary:
                 job["status"] = "failed"
                 job["error_message"] = (
                     "Тестовый прогон завершился без итоговой строки (возможно, "
                     "упал импорт/сборка). Смотрите журнал вывода."
                 )
-                _append_log(run_id, "⚠ Не удалось получить итог — проверьте журнал ниже.", kind="warn")
             else:
                 job["status"] = "completed"
             job["updated_at_ts"] = time.time()
+            final_status = job.get("status") or "failed"
+            final_summary = job.get("summary") or {}
+
+    if no_summary:
+        # Вне _jobs_lock: _append_lock берёт лок сам, а threading.Lock
+        # нереентерабельный (вызов под локом — deadlock).
+        _append_log(run_id, "⚠ Не удалось получить итог — проверьте журнал ниже.", kind="warn")
+
+    if log_fh is not None:
+        try:
+            log_fh.write(_format_log_footer(final_status, final_summary) + "\n")
+        except OSError:
+            pass
+        try:
+            log_fh.close()
+        except OSError:
+            pass
+        if log_dir is not None:
+            _rotate_logs(log_dir)
 
 
 def get_test_run_snapshot(run_id):
@@ -563,24 +790,56 @@ def get_test_run_snapshot(run_id):
     return None
 
 
-def list_running_runs():
-    """Краткие сводки всех running-прогонов тестовой консоли.
+def get_latest_run_snapshot(user_id, max_age_seconds=_LAST_RUN_TTL_SECONDS):
+    """Полный снимок последнего прогона пользователя (deepcopy) или None.
 
-    Для глобального бейджа активных прогонов в админке (superuser). In-memory
-    only: у тестовой консоли нет БД-модели и параметров формы (восстанавливать
-    нечего).
+    Running-прогон возвращается всегда (живой прогресс — возврат на страницу
+    во время прогона тоже должен восстанавливаться). Завершённый — только если
+    обновлялся не раньше ``max_age_seconds`` назад (окно «недавно завершился»).
+    """
+    if user_id is None:
+        return None
+    cutoff = time.time() - max_age_seconds
+    with _jobs_lock:
+        best_job = None
+        for job in _jobs.values():
+            if job.get("user_id") != user_id:
+                continue
+            if job.get("status") != "running" and float(job.get("updated_at_ts") or 0.0) < cutoff:
+                continue
+            if best_job is None or float(job.get("created_at_ts") or 0.0) > float(best_job.get("created_at_ts") or 0.0):
+                best_job = job
+        if best_job is None:
+            return None
+        return copy.deepcopy(best_job)
+
+
+def list_user_runs(user_id, since_ts=0.0):
+    """Краткие сводки прогонов тестовой консоли одного пользователя.
+
+    Для личного меню «мои процессы» в шапке админки (active_runs.py):
+    running-прогоны — всегда; завершённые — только обновлённые не раньше
+    ``since_ts`` (окно «только что завершился» для уведомления на фронте).
+    In-memory only: у тестовой консоли нет БД-модели и параметров формы
+    (восстанавливать нечего).
     """
     runs = []
     with _jobs_lock:
         for job in _jobs.values():
-            if job.get("status") != "running":
+            if job.get("user_id") != user_id:
+                continue
+            status = job.get("status", "")
+            if status != "running" and float(job.get("updated_at_ts") or 0.0) < since_ts:
                 continue
             runs.append({
                 "run_id": job.get("run_id", ""),
                 "run_type": "test_console",
                 "page_url": "/ai/admin/test-console/",
+                "status": status,
                 "completed": job.get("completed") or 0,
                 "total": job.get("total") or 0,
                 "current": job.get("current") or "",
+                "created_at_ts": float(job.get("created_at_ts") or 0.0),
+                "updated_at_ts": float(job.get("updated_at_ts") or 0.0),
             })
     return runs
