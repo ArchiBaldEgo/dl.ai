@@ -788,6 +788,41 @@ def _extract_code_from_response(text):
     return text.strip()
 
 
+# Маркеры провала в ЗАВЕРШЁННОМ DL-комментарии. Проверяются ПЕРВЫМИ и
+# перекрывают success-маркеры: раньше голая подстрока «ок» матчилась внутри
+# «строке»/«token»/«broken», и комментарий вида «Ошибка компиляции в строке 5»
+# ложно помечал проваленную DL-проверку как solved.
+_DL_FAILURE_MARKERS = (
+    "неверн", "неправильн", "ошибк", "не совп", "не прош", "не пройден",
+    "не все", "не всё", "провал", "не принят", "не зачт", "отклон", "не ок",
+    "wrong", "error", "failed", "incorrect",
+)
+# Success-маркеры с границами слов: «ок»/«ok» как отдельное слово, а не
+# подстрока внутри «строке»/«token». «все тесты успешно» покрывается «все тесты».
+_DL_SUCCESS_MARKERS_RE = _re.compile(
+    r"\b(?:все тесты|ок|ok|accepted|correct|пройдены|успешно пройден)\b",
+    _re.IGNORECASE,
+)
+
+
+def _verdict_from_dl_comment(comment):
+    """Вердикт по завершённому DL-комментарию: solved / failed.
+
+    DL REST API не отдаёт структурированный вердикт (только isFinished +
+    comment), поэтому решаем по тексту. Провальные маркеры приоритетны: любой
+    комментарий провала («Ошибка…», «Неверный ответ…», «не все тесты…») —
+    failed, даже если в нём по случайности встретилось слово «ок».
+    Нераспознанный комментарий — failed (как и раньше: solved ставится только
+    при явном подтверждении).
+    """
+    comment_lower = (comment or "").lower().strip()
+    if any(m in comment_lower for m in _DL_FAILURE_MARKERS):
+        return _VERDICT_FAILED
+    if _DL_SUCCESS_MARKERS_RE.search(comment_lower):
+        return _VERDICT_SOLVED
+    return _VERDICT_FAILED
+
+
 def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None, course_id=None):
     """Send code to DL for real testing and poll for the result.
 
@@ -900,17 +935,7 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
 
         if is_finished:
             result["comment"] = comment
-            comment_lower = comment.lower().strip()
-            # Success: DL reports all tests passed.
-            success_markers = (
-                "все тесты", "все тесты успешно", "ок", "ok",
-                "accepted", "correct", "пройдены", "успешно пройден",
-            )
-            if any(m in comment_lower for m in success_markers):
-                result["verdict"] = _VERDICT_SOLVED
-            else:
-                # Any other finished result = failed (wrong answer, error, etc).
-                result["verdict"] = _VERDICT_FAILED
+            result["verdict"] = _verdict_from_dl_comment(comment)
             return result
 
     # Timed out waiting for DL.

@@ -2001,6 +2001,53 @@ class BatchGradingTests(SimpleTestCase):
         self.assertEqual(grade_solution("", "int main(){return 0;}"), "failed")
 
 
+class DLCommentVerdictTests(SimpleTestCase):
+    """Batch-solve ARM: вердикт по завершённому DL-комментарию.
+
+    Раньше success-маркеры были голыми подстроками («ок»/«ok»): комментарий
+    «Ошибка компиляции в строке 5» содержит «ок» (в «строке») и ложно
+    помечал проваленную DL-проверку как solved.
+    """
+
+    def _verdict(self, comment):
+        from ai.arm_runner import _verdict_from_dl_comment
+        return _verdict_from_dl_comment(comment)
+
+    def test_success_comments_are_solved(self):
+        for comment in ("Все тесты пройдены успешно", "ОК", "ok", "Accepted",
+                        "Тесты успешно пройдены", "Correct"):
+            self.assertEqual(self._verdict(comment), "solved", comment)
+
+    def test_compile_error_with_ok_substring_is_failed(self):
+        # «в строке» содержит подстроку «ок» — провальный маркер приоритетен.
+        self.assertEqual(
+            self._verdict("Ошибка компиляции в строке 5: expected ';'"),
+            "failed",
+        )
+
+    def test_wrong_answer_comments_are_failed(self):
+        for comment in (
+            "Неправильный ответ на тесте 2",
+            "Неверный вывод программы",
+            "Не все тесты пройдены",
+            "Вывод не совпадает с ожидаемым",
+            "Задача не прошла проверку",
+            "Wrong answer on test 3",
+            "Runtime error: token limit exceeded",
+            "Solution rejected",
+        ):
+            self.assertEqual(self._verdict(comment), "failed", comment)
+
+    def test_standalone_ok_word_boundaries(self):
+        # «ок»/«ok» как отдельное слово — solved; внутри «строке»/«token» — нет.
+        self.assertEqual(self._verdict("Всё ок"), "solved")
+        self.assertEqual(self._verdict("token"), "failed")
+
+    def test_empty_comment_is_failed(self):
+        self.assertEqual(self._verdict(""), "failed")
+        self.assertEqual(self._verdict(None), "failed")
+
+
 class HealthCheckOutputTests(SimpleTestCase):
     """`check_models_health --force` live per-model console line formatting."""
 
@@ -3290,28 +3337,45 @@ class OllamaRegistryTests(SimpleTestCase):
 
 
 class OllamaHandlerTests(SimpleTestCase):
-    """Handler вызывает ollama.Client.chat и возвращает (content, tokens, is_error)."""
+    """Handler вызывает ollama.Client.chat (СТРИМОМ) и возвращает (content, tokens, is_error).
 
-    async def test_handler_returns_content_and_tokens(self):
+    Стриминг обязателен: без него длинные генерации ARM-solve минутами ждут
+    готовый ответ, и шлюз api.ollama.com рвёт соединение — httpx
+    ServerDisconnectedError («Server disconnected without sending a response»).
+    """
+
+    @staticmethod
+    def _stream(*pieces, eval_count=0):
+        """Фейковые чанки стрима: контент по кускам, eval_count в финальном чанке."""
+        from types import SimpleNamespace
+        chunks = []
+        for piece in pieces:
+            chunks.append(SimpleNamespace(
+                message=SimpleNamespace(content=piece), eval_count=0))
+        chunks.append(SimpleNamespace(
+            message=SimpleNamespace(content=""), eval_count=eval_count))
+        return iter(chunks)
+
+    async def test_handler_streams_and_accumulates(self):
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
              patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
-            mock_resp = MagicMock()
-            mock_resp.message.content = "2"
-            mock_resp.eval_count = 5
-            mock_client.chat.return_value = mock_resp
+            # Контент приходит кусками — handler обязан собрать его в строку.
+            mock_client.chat.return_value = self._stream("print", "(1", ")", eval_count=5)
 
             # Хендлеры генерируются динамически (make_table_handlers) — getattr,
             # чтобы линтер не ругался на отсутствующий атрибут.
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
             result = await glm_5_2("1+1=?", "client")
-            self.assertEqual(result, ("2", 5, False))
+            self.assertEqual(result, ("print(1)", 5, False))
             mock_client.chat.assert_called_once()
-            # Без tools= (обычный чат).
+            # Без tools= (обычный чат), но СТРИМОМ (stream=True) — иначе
+            # api.ollama.com рвёт соединение на длинных генерациях.
             _, kwargs = mock_client.chat.call_args
             self.assertNotIn("tools", kwargs)
+            self.assertIs(kwargs.get("stream"), True)
 
     async def test_glm_5_3_flash_uses_cloud_model_id(self):
         """GLM 5.3 Flash ходит через ollama.chat с model='glm-5.3-flash:cloud'."""
@@ -3320,10 +3384,7 @@ class OllamaHandlerTests(SimpleTestCase):
              patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
-            mock_resp = MagicMock()
-            mock_resp.message.content = "ok"
-            mock_resp.eval_count = 1
-            mock_client.chat.return_value = mock_resp
+            mock_client.chat.return_value = self._stream("ok", eval_count=1)
 
             glm_5_3_flash = getattr(ollama, "ask_Ollama_Glm_5_3_Flash_Cloud_async")
             result = await glm_5_3_flash("hi", "client")
@@ -3343,10 +3404,7 @@ class OllamaHandlerTests(SimpleTestCase):
                      patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
                      patch("ai.model_clients.ollama.Client") as mock_client_cls:
                     mock_client = mock_client_cls.return_value
-                    mock_resp = MagicMock()
-                    mock_resp.message.content = "ok"
-                    mock_resp.eval_count = 1
-                    mock_client.chat.return_value = mock_resp
+                    mock_client.chat.return_value = self._stream("ok", eval_count=1)
 
                     handler = getattr(ollama, f"ask_{key}_async")
                     result = await handler("hi", "client")
@@ -3364,6 +3422,21 @@ class OllamaHandlerTests(SimpleTestCase):
             result = await qwen_3_5("hi", "client")
             self.assertIn("Ollama API ключ не настроен", result[0])
             mock_client_cls.assert_not_called()
+
+
+class ArmBatchResultsPartialTests(SimpleTestCase):
+    """Частичный шаблон _ai_batch_results.html не должен утекать комментариями:
+    Django вырезает {# #} только в одну строку — многострочный комментарий
+    попадал на страницу /arm/solve/ как видимый текст внизу. Комментарий
+    частичного шаблона обязан быть {% comment %}…{% endcomment %}."""
+
+    def test_partial_comment_not_leaked(self):
+        from django.template.loader import render_to_string
+        html = render_to_string("admin/ai/_ai_batch_results.html")
+        self.assertNotIn("{#", html)
+        self.assertNotIn("Общий CSS", html)
+        # Содержимое частички (CSS) рендерится как обычно.
+        self.assertIn(".arm-card", html)
 
 
 class SendSolutionCourseIdTests(SimpleTestCase):
@@ -3921,6 +3994,43 @@ class RequestLogCsvTests(TestCase):
         request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.log.id}/csv/")
         request.user = self.normal_user
         response = admin_request_log_csv_view(request, self.log.id)
+        self.assertEqual(response.status_code, 403)
+
+    def test_result_download_named_by_model(self):
+        """Имя файла решения: arm_<модель><расширение> — по модели, не по задаче
+        (у одной задачи скачивают решения нескольких моделей)."""
+        from ai.models import AIModelTestResult
+        from ai.admin.arm import admin_arm_solve_result_download_view
+        result = AIModelTestResult.objects.get(model_key="M1")
+        request = self.factory.get(f"/ai/admin/arm/solve/result/{result.id}/download/")
+        request.user = self.superuser
+        response = admin_arm_solve_result_download_view(request, result.id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response["Content-Disposition"],
+            'attachment; filename="arm_Model_One.pas"',
+        )
+
+    def test_result_download_title_fallbacks_and_403(self):
+        """Пробелы/спецсимволы title → «_» (точки типа «K2.7» сохраняются);
+        нет доступа → 403."""
+        from ai.models import AIModelTestResult
+        from ai.admin.arm import admin_arm_solve_result_download_view
+        result = AIModelTestResult.objects.get(model_key="M2")
+        result.model_title = "Model Two K2.7"
+        result.save(update_fields=["model_title"])
+
+        request = self.factory.get(f"/ai/admin/arm/solve/result/{result.id}/download/")
+        request.user = self.superuser
+        response = admin_arm_solve_result_download_view(request, result.id)
+        self.assertEqual(
+            response["Content-Disposition"],
+            'attachment; filename="arm_Model_Two_K2.7.pas"',
+        )
+
+        request = self.factory.get(f"/ai/admin/arm/solve/result/{result.id}/download/")
+        request.user = self.normal_user
+        response = admin_arm_solve_result_download_view(request, result.id)
         self.assertEqual(response.status_code, 403)
 
 

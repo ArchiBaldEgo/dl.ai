@@ -305,6 +305,7 @@ async function waitLastOuterHtmlStable(page, xpathOrGetter, {
     minContentLength = 50,
     checkStopButton = true,
     confirmMs = 0,
+    maxEmptyStableTicks = 2,
 } = {}) {
     // Ожидание стабилизации HTML-контента: опрашивает outerHTML элемента по XPath,
     // пока он не перестанет меняться stableTicks раз подряд (потоковая генерация завершена).
@@ -327,6 +328,14 @@ async function waitLastOuterHtmlStable(page, xpathOrGetter, {
     //   12с «стабильности» были паузой в генерации, а не завершением (продолжаем
     //   ждать). Это единственный надёжный сигнал завершения, если селектор кнопки
     //   Stop устарел — без него ответ обрезается посередине.
+    // - maxEmptyStableTicks: ФЕЙЛ-ФАСТ на «пустом скелете». Если элемент сматчен
+    //   (XPath-путь), генерация не идёт (кнопка Stop не видна), а текста нет
+    //   N опросов подряд — селектор поймал пустышку (Kimi сменил вёрстку):
+    //   сразу бросаем ошибку → следующий селектор. Раньше каждый мёртвый селектор
+    //   выжигал полное окно стабильности (12с + 5с confirm = 17-27с; по логу
+    //   воркера три мёртвых XPath ≈ минуту пустого ожидания на КАЖДЫЙ запрос).
+    //   Ловятся оба состояния: outerHTML < minContentLength и стабильный
+    //   outerHTML без текста (раздут атрибутами/обёртками и проходит порог).
     // xpathOrGetter: либо строка XPath (как раньше), либо async-геттер (page) => html.
     // Геттер используется класс-независимым robust-fallback (getRobustLastAnswerHtml):
     // для него появления ждёт сам poll-цикл (minContentLength), waitForXPathCompat не нужен.
@@ -345,11 +354,24 @@ async function waitLastOuterHtmlStable(page, xpathOrGetter, {
     let prev = null;
     let sameCount = 0;
     let lastNonEmpty = null;
+    let emptyStableCount = 0;
 
     while (Date.now() - start < timeoutMs) {
         const cur = await readNow();
+        const generating = checkStopButton ? await isStillGenerating(page) : false;
 
         if (minContentLength > 0 && (!cur || cur.length < minContentLength)) {
+            // Контент ещё не появился — или XPath матчит пустой скелет. Для
+            // XPath-пути элемент уже сматчен (waitForXPathCompat): если генерация
+            // не идёт, а текста всё нет — это скелет, фейл-фаст к следующему
+            // селектору. Геттер-путь (robust) не фейл-фастится: у него нет
+            // гарантии появления элемента, он честно ждёт свой timeout.
+            if (!generating && !isGetter) {
+                emptyStableCount++;
+                if (emptyStableCount >= maxEmptyStableTicks) {
+                    throw new Error('matched an empty skeleton (no content appears)');
+                }
+            }
             sameCount = 0;
             prev = cur;
             await sleep(pollMs);
@@ -358,7 +380,7 @@ async function waitLastOuterHtmlStable(page, xpathOrGetter, {
 
         lastNonEmpty = cur;
 
-        if (checkStopButton && await isStillGenerating(page)) {
+        if (generating) {
             sameCount = 0;
             prev = cur;
             await sleep(pollMs);
@@ -367,6 +389,18 @@ async function waitLastOuterHtmlStable(page, xpathOrGetter, {
 
         if (cur && cur === prev) {
             sameCount++;
+
+            // Стабильный, но текстово-пустой контейнер — тоже скелет: outerHTML
+            // прошёл minContentLength за счёт атрибутов/обёрток, а текста нет.
+            const plainTextLen = cur.replace(/<[^>]*>/g, '').trim().length;
+            if (plainTextLen < 1) {
+                emptyStableCount++;
+                if (emptyStableCount >= maxEmptyStableTicks) {
+                    throw new Error('matched an empty skeleton (stable, no text content)');
+                }
+            } else {
+                emptyStableCount = 0;
+            }
 
             if (sameCount >= stableTicks) {
                 if (confirmMs > 0) {
@@ -386,6 +420,7 @@ async function waitLastOuterHtmlStable(page, xpathOrGetter, {
         else {
             prev = cur;
             sameCount = 0;
+            emptyStableCount = 0;
         }
 
         await sleep(pollMs);
@@ -399,15 +434,15 @@ async function waitLastOuterHtmlStable(page, xpathOrGetter, {
     throw new Error(`waitLastOuterHtmlStable timeout for xpath: ${isGetter ? '<getter>' : xpathOrGetter}`);
 }
 
-async function getRobustLastAnswerHtml(page) {
-  // Класс-независимый robust-fallback: находит последний «пузырь» ответа ассистента
-  // по устойчивым структурным признакам (data-testid, ARIA role, class*='assistant'/
-  // 'message', последний дочерний блок чат-контейнера) и возвращает его outerHTML.
+async function getRobustLastAnswerData(page) {
+  // Класс-независимый robust-fallback (данные): находит последний «пузырь» ответа
+  // ассистента по устойчивым структурным признакам (data-testid, ARIA role,
+  // class*='assistant'/'message', последний дочерний блок чат-контейнера) и
+  // возвращает { html, text }. html скармливается kimiHtmlToApiMarkdown, text —
+  // снапшот-гварду свежести ответа в sendMessage (сравнение «до/после отправки»).
   // НЕ опирается на конкретные имена классов ('markdown' и т.п.), которые Kimi
   // регулярно меняет — поэтому переживает смену вёрстки («matched an empty skeleton»).
-  // Весь пузырь целиком скармливается kimiHtmlToApiMarkdown: она снимет теги и
-  // сохранит code blocks (<pre><code> -> ```fences), нужные для извлечения кода.
-  return page.evaluate(() => {
+  const data = await page.evaluate(() => {
     const containerSels = [
       "[data-testid='virtuoso-item-list']",
       "[data-testid*='chat-list']",
@@ -458,9 +493,17 @@ async function getRobustLastAnswerHtml(page) {
     };
 
     const bubble = pickLastWithText(container) || pickLastWithText(document.body);
-    if (!bubble) return '';
-    return bubble.outerHTML || '';
+    if (!bubble) return { html: '', text: '' };
+    return { html: bubble.outerHTML || '', text: (bubble.innerText || '').trim() };
   });
+  return data || { html: '', text: '' };
+}
+
+async function getRobustLastAnswerHtml(page) {
+  // Обёртка над getRobustLastAnswerData для waitLastOuterHtmlStable (геттер
+  // должен возвращать строку outerHTML для сравнения на стабильность).
+  const data = await getRobustLastAnswerData(page);
+  return data.html || '';
 }
 
 async function dumpDomDiagnostics(page) {
@@ -586,6 +629,17 @@ async function sendMessage(ctx, payload = {}) {
             };
         }
 
+        // СНАПШОТ ДО отправки: текст последнего assistant-пузыря до нажатия
+        // Enter. Если после «отправки» extracted-ответ совпадёт с ним — сообщение
+        // не отправилось, а extraction прочитал СТАРЫЙ пузырь (например,
+        // kimi.com восстановил прошлый диалог в персистентном Chrome-профиле).
+        // Раньше такой старый ответ молча возвращался как ответ модели.
+        let preAnswerText = '';
+        try {
+            const pre = await getRobustLastAnswerData(page);
+            preAnswerText = (pre?.text || '').trim();
+        } catch (_) { /* снапшот опционален — гвард просто не сработает */ }
+
         // Отправка: в Kimi намеренно НЕ ищем кнопку отправки по XPath —
         // data.xpaths.chat.sendMessageButton пуст (""), т.к. реальный селектор
         // кнопки не выверен, а waitAndClickX жжёт 30с на промахе. Enter в
@@ -606,7 +660,10 @@ async function sendMessage(ctx, payload = {}) {
 
         // Wait for the answer to stabilize — Kimi streams tokens, so we need
         // enough stable ticks to ensure generation is truly complete.
-        // 6 ticks × 2000ms = 12s of stability required before reading.
+        // 4 ticks × 1500ms + 3000ms confirm ≈ 9s of stability required before
+        // reading (раньше 6×2000 + 5000 = 17с; сокращено — главный источник
+        // задержки был не здесь, а в мёртвых XPath-селекторах, которые теперь
+        // фейл-фастятся через maxEmptyStableTicks).
         // Fallback XPath selectors: if the primary selector fails (Kimi changed
         // their HTML), try alternative selectors before giving up.
         const answerXPaths = [
@@ -629,11 +686,11 @@ async function sendMessage(ctx, payload = {}) {
             try {
                 answer = await waitLastOuterHtmlStable(page, xp, {
                     timeoutMs: 300000,
-                    pollMs: 2000,
-                    stableTicks: 6,
+                    pollMs: 1500,
+                    stableTicks: 4,
                     minContentLength: 50,
                     checkStopButton: true,
-                    confirmMs: 5000,
+                    confirmMs: 3000,
                 });
                 // НЕ принимаем структурно-набитый, но текстово-ПУСТОЙ контейнер (0/whitespace).
                 // Короткие ответы («2», «да», «42») — легитимны, НЕ отбраковываем: порог 1 символ,
@@ -660,11 +717,11 @@ async function sendMessage(ctx, payload = {}) {
             try {
                 const robustHtml = await waitLastOuterHtmlStable(page, getRobustLastAnswerHtml, {
                     timeoutMs: 120000,
-                    pollMs: 2000,
-                    stableTicks: 6,
+                    pollMs: 1500,
+                    stableTicks: 4,
                     minContentLength: 50,
                     checkStopButton: true,
-                    confirmMs: 5000,
+                    confirmMs: 3000,
                 });
                 if (robustHtml) {
                     inner = kimiHtmlToApiMarkdown(robustHtml);
@@ -701,11 +758,11 @@ async function sendMessage(ctx, payload = {}) {
                 try {
                     const retryAnswer = await waitLastOuterHtmlStable(page, xp, {
                         timeoutMs: 120000,
-                        pollMs: 2000,
-                        stableTicks: 6,
+                        pollMs: 1500,
+                        stableTicks: 4,
                         minContentLength: 50,
                         checkStopButton: true,
-                        confirmMs: 5000,
+                        confirmMs: 3000,
                     });
                     const retryInner = kimiHtmlToApiMarkdown(retryAnswer);
                     if (retryInner && retryInner.trim().length >= 1 && retryInner.trim().length > inner.trim().length) {
@@ -725,6 +782,36 @@ async function sendMessage(ctx, payload = {}) {
                 ok: false,
                 reason: "can't send message",
                 data: { "moreInformation": "Kimi returned an empty response after retries" }
+            };
+        }
+
+        // ГВАРД СВЕЖЕСТИ ОТВЕТА. Если сообщение не отправилось (paste-инжект
+        // мёртв, Enter не сработал, kimi.com восстановил прошлый диалог в
+        // персистентном профиле), нового пузыря нет — и extraction молча
+        // возвращал СТАРЫЙ последний assistant-пузырь как «ответ модели»
+        // (реальный случай: ARM solve получил анализ hydration payload из
+        // чужого ручного диалога). Отбраковываем такие ответы ошибкой, а не
+        // мусором: Django пометит пару как error с понятной причиной.
+        const innerTrimmed = inner.trim();
+        const msgTrimmed = messageText.trim();
+        if (preAnswerText && innerTrimmed === preAnswerText) {
+            log('STALE ANSWER guard: extracted answer is identical to the assistant bubble that existed BEFORE sending — message was probably not sent');
+            return {
+                ok: false,
+                reason: "can't send message",
+                data: {
+                    "moreInformation": "Stale answer: extracted text is identical to the assistant bubble that existed BEFORE sending — the message was probably not sent (Kimi UI changed / Enter did not submit)"
+                }
+            };
+        }
+        if (msgTrimmed && innerTrimmed === msgTrimmed) {
+            log("STALE ANSWER guard: extraction picked the user's own message bubble instead of the answer");
+            return {
+                ok: false,
+                reason: "can't send message",
+                data: {
+                    "moreInformation": "Extraction picked the user's own message bubble instead of the answer — answer selectors are stale"
+                }
             };
         }
 

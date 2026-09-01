@@ -788,8 +788,10 @@ def admin_arm_solve_result_download_view(request, result_id):
     """Скачать извлечённый код модели как файл программы.
 
     Отдаёт ``AIModelTestResult.code`` как ``text/plain`` во вложении. Имя файла —
-    ``task_<node_id><file_extension>`` (расширение из снимка, с ведущей точкой).
-    Файлы на диске не хранятся — содержимое берётся прямо из БД.
+    ``arm_<модель><file_extension>`` (расширение из снимка, с ведущей точкой):
+    у одной задачи скачивают решения нескольких моделей, поэтому имя даётся по
+    модели, а не по задаче. Файлы на диске не хранятся — содержимое берётся
+    прямо из БД.
     """
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
@@ -800,15 +802,18 @@ def admin_arm_solve_result_download_view(request, result_id):
     if ext and not ext.startswith("."):
         ext = f".{ext}"
     # Sanitize ext: допускаем только ведущую точку + буквы/цифры — иначе символы
-    # вроде " \r\n могли бы инъецировать в Content-Disposition. node_id — int,
-    # безопасен; filename собирается из проверенных частей.
+    # вроде " \r\n могли бы инъецировать в Content-Disposition. filename
+    # собирается из проверенных частей.
     ext = re.sub(r"[^\w.]", "", ext)
     if ext and not ext.startswith("."):
         ext = f".{ext}"
-    node_id = ""
-    if result.task_id and result.task and result.task.node_id:
-        node_id = str(result.task.node_id)
-    filename = f"task_{node_id}{ext}" if node_id else f"task_result_{result_id}{ext}"
+    # Модель в имя файла: пробелы/спецсимволы → «_» (title может содержать
+    # точки — «K2.7» — их оставляем). Пустой title и key — fallback на id.
+    model_name = (result.model_title or result.model_key or "").strip()
+    model_name = re.sub(r"[^\w.]+", "_", model_name).strip("._")
+    if not model_name:
+        model_name = f"result_{result_id}"
+    filename = f"arm_{model_name}{ext}"
 
     response = HttpResponse(code, content_type="text/plain; charset=utf-8")
     response["Content-Disposition"] = f'attachment; filename="{filename}"'

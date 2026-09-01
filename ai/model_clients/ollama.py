@@ -79,14 +79,33 @@ def _get_client() -> Client:
     return Client(host=OLLAMA_HOST, timeout=_OLLAMA_TIMEOUT, headers=headers)
 
 
-def _chat_sync(model: str, msg: str, temperature: float, num_predict: int):
-    """Синхронный вызов ollama.chat (запускается через asyncio.to_thread)."""
+def _chat_sync(model: str, msg: str, temperature: float, num_predict: int) -> Tuple[str, int]:
+    """Синхронный streaming-вызов ollama.chat (запускается через asyncio.to_thread).
+
+    Возвращает ``(content, eval_count)``. Стриминг обязателен: без него длинные
+    генерации ARM-solve (промпт ~5k символов + num_predict=4096) идут минутами
+    без единого байта в ответ, и шлюз api.ollama.com закрывает соединение, не
+    дождавшись готового ответа — httpx поднимает ServerDisconnectedError
+    («Server disconnected without sending a response»). С потоковыми чанками
+    соединение живёт, пока модель генерирует, а httpx-таймаут действует на
+    каждый чанк, а не на весь ответ. eval_count приходит только в финальном
+    чанке (done=True) — берём последний ненулевой.
+    """
     client = _get_client()
-    return client.chat(
+    parts: list[str] = []
+    tokens = 0
+    for chunk in client.chat(
         model=model,
         messages=[{"role": "user", "content": msg}],
         options={"temperature": temperature, "num_predict": num_predict},
-    )
+        stream=True,
+    ):
+        content = getattr(getattr(chunk, "message", None), "content", "") or ""
+        if content:
+            parts.append(content)
+        if getattr(chunk, "eval_count", 0):
+            tokens = int(chunk.eval_count)
+    return "".join(parts), tokens
 
 
 async def _ask_ollama(
@@ -103,8 +122,8 @@ async def _ask_ollama(
         return "Ollama API ключ не настроен. Добавьте OLLAMA_API_KEY в .env", 0, True
 
     try:
-        resp = await asyncio.to_thread(_chat_sync, model_id, msg, temperature, num_predict)
-    except Exception as exc:  # ollama.ResponseError / httpx.TimeoutException / прочее
+        content, tokens = await asyncio.to_thread(_chat_sync, model_id, msg, temperature, num_predict)
+    except Exception as exc:  # ollama.ResponseError / httpx исключения / прочее
         # Импорт здесь, чтобы не падать при отсутствии SDK на старых окружениях.
         try:
             from ollama import ResponseError
@@ -116,11 +135,17 @@ async def _ask_ollama(
         text = str(exc).lower()
         if "timeout" in text or "timed out" in text:
             return "Таймаут при подключении к Ollama. Попробуйте позже.", 0, True
+        if "disconnected" in text:
+            logger.warning("Ollama server disconnected for %s (long generation?): %s", model_id, exc)
+            return (
+                "Ollama оборвал соединение, не дождавшись ответа. "
+                "Попробуйте позже или выберите другую модель.",
+                0,
+                True,
+            )
         logger.exception("Ollama request failed for %s: %s", model_id, exc)
         return f"Ошибка Ollama: {exc}", 0, True
 
-    content = getattr(getattr(resp, "message", None), "content", "") or ""
-    tokens = getattr(resp, "eval_count", 0) or 0
     if not content.strip():
         logger.warning("Ollama model %s returned empty content", model_id)
         return f"Модель Ollama ({model_id}) вернула пустой ответ. Попробуйте позже.", 0, True
