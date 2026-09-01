@@ -512,6 +512,11 @@ class AIModelTestRun(models.Model):
     the single-prompt find-error runner (``single``) from the batch-over-tasks
     solver (``batch``); the latter keeps one run for many (task, model) pairs and
     stores the per-task topic/language snapshot on each ``AIModelTestResult``.
+    ``run_params`` — снимок параметров формы на момент запуска (batch: node_ids,
+    model_keys, file_extension, prompt_id, dl_test, ui_language, course_id;
+    single: model_keys, interface_language, programming_language, topic, prompt,
+    task_text, code_text) — для восстановления состояния формы при возврате
+    на страницу прогона (``?run_id=``).
     """
 
     STATUS_RUNNING = "running"
@@ -564,6 +569,9 @@ class AIModelTestRun(models.Model):
     # Сохраняется для отображения в Журнале запросов (режим «Пакетное решение»,
     # поле «id дерева») и для проброса в send-solution как courseId.
     course_id = models.IntegerField(null=True, blank=True, verbose_name="ID курса DL")
+    # Снимок параметров формы на момент запуска — для восстановления состояния
+    # формы при возврате на страницу прогона (?run_id=). См. докстринг модели.
+    run_params = models.JSONField(default=dict, blank=True, verbose_name="Параметры запуска (форма)")
 
     class Meta:
         db_table = "ai_ai_model_test_run"
@@ -753,6 +761,9 @@ class PromptTestRun(models.Model):
 
     Живой прогресс хранится in-memory в ``ai/prompt_test_runner.py``; эта модель
     — источник правды для завершённых/вытесненных прогонов и основа отчётов.
+    ``run_params`` — снимок параметров формы на момент запуска (``case_ids``,
+    фактически разрешённые id кейсов; пустой список = «все активные») — для
+    восстановления состояния формы при возврате на страницу прогона (``?run_id=``).
     """
 
     STATUS_RUNNING = "running"
@@ -782,6 +793,9 @@ class PromptTestRun(models.Model):
     error_message = models.TextField(blank=True, default="", verbose_name="Текст ошибки")
     report = models.JSONField(default=dict, blank=True, verbose_name="Отчёт")
     total_cases = models.PositiveSmallIntegerField(default=0, verbose_name="Всего кейсов")
+    # Снимок параметров формы на момент запуска — для восстановления состояния
+    # формы при возврате на страницу прогона (?run_id=). См. докстринг модели.
+    run_params = models.JSONField(default=dict, blank=True, verbose_name="Параметры запуска (форма)")
 
     class Meta:
         db_table = "ai_prompttest_run"

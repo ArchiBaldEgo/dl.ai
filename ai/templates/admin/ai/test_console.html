@@ -98,6 +98,7 @@
     <form id="tcRunForm" method="post" class="tc-form">
       {% csrf_token %}
       <p>Проверки идут в отдельной копии и не затрагивают рабочую базу. Одновременно возможен только один прогон.</p>
+      {% if not is_super_user %}<div class="arm-warning">Не покидайте страницу, иначе тестирование прервётся.</div>{% endif %}
       <div id="tcRunError" class="tc-error" {% if not error_message %}style="display:none"{% endif %}>{{ error_message }}</div>
       <div id="tcRunProgress" class="tc-status-line">
         <span class="tc-spinner" aria-hidden="true"></span>

@@ -423,12 +423,14 @@ def _run_job_worker(
     topic_name="",
     prompt_id=None,
     prompt_name="",
+    run_params=None,
 ):
     """Фоновый worker для single-run (find-error): последовательно вызывает модели.
 
     Создаёт AIModelTestRun и AIRequestLog в БД, перебирает модели по одной,
     сохраняет результат каждой в AIModelTestResult и в in-memory job.
     При evict (job удалён из памяти) — помечает прогон как failed в БД.
+    ``run_params`` — снимок формы запуска (см. AIModelTestRun.run_params).
     """
     test_run = None
     log = None
@@ -463,6 +465,7 @@ def _run_job_worker(
             topic_name=topic_name or "",
             prompt_id=prompt_id,
             prompt_name=prompt_name or "",
+            run_params=run_params or {},
         )
 
         log = AIRequestLog.objects.create(
@@ -709,9 +712,13 @@ def start_arm_sequential_run(
     topic_name="",
     prompt_id=None,
     prompt_name="",
+    run_params=None,
 ):
     """Запускает single-run ARM в фоновом потоке.
 
+    ``run_params`` — снимок полей формы запуска (models, interface_language,
+    programming_language, topic, prompt, task_text, code_text) — сохраняется в
+    AIModelTestRun.run_params для восстановления формы при возврате (?run_id=).
     Возвращает (run_id, error_message). Если error_message непустой — run_id=None.
     """
     handlers = get_runtime_model_handlers()
@@ -731,6 +738,7 @@ def start_arm_sequential_run(
         "current_model_title": handlers[valid_model_keys[0]]["title"],
         "results": [],
         "report": None,
+        "run_params": run_params or {},
         "created_at_ts": now_ts,
         "updated_at_ts": now_ts,
     }
@@ -749,6 +757,7 @@ def start_arm_sequential_run(
             "topic_name": topic_name,
             "prompt_id": prompt_id,
             "prompt_name": prompt_name,
+            "run_params": run_params or {},
         },
         name=f"arm-sequential-run-{run_id[:8]}",
         daemon=True,
@@ -926,6 +935,7 @@ def _run_batch_job_worker(
     prompt_name="",
     topic_id=None,
     topic_name="",
+    run_params=None,
 ):
     """Daemon worker for a batch-solve run.
 
@@ -933,6 +943,7 @@ def _run_batch_job_worker(
     from DL (get-task-info) and creates/updates a Task in DB via ensure_task.
     Then iterates tasks in the outer loop and models in the inner loop.
     Вердикт ставится строго по DL-тесту (send-solution / get-solution-result).
+    ``run_params`` — снимок формы запуска (см. AIModelTestRun.run_params).
     """
     from .services.task_registry import EXTENSION_TO_LANG, ensure_task, _guess_extension
     from .models import ProgrammingLanguage
@@ -959,6 +970,7 @@ def _run_batch_job_worker(
             prompt_id=prompt_id,
             prompt_name=prompt_name or "",
             course_id=course_id or None,
+            run_params=run_params or {},
         )
         log = AIRequestLog.objects.create(
             user=user,
@@ -1216,6 +1228,10 @@ def _run_batch_job_worker(
         else:
             batch_results = results
         any_ok_batch = any(r.get("status") == "ok" for r in batch_results)
+        # Статус batch-лога: Success строго если ВСЕ пары задача×модель решены
+        # (включая прерванные/частичные прогоны — они всегда Error).
+        solved_pairs = sum(1 for r in batch_results if r.get("verdict") == _VERDICT_SOLVED)
+        all_solved_batch = bool(batch_results) and solved_pairs == len(batch_results)
         # Сводный ответ для журнала: per-model вердикты + ошибки (до 5000 символов).
         batch_summary_parts = []
         for r in batch_results:
@@ -1230,8 +1246,14 @@ def _run_batch_job_worker(
             batch_summary_parts.append(line)
         batch_response_text = "\n".join(batch_summary_parts)[:5000]
         batch_error_message = ""
-        if not any_ok_batch:
-            # Краткая причина: все пары провалены — собираем уникальные ошибки.
+        if not all_solved_batch:
+            # Краткая причина: сколько пар решено; уникальные DL-ошибки в конце.
+            if not batch_results:
+                batch_error_message = "Ни одна пара задача×модель не была выполнена."
+            elif not any_ok_batch:
+                batch_error_message = "Все пары провалены. "
+            else:
+                batch_error_message = f"Решено {solved_pairs} из {len(batch_results)} пар (задача×модель). "
             unique_errs = []
             seen = set()
             for r in batch_results:
@@ -1239,11 +1261,16 @@ def _run_batch_job_worker(
                 if dl_err and dl_err not in seen:
                     seen.add(dl_err)
                     unique_errs.append(dl_err)
-            batch_error_message = "Все пары провалены. Ошибки: " + " | ".join(unique_errs[:5])[:2000]
+            if unique_errs:
+                batch_error_message += "Ошибки: " + " | ".join(unique_errs[:5])[:2000]
+            else:
+                batch_error_message = batch_error_message[:2000]
+        if cancelled:
+            batch_error_message = (batch_error_message + " Прервано пользователем.")[:2000]
         AIRequestLog.objects.filter(pk=log.pk).update(
             received_at=end_time,
             duration_seconds=(end_time - start_time).total_seconds(),
-            status=AIRequestLog.STATUS_SUCCESS if any_ok_batch else AIRequestLog.STATUS_ERROR,
+            status=AIRequestLog.STATUS_SUCCESS if all_solved_batch else AIRequestLog.STATUS_ERROR,
             response_text=batch_response_text,
             error_message=batch_error_message,
         )
@@ -1343,6 +1370,19 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         for k in valid_model_keys
     ]
 
+    # Снимок параметров формы запуска — один раз, на старте (без обновлений в
+    # середине прогона). Хранится в AIModelTestRun.run_params и в живом job для
+    # восстановления формы при возврате на /arm/solve/?run_id=.
+    run_params = {
+        "node_ids": [int(n) for n in node_ids],
+        "model_keys": [m["key"] for m in ordered_models],
+        "file_extension": solve_file_extension or "",
+        "prompt_id": (str(prompt_id) if prompt_id is not None else ""),
+        "dl_test": bool(dl_test),
+        "ui_language": ui_language,
+        "course_id": course_id,
+    }
+
     run_id = uuid.uuid4().hex
     now_ts = time.time()
     total_pairs = len(node_ids) * len(ordered_models)
@@ -1363,6 +1403,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "current_task_name": "",
         "results": [],
         "report": None,
+        "run_params": run_params,
         "created_at_ts": now_ts,
         "updated_at_ts": now_ts,
     }
@@ -1373,7 +1414,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, node_ids, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )
@@ -1420,6 +1461,7 @@ def _snapshot_from_test_run(test_run):
             "current_task_name": current_task_name,
             "results": results,
             "report": report,
+            "run_params": test_run.run_params or {},
             "created_at_ts": test_run.started_at.timestamp() if test_run.started_at else 0.0,
             "updated_at_ts": test_run.finished_at.timestamp() if test_run.finished_at else 0.0,
         }
@@ -1450,6 +1492,7 @@ def _snapshot_from_test_run(test_run):
         "current_model_title": current_title,
         "results": results,
         "report": report,
+        "run_params": test_run.run_params or {},
         "created_at_ts": test_run.started_at.timestamp() if test_run.started_at else 0.0,
         "updated_at_ts": test_run.finished_at.timestamp() if test_run.finished_at else 0.0,
     }
@@ -1503,3 +1546,34 @@ def get_arm_run_snapshot(run_id):
     if test_run.status == AIModelTestRun.STATUS_RUNNING:
         test_run = _mark_orphaned_run_failed(test_run)
     return _snapshot_from_test_run(test_run)
+
+
+def list_running_runs():
+    """Краткие сводки всех running-прогонов ARM (single + batch).
+
+    Для глобального бейджа активных прогонов в админке (superuser): лёгкий
+    список без results/report — только прогресс и ссылка на страницу прогона.
+    """
+    runs = []
+    with _jobs_lock:
+        for job in _jobs.values():
+            if job.get("status") != "running":
+                continue
+            is_batch = job.get("run_type") == "batch"
+            if is_batch:
+                completed = job.get("completed_pairs", 0)
+                total = job.get("total_pairs", 0)
+                current = job.get("current_task_name", "")
+            else:
+                completed = job.get("completed_models", 0)
+                total = job.get("total_models", 0)
+                current = job.get("current_model_title", "")
+            runs.append({
+                "run_id": job.get("run_id", ""),
+                "run_type": "batch" if is_batch else "single",
+                "page_url": "/ai/admin/arm/solve/" if is_batch else "/ai/admin/arm/find-error/",
+                "completed": completed,
+                "total": total,
+                "current": current,
+            })
+    return runs

@@ -353,6 +353,7 @@
       </select>
 
       <input type="hidden" name="dl_test" value="1" id="armDlTest">
+      {% if not is_super_user %}<div class="arm-warning">Не покидайте страницу, иначе тестирование прервётся.</div>{% endif %}
       <div id="armSolveError" class="arm-error"{% if not error_message %} style="display:none;"{% endif %}>{{ error_message }}</div>
       <div id="armSolveProgress" class="arm-success arm-status-line" style="display:none;">
         <span class="arm-spinner" aria-hidden="true"></span>
@@ -832,8 +833,41 @@
       if (initialRun.status === 'running') { setSubmitDisabled(true); pollRunStatus(); }
     }
 
-    // Auto-load tree if course_id is pre-filled (default 1450).
-    if (courseIdInput && courseIdInput.value.trim()) {
+    // Восстановление формы из снимка запуска (AIModelTestRun.run_params):
+    // возврат на страницу прогона (?run_id=) не требует выставлять задачи/
+    // модели/расширение/препромт заново. Отсутствующие в списке значения
+    // (задача ушла из дерева, препромпт скрыт) просто не отмечаются.
+    async function restoreFormFromRunParams(rp) {
+      try {
+        if (rp.course_id) { courseIdInput.value = String(rp.course_id); }
+        const wantedModels = new Set((rp.model_keys || []).map(String));
+        document.querySelectorAll('input.arm-model-check').forEach(function (cb) {
+          cb.checked = wantedModels.has(String(cb.value));
+        });
+        if (rp.file_extension && extensionSelect) {
+          extensionSelect.value = rp.file_extension;
+          await loadPrompts(rp.file_extension);
+          if (rp.prompt_id) { promptSelect.value = String(rp.prompt_id); }
+        }
+        if (courseIdInput.value.trim()) { await loadTree(); }
+        const wantedNodes = new Set((rp.node_ids || []).map(String));
+        let restored = 0;
+        treeContainer.querySelectorAll('input.arm-task-check').forEach(function (cb) {
+          if (wantedNodes.has(String(cb.value))) { cb.checked = true; restored++; }
+        });
+        refreshAllFolderStates();
+        if (wantedNodes.size && restored < wantedNodes.size) {
+          loadTreeMsg.style.color = '#b54708';
+          loadTreeMsg.textContent = 'Восстановлено ' + restored + ' из ' + wantedNodes.size + ' задач';
+        }
+      } catch (e) { /* восстановление — best effort, не ломаем страницу */ }
+    }
+
+    const initialRp = (initialRun && initialRun.run_params) || null;
+    if (initialRp && Object.keys(initialRp).length) {
+      restoreFormFromRunParams(initialRp);
+    } else if (courseIdInput && courseIdInput.value.trim()) {
+      // Auto-load tree if course_id is pre-filled (default 1450).
       loadTree();
     }
   })();

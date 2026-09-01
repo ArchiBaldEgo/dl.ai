@@ -211,7 +211,7 @@ def _per_mode_bucket(results):
     return rows
 
 
-def _run_job_worker(run_id, cases, model, user_id, *, prompt_id=None, ui_language="Русский"):
+def _run_job_worker(run_id, cases, model, user_id, *, prompt_id=None, ui_language="Русский", run_params=None):
     test_run = None
     log = None
     start_time = timezone.now()
@@ -244,6 +244,7 @@ def _run_job_worker(run_id, cases, model, user_id, *, prompt_id=None, ui_languag
             user=user,
             started_at=start_time,
             total_cases=len(cases),
+            run_params=run_params or {},
         )
         log = AIRequestLog.objects.create(
             user=user,
@@ -476,6 +477,9 @@ def start_prompt_test_run(case_ids, model_key, user_id, *, prompt_id=None, ui_la
 
     run_id = uuid.uuid4().hex
     now_ts = time.time()
+    # Снимок формы запуска: фактически разрешённые id кейсов (пустой список =
+    # «все активные»). Для восстановления формы при возврате (?run_id=).
+    run_params = {"case_ids": [c.id for c in cases]}
     job = {
         "run_id": run_id,
         "status": "running",
@@ -485,6 +489,7 @@ def start_prompt_test_run(case_ids, model_key, user_id, *, prompt_id=None, ui_la
         "current_case_name": cases[0].name,
         "results": [],
         "report": None,
+        "run_params": run_params,
         "created_at_ts": now_ts,
         "updated_at_ts": now_ts,
     }
@@ -496,7 +501,7 @@ def start_prompt_test_run(case_ids, model_key, user_id, *, prompt_id=None, ui_la
     worker = threading.Thread(
         target=_run_job_worker,
         args=(run_id, cases, model, user_id),
-        kwargs={"prompt_id": prompt_id, "ui_language": ui_language},
+        kwargs={"prompt_id": prompt_id, "ui_language": ui_language, "run_params": run_params},
         name=f"prompt-test-run-{run_id[:8]}",
         daemon=True,
     )
@@ -532,6 +537,7 @@ def _snapshot_from_test_run(test_run):
         "current_case_name": current_case_name,
         "results": results,
         "report": report,
+        "run_params": test_run.run_params or {},
         "created_at_ts": test_run.started_at.timestamp() if test_run.started_at else 0.0,
         "updated_at_ts": test_run.finished_at.timestamp() if test_run.finished_at else 0.0,
     }
@@ -553,3 +559,24 @@ def get_prompt_test_run_snapshot(run_id):
     except PromptTestRun.DoesNotExist:
         return None
     return _snapshot_from_test_run(test_run)
+
+
+def list_running_runs():
+    """Краткие сводки всех running-прогонов регрессии препромптов.
+
+    Для глобального бейджа активных прогонов в админке (superuser).
+    """
+    runs = []
+    with _jobs_lock:
+        for job in _jobs.values():
+            if job.get("status") != "running":
+                continue
+            runs.append({
+                "run_id": job.get("run_id", ""),
+                "run_type": "prompt_regression",
+                "page_url": "/ai/admin/prompt-regression/",
+                "completed": job.get("completed_cases", 0),
+                "total": job.get("total_cases", 0),
+                "current": job.get("current_case_name", ""),
+            })
+    return runs

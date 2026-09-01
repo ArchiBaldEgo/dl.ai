@@ -198,6 +198,17 @@ def _prepare_arm_run_payload(form_state, user=None):
         "prompt_id": form_state["selected_prompt"] or None,
         "prompt_name": prompt_obj.prompt_name if prompt_obj else "",
         "prompt_name_localized": get_localized_name(prompt_obj, form_state["selected_language_ui"], "prompt_name") if prompt_obj else "",
+        # Снимок формы запуска — для восстановления состояния формы при
+        # возврате на страницу прогона (?run_id=). См. AIModelTestRun.run_params.
+        "run_params": {
+            "model_keys": list(selected_models),
+            "interface_language": form_state["selected_language_ui"],
+            "programming_language": str(form_state["selected_prog_lng"] or ""),
+            "topic": str(form_state["selected_topic"] or ""),
+            "prompt": str(form_state["selected_prompt"] or ""),
+            "task_text": task_text,
+            "code_text": code_text,
+        },
     }, ""
 
 
@@ -212,6 +223,7 @@ def _start_arm_from_payload(run_payload, user_id):
         topic_name=run_payload.get("topic_name_localized") or run_payload.get("topic_name"),
         prompt_id=run_payload.get("prompt_id"),
         prompt_name=run_payload.get("prompt_name_localized") or run_payload.get("prompt_name"),
+        run_params=run_payload.get("run_params") or {},
     )
 
 
@@ -271,6 +283,18 @@ def admin_arm_find_error_view(request):
             report = active_run_snapshot.get("report")
             if active_run_snapshot.get("status") == "failed":
                 error_message = active_run_snapshot.get("error_message") or "ARM процесс завершился с ошибкой"
+            # Восстановление формы: перезаполняем поля тем, что пользователь
+            # отправлял при запуске (снимок в AIModelTestRun.run_params), чтобы
+            # возврат на страницу прогона не требовал ввода заново.
+            rp = active_run_snapshot.get("run_params") or {}
+            if rp:
+                selected_models = rp.get("model_keys") or []
+                selected_language_ui = rp.get("interface_language") or "Русский"
+                selected_prog_lng = str(rp.get("programming_language") or "")
+                selected_topic = str(rp.get("topic") or "")
+                selected_prompt = str(rp.get("prompt") or "")
+                task_text = rp.get("task_text") or ""
+                code_text = rp.get("code_text") or ""
         else:
             error_message = "ARM процесс не найден или уже завершен"
 

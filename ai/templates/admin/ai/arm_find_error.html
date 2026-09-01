@@ -466,6 +466,7 @@
           </div>
         </div>
 
+        {% if not is_super_user %}<div class="arm-warning">Не покидайте страницу, иначе тестирование прервётся.</div>{% endif %}
         <div id="armRunError" class="arm-error"{% if not error_message %} style="display: none;"{% endif %}>{{ error_message }}</div>
         <div id="armRunProgress" class="arm-success arm-status-line" style="display: none;">
           <span class="arm-spinner" aria-hidden="true"></span>

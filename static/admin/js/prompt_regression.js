@@ -289,5 +289,38 @@
     if (initialRun.status === "running") {
       pollRunStatus();
     }
+    // Восстановление формы из снимка запуска (PromptTestRun.run_params):
+    // возврат на страницу прогона (?run_id=) не требует отмечать модель/
+    // препромпт/язык/кейсы заново. case_ids хранит фактически разрешённые id
+    // (пустой список = «все активные» — отмечаем все чекбоксы).
+    restoreFormFromRun(initialRun);
+  }
+
+  function restoreFormFromRun(run) {
+    try {
+      if (run.model_key) {
+        runForm.querySelectorAll('input[name="models"]').forEach(function (cb) {
+          cb.checked = String(cb.value) === String(run.model_key);
+        });
+      }
+      var promptSelect = document.getElementById("prt_prompt");
+      if (promptSelect && run.prompt_id !== null && run.prompt_id !== undefined) {
+        promptSelect.value = String(run.prompt_id || "");
+      }
+      var langSelect = document.getElementById("prt_interface_language");
+      if (langSelect && run.ui_language) {
+        langSelect.value = run.ui_language;
+      }
+      var rp = run.run_params || {};
+      if (rp && Array.isArray(rp.case_ids)) {
+        var wanted = rp.case_ids.map(String);
+        var checkAll = wanted.length === 0;
+        runForm.querySelectorAll('input[name="cases"]').forEach(function (cb) {
+          cb.checked = checkAll || wanted.indexOf(String(cb.value)) !== -1;
+        });
+      }
+    } catch (e) {
+      /* восстановление — best effort, не ломаем страницу */
+    }
   }
 })();

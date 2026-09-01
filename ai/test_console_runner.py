@@ -561,3 +561,26 @@ def get_test_run_snapshot(run_id):
         if job:
             return copy.deepcopy(job)
     return None
+
+
+def list_running_runs():
+    """Краткие сводки всех running-прогонов тестовой консоли.
+
+    Для глобального бейджа активных прогонов в админке (superuser). In-memory
+    only: у тестовой консоли нет БД-модели и параметров формы (восстанавливать
+    нечего).
+    """
+    runs = []
+    with _jobs_lock:
+        for job in _jobs.values():
+            if job.get("status") != "running":
+                continue
+            runs.append({
+                "run_id": job.get("run_id", ""),
+                "run_type": "test_console",
+                "page_url": "/ai/admin/test-console/",
+                "completed": job.get("completed") or 0,
+                "total": job.get("total") or 0,
+                "current": job.get("current") or "",
+            })
+    return runs

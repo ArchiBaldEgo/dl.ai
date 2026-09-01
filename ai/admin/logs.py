@@ -1,13 +1,14 @@
 """Логи запросов к AI-моделям: admin view и кастомная страница списка."""
 
 import logging
+import re
 from datetime import datetime
 
 from django.contrib import admin
 from django.core.paginator import Paginator
 from django.db.models import Q
 from .site import ai_admin_site
-from django.http import HttpResponseForbidden, JsonResponse
+from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
 from django.utils.html import strip_tags
 from django.utils.http import urlencode
@@ -30,6 +31,16 @@ from ..model_health import get_runtime_model_handlers
 from .permissions import can_access_logs
 
 logger = logging.getLogger(__name__)
+
+# Run id из message batch-лога ("Batch solve run <uuid4 hex>"). Единственная
+# копия паттерна: отсюда его читают _batch_run_id_from_log и все потребители.
+_BATCH_RUN_ID_RE = re.compile(r"Batch solve run ([0-9a-f]{32})")
+
+
+def _batch_run_id_from_log(log):
+    """Run id batch-прогона из записи журнала или None."""
+    m = _BATCH_RUN_ID_RE.search(log.message or "")
+    return m.group(1) if m else None
 
 
 def _parse_date(value: str) -> str:
@@ -206,6 +217,11 @@ def admin_request_logs_view(request):
     page_number = request.GET.get("page")
     page_obj = paginator.get_page(page_number)
 
+    # Строки страницы парами (log, batch-контекст) — batch-контекст None для
+    # обычных записей. Так шаблон читает его без dict-lookup по pk.
+    batch_contexts = _batch_log_row_contexts(page_obj.object_list)
+    rows = [(log, batch_contexts.get(log.pk)) for log in page_obj.object_list]
+
     # Build the query string carried by pagination links. ``urlencode`` over a
     # QueryDict *without* doseq stringifies each value-list (``str(['x'])`` =
     # "['x']"), which is how the pagination URL used to carry ``date_from=['']``
@@ -246,6 +262,7 @@ def admin_request_logs_view(request):
         **ai_admin_site.each_context(request),
         "title": "DL.AI: Логи запросов",
         "page_obj": page_obj,
+        "rows": rows,
         "status_choices": AIRequestLog.STATUS_CHOICES,
         "source_choices": AIRequestLog.SOURCE_CHOICES,
         "mode_choices": AIRequestLog.MODE_CHOICES,
@@ -283,14 +300,12 @@ def _build_batch_log_snapshot(log):
     report} для детали batch-solve лога — тот же формат, что потребляет JS
     мини-таблицы в /arm/solve/. Возвращает None, если прогон/результаты не
     найдены (тогда детал отрисуется как обычный текстовый лог)."""
-    import re as _re
-    from ..models import AIModelTestRun, AIModelTestResult
+    from ..models import AIModelTestRun
     from ..arm_runner import _batch_results_from_db, _build_batch_report
 
-    m = _re.search(r"Batch solve run ([0-9a-f]{32})", log.message or "")
-    if not m:
+    run_id_hex = _batch_run_id_from_log(log)
+    if not run_id_hex:
         return None
-    run_id_hex = m.group(1)
     try:
         test_run = AIModelTestRun.objects.get(run_id=run_id_hex)
     except AIModelTestRun.DoesNotExist:
@@ -320,6 +335,156 @@ def _build_batch_log_snapshot(log):
         "results": results,
         "report": report,
     }
+
+
+def _batch_log_row_contexts(logs):
+    """Bulk-контекст batch-строк для страницы списка журнала.
+
+    Для каждой batch-solve записи страницы (одним запросом AIModelTestRun и
+    одним запросом AIModelTestResult с select_related('task')) собирает
+    {log.pk: {run_id, course_id, file_extension, tasks: [{node_id, name}]}}.
+    Отличие от _build_batch_log_snapshot: НЕ тянет raw_response/results —
+    списку нужен только курс/задачи, без N+1 по 50 строкам.
+    """
+    from ..models import AIModelTestRun, AIModelTestResult
+
+    run_ids = {}
+    for log in logs:
+        if not _is_batch_solve_log(log):
+            continue
+        run_id = _batch_run_id_from_log(log)
+        if run_id:
+            run_ids[log.pk] = run_id
+    if not run_ids:
+        return {}
+
+    contexts = {}
+    runs = {
+        r.run_id: r
+        for r in AIModelTestRun.objects.filter(run_id__in=set(run_ids.values()))
+    }
+
+    # Задачи и расширение — по прогону (run_id уникален), затем раскладываем
+    # по строкам журнала: одна запись журнала = один прогон.
+    tasks_by_run = {}
+    ext_by_run = {}
+    for r in (
+        AIModelTestResult.objects.select_related("task", "run")
+        .filter(run__run_id__in=set(run_ids.values()))
+        .order_by("id")
+    ):
+        # r.run_id — это pk FK-поля run; строковый идентификатор прогона —
+        # r.run.run_id (тот же, что в AIModelTestRun.run_id).
+        run_key = r.run.run_id
+        ext = r.file_extension_snapshot or ""
+        if ext and run_key not in ext_by_run:
+            ext_by_run[run_key] = ext
+        node_id = r.task.node_id if r.task else None
+        if node_id:
+            bucket = tasks_by_run.setdefault(run_key, [])
+            if not any(t["node_id"] == node_id for t in bucket):
+                bucket.append({
+                    "node_id": node_id,
+                    "name": r.task.name if r.task else "",
+                })
+
+    for log_pk, run_id in run_ids.items():
+        if runs.get(run_id) is None:
+            continue
+        tasks = tasks_by_run.get(run_id, [])
+        contexts[log_pk] = {
+            "run_id": run_id,
+            "course_id": runs[run_id].course_id,
+            "file_extension": ext_by_run.get(run_id, ""),
+            "tasks": tasks,
+            # Свёрнутые строки для ячейки таблицы (первые 3 + «+N ещё»)
+            # и полный список для title-подсказки.
+            "tasks_preview": _tasks_preview(tasks),
+            "tasks_title": "; ".join(f"{t['name']} ({t['node_id']})" for t in tasks),
+        }
+    return contexts
+
+
+def _tasks_preview(tasks, limit=3):
+    """«Задача (id), Задача (id), Задача (id) +N ещё» — для ячейки списка."""
+    if not tasks:
+        return "—"
+    parts = [f"{t['name']} ({t['node_id']})" for t in tasks[:limit]]
+    if len(tasks) > limit:
+        parts.append(f"+{len(tasks) - limit} ещё")
+    return ", ".join(parts)
+
+
+def _csv_cell(value):
+    """Экранирование ячейки CSV — зеркало csvCell из _ai_batch_results.html."""
+    s = str(value if value is not None else "")
+    if any(ch in s for ch in (';', '"', "\n", "\r")):
+        return '"' + s.replace('"', '""') + '"'
+    return s
+
+
+def _batch_results_csv_lines(results):
+    """Строки CSV-матрицы задача×модель — серверное зеркало клиентской
+    downloadResultsCsv из _ai_batch_results.html (тот же формат: 'Node ID;
+    Задача; <модели>', '+' solved / '-' failed / '?' иначе, ';' разделитель)."""
+    task_map, task_order = {}, []
+    model_map, model_order = {}, []
+    for r in results:
+        tkey = str(r.get("task_node_id") or "")
+        if tkey not in task_map:
+            task_map[tkey] = tkey
+            task_order.append(tkey)
+        mkey = str(r.get("model_key") or r.get("model_title") or "")
+        if mkey not in model_map:
+            model_map[mkey] = r.get("model_title") or mkey
+            model_order.append(mkey)
+
+    matrix = {}
+    for r in results:
+        tkey = str(r.get("task_node_id") or "")
+        mkey = str(r.get("model_key") or r.get("model_title") or "")
+        verdict = r.get("verdict")
+        matrix.setdefault(tkey, {})[mkey] = "+" if verdict == "solved" else ("-" if verdict == "failed" else "?")
+
+    lines = [";".join(["Node ID", "Задача"] + [_csv_cell(model_map[m]) for m in model_order])]
+    for tkey in task_order:
+        # Название задачи берём из первого результата этой задачи.
+        task_name = next(
+            (r.get("task_name") or "" for r in results if str(r.get("task_node_id") or "") == tkey),
+            "",
+        )
+        cells = [_csv_cell(tkey), _csv_cell(task_name)]
+        for m in model_order:
+            cells.append(matrix.get(tkey, {}).get(m, ""))
+        lines.append(";".join(cells))
+    return lines
+
+
+def admin_request_log_csv_view(request, log_id):
+    """CSV-выгрузка результатов batch-solve прогона из записи журнала.
+
+    Тот же файл, что даёт кнопка «Скачать результаты (CSV)» на /arm/solve/:
+    матрица задача×модель (см. _batch_results_csv_lines).
+    """
+    if not can_access_logs(request):
+        return HttpResponseForbidden("Access denied")
+
+    log = AIRequestLog.objects.filter(pk=log_id).first()
+    if log is None:
+        return JsonResponse({"error": "Запись журнала не найдена"}, status=404)
+    if not _is_batch_solve_log(log):
+        return JsonResponse({"error": "CSV доступен только для записей пакетного решения"}, status=404)
+
+    snapshot = _build_batch_log_snapshot(log)
+    if snapshot is None:
+        return JsonResponse({"error": "Прогон ARM не найден в БД"}, status=404)
+    if not snapshot["results"]:
+        return JsonResponse({"error": "В прогоне нет результатов"}, status=404)
+
+    csv_text = "﻿" + "\r\n".join(_batch_results_csv_lines(snapshot["results"]))
+    response = HttpResponse(csv_text, content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="arm_solve_results_{snapshot["run_id"]}.csv"'
+    return response
 
 
 def admin_request_log_detail_view(request, log_id):
@@ -579,7 +744,6 @@ def _rerun_arm_batch(request, log):
     file_extension, prompt_id, language) из результатов прогона и запускает
     новый batch через ``start_batch_solve_run`` с session_id текущего юзера.
     """
-    import re as _re
     from ..models import AIModelTestRun, AIModelTestResult, Prompt
     from ..arm_runner import start_batch_solve_run
     from ..services.task_registry import EXTENSION_TO_LANG, extension_to_language_ids
@@ -588,10 +752,9 @@ def _rerun_arm_batch(request, log):
         return JsonResponse({"error": "Access denied"}, status=403)
 
     # 1. Extract run_id from message.
-    m = _re.search(r"Batch solve run ([0-9a-f]{32})", log.message or "")
-    if not m:
+    run_id_hex = _batch_run_id_from_log(log)
+    if not run_id_hex:
         return JsonResponse({"error": "Не удалось извлечь run_id из лога"}, status=400)
-    run_id_hex = m.group(1)
 
     try:
         test_run = AIModelTestRun.objects.get(run_id=run_id_hex)

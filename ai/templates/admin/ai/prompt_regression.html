@@ -104,6 +104,7 @@
         {% if not test_cases %}<span class="prt-empty">Нет активных тест-кейсов. Создайте их в разделе «Тест-кейсы промптов».</span>{% endif %}
       </div>
 
+      {% if not is_super_user %}<div class="arm-warning">Не покидайте страницу, иначе тестирование прервётся.</div>{% endif %}
       <div id="prtRunError" class="prt-error" {% if not error_message %}style="display:none"{% endif %}>{{ error_message }}</div>
       <div id="prtRunProgress" class="prt-status-line">
         <span class="prt-spinner" aria-hidden="true"></span>

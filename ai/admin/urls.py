@@ -8,6 +8,7 @@
 from django.urls import include, path
 
 from ..views import set_password_view
+from .active_runs import admin_active_runs_view
 from .arm import (
     admin_arm_find_error_view,
     admin_arm_find_error_start_view,
@@ -21,6 +22,7 @@ from .arm import (
     admin_arm_solve_result_download_view,
 )
 from .logs import (
+    admin_request_log_csv_view,
     admin_request_log_detail_view,
     admin_request_log_task_text_view,
     admin_request_logs_view,
@@ -54,6 +56,7 @@ def get_ai_admin_urls():
     """
     custom_urls = [
         path("set-password/", set_password_view, name="set_password_view"),
+        path("active-runs/", ai_admin_site.admin_view(admin_active_runs_view), name="ai_active_runs"),
         path("arm/find-error/start/", ai_admin_site.admin_view(admin_arm_find_error_start_view), name="ai_arm_find_error_start"),
         path("arm/find-error/status/", ai_admin_site.admin_view(admin_arm_find_error_status_view), name="ai_arm_find_error_status"),
         path("arm/solve/start/", ai_admin_site.admin_view(admin_arm_solve_start_view), name="ai_arm_solve_start"),
@@ -76,6 +79,7 @@ def get_ai_admin_urls():
         path("prompts/my/", ai_admin_site.admin_view(admin_my_prompt_view), name="ai_my_prompt"),
         path("updates/", ai_admin_site.admin_view(admin_updates_view), name="ai_updates"),
         path("ai/airequestlog/task-text/", ai_admin_site.admin_view(admin_request_log_task_text_view), name="ai_request_log_task_text"),
+        path("ai/airequestlog/<int:log_id>/csv/", ai_admin_site.admin_view(admin_request_log_csv_view), name="ai_request_log_csv"),
         path("ai/airequestlog/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
         path("ai/airequestlog/<int:log_id>/resend/", ai_admin_site.admin_view(resend_request_view), name="ai_request_log_resend"),
         path("ai/airequestlog/<int:log_id>/rerun-arm/", ai_admin_site.admin_view(rerun_arm_batch_view), name="ai_request_log_rerun_arm"),

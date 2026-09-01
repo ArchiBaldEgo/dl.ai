@@ -140,10 +140,19 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "handler": ollama.ask_Ollama_Kimi_K2_6_Cloud_async,
         "capabilities": _TEXT_ONLY,
     },
-    "Ollama_DeepSeek_V4_Flash_Cloud": {
-        "title": "Ollama DeepSeek V4 Flash",
-        "handler": ollama.ask_Ollama_DeepSeek_V4_Flash_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+    "Ollama_Gpt_Oss_20B_Cloud": {
+        "title": "Ollama GPT-OSS 20B",
+        "handler": ollama.ask_Ollama_Gpt_Oss_20B_Cloud_async,
+        # gpt-oss:cloud (harmony) стримит отдельное поле ``thinking`` (как
+        # glm-5.3-flash:cloud) — помечаем как reasoning, content остаётся чистым.
+        "capabilities": _REASONING,
+    },
+    "Ollama_Gpt_Oss_120B_Cloud": {
+        "title": "Ollama GPT-OSS 120B",
+        "handler": ollama.ask_Ollama_Gpt_Oss_120B_Cloud_async,
+        # gpt-oss:cloud (harmony) стримит отдельное поле ``thinking`` (как
+        # glm-5.3-flash:cloud) — помечаем как reasoning, content остаётся чистым.
+        "capabilities": _REASONING,
     },
 }
 

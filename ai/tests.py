@@ -2101,6 +2101,12 @@ class BatchRunnerIntegrationTests(TestCase):
         self.assertEqual(snapshot["report"]["per_model"][0]["solved"], 2)
         self.assertEqual(snapshot["report"]["per_model"][0]["total"], 2)
 
+        # Все пары решены → batch-лог в журнале получает Success (статус строго
+        # по полному решению всех пар задача×модель).
+        log = AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
+        self.assertEqual(log.status, AIRequestLog.STATUS_SUCCESS)
+        self.assertEqual(log.error_message, "")
+
 
 class TestSolutionOnDlTests(SimpleTestCase):
     """``_test_solution_on_dl``: на 400 от send-solution пробует taskId вместо
@@ -3134,11 +3140,17 @@ class OllamaRegistryTests(SimpleTestCase):
         "Ollama_Nemotron_3_Super_Cloud",
         "Ollama_Kimi_K2_7_Code_Cloud",
         "Ollama_Kimi_K2_6_Cloud",
-        "Ollama_DeepSeek_V4_Flash_Cloud",
+        "Ollama_Gpt_Oss_20B_Cloud",
+        "Ollama_Gpt_Oss_120B_Cloud",
     ]
 
-    # glm-5.3-flash:cloud стримит отдельное поле thinking → reasoning-модель.
-    REASONING_KEYS = {"Ollama_Glm_5_3_Flash_Cloud"}
+    # glm-5.3-flash:cloud и gpt-oss:cloud (harmony) стримят отдельное поле
+    # thinking → reasoning-модели.
+    REASONING_KEYS = {
+        "Ollama_Glm_5_3_Flash_Cloud",
+        "Ollama_Gpt_Oss_20B_Cloud",
+        "Ollama_Gpt_Oss_120B_Cloud",
+    }
 
     def _expected_caps(self, key):
         return {"text": True, "vision": False, "reasoning": key in self.REASONING_KEYS}
@@ -3224,6 +3236,29 @@ class OllamaHandlerTests(SimpleTestCase):
             self.assertEqual(result, ("ok", 1, False))
             _, kwargs = mock_client.chat.call_args
             self.assertEqual(kwargs.get("model"), "glm-5.3-flash:cloud")
+
+    async def test_gpt_oss_cloud_model_ids(self):
+        """gpt-oss ходит через ollama.chat с model='gpt-oss:<size>b-cloud'."""
+        from ai.model_clients import ollama
+        for key, model_id in (
+            ("Ollama_Gpt_Oss_20B_Cloud", "gpt-oss:20b-cloud"),
+            ("Ollama_Gpt_Oss_120B_Cloud", "gpt-oss:120b-cloud"),
+        ):
+            with self.subTest(key=key):
+                with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+                     patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+                     patch("ai.model_clients.ollama.Client") as mock_client_cls:
+                    mock_client = mock_client_cls.return_value
+                    mock_resp = MagicMock()
+                    mock_resp.message.content = "ok"
+                    mock_resp.eval_count = 1
+                    mock_client.chat.return_value = mock_resp
+
+                    handler = getattr(ollama, f"ask_{key}_async")
+                    result = await handler("hi", "client")
+                    self.assertEqual(result, ("ok", 1, False))
+                    _, kwargs = mock_client.chat.call_args
+                    self.assertEqual(kwargs.get("model"), model_id)
 
     async def test_cloud_guard_without_api_key(self):
         """Cloud host + пустой OLLAMA_API_KEY → guard-сообщение, без вызова Client."""
@@ -3523,6 +3558,424 @@ class ArmCancelImmediateDbFlipTests(TestCase):
         run = AIModelTestRun.objects.get(run_id=run_id)
         self.assertEqual(run.status, AIModelTestRun.STATUS_CANCELLED)
         self.assertIsNotNone(run.finished_at)
+
+
+class BatchLogStatusSemanticsTests(TestCase):
+    """Статус batch-лога в журнале: Success строго если ВСЕ пары задача×модель
+    решены; иначе Error с краткой причиной «Решено N из M пар». ``run_params``
+    (снимок формы запуска) сохраняется в AIModelTestRun как есть."""
+
+    def setUp(self):
+        from ai.models import Task
+        self.user = get_user_model().objects.create_user(username="batchstat", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=3101, task_id=3201, name="A", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.t2 = Task.objects.create(
+            node_id=3102, task_id=3202, name="B", statement="y",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+    def _run_batch(self, dl_mock, run_id, run_params=None):
+        """Прогон batch-воркера синхронно (как BatchRunnerIntegrationTests)."""
+        import time as _t
+        from ai import arm_runner
+
+        async def fake_handler(messages, conv_id):
+            return ("program a; begin writeln(1); end.", 12)
+
+        ordered_models = [{"key": "FakeModel", "title": "FakeModel", "handler": fake_handler}]
+        node_ids = [self.t1.node_id, self.t2.node_id]
+        now_ts = _t.time()
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 1,
+            "total_pairs": 2, "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "FakeModel", "current_model_title": "FakeModel",
+            "current_task_node_id": "", "current_task_name": "",
+            "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", dl_mock):
+                arm_runner._run_batch_job_worker(
+                    run_id, node_ids, ordered_models, self.user.id, "DLSID-1",
+                    ui_language="Русский", dl_test=True, run_params=run_params,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        return AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
+
+    @staticmethod
+    def _dl(verdict):
+        def dl_mock(sid, node_id, code, ext, **kw):
+            return {
+                "verdict": verdict if node_id == 3101 else "failed",
+                "comment": "c", "submit_error": "", "queue_id": 1,
+                "code_sent": code,
+            }
+        return dl_mock
+
+    def test_mixed_run_logs_error(self):
+        """1 решена из 2 пар → Error + «Решено 1 из 2 пар»."""
+        log = self._run_batch(self._dl("solved"), "batch-status-mixed-1")
+        self.assertEqual(log.status, AIRequestLog.STATUS_ERROR)
+        self.assertIn("Решено 1 из 2 пар", log.error_message)
+
+    def test_all_failed_logs_error(self):
+        """Ни одна пара не решена → Error + «Все пары провалены»."""
+        log = self._run_batch(self._dl("failed"), "batch-status-fail-1")
+        self.assertEqual(log.status, AIRequestLog.STATUS_ERROR)
+        self.assertIn("Все пары провалены", log.error_message)
+
+    def test_all_solved_logs_success(self):
+        """Все пары решены → Success, без сообщения об ошибке."""
+        def dl_ok(sid, node_id, code, ext, **kw):
+            return {
+                "verdict": "solved", "comment": "ok", "submit_error": "",
+                "queue_id": 1, "code_sent": code,
+            }
+        log = self._run_batch(dl_ok, "batch-status-ok-1")
+        self.assertEqual(log.status, AIRequestLog.STATUS_SUCCESS)
+        self.assertEqual(log.error_message, "")
+
+    def test_run_params_persisted(self):
+        """Снимок формы запуска пишется в AIModelTestRun.run_params как есть."""
+        from ai.models import AIModelTestRun
+        rp = {
+            "node_ids": [3101, 3102], "model_keys": ["FakeModel"],
+            "file_extension": ".pas", "prompt_id": "",
+            "dl_test": True, "ui_language": "Русский", "course_id": 1450,
+        }
+        self._run_batch(self._dl("solved"), "batch-params-1", run_params=rp)
+        run = AIModelTestRun.objects.get(run_id="batch-params-1")
+        self.assertEqual(run.run_params, rp)
+
+
+class BatchLogRowContextsTests(TestCase):
+    """Bulk-контекст batch-строк списка журнала (_batch_log_row_contexts):
+    course_id/задачи/расширение одним запросом, без N+1 по 50 строкам."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun, AIModelTestResult, Task
+        self.user = get_user_model().objects.create_user(username="rowctx", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=5001, task_id=6001, name="A", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.t2 = Task.objects.create(
+            node_id=5002, task_id=6002, name="B", statement="y",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.run_id = "c" * 32
+        self.test_run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED,
+            course_id=1450,
+        )
+        for task, verdict in ((self.t1, "solved"), (self.t2, "failed")):
+            AIModelTestResult.objects.create(
+                run=self.test_run, task=task,
+                model_key="FakeModel", model_title="FakeModel",
+                status="ok", verdict=verdict,
+                duration_seconds=1.0, tokens=10,
+                short_response="r", raw_response="raw", code="code",
+                dl_comment="c", dl_queue_id=1,
+                file_extension_snapshot=".pas",
+                topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+            )
+
+    def _make_log(self, mode, message):
+        return AIRequestLog.objects.create(
+            user=self.user, source="arm", mode=mode, message=message,
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+
+    def test_context_fields(self):
+        from ai.admin.logs import _batch_log_row_contexts
+        log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
+        ctx = _batch_log_row_contexts([log])
+        self.assertIn(log.pk, ctx)
+        c = ctx[log.pk]
+        self.assertEqual(c["run_id"], self.run_id)
+        self.assertEqual(c["course_id"], 1450)
+        self.assertEqual(c["file_extension"], ".pas")
+        self.assertEqual([t["node_id"] for t in c["tasks"]], [5001, 5002])
+        self.assertEqual(c["tasks"][0]["name"], "A")
+        self.assertEqual(c["tasks_preview"], "A (5001), B (5002)")
+        self.assertIn("A (5001); B (5002)", c["tasks_title"])
+
+    def test_legacy_log_included(self):
+        """Старый batch-лог (mode=solve + sentinel) тоже получает контекст."""
+        from ai.admin.logs import _batch_log_row_contexts
+        log = self._make_log("solve", f"Batch solve run {self.run_id}")
+        self.assertIn(log.pk, _batch_log_row_contexts([log]))
+
+    def test_plain_log_ignored(self):
+        from ai.admin.logs import _batch_log_row_contexts
+        plain = self._make_log("chat", "hello")
+        self.assertEqual(_batch_log_row_contexts([plain]), {})
+
+    def test_missing_run_skipped(self):
+        """run_id из сообщения отсутствует в БД → контекста нет."""
+        from ai.admin.logs import _batch_log_row_contexts
+        log = self._make_log("batch_solve", f"Batch solve run {'d' * 32}")
+        self.assertEqual(_batch_log_row_contexts([log]), {})
+
+
+class RequestLogCsvTests(TestCase):
+    """CSV-выгрузка результатов batch-прогона из записи журнала:
+    серверное зеркало клиентской downloadResultsCsv с /arm/solve/."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun, AIModelTestResult, Task
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="csv_admin", password="x", email="a@t.com",
+        )
+        self.normal_user = get_user_model().objects.create_user(username="csv_user", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=5101, task_id=6101, name="A", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.run_id = "e" * 32
+        self.test_run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED,
+            course_id=1450,
+        )
+        for task, verdict in ((self.t1, "solved"), (self.t1, "failed")):
+            AIModelTestResult.objects.create(
+                run=self.test_run, task=task,
+                model_key="M1" if verdict == "solved" else "M2",
+                model_title="Model One" if verdict == "solved" else "Model Two",
+                status="ok", verdict=verdict,
+                duration_seconds=1.0, tokens=10,
+                short_response="r", raw_response="raw", code="code",
+                dl_comment="c", dl_queue_id=1,
+                file_extension_snapshot=".pas",
+                topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+            )
+        self.log = AIRequestLog.objects.create(
+            user=self.superuser, source="arm", mode="batch_solve",
+            message=f"Batch solve run {self.run_id}",
+            status=AIRequestLog.STATUS_ERROR, sent_at=timezone.now(),
+        )
+        self.plain_log = AIRequestLog.objects.create(
+            user=self.superuser, source="chat", mode="chat", message="hi",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+
+    def test_csv_lines_format(self):
+        """Чистый формат: ';' разделитель, '+'/'-'/'?' вердикты, экранирование."""
+        from ai.admin.logs import _batch_results_csv_lines
+        results = [
+            {"task_node_id": 1001, "task_name": 'Задача; "цитата"',
+             "model_key": "M1", "model_title": "Model One", "verdict": "solved"},
+            {"task_node_id": 1001, "task_name": 'Задача; "цитата"',
+             "model_key": "M2", "model_title": "Model Two", "verdict": "failed"},
+            {"task_node_id": 1002, "task_name": "B",
+             "model_key": "M1", "model_title": "Model One", "verdict": None},
+        ]
+        lines = _batch_results_csv_lines(results)
+        self.assertEqual(
+            lines,
+            [
+                "Node ID;Задача;Model One;Model Two",
+                '1001;"Задача; ""цитата""";+;-',
+                "1002;B;?;",
+            ],
+        )
+
+    def test_csv_endpoint_superuser(self):
+        from ai.admin.logs import admin_request_log_csv_view
+        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.log.id}/csv/")
+        request.user = self.superuser
+        response = admin_request_log_csv_view(request, self.log.id)
+        self.assertEqual(response.status_code, 200)
+        # BOM + CRLF + матрица + attachment.
+        self.assertTrue(response.content.startswith(b"\xef\xbb\xbf"))
+        first_line = response.content.split(b"\r\n")[0]
+        self.assertTrue(first_line.startswith(b"\xef\xbb\xbfNode ID;"))
+        self.assertIn(b"+", response.content)
+        self.assertIn(b"-", response.content)
+        self.assertIn(b"Model One", response.content)
+        self.assertTrue(
+            response["Content-Disposition"].startswith(
+                f'attachment; filename="arm_solve_results_{self.run_id}.csv'
+            )
+        )
+
+    def test_csv_endpoint_non_batch_404(self):
+        from ai.admin.logs import admin_request_log_csv_view
+        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.plain_log.id}/csv/")
+        request.user = self.superuser
+        response = admin_request_log_csv_view(request, self.plain_log.id)
+        self.assertEqual(response.status_code, 404)
+
+    def test_csv_endpoint_non_staff_403(self):
+        from ai.admin.logs import admin_request_log_csv_view
+        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.log.id}/csv/")
+        request.user = self.normal_user
+        response = admin_request_log_csv_view(request, self.log.id)
+        self.assertEqual(response.status_code, 403)
+
+
+class ActiveRunsBadgeTests(TestCase):
+    """/ai/admin/active-runs/: лёгкий свод всех running-прогонов для бейджа
+    суперпользователя (arm solve/find-error + регрессия + тест-консоль)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="badge_admin", password="x", email="a@t.com",
+        )
+        self.normal_user = get_user_model().objects.create_user(username="badge_user", password="x")
+
+    def _make_request(self, user):
+        request = self.factory.get("/ai/admin/active-runs/")
+        request.user = user
+        return request
+
+    def test_superuser_gets_all_run_types(self):
+        from ai import arm_runner, prompt_test_runner, test_console_runner
+        from ai.admin.active_runs import admin_active_runs_view
+        arm_runner._jobs["badge-batch"] = {
+            "run_id": "badge-batch", "run_type": "batch", "status": "running",
+            "completed_pairs": 1, "total_pairs": 3, "current_task_name": "A",
+        }
+        arm_runner._jobs["badge-single"] = {
+            "run_id": "badge-single", "run_type": "single", "status": "running",
+            "completed_models": 0, "total_models": 2,
+            "current_model_title": "FakeModel",
+        }
+        prompt_test_runner._jobs["badge-reg"] = {
+            "run_id": "badge-reg", "status": "running",
+            "completed_cases": 1, "total_cases": 4, "current_case_name": "case1",
+        }
+        test_console_runner._jobs["badge-console"] = {
+            "run_id": "badge-console", "status": "running",
+            "completed": 1, "total": 2, "current": "ai.tests",
+        }
+        try:
+            response = admin_active_runs_view(self._make_request(self.superuser))
+            data = json.loads(response.content)
+            self.assertTrue(data["ok"])
+            by_type = {r["run_type"]: r for r in data["runs"]}
+            self.assertEqual(
+                set(by_type),
+                {"batch", "single", "prompt_regression", "test_console"},
+            )
+            self.assertEqual(by_type["batch"]["page_url"], "/ai/admin/arm/solve/")
+            self.assertEqual(by_type["single"]["page_url"], "/ai/admin/arm/find-error/")
+            self.assertEqual(by_type["prompt_regression"]["page_url"], "/ai/admin/prompt-regression/")
+            self.assertEqual(by_type["test_console"]["page_url"], "/ai/admin/test-console/")
+            self.assertEqual(by_type["batch"]["completed"], 1)
+            self.assertEqual(by_type["batch"]["total"], 3)
+            self.assertEqual(by_type["batch"]["current"], "A")
+        finally:
+            arm_runner._jobs.pop("badge-batch", None)
+            arm_runner._jobs.pop("badge-single", None)
+            prompt_test_runner._jobs.pop("badge-reg", None)
+            test_console_runner._jobs.pop("badge-console", None)
+
+    def test_completed_jobs_skipped(self):
+        """Завершённые джобы в бейдж не попадают."""
+        from ai import arm_runner, test_console_runner
+        from ai.admin.active_runs import admin_active_runs_view
+        arm_runner._jobs["badge-done"] = {
+            "run_id": "badge-done", "run_type": "batch", "status": "completed",
+            "completed_pairs": 2, "total_pairs": 2, "current_task_name": "",
+        }
+        test_console_runner._jobs["badge-console-done"] = {
+            "run_id": "badge-console-done", "status": "completed",
+            "completed": 2, "total": 2, "current": "",
+        }
+        try:
+            response = admin_active_runs_view(self._make_request(self.superuser))
+            data = json.loads(response.content)
+            self.assertEqual(data["runs"], [])
+        finally:
+            arm_runner._jobs.pop("badge-done", None)
+            test_console_runner._jobs.pop("badge-console-done", None)
+
+    def test_non_superuser_forbidden(self):
+        from ai.admin.active_runs import admin_active_runs_view
+        response = admin_active_runs_view(self._make_request(self.normal_user))
+        self.assertEqual(response.status_code, 403)
+
+
+class ArmFindErrorRestoreTests(TestCase):
+    """Возврат на /ai/admin/arm/find-error/?run_id=: форма восстанавливается
+    из AIModelTestRun.run_params (модели, язык, тема, промпт, тексты)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="fe_admin", password="x", email="a@t.com",
+        )
+
+    def test_run_params_prefill(self):
+        from ai.admin.arm import admin_arm_find_error_view
+        from ai.models import AIModelTestRun
+        run_id = "find-error-restore-1"
+        AIModelTestRun.objects.create(
+            run_id=run_id, run_type=AIModelTestRun.RUN_TYPE_SINGLE,
+            status=AIModelTestRun.STATUS_COMPLETED, user=self.superuser,
+            run_params={
+                "model_keys": ["FakeModel"], "interface_language": "English",
+                "programming_language": "Pascal", "topic": "Тесты",
+                "prompt": "Промпт", "task_text": "Текст задачи",
+                "code_text": "Код задачи",
+            },
+        )
+        request = self.factory.get(f"/ai/admin/arm/find-error/", {"run_id": run_id})
+        request.user = self.superuser
+        request.session = {}
+        response = admin_arm_find_error_view(request)
+        ctx = response.context_data
+        self.assertEqual(ctx["selected_models"], ["FakeModel"])
+        self.assertEqual(ctx["selected_language_ui"], "English")
+        self.assertEqual(ctx["selected_prog_lng"], "Pascal")
+        self.assertEqual(ctx["selected_topic"], "Тесты")
+        self.assertEqual(ctx["selected_prompt"], "Промпт")
+        self.assertEqual(ctx["task_text"], "Текст задачи")
+        self.assertEqual(ctx["code_text"], "Код задачи")
+        # Снапшот тоже содержит run_params — JS-поллинг не нужен для restore.
+        self.assertEqual(
+            ctx["active_run_snapshot"]["run_params"]["model_keys"], ["FakeModel"],
+        )
+
+
+class EachContextSuperUserFlagTests(TestCase):
+    """each_context отдаёт is_super_user: бейдж прогонов только суперу."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="ctx_admin", password="x", email="a@t.com",
+        )
+        self.normal_user = get_user_model().objects.create_user(username="ctx_user", password="x")
+
+    def _each_context(self, user):
+        from ai.admin.site import ai_admin_site
+        request = self.factory.get("/ai/admin/")
+        request.user = user
+        request.session = {}
+        return ai_admin_site.each_context(request)
+
+    def test_is_super_user_flag(self):
+        self.assertTrue(self._each_context(self.superuser)["is_super_user"])
+        self.assertFalse(self._each_context(self.normal_user)["is_super_user"])
 
 
 # Хелпер: запустить async-корутину из синхронного test-метода (в sync-методах

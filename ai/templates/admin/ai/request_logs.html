@@ -265,6 +265,46 @@
     document.addEventListener('keydown', function (event) {
       if (event.key === 'Escape') closeModal();
     });
+
+    // Перезапуск batch-solve прогона из строки журнала: rerun-arm — JSON
+    // endpoint, поэтому POST идёт через fetch, затем переход на страницу
+    // нового прогона (как в детали записи).
+    document.querySelectorAll('.ai-batch-rerun-form').forEach(function (form) {
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        const statusEl = form.querySelector('.ai-batch-rerun-status');
+        const btn = form.querySelector('button[type="submit"]');
+        const csrfInput = form.querySelector('input[name="csrfmiddlewaretoken"]');
+        btn.disabled = true;
+        btn.textContent = 'Отправка...';
+        statusEl.textContent = '';
+        fetch(form.action, {
+          method: 'POST',
+          headers: {
+            'X-CSRFToken': (csrfInput && csrfInput.value) || '',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({}),
+          credentials: 'same-origin',
+        })
+          .then(function (resp) { return resp.json(); })
+          .then(function (data) {
+            if (data.run_id) {
+              statusEl.textContent = 'Перезапуск ARM...';
+              window.location.href = '/ai/admin/arm/solve/?run_id=' + encodeURIComponent(data.run_id);
+            } else {
+              btn.disabled = false;
+              btn.textContent = '↻ Повторить запрос';
+              statusEl.textContent = 'Ошибка: ' + (data.error || 'Неизвестная ошибка');
+            }
+          })
+          .catch(function (err) {
+            btn.disabled = false;
+            btn.textContent = '↻ Повторить запрос';
+            statusEl.textContent = 'Сетевая ошибка: ' + err.message;
+          });
+      });
+    });
   });
 </script>
 
@@ -331,11 +371,14 @@
     <table class="ai-logs-table">
       <thead>
         <tr>
+          <th>ID</th>
+          <th>Источник</th>
           <th>Отправлен</th>
           <th>Получен</th>
           <th>Кто отправлял</th>
           <th>Язык</th>
           <th>Тема</th>
+          <th>ID дерева</th>
           <th>Задача</th>
           <th>Препромпт</th>
           <th>Модель</th>
@@ -347,9 +390,12 @@
       </thead>
       <tbody>
         {% timezone moscow_tz %}
-        {% for log in page_obj.object_list %}
+        {% for log, batch in rows %}
           {# === Основная строка (кликабельная — раскрывает детали) === #}
+          {# batch — не-None только для записей batch-solve (/arm/solve/) #}
           <tr class="ai-log-row" data-log-id="{{ log.id }}">
+            <td>{{ log.id }}</td>
+            <td>{{ log.get_source_display|default:"—" }}</td>
             <td>{{ log.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>{{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>
@@ -362,7 +408,12 @@
             <td>{{ log.programming_language_name|default:"—" }}</td>
             <td>{{ log.topic_name|default:"—" }}</td>
             <td>
-              {% if log.task_node_id %}
+              {% if batch %}{{ batch.course_id|default:"—" }}{% else %}—{% endif %}
+            </td>
+            <td>
+              {% if batch %}
+                <span title="{{ batch.tasks_title }}">{{ batch.tasks_preview }}</span>
+              {% elif log.task_node_id %}
                 <button type="button" class="ai-log-task-link" data-task-node="{{ log.task_node_id }}" title="Показать условие задачи">{{ log.task_name|default:log.task_node_id }}</button>
               {% else %}
                 {{ log.task_name|default:"—" }}
@@ -386,16 +437,21 @@
             </td>
             <td>{{ log.duration_seconds|floatformat:0|default:"—" }}</td>
             <td>
-              <div class="ai-log-response-preview" title="{{ log.response_text|default:'' }}">{{ log.response_text|truncatechars:80|default:"—" }}</div>
+              {% if batch %}
+                {# Текст запроса/ответа для batch-строк не показываем (ТЗ) #}
+                —
+              {% else %}
+                <div class="ai-log-response-preview" title="{{ log.response_text|default:'' }}">{{ log.response_text|truncatechars:80|default:"—" }}</div>
+              {% endif %}
             </td>
           </tr>
 
           {# === Скрытая строка с деталями (аккордеон) === #}
           <tr class="ai-log-detail-row">
-            <td class="ai-log-detail-cell" colspan="12">
+            <td class="ai-log-detail-cell" colspan="15">
               <div class="ai-log-detail-content">
 
-                {# Левая колонка: метаданные + текст запроса #}
+                {# Левая колонка: метаданные (+ задачи прогона для batch) #}
                 <div class="ai-log-detail-section">
                   <h4>Параметры запроса</h4>
                   <div class="ai-log-detail-meta">
@@ -404,8 +460,8 @@
                     <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
                     <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
                     <div><strong>Статус:</strong> {{ log.get_status_display }}</div>
-                    <div><strong>Время ответа:</strong> {{ log.duration_seconds|floatformat:2|default:"—" }} с</div>
-                    <div><strong>Токенов:</strong> {{ log.tokens|default:"—" }}</div>
+                    <div><strong>Время ответа:</strong> {{ log.duration_seconds|floatformat:2|default:"—" }} с{% if batch %} (общее){% endif %}</div>
+                    {% if not batch %}<div><strong>Токенов:</strong> {{ log.tokens|default:"—" }}</div>{% endif %}
                     <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y:H:i:s" }}</div>
                     <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</div>
                     <div><strong>Кто:</strong>
@@ -417,13 +473,24 @@
                     </div>
                     <div><strong>Язык:</strong> {{ log.programming_language_name|default:"—" }}</div>
                     <div><strong>Тема:</strong> {{ log.topic_name|default:"—" }}</div>
-                    <div><strong>Задача:</strong>
-                      {% if log.task_node_id %}
-                        <button type="button" class="ai-log-task-link" data-task-node="{{ log.task_node_id }}" title="Показать условие задачи">{{ log.task_name|default:log.task_node_id }}</button>
-                      {% else %}
-                        {{ log.task_name|default:"—" }}
-                      {% endif %}
-                    </div>
+                    {% if batch %}
+                      <div><strong>ID дерева:</strong> {{ batch.course_id|default:"—" }}</div>
+                      <div><strong>Задачи ({{ batch.tasks|length }}):</strong>
+                        {% for t in batch.tasks %}
+                          <div>{{ t.name }} ({{ t.node_id }})</div>
+                        {% empty %}
+                          —
+                        {% endfor %}
+                      </div>
+                    {% else %}
+                      <div><strong>Задача:</strong>
+                        {% if log.task_node_id %}
+                          <button type="button" class="ai-log-task-link" data-task-node="{{ log.task_node_id }}" title="Показать условие задачи">{{ log.task_name|default:log.task_node_id }}</button>
+                        {% else %}
+                          {{ log.task_name|default:"—" }}
+                        {% endif %}
+                      </div>
+                    {% endif %}
                     <div><strong>Препромпт:</strong>
                       {% if log.prompt_id %}
                         <a href="/ai/admin/ai/prompt/{{ log.prompt_id }}/change/" target="_blank" rel="noopener">{{ log.prompt_name|default:"—" }}</a>
@@ -434,16 +501,28 @@
                   </div>
                 </div>
 
-                <div class="ai-log-detail-section">
-                  <h4>Текст запроса</h4>
-                  <pre>{{ log.message|default:"(пусто)" }}</pre>
-                </div>
+                {% if batch %}
+                  {# Для batch-строк текст запроса и ответ модели не отображаем (ТЗ); #}
+                  {# подробные результаты — в деталях записи (/airequestlog/<id>/). #}
+                  <div class="ai-log-detail-section">
+                    <h4>Прогон</h4>
+                    <div class="ai-log-detail-meta">
+                      <div><strong>Расширение:</strong> {{ batch.file_extension|default:"—" }}</div>
+                      <div><strong>Детали:</strong> <a href="{% url 'ai_request_log_detail' log.id %}">результаты прогона →</a></div>
+                    </div>
+                  </div>
+                {% else %}
+                  <div class="ai-log-detail-section">
+                    <h4>Текст запроса</h4>
+                    <pre>{{ log.message|default:"(пусто)" }}</pre>
+                  </div>
 
-                {# Правая колонка: ответ модели + ошибки #}
-                <div class="ai-log-detail-section">
-                  <h4>Ответ модели</h4>
-                  <pre>{{ log.response_text|default:"(пусто)" }}</pre>
-                </div>
+                  {# Правая колонка: ответ модели + ошибки #}
+                  <div class="ai-log-detail-section">
+                    <h4>Ответ модели</h4>
+                    <pre>{{ log.response_text|default:"(пусто)" }}</pre>
+                  </div>
+                {% endif %}
 
                 {% if log.error_message %}
                 <div class="ai-log-detail-section">
@@ -454,10 +533,19 @@
 
                 {# Действия === #}
                 <div class="ai-log-detail-actions">
-                  <form method="post" action="{% url 'ai_request_log_resend' log.id %}">
-                    {% csrf_token %}
-                    <button type="submit" class="resend-btn">↻ Повторить запрос</button>
-                  </form>
+                  {% if batch %}
+                    <a class="resend-btn" href="{% url 'ai_request_log_csv' log.id %}">Скачать CSV</a>
+                    <form method="post" class="ai-batch-rerun-form" action="{% url 'ai_request_log_rerun_arm' log.id %}">
+                      {% csrf_token %}
+                      <button type="submit" class="resend-btn">↻ Повторить запрос</button>
+                      <span class="ai-batch-rerun-status"></span>
+                    </form>
+                  {% else %}
+                    <form method="post" action="{% url 'ai_request_log_resend' log.id %}">
+                      {% csrf_token %}
+                      <button type="submit" class="resend-btn">↻ Повторить запрос</button>
+                    </form>
+                  {% endif %}
                 </div>
 
               </div>
