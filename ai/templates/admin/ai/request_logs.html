@@ -31,10 +31,6 @@
   }
   .ai-log-row { cursor: pointer; }
   .ai-log-row:hover { background: var(--selected-row); }
-  .ai-log-response-preview {
-    max-width: 200px; overflow: hidden; text-overflow: ellipsis;
-    white-space: nowrap; color: var(--body-quiet-color); font-size: 12px;
-  }
   .ai-log-task-link {
     background: none; border: none; padding: 0;
     color: var(--link-fg); cursor: pointer;
@@ -378,14 +374,11 @@
           <th>Кто отправлял</th>
           <th>Язык</th>
           <th>Тема</th>
-          <th>ID дерева</th>
-          <th>Задача</th>
           <th>Препромпт</th>
           <th>Модель</th>
           <th>Статус</th>
           <th>Режим</th>
           <th>с</th>
-          <th>Ответ</th>
         </tr>
       </thead>
       <tbody>
@@ -408,18 +401,6 @@
             <td>{{ log.programming_language_name|default:"—" }}</td>
             <td>{{ log.topic_name|default:"—" }}</td>
             <td>
-              {% if batch %}{{ batch.course_id|default:"—" }}{% else %}—{% endif %}
-            </td>
-            <td>
-              {% if batch %}
-                <span title="{{ batch.tasks_title }}">{{ batch.tasks_preview }}</span>
-              {% elif log.task_node_id %}
-                <button type="button" class="ai-log-task-link" data-task-node="{{ log.task_node_id }}" title="Показать условие задачи">{{ log.task_name|default:log.task_node_id }}</button>
-              {% else %}
-                {{ log.task_name|default:"—" }}
-              {% endif %}
-            </td>
-            <td>
               {% if log.prompt_id %}
                 <a href="/ai/admin/ai/prompt/{{ log.prompt_id }}/change/" target="_blank" rel="noopener">{{ log.prompt_name|default:"—" }}</a>
               {% else %}
@@ -436,19 +417,11 @@
               {{ log.get_mode_display|default:"—" }}
             </td>
             <td>{{ log.duration_seconds|floatformat:0|default:"—" }}</td>
-            <td>
-              {% if batch %}
-                {# Текст запроса/ответа для batch-строк не показываем (ТЗ) #}
-                —
-              {% else %}
-                <div class="ai-log-response-preview" title="{{ log.response_text|default:'' }}">{{ log.response_text|truncatechars:80|default:"—" }}</div>
-              {% endif %}
-            </td>
           </tr>
 
           {# === Скрытая строка с деталями (аккордеон) === #}
           <tr class="ai-log-detail-row">
-            <td class="ai-log-detail-cell" colspan="15">
+            <td class="ai-log-detail-cell" colspan="12">
               <div class="ai-log-detail-content">
 
                 {# Левая колонка: метаданные (+ задачи прогона для batch) #}

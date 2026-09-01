@@ -3908,6 +3908,32 @@ class ActiveRunsBadgeTests(TestCase):
             arm_runner._jobs.pop("badge-done", None)
             test_console_runner._jobs.pop("badge-console-done", None)
 
+    def test_model_health_refresh_included(self):
+        """Обновление состояния моделей (health-sweep) тоже попадает в бейдж."""
+        from ai.admin.active_runs import admin_active_runs_view
+        with patch(
+            "ai.model_health.is_model_health_refresh_running", return_value=True
+        ):
+            response = admin_active_runs_view(self._make_request(self.superuser))
+            data = json.loads(response.content)
+            model_runs = [r for r in data["runs"] if r["run_type"] == "model_status"]
+            self.assertEqual(len(model_runs), 1)
+            self.assertEqual(model_runs[0]["page_url"], "/ai/admin/arm/models/")
+            # Прогресса N/M у sweep'а нет — только факт «выполняется».
+            self.assertEqual(model_runs[0]["total"], 0)
+
+    def test_model_health_refresh_absent_when_idle(self):
+        """Без идущего health-sweep пункта model_status нет."""
+        from ai.admin.active_runs import admin_active_runs_view
+        with patch(
+            "ai.model_health.is_model_health_refresh_running", return_value=False
+        ):
+            response = admin_active_runs_view(self._make_request(self.superuser))
+            data = json.loads(response.content)
+            self.assertEqual(
+                [r for r in data["runs"] if r["run_type"] == "model_status"], []
+            )
+
     def test_non_superuser_forbidden(self):
         from ai.admin.active_runs import admin_active_runs_view
         response = admin_active_runs_view(self._make_request(self.normal_user))

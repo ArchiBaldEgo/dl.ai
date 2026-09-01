@@ -40,7 +40,8 @@ INSTALLED_APPS so this file is not shadowed by the stock admin/base_site.html
       batch: 'Пакетное решение',
       single: 'Поиск ошибки',
       prompt_regression: 'Регрессионные тесты',
-      test_console: 'Тестовая консоль'
+      test_console: 'Тестовая консоль',
+      model_status: 'Обновление моделей'
     };
     var POLL_INTERVAL_MS = 15000;
     var badge = document.getElementById('ai-active-runs-badge');
@@ -52,7 +53,11 @@ INSTALLED_APPS so this file is not shadowed by the stock admin/base_site.html
       return div.innerHTML;
     }
 
-    function render(runs) {
+    function render(allRuns) {
+      // На странице самого прогона прогресс уже отображается — бейдж дублирует.
+      var runs = allRuns.filter(function (run) {
+        return run.page_url !== window.location.pathname;
+      });
       if (!runs.length) {
         badge.hidden = true;
         badge.innerHTML = '';

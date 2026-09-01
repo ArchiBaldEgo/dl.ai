@@ -1,15 +1,16 @@
 """Глобальный бейдж активных прогонов для суперпользователя.
 
-Прогон (batch-solve, find-error, регрессия препромптов, тестовая консоль)
-живёт в фоновом потоке сервера и не прерывается навигацией по админке.
-Этот endpoint даёт бейджу в ``base_site.html`` единый лёгкий список всех
-running-прогонов (без results/report) — прогресс и ссылка на страницу.
-Только superuser; путь под ``/ai/admin/`` — RateLimitMiddleware его не считает.
+Прогон (batch-solve, find-error, регрессия препромптов, тестовая консоль,
+обновление состояния моделей) живёт в фоновом потоке сервера и не
+прерывается навигацией по админке. Этот endpoint даёт бейджу в
+``base_site.html`` единый лёгкий список всех running-прогонов (без
+results/report) — прогресс и ссылка на страницу. Только superuser; путь под
+``/ai/admin/`` — RateLimitMiddleware его не считает.
 """
 
 from django.http import HttpResponseForbidden, JsonResponse
 
-from .. import arm_runner, prompt_test_runner, test_console_runner
+from .. import arm_runner, model_health, prompt_test_runner, test_console_runner
 from ..models import AIModelTestRun, PromptTestRun
 
 
@@ -43,5 +44,6 @@ def admin_active_runs_view(request):
         arm_runner.list_running_runs()
         + prompt_test_runner.list_running_runs()
         + test_console_runner.list_running_runs()
+        + model_health.list_running_runs()
     )
     return JsonResponse({"ok": True, "runs": _annotate_started_by(runs)})

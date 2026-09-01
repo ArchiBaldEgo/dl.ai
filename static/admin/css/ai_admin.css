@@ -117,16 +117,19 @@
 }
 /* ───────────────── Global active-runs badge (superuser) ─────────────── */
 
-/* Fixed bottom-right pill shown on every admin page (admin/base_site.html
+/* Fixed top-right pill shown on every admin page (admin/base_site.html
    footer block) while any test run is in flight. The run lives in a server
    background thread and survives navigation; the badge links back to the
-   run page (?run_id=), where the form is restored from run_params. */
+   run page (?run_id=), where the form is restored from run_params. Hidden
+   on the run page itself (its page_url matches the current pathname). */
 .ai-active-runs {
   position: fixed;
+  top: 16px;
   right: 16px;
-  bottom: 16px;
   z-index: 1000;
   max-width: 340px;
+  max-height: 70vh;
+  overflow-y: auto;
   background: var(--darkened-bg);
   border: 1px solid var(--hairline-color);
   border-radius: 10px;
