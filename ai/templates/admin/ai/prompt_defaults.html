@@ -22,7 +22,12 @@
       <input type="hidden" name="action" value="save">
       <div style="display:grid; gap:12px; max-width:640px;">
         <label>Язык программирования
-          <select name="language_id" id="pdLanguage" style="width:100%;"></select>
+          <select name="language_id" id="pdLanguage" style="width:100%;">
+            <option value="">— выберите язык —</option>
+            {% for lang in languages %}
+              <option value="{{ lang.id }}">{{ lang.name }}</option>
+            {% endfor %}
+          </select>
         </label>
         <label>Тема
           <select name="topic_id" id="pdTopic" style="width:100%;" disabled></select>
@@ -83,13 +88,14 @@
 {{ topics|json_script:"pd-topics-data" }}
 {{ prompts|json_script:"pd-prompts-data" }}
 {{ editing|json_script:"pd-editing-data" }}
-{% endblock %}
-
-{% block extrahead %}
-{{ block.super }}
 <script>
 (function () {
   'use strict';
+  // Скрипт обязан лежать в конце content (после json_script-блоков):
+  // в extrahead он выполняется в <head> до отрисовки body, все
+  // getElementById возвращают null и IIFE умирает целиком.
+  // Языки отрендерены сервером прямо в <select> — JS их не строит.
+
   // Тот же контракт, что у всех AJAX-хендлеров админки: протухшая сессия
   // редиректит fetch на страницу логина (HTML) — показываем понятную ошибку.
   function parseJsonResponse(response) {
@@ -113,21 +119,9 @@
   var promptSelect = document.getElementById('pdPrompt');
   var saveBtn = document.getElementById('pdSaveBtn');
   var form = document.getElementById('pdForm');
-  var languagesData = JSON.parse(document.getElementById('pd-languages-data').textContent || '[]');
   var topicsData = JSON.parse(document.getElementById('pd-topics-data').textContent || '[]');
   var promptsData = JSON.parse(document.getElementById('pd-prompts-data').textContent || '[]');
   var editing = JSON.parse(document.getElementById('pd-editing-data').textContent || 'null');
-
-  function fillLanguages(selectedId) {
-    languageSelect.innerHTML = '';
-    languageSelect.appendChild(new Option('— выберите язык —', ''));
-    // Все языки из базы, даже без тем (Python, C++): для них работает
-    // привязка «на весь язык» (пустая тема).
-    languagesData.forEach(function (lang) {
-      languageSelect.appendChild(new Option(lang.name, String(lang.id)));
-    });
-    if (selectedId) { languageSelect.value = String(selectedId); }
-  }
 
   function fillTopics(languageId, selectedId) {
     topicSelect.innerHTML = '';
@@ -165,15 +159,13 @@
   });
   topicSelect.addEventListener('change', function () { fillPrompts(this.value); });
 
-  // Prefill: новая привязка или редактирование ?edit=<id>.
+  // Prefill при редактировании ?edit=<id>: язык уже в HTML, ставим value.
   if (editing) {
-    fillLanguages(editing.language_id);
+    languageSelect.value = String(editing.language_id);
     fillTopics(editing.language_id, editing.topic_id);
     fillPrompts(editing.topic_id, editing.prompt_id);
     var modeSelect = document.getElementById('pdMode');
     if (modeSelect) { modeSelect.value = editing.mode; }
-  } else {
-    fillLanguages();
   }
 
   function post(action, fields) {

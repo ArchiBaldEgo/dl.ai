@@ -135,7 +135,8 @@ function initSelectionPersistence() {
 // optgroup «Все модели» — favorite-first контракт («Часто используемые»
 // сверху) не трогаем. Режим хранится в localStorage: серверу он не нужен.
 // Модели без данных всегда в конце (внутри группы — исходный алфавитный
-// порядок).
+// порядок). В закрытом селекторе — чистые названия; суффикс статистики
+// («12.3с·45%») виден только в развёрнутом списке (см. initModelSortSelector).
 var MODEL_SORT_KEY = 'ai_model_sort_mode';
 
 function modelOptionStats(opt) {
@@ -172,6 +173,18 @@ function applyModelOptionSuffixes() {
     Array.prototype.forEach.call(modelSelect.options, applyModelOptionSuffix);
 }
 
+// Обратное применение: закрытый селектор показывает чистые названия
+// (единая компактная ширина на всех страницах), статистика видна только
+// в развёрнутом списке.
+function stripModelOptionSuffixes() {
+    var modelSelect = document.getElementById('select');
+    if (!modelSelect) return;
+    Array.prototype.forEach.call(modelSelect.options, function (opt) {
+        var base = opt.getAttribute('data-base-title');
+        if (base !== null) opt.textContent = base;
+    });
+}
+
 function sortModelOptions(mode) {
     var modelSelect = document.getElementById('select');
     var group = modelSelect && modelSelect.querySelector('optgroup[label="Все модели"]');
@@ -179,7 +192,6 @@ function sortModelOptions(mode) {
 
     var selectedValue = modelSelect.value;
     var opts = Array.prototype.slice.call(group.children);
-    applyModelOptionSuffixes();
 
     if (mode !== 'default') {
         var withStats = [];
@@ -239,8 +251,11 @@ function initModelSortSelector() {
         return;
     }
 
-    // Подписи режимов сортировки и единица «с» переводятся вместе с остальным
-    // UI при смене selectLang (общий слушатель здесь — все три страницы чата).
+    // Подписи режимов сортировки переводятся вместе с остальным UI при смене
+    // selectLang (общий слушатель здесь — все три страницы чата). Суффиксы
+    // статистики не трогаем: они живут только в открытом списке и строятся
+    // заново при каждом открытии (applyModelOptionSuffixes), так что свежая
+    // локализация подхватывается сама.
     function updateSortLabels() {
         var labels = {
             'default': getUiString('sortDefault', 'Порядок: по алфавиту'),
@@ -251,8 +266,26 @@ function initModelSortSelector() {
         Array.prototype.forEach.call(sortSelect.options, function(o) {
             if (labels[o.value]) o.textContent = labels[o.value];
         });
-        sortModelOptions(sortSelect.value);  // пере-вешивает суффиксы с новой единицей
     }
+
+    // Статистика («Model — 12.3с·45%») показывается ТОЛЬКО в развёрнутом
+    // списке: нативный select рендерит опции в момент открытия, поэтому
+    // суффиксы вешаем на открытие (mousedown — мышь, keydown — клавиатура:
+    // Enter/Space/стрелки/F4) и снимаем при закрытии (change/blur/Escape).
+    // Закрытый селектор показывает чистые названия — одинаковая компактная
+    // ширина на всех трёх страницах.
+    modelSelect.addEventListener('pointerdown', applyModelOptionSuffixes);
+    modelSelect.addEventListener('mousedown', applyModelOptionSuffixes);
+    modelSelect.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') {
+            stripModelOptionSuffixes();
+        } else {
+            applyModelOptionSuffixes();
+        }
+    });
+    modelSelect.addEventListener('change', stripModelOptionSuffixes);
+    modelSelect.addEventListener('blur', stripModelOptionSuffixes);
+    stripModelOptionSuffixes();
 
     var saved = 'default';
     try { saved = localStorage.getItem(MODEL_SORT_KEY) || 'default'; } catch (e) {}
