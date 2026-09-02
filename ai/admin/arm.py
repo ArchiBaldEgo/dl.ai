@@ -184,18 +184,14 @@ def _prepare_arm_run_payload(form_state, user=None):
         topic = Topic.objects.filter(id=form_state["selected_topic"]).first()
 
     # Препромпт — только привязка ArmPromptBinding («Препромпты по умолчанию»,
-    # суперюзерский инструмент). Ручной выбор убран: нет привязки → прогон
-    # без препромпта.
+    # суперюзерский инструмент): точная (язык+тема), иначе «на весь язык».
+    # Ручной выбор убран: нет привязки → прогон без препромпта.
     prompt_obj = None
-    if topic is not None and form_state["selected_prog_lng"]:
-        prompt_obj = (
-            ArmPromptBinding.objects.filter(
-                mode=ArmPromptBinding.MODE_FIND_ERROR,
-                programming_language_id=form_state["selected_prog_lng"],
-                topic=topic,
-            )
-            .select_related("prompt")
-            .first()
+    if form_state["selected_prog_lng"]:
+        prompt_obj = ArmPromptBinding.resolve(
+            programming_language_id=form_state["selected_prog_lng"],
+            topic_id=topic.id if topic is not None else None,
+            mode=ArmPromptBinding.MODE_FIND_ERROR,
         )
     topic_name_localized = (
         get_localized_name(topic, form_state["selected_language_ui"], "topic_name")
@@ -677,7 +673,8 @@ def admin_arm_solve_start_view(request):
             status=400,
         )
     # Тема выбрана пользователем; препромпт — только привязка ArmPromptBinding
-    # (mode=solve) по этой теме. Нет привязки → прогон без препромпта.
+    # (mode=solve) по этой теме, иначе привязка «на весь язык» (topic IS NULL —
+    # языки без тем: Python, C++). Нет привязки → прогон без препромпта.
     # Клиентский prompt_id не читается: привязки куртирует только суперюзер.
     topic_id = None
     topic_id_log = None
@@ -686,17 +683,11 @@ def admin_arm_solve_start_view(request):
         topic_id = int(body.get("arm_topic_id") or request.POST.get("arm_topic_id") or 0) or None
     except (ValueError, TypeError):
         topic_id = None
-    prompt_obj = None
-    if topic_id:
-        prompt_obj = (
-            ArmPromptBinding.objects.filter(
-                mode=ArmPromptBinding.MODE_SOLVE,
-                topic_id=topic_id,
-                programming_language_id=prog_lang_id,
-            )
-            .select_related("prompt")
-            .first()
-        )
+    prompt_obj = ArmPromptBinding.resolve(
+        programming_language_id=prog_lang_id,
+        topic_id=topic_id,
+        mode=ArmPromptBinding.MODE_SOLVE,
+    )
     prompt_id = prompt_obj.prompt_id if prompt_obj else None
     prompt_name = prompt_obj.prompt.prompt_name if prompt_obj else ""
     topic_name_log = (

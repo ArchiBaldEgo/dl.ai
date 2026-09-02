@@ -9,6 +9,8 @@
     «Пакетное решение» и «Поиск ошибки» после выбора темы препромпт подтягивается
     автоматически. Сам промпт редактируется по обычным правилам (владелец /
     редактор / суперюзер) — привязка всегда использует актуальный текст.
+    Пустая тема — привязка «на весь язык» (для языков без тем, например
+    Python или C++, и как запасная, когда точная привязка темы не задана).
   </p>
 
   <p id="pdMessage" style="display:none; padding:8px 12px; border-radius:6px; margin:10px 0;"></p>
@@ -119,34 +121,37 @@
   function fillLanguages(selectedId) {
     languageSelect.innerHTML = '';
     languageSelect.appendChild(new Option('— выберите язык —', ''));
-    // Только языки, у которых есть темы: привязка всегда содержит тему.
-    var languagesWithTopics = {};
-    topicsData.forEach(function (t) { languagesWithTopics[t.language_id] = true; });
+    // Все языки из базы, даже без тем (Python, C++): для них работает
+    // привязка «на весь язык» (пустая тема).
     languagesData.forEach(function (lang) {
-      if (languagesWithTopics[lang.id]) {
-        languageSelect.appendChild(new Option(lang.name, String(lang.id)));
-      }
+      languageSelect.appendChild(new Option(lang.name, String(lang.id)));
     });
     if (selectedId) { languageSelect.value = String(selectedId); }
   }
 
   function fillTopics(languageId, selectedId) {
     topicSelect.innerHTML = '';
-    topicSelect.appendChild(new Option('— выберите тему —', ''));
+    // Пустая тема — валидный выбор: привязка «на весь язык».
+    topicSelect.appendChild(new Option('— для всего языка —', ''));
     topicsData.forEach(function (t) {
       if (String(t.language_id) === String(languageId)) {
         topicSelect.appendChild(new Option(t.name, String(t.id)));
       }
     });
-    topicSelect.disabled = topicSelect.options.length <= 1;
-    if (selectedId) { topicSelect.value = String(selectedId); }
+    topicSelect.disabled = !languageId;
+    if (selectedId) {
+      topicSelect.value = String(selectedId);
+    } else {
+      topicSelect.value = '';
+    }
   }
 
   function fillPrompts(topicId, selectedId) {
     promptSelect.innerHTML = '';
     promptSelect.appendChild(new Option('— выберите препромпт —', ''));
+    // Для темы — только её промпты; «на весь язык» — любой промпт.
     promptsData.forEach(function (p) {
-      if (String(p.topic_id) === String(topicId)) {
+      if (!topicId || String(p.topic_id) === String(topicId)) {
         promptSelect.appendChild(new Option(p.name, String(p.id)));
       }
     });
@@ -189,8 +194,9 @@
 
   form.addEventListener('submit', function (event) {
     event.preventDefault();
-    if (!languageSelect.value || !topicSelect.value || !promptSelect.value) {
-      showMessage('Выберите язык, тему и препромпт.', true);
+    // Тема необязательна: пустая = привязка «на весь язык».
+    if (!languageSelect.value || !promptSelect.value) {
+      showMessage('Выберите язык и препромпт.', true);
       return;
     }
     saveBtn.disabled = true;

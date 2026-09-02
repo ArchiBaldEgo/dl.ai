@@ -3459,6 +3459,48 @@ class OllamaHandlerTests(SimpleTestCase):
             self.assertIn("Ollama API ключ не настроен", result[0])
             mock_client_cls.assert_not_called()
 
+    @staticmethod
+    def _thinking_stream(*thinking_pieces, eval_count=0):
+        """Чанки с пустым content и текстом в отдельном поле thinking."""
+        from types import SimpleNamespace
+        chunks = []
+        for piece in thinking_pieces:
+            chunks.append(SimpleNamespace(
+                message=SimpleNamespace(content="", thinking=piece), eval_count=0))
+        chunks.append(SimpleNamespace(
+            message=SimpleNamespace(content="", thinking=""), eval_count=eval_count))
+        return iter(chunks)
+
+    async def test_empty_content_falls_back_to_thinking(self):
+        """glm-5.3-flash:cloud кладёт ответ в поле thinking при пустом content —
+        отдаём его пользователю, а не «пустой ответ»."""
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.return_value = self._thinking_stream(
+                "Рассуждаю", " и отвечаю", eval_count=7)
+
+            glm_5_3_flash = getattr(ollama, "ask_Ollama_Glm_5_3_Flash_Cloud_async")
+            result = await glm_5_3_flash("hi", "client")
+            self.assertEqual(result, ("Рассуждаю и отвечаю", 7, False))
+
+    async def test_empty_content_and_thinking_returns_error(self):
+        """Пустые и content, и thinking → прежняя ошибка «пустой ответ»."""
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.return_value = self._stream("", eval_count=0)
+
+            glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
+            content, tokens, is_error = await glm_5_2("hi", "client")
+            self.assertTrue(is_error)
+            self.assertEqual(tokens, 0)
+            self.assertIn("пустой ответ", content)
+
 
 class ArmBatchResultsPartialTests(SimpleTestCase):
     """Частичный шаблон _ai_batch_results.html не должен утекать комментариями:
@@ -4788,6 +4830,108 @@ class ArmPromptBindingTests(TestCase):
         # Тот же вид — другая тема, та же тройка с другим видом — ок.
         self._binding(topic=self.other_topic)
         self._binding(mode=ArmPromptBinding.MODE_FIND_ERROR)
+
+    def test_unique_language_level_binding(self):
+        """«На весь язык» (topic=NULL) — одна на (язык, вид): частичный
+        UNIQUE-констрейнт ловит дубликаты NULL-темы (обычный UNIQUE в
+        Postgres NULLs не сравнивает)."""
+        from django.db import IntegrityError, transaction
+        self._binding(topic=None)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                ArmPromptBinding.objects.create(
+                    programming_language=self.lang, topic=None,
+                    mode=ArmPromptBinding.MODE_SOLVE, prompt=self.prompt,
+                )
+        # Другой язык или другой вид с NULL-темой — ок.
+        self._binding(topic=None, programming_language=self.other_lang)
+        self._binding(topic=None, mode=ArmPromptBinding.MODE_FIND_ERROR)
+
+    def test_resolve_falls_back_to_language_level(self):
+        """ArmPromptBinding.resolve: точная (язык+тема) → «на весь язык» → None.
+        Сервер и JS (findBoundPrompt/findBoundPromptName) обязаны резолвить
+        одинаково — точная привязка сильнее языковой."""
+        resolve = ArmPromptBinding.resolve
+        mode = ArmPromptBinding.MODE_SOLVE
+        # Ничего нет — None.
+        self.assertIsNone(resolve(
+            programming_language_id=self.lang.id, topic_id=self.topic.id, mode=mode,
+        ))
+        # Привязка «на весь язык»: и с темой, и без.
+        lang_level = self._binding(topic=None)
+        self.assertEqual(resolve(
+            programming_language_id=self.lang.id, topic_id=self.topic.id, mode=mode,
+        ), lang_level)
+        self.assertEqual(resolve(
+            programming_language_id=self.lang.id, topic_id=None, mode=mode,
+        ), lang_level)
+        # Точная привязка темы сильнее языковой.
+        exact = self._binding()
+        self.assertEqual(resolve(
+            programming_language_id=self.lang.id, topic_id=self.topic.id, mode=mode,
+        ), exact)
+        # Другая тема — снова языковая.
+        self.assertEqual(resolve(
+            programming_language_id=self.lang.id, topic_id=self.other_topic.id, mode=mode,
+        ), lang_level)
+        # Другой вид — ничего.
+        self.assertIsNone(resolve(
+            programming_language_id=self.lang.id, topic_id=self.topic.id,
+            mode=ArmPromptBinding.MODE_FIND_ERROR,
+        ))
+
+    def test_save_language_level_binding(self):
+        """save без topic_id создаёт привязку «на весь язык»: до двух строк
+        (solve + find_error), upsert, промпт может быть любым (не только
+        безтематическим) — языку без тем (Python, C++) нужно дефолтное
+        правило, а тем у него нет."""
+        from ai.admin.prompt_defaults import admin_prompt_defaults_view
+
+        def post(topic_id):
+            payload = {
+                "action": "save", "mode": "solve",
+                "language_id": str(self.other_lang.id),
+                "prompt_id": str(self.prompt.id),  # промпт чужой темы — ок для языка
+            }
+            if topic_id is not None:
+                payload["topic_id"] = topic_id
+            request = self.factory.post("/ai/admin/prompt-defaults/", payload)
+            request.user = self.superuser
+            request.session = {}
+            response = admin_prompt_defaults_view(request)
+            return response.status_code, json.loads(response.content)
+
+        status, data = post(None)
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"], data)
+        binding = ArmPromptBinding.objects.get()
+        self.assertIsNone(binding.topic_id)
+        self.assertEqual(binding.programming_language, self.other_lang)
+
+        # Тот же вид снова — upsert, второй строки нет.
+        status, data = post("")
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(ArmPromptBinding.objects.count(), 1)
+
+        # Другой вид с той же пустой темой — вторая строка.
+        payload = {
+            "action": "save", "mode": "find_error",
+            "language_id": str(self.other_lang.id),
+            "prompt_id": str(self.prompt.id),
+        }
+        request = self.factory.post("/ai/admin/prompt-defaults/", payload)
+        request.user = self.superuser
+        request.session = {}
+        self.assertTrue(json.loads(admin_prompt_defaults_view(request).content)["ok"])
+        self.assertEqual(ArmPromptBinding.objects.count(), 2)
+
+        # Несуществующий язык без темы — 404.
+        payload["language_id"] = "99999"
+        request = self.factory.post("/ai/admin/prompt-defaults/", payload)
+        request.user = self.superuser
+        request.session = {}
+        self.assertEqual(admin_prompt_defaults_view(request).status_code, 404)
+        self.assertEqual(ArmPromptBinding.objects.count(), 2)
 
     def test_page_requires_superuser(self):
         from ai.admin.prompt_defaults import admin_prompt_defaults_view

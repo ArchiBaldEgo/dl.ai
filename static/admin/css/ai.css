@@ -157,7 +157,8 @@
         }
 
         #select,
-        #selectType {
+        #selectType,
+        #selectModelSort {
             font-size: 18px;
             max-width: 77%;
         }
@@ -839,7 +840,8 @@ form {
 
 #select,
 #selectType,
-#selectLang {
+#selectLang,
+#selectModelSort {
     font-size: 18px;
     max-width: 77%;
 }
@@ -1499,7 +1501,8 @@ hr {
     }
 
     #select,
-    #selectType {
+    #selectType,
+    #selectModelSort {
         font-size: 14px;
         max-width: 100%;
         width: 100%;
@@ -1662,7 +1665,8 @@ hr {
 
 @media (max-width: 480px) {
     #select,
-    #selectType {
+    #selectType,
+    #selectModelSort {
         font-size: 13px;
         padding: 5px 6px;
     }

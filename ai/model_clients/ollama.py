@@ -79,20 +79,25 @@ def _get_client() -> Client:
     return Client(host=OLLAMA_HOST, timeout=_OLLAMA_TIMEOUT, headers=headers)
 
 
-def _chat_sync(model: str, msg: str, temperature: float, num_predict: int) -> Tuple[str, int]:
+def _chat_sync(model: str, msg: str, temperature: float, num_predict: int) -> Tuple[str, int, str]:
     """Синхронный streaming-вызов ollama.chat (запускается через asyncio.to_thread).
 
-    Возвращает ``(content, eval_count)``. Стриминг обязателен: без него длинные
-    генерации ARM-solve (промпт ~5k символов + num_predict=4096) идут минутами
-    без единого байта в ответ, и шлюз api.ollama.com закрывает соединение, не
-    дождавшись готового ответа — httpx поднимает ServerDisconnectedError
-    («Server disconnected without sending a response»). С потоковыми чанками
-    соединение живёт, пока модель генерирует, а httpx-таймаут действует на
-    каждый чанк, а не на весь ответ. eval_count приходит только в финальном
-    чанке (done=True) — берём последний ненулевой.
+    Возвращает ``(content, eval_count, thinking)``. Стриминг обязателен: без
+    него длинные генерации ARM-solve (промпт ~5k символов + num_predict=4096)
+    идут минутами без единого байта в ответ, и шлюз api.ollama.com закрывает
+    соединение, не дождавшись готового ответа — httpx поднимает
+    ServerDisconnectedError («Server disconnected without sending a response»).
+    С потоковыми чанками соединение живёт, пока модель генерирует, а
+    httpx-таймаут действует на каждый чанк, а не на весь ответ. eval_count
+    приходит только в финальном чанке (done=True) — берём последний ненулевой.
+
+    ``thinking`` — накопленное содержимое одноимённого поля (glm-5.3-flash:cloud,
+    gpt-oss:cloud стримят рассуждение отдельным полем, не think-тегами в
+    content); обычно отбрасывается, но спасает ответ, когда content пуст.
     """
     client = _get_client()
     parts: list[str] = []
+    thinking_parts: list[str] = []
     tokens = 0
     for chunk in client.chat(
         model=model,
@@ -100,12 +105,16 @@ def _chat_sync(model: str, msg: str, temperature: float, num_predict: int) -> Tu
         options={"temperature": temperature, "num_predict": num_predict},
         stream=True,
     ):
-        content = getattr(getattr(chunk, "message", None), "content", "") or ""
+        message = getattr(chunk, "message", None)
+        content = getattr(message, "content", "") or ""
         if content:
             parts.append(content)
+        thinking = getattr(message, "thinking", "") or ""
+        if thinking:
+            thinking_parts.append(thinking)
         if getattr(chunk, "eval_count", 0):
             tokens = int(chunk.eval_count)
-    return "".join(parts), tokens
+    return "".join(parts), tokens, "".join(thinking_parts)
 
 
 async def _ask_ollama(
@@ -122,7 +131,9 @@ async def _ask_ollama(
         return "Ollama API ключ не настроен. Добавьте OLLAMA_API_KEY в .env", 0, True
 
     try:
-        content, tokens = await asyncio.to_thread(_chat_sync, model_id, msg, temperature, num_predict)
+        content, tokens, thinking = await asyncio.to_thread(
+            _chat_sync, model_id, msg, temperature, num_predict,
+        )
     except Exception as exc:  # ollama.ResponseError / httpx исключения / прочее
         # Импорт здесь, чтобы не падать при отсутствии SDK на старых окружениях.
         try:
@@ -147,6 +158,15 @@ async def _ask_ollama(
         return f"Ошибка Ollama: {exc}", 0, True
 
     if not content.strip():
+        # Reasoning-модели (glm-5.3-flash:cloud, gpt-oss:cloud) иногда кладут
+        # весь ответ в поле ``thinking``, оставляя content пустым — отдаём его
+        # пользователю вместо ошибки «пустой ответ».
+        if thinking.strip():
+            logger.warning(
+                "Ollama model %s returned empty content, falling back to thinking (%d chars)",
+                model_id, len(thinking),
+            )
+            return thinking, int(tokens), False
         logger.warning("Ollama model %s returned empty content", model_id)
         return f"Модель Ollama ({model_id}) вернула пустой ответ. Попробуйте позже.", 0, True
     return content, int(tokens), False

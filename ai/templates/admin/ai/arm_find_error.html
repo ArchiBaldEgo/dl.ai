@@ -587,21 +587,28 @@
     ) || [];
     const boundPromptLabel = document.getElementById('armBoundPromptLabel');
 
+    // Резолв как на сервере (ArmPromptBinding.resolve): точная (язык+тема),
+    // иначе привязка «на весь язык» (topic_id === null — языки без тем).
     function findBoundPromptName(languageId, topicId) {
-      const binding = promptBindings.find(function (item) {
+      const exact = promptBindings.find(function (item) {
         return String(item.language_id) === String(languageId)
-          && String(item.topic_id) === String(topicId)
+          && item.topic_id !== null && String(item.topic_id) === String(topicId)
           && item.mode === 'find_error';
+      });
+      const binding = exact || promptBindings.find(function (item) {
+        return String(item.language_id) === String(languageId)
+          && item.topic_id === null && item.mode === 'find_error';
       });
       return binding ? (binding.prompt_name || ('Prompt #' + binding.prompt_id)) : '';
     }
 
     // Подпись под темой: какой «препромпт по умолчанию» подтянется из
     // привязки — чтобы сразу видеть, что применилось (или что прогона
-    // не будет с препромптом).
+    // не будет с препромптом). Тема необязательна: без темы срабатывает
+    // привязка «на весь язык».
     function updateBoundPromptLabel() {
       if (!boundPromptLabel) { return; }
-      const name = (topicSelect.value && langSelect.value)
+      const name = langSelect.value
         ? findBoundPromptName(langSelect.value, topicSelect.value)
         : '';
       if (!name) {

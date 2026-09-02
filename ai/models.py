@@ -327,6 +327,11 @@ class ArmPromptBinding(models.Model):
     чтобы пользователю не приходилось выбирать один и тот же препромпт каждый
     раз. Промпт редактируется по обычным правилам (владелец/редактор/
     суперюзер) — привязка тянет актуальный текст по FK, ничего не копируем.
+
+    ``topic`` может быть NULL — привязка «на весь язык» (ЯП = формат: язык
+    эквивалентен своему расширению, препромпт по умолчанию на весь Python
+    покрывает все .py-задачи). Нужно там, где у языка нет тем (Python, C++),
+    и как fallback, когда точная привязка (язык+тема) не задана.
     """
     MODE_SOLVE = "solve"
     MODE_FIND_ERROR = "find_error"
@@ -341,7 +346,7 @@ class ArmPromptBinding(models.Model):
         verbose_name="Язык программирования",
     )
     topic = models.ForeignKey(
-        Topic, on_delete=models.CASCADE,
+        Topic, on_delete=models.CASCADE, null=True, blank=True,
         related_name="arm_prompt_bindings",
         verbose_name="Тема",
     )
@@ -363,10 +368,34 @@ class ArmPromptBinding(models.Model):
                 fields=["programming_language", "topic", "mode"],
                 name="unique_arm_prompt_binding",
             ),
+            # Привязка «на весь язык»: одна на (язык, вид). Частичный индекс —
+            # обычный UNIQUE не ловит дубликаты NULL-темы в Postgres.
+            models.UniqueConstraint(
+                fields=["programming_language", "mode"],
+                condition=models.Q(topic__isnull=True),
+                name="unique_arm_prompt_binding_language",
+            ),
         ]
 
+    @classmethod
+    def resolve(cls, *, programming_language_id, topic_id, mode):
+        """Привязка для прогона: точная (язык+тема) → иначе «на весь язык».
+
+        Возвращает ArmPromptBinding (select_related("prompt")) или None —
+        нет ни одной → прогон без препромпта.
+        """
+        base = cls.objects.filter(
+            mode=mode, programming_language_id=programming_language_id,
+        ).select_related("prompt")
+        if topic_id:
+            exact = base.filter(topic_id=topic_id).first()
+            if exact:
+                return exact
+        return base.filter(topic__isnull=True).first()
+
     def __str__(self):
-        return f"{self.get_mode_display()}: {self.programming_language} / {self.topic} → {self.prompt}"
+        topic = self.topic if self.topic is not None else "(весь язык)"
+        return f"{self.get_mode_display()}: {self.programming_language} / {topic} → {self.prompt}"
 
 
 class AIAppSettings(models.Model):

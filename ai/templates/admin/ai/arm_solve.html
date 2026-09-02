@@ -761,16 +761,24 @@
     } catch (e) { allTopics = []; }
 
     // Привязки «препромпт по умолчанию» отдаются сервером в json_script.
-    // Тема однозначно определяет язык, поэтому достаточно (topic_id, mode).
+    // Резолв как на сервере (ArmPromptBinding.resolve): точная (язык+тема),
+    // иначе привязка «на весь язык» (topic_id === null — языки без тем).
     let promptBindings = [];
     try {
       const bindingsEl = document.getElementById('arm-prompt-bindings');
       promptBindings = JSON.parse(bindingsEl ? bindingsEl.textContent : '[]') || [];
     } catch (e) { promptBindings = []; }
 
-    function findBoundPrompt(topicId, mode) {
+    function findBoundPrompt(languageId, topicId, mode) {
+      const exact = promptBindings.find(function (x) {
+        return String(x.language_id) === String(languageId)
+          && x.topic_id !== null && String(x.topic_id) === String(topicId)
+          && x.mode === mode;
+      });
+      if (exact) { return exact; }
       return promptBindings.find(function (x) {
-        return String(x.topic_id) === String(topicId) && x.mode === mode;
+        return String(x.language_id) === String(languageId)
+          && x.topic_id === null && x.mode === mode;
       }) || null;
     }
 
@@ -778,8 +786,9 @@
     // прогон пойдёт без препромпта) — чтобы сразу видеть, что применилось.
     function updateBoundPromptLabel() {
       if (!boundPromptLabel) { return; }
-      const promptId = promptIdInput ? promptIdInput.value : '';
-      const binding = promptId ? findBoundPrompt(topicSelect ? topicSelect.value : '', 'solve') : null;
+      const languageId = languageSelect ? languageSelect.value : '';
+      const topicId = topicSelect ? topicSelect.value : '';
+      const binding = languageId ? findBoundPrompt(languageId, topicId, 'solve') : null;
       if (!binding) {
         boundPromptLabel.style.display = '';
         boundPromptLabel.textContent = 'Препромпт не задан — прогон без препромпта';
@@ -789,9 +798,11 @@
       boundPromptLabel.textContent = 'Препромпт по умолчанию: ' + (binding.prompt_name || 'Prompt #' + binding.prompt_id);
     }
 
-    // Тема → привязка → hidden prompt_id. Нет темы/привязки — без препромпта.
+    // Язык+тема → привязка → hidden prompt_id. Нет привязки — без препромпта
+    // (пустая тема допустима: сработает привязка «на весь язык»).
     function applyTopicSelection(topicId) {
-      const binding = topicId ? findBoundPrompt(topicId, 'solve') : null;
+      const languageId = languageSelect ? languageSelect.value : '';
+      const binding = languageId ? findBoundPrompt(languageId, topicId, 'solve') : null;
       if (promptIdInput) { promptIdInput.value = binding ? String(binding.prompt_id) : ''; }
       updateBoundPromptLabel();
     }

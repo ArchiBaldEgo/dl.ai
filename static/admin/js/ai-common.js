@@ -147,22 +147,29 @@ function modelOptionStats(opt) {
     };
 }
 
-// Человекочитаемый суффикс названия: «Model X — 12.3 с · 45%». Идемпотентен:
-// базовое название кешируется в data-base-title при первом проходе.
+// Человекочитаемый суффикс названия: «Model X — 12.3с·45%» (компактный формат,
+// единица «с» локализована через getUiString). Отсутствующие данные показываются
+// нулями («0с·0%») — по ним сортировка модели всё равно отправляет в конец.
+// Идемпотентен: базовое название кешируется в data-base-title при первом проходе.
 function applyModelOptionSuffix(opt) {
+    if (!opt.value) return;  // заглушка «Сегодня нет доступных моделей» — не модель
     if (!opt.hasAttribute('data-base-title')) {
         opt.setAttribute('data-base-title', opt.textContent.trim());
     }
     var title = opt.getAttribute('data-base-title');
     var stats = modelOptionStats(opt);
-    if (stats.avgSeconds === null && stats.percentSolved === null) {
-        opt.textContent = title;
-        return;
-    }
-    var parts = [];
-    if (stats.avgSeconds !== null) parts.push(stats.avgSeconds.toFixed(1) + ' с');
-    if (stats.percentSolved !== null) parts.push(String(stats.percentSolved) + '%');
-    opt.textContent = title + ' — ' + parts.join(' · ');
+    var avg = stats.avgSeconds === null ? 0 : stats.avgSeconds;
+    var pct = stats.percentSolved === null ? 0 : stats.percentSolved;
+    opt.textContent = title + ' — ' + avg.toFixed(1)
+        + getUiString('statSeconds', 'с') + '·' + String(pct) + '%';
+}
+
+// Суффикс статистики вешается на ВСЕ опции селектора (включая «Часто
+// используемые»), а пересортировка — только на optgroup «Все модели».
+function applyModelOptionSuffixes() {
+    var modelSelect = document.getElementById('select');
+    if (!modelSelect) return;
+    Array.prototype.forEach.call(modelSelect.options, applyModelOptionSuffix);
 }
 
 function sortModelOptions(mode) {
@@ -172,7 +179,7 @@ function sortModelOptions(mode) {
 
     var selectedValue = modelSelect.value;
     var opts = Array.prototype.slice.call(group.children);
-    opts.forEach(applyModelOptionSuffix);
+    applyModelOptionSuffixes();
 
     if (mode !== 'default') {
         var withStats = [];
@@ -232,6 +239,21 @@ function initModelSortSelector() {
         return;
     }
 
+    // Подписи режимов сортировки и единица «с» переводятся вместе с остальным
+    // UI при смене selectLang (общий слушатель здесь — все три страницы чата).
+    function updateSortLabels() {
+        var labels = {
+            'default': getUiString('sortDefault', 'Порядок: по алфавиту'),
+            'speed': getUiString('sortSpeed', 'Порядок: по скорости'),
+            'accuracy': getUiString('sortAccuracy', 'Порядок: по точности'),
+            'both': getUiString('sortBoth', 'Порядок: скорость + точность'),
+        };
+        Array.prototype.forEach.call(sortSelect.options, function(o) {
+            if (labels[o.value]) o.textContent = labels[o.value];
+        });
+        sortModelOptions(sortSelect.value);  // пере-вешивает суффиксы с новой единицей
+    }
+
     var saved = 'default';
     try { saved = localStorage.getItem(MODEL_SORT_KEY) || 'default'; } catch (e) {}
     if (!Array.prototype.some.call(sortSelect.options, function(o) { return o.value === saved; })) {
@@ -242,7 +264,9 @@ function initModelSortSelector() {
         try { localStorage.setItem(MODEL_SORT_KEY, sortSelect.value); } catch (e) {}
         sortModelOptions(sortSelect.value);
     });
-    sortModelOptions(sortSelect.value);
+    var selectLangEl = document.getElementById('selectLang');
+    if (selectLangEl) selectLangEl.addEventListener('change', updateSortLabels);
+    updateSortLabels();
 }
 
 // === Selectors: programming language / topic / prompt (shared by find-error & solve-problem) ===
@@ -956,6 +980,12 @@ var localization = {
         speakThinkLabel: "Озвучивать дополнительную информацию",
         themeToggle: "Сменить тему",
         lastUpdate: "Последнее обновление",
+        // Селектор сортировки моделей (base_chat.html) + суффикс статистики.
+        sortDefault: "Порядок: по алфавиту",
+        sortSpeed: "Порядок: по скорости",
+        sortAccuracy: "Порядок: по точности",
+        sortBoth: "Порядок: скорость + точность",
+        statSeconds: "с",
         // Маркер shared-препромпта — JS-зеркало _SHARED_PROMPT_PREFIX из ai/i18n.py.
         sharedPrefix: "[Общий]",
         voiceStatus: {
@@ -1024,6 +1054,12 @@ var localization = {
         speakThinkLabel: "Voice extra information",
         themeToggle: "Toggle theme",
         lastUpdate: "Last updated",
+        // Model sort selector (base_chat.html) + stats suffix.
+        sortDefault: "Order: alphabetical",
+        sortSpeed: "Order: by speed",
+        sortAccuracy: "Order: by accuracy",
+        sortBoth: "Order: speed + accuracy",
+        statSeconds: "s",
         // Mirror of _SHARED_PROMPT_PREFIX from ai/i18n.py.
         sharedPrefix: "[Shared]",
         voiceStatus: {
@@ -1092,6 +1128,12 @@ var localization = {
         speakThinkLabel: "Informations supplémentaires vocales",
         themeToggle: "Changer le thème",
         lastUpdate: "Dernière mise à jour",
+        // Sélecteur de tri des modèles (base_chat.html) + suffixe statistiques.
+        sortDefault: "Ordre : alphabétique",
+        sortSpeed: "Ordre : par vitesse",
+        sortAccuracy: "Ordre : par précision",
+        sortBoth: "Ordre : vitesse + précision",
+        statSeconds: "s",
         // Miroir de _SHARED_PROMPT_PREFIX de ai/i18n.py.
         sharedPrefix: "[Partagé]",
         voiceStatus: {

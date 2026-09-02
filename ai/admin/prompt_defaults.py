@@ -30,7 +30,7 @@ def _binding_rows():
         rows.append({
             **arm_prompt_binding(b),
             "language_name": b.programming_language.language_name,
-            "topic_name": get_localized_topic_name(b.topic),
+            "topic_name": get_localized_topic_name(b.topic) if b.topic else "(весь язык)",
             "mode_label": b.get_mode_display(),
             "prompt_name": str(b.prompt),
         })
@@ -110,36 +110,48 @@ def _handle_save_or_delete(request):
             return JsonResponse({"ok": False, "error": "Привязка не найдена"}, status=404)
         return JsonResponse({"ok": True, "message": "Привязка удалена"})
 
-    # save: upsert привязки (язык, тема, вид) → промпт.
+    # save: upsert привязки (язык, тема, вид) → промпт. Пустая тема — привязка
+    # «на весь язык» (нужно языкам без тем: Python, C++; и как fallback).
     language_id = (request.POST.get("language_id") or "").strip()
     topic_id = (request.POST.get("topic_id") or "").strip()
     mode = (request.POST.get("mode") or "").strip()
     prompt_id = (request.POST.get("prompt_id") or "").strip()
-    if not (language_id.isdigit() and topic_id.isdigit() and prompt_id.isdigit()):
+    if not (language_id.isdigit() and prompt_id.isdigit()):
         return JsonResponse(
-            {"ok": False, "error": "Выберите язык, тему и препромпт"}, status=400,
+            {"ok": False, "error": "Выберите язык и препромпт"}, status=400,
         )
     if mode not in dict(ArmPromptBinding.ARM_MODE_CHOICES):
         return JsonResponse({"ok": False, "error": "Выберите вид ARM"}, status=400)
 
-    topic = Topic.objects.filter(pk=int(topic_id)).select_related("programming_language").first()
+    topic = None
+    if topic_id:
+        if not topic_id.isdigit():
+            return JsonResponse({"ok": False, "error": "Тема не найдена"}, status=404)
+        topic = Topic.objects.filter(pk=int(topic_id)).select_related("programming_language").first()
+        if topic is None:
+            return JsonResponse({"ok": False, "error": "Тема не найдена"}, status=404)
+        if topic.programming_language_id != int(language_id):
+            return JsonResponse(
+                {"ok": False, "error": "Тема не принадлежит выбранному языку программирования"},
+                status=400,
+            )
+    elif not ProgrammingLanguage.objects.filter(pk=int(language_id)).exists():
+        return JsonResponse({"ok": False, "error": "Язык не найден"}, status=404)
+
     prompt = Prompt.objects.filter(pk=int(prompt_id)).first()
-    if topic is None or prompt is None:
-        return JsonResponse({"ok": False, "error": "Тема или препромпт не найдены"}, status=404)
-    if topic.programming_language_id != int(language_id):
-        return JsonResponse(
-            {"ok": False, "error": "Тема не принадлежит выбранному языку программирования"},
-            status=400,
-        )
-    if prompt.topic_id != topic.id:
+    if prompt is None:
+        return JsonResponse({"ok": False, "error": "Препромпт не найден"}, status=404)
+    # Для привязки «на весь язык» промпт может быть любым (в т.ч. без темы);
+    # для темы — только промптом этой темы.
+    if topic is not None and prompt.topic_id != topic.id:
         return JsonResponse(
             {"ok": False, "error": "Препромпт привязан к другой теме"}, status=400,
         )
 
     try:
         binding, created = ArmPromptBinding.objects.update_or_create(
-            programming_language_id=topic.programming_language_id,
-            topic_id=topic.id,
+            programming_language_id=int(language_id),
+            topic_id=topic.id if topic is not None else None,
             mode=mode,
             defaults={"prompt_id": prompt.id},
         )
