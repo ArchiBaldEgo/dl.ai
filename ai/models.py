@@ -319,6 +319,55 @@ class Prompt(models.Model):
         verbose_name_plural = "Промпты"
 
 
+class ArmPromptBinding(models.Model):
+    """Привязка «препромпт по умолчанию» для ARM: (язык, тема, вид ARM) → промпт.
+
+    Суперюзерский инструмент «Препромпты по умолчанию»: на /arm/solve/ и
+    /arm/find-error/ после выбора темы препромпт подтягивается автоматически,
+    чтобы пользователю не приходилось выбирать один и тот же препромпт каждый
+    раз. Промпт редактируется по обычным правилам (владелец/редактор/
+    суперюзер) — привязка тянет актуальный текст по FK, ничего не копируем.
+    """
+    MODE_SOLVE = "solve"
+    MODE_FIND_ERROR = "find_error"
+    ARM_MODE_CHOICES = [
+        (MODE_SOLVE, "Пакетное решение"),
+        (MODE_FIND_ERROR, "Поиск ошибки"),
+    ]
+
+    programming_language = models.ForeignKey(
+        ProgrammingLanguage, on_delete=models.CASCADE,
+        related_name="arm_prompt_bindings",
+        verbose_name="Язык программирования",
+    )
+    topic = models.ForeignKey(
+        Topic, on_delete=models.CASCADE,
+        related_name="arm_prompt_bindings",
+        verbose_name="Тема",
+    )
+    mode = models.CharField(max_length=16, choices=ARM_MODE_CHOICES, verbose_name="Вид ARM")
+    prompt = models.ForeignKey(
+        Prompt, on_delete=models.CASCADE,
+        related_name="arm_bindings",
+        verbose_name="Препромпт",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создана")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлена")
+
+    class Meta:
+        db_table = "ai_arm_prompt_binding"
+        verbose_name = "Привязка препромпта ARM"
+        verbose_name_plural = "Привязки препромптов ARM"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["programming_language", "topic", "mode"],
+                name="unique_arm_prompt_binding",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.get_mode_display()}: {self.programming_language} / {self.topic} → {self.prompt}"
+
 
 class AIAppSettings(models.Model):
     """Глобальная настройка приложения AI (singleton-модель).

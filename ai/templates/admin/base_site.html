@@ -22,6 +22,7 @@ INSTALLED_APPS so this file is not shadowed by the stock admin/base_site.html
 {% block extrahead %}
   {{ block.super }}
   <script src="{% static 'admin/js/ai_processes.js' %}" defer></script>
+  <script src="{% static 'admin/js/ai_admin_state.js' %}" defer></script>
 {% endblock %}
 
 {% comment %}Приветствие кликабельно: рядом с именем чип-счётчик «Процессы (N)»

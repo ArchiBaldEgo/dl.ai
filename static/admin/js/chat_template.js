@@ -100,6 +100,7 @@ document.getElementById("selectLang").addEventListener("change", function() {
 
     saveInterfaceLanguage();
     updateAccordionLabels();
+    updateLastUpdateLabel();
     updateVoiceStatus(getVoiceStatusText('readyForVoice'));
 });
 

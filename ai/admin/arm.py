@@ -21,10 +21,23 @@ from ..model_health import (
     get_available_model_options,
     get_health_window_date,
 )
-from ..models import AIModelTestResult, ProgrammingLanguage, Prompt, SharedPrompt, Task, Topic
+from ..models import (
+    AIModelTestResult,
+    ArmPromptBinding,
+    ProgrammingLanguage,
+    Prompt,
+    SharedPrompt,
+    Task,
+    Topic,
+)
 from ..http_utils import resolve_dl_session_id
 from ..querysets import prompt_queryset_for_user
-from ..serializers import programming_language as serialize_programming_language, prompt as serialize_prompt, topic as serialize_topic
+from ..serializers import (
+    arm_prompt_binding as serialize_arm_prompt_binding,
+    programming_language as serialize_programming_language,
+    prompt as serialize_prompt,
+    topic as serialize_topic,
+)
 from ..services.task_registry import EXTENSION_TO_LANG, SOLVE_EXTENSION_CHOICES, extension_to_language_ids
 from ..constants import AI_CACHE_KEY_PREFIX
 from .permissions import can_access_arm
@@ -300,11 +313,15 @@ def admin_arm_find_error_view(request):
 
     from ..http_utils import safe_relative_url
     arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
+    prompt_bindings = [
+        serialize_arm_prompt_binding(b) for b in ArmPromptBinding.objects.all()
+    ]
     context = {
         **ai_admin_site.each_context(request),
         "title": "ARM: В чем ошибка",
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "arm_back_url": arm_back_url,
+        "arm_prompt_bindings": prompt_bindings,
         "languages": languages,
         "topics": topics,
         "prompts": prompts,
@@ -387,7 +404,9 @@ def _arm_solve_prompt_options(user, file_extension=None):
     грузится по расширению через ``/solve/prompts/``).
 
     ACL — ``prompt_queryset_for_user`` (staff/superuser — все, иначе owner/editor).
-    Возвращает список ``{id, name}``, отсортированный по имени.
+    Возвращает список ``{id, name, topic_id}``, отсортированный по имени
+    (``topic_id`` нужен клиенту для фильтра препромтов по выбранной теме и
+    авто-подстановки привязки ArmPromptBinding).
     """
     prompts_qs = prompt_queryset_for_user(Prompt.objects.select_related("topic"), user)
     if file_extension:
@@ -398,7 +417,7 @@ def _arm_solve_prompt_options(user, file_extension=None):
     for p in prompts_qs.order_by("prompt_name", "id"):
         topic_name = get_localized_name(p.topic, "Русский", "topic_name") if p.topic else ""
         label = f"[Тема] {topic_name} — {p.prompt_name}" if topic_name else f"[Тема] {p.prompt_name}"
-        options.append({"id": str(p.id), "name": label})
+        options.append({"id": str(p.id), "name": label, "topic_id": p.topic_id})
 
     options.sort(key=lambda opt: opt["name"])
     return options
@@ -434,6 +453,12 @@ def admin_arm_solve_view(request):
 
     prompt_options = []  # грузится клиентом по выбранному расширению (/solve/prompts/)
 
+    # Привязки «препромпт по умолчанию» (Инструменты → Препромпты по умолчанию):
+    # после выбора темы клиент подставляет привязанный промромпт автоматически.
+    prompt_bindings = [
+        serialize_arm_prompt_binding(b) for b in ArmPromptBinding.objects.all()
+    ]
+
     context = {
         **ai_admin_site.each_context(request),
         "title": "ARM: Пакетное решение",
@@ -441,6 +466,7 @@ def admin_arm_solve_view(request):
         "arm_back_url": arm_back_url,
         "model_options": get_arm_solve_model_options(),
         "prompt_options": prompt_options,
+        "arm_prompt_bindings": prompt_bindings,
         "extension_options": [{"value": ext, "label": f"{ext} — {name}"}
                              for ext, name in SOLVE_EXTENSION_CHOICES],
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
@@ -595,18 +621,30 @@ def admin_arm_solve_load_tree_view(request):
 
 
 def admin_arm_solve_prompts_view(request):
-    """Return prompt options for solve filtered by the selected file extension.
+    """Return prompt + topic options for solve filtered by the selected extension.
 
     Общие ``SharedPrompt`` на solve не предлагаются — только topic-bound ``Prompt``,
     отфильтрованные по языку программирования, соответствующему расширению
     (``extension_to_language_ids``). ``file_extension`` передаётся в GET.
+    Вместе со списком препромтов отдаются темы этих языков (``topic_options``) —
+    селектор «Тема» на /arm/solve/ ограничивает список препромтов и включает
+    авто-подстановку привязки (ArmPromptBinding, mode=solve).
     """
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
 
     file_extension = (request.GET.get("file_extension") or "").strip()
     prompt_options = _arm_solve_prompt_options(request.user, file_extension or None)
-    return JsonResponse({"ok": True, "prompt_options": prompt_options})
+    topic_options = []
+    if file_extension:
+        lang_ids = extension_to_language_ids(file_extension)
+        topics_qs = Topic.objects.filter(programming_language_id__in=lang_ids).order_by("topic_name")
+        topic_options = [serialize_topic(t, "Русский") for t in topics_qs]
+    return JsonResponse({
+        "ok": True,
+        "prompt_options": prompt_options,
+        "topic_options": topic_options,
+    })
 
 
 def admin_arm_solve_start_view(request):
@@ -818,3 +856,33 @@ def admin_arm_solve_result_download_view(request, result_id):
     response = HttpResponse(code, content_type="text/plain; charset=utf-8")
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
+
+
+def admin_arm_solve_report_xlsx_view(request, run_id):
+    """XLSX-отчёт batch-прогона (матрица задача×модель) по run_id.
+
+    Серверная генерация с автошириной колонок (см. export.build_arm_results_xlsx)
+    — раньше матрицу собирал и клиентский CSV в _ai_batch_results.html. Работает
+    и для живого in-memory прогона, и для завершённого (DB-fallback внутри
+    get_arm_run_snapshot).
+    """
+    from .logs import _arm_results_xlsx_response
+
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    run_id = (run_id or "").strip()
+    if not run_id:
+        return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
+
+    run_snapshot = get_arm_run_snapshot(run_id)
+    if not run_snapshot:
+        return JsonResponse(
+            {"ok": False, "message": "Процесс не найден или уже завершен"},
+            status=404,
+        )
+    results = run_snapshot.get("results") or []
+    if not results:
+        return JsonResponse({"ok": False, "message": "В прогоне нет результатов"}, status=404)
+
+    return _arm_results_xlsx_response(results, run_id)

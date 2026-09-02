@@ -448,7 +448,7 @@
                     <div><strong>Тема:</strong> {{ log.topic_name|default:"—" }}</div>
                     {% if batch %}
                       <div><strong>ID дерева:</strong> {{ batch.course_id|default:"—" }}</div>
-                      <div><strong>Задачи ({{ batch.tasks|length }}):</strong>
+                      <div><strong>Нерешённые задачи ({{ batch.tasks|length }}):</strong>
                         {% for t in batch.tasks %}
                           <div>{{ t.name }} ({{ t.node_id }})</div>
                         {% empty %}
@@ -507,7 +507,7 @@
                 {# Действия === #}
                 <div class="ai-log-detail-actions">
                   {% if batch %}
-                    <a class="resend-btn" href="{% url 'ai_request_log_csv' log.id %}">Скачать CSV</a>
+                    <a class="resend-btn" href="{% url 'ai_request_log_xlsx' log.id %}">Скачать XLSX</a>
                     <form method="post" class="ai-batch-rerun-form" action="{% url 'ai_request_log_rerun_arm' log.id %}">
                       {% csrf_token %}
                       <button type="submit" class="resend-btn">↻ Повторить запрос</button>

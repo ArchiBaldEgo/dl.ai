@@ -341,8 +341,19 @@
 
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
+          <h2>Тема</h2>
+          <p class="arm-section-note">Выберите тему — список препромтов ограничится ею, а препромпт подтянется автоматически, если для этой темы задан «препромпт по умолчанию» (Инструменты → Препромпты по умолчанию).</p>
+        </div>
+      </div>
+      <select name="arm_topic_id" id="armTopicSelect" disabled style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:4px;">
+        <option value="">— выберите расширение сначала —</option>
+      </select>
+      <p id="armBoundPromptLabel" class="arm-section-note" style="display:none; margin:0 0 12px;"></p>
+
+      <div class="arm-section-head" style="margin-top:18px;">
+        <div>
           <h2>Препромпт</h2>
-          <p class="arm-section-note">Сначала выберите расширение выше — для каждого расширения свой список препромтов. Отправка без препромта невозможна.</p>
+          <p class="arm-section-note">Сначала выберите расширение выше — для каждого расширения свой список препромтов. Отправка без препромта невозможна. Можно выбрать вручную; при выборе темы подставляется привязанный по умолчанию.</p>
         </div>
       </div>
       <select name="prompt_id" id="armPromptSelect" disabled style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
@@ -372,7 +383,7 @@
         <h2>Сводка</h2>
         <p class="arm-section-note">Результаты последнего запуска</p>
       </div>
-      <button type="button" class="button" id="armSolveDownloadCsvBtn" style="font-size:13px; display:none;">Скачать результаты (CSV)</button>
+      <a class="button" id="armSolveDownloadXlsxBtn" style="font-size:13px; display:none;" href="#">Скачать результаты (XLSX)</a>
     </div>
     <ul id="armSolveReportList" class="arm-report"></ul>
     <div id="armSolvePerModelWrap"></div>
@@ -391,6 +402,7 @@
 </div>
 
 {{ active_run_snapshot|json_script:"arm-solve-initial-run" }}
+{{ arm_prompt_bindings|json_script:"arm-prompt-bindings" }}
 
 {% include "admin/ai/_ai_batch_results.html" %}
 
@@ -410,10 +422,11 @@
     const statusUrl = '{{ arm_solve_status_url }}';
     const promptsUrl = '{{ arm_solve_prompts_url }}';
     const extensionSelect = document.getElementById('armExtensionSelect');
+    const topicSelect = document.getElementById('armTopicSelect');
+    const boundPromptLabel = document.getElementById('armBoundPromptLabel');
     const promptSelect = document.getElementById('armPromptSelect');
     let currentRunId = '';
     let pollTimer = null;
-    let lastRenderedResults = [];
 
     function getCsrfToken() {
       const input = form.querySelector('input[name="csrfmiddlewaretoken"]');
@@ -466,13 +479,16 @@
       if (!run) { return; }
       renderReport(run.report || null);
       renderResults(run.results || []);
-      lastRenderedResults = run.results || [];
-      // Show download button only when run is done and has results.
-      const downloadBtn = document.getElementById('armSolveDownloadCsvBtn');
+      // Show download link only when run is done and has results; href —
+      // серверная xlsx-выгрузка по run_id (живой прогон и DB-fallback).
+      const downloadBtn = document.getElementById('armSolveDownloadXlsxBtn');
       if (downloadBtn) {
         const hasResults = (run.results || []).length > 0;
         const isDone = run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
         downloadBtn.style.display = (hasResults && isDone) ? '' : 'none';
+        if (run.run_id) {
+          downloadBtn.href = '/ai/admin/arm/solve/report/' + encodeURIComponent(run.run_id) + '/xlsx/';
+        }
       }
       if (run.status === 'running') {
         const done = run.completed_pairs != null ? run.completed_pairs : 0;
@@ -694,10 +710,15 @@
       });
     }
 
-    // Препромты грузятся с бэкенда по выбранному расширению (/solve/prompts/).
-    // Список зависит от расширения (маппинг расширение→ProgrammingLanguage→
-    // Prompt.topic.programming_language), общие SharedPrompt не предлагаются.
+    // Препромты и темы грузятся с бэкенда по выбранному расширению
+    // (/solve/prompts/). Список зависит от расширения (маппинг
+    // расширение→ProgrammingLanguage→Prompt.topic.programming_language),
+    // общие SharedPrompt не предлагаются. Тема ограничивает список препромтов
+    // и включает авто-подстановку «препромпта по умолчанию» (ArmPromptBinding).
+    let currentPromptOptions = [];
+
     function setPromptOptions(options, placeholder) {
+      currentPromptOptions = options;
       promptSelect.innerHTML = '';
       const ph = document.createElement('option');
       ph.value = '';
@@ -710,14 +731,86 @@
         promptSelect.appendChild(o);
       });
       promptSelect.value = '';
+      updateBoundPromptLabel(false);
+    }
+
+    // Подпись под темой: какой промромпт сейчас выбран (по привязке или
+    // вручную) — чтобы сразу видеть, что подтянулось.
+    function updateBoundPromptLabel(fromBinding) {
+      if (!boundPromptLabel) { return; }
+      const selected = promptSelect && promptSelect.selectedOptions[0];
+      if (!selected || !selected.value) {
+        boundPromptLabel.style.display = 'none';
+        boundPromptLabel.textContent = '';
+        return;
+      }
+      boundPromptLabel.style.display = '';
+      boundPromptLabel.textContent = (fromBinding ? 'Препромпт по умолчанию: ' : 'Препромпт: ')
+        + selected.textContent;
+    }
+
+    // Привязки «препромпт по умолчанию» отдаются сервером в json_script.
+    // Тема однозначно определяет язык, поэтому достаточно (topic_id, mode).
+    let promptBindings = [];
+    try {
+      const bindingsEl = document.getElementById('arm-prompt-bindings');
+      promptBindings = JSON.parse(bindingsEl ? bindingsEl.textContent : '[]') || [];
+    } catch (e) { promptBindings = []; }
+
+    function findBoundPromptId(topicId, mode) {
+      const b = promptBindings.find(function (x) {
+        return String(x.topic_id) === String(topicId) && x.mode === mode;
+      });
+      return b ? String(b.prompt_id) : '';
+    }
+
+    // Ограничить список препромтов выбранной темой и подтянуть привязку.
+    function applyTopicSelection(topicId) {
+      let opts = currentPromptOptions;
+      if (topicId) {
+        opts = currentPromptOptions.filter(function (o) {
+          return String(o.topic_id) === String(topicId);
+        });
+      }
+      const placeholder = topicId && !opts.length
+        ? '— нет препромтов этой темы —'
+        : (currentPromptOptions.length ? '— выберите препромт —' : '— выберите расширение сначала —');
+      setPromptOptions(opts, placeholder);
+      promptSelect.disabled = !opts.length;
+      if (topicId && opts.length) {
+        const boundId = findBoundPromptId(topicId, 'solve');
+        if (boundId && opts.some(function (o) { return o.id === boundId; })) {
+          promptSelect.value = boundId;
+          updateBoundPromptLabel(true);
+        }
+      }
+    }
+
+    function setTopicOptions(topics) {
+      if (!topicSelect) { return; }
+      topicSelect.innerHTML = '';
+      const ph = document.createElement('option');
+      ph.value = '';
+      ph.textContent = topics.length ? '— выберите тему (необязательно) —' : '— нет тем для этого расширения —';
+      topicSelect.appendChild(ph);
+      topics.forEach(function (t) {
+        const o = document.createElement('option');
+        o.value = String(t.id);
+        o.textContent = t.name || t.topic_name;
+        topicSelect.appendChild(o);
+      });
+      topicSelect.value = '';
+      topicSelect.disabled = !topics.length;
     }
 
     async function loadPrompts(extension) {
       if (!extension) {
+        setTopicOptions([]);
         setPromptOptions([], '— выберите расширение сначала —');
         promptSelect.disabled = true;
         return;
       }
+      setTopicOptions([]);
       setPromptOptions([], 'Загрузка препромтов...');
       promptSelect.disabled = true;
       try {
@@ -728,6 +821,7 @@
         const data = await parseJsonResponse(response);
         if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка загрузки препромтов'); }
         const opts = data.prompt_options || [];
+        setTopicOptions(data.topic_options || []);
         if (!opts.length) {
           setPromptOptions([], '— нет препромтов для этого расширения —');
           promptSelect.disabled = true;
@@ -736,10 +830,22 @@
         setPromptOptions(opts, '— выберите препромт —');
         promptSelect.disabled = false;
       } catch (error) {
+        setTopicOptions([]);
         setPromptOptions([], '— ошибка загрузки препромтов —');
         setError(error.message || 'Ошибка загрузки препромтов');
         promptSelect.disabled = true;
       }
+    }
+
+    if (topicSelect) {
+      topicSelect.addEventListener('change', function () {
+        applyTopicSelection(this.value);
+      });
+    }
+    if (promptSelect) {
+      promptSelect.addEventListener('change', function () {
+        updateBoundPromptLabel(false);
+      });
     }
 
     if (extensionSelect) {
@@ -783,14 +889,10 @@
       }
     }
 
-    // ── Download results as CSV (tasks × models matrix) — общий код в partial ──
-    var downloadCsvBtn = document.getElementById('armSolveDownloadCsvBtn');
-    if (downloadCsvBtn) {
-      downloadCsvBtn.addEventListener('click', function () {
-        // Use the latest results from the last rendered snapshot.
-        ArmBatchResults.downloadResultsCsv(lastRenderedResults, currentRunId);
-      });
-    }
+    // ── Download results (xlsx-матрица задача×модель) — серверный эндпоинт
+    // /ai/admin/arm/solve/report/<run_id>/xlsx/, ссылка обновляется в
+    // applyRunSnapshot. Клиентская CSV-генерация удалена (DRY: один
+    // серверный генератор в ai/admin/export.py). ──
 
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
@@ -860,7 +962,24 @@
         if (rp.file_extension && extensionSelect) {
           extensionSelect.value = rp.file_extension;
           await loadPrompts(rp.file_extension);
-          if (rp.prompt_id) { promptSelect.value = String(rp.prompt_id); }
+          if (rp.prompt_id && currentPromptOptions.length) {
+            // Тему восстанавливаем по препромпту прогона; сам выбор
+            // препромпта из run_params имеет приоритет над привязкой.
+            const restoredOpt = currentPromptOptions.find(function (o) {
+              return String(o.id) === String(rp.prompt_id);
+            });
+            if (restoredOpt && restoredOpt.topic_id && topicSelect) {
+              topicSelect.value = String(restoredOpt.topic_id);
+              applyTopicSelection(String(restoredOpt.topic_id));
+            }
+            const restoredIds = Array.prototype.map.call(
+              promptSelect.options, function (o) { return o.value; }
+            );
+            if (restoredIds.indexOf(String(rp.prompt_id)) !== -1) {
+              promptSelect.value = String(rp.prompt_id);
+              updateBoundPromptLabel(false);
+            }
+          }
         }
         if (courseIdInput.value.trim()) { await loadTree(); }
         const wantedNodes = new Set((rp.node_ids || []).map(String));

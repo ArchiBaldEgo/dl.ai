@@ -289,6 +289,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         const codeLabel = document.querySelector(".codetx");
         if (codeLabel) codeLabel.textContent = getUiString('codetx', 'Код программы:');
         updateAccordionLabels();
+        updateLastUpdateLabel();
 
         const voiceModeBtn = document.getElementById("voiceModeBtn");
         if (voiceModeBtn) voiceModeBtn.textContent = localization[selectedLang].voiceMode;

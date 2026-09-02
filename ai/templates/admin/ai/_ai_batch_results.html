@@ -1,8 +1,9 @@
 {% comment %}
 Общий CSS + JS мини-таблицы результатов batch-solve. Используется страницей
 /arm/solve/ (arm_solve.html) и детальной страницей записи Журнала запросов
-в режиме «Пакетное решение» (airequestlog_detail.html), чтобы рендеринг и
-CSV-экспорт были идентичны. Единый источник правды — window.ArmBatchResults.
+в режиме «Пакетное решение» (airequestlog_detail.html), чтобы рендеринг был
+идентичен. Единый источник правды — window.ArmBatchResults. Экспорт XLSX —
+серверный (ai/admin/export.py), кнопка здесь — ссылка на эндпоинт по run_id.
 NB: комментарии с решёткой Django вырезает только в одну строку —
 многострочный комментарий шаблона обязан быть блочным тегом comment.
 {% endcomment %}
@@ -87,14 +88,6 @@ window.ArmBatchResults = (function () {
     var labels = { solved: 'Решено', failed: 'Не решено', skipped: 'Пропущено' };
     var cls = v === 'solved' ? 'solved' : (v === 'failed' ? 'failed' : 'skipped');
     return '<span class="arm-badge ' + cls + '">' + escapeHtml(labels[v] || v) + '</span>';
-  }
-  function csvCell(value) {
-    var s = String(value == null ? '' : value);
-    // Квотируем ячейку при наличии ; " \n \r — иначе Excel/CSV собьёт строку.
-    if (s.indexOf(';') !== -1 || s.indexOf('"') !== -1 || s.indexOf('\n') !== -1 || s.indexOf('\r') !== -1) {
-      return '"' + s.replace(/"/g, '""') + '"';
-    }
-    return s;
   }
 
   function renderBucketTable(rows, labelHeader, wrapEl) {
@@ -238,50 +231,6 @@ window.ArmBatchResults = (function () {
     if (resultsCard) { resultsCard.style.display = 'block'; }
   }
 
-  // CSV (tasks × models matrix) с BOM для Excel; + solved, - failed, ? skipped.
-  function downloadResultsCsv(results, runId) {
-    if (!results || !results.length) { return; }
-    var taskMap = {}, taskOrder = [];
-    var modelMap = {}, modelOrder = [];
-    results.forEach(function (r) {
-      var tkey = String(r.task_node_id || '');
-      if (!(tkey in taskMap)) { taskMap[tkey] = { id: tkey, name: r.task_name || '' }; taskOrder.push(tkey); }
-      var mkey = String(r.model_key || r.model_title || '');
-      if (!(mkey in modelMap)) { modelMap[mkey] = r.model_title || mkey; modelOrder.push(mkey); }
-    });
-    var matrix = {};
-    results.forEach(function (r) {
-      var tkey = String(r.task_node_id || '');
-      var mkey = String(r.model_key || r.model_title || '');
-      var v = r.verdict;
-      var symbol = v === 'solved' ? '+' : (v === 'failed' ? '-' : '?');
-      if (!matrix[tkey]) { matrix[tkey] = {}; }
-      matrix[tkey][mkey] = symbol;
-    });
-    var lines = [];
-    var header = ['Node ID', 'Задача'];
-    modelOrder.forEach(function (mkey) { header.push(csvCell(modelMap[mkey])); });
-    lines.push(header.join(';'));
-    taskOrder.forEach(function (tkey) {
-      var t = taskMap[tkey];
-      var row = [csvCell(t.id), csvCell(t.name)];
-      modelOrder.forEach(function (mkey) {
-        row.push(matrix[tkey] && matrix[tkey][mkey] ? matrix[tkey][mkey] : '');
-      });
-      lines.push(row.join(';'));
-    });
-    var csv = '﻿' + lines.join('\r\n');
-    var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = 'arm_solve_results_' + (runId || 'run') + '.csv';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }
-
   // init(rootEl, snapshot, runId): строит карточки сводки + ответов и рендерит.
   // snapshot = {results, report, ...}. Возвращает {downloadBtn, ...}.
   function init(rootEl, snapshot, runId) {
@@ -298,11 +247,15 @@ window.ArmBatchResults = (function () {
     var reportNote = document.createElement('p'); reportNote.className = 'arm-section-note'; reportNote.textContent = 'Результаты прогона';
     reportHeadLeft.appendChild(reportH2); reportHeadLeft.appendChild(reportNote);
     reportHead.appendChild(reportHeadLeft);
-    var downloadBtn = document.createElement('button');
-    downloadBtn.type = 'button'; downloadBtn.className = 'arm-button';
-    downloadBtn.textContent = 'Скачать результаты (CSV)';
+    // XLSX-выгрузка — серверный эндпоинт по run_id (единый генератор в
+    // ai/admin/export.py, автоширина колонок); ссылка, а не клиентский blob.
+    var downloadBtn = document.createElement('a');
+    downloadBtn.className = 'arm-button';
+    downloadBtn.textContent = 'Скачать результаты (XLSX)';
     downloadBtn.style.fontSize = '13px';
-    downloadBtn.addEventListener('click', function () { downloadResultsCsv(snapshot.results || [], runId); });
+    if (runId) {
+      downloadBtn.href = '/ai/admin/arm/solve/report/' + encodeURIComponent(runId) + '/xlsx/';
+    }
     reportHead.appendChild(downloadBtn);
     reportCard.appendChild(reportHead);
 
@@ -325,16 +278,16 @@ window.ArmBatchResults = (function () {
     renderReport(snapshot.report || null, { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap });
     renderResults(snapshot.results || [], resultsEl, resultsCard);
 
-    var hasResults = (snapshot.results || []).length > 0;
+    var hasResults = (snapshot.results || []).length > 0 && !!runId;
     downloadBtn.style.display = hasResults ? '' : 'none';
 
     return { reportCard: reportCard, resultsCard: resultsCard, resultsEl: resultsEl, downloadBtn: downloadBtn };
   }
 
   return {
-    escapeHtml: escapeHtml, verdictBadge: verdictBadge, csvCell: csvCell,
+    escapeHtml: escapeHtml, verdictBadge: verdictBadge,
     renderBucketTable: renderBucketTable, renderReport: renderReport,
-    renderResults: renderResults, downloadResultsCsv: downloadResultsCsv, init: init,
+    renderResults: renderResults, init: init,
   };
 })();
 </script>

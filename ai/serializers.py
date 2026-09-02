@@ -61,3 +61,18 @@ def shared_prompt_with_dates(obj, ui_language=""):
     data["created_at"] = obj.created_at.isoformat() if obj.created_at else None
     data["updated_at"] = obj.updated_at.isoformat() if obj.updated_at else None
     return data
+
+
+def arm_prompt_binding(obj):
+    """Сериализует ArmPromptBinding для авто-подстановки препромпта на ARM-страницах.
+
+    Компактный формат: фронт ищет запись по (language_id, topic_id, mode) и
+    подставляет prompt_id в селект препромпта.
+    """
+    return {
+        "id": obj.id,
+        "language_id": obj.programming_language_id,
+        "topic_id": obj.topic_id,
+        "mode": obj.mode,
+        "prompt_id": obj.prompt_id,
+    }

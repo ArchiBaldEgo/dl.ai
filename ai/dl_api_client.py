@@ -183,7 +183,11 @@ def _raise_for_status(response: requests.Response) -> None:
     if response.status_code == 404:
         raise DLTaskNotFoundError()
     if response.status_code >= 500:
-        raise DLServerError(f"Ошибка сервера DL (код {response.status_code})")
+        # Тело 5xx часто несёт реальную причину (stacktrace/HTML-страница DL) —
+        # прикладываем сниппет, иначе диагностика сводится к голому «код 500».
+        raise DLServerError(
+            f"Ошибка сервера DL (код {response.status_code}){_body_snippet(response)}"
+        )
     if response.status_code >= 400:
         # Прочие 4xx (400/405/413/422/…): DL вернул ошибку запроса, тело часто
         # HTML (страница nginx/Spring/WAF), а не JSON. Поднимаем ошибку с фрагментом

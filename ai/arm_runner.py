@@ -869,14 +869,14 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
     except DLServerError as exc:
         msg = str(exc)
         result["submit_error"] = f"send-solution: {msg}"
-        # 400 от send-solution недокументировано (док описывает только 401/500),
-        # DL не поясняет, какое поле отвергнуто. Контракт REST API требует
-        # courseId в теле — он теперь передаётся; ensure_course_session выше
-        # дополнительно активирует курс в сессии. Если 400 всё равно пришёл,
+        # Отказы send-solution (400/500/…) недокументированы (док описывает
+        # только 401/500), DL не поясняет, какое поле отвергнуто. Контракт REST
+        # API требует courseId в теле — он передаётся; ensure_course_session выше
+        # дополнительно активирует курс в сессии. При любом отказе отправки
         # проверяем эмпирическую гипотезу: возможно send-solution ждёт не nodeId,
         # а taskId (get-task-info возвращает оба id). Отправляем task_id в поле
         # nodeId (courseId тот же); если принято — продолжаем поллинг.
-        if "код 400" in msg and task_id and task_id != node_id:
+        if task_id and task_id != node_id:
             try:
                 alt_resp = send_solution_to_dl(session_id, task_id, code, file_extension, course_id=course_id)
                 alt_qid = alt_resp.get("queueId") or 0
@@ -895,7 +895,7 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
                 result["submit_error"] += f" | проба taskId={task_id} вместо nodeId: {alt_exc}"
         if not submit_resp:
             result["submit_error"] += (
-                " — DL отклонил отправку решения (400). courseId/nodeId/"
+                " — DL отклонил отправку решения. courseId/nodeId/"
                 "fileExtension переданы по контракту REST API, язык выбран "
                 "корректно. Вероятные причины: задача не принимает отправку через "
                 "REST API (напр. раздел «Программы с подсказками»), у сессии нет "

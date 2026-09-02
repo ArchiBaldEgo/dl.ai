@@ -240,11 +240,12 @@ function initProblemSelectors() {
         });
 
         let candidates = [];
+        const sharedPrefix = getUiString('sharedPrefix', '[Общий]');
         sharedVisible.forEach(sp => {
             candidates.push({
                 id: `shared_${sp.id}`,
-                prompt_name: `[Общий] ${sp.name || sp.prompt_name}`,
-                name: `[Общий] ${sp.name || sp.prompt_name}`,
+                prompt_name: `${sharedPrefix} ${sp.name || sp.prompt_name}`,
+                name: `${sharedPrefix} ${sp.name || sp.prompt_name}`,
                 topic_id: null,
                 topic__programming_language: langIdStr
             });
@@ -835,6 +836,9 @@ var localization = {
         voiceOutput: "Озвучить ответ",
         speakThinkLabel: "Озвучивать дополнительную информацию",
         themeToggle: "Сменить тему",
+        lastUpdate: "Последнее обновление",
+        // Маркер shared-препромпта — JS-зеркало _SHARED_PROMPT_PREFIX из ai/i18n.py.
+        sharedPrefix: "[Общий]",
         voiceStatus: {
             listening: "Запись голоса",
             recognized: "Распознано: ",
@@ -900,6 +904,9 @@ var localization = {
         voiceOutput: "Speak answer",
         speakThinkLabel: "Voice extra information",
         themeToggle: "Toggle theme",
+        lastUpdate: "Last updated",
+        // Mirror of _SHARED_PROMPT_PREFIX from ai/i18n.py.
+        sharedPrefix: "[Shared]",
         voiceStatus: {
             listening: "Voice recording",
             recognized: "Recognized: ",
@@ -965,6 +972,9 @@ var localization = {
         voiceOutput: "Lire la réponse",
         speakThinkLabel: "Informations supplémentaires vocales",
         themeToggle: "Changer le thème",
+        lastUpdate: "Dernière mise à jour",
+        // Miroir de _SHARED_PROMPT_PREFIX de ai/i18n.py.
+        sharedPrefix: "[Partagé]",
         voiceStatus: {
             listening: "Enregistrement vocal",
             recognized: "Reconnu : ",
@@ -1138,6 +1148,13 @@ function initAccordionForMessages() {
         }
     }
     window._accordionRoles = roles;
+}
+
+// Подпись «Последнее обновление» в сайдбаре (base_chat.html) — переводится
+// вместе с остальными строками UI при смене языка интерфейса.
+function updateLastUpdateLabel() {
+    var label = document.querySelector('.ai-last-update-label');
+    if (label) label.textContent = getUiString('lastUpdate', 'Последнее обновление');
 }
 
 function updateAccordionLabels() {

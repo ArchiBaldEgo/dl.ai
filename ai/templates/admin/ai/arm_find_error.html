@@ -447,6 +447,7 @@
           <div class="arm-field">
             <label for="prompt">Препромпт</label>
             <select id="prompt" name="prompt"></select>
+            <p id="armBoundPromptLabel" style="display:none; margin:4px 0 0; font-size:13px; color:var(--body-quiet-color, #666);"></p>
           </div>
         </div>
 
@@ -567,6 +568,7 @@
 {{ languages|json_script:"langs-data" }}
 {{ topics|json_script:"topics-data" }}
 {{ prompts|json_script:"prompts-data" }}
+{{ arm_prompt_bindings|json_script:"arm-find-error-bindings" }}
 {{ active_run_snapshot|json_script:"arm-initial-run-data" }}
 
 <script>
@@ -582,6 +584,55 @@
     const languages = JSON.parse(document.getElementById('langs-data').textContent || '[]');
     const topics = JSON.parse(document.getElementById('topics-data').textContent || '[]');
     const prompts = JSON.parse(document.getElementById('prompts-data').textContent || '[]');
+    // Привязки «препромпт по умолчанию» (ArmPromptBinding): после выбора
+    // языка и темы подтягиваем привязанный препромпт mode=find_error.
+    // Восстановление формы по run_params (selectedPrompt) приоритетнее —
+    // авто-подстановку делаем только когда пользователь ещё ничего не выбрал.
+    const promptBindings = JSON.parse(
+      document.getElementById('arm-find-error-bindings').textContent || '[]'
+    ) || [];
+    const boundPromptLabel = document.getElementById('armBoundPromptLabel');
+
+    function findBoundPromptId(languageId, topicId) {
+      const binding = promptBindings.find(function (item) {
+        return String(item.language_id) === String(languageId)
+          && String(item.topic_id) === String(topicId)
+          && item.mode === 'find_error';
+      });
+      return binding ? String(binding.prompt_id) : '';
+    }
+
+    // Подпись под селектором препромпта: что сейчас выбрано (по привязке
+    // или вручную) — чтобы сразу видеть, что подтянулось.
+    function updateBoundPromptLabel(fromBinding) {
+      if (!boundPromptLabel) { return; }
+      const selected = promptSelect.selectedOptions[0];
+      if (!selected || !selected.value) {
+        boundPromptLabel.style.display = 'none';
+        boundPromptLabel.textContent = '';
+        return;
+      }
+      boundPromptLabel.style.display = '';
+      boundPromptLabel.textContent = (fromBinding ? 'Препромпт по умолчанию: ' : 'Препромпт: ')
+        + selected.textContent;
+    }
+
+    function applyPromptBinding() {
+      if (selectedPrompt || !topicSelect.value || !langSelect.value) {
+        updateBoundPromptLabel(false);
+        return;
+      }
+      const boundId = findBoundPromptId(langSelect.value, topicSelect.value);
+      const exists = Array.prototype.some.call(promptSelect.options, function (o) {
+        return o.value === boundId && boundId;
+      });
+      if (boundId && exists) {
+        promptSelect.value = boundId;
+        updateBoundPromptLabel(true);
+      } else {
+        updateBoundPromptLabel(false);
+      }
+    }
 
     function fillLanguages() {
       langSelect.innerHTML = '<option value="">Выберите язык</option>';
@@ -650,10 +701,16 @@
     langSelect.addEventListener('change', function () {
       fillTopics(langSelect.value);
       fillPrompts(langSelect.value, null);
+      applyPromptBinding();
     });
 
     topicSelect.addEventListener('change', function () {
       fillPrompts(langSelect.value, topicSelect.value);
+      applyPromptBinding();
+    });
+
+    promptSelect.addEventListener('change', function () {
+      updateBoundPromptLabel(false);
     });
 
     const interfaceLangSelect = document.getElementById('interface_language');
@@ -676,6 +733,7 @@
         fillLanguages();
         fillTopics(langSelect.value);
         fillPrompts(langSelect.value, topicSelect.value);
+        applyPromptBinding();
       } catch (error) {
         console.error('Failed to reload problem data:', error);
       }
@@ -687,6 +745,7 @@
     fillLanguages();
     fillTopics(langSelect.value);
     fillPrompts(langSelect.value, topicSelect.value);
+    applyPromptBinding();
   })();
 
   function openArmModal(card) {

@@ -30,6 +30,35 @@ from ..auth_backends import get_external_user_id_from_request
 
 logger = logging.getLogger(__name__)
 
+# Временно скрытые разделы админки: убираются из левого меню (и из списка
+# моделей на дашборде), но сами страницы по прямым URL продолжают работать —
+# «просто скрыть, чтобы с ними никто не взаимодействовал». Сюда попадают и
+# инструменты (_build_ai_nav_apps фильтрует по object_name). Вернуть раздел —
+# удалить его имя из множества.
+_HIDDEN_NAV_OBJECT_NAMES = {
+    "User",              # «Аутентификация и авторизация» → «Пользователи»
+    "Task",              # «Задачи (DL)»
+    "PromptTestRun",      # «Прогоны регрессионных тестов промптов»
+    "PromptTestCase",     # «Тест-кейсы промптов»
+    "AiPromptRegression", # инструмент «Регрессионные тесты»
+}
+
+
+def _hide_nav_sections(app_list):
+    """Выкинуть из app_list скрытые разделы; опустевшие приложения убрать."""
+    filtered = []
+    for app in app_list:
+        models = [
+            m for m in app.get("models", [])
+            if m.get("object_name") not in _HIDDEN_NAV_OBJECT_NAMES
+        ]
+        if not models:
+            # Например, auth остаётся без «Пользователей» — группа исчезает.
+            continue
+        app = dict(app, models=models)
+        filtered.append(app)
+    return filtered
+
 
 def _is_admin_login_path(path: str) -> bool:
     normalized = (path or "/").split("?")[0].rstrip("/") or "/"
@@ -259,7 +288,12 @@ class AIAdminSite(admin.AdminSite):
                         model["_model_cls"] = cls
                         break
         request._ai_admin_registry = registry
-        return filter_app_list_for_user(app_list, request)
+        app_list = filter_app_list_for_user(app_list, request)
+        # Временно скрытые разделы: убираем из навигации, но НЕ отключаем
+        # сами страницы — прямые URL продолжают работать. Возврат — удалить
+        # имя из множества.
+        app_list = _hide_nav_sections(app_list)
+        return app_list
 
     def each_context(self, request):
         from .my_prompt import get_my_prompt_admin_url
@@ -324,6 +358,7 @@ class AIAdminSite(admin.AdminSite):
                 ("Инструменты", "Мой промпт", "AiMyPrompt", my_prompt_url, is_pd),
                 ("Инструменты", "Поиск ошибки (ARM)", "AiArmFindError", arm_find_error_url, show_arm),
                 ("Инструменты", "Пакетное решение (ARM)", "AiArmSolve", arm_solve_url, show_arm),
+                ("Инструменты", "Препромпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", is_super),
                 ("Инструменты", "Регрессионные тесты", "AiPromptRegression", prompt_regression_url, show_prompt_regression),
                 ("Инструменты", "Тестовая консоль", "AiTestConsole", test_console_url, show_test_console),
                 ("Администрирование", "Состояние моделей", "AiModelStatus", arm_model_status_url, show_model_status),
@@ -391,7 +426,7 @@ class AIAdminSite(admin.AdminSite):
         label_to_key = {"Инструменты": "ai-tools", "Администрирование": "ai-admin"}
         groups: dict[str, dict] = {}
         for group, label, object_name, url, visible in tools:
-            if not visible:
+            if not visible or object_name in _HIDDEN_NAV_OBJECT_NAMES:
                 continue
             app = groups.get(group)
             if app is None:

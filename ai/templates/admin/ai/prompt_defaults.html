@@ -1,0 +1,226 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+{% include "admin/ai/_ai_back_nav.html" %}
+<div id="content-main">
+  <h1>Препромпты по умолчанию (ARM)</h1>
+  <p class="help">
+    Привязка «язык + тема + вид ARM → препромпт»: на страницах
+    «Пакетное решение» и «Поиск ошибки» после выбора темы препромпт подтягивается
+    автоматически. Сам промпт редактируется по обычным правилам (владелец /
+    редактор / суперюзер) — привязка всегда использует актуальный текст.
+  </p>
+
+  <p id="pdMessage" style="display:none; padding:8px 12px; border-radius:6px; margin:10px 0;"></p>
+
+  <section style="background:var(--body-bg); border:1px solid var(--hairline-color); border-radius:8px; padding:18px; margin-bottom:16px;">
+    <h2 style="margin:0 0 12px; font-size:18px;">{% if editing %}Изменить привязку{% else %}Новая привязка{% endif %}</h2>
+    <form id="pdForm" method="post" action="{% url 'ai_prompt_defaults' %}">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="save">
+      <div style="display:grid; gap:12px; max-width:640px;">
+        <label>Язык программирования
+          <select name="language_id" id="pdLanguage" style="width:100%;"></select>
+        </label>
+        <label>Тема
+          <select name="topic_id" id="pdTopic" style="width:100%;" disabled></select>
+        </label>
+        <label>Вид ARM
+          <select name="mode" id="pdMode" style="width:100%;">
+            {% for choice in mode_choices %}
+              <option value="{{ choice.value }}">{{ choice.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Препромпт
+          <select name="prompt_id" id="pdPrompt" style="width:100%;" disabled></select>
+        </label>
+        <div style="display:flex; gap:8px;">
+          <button type="submit" class="button" id="pdSaveBtn">{% if editing %}Сохранить{% else %}Создать привязку{% endif %}</button>
+          {% if editing %}
+            <a class="button" href="{% url 'ai_prompt_defaults' %}">Отменить</a>
+          {% endif %}
+        </div>
+      </div>
+    </form>
+  </section>
+
+  <section style="margin-top:20px;">
+    <h2 style="font-size:18px;">Существующие привязки</h2>
+    <table style="width:100%; border-collapse:collapse;">
+      <thead>
+        <tr>
+          <th style="text-align:left; padding:8px 10px; border-bottom:1px solid var(--hairline-color);">Язык</th>
+          <th style="text-align:left; padding:8px 10px; border-bottom:1px solid var(--hairline-color);">Тема</th>
+          <th style="text-align:left; padding:8px 10px; border-bottom:1px solid var(--hairline-color);">Вид ARM</th>
+          <th style="text-align:left; padding:8px 10px; border-bottom:1px solid var(--hairline-color);">Препромпт</th>
+          <th style="text-align:left; padding:8px 10px; border-bottom:1px solid var(--hairline-color);"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in bindings %}
+          <tr>
+            <td style="padding:8px 10px;">{{ b.language_name }}</td>
+            <td style="padding:8px 10px;">{{ b.topic_name }}</td>
+            <td style="padding:8px 10px;">{{ b.mode_label }}</td>
+            <td style="padding:8px 10px;">{{ b.prompt_name }}</td>
+            <td style="padding:8px 10px; white-space:nowrap;">
+              <a href="{% url 'ai_prompt_defaults' %}?edit={{ b.id }}">Изменить</a>
+              <button type="button" class="button pd-delete-btn" data-id="{{ b.id }}" style="font-size:13px; padding:4px 10px; margin-left:6px;">Удалить</button>
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" style="padding:8px 10px; color:var(--body-quiet-color);">Привязок пока нет.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+
+{{ languages|json_script:"pd-languages-data" }}
+{{ topics|json_script:"pd-topics-data" }}
+{{ prompts|json_script:"pd-prompts-data" }}
+{{ editing|json_script:"pd-editing-data" }}
+{% endblock %}
+
+{% block extrahead %}
+{{ block.super }}
+<script>
+(function () {
+  'use strict';
+  // Тот же контракт, что у всех AJAX-хендлеров админки: протухшая сессия
+  // редиректит fetch на страницу логина (HTML) — показываем понятную ошибку.
+  function parseJsonResponse(response) {
+    return response.text().then(function (text) {
+      if (!text || !text.trim()) { throw new Error('Сессия истекла. Обновите страницу и войдите заново.'); }
+      try { return JSON.parse(text); }
+      catch (e) { throw new Error('Сессия истекла. Обновите страницу и войдите заново.'); }
+    });
+  }
+
+  function showMessage(text, isError) {
+    var el = document.getElementById('pdMessage');
+    el.style.display = '';
+    el.style.background = isError ? '#fee2e2' : '#dcfce7';
+    el.style.color = isError ? '#991b1b' : '#166534';
+    el.textContent = text;
+  }
+
+  var languageSelect = document.getElementById('pdLanguage');
+  var topicSelect = document.getElementById('pdTopic');
+  var promptSelect = document.getElementById('pdPrompt');
+  var saveBtn = document.getElementById('pdSaveBtn');
+  var form = document.getElementById('pdForm');
+  var languagesData = JSON.parse(document.getElementById('pd-languages-data').textContent || '[]');
+  var topicsData = JSON.parse(document.getElementById('pd-topics-data').textContent || '[]');
+  var promptsData = JSON.parse(document.getElementById('pd-prompts-data').textContent || '[]');
+  var editing = JSON.parse(document.getElementById('pd-editing-data').textContent || 'null');
+
+  function fillLanguages(selectedId) {
+    languageSelect.innerHTML = '';
+    languageSelect.appendChild(new Option('— выберите язык —', ''));
+    // Только языки, у которых есть темы: привязка всегда содержит тему.
+    var languagesWithTopics = {};
+    topicsData.forEach(function (t) { languagesWithTopics[t.language_id] = true; });
+    languagesData.forEach(function (lang) {
+      if (languagesWithTopics[lang.id]) {
+        languageSelect.appendChild(new Option(lang.name, String(lang.id)));
+      }
+    });
+    if (selectedId) { languageSelect.value = String(selectedId); }
+  }
+
+  function fillTopics(languageId, selectedId) {
+    topicSelect.innerHTML = '';
+    topicSelect.appendChild(new Option('— выберите тему —', ''));
+    topicsData.forEach(function (t) {
+      if (String(t.language_id) === String(languageId)) {
+        topicSelect.appendChild(new Option(t.name, String(t.id)));
+      }
+    });
+    topicSelect.disabled = topicSelect.options.length <= 1;
+    if (selectedId) { topicSelect.value = String(selectedId); }
+  }
+
+  function fillPrompts(topicId, selectedId) {
+    promptSelect.innerHTML = '';
+    promptSelect.appendChild(new Option('— выберите препромпт —', ''));
+    promptsData.forEach(function (p) {
+      if (String(p.topic_id) === String(topicId)) {
+        promptSelect.appendChild(new Option(p.name, String(p.id)));
+      }
+    });
+    promptSelect.disabled = promptSelect.options.length <= 1;
+    if (selectedId) { promptSelect.value = String(selectedId); }
+  }
+
+  languageSelect.addEventListener('change', function () {
+    fillTopics(this.value);
+    fillPrompts('');
+  });
+  topicSelect.addEventListener('change', function () { fillPrompts(this.value); });
+
+  // Prefill: новая привязка или редактирование ?edit=<id>.
+  if (editing) {
+    fillLanguages(editing.language_id);
+    fillTopics(editing.language_id, editing.topic_id);
+    fillPrompts(editing.topic_id, editing.prompt_id);
+    var modeSelect = document.getElementById('pdMode');
+    if (modeSelect) { modeSelect.value = editing.mode; }
+  } else {
+    fillLanguages();
+  }
+
+  function post(action, fields) {
+    var body = new URLSearchParams();
+    body.set('action', action);
+    Object.keys(fields).forEach(function (key) { body.set(key, fields[key]); });
+    var csrf = document.querySelector('input[name="csrfmiddlewaretoken"]');
+    return fetch(form.action, {
+      method: 'POST', credentials: 'same-origin',
+      headers: {
+        'X-CSRFToken': csrf ? csrf.value : '',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      body: body.toString(),
+    }).then(parseJsonResponse);
+  }
+
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    if (!languageSelect.value || !topicSelect.value || !promptSelect.value) {
+      showMessage('Выберите язык, тему и препромпт.', true);
+      return;
+    }
+    saveBtn.disabled = true;
+    post('save', {
+      language_id: languageSelect.value,
+      topic_id: topicSelect.value,
+      mode: document.getElementById('pdMode').value,
+      prompt_id: promptSelect.value,
+    }).then(function (data) {
+      if (!data.ok) { throw new Error(data.error || 'Не удалось сохранить привязку'); }
+      showMessage(data.message || 'Сохранено', false);
+      // Перегрузка обновляет таблицу привязок (простой и честный путь).
+      window.setTimeout(function () { window.location.reload(); }, 400);
+    }).catch(function (error) {
+      showMessage(error.message || 'Ошибка', true);
+      saveBtn.disabled = false;
+    });
+  });
+
+  document.querySelectorAll('.pd-delete-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      if (!window.confirm('Удалить привязку?')) { return; }
+      post('delete', { binding_id: btn.getAttribute('data-id') })
+        .then(function (data) {
+          if (!data.ok) { throw new Error(data.error || 'Не удалось удалить'); }
+          window.location.reload();
+        })
+        .catch(function (error) { showMessage(error.message || 'Ошибка', true); });
+    });
+  });
+})();
+</script>
+{% endblock %}

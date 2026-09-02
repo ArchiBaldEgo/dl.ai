@@ -232,6 +232,7 @@ document.addEventListener("DOMContentLoaded", function() {
             if (prepromptEl) prepromptEl.textContent = localization[selectedLang].preprompt;
 
             updateAccordionLabels();
+            updateLastUpdateLabel();
 
             var voiceModeBtn = document.getElementById("voiceModeBtn");
             if (voiceModeBtn) voiceModeBtn.textContent = localization[selectedLang].voiceMode;

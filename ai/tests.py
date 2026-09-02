@@ -24,7 +24,7 @@ from types import SimpleNamespace
 from ai.admin import PromptAdmin, PromptForm
 from ai.middleware import ExternalAuthMiddleware
 from ai.i18n import get_localized_name, get_ui_language_suffix
-from ai.models import AIRequestLog, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic, UpdateLog
+from ai.models import AIRequestLog, ArmPromptBinding, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic, UpdateLog
 from ai.services import (
     ConversationHistory,
     LogWriter,
@@ -2250,9 +2250,10 @@ class BatchRunnerIntegrationTests(TestCase):
 
 
 class TestSolutionOnDlTests(SimpleTestCase):
-    """``_test_solution_on_dl``: на 400 от send-solution пробует taskId вместо
-    nodeId (гипотеза пользователя: «с твоим nodeId — доступ запрещён») и при
-    успехе падает в поллинг. Старая подсказка «язык выбран неверно» удалена."""
+    """``_test_solution_on_dl``: на любой отказ send-solution (400/500/…)
+    пробует taskId вместо nodeId (гипотеза пользователя: «с твоим nodeId —
+    доступ запрещён») и при успехе падает в поллинг. Старая подсказка
+    «язык выбран неверно» и хардкод «(400)» в финальном тексте удалены."""
 
     def test_400_falls_back_to_task_id_and_polls(self):
         from ai import arm_runner
@@ -2287,6 +2288,37 @@ class TestSolutionOnDlTests(SimpleTestCase):
         self.assertEqual(res["verdict"], "solved")
         self.assertEqual(res["comment"], "Все тесты успешно пройдены")
 
+    def test_500_falls_back_to_task_id_and_polls(self):
+        from ai import arm_runner
+        from ai.dl_api_client import DLServerError
+
+        calls = []
+
+        def fake_send(session_id, node_id, code, file_extension, course_id=0):
+            calls.append(node_id)
+            if node_id == 2606747:
+                raise DLServerError(
+                    "send-solution(nodeId=2606747, fileExtension='.i86', "
+                    "codeLen=111, codeHead='...'): Ошибка сервера DL (код 500)"
+                )
+            # taskId принят
+            return {"queueId": 7, "message": "ok"}
+
+        def fake_poll(session_id, queue_id):
+            return {"isFinished": True, "comment": "Задача решена неправильно"}
+
+        with patch("ai.dl_api_client.send_solution_to_dl", fake_send), \
+                patch("ai.dl_api_client.get_solution_result_from_dl", fake_poll):
+            res = arm_runner._test_solution_on_dl(
+                "SID", 2606747, "code...", ".i86",
+                max_polls=1, poll_interval=0, task_id=2001,
+            )
+        # 500 — тоже повод попробовать taskId (раньше fallback был только на 400).
+        self.assertEqual(calls, [2606747, 2001])
+        self.assertEqual(res["queue_id"], 7)
+        self.assertEqual(res["submit_error"], "")
+        self.assertEqual(res["verdict"], "failed")
+
     def test_400_both_ids_rejected_reports_honest_error(self):
         from ai import arm_runner
         from ai.dl_api_client import DLServerError
@@ -2309,6 +2341,10 @@ class TestSolutionOnDlTests(SimpleTestCase):
         self.assertIn("taskId=2001", res["submit_error"])
         # Старая неверная подсказка о языке удалена.
         self.assertNotIn("язык выбран неверно", res["submit_error"])
+        # Хардкод «(400)» в финальной фразе удалён — реальный код отказа
+        # виден выше, в тексте исключения.
+        self.assertNotIn("отправку решения (400)", res["submit_error"])
+        self.assertIn("DL отклонил отправку решения", res["submit_error"])
 
     def test_400_without_task_id_skips_fallback(self):
         from ai import arm_runner
@@ -3824,7 +3860,9 @@ class BatchLogStatusSemanticsTests(TestCase):
 
 class BatchLogRowContextsTests(TestCase):
     """Bulk-контекст batch-строк списка журнала (_batch_log_row_contexts):
-    course_id/задачи/расширение одним запросом, без N+1 по 50 строкам."""
+    course_id/задачи/расширение одним запросом, без N+1 по 50 строкам.
+    Решённые задачи (есть solved-пара хотя бы у одной модели) в списке
+    журнала не показываются — только нерешённые."""
 
     def setUp(self):
         from ai.models import AIModelTestRun, AIModelTestResult, Task
@@ -3865,6 +3903,7 @@ class BatchLogRowContextsTests(TestCase):
         )
 
     def test_context_fields(self):
+        """t1 решена (solved), t2 нет → в списке журнала только t2."""
         from ai.admin.logs import _batch_log_row_contexts
         log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
         ctx = _batch_log_row_contexts([log])
@@ -3873,10 +3912,31 @@ class BatchLogRowContextsTests(TestCase):
         self.assertEqual(c["run_id"], self.run_id)
         self.assertEqual(c["course_id"], 1450)
         self.assertEqual(c["file_extension"], ".pas")
-        self.assertEqual([t["node_id"] for t in c["tasks"]], [5001, 5002])
-        self.assertEqual(c["tasks"][0]["name"], "A")
-        self.assertEqual(c["tasks_preview"], "A (5001), B (5002)")
-        self.assertIn("A (5001); B (5002)", c["tasks_title"])
+        self.assertEqual([t["node_id"] for t in c["tasks"]], [5002])
+        self.assertEqual(c["tasks"][0]["name"], "B")
+        self.assertEqual(c["tasks_preview"], "B (5002)")
+        self.assertIn("B (5002)", c["tasks_title"])
+        self.assertNotIn("A (5001)", c["tasks_title"])
+
+    def test_all_solved_tasks_hidden(self):
+        """Все задачи прогона решены → список задач в журнале пуст."""
+        from ai.models import AIModelTestResult
+        from ai.admin.logs import _batch_log_row_contexts
+        AIModelTestResult.objects.create(
+            run=self.test_run, task=self.t2,
+            model_key="FakeModel2", model_title="FakeModel2",
+            status="ok", verdict="solved",
+            duration_seconds=1.0, tokens=10,
+            short_response="r", raw_response="raw", code="code",
+            dl_comment="c", dl_queue_id=1,
+            file_extension_snapshot=".pas",
+            topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+        )
+        log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
+        c = _batch_log_row_contexts([log])[log.pk]
+        self.assertEqual(c["tasks"], [])
+        self.assertEqual(c["tasks_preview"], "—")
+        self.assertEqual(c["tasks_title"], "")
 
     def test_legacy_log_included(self):
         """Старый batch-лог (mode=solve + sentinel) тоже получает контекст."""
@@ -3896,9 +3956,10 @@ class BatchLogRowContextsTests(TestCase):
         self.assertEqual(_batch_log_row_contexts([log]), {})
 
 
-class RequestLogCsvTests(TestCase):
-    """CSV-выгрузка результатов batch-прогона из записи журнала:
-    серверное зеркало клиентской downloadResultsCsv с /arm/solve/."""
+class RequestLogXlsxTests(TestCase):
+    """XLSX-выгрузка результатов batch-прогона (матрица задача×модель,
+    автоширина колонок): единый серверный генератор (ai/admin/export.py)
+    для записи журнала и для /arm/solve/ по run_id."""
 
     def setUp(self):
         from ai.models import AIModelTestRun, AIModelTestResult, Task
@@ -3942,58 +4003,85 @@ class RequestLogCsvTests(TestCase):
             status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
         )
 
-    def test_csv_lines_format(self):
-        """Чистый формат: ';' разделитель, '+'/'-'/'?' вердикты, экранирование."""
-        from ai.admin.logs import _batch_results_csv_lines
+    def test_xlsx_matrix_and_auto_width(self):
+        """Матрица задача×модель ('+'/'-'/'?') и автоширина колонок —
+        ширина подбирается по максимальной длине содержимого."""
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        from ai.admin.export import _MIN_COL_WIDTH, build_arm_results_xlsx
         results = [
-            {"task_node_id": 1001, "task_name": 'Задача; "цитата"',
+            {"task_node_id": 1001, "task_name": "Очень длинное название задачи для проверки ширины",
              "model_key": "M1", "model_title": "Model One", "verdict": "solved"},
-            {"task_node_id": 1001, "task_name": 'Задача; "цитата"',
+            {"task_node_id": 1001, "task_name": "Очень длинное название задачи для проверки ширины",
              "model_key": "M2", "model_title": "Model Two", "verdict": "failed"},
             {"task_node_id": 1002, "task_name": "B",
              "model_key": "M1", "model_title": "Model One", "verdict": None},
         ]
-        lines = _batch_results_csv_lines(results)
+        payload = build_arm_results_xlsx(results)
+        wb = load_workbook(BytesIO(payload))
+        ws = wb.active
+        rows = [[c.value for c in row] for row in ws.iter_rows()]
         self.assertEqual(
-            lines,
+            rows,
             [
-                "Node ID;Задача;Model One;Model Two",
-                '1001;"Задача; ""цитата""";+;-',
-                "1002;B;?;",
+                ["Node ID", "Задача", "Model One", "Model Two"],
+                [1001, "Очень длинное название задачи для проверки ширины", "+", "-"],
+                [1002, "B", "?", ""],
             ],
         )
+        # Автоширина: каждая колонка не уже минимума и подогнана под содержимое.
+        widths = [dim.width for dim in ws.column_dimensions.values()]
+        self.assertTrue(widths)
+        self.assertTrue(all(w >= _MIN_COL_WIDTH for w in widths))
+        # Колонка «Задача» (самое длинное значение) шире колонок вердиктов.
+        task_col_width = ws.column_dimensions["B"].width
+        verdict_col_width = ws.column_dimensions["C"].width
+        self.assertGreater(task_col_width, verdict_col_width)
 
-    def test_csv_endpoint_superuser(self):
-        from ai.admin.logs import admin_request_log_csv_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.log.id}/csv/")
+    def test_xlsx_endpoint_superuser(self):
+        from ai.admin.export import XLSX_CONTENT_TYPE
+        from ai.admin.logs import admin_request_log_xlsx_view
+        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.log.id}/xlsx/")
         request.user = self.superuser
-        response = admin_request_log_csv_view(request, self.log.id)
+        response = admin_request_log_xlsx_view(request, self.log.id)
         self.assertEqual(response.status_code, 200)
-        # BOM + CRLF + матрица + attachment.
-        self.assertTrue(response.content.startswith(b"\xef\xbb\xbf"))
-        first_line = response.content.split(b"\r\n")[0]
-        self.assertTrue(first_line.startswith(b"\xef\xbb\xbfNode ID;"))
+        self.assertEqual(response["Content-Type"], XLSX_CONTENT_TYPE)
         self.assertIn(b"+", response.content)
-        self.assertIn(b"-", response.content)
         self.assertIn(b"Model One", response.content)
         self.assertTrue(
             response["Content-Disposition"].startswith(
-                f'attachment; filename="arm_solve_results_{self.run_id}.csv'
+                f'attachment; filename="arm_solve_results_{self.run_id}.xlsx'
             )
         )
 
-    def test_csv_endpoint_non_batch_404(self):
-        from ai.admin.logs import admin_request_log_csv_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.plain_log.id}/csv/")
+    def test_xlsx_report_endpoint_by_run_id(self):
+        """Выгрузка по run_id (кнопка на /arm/solve/): живой прогон и DB-fallback."""
+        from ai.admin.arm import admin_arm_solve_report_xlsx_view
+        request = self.factory.get(f"/ai/admin/arm/solve/report/{self.run_id}/xlsx/")
         request.user = self.superuser
-        response = admin_request_log_csv_view(request, self.plain_log.id)
+        response = admin_arm_solve_report_xlsx_view(request, self.run_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Model One", response.content)
+        # Неизвестный run_id → 404.
+        request = self.factory.get("/ai/admin/arm/solve/report/ffff/xlsx/")
+        request.user = self.superuser
+        response = admin_arm_solve_report_xlsx_view(request, "ffff")
         self.assertEqual(response.status_code, 404)
 
-    def test_csv_endpoint_non_staff_403(self):
-        from ai.admin.logs import admin_request_log_csv_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.log.id}/csv/")
+    def test_xlsx_endpoint_non_batch_404(self):
+        from ai.admin.logs import admin_request_log_xlsx_view
+        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.plain_log.id}/xlsx/")
+        request.user = self.superuser
+        response = admin_request_log_xlsx_view(request, self.plain_log.id)
+        self.assertEqual(response.status_code, 404)
+
+    def test_xlsx_endpoint_non_staff_403(self):
+        from ai.admin.logs import admin_request_log_xlsx_view
+        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.log.id}/xlsx/")
         request.user = self.normal_user
-        response = admin_request_log_csv_view(request, self.log.id)
+        response = admin_request_log_xlsx_view(request, self.log.id)
         self.assertEqual(response.status_code, 403)
 
     def test_result_download_named_by_model(self):
@@ -4606,6 +4694,197 @@ class EachContextSuperUserFlagTests(TestCase):
     def test_is_super_user_flag(self):
         self.assertTrue(self._each_context(self.superuser)["is_super_user"])
         self.assertFalse(self._each_context(self.normal_user)["is_super_user"])
+
+
+class ArmPromptBindingTests(TestCase):
+    """Инструмент «Препромпты по умолчанию» (ArmPromptBinding): unique
+    (язык, тема, вид ARM), суперюзер-гейт страницы, save/delete через AJAX,
+    привязки отдаются в контекст /arm/solve/ и /arm/find-error/ для
+    JS авто-подстановки."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="pd_admin", password="x", email="a@t.com",
+        )
+        self.staff = get_user_model().objects.create_user(
+            username="pd_staff", password="x", is_staff=True,
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.other_lang = ProgrammingLanguage.objects.create(language_name="Python")
+        self.topic = Topic.objects.create(
+            topic_name="Массивы", programming_language=self.lang,
+        )
+        self.other_topic = Topic.objects.create(
+            topic_name="Файлы", programming_language=self.other_lang,
+        )
+        self.prompt = Prompt.objects.create(
+            prompt_name="Массивы базовый", prompt_text="Текст",
+            topic=self.topic, owner=self.superuser,
+        )
+
+    def _binding(self, mode=ArmPromptBinding.MODE_SOLVE, **overrides):
+        defaults = {
+            "programming_language": self.lang,
+            "topic": self.topic,
+            "mode": mode,
+            "prompt": self.prompt,
+        }
+        defaults.update(overrides)
+        return ArmPromptBinding.objects.create(**defaults)
+
+    def test_unique_language_topic_mode(self):
+        from django.db import IntegrityError
+        self._binding()
+        with self.assertRaises(IntegrityError):
+            ArmPromptBinding.objects.create(
+                programming_language=self.lang, topic=self.topic,
+                mode=ArmPromptBinding.MODE_SOLVE, prompt=self.prompt,
+            )
+        # Тот же вид — другая тема, та же тройка с другим видом — ок.
+        self._binding(topic=self.other_topic)
+        self._binding(mode=ArmPromptBinding.MODE_FIND_ERROR)
+
+    def test_page_requires_superuser(self):
+        from ai.admin.prompt_defaults import admin_prompt_defaults_view
+        request = self.factory.get("/ai/admin/prompt-defaults/")
+        request.user = self.staff
+        request.session = {}
+        response = admin_prompt_defaults_view(request)
+        self.assertEqual(response.status_code, 403)
+
+        request = self.factory.get("/ai/admin/prompt-defaults/")
+        request.user = self.superuser
+        request.session = {}
+        response = admin_prompt_defaults_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("bindings", response.context_data)
+
+    def test_save_binding_creates_and_updates(self):
+        from ai.admin.prompt_defaults import admin_prompt_defaults_view
+        request = self.factory.post("/ai/admin/prompt-defaults/", {
+            "action": "save",
+            "language_id": str(self.lang.id),
+            "topic_id": str(self.topic.id),
+            "mode": "solve",
+            "prompt_id": str(self.prompt.id),
+        })
+        request.user = self.superuser
+        request.session = {}
+        response = admin_prompt_defaults_view(request)
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"], data)
+        binding = ArmPromptBinding.objects.get()
+        self.assertEqual(binding.prompt, self.prompt)
+        self.assertEqual(binding.mode, "solve")
+
+        # Повторный save той же тройки — upsert, не ошибка.
+        request = self.factory.post("/ai/admin/prompt-defaults/", {
+            "action": "save",
+            "language_id": str(self.lang.id),
+            "topic_id": str(self.topic.id),
+            "mode": "solve",
+            "prompt_id": str(self.prompt.id),
+        })
+        request.user = self.superuser
+        request.session = {}
+        data = json.loads(admin_prompt_defaults_view(request).content)
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(ArmPromptBinding.objects.count(), 1)
+
+    def test_save_validates_language_and_prompt_topic(self):
+        from ai.admin.prompt_defaults import admin_prompt_defaults_view
+
+        def post(**fields):
+            payload = {"action": "save", "mode": "solve"}
+            payload.update(fields)
+            request = self.factory.post("/ai/admin/prompt-defaults/", payload)
+            request.user = self.superuser
+            request.session = {}
+            response = admin_prompt_defaults_view(request)
+            return response.status_code, json.loads(response.content)
+
+        # Тема не принадлежит выбранному языку.
+        status, data = post(
+            language_id=str(self.other_lang.id), topic_id=str(self.topic.id),
+            prompt_id=str(self.prompt.id),
+        )
+        self.assertEqual(status, 400)
+        self.assertFalse(data["ok"])
+
+        # Промпт привязан к другой теме.
+        status, data = post(
+            language_id=str(self.other_lang.id), topic_id=str(self.other_topic.id),
+            prompt_id=str(self.prompt.id),
+        )
+        self.assertEqual(status, 400)
+        self.assertFalse(data["ok"])
+        self.assertFalse(ArmPromptBinding.objects.exists())
+
+    def test_delete_binding(self):
+        from ai.admin.prompt_defaults import admin_prompt_defaults_view
+        binding = self._binding()
+        request = self.factory.post("/ai/admin/prompt-defaults/", {
+            "action": "delete", "binding_id": str(binding.id),
+        })
+        request.user = self.superuser
+        request.session = {}
+        response = admin_prompt_defaults_view(request)
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"], data)
+        self.assertFalse(ArmPromptBinding.objects.exists())
+
+        # Повторное удаление — 404 в JSON, не краш.
+        request = self.factory.post("/ai/admin/prompt-defaults/", {
+            "action": "delete", "binding_id": str(binding.id),
+        })
+        request.user = self.superuser
+        request.session = {}
+        response = admin_prompt_defaults_view(request)
+        self.assertEqual(response.status_code, 404)
+
+    def test_arm_solve_context_includes_bindings(self):
+        from ai.admin.arm import admin_arm_solve_view
+        binding = self._binding()
+        request = self.factory.get("/ai/admin/arm/solve/")
+        request.user = self.superuser
+        request.session = {}
+        response = admin_arm_solve_view(request)
+        serialized = response.context_data["arm_prompt_bindings"]
+        self.assertEqual(len(serialized), 1)
+        self.assertEqual(serialized[0]["prompt_id"], self.prompt.id)
+        self.assertEqual(serialized[0]["topic_id"], self.topic.id)
+        self.assertEqual(serialized[0]["mode"], binding.mode)
+
+    def test_find_error_context_includes_bindings(self):
+        from ai.admin.arm import admin_arm_find_error_view
+        self._binding(mode=ArmPromptBinding.MODE_FIND_ERROR)
+        request = self.factory.get("/ai/admin/arm/find-error/")
+        request.user = self.superuser
+        request.session = {}
+        response = admin_arm_find_error_view(request)
+        serialized = response.context_data["arm_prompt_bindings"]
+        self.assertEqual(len(serialized), 1)
+        self.assertEqual(serialized[0]["mode"], "find_error")
+
+    def test_solve_prompts_endpoint_returns_topic_options(self):
+        """AJAX /arm/solve/prompts/ отдаёт topic_id в опциях промптов и
+        topic_options для селектора тем (JS каскад расширение→тема)."""
+        from ai.admin.arm import admin_arm_solve_prompts_view
+        request = self.factory.get(
+            "/ai/admin/arm/solve/prompts/", {"file_extension": ".pas"},
+        )
+        request.user = self.superuser
+        request.session = {}
+        response = admin_arm_solve_prompts_view(request)
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(
+            [o["topic_id"] for o in data["prompt_options"]], [self.topic.id],
+        )
+        self.assertEqual(
+            [t["id"] for t in data["topic_options"]], [self.topic.id],
+        )
 
 
 # Хелпер: запустить async-корутину из синхронного test-метода (в sync-методах

@@ -343,6 +343,8 @@ def _batch_log_row_contexts(logs):
     Для каждой batch-solve записи страницы (одним запросом AIModelTestRun и
     одним запросом AIModelTestResult с select_related('task')) собирает
     {log.pk: {run_id, course_id, file_extension, tasks: [{node_id, name}]}}.
+    В tasks попадают только НЕрешённые задачи прогона (ни одна модель не дала
+    solved) — решённые в списке журнала не показываются.
     Отличие от _build_batch_log_snapshot: НЕ тянет raw_response/results —
     списку нужен только курс/задачи, без N+1 по 50 строкам.
     """
@@ -365,8 +367,11 @@ def _batch_log_row_contexts(logs):
     }
 
     # Задачи и расширение — по прогону (run_id уникален), затем раскладываем
-    # по строкам журнала: одна запись журнала = один прогон.
+    # по строкам журнала: одна запись журнала = один прогон. Решённые задачи
+    # (задача×модель с verdict='solved' есть хотя бы для одной модели) в списке
+    # журнала не показываем — интерес представляют только нерешённые.
     tasks_by_run = {}
+    solved_nodes_by_run = {}
     ext_by_run = {}
     for r in (
         AIModelTestResult.objects.select_related("task", "run")
@@ -381,6 +386,8 @@ def _batch_log_row_contexts(logs):
             ext_by_run[run_key] = ext
         node_id = r.task.node_id if r.task else None
         if node_id:
+            if r.verdict == "solved":
+                solved_nodes_by_run.setdefault(run_key, set()).add(node_id)
             bucket = tasks_by_run.setdefault(run_key, [])
             if not any(t["node_id"] == node_id for t in bucket):
                 bucket.append({
@@ -391,7 +398,11 @@ def _batch_log_row_contexts(logs):
     for log_pk, run_id in run_ids.items():
         if runs.get(run_id) is None:
             continue
-        tasks = tasks_by_run.get(run_id, [])
+        solved_nodes = solved_nodes_by_run.get(run_id, set())
+        tasks = [
+            t for t in tasks_by_run.get(run_id, [])
+            if t["node_id"] not in solved_nodes
+        ]
         contexts[log_pk] = {
             "run_id": run_id,
             "course_id": runs[run_id].course_id,
@@ -415,56 +426,25 @@ def _tasks_preview(tasks, limit=3):
     return ", ".join(parts)
 
 
-def _csv_cell(value):
-    """Экранирование ячейки CSV — зеркало csvCell из _ai_batch_results.html."""
-    s = str(value if value is not None else "")
-    if any(ch in s for ch in (';', '"', "\n", "\r")):
-        return '"' + s.replace('"', '""') + '"'
-    return s
+def _arm_results_xlsx_response(results, run_id):
+    """Общий HTTP-ответ с .xlsx-матрицей задача×модель (см. export.py)."""
+    from .export import XLSX_CONTENT_TYPE, build_arm_results_xlsx
+
+    payload = build_arm_results_xlsx(results)
+    response = HttpResponse(
+        payload, content_type=XLSX_CONTENT_TYPE,
+    )
+    response["Content-Disposition"] = (
+        f'attachment; filename="arm_solve_results_{run_id}.xlsx"'
+    )
+    return response
 
 
-def _batch_results_csv_lines(results):
-    """Строки CSV-матрицы задача×модель — серверное зеркало клиентской
-    downloadResultsCsv из _ai_batch_results.html (тот же формат: 'Node ID;
-    Задача; <модели>', '+' solved / '-' failed / '?' иначе, ';' разделитель)."""
-    task_map, task_order = {}, []
-    model_map, model_order = {}, []
-    for r in results:
-        tkey = str(r.get("task_node_id") or "")
-        if tkey not in task_map:
-            task_map[tkey] = tkey
-            task_order.append(tkey)
-        mkey = str(r.get("model_key") or r.get("model_title") or "")
-        if mkey not in model_map:
-            model_map[mkey] = r.get("model_title") or mkey
-            model_order.append(mkey)
+def admin_request_log_xlsx_view(request, log_id):
+    """XLSX-выгрузка результатов batch-solve прогона из записи журнала.
 
-    matrix = {}
-    for r in results:
-        tkey = str(r.get("task_node_id") or "")
-        mkey = str(r.get("model_key") or r.get("model_title") or "")
-        verdict = r.get("verdict")
-        matrix.setdefault(tkey, {})[mkey] = "+" if verdict == "solved" else ("-" if verdict == "failed" else "?")
-
-    lines = [";".join(["Node ID", "Задача"] + [_csv_cell(model_map[m]) for m in model_order])]
-    for tkey in task_order:
-        # Название задачи берём из первого результата этой задачи.
-        task_name = next(
-            (r.get("task_name") or "" for r in results if str(r.get("task_node_id") or "") == tkey),
-            "",
-        )
-        cells = [_csv_cell(tkey), _csv_cell(task_name)]
-        for m in model_order:
-            cells.append(matrix.get(tkey, {}).get(m, ""))
-        lines.append(";".join(cells))
-    return lines
-
-
-def admin_request_log_csv_view(request, log_id):
-    """CSV-выгрузка результатов batch-solve прогона из записи журнала.
-
-    Тот же файл, что даёт кнопка «Скачать результаты (CSV)» на /arm/solve/:
-    матрица задача×модель (см. _batch_results_csv_lines).
+    Тот же файл, что даёт кнопка «Скачать результаты» на /arm/solve/:
+    матрица задача×модель (см. export.build_arm_results_xlsx).
     """
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
@@ -473,7 +453,7 @@ def admin_request_log_csv_view(request, log_id):
     if log is None:
         return JsonResponse({"error": "Запись журнала не найдена"}, status=404)
     if not _is_batch_solve_log(log):
-        return JsonResponse({"error": "CSV доступен только для записей пакетного решения"}, status=404)
+        return JsonResponse({"error": "Выгрузка доступна только для записей пакетного решения"}, status=404)
 
     snapshot = _build_batch_log_snapshot(log)
     if snapshot is None:
@@ -481,10 +461,7 @@ def admin_request_log_csv_view(request, log_id):
     if not snapshot["results"]:
         return JsonResponse({"error": "В прогоне нет результатов"}, status=404)
 
-    csv_text = "﻿" + "\r\n".join(_batch_results_csv_lines(snapshot["results"]))
-    response = HttpResponse(csv_text, content_type="text/csv; charset=utf-8")
-    response["Content-Disposition"] = f'attachment; filename="arm_solve_results_{snapshot["run_id"]}.csv"'
-    return response
+    return _arm_results_xlsx_response(snapshot["results"], snapshot["run_id"])
 
 
 def admin_request_log_detail_view(request, log_id):
