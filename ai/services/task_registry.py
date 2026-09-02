@@ -133,6 +133,26 @@ def extension_to_language_ids(file_extension):
     return ids
 
 
+def solve_language_options():
+    """Языки программирования для селектора /arm/solve/.
+
+    Возвращает ``[{"id", "name", "extension"}]`` — только языки, чей
+    ``_guess_extension(language_name)`` входит в ``EXTENSION_TO_LANG``
+    (то есть допущен к пакетному решению). Расширение на странице выводится
+    из языка автоматически (readonly), поэтому единый источник соответствия —
+    снова ``_guess_extension`` (DRY).
+    """
+    from ..models import ProgrammingLanguage
+
+    options = []
+    for pl in ProgrammingLanguage.objects.all():
+        ext = _guess_extension(pl.language_name)
+        if ext in EXTENSION_TO_LANG:
+            options.append({"id": pl.id, "name": pl.language_name, "extension": ext})
+    options.sort(key=lambda opt: opt["name"].lower())
+    return options
+
+
 # Mapping from DL path fragments to local Topic names. The DL course tree
 # uses folder names that are close but not identical to Topic.topic_name, so
 # we match by substring. Order matters: more specific patterns first.

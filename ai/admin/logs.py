@@ -28,7 +28,7 @@ from ..dl_api_client import (
 from ..http_utils import resolve_dl_session_id
 from ..models import AIRequestLog, Task
 from ..model_health import get_runtime_model_handlers
-from .permissions import can_access_logs
+from .permissions import can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,32 @@ def _parse_date(value: str) -> str:
     return value
 
 
+def _scope_logs_qs(qs, user):
+    """Журнал с учётом строгого фильтра «только свои» для prompt_developer."""
+    if logs_scope_is_own_user(user):
+        return qs.filter(user=user)
+    return qs
+
+
+def _get_scoped_log(request, log_id, json_errors=True):
+    """Запись журнала с учётом «только свои» (prompt_developer).
+
+    Возвращает ``(log, error_response)``: ровно одно из двух не ``None``.
+    404 — записи нет; 403 — разработчику чужую запись смотреть нельзя.
+    ``json_errors=True`` — JsonResponse (AJAX-эндпоинты), иначе
+    HttpResponseForbidden (HTML-страница деталей).
+    """
+    log = AIRequestLog.objects.filter(pk=log_id).first()
+    if log is None:
+        error = JsonResponse({"error": "Запись журнала не найдена"}, status=404)
+        return None, error if json_errors else HttpResponseForbidden("Запись журнала не найдена")
+    if logs_scope_is_own_user(request.user) and log.user_id != request.user.pk:
+        message = "Доступны только собственные запросы"
+        error = JsonResponse({"error": message}, status=403)
+        return None, error if json_errors else HttpResponseForbidden(message)
+    return log, None
+
+
 class AIRequestLogAdmin(admin.ModelAdmin):
     list_display = (
         "sent_at_display",
@@ -90,8 +116,13 @@ class AIRequestLogAdmin(admin.ModelAdmin):
     ordering = ("-sent_at",)
     readonly_fields = [f.name for f in AIRequestLog._meta.fields]
 
+    def get_queryset(self, request):
+        # Оборона в глубину: ModelAdmin-URL и так закрыт для не-staff
+        # (has_module_permission ниже), но queryset всё равно ограничиваем.
+        return _scope_logs_qs(super().get_queryset(request), request.user)
+
     def has_module_permission(self, request):
-        return can_access_logs(request)
+        return can_access_logs(request) and is_staff_or_superuser(request.user)
 
     def has_add_permission(self, request):
         return False
@@ -100,7 +131,9 @@ class AIRequestLogAdmin(admin.ModelAdmin):
         return False
 
     def has_delete_permission(self, request, obj=None):
-        return can_access_logs(request)
+        # Разработчикам препромтов журнал доступен только на чтение,
+        # и только свои записи — удаление только staff/superuser.
+        return is_staff_or_superuser(request.user)
 
     def sent_at_display(self, obj):
         return _format_moscow_datetime(obj.sent_at)
@@ -172,7 +205,7 @@ def admin_request_logs_view(request):
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
 
-    qs = AIRequestLog.objects.all()
+    qs = _scope_logs_qs(AIRequestLog.objects.all(), request.user)
 
     status = request.GET.get("status", "").strip()
     source = request.GET.get("source", "").strip()
@@ -269,6 +302,7 @@ def admin_request_logs_view(request):
         "model_choices": model_choices,
         "task_choices": task_choices,
         "filters_query": filters_query_str,
+        "own_logs_only": logs_scope_is_own_user(request.user),
         "moscow_tz": MOSCOW_TZ,
         "filters": {
             "status": status,
@@ -449,9 +483,9 @@ def admin_request_log_xlsx_view(request, log_id):
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
 
-    log = AIRequestLog.objects.filter(pk=log_id).first()
-    if log is None:
-        return JsonResponse({"error": "Запись журнала не найдена"}, status=404)
+    log, error = _get_scoped_log(request, log_id)
+    if error is not None:
+        return error
     if not _is_batch_solve_log(log):
         return JsonResponse({"error": "Выгрузка доступна только для записей пакетного решения"}, status=404)
 
@@ -468,7 +502,9 @@ def admin_request_log_detail_view(request, log_id):
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
 
-    log = AIRequestLog.objects.get(pk=log_id)
+    log, error = _get_scoped_log(request, log_id, json_errors=False)
+    if error is not None:
+        return error
 
     context = {
         **ai_admin_site.each_context(request),
@@ -501,10 +537,9 @@ def resend_request_view(request, log_id):
     if not can_access_logs(request):
         return JsonResponse({"error": "Access denied"}, status=403)
 
-    try:
-        log = AIRequestLog.objects.get(pk=log_id)
-    except AIRequestLog.DoesNotExist:
-        return JsonResponse({"error": "Лог не найден"}, status=404)
+    log, error = _get_scoped_log(request, log_id)
+    if error is not None:
+        return error
 
     # ARM batch-solve logs have message="Batch solve run <run_id>" and must be
     # rerun as a full batch (same models, tasks, prompt, language) under the
@@ -832,8 +867,7 @@ def rerun_arm_batch_view(request, log_id):
     """Public entry point for rerun-arm URL — loads the log and delegates."""
     if not can_access_logs(request):
         return JsonResponse({"error": "Access denied"}, status=403)
-    try:
-        log = AIRequestLog.objects.get(pk=log_id)
-    except AIRequestLog.DoesNotExist:
-        return JsonResponse({"error": "Лог не найден"}, status=404)
+    log, error = _get_scoped_log(request, log_id)
+    if error is not None:
+        return error
     return _rerun_arm_batch(request, log)

@@ -727,6 +727,34 @@ class AIModelTestResult(models.Model):
         return f"{self.run.run_id} / {self.model_title} — {self.status}"
 
 
+class AIModelStats(models.Model):
+    """Глобальная накопленная статистика модели по прогонам /arm/solve/.
+
+    Обновляется только по завершении пакетного прогона, запущенного с
+    включённым чекбоксом «заносить результаты в БД» (доступен суперюзерам).
+    Semantics совпадают с ``arm_runner._per_bucket``: в ``total_count``
+    идут только решённые/проваленные пары, длительности — только не-skipped.
+    Эти числа показываются в селекторе моделей чата (среднее время и % решённых).
+    """
+
+    model_key = models.CharField(max_length=128, unique=True, db_index=True, verbose_name="Ключ модели")
+    model_title = models.CharField(max_length=255, blank=True, default="", verbose_name="Название модели")
+    solved_count = models.PositiveIntegerField(default=0, verbose_name="Решено задач")
+    total_count = models.PositiveIntegerField(default=0, verbose_name="Всего задач (решено+провалено)")
+    duration_count = models.PositiveIntegerField(default=0, verbose_name="Измерений времени")
+    duration_sum = models.FloatField(default=0.0, verbose_name="Сумма времени, сек")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлено")
+
+    class Meta:
+        db_table = "ai_ai_model_stats"
+        verbose_name = "Статистика модели"
+        verbose_name_plural = "Статистика моделей"
+        ordering = ("-solved_count",)
+
+    def __str__(self):
+        return self.model_key
+
+
 # ---------------------------------------------------------------------------
 # Prompt regression tests (golden-master suite).
 #

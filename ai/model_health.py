@@ -841,8 +841,11 @@ def get_available_model_options():
     if cached is not None:
         return cached
 
-    ordered_keys = MODEL_CATALOG_KEYS
-    titles = {key: registry.title(key) for key in MODEL_CATALOG_KEYS}
+    # Скрытые из селекторов модели (пока — OpenRouter) исключаются здесь
+    # централизованно: «Состояние моделей» и 04:00 health-check продолжают их
+    # видеть/проверять (см. HIDDEN_FROM_SELECTORS_PREFIXES ниже).
+    ordered_keys = [k for k in MODEL_CATALOG_KEYS if not is_hidden_from_selectors(k)]
+    titles = {key: registry.title(key) for key in ordered_keys}
 
     window_date = get_health_window_date()
     available_rows = {
@@ -879,7 +882,15 @@ def get_available_model_options():
         for key in ordered_keys
         if key in available_rows
     ]
+    # Статистика прогонов /arm/solve/ (среднее время, % решённых) — для
+    # сортировки селектора моделей чата. Обогащаем ДО cache.set: Redis-копии
+    # из кеша мутировать нельзя (cache.get возвращает десериализованную копию).
     if result:
+        from .services.model_stats import get_model_stats_map
+
+        stats = get_model_stats_map([opt["key"] for opt in result])
+        for opt in result:
+            opt.update(stats.get(opt["key"], {}))
         cache.set(cache_key, result, 30)  # 30 c
     return result
 
@@ -888,6 +899,16 @@ def get_available_model_options():
 # (нет жёсткого лимита вывода — длинный код не обрежется). OpenRouter/Groq
 # исключены: не вытягивают по токенам пакетную генерацию кода.
 ARM_SOLVE_MODEL_PREFIXES = ("Web_", "Ollama_")
+
+# Модели, скрытые из селекторов (пока — OpenRouter): не показываются в чате и
+# ARM-инструментах, но остаются в каталоге, health-check и «Состоянии моделей».
+# Вернуть — убрать префикс из этого кортежа.
+HIDDEN_FROM_SELECTORS_PREFIXES = ("OR_",)
+
+
+def is_hidden_from_selectors(key):
+    """Скрыта ли модель из селекторов чата/ARM (пока OpenRouter OR_*)."""
+    return bool(key) and key.startswith(HIDDEN_FROM_SELECTORS_PREFIXES)
 
 
 def is_arm_solve_model(key):

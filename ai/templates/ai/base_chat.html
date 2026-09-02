@@ -48,7 +48,7 @@
                         {% if favorite_models %}
                             <optgroup label="Часто используемые">
                                 {% for model in favorite_models %}
-                                    <option value="{{ model.key }}">
+                                    <option value="{{ model.key }}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}">
                                         {{ model.title }}
                                     </option>
                                 {% endfor %}
@@ -56,7 +56,7 @@
                         {% endif %}
                         <optgroup label="Все модели">
                             {% for model in other_models %}
-                                <option value="{{ model.key }}">
+                                <option value="{{ model.key }}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}">
                                     {{ model.title }}
                                 </option>
                             {% endfor %}
@@ -64,6 +64,16 @@
                     {% else %}
                         <option value="" selected disabled>Сегодня нет доступных моделей</option>
                     {% endif %}
+                </select>
+                <!-- Сортировка «Все модели» по статистике прогонов /arm/solve/
+                     (среднее время / % решённых); управляет ai-common.js
+                     (initModelSortSelector). Пересортировка касается только
+                     optgroup «Все модели» — favorite-first контракт не трогаем. -->
+                <select id="selectModelSort">
+                    <option value="default" selected>Порядок: по алфавиту</option>
+                    <option value="speed">Порядок: по скорости</option>
+                    <option value="accuracy">Порядок: по точности</option>
+                    <option value="both">Порядок: скорость + точность</option>
                 </select>
                 <select id="selectType" onchange="goToAiPage(this)">
                     <option data-link="/ai/chat/" {% block chat_selected %}{% endblock %}>Чат с DLAI</option>

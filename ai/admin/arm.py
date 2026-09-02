@@ -14,7 +14,13 @@ from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotAllo
 from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
 
-from ..arm_runner import cancel_arm_run, get_arm_run_snapshot, start_arm_sequential_run, start_batch_solve_run
+from ..arm_runner import (
+    cancel_arm_run,
+    get_arm_run_snapshot,
+    get_latest_batch_run_snapshot,
+    start_arm_sequential_run,
+    start_batch_solve_run,
+)
 from ..i18n import get_language_instruction, get_localized_name
 from ..model_health import (
     get_arm_solve_model_options,
@@ -31,16 +37,19 @@ from ..models import (
     Topic,
 )
 from ..http_utils import resolve_dl_session_id
-from ..querysets import prompt_queryset_for_user
 from ..serializers import (
     arm_prompt_binding as serialize_arm_prompt_binding,
     programming_language as serialize_programming_language,
-    prompt as serialize_prompt,
     topic as serialize_topic,
 )
-from ..services.task_registry import EXTENSION_TO_LANG, SOLVE_EXTENSION_CHOICES, extension_to_language_ids
+from ..services.task_registry import (
+    EXTENSION_TO_LANG,
+    _guess_extension,
+    extension_to_language_ids,
+    solve_language_options,
+)
 from ..constants import AI_CACHE_KEY_PREFIX
-from .permissions import can_access_arm
+from .permissions import can_access_arm, is_superuser_user
 
 # TTL кэша дерева задач курса в Redis (см. admin_arm_solve_load_tree_view).
 _DL_TREE_CACHE_TTL = 30 * 60
@@ -150,7 +159,6 @@ def _collect_arm_form_state(request):
         "selected_language_ui": request.POST.get("interface_language", "Русский"),
         "selected_prog_lng": request.POST.get("programming_language", ""),
         "selected_topic": request.POST.get("topic", ""),
-        "selected_prompt": request.POST.get("prompt", ""),
         "task_text": (request.POST.get("task_text") or "").strip(),
         "code_text": (request.POST.get("code_text") or "").strip(),
     }
@@ -175,17 +183,26 @@ def _prepare_arm_run_payload(form_state, user=None):
     if form_state["selected_topic"]:
         topic = Topic.objects.filter(id=form_state["selected_topic"]).first()
 
-    prompt_obj = (
-        Prompt.objects.filter(id=form_state["selected_prompt"])
-        .select_related("shared_prompt")
-        .first()
-    )
+    # Препромпт — только привязка ArmPromptBinding («Препромпты по умолчанию»,
+    # суперюзерский инструмент). Ручной выбор убран: нет привязки → прогон
+    # без препромпта.
+    prompt_obj = None
+    if topic is not None and form_state["selected_prog_lng"]:
+        prompt_obj = (
+            ArmPromptBinding.objects.filter(
+                mode=ArmPromptBinding.MODE_FIND_ERROR,
+                programming_language_id=form_state["selected_prog_lng"],
+                topic=topic,
+            )
+            .select_related("prompt")
+            .first()
+        )
     topic_name_localized = (
         get_localized_name(topic, form_state["selected_language_ui"], "topic_name")
         if topic else ""
     )
     prompt_text = (
-        prompt_obj.get_effective_text(
+        prompt_obj.prompt.get_effective_text(
             form_state["selected_language_ui"], prog_lng_name, topic_name_localized
         )
         if prompt_obj else ""
@@ -208,9 +225,9 @@ def _prepare_arm_run_payload(form_state, user=None):
         "topic_id": form_state["selected_topic"] or None,
         "topic_name": topic.topic_name if topic else "",
         "topic_name_localized": get_localized_name(topic, form_state["selected_language_ui"], "topic_name") if topic else "",
-        "prompt_id": form_state["selected_prompt"] or None,
-        "prompt_name": prompt_obj.prompt_name if prompt_obj else "",
-        "prompt_name_localized": get_localized_name(prompt_obj, form_state["selected_language_ui"], "prompt_name") if prompt_obj else "",
+        "prompt_id": prompt_obj.prompt_id if prompt_obj else None,
+        "prompt_name": prompt_obj.prompt.prompt_name if prompt_obj else "",
+        "prompt_name_localized": get_localized_name(prompt_obj.prompt, form_state["selected_language_ui"], "prompt_name") if prompt_obj else "",
         # Снимок формы запуска — для восстановления состояния формы при
         # возврате на страницу прогона (?run_id=). См. AIModelTestRun.run_params.
         "run_params": {
@@ -218,7 +235,6 @@ def _prepare_arm_run_payload(form_state, user=None):
             "interface_language": form_state["selected_language_ui"],
             "programming_language": str(form_state["selected_prog_lng"] or ""),
             "topic": str(form_state["selected_topic"] or ""),
-            "prompt": str(form_state["selected_prompt"] or ""),
             "task_text": task_text,
             "code_text": code_text,
         },
@@ -253,17 +269,10 @@ def admin_arm_find_error_view(request):
         serialize_topic(t, selected_language_ui)
         for t in Topic.objects.all()
     ]
-    prompts = [
-        serialize_prompt(p, selected_language_ui)
-        for p in prompt_queryset_for_user(
-            Prompt.objects.select_related("topic"), request.user
-        ).order_by("prompt_name", "id")
-    ]
 
     selected_models = []
     selected_prog_lng = ""
     selected_topic = ""
-    selected_prompt = ""
     task_text = ""
     code_text = ""
     results = []
@@ -278,7 +287,6 @@ def admin_arm_find_error_view(request):
         selected_language_ui = form_state["selected_language_ui"]
         selected_prog_lng = form_state["selected_prog_lng"]
         selected_topic = form_state["selected_topic"]
-        selected_prompt = form_state["selected_prompt"]
         task_text = form_state["task_text"]
         code_text = form_state["code_text"]
 
@@ -305,7 +313,6 @@ def admin_arm_find_error_view(request):
                 selected_language_ui = rp.get("interface_language") or "Русский"
                 selected_prog_lng = str(rp.get("programming_language") or "")
                 selected_topic = str(rp.get("topic") or "")
-                selected_prompt = str(rp.get("prompt") or "")
                 task_text = rp.get("task_text") or ""
                 code_text = rp.get("code_text") or ""
         else:
@@ -314,7 +321,7 @@ def admin_arm_find_error_view(request):
     from ..http_utils import safe_relative_url
     arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
     prompt_bindings = [
-        serialize_arm_prompt_binding(b) for b in ArmPromptBinding.objects.all()
+        serialize_arm_prompt_binding(b) for b in ArmPromptBinding.objects.select_related("prompt")
     ]
     context = {
         **ai_admin_site.each_context(request),
@@ -324,13 +331,11 @@ def admin_arm_find_error_view(request):
         "arm_prompt_bindings": prompt_bindings,
         "languages": languages,
         "topics": topics,
-        "prompts": prompts,
         "model_options": get_available_model_options(),
         "selected_models": selected_models,
         "selected_language_ui": selected_language_ui,
         "selected_prog_lng": selected_prog_lng,
         "selected_topic": selected_topic,
-        "selected_prompt": selected_prompt,
         "task_text": task_text,
         "code_text": code_text,
         "results": results,
@@ -392,35 +397,27 @@ def admin_arm_find_error_status_view(request):
 # test the code via DL (send-solution / get-solution-result).
 # ---------------------------------------------------------------------------
 
-def _arm_solve_prompt_options(user, file_extension=None):
-    """Опции препромтов для /arm/solve/: только topic-bound ``Prompt`` (общие
-    ``SharedPrompt`` на solve не предлагаются).
+def _resolve_solve_language(language_id, file_extension):
+    """Резолв языка программирования для старта /arm/solve/.
 
-    Список зависит от выбранного расширения: промпт привязан к теме (``Prompt.topic``),
-    тема — к языку программирования, а язык → расширение через ``_guess_extension``.
-    При ``file_extension`` отдаются только ``Prompt`` тем, чей язык маппится в это
-    расширение (``extension_to_language_ids``). Без ``file_extension`` — все
-    доступные по ACL промпты (для начального рендера; реальный выбор на клиенте
-    грузится по расширению через ``/solve/prompts/``).
-
-    ACL — ``prompt_queryset_for_user`` (staff/superuser — все, иначе owner/editor).
-    Возвращает список ``{id, name, topic_id}``, отсортированный по имени
-    (``topic_id`` нужен клиенту для фильтра препромтов по выбранной теме и
-    авто-подстановки привязки ArmPromptBinding).
+    Возвращает ``(prog_lang_id, prog_lang_name, file_extension, error)``.
+    Основной путь: язык выбран в селекторе (``solve_language_options``) →
+    расширение выводится из его имени через ``_guess_extension``. Легаси-путь:
+    пришло только расширение → имя языка из ``EXTENSION_TO_LANG``. Ошибка —
+    если ни язык, ни расширение определить не удалось.
     """
-    prompts_qs = prompt_queryset_for_user(Prompt.objects.select_related("topic"), user)
+    file_extension = (file_extension or "").strip()
+    if language_id:
+        pl = ProgrammingLanguage.objects.filter(id=language_id).first()
+        if pl is not None:
+            ext = _guess_extension(pl.language_name)
+            if ext or file_extension:
+                return pl.id, pl.language_name, ext or file_extension, ""
     if file_extension:
         lang_ids = extension_to_language_ids(file_extension)
-        prompts_qs = prompts_qs.filter(topic__programming_language_id__in=lang_ids)
-
-    options = []
-    for p in prompts_qs.order_by("prompt_name", "id"):
-        topic_name = get_localized_name(p.topic, "Русский", "topic_name") if p.topic else ""
-        label = f"[Тема] {topic_name} — {p.prompt_name}" if topic_name else f"[Тема] {p.prompt_name}"
-        options.append({"id": str(p.id), "name": label, "topic_id": p.topic_id})
-
-    options.sort(key=lambda opt: opt["name"])
-    return options
+        prog_lang_id = next(iter(lang_ids), None) if lang_ids else None
+        return prog_lang_id, EXTENSION_TO_LANG.get(file_extension, ""), file_extension, ""
+    return None, "", "", "Не выбран язык программирования."
 
 
 def admin_arm_solve_view(request):
@@ -432,6 +429,7 @@ def admin_arm_solve_view(request):
     results = []
     report = None
     error_message = ""
+    is_previous_run = False
 
     if active_run_id:
         active_run_snapshot = get_arm_run_snapshot(active_run_id)
@@ -442,6 +440,17 @@ def admin_arm_solve_view(request):
                 error_message = active_run_snapshot.get("error_message") or "Batch solve завершился с ошибкой"
         else:
             error_message = "Процесс не найден или уже завершен"
+    else:
+        # Без ?run_id= показываем последний batch-прогон пользователя
+        # («таблица с прошлого запуска»). Форма при этом восстанавливается
+        # из localStorage, а не из run_params этого прогона.
+        active_run_snapshot = get_latest_batch_run_snapshot(request.user.id)
+        if active_run_snapshot:
+            is_previous_run = True
+            results = active_run_snapshot.get("results") or []
+            report = active_run_snapshot.get("report")
+            if active_run_snapshot.get("status") == "failed":
+                error_message = active_run_snapshot.get("error_message") or "Batch solve завершился с ошибкой"
 
     # Определяем активный курс пользователя автоматически (без ручного ввода).
     active_course_id, course_error = _resolve_active_course_id(request)
@@ -451,12 +460,18 @@ def admin_arm_solve_view(request):
     from ..http_utils import safe_relative_url
     arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
 
-    prompt_options = []  # грузится клиентом по выбранному расширению (/solve/prompts/)
+    # Селектор «Язык программирования»: расширение выводится из языка
+    # автоматически (readonly). Темы фильтруются на клиенте по языку.
+    language_options = solve_language_options()
+    topics = [
+        serialize_topic(t, "Русский")
+        for t in Topic.objects.select_related("programming_language").all()
+    ]
 
     # Привязки «препромпт по умолчанию» (Инструменты → Препромпты по умолчанию):
-    # после выбора темы клиент подставляет привязанный промромпт автоматически.
+    # препромпт берётся только из привязки по выбранной теме, ручного выбора нет.
     prompt_bindings = [
-        serialize_arm_prompt_binding(b) for b in ArmPromptBinding.objects.all()
+        serialize_arm_prompt_binding(b) for b in ArmPromptBinding.objects.select_related("prompt")
     ]
 
     context = {
@@ -465,12 +480,10 @@ def admin_arm_solve_view(request):
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "arm_back_url": arm_back_url,
         "model_options": get_arm_solve_model_options(),
-        "prompt_options": prompt_options,
         "arm_prompt_bindings": prompt_bindings,
-        "extension_options": [{"value": ext, "label": f"{ext} — {name}"}
-                             for ext, name in SOLVE_EXTENSION_CHOICES],
+        "language_options": language_options,
+        "topics": topics,
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
-        "arm_solve_prompts_url": "/ai/admin/arm/solve/prompts/",
         "results": results,
         "report": report,
         "error_message": error_message,
@@ -478,6 +491,7 @@ def admin_arm_solve_view(request):
         "arm_solve_status_url": "/ai/admin/arm/solve/status/",
         "active_run_id": active_run_id,
         "active_run_snapshot": active_run_snapshot or {},
+        "is_previous_run": is_previous_run,
         "active_course_id": active_course_id or 0,
     }
     return TemplateResponse(request, "admin/ai/arm_solve.html", context)
@@ -620,33 +634,6 @@ def admin_arm_solve_load_tree_view(request):
         return JsonResponse({"ok": False, "message": f"Ошибка: {exc}"}, status=500)
 
 
-def admin_arm_solve_prompts_view(request):
-    """Return prompt + topic options for solve filtered by the selected extension.
-
-    Общие ``SharedPrompt`` на solve не предлагаются — только topic-bound ``Prompt``,
-    отфильтрованные по языку программирования, соответствующему расширению
-    (``extension_to_language_ids``). ``file_extension`` передаётся в GET.
-    Вместе со списком препромтов отдаются темы этих языков (``topic_options``) —
-    селектор «Тема» на /arm/solve/ ограничивает список препромтов и включает
-    авто-подстановку привязки (ArmPromptBinding, mode=solve).
-    """
-    if not can_access_arm(request):
-        return HttpResponseForbidden("Access denied")
-
-    file_extension = (request.GET.get("file_extension") or "").strip()
-    prompt_options = _arm_solve_prompt_options(request.user, file_extension or None)
-    topic_options = []
-    if file_extension:
-        lang_ids = extension_to_language_ids(file_extension)
-        topics_qs = Topic.objects.filter(programming_language_id__in=lang_ids).order_by("topic_name")
-        topic_options = [serialize_topic(t, "Русский") for t in topics_qs]
-    return JsonResponse({
-        "ok": True,
-        "prompt_options": prompt_options,
-        "topic_options": topic_options,
-    })
-
-
 def admin_arm_solve_start_view(request):
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
@@ -675,35 +662,52 @@ def admin_arm_solve_start_view(request):
     dl_test = body.get("dl_test", False)
     if isinstance(dl_test, str):
         dl_test = dl_test == "1"
-    prompt_id = body.get("prompt_id") or None
-    # Расширение для DL-тестирования, выбранное пользователем (перекрывает
-    # авто-определение задачи). Обязательно: на solve расширение выбирается
-    # перед препромтом, «По умолчанию (из задачи)» убрано.
+    # Язык программирования: основной путь — селектор на странице; расширение
+    # выводится из языка автоматически (readonly, но принимаем и легаси-путь
+    # с явным расширением).
+    try:
+        language_id = int(body.get("language_id") or request.POST.get("language_id") or 0)
+    except (ValueError, TypeError):
+        language_id = 0
     file_extension = (body.get("file_extension") or request.POST.get("file_extension") or "").strip()
-    if not file_extension:
+    prog_lang_id, prog_lang_name, file_extension, lang_error = _resolve_solve_language(language_id, file_extension)
+    if lang_error or not file_extension:
         return JsonResponse(
-            {"ok": False, "message": "Не выбрано расширение файла для тестирования."},
+            {"ok": False, "message": lang_error or "Не выбрано расширение файла для тестирования."},
             status=400,
         )
-    # Название языка для препромпта под выбранным расширением.
-    prog_lang_name = EXTENSION_TO_LANG.get(file_extension, "")
-    # ID языка программирования для журнала запросов (по выбранному расширению).
-    prog_lang_ids = extension_to_language_ids(file_extension) if file_extension else set()
-    prog_lang_id = next(iter(prog_lang_ids), None) if prog_lang_ids else None
-    # Название и тема препромта для журнала запросов.
-    prompt_name = ""
+    # Тема выбрана пользователем; препромпт — только привязка ArmPromptBinding
+    # (mode=solve) по этой теме. Нет привязки → прогон без препромпта.
+    # Клиентский prompt_id не читается: привязки куртирует только суперюзер.
+    topic_id = None
     topic_id_log = None
     topic_name_log = ""
+    try:
+        topic_id = int(body.get("arm_topic_id") or request.POST.get("arm_topic_id") or 0) or None
+    except (ValueError, TypeError):
+        topic_id = None
     prompt_obj = None
-    if prompt_id and not str(prompt_id).startswith("shared_"):
-        try:
-            prompt_obj = Prompt.objects.select_related("topic").get(id=int(prompt_id))
-            prompt_name = prompt_obj.prompt_name or ""
-            if prompt_obj.topic:
-                topic_id_log = prompt_obj.topic_id
-                topic_name_log = prompt_obj.topic.topic_name or ""
-        except (Prompt.DoesNotExist, ValueError):
-            pass
+    if topic_id:
+        prompt_obj = (
+            ArmPromptBinding.objects.filter(
+                mode=ArmPromptBinding.MODE_SOLVE,
+                topic_id=topic_id,
+                programming_language_id=prog_lang_id,
+            )
+            .select_related("prompt")
+            .first()
+        )
+    prompt_id = prompt_obj.prompt_id if prompt_obj else None
+    prompt_name = prompt_obj.prompt.prompt_name if prompt_obj else ""
+    topic_name_log = (
+        Topic.objects.filter(id=topic_id).values_list("topic_name", flat=True).first() or ""
+    ) if topic_id else ""
+    # Статистика моделей (AIModelStats): чекбокс виден только суперюзерам,
+    # и флаг принимаем только от суперюзера — клиенту не доверяем.
+    record_stats = is_superuser_user(request.user) and bool(
+        body.get("record_stats")
+        or request.POST.get("record_stats") in ("1", "true", "True", "on")
+    )
     # Course ID: берём из активного курса пользователя (не из запроса).
     # Фронтенд больше не отправляет course_id — он определяется автоматически.
     course_id_from_body = body.get("course_id") or request.POST.get("course_id")
@@ -738,13 +742,6 @@ def admin_arm_solve_start_view(request):
             status=400,
         )
 
-    # Препромт обязателен; общие (shared_*) на solve не принимаются.
-    if not prompt_id or str(prompt_id).startswith("shared_"):
-        return JsonResponse(
-            {"ok": False, "message": "Не выбран препромт (выберите расширение, затем препромт)."},
-            status=400,
-        )
-
     run_id, start_error = start_batch_solve_run(
         node_id_ints,
         model_keys,
@@ -759,8 +756,9 @@ def admin_arm_solve_start_view(request):
         programming_language_id=prog_lang_id,
         programming_language_name=prog_lang_name,
         prompt_name=prompt_name,
-        topic_id=topic_id_log,
+        topic_id=topic_id,
         topic_name=topic_name_log,
+        record_stats=record_stats,
     )
     if not run_id:
         return JsonResponse(

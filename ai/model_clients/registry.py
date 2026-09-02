@@ -9,6 +9,7 @@
 настройки ``AI_ENABLE_SAMBANOVA`` / ``AI_ENABLE_GROQ`` (см. DjangoTest/settings).
 """
 
+import re
 from typing import Callable, Coroutine, Dict
 
 from django.conf import settings
@@ -318,3 +319,104 @@ class ModelRegistry:
 
 
 registry = ModelRegistry(_MODELS)
+
+
+# ---------------------------------------------------------------------------
+# Сокращённые названия моделей (для XLSX-сводки /arm/solve/).
+# ---------------------------------------------------------------------------
+
+# Ручные сокращения — точные примеры пользователя; имеют приоритет над
+# автоматическим алгоритмом.
+SHORT_MODEL_TITLE_OVERRIDES = {
+    "Ollama GLM 5.2": "OG5.2",
+    "Ollama GPT-OSS 120B": "GPTO120",
+}
+
+# Первые токены-провайдеры в названиях моделей → короткий префикс.
+_PROVIDER_ABBRS = {
+    "ollama": "O",
+    "web": "W",
+    "or": "OR",
+    "openrouter": "OR",
+    "groq": "GQ",
+    "sambanova": "SN",
+}
+
+_TITLE_TOKEN_RE = re.compile(r"[A-Za-z]+|\d+(?:\.\d+)?")
+
+
+def short_model_title(title: str) -> str:
+    """Сокращённое название модели: «Ollama GLM 5.2» → «OG5.2».
+
+    Детерминированный алгоритм: токен-провайдер → аббревиатура
+    (``_PROVIDER_ABBRS``), остальные буквенные токены → первая буква,
+    числовые токены (включая дробные «5.2») → целиком. Точные совпадения из
+    ``SHORT_MODEL_TITLE_OVERRIDES`` имеют приоритет. Читаемость гарантирует
+    лист-расшифровка XLSX, так что алгоритм намеренно агрессивно короткий.
+    """
+    variants = _abbr_variants(str(title or "").strip())
+    return variants[0] if variants else ""
+
+
+def short_model_titles(titles) -> dict:
+    """``{title: abbr}`` с разрешением коллизий внутри одного набора.
+
+    При столкновении берём следующий вариант сокращения (буквенные токены
+    раскрываются по одной букве: «OG5.2» → «OGL5.2» → …), в крайнем случае
+    добавляя числовой суффикс. Возвращает одну мапу для обоих листов XLSX,
+    чтобы сокращения совпадали.
+    """
+    titles = [str(t or "").strip() for t in titles if str(t or "").strip()]
+    # Дубликаты названий встречаются (одна модель на много задач): второе
+    # вхождение перетёрло бы мапу следующим вариантом сокращения — дедуплим.
+    seen_titles = []
+    for t in titles:
+        if t not in seen_titles:
+            seen_titles.append(t)
+    abbrs = {}
+    used = set()
+    for title in seen_titles:
+        variants = _abbr_variants(title)
+        abbr = next((v for v in variants if v not in used), None)
+        if abbr is None:
+            base = variants[0]
+            suffix = 2
+            while f"{base}{suffix}" in used:
+                suffix += 1
+            abbr = f"{base}{suffix}"
+        used.add(abbr)
+        abbrs[title] = abbr
+    return abbrs
+
+
+def _abbr_variants(title: str) -> list:
+    """Все варианты сокращения по возрастанию «раскрытости».
+
+    Уровень 0 — базовый (первая буква каждого токена), далее буквенные
+    токены раскрываются на 2, 3, … букв. Ручные override-ы дают ровно один
+    вариант — коллизия с override разрешается числовым суффиксом.
+    """
+    if not title:
+        return [""]
+    override = SHORT_MODEL_TITLE_OVERRIDES.get(title)
+    if override:
+        return [override]
+    tokens = _TITLE_TOKEN_RE.findall(title)
+    if not tokens:
+        return [title[:6]]
+    letter_tokens = [t for t in tokens if not t[0].isdigit()]
+    max_take = max((len(t) for t in letter_tokens), default=1)
+    variants = []
+    for take in range(1, max_take + 1):
+        parts = []
+        provider_consumed = False
+        for token in tokens:
+            if token[0].isdigit():
+                parts.append(token)
+            elif not provider_consumed and token.lower() in _PROVIDER_ABBRS:
+                parts.append(_PROVIDER_ABBRS[token.lower()])
+                provider_consumed = True
+            else:
+                parts.append(token[:take].upper())
+        variants.append("".join(parts))
+    return variants or [title[:6]]

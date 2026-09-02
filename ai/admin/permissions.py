@@ -79,8 +79,28 @@ def can_access_test_console(request):
 
 
 def can_access_logs(request):
-    """Доступ к логам запросов: только staff/superuser."""
-    return request.user.is_authenticated and is_staff_or_superuser(request.user)
+    """Доступ к логам запросов: staff/superuser или prompt_developer.
+
+    Разработчикам препромтов журнал открыт со строгим ограничением —
+    только собственные запросы (см. ``logs_scope_is_own_user``).
+    """
+    return request.user.is_authenticated and (
+        is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+    )
+
+
+def logs_scope_is_own_user(user):
+    """Строгий фильтр журнала запросов: только свои записи.
+
+    True для prompt_developer без staff/superuser-прав — им журнал доступен,
+    но queryset жёстко ограничивается ``user=<себя>`` и чужие записи
+    недоступны даже по прямой ссылке (detail/xlsx/resend дают 403).
+    """
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    if is_staff_or_superuser(user):
+        return False
+    return is_prompt_developer_user(user)
 
 
 def filter_app_list_for_user(app_list, request):

@@ -4004,8 +4004,9 @@ class RequestLogXlsxTests(TestCase):
         )
 
     def test_xlsx_matrix_and_auto_width(self):
-        """Матрица задача×модель ('+'/'-'/'?') и автоширина колонок —
-        ширина подбирается по максимальной длине содержимого."""
+        """Два листа: «Сводка» (матрица задача×модель с сокращёнными
+        названиями + сводка по моделям) и «Расшифровка моделей»
+        (сокращение → полное название). Автоширина — по содержимому."""
         from io import BytesIO
 
         from openpyxl import load_workbook
@@ -4013,24 +4014,35 @@ class RequestLogXlsxTests(TestCase):
         from ai.admin.export import _MIN_COL_WIDTH, build_arm_results_xlsx
         results = [
             {"task_node_id": 1001, "task_name": "Очень длинное название задачи для проверки ширины",
-             "model_key": "M1", "model_title": "Model One", "verdict": "solved"},
+             "model_key": "M1", "model_title": "Model One", "verdict": "solved", "duration": 2.0},
             {"task_node_id": 1001, "task_name": "Очень длинное название задачи для проверки ширины",
-             "model_key": "M2", "model_title": "Model Two", "verdict": "failed"},
+             "model_key": "M2", "model_title": "Model Two", "verdict": "failed", "duration": 4.0},
             {"task_node_id": 1002, "task_name": "B",
-             "model_key": "M1", "model_title": "Model One", "verdict": None},
+             "model_key": "M1", "model_title": "Model One", "verdict": None, "duration": 6.0},
         ]
         payload = build_arm_results_xlsx(results)
         wb = load_workbook(BytesIO(payload))
-        ws = wb.active
+        self.assertEqual(wb.sheetnames, ["Сводка", "Расшифровка моделей"])
+
+        ws = wb["Сводка"]
         rows = [[c.value for c in row] for row in ws.iter_rows()]
+        # Лист смешанной ширины (матрица 4 колонки + сводка из 5): iter_rows
+        # дополняет короткие строки None-паддингом — срезаем до ширины матрицы.
+        # Пустые ячейки openpyxl сохраняет как None (не "").
         self.assertEqual(
-            rows,
+            [row[:4] for row in rows[:3]],
             [
-                ["Node ID", "Задача", "Model One", "Model Two"],
+                ["Node ID", "Задача", "MO", "MT"],
                 [1001, "Очень длинное название задачи для проверки ширины", "+", "-"],
-                [1002, "B", "?", ""],
+                [1002, "B", "?", None],
             ],
         )
+        # Пустая строка-разделитель + сводная таблица по моделям
+        # (семантика _per_bucket: skipped/None-вердикт в total, avg по всем).
+        self.assertEqual(rows[4], ["Модель", "% решено", "Среднее время, сек", "Токены", "Решено/всего"])
+        self.assertEqual(rows[5], ["MO", 50.0, 4.0, 0, "1/2"])
+        self.assertEqual(rows[6], ["MT", 0.0, 4.0, 0, "0/1"])
+
         # Автоширина: каждая колонка не уже минимума и подогнана под содержимое.
         widths = [dim.width for dim in ws.column_dimensions.values()]
         self.assertTrue(widths)
@@ -4040,7 +4052,22 @@ class RequestLogXlsxTests(TestCase):
         verdict_col_width = ws.column_dimensions["C"].width
         self.assertGreater(task_col_width, verdict_col_width)
 
+        ws_legend = wb["Расшифровка моделей"]
+        legend_rows = [[c.value for c in row] for row in ws_legend.iter_rows()]
+        self.assertEqual(
+            legend_rows,
+            [
+                ["Сокращение", "Полное название", "Провайдер"],
+                ["MO", "Model One", "Model"],
+                ["MT", "Model Two", "Model"],
+            ],
+        )
+
     def test_xlsx_endpoint_superuser(self):
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
         from ai.admin.export import XLSX_CONTENT_TYPE
         from ai.admin.logs import admin_request_log_xlsx_view
         request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.log.id}/xlsx/")
@@ -4048,8 +4075,11 @@ class RequestLogXlsxTests(TestCase):
         response = admin_request_log_xlsx_view(request, self.log.id)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], XLSX_CONTENT_TYPE)
-        self.assertIn(b"+", response.content)
-        self.assertIn(b"Model One", response.content)
+        wb = load_workbook(BytesIO(response.content))
+        ws = wb["Сводка"]
+        rows = [[c.value for c in row] for row in ws.iter_rows()]
+        self.assertIn("+", [c for row in rows for c in row if isinstance(c, str)])
+        self.assertIn("Model One", [c for row in wb["Расшифровка моделей"].iter_rows(values_only=True) for c in row])
         self.assertTrue(
             response["Content-Disposition"].startswith(
                 f'attachment; filename="arm_solve_results_{self.run_id}.xlsx'
@@ -4058,12 +4088,20 @@ class RequestLogXlsxTests(TestCase):
 
     def test_xlsx_report_endpoint_by_run_id(self):
         """Выгрузка по run_id (кнопка на /arm/solve/): живой прогон и DB-fallback."""
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
         from ai.admin.arm import admin_arm_solve_report_xlsx_view
         request = self.factory.get(f"/ai/admin/arm/solve/report/{self.run_id}/xlsx/")
         request.user = self.superuser
         response = admin_arm_solve_report_xlsx_view(request, self.run_id)
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Model One", response.content)
+        wb = load_workbook(BytesIO(response.content))
+        self.assertIn(
+            "Model One",
+            [c for row in wb["Расшифровка моделей"].iter_rows(values_only=True) for c in row],
+        )
         # Неизвестный run_id → 404.
         request = self.factory.get("/ai/admin/arm/solve/report/ffff/xlsx/")
         request.user = self.superuser
@@ -4631,7 +4669,7 @@ class TestConsoleRunnerTests(TestCase):
 
 class ArmFindErrorRestoreTests(TestCase):
     """Возврат на /ai/admin/arm/find-error/?run_id=: форма восстанавливается
-    из AIModelTestRun.run_params (модели, язык, тема, промпт, тексты)."""
+    из AIModelTestRun.run_params (модели, язык, тема, тексты)."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -4649,7 +4687,7 @@ class ArmFindErrorRestoreTests(TestCase):
             run_params={
                 "model_keys": ["FakeModel"], "interface_language": "English",
                 "programming_language": "Pascal", "topic": "Тесты",
-                "prompt": "Промпт", "task_text": "Текст задачи",
+                "task_text": "Текст задачи",
                 "code_text": "Код задачи",
             },
         )
@@ -4662,9 +4700,12 @@ class ArmFindErrorRestoreTests(TestCase):
         self.assertEqual(ctx["selected_language_ui"], "English")
         self.assertEqual(ctx["selected_prog_lng"], "Pascal")
         self.assertEqual(ctx["selected_topic"], "Тесты")
-        self.assertEqual(ctx["selected_prompt"], "Промпт")
         self.assertEqual(ctx["task_text"], "Текст задачи")
         self.assertEqual(ctx["code_text"], "Код задачи")
+        # Ручной выбор препромпта убран: в контексте и run_params его нет —
+        # привязка резолвится серверно.
+        self.assertNotIn("selected_prompt", ctx)
+        self.assertNotIn("prompt", ctx["active_run_snapshot"]["run_params"])
         # Снапшот тоже содержит run_params — JS-поллинг не нужен для restore.
         self.assertEqual(
             ctx["active_run_snapshot"]["run_params"]["model_keys"], ["FakeModel"],
@@ -4734,13 +4775,16 @@ class ArmPromptBindingTests(TestCase):
         return ArmPromptBinding.objects.create(**defaults)
 
     def test_unique_language_topic_mode(self):
-        from django.db import IntegrityError
+        # atomic-обёртка обязательна: IntegrityError ломает транзакцию TestCase
+        # (validate_no_broken_transaction), savepoint-откат её восстанавливает.
+        from django.db import IntegrityError, transaction
         self._binding()
         with self.assertRaises(IntegrityError):
-            ArmPromptBinding.objects.create(
-                programming_language=self.lang, topic=self.topic,
-                mode=ArmPromptBinding.MODE_SOLVE, prompt=self.prompt,
-            )
+            with transaction.atomic():
+                ArmPromptBinding.objects.create(
+                    programming_language=self.lang, topic=self.topic,
+                    mode=ArmPromptBinding.MODE_SOLVE, prompt=self.prompt,
+                )
         # Тот же вид — другая тема, та же тройка с другим видом — ок.
         self._binding(topic=self.other_topic)
         self._binding(mode=ArmPromptBinding.MODE_FIND_ERROR)
@@ -4867,24 +4911,31 @@ class ArmPromptBindingTests(TestCase):
         self.assertEqual(len(serialized), 1)
         self.assertEqual(serialized[0]["mode"], "find_error")
 
-    def test_solve_prompts_endpoint_returns_topic_options(self):
-        """AJAX /arm/solve/prompts/ отдаёт topic_id в опциях промптов и
-        topic_options для селектора тем (JS каскад расширение→тема)."""
-        from ai.admin.arm import admin_arm_solve_prompts_view
-        request = self.factory.get(
-            "/ai/admin/arm/solve/prompts/", {"file_extension": ".pas"},
-        )
+    def test_arm_solve_context_language_options_and_topics(self):
+        """Ручной выбор препромпта убран: /arm/solve/ отдаёт селектор языков
+        (solve_language_options: {id, name, extension}) и все темы с языком
+        (фильтр на клиенте), привязки — по-прежнему в arm_prompt_bindings."""
+        from ai.admin.arm import admin_arm_solve_view
+        request = self.factory.get("/ai/admin/arm/solve/")
         request.user = self.superuser
         request.session = {}
-        response = admin_arm_solve_prompts_view(request)
-        data = json.loads(response.content)
-        self.assertTrue(data["ok"], data)
-        self.assertEqual(
-            [o["topic_id"] for o in data["prompt_options"]], [self.topic.id],
+        response = admin_arm_solve_view(request)
+        language_options = response.context_data["language_options"]
+        self.assertIn(
+            {"id": self.lang.id, "name": "Pascal", "extension": ".pas"},
+            language_options,
         )
-        self.assertEqual(
-            [t["id"] for t in data["topic_options"]], [self.topic.id],
-        )
+        topic_ids = [t["id"] for t in response.context_data["topics"]]
+        self.assertIn(self.topic.id, topic_ids)
+        self.assertIn(self.other_topic.id, topic_ids)
+
+    def test_arm_prompt_binding_serializer_includes_prompt_name(self):
+        """Подпись «Препромпт по умолчанию: …» строится на клиенте без
+        загрузки списка промптов — serializer отдаёт prompt_name."""
+        from ai.serializers import arm_prompt_binding
+        data = arm_prompt_binding(self._binding())
+        self.assertEqual(data["prompt_name"], "Массивы базовый")
+        self.assertEqual(data["mode"], "solve")
 
 
 # Хелпер: запустить async-корутину из синхронного test-метода (в sync-методах
@@ -4892,3 +4943,428 @@ class ArmPromptBindingTests(TestCase):
 def async_to_sync_runner(coro):
     import asyncio
     return asyncio.run(coro)
+
+
+# ===================================================================
+# W9: сокращённые названия моделей (XLSX-сводка /arm/solve/)
+# ===================================================================
+
+class ShortModelTitleTests(SimpleTestCase):
+    """short_model_title/short_model_titles: точные примеры пользователя
+    («Ollama GLM 5.2» → «OG5.2», «Ollama GPT-OSS 120B» → «GPTO120») имеют
+    приоритет; без коллизий алгоритм детерминирован, при коллизии мапа
+    уникальна."""
+
+    def test_user_examples_take_precedence(self):
+        from ai.model_clients.registry import SHORT_MODEL_TITLE_OVERRIDES, short_model_title
+        self.assertEqual(short_model_title("Ollama GLM 5.2"), "OG5.2")
+        self.assertEqual(short_model_title("Ollama GPT-OSS 120B"), "GPTO120")
+        self.assertIn("Ollama GLM 5.2", SHORT_MODEL_TITLE_OVERRIDES)
+
+    def test_algorithm_shape(self):
+        from ai.model_clients.registry import short_model_title
+        # Провайдер-токен → аббревиатура, буквенные → первая буква,
+        # числа → целиком (включая дробные).
+        self.assertEqual(short_model_title("Ollama Qwen 3 32B"), "OQ332B")
+        self.assertEqual(short_model_title("Web DeepSeek"), "WD")
+
+    def test_titles_map_unique_and_total(self):
+        from ai.model_clients.registry import short_model_titles
+        titles = ["Ollama GLM 5.2", "Ollama GLM 5", "Web DeepSeek"]
+        mapping = short_model_titles(titles)
+        self.assertEqual(set(mapping), set(titles))
+        self.assertEqual(len(set(mapping.values())), len(titles))
+        # Дубликат названия не перетирает сокращение следующим вариантом
+        # (одна модель встречается в результатах на каждую задачу).
+        mapping = short_model_titles(titles + ["Ollama GLM 5.2"])
+        self.assertEqual(mapping["Ollama GLM 5.2"], "OG5.2")
+
+
+# ===================================================================
+# W9: AIModelStats — накопление и обогащение опций чата
+# ===================================================================
+
+class AIModelStatsTests(TestCase):
+    """record_batch_solve_stats: race-safe upsert, семантика _per_bucket
+    (total = solved+failed, skipped не считается; durations только
+    не-skipped); get_model_stats_map → avg_seconds/percent_solved."""
+
+    def test_accumulates_and_computes_stats(self):
+        from ai.models import AIModelStats
+        from ai.services.model_stats import get_model_stats_map, record_batch_solve_stats
+        record_batch_solve_stats([
+            {"model_key": "K1", "model_title": "Model A", "verdict": "solved", "duration": 2.0},
+            {"model_key": "K1", "model_title": "Model A", "verdict": "failed", "duration": 4.0},
+            {"model_key": "K2", "model_title": "Model B", "verdict": "solved", "duration": 1.0},
+        ])
+        stats = get_model_stats_map(["K1", "K2", "K3"])
+        self.assertEqual(stats["K1"], {"avg_seconds": 3.0, "percent_solved": 50.0})
+        self.assertEqual(stats["K2"], {"avg_seconds": 1.0, "percent_solved": 100.0})
+        self.assertNotIn("K3", stats)
+
+        # Второй прогон инкрементирует (не перетирает).
+        record_batch_solve_stats([
+            {"model_key": "K1", "model_title": "Model A", "verdict": "solved", "duration": 6.0},
+        ])
+        stats = get_model_stats_map(["K1"])
+        self.assertEqual(stats["K1"], {"avg_seconds": 4.0, "percent_solved": 66.7})
+
+    def test_skipped_semantics_matches_per_bucket(self):
+        from ai.models import AIModelStats
+        from ai.services.model_stats import get_model_stats_map, record_batch_solve_stats
+        record_batch_solve_stats([
+            {"model_key": "K1", "model_title": "M", "verdict": "skipped", "duration": 1.0},
+            {"model_key": "K1", "model_title": "M", "verdict": "failed", "duration": 3.0},
+        ])
+        stats = get_model_stats_map(["K1"])
+        # skipped не в total и не в avg; его duration не портит среднее.
+        self.assertEqual(stats["K1"], {"avg_seconds": 3.0, "percent_solved": 0.0})
+        row = AIModelStats.objects.get(model_key="K1")
+        self.assertEqual((row.total_count, row.duration_count), (1, 1))
+
+    def test_available_model_options_enriched_with_stats(self):
+        """get_available_model_options добавляет avg_seconds/percent_solved
+        из AIModelStats (обогащение до cache.set — Redis-копии не мутируем)."""
+        from django.core.cache import cache
+        from ai.models import AIModelAvailability
+        from ai.model_health import get_available_model_options, get_health_window_date, MODEL_CATALOG_KEYS
+        from ai.services.model_stats import record_batch_solve_stats
+        if not MODEL_CATALOG_KEYS:
+            self.skipTest("No models in registry")
+        key = MODEL_CATALOG_KEYS[0]
+        record_batch_solve_stats([
+            {"model_key": key, "model_title": "T", "verdict": "solved", "duration": 5.0},
+        ])
+        AIModelAvailability.objects.create(
+            model_key=key, model_title=key, is_available=True,
+            window_date=get_health_window_date(), last_message="ok",
+        )
+        cache.clear()
+        options = get_available_model_options()
+        opt = next(o for o in options if o["key"] == key)
+        self.assertEqual(opt["avg_seconds"], 5.0)
+        self.assertEqual(opt["percent_solved"], 100.0)
+
+
+# ===================================================================
+# W9: сообщение solve-прогона — препромпт только из привязки
+# ===================================================================
+
+class SolveMessageTests(TestCase):
+    """_build_solve_message: без привязки — базовая инструкция без текста
+    препромпта; с prompt_id (pk привязки) — текст препромпта присутствует;
+    условие задачи гарантированно входит в сообщение."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="sol", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name="Массивы", programming_language=self.lang)
+        self.prompt = Prompt.objects.create(
+            prompt_name="С особым стилем", prompt_text="ПИШИ КАПСОМ: {message}",
+            topic=self.topic, owner=self.user,
+        )
+
+    def _message(self, prompt_id=None):
+        from ai.arm_runner import _build_solve_message
+        return _build_solve_message(
+            "Найти максимум в массиве", "Pascal", "Массивы",
+            prompt_id=prompt_id,
+        )
+
+    def test_no_binding_means_no_preprompt(self):
+        message = self._message()
+        self.assertIn("Реши задачу по программированию", message)
+        self.assertNotIn("ПИШИ КАПСОМ", message)
+        self.assertIn("Найти максимум в массиве", message)
+
+    def test_binding_prompt_id_includes_prompt_text(self):
+        message = self._message(prompt_id=self.prompt.id)
+        self.assertIn("ПИШИ КАПСОМ", message)
+        # Плейсхолдер {message} подставлен условием задачи.
+        self.assertIn("Найти максимум в массиве", message)
+
+    def test_task_statement_always_included(self):
+        # Промпт без {message}: условие дописывается явно (гарантия полного входа).
+        self.prompt.prompt_text = "Стиль без плейсхолдера"
+        self.prompt.save()
+        message = self._message(prompt_id=self.prompt.id)
+        self.assertIn("Условие задачи:", message)
+        self.assertIn("Найти максимум в массиве", message)
+
+
+# ===================================================================
+# W9: старт /arm/solve/ — язык, привязка, record_stats
+# ===================================================================
+
+class ArmSolveStartViewTests(TestCase):
+    """admin_arm_solve_start_view: клиентский prompt_id не читается (привязка
+    резолвится серверно по теме); расширение выводится из языка; record_stats
+    принимается только от суперюзера; run_params фиксирует язык/тему."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="ss_admin", password="x", email="s@t.com",
+        )
+        # Не-суперпользователь с доступом к ARM (staff, но не superuser).
+        self.staff = get_user_model().objects.create_user(
+            username="ss_staff", password="x", is_staff=True,
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name="Массивы", programming_language=self.lang)
+        self.prompt = Prompt.objects.create(
+            prompt_name="Массивы базовый", prompt_text="Текст",
+            topic=self.topic, owner=self.superuser,
+        )
+        self.binding = ArmPromptBinding.objects.create(
+            programming_language=self.lang, topic=self.topic,
+            mode=ArmPromptBinding.MODE_SOLVE, prompt=self.prompt,
+        )
+
+    def _post(self, user, payload):
+        from ai.admin.arm import admin_arm_solve_start_view
+        request = self.factory.post(
+            "/ai/admin/arm/solve/start/", data=json.dumps(payload),
+            content_type="application/json",
+        )
+        request.user = user
+        request.session = {}
+        with (
+            patch("ai.admin.arm._resolve_session_id", return_value="sess-1"),
+            patch("ai.admin.arm._resolve_active_course_id", return_value=(1450, "")),
+            patch("ai.admin.arm.start_batch_solve_run", return_value=("run-x", None)) as start_mock,
+        ):
+            response = admin_arm_solve_start_view(request)
+        return response, start_mock
+
+    def test_start_without_binding_ok_and_language_resolves_extension(self):
+        self.binding.delete()  # нет привязки → прогон без препромпта
+        payload = {
+            "node_ids": [101, "102"], "models": ["FakeModel"],
+            "language_id": self.lang.id, "arm_topic_id": self.topic.id,
+            "dl_test": True,
+        }
+        response, start_mock = self._post(self.superuser, payload)
+        self.assertEqual(response.status_code, 200)
+        kwargs = start_mock.call_args.kwargs
+        self.assertEqual(kwargs["solve_file_extension"], ".pas")
+        self.assertEqual(kwargs["programming_language_id"], self.lang.id)
+        self.assertIsNone(kwargs["prompt_id"])  # привязки нет → без препромпта
+
+    def test_start_resolves_binding_prompt_server_side(self):
+        payload = {
+            "node_ids": [101], "models": ["FakeModel"],
+            "language_id": self.lang.id, "arm_topic_id": self.topic.id,
+            # Клиентский prompt_id игнорируется: подставляется привязка.
+            "prompt_id": 99999,
+        }
+        response, start_mock = self._post(self.superuser, payload)
+        self.assertEqual(response.status_code, 200)
+        kwargs = start_mock.call_args.kwargs
+        self.assertEqual(kwargs["prompt_id"], self.prompt.id)
+        self.assertEqual(kwargs["prompt_name"], "Массивы базовый")
+
+    def test_non_superuser_record_stats_ignored(self):
+        payload = {
+            "node_ids": [101], "models": ["FakeModel"],
+            "language_id": self.lang.id, "record_stats": "1",
+        }
+        _, start_mock = self._post(self.staff, payload)
+        self.assertFalse(start_mock.call_args.kwargs["record_stats"])
+
+    def test_superuser_record_stats_accepted(self):
+        payload = {
+            "node_ids": [101], "models": ["FakeModel"],
+            "language_id": self.lang.id, "record_stats": "1",
+        }
+        _, start_mock = self._post(self.superuser, payload)
+        self.assertTrue(start_mock.call_args.kwargs["record_stats"])
+
+    def test_run_params_snapshot_contains_language_and_topic(self):
+        payload = {
+            "node_ids": [101], "models": ["FakeModel"],
+            "language_id": self.lang.id, "arm_topic_id": self.topic.id,
+        }
+        _, start_mock = self._post(self.superuser, payload)
+        kwargs = start_mock.call_args.kwargs
+        self.assertEqual(kwargs["programming_language_id"], self.lang.id)
+        self.assertEqual(kwargs["topic_id"], self.topic.id)
+
+    def test_no_language_and_no_extension_rejected(self):
+        payload = {"node_ids": [101], "models": ["FakeModel"]}
+        response, _ = self._post(self.superuser, payload)
+        self.assertEqual(response.status_code, 400)
+
+
+class ArmSolvePreviousRunTests(TestCase):
+    """/arm/solve/ без ?run_id= показывает последний batch-прогон
+    пользователя (get_latest_batch_run_snapshot → is_previous_run)."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="prev_admin", password="x", email="p@t.com",
+        )
+        # Не-суперпользователь с доступом к ARM (staff, но не superuser).
+        self.other = get_user_model().objects.create_user(
+            username="prev_other", password="x", is_staff=True,
+        )
+        self.run_id = "p" * 32
+        AIModelTestRun.objects.create(
+            run_id=self.run_id, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED, user=self.superuser,
+        )
+
+    def test_view_without_run_id_shows_latest_run(self):
+        from ai.admin.arm import admin_arm_solve_view
+        request = self.factory.get("/ai/admin/arm/solve/")
+        request.user = self.superuser
+        request.session = {}
+        response = admin_arm_solve_view(request)
+        self.assertTrue(response.context_data["is_previous_run"])
+        self.assertEqual(response.context_data["active_run_snapshot"]["run_id"], self.run_id)
+
+    def test_other_users_run_not_shown(self):
+        from ai.admin.arm import admin_arm_solve_view
+        request = self.factory.get("/ai/admin/arm/solve/")
+        request.user = self.other
+        request.session = {}
+        response = admin_arm_solve_view(request)
+        self.assertFalse(response.context_data["is_previous_run"])
+        self.assertEqual(response.context_data["active_run_snapshot"], {})
+
+    def test_get_latest_batch_run_snapshot_scopes_by_user(self):
+        from ai.arm_runner import get_latest_batch_run_snapshot
+        self.assertIsNotNone(get_latest_batch_run_snapshot(self.superuser.id))
+        self.assertIsNone(get_latest_batch_run_snapshot(self.other.id))
+        self.assertIsNone(get_latest_batch_run_snapshot(None))
+
+
+# ===================================================================
+# W9: журнал запросов для prompt_developer — строго свои записи
+# ===================================================================
+
+class LogsDeveloperAccessTests(TestCase):
+    """prompt_developer (non-staff): журнал запросов открыт только со своими
+    записями — список фильтруется по user, чужие detail/xlsx дают 403,
+    удаление запрещено."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.developer = get_user_model().objects.create_user(
+            username="log_dev", password="x",
+        )
+        self.developer.groups.add(Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)[0])
+        self.superuser = get_user_model().objects.create_superuser(
+            username="log_admin", password="x", email="l@t.com",
+        )
+        self.own_log = AIRequestLog.objects.create(
+            user=self.developer, source="chat", mode="chat", message="own",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        self.foreign_log = AIRequestLog.objects.create(
+            user=self.superuser, source="chat", mode="chat", message="foreign",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+
+    def test_logs_scope_is_own_user(self):
+        from ai.admin.permissions import logs_scope_is_own_user
+        self.assertTrue(logs_scope_is_own_user(self.developer))
+        self.assertFalse(logs_scope_is_own_user(self.superuser))
+
+    def test_list_shows_only_own_logs(self):
+        from ai.admin.logs import admin_request_logs_view
+        request = self.factory.get("/ai/admin/ai/airequestlog/")
+        request.user = self.developer
+        request.session = {}
+        response = admin_request_logs_view(request)
+        self.assertEqual(response.status_code, 200)
+        page_logs = list(response.context_data["page_obj"].object_list)
+        self.assertIn(self.own_log, page_logs)
+        self.assertNotIn(self.foreign_log, page_logs)
+
+    def test_foreign_detail_forbidden(self):
+        from ai.admin.logs import admin_request_log_detail_view
+        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.foreign_log.id}/")
+        request.user = self.developer
+        request.session = {}
+        response = admin_request_log_detail_view(request, self.foreign_log.id)
+        self.assertEqual(response.status_code, 403)
+
+    def test_own_detail_allowed(self):
+        from ai.admin.logs import admin_request_log_detail_view
+        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.own_log.id}/")
+        request.user = self.developer
+        request.session = {}
+        response = admin_request_log_detail_view(request, self.own_log.id)
+        self.assertEqual(response.status_code, 200)
+
+    def test_delete_permission_denied_for_developer(self):
+        from ai.admin.logs import AIRequestLogAdmin
+        from ai.admin.site import ai_admin_site
+        model_admin = AIRequestLogAdmin(AIRequestLog, ai_admin_site)
+        request = self.factory.get("/ai/admin/")
+        request.user = self.developer
+        self.assertFalse(model_admin.has_delete_permission(request))
+        # changelist ModelAdmin'а разработчику недоступен (non-staff).
+        self.assertFalse(model_admin.has_module_permission(request))
+
+
+# ===================================================================
+# W9: find-error — привязка резолвится серверно, без ручного препромпта
+# ===================================================================
+
+class ArmFindErrorBindingTests(TestCase):
+    """_prepare_arm_run_payload (find_error): препромпт берётся только из
+    ArmPromptBinding(mode=find_error); нет темы или привязки — текст без
+    препромпта, run_params не содержит ключ 'prompt'."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="fe_bind", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name="Массивы", programming_language=self.lang)
+        self.prompt = Prompt.objects.create(
+            prompt_name="Стиль FE", prompt_text="ОТВЕЧАЙ КРАТКО",
+            topic=self.topic, owner=self.user,
+        )
+
+    def _form_state(self, **overrides):
+        state = {
+            "selected_models": ["FakeModel"],
+            "selected_language_ui": "Русский",
+            "selected_prog_lng": str(self.lang.id),
+            "selected_topic": str(self.topic.id),
+            "task_text": "Условие",
+            "code_text": "begin end.",
+        }
+        state.update(overrides)
+        return state
+
+    def test_binding_prompt_appended_to_message(self):
+        from ai.admin.arm import _prepare_arm_run_payload
+        ArmPromptBinding.objects.create(
+            programming_language=self.lang, topic=self.topic,
+            mode=ArmPromptBinding.MODE_FIND_ERROR, prompt=self.prompt,
+        )
+        payload, error = _prepare_arm_run_payload(self._form_state(), self.user)
+        self.assertEqual(error, "")
+        self.assertIn("ОТВЕЧАЙ КРАТКО", payload["message"])
+        self.assertEqual(payload["prompt_id"], self.prompt.id)
+
+    def test_no_binding_means_no_prompt_in_message(self):
+        from ai.admin.arm import _prepare_arm_run_payload
+        payload, error = _prepare_arm_run_payload(self._form_state(), self.user)
+        self.assertEqual(error, "")
+        self.assertNotIn("ОТВЕЧАЙ КРАТКО", payload["message"])
+        self.assertIsNone(payload["prompt_id"])
+
+    def test_run_params_without_prompt_key(self):
+        from ai.admin.arm import _prepare_arm_run_payload
+        ArmPromptBinding.objects.create(
+            programming_language=self.lang, topic=self.topic,
+            mode=ArmPromptBinding.MODE_FIND_ERROR, prompt=self.prompt,
+        )
+        payload, _ = _prepare_arm_run_payload(self._form_state(), self.user)
+        self.assertNotIn("prompt", payload["run_params"])

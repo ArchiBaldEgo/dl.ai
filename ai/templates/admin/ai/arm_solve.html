@@ -300,7 +300,7 @@
 
       <div id="armTreeToolbar" style="display:none; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
         <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; user-select:none;">
-          <input type="checkbox" id="armTreeSelectAll"> Выбрать всё дерево
+          <input type="checkbox" id="armTreeSelectAll" data-no-state> Выбрать всё дерево
         </label>
         <span id="armTreeSelectedCount" style="color:var(--body-quiet-color); font-size:13px;"></span>
       </div>
@@ -314,6 +314,9 @@
         </div>
       </div>
       {% if model_options %}
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; user-select:none; margin-bottom:8px;">
+          <input type="checkbox" id="armSelectAllModels" data-no-state> Выбрать все модели
+        </label>
         <div class="arm-models">
           {% for m in model_options %}
             <label class="arm-model">
@@ -328,40 +331,43 @@
       <input type="hidden" name="interface_language" value="Русский">
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
-          <h2>Язык / расширение для тестирования</h2>
-          <p class="arm-section-note">DL REST send-solution требует расширение файла. Курс может содержать задачи разных языков (например «[Ассемблер i8086, C-MPA]» — каждая задача допускает и .i86, и .mpc), поэтому выберите нужный вручную. Препромт выбирается после расширения — для каждого расширения свой список.</p>
+          <h2>Язык программирования</h2>
+          <p class="arm-section-note">DL REST send-solution требует расширение файла — оно определяется выбранным языком автоматически. Курс может содержать задачи разных языков (например «[Ассемблер i8086, C-MPA]» — каждая задача допускает и .i86, и .mpc), поэтому язык задаёт расширение для всех задач прогона.</p>
         </div>
       </div>
-      <select name="file_extension" id="armExtensionSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
-        <option value="" disabled selected>— выберите расширение —</option>
-        {% for opt in extension_options %}
-          <option value="{{ opt.value }}">{{ opt.label }}</option>
+      <select name="language_id" id="armLanguageSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:8px;">
+        <option value="" disabled selected>— выберите язык —</option>
+        {% for lang in language_options %}
+          <option value="{{ lang.id }}" data-ext="{{ lang.extension }}">{{ lang.name }}</option>
         {% endfor %}
       </select>
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
+        <input type="text" name="file_extension" id="armExtensionInput" readonly placeholder="расширение" style="padding:6px 10px; width:120px;">
+        <span class="arm-section-note" style="margin:0;">Расширение выводится из языка автоматически</span>
+      </div>
 
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
           <h2>Тема</h2>
-          <p class="arm-section-note">Выберите тему — список препромтов ограничится ею, а препромпт подтянется автоматически, если для этой темы задан «препромпт по умолчанию» (Инструменты → Препромпты по умолчанию).</p>
+          <p class="arm-section-note">Выберите тему — препромпт подтягивается из «препромпта по умолчанию», заданного суперюзером (Инструменты → Препромпты по умолчанию). Нет темы или привязки — прогон без препромпта.</p>
         </div>
       </div>
       <select name="arm_topic_id" id="armTopicSelect" disabled style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:4px;">
-        <option value="">— выберите расширение сначала —</option>
+        <option value="">— выберите язык сначала —</option>
       </select>
       <p id="armBoundPromptLabel" class="arm-section-note" style="display:none; margin:0 0 12px;"></p>
 
+      {% if is_super_user %}
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
-          <h2>Препромпт</h2>
-          <p class="arm-section-note">Сначала выберите расширение выше — для каждого расширения свой список препромтов. Отправка без препромта невозможна. Можно выбрать вручную; при выборе темы подставляется привязанный по умолчанию.</p>
+          <h2>Статистика моделей</h2>
+          <p class="arm-section-note">По завершении прогона результаты (среднее время, % решённых) заносятся в БД и показываются пользователям в селекторе моделей чата.</p>
         </div>
       </div>
-      <select name="prompt_id" id="armPromptSelect" disabled style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
-        <option value="">— выберите расширение сначала —</option>
-        {% for p in prompt_options %}
-          <option value="{{ p.id }}">{{ p.name }}</option>
-        {% endfor %}
-      </select>
+      <label class="arm-model" style="max-width:500px; margin-bottom:12px;">
+        <input type="checkbox" name="record_stats" id="armRecordStats" value="1"> Заносить результаты в БД
+      </label>
+      {% endif %}
 
       <input type="hidden" name="dl_test" value="1" id="armDlTest">
       {% if not is_super_user %}<div class="arm-warning">Не покидайте страницу, иначе тестирование прервётся.</div>{% endif %}
@@ -381,7 +387,7 @@
     <div class="arm-section-head">
       <div>
         <h2>Сводка</h2>
-        <p class="arm-section-note">Результаты последнего запуска</p>
+        <p class="arm-section-note">{% if is_previous_run %}Результаты предыдущего запуска (без ?run_id= — показывается последний завершённый прогон){% else %}Результаты последнего запуска{% endif %}</p>
       </div>
       <a class="button" id="armSolveDownloadXlsxBtn" style="font-size:13px; display:none;" href="#">Скачать результаты (XLSX)</a>
     </div>
@@ -403,6 +409,7 @@
 
 {{ active_run_snapshot|json_script:"arm-solve-initial-run" }}
 {{ arm_prompt_bindings|json_script:"arm-prompt-bindings" }}
+{{ topics|json_script:"arm-topics" }}
 
 {% include "admin/ai/_ai_batch_results.html" %}
 
@@ -420,11 +427,12 @@
     const resultsEl = document.getElementById('armSolveResults');
     const startUrl = '{{ arm_solve_start_url }}';
     const statusUrl = '{{ arm_solve_status_url }}';
-    const promptsUrl = '{{ arm_solve_prompts_url }}';
-    const extensionSelect = document.getElementById('armExtensionSelect');
+    const languageSelect = document.getElementById('armLanguageSelect');
+    const extensionInput = document.getElementById('armExtensionInput');
     const topicSelect = document.getElementById('armTopicSelect');
     const boundPromptLabel = document.getElementById('armBoundPromptLabel');
-    const promptSelect = document.getElementById('armPromptSelect');
+    const promptIdInput = document.getElementById('armPromptId');
+    const selectAllModelsCb = document.getElementById('armSelectAllModels');
     let currentRunId = '';
     let pollTimer = null;
 
@@ -565,6 +573,9 @@
       treeContainer.querySelectorAll('details.arm-tree-folder').forEach(updateFolderState);
       updateSelectedCount();
       syncSelectAllCheckbox();
+      // Выбранные задачи живут в localStorage (data-no-state, см. ниже) —
+      // сохраняем после каждой смены отметок.
+      saveSelectedNodes();
     }
 
     function updateSelectedCount() {
@@ -626,6 +637,11 @@
           cb.name = 'node_ids';
           cb.value = String(node.nodeId);
           cb.className = 'arm-task-check';
+          // Исключены из общего сохранения ai_admin_state.js (data-no-state):
+          // чекбоксы появляются динамически и восстанавливаются выделенным
+          // механизмом localStorage ai_arm_solve_nodes — иначе гонка двойного
+          // восстановления и лишние срабатывания change.
+          cb.setAttribute('data-no-state', '');
           cb.checked = false;
           cb.addEventListener('change', refreshAllFolderStates);
           li.appendChild(cb);
@@ -685,7 +701,21 @@
         if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка загрузки дерева'); }
         loadTreeMsg.style.color = '#067647';
         loadTreeMsg.textContent = '✓ Загружено задач: ' + (data.task_count || 0);
+        // Снапшот localStorage читаем ДО renderTree: renderTree →
+        // refreshAllFolderStates → saveSelectedNodes перезаписал бы ключ
+        // пустым выбором раньше, чем мы успели прочитать сохранённое.
+        const savedNodes = pendingNodeIds === null ? readSavedNodes() : null;
         renderTree(data.tree || []);
+        // Восстановление отметок: на странице прогона (?run_id=) — из
+        // run_params, иначе — из localStorage. Потом сохраняем текущее
+        // состояние (пустой выбор тоже валиден).
+        if (pendingNodeIds !== null) {
+          restoreNodes(pendingNodeIds);
+          pendingNodeIds = null;
+        } else if (savedNodes && String(savedNodes.courseId) === courseId) {
+          restoreNodes(savedNodes.nodeIds || []);
+        }
+        saveSelectedNodes();
       } catch (error) {
         loadTreeMsg.style.color = '#b42318';
         loadTreeMsg.textContent = error.message || 'Ошибка';
@@ -696,6 +726,16 @@
 
     if (loadTreeBtn) {
       loadTreeBtn.addEventListener('click', loadTree);
+    }
+    // Смена курса перезагружает дерево автоматически: во-первых, restore
+    // состояния страницы (ai_admin_state.js) выставляет сохранённый course_id
+    // и диспатчит change — без листенера сохранённые задачи неотмечаемы
+    // (дерево грузится позже, чекбоксы создаются только после loadTree);
+    // во-вторых, вручную менять курс без лишнего клика по кнопке удобнее.
+    if (courseIdInput) {
+      courseIdInput.addEventListener('change', function () {
+        if (courseIdInput.value.trim()) { loadTree(); }
+      });
     }
 
     const selectAllCb = document.getElementById('armTreeSelectAll');
@@ -710,44 +750,15 @@
       });
     }
 
-    // Препромты и темы грузятся с бэкенда по выбранному расширению
-    // (/solve/prompts/). Список зависит от расширения (маппинг
-    // расширение→ProgrammingLanguage→Prompt.topic.programming_language),
-    // общие SharedPrompt не предлагаются. Тема ограничивает список препромтов
-    // и включает авто-подстановку «препромпта по умолчанию» (ArmPromptBinding).
-    let currentPromptOptions = [];
-
-    function setPromptOptions(options, placeholder) {
-      currentPromptOptions = options;
-      promptSelect.innerHTML = '';
-      const ph = document.createElement('option');
-      ph.value = '';
-      ph.textContent = placeholder;
-      promptSelect.appendChild(ph);
-      options.forEach(function (opt) {
-        const o = document.createElement('option');
-        o.value = opt.id;
-        o.textContent = opt.name;
-        promptSelect.appendChild(o);
-      });
-      promptSelect.value = '';
-      updateBoundPromptLabel(false);
-    }
-
-    // Подпись под темой: какой промромпт сейчас выбран (по привязке или
-    // вручную) — чтобы сразу видеть, что подтянулось.
-    function updateBoundPromptLabel(fromBinding) {
-      if (!boundPromptLabel) { return; }
-      const selected = promptSelect && promptSelect.selectedOptions[0];
-      if (!selected || !selected.value) {
-        boundPromptLabel.style.display = 'none';
-        boundPromptLabel.textContent = '';
-        return;
-      }
-      boundPromptLabel.style.display = '';
-      boundPromptLabel.textContent = (fromBinding ? 'Препромпт по умолчанию: ' : 'Препромпт: ')
-        + selected.textContent;
-    }
+    // Препромпт не выбирается вручную: тема подтягивает привязку
+    // ArmPromptBinding (mode=solve) — «препромпт по умолчанию» суперюзера.
+    // Нет темы или привязки — прогон без препромпта. Список тем отдаётся
+    // сервером целиком (json_script) и фильтруется на клиенте по языку.
+    let allTopics = [];
+    try {
+      const topicsEl = document.getElementById('arm-topics');
+      allTopics = JSON.parse(topicsEl ? topicsEl.textContent : '[]') || [];
+    } catch (e) { allTopics = []; }
 
     // Привязки «препромпт по умолчанию» отдаются сервером в json_script.
     // Тема однозначно определяет язык, поэтому достаточно (topic_id, mode).
@@ -757,33 +768,32 @@
       promptBindings = JSON.parse(bindingsEl ? bindingsEl.textContent : '[]') || [];
     } catch (e) { promptBindings = []; }
 
-    function findBoundPromptId(topicId, mode) {
-      const b = promptBindings.find(function (x) {
+    function findBoundPrompt(topicId, mode) {
+      return promptBindings.find(function (x) {
         return String(x.topic_id) === String(topicId) && x.mode === mode;
-      });
-      return b ? String(b.prompt_id) : '';
+      }) || null;
     }
 
-    // Ограничить список препромтов выбранной темой и подтянуть привязку.
+    // Подпись под темой: какой препромпт подтянут из привязки (или что
+    // прогон пойдёт без препромпта) — чтобы сразу видеть, что применилось.
+    function updateBoundPromptLabel() {
+      if (!boundPromptLabel) { return; }
+      const promptId = promptIdInput ? promptIdInput.value : '';
+      const binding = promptId ? findBoundPrompt(topicSelect ? topicSelect.value : '', 'solve') : null;
+      if (!binding) {
+        boundPromptLabel.style.display = '';
+        boundPromptLabel.textContent = 'Препромпт не задан — прогон без препромпта';
+        return;
+      }
+      boundPromptLabel.style.display = '';
+      boundPromptLabel.textContent = 'Препромпт по умолчанию: ' + (binding.prompt_name || 'Prompt #' + binding.prompt_id);
+    }
+
+    // Тема → привязка → hidden prompt_id. Нет темы/привязки — без препромпта.
     function applyTopicSelection(topicId) {
-      let opts = currentPromptOptions;
-      if (topicId) {
-        opts = currentPromptOptions.filter(function (o) {
-          return String(o.topic_id) === String(topicId);
-        });
-      }
-      const placeholder = topicId && !opts.length
-        ? '— нет препромтов этой темы —'
-        : (currentPromptOptions.length ? '— выберите препромт —' : '— выберите расширение сначала —');
-      setPromptOptions(opts, placeholder);
-      promptSelect.disabled = !opts.length;
-      if (topicId && opts.length) {
-        const boundId = findBoundPromptId(topicId, 'solve');
-        if (boundId && opts.some(function (o) { return o.id === boundId; })) {
-          promptSelect.value = boundId;
-          updateBoundPromptLabel(true);
-        }
-      }
+      const binding = topicId ? findBoundPrompt(topicId, 'solve') : null;
+      if (promptIdInput) { promptIdInput.value = binding ? String(binding.prompt_id) : ''; }
+      updateBoundPromptLabel();
     }
 
     function setTopicOptions(topics) {
@@ -791,7 +801,7 @@
       topicSelect.innerHTML = '';
       const ph = document.createElement('option');
       ph.value = '';
-      ph.textContent = topics.length ? '— выберите тему (необязательно) —' : '— нет тем для этого расширения —';
+      ph.textContent = topics.length ? '— выберите тему (необязательно) —' : '— нет тем для этого языка —';
       topicSelect.appendChild(ph);
       topics.forEach(function (t) {
         const o = document.createElement('option');
@@ -799,42 +809,23 @@
         o.textContent = t.name || t.topic_name;
         topicSelect.appendChild(o);
       });
-      topicSelect.value = '';
       topicSelect.disabled = !topics.length;
     }
 
-    async function loadPrompts(extension) {
-      if (!extension) {
-        setTopicOptions([]);
-        setPromptOptions([], '— выберите расширение сначала —');
-        promptSelect.disabled = true;
-        return;
-      }
-      setTopicOptions([]);
-      setPromptOptions([], 'Загрузка препромтов...');
-      promptSelect.disabled = true;
-      try {
-        const response = await fetch(promptsUrl + '?file_extension=' + encodeURIComponent(extension), {
-          method: 'GET', credentials: 'same-origin',
-          headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        });
-        const data = await parseJsonResponse(response);
-        if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка загрузки препромтов'); }
-        const opts = data.prompt_options || [];
-        setTopicOptions(data.topic_options || []);
-        if (!opts.length) {
-          setPromptOptions([], '— нет препромтов для этого расширения —');
-          promptSelect.disabled = true;
-          return;
-        }
-        setPromptOptions(opts, '— выберите препромт —');
-        promptSelect.disabled = false;
-      } catch (error) {
-        setTopicOptions([]);
-        setPromptOptions([], '— ошибка загрузки препромтов —');
-        setError(error.message || 'Ошибка загрузки препромтов');
-        promptSelect.disabled = true;
-      }
+    // Язык → расширение (readonly, из data-ext) + темы, отфильтрованные по
+    // языку (serialize_topic отдаёт programming_language_id). Смена языка
+    // сбрасывает тему и препромпт.
+    function applyLanguageSelection(languageId) {
+      const opt = languageSelect
+        ? Array.prototype.find.call(languageSelect.options, function (o) { return o.value === String(languageId); })
+        : null;
+      if (extensionInput) { extensionInput.value = opt ? (opt.getAttribute('data-ext') || '') : ''; }
+      const langId = opt ? String(languageId) : '';
+      const langTopics = langId
+        ? allTopics.filter(function (t) { return String(t.programming_language) === langId; })
+        : [];
+      setTopicOptions(langTopics);
+      applyTopicSelection('');
     }
 
     if (topicSelect) {
@@ -842,17 +833,37 @@
         applyTopicSelection(this.value);
       });
     }
-    if (promptSelect) {
-      promptSelect.addEventListener('change', function () {
-        updateBoundPromptLabel(false);
+
+    if (languageSelect) {
+      languageSelect.addEventListener('change', function () {
+        applyLanguageSelection(languageSelect.value);
       });
     }
 
-    if (extensionSelect) {
-      extensionSelect.addEventListener('change', function () {
-        loadPrompts(extensionSelect.value.trim());
+    // «Выбрать все модели» одним кликом; три состояния чекбоса отражают
+    // ручные отметки (всё / часть / ничего).
+    function syncSelectAllModelsCheckbox() {
+      if (!selectAllModelsCb) { return; }
+      const boxes = document.querySelectorAll('input.arm-model-check');
+      const total = boxes.length;
+      let checked = 0;
+      boxes.forEach(function (c) { if (c.checked) { checked++; } });
+      selectAllModelsCb.checked = total > 0 && checked === total;
+      selectAllModelsCb.indeterminate = checked > 0 && checked < total;
+    }
+
+    if (selectAllModelsCb) {
+      selectAllModelsCb.addEventListener('click', function (e) { e.stopPropagation(); });
+      selectAllModelsCb.addEventListener('change', function () {
+        document.querySelectorAll('input.arm-model-check').forEach(function (c) {
+          c.checked = selectAllModelsCb.checked;
+        });
+        syncSelectAllModelsCheckbox();
       });
     }
+    document.querySelectorAll('input.arm-model-check').forEach(function (c) {
+      c.addEventListener('change', syncSelectAllModelsCheckbox);
+    });
 
     // Cancel button
     if (cancelBtn) {
@@ -897,11 +908,11 @@
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
       if (submitBtn.disabled) { return; }
-      // Расширение и препромт обязательны (дублирует серверную валидацию).
-      const ext = extensionSelect ? extensionSelect.value.trim() : '';
-      const pid = promptSelect ? promptSelect.value.trim() : '';
-      if (!ext) { setError('Сначала выберите расширение файла.'); return; }
-      if (!pid) { setError('Выберите препромт (после выбора расширения).'); return; }
+      // Язык обязателен (дублирует серверную валидацию) — из него выводится
+      // расширение файла. Препромпт задаёт привязка ArmPromptBinding по теме;
+      // без темы/привязки прогон идёт без препромпта.
+      const langId = languageSelect ? languageSelect.value.trim() : '';
+      if (!langId) { setError('Сначала выберите язык программирования.'); return; }
       if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
       setSubmitDisabled(true);
       setError('');
@@ -952,54 +963,98 @@
     // возврат на страницу прогона (?run_id=) не требует выставлять задачи/
     // модели/расширение/препромт заново. Отсутствующие в списке значения
     // (задача ушла из дерева, препромпт скрыт) просто не отмечаются.
-    async function restoreFormFromRunParams(rp) {
+    // ── Сохранение выбранных задач дерева (localStorage) ──────────────────
+    // Дерево создаётся динамически (после loadTree), поэтому общему механизму
+    // ai_admin_state.js оно недоступно надёжно — чекбоксы задач помечены
+    // data-no-state и сохраняются выделенно: courseId + node_ids одним ключом.
+    const NODES_KEY = 'ai_arm_solve_nodes';
+
+    function readSavedNodes() {
+      try { return JSON.parse(localStorage.getItem(NODES_KEY) || 'null'); }
+      catch (e) { return null; }
+    }
+
+    function saveSelectedNodes() {
+      const courseId = courseIdInput ? courseIdInput.value.trim() : '';
+      if (!courseId) { return; }
+      const nodeIds = [];
+      treeContainer.querySelectorAll('input.arm-task-check').forEach(function (cb) {
+        if (cb.checked) { nodeIds.push(String(cb.value)); }
+      });
+      try {
+        localStorage.setItem(NODES_KEY, JSON.stringify({ courseId: courseId, nodeIds: nodeIds }));
+      } catch (e) { /* quota — состояние не критично */ }
+    }
+
+    function restoreNodes(nodeIds) {
+      const wanted = new Set((nodeIds || []).map(String));
+      let restored = 0;
+      treeContainer.querySelectorAll('input.arm-task-check').forEach(function (cb) {
+        if (wanted.has(String(cb.value))) { cb.checked = true; restored++; }
+      });
+      refreshAllFolderStates();
+      if (wanted.size && restored < wanted.size) {
+        loadTreeMsg.style.color = '#b54708';
+        loadTreeMsg.textContent = 'Восстановлено ' + restored + ' из ' + wanted.size + ' задач';
+      }
+    }
+
+    // ── Восстановление формы из снимка запуска (AIModelTestRun.run_params) ─
+    // Только на странице прогона (?run_id=): возврат не требует выставлять
+    // задачи/модели/язык/тему заново. Отсутствующие в списке значения (задача
+    // ушла из дерева) просто не отмечаются. Старые run_params без language_id
+    // деградируют мягко: язык подбирается по сохранённому расширению.
+    let pendingNodeIds = null; // узлы для отметки после loadTree (?run_id=)
+
+    function restoreFormFromRunParams(rp) {
       try {
         if (rp.course_id) { courseIdInput.value = String(rp.course_id); }
         const wantedModels = new Set((rp.model_keys || []).map(String));
         document.querySelectorAll('input.arm-model-check').forEach(function (cb) {
           cb.checked = wantedModels.has(String(cb.value));
         });
-        if (rp.file_extension && extensionSelect) {
-          extensionSelect.value = rp.file_extension;
-          await loadPrompts(rp.file_extension);
-          if (rp.prompt_id && currentPromptOptions.length) {
-            // Тему восстанавливаем по препромпту прогона; сам выбор
-            // препромпта из run_params имеет приоритет над привязкой.
-            const restoredOpt = currentPromptOptions.find(function (o) {
-              return String(o.id) === String(rp.prompt_id);
-            });
-            if (restoredOpt && restoredOpt.topic_id && topicSelect) {
-              topicSelect.value = String(restoredOpt.topic_id);
-              applyTopicSelection(String(restoredOpt.topic_id));
-            }
-            const restoredIds = Array.prototype.map.call(
-              promptSelect.options, function (o) { return o.value; }
-            );
-            if (restoredIds.indexOf(String(rp.prompt_id)) !== -1) {
-              promptSelect.value = String(rp.prompt_id);
-              updateBoundPromptLabel(false);
-            }
+        syncSelectAllModelsCheckbox();
+        let languageRestored = false;
+        if (languageSelect && rp.language_id) {
+          const exists = Array.prototype.some.call(
+            languageSelect.options, function (o) { return o.value === String(rp.language_id); }
+          );
+          if (exists) {
+            languageSelect.value = String(rp.language_id);
+            languageRestored = true;
           }
         }
-        if (courseIdInput.value.trim()) { await loadTree(); }
-        const wantedNodes = new Set((rp.node_ids || []).map(String));
-        let restored = 0;
-        treeContainer.querySelectorAll('input.arm-task-check').forEach(function (cb) {
-          if (wantedNodes.has(String(cb.value))) { cb.checked = true; restored++; }
-        });
-        refreshAllFolderStates();
-        if (wantedNodes.size && restored < wantedNodes.size) {
-          loadTreeMsg.style.color = '#b54708';
-          loadTreeMsg.textContent = 'Восстановлено ' + restored + ' из ' + wantedNodes.size + ' задач';
+        if (!languageRestored && rp.file_extension && languageSelect) {
+          // Legacy run_params: подбор языка по расширению прогона.
+          const byExt = Array.prototype.find.call(
+            languageSelect.options,
+            function (o) { return o.getAttribute('data-ext') === rp.file_extension; }
+          );
+          if (byExt) { languageSelect.value = byExt.value; languageRestored = true; }
         }
+        applyLanguageSelection(languageRestored ? languageSelect.value : '');
+        if (languageRestored && rp.topic_id && topicSelect) {
+          const topicExists = Array.prototype.some.call(
+            topicSelect.options, function (o) { return o.value === String(rp.topic_id); }
+          );
+          if (topicExists) {
+            topicSelect.value = String(rp.topic_id);
+            applyTopicSelection(String(rp.topic_id));
+          }
+        }
+        if (Array.isArray(rp.node_ids)) { pendingNodeIds = rp.node_ids; }
+        if (courseIdInput.value.trim()) { loadTree(); }
       } catch (e) { /* восстановление — best effort, не ломаем страницу */ }
     }
 
+    const isRunPage = new URLSearchParams(window.location.search).has('run_id');
     const initialRp = (initialRun && initialRun.run_params) || null;
-    if (initialRp && Object.keys(initialRp).length) {
+    if (isRunPage && initialRp && Object.keys(initialRp).length) {
       restoreFormFromRunParams(initialRp);
     } else if (courseIdInput && courseIdInput.value.trim()) {
-      // Auto-load tree if course_id is pre-filled (default 1450).
+      // Без ?run_id= (страница «с прошлого запуска» или пустая): задачи
+      // восстанавливаются из localStorage после загрузки дерева. course_id
+      // и остальные поля восстанавливает ai_admin_state.js (change → loadTree).
       loadTree();
     }
   })();

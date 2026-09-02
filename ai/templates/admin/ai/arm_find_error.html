@@ -420,7 +420,7 @@
         <div class="arm-section-head">
           <div>
             <h2>Фильтры</h2>
-            <p class="arm-section-note">Выберите язык, тему и препромпт</p>
+            <p class="arm-section-note">Выберите язык и тему. Препромпт подтягивается из «препромпта по умолчанию» суперюзера (привязка по языку и теме); нет привязки — прогон без препромпта.</p>
           </div>
         </div>
 
@@ -442,11 +442,9 @@
           <div class="arm-field">
             <label for="topic">Тема</label>
             <select id="topic" name="topic"></select>
-          </div>
-
-          <div class="arm-field">
-            <label for="prompt">Препромпт</label>
-            <select id="prompt" name="prompt"></select>
+            <!-- Ручной выбор препромпта убран: привязка ArmPromptBinding
+                 (mode=find_error) резолвится серверно. Подпись показывает,
+                 какой «препромпт по умолчанию» применится. -->
             <p id="armBoundPromptLabel" style="display:none; margin:4px 0 0; font-size:13px; color:var(--body-quiet-color, #666);"></p>
           </div>
         </div>
@@ -567,7 +565,6 @@
 
 {{ languages|json_script:"langs-data" }}
 {{ topics|json_script:"topics-data" }}
-{{ prompts|json_script:"prompts-data" }}
 {{ arm_prompt_bindings|json_script:"arm-find-error-bindings" }}
 {{ active_run_snapshot|json_script:"arm-initial-run-data" }}
 
@@ -575,63 +572,45 @@
   (function () {
     const langSelect = document.getElementById('programming_language');
     const topicSelect = document.getElementById('topic');
-    const promptSelect = document.getElementById('prompt');
 
     const selectedLang = "{{ selected_prog_lng|escapejs }}";
     const selectedTopic = "{{ selected_topic|escapejs }}";
-    const selectedPrompt = "{{ selected_prompt|escapejs }}";
 
     const languages = JSON.parse(document.getElementById('langs-data').textContent || '[]');
-    const topics = JSON.parse(document.getElementById('topics-data').textContent || '[]');
-    const prompts = JSON.parse(document.getElementById('prompts-data').textContent || '[]');
-    // Привязки «препромпт по умолчанию» (ArmPromptBinding): после выбора
-    // языка и темы подтягиваем привязанный препромпт mode=find_error.
-    // Восстановление формы по run_params (selectedPrompt) приоритетнее —
-    // авто-подстановку делаем только когда пользователь ещё ничего не выбрал.
+    let topics = JSON.parse(document.getElementById('topics-data').textContent || '[]');
+    // Привязки «препромпт по умолчанию» (ArmPromptBinding): ручной выбор
+    // препромпта убран — привязка (mode=find_error) резолвится серверно по
+    // языку и теме; нет привязки — прогон без препромпта. Клиент показывает
+    // только подпись о том, что применится.
     const promptBindings = JSON.parse(
       document.getElementById('arm-find-error-bindings').textContent || '[]'
     ) || [];
     const boundPromptLabel = document.getElementById('armBoundPromptLabel');
 
-    function findBoundPromptId(languageId, topicId) {
+    function findBoundPromptName(languageId, topicId) {
       const binding = promptBindings.find(function (item) {
         return String(item.language_id) === String(languageId)
           && String(item.topic_id) === String(topicId)
           && item.mode === 'find_error';
       });
-      return binding ? String(binding.prompt_id) : '';
+      return binding ? (binding.prompt_name || ('Prompt #' + binding.prompt_id)) : '';
     }
 
-    // Подпись под селектором препромпта: что сейчас выбрано (по привязке
-    // или вручную) — чтобы сразу видеть, что подтянулось.
-    function updateBoundPromptLabel(fromBinding) {
+    // Подпись под темой: какой «препромпт по умолчанию» подтянется из
+    // привязки — чтобы сразу видеть, что применилось (или что прогона
+    // не будет с препромптом).
+    function updateBoundPromptLabel() {
       if (!boundPromptLabel) { return; }
-      const selected = promptSelect.selectedOptions[0];
-      if (!selected || !selected.value) {
+      const name = (topicSelect.value && langSelect.value)
+        ? findBoundPromptName(langSelect.value, topicSelect.value)
+        : '';
+      if (!name) {
         boundPromptLabel.style.display = 'none';
         boundPromptLabel.textContent = '';
         return;
       }
       boundPromptLabel.style.display = '';
-      boundPromptLabel.textContent = (fromBinding ? 'Препромпт по умолчанию: ' : 'Препромпт: ')
-        + selected.textContent;
-    }
-
-    function applyPromptBinding() {
-      if (selectedPrompt || !topicSelect.value || !langSelect.value) {
-        updateBoundPromptLabel(false);
-        return;
-      }
-      const boundId = findBoundPromptId(langSelect.value, topicSelect.value);
-      const exists = Array.prototype.some.call(promptSelect.options, function (o) {
-        return o.value === boundId && boundId;
-      });
-      if (boundId && exists) {
-        promptSelect.value = boundId;
-        updateBoundPromptLabel(true);
-      } else {
-        updateBoundPromptLabel(false);
-      }
+      boundPromptLabel.textContent = 'Препромпт по умолчанию: ' + name;
     }
 
     function fillLanguages() {
@@ -649,7 +628,6 @@
 
     function fillTopics(languageId) {
       topicSelect.innerHTML = '<option value="">Выберите тему</option>';
-      promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
       if (!languageId) {
         return;
       }
@@ -667,50 +645,13 @@
         });
     }
 
-    function filterPrompts(prompts, languageId, topicId) {
-      const languageValue = languageId ? String(languageId) : "";
-      const topicValue = topicId ? String(topicId) : "";
-      return prompts.filter(function (item) {
-        const hasTopic = item.topic_id !== null && item.topic_id !== undefined && item.topic_id !== "";
-        if (!hasTopic) {
-          return true;
-        }
-        if (topicValue) {
-          return String(item.topic_id) === topicValue;
-        }
-        if (!languageValue) {
-          return false;
-        }
-        return String(item.topic__programming_language) === languageValue;
-      });
-    }
-
-    function fillPrompts(languageId, topicId) {
-      promptSelect.innerHTML = '<option value="">Выберите промпт</option>';
-      filterPrompts(prompts, languageId, topicId).forEach(function (item) {
-        const option = document.createElement('option');
-        option.value = String(item.id);
-        option.textContent = item.name || item.prompt_name || ('Prompt #' + item.id);
-        if (selectedPrompt && String(item.id) === selectedPrompt) {
-          option.selected = true;
-        }
-        promptSelect.appendChild(option);
-      });
-    }
-
     langSelect.addEventListener('change', function () {
       fillTopics(langSelect.value);
-      fillPrompts(langSelect.value, null);
-      applyPromptBinding();
+      updateBoundPromptLabel();
     });
 
     topicSelect.addEventListener('change', function () {
-      fillPrompts(langSelect.value, topicSelect.value);
-      applyPromptBinding();
-    });
-
-    promptSelect.addEventListener('change', function () {
-      updateBoundPromptLabel(false);
+      updateBoundPromptLabel();
     });
 
     const interfaceLangSelect = document.getElementById('interface_language');
@@ -721,19 +662,9 @@
         if (!response.ok) throw new Error('HTTP error');
         const data = await response.json();
         topics = data.topics || [];
-        prompts = (data.prompts || []).map(function (p) {
-          return {
-            id: p.id,
-            prompt_name: p.prompt_name,
-            name: p.name,
-            topic_id: p.topic_id,
-            topic__programming_language: p.topic__programming_language,
-          };
-        });
         fillLanguages();
         fillTopics(langSelect.value);
-        fillPrompts(langSelect.value, topicSelect.value);
-        applyPromptBinding();
+        updateBoundPromptLabel();
       } catch (error) {
         console.error('Failed to reload problem data:', error);
       }
@@ -744,8 +675,7 @@
 
     fillLanguages();
     fillTopics(langSelect.value);
-    fillPrompts(langSelect.value, topicSelect.value);
-    applyPromptBinding();
+    updateBoundPromptLabel();
   })();
 
   function openArmModal(card) {

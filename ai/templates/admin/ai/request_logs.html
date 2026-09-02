@@ -335,10 +335,12 @@
         {% endfor %}
       </select>
     </div>
+    {% if not own_logs_only %}
     <div class="filter-field">
       <label for="id_user">Пользователь</label>
       <input id="id_user" type="text" name="user" value="{{ filters.user }}" placeholder="ID, логин или ФИО">
     </div>
+    {% endif %}
     <div class="filter-field">
       <label for="id_task">Задача</label>
       <select id="id_task" name="task">

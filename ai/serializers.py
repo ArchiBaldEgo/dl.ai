@@ -67,7 +67,9 @@ def arm_prompt_binding(obj):
     """Сериализует ArmPromptBinding для авто-подстановки препромпта на ARM-страницах.
 
     Компактный формат: фронт ищет запись по (language_id, topic_id, mode) и
-    подставляет prompt_id в селект препромпта.
+    подставляет prompt_id в селект препромпта. ``prompt_name`` — для подписи
+    «Препромпт по умолчанию: …» без загрузки списка промптов (ручной выбор
+    препромпта на ARM-страницах убран).
     """
     return {
         "id": obj.id,
@@ -75,4 +77,5 @@ def arm_prompt_binding(obj):
         "topic_id": obj.topic_id,
         "mode": obj.mode,
         "prompt_id": obj.prompt_id,
+        "prompt_name": obj.prompt.prompt_name if obj.prompt else "",
     }

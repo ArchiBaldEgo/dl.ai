@@ -106,77 +106,33 @@ _VERDICT_FAILED = "failed"
 _VERDICT_SKIPPED = "skipped"
 
 
-def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None, topic_id=None):
+def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None):
     """Compose the solve prompt for one task.
 
-    If prompt_id is given, use that specific SharedPrompt or Prompt.
-    If topic_id is given and no prompt_id, try a topic-bound Prompt first
-    (it contains language-specific instructions like C-MPA/ASM syntax rules).
-    Otherwise fall back to the SharedPrompt with mode="solve", then to a
-    plain Russian instruction.
+    Препромпт берётся только по явному ``prompt_id`` — это pk ``Prompt`` из
+    суперпюзерской привязки ArmPromptBinding (mode=solve); ручного выбора и
+    fallback'ов (topic-bound Prompt, SharedPrompt mode=solve) больше нет:
+    нет привязки → прогон без препромпта, только базовая инструкция.
     """
     from .i18n import get_language_instruction
-    from .models import SharedPrompt, Prompt
+    from .models import Prompt
 
     message = None
-
-    # Try specific prompt_id first.
     if prompt_id:
-        # SharedPrompt ids are passed as "shared_<pk>" or just "<pk>".
-        from .services.prompt_resolver import parse_shared_prompt_id
-        shared_pk = parse_shared_prompt_id(prompt_id)
-        if shared_pk is not None:
-            try:
-                sp = SharedPrompt.objects.get(pk=shared_pk)
-                message = sp.get_effective_text(
-                    ui_language, prog_lang_name, topic_name, task_statement, ""
-                )
-            except SharedPrompt.DoesNotExist:
-                pass
-        else:
-            try:
-                p = Prompt.objects.get(pk=int(prompt_id))
-                message = p.get_effective_text(
-                    ui_language, prog_lang_name, topic_name, task_statement, ""
-                )
-            except (Prompt.DoesNotExist, ValueError):
-                pass
-
-    # No explicit prompt — try a topic-bound Prompt (language-specific syntax
-    # instructions are critical for C-MPA / ASM i8086 tasks).
-    topic_prompt_text = None
-    if not message and topic_id:
-        topic_prompt = (
-            Prompt.objects.filter(topic_id=topic_id)
-            .order_by("id")
-            .first()
-        )
-        if topic_prompt:
-            topic_prompt_text = topic_prompt.get_effective_text(
-                ui_language, prog_lang_name, topic_name, task_statement, ""
-            )
-
-    # Build the final message. For topic-bound prompts, put the task statement
-    # FIRST so the model sees it even if the prompt is long (ASM-i86-1 is ~5k
-    # chars — Web DeepSeek may not see the end of a long message).
-    if topic_prompt_text and task_statement and task_statement.strip():
-        message = f"Условие задачи:\n{task_statement}\n\n{topic_prompt_text}"
-    elif topic_prompt_text:
-        message = topic_prompt_text
-
-    # Fall back to SharedPrompt with mode="solve".
-    if not message:
         try:
-            default_prompt = SharedPrompt.objects.get(mode="solve")
-            message = default_prompt.get_effective_text(
+            p = Prompt.objects.get(pk=int(prompt_id))
+            message = p.get_effective_text(
                 ui_language, prog_lang_name, topic_name, task_statement, ""
             )
-        except SharedPrompt.DoesNotExist:
-            message = (
-                f"Реши задачу по программированию на языке {prog_lang_name}. "
-                f"Выведи только готовое решение (код), без пояснений. "
-                f"Условие задачи: {task_statement}."
-            )
+        except (Prompt.DoesNotExist, ValueError):
+            pass
+
+    if not message:
+        message = (
+            f"Реши задачу по программированию на языке {prog_lang_name}. "
+            f"Выведи только готовое решение (код), без пояснений. "
+            f"Условие задачи: {task_statement}."
+        )
     # Гарантия полного входа: если выбранный шаблон промпта не содержал
     # плейсхолдер {message}, условие задачи могло потеряться — дописываем его
     # явно, чтобы модели всегда приходил полный текст задачи.
@@ -962,6 +918,7 @@ def _run_batch_job_worker(
     topic_id=None,
     topic_name="",
     run_params=None,
+    record_stats=False,
 ):
     """Daemon worker for a batch-solve run.
 
@@ -970,6 +927,8 @@ def _run_batch_job_worker(
     Then iterates tasks in the outer loop and models in the inner loop.
     Вердикт ставится строго по DL-тесту (send-solution / get-solution-result).
     ``run_params`` — снимок формы запуска (см. AIModelTestRun.run_params).
+    ``record_stats`` — по завершении инкрементировать глобальную статистику
+    моделей (AIModelStats), из которой питается селектор моделей чата.
     """
     from .services.task_registry import EXTENSION_TO_LANG, ensure_task, _guess_extension
     from .models import ProgrammingLanguage
@@ -1089,7 +1048,6 @@ def _run_batch_job_worker(
                 try:
                     message = _build_solve_message(
                         task.statement, prog_lang_name, topic_name, ui_language, prompt_id,
-                        topic_id=task.topic_id,
                     )
                     response = async_to_sync(model["handler"])(
                         message,
@@ -1316,6 +1274,14 @@ def _run_batch_job_worker(
             )
         _update_job(run_id, status="cancelled" if cancelled else "completed", cancelled=cancelled)
 
+        # Глобальная статистика моделей (селектор чата): инкремент по парам
+        # этого прогона. Только вне _jobs_lock (нереентерабельный лок) и только
+        # по флагу суперюзера; частичные (прерванные) результаты тоже считаются.
+        if record_stats and batch_results:
+            from .services.model_stats import record_batch_solve_stats
+
+            record_batch_solve_stats(batch_results)
+
     except Exception as exc:
         _update_job(
             run_id, status="failed",
@@ -1366,7 +1332,7 @@ def _batch_results_from_db(test_run):
     return results
 
 
-def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name=""):
+def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name="", record_stats=False):
     """Запускает batch-solve ARM: задачи из DL дерева × модели в фоновом потоке.
 
     Принимает node_ids — список DL node ID (из дерева задач dl.gsu.by).
@@ -1407,6 +1373,9 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "dl_test": bool(dl_test),
         "ui_language": ui_language,
         "course_id": course_id,
+        "language_id": programming_language_id,
+        "topic_id": topic_id,
+        "record_stats": bool(record_stats),
     }
 
     run_id = uuid.uuid4().hex
@@ -1441,7 +1410,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, node_ids, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params, "record_stats": record_stats},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )
@@ -1545,6 +1514,28 @@ def _mark_orphaned_run_failed(test_run):
     test_run.finished_at = now
     test_run.error_message = "Процесс потерян (перезапуск сервера)"
     return test_run
+
+
+def get_latest_batch_run_snapshot(user_id):
+    """Снапшот последнего batch-прогона пользователя (для /arm/solve/ без run_id).
+
+    Страница «Пакетное решение» показывает таблицу предыдущего запуска, когда
+    открыта без ``?run_id=``. Источник истины — БД (AIModelTestRun); живой job
+    берётся через обычный get_arm_run_snapshot. Возвращает None, если у
+    пользователя ещё не было batch-прогонов.
+    """
+    if not user_id:
+        return None
+    last = (
+        AIModelTestRun.objects.filter(
+            run_type=AIModelTestRun.RUN_TYPE_BATCH, user_id=user_id
+        )
+        .order_by("-started_at", "-id")
+        .first()
+    )
+    if last is None:
+        return None
+    return get_arm_run_snapshot(last.run_id)
 
 
 def get_arm_run_snapshot(run_id):

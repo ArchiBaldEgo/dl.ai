@@ -124,6 +124,125 @@ function initSelectionPersistence() {
             setTimeout(saveSelections, 100);
         });
     }
+    // Сортировка «Все модели» по статистике прогонов /arm/solve/ — общий
+    // механизм для всех трёх страниц чата (base_chat.html).
+    initModelSortSelector();
+}
+
+// === Сортировка селектора моделей по статистике прогонов /arm/solve/ ===
+// Статистика (среднее время, % решённых) приходит с сервера в data-атрибутах
+// опций (model_health.get_available_model_options). Управляет порядком ТОЛЬКО
+// optgroup «Все модели» — favorite-first контракт («Часто используемые»
+// сверху) не трогаем. Режим хранится в localStorage: серверу он не нужен.
+// Модели без данных всегда в конце (внутри группы — исходный алфавитный
+// порядок).
+var MODEL_SORT_KEY = 'ai_model_sort_mode';
+
+function modelOptionStats(opt) {
+    var avg = parseFloat(opt.getAttribute('data-avg-seconds'));
+    var pct = parseFloat(opt.getAttribute('data-percent-solved'));
+    return {
+        avgSeconds: isNaN(avg) ? null : avg,
+        percentSolved: isNaN(pct) ? null : pct,
+    };
+}
+
+// Человекочитаемый суффикс названия: «Model X — 12.3 с · 45%». Идемпотентен:
+// базовое название кешируется в data-base-title при первом проходе.
+function applyModelOptionSuffix(opt) {
+    if (!opt.hasAttribute('data-base-title')) {
+        opt.setAttribute('data-base-title', opt.textContent.trim());
+    }
+    var title = opt.getAttribute('data-base-title');
+    var stats = modelOptionStats(opt);
+    if (stats.avgSeconds === null && stats.percentSolved === null) {
+        opt.textContent = title;
+        return;
+    }
+    var parts = [];
+    if (stats.avgSeconds !== null) parts.push(stats.avgSeconds.toFixed(1) + ' с');
+    if (stats.percentSolved !== null) parts.push(String(stats.percentSolved) + '%');
+    opt.textContent = title + ' — ' + parts.join(' · ');
+}
+
+function sortModelOptions(mode) {
+    var modelSelect = document.getElementById('select');
+    var group = modelSelect && modelSelect.querySelector('optgroup[label="Все модели"]');
+    if (!group || !group.children.length) return;
+
+    var selectedValue = modelSelect.value;
+    var opts = Array.prototype.slice.call(group.children);
+    opts.forEach(applyModelOptionSuffix);
+
+    if (mode !== 'default') {
+        var withStats = [];
+        var withoutStats = [];
+        opts.forEach(function(opt) {
+            var s = modelOptionStats(opt);
+            (s.avgSeconds !== null || s.percentSolved !== null ? withStats : withoutStats).push(opt);
+        });
+
+        var maxAvg = 0;
+        withStats.forEach(function(opt) {
+            var s = modelOptionStats(opt);
+            if (s.avgSeconds !== null && s.avgSeconds > maxAvg) maxAvg = s.avgSeconds;
+        });
+
+        var score;
+        if (mode === 'speed') {
+            // Быстрее (меньше avg) — выше.
+            score = function(opt) {
+                var s = modelOptionStats(opt);
+                return s.avgSeconds === null ? -Infinity : -s.avgSeconds;
+            };
+        } else if (mode === 'accuracy') {
+            score = function(opt) {
+                var s = modelOptionStats(opt);
+                return s.percentSolved === null ? -Infinity : s.percentSolved;
+            };
+        } else {
+            // both: равный вклад скорости и точности, оба нормированы в [0..1].
+            // Модель без одного из показателей не получает «половину» оценки.
+            score = function(opt) {
+                var s = modelOptionStats(opt);
+                var total = 0;
+                if (s.avgSeconds !== null && maxAvg > 0) total += 0.5 * (1 - s.avgSeconds / maxAvg);
+                if (s.percentSolved !== null) total += 0.5 * (s.percentSolved / 100);
+                return total;
+            };
+        }
+
+        withStats.sort(function(a, b) { return score(b) - score(a); });
+        opts = withStats.concat(withoutStats);
+    }
+
+    // Перезаписываем группу в новом порядке (selected сохраняем по значению).
+    group.innerHTML = '';
+    opts.forEach(function(opt) { group.appendChild(opt); });
+    if (selectedValue) modelSelect.value = selectedValue;
+}
+
+function initModelSortSelector() {
+    var modelSelect = document.getElementById('select');
+    var sortSelect = document.getElementById('selectModelSort');
+    if (!modelSelect || !sortSelect) return;
+    var group = modelSelect.querySelector('optgroup[label="Все модели"]');
+    if (!group || !group.children.length) {
+        sortSelect.style.display = 'none';
+        return;
+    }
+
+    var saved = 'default';
+    try { saved = localStorage.getItem(MODEL_SORT_KEY) || 'default'; } catch (e) {}
+    if (!Array.prototype.some.call(sortSelect.options, function(o) { return o.value === saved; })) {
+        saved = 'default';
+    }
+    sortSelect.value = saved;
+    sortSelect.addEventListener('change', function() {
+        try { localStorage.setItem(MODEL_SORT_KEY, sortSelect.value); } catch (e) {}
+        sortModelOptions(sortSelect.value);
+    });
+    sortModelOptions(sortSelect.value);
 }
 
 // === Selectors: programming language / topic / prompt (shared by find-error & solve-problem) ===

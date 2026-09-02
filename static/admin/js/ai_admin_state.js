@@ -13,6 +13,9 @@
 //    применяются повторными проходами, пока значения не «прилипнут».
 //    Страница с ?run_id= не восстанавливается — приоритет у серверного
 //    восстановления из AIModelTestRun.run_params.
+//    Поля с атрибутом data-no-state исключаются из сохранения/восстановления
+//    (например, динамическое дерево задач /arm/solve/, у которого выделенный
+//    механизм localStorage ai_arm_solve_nodes).
 //
 // request_logs.html держит собственную логику фильтров (localStorage
 // ai_logs_filters) и не является changelist'ом — этот механизм её не задевает.
@@ -21,17 +24,19 @@
 
   var QS_KEY_PREFIX = "ai_admin_state:";
   var FORM_KEY_PREFIX = "ai_admin_form:";
-  // Формы страниц-инструментов. «Препромпты по умолчанию» здесь не участвует:
-  // у него предзаполнение ?edit= и JS-каскад селектов — generic-restore
-  // конфликтовал бы с ними (KISS: страница короткая, заново выбрать дёшево).
-  var FORM_STATE_PATHS = [
-    "/ai/admin/arm/solve/",
-    "/ai/admin/arm/find-error/",
-    "/ai/admin/prompt-regression/",
-    "/ai/admin/test-console/"
-  ];
-  var RETRY_MS = 700;
-  var MAX_RETRIES = 8; // асинхронные селекты успевают наполниться
+  // Формы страниц-инструментов: pathname → селектор формы. Эти шаблоны НЕ
+  // используют обёртку #content-main (в отличие от django changelist'ов),
+  // поэтому ищем форму по её id явно. «Препромпты по умолчанию» здесь не
+  // участвует: у него предзаполнение ?edit= и JS-каскад селектов —
+  // generic-restore конфликтовал бы с ними (KISS: страница короткая).
+  var FORM_SELECTORS = {
+    "/ai/admin/arm/solve/": "#armSolveForm",
+    "/ai/admin/arm/find-error/": "#armRunForm",
+    "/ai/admin/prompt-regression/": "#prtRunForm",
+    "/ai/admin/test-console/": "#tcRunForm"
+  };
+  var RETRY_MS = 1000;
+  var MAX_RETRIES = 25; // дерево задач / каскадные селекты грузятся асинхронно
 
   function parseSaved(key) {
     try {
@@ -86,17 +91,16 @@
   function isSaveable(el) {
     var type = el.type || "";
     return !el.disabled
+      && !el.hasAttribute("data-no-state")
       && fieldKey(el) !== null
       && type !== "file" && type !== "hidden" && type !== "password"
       && el.name !== "csrfmiddlewaretoken";
   }
 
   function setupFormState() {
-    var path = window.location.pathname;
-    if (FORM_STATE_PATHS.indexOf(path) === -1) return;
-    var form = document.querySelector("#content-main form");
+    var form = document.querySelector(FORM_SELECTORS[window.location.pathname] || "");
     if (!form) return;
-    var key = FORM_KEY_PREFIX + path;
+    var key = FORM_KEY_PREFIX + window.location.pathname;
 
     function collect() {
       var data = {};
@@ -121,28 +125,28 @@
     var savedState = parseSaved(key);
     if (!savedState) return;
 
-    // Значения применяем проходами: селекты каскада наполняются позже
-    // (fetch по change предыдущего), поэтому не «прилипшее» перепроверяем.
-    var pending = {};
-    form.querySelectorAll("select, input, textarea").forEach(function (el) {
-      if (!isSaveable(el)) return;
-      var k = fieldKey(el);
-      if (Object.prototype.hasOwnProperty.call(savedState, k)) {
-        pending[k] = { el: el, value: savedState[k] };
-      }
-    });
+    // Значения применяем проходами с повторным сканированием DOM: часть
+    // полей появляется позже (чекбоксы задач дерева — только после loadTree,
+    // options каскадных селектов — после асинхронных fetch). Применённые
+    // ключи запоминаем, остальных ждём до MAX_RETRIES.
+    var applied = {};
 
     function applyPass(attempt) {
-      Object.keys(pending).forEach(function (k) {
-        var item = pending[k];
-        var el = item.el;
-        var value = item.value;
+      form.querySelectorAll("select, input, textarea").forEach(function (el) {
+        if (!isSaveable(el)) return;
+        var k = fieldKey(el);
+        if (applied[k]) return;
+        if (!Object.prototype.hasOwnProperty.call(savedState, k)) {
+          applied[k] = true; // отсутствовало в сохранённом — не трогаем
+          return;
+        }
+        var value = savedState[k];
         if (el.type === "checkbox") {
           if (el.checked !== !!value) {
             el.checked = !!value;
             el.dispatchEvent(new Event("change"));
           }
-          delete pending[k];
+          applied[k] = true;
         } else if (el.tagName === "SELECT") {
           var exists = Array.prototype.some.call(
             el.options, function (o) { return o.value === String(value); }
@@ -152,17 +156,21 @@
               el.value = String(value);
               el.dispatchEvent(new Event("change"));
             }
-            delete pending[k];
+            applied[k] = true;
           }
         } else {
           if (el.value !== value) {
             el.value = value;
             el.dispatchEvent(new Event("change"));
           }
-          delete pending[k];
+          applied[k] = true;
         }
       });
-      if (Object.keys(pending).length && attempt < MAX_RETRIES) {
+      var pendingCount = 0;
+      form.querySelectorAll("select, input, textarea").forEach(function (el) {
+        if (isSaveable(el) && !applied[fieldKey(el)]) pendingCount++;
+      });
+      if (pendingCount && attempt < MAX_RETRIES) {
         window.setTimeout(function () { applyPass(attempt + 1); }, RETRY_MS);
       }
     }
