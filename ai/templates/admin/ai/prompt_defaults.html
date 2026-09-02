@@ -168,15 +168,27 @@
     if (modeSelect) { modeSelect.value = editing.mode; }
   }
 
+  function getCookie(name) {
+    var match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  function getCsrfToken() {
+    // Сперва СВЕЖАЯ кука csrftoken (middleware ротирует токен при ребинде
+    // сессии — токен в уже отрендеренной форме успевает устареть, и все
+    // прочие AJAX-хендлеры админки читают именно куку), потом инпут.
+    var csrfInput = document.querySelector('input[name="csrfmiddlewaretoken"]');
+    return getCookie('csrftoken') || (csrfInput ? csrfInput.value : '');
+  }
+
   function post(action, fields) {
     var body = new URLSearchParams();
     body.set('action', action);
     Object.keys(fields).forEach(function (key) { body.set(key, fields[key]); });
-    var csrf = document.querySelector('input[name="csrfmiddlewaretoken"]');
     return fetch(form.action, {
       method: 'POST', credentials: 'same-origin',
       headers: {
-        'X-CSRFToken': csrf ? csrf.value : '',
+        'X-CSRFToken': getCsrfToken(),
         'Content-Type': 'application/x-www-form-urlencoded',
         'X-Requested-With': 'XMLHttpRequest',
       },
