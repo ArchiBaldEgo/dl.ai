@@ -37,6 +37,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
             <thead>
               <tr>
                 <th>Отправлен</th>
+                <th>Название прогона</th>
                 <th>Курс</th>
                 <th>Расширение</th>
                 <th>Решено</th>
@@ -52,17 +53,18 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
                 <tr class="ai-batch-row{% if row.snapshot %} ai-batch-row-clickable{% endif %}"
                     data-json-id="{{ row.json_id }}" data-run-id="{{ row.run_id }}"{% if row.snapshot %} title="Кликните, чтобы развернуть результаты прогона"{% endif %}>
                   <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
+                  <td>{{ row.run_name|default:"—" }}</td>
                   <td>{{ row.course_id|default:"—" }}</td>
                   <td>{{ row.file_extension|default:"—" }}</td>
                   <td class="ai-recent-logs-ok">{{ row.solved|default:"—" }}</td>
                   <td class="ai-recent-logs-err">{{ row.failed|default:"—" }}</td>
                   <td>{{ row.total_pairs|default:"—" }}</td>
-                  <td class="{% if row.status == 'success' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.status_display }}</td>
+                  <td class="{% if row.run_status == 'completed' or row.run_status == 'success' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.run_status_display }}</td>
                   <td><a href="{{ row.detail_url }}">Детали →</a></td>
                 </tr>
                 {# Развёртка: сводка + ответы моделей прогона (ленивый рендер по первому клику). #}
                 <tr class="ai-batch-detail" hidden>
-                  <td colspan="8">
+                  <td colspan="9">
                     {% if row.snapshot %}{{ row.snapshot|json_script:row.json_id }}{% endif %}
                     <div class="ai-batch-detail-body"></div>
                     {% if not row.snapshot %}<p class="ai-recent-logs-empty">Прогон не найден в БД — результаты недоступны.</p>{% endif %}
@@ -127,7 +129,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
                   <td>{{ row.programming_language_name }}</td>
                   <td>{{ row.topic_name }}</td>
                   <td>{{ row.model_names }}</td>
-                  <td class="{% if row.status == 'success' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.status_display }}</td>
+                  <td class="{% if row.status_class == 'ok' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.status_display }}</td>
                   <td>{{ row.mode_display }}</td>
                   <td>{{ row.duration_seconds|floatformat:0|default:"—" }}</td>
                 </tr>

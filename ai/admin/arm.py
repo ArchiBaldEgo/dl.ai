@@ -470,6 +470,21 @@ def admin_arm_solve_view(request):
         serialize_arm_prompt_binding(b) for b in ArmPromptBinding.objects.select_related("prompt")
     ]
 
+    # Список всех препромптов для ручного выбора на странице. Препромпты —
+    # студенческий контент: тот же контракт, что у chat-facing get_prompts
+    # (см. querysets.prompt_queryset_for_user — здесь ACL не режем).
+    prompt_options = [
+        {
+            "id": p.pk,
+            "name": p.prompt_name or f"Промпт #{p.pk}",
+            "topic_id": p.topic_id,
+            "topic_name": p.topic.topic_name if p.topic else "",
+        }
+        for p in Prompt.objects.select_related("topic").order_by(
+            "topic__topic_name", "prompt_name"
+        )
+    ]
+
     context = {
         **ai_admin_site.each_context(request),
         "title": "ARM: Пакетное решение",
@@ -477,6 +492,7 @@ def admin_arm_solve_view(request):
         "arm_back_url": arm_back_url,
         "model_options": get_arm_solve_model_options(),
         "arm_prompt_bindings": prompt_bindings,
+        "prompt_options": prompt_options,
         "language_options": language_options,
         "topics": topics,
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
@@ -672,10 +688,11 @@ def admin_arm_solve_start_view(request):
             {"ok": False, "message": lang_error or "Не выбрано расширение файла для тестирования."},
             status=400,
         )
-    # Тема выбрана пользователем; препромпт — только привязка ArmPromptBinding
-    # (mode=solve) по этой теме, иначе привязка «на весь язык» (topic IS NULL —
-    # языки без тем: Python, C++). Нет привязки → прогон без препромпта.
-    # Клиентский prompt_id не читается: привязки куртирует только суперюзер.
+    # Тема выбрана пользователем; препромпт — ручной выбор из списка на
+    # странице (все промпты — студенческий контент, как в chat-facing API),
+    # иначе привязка ArmPromptBinding (mode=solve): точная (язык+тема), иначе
+    # «на весь язык» (topic IS NULL — языки без тем: Python, C++). Нет
+    # ни ручного выбора, ни привязки → прогон без препромпта.
     topic_id = None
     topic_id_log = None
     topic_name_log = ""
@@ -683,13 +700,28 @@ def admin_arm_solve_start_view(request):
         topic_id = int(body.get("arm_topic_id") or request.POST.get("arm_topic_id") or 0) or None
     except (ValueError, TypeError):
         topic_id = None
-    prompt_obj = ArmPromptBinding.resolve(
-        programming_language_id=prog_lang_id,
-        topic_id=topic_id,
-        mode=ArmPromptBinding.MODE_SOLVE,
-    )
-    prompt_id = prompt_obj.prompt_id if prompt_obj else None
-    prompt_name = prompt_obj.prompt.prompt_name if prompt_obj else ""
+    # prompt_id может прийти числом из JSON — приводим к строке до strip().
+    raw_prompt_id = str(body.get("prompt_id") or request.POST.get("prompt_id") or "").strip()
+    prompt_override = None
+    if raw_prompt_id:
+        try:
+            prompt_override = Prompt.objects.filter(id=int(raw_prompt_id)).first()
+        except (ValueError, TypeError):
+            prompt_override = None
+    if prompt_override is not None:
+        prompt_id = prompt_override.pk
+        prompt_name = prompt_override.prompt_name or ""
+    else:
+        prompt_obj = ArmPromptBinding.resolve(
+            programming_language_id=prog_lang_id,
+            topic_id=topic_id,
+            mode=ArmPromptBinding.MODE_SOLVE,
+        )
+        prompt_id = prompt_obj.prompt_id if prompt_obj else None
+        prompt_name = prompt_obj.prompt.prompt_name if prompt_obj else ""
+    # Название прогона — необязательно, задаётся только при запуске
+    # (хранится в AIAppSettings.batch_run_names по дате-времени старта).
+    run_name = str(body.get("run_name") or request.POST.get("run_name") or "").strip()[:200]
     topic_name_log = (
         Topic.objects.filter(id=topic_id).values_list("topic_name", flat=True).first() or ""
     ) if topic_id else ""
@@ -750,6 +782,7 @@ def admin_arm_solve_start_view(request):
         topic_id=topic_id,
         topic_name=topic_name_log,
         record_stats=record_stats,
+        run_name=run_name,
     )
     if not run_id:
         return JsonResponse(

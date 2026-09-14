@@ -4,6 +4,9 @@
 в режиме «Пакетное решение» (airequestlog_detail.html), чтобы рендеринг был
 идентичен. Единый источник правды — window.ArmBatchResults. Экспорт XLSX —
 серверный (ai/admin/export.py), кнопка здесь — ссылка на эндпоинт по run_id.
+Переключатель «Все / Не пройденные» в шапке карточки «Ответы моделей»
+(счётчики, авто-раскрытие не пройденных, режим в localStorage) живёт здесь же —
+его получают все три поверхности, где рендерится эта таблица.
 NB: комментарии с решёткой Django вырезает только в одну строку —
 многострочный комментарий шаблона обязан быть блочным тегом comment.
 {% endcomment %}
@@ -74,11 +77,34 @@ NB: комментарии с решёткой Django вырезает толь�
     text-decoration: none; font-size: 13px; cursor: pointer;
   }
   .arm-button:hover { background: color-mix(in srgb, var(--body-bg) 90%, var(--hairline-color)); }
+
+  /* Переключатель «Все / Не пройденные»: компактный сегмент из двух кнопок
+     в шапке карточки «Ответы моделей»; ничего не раздувает, но ошибки видны
+     в один клик. */
+  .arm-filter-toggle { display: inline-flex; flex: none; }
+  .arm-filter-toggle .arm-button { padding: 5px 10px; font-size: 13px; border-radius: 0; }
+  .arm-filter-toggle .arm-button:first-child { border-radius: 6px 0 0 6px; }
+  .arm-filter-toggle .arm-button:last-child { border-radius: 0 6px 6px 0; border-left-width: 0; }
+  .arm-filter-toggle .arm-button.active { background: var(--darkened-bg); font-weight: 700; }
+  .arm-filter-toggle .arm-button:disabled { opacity: 0.55; cursor: default; }
   @media (max-width: 700px) { .arm-result-top { align-items: flex-start; flex-direction: column; } }
 </style>
 
 <script>
 window.ArmBatchResults = (function () {
+  // Режим фильтра списка «Ответы моделей»: 'all' | 'failed' («Не пройденные»
+  // = не решено ИЛИ пропущено). Хранится в localStorage — выбранный режим
+  // переживает перезагрузку и одинаков на всех поверхностях (/arm/solve/,
+  // развёртка в «Настройка ИИ-приложения», деталь записи журнала).
+  var FILTER_STORAGE_KEY = 'ai_arm_batch_filter';
+  var filterMode = 'all';
+  try {
+    filterMode = localStorage.getItem(FILTER_STORAGE_KEY) === 'failed' ? 'failed' : 'all';
+  } catch (e) { /* localStorage недоступен — работает дефолт */ }
+  var prevRenderedMode = null;   // режим текущей отрисовки списка в DOM
+  var allOpenKeys = new Set();   // ручные раскрытия карточек в режиме «Все»
+  var lastRender = null;         // аргументы последнего рендера (для re-render переключателем)
+
   function escapeHtml(value) {
     return String(value == null ? '' : value)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -88,6 +114,11 @@ window.ArmBatchResults = (function () {
     var labels = { solved: 'Решено', failed: 'Не решено', skipped: 'Пропущено' };
     var cls = v === 'solved' ? 'solved' : (v === 'failed' ? 'failed' : 'skipped');
     return '<span class="arm-badge ' + cls + '">' + escapeHtml(labels[v] || v) + '</span>';
+  }
+
+  function isFailedRow(r) {
+    // «Не пройденные»: не решено (failed) или пропущено (skipped).
+    return !!r && r.verdict !== 'solved';
   }
 
   function renderBucketTable(rows, labelHeader, wrapEl) {
@@ -145,28 +176,110 @@ window.ArmBatchResults = (function () {
     if (els.card) { els.card.style.display = 'block'; }
   }
 
-  function renderResults(results, resultsEl, resultsCard) {
-    if (!results || !results.length) {
-      if (resultsEl) { resultsEl.innerHTML = ''; }
-      if (resultsCard) { resultsCard.style.display = 'none'; }
-      return;
-    }
-    var openKeys = new Set();
+  function collectOpenKeys(resultsEl) {
+    var keys = new Set();
     if (resultsEl) {
       resultsEl.querySelectorAll('details[open]').forEach(function (d) {
         var key = d.getAttribute('data-key');
-        if (key) { openKeys.add(key); }
+        if (key) { keys.add(key); }
       });
-      resultsEl.innerHTML = '';
     }
+    return keys;
+  }
+
+  function setFilterMode(mode) {
+    if (mode !== 'all' && mode !== 'failed') { return; }
+    filterMode = mode;
+    try { localStorage.setItem(FILTER_STORAGE_KEY, mode); } catch (e) { /* не критично */ }
+    if (lastRender) {
+      renderResults(lastRender.results, lastRender.resultsEl, lastRender.resultsCard, lastRender.filterHost);
+    }
+  }
+
+  // Переключатель «Все (N)» / «Не пройденные (M)» — создаётся один раз в
+  // filterHost (шапка карточки «Ответы моделей»); при M = 0 кнопка неактивна.
+  function ensureFilterToggle(filterHost, total, failedCount) {
+    if (!filterHost) { return null; }
+    var toggle = filterHost.querySelector('.arm-filter-toggle');
+    if (!toggle) {
+      toggle = document.createElement('div');
+      toggle.className = 'arm-filter-toggle';
+      var btnAll = document.createElement('button');
+      btnAll.type = 'button';
+      btnAll.className = 'arm-button arm-filter-all';
+      var btnFailed = document.createElement('button');
+      btnFailed.type = 'button';
+      btnFailed.className = 'arm-button arm-filter-failed';
+      toggle.appendChild(btnAll);
+      toggle.appendChild(btnFailed);
+      filterHost.appendChild(toggle);
+      btnAll.addEventListener('click', function () { setFilterMode('all'); });
+      btnFailed.addEventListener('click', function () {
+        if (!btnFailed.disabled) { setFilterMode('failed'); }
+      });
+    }
+    var btnAll = toggle.querySelector('.arm-filter-all');
+    var btnFailed = toggle.querySelector('.arm-filter-failed');
+    btnAll.textContent = 'Все (' + total + ')';
+    btnFailed.textContent = 'Не пройденные (' + failedCount + ')';
+    btnFailed.disabled = failedCount === 0;
+    btnAll.classList.toggle('active', filterMode === 'all');
+    btnFailed.classList.toggle('active', filterMode === 'failed');
+    btnAll.setAttribute('aria-pressed', filterMode === 'all' ? 'true' : 'false');
+    btnFailed.setAttribute('aria-pressed', filterMode === 'failed' ? 'true' : 'false');
+    return toggle;
+  }
+
+  // renderResults(results, resultsEl, resultsCard, filterHost): рендер списка
+  // «Ответы моделей» с учётом filterMode. filterHost — контейнер для
+  // переключателя (шапка карточки); без него список рисуется целиком.
+  // Раскрытие карточек: в «Все» сохраняются ручные открытия (и возвращаются
+  // прежние после «Не пройденных»); вход в «Не пройденные» раскрывает все
+  // отфильтрованные карточки сразу — ошибки видны без клика по каждой.
+  function renderResults(results, resultsEl, resultsCard, filterHost) {
+    lastRender = { results: results, resultsEl: resultsEl, resultsCard: resultsCard, filterHost: filterHost };
+    results = results || [];
+    var failedRows = results.filter(isFailedRow);
+    // Режим «Не пройденные» без не пройденных — пустой список за неактивной
+    // кнопкой бесполезен: показываем «Все».
+    if (filterMode === 'failed' && !failedRows.length) { filterMode = 'all'; }
+    ensureFilterToggle(filterHost, results.length, failedRows.length);
+
+    var visible = filterMode === 'failed' ? failedRows : results;
+    if (resultsCard) { resultsCard.style.display = results.length ? 'block' : 'none'; }
+
+    // Раскрытие (см. докстринг): domOpen читается ДО очистки DOM.
+    var domOpen = collectOpenKeys(resultsEl);
+    var openKeys = new Set();
+    var openAll = false;
+    if (filterMode === 'all') {
+      if (prevRenderedMode === 'all') { allOpenKeys = domOpen; }
+      openKeys = allOpenKeys;
+    } else if (prevRenderedMode === 'failed') {
+      openKeys = domOpen; // внутри режима — ручные сворачивания сохраняются
+    } else {
+      openAll = true;     // вход в режим: раскрыть все не пройденные
+    }
+    prevRenderedMode = filterMode;
+
+    if (resultsEl) { resultsEl.innerHTML = ''; }
+    if (!visible.length) {
+      if (resultsEl) {
+        resultsEl.innerHTML = '<p class="arm-section-note">'
+          + (filterMode === 'failed' ? 'Не пройденных результатов нет.' : 'нет данных')
+          + '</p>';
+      }
+      return;
+    }
+
     var downloadBase = '/ai/admin/arm/solve/result/';
-    results.forEach(function (r) {
+    visible.forEach(function (r) {
       var cls = r.verdict === 'solved' ? 'solved' : (r.verdict === 'failed' ? 'failed' : 'skipped');
       var card = document.createElement('details');
       card.className = 'arm-result ' + cls;
       var rkey = (r.task_node_id || '') + ':' + (r.model_key || '');
       card.setAttribute('data-key', rkey);
-      if (openKeys.has(rkey)) { card.setAttribute('open', ''); }
+      if (openAll || openKeys.has(rkey)) { card.setAttribute('open', ''); }
 
       var dlComment = r.dl_comment || '';
       var dlError = r.dl_error || '';
@@ -228,7 +341,6 @@ window.ArmBatchResults = (function () {
       card.appendChild(body);
       if (resultsEl) { resultsEl.appendChild(card); }
     });
-    if (resultsCard) { resultsCard.style.display = 'block'; }
   }
 
   // init(rootEl, snapshot, runId): строит карточки сводки + ответов и рендерит.
@@ -268,15 +380,18 @@ window.ArmBatchResults = (function () {
     var resultsCard = document.createElement('section');
     resultsCard.className = 'arm-card';
     var resultsHead = document.createElement('div'); resultsHead.className = 'arm-section-head';
+    var resultsHeadLeft = document.createElement('div');
     var resultsH2 = document.createElement('h2'); resultsH2.textContent = 'Ответы моделей';
     var resultsNote = document.createElement('p'); resultsNote.className = 'arm-section-note'; resultsNote.textContent = 'Откройте строку, чтобы увидеть полный ответ';
-    resultsHead.appendChild(resultsH2); resultsHead.appendChild(resultsNote);
+    resultsHeadLeft.appendChild(resultsH2); resultsHeadLeft.appendChild(resultsNote);
+    resultsHead.appendChild(resultsHeadLeft);
     resultsCard.appendChild(resultsHead);
     var resultsEl = document.createElement('div'); resultsCard.appendChild(resultsEl);
     rootEl.appendChild(resultsCard);
 
     renderReport(snapshot.report || null, { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap });
-    renderResults(snapshot.results || [], resultsEl, resultsCard);
+    // В шапке карточки — переключатель «Все / Не пройденные».
+    renderResults(snapshot.results || [], resultsEl, resultsCard, resultsHead);
 
     var hasResults = (snapshot.results || []).length > 0 && !!runId;
     downloadBtn.style.display = hasResults ? '' : 'none';

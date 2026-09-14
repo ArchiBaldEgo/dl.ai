@@ -11,6 +11,10 @@
        _ai_batch_results.html / window.ArmBatchResults). Никаких метаданных
        запроса и прочих блоков — по ТЗ это именно «развёртка» результата. #}
     <h1>Пакетное решение (ARM) — результаты прогона</h1>
+    <div class="ai-batch-run-meta">
+      <div><strong>Статус:</strong> <span class="{% if batch_snapshot.run_status == 'completed' %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">{{ batch_snapshot.run_status_display|default:"—" }}</span></div>
+      <div><strong>Название прогона:</strong> {{ batch_snapshot.run_name|default:"—" }}</div>
+    </div>
     {% if log.error_message %}
       {# Прогон упал — без этой строки таблица была бы пустой без объяснения. #}
       <pre class="ai-log-block ai-log-error">{{ log.error_message }}</pre>
@@ -88,6 +92,12 @@
   .ai-log-detail {
     max-width: 1200px;
   }
+  .ai-batch-run-meta {
+    display: flex; gap: 24px; flex-wrap: wrap;
+    margin: 8px 0 14px; font-size: 14px;
+  }
+  .ai-logs-status-success { color: #067647; font-weight: 600; }
+  .ai-logs-status-error { color: #b42318; font-weight: 600; }
   .ai-log-meta {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

@@ -426,8 +426,8 @@
             <td>
               {{ log.model_names|join:", "|default:"—" }}
             </td>
-            <td class="{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">
-              {{ log.get_status_display }}
+            <td class="{% if batch %}{% if batch.run_status == 'completed' %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}{% else %}{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}{% endif %}">
+              {% if batch %}{{ batch.run_status_display }}{% else %}{{ log.get_status_display }}{% endif %}
             </td>
             <td>
               {{ log.get_mode_display|default:"—" }}
@@ -448,7 +448,7 @@
                     <div><strong>Источник:</strong> {{ log.get_source_display|default:"—" }}</div>
                     <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
                     <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
-                    <div><strong>Статус:</strong> {{ log.get_status_display }}</div>
+                    <div><strong>Статус:</strong> {% if batch %}{{ batch.run_status_display|default:log.get_status_display }}{% else %}{{ log.get_status_display }}{% endif %}</div>
                     <div><strong>Время ответа:</strong> {{ log.duration_seconds|floatformat:2|default:"—" }} с{% if batch %} (общее){% endif %}</div>
                     {% if not batch %}<div><strong>Токенов:</strong> {{ log.tokens|default:"—" }}</div>{% endif %}
                     <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y:H:i:s" }}</div>
@@ -496,6 +496,8 @@
                   <div class="ai-log-detail-section">
                     <h4>Прогон</h4>
                     <div class="ai-log-detail-meta">
+                      <div><strong>Название прогона:</strong> {{ batch.run_name|default:"—" }}</div>
+                      <div><strong>Статус прогона:</strong> {{ batch.run_status_display|default:"—" }}</div>
                       <div><strong>Расширение:</strong> {{ batch.file_extension|default:"—" }}</div>
                       <div><strong>Детали:</strong> <a href="{% url 'ai_request_log_detail' log.id %}">результаты прогона →</a></div>
                     </div>

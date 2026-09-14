@@ -10,7 +10,7 @@
 
 from urllib.parse import quote
 
-from django.http import HttpResponse, HttpResponseForbidden
+from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import redirect, render
 
 from ..services.docs import (
@@ -74,6 +74,7 @@ def admin_docs_view(request, slug):
         return HttpResponseForbidden("Эта документация доступна только для других ролей")
     try:
         rendered = render_chapter_html(slug)
+        fingerprint = rendered["fingerprint"]
     except DocUnavailableError as exc:
         return render(request, "admin/ai/docs.html", {
             "title": "Документация",
@@ -82,6 +83,7 @@ def admin_docs_view(request, slug):
             "download_url": None,
             "chapters": _visible_chapters(request),
             "current_slug": slug,
+            "fingerprint": None,
             **ai_admin_site.each_context(request),
         })
     return render(request, "admin/ai/docs.html", {
@@ -91,6 +93,7 @@ def admin_docs_view(request, slug):
         "download_url": f"/ai/admin/docs/{slug}/download/",
         "chapters": _visible_chapters(request),
         "current_slug": slug,
+        "fingerprint": fingerprint,
         **ai_admin_site.each_context(request),
     })
 
@@ -107,3 +110,27 @@ def admin_docs_download_view(request, slug):
         return _markdown_response(read_chapter_markdown(slug))
     except DocUnavailableError as exc:
         return HttpResponseForbidden(str(exc))
+
+
+@ai_admin_site.admin_view
+def admin_docs_content_view(request, slug):
+    """Текущий HTML главы ({success, title, html, fingerprint}) для поллинга.
+
+    Права — те же, что у страницы главы. fingerprint (mtime, size) — фронт
+    заменяет тело страницы, только когда файл документации изменился.
+    """
+    chapter = get_chapter(slug)
+    if chapter is None or not chapter.in_admin_nav:
+        return JsonResponse({"success": False, "error": "Глава документации не найдена"}, status=404)
+    if not _chapter_visible_for_user(chapter, request):
+        return JsonResponse({"success": False, "error": "forbidden"}, status=403)
+    try:
+        rendered = render_chapter_html(slug)
+    except DocUnavailableError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=404)
+    return JsonResponse({
+        "success": True,
+        "title": rendered["title"],
+        "html": rendered["html"],
+        "fingerprint": rendered["fingerprint"],
+    })

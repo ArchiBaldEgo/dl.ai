@@ -1611,11 +1611,14 @@ function initThemeToggle() {
 }
 
 // === Кнопка «?» — инструкция пользователя (модалка) ===
-// GET /ai/docs/ → {ok/success, title, html, download_url} (ai/views.py
-// chat_user_docs_view: глава «Инструкция для пользователя» из DOCX.md).
+// GET /ai/docs/?lang=… → {success, title, html, download_url, lang,
+// fingerprint} (ai/views.py chat_user_docs_view: глава «Инструкция для
+// пользователя» из DOCX.md, переводится на язык интерфейса en/fr).
 // HTML приходит уже отрендеренным и экранированным сервером (markdown → HTML
 // из нашего DOCX.md, пользовательский ввод в него не попадает). Закрытие —
-// крестик, фон, Escape.
+// крестик, фон, Escape. Динамика: пока модалка открыта, поллинг каждые 10 с
+// по fingerprint — правка файла видна без переоткрытия; смена языка
+// интерфейса перезагружает док на выбранном языке.
 
 function initUserDocs() {
     var btn = document.getElementById('userDocsBtn');
@@ -1626,7 +1629,8 @@ function initUserDocs() {
     var bodyEl = document.getElementById('aiDocsBody');
     var downloadEl = document.getElementById('aiDocsDownload');
     var closeEl = document.getElementById('aiDocsClose');
-    var loaded = false;
+    var pollTimer = null;
+    var fingerprint = null;
 
     function localize() {
         var label = getUiString('userDocs', 'Инструкция пользователя');
@@ -1636,28 +1640,79 @@ function initUserDocs() {
         if (downloadEl) downloadEl.textContent = '⇓ ' + getUiString('docsDownload', 'Скачать .md');
     }
 
-    function open() {
-        modal.hidden = false;
-        if (loaded) return;
+    // Язык интерфейса — атрибут language текущей опции #selectLang
+    // ("Russian"/"English"/"French"); сервер приводит его к ru/en/fr.
+    function currentUiLang() {
+        var selectLang = document.getElementById('selectLang');
+        if (!selectLang || selectLang.selectedIndex < 0) return '';
+        return selectLang.options[selectLang.selectedIndex].getAttribute('language') || '';
+    }
+
+    function docsUrl(lang) {
+        return '/ai/docs/' + (lang ? '?lang=' + encodeURIComponent(lang) : '');
+    }
+
+    function applyDocs(data) {
+        titleEl.textContent = data.title || getUiString('userDocs', 'Инструкция пользователя');
+        var scroll = bodyEl.scrollTop;
+        bodyEl.innerHTML = data.html;
+        bodyEl.scrollTop = scroll;
+        if (downloadEl && data.download_url) downloadEl.setAttribute('href', data.download_url);
+        fingerprint = data.fingerprint || null;
+    }
+
+    function fetchDocs() {
         bodyEl.textContent = getUiString('docsLoadError', 'Не удалось загрузить инструкцию') + '…';
-        fetch('/ai/docs/', {credentials: 'same-origin'})
+        fetch(docsUrl(currentUiLang()), {credentials: 'same-origin'})
             .then(function(response) {
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 return response.json();
             })
             .then(function(data) {
                 if (!data || !data.success || !data.html) throw new Error('bad payload');
-                titleEl.textContent = data.title || getUiString('userDocs', 'Инструкция пользователя');
-                bodyEl.innerHTML = data.html;
-                if (downloadEl && data.download_url) downloadEl.setAttribute('href', data.download_url);
-                loaded = true;
+                applyDocs(data);
             })
             .catch(function() {
                 bodyEl.textContent = getUiString('docsLoadError', 'Не удалось загрузить инструкцию');
             });
     }
 
-    function close() { modal.hidden = true; }
+    function stopPolling() {
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    // Пока модалка открыта: раз в 10 с сверяем fingerprint главы; файл
+    // изменился — заменяем тело (позиция прокрутки сохраняется). Ошибка
+    // тика (сеть/сессия) просто пропускается — не пугаем пользователя.
+    function startPolling() {
+        stopPolling();
+        pollTimer = setInterval(function() {
+            fetch(docsUrl(currentUiLang()), {credentials: 'same-origin'})
+                .then(function(response) {
+                    if (!response.ok) throw new Error('HTTP ' + response.status);
+                    return response.json();
+                })
+                .then(function(data) {
+                    if (!data || !data.success || !data.html || !data.fingerprint) return;
+                    var fp = data.fingerprint;
+                    if (!fingerprint || fp[0] !== fingerprint[0] || fp[1] !== fingerprint[1]) {
+                        applyDocs(data);
+                    }
+                })
+                .catch(function() { /* пропускаем тик */ });
+        }, 10000);
+    }
+
+    function open() {
+        modal.hidden = false;
+        fetchDocs();
+        startPolling();
+    }
+
+    function close() {
+        modal.hidden = true;
+        stopPolling();
+    }
 
     btn.addEventListener('click', open);
     if (closeEl) closeEl.addEventListener('click', close);
@@ -1668,9 +1723,13 @@ function initUserDocs() {
     document.addEventListener('keydown', function(event) {
         if (event.key === 'Escape' && !modal.hidden) close();
     });
-    // Перелокализировать подсказки при смене языка интерфейса.
+    // Смена языка интерфейса: перелокализировать подсказки и перезагрузить
+    // открытую модалку на выбранном языке.
     var selectLang = document.getElementById('selectLang');
-    if (selectLang) selectLang.addEventListener('change', localize);
+    if (selectLang) selectLang.addEventListener('change', function() {
+        localize();
+        if (!modal.hidden) fetchDocs();
+    });
     localize();
 }
 

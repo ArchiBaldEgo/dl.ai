@@ -57,7 +57,7 @@ from .dl_api_client import (
     fetch_task_solution,
 )
 from .http_utils import resolve_dl_session_id, safe_relative_url
-from .i18n import get_language_instruction, get_localized_name, get_localized_text
+from .i18n import get_language_instruction, get_localized_name, get_localized_text, get_ui_language_suffix
 from .serializers import (
     programming_language as serialize_programming_language,
     prompt as serialize_prompt,
@@ -947,28 +947,36 @@ def chat_user_docs_view(request):
     Рендер главы «Инструкция для пользователя» (DOCX.md) в HTML
     (ai/services/docs.py). Гейт как у страниц чата (_has_page_access → 403):
     доступна любому аутентифицированному DL-пользователю, роль не нужна.
+
+    ?lang= — язык интерфейса (значение атрибута language селекта #selectLang,
+    напр. "Russian"/"English"/"French"); глава переводится (en/fr, Google),
+    ответ несёт lang и fingerprint (mtime, size) для поллинга изменений.
     """
     if not _has_page_access(request):
         return JsonResponse({'success': False, 'error': 'forbidden'}, status=403)
+    lang = get_ui_language_suffix(request.GET.get('lang', ''))
     try:
-        rendered = render_chapter_html("user")
+        rendered = render_chapter_html("user", lang=lang)
     except DocUnavailableError as exc:
         return JsonResponse({'success': False, 'error': str(exc)}, status=404)
     return JsonResponse({
         'success': True,
         'title': rendered['title'],
         'html': rendered['html'],
-        'download_url': '/ai/docs/download/',
+        'lang': rendered['lang'],
+        'fingerprint': rendered['fingerprint'],
+        'download_url': f'/ai/docs/download/?lang={lang}',
     })
 
 
 @require_http_methods(["GET"])
 def chat_user_docs_download_view(request):
-    """Скачивание инструкции пользователя как .md-файла."""
+    """Скачивание инструкции пользователя как .md-файла (с учётом ?lang=)."""
     if not _has_page_access(request):
         return JsonResponse({'success': False, 'error': 'forbidden'}, status=403)
+    lang = get_ui_language_suffix(request.GET.get('lang', ''))
     try:
-        data = read_chapter_markdown("user")
+        data = read_chapter_markdown("user", lang=lang)
     except DocUnavailableError as exc:
         return JsonResponse({'success': False, 'error': str(exc)}, status=404)
     from urllib.parse import quote

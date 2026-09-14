@@ -5241,9 +5241,10 @@ class SolveMessageTests(TestCase):
 # ===================================================================
 
 class ArmSolveStartViewTests(TestCase):
-    """admin_arm_solve_start_view: клиентский prompt_id не читается (привязка
-    резолвится серверно по теме); расширение выводится из языка; record_stats
-    принимается только от суперюзера; run_params фиксирует язык/тему."""
+    """admin_arm_solve_start_view: клиентский prompt_id — ручное перекрытие
+    привязки (существует → препромпт из списка; нет/пусто → привязка для
+    вида solve); run_name прокидывается в запуск; расширение выводится из
+    языка; record_stats принимается только от суперюзера."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -5299,7 +5300,7 @@ class ArmSolveStartViewTests(TestCase):
         payload = {
             "node_ids": [101], "models": ["FakeModel"],
             "language_id": self.lang.id, "arm_topic_id": self.topic.id,
-            # Клиентский prompt_id игнорируется: подставляется привязка.
+            # Несуществующий prompt_id → фолбэк на привязку (ручного выбора нет).
             "prompt_id": 99999,
         }
         response, start_mock = self._post(self.superuser, payload)
@@ -5307,6 +5308,45 @@ class ArmSolveStartViewTests(TestCase):
         kwargs = start_mock.call_args.kwargs
         self.assertEqual(kwargs["prompt_id"], self.prompt.id)
         self.assertEqual(kwargs["prompt_name"], "Массивы базовый")
+
+    def test_start_manual_prompt_id_overrides_binding(self):
+        """Существующий prompt_id (выбор из списка) перекрывает привязку."""
+        other = Prompt.objects.create(
+            prompt_name="Общий препромпт", prompt_text="Текст 2",
+            topic=self.topic, owner=self.superuser,
+        )
+        payload = {
+            "node_ids": [101], "models": ["FakeModel"],
+            "language_id": self.lang.id, "arm_topic_id": self.topic.id,
+            "prompt_id": other.id,
+        }
+        response, start_mock = self._post(self.superuser, payload)
+        self.assertEqual(response.status_code, 200)
+        kwargs = start_mock.call_args.kwargs
+        self.assertEqual(kwargs["prompt_id"], other.id)
+        self.assertEqual(kwargs["prompt_name"], "Общий препромпт")
+
+    def test_start_empty_prompt_id_uses_binding(self):
+        payload = {
+            "node_ids": [101], "models": ["FakeModel"],
+            "language_id": self.lang.id, "arm_topic_id": self.topic.id,
+            "prompt_id": "",
+        }
+        response, start_mock = self._post(self.superuser, payload)
+        self.assertEqual(response.status_code, 200)
+        kwargs = start_mock.call_args.kwargs
+        self.assertEqual(kwargs["prompt_id"], self.prompt.id)
+
+    def test_start_passes_run_name(self):
+        """Ручное название прогона тримится и передаётся в запуск."""
+        payload = {
+            "node_ids": [101], "models": ["FakeModel"],
+            "language_id": self.lang.id, "arm_topic_id": self.topic.id,
+            "run_name": "  Неделя 3  ",
+        }
+        response, start_mock = self._post(self.superuser, payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(start_mock.call_args.kwargs["run_name"], "Неделя 3")
 
     def test_non_superuser_record_stats_ignored(self):
         payload = {
@@ -6488,7 +6528,9 @@ class ChatUserDocsViewTests(TestCase):
         data = json.loads(response.content)
         self.assertTrue(data["success"])
         self.assertIn("<h", data["html"])
-        self.assertEqual(data["download_url"], "/ai/docs/download/")
+        self.assertEqual(data["lang"], "ru")
+        self.assertEqual(len(data["fingerprint"]), 2)
+        self.assertEqual(data["download_url"], "/ai/docs/download/?lang=ru")
 
     def test_download_headers(self):
         from unittest.mock import patch
@@ -6502,3 +6544,433 @@ class ChatUserDocsViewTests(TestCase):
         from ai.views import chat_user_docs_download_view
         response = chat_user_docs_download_view(self._request("/ai/docs/download/"))
         self.assertEqual(response.status_code, 403)
+
+
+class BatchRunStatusDisplayTests(SimpleTestCase):
+    """Маппинг статуса batch-прогона в журналах: только «Выполнен»/«Прерван»
+    (+ переходное «Выполняется…»); неизвестный статус — пусто (шаблоны
+    падают на статус записи журнала). AIRequestLog.status в БД не меняется."""
+
+    def test_status_mapping(self):
+        from ai.admin.logs import batch_run_status_display
+        self.assertEqual(batch_run_status_display("completed"), "Выполнен")
+        self.assertEqual(batch_run_status_display("cancelled"), "Прерван")
+        self.assertEqual(batch_run_status_display("failed"), "Прерван")
+        self.assertEqual(batch_run_status_display("running"), "Выполняется…")
+        self.assertEqual(batch_run_status_display(""), "")
+        self.assertEqual(batch_run_status_display("weird"), "")
+
+
+class BatchRunNameTests(TestCase):
+    """Названия прогонов: словарь AIAppSettings.batch_run_names «дата-время
+    ISO → название» пишется воркером (ключ == started_at == sent_at записи
+    журнала), читается по sent_at (batch_run_name_for, окно ±2 с) и попадает
+    в строки «Настройки ИИ-приложения» и снапшот деталей журнала."""
+
+    def setUp(self):
+        from ai.models import AIAppSettings
+        self.user = get_user_model().objects.create_user(username="runname", password="x")
+        settings_obj = AIAppSettings.get_solo()
+        settings_obj.batch_run_names = {}
+        settings_obj.save()
+
+    def _write_name(self, started_at, name):
+        from ai.models import AIAppSettings
+        settings_obj = AIAppSettings.get_solo()
+        names = dict(settings_obj.batch_run_names or {})
+        names[timezone.localtime(started_at).isoformat()] = name
+        settings_obj.batch_run_names = names
+        settings_obj.save()
+
+    def test_batch_run_name_for_exact_key(self):
+        from ai.admin.logs import batch_run_name_for
+        started_at = timezone.now()
+        self._write_name(started_at, "Неделя 3")
+        self.assertEqual(batch_run_name_for(started_at), "Неделя 3")
+
+    def test_batch_run_name_for_two_second_window(self):
+        """Ключ на 1.5 с раньше sent_at — внутри окна ±2 с → название найдено."""
+        from datetime import timedelta
+
+        from ai.admin.logs import batch_run_name_for
+        started_at = timezone.now()
+        self._write_name(started_at - timedelta(seconds=1.5), "Проверка")
+        self.assertEqual(batch_run_name_for(started_at), "Проверка")
+
+    def test_batch_run_name_for_outside_window_is_dash(self):
+        from datetime import timedelta
+
+        from ai.admin.logs import batch_run_name_for
+        started_at = timezone.now()
+        self._write_name(started_at - timedelta(seconds=30), "Другой прогон")
+        self.assertEqual(batch_run_name_for(started_at), "—")
+        self.assertEqual(batch_run_name_for(None), "—")
+
+    def _run_batch_with_name(self, run_id, run_name):
+        """Прогон batch-воркера синхронно с run_name (как в IntegrationTests)."""
+        import time as _t
+        from ai import arm_runner
+        from ai.models import Task
+
+        lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        topic = Topic.objects.create(topic_name="Линейные", programming_language=lang)
+        t1 = Task.objects.create(
+            node_id=7001, task_id=7101, name="A", statement="x",
+            topic=topic, programming_language=lang, file_extension=".pas",
+        )
+
+        async def fake_handler(messages, conv_id):
+            return ("program a; begin writeln(1); end.", 12)
+
+        ordered_models = [{"key": "FakeModel", "title": "FakeModel", "handler": fake_handler}]
+        dl_ok = lambda sid, node_id, code, ext, **kw: {
+            "verdict": "solved", "comment": "ok", "submit_error": "",
+            "queue_id": 1, "code_sent": code,
+        }
+        now_ts = _t.time()
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 1,
+            "total_pairs": 1, "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "FakeModel", "current_model_title": "FakeModel",
+            "current_task_node_id": "", "current_task_name": "",
+            "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", dl_ok):
+                arm_runner._run_batch_job_worker(
+                    run_id, [t1.node_id], ordered_models, self.user.id, "DLSID-1",
+                    ui_language="Русский", dl_test=True, run_name=run_name,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        return AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
+
+    def test_worker_writes_run_name_and_journals_read_it(self):
+        """Воркер пишет run_name в AIAppSettings.batch_run_names; журналы
+        восстанавливают название по sent_at записи без доп. связок."""
+        from ai.admin.logs import (
+            _build_batch_log_snapshot,
+            batch_run_name_for,
+            build_recent_batch_rows,
+            build_recent_log_rows,
+        )
+        from ai.models import AIAppSettings, AIModelTestRun
+
+        run_id = "b" * 32
+        log = self._run_batch_with_name(run_id, "Неделя 3")
+
+        names = dict(AIAppSettings.get_solo().batch_run_names or {})
+        self.assertEqual(list(names.values()), ["Неделя 3"])
+
+        # Точное совпадение ключа: started_at прогона == sent_at записи.
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(batch_run_name_for(log.sent_at), "Неделя 3")
+
+        request = RequestFactory().get("/ai/admin/")
+        request.user = get_user_model().objects.create_user(
+            username="runname-su", password="x", is_superuser=True, is_staff=True,
+        )
+        batch_rows = build_recent_batch_rows(request)["recent_batch_runs"]
+        self.assertEqual(batch_rows[0]["run_name"], "Неделя 3")
+        self.assertEqual(batch_rows[0]["run_status_display"], "Выполнен")
+        log_rows = build_recent_log_rows(request)["recent_logs"]
+        self.assertEqual(log_rows[0]["run_name"], "Неделя 3")
+        self.assertEqual(log_rows[0]["status_display"], "Выполнен")
+
+        snapshot = _build_batch_log_snapshot(log)
+        self.assertEqual(snapshot["run_name"], "Неделя 3")
+        self.assertEqual(snapshot["run_status"], "completed")
+
+    def test_worker_without_run_name_writes_nothing(self):
+        from ai.admin.logs import batch_run_name_for
+        from ai.models import AIAppSettings
+
+        run_id = "c" * 32
+        self._run_batch_with_name(run_id, "")
+        self.assertEqual(dict(AIAppSettings.get_solo().batch_run_names or {}), {})
+        log = AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
+        self.assertEqual(batch_run_name_for(log.sent_at), "—")
+
+    def test_snapshot_from_test_run_carries_run_name(self):
+        """Снапшот страницы прогона берёт run_name из run_params."""
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        run = AIModelTestRun.objects.create(
+            run_id="a" * 32,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_RUNNING,
+            run_params={"run_name": "Неделя 3"},
+        )
+        snapshot = arm_runner._snapshot_from_test_run(run)
+        self.assertEqual(snapshot["run_name"], "Неделя 3")
+
+
+def _fake_translate_chunk(counter):
+    """Мок _translate_chunk: считает вызовы, возвращает «[lang]текст»."""
+    def fake(chunk, google_lang):
+        counter.append(1)
+        return f"[{google_lang}]{chunk}"
+    return fake
+
+
+class DocTranslationTests(SimpleTestCase):
+    """Перевод дока (deep-translator): структура markdown сохраняется
+    (код/таблицы не переводятся), кэш ключом (slug, lang, fingerprint),
+    частичный перевод не кэшируется, фолбэк — русский текст."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    _DOC = (
+        "## Инструкция для пользователя\n\n"
+        "Привет, мир!\n\n"
+        "```python\nprint('| не таблица |')\n```\n\n"
+        "| Код | Имя |\n| --- | --- |\n| 1 | а |\n"
+    )
+
+    def test_translate_markdown_structure(self):
+        from ai.services.doc_translation import translate_markdown
+        counter = []
+        with patch("ai.services.doc_translation._translate_chunk", _fake_translate_chunk(counter)):
+            out, failed = translate_markdown(self._DOC, "en")
+        self.assertEqual(failed, 0)
+        # Код и таблицы прошли без изменений, текст переведён.
+        self.assertIn("```python\nprint('| не таблица |')\n```", out)
+        self.assertIn("| Код | Имя |", out)
+        self.assertIn("[en]Привет, мир!", out)
+        # Заголовок: маркер «## » защищён и восстановлен.
+        self.assertIn("[en]## Инструкция", out)
+        self.assertNotIn("@@PH", out)
+
+    def test_ru_passes_through_without_translator(self):
+        from ai.services.doc_translation import translate_markdown
+        with patch("ai.services.doc_translation._translate_chunk") as mock:
+            out, failed = translate_markdown(self._DOC, "ru")
+        mock.assert_not_called()
+        self.assertEqual(out, self._DOC)
+        self.assertEqual(failed, 0)
+
+    def test_failure_falls_back_to_original(self):
+        from ai.services.doc_translation import translate_markdown
+
+        def boom(chunk, google_lang):
+            raise RuntimeError("google down")
+
+        # Ретрай спит 1 с — в тесте не ждём.
+        with (
+            patch("ai.services.doc_translation._translate_chunk", boom),
+            patch("ai.services.doc_translation.time.sleep"),
+        ):
+            out, failed = translate_markdown(self._DOC, "en")
+        self.assertEqual(failed, 1)
+        self.assertEqual(out, self._DOC)  # блок остался в оригинале
+
+    def test_render_chapter_html_en_title(self):
+        from ai.services import docs as docs_module
+        calls = []
+        with (
+            patch.object(docs_module, "_chapter_markdown", return_value=self._DOC),
+            patch.object(docs_module, "chapter_fingerprint", return_value=(1000, 500)),
+            patch("ai.services.doc_translation._translate_chunk", _fake_translate_chunk(calls)),
+        ):
+            rendered = docs_module.render_chapter_html("user", lang="en")
+        self.assertEqual(rendered["title"], "User Guide")
+        self.assertEqual(rendered["lang"], "en")
+        self.assertEqual(rendered["fingerprint"], (1000, 500))
+        self.assertIn("[en]Привет, мир!", rendered["html"])
+
+    def test_render_fr_title(self):
+        from ai.services import docs as docs_module
+        calls = []
+        with (
+            patch.object(docs_module, "_chapter_markdown", return_value=self._DOC),
+            patch.object(docs_module, "chapter_fingerprint", return_value=(1000, 500)),
+            patch("ai.services.doc_translation._translate_chunk", _fake_translate_chunk(calls)),
+        ):
+            rendered = docs_module.render_chapter_html("user", lang="fr")
+        self.assertEqual(rendered["title"], "Guide de l'utilisateur")
+        self.assertIn("[fr]Привет, мир!", rendered["html"])
+
+    def test_translation_cached_by_fingerprint(self):
+        from django.core.cache import cache
+
+        from ai.services import docs as docs_module
+        calls = []
+        with (
+            patch.object(docs_module, "_chapter_markdown", return_value=self._DOC),
+            patch.object(docs_module, "chapter_fingerprint", return_value=(1000, 500)),
+            patch("ai.services.doc_translation._translate_chunk", _fake_translate_chunk(calls)),
+        ):
+            first = docs_module.render_chapter_html("user", lang="en")
+            # 2 абзаца в текстовом блоке → 2 куска на перевод.
+            self.assertEqual(len(calls), 2)
+            second = docs_module.render_chapter_html("user", lang="en")
+            self.assertEqual(len(calls), 2)  # второй запрос из кэша
+        self.assertEqual(first["html"], second["html"])
+        self.assertIn("[en]Привет, мир!", second["html"])
+        cache.clear()
+
+    def test_translation_cache_broken_by_fingerprint_change(self):
+        """Правка файла → новый fingerprint → старый кэш не используется."""
+        from ai.services import docs as docs_module
+        calls = []
+        # Один stat() на рендер; после первого рендера файл «изменился» →
+        # другой отпечаток → кэш мимо.
+        fp_state = {"n": 0}
+
+        def fake_fingerprint(slug):
+            fp_state["n"] += 1
+            return (1000, 500) if fp_state["n"] <= 1 else (1001, 600)
+
+        with (
+            patch.object(docs_module, "_chapter_markdown", return_value=self._DOC),
+            patch.object(docs_module, "chapter_fingerprint", side_effect=fake_fingerprint),
+            patch("ai.services.doc_translation._translate_chunk", _fake_translate_chunk(calls)),
+        ):
+            docs_module.render_chapter_html("user", lang="en")
+            docs_module.render_chapter_html("user", lang="en")
+        self.assertEqual(len(calls), 4)  # отпечаток изменился → перевод снова (2 абзаца × 2)
+
+    def test_partial_translation_not_cached(self):
+        """failed_count > 0 → кэш не пишется; повторный запрос снова переводит."""
+        from ai.services import docs as docs_module
+
+        calls = []
+
+        def flaky(chunk, google_lang):
+            calls.append(1)
+            if len(calls) <= 4:
+                raise RuntimeError("google down")
+            return f"[{google_lang}]{chunk}"
+
+        # 1 текстовый блок в _DOC; каждый блок ретраится один раз (sleep не ждём):
+        # первый рендер — 2 неудачных вызова, второй — ещё 2 (кэша нет).
+        with (
+            patch.object(docs_module, "_chapter_markdown", return_value=self._DOC),
+            patch.object(docs_module, "chapter_fingerprint", return_value=(1000, 500)),
+            patch("ai.services.doc_translation._translate_chunk", flaky),
+            patch("ai.services.doc_translation.time.sleep"),
+        ):
+            first = docs_module.render_chapter_html("user", lang="en")
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(first["lang"], "en")
+            self.assertIn("Привет, мир!", first["html"])  # фолбэк на русский
+            second = docs_module.render_chapter_html("user", lang="en")
+            self.assertEqual(len(calls), 4)  # кэша нет → переводится заново
+
+    def test_fingerprint_missing_file_raises(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from ai.services import docs as docs_module
+        with patch.object(docs_module, "_base_dir", return_value=Path("/nonexistent")):
+            with self.assertRaises(docs_module.DocUnavailableError):
+                docs_module.chapter_fingerprint("user")
+
+    def test_read_chapter_markdown_lang_title(self):
+        from ai.services import docs as docs_module
+        calls = []
+        with (
+            patch.object(docs_module, "_chapter_markdown", return_value=self._DOC),
+            patch.object(docs_module, "chapter_fingerprint", return_value=(1000, 500)),
+            patch("ai.services.doc_translation._translate_chunk", _fake_translate_chunk(calls)),
+        ):
+            data = docs_module.read_chapter_markdown("user", lang="en")
+        self.assertEqual(data["title"], "User Guide")
+        self.assertEqual(data["filename"], "User Guide.md")
+        self.assertIn("[en]Привет", data["text"])
+
+
+class DocsContentEndpointTests(_AdminViewRequestMixin, TestCase):
+    """JSON-эндпоинт /ai/admin/docs/<slug>/content/ — поллинг изменений главы:
+    права как у страницы, payload {success, title, html, fingerprint}."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def _request(self, user):
+        from ai.admin import docs as docs_views
+        from unittest.mock import patch
+        request = self._admin_request(user, path="/ai/admin/docs/developer/content/")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return docs_views.admin_docs_content_view(request, slug="developer")
+
+    def test_payload_for_staff(self):
+        user = self.user_model.objects.create_user(username="cnt-staff", password="x", is_staff=True)
+        response = self._request(user)
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertTrue(data["success"])
+        self.assertEqual(len(data["fingerprint"]), 2)
+        self.assertIn("<h", data["html"])
+
+    def test_forbidden_for_other_role(self):
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        from django.contrib.auth.models import Group
+        user = self.user_model.objects.create_user(username="cnt-pd", password="x")
+        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        user.groups.add(group)
+        self.assertEqual(self._request(user).status_code, 403)
+
+
+class ChatUserDocsLangTests(TestCase):
+    """?lang= модалки «?»: язык интерфейса → суффикс (ru/en/fr), перевод
+    главы, локализованный заголовок и имя скачиваемого файла."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.patcher = patch(
+            "ai.views.get_external_user_id_from_request", return_value="12345"
+        )
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+
+    def test_en_lang_translates_and_localizes_title(self):
+        from ai.services import docs as docs_module
+        from unittest.mock import patch
+        from ai.views import chat_user_docs_view
+
+        request = self.factory.get("/ai/docs/", {"lang": "English"})
+        request.user = self.user_model.objects.create_user(username="lang-en", password="x")
+        with (
+            patch.object(docs_module, "_chapter_markdown", return_value=DocTranslationTests._DOC),
+            patch("ai.services.doc_translation._translate_chunk",
+                  _fake_translate_chunk([])),
+        ):
+            response = chat_user_docs_view(request)
+        data = json.loads(response.content)
+        self.assertEqual(data["title"], "User Guide")
+        self.assertEqual(data["lang"], "en")
+        self.assertEqual(data["download_url"], "/ai/docs/download/?lang=en")
+        self.assertIn("[en]Привет", data["html"])
+
+    def test_french_download_filename(self):
+        from ai.services import docs as docs_module
+        from unittest.mock import patch
+        from ai.views import chat_user_docs_download_view
+
+        request = self.factory.get("/ai/docs/download/", {"lang": "French"})
+        request.user = self.user_model.objects.create_user(username="lang-fr", password="x")
+        with (
+            patch.object(docs_module, "_chapter_markdown", return_value=DocTranslationTests._DOC),
+            patch("ai.services.doc_translation._translate_chunk",
+                  _fake_translate_chunk([])),
+        ):
+            response = chat_user_docs_download_view(request)
+        self.assertIn("filename*=UTF-8''Guide%20de%20l", response["Content-Disposition"])
+        self.assertIn("[fr]Привет", response.content.decode("utf-8"))
+
+    def test_unknown_lang_falls_back_to_ru(self):
+        from ai.views import chat_user_docs_view
+
+        request = self.factory.get("/ai/docs/", {"lang": "Esperanto"})
+        request.user = self.user_model.objects.create_user(username="lang-xx", password="x")
+        response = chat_user_docs_view(request)
+        data = json.loads(response.content)
+        self.assertEqual(data["lang"], "ru")

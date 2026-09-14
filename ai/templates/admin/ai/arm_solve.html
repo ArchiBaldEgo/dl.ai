@@ -349,11 +349,24 @@
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
           <h2>Тема</h2>
-          <p class="arm-section-note">Выберите тему — препромпт подтягивается из «препромпта по умолчанию», заданного суперюзером (Инструменты → Препромпты по умолчанию). Нет темы или привязки — прогон без препромпта.</p>
+          <p class="arm-section-note">Тема подставляется в препромпт. По умолчанию препромпт берётся из «Препромптов по умолчанию» (привязка язык+тема, Инструменты → Препромпты по умолчанию); можно выбрать и вручную — в поле ниже.</p>
         </div>
       </div>
       <select name="arm_topic_id" id="armTopicSelect" disabled style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:4px;">
         <option value="">— выберите язык сначала —</option>
+      </select>
+
+      <div class="arm-section-head" style="margin-top:18px;">
+        <div>
+          <h2>Препромпт</h2>
+          <p class="arm-section-note">По умолчанию — привязка «препромпта по умолчанию» для выбранного языка и темы (точная, иначе привязка «на весь язык»). Вместо неё можно выбрать любой препромпт вручную.</p>
+        </div>
+      </div>
+      <select name="prompt_id" id="armPromptSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:4px;">
+        <option value="">По привязке (по умолчанию)</option>
+        {% for p in prompt_options %}
+          <option value="{{ p.id }}">{{ p.name }}{% if p.topic_name %} — {{ p.topic_name }}{% endif %}</option>
+        {% endfor %}
       </select>
       <p id="armBoundPromptLabel" class="arm-section-note" style="display:none; margin:0 0 12px;"></p>
 
@@ -371,6 +384,13 @@
 
       <input type="hidden" name="dl_test" value="1" id="armDlTest">
       {% if not is_super_user %}<div class="arm-warning">Не покидайте страницу, иначе тестирование прервётся.</div>{% endif %}
+      <div class="arm-section-head" style="margin-top:18px;">
+        <div>
+          <h2>Название прогона</h2>
+          <p class="arm-section-note">Необязательно. Задаётся только при запуске; дальше отображается в «Настройке ИИ-приложения» и в журнале запросов (хранится на сервере по дате-времени старта).</p>
+        </div>
+      </div>
+      <input type="text" name="run_name" id="armRunName" maxlength="200" placeholder="например: Проверка новых задач, неделя 3" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
       <div id="armSolveError" class="arm-error"{% if not error_message %} style="display:none;"{% endif %}>{{ error_message }}</div>
       <div id="armSolveProgress" class="arm-success arm-status-line" style="display:none;">
         <span class="arm-spinner" aria-hidden="true"></span>
@@ -387,7 +407,7 @@
     <div class="arm-section-head">
       <div>
         <h2>Сводка</h2>
-        <p class="arm-section-note">{% if is_previous_run %}Результаты предыдущего запуска (без ?run_id= — показывается последний завершённый прогон){% else %}Результаты последнего запуска{% endif %}</p>
+        <p class="arm-section-note" id="armSolveReportNote" data-base="{% if is_previous_run %}Результаты предыдущего запуска (без ?run_id= — показывается последний завершённый прогон){% else %}Результаты последнего запуска{% endif %}">{% if is_previous_run %}Результаты предыдущего запуска (без ?run_id= — показывается последний завершённый прогон){% else %}Результаты последнего запуска{% endif %}</p>
       </div>
       <a class="button" id="armSolveDownloadXlsxBtn" style="font-size:13px; display:none;" href="#">Скачать результаты (XLSX)</a>
     </div>
@@ -402,6 +422,7 @@
         <h2>Ответы моделей</h2>
         <p class="arm-section-note">Откройте строку, чтобы увидеть полный ответ</p>
       </div>
+      <div id="armSolveFilterHost"></div>
     </div>
     <div id="armSolveResults"></div>
   </section>
@@ -409,6 +430,7 @@
 
 {{ active_run_snapshot|json_script:"arm-solve-initial-run" }}
 {{ arm_prompt_bindings|json_script:"arm-prompt-bindings" }}
+{{ prompt_options|json_script:"arm-prompt-options" }}
 {{ topics|json_script:"arm-topics" }}
 
 {% include "admin/ai/_ai_batch_results.html" %}
@@ -431,7 +453,9 @@
     const extensionInput = document.getElementById('armExtensionInput');
     const topicSelect = document.getElementById('armTopicSelect');
     const boundPromptLabel = document.getElementById('armBoundPromptLabel');
-    const promptIdInput = document.getElementById('armPromptId');
+    const promptSelect = document.getElementById('armPromptSelect');
+    const runNameInput = document.getElementById('armRunName');
+    const filterHost = document.getElementById('armSolveFilterHost');
     const selectAllModelsCb = document.getElementById('armSelectAllModels');
     let currentRunId = '';
     let pollTimer = null;
@@ -476,17 +500,25 @@
     // Мини-таблица результатов (сводка + ответы моделей) и CSV-экспорт
     // вынесены в общий partial _ai_batch_results.html (window.ArmBatchResults) —
     // тот же рендер используется детальной страницей Журнала запросов в режиме
-    // «Пакетное решение». Локальные обёртки пробрасывают closure-элементы.
+    // «Пакетное решение». Локальные обёртки пробрасывают closure-элементы;
+    // filterHost — куда partial ставит переключатель «Все / Не пройденные».
     function renderReport(report) {
       ArmBatchResults.renderReport(report, { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap });
     }
     function renderResults(results) {
-      ArmBatchResults.renderResults(results, resultsEl, resultsCard);
+      ArmBatchResults.renderResults(results, resultsEl, resultsCard, filterHost);
     }
     function applyRunSnapshot(run) {
       if (!run) { return; }
       renderReport(run.report || null);
       renderResults(run.results || []);
+      // Название прогона (ручное, задаётся при запуске) — в примечании «Сводки».
+      const reportNote = document.getElementById('armSolveReportNote');
+      if (reportNote) {
+        const base = reportNote.dataset.base || '';
+        const name = run.run_name || (run.run_params && run.run_params.run_name) || '';
+        reportNote.textContent = name ? (base + ' · Название прогона: ' + name) : base;
+      }
       // Show download link only when run is done and has results; href —
       // серверная xlsx-выгрузка по run_id (живой прогон и DB-fallback).
       const downloadBtn = document.getElementById('armSolveDownloadXlsxBtn');
@@ -750,15 +782,24 @@
       });
     }
 
-    // Препромпт не выбирается вручную: тема подтягивает привязку
-    // ArmPromptBinding (mode=solve) — «препромпт по умолчанию» суперюзера.
-    // Нет темы или привязки — прогон без препромпта. Список тем отдаётся
-    // сервером целиком (json_script) и фильтруется на клиенте по языку.
+    // Препромпт: по умолчанию тема подтягивает привязку ArmPromptBinding
+    // (mode=solve) — «препромпт по умолчанию» суперюзера; можно выбрать любой
+    // препромпт вручную (селект armPromptSelect, value="" = по привязке).
+    // Список тем отдаётся сервером целиком (json_script) и фильтруется на
+    // клиенте по языку.
     let allTopics = [];
     try {
       const topicsEl = document.getElementById('arm-topics');
       allTopics = JSON.parse(topicsEl ? topicsEl.textContent : '[]') || [];
     } catch (e) { allTopics = []; }
+
+    // Все препромпты для ручного выбора (сервер, json_script; промпты —
+    // студенческий контент, список полный, как в chat-facing API).
+    let allPrompts = [];
+    try {
+      const promptsEl = document.getElementById('arm-prompt-options');
+      allPrompts = JSON.parse(promptsEl ? promptsEl.textContent : '[]') || [];
+    } catch (e) { allPrompts = []; }
 
     // Привязки «препромпт по умолчанию» отдаются сервером в json_script.
     // Резолв как на сервере (ArmPromptBinding.resolve): точная (язык+тема),
@@ -782,28 +823,37 @@
       }) || null;
     }
 
-    // Подпись под темой: какой препромпт подтянут из привязки (или что
-    // прогон пойдёт без препромпта) — чтобы сразу видеть, что применилось.
+    // Подпись под селектом препромпта: что фактически применится — ручной
+    // выбор, привязка «по умолчанию» (или что прогон пойдёт без препромпта).
     function updateBoundPromptLabel() {
       if (!boundPromptLabel) { return; }
+      const manualId = promptSelect ? String(promptSelect.value || '') : '';
+      if (manualId) {
+        const manual = allPrompts.find(function (p) { return String(p.id) === manualId; });
+        boundPromptLabel.style.display = '';
+        boundPromptLabel.textContent = 'Препромпт (выбран вручную): '
+          + (manual ? (manual.name || 'Prompt #' + manual.id) : 'Prompt #' + manualId);
+        return;
+      }
       const languageId = languageSelect ? languageSelect.value : '';
       const topicId = topicSelect ? topicSelect.value : '';
       const binding = languageId ? findBoundPrompt(languageId, topicId, 'solve') : null;
       if (!binding) {
         boundPromptLabel.style.display = '';
-        boundPromptLabel.textContent = 'Препромпт не задан — прогон без препромпта';
+        boundPromptLabel.textContent = 'Препромпт по привязке не задан — прогон без препромпта';
         return;
       }
       boundPromptLabel.style.display = '';
       boundPromptLabel.textContent = 'Препромпт по умолчанию: ' + (binding.prompt_name || 'Prompt #' + binding.prompt_id);
     }
 
-    // Язык+тема → привязка → hidden prompt_id. Нет привязки — без препромпта
-    // (пустая тема допустима: сработает привязка «на весь язык»).
+    if (promptSelect) {
+      promptSelect.addEventListener('change', updateBoundPromptLabel);
+    }
+
+    // Тема меняется → пересчитать фактический препромпт (ручной выбор
+    // в селекте НЕ сбрасывается: value="" лишь значит «по привязке»).
     function applyTopicSelection(topicId) {
-      const languageId = languageSelect ? languageSelect.value : '';
-      const binding = languageId ? findBoundPrompt(languageId, topicId, 'solve') : null;
-      if (promptIdInput) { promptIdInput.value = binding ? String(binding.prompt_id) : ''; }
       updateBoundPromptLabel();
     }
 
@@ -824,8 +874,8 @@
     }
 
     // Язык → расширение (readonly, из data-ext) + темы, отфильтрованные по
-    // языку (serialize_topic отдаёт programming_language — id языка). Смена языка
-    // сбрасывает тему и препромпт.
+    // языку (serialize_topic отдаёт programming_language — id языка). Смена
+    // языка сбрасывает тему (ручной выбор препромпта не сбрасывается).
     function applyLanguageSelection(languageId) {
       const opt = languageSelect
         ? Array.prototype.find.call(languageSelect.options, function (o) { return o.value === String(languageId); })
@@ -920,8 +970,8 @@
       event.preventDefault();
       if (submitBtn.disabled) { return; }
       // Язык обязателен (дублирует серверную валидацию) — из него выводится
-      // расширение файла. Препромпт задаёт привязка ArmPromptBinding по теме;
-      // без темы/привязки прогон идёт без препромпта.
+      // расширение файла. Препромпт: prompt_id из селекта ("" = по привязке)
+      // и run_name уходят в FormData автоматически.
       const langId = languageSelect ? languageSelect.value.trim() : '';
       if (!langId) { setError('Сначала выберите язык программирования.'); return; }
       if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
@@ -1053,6 +1103,18 @@
             applyTopicSelection(String(rp.topic_id));
           }
         }
+        // Препромпт прогона: ручной выбор из run_params (если опция ещё есть;
+        // иначе «по привязке» — привязка могла смениться). Название прогона —
+        // тоже снимок формы запуска.
+        if (promptSelect) {
+          const rpPromptId = String(rp.prompt_id || '');
+          const promptExists = rpPromptId && Array.prototype.some.call(
+            promptSelect.options, function (o) { return o.value === rpPromptId; }
+          );
+          promptSelect.value = promptExists ? rpPromptId : '';
+        }
+        if (runNameInput) { runNameInput.value = String(rp.run_name || ''); }
+        updateBoundPromptLabel();
         if (Array.isArray(rp.node_ids)) { pendingNodeIds = rp.node_ids; }
         if (courseIdInput.value.trim()) { loadTree(); }
       } catch (e) { /* восстановление — best effort, не ломаем страницу */ }

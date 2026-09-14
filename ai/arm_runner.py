@@ -27,7 +27,7 @@ from django.utils.html import strip_tags
 
 from .model_clients.exceptions import humanize_model_error
 from .model_health import get_runtime_model_handlers, is_arm_solve_model
-from .models import AIModelTestResult, AIModelTestRun, AIRequestLog, ExternalDLAccount, Task
+from .models import AIAppSettings, AIModelTestResult, AIModelTestRun, AIRequestLog, ExternalDLAccount, Task
 
 
 User = get_user_model()
@@ -919,6 +919,7 @@ def _run_batch_job_worker(
     topic_name="",
     run_params=None,
     record_stats=False,
+    run_name="",
 ):
     """Daemon worker for a batch-solve run.
 
@@ -974,6 +975,17 @@ def _run_batch_job_worker(
             prompt_id=prompt_id,
             prompt_name=prompt_name or "",
         )
+
+        # Ручное название прогона → серверный словарь AIAppSettings.batch_run_names.
+        # Ключ — ISO дата-время старта прогона; он совпадает с sent_at записи
+        # AIRequestLog, поэтому журналы восстанавливают название по записи без
+        # дополнительных связок.
+        if run_name:
+            settings_obj = AIAppSettings.get_solo()
+            names = dict(settings_obj.batch_run_names or {})
+            names[timezone.localtime(test_run.started_at).isoformat()] = run_name[:255]
+            settings_obj.batch_run_names = names
+            settings_obj.save()
 
         # Resolve node_ids → Task objects via DL get-task-info + ensure_task.
         tasks = []
@@ -1332,7 +1344,7 @@ def _batch_results_from_db(test_run):
     return results
 
 
-def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name="", record_stats=False):
+def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name="", record_stats=False, run_name=""):
     """Запускает batch-solve ARM: задачи из DL дерева × модели в фоновом потоке.
 
     Принимает node_ids — список DL node ID (из дерева задач dl.gsu.by).
@@ -1341,6 +1353,8 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     solve_file_extension — расширение, выбранное пользователем для DL-тестирования
         (перекрывает task.file_extension; пусто → браться из задачи).
     solve_prog_lang_name — название языка для препромпта под выбранным расширением.
+    run_name — необязательное ручное название прогона (задаётся только при
+        запуске; сохраняется в AIAppSettings.batch_run_names по дате-времени).
     """
     handlers = get_runtime_model_handlers()
     # В solve допущены только Web_* и Ollama_* (нет жёсткого лимита вывода);
@@ -1376,6 +1390,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "language_id": programming_language_id,
         "topic_id": topic_id,
         "record_stats": bool(record_stats),
+        "run_name": (run_name or "").strip(),
     }
 
     run_id = uuid.uuid4().hex
@@ -1399,6 +1414,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "current_task_name": "",
         "results": [],
         "report": None,
+        "run_name": (run_name or "").strip(),
         "run_params": run_params,
         "created_at_ts": now_ts,
         "updated_at_ts": now_ts,
@@ -1410,7 +1426,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, node_ids, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params, "record_stats": record_stats},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params, "record_stats": record_stats, "run_name": (run_name or "").strip()},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )
@@ -1448,6 +1464,7 @@ def _snapshot_from_test_run(test_run):
             "run_type": "batch",
             "status": status_map.get(test_run.status, test_run.status),
             "error_message": test_run.error_message or ("Batch solve завершился с ошибкой" if is_failed else ""),
+            "run_name": (test_run.run_params or {}).get("run_name", ""),
             "total_models": test_run.total_models or 0,
             "total_pairs": total_pairs or len(results),
             "completed_pairs": len(results),

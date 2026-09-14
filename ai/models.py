@@ -416,6 +416,16 @@ class AIAppSettings(models.Model):
         null=True, blank=True, default=timezone.now,
         verbose_name="Дата отсечки фаворитов",
     )
+    # Ручные названия прогонов пакетного решения, задаваемые при запуске на
+    # /arm/solve/. Словарь «дата-время ISO → название»: ключ —
+    # timezone.localtime(AIModelTestRun.started_at).isoformat() (он совпадает с
+    # sent_at одноимённой записи AIRequestLog, поэтому по журналу имя
+    # восстанавливается без правки логов). Хранится на сервере, а не в логе —
+    # название может задаваться после создания прогона.
+    batch_run_names = models.JSONField(
+        default=dict, blank=True,
+        verbose_name="Названия прогонов (ключ — дата-время ISO)",
+    )
 
     class Meta:
         verbose_name = "Настройки ИИ-приложения"

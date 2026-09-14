@@ -2,7 +2,7 @@
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.contrib import admin
 from django.core.paginator import Paginator
@@ -10,6 +10,7 @@ from django.db.models import Q
 from .site import ai_admin_site
 from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
+from django.utils import timezone
 from django.utils.html import strip_tags
 from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
@@ -26,7 +27,7 @@ from ..dl_api_client import (
     fetch_task_info,
 )
 from ..http_utils import resolve_dl_session_id
-from ..models import AIRequestLog, Task
+from ..models import AIAppSettings, AIModelTestRun, AIRequestLog, Task
 from ..model_health import get_runtime_model_handlers
 from .permissions import can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
 
@@ -41,6 +42,52 @@ def _batch_run_id_from_log(log):
     """Run id batch-прогона из записи журнала или None."""
     m = _BATCH_RUN_ID_RE.search(log.message or "")
     return m.group(1) if m else None
+
+
+# Отображение статуса batch-прогона (AIModelTestRun.status) в журналах:
+# по требованиям только «Выполнен» / «Прерван»; running — переходное
+# «Выполняется…». AIRequestLog.status (Success/Error) в БД не меняется —
+# это только слой отображения.
+_BATCH_RUN_STATUS_DISPLAY = {
+    "completed": "Выполнен",
+    "cancelled": "Прерван",
+    "failed": "Прерван",
+    "running": "Выполняется…",
+}
+
+
+def batch_run_status_display(status):
+    """«Выполнен» / «Прерван» (failed тоже прерван — не доведён до конца)."""
+    return _BATCH_RUN_STATUS_DISPLAY.get(status, "")
+
+
+def get_batch_run_names():
+    """Серверный словарь ручных названий прогонов «дата-время ISO → название»."""
+    return dict(AIAppSettings.get_solo().batch_run_names or {})
+
+
+def batch_run_name_for(started_at):
+    """Название прогона по дате-времени старта (== sent_at записи журнала).
+
+    Ключ словаря AIAppSettings.batch_run_names — ISO-дата-время старта
+    прогона; он совпадает с sent_at batch-записи журнала. Окно ±2 с —
+    защита от расхождения округления при записи ключа. Пусто → "—".
+    """
+    if not started_at:
+        return "—"
+    names = get_batch_run_names()
+    target = timezone.localtime(started_at)
+    name = names.get(target.isoformat())
+    if name:
+        return name
+    for key, value in names.items():
+        try:
+            dt = datetime.fromisoformat(key)
+        except (TypeError, ValueError):
+            continue
+        if abs(dt - target) <= timedelta(seconds=2) and value:
+            return value
+    return "—"
 
 
 def _parse_date(value: str) -> str:
@@ -194,9 +241,6 @@ class AIRequestLogAdmin(admin.ModelAdmin):
 def _format_moscow_datetime(value):
     if not value:
         return "—"
-    from django.utils import timezone
-    from ..constants import MOSCOW_TZ
-
     local = timezone.localtime(value, MOSCOW_TZ)
     return local.strftime("%d.%m.%Y:%H:%M:%S")
 
@@ -218,7 +262,28 @@ def build_recent_log_rows(request, limit=5):
     rows = []
     if can_view:
         qs = _scope_logs_qs(AIRequestLog.objects.all(), request.user).order_by("-sent_at")
-        for log in qs[: max(0, int(limit))]:
+        logs = list(qs[: max(0, int(limit))])
+        # Batch-записи: статус показываем по статусу прогона (Выполнен/Прерван),
+        # а не по Success/Error записи журнала. Один запрос по ≤5 run_id.
+        batch_run_by_log = {}
+        batch_run_ids = {
+            log.pk: _batch_run_id_from_log(log)
+            for log in logs
+            if _is_batch_solve_log(log)
+        }
+        if batch_run_ids:
+            runs_by_hex = {
+                r.run_id: r
+                for r in AIModelTestRun.objects.filter(run_id__in=set(batch_run_ids.values()))
+            }
+            batch_run_by_log = {
+                log_pk: runs_by_hex[run_hex]
+                for log_pk, run_hex in batch_run_ids.items()
+                if run_hex in runs_by_hex
+            }
+        for log in logs:
+            run = batch_run_by_log.get(log.pk)
+            status_ok = (run.status == "completed") if run else (log.status == "success")
             rows.append({
                 "id": log.id,
                 "sent_at": log.sent_at,
@@ -228,7 +293,11 @@ def build_recent_log_rows(request, limit=5):
                 "topic_name": log.topic_name or "—",
                 "model_names": ", ".join(log.model_names or []) or "—",
                 "status": log.status,
-                "status_display": log.get_status_display(),
+                "status_display": (
+                    batch_run_status_display(run.status) if run else log.get_status_display()
+                ),
+                "status_class": "ok" if status_ok else "err",
+                "run_name": batch_run_name_for(run.started_at) if run else "—",
                 "mode_display": log.get_mode_display() or "—",
                 "duration_seconds": log.duration_seconds,
                 "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
@@ -274,11 +343,18 @@ def build_recent_batch_rows(request, limit=5):
         for log in qs[: max(0, int(limit))]:
             snapshot = _build_batch_log_snapshot(log)
             report = (snapshot or {}).get("report") or {}
+            run_status = (snapshot or {}).get("run_status", "")
             rows.append({
                 "id": log.id,
                 "sent_at": log.sent_at,
                 "status": log.status,
-                "status_display": log.get_status_display(),
+                # Статус прогона («Выполнен»/«Прерван»); прогон стёрт из БД →
+                # старое отображение по записи журнала.
+                "run_status_display": batch_run_status_display(run_status) or log.get_status_display(),
+                # Сырой статус прогона — для класса цвета в шаблоне
+                # (прогон стёрт из БД → старый статус записи журнала).
+                "run_status": run_status or log.status,
+                "run_name": (snapshot or {}).get("run_name", "—"),
                 # Развёртка доступна только когда прогон ещё есть в БД.
                 "snapshot": snapshot,
                 "run_id": (snapshot or {}).get("run_id", ""),
@@ -446,10 +522,10 @@ def _is_batch_solve_log(log):
 
 def _build_batch_log_snapshot(log):
     """Собрать snapshot {run_id, course_id, file_extension, node_ids, results,
-    report} для детали batch-solve лога — тот же формат, что потребляет JS
-    мини-таблицы в /arm/solve/. Возвращает None, если прогон/результаты не
-    найдены (тогда детал отрисуется как обычный текстовый лог)."""
-    from ..models import AIModelTestRun
+    report, run_status, run_name} для детали batch-solve лога — тот же формат,
+    что потребляет JS мини-таблицы в /arm/solve/. Возвращает None, если
+    прогон/результаты не найдены (тогда детал отрисуется как обычный
+    текстовый лог)."""
     from ..arm_runner import _batch_results_from_db, _build_batch_report
 
     run_id_hex = _batch_run_id_from_log(log)
@@ -483,6 +559,9 @@ def _build_batch_log_snapshot(log):
         "node_ids": node_ids,
         "results": results,
         "report": report,
+        # Статус прогона и ручное название — для шапки деталей журнала.
+        "run_status": test_run.status,
+        "run_name": batch_run_name_for(test_run.started_at),
     }
 
 
@@ -491,13 +570,14 @@ def _batch_log_row_contexts(logs):
 
     Для каждой batch-solve записи страницы (одним запросом AIModelTestRun и
     одним запросом AIModelTestResult с select_related('task')) собирает
-    {log.pk: {run_id, course_id, file_extension, tasks: [{node_id, name}]}}.
+    {log.pk: {run_id, course_id, file_extension, tasks: [{node_id, name}],
+    run_status_display, run_name}}.
     В tasks попадают только НЕрешённые задачи прогона (ни одна модель не дала
     solved) — решённые в списке журнала не показываются.
     Отличие от _build_batch_log_snapshot: НЕ тянет raw_response/results —
     списку нужен только курс/задачи, без N+1 по 50 строкам.
     """
-    from ..models import AIModelTestRun, AIModelTestResult
+    from ..models import AIModelTestResult
 
     run_ids = {}
     for log in logs:
@@ -545,7 +625,8 @@ def _batch_log_row_contexts(logs):
                 })
 
     for log_pk, run_id in run_ids.items():
-        if runs.get(run_id) is None:
+        run_obj = runs.get(run_id)
+        if run_obj is None:
             continue
         solved_nodes = solved_nodes_by_run.get(run_id, set())
         tasks = [
@@ -554,9 +635,14 @@ def _batch_log_row_contexts(logs):
         ]
         contexts[log_pk] = {
             "run_id": run_id,
-            "course_id": runs[run_id].course_id,
+            "course_id": run_obj.course_id,
             "file_extension": ext_by_run.get(run_id, ""),
             "tasks": tasks,
+            # Статус прогона (Выполнен/Прерван) и ручное название —
+            # отображаются в строке журнала вместо статуса записи.
+            "run_status": run_obj.status,
+            "run_status_display": batch_run_status_display(run_obj.status),
+            "run_name": batch_run_name_for(run_obj.started_at),
             # Свёрнутые строки для ячейки таблицы (первые 3 + «+N ещё»)
             # и полный список для title-подсказки.
             "tasks_preview": _tasks_preview(tasks),

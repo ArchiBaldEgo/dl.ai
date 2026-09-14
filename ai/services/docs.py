@@ -129,26 +129,113 @@ def visible_chapter_slugs(*, is_superuser: bool, is_staff: bool, is_authenticate
     return [c.slug for c in _CHAPTERS.values() if c.role_rank <= rank]
 
 
-def read_chapter_markdown(slug: str) -> dict:
-    """Markdown-текст главы для скачивания: {title, text, filename}."""
+def _chapter_source_path(chapter: DocChapter) -> Path:
+    kind, arg = chapter.source
+    return (_base_dir() / "DOCX.md") if kind == "docx" else (_base_dir() / arg)
+
+
+def chapter_fingerprint(slug: str) -> tuple[int, int]:
+    """(mtime, size) исходника главы — дешёвая проверка «файл изменился».
+
+    Используется фронтендом (поллинг) и ключом кэша перевода: правка файла
+    меняет отпечаток → старый кэш переводов перестаёт использоваться.
+    """
     chapter = _CHAPTERS.get(slug)
     if chapter is None:
         raise DocUnavailableError(f"Неизвестная глава: {slug}")
+    path = _chapter_source_path(chapter)
+    if not path.is_file():
+        raise DocUnavailableError(f"Файл документации не найден: {path.name}")
+    st = path.stat()
+    return (int(st.st_mtime), int(st.st_size))
+
+
+# Локализованные заголовки главы «user» (модалка «?» в чате); остальные
+# главы админки остаются на русском.
+_USER_CHAPTER_TITLES = {
+    "en": "User Guide",
+    "fr": "Guide de l'utilisateur",
+}
+
+# Кэш переведённого markdown: правка файла меняет fingerprint → ключ.
+_DOC_CACHE_TTL = 7 * 24 * 3600
+
+
+def _chapter_title(chapter: DocChapter, lang: str = "ru") -> str:
+    if chapter.slug == "user" and lang != "ru":
+        return _USER_CHAPTER_TITLES.get(lang, chapter.title)
+    return chapter.title
+
+
+def _doc_cache_key(slug: str, lang: str, fingerprint: tuple[int, int]) -> str:
+    from ..constants import AI_CACHE_KEY_PREFIX
+
+    return f"{AI_CACHE_KEY_PREFIX}:doc-md:{slug}:{lang}:{fingerprint[0]}:{fingerprint[1]}"
+
+
+def _translated_chapter_text(chapter: DocChapter, lang: str, fingerprint: tuple[int, int]) -> tuple[str, int]:
+    """Переведённый markdown главы с кэшем; (текст, failed_count).
+
+    Частичный перевод (failed_count > 0) не кэшируется — следующий запрос
+    попробует перевести его целиком.
+    """
+    from django.core.cache import cache
+
+    key = _doc_cache_key(chapter.slug, lang, fingerprint)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached, 0
+    from .doc_translation import translate_markdown
+
+    text, failed = translate_markdown(_chapter_markdown(chapter), lang)
+    if not failed:
+        cache.set(key, text, _DOC_CACHE_TTL)
+    return text, failed
+
+
+def read_chapter_markdown(slug: str, lang: str = "ru") -> dict:
+    """Markdown-текст главы для скачивания: {title, text, filename}.
+
+    lang != "ru" — текст переводится (ai/services/doc_translation.py);
+    блок, который перевести не удалось, остаётся в оригинале.
+    """
+    chapter = _CHAPTERS.get(slug)
+    if chapter is None:
+        raise DocUnavailableError(f"Неизвестная глава: {slug}")
+    if lang and lang != "ru":
+        text, _failed = _translated_chapter_text(chapter, lang, chapter_fingerprint(slug))
+    else:
+        text = _chapter_markdown(chapter)
     return {
-        "title": chapter.title,
-        "text": _chapter_markdown(chapter),
-        "filename": f"{chapter.title}.md",
+        "title": _chapter_title(chapter, lang),
+        "text": text,
+        "filename": f"{_chapter_title(chapter, lang)}.md",
     }
 
 
-def render_chapter_html(slug: str) -> dict:
-    """HTML главы для показа на странице: {title, html}. Markdown → HTML."""
-    data = read_chapter_markdown(slug)
+def _markdown_to_html(text: str) -> str:
     try:
         import markdown  # пакет из requirements.txt; отсутствует — см. fallback
-        html = markdown.markdown(
-            data["text"], extensions=["tables", "fenced_code"], output_format="html5"
+        return markdown.markdown(
+            text, extensions=["tables", "fenced_code"], output_format="html5"
         )
     except ImportError:
-        html = f"<pre>{escape(data['text'])}</pre>"
-    return {"title": data["title"], "html": html}
+        return f"<pre>{escape(text)}</pre>"
+
+
+def render_chapter_html(slug: str, lang: str = "ru") -> dict:
+    """HTML главы: {title, html, lang, fingerprint}.
+
+    lang != "ru" — markdown переводится; перевод кэшируется ключом
+    (slug, lang, fingerprint), правка файла меняет ключ → свежий перевод.
+    """
+    chapter = _CHAPTERS.get(slug)
+    if chapter is None:
+        raise DocUnavailableError(f"Неизвестная глава: {slug}")
+    fingerprint = chapter_fingerprint(slug)
+    title = _chapter_title(chapter, lang)
+    if lang and lang != "ru":
+        text, _failed = _translated_chapter_text(chapter, lang, fingerprint)
+    else:
+        text = _chapter_markdown(chapter)
+    return {"title": title, "html": _markdown_to_html(text), "lang": lang, "fingerprint": fingerprint}

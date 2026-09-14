@@ -22,6 +22,7 @@ from .arm import (
     admin_arm_solve_result_download_view,
 )
 from .docs import (
+    admin_docs_content_view,
     admin_docs_download_view,
     admin_docs_index_view,
     admin_docs_view,
@@ -68,6 +69,7 @@ def get_ai_admin_urls():
         path("view-as-guest/", ai_admin_site.admin_view(admin_toggle_guest_view), name="ai_view_as_guest"),
         path("docs/", ai_admin_site.admin_view(admin_docs_index_view), name="ai_docs"),
         path("docs/<slug:slug>/", ai_admin_site.admin_view(admin_docs_view), name="ai_docs_detail"),
+        path("docs/<slug:slug>/content/", ai_admin_site.admin_view(admin_docs_content_view), name="ai_docs_content"),
         path("docs/<slug:slug>/download/", ai_admin_site.admin_view(admin_docs_download_view), name="ai_docs_download"),
         path("active-runs/", ai_admin_site.admin_view(admin_active_runs_view), name="ai_active_runs"),
         path("arm/find-error/start/", ai_admin_site.admin_view(admin_arm_find_error_start_view), name="ai_arm_find_error_start"),
