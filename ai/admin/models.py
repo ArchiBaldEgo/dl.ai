@@ -369,16 +369,19 @@ class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         return False
 
     def changeform_view(self, request, object_id=None, form_url="", extra_context=None):
-        """Добавляем на страницу настроек таблицу последних 5 запросов.
+        """Добавляем на страницу настроек таблицы последних запросов.
 
-        Те же записи, что в «Журнале запросов», но только последние 5 и
-        с теми же колонками (сокращённые). Если нужно искать конкретную
-        запись — кнопка ведёт в полный журнал с поиском по всему журналу.
+        Два блока: последние 5 batch-solve прогонов (по клику на строку
+        разворачивается та же таблица результатов, что после прогона на
+        /arm/solve/) и последние 5 записей журнала — те же, что в «Журнале
+        запросов», но сокращённые. Если нужно искать конкретную запись —
+        кнопка ведёт в полный журнал с поиском по всему журналу.
         """
-        from .logs import build_recent_log_rows
+        from .logs import build_recent_batch_rows, build_recent_log_rows
 
         extra_context = {**(extra_context or {})}
         extra_context.update(build_recent_log_rows(request, limit=5))
+        extra_context.update(build_recent_batch_rows(request, limit=5))
         return super().changeform_view(request, object_id, form_url, extra_context)
 
 

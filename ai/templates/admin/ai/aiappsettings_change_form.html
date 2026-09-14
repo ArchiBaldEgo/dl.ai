@@ -1,19 +1,91 @@
 {% extends "admin/change_form.html" %}
-{% load i18n %}
+{% load i18n tz %}
 
 {% comment %}
 Страница «Настройки ИИ-приложения»: помимо штатной формы (вкл/выкл доступ к
-сайту) добавляем таблицу последних 5 запросов из «Журнала запросов» — чтобы
-не уходить со страницы ради быстрой проверки. Полный журнал с поиском по
-всему журналу — по кнопке ниже.
+сайту) добавляем два блока:
+
+1. «Последние пакетные решения» — последние 5 batch-solve прогонов (ARM).
+   Клик по строке разворачивает ту же таблицу результатов, что показывается
+   на /arm/solve/ после окончания прогона (общий partial
+   _ai_batch_results.html / window.ArmBatchResults — единый источник правды
+   с детальной страницей записи журнала).
+2. «Последние запросы» — последние 5 записей «Журнала запросов».
 
 Контекст готовит AIAppSettingsAdmin.changeform_view →
-ai.admin.logs.build_recent_log_rows (учитывает ограничение видимости «только
-свои» для prompt_developer).
+ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитывают
+ограничение видимости «только свои» для prompt_developer).
 {% endcomment %}
 
 {% block after_field_sets %}
   {{ block.super }}
+
+  <fieldset class="module aligned ai-settings-logs">
+    <h2>Последние пакетные решения ({{ recent_batch_limit|default:5 }})</h2>
+    <div class="ai-settings-logs-body">
+      <p class="help">
+        Последние {{ recent_batch_limit|default:5 }} прогонов «Пакетного решения» (ARM).
+        Кликните по строке, чтобы развернуть результаты прогона; найти конкретную запись
+        можно в полном журнале с поиском.
+      </p>
+
+      {% if can_view_logs %}
+        {% if recent_batch_runs %}
+          {# CSS + window.ArmBatchResults — тот же рендер, что после прогона на /arm/solve/ #}
+          {% include "admin/ai/_ai_batch_results.html" %}
+          <table class="ai-recent-logs-table ai-batch-table">
+            <thead>
+              <tr>
+                <th>Отправлен</th>
+                <th>Курс</th>
+                <th>Расширение</th>
+                <th>Решено</th>
+                <th>Не решено</th>
+                <th>Всего пар</th>
+                <th>Статус</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% timezone moscow_tz %}
+              {% for row in recent_batch_runs %}
+                <tr class="ai-batch-row{% if row.snapshot %} ai-batch-row-clickable{% endif %}"
+                    data-json-id="{{ row.json_id }}" data-run-id="{{ row.run_id }}"{% if row.snapshot %} title="Кликните, чтобы развернуть результаты прогона"{% endif %}>
+                  <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
+                  <td>{{ row.course_id|default:"—" }}</td>
+                  <td>{{ row.file_extension|default:"—" }}</td>
+                  <td class="ai-recent-logs-ok">{{ row.solved|default:"—" }}</td>
+                  <td class="ai-recent-logs-err">{{ row.failed|default:"—" }}</td>
+                  <td>{{ row.total_pairs|default:"—" }}</td>
+                  <td class="{% if row.status == 'success' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.status_display }}</td>
+                  <td><a href="{{ row.detail_url }}">Детали →</a></td>
+                </tr>
+                {# Развёртка: сводка + ответы моделей прогона (ленивый рендер по первому клику). #}
+                <tr class="ai-batch-detail" hidden>
+                  <td colspan="8">
+                    {% if row.snapshot %}{{ row.snapshot|json_script:row.json_id }}{% endif %}
+                    <div class="ai-batch-detail-body"></div>
+                    {% if not row.snapshot %}<p class="ai-recent-logs-empty">Прогон не найден в БД — результаты недоступны.</p>{% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+              {% endtimezone %}
+            </tbody>
+          </table>
+        {% else %}
+          <p class="ai-recent-logs-empty">Пакетных решений пока не было.</p>
+        {% endif %}
+
+        <p class="ai-settings-logs-actions">
+          <a class="button" href="/ai/admin/arm/solve/">Открыть «Пакетное решение» →</a>
+        </p>
+      {% else %}
+        <p class="ai-recent-logs-empty">
+          У вас нет доступа к «Журналу запросов».
+        </p>
+      {% endif %}
+    </div>
+  </fieldset>
 
   <fieldset class="module aligned ai-settings-logs">
     <h2>Последние запросы ({{ recent_logs_limit|default:5 }})</h2>
@@ -25,7 +97,6 @@ ai.admin.logs.build_recent_log_rows (учитывает ограничение �
 
       {% if can_view_logs %}
         {% if recent_logs %}
-          {% load tz %}
           <table class="ai-recent-logs-table">
             <thead>
               <tr>
@@ -92,5 +163,38 @@ ai.admin.logs.build_recent_log_rows (учитывает ограничение �
     .ai-recent-logs-err { color: #b42318; font-weight: 600; }
     .ai-recent-logs-empty { color: var(--body-quiet-color); padding: 8px 0; }
     .ai-settings-logs-actions { margin-top: 10px; }
+    .ai-batch-row-clickable { cursor: pointer; }
+    .ai-batch-row-clickable:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }
+    .ai-batch-row-open td { font-weight: 600; }
+    .ai-batch-detail > td { background: var(--darkened-bg); }
   </style>
+
+  <script>
+    (function () {
+      // Клик по строке пакетного решения → развёртка результатов прогона
+      // (та же таблица, что на /arm/solve/ после прогона). Snapshot строки
+      // лежит в json_script-теге внутри скрытой строки; рендер ленивый —
+      // при первом раскрытии.
+      document.querySelectorAll('.ai-batch-row-clickable').forEach(function (row) {
+        row.addEventListener('click', function (event) {
+          if (event.target.closest('a')) { return; } // клик по «Детали →» — обычный переход
+          var detailRow = row.nextElementSibling;
+          if (!detailRow || !detailRow.classList.contains('ai-batch-detail')) { return; }
+          var willOpen = detailRow.hidden;
+          var body = detailRow.querySelector('.ai-batch-detail-body');
+          if (willOpen && body && !body.dataset.rendered) {
+            var raw = document.getElementById(row.getAttribute('data-json-id'));
+            if (!raw) { return; }
+            var snapshot = JSON.parse(raw.textContent);
+            window.ArmBatchResults.init(
+              body, snapshot, snapshot.run_id || row.getAttribute('data-run-id') || ''
+            );
+            body.dataset.rendered = '1';
+          }
+          detailRow.hidden = !willOpen;
+          row.classList.toggle('ai-batch-row-open', willOpen);
+        });
+      });
+    })();
+  </script>
 {% endblock %}

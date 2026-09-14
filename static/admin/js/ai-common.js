@@ -136,7 +136,7 @@ function initSelectionPersistence() {
 // сверху) не трогаем. Режим хранится в localStorage: серверу он не нужен.
 // Модели без данных всегда в конце (внутри группы — исходный алфавитный
 // порядок). В закрытом селекторе — чистые названия; суффикс статистики
-// («12.3с·45%») виден только в развёрнутом списке (см. initModelSortSelector).
+// («45%·12.3с») виден только в развёрнутом списке (см. initModelSortSelector).
 var MODEL_SORT_KEY = 'ai_model_sort_mode';
 
 function modelOptionStats(opt) {
@@ -148,9 +148,10 @@ function modelOptionStats(opt) {
     };
 }
 
-// Человекочитаемый суффикс названия: «Model X — 12.3с·45%» (компактный формат,
-// единица «с» локализована через getUiString). Отсутствующие данные показываются
-// нулями («0с·0%») — по ним сортировка модели всё равно отправляет в конец.
+// Человекочитаемый суффикс названия: «Model X — 45%·12.3с» (компактный формат,
+// сначала процент решённых, затем время; единица «с» локализована через
+// getUiString). Отсутствующие данные показываются нулями («0%·0.0с») — по ним
+// сортировка модели всё равно отправляет в конец.
 // Идемпотентен: базовое название кешируется в data-base-title при первом проходе.
 function applyModelOptionSuffix(opt) {
     if (!opt.value) return;  // заглушка «Сегодня нет доступных моделей» — не модель
@@ -161,8 +162,8 @@ function applyModelOptionSuffix(opt) {
     var stats = modelOptionStats(opt);
     var avg = stats.avgSeconds === null ? 0 : stats.avgSeconds;
     var pct = stats.percentSolved === null ? 0 : stats.percentSolved;
-    opt.textContent = title + ' — ' + avg.toFixed(1)
-        + getUiString('statSeconds', 'с') + '·' + String(pct) + '%';
+    opt.textContent = title + ' — ' + String(pct) + '%·'
+        + avg.toFixed(1) + getUiString('statSeconds', 'с');
 }
 
 // Суффикс статистики вешается на ВСЕ опции селектора (включая «Часто
@@ -268,7 +269,7 @@ function initModelSortSelector() {
         });
     }
 
-    // Статистика («Model — 12.3с·45%») показывается ТОЛЬКО в развёрнутом
+    // Статистика («Model — 45%·12.3с») показывается ТОЛЬКО в развёрнутом
     // списке: нативный select рендерит опции в момент открытия, поэтому
     // суффиксы вешаем на открытие (mousedown — мышь, keydown — клавиатура:
     // Enter/Space/стрелки/F4) и снимаем при закрытии (change/blur/Escape).
@@ -306,6 +307,26 @@ function initModelSortSelector() {
 
     stripModelOptionSuffixes();
 
+    // Стабильная ширина окна селектора: суффиксы статистики в закрытом виде
+    // сняты, но нативный select следует ширине самой широкой опции, поэтому
+    // при раскрытии (суффиксы вешаются на открытие) он «распрыгивается».
+    // Резервируем min-width по самому широкому состоянию (с суффиксами,
+    // уже с учётом CSS max-width) — закрытое окно всегда размером с раскрытый
+    // список. Замер повторяется на resize (max-width в % от контейнера) и на
+    // смене языка (единица «с»/«s» меняет длину суффикса).
+    function reserveModelSelectWidth() {
+        applyModelOptionSuffixes();
+        var w = Math.ceil(modelSelect.getBoundingClientRect().width);
+        stripModelOptionSuffixes();
+        if (w > 0) modelSelect.style.minWidth = w + 'px';
+    }
+    reserveModelSelectWidth();
+    var resizeTimer = null;
+    window.addEventListener('resize', function () {
+        if (resizeTimer) clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(reserveModelSelectWidth, 200);
+    });
+
     var saved = 'default';
     try { saved = localStorage.getItem(MODEL_SORT_KEY) || 'default'; } catch (e) {}
     if (!Array.prototype.some.call(sortSelect.options, function(o) { return o.value === saved; })) {
@@ -317,7 +338,12 @@ function initModelSortSelector() {
         sortModelOptions(sortSelect.value);
     });
     var selectLangEl = document.getElementById('selectLang');
-    if (selectLangEl) selectLangEl.addEventListener('change', updateSortLabels);
+    if (selectLangEl) {
+        selectLangEl.addEventListener('change', function () {
+            updateSortLabels();
+            reserveModelSelectWidth();
+        });
+    }
     updateSortLabels();
 }
 

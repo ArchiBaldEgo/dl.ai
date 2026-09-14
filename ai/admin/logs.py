@@ -246,6 +246,59 @@ def build_recent_log_rows(request, limit=5):
     }
 
 
+def build_recent_batch_rows(request, limit=5):
+    """Контекст-хелпер: последние N batch-solve прогонов (для страницы
+    «Настройки ИИ-приложения»).
+
+    Отбирает записи журнала пакетного решения (source="arm",
+    mode=batch_solve|solve, sentinel "Batch solve run " в message) с учётом
+    ограничения видимости («только свои» для prompt_developer). Для каждого
+    прогона собирает snapshot тем же кодом, что и страницу деталей
+    (``_build_batch_log_snapshot`` → results + report), чтобы по клику на
+    строку развернуть ту же таблицу результатов, что на /arm/solve/ после
+    прогона (window.ArmBatchResults).
+
+    Возвращает словарь для ``extra_context``: ``recent_batch_runs`` (список
+    строк; у строки без прогонов в БД snapshot=None — развёртка недоступна),
+    ``recent_batch_limit`` и ``moscow_tz``.
+    """
+    can_view = can_access_logs(request)
+    rows = []
+    if can_view:
+        qs = (
+            _scope_logs_qs(AIRequestLog.objects.all(), request.user)
+            .filter(source="arm", mode__in=("batch_solve", "solve"))
+            .filter(message__icontains="Batch solve run ")
+            .order_by("-sent_at")
+        )
+        for log in qs[: max(0, int(limit))]:
+            snapshot = _build_batch_log_snapshot(log)
+            report = (snapshot or {}).get("report") or {}
+            rows.append({
+                "id": log.id,
+                "sent_at": log.sent_at,
+                "status": log.status,
+                "status_display": log.get_status_display(),
+                # Развёртка доступна только когда прогон ещё есть в БД.
+                "snapshot": snapshot,
+                "run_id": (snapshot or {}).get("run_id", ""),
+                "course_id": (snapshot or {}).get("course_id"),
+                "file_extension": (snapshot or {}).get("file_extension", ""),
+                "total_pairs": report.get("total_pairs"),
+                "solved": report.get("solved"),
+                "failed": report.get("failed"),
+                "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
+                # Уникальный id для {% json_script %} — по нему JS находит
+                # snapshot строки и лениво рендерит развёртку.
+                "json_id": f"batch-snap-{log.id}",
+            })
+    return {
+        "recent_batch_runs": rows,
+        "recent_batch_limit": limit,
+        "moscow_tz": MOSCOW_TZ,
+    }
+
+
 def admin_request_logs_view(request):
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")

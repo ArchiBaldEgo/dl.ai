@@ -359,6 +359,7 @@ class AIAdminSite(admin.AdminSite):
         context["show_updates_link"] = show_updates
         updates_url = "/ai/admin/updates/"
         context["updates_url"] = updates_url
+        aiappsettings_url = self._aiappsettings_url()
 
         # --- AI tools in the left navigation sidebar (#nav-sidebar) ---
         # The left nav renders `available_apps` (separate from the dashboard's
@@ -370,9 +371,14 @@ class AIAdminSite(admin.AdminSite):
             request,
             tools=[
                 # (group, label, object_name, url, flag, icon, hint)
-                # NB: дубликаты реальных ModelAdmin-строк («Препромпты», «Настройки
-                # ИИ-приложения») сюда НЕ добавляем — они и так есть в группе
-                # «Раздел ИИ» ниже. Здесь — только кастомные инструменты.
+                # «Настройка ИИ-приложения» закреплена самым первым пунктом
+                # навигации (группа «ai-pinned» рендерится без заголовка, см.
+                # admin/app_list.html). Раньше это была строка группы «Раздел
+                # ИИ» — из real_apps ниже она убирается, чтобы не дублировалась.
+                ("Закреплено", "Настройка ИИ-приложения", "AiAppSettings", aiappsettings_url, is_staff, "⚙", "Вкл/выкл доступ к ИИ, последние запросы и пакетные прогоны"),
+                # NB: остальные дубликаты реальных ModelAdmin-строк («Препромпты»)
+                # сюда НЕ добавляем — они и так есть в группе «Раздел ИИ» ниже.
+                # Здесь — только кастомные инструменты.
                 ("Промпты", "Мой препромпт", "AiMyPrompt", my_prompt_url, is_pd, "✎", "Свои и закреплённые препромпты"),
                 ("Промпты", "Препромпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", is_super, "⚙", "Авто-подстановка по языку/теме ARM"),
                 ("ARM", "Пакетное решение", "AiArmSolve", arm_solve_url, show_arm, "▤", "Пакетный прогон моделей по задачам DL"),
@@ -393,6 +399,12 @@ class AIAdminSite(admin.AdminSite):
                 icon = _REAL_MODEL_ICONS.get(model.get("object_name"))
                 if icon:
                     model["icon"] = icon
+            # «Настройка ИИ-приложения» переехала в закреплённый первый пункт
+            # навигации (см. tools выше) — в «Разделе ИИ» её больше не рисуем.
+            app["models"] = [
+                m for m in app.get("models", [])
+                if m.get("object_name") != "AIAppSettings"
+            ]
         context["available_apps"] = tools_apps + real_apps
         return context
 
@@ -428,6 +440,24 @@ class AIAdminSite(admin.AdminSite):
             return "Разработчик промптов"
         return "Пользователь"
 
+    @staticmethod
+    def _aiappsettings_url():
+        """Ссылка на страницу «Настройка ИИ-приложения» для навигации.
+
+        Синглтон: если запись уже создана — сразу на её change-форму (именно
+        там таблицы последних запросов/прогонов), иначе на changelist, где
+        доступно создание.
+        """
+        from ..models import AIAppSettings
+
+        try:
+            pk = AIAppSettings.objects.values_list("pk", flat=True).first()
+        except Exception:  # например, таблица ещё не создана при migrate
+            return "/ai/admin/ai/aiappsettings/"
+        if pk:
+            return f"/ai/admin/ai/aiappsettings/{pk}/change/"
+        return "/ai/admin/ai/aiappsettings/"
+
     def _build_ai_nav_apps(self, request, *, tools):
         """Build fake "app" groups (for the left nav) from a list of tools.
 
@@ -451,9 +481,12 @@ class AIAdminSite(admin.AdminSite):
         group_url = "#"
 
         # Explicit ordering of tool groups in the left nav (top → bottom).
-        # Keep in sync with the labels used by each_context.
-        group_order = ["Промпты", "ARM", "Диагностика", "Система"]
+        # Keep in sync with the labels used by each_context. «ai-pinned» —
+        # беззаголовочная группа, закреплённая самым первым пунктом навигации
+        # (шаблон admin/app_list.html не рисует для неё title).
+        group_order = ["ai-pinned", "Промпты", "ARM", "Диагностика", "Система"]
         label_to_key = {
+            "Закреплено": "ai-pinned",
             "Промпты": "ai-tools-prompts",
             "ARM": "ai-tools-arm",
             "Диагностика": "ai-tools-diag",

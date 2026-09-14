@@ -26,7 +26,8 @@ comment only strips a single line.
   {% for app in app_list %}
     {% if app.models %}
       <div class="ai-nav-group app-{{ app.app_label }}{% if app.app_url in request.path|urlencode and app.app_url != '#' %} current-app{% endif %}">
-        <div class="ai-nav-group-title">{{ app.name }}</div>
+        {# ai-pinned — закреплённые одиночные пункты (сейчас «Настройка ИИ-приложения») без заголовка группы #}
+        {% if app.app_label != "ai-pinned" %}<div class="ai-nav-group-title">{{ app.name }}</div>{% endif %}
         <ul class="ai-nav-list">
           {% for model in app.models %}
             <li class="ai-nav-item model-{{ model.object_name|lower }}{% if model.admin_url in request.path|urlencode %} current-model{% endif %}">
