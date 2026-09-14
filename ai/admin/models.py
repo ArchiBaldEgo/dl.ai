@@ -12,6 +12,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
 from django.http import HttpResponse
+from django.urls import path
 
 from ..models import (
     AIAppSettings,
@@ -189,18 +190,68 @@ class PromptAdmin(admin.ModelAdmin):
         return obj.owner_id == request.user.pk
 
     def get_fieldsets(self, request, obj=None):
+        # Локализованные поля (prompt_name_ru/en/fr, prompt_text_ru/en/fr)
+        # рендерятся ЯЗЫКОВЫМИ ТАБАМИ RU/EN/FR (prompt_translate_tabs.js):
+        # на экране всегда 1 название + 1 textarea; при переключении таба
+        # пустой язык авто-переводится с заполненного (AJAX →
+        # translate-field/ → Google Translate). Базовые prompt_name /
+        # prompt_text (fallback для старых записей) и переопределение текста
+        # спрятаны в свёрнутый блок, чтобы не громоздить форму.
         main_fields = (
-            "programming_language", "topic",
-            "prompt_name", "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
-            "shared_prompt", "prompt_text_override",
-            "prompt_text", "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
+            "programming_language", "topic", "shared_prompt",
+            "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
+            "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
         )
+        advanced_fields = ("prompt_name", "prompt_text", "prompt_text_override")
         if request.user.is_superuser:
             return (
                 (None, {"fields": main_fields}),
+                ("Базовые поля и переопределение", {"fields": advanced_fields, "classes": ("collapse",)}),
                 ("Доступ", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
             )
-        return ((None, {"fields": main_fields}),)
+        return (
+            (None, {"fields": main_fields}),
+            ("Базовые поля и переопределение", {"fields": advanced_fields, "classes": ("collapse",)}),
+        )
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path(
+                "translate-field/",
+                self.admin_site.admin_view(self.admin_translate_field_view),
+                name="ai_prompt_translate_field",
+            ),
+        ]
+        return custom + urls
+
+    def admin_translate_field_view(self, request):
+        """AJAX-перевод для языковых табов формы препромпта.
+
+        POST text + target (ru|en|fr) → Google Translate (deep-translator,
+        тот же сервис, что у массового автоперевода). Только для тех, кто
+        может редактировать промпты; /ai/admin/ исключён из RateLimitMiddleware.
+        """
+        from django.http import JsonResponse
+
+        if request.method != "POST":
+            return JsonResponse({"success": False, "error": "Метод не поддерживается"}, status=403)
+        if not self.has_change_permission(request):
+            return JsonResponse({"success": False, "error": "Нет прав на редактирование промптов"}, status=403)
+        text = (request.POST.get("text") or "").strip()
+        target = request.POST.get("target") or ""
+        if target not in ("ru", "en", "fr"):
+            return JsonResponse({"success": False, "error": "Неизвестный целевой язык"}, status=400)
+        if not text:
+            return JsonResponse({"success": False, "error": "Нет текста для перевода"}, status=400)
+        from ..services.auto_translate import translate_text
+        translated = translate_text(text, target)
+        if not translated:
+            return JsonResponse(
+                {"success": False, "error": "Сервис перевода недоступен, попробуйте позже"},
+                status=502,
+            )
+        return JsonResponse({"success": True, "text": translated})
 
     def get_readonly_fields(self, request, obj=None):
         if is_staff_or_superuser(request.user):
@@ -405,6 +456,24 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     user_link.admin_order_field = "user__username"
 
 
+class PromptEditorshipInline(admin.TabularInline):
+    """Права редактирования промптов на странице пользователя (суперюзер).
+
+    Работает с implicit through-моделью ``Prompt.editors.through``: страница
+    аккаунта редактирует строки «кто какой чужой промпт может править».
+    ``fk_name="user"`` — точка монтирования со страницы пользователя. Сама
+    through-модель в ai_admin_site НЕ регистрируется.
+    """
+
+    model = Prompt.editors.through
+    fk_name = "user"
+    autocomplete_fields = ("prompt",)
+    extra = 0
+    classes = ("collapse",)
+    verbose_name = "Право на промпт"
+    verbose_name_plural = "Права редактирования промптов"
+
+
 class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
     """User management restricted to staff/superuser in the AI admin site."""
 
@@ -413,6 +482,13 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
     list_filter = ("is_staff", "is_superuser", "groups")
     search_fields = ("username", "first_name", "last_name", "email")
     ordering = ("last_name", "first_name")
+
+    def get_inlines(self, request, obj=None):
+        # Выдача прав на чужие промпты — только суперюзеру (зеркало правила
+        # «Доступ» fieldset в PromptAdmin).
+        if not is_superuser_user(request.user):
+            return super().get_inlines(request, obj)
+        return [*(super().get_inlines(request, obj) or []), PromptEditorshipInline]
 
     def is_staff_badge(self, obj):
         if obj.is_superuser:

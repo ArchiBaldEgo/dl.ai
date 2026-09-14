@@ -220,3 +220,133 @@ option {
 .theme-toggle .icon-moon { display: inline; }
 [data-theme="dark"] .theme-toggle .icon-sun { display: inline; }
 [data-theme="dark"] .theme-toggle .icon-moon { display: none; }
+/* --- Кнопка «?» — инструкция пользователя (модалка initUserDocs) --- */
+/* Размер наследуем от .theme-toggle; отличаем только текстом вместо иконки. */
+.doc-toggle {
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+/* Модалка инструкции (паттерн tc-log-modal из test_console.html). */
+.ai-docs-modal {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 3000;
+    padding: 20px;
+}
+
+.ai-docs-modal[hidden] { display: none; }
+
+.ai-docs-modal-dialog {
+    background: var(--bg-surface, #ffffff);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    width: min(860px, 100%);
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+    overflow: hidden;
+}
+
+.ai-docs-modal-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-soft);
+    flex-shrink: 0;
+}
+
+.ai-docs-modal-header h2 {
+    flex: 1;
+    margin: 0;
+    font-size: 16px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ai-docs-modal-download {
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 13px;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.ai-docs-modal-download:hover { background-color: var(--bg-toggle-hover); }
+
+.ai-docs-modal-close {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-toggle);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+}
+
+.ai-docs-modal-close:hover { background-color: var(--bg-toggle-hover); }
+
+/* Тело: рендер markdown (DOCX.md) — таблицы и код насыщенные. */
+.ai-docs-modal-body {
+    padding: 16px 20px;
+    overflow-y: auto;
+    font-size: 14px;
+    line-height: 1.55;
+    overflow-wrap: break-word;
+}
+
+.ai-docs-modal-body h1,
+.ai-docs-modal-body h2,
+.ai-docs-modal-body h3,
+.ai-docs-modal-body h4 { margin: 18px 0 8px; line-height: 1.3; }
+.ai-docs-modal-body h1:first-child { margin-top: 0; }
+.ai-docs-modal-body p { margin: 8px 0; }
+.ai-docs-modal-body ul,
+.ai-docs-modal-body ol { margin: 8px 0; padding-left: 22px; }
+.ai-docs-modal-body pre {
+    background: var(--bg-toggle);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    overflow-x: auto;
+}
+.ai-docs-modal-body code {
+    background: var(--bg-toggle);
+    border-radius: 4px;
+    padding: 0 4px;
+    font-size: 13px;
+}
+.ai-docs-modal-body pre code { background: none; border: none; padding: 0; }
+.ai-docs-modal-body table {
+    border-collapse: collapse;
+    margin: 10px 0;
+    width: 100%;
+}
+.ai-docs-modal-body th,
+.ai-docs-modal-body td {
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: top;
+}
+.ai-docs-modal-body th { background: var(--bg-toggle); font-weight: 600; }
+.ai-docs-modal-body blockquote {
+    border-left: 3px solid var(--border);
+    margin: 10px 0;
+    padding: 2px 12px;
+    opacity: 0.85;
+}

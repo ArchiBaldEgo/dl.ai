@@ -5625,28 +5625,36 @@ class AdminNavToolGroupTests(TestCase):
         self.assertNotIn('th scope="row"', html)
 
     def test_tools_first_in_available_apps(self):
-        """available_apps: сначала все ai-tools-группы, затем реальные
-        приложения — порядок задаётся в each_context."""
+        """available_apps: сначала все инжектированные группы инструментов
+        (ai-pinned / ai-docs / ai-tools-*), затем реальные приложения —
+        порядок задаётся в each_context."""
         ctx = self._each_context(self.superuser)
         labels = [a["app_label"] for a in ctx["available_apps"]]
         self.assertTrue(labels)
         first_real = next(
-            i for i, label in enumerate(labels) if not label.startswith("ai-tools")
+            i for i, label in enumerate(labels) if not label.startswith("ai-")
         )
-        self.assertTrue(all(l.startswith("ai-tools") for l in labels[:first_real]))
-        self.assertFalse(any(l.startswith("ai-tools") for l in labels[first_real:]))
+        self.assertTrue(all(l.startswith("ai-") for l in labels[:first_real]))
+        self.assertFalse(any(l.startswith("ai-") for l in labels[first_real:]))
 
     def test_real_model_rows_get_icons(self):
         """Строки реальных моделей украшаются иконками (_REAL_MODEL_ICONS) —
-        «Раздел ИИ» в том же иконизированном стиле, что и инструменты."""
+        «Раздел ИИ» в том же иконизированном стиле, что и инструменты.
+        «Настройка ИИ-приложения» (AIAppSettings) в «Раздел ИИ» не входит:
+        она закреплена первым пунктом навигации (группа ai-pinned)."""
         ctx = self._each_context(self.superuser)
         ai_app = next(
             a for a in ctx["available_apps"] if a["app_label"] == "ai"
         )
         icons = {m["object_name"]: m.get("icon") for m in ai_app["models"]}
-        self.assertEqual(icons.get("AIAppSettings"), "⚙")
+        self.assertNotIn("AIAppSettings", icons)
         self.assertEqual(icons.get("Prompt"), "✎")
         self.assertTrue(icons.get("ExternalDLAccount"))
+        pinned = next(
+            a for a in ctx["available_apps"] if a["app_label"] == "ai-pinned"
+        )
+        self.assertEqual(pinned["models"][0]["object_name"], "AiAppSettings")
+        self.assertEqual(pinned["models"][0]["icon"], "⚙")
 
 
 # ===================================================================
@@ -5981,3 +5989,405 @@ class ModelStatsSuffixStripTests(SimpleTestCase):
         src = self._source()
         self.assertIn("selectPointerActive = true", src)
         self.assertIn("if (!onModelSelect || !selectPointerActive)", src)
+
+
+class DocsServiceTests(SimpleTestCase):
+    """ai/services/docs.py: главы, права по рангу, markdown → HTML."""
+
+    def test_all_chapters_resolve(self):
+        from ai.services.docs import all_chapters, read_chapter_markdown
+        for chapter in all_chapters():
+            data = read_chapter_markdown(chapter.slug)
+            self.assertTrue(data["text"].strip())
+            self.assertEqual(data["title"], chapter.title)
+            self.assertTrue(data["filename"].endswith(".md"))
+
+    def test_docx_chapter_boundaries(self):
+        """Глава режется только по «## Инструкция для …» — соседние главы
+        и приложения тестера/сисадмина в текст не попадают."""
+        from ai.services.docs import read_chapter_markdown
+        pd = read_chapter_markdown("prompt-developer")["text"]
+        self.assertIn("## Инструкция для разработчика промптов", pd)
+        self.assertNotIn("## Инструкция для суперадмина", pd)
+        self.assertNotIn("Приложение", pd)
+        su = read_chapter_markdown("superuser")["text"]
+        self.assertIn("## Инструкция для суперадмина", su)
+        self.assertNotIn("## Инструкция для пользователя", su)
+
+    def test_render_html_contains_tables(self):
+        from ai.services.docs import render_chapter_html
+        rendered = render_chapter_html("developer")
+        self.assertTrue(rendered["html"].lstrip().startswith("<"))
+        # Техдок для разработчика насыщен таблицами — extension "tables".
+        self.assertIn("<table>", rendered["html"])
+
+    def test_visible_chapter_slugs_by_role(self):
+        from ai.services.docs import visible_chapter_slugs
+        self.assertEqual(
+            visible_chapter_slugs(is_superuser=False, is_staff=False, is_authenticated=True),
+            ["user", "prompt-developer"],
+        )
+        staff_slugs = visible_chapter_slugs(is_superuser=False, is_staff=True, is_authenticated=True)
+        self.assertIn("developer", staff_slugs)
+        self.assertNotIn("superuser", staff_slugs)
+        self.assertEqual(
+            visible_chapter_slugs(is_superuser=True, is_staff=True, is_authenticated=True),
+            ["user", "prompt-developer", "developer", "superuser"],
+        )
+        self.assertEqual(
+            visible_chapter_slugs(is_superuser=False, is_staff=False, is_authenticated=False),
+            [],
+        )
+
+    def test_unknown_slug_raises(self):
+        from ai.services.docs import DocUnavailableError, read_chapter_markdown
+        with self.assertRaises(DocUnavailableError):
+            read_chapter_markdown("no-such-chapter")
+
+    def test_missing_docx_raises_friendly_error(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from ai.services import docs as docs_module
+        with patch.object(docs_module, "_base_dir", return_value=Path("/nonexistent")):
+            with self.assertRaises(docs_module.DocUnavailableError):
+                docs_module.read_chapter_markdown("user")
+
+
+class _AdminViewRequestMixin:
+    """Request с сессией, провижненным пользователем и admin_fresh_auth —
+    чтобы @ai_admin_site.admin_view пропустил запрос (патчится внешний id)."""
+
+    def _admin_request(self, user, method="get", path="/ai/admin/", data=None):
+        from django.contrib.messages.middleware import MessageMiddleware
+        from django.contrib.sessions.middleware import SessionMiddleware
+
+        request = getattr(self.factory, method)(path, data=data or {})
+        SessionMiddleware(lambda req: None).process_request(request)
+        MessageMiddleware(lambda req: None).process_request(request)
+        request.user = user
+        request._ai_provisioned_user = user
+        request.session["admin_fresh_auth"] = True
+        # admin_view оборачивает вью в csrf_protect — для RequestFactory
+        # (без CsrfViewMiddleware) это всегда 403. Документированный способ
+        # отключить проверку в тестах — атрибут _dont_enforce_csrf_checks.
+        request._dont_enforce_csrf_checks = True
+        return request
+
+
+class DocsAdminAccessTests(_AdminViewRequestMixin, TestCase):
+    """Роль-гейты страниц «Документация» + скачивание .md."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        from django.contrib.auth.models import Group
+        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+
+    def _view(self, user, slug, view_name="admin_docs_view"):
+        from unittest.mock import patch
+        from ai.admin import docs as docs_views
+
+        view = getattr(docs_views, view_name)
+        path = f"/ai/admin/docs/{slug}/"
+        if view_name == "admin_docs_view":
+            request = self._admin_request(user, path=path)
+            with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+                return view(request, slug=slug)
+        request = self._admin_request(user, path=f"{path}download/")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return view(request, slug=slug)
+
+    def _pd_user(self):
+        user = self.user_model.objects.create_user(username="pd-docs", password="x")
+        user.groups.add(self.pd_group)
+        return user
+
+    def test_prompt_developer_sees_only_own_chapter(self):
+        user = self._pd_user()
+        self.assertEqual(self._view(user, "prompt-developer").status_code, 200)
+        self.assertEqual(self._view(user, "developer").status_code, 403)
+        self.assertEqual(self._view(user, "superuser").status_code, 403)
+
+    def test_staff_sees_developer_chapter(self):
+        user = self.user_model.objects.create_user(username="staff-docs", password="x", is_staff=True)
+        self.assertEqual(self._view(user, "developer").status_code, 200)
+        self.assertEqual(self._view(user, "superuser").status_code, 403)
+
+    def test_superuser_sees_all_chapters(self):
+        user = self.user_model.objects.create_user(
+            username="super-docs", password="x", is_superuser=True, is_staff=True,
+        )
+        for slug in ("prompt-developer", "developer", "superuser"):
+            self.assertEqual(self._view(user, slug).status_code, 200)
+
+    def test_guest_superuser_sees_only_prompt_developer(self):
+        from ai.admin.guest_mode import SESSION_KEY
+        user = self.user_model.objects.create_user(
+            username="guest-docs", password="x", is_superuser=True, is_staff=True,
+        )
+        request_path = "/ai/admin/docs/developer/"
+        from ai.admin.docs import admin_docs_view
+        from unittest.mock import patch
+        request = self._admin_request(user, path=request_path)
+        request.session[SESSION_KEY] = True
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = admin_docs_view(request, slug="developer")
+        self.assertEqual(response.status_code, 403)
+
+    def test_download_returns_markdown_attachment(self):
+        user = self.user_model.objects.create_user(username="dl-docs", password="x", is_staff=True)
+        response = self._view(user, "developer", view_name="admin_docs_download_view")
+        self.assertEqual(response["Content-Type"], "text/markdown; charset=utf-8")
+        self.assertIn("attachment", response["Content-Disposition"])
+        self.assertIn("filename*", response["Content-Disposition"])
+
+    def test_download_denied_for_wrong_role(self):
+        user = self._pd_user()
+        response = self._view(user, "superuser", view_name="admin_docs_download_view")
+        self.assertEqual(response.status_code, 403)
+
+
+class GuestModeViewTests(_AdminViewRequestMixin, TestCase):
+    """POST-переключатель «Зайти как гость» (ai/admin/guest_mode.py)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def _superuser(self):
+        return self.user_model.objects.create_user(
+            username="toggle-super", password="x", is_superuser=True, is_staff=True,
+        )
+
+    def _post(self, user):
+        from unittest.mock import patch
+        from ai.admin.guest_mode import admin_toggle_guest_view
+        request = self._admin_request(user, method="post", path="/ai/admin/view-as-guest/")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return admin_toggle_guest_view(request)
+
+    def test_post_enables_guest_mode(self):
+        from ai.admin.guest_mode import SESSION_KEY, admin_toggle_guest_view
+        from unittest.mock import patch
+        user = self._superuser()
+        request = self._admin_request(user, method="post", path="/ai/admin/view-as-guest/")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = admin_toggle_guest_view(request)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/ai/admin/")
+        self.assertIn(SESSION_KEY, request.session)
+
+    def test_post_removes_flag_when_active(self):
+        from ai.admin.guest_mode import SESSION_KEY
+        user = self._superuser()
+        request = self._admin_request(user, method="post", path="/ai/admin/view-as-guest/")
+        request.session[SESSION_KEY] = True
+        from unittest.mock import patch
+        from ai.admin.guest_mode import admin_toggle_guest_view
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            admin_toggle_guest_view(request)
+        self.assertNotIn(SESSION_KEY, request.session)
+
+    def test_get_method_forbidden(self):
+        from unittest.mock import patch
+        from ai.admin.guest_mode import admin_toggle_guest_view
+        request = self._admin_request(self._superuser(), method="get", path="/ai/admin/view-as-guest/")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = admin_toggle_guest_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_non_superuser_forbidden(self):
+        from unittest.mock import patch
+        from ai.admin.guest_mode import admin_toggle_guest_view
+        user = self.user_model.objects.create_user(username="toggle-staff", password="x", is_staff=True)
+        request = self._admin_request(user, method="post", path="/ai/admin/view-as-guest/")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = admin_toggle_guest_view(request)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.content.decode(), "Только для суперпользователя")
+
+
+class GuestModeContextTests(_AdminViewRequestMixin, TestCase):
+    """each_context в гостевом режиме: суперюзерские инструменты скрыты."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def _context(self, user, guest=False):
+        from unittest.mock import patch
+        from ai.admin.site import ai_admin_site
+        request = self._admin_request(user, path="/ai/admin/")
+        if guest:
+            from ai.admin.guest_mode import SESSION_KEY
+            request.session[SESSION_KEY] = True
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return ai_admin_site.each_context(request)
+
+    def _superuser(self):
+        return self.user_model.objects.create_user(
+            username="ctx-super", password="x", is_superuser=True, is_staff=True,
+        )
+
+    def _doc_tool_names(self, context):
+        doc_app = next(
+            app for app in context["available_apps"] if app["app_label"] == "ai-docs"
+        )
+        return [m["name"] for m in doc_app["models"]]
+
+    def test_normal_superuser_context(self):
+        context = self._context(self._superuser(), guest=False)
+        self.assertFalse(context["is_viewing_as_guest"])
+        self.assertTrue(context["show_model_status_link"])
+        self.assertTrue(context["show_test_console_link"])
+        self.assertEqual(
+            self._doc_tool_names(context),
+            ["Разработчик промптов", "Разработчик", "Суперюзер"],
+        )
+
+    def test_guest_context_downgrades_tools(self):
+        context = self._context(self._superuser(), guest=True)
+        self.assertTrue(context["is_viewing_as_guest"])
+        self.assertIn("гость", context["user_role_label"])
+        self.assertFalse(context["show_model_status_link"])
+        self.assertFalse(context["show_prompt_regression_link"])
+        self.assertFalse(context["show_test_console_link"])
+        self.assertFalse(context["show_updates_link"])
+        # «Настройка ИИ-приложения» (ai-pinned) скрыта целиком.
+        self.assertNotIn(
+            "ai-pinned",
+            [app["app_label"] for app in context["available_apps"]],
+        )
+        self.assertEqual(self._doc_tool_names(context), ["Разработчик промптов"])
+
+    def test_prompt_developer_context_unchanged(self):
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        from django.contrib.auth.models import Group
+        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        user = self.user_model.objects.create_user(username="ctx-pd", password="x")
+        user.groups.add(group)
+        context = self._context(user, guest=False)
+        self.assertFalse(context["is_viewing_as_guest"])
+        self.assertEqual(
+            self._doc_tool_names(context), ["Разработчик промптов"],
+        )
+
+
+class RestrictedUserEditorsInlineTests(TestCase):
+    """Выдача прав на чужие промпты со страницы пользователя."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.admin = get_user_model().objects.create_user(
+            username="inline-super", password="x", is_superuser=True, is_staff=True,
+        )
+        self.staff = get_user_model().objects.create_user(username="inline-staff", password="x", is_staff=True)
+
+    def test_inline_only_for_superuser(self):
+        from ai.admin.models import PromptEditorshipInline, RestrictedUserAdmin
+        from django.contrib.admin.sites import AdminSite
+        model_admin = RestrictedUserAdmin(self.user_model, AdminSite())
+        request = self.factory.get("/ai/admin/auth/user/")
+        request.user = self.admin
+        inlines = model_admin.get_inlines(request, obj=self.staff)
+        self.assertIn(PromptEditorshipInline, inlines)
+        request.user = self.staff
+        inlines = model_admin.get_inlines(request, obj=self.staff)
+        self.assertNotIn(PromptEditorshipInline, inlines)
+
+    def test_through_model_links_editor(self):
+        prompt = Prompt.objects.create(prompt_name="t", prompt_text="текст")
+        editor = self.user_model.objects.create_user(username="inline-editor", password="x")
+        Prompt.editors.through.objects.create(prompt=prompt, user=editor)
+        self.assertIn(editor, prompt.editors.all())
+        self.assertIn(prompt, editor.editable_prompts.all())
+
+    def test_through_model_not_registered_in_admin_site(self):
+        from ai.admin.site import ai_admin_site
+        from ai.models import Prompt
+        self.assertNotIn(
+            Prompt.editors.through,
+            {model for model, _ in ai_admin_site._registry.items()},
+        )
+
+
+class DashboardGreetingTests(TestCase):
+    """Приветствие «[id] ФИО» вместо Recent actions на дашборде."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def test_user_dl_id(self):
+        from ai.admin.site import AIAdminSite
+        user = self.user_model.objects.create_user(username="user_123", password="x")
+        self.assertEqual(AIAdminSite._user_dl_id(user), "123")
+        local = self.user_model.objects.create_user(username="alice", password="x")
+        self.assertEqual(AIAdminSite._user_dl_id(local), "alice")
+        self.assertEqual(AIAdminSite._user_dl_id(AnonymousUser()), "")
+
+    def test_dashboard_template_greeting(self):
+        from django.template.loader import render_to_string
+        user = self.user_model.objects.create_user(username="user_42", password="x")
+        request = self.factory.get("/ai/admin/")
+        request.user = user
+        html = render_to_string(
+            "admin/ai/index.html",
+            {
+                "user_dl_id": "42",
+                "user_display_name": "Иван Иванов",
+                "user_role_label": "Суперпользователь",
+                "user": user,
+                "available_apps": [],
+            },
+            request=request,
+        )
+        self.assertIn("ai-dashboard-greeting", html)
+        self.assertIn("[42]", html)
+        self.assertIn("Иван Иванов", html)
+        self.assertNotIn("recent-actions-module", html)
+        self.assertNotIn("get_admin_log", html)
+
+
+class ChatUserDocsViewTests(TestCase):
+    """Модалка «?» в чате: GET /ai/docs/ + /ai/docs/download/."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def _request(self, path):
+        request = self.factory.get(path)
+        request.user = self.user_model.objects.create_user(username="chat-docs", password="x")
+        return request
+
+    def test_forbidden_without_external_id(self):
+        from ai.views import chat_user_docs_view
+        response = chat_user_docs_view(self._request("/ai/docs/"))
+        self.assertEqual(response.status_code, 403)
+
+    def test_docs_json_payload(self):
+        from unittest.mock import patch
+        from ai.views import chat_user_docs_view
+        with patch("ai.views.get_external_user_id_from_request", return_value="12345"):
+            response = chat_user_docs_view(self._request("/ai/docs/"))
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertTrue(data["success"])
+        self.assertIn("<h", data["html"])
+        self.assertEqual(data["download_url"], "/ai/docs/download/")
+
+    def test_download_headers(self):
+        from unittest.mock import patch
+        from ai.views import chat_user_docs_download_view
+        with patch("ai.views.get_external_user_id_from_request", return_value="12345"):
+            response = chat_user_docs_download_view(self._request("/ai/docs/download/"))
+        self.assertEqual(response["Content-Type"], "text/markdown; charset=utf-8")
+        self.assertIn("attachment", response["Content-Disposition"])
+
+    def test_download_forbidden_without_external_id(self):
+        from ai.views import chat_user_docs_download_view
+        response = chat_user_docs_download_view(self._request("/ai/docs/download/"))
+        self.assertEqual(response.status_code, 403)
