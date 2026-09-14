@@ -41,6 +41,7 @@ _HIDDEN_NAV_OBJECT_NAMES = {
     "PromptTestRun",      # «Прогоны регрессионных тестов промптов»
     "PromptTestCase",     # «Тест-кейсы промптов»
     "AiPromptRegression", # инструмент «Регрессионные тесты»
+    "AiArmFindError",     # инструмент «Поиск ошибки (ARM)» — временно скрыт
 }
 
 
@@ -334,7 +335,8 @@ class AIAdminSite(admin.AdminSite):
         test_console_url = "/ai/admin/test-console/"
         context["prompt_regression_url"] = prompt_regression_url
         context["test_console_url"] = test_console_url
-        context["prompt_admin_url"] = "/ai/admin/ai/prompt/"
+        prompt_admin_url = "/ai/admin/ai/prompt/"
+        context["prompt_admin_url"] = prompt_admin_url
         my_prompt_url = "/ai/admin/prompts/my/"
         context["my_prompt_url"] = my_prompt_url
         context["my_prompt_change_url"] = get_my_prompt_admin_url(request)
@@ -348,27 +350,29 @@ class AIAdminSite(admin.AdminSite):
         # --- AI tools in the left navigation sidebar (#nav-sidebar) ---
         # The left nav renders `available_apps` (separate from the dashboard's
         # main `app_list`), so we inject the custom (non-ModelAdmin) tool pages
-        # as fake "app" groups. They then render natively via admin/app_list.html
-        # (with the stock filter + current-page highlight) on every admin page,
+        # as fake "app" groups. They then render through our project override of
+        # admin/app_list.html (grouped, sorted, iconised) on every admin page,
         # without appearing in the dashboard's main model list.
         tools_apps = self._build_ai_nav_apps(
             request,
             tools=[
-                # (group, label, object_name, url, flag)
-                ("Инструменты", "Мой промпт", "AiMyPrompt", my_prompt_url, is_pd),
-                ("Инструменты", "Поиск ошибки (ARM)", "AiArmFindError", arm_find_error_url, show_arm),
-                ("Инструменты", "Пакетное решение (ARM)", "AiArmSolve", arm_solve_url, show_arm),
-                ("Инструменты", "Препромпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", is_super),
-                ("Инструменты", "Регрессионные тесты", "AiPromptRegression", prompt_regression_url, show_prompt_regression),
-                ("Инструменты", "Тестовая консоль", "AiTestConsole", test_console_url, show_test_console),
-                ("Администрирование", "Состояние моделей", "AiModelStatus", arm_model_status_url, show_model_status),
-                ("Администрирование", "Журнал запросов", "AiRequestLogs", ai_logs_url, show_logs),
-                ("Администрирование", "Обновления", "AiUpdates", updates_url, show_updates),
+                # (group, label, object_name, url, flag, icon, hint)
+                # NB: дубликаты реальных ModelAdmin-строк («Препромпты», «Настройки
+                # ИИ-приложения») сюда НЕ добавляем — они и так есть в группе
+                # «Раздел ИИ» ниже. Здесь — только кастомные инструменты.
+                ("Промпты", "Мой препромпт", "AiMyPrompt", my_prompt_url, is_pd, "✎", "Свои и закреплённые препромпты"),
+                ("Промпты", "Препромпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", is_super, "⚙", "Авто-подстановка по языку/теме ARM"),
+                ("ARM", "Пакетное решение", "AiArmSolve", arm_solve_url, show_arm, "▤", "Пакетный прогон моделей по задачам DL"),
+                ("ARM", "Состояние моделей", "AiModelStatus", arm_model_status_url, show_model_status, "◉", "Доступность AI-моделей сегодня"),
+                ("Диагностика", "Журнал запросов", "AiRequestLogs", ai_logs_url, show_logs, "≣", "Все запросы к моделям, с поиском"),
+                ("Диагностика", "Регрессионные тесты", "AiPromptRegression", prompt_regression_url, show_prompt_regression, "✓", "Проверка препромптов на тест-кейсах"),
+                ("Диагностика", "Тестовая консоль", "AiTestConsole", test_console_url, show_test_console, "⌘", "Запуск набора тестов приложения"),
+                ("Система", "Обновления", "AiUpdates", updates_url, show_updates, "↻", "История изменений проекта"),
             ],
         )
         # Change/tool pages AND the dashboard: stock admin/nav_sidebar.html renders
-        # available_apps (real apps + the injected tool groups), so «Раздел ИИ»
-        # stays in the left nav on every page — including the dashboard.
+        # available_apps (real apps + the injected tool groups), so the AI tool
+        # groups stay in the left nav on every page — including the dashboard.
         context["available_apps"] = list(context["available_apps"]) + tools_apps
         return context
 
@@ -407,25 +411,39 @@ class AIAdminSite(admin.AdminSite):
     def _build_ai_nav_apps(self, request, *, tools):
         """Build fake "app" groups (for the left nav) from a list of tools.
 
-        ``tools`` is a list of ``(group, label, object_name, url, visible)``
-        tuples. Groups with no visible tool are omitted. The returned dicts mimic
-        ``AdminSite._build_app_dict`` so ``admin/app_list.html`` renders them
-        natively (per-tool ``current-model`` highlight via ``admin_url``).
+        ``tools`` is a list of ``(group, label, object_name, url, visible,
+        icon, hint)`` tuples (icon/hint optional). Groups with no visible tool
+        are omitted. The returned dicts mimic ``AdminSite._build_app_dict`` so
+        our project override of ``admin/app_list.html`` renders them (grouped,
+        sorted, iconised) with per-tool ``current-model`` highlight via
+        ``admin_url``.
 
-        ``app_url`` is set to ``"#"`` deliberately: the group heading is a label,
-        not a navigation target. The stock ``admin/app_list.html`` adds the
-        ``current-app`` class (which renders the caption bold + header-coloured)
-        when ``app.app_url in request.path`` — pointing it at the admin index
-        would match EVERY admin page (all paths start with ``/ai/admin/``), so
-        both tool groups would stay permanently bold. ``"#"`` never matches the
-        path, so the heading keeps its normal weight and only the active *tool*
-        row highlights via ``current-model``.
+        ``app_url`` is set to ``"#"`` deliberately: the group heading is a
+        label, not a navigation target. The stock ``current-app`` state would
+        otherwise match EVERY admin page (all paths start with ``/ai/admin/``),
+        keeping both tool groups permanently bold. ``"#"`` never matches the
+        path, so only the active *tool* row highlights via ``current-model``.
+
+        The injected groups are prefixed with ``ai`` in their ``app_label`` so
+        our custom ``app_list.html`` can render them as first-class AI sections
+        ahead of the stock model apps.
         """
         group_url = "#"
 
-        label_to_key = {"Инструменты": "ai-tools", "Администрирование": "ai-admin"}
+        # Explicit ordering of tool groups in the left nav (top → bottom).
+        # Keep in sync with the labels used by each_context.
+        group_order = ["Промпты", "ARM", "Диагностика", "Система"]
+        label_to_key = {
+            "Промпты": "ai-tools-prompts",
+            "ARM": "ai-tools-arm",
+            "Диагностика": "ai-tools-diag",
+            "Система": "ai-tools-system",
+        }
         groups: dict[str, dict] = {}
-        for group, label, object_name, url, visible in tools:
+        for tool in tools:
+            group, label, object_name, url, visible = tool[:5]
+            icon = tool[5] if len(tool) > 5 else ""
+            hint = tool[6] if len(tool) > 6 else ""
             if not visible or object_name in _HIDDEN_NAV_OBJECT_NAMES:
                 continue
             app = groups.get(group)
@@ -445,10 +463,10 @@ class AIAdminSite(admin.AdminSite):
                 "add_url": None,
                 "perms": {"view": True},
                 "view_only": True,
+                "icon": icon,
+                "hint": hint,
             })
-        # Stable order: Инструменты before Администрирование.
-        order = ["Инструменты", "Администрирование"]
-        return [groups[g] for g in order if g in groups]
+        return [groups[g] for g in group_order if g in groups]
 
 
 ai_admin_site = AIAdminSite(name="admin")

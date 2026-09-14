@@ -1,0 +1,96 @@
+{% extends "admin/change_form.html" %}
+{% load i18n %}
+
+{% comment %}
+Страница «Настройки ИИ-приложения»: помимо штатной формы (вкл/выкл доступ к
+сайту) добавляем таблицу последних 5 запросов из «Журнала запросов» — чтобы
+не уходить со страницы ради быстрой проверки. Полный журнал с поиском по
+всему журналу — по кнопке ниже.
+
+Контекст готовит AIAppSettingsAdmin.changeform_view →
+ai.admin.logs.build_recent_log_rows (учитывает ограничение видимости «только
+свои» для prompt_developer).
+{% endcomment %}
+
+{% block after_field_sets %}
+  {{ block.super }}
+
+  <fieldset class="module aligned ai-settings-logs">
+    <h2>Последние запросы ({{ recent_logs_limit|default:5 }})</h2>
+    <div class="ai-settings-logs-body">
+      <p class="help">
+        Последние {{ recent_logs_limit|default:5 }} записей из «Журнала запросов».
+        Чтобы найти конкретную запись — откройте полный журнал с поиском.
+      </p>
+
+      {% if can_view_logs %}
+        {% if recent_logs %}
+          {% load tz %}
+          <table class="ai-recent-logs-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Отправлен</th>
+                <th>Кто отправлял</th>
+                <th>Язык</th>
+                <th>Тема</th>
+                <th>Модель</th>
+                <th>Статус</th>
+                <th>Режим</th>
+                <th>с</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% timezone moscow_tz %}
+              {% for row in recent_logs %}
+                <tr>
+                  <td><a href="{{ row.detail_url }}">{{ row.id }}</a></td>
+                  <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
+                  <td>
+                    {% if row.external_user_id %}
+                      <a href="https://dl.gsu.by/report.asp?id={{ row.external_user_id }}" target="_blank" rel="noopener">{{ row.sender }}</a>
+                    {% else %}
+                      {{ row.sender }}
+                    {% endif %}
+                  </td>
+                  <td>{{ row.programming_language_name }}</td>
+                  <td>{{ row.topic_name }}</td>
+                  <td>{{ row.model_names }}</td>
+                  <td class="{% if row.status == 'success' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.status_display }}</td>
+                  <td>{{ row.mode_display }}</td>
+                  <td>{{ row.duration_seconds|floatformat:0|default:"—" }}</td>
+                </tr>
+              {% endfor %}
+              {% endtimezone %}
+            </tbody>
+          </table>
+        {% else %}
+          <p class="ai-recent-logs-empty">Записей пока нет.</p>
+        {% endif %}
+
+        <p class="ai-settings-logs-actions">
+          <a class="button" href="{{ logs_search_url }}">Поиск по всему журналу запросов →</a>
+        </p>
+      {% else %}
+        <p class="ai-recent-logs-empty">
+          У вас нет доступа к «Журналу запросов».
+        </p>
+      {% endif %}
+    </div>
+  </fieldset>
+
+  <style>
+    .ai-settings-logs-body { padding: 4px 0 0; }
+    .ai-recent-logs-table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+    .ai-recent-logs-table th,
+    .ai-recent-logs-table td {
+      border: 1px solid var(--hairline-color); padding: 6px 9px;
+      text-align: left; vertical-align: top; font-size: 13px;
+    }
+    .ai-recent-logs-table th { background: var(--darkened-bg); font-weight: 600; }
+    .ai-recent-logs-ok { color: #067647; font-weight: 600; }
+    .ai-recent-logs-err { color: #b42318; font-weight: 600; }
+    .ai-recent-logs-empty { color: var(--body-quiet-color); padding: 8px 0; }
+    .ai-settings-logs-actions { margin-top: 10px; }
+  </style>
+{% endblock %}

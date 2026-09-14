@@ -5512,3 +5512,361 @@ class ArmFindErrorBindingTests(TestCase):
         )
         payload, _ = _prepare_arm_run_payload(self._form_state(), self.user)
         self.assertNotIn("prompt", payload["run_params"])
+
+
+# ===================================================================
+# Левое меню админки: сгруппированные AI-инструменты + скрытие разделов
+# ===================================================================
+
+class AdminNavToolGroupTests(TestCase):
+    """Левое меню (each_context → available_apps + наш оверрайд
+    admin/app_list.html): инструменты сгруппированы в фиксированном порядке
+    (Промпты → ARM → Диагностика → Система), каждый с иконкой и подсказкой;
+    реальные приложения рендерятся отдельным блоком ниже; дубликаты
+    ModelAdmin-строк в инструменты не добавляются; «Поиск ошибки (ARM)»
+    временно скрыт из меню (_HIDDEN_NAV_OBJECT_NAMES), страница остаётся
+    доступной по прямому URL."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="nav_admin", password="x", email="n@t.com",
+        )
+
+    def _each_context(self, user):
+        from ai.admin.site import ai_admin_site
+        request = self.factory.get("/ai/admin/")
+        request.user = user
+        request.session = {}
+        return ai_admin_site.each_context(request)
+
+    def test_tool_groups_present_and_ordered(self):
+        ctx = self._each_context(self.superuser)
+        tools = [
+            app for app in ctx["available_apps"]
+            if app["app_label"].startswith("ai-tools")
+        ]
+        self.assertEqual(
+            [a["name"] for a in tools], ["Промпты", "ARM", "Диагностика", "Система"],
+        )
+
+    def test_find_error_tool_hidden_from_nav(self):
+        """«Поиск ошибки (ARM)» скрыт из левого меню и дашборда, но
+        объект остаётся в скрытом множестве — вернуть можно, удалив имя."""
+        from ai.admin.site import _HIDDEN_NAV_OBJECT_NAMES
+        self.assertIn("AiArmFindError", _HIDDEN_NAV_OBJECT_NAMES)
+        ctx = self._each_context(self.superuser)
+        names = [
+            m["object_name"]
+            for app in ctx["available_apps"] for m in app["models"]
+        ]
+        self.assertNotIn("AiArmFindError", names)
+
+    def test_tool_models_carry_icon_and_hint(self):
+        ctx = self._each_context(self.superuser)
+        arm = next(a for a in ctx["available_apps"] if a["name"] == "ARM")
+        solve = next(m for m in arm["models"] if m["object_name"] == "AiArmSolve")
+        self.assertTrue(solve["icon"])
+        self.assertTrue(solve["hint"])
+
+    def test_no_duplicate_modeladmin_rows_in_tools(self):
+        """Инструменты не дублируют реальные ModelAdmin-строки («Препромпты»,
+        «Настройки ИИ-приложения» и пр. живут в группе «Раздел ИИ»)."""
+        ctx = self._each_context(self.superuser)
+        tool_object_names = {
+            m["object_name"]
+            for app in ctx["available_apps"]
+            if app["app_label"].startswith("ai-tools")
+            for m in app["models"]
+        }
+        self.assertNotIn("Prompt", tool_object_names)
+        self.assertNotIn("AIAppSettings", tool_object_names)
+
+    def test_app_list_override_renders_groups_before_real_apps(self):
+        """Наш оверрайд admin/app_list.html рендерит группы инструментов выше
+        реальных приложений, с разметкой .ai-nav-group и скрытым Поиском
+        ошибки."""
+        from django.template.loader import render_to_string
+        ctx = self._each_context(self.superuser)
+        request = self.factory.get("/ai/admin/")
+        request.user = self.superuser
+        request.session = {}
+        html = render_to_string("admin/app_list.html", {
+            "app_list": ctx["available_apps"],
+            "request": request,
+            "show_changelinks": False,
+        })
+        self.assertIn("ai-nav-group", html)
+        self.assertIn('class="ai-nav-icon"', html)
+        # Инструменты идут раньше реальных приложений («Раздел ИИ»).
+        self.assertLess(html.find("Пакетное решение"), html.find("Раздел ИИ"))
+        self.assertNotIn("Поиск ошибки (ARM)", html)
+
+
+# ===================================================================
+# «Настройки ИИ-приложения»: таблица последних 5 запросов (по ТЗ)
+# ===================================================================
+
+class RecentLogRowsTests(TestCase):
+    """build_recent_log_rows: последние N записей журнала для встраивания в
+    страницу настроек — лимит, порядок (свежие сверху), права (только свои
+    для prompt_developer) и ссылка на поиск по всему журналу."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="recent_admin", password="x", email="r@t.com",
+        )
+        self.developer = get_user_model().objects.create_user(
+            username="recent_dev", password="x",
+        )
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.developer.groups.add(
+            Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)[0]
+        )
+        base = timezone.now()
+        self.logs = [
+            AIRequestLog.objects.create(
+                user=self.superuser, source="chat", mode="chat",
+                message=f"msg-{i}", status=AIRequestLog.STATUS_SUCCESS,
+                sent_at=base - timezone.timedelta(minutes=10 - i),
+            )
+            for i in range(7)
+        ]
+
+    def _request(self, user):
+        request = self.factory.get("/ai/admin/ai/aiappsettings/1/change/")
+        request.user = user
+        request.session = {}
+        return request
+
+    def test_limit_and_order(self):
+        from ai.admin.logs import build_recent_log_rows
+        data = build_recent_log_rows(self._request(self.superuser), limit=5)
+        self.assertEqual(len(data["recent_logs"]), 5)
+        self.assertEqual(data["recent_logs_limit"], 5)
+        expected = [log.id for log in reversed(self.logs)][:5]
+        self.assertEqual([r["id"] for r in data["recent_logs"]], expected)
+
+    def test_search_url_and_flag(self):
+        from ai.admin.logs import build_recent_log_rows
+        data = build_recent_log_rows(self._request(self.superuser), limit=5)
+        self.assertTrue(data["can_view_logs"])
+        self.assertIn("focus=1", data["logs_search_url"])
+
+    def test_developer_sees_only_own_logs(self):
+        from ai.admin.logs import build_recent_log_rows
+        own = AIRequestLog.objects.create(
+            user=self.developer, source="chat", mode="chat", message="dev own",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        data = build_recent_log_rows(self._request(self.developer), limit=5)
+        ids = [r["id"] for r in data["recent_logs"]]
+        self.assertIn(own.id, ids)
+        self.assertNotIn(self.logs[-1].id, ids)
+
+    def test_settings_change_form_renders_table(self):
+        from ai.admin.models import AIAppSettingsAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import AIAppSettings
+        solo = AIAppSettings.get_solo()
+        model_admin = AIAppSettingsAdmin(AIAppSettings, ai_admin_site)
+        request = self._request(self.superuser)
+        response = model_admin.changeform_view(request, object_id=str(solo.pk))
+        html = response.render().content.decode()
+        self.assertIn("Последние запросы", html)
+        self.assertIn("Поиск по всему журналу запросов", html)
+        self.assertIn(str(self.logs[-1].id), html)
+
+    def test_changeform_view_passes_recent_logs_context(self):
+        from ai.admin.models import AIAppSettingsAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import AIAppSettings
+        solo = AIAppSettings.get_solo()
+        model_admin = AIAppSettingsAdmin(AIAppSettings, ai_admin_site)
+        request = self._request(self.superuser)
+        response = model_admin.changeform_view(request, object_id=str(solo.pk))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("recent_logs", response.context_data)
+        self.assertIn("logs_search_url", response.context_data)
+
+
+# ===================================================================
+# Журнал запросов: поиск по всему журналу (q + id) — по ТЗ
+# ===================================================================
+
+class RequestLogSearchTests(TestCase):
+    """Новые фильтры admin_request_logs_view: ``q`` — поиск по тексту
+    запроса/ответа, препромпту, теме, языку и названию задачи; ``id`` —
+    точечный поиск конкретной записи."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="search_admin", password="x", email="s@t.com",
+        )
+        self.log_a = AIRequestLog.objects.create(
+            user=self.superuser, source="chat", mode="chat",
+            message="найди ошибку в коде", response_text="ок",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        self.log_b = AIRequestLog.objects.create(
+            user=self.superuser, source="chat", mode="chat",
+            message="другой запрос", response_text="ответ с меткой ZEBRA",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+
+    def _list(self, params, user=None):
+        from ai.admin.logs import admin_request_logs_view
+        request = self.factory.get("/ai/admin/ai/airequestlog/", params)
+        request.user = user or self.superuser
+        request.session = {}
+        response = admin_request_logs_view(request)
+        return list(response.context_data["page_obj"].object_list)
+
+    def test_q_searches_message(self):
+        rows = self._list({"q": "ошибк"})
+        self.assertIn(self.log_a, rows)
+        self.assertNotIn(self.log_b, rows)
+
+    def test_q_searches_response(self):
+        rows = self._list({"q": "ZEBRA"})
+        self.assertIn(self.log_b, rows)
+        self.assertNotIn(self.log_a, rows)
+
+    def test_id_filter_exact(self):
+        rows = self._list({"id": str(self.log_a.id)})
+        self.assertEqual(rows, [self.log_a])
+
+    def test_filters_echoed_in_context(self):
+        from ai.admin.logs import admin_request_logs_view
+        request = self.factory.get(
+            "/ai/admin/ai/airequestlog/", {"q": "тест", "id": "42"},
+        )
+        request.user = self.superuser
+        request.session = {}
+        response = admin_request_logs_view(request)
+        self.assertEqual(response.context_data["filters"]["q"], "тест")
+        self.assertEqual(response.context_data["filters"]["id"], "42")
+
+
+# ===================================================================
+# Детал batch-лога «Пакетное решение (ARM)»: только таблица результатов
+# ===================================================================
+
+class BatchLogDetailTemplateTests(TestCase):
+    """Детальная страница batch-solve записи журнала показывает ТОЛЬКУ
+    таблицу результатов — ту же, что на /arm/solve/ после прогона (общий
+    partial _ai_batch_results.html): без метаданных и блоков «текст
+    запроса/ответа». Обычные записи сохраняют прежний расширенный
+    layout."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun, AIModelTestResult, Task
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="bd_admin", password="x", email="bd@t.com",
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name="Линейные", programming_language=self.lang,
+        )
+        task = Task.objects.create(
+            node_id=7101, task_id=7201, name="BD", statement="s",
+            topic=self.topic, programming_language=self.lang,
+            file_extension=".pas",
+        )
+        self.run_id = "c" * 32
+        test_run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED,
+            course_id=1450,
+        )
+        AIModelTestResult.objects.create(
+            run=test_run, task=task,
+            model_key="FakeModel", model_title="FakeModel",
+            status="ok", verdict="solved",
+            duration_seconds=2.0, tokens=7,
+            short_response="ok", raw_response="raw", code="code",
+            dl_comment="c", dl_queue_id=1,
+            file_extension_snapshot=".pas",
+            topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+        )
+        self.batch_log = AIRequestLog.objects.create(
+            user=self.superuser, source="arm", mode="batch_solve",
+            message=f"Batch solve run {self.run_id}",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        self.plain_log = AIRequestLog.objects.create(
+            user=self.superuser, source="chat", mode="chat",
+            message="обычный запрос", response_text="обычный ответ",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+
+    def _detail(self, log):
+        from ai.admin.logs import admin_request_log_detail_view
+        request = self.factory.get(f"/ai/admin/ai/airequestlog/{log.id}/")
+        request.user = self.superuser
+        request.session = {}
+        response = admin_request_log_detail_view(request, log.id)
+        self.assertEqual(response.status_code, 200)
+        return response.render().content.decode()
+
+    def test_batch_detail_shows_only_results_table(self):
+        html = self._detail(self.batch_log)
+        self.assertIn("ArmBatchResults.init", html)
+        self.assertIn("результаты прогона", html)
+        # Метаданные и тексты запроса/ответа НЕ показываем.
+        self.assertNotIn("Кто отправлял", html)
+        self.assertNotIn("Текст, который отправил пользователь", html)
+        self.assertNotIn("Текст, который ответила модель", html)
+
+    def test_plain_detail_keeps_full_layout(self):
+        html = self._detail(self.plain_log)
+        self.assertIn("Текст, который отправил пользователь", html)
+        self.assertIn("Текст, который ответила модель", html)
+        self.assertIn("Кто отправлял", html)
+        self.assertNotIn("ArmBatchResults.init", html)
+
+
+# ===================================================================
+# ARM «Поиск ошибки»: регрессия ключа тем в fillTopics
+# ===================================================================
+
+class ArmFindErrorTopicsKeyTests(TestCase):
+    """fillTopics в arm_find_error.html обязан фильтровать темы по ключу
+    сериализатора serialize_topic (``programming_language``). Регрессия:
+    JS читал ``programming_language_id`` — такого ключа сериализатор не
+    отдаёт, селектор тем был всегда пуст, и привязки «Препромпты по
+    умолчанию» по темам не действовали на странице «Поиск ошибки»."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="fe_admin", password="x", email="fe@t.com",
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name="Массивы", programming_language=self.lang,
+        )
+
+    def test_view_topics_carry_programming_language_key(self):
+        from ai.admin.arm import admin_arm_find_error_view
+        request = self.factory.get("/ai/admin/arm/find-error/")
+        request.user = self.superuser
+        request.session = {}
+        response = admin_arm_find_error_view(request)
+        self.assertEqual(response.status_code, 200)
+        topics = response.context_data["topics"]
+        self.assertTrue(topics)
+        self.assertEqual(topics[0]["programming_language"], self.lang.id)
+        self.assertNotIn("programming_language_id", topics[0])
+
+    def test_js_filltopics_matches_serializer_key(self):
+        from django.template.loader import get_template
+        src = get_template("admin/ai/arm_find_error.html").template.source
+        self.assertIn(
+            "String(item.programming_language) === String(languageId)", src,
+        )
+        self.assertNotIn("item.programming_language_id", src)

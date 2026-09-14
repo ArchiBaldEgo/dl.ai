@@ -8,10 +8,12 @@ that site — there is no second AdminSite in use.
 Wires the AI admin stylesheet and a Russian welcome+role greeting in the stock
 #user-tools header. The AI tools (and the real «Раздел ИИ» app group) live in
 the LEFT navigation sidebar — tool groups are injected into `available_apps`
-by AIAdminSite.each_context and rendered by the stock admin/nav_sidebar.html
-on every page (admin/ai/index.html re-enables that nav-sidebar block on the
-dashboard too). NOTE: 'ai' must precede 'django.contrib.admin' in
-INSTALLED_APPS so this file is not shadowed by the stock admin/base_site.html
+by AIAdminSite.each_context and rendered by our project override of
+admin/app_list.html (ai/templates/admin/app_list.html: iconised, grouped,
+sorted; ai_nav_filter.js extends the stock quick filter to them) on every page
+(admin/ai/index.html re-enables that nav-sidebar block on the dashboard too).
+NOTE: 'ai' must precede 'django.contrib.admin' in INSTALLED_APPS so both this
+file AND admin/app_list.html are not shadowed by the stock admin templates
 (APP_DIRS=True returns the first match).{% endcomment %}
 
 {% block extrastyle %}
@@ -23,6 +25,7 @@ INSTALLED_APPS so this file is not shadowed by the stock admin/base_site.html
   {{ block.super }}
   <script src="{% static 'admin/js/ai_processes.js' %}" defer></script>
   <script src="{% static 'admin/js/ai_admin_state.js' %}" defer></script>
+  <script src="{% static 'admin/js/ai_nav_filter.js' %}" defer></script>
 {% endblock %}
 
 {% comment %}Приветствие кликабельно: рядом с именем чип-счётчик «Процессы (N)»

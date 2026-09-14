@@ -354,6 +354,7 @@ class SharedPromptAdmin(admin.ModelAdmin):
 
 class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     list_display = ("is_enabled", "updated_at")
+    change_form_template = "admin/ai/aiappsettings_change_form.html"
 
     def has_add_permission(self, request):
         if not is_staff_or_superuser(request.user):
@@ -366,6 +367,19 @@ class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         if not is_staff_or_superuser(request.user):
             return False
         return False
+
+    def changeform_view(self, request, object_id=None, form_url="", extra_context=None):
+        """Добавляем на страницу настроек таблицу последних 5 запросов.
+
+        Те же записи, что в «Журнале запросов», но только последние 5 и
+        с теми же колонками (сокращённые). Если нужно искать конкретную
+        запись — кнопка ведёт в полный журнал с поиском по всему журналу.
+        """
+        from .logs import build_recent_log_rows
+
+        extra_context = {**(extra_context or {})}
+        extra_context.update(build_recent_log_rows(request, limit=5))
+        return super().changeform_view(request, object_id, form_url, extra_context)
 
 
 class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):

@@ -31,12 +31,82 @@
 
 /* ─────────────────── Left-nav tool group readability ───────────────── */
 
-/* The injected «Инструменты» / «Администрирование» groups render through the
-   stock admin/app_list.html. Their app_url is "#", so the bold `current-app`
-   state never fires — but the caption link still gets the stock `a.section`
-   treatment (header-link colour). Tone it down so group headings read as
-   quiet section labels, not clickable destinations, and add a little air
-   above each group so the tool list is easier to scan. */
+/* Custom, iconised AI tool groups rendered by our override of
+   admin/app_list.html (ai/templates/admin/app_list.html), fed by
+   AIAdminSite.each_context → available_apps. Groups carry an `ai-tools-*`
+   app_label and render at the top of the left nav in the explicit order set
+   in site.py::_build_ai_nav_apps. */
+#nav-sidebar .ai-nav-group {
+  margin: 14px 0 0;
+  padding: 0 0 2px;
+}
+#nav-sidebar .ai-nav-group:first-child {
+  margin-top: 4px;
+}
+
+#nav-sidebar .ai-nav-group-title {
+  padding: 0 12px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--body-quiet-color);
+}
+
+#nav-sidebar ul.ai-nav-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+#nav-sidebar .ai-nav-item > a {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 12px;
+  color: var(--body-fg);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+  line-height: 1.3;
+}
+#nav-sidebar .ai-nav-item > a:hover,
+#nav-sidebar .ai-nav-item > a:focus {
+  background: var(--darkened-bg);
+  color: var(--link-fg);
+}
+
+/* Active tool: highlighted bar on the left + tinted background. */
+#nav-sidebar .ai-nav-item.current-model > a {
+  background: var(--selected-bg, var(--darkened-bg));
+  border-left-color: var(--link-fg);
+  font-weight: 600;
+  color: var(--link-fg);
+}
+
+#nav-sidebar .ai-nav-icon {
+  flex: 0 0 16px;
+  width: 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--body-quiet-color);
+}
+#nav-sidebar .ai-nav-item.current-model .ai-nav-icon,
+#nav-sidebar .ai-nav-item > a:hover .ai-nav-icon {
+  color: var(--link-fg);
+}
+
+#nav-sidebar .ai-nav-label {
+  flex: 1 1 auto;
+}
+
+/* Separator above the first real model app so tools read as their own zone. */
+#nav-sidebar .ai-nav-group + .module {
+  margin-top: 16px;
+}
+
+/* Legacy: injected groups used to carry a generic `ai-tools`/`ai-admin`
+   app_label and render through the stock app_list markup. Kept toned-down in
+   case a cached/older context still produces them. */
 #nav-sidebar .app-ai-tools,
 #nav-sidebar .app-ai-admin {
   margin-top: 6px;

@@ -136,7 +136,11 @@
 
 <script>
   const FILTER_KEY = 'ai_logs_filters';
-  const FILTER_FIELDS = ['status', 'mode', 'model', 'user', 'task', 'date_from', 'date_to'];
+  const FILTER_FIELDS = ['q', 'id', 'status', 'mode', 'model', 'user', 'task', 'date_from', 'date_to'];
+  // DOM id suffix per filter name (most are 'id_<name>'; the record-id field
+  // uses 'id_record_id' to avoid the awkward 'id_id').
+  const FILTER_DOM_ID = { id: 'id_record_id' };
+  const domIdFor = (name) => FILTER_DOM_ID[name] || ('id_' + name);
 
   // Restore filters from localStorage on page load (unless a hard reset was requested).
   document.addEventListener('DOMContentLoaded', function () {
@@ -156,7 +160,7 @@
         const saved = JSON.parse(localStorage.getItem(FILTER_KEY) || '{}');
         let restored = false;
         FILTER_FIELDS.forEach(function (name) {
-          const el = document.getElementById('id_' + name);
+          const el = document.getElementById(domIdFor(name));
           if (el && saved[name]) { el.value = saved[name]; restored = true; }
         });
         if (restored) {
@@ -170,7 +174,7 @@
       form.addEventListener('submit', function () {
         const data = {};
         FILTER_FIELDS.forEach(function (name) {
-          const el = document.getElementById('id_' + name);
+          const el = document.getElementById(domIdFor(name));
           if (el) data[name] = el.value;
         });
         localStorage.setItem(FILTER_KEY, JSON.stringify(data));
@@ -308,6 +312,14 @@
   {% include "admin/ai/_ai_back_nav.html" %}
 
   <form method="get" class="ai-logs-filters">
+    <div class="filter-field">
+      <label for="id_q">Поиск по журналу</label>
+      <input id="id_q" type="text" name="q" value="{{ filters.q }}" placeholder="Текст запроса/ответа, промпт, тема…"{% if request.GET.focus %} autofocus{% endif %}>
+    </div>
+    <div class="filter-field">
+      <label for="id_record_id">ID записи</label>
+      <input id="id_record_id" type="text" name="id" value="{{ filters.id }}" placeholder="напр. 12345">
+    </div>
     <div class="filter-field">
       <label for="id_status">Статус</label>
       <select id="id_status" name="status">

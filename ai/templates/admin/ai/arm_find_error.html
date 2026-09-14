@@ -640,7 +640,7 @@
       }
 
       topics
-        .filter(function (item) { return String(item.programming_language_id) === String(languageId); })
+        .filter(function (item) { return String(item.programming_language) === String(languageId); })
         .forEach(function (item) {
           const option = document.createElement('option');
           option.value = String(item.id);

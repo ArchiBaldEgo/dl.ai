@@ -201,6 +201,51 @@ def _format_moscow_datetime(value):
     return local.strftime("%d.%m.%Y:%H:%M:%S")
 
 
+def build_recent_log_rows(request, limit=5):
+    """Контекст-хелпер: последние N записей журнала для встраивания в другую
+    страницу (напр. «Настройки ИИ-приложения»).
+
+    Отдаёт те же данные, что и колонки «Журнала запросов» (ID, отправлен,
+    кто, язык, тема, модель, статус, режим, время), но без пагинации и
+    фильтров, + ссылка на поиск по всему журналу. Учитывает ограничение
+    видимости (``logs_scope_is_own_user`` → только свои записи).
+
+    Возвращает словарь для ``extra_context``: ``recent_logs`` (список строк)
+    и ``logs_search_url`` (полный журнал). Если у пользователя нет доступа к
+    журналу — ``recent_logs`` пуст и ``can_view_logs`` False.
+    """
+    can_view = can_access_logs(request)
+    rows = []
+    if can_view:
+        qs = _scope_logs_qs(AIRequestLog.objects.all(), request.user).order_by("-sent_at")
+        for log in qs[: max(0, int(limit))]:
+            rows.append({
+                "id": log.id,
+                "sent_at": log.sent_at,
+                "sender": log.user_full_name or log.username or "—",
+                "external_user_id": log.external_user_id or "",
+                "programming_language_name": log.programming_language_name or "—",
+                "topic_name": log.topic_name or "—",
+                "model_names": ", ".join(log.model_names or []) or "—",
+                "status": log.status,
+                "status_display": log.get_status_display(),
+                "mode_display": log.get_mode_display() or "—",
+                "duration_seconds": log.duration_seconds,
+                "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
+            })
+    return {
+        "recent_logs": rows,
+        "recent_logs_limit": limit,
+        "can_view_logs": can_view,
+        # Полный журнал: там есть поиск/фильтры по всему журналу. Ссылка ведёт
+        # на страницу журнала с фокусом на поле поиска (см. шаблон настроек).
+        "logs_search_url": "/ai/admin/ai/airequestlog/?focus=1",
+        # Для {% timezone moscow_tz %} в aiappsettings_change_form.html —
+        # тот же контракт, что у admin_request_logs_view.
+        "moscow_tz": MOSCOW_TZ,
+    }
+
+
 def admin_request_logs_view(request):
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
@@ -213,6 +258,8 @@ def admin_request_logs_view(request):
     model = request.GET.get("model", "").strip()
     user_q = request.GET.get("user", "").strip()
     task_q = request.GET.get("task", "").strip()
+    log_id = request.GET.get("id", "").strip()
+    text_q = request.GET.get("q", "").strip()
     date_from = _parse_date(request.GET.get("date_from", ""))
     date_to = _parse_date(request.GET.get("date_to", ""))
 
@@ -233,6 +280,19 @@ def admin_request_logs_view(request):
             Q(user_full_name__icontains=user_q)
             | Q(username__icontains=user_q)
             | Q(external_user_id__icontains=user_q)
+        )
+    if log_id.isdigit():
+        qs = qs.filter(pk=int(log_id))
+    if text_q:
+        # Поиск по всему журналу: текст запроса/ответа, модель, язык, тема,
+        # препромпт, название задачи.
+        qs = qs.filter(
+            Q(message__icontains=text_q)
+            | Q(response_text__icontains=text_q)
+            | Q(prompt_name__icontains=text_q)
+            | Q(programming_language_name__icontains=text_q)
+            | Q(topic_name__icontains=text_q)
+            | Q(task_name__icontains=text_q)
         )
     if task_q:
         if task_q.isdigit():
@@ -311,6 +371,8 @@ def admin_request_logs_view(request):
             "model": model,
             "user": user_q,
             "task": task_q,
+            "id": log_id,
+            "q": text_q,
             "date_from": date_from,
             "date_to": date_to,
         },
