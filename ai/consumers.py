@@ -166,6 +166,23 @@ class MyConsumer(AsyncWebsocketConsumer):
             return True
         return rate_limiter.is_allowed_ws(self.user_id)
 
+    def _resolve_course_id(self) -> int | None:
+        """courseID текущего курса пользователя — для DL get-task-info.
+
+        dl.gsu.by требует courseId в get-task-info (иначе 400). Источники:
+        user_info из аутентификации WS (обычно None для Django-auth юзера —
+        scope["user_info"] никто не заполняет), затем кеш external_user_info
+        в Django-сессии (кладут и HTTP-, и WS-аутентификация)."""
+        candidates = [self.user_info or {}]
+        session = self.scope.get("session")
+        if session is not None:
+            candidates.append(session.get("external_user_info") or {})
+        for info in candidates:
+            course = str(info.get("courseID") or "").strip()
+            if course.isdigit():
+                return int(course)
+        return None
+
     @staticmethod
     def _parse_node_id(raw) -> int | None:
         """Coerce a WS message nodeId into a positive int, or None."""
@@ -198,6 +215,7 @@ class MyConsumer(AsyncWebsocketConsumer):
                 programming_language_id=int(prog_lng_id) if prog_lng_id else None,
                 topic_id=int(topic_id) if topic_id else None,
                 session_id=session_id,
+                course_id=self._resolve_course_id(),
             ))
 
         prog_lng_name, topic_name, prompt_name = await self.prompt_resolver.resolve_context_names(

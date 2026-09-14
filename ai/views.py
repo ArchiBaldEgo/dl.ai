@@ -633,8 +633,22 @@ def get_task_info_view(request):
     if session_id and any(c in session_id for c in "\\/\n\r\t "):
         return JsonResponse({"error": "Invalid session id format"}, status=400)
 
+    # dl.gsu.by требует courseId в get-task-info: без него REST отвечает
+    # 400 Bad Request, который _raise_for_status превращает в DLServerError
+    # (наш 502). Берём курс пользователя из validated user_info (middleware
+    # кладёт его на каждый запрос — courseID из get-user-info); явный
+    # параметр запроса имеет приоритет.
+    course_raw = request.GET.get("courseId", "").strip()
+    if not course_raw.isdigit():
+        user_info = getattr(request, "user_info", None) or {}
+        course_raw = str(user_info.get("courseID") or "").strip()
+    course_id = int(course_raw) if course_raw.isdigit() else None
+
     try:
-        data = fetch_task_info(node_id, session_id=session_id, remove_html_tags=remove_html_tags)
+        data = fetch_task_info(
+            node_id, session_id=session_id, remove_html_tags=remove_html_tags,
+            course_id=course_id,
+        )
     except (DLUnauthorizedError, DLForbiddenError, DLTaskNotFoundError,
             DLApiUnavailable, DLServerError) as exc:
         return dl_error_response(exc)
@@ -648,7 +662,10 @@ def get_task_info_view(request):
     if remove_html_tags and not (data.get("statement") or "").strip() \
             and not (data.get("currentStatement") or "").strip():
         try:
-            raw = fetch_task_info(node_id, session_id=session_id, remove_html_tags=None)
+            raw = fetch_task_info(
+                node_id, session_id=session_id, remove_html_tags=None,
+                course_id=course_id,
+            )
             raw_statement = (raw.get("statement") or raw.get("currentStatement") or "").strip()
             if raw_statement:
                 stripped = strip_tags(raw_statement).strip()

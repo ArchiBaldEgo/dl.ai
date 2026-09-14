@@ -16,6 +16,7 @@
 """
 
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -26,6 +27,8 @@ import requests
 from django.http import JsonResponse
 
 from .external_auth import get_external_auth_api_url
+
+logger = logging.getLogger(__name__)
 
 
 class DLApiError(RuntimeError):
@@ -79,6 +82,11 @@ def dl_error_response(exc: DLApiError, extra: dict | None = None) -> JsonRespons
     DLUnauthorizedError→401, DLForbiddenError→403, DLTaskNotFoundError→404,
     DLApiUnavailable→503, DLServerError/прочие DLApiError→502.
 
+    Причина (текст исключения — код ответа DL и сниппет тела) пишется в лог:
+    наружу отдаётся обезличенный JSON, а без лога диагностика апстрима
+    сводилась бы к голому «Bad Gateway» (ситуация 2026-09-14: dl.gsu.by
+    стал требовать courseId в get-task-info — без лога это не видно).
+
     ``extra`` дописывает ключи в payload (например, ``{"ok": False}`` для
     admin-эндпоинтов, где JS проверяет ``d.ok``).
     """
@@ -93,6 +101,10 @@ def dl_error_response(exc: DLApiError, extra: dict | None = None) -> JsonRespons
         if isinstance(exc, exc_type):
             status, message = mapped_status, mapped_message
             break
+    # 401/403 — штатные состояния (протухшая сессия пользователя), шуметь
+    # не нужно; всё остальное — признак проблемы апстрима/нашего запроса.
+    if status not in (401, 403):
+        logger.warning("DL API error → HTTP %s: %s", status, exc)
     payload = {"error": message}
     if extra:
         payload.update(extra)

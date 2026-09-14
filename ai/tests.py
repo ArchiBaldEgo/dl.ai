@@ -5520,13 +5520,14 @@ class ArmFindErrorBindingTests(TestCase):
 
 class AdminNavToolGroupTests(TestCase):
     """Левое меню (each_context → available_apps + наш оверрайд
-    admin/app_list.html): инструменты идут первыми, сгруппированы в
-    фиксированном порядке (Промпты → ARM → Диагностика → Система), каждый
-    с иконкой и подсказкой; реальные приложения («Раздел ИИ») рендерятся
-    той же единой разметкой .ai-nav-group с иконками; дубликаты
-    ModelAdmin-строк в инструменты не добавляются; «Поиск ошибки (ARM)»
-    временно скрыт из меню (_HIDDEN_NAV_OBJECT_NAMES), страница остаётся
-    доступной по прямому URL."""
+    admin/app_list.html): первым идёт закреплённый пункт «Настройка
+    ИИ-приложения» (ai-pinned, без заголовка), затем группы инструментов
+    (Промпты → ARM → Диагностика → Система), каждый с иконкой и подсказкой;
+    реальные приложения («Раздел ИИ») рендерятся той же единой разметкой
+    .ai-nav-group с иконками; дубликаты ModelAdmin-строк в инструменты не
+    добавляются; «Поиск ошибки (ARM)» временно скрыт из меню
+    (_HIDDEN_NAV_OBJECT_NAMES), страница остаётся доступной по прямому
+    URL."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -5546,9 +5547,11 @@ class AdminNavToolGroupTests(TestCase):
         tools = [
             app for app in ctx["available_apps"]
             if app["app_label"].startswith("ai-tools")
+            or app["app_label"] == "ai-pinned"
         ]
         self.assertEqual(
-            [a["name"] for a in tools], ["Промпты", "ARM", "Диагностика", "Система"],
+            [a["name"] for a in tools],
+            ["Закреплено", "Промпты", "ARM", "Диагностика", "Система"],
         )
 
     def test_find_error_tool_hidden_from_nav(self):
@@ -5571,17 +5574,23 @@ class AdminNavToolGroupTests(TestCase):
         self.assertTrue(solve["hint"])
 
     def test_no_duplicate_modeladmin_rows_in_tools(self):
-        """Инструменты не дублируют реальные ModelAdmin-строки («Препромпты»,
-        «Настройки ИИ-приложения» и пр. живут в группе «Раздел ИИ»)."""
+        """Инструменты не дублируют реальные ModelAdmin-строки: «Препромпты»
+        живут в группе «Раздел ИИ»; «Настройка ИИ-приложения» закреплена
+        отдельным пунктом и из «Раздела ИИ» убрана — дубля нет нигде."""
         ctx = self._each_context(self.superuser)
         tool_object_names = {
             m["object_name"]
             for app in ctx["available_apps"]
             if app["app_label"].startswith("ai-tools")
+            or app["app_label"] == "ai-pinned"
             for m in app["models"]
         }
         self.assertNotIn("Prompt", tool_object_names)
-        self.assertNotIn("AIAppSettings", tool_object_names)
+        self.assertIn("AiAppSettings", tool_object_names)
+        ai_app = next(a for a in ctx["available_apps"] if a["app_label"] == "ai")
+        self.assertNotIn(
+            "AIAppSettings", [m["object_name"] for m in ai_app["models"]],
+        )
 
     def test_app_list_override_renders_groups_before_real_apps(self):
         """Наш оверрайд admin/app_list.html рендерит группы инструментов выше
@@ -5625,28 +5634,37 @@ class AdminNavToolGroupTests(TestCase):
         self.assertNotIn('th scope="row"', html)
 
     def test_tools_first_in_available_apps(self):
-        """available_apps: сначала все ai-tools-группы, затем реальные
-        приложения — порядок задаётся в each_context."""
+        """available_apps: сначала все группы инструментов (ai-tools-* и
+        закреплённая ai-pinned), затем реальные приложения."""
         ctx = self._each_context(self.superuser)
+
+        def is_tool(label):
+            return label == "ai-pinned" or label.startswith("ai-tools")
+
         labels = [a["app_label"] for a in ctx["available_apps"]]
         self.assertTrue(labels)
-        first_real = next(
-            i for i, label in enumerate(labels) if not label.startswith("ai-tools")
-        )
-        self.assertTrue(all(l.startswith("ai-tools") for l in labels[:first_real]))
-        self.assertFalse(any(l.startswith("ai-tools") for l in labels[first_real:]))
+        first_real = next(i for i, label in enumerate(labels) if not is_tool(label))
+        self.assertTrue(all(is_tool(l) for l in labels[:first_real]))
+        self.assertFalse(any(is_tool(l) for l in labels[first_real:]))
 
     def test_real_model_rows_get_icons(self):
         """Строки реальных моделей украшаются иконками (_REAL_MODEL_ICONS) —
-        «Раздел ИИ» в том же иконизированном стиле, что и инструменты."""
+        «Раздел ИИ» в том же иконизированном стиле, что и инструменты.
+        «Настройка ИИ-приложения» при этом закреплена первым пунктом (группа
+        ai-pinned) и из «Раздела ИИ» убрана — без дубля."""
         ctx = self._each_context(self.superuser)
         ai_app = next(
             a for a in ctx["available_apps"] if a["app_label"] == "ai"
         )
         icons = {m["object_name"]: m.get("icon") for m in ai_app["models"]}
-        self.assertEqual(icons.get("AIAppSettings"), "⚙")
+        self.assertNotIn("AIAppSettings", icons)
         self.assertEqual(icons.get("Prompt"), "✎")
         self.assertTrue(icons.get("ExternalDLAccount"))
+        pinned = next(
+            a for a in ctx["available_apps"] if a["app_label"] == "ai-pinned"
+        )
+        self.assertEqual(pinned["models"][0]["object_name"], "AiAppSettings")
+        self.assertEqual(pinned["models"][0]["icon"], "⚙")
 
 
 # ===================================================================
@@ -5981,3 +5999,102 @@ class ModelStatsSuffixStripTests(SimpleTestCase):
         src = self._source()
         self.assertIn("selectPointerActive = true", src)
         self.assertIn("if (!onModelSelect || !selectPointerActive)", src)
+
+
+# ===================================================================
+# dl.gsu.by требует courseId в get-task-info (иначе 400 → наш 502)
+# ===================================================================
+
+class TaskInfoCourseIdTests(TestCase):
+    """REST API dl.gsu.by стал требовать courseId в GET /restapi/get-task-info:
+    без него возвращается 400 Bad Request, который _raise_for_status маппит в
+    DLServerError → наш 502 («Bad Gateway», 2026-09-14, nodeId=2606747).
+    get_task_info_view обязан передавать course_id: явный параметр запроса
+    имеет приоритет, иначе courseID текущего курса из validated user_info
+    (кладёт ExternalAuthMiddleware на каждый запрос)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="ti_admin", password="***", email="ti@t.com",
+        )
+
+    def _request(self, path="/ai/api/task-info/", user_info=None, **params):
+        from ai.views import get_task_info_view
+        request = self.factory.get(path, params)
+        request.user = self.superuser
+        request.session = {}
+        if user_info is not None:
+            request.user_info = user_info
+        return get_task_info_view(request)
+
+    @patch("ai.views.fetch_task_info")
+    def test_course_id_taken_from_user_info(self, mock_fetch):
+        mock_fetch.return_value = {"name": "t", "taskId": 1, "statement": "s"}
+        response = self._request(user_info={"userId": 186638, "courseID": 1450}, nodeId="2606747")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_fetch.call_args.kwargs.get("course_id"), 1450)
+
+    @patch("ai.views.fetch_task_info")
+    def test_explicit_course_id_param_wins(self, mock_fetch):
+        mock_fetch.return_value = {"name": "t", "taskId": 1, "statement": "s"}
+        # userId в user_info обязателен: иначе _has_page_access вернёт 403.
+        self._request(user_info={"userId": 186638, "courseID": 1450}, nodeId="2606747", courseId="999")
+        self.assertEqual(mock_fetch.call_args.kwargs.get("course_id"), 999)
+
+    @patch("ai.views.fetch_task_info")
+    def test_no_course_id_passes_none(self, mock_fetch):
+        """user_info без courseID (или вовсе без user_info) → course_id=None:
+        запрос уходит как раньше (и упадёт с 400 уже на стороне DL — но
+        приложение теперь честно передаёт курс, когда он известен)."""
+        mock_fetch.return_value = {"name": "t", "taskId": 1, "statement": "s"}
+        self._request(user_info={"userId": 186638}, nodeId="2606747")
+        self.assertIsNone(mock_fetch.call_args.kwargs.get("course_id"))
+
+    @patch("ai.views.fetch_task_info")
+    def test_bad_course_id_param_falls_back_to_user_info(self, mock_fetch):
+        mock_fetch.return_value = {"name": "t", "taskId": 1, "statement": "s"}
+        self._request(user_info={"userId": 186638, "courseID": 1450}, nodeId="2606747", courseId="abc")
+        self.assertEqual(mock_fetch.call_args.kwargs.get("course_id"), 1450)
+
+
+class DLApiClientErrorLoggingTests(SimpleTestCase):
+    """dl_error_response отдаёт наружу обезличенный JSON ("Server error"),
+    а причина (код DL и сниппет тела) раньше терялась — диагностика апстрима
+    сводилась к голому «Bad Gateway». Теперь причина пишется в лог
+    (кроме штатных 401/403 — протухшая пользовательская сессия)."""
+
+    def test_error_response_logs_cause(self):
+        import logging as _logging
+        from ai.dl_api_client import DLServerError, dl_error_response
+        exc = DLServerError("DL API вернул ошибку (код 400)Bad Request")
+        with self.assertLogs("ai.dl_api_client", level=_logging.WARNING) as captured:
+            response = dl_error_response(exc)
+        self.assertEqual(response.status_code, 502)
+        joined = "\n".join(captured.output)
+        self.assertIn("HTTP 502", joined)
+        self.assertIn("код 400", joined)
+
+    def test_auth_errors_not_logged_as_warnings(self):
+        from ai.dl_api_client import DLUnauthorizedError, dl_error_response
+        with self.assertNoLogs("ai.dl_api_client", level="WARNING"):
+            dl_error_response(DLUnauthorizedError())
+
+    def test_consumer_resolves_course_id_from_session(self):
+        """Консьюмер берёт courseID из user_info WS-аутентификации, а при её
+        отсутствии — из кеша external_user_info в Django-сессии (scope)."""
+        from ai.consumers import MyConsumer
+        consumer = MyConsumer()
+        consumer.scope = {}
+        consumer.user_info = {"courseID": 1450}
+        self.assertEqual(consumer._resolve_course_id(), 1450)
+
+        consumer.user_info = None
+        consumer.scope = {
+            "session": {"external_user_info": {"courseID": 777}},
+        }
+        self.assertEqual(consumer._resolve_course_id(), 777)
+
+        consumer.user_info = None
+        consumer.scope = {}
+        self.assertIsNone(consumer._resolve_course_id())
