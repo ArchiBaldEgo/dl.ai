@@ -156,7 +156,15 @@
             max-height: 95%;
         }
 
-        #select,
+        /* Селектор моделей — такой же ширины, как в «Чате с DLAI»
+           (chat_template.css: max-width 77%): растягивается по содержимому,
+           а не зажат в 180px. Остальные селекторы (режим/язык/тема)
+           остаются компактными. */
+        #select {
+            font-size: 18px;
+            max-width: 77%;
+        }
+
         #selectType,
         #selectProgLng,
         #selectTheme {
