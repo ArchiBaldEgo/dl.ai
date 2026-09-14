@@ -53,7 +53,6 @@ _REAL_MODEL_ICONS = {
     "Topic": "▣",
     "Prompt": "✎",
     "SharedPrompt": "⁂",
-    "AIAppSettings": "⚙",
     "ExternalDLAccount": "☰",
 }
 
@@ -481,10 +480,12 @@ class AIAdminSite(admin.AdminSite):
         group_url = "#"
 
         # Explicit ordering of tool groups in the left nav (top → bottom).
-        # Keep in sync with the labels used by each_context. «ai-pinned» —
-        # беззаголовочная группа, закреплённая самым первым пунктом навигации
-        # (шаблон admin/app_list.html не рисует для неё title).
-        group_order = ["ai-pinned", "Промпты", "ARM", "Диагностика", "Система"]
+        # NB: здесь ИМЕНА групп (первый элемент кортежей tools), а не их
+        # app_label из label_to_key — dict groups ключуется именем.
+        # «Закреплено» (app_label ai-pinned) — беззаголовочная группа,
+        # закреплённая самым первым пунктом навигации (шаблон
+        # admin/app_list.html не рисует для неё title).
+        group_order = ["Закреплено", "Промпты", "ARM", "Диагностика", "Система"]
         label_to_key = {
             "Закреплено": "ai-pinned",
             "Промпты": "ai-tools-prompts",
