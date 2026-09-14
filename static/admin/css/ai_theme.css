@@ -186,6 +186,10 @@ option {
 }
 
 /* --- Кнопка-переключатель темы --- */
+/* vertical-align: middle — обе кнопки шапки («тема» и «?» — класс общий)
+   выравниваются по одному правилу: без него текстовая «?» стоит ниже
+   иконки (inline-боксы выравниваются по baseline, а у svg-кнопки baseline
+   падает на нижний край бокса). */
 .theme-toggle {
     display: inline-flex;
     align-items: center;
@@ -202,6 +206,7 @@ option {
     box-shadow: none;
     cursor: pointer;
     transition: background-color 0.2s ease;
+    vertical-align: middle;
 }
 
 .theme-toggle:hover {
