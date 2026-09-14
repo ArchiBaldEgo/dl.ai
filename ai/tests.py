@@ -1600,6 +1600,82 @@ class AutorecoveryTests(TestCase):
             mock_restart.assert_not_called()
 
 
+class ArmSolveModelOptionsTests(TestCase):
+    """get_arm_solve_model_options: весь каталог Web_/Ollama_ + пометки доступности.
+
+    Список чекбоксов на /arm/solve/ больше не режется по is_available: модель
+    без строки AIModelAvailability за текущее окно (только что добавленная,
+    до первой проверки в 04:00) всё равно должна попасть в список — иначе
+    она невидима до следующего дня. Проверки: полный состав, пометки
+    («» / «неактивна» / «не проверена»), доступные первыми, чужие префиксы вне.
+    """
+
+    def _row(self, key, is_available):
+        from ai.models import AIModelAvailability
+        from ai.model_health import get_health_window_date
+        return AIModelAvailability.objects.create(
+            model_key=key,
+            model_title=key,
+            is_available=is_available,
+            window_date=get_health_window_date(),
+        )
+
+    def _options(self):
+        from ai.model_health import get_arm_solve_model_options
+        return get_arm_solve_model_options()
+
+    def _arm_keys(self):
+        from ai.model_health import MODEL_CATALOG_KEYS, is_arm_solve_model, is_hidden_from_selectors
+        return [
+            k for k in MODEL_CATALOG_KEYS
+            if is_arm_solve_model(k) and not is_hidden_from_selectors(k)
+        ]
+
+    def test_all_catalog_arm_models_returned_without_rows(self):
+        # Ни одной строки доступности за окно — все Web_/Ollama_-модели каталога
+        # всё равно в списке (раньше новые модели появлялись только на след. день).
+        options = self._options()
+        by_key = {opt["key"]: opt for opt in options}
+        self.assertEqual(set(by_key), set(self._arm_keys()))
+        for opt in options:
+            self.assertFalse(opt["is_available"])
+            self.assertEqual(opt["availability_note"], "не проверена")
+
+    def test_checked_models_get_notes_and_flags(self):
+        keys = self._arm_keys()
+        self.assertGreaterEqual(len(keys), 3)
+        available_key, failed_key, missing_key = keys[0], keys[1], keys[2]
+        self._row(available_key, True)
+        self._row(failed_key, False)
+
+        by_key = {opt["key"]: opt for opt in self._options()}
+        self.assertTrue(by_key[available_key]["is_available"])
+        self.assertEqual(by_key[available_key]["availability_note"], "")
+        self.assertFalse(by_key[failed_key]["is_available"])
+        self.assertEqual(by_key[failed_key]["availability_note"], "неактивна")
+        self.assertFalse(by_key[missing_key]["is_available"])
+        self.assertEqual(by_key[missing_key]["availability_note"], "не проверена")
+
+    def test_available_models_sort_first_then_alphabetical(self):
+        keys = self._arm_keys()
+        self._row(keys[-1], True)  # единственная доступная — она и первая
+        options = self._options()
+        self.assertEqual(options[0]["key"], keys[-1])
+        titles = [opt["title"] for opt in options[1:]]
+        self.assertEqual(titles, sorted(titles, key=str.lower))
+
+    def test_titles_and_capabilities_come_from_registry(self):
+        from ai.model_clients import registry
+        for opt in self._options():
+            self.assertEqual(opt["title"], registry.title(opt["key"]))
+            self.assertEqual(opt["capabilities"], registry.capabilities(opt["key"]))
+
+    def test_only_web_and_ollama_keys_present(self):
+        from ai.model_health import ARM_SOLVE_MODEL_PREFIXES
+        for opt in self._options():
+            self.assertTrue(opt["key"].startswith(ARM_SOLVE_MODEL_PREFIXES))
+
+
 class ModelHealthGuardTests(TestCase):
     """Serialization guard for run_model_health_check (multi-worker prod safety).
 

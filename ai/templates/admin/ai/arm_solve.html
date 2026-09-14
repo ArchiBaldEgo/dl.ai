@@ -110,6 +110,13 @@
     gap: 8px;
     background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color));
   }
+  /* Пометка у моделей без подтверждённой доступности («неактивна» /
+     «не проверена»): выбирать можно, но прогон по ней может не решить задачи. */
+  .arm-model-flag {
+    color: var(--body-quiet-color);
+    font-size: 12px;
+    white-space: nowrap;
+  }
 
   .arm-error {
     color: #b42318;
@@ -310,7 +317,7 @@
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
           <h2>Модели</h2>
-          <p class="arm-section-note">Без отметки запускается по всем доступным моделям (health-check).</p>
+          <p class="arm-section-note">В списке все модели Web/Ollama из каталога. Пометка у модели — статус последней проверки доступности. Без отметок прогон пойдёт по всем моделям из списка.</p>
         </div>
       </div>
       {% if model_options %}
@@ -321,6 +328,7 @@
           {% for m in model_options %}
             <label class="arm-model">
               <input type="checkbox" name="models" value="{{ m.key }}" class="arm-model-check"> {{ m.title }}
+              {% if m.availability_note %}<span class="arm-model-flag">({{ m.availability_note }})</span>{% endif %}
             </label>
           {% endfor %}
         </div>

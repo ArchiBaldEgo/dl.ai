@@ -917,11 +917,42 @@ def is_arm_solve_model(key):
 
 
 def get_arm_solve_model_options():
-    """Доступные модели для /arm/solve/ — только Web_* и Ollama_*.
+    """Все модели каталога, допущенные к /arm/solve/ (Web_* и Ollama_*).
 
-    Фильтрует get_available_model_options() по префиксам. Чтение только из
-    кеша/БД, health-check не запускает.
+    Список больше НЕ режется по «is_available» последнего health-окна: новая
+    модель каталога иначе не видна до первой проверки (окно раз в сутки,
+    см. баг с deepseek-v4.1-flash:cloud), а решение «брать ли сомнительную
+    модель» и так принимает запускающий галочками. Runner (start_batch_solve_run)
+    валидирует ключи тем же правилом is_arm_solve_model — теперь форма и
+    раннер согласованы. Статус последнего окна прикладывается пометкой:
+    «неактивна» (проверена и недоступна) / «не проверена» (нет данных за окно).
+    Порядок: доступные первыми, далее по алфавиту. Чтение только из БД,
+    health-check не запускает.
     """
-    return [
-        opt for opt in get_available_model_options() if is_arm_solve_model(opt.get("key"))
+    ordered_keys = [
+        k for k in MODEL_CATALOG_KEYS
+        if is_arm_solve_model(k) and not is_hidden_from_selectors(k)
     ]
+    titles = {key: registry.title(key) for key in ordered_keys}
+    checked = {
+        row.model_key: row.is_available
+        for row in AIModelAvailability.objects.filter(
+            window_date=get_health_window_date(),
+            model_key__in=ordered_keys,
+        )
+    }
+    options = [
+        {
+            "key": key,
+            "title": titles[key],
+            "capabilities": registry.capabilities(key),
+            "is_available": checked.get(key, False),
+            "availability_note": (
+                "" if checked.get(key)
+                else ("неактивна" if key in checked else "не проверена")
+            ),
+        }
+        for key in ordered_keys
+    ]
+    options.sort(key=lambda opt: (not opt["is_available"], opt["title"].lower()))
+    return options
