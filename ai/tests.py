@@ -5870,3 +5870,28 @@ class ArmFindErrorTopicsKeyTests(TestCase):
             "String(item.programming_language) === String(languageId)", src,
         )
         self.assertNotIn("item.programming_language_id", src)
+
+
+# ===================================================================
+# fetch(form.action) vs <input name="action">: затенение DOM-свойств формы
+# ===================================================================
+
+class FormActionShadowingTests(SimpleTestCase):
+    """Именованные поля формы затеняют DOM-свойства: в pdForm лежит
+    <input name="action">, поэтому ``form.action`` возвращал сам инпут, и
+    POST уходил на ``/ai/admin/prompt-defaults/[object HTMLInputElement]``
+    (404 в access-логах), а parseJsonResponse показывала «Сессия истекла…».
+    Все AJAX-отправки обязаны читать адрес формы через
+    ``form.getAttribute('action')`` — атрибут затенением не страдает."""
+
+    def test_prompt_defaults_post_url_uses_get_attribute(self):
+        from django.template.loader import get_template
+        src = get_template("admin/ai/prompt_defaults.html").template.source
+        self.assertIn("form.getAttribute('action')", src)
+        self.assertNotIn("fetch(form.action", src)
+
+    def test_request_logs_rerun_url_uses_get_attribute(self):
+        from django.template.loader import get_template
+        src = get_template("admin/ai/request_logs.html").template.source
+        self.assertIn("form.getAttribute('action')", src)
+        self.assertNotIn("fetch(form.action", src)

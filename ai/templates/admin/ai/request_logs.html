@@ -278,7 +278,9 @@
         btn.disabled = true;
         btn.textContent = 'Отправка...';
         statusEl.textContent = '';
-        fetch(form.action, {
+        // getAttribute, а НЕ form.action: именованное поле формы с тем же именем
+        // затенило бы свойство DOM (как в pdForm с <input name="action">).
+        fetch(form.getAttribute('action'), {
           method: 'POST',
           headers: {
             'X-CSRFToken': (csrfInput && csrfInput.value) || '',

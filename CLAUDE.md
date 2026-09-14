@@ -75,6 +75,7 @@ The project follows these rules; keep it that way and extend along them:
 ## Gotchas invisible from code
 
 - `serialize_topic` (ai/serializers.py) emits the language id under the key `programming_language` (NOT `programming_language_id`) — every client-side topic filter must read `t.programming_language` (arm_solve.html, arm_find_error.html fillTopics). Reading the wrong key leaves the topic select silently empty and breaks «Препромпты по умолчанию» by-topic bindings on that page (regression tested in `ArmFindErrorTopicsKeyTests`).
+- Named form fields shadow DOM properties: ``form.action`` with a form containing ``<input name="action">`` returns the INPUT ELEMENT, not the URL (POST to ``…/[object HTMLInputElement]`` → 404; parseJsonResponse then mislabels it «Сессия истекла…»). AJAX handlers must read the form target via ``form.getAttribute('action')`` (same for ``submit``/``method`` etc. if a field ever shares the name) — regression-guarded by `FormActionShadowingTests`.
 
 - `ConversationHistory` under Redis: `cache.get` returns a deserialized copy, so mutating the list returned by `get()` never persists — always write via `append()` and treat `get()` as read-only (it returns a defensive copy anyway).
 - `threading.Lock` в раннерах (`_jobs_lock`) нереентерабельный: `_append_log`/`_update_job` берут лок сами — никогда не вызывай их внутри `with _jobs_lock` (это deadlock; фикс в `test_console_runner._run_worker` — статус меняется под локом, warn-строка пишется после).

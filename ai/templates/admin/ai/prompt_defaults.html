@@ -185,7 +185,10 @@
     var body = new URLSearchParams();
     body.set('action', action);
     Object.keys(fields).forEach(function (key) { body.set(key, fields[key]); });
-    return fetch(form.action, {
+    // getAttribute, а НЕ form.action: в форме есть <input name="action">,
+    // и именованные поля затеняют свойства DOM — form.action возвращал бы
+    // сам инпут ("[object HTMLInputElement]"), и POST уходил на 404.
+    return fetch(form.getAttribute('action'), {
       method: 'POST', credentials: 'same-origin',
       headers: {
         'X-CSRFToken': getCsrfToken(),
