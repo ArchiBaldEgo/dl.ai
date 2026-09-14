@@ -17,6 +17,9 @@ TARGET_LANGUAGES = ("en", "fr")
 _GOOGLE_LANG_MAP = {
     "en": "en",
     "fr": "fr",
+    # "ru" — только для формы препромптов (перевод при смене языкового таба);
+    # в массовом автопереводе (TARGET_LANGUAGES) русский не участвует.
+    "ru": "ru",
 }
 
 # Compiled regex for placeholder protection — matches {anything} including

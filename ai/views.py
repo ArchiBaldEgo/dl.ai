@@ -20,7 +20,7 @@ import speech_recognition as sr
 import tempfile
 from django.contrib.auth import login
 from django.shortcuts import redirect, render
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponse
 from django.http import FileResponse, Http404, HttpResponseForbidden, HttpResponseNotFound, HttpResponseNotModified
 from django.db import ProgrammingError, models
 from django.db.models import Q
@@ -45,6 +45,7 @@ from .auth_backends import (
     normalize_external_user_id,
 )
 from .constants import PROMPT_DEVELOPER_GROUP
+from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
 from .dl_api_client import (
     DLApiUnavailable,
     DLForbiddenError,
@@ -937,3 +938,41 @@ def transcribe_audio(request):
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         return JsonResponse({'success': False, 'error': str(e)})
+
+
+@require_http_methods(["GET"])
+def chat_user_docs_view(request):
+    """Инструкция пользователя для модалки «?» в шапке чата.
+
+    Рендер главы «Инструкция для пользователя» (DOCX.md) в HTML
+    (ai/services/docs.py). Гейт как у страниц чата (_has_page_access → 403):
+    доступна любому аутентифицированному DL-пользователю, роль не нужна.
+    """
+    if not _has_page_access(request):
+        return JsonResponse({'success': False, 'error': 'forbidden'}, status=403)
+    try:
+        rendered = render_chapter_html("user")
+    except DocUnavailableError as exc:
+        return JsonResponse({'success': False, 'error': str(exc)}, status=404)
+    return JsonResponse({
+        'success': True,
+        'title': rendered['title'],
+        'html': rendered['html'],
+        'download_url': '/ai/docs/download/',
+    })
+
+
+@require_http_methods(["GET"])
+def chat_user_docs_download_view(request):
+    """Скачивание инструкции пользователя как .md-файла."""
+    if not _has_page_access(request):
+        return JsonResponse({'success': False, 'error': 'forbidden'}, status=403)
+    try:
+        data = read_chapter_markdown("user")
+    except DocUnavailableError as exc:
+        return JsonResponse({'success': False, 'error': str(exc)}, status=404)
+    from urllib.parse import quote
+    filename = quote(data['filename'])
+    response = HttpResponse(data['text'], content_type='text/markdown; charset=utf-8')
+    response['Content-Disposition'] = f"attachment; filename=\"docs.md\"; filename*=UTF-8''{filename}"
+    return response

@@ -1060,6 +1060,11 @@ var localization = {
         speakThinkLabel: "Озвучивать дополнительную информацию",
         themeToggle: "Сменить тему",
         lastUpdate: "Последнее обновление",
+        // Кнопка «?» — инструкция пользователя (модалка, initUserDocs).
+        userDocs: "Инструкция пользователя",
+        docsDownload: "Скачать .md",
+        docsClose: "Закрыть",
+        docsLoadError: "Не удалось загрузить инструкцию",
         // Селектор сортировки моделей (base_chat.html) + суффикс статистики.
         sortDefault: "Порядок: по алфавиту",
         sortSpeed: "Порядок: по скорости",
@@ -1134,6 +1139,11 @@ var localization = {
         speakThinkLabel: "Voice extra information",
         themeToggle: "Toggle theme",
         lastUpdate: "Last updated",
+        // «?» button — user docs modal (initUserDocs).
+        userDocs: "User guide",
+        docsDownload: "Download .md",
+        docsClose: "Close",
+        docsLoadError: "Failed to load the guide",
         // Model sort selector (base_chat.html) + stats suffix.
         sortDefault: "Order: alphabetical",
         sortSpeed: "Order: by speed",
@@ -1208,6 +1218,11 @@ var localization = {
         speakThinkLabel: "Informations supplémentaires vocales",
         themeToggle: "Changer le thème",
         lastUpdate: "Dernière mise à jour",
+        // Bouton « ? » — modale du guide utilisateur (initUserDocs).
+        userDocs: "Guide de l'utilisateur",
+        docsDownload: "Télécharger .md",
+        docsClose: "Fermer",
+        docsLoadError: "Impossible de charger le guide",
         // Sélecteur de tri des modèles (base_chat.html) + suffixe statistiques.
         sortDefault: "Ordre : alphabétique",
         sortSpeed: "Ordre : par vitesse",
@@ -1595,7 +1610,72 @@ function initThemeToggle() {
     if (selectLang) selectLang.addEventListener('change', updateTitle);
 }
 
+// === Кнопка «?» — инструкция пользователя (модалка) ===
+// GET /ai/docs/ → {ok/success, title, html, download_url} (ai/views.py
+// chat_user_docs_view: глава «Инструкция для пользователя» из DOCX.md).
+// HTML приходит уже отрендеренным и экранированным сервером (markdown → HTML
+// из нашего DOCX.md, пользовательский ввод в него не попадает). Закрытие —
+// крестик, фон, Escape.
+
+function initUserDocs() {
+    var btn = document.getElementById('userDocsBtn');
+    var modal = document.getElementById('aiDocsModal');
+    if (!btn || !modal) return;
+
+    var titleEl = document.getElementById('aiDocsTitle');
+    var bodyEl = document.getElementById('aiDocsBody');
+    var downloadEl = document.getElementById('aiDocsDownload');
+    var closeEl = document.getElementById('aiDocsClose');
+    var loaded = false;
+
+    function localize() {
+        var label = getUiString('userDocs', 'Инструкция пользователя');
+        btn.setAttribute('title', label);
+        btn.setAttribute('aria-label', label);
+        if (closeEl) closeEl.setAttribute('aria-label', getUiString('docsClose', 'Закрыть'));
+        if (downloadEl) downloadEl.textContent = '⇓ ' + getUiString('docsDownload', 'Скачать .md');
+    }
+
+    function open() {
+        modal.hidden = false;
+        if (loaded) return;
+        bodyEl.textContent = getUiString('docsLoadError', 'Не удалось загрузить инструкцию') + '…';
+        fetch('/ai/docs/', {credentials: 'same-origin'})
+            .then(function(response) {
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                return response.json();
+            })
+            .then(function(data) {
+                if (!data || !data.success || !data.html) throw new Error('bad payload');
+                titleEl.textContent = data.title || getUiString('userDocs', 'Инструкция пользователя');
+                bodyEl.innerHTML = data.html;
+                if (downloadEl && data.download_url) downloadEl.setAttribute('href', data.download_url);
+                loaded = true;
+            })
+            .catch(function() {
+                bodyEl.textContent = getUiString('docsLoadError', 'Не удалось загрузить инструкцию');
+            });
+    }
+
+    function close() { modal.hidden = true; }
+
+    btn.addEventListener('click', open);
+    if (closeEl) closeEl.addEventListener('click', close);
+    // Клик по фону (не по диалогу) закрывает.
+    modal.addEventListener('click', function(event) {
+        if (event.target === modal) close();
+    });
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape' && !modal.hidden) close();
+    });
+    // Перелокализировать подсказки при смене языка интерфейса.
+    var selectLang = document.getElementById('selectLang');
+    if (selectLang) selectLang.addEventListener('change', localize);
+    localize();
+}
+
 document.addEventListener('DOMContentLoaded', initThemeToggle);
+document.addEventListener('DOMContentLoaded', initUserDocs);
 
 // === Conversation persistence across reloads (until «Clear Context») ===
 // Каждое пришедшее по WS сообщение диалога (эхо пользователя «Обрабатываю

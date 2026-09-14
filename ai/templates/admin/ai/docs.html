@@ -1,0 +1,47 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% comment %}Страница документации: глава рендерится из markdown в HTML
+(ai/services/docs.py), доступ по роли (any/staff/superuser). Кнопка «Скачать
+.md» отдаёт исходник главы (ai_docs_download).{% endcomment %}
+
+{% block title %}{{ chapter_title }}{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Главная</a>
+  &rsaquo; <a href="{% url 'ai_docs' %}">Документация</a>
+  &rsaquo; {{ chapter_title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main" class="ai-docs-wrap">
+  {% include "admin/ai/_ai_back_nav.html" %}
+
+  {% if chapters %}
+  <div class="ai-docs-chapters">
+    <span class="ai-docs-chapters-label">Разделы:</span>
+    {% for chapter in chapters %}
+      {% if chapter.slug == current_slug %}
+        <span class="ai-docs-chapter ai-docs-chapter-current">{{ chapter.title }}</span>
+      {% else %}
+        <a class="ai-docs-chapter" href="/ai/admin/docs/{{ chapter.slug }}/">{{ chapter.title }}</a>
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="ai-docs-toolbar">
+    {% if download_url %}
+    <a class="button ai-docs-download" href="{{ download_url }}">&#8681; Скачать .md</a>
+    {% endif %}
+  </div>
+
+  <div class="module ai-docs-module">
+    <div class="ai-docs-content">
+      {{ html|safe }}
+    </div>
+  </div>
+</div>
+{% endblock %}

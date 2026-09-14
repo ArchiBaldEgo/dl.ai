@@ -411,3 +411,241 @@
   font-weight: 600;
   font-size: 13px;
 }
+
+/* ───────────── «Зайти как гость» (шапка админки, суперюзер) ───────────── */
+
+/* Кнопка-пилюля рядом с «Процессы» — визуальный гостевой режим
+   (ai/admin/guest_mode.py). В активном состоянии подсвечена: суперюзер
+   смотрит админку глазами разработчика промптов. */
+.ai-guest-form {
+  display: inline;
+  margin-left: 8px;
+}
+
+.ai-guest-toggle {
+  display: inline-block;
+  padding: 1px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  background: var(--darkened-bg);
+  border: 1px solid var(--hairline-color);
+  color: var(--body-quiet-color);
+  cursor: pointer;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.ai-guest-toggle:hover {
+  color: var(--link-fg);
+  border-color: var(--link-fg);
+}
+
+.ai-guest-toggle.ai-guest-active {
+  color: #b54708;
+  border-color: #b54708;
+  background: color-mix(in srgb, #fff7ed 70%, var(--body-bg));
+}
+
+/* ───────────── Страница документации (группа «Документация») ───────────── */
+
+.ai-docs-chapters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 10px 0 6px;
+  font-size: 12px;
+}
+
+.ai-docs-chapters-label {
+  color: var(--body-quiet-color);
+}
+
+.ai-docs-chapter {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--darkened-bg);
+  border: 1px solid var(--hairline-color);
+  color: var(--body-quiet-color);
+  white-space: nowrap;
+}
+
+a.ai-docs-chapter:hover {
+  color: var(--link-fg);
+  border-color: var(--link-fg);
+}
+
+.ai-docs-chapter-current {
+  color: var(--link-fg);
+  border-color: var(--link-fg);
+  cursor: default;
+}
+
+.ai-docs-toolbar {
+  margin: 8px 0;
+}
+
+.ai-docs-module {
+  padding: 16px 20px;
+}
+
+/* Контент главы: markdown → HTML. Стилизуем таблицы, код и цитаты —
+   исходники глав (DOCX.md, док/документация) насыщены таблицами. */
+.ai-docs-content {
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: break-word;
+}
+
+.ai-docs-content h1,
+.ai-docs-content h2,
+.ai-docs-content h3,
+.ai-docs-content h4 {
+  margin: 18px 0 8px;
+  line-height: 1.3;
+}
+
+.ai-docs-content h1:first-child {
+  margin-top: 0;
+}
+
+.ai-docs-content p {
+  margin: 8px 0;
+}
+
+.ai-docs-content ul,
+.ai-docs-content ol {
+  margin: 8px 0;
+  padding-left: 22px;
+}
+
+.ai-docs-content code {
+  background: var(--darkened-bg);
+  border: 1px solid var(--hairline-color);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 13px;
+}
+
+.ai-docs-content pre {
+  background: var(--darkened-bg);
+  border: 1px solid var(--hairline-color);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+
+.ai-docs-content pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.ai-docs-content table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  width: 100%;
+}
+
+.ai-docs-content th,
+.ai-docs-content td {
+  border: 1px solid var(--hairline-color);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.ai-docs-content th {
+  background: var(--darkened-bg);
+  font-weight: 600;
+}
+
+.ai-docs-content blockquote {
+  border-left: 3px solid var(--hairline-color);
+  margin: 10px 0;
+  padding: 2px 12px;
+  color: var(--body-quiet-color);
+}
+
+/* ───────────── Приветствие дашборда («[id] ФИО» вместо Recent actions) ───────────── */
+
+.ai-dashboard-greeting {
+  padding: 14px 16px;
+}
+
+.ai-dashboard-greeting h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.ai-dashboard-role {
+  margin: 0;
+  color: var(--body-quiet-color);
+  font-size: 12px;
+}
+
+/* ───────────── Языковые табы RU/EN/FR в форме препромпта ───────────── */
+
+/* Вместо 3 полей названия + 3 textarea — 1 название + 1 textarea с табами
+   языков (prompt_translate_tabs.js); пустой язык авто-переводится AJAX-ом
+   с заполненного (PromptAdmin.admin_translate_field_view). */
+.ai-lang-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 8px 0 12px;
+}
+
+.ai-lang-tab {
+  padding: 4px 14px;
+  border-radius: 14px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--darkened-bg);
+  border: 1px solid var(--hairline-color);
+  color: var(--body-quiet-color);
+  cursor: pointer;
+}
+
+.ai-lang-tab:hover {
+  color: var(--link-fg);
+  border-color: var(--link-fg);
+}
+
+.ai-lang-tab-active,
+.ai-lang-tab-active:hover {
+  background: var(--link-fg);
+  border-color: var(--link-fg);
+  color: #fff;
+}
+
+.ai-lang-translate {
+  padding: 4px 10px;
+  border-radius: 14px;
+  font-size: 11px;
+  background: none;
+  border: 1px dashed var(--hairline-color);
+  color: var(--body-quiet-color);
+  cursor: pointer;
+}
+
+.ai-lang-translate:hover {
+  color: var(--link-fg);
+  border-color: var(--link-fg);
+}
+
+.ai-lang-msg {
+  font-size: 11px;
+  color: var(--body-quiet-color);
+}
+
+.ai-lang-msg-error {
+  color: #b54708;
+  font-weight: 600;
+}

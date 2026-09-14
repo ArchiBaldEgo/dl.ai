@@ -9,4 +9,6 @@ urlpatterns = [
     path('ai/find-error/',views.find_error_view, name='find_error_view'),
     path('ai/assets/<path:asset_path>', views.asset_view, name='asset_view'),
     path('ai/transcribe/', views.transcribe_audio, name='transcribe_audio'),
+    path('ai/docs/', views.chat_user_docs_view, name='ai_user_docs'),
+    path('ai/docs/download/', views.chat_user_docs_download_view, name='ai_user_docs_download'),
 ]

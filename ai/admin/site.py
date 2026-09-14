@@ -309,6 +309,7 @@ class AIAdminSite(admin.AdminSite):
         return app_list
 
     def each_context(self, request):
+        from .guest_mode import is_viewing_as_guest
         from .my_prompt import get_my_prompt_admin_url
         context = super().each_context(request)
         is_pd = is_prompt_developer_user(request.user)
@@ -320,20 +321,28 @@ class AIAdminSite(admin.AdminSite):
         # в тестовой консоли. Личное меню «мои процессы» в шапке (ai_processes.js
         # + active_runs) видно всем админам и показывает только свои прогоны.
         context["is_super_user"] = is_super
+        # Гостевой режим («Зайти как гость»): суперюзер смотрит админку глазами
+        # разработчика промптов — только ВИД, права не режем (см. guest_mode.py).
+        guest = is_viewing_as_guest(request)
+        context["is_viewing_as_guest"] = guest
         context["user_display_name"] = self._user_display_name(request.user)
+        context["user_dl_id"] = self._user_dl_id(request.user)
         context["user_role_label"] = self._user_role_label(
             request.user, is_super, is_staff, is_pd,
         )
+        if guest:
+            context["user_role_label"] += " (гость)"
         show_arm = can_access_arm(request)
         context["show_arm_link"] = show_arm
-        show_model_status = can_access_model_status(request)
+        # Суперюзерские инструменты в гостевом режиме визуально скрыты.
+        show_model_status = can_access_model_status(request) and not guest
         context["show_model_status_link"] = show_model_status
         context["show_prompt_link"] = can_access_prompt_admin(request)
         show_logs = can_access_logs(request)
         context["show_logs_link"] = show_logs
-        show_prompt_regression = can_access_prompt_regression(request)
+        show_prompt_regression = can_access_prompt_regression(request) and not guest
         context["show_prompt_regression_link"] = show_prompt_regression
-        show_test_console = can_access_test_console(request)
+        show_test_console = can_access_test_console(request) and not guest
         context["show_test_console_link"] = show_test_console
         arm_find_error_url = "/ai/admin/arm/find-error/"
         arm_solve_url = "/ai/admin/arm/solve/"
@@ -354,11 +363,12 @@ class AIAdminSite(admin.AdminSite):
         context["my_prompt_change_url"] = get_my_prompt_admin_url(request)
         ai_logs_url = "/ai/admin/ai/airequestlog/"
         context["ai_logs_url"] = ai_logs_url
-        show_updates = is_staff
+        show_updates = is_staff and not guest
         context["show_updates_link"] = show_updates
         updates_url = "/ai/admin/updates/"
         context["updates_url"] = updates_url
         aiappsettings_url = self._aiappsettings_url()
+        docs_url = "/ai/admin/docs/"
 
         # --- AI tools in the left navigation sidebar (#nav-sidebar) ---
         # The left nav renders `available_apps` (separate from the dashboard's
@@ -374,12 +384,15 @@ class AIAdminSite(admin.AdminSite):
                 # навигации (группа «ai-pinned» рендерится без заголовка, см.
                 # admin/app_list.html). Раньше это была строка группы «Раздел
                 # ИИ» — из real_apps ниже она убирается, чтобы не дублировалась.
-                ("Закреплено", "Настройка ИИ-приложения", "AiAppSettings", aiappsettings_url, is_staff, "⚙", "Вкл/выкл доступ к ИИ, последние запросы и пакетные прогоны"),
+                ("Закреплено", "Настройка ИИ-приложения", "AiAppSettings", aiappsettings_url, is_staff and not guest, "⚙", "Вкл/выкл доступ к ИИ, последние запросы и пакетные прогоны"),
                 # NB: остальные дубликаты реальных ModelAdmin-строк («Препромпты»)
                 # сюда НЕ добавляем — они и так есть в группе «Раздел ИИ» ниже.
                 # Здесь — только кастомные инструменты.
                 ("Промпты", "Мой препромпт", "AiMyPrompt", my_prompt_url, is_pd, "✎", "Свои и закреплённые препромпты"),
-                ("Промпты", "Препромпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", is_super, "⚙", "Авто-подстановка по языку/теме ARM"),
+                ("Промпты", "Препромпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", is_super and not guest, "⚙", "Авто-подстановка по языку/теме ARM"),
+                ("Документация", "Разработчик промптов", "AiDocsPromptDeveloper", docs_url + "prompt-developer/", True, "✎", "Инструкция для разработчика промптов"),
+                ("Документация", "Разработчик", "AiDocsDeveloper", docs_url + "developer/", is_staff and not guest, "⚙", "Документация для разработчика"),
+                ("Документация", "Суперюзер", "AiDocsSuperuser", docs_url + "superuser/", is_super and not guest, "⚙", "Инструкция для суперадмина"),
                 ("ARM", "Пакетное решение", "AiArmSolve", arm_solve_url, show_arm, "▤", "Пакетный прогон моделей по задачам DL"),
                 ("ARM", "Состояние моделей", "AiModelStatus", arm_model_status_url, show_model_status, "◉", "Доступность AI-моделей сегодня"),
                 ("Диагностика", "Журнал запросов", "AiRequestLogs", ai_logs_url, show_logs, "≣", "Все запросы к моделям, с поиском"),
@@ -440,6 +453,21 @@ class AIAdminSite(admin.AdminSite):
         return "Пользователь"
 
     @staticmethod
+    def _user_dl_id(user):
+        """DL-идентификатор пользователя для приветствия «[id] ФИО».
+
+        DL-провижненные аккаунты — это username ``user_<id>``; возвращаем id
+        без префикса. Локальным пользователям (без префикса) — username, а
+        если он пуст — pk.
+        """
+        if not user or not getattr(user, "is_authenticated", False):
+            return ""
+        username = getattr(user, "get_username", lambda: "")() or ""
+        if username.startswith("user_"):
+            return username[5:]
+        return username or str(getattr(user, "pk", "") or "")
+
+    @staticmethod
     def _aiappsettings_url():
         """Ссылка на страницу «Настройка ИИ-приложения» для навигации.
 
@@ -485,10 +513,11 @@ class AIAdminSite(admin.AdminSite):
         # «Закреплено» (app_label ai-pinned) — беззаголовочная группа,
         # закреплённая самым первым пунктом навигации (шаблон
         # admin/app_list.html не рисует для неё title).
-        group_order = ["Закреплено", "Промпты", "ARM", "Диагностика", "Система"]
+        group_order = ["Закреплено", "Промпты", "Документация", "ARM", "Диагностика", "Система"]
         label_to_key = {
             "Закреплено": "ai-pinned",
             "Промпты": "ai-tools-prompts",
+            "Документация": "ai-docs",
             "ARM": "ai-tools-arm",
             "Диагностика": "ai-tools-diag",
             "Система": "ai-tools-system",

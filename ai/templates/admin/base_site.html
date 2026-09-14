@@ -43,5 +43,18 @@ file AND admin/app_list.html are not shadowed by the stock admin templates
       <span class="ai-processes-chip" id="aiProcessesChip">Процессы (0) ▾</span>
     </button>
     <div id="aiProcessesMenu" class="ai-processes-menu" hidden></div>
+    {% comment %}«Зайти как гость» — сосед кнопки «Процессы» (не вложенный:
+    nested <button> невалиден). Суперюзерский POST-переключатель визуального
+    гостевого режима (ai/admin/guest_mode.py): интерфейс как у разработчика
+    промптов, права не режем.{% endcomment %}
+    {% if is_super_user %}
+    <form method="post" action="{% url 'ai_view_as_guest' %}" class="ai-guest-form">
+      {% csrf_token %}
+      <button type="submit" id="aiGuestToggle"
+              class="ai-guest-toggle{% if is_viewing_as_guest %} ai-guest-active{% endif %}">
+        {% if is_viewing_as_guest %}Вернуться в полную админку{% else %}Зайти как гость{% endif %}
+      </button>
+    </form>
+    {% endif %}
   </span>
 {% endblock %}

@@ -25,9 +25,9 @@
     {% endblock %}
     {% block extra_css %}{% endblock %}
     <!-- Тема подключается ПОСЛЕ страничных CSS, чтобы переменные перепобивали значения. -->
-    <link rel="stylesheet" href="/ai/assets/admin/css/ai_theme.css?v=1"/>
+    <link rel="stylesheet" href="/ai/assets/admin/css/ai_theme.css?v=2"/>
     {% block js %}
-    <script src="/ai/assets/admin/js/ai-common.js?v=11" defer></script>
+    <script src="/ai/assets/admin/js/ai-common.js?v=12" defer></script>
     <script src="/ai/assets/admin/js/chat_template.js?v=4" defer></script>
     {% endblock %}
     {% block extra_js %}{% endblock %}
@@ -101,6 +101,10 @@
                         <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
                     </svg>
                 </button>
+                <!-- Инструкция пользователя «?» (ai-common.js initUserDocs):
+                     модалка с HTML-рендером главы DOCX.md + скачивание .md -->
+                <button type="button" class="theme-toggle doc-toggle" id="userDocsBtn"
+                    aria-label="Инструкция пользователя" title="Инструкция пользователя">?</button>
             </div>
             <div class="voice-mod-div">
                 <button type="button" class="voice-mode-btn" id="voiceModeBtn" onclick="toggleVoiceControls()">
@@ -165,6 +169,20 @@
         </button>
     </div>
     <footer id="load-time-footer" class="load-time-footer" aria-live="polite"></footer>
+
+    <!-- Модалка «Инструкция пользователя» (initUserDocs в ai-common.js):
+         HTML-рендер главы DOCX.md + скачивание .md. Закрытие — крестик,
+         фон, Escape. -->
+    <div class="ai-docs-modal" id="aiDocsModal" hidden>
+        <div class="ai-docs-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="aiDocsTitle">
+            <div class="ai-docs-modal-header">
+                <h2 id="aiDocsTitle"></h2>
+                <a id="aiDocsDownload" class="ai-docs-modal-download" download>&#8681; Скачать .md</a>
+                <button type="button" id="aiDocsClose" class="ai-docs-modal-close" aria-label="Закрыть">&#10005;</button>
+            </div>
+            <div class="ai-docs-modal-body" id="aiDocsBody"></div>
+        </div>
+    </div>
 </body>
 <script>
 function goToAiPage(selectEl) {

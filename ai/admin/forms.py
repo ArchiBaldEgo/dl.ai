@@ -52,7 +52,7 @@ class PromptForm(forms.ModelForm):
         }
 
     class Media:
-        js = ("admin/js/prompt_language_topic.js",)
+        js = ("admin/js/prompt_language_topic.js", "admin/js/prompt_translate_tabs.js",)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

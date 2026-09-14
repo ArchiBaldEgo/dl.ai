@@ -1,12 +1,22 @@
 """Высокоуровневые сервисы для views, consumers и admin-кода.
 
 Объединяет: аутентификацию WebSocket, композицию сообщений, вызов моделей,
-резолвинг промптов, логирование, историю диалогов, авто-перевод, регистрацию DL-задач.
+резолвинг промптов, логирование, историю диалогов, авто-перевод, регистрацию DL-задач,
+документацию.
 """
 
 from .auth import WebSocketAuthService, get_user_identity_for_log, resolve_external_account
 from .auto_translate import translate_object, translate_text, get_translatable_models
 from .conversation_history import ConversationHistory, conversation_history
+from .docs import (
+    DocChapter,
+    DocUnavailableError,
+    all_chapters,
+    get_chapter,
+    read_chapter_markdown,
+    render_chapter_html,
+    visible_chapter_slugs,
+)
 from .log_writer import LogWriter
 from .message_composer import MessageComposer
 from .model_caller import ModelCaller
@@ -22,6 +32,13 @@ __all__ = [
     "get_translatable_models",
     "ConversationHistory",
     "conversation_history",
+    "DocChapter",
+    "DocUnavailableError",
+    "all_chapters",
+    "get_chapter",
+    "read_chapter_markdown",
+    "render_chapter_html",
+    "visible_chapter_slugs",
     "LogWriter",
     "MessageComposer",
     "ModelCaller",
