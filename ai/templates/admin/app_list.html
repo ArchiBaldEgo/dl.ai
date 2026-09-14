@@ -3,84 +3,52 @@
 Project override of django.contrib.admin's admin/app_list.html (found first
 because 'ai' precedes 'django.contrib.admin' in INSTALLED_APPS with
 APP_DIRS=True). It feeds the LEFT navigation sidebar (#nav-sidebar, rendered by
-admin/nav_sidebar.html on every admin page) and the dashboard.
+admin/nav_sidebar.html on every admin page).
 
-Goals (per ТЗ): a convenient, tidy, ordered left nav.
+Everything renders in ONE unified style (по ТЗ «всё в одном стиле»): each app —
+real model apps («Раздел ИИ») and the AI tool groups injected by
+AIAdminSite.each_context — is an .ai-nav-group: quiet uppercase title, then an
+iconised link list (.ai-nav-item). Tool groups carry app_label `ai-tools-*` and
+come first (tools_apps + real_apps, see site.py::each_context), real apps follow.
+Model rows keep a small «+» add-action when add_url is present (stock addlink
+capability), and the current page highlights via current-app/current-model
+(substring check, same semantics as the stock template).
 
-* AI tool groups injected by AIAdminSite.each_context have an app_label
-  starting with "ai-tools" (see site.py::_build_ai_nav_apps). They render as
-  first-class, iconised sections at the top, in the explicit order produced
-  there (Промпты → ARM → Диагностика → Система).
-* Real ModelAdmin apps (Раздел ИИ, …) render below as a plain, sorted list.
-  Their per-model rows keep the stock markup/classes so the stock
-  nav-filter JS, `current-app`/`current-model` highlight and CSS all keep
-  working.
+The stock nav quick-filter JS only knows `th[scope=row] a` table rows — there
+are none here — so static/admin/js/ai_nav_filter.js filters .ai-nav-item rows
+and manages the stock `.no-results` flag on the input.
 
 NB: multi-line Django comments must be a {% comment %} block — a {# … #}
 comment only strips a single line.
 {% endcomment %}
 
 {% if app_list %}
-  {# --- AI tool groups (custom, iconised, ordered) --- #}
   {% for app in app_list %}
-    {% if app.app_label|slice:":8" == "ai-tools" %}
-      <div class="ai-nav-group app-{{ app.app_label }}{% if app.app_url in request.path|urlencode %} current-app{% endif %}">
+    {% if app.models %}
+      <div class="ai-nav-group app-{{ app.app_label }}{% if app.app_url in request.path|urlencode and app.app_url != '#' %} current-app{% endif %}">
         <div class="ai-nav-group-title">{{ app.name }}</div>
         <ul class="ai-nav-list">
           {% for model in app.models %}
             <li class="ai-nav-item model-{{ model.object_name|lower }}{% if model.admin_url in request.path|urlencode %} current-model{% endif %}">
-              {% if model.admin_url %}
-                <a href="{{ model.admin_url }}"{% if model.hint %} title="{{ model.hint }}"{% endif %}{% if model.admin_url in request.path|urlencode %} aria-current="page"{% endif %}>
-                  {% if model.icon %}<span class="ai-nav-icon" aria-hidden="true">{{ model.icon }}</span>{% endif %}
-                  <span class="ai-nav-label">{{ model.name }}</span>
-                </a>
-              {% else %}
-                <span class="ai-nav-icon" aria-hidden="true">{{ model.icon }}</span>
-                <span class="ai-nav-label">{{ model.name }}</span>
-              {% endif %}
+              <div class="ai-nav-row">
+                {% if model.admin_url %}
+                  <a class="ai-nav-link" href="{{ model.admin_url }}"{% if model.hint %} title="{{ model.hint }}"{% endif %}{% if model.admin_url in request.path|urlencode %} aria-current="page"{% endif %}>
+                    <span class="ai-nav-icon" aria-hidden="true">{{ model.icon|default:"" }}</span>
+                    <span class="ai-nav-label">{{ model.name }}</span>
+                  </a>
+                {% else %}
+                  <span class="ai-nav-link ai-nav-link-static">
+                    <span class="ai-nav-icon" aria-hidden="true">{{ model.icon|default:"" }}</span>
+                    <span class="ai-nav-label">{{ model.name }}</span>
+                  </span>
+                {% endif %}
+                {% if model.add_url %}
+                  <a class="ai-nav-add" href="{{ model.add_url }}" title="{% blocktranslate with name=model.name %}Add {{ name }}{% endblocktranslate %}">+</a>
+                {% endif %}
+              </div>
             </li>
           {% endfor %}
         </ul>
-      </div>
-    {% endif %}
-  {% endfor %}
-
-  {# --- Real model apps (stock list, but tidy) --- #}
-  {% for app in app_list %}
-    {% if app.app_label|slice:":8" != "ai-tools" %}
-      <div class="app-{{ app.app_label }} module{% if app.app_url in request.path|urlencode %} current-app{% endif %}">
-        <table>
-          <caption>
-            <a href="{{ app.app_url }}" class="section" title="{% blocktranslate with name=app.name %}Models in the {{ name }} application{% endblocktranslate %}">{{ app.name }}</a>
-          </caption>
-          {% for model in app.models %}
-            {% with model_name=model.object_name|lower %}
-              <tr class="model-{{ model_name }}{% if model.admin_url in request.path|urlencode %} current-model{% endif %}">
-                <th scope="row" id="{{ app.app_label }}-{{ model_name }}">
-                  {% if model.admin_url %}
-                    <a href="{{ model.admin_url }}"{% if model.admin_url in request.path|urlencode %} aria-current="page"{% endif %}>{{ model.name }}</a>
-                  {% else %}
-                    {{ model.name }}
-                  {% endif %}
-                </th>
-                {% if model.add_url %}
-                  <td><a href="{{ model.add_url }}" class="addlink" aria-describedby="{{ app.app_label }}-{{ model_name }}">{% translate 'Add' %}</a></td>
-                {% else %}
-                  <td></td>
-                {% endif %}
-                {% if model.admin_url and show_changelinks %}
-                  {% if model.view_only %}
-                    <td><a href="{{ model.admin_url }}" class="viewlink" aria-describedby="{{ app.app_label }}-{{ model_name }}">{% translate 'View' %}</a></td>
-                  {% else %}
-                    <td><a href="{{ model.admin_url }}" class="changelink" aria-describedby="{{ app.app_label }}-{{ model_name }}">{% translate 'Change' %}</a></td>
-                  {% endif %}
-                {% elif show_changelinks %}
-                  <td></td>
-                {% endif %}
-              </tr>
-            {% endwith %}
-          {% endfor %}
-        </table>
       </div>
     {% endif %}
   {% endfor %}

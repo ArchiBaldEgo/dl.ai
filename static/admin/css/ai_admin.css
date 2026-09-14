@@ -29,13 +29,13 @@
   vertical-align: middle;
 }
 
-/* ─────────────────── Left-nav tool group readability ───────────────── */
+/* ─────────────────── Left-nav groups (unified style) ─────────────── */
 
-/* Custom, iconised AI tool groups rendered by our override of
-   admin/app_list.html (ai/templates/admin/app_list.html), fed by
-   AIAdminSite.each_context → available_apps. Groups carry an `ai-tools-*`
-   app_label and render at the top of the left nav in the explicit order set
-   in site.py::_build_ai_nav_apps. */
+/* Every left-nav group — AI tools (app_label `ai-tools-*`, injected by
+   AIAdminSite.each_context) AND real model apps («Раздел ИИ») — renders
+   as .ai-nav-group: quiet uppercase title + iconised link list. See
+   ai/templates/admin/app_list.html (project override of the stock
+   admin/app_list.html). */
 #nav-sidebar .ai-nav-group {
   margin: 14px 0 0;
   padding: 0 0 2px;
@@ -53,31 +53,45 @@
   color: var(--body-quiet-color);
 }
 
+#nav-sidebar .ai-nav-group.current-app .ai-nav-group-title {
+  color: var(--link-fg);
+}
+
 #nav-sidebar ul.ai-nav-list {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-#nav-sidebar .ai-nav-item > a {
+#nav-sidebar .ai-nav-row {
+  display: flex;
+  align-items: stretch;
+}
+
+#nav-sidebar .ai-nav-link {
   display: flex;
   align-items: center;
   gap: 9px;
+  flex: 1 1 auto;
+  min-width: 0;
   padding: 7px 12px;
   color: var(--body-fg);
   text-decoration: none;
   border-left: 3px solid transparent;
   line-height: 1.3;
 }
-#nav-sidebar .ai-nav-item > a:hover,
-#nav-sidebar .ai-nav-item > a:focus {
+#nav-sidebar .ai-nav-link-static {
+  color: var(--body-quiet-color);
+}
+#nav-sidebar a.ai-nav-link:hover,
+#nav-sidebar a.ai-nav-link:focus {
   background: var(--darkened-bg);
   color: var(--link-fg);
 }
 
-/* Active tool: highlighted bar on the left + tinted background. */
-#nav-sidebar .ai-nav-item.current-model > a {
-  background: var(--selected-bg, var(--darkened-bg));
+/* Active row: highlighted bar on the left + tinted background. */
+#nav-sidebar .ai-nav-item.current-model .ai-nav-link {
+  background: var(--darkened-bg);
   border-left-color: var(--link-fg);
   font-weight: 600;
   color: var(--link-fg);
@@ -91,37 +105,31 @@
   color: var(--body-quiet-color);
 }
 #nav-sidebar .ai-nav-item.current-model .ai-nav-icon,
-#nav-sidebar .ai-nav-item > a:hover .ai-nav-icon {
+#nav-sidebar a.ai-nav-link:hover .ai-nav-icon {
   color: var(--link-fg);
 }
 
 #nav-sidebar .ai-nav-label {
   flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* Separator above the first real model app so tools read as their own zone. */
-#nav-sidebar .ai-nav-group + .module {
-  margin-top: 16px;
-}
-
-/* Legacy: injected groups used to carry a generic `ai-tools`/`ai-admin`
-   app_label and render through the stock app_list markup. Kept toned-down in
-   case a cached/older context still produces them. */
-#nav-sidebar .app-ai-tools,
-#nav-sidebar .app-ai-admin {
-  margin-top: 6px;
-}
-#nav-sidebar .app-ai-tools caption a.section:link,
-#nav-sidebar .app-ai-tools caption a.section:visited,
-#nav-sidebar .app-ai-admin caption a.section:link,
-#nav-sidebar .app-ai-admin caption a.section:visited {
+/* «+» add-action on model rows (the stock sidebar's addlink, restyled). */
+#nav-sidebar .ai-nav-add {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 7px 12px;
+  border-left: 1px solid var(--hairline-color);
   color: var(--body-quiet-color);
   font-weight: 700;
-}
-#nav-sidebar .app-ai-tools caption a.section:hover,
-#nav-sidebar .app-ai-admin caption a.section:hover {
-  color: var(--link-fg);
   text-decoration: none;
+}
+#nav-sidebar .ai-nav-add:hover {
+  background: var(--darkened-bg);
+  color: var(--link-fg);
 }
 
 /* ─────────────────────── Back-nav (tool pages) ─────────────────────── */

@@ -5520,9 +5520,10 @@ class ArmFindErrorBindingTests(TestCase):
 
 class AdminNavToolGroupTests(TestCase):
     """Левое меню (each_context → available_apps + наш оверрайд
-    admin/app_list.html): инструменты сгруппированы в фиксированном порядке
-    (Промпты → ARM → Диагностика → Система), каждый с иконкой и подсказкой;
-    реальные приложения рендерятся отдельным блоком ниже; дубликаты
+    admin/app_list.html): инструменты идут первыми, сгруппированы в
+    фиксированном порядке (Промпты → ARM → Диагностика → Система), каждый
+    с иконкой и подсказкой; реальные приложения («Раздел ИИ») рендерятся
+    той же единой разметкой .ai-nav-group с иконками; дубликаты
     ModelAdmin-строк в инструменты не добавляются; «Поиск ошибки (ARM)»
     временно скрыт из меню (_HIDDEN_NAV_OBJECT_NAMES), страница остаётся
     доступной по прямому URL."""
@@ -5584,8 +5585,8 @@ class AdminNavToolGroupTests(TestCase):
 
     def test_app_list_override_renders_groups_before_real_apps(self):
         """Наш оверрайд admin/app_list.html рендерит группы инструментов выше
-        реальных приложений, с разметкой .ai-nav-group и скрытым Поиском
-        ошибки."""
+        реальных приложений, ЕДИНОЙ разметкой .ai-nav-group с иконками;
+        Поиск ошибки скрыт."""
         from django.template.loader import render_to_string
         ctx = self._each_context(self.superuser)
         request = self.factory.get("/ai/admin/")
@@ -5601,6 +5602,51 @@ class AdminNavToolGroupTests(TestCase):
         # Инструменты идут раньше реальных приложений («Раздел ИИ»).
         self.assertLess(html.find("Пакетное решение"), html.find("Раздел ИИ"))
         self.assertNotIn("Поиск ошибки (ARM)", html)
+
+    def test_real_apps_render_in_unified_style(self):
+        """«Раздел ИИ» рендерится той же разметкой, что и группы инструментов:
+        div.ai-nav-group + строки .ai-nav-item с иконками и «+» добавления,
+        без стоковых таблиц (th[scope=row] больше нет — их фильтровал только
+        штатный nav_sidebar.js)."""
+        from django.template.loader import render_to_string
+        ctx = self._each_context(self.superuser)
+        request = self.factory.get("/ai/admin/")
+        request.user = self.superuser
+        request.session = {}
+        html = render_to_string("admin/app_list.html", {
+            "app_list": ctx["available_apps"],
+            "request": request,
+            "show_changelinks": False,
+        })
+        self.assertIn('ai-nav-group app-ai', html)
+        self.assertIn('model-aiappsettings', html)
+        self.assertIn('model-prompt', html)
+        self.assertIn('class="ai-nav-add"', html)
+        self.assertNotIn('th scope="row"', html)
+
+    def test_tools_first_in_available_apps(self):
+        """available_apps: сначала все ai-tools-группы, затем реальные
+        приложения — порядок задаётся в each_context."""
+        ctx = self._each_context(self.superuser)
+        labels = [a["app_label"] for a in ctx["available_apps"]]
+        self.assertTrue(labels)
+        first_real = next(
+            i for i, label in enumerate(labels) if not label.startswith("ai-tools")
+        )
+        self.assertTrue(all(l.startswith("ai-tools") for l in labels[:first_real]))
+        self.assertFalse(any(l.startswith("ai-tools") for l in labels[first_real:]))
+
+    def test_real_model_rows_get_icons(self):
+        """Строки реальных моделей украшаются иконками (_REAL_MODEL_ICONS) —
+        «Раздел ИИ» в том же иконизированном стиле, что и инструменты."""
+        ctx = self._each_context(self.superuser)
+        ai_app = next(
+            a for a in ctx["available_apps"] if a["app_label"] == "ai"
+        )
+        icons = {m["object_name"]: m.get("icon") for m in ai_app["models"]}
+        self.assertEqual(icons.get("AIAppSettings"), "⚙")
+        self.assertEqual(icons.get("Prompt"), "✎")
+        self.assertTrue(icons.get("ExternalDLAccount"))
 
 
 # ===================================================================
@@ -5895,3 +5941,43 @@ class FormActionShadowingTests(SimpleTestCase):
         src = get_template("admin/ai/request_logs.html").template.source
         self.assertIn("form.getAttribute('action')", src)
         self.assertNotIn("fetch(form.action", src)
+
+
+# ===================================================================
+# Селектор моделей: статистика не должна залипать в закрытом селекте
+# ===================================================================
+
+class ModelStatsSuffixStripTests(SimpleTestCase):
+    """Суффикс статистики («Model — 12.3с·45%») виден только в развёрнутом
+    списке. Закрытие списка «клик мимо» не даёт ни change (значение то же),
+    ни blur (фокус остаётся на селекте) — суффикс висел в закрытом селекте
+    до первого клика по странице. Регрессионный гард на источник: слушатели
+    document pointerdown/click вне селекта обязаны оставаться в
+    initModelSortSelector (static/admin/js/ai-common.js)."""
+
+    def _source(self):
+        from pathlib import Path
+        path = (
+            Path(__file__).resolve().parent.parent
+            / "static" / "admin" / "js" / "ai-common.js"
+        )
+        return path.read_text(encoding="utf-8")
+
+    def test_strip_listeners_present(self):
+        src = self._source()
+        self.assertIn(
+            "document.addEventListener('pointerdown', function (event) {\n"
+            "        if (!modelSelect.contains(event.target)) stripModelOptionSuffixes();",
+            src,
+        )
+        self.assertIn(
+            "document.addEventListener('click', function (event) {\n"
+            "        var onModelSelect = modelSelect.contains(event.target);",
+            src,
+        )
+
+    def test_open_click_still_applies_suffixes(self):
+        """Открывающий клик по селекту не должен снимать суффиксы: флаг\n        selectPointerActive различает реальный клик и синтетический (после\n        выбора опции в нативном списке)."""
+        src = self._source()
+        self.assertIn("selectPointerActive = true", src)
+        self.assertIn("if (!onModelSelect || !selectPointerActive)", src)

@@ -285,6 +285,25 @@ function initModelSortSelector() {
     });
     modelSelect.addEventListener('change', stripModelOptionSuffixes);
     modelSelect.addEventListener('blur', stripModelOptionSuffixes);
+
+    // Закрытие списка «клик мимо селекта» не даёт ни change (значение то же),
+    // ни blur (фокус остаётся на селекте) — суффиксы висели в закрытом
+    // селекте до первого клика по странице. Снимаем их сразу: любой
+    // pointerdown/click вне селекта закрывает список — момент закрытия.
+    // Синтетический click по самому селекту (браузер стреляет им после выбора
+    // опции в нативном списке) отличается от «открывающего» клика флагом
+    // pointerdown: так выбор ТОЙ ЖЕ опции (без change) тоже снимает суффиксы.
+    var selectPointerActive = false;
+    modelSelect.addEventListener('pointerdown', function () { selectPointerActive = true; });
+    document.addEventListener('pointerdown', function (event) {
+        if (!modelSelect.contains(event.target)) stripModelOptionSuffixes();
+    }, true);
+    document.addEventListener('click', function (event) {
+        var onModelSelect = modelSelect.contains(event.target);
+        if (!onModelSelect || !selectPointerActive) stripModelOptionSuffixes();
+        selectPointerActive = false;
+    }, true);
+
     stripModelOptionSuffixes();
 
     var saved = 'default';

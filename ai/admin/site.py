@@ -44,6 +44,19 @@ _HIDDEN_NAV_OBJECT_NAMES = {
     "AiArmFindError",     # инструмент «Поиск ошибки (ARM)» — временно скрыт
 }
 
+# Иконки реальных ModelAdmin-строк (объекты, видимые в левом меню) — чтобы
+# «Раздел ИИ» рендерился в том же иконизированном стиле, что и группы
+# AI-инструментов (см. _build_ai_nav_apps и шаблон ai/app_list.html).
+# Скрытые модели сюда не добавляем — они не рендерятся.
+_REAL_MODEL_ICONS = {
+    "ProgrammingLanguage": "⌨",
+    "Topic": "▣",
+    "Prompt": "✎",
+    "SharedPrompt": "⁂",
+    "AIAppSettings": "⚙",
+    "ExternalDLAccount": "☰",
+}
+
 
 def _hide_nav_sections(app_list):
     """Выкинуть из app_list скрытые разделы; опустевшие приложения убрать."""
@@ -370,10 +383,17 @@ class AIAdminSite(admin.AdminSite):
                 ("Система", "Обновления", "AiUpdates", updates_url, show_updates, "↻", "История изменений проекта"),
             ],
         )
-        # Change/tool pages AND the dashboard: stock admin/nav_sidebar.html renders
-        # available_apps (real apps + the injected tool groups), so the AI tool
-        # groups stay in the left nav on every page — including the dashboard.
-        context["available_apps"] = list(context["available_apps"]) + tools_apps
+        # Change/tool pages AND the dashboard: the left nav renders
+        # available_apps on every page — tools first, then real model apps
+        # (unified ai-nav-group markup, see admin/app_list.html). Decorate
+        # real model rows with icons so «Раздел ИИ» matches the tool style.
+        real_apps = list(context["available_apps"])
+        for app in real_apps:
+            for model in app.get("models", []):
+                icon = _REAL_MODEL_ICONS.get(model.get("object_name"))
+                if icon:
+                    model["icon"] = icon
+        context["available_apps"] = tools_apps + real_apps
         return context
 
     @staticmethod
