@@ -150,8 +150,8 @@ function modelOptionStats(opt) {
 
 // Человекочитаемый суффикс названия: «Model X — 45%·12.3с» (компактный формат,
 // сначала процент решённых, затем время; единица «с» локализована через
-// getUiString). Отсутствующие данные показываются нулями («0%·0.0с») — по ним
-// сортировка модели всё равно отправляет в конец.
+// getUiString). Если данных по модели нет вообще — суффикс не показывается
+// (голое название); если есть только один показатель — показывается только он.
 // Идемпотентен: базовое название кешируется в data-base-title при первом проходе.
 function applyModelOptionSuffix(opt) {
     if (!opt.value) return;  // заглушка «Сегодня нет доступных моделей» — не модель
@@ -160,10 +160,12 @@ function applyModelOptionSuffix(opt) {
     }
     var title = opt.getAttribute('data-base-title');
     var stats = modelOptionStats(opt);
-    var avg = stats.avgSeconds === null ? 0 : stats.avgSeconds;
-    var pct = stats.percentSolved === null ? 0 : stats.percentSolved;
-    opt.textContent = title + ' — ' + String(pct) + '%·'
-        + avg.toFixed(1) + getUiString('statSeconds', 'с');
+    var parts = [];
+    if (stats.percentSolved !== null) parts.push(String(stats.percentSolved) + '%');
+    if (stats.avgSeconds !== null) {
+        parts.push(stats.avgSeconds.toFixed(1) + getUiString('statSeconds', 'с'));
+    }
+    opt.textContent = parts.length ? title + ' — ' + parts.join('·') : title;
 }
 
 // Суффикс статистики вешается на ВСЕ опции селектора (включая «Часто
