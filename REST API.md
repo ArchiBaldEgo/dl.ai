@@ -2,17 +2,6 @@ DL REST API
 
 Это документация к API для DL, сделанной на принципах REST. С его помощью можно легко и интуитивно делать запросы для получение информации из-вне сервера DL. Легко адаптируются и добавляются новые endpoint'ы.
 
-Чтобы наверняка увидеть актуальную страницу можно нажать ctrl+f5.
-
-Ссылки:
-
-    Страница на confluence
-
-Server
-
-Обычный сервер DL
-Client Libraries
-Python Requests
 Пользователь ​
 
 Получение информации о пользователе DL
@@ -300,10 +289,37 @@ requests.post("https://dl.gsu.by/restapi/get-solution",
 Отправка решений на проверку и получение результатов
 Решения Operations
 
+    get/get-deltas
     post/send-solution
     post/get-solution-result
     post/get-solutions
 
+Получить список тестирующих машин (Дельт)​
+
+Возвращает список всех зарегистрированных Дельт, включая их статус активности.
+Responses
+
+    application/json
+    500
+
+    Внутренняя ошибка сервера
+
+Request Example for get/get-deltas
+
+requests.get("https://dl.gsu.by/restapi/get-deltas")
+
+{
+  "deltas": [
+    {
+      "id": 1,
+      "name": "string",
+      "displayName": "string",
+      "isWorking": true
+    }
+  ]
+}
+
+Успешный ответ со списком машин
 Отправить решение на проверку​
 
 Сохраняет переданный код во временный файл и добавляет его в очередь на проверку. Возвращает Id в очереди (queueId).
@@ -333,36 +349,41 @@ required
 
 Id ноды, куда отправляется решение
 sessionId
+Type: string
+required
+
+Session Id хранится в Url-encoded виде внутри cookies. Он существует и валиден некоторое время после того как человек заходит в аккаунт DL из браузера.
+
+Выглядит он примерно так: {2DA21836-FD30-433F-B0A3-A4BDA2669B6D}
+
+Для получения вручную нужно:
+
+    Зайти в devtools браузера
+
+    Перейти на вкладку Application
+
+    Раздел Cookies -> https://dl.gsu.by
+
+    Найти DLSID
+
+    Включить снизу галочку "Show URL-decoded"
+
+    Скопировать значение
+
+Для получения через JavaScript можно использовать следующий код:
+
+function getSessionId() {
+    const match = document.cookie.match('(?:^|; )DLSID=([^;]*)');
+    return match ? decodeURIComponent(match[1]) : null;
+}
+
+console.log(getSessionId());
+
+delta
 
     Type: string
-    required
 
-    Session Id хранится в Url-encoded виде внутри cookies. Он существует и валиден некоторое время после того как человек заходит в аккаунт DL из браузера.
-
-    Выглядит он примерно так: {2DA21836-FD30-433F-B0A3-A4BDA2669B6D}
-
-    Для получения вручную нужно:
-
-        Зайти в devtools браузера
-
-        Перейти на вкладку Application
-
-        Раздел Cookies -> https://dl.gsu.by
-
-        Найти DLSID
-
-        Включить снизу галочку "Show URL-decoded"
-
-        Скопировать значение
-
-    Для получения через JavaScript можно использовать следующий код:
-
-    function getSessionId() {
-        const match = document.cookie.match('(?:^|; )DLSID=([^;]*)');
-        return match ? decodeURIComponent(match[1]) : null;
-    }
-
-    console.log(getSessionId());
+    Машина для проверки. Может быть передана как ID (например, "5") или как точное название (например, "DelTA4 at NIT1 Win10 x64"). Если не передано или пусто — машина назначается автоматически.
 
 Responses
 
@@ -387,7 +408,8 @@ requests.post("https://dl.gsu.by/restapi/send-solution",
       "nodeId": 1,
       "courseId": 1,
       "code": "",
-      "fileExtension": ".cpp"
+      "fileExtension": ".cpp",
+      "delta": ""
     }
 )
 
@@ -470,7 +492,9 @@ requests.post(
 
 {
   "isFinished": true,
-  "comment": "string"
+  "comment": "string",
+  "deltaId": 1,
+  "deltaName": "string"
 }
 
 Успешный ответ со статусом и результатом тестирования
@@ -836,18 +860,16 @@ sessionId
 
 Responses
 
-    application/json
-    401
+application/json
+401
 
-    Неавторизован — sessionId отсутствует или недействителен
-    403
+Неавторизован — sessionId отсутствует или недействителен
+403
 
-    У пользователя нет доступа к указанному курсу
-    500
+У пользователя нет доступа к указанному курсу
+500
 
-    Внутренняя ошибка сервера
-
-Request Example for post/get-course-node
+Внутренняя ошибка сервера
 
 requests.post(
     "https://dl.gsu.by/restapi/get-course-node",
