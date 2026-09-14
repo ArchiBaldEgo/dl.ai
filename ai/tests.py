@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from ai.admin import PromptAdmin, PromptForm
 from ai.middleware import ExternalAuthMiddleware
 from ai.i18n import get_localized_name, get_ui_language_suffix
+from ai.external_account import get_or_create_user_from_external
 from ai.models import AIRequestLog, ArmPromptBinding, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic, UpdateLog
 from ai.services import (
     ConversationHistory,
@@ -413,6 +414,105 @@ class AdminExternalAuthTests(TestCase):
         self.assertEqual(response["Location"], "/ai/admin/ai/prompt/add/")
         self.assertTrue(user.check_password("strong-pass-123"))
         self.assertEqual(self.user_model.objects.filter(username="13579").count(), 0)
+
+
+class ExternalAccountStudentInfoTests(TestCase):
+    """Email и блок education из get-user-info (REST API.md) сохраняются
+    в ExternalDLAccount: при создании и при повторном входе."""
+
+    def setUp(self):
+        self.user_model = get_user_model()
+
+    @staticmethod
+    def _payload(user_id="42", email="student@gsu.by", education=None):
+        payload = {
+            "userId": user_id,
+            "login": f"user{user_id}",
+            "firstName": "Иван",
+            "lastName": "Иванов",
+        }
+        if email is not None:
+            payload["email"] = email
+        if education is not None:
+            payload["education"] = education
+        return payload
+
+    def test_create_stores_email_and_education(self):
+        user, created = get_or_create_user_from_external(self._payload(
+            education={
+                "form": "очная",
+                "schoolId": "10",
+                "schoolKind": "вуз",
+                "schoolNo": "1234",
+                "groupMaskId": "Г-2026-1",
+                "formLetter": "Б",
+            },
+        ))
+        self.assertTrue(created)
+        account = ExternalDLAccount.objects.get(external_user_id="42")
+        self.assertEqual(account.dl_email, "student@gsu.by")
+        self.assertEqual(account.education_form, "очная")
+        self.assertEqual(account.education_school_id, "10")
+        self.assertEqual(account.education_school_kind, "вуз")
+        self.assertEqual(account.education_school_no, "1234")
+        self.assertEqual(account.education_group_mask_id, "Г-2026-1")
+        self.assertEqual(account.education_form_letter, "Б")
+
+    def test_relogin_updates_student_info(self):
+        get_or_create_user_from_external(self._payload(
+            email="old@gsu.by",
+            education={"form": "очная", "schoolNo": "1", "formLetter": "А"},
+        ))
+        get_or_create_user_from_external(self._payload(
+            email="new@gsu.by",
+            education={
+                "form": "заочная",
+                "schoolId": "10",
+                "schoolKind": "вуз",
+                "schoolNo": "1234",
+                "groupMaskId": "Г-2027-2",
+                "formLetter": "В",
+            },
+        ))
+
+        account = ExternalDLAccount.objects.get(external_user_id="42")
+        self.assertEqual(account.dl_email, "new@gsu.by")
+        self.assertEqual(account.education_form, "заочная")
+        self.assertEqual(account.education_school_no, "1234")
+        self.assertEqual(account.education_group_mask_id, "Г-2027-2")
+        self.assertEqual(account.education_form_letter, "В")
+
+    def test_relogin_empty_email_does_not_wipe_stored_value(self):
+        # DL может не отдать email/education в каком-то ответе — пустое
+        # значение из API не затирает то, что уже сохранено.
+        get_or_create_user_from_external(self._payload(
+            email="keep@gsu.by",
+            education={"form": "очная", "schoolNo": "5"},
+        ))
+        get_or_create_user_from_external(self._payload(email=None, education=None))
+
+        account = ExternalDLAccount.objects.get(external_user_id="42")
+        self.assertEqual(account.dl_email, "keep@gsu.by")
+        self.assertEqual(account.education_form, "очная")
+        self.assertEqual(account.education_school_no, "5")
+
+    def test_missing_email_and_education_leave_blank_fields(self):
+        get_or_create_user_from_external(self._payload(email=None, education=None))
+
+        account = ExternalDLAccount.objects.get(external_user_id="42")
+        self.assertEqual(account.dl_email, "")
+        self.assertEqual(account.education_form, "")
+        self.assertEqual(account.education_school_id, "")
+        self.assertEqual(account.education_school_kind, "")
+        self.assertEqual(account.education_school_no, "")
+        self.assertEqual(account.education_group_mask_id, "")
+        self.assertEqual(account.education_form_letter, "")
+
+    def test_non_dict_education_is_ignored(self):
+        get_or_create_user_from_external(self._payload(education="мусор"))
+
+        account = ExternalDLAccount.objects.get(external_user_id="42")
+        self.assertEqual(account.education_form, "")
 
 
 class AdminPermissionsTests(TestCase):
@@ -3311,7 +3411,7 @@ class OllamaRegistryTests(SimpleTestCase):
 
     OLLAMA_KEYS = [
         "Ollama_Glm_5_2_Cloud",
-        "Ollama_Glm_5_3_Flash_Cloud",
+        "Ollama_DeepSeek_V4_1_Flash_Cloud",
         "Ollama_Gemma_4_Cloud",
         "Ollama_Qwen_3_5_Cloud",
         "Ollama_Nemotron_3_Super_Cloud",
@@ -3321,10 +3421,8 @@ class OllamaRegistryTests(SimpleTestCase):
         "Ollama_Gpt_Oss_120B_Cloud",
     ]
 
-    # glm-5.3-flash:cloud и gpt-oss:cloud (harmony) стримят отдельное поле
-    # thinking → reasoning-модели.
+    # gpt-oss:cloud (harmony) стримит отдельное поле thinking → reasoning-модели.
     REASONING_KEYS = {
-        "Ollama_Glm_5_3_Flash_Cloud",
         "Ollama_Gpt_Oss_20B_Cloud",
         "Ollama_Gpt_Oss_120B_Cloud",
     }
@@ -3413,8 +3511,8 @@ class OllamaHandlerTests(SimpleTestCase):
             self.assertNotIn("tools", kwargs)
             self.assertIs(kwargs.get("stream"), True)
 
-    async def test_glm_5_3_flash_uses_cloud_model_id(self):
-        """GLM 5.3 Flash ходит через ollama.chat с model='glm-5.3-flash:cloud'."""
+    async def test_deepseek_v4_1_flash_uses_cloud_model_id(self):
+        """DeepSeek 4.1 Flash ходит через ollama.chat с model='deepseek-v4.1-flash:cloud'."""
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
              patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
@@ -3422,11 +3520,11 @@ class OllamaHandlerTests(SimpleTestCase):
             mock_client = mock_client_cls.return_value
             mock_client.chat.return_value = self._stream("ok", eval_count=1)
 
-            glm_5_3_flash = getattr(ollama, "ask_Ollama_Glm_5_3_Flash_Cloud_async")
-            result = await glm_5_3_flash("hi", "client")
+            deepseek_flash = getattr(ollama, "ask_Ollama_DeepSeek_V4_1_Flash_Cloud_async")
+            result = await deepseek_flash("hi", "client")
             self.assertEqual(result, ("ok", 1, False))
             _, kwargs = mock_client.chat.call_args
-            self.assertEqual(kwargs.get("model"), "glm-5.3-flash:cloud")
+            self.assertEqual(kwargs.get("model"), "deepseek-v4.1-flash:cloud")
 
     async def test_gpt_oss_cloud_model_ids(self):
         """gpt-oss ходит через ollama.chat с model='gpt-oss:<size>b-cloud'."""
@@ -3472,7 +3570,7 @@ class OllamaHandlerTests(SimpleTestCase):
         return iter(chunks)
 
     async def test_empty_content_falls_back_to_thinking(self):
-        """glm-5.3-flash:cloud кладёт ответ в поле thinking при пустом content —
+        """gpt-oss:cloud кладёт ответ в поле thinking при пустом content —
         отдаём его пользователю, а не «пустой ответ»."""
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
@@ -3482,8 +3580,8 @@ class OllamaHandlerTests(SimpleTestCase):
             mock_client.chat.return_value = self._thinking_stream(
                 "Рассуждаю", " и отвечаю", eval_count=7)
 
-            glm_5_3_flash = getattr(ollama, "ask_Ollama_Glm_5_3_Flash_Cloud_async")
-            result = await glm_5_3_flash("hi", "client")
+            gpt_oss = getattr(ollama, "ask_Ollama_Gpt_Oss_20B_Cloud_async")
+            result = await gpt_oss("hi", "client")
             self.assertEqual(result, ("Рассуждаю и отвечаю", 7, False))
 
     async def test_empty_content_and_thinking_returns_error(self):

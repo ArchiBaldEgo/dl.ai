@@ -439,13 +439,19 @@ class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     """Admin for viewing external DL accounts (dl.gsu.by user info)."""
     list_display = ("external_user_id", "external_login", "external_first_name",
-                    "external_last_name", "user_link", "created_at", "updated_at")
+                    "external_last_name", "dl_email", "education_summary",
+                    "user_link", "created_at", "updated_at")
     list_display_links = ("external_user_id",)
     list_filter = ("created_at", "updated_at")
     search_fields = ("external_user_id", "external_login",
                      "external_first_name", "external_last_name",
-                     "user__username")
-    readonly_fields = ("created_at", "updated_at")
+                     "dl_email", "education_school_no", "user__username")
+    # Учебные данные приходят из dl.gsu.by при входе пользователя (REST API.md
+    # get-user-info) — руками их не правим, только смотрим.
+    readonly_fields = ("dl_email", "education_form", "education_school_id",
+                       "education_school_kind", "education_school_no",
+                       "education_group_mask_id", "education_form_letter",
+                       "created_at", "updated_at")
     raw_id_fields = ("user",)
 
     def user_link(self, obj):
@@ -454,6 +460,14 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         return "-"
     user_link.short_description = "Локальный пользователь"
     user_link.admin_order_field = "user__username"
+
+    def education_summary(self, obj):
+        """Компактная сводка блока education: «форма · школа № · группа · класс»."""
+        parts = [obj.education_form, obj.education_school_no,
+                 obj.education_group_mask_id, obj.education_form_letter]
+        parts = [p for p in parts if p]
+        return " · ".join(parts) if parts else "—"
+    education_summary.short_description = "Учебные данные"
 
 
 class PromptEditorshipInline(admin.TabularInline):

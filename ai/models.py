@@ -73,6 +73,59 @@ class ExternalDLAccount(models.Model):
         help_text="Фамилия из dl.gsu.by",
         verbose_name="Фамилия",
     )
+    # Учебные данные студента из post/get-user-info (REST API.md): top-level
+    # email + вложенный блок education. Обновляются при каждом входе
+    # пользователя; массовый бэкфилл невозможен — endpoint требует sessionId
+    # самого пользователя.
+    dl_email = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Email из dl.gsu.by (get-user-info)",
+        verbose_name="Email dl.gsu.by",
+    )
+    education_form = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Форма обучения (education.form)",
+        verbose_name="Форма обучения",
+    )
+    education_school_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="ID школы (education.schoolId)",
+        verbose_name="Школа: ID",
+    )
+    education_school_kind = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Тип школы (education.schoolKind)",
+        verbose_name="Школа: тип",
+    )
+    education_school_no = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Номер школы (education.schoolNo)",
+        verbose_name="Школа: номер",
+    )
+    education_group_mask_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Группа (education.groupMaskId)",
+        verbose_name="Группа (groupMaskId)",
+    )
+    education_form_letter = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Класс/буква (education.formLetter)",
+        verbose_name="Класс (буква)",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
 

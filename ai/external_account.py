@@ -41,6 +41,44 @@ def _normalize_name(value) -> str:
     return (value or "").strip()
 
 
+# Поля ExternalDLAccount, заполняемые из email/education ответа get-user-info.
+_STUDENT_INFO_FIELDS = (
+    "dl_email",
+    "education_form",
+    "education_school_id",
+    "education_school_kind",
+    "education_school_no",
+    "education_group_mask_id",
+    "education_form_letter",
+)
+
+
+def _extract_student_info(user_info: dict) -> dict[str, str]:
+    """Извлекает email и учебный блок education из ответа post/get-user-info.
+
+    Формат ответа описан в REST API.md: top-level ``email`` и вложенный
+    ``education`` (form, schoolId, schoolKind, schoolNo, groupMaskId,
+    formLetter). Отсутствующие ключи дают пустую строку (поля модели blank).
+    Небезопасные значения приводятся к строке и обрезаются.
+    """
+    education = user_info.get("education") or {}
+    if not isinstance(education, dict):
+        education = {}
+
+    def _pick(key: str) -> str:
+        return str(education.get(key) or "").strip()
+
+    return {
+        "dl_email": str(user_info.get("email") or "").strip(),
+        "education_form": _pick("form"),
+        "education_school_id": _pick("schoolId"),
+        "education_school_kind": _pick("schoolKind"),
+        "education_school_no": _pick("schoolNo"),
+        "education_group_mask_id": _pick("groupMaskId"),
+        "education_form_letter": _pick("formLetter"),
+    }
+
+
 def _extract_first_last_name(user_info: dict) -> tuple[str, str]:
     """Извлекает имя и фамилию из ответа API dl.gsu.by.
 
@@ -94,7 +132,9 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
     2. При необходимости обогащает имена через /restapi/get-id-user-info.
     3. Ищет существующего пользователя по ExternalDLAccount.external_user_id.
     4. Если не найден — создаёт User + ExternalDLAccount.
-    5. Обновляет username/first_name/last_name при изменении.
+    5. Обновляет username/first_name/last_name при изменении; email и блок
+       education (учебные данные студента, REST API.md) обновляются при
+       каждом входе, если API отдал непустое значение.
     6. Добавляет пользователя в группу prompt_developer.
 
     Возвращает (user, created), где created=True если пользователь создан.
@@ -102,6 +142,7 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
     external_user_id = str(user_info.get('userId'))
     external_login = _extract_external_login(user_info)
     external_first_name, external_last_name = _extract_first_last_name(user_info)
+    student_info = _extract_student_info(user_info)
     
     # Enrich from /restapi/get-id-user-info when names are missing.
     if external_user_id and not (external_first_name and external_last_name):
@@ -137,6 +178,12 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
             updates["external_first_name"] = external_first_name
         if external_last_name and ext_account.external_last_name != external_last_name:
             updates["external_last_name"] = external_last_name
+        # Email/education: перезаписываем только непустыми значениями из API —
+        # DL может не отдавать блок education (см. комментарий у полей модели).
+        for field in _STUDENT_INFO_FIELDS:
+            value = student_info.get(field) or ""
+            if value and getattr(ext_account, field) != value:
+                updates[field] = value
         if updates:
             for key, value in updates.items():
                 setattr(ext_account, key, value)
@@ -177,6 +224,7 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
                     'external_login': external_login,
                     'external_first_name': external_first_name,
                     'external_last_name': external_last_name,
+                    **student_info,
                 }
             )
         except IntegrityError as e:

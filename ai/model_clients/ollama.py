@@ -1,7 +1,7 @@
 """Ollama API клиент — cloud-модели (вид ``<name>:cloud``) и локальный Ollama.
 
 Использует официальную Python-библиотеку ``ollama`` (``from ollama import Client``).
-Cloud-модели (glm-5.2:cloud, glm-5.3-flash:cloud, gemma4:cloud, qwen3.5:cloud,
+Cloud-модели (glm-5.2:cloud, deepseek-v4.1-flash:cloud, gemma4:cloud, qwen3.5:cloud,
 nemotron-3-super:cloud, kimi-k2.7-code:cloud, kimi-k2.6:cloud, gpt-oss:20b-cloud,
 gpt-oss:120b-cloud) требуют bearer-токен ``OLLAMA_API_KEY`` и
 хост ``https://api.ollama.com``. Локальный Ollama работает без ключа на
@@ -38,9 +38,9 @@ OLLAMA_MODELS: dict[str, dict] = {
         "model": "glm-5.2:cloud",
         "description": "Ollama GLM 5.2 — обычный чат",
     },
-    "Ollama_Glm_5_3_Flash_Cloud": {
-        "model": "glm-5.3-flash:cloud",
-        "description": "Ollama GLM 5.3 Flash — обычный чат",
+    "Ollama_DeepSeek_V4_1_Flash_Cloud": {
+        "model": "deepseek-v4.1-flash:cloud",
+        "description": "Ollama DeepSeek 4.1 Flash — обычный чат",
     },
     "Ollama_Gemma_4_Cloud": {
         "model": "gemma4:cloud",
@@ -91,9 +91,9 @@ def _chat_sync(model: str, msg: str, temperature: float, num_predict: int) -> Tu
     httpx-таймаут действует на каждый чанк, а не на весь ответ. eval_count
     приходит только в финальном чанке (done=True) — берём последний ненулевой.
 
-    ``thinking`` — накопленное содержимое одноимённого поля (glm-5.3-flash:cloud,
-    gpt-oss:cloud стримят рассуждение отдельным полем, не think-тегами в
-    content); обычно отбрасывается, но спасает ответ, когда content пуст.
+    ``thinking`` — накопленное содержимое одноимённого поля (gpt-oss:cloud
+    стримит рассуждение отдельным полем, не think-тегами в content);
+    обычно отбрасывается, но спасает ответ, когда content пуст.
     """
     client = _get_client()
     parts: list[str] = []
@@ -158,7 +158,7 @@ async def _ask_ollama(
         return f"Ошибка Ollama: {exc}", 0, True
 
     if not content.strip():
-        # Reasoning-модели (glm-5.3-flash:cloud, gpt-oss:cloud) иногда кладут
+        # Reasoning-модели (gpt-oss:cloud) иногда кладут
         # весь ответ в поле ``thinking``, оставляя content пустым — отдаём его
         # пользователю вместо ошибки «пустой ответ».
         if thinking.strip():
