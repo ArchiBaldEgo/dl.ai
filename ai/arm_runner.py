@@ -985,9 +985,16 @@ def _run_batch_job_worker(
             settings_obj.save()
 
         # Resolve node_ids → Task objects via DL get-task-info + ensure_task.
+        # Язык формы прогона прокидывается в ensure_task: задача получает язык
+        # текущего прогона, а тема чужого языка перегадывается из path с
+        # фильтром по этому языку — иначе _resolve_batch_prompt резолвит
+        # (новый язык, stale-тема старого) и не находит точную привязку.
         tasks = []
         for node_id in node_ids:
-            task = ensure_task(node_id, session_id=session_id, course_id=course_id)
+            task = ensure_task(
+                node_id, session_id=session_id, course_id=course_id,
+                programming_language_id=programming_language_id,
+            )
             if task is None:
                 continue
             tasks.append(task)

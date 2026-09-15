@@ -186,7 +186,7 @@ _PATH_TOPIC_KEYWORDS = [
 ]
 
 
-def _guess_topic_from_path(path: str):
+def _guess_topic_from_path(path: str, programming_language_id=None):
     """Best-effort: find a local Topic from a DL task path.
 
     Returns the Topic instance or None. Two passes:
@@ -196,10 +196,20 @@ def _guess_topic_from_path(path: str):
        «Простейшая (Программы с подсказками)»).
     2. Fallback — keyword-подстроки из ``_PATH_TOPIC_KEYWORDS``: названия
        папок DL иногда лишь близки к теме («Одномерные числовые массивы»).
+
+    Темы per-языковые (курс «[Ассемблер i8086, C-MPA]» держит два Topic с
+    одинаковым названием — по одному на язык), поэтому при известном языке
+    ищем только среди тем этого языка. Совпадений в языке нет → None:
+    чужая тема хуже отсутствующей (с None резолв привязки честно уйдёт
+    «на весь язык», а плейсхолдер {topic} не получит чужое название).
     """
     if not path:
         return None
     from ..models import Topic
+
+    topics = Topic.objects.all()
+    if programming_language_id is not None:
+        topics = topics.filter(programming_language_id=programming_language_id)
 
     # Точное совпадение сегмента с topic_name (порядок — от глубоких папок к
     # корню: более конкретная тема приоритетна).
@@ -208,14 +218,14 @@ def _guess_topic_from_path(path: str):
         name = segment.strip()
         if not name:
             continue
-        topic = Topic.objects.filter(topic_name_ru__iexact=name).first()
+        topic = topics.filter(topic_name_ru__iexact=name).first()
         if topic:
             return topic
 
     low = path.lower()
     for keyword, topic_name in _PATH_TOPIC_KEYWORDS:
         if keyword in low:
-            topic = Topic.objects.filter(topic_name_ru__iexact=topic_name).first()
+            topic = topics.filter(topic_name_ru__iexact=topic_name).first()
             if topic:
                 return topic
     return None
@@ -230,8 +240,16 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
     name and is required for ``fetch_task_solution``); the operator fills it
     and activates the task. Auto-created tasks are ``active=False`` so they do
     not clutter batch-solve "all active" runs while still ungradeable.
+
+    When ``programming_language_id`` is given (ARM batch-solve passes the
+    run form's language), the task's language follows it and a topic of a
+    different language is re-guessed from the DL path scoped to that language
+    (topics are per-language; a stale foreign-language topic would make
+    ArmPromptBinding.resolve miss the exact binding).
     """
     try:
+        from ..models import Topic
+
         # Auto-determine file_extension from programming language if provided.
         file_ext = ""
         if programming_language_id is not None:
@@ -253,6 +271,20 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
         )
         if not created:
             dirty = False
+            # Тема per-языковая: тема чужого языка не имеет смысла для прогона
+            # на другом языке (привязки ArmPromptBinding задаются per-язык) —
+            # её нужно перегадать из path. NULL-язык темы не считается stale
+            # (не ломаем легитимные безязыковые темы).
+            topic_lang_id = (
+                Topic.objects.filter(pk=task.topic_id)
+                .values_list("programming_language_id", flat=True).first()
+                if task.topic_id is not None else None
+            )
+            topic_stale = (
+                programming_language_id is not None
+                and topic_lang_id is not None
+                and topic_lang_id != programming_language_id
+            )
             if programming_language_id is not None and task.programming_language_id != programming_language_id:
                 task.programming_language_id = programming_language_id
                 dirty = True
@@ -260,8 +292,9 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
                 task.topic_id = topic_id
                 dirty = True
             # Backfill missing topic/extension/statement from DL for pre-existing
-            # tasks created before auto-detection was added.
-            if session_id and (not task.topic_id or not task.file_extension or not task.statement):
+            # tasks created before auto-detection was added. topic_stale тоже
+            # требует фэтча: перегадать тему можно только из path.
+            if session_id and (not task.topic_id or topic_stale or not task.file_extension or not task.statement):
                 try:
                     data = fetch_task_info(node_id, session_id=session_id, remove_html_tags=True, course_id=course_id)
                 except DLApiError:
@@ -269,15 +302,22 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
                 if data:
                     path = data.get("path", "")
                     apply_dl_task_info(task, data)
+                    dirty = True  # фэтч дорого — его результат обязан сохраниться
                     if not task.file_extension and path:
                         guessed = _guess_extension(path)
                         if guessed:
                             task.file_extension = guessed
-                            dirty = True
-                    if not task.topic_id and path:
-                        guessed_topic = _guess_topic_from_path(path)
-                        if guessed_topic:
+                    if (not task.topic_id or topic_stale) and path:
+                        guessed_topic = _guess_topic_from_path(
+                            path, programming_language_id=programming_language_id,
+                        )
+                        if guessed_topic and guessed_topic.id != task.topic_id:
                             task.topic_id = guessed_topic.id
+                            dirty = True
+                        elif not guessed_topic and topic_stale:
+                            # В этом языке темы нет: чужая тема хуже отсутствующей —
+                            # сбрасываем, резолв привязки уйдёт «на весь язык».
+                            task.topic_id = None
                             dirty = True
             if dirty:
                 task.save(update_fields=["programming_language_id", "topic_id", "file_extension", "name", "statement", "task_id"])
@@ -299,7 +339,9 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
                         task.file_extension = guessed
                 # If topic is not set, try to guess from DL path.
                 if not task.topic_id and path:
-                    guessed_topic = _guess_topic_from_path(path)
+                    guessed_topic = _guess_topic_from_path(
+                        path, programming_language_id=programming_language_id,
+                    )
                     if guessed_topic:
                         task.topic_id = guessed_topic.id
                 task.save(update_fields=["task_id", "name", "statement", "file_extension", "topic"])

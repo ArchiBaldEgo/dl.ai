@@ -2612,11 +2612,14 @@ class TaskRegistryTests(TestCase):
         mocked.assert_not_called()  # no DL fetch without a session
 
     def test_ensure_task_existing_updates_assignments_no_dl(self):
-        from ai.models import Task
+        from ai.models import Task, Topic
         from ai.services import ensure_task
+        # Тема чужого языка не stale только если принадлежит целевому языку —
+        # тогда перегадывание не нужно и DL-фэтч не требуется.
+        other_topic = Topic.objects.create(topic_name_ru="Циклы", programming_language=self.other_lang)
         Task.objects.create(
             node_id=9, name="exists", statement="stmt", task_id=5,
-            programming_language=self.lang, topic=self.topic, file_extension=".pas", active=True,
+            programming_language=self.other_lang, topic=other_topic, file_extension=".pas", active=True,
         )
         with patch("ai.services.task_registry.fetch_task_info") as mocked:
             task = ensure_task(
@@ -2626,8 +2629,73 @@ class TaskRegistryTests(TestCase):
         # Local assignments refreshed to the latest solve request; active unchanged.
         self.assertEqual(task.programming_language_id, self.other_lang.id)
         self.assertTrue(task.active)
-        # No DL fetch for an already-existing task.
+        # No DL fetch for an already-existing task with a language-consistent topic.
         mocked.assert_not_called()
+
+    def test_ensure_task_reguesses_stale_topic_from_new_language(self):
+        """Тема per-языковая: задача, зарегистрированная прогоном на Pascal,
+        хранит Pascal-тему. Прогон на Python должен перегадать тему из path
+        (тема = имя папки DL) с фильтром по языку — иначе резолв привязки
+        уходит как (Python, Pascal-тема) и точная привязка не находится."""
+        from ai.models import Task, Topic
+        from ai.services import ensure_task
+        py_topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.other_lang)
+        Task.objects.create(
+            node_id=9, name="exists", statement="stmt", task_id=5,
+            programming_language=self.lang, topic=self.topic, file_extension=".pas", active=True,
+        )
+        dl_data = {
+            "taskId": 5, "name": "exists", "statement": "stmt",
+            "path": "Программирование\\Линейные\\Задача1",
+        }
+        with patch("ai.services.task_registry.fetch_task_info", return_value=dl_data) as mocked:
+            task = ensure_task(9, programming_language_id=self.other_lang.id, session_id="DLSID")
+        mocked.assert_called_once()  # stale-тема требует фэтча: path нужен для перегадывания
+        self.assertEqual(task.programming_language_id, self.other_lang.id)
+        self.assertEqual(task.topic_id, py_topic.id)
+        self.assertTrue(task.active)
+
+    def test_ensure_task_clears_stale_topic_when_missing_in_language(self):
+        """В целевом языке темы с таким названием нет: чужая тема хуже
+        отсутствующей — сбрасываем, резолв привязки честно уйдёт «на весь язык»."""
+        from ai.models import Task
+        from ai.services import ensure_task
+        Task.objects.create(
+            node_id=9, name="exists", statement="stmt", task_id=5,
+            programming_language=self.lang, topic=self.topic, file_extension=".pas", active=True,
+        )
+        # «Линейные» под Python не заведена; в path нет keyword-тем.
+        dl_data = {
+            "taskId": 5, "name": "exists", "statement": "stmt",
+            "path": "Программирование\\Линейные\\Задача1",
+        }
+        with patch("ai.services.task_registry.fetch_task_info", return_value=dl_data):
+            task = ensure_task(9, programming_language_id=self.other_lang.id, session_id="DLSID")
+        self.assertEqual(task.programming_language_id, self.other_lang.id)
+        self.assertIsNone(task.topic_id)
+        self.assertTrue(task.active)
+
+    def test_guess_topic_from_path_is_language_scoped(self):
+        """Два Topic с одинаковым topic_name_ru под разными языками (курс
+        «[Ассемблер i8086, C-MPA]»): с языком ищем только в нём; без языка —
+        прежнее поведение. Чужой язык не подставляется никогда."""
+        from ai.models import Topic
+        from ai.services.task_registry import _guess_topic_from_path
+        Topic.objects.create(topic_name_ru="Линейные", programming_language=self.other_lang)
+        third_lang = ProgrammingLanguage.objects.create(language_name="C++")
+        path = "Программирование\\Линейные\\Задача1"
+        self.assertEqual(
+            _guess_topic_from_path(path, programming_language_id=self.lang.id).id,
+            self.topic.id,
+        )
+        self.assertEqual(
+            _guess_topic_from_path(path, programming_language_id=self.other_lang.id).programming_language_id,
+            self.other_lang.id,
+        )
+        # В языке C++ темы «Линейные» нет — None, а не чужая тема.
+        self.assertIsNone(_guess_topic_from_path(path, programming_language_id=third_lang.id))
+        # Без языка — прежнее поведение: какой-то из одноимённых Topic.
+        self.assertIsNotNone(_guess_topic_from_path(path))
 
     def test_ensure_task_swallows_dl_errors(self):
         from ai.services import ensure_task
@@ -5261,6 +5329,48 @@ class ArmPromptBindingTests(TestCase):
         self.assertEqual(
             _resolve_batch_prompt(task_no_lang, self.lang.id, {}), binding.prompt_id,
         )
+
+    def test_stale_topic_reguess_makes_binding_resolve(self):
+        """Сквозная регрессия бага «сменил язык — промпт не подтянулся»:
+        ensure_task с языком прогона перегадывает stale-тему из path (тема =
+        имя папки DL, per-языковая), после чего _resolve_batch_prompt находит
+        точную привязку нового языка. До фикса тема оставалась от языка A →
+        resolve(B, тема_A) не находил точную привязку → задача без препромпта.
+        """
+        from unittest.mock import patch as _patch
+
+        from ai.arm_runner import _resolve_batch_prompt
+        from ai.models import Task
+        from ai.services.task_registry import ensure_task
+
+        # Одноимённые темы и привязки на оба языка — как в курсе
+        # «[Ассемблер i8086, C-MPA]».
+        py_topic = Topic.objects.create(
+            topic_name_ru="Массивы", programming_language=self.other_lang,
+        )
+        py_prompt = Prompt.objects.create(
+            prompt_name_ru="Массивы Python", prompt_text_ru="Текст",
+            topic=py_topic, owner=self.superuser,
+        )
+        self._binding(prompt=self.prompt)  # привязка Pascal не участвует
+        self._binding(programming_language=self.other_lang, topic=py_topic, prompt=py_prompt)
+        # Task от прошлого прогона на Pascal: stale язык и stale тема.
+        Task.objects.create(
+            node_id=555, name="Задача", statement="stmt", task_id=5,
+            programming_language=self.lang, topic=self.topic,
+            file_extension=".pas", active=True,
+        )
+        dl_data = {
+            "taskId": 5, "name": "Задача", "statement": "stmt",
+            "path": "Программирование\\Массивы\\Задача1",
+        }
+        with _patch("ai.services.task_registry.fetch_task_info", return_value=dl_data):
+            task = ensure_task(
+                555, session_id="DLSID", programming_language_id=self.other_lang.id,
+            )
+        self.assertEqual(task.programming_language_id, self.other_lang.id)
+        self.assertEqual(task.topic_id, py_topic.id)
+        self.assertEqual(_resolve_batch_prompt(task, self.other_lang.id, {}), py_prompt.id)
 
     def test_arm_solve_context_includes_bindings(self):
         from ai.admin.arm import admin_arm_solve_view
