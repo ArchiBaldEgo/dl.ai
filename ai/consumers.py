@@ -22,6 +22,7 @@ from .services import (
     ModelCaller,
     PromptResolver,
     WebSocketAuthService,
+    CACHE_SERVE_LOG_MESSAGE,
     conversation_history,
     ensure_task,
     find_passed_solution,
@@ -328,12 +329,13 @@ class MyConsumer(AsyncWebsocketConsumer):
         start_time = timezone.now()
         start_str = timezone.localtime(start_time, MOSCOW_TZ).strftime("%H:%M:%S")
         await self.send(text_data=self.formatter.format_user_processing(
-            start_str, "Запрос сохранённого решения (кэш решённых задач)."))
+            start_str, "Задача взята из базы данных (кэш решённых задач)."))
 
         identity = self._get_identity_for_log()
         response = (
-            "Задача уже была решена ранее (тестирование пройдено) — "
-            "выдаю сохранённое решение.\n\n"
+            "Задача взята из базы данных: она уже была решена ранее "
+            "(тестирование пройдено) — выдаю сохранённый код без обращения "
+            "к модели.\n\n"
             f"```\n{solution.code}\n```"
         )
         log = await self.log_writer.create(
@@ -346,7 +348,7 @@ class MyConsumer(AsyncWebsocketConsumer):
             mode=AIRequestLog.MODE_SOLVE,
             sent_at=start_time,
             model_names=[solution.model_key] if solution.model_key else [],
-            message="Повторный запрос задачи — выдано сохранённое решение (кэш).",
+            message=CACHE_SERVE_LOG_MESSAGE,
             programming_language_id=solution.programming_language_id,
             programming_language_name="",
             topic_id=None,
@@ -357,7 +359,7 @@ class MyConsumer(AsyncWebsocketConsumer):
         )
 
         end_time = timezone.now()
-        model_title = solution.model_title or "Сохранённое решение"
+        model_title = solution.model_title or "Сохранённое решение (из БД)"
         await self.log_writer.update_success(
             log, f"{response}\n(решение выдано из кэша)", 0, model_title, end_time
         )
@@ -365,7 +367,7 @@ class MyConsumer(AsyncWebsocketConsumer):
         duration = self.formatter.format_duration((end_time - start_time).total_seconds())
         await self.send(
             text_data=self.formatter.format_success(
-                end_str, "Сохранённое решение", duration, response, 0,
+                end_str, "Сохранённое решение (из БД)", duration, response, 0,
             )
         )
         await sync_to_async(mark_cache_used)(solution)

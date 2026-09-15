@@ -21,7 +21,7 @@ from .log_writer import LogWriter
 from .message_composer import MessageComposer
 from .model_caller import ModelCaller
 from .prompt_resolver import PromptResolver, get_default_shared_prompt, parse_shared_prompt_id
-from .solution_cache import find_passed_solution, last_solve_model, mark_cache_used, record_result, record_submission
+from .solution_cache import CACHE_SERVE_LOG_MESSAGE, find_passed_solution, last_solve_model, mark_cache_used, record_result, record_submission
 from .task_registry import apply_dl_task_info, ensure_task
 
 __all__ = [
@@ -48,6 +48,7 @@ __all__ = [
     "parse_shared_prompt_id",
     "apply_dl_task_info",
     "ensure_task",
+    "CACHE_SERVE_LOG_MESSAGE",
     "find_passed_solution",
     "last_solve_model",
     "mark_cache_used",

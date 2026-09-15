@@ -16,6 +16,11 @@ from ..models import AIRequestLog, TaskSolution
 
 logger = logging.getLogger(__name__)
 
+# Сообщение журнала AIRequestLog при выдаче решения из кэша (consumers.py
+# _serve_cached_solution). Такие записи не являются генерацией решения —
+# их нужно исключать при поиске контекста последней генерации.
+CACHE_SERVE_LOG_MESSAGE = "Повторный запрос задачи — выдано сохранённое решение (кэш)."
+
 
 def find_passed_solution(node_id, programming_language_id):
     """Пройденное решение для узла+языка или ``None`` (verdict == passed)."""
@@ -39,22 +44,33 @@ def record_submission(node_id, code, *, programming_language_id=None, file_exten
     try:
         model_key, model_title = last_solve_model(node_id)
         identity = identity or {}
+        defaults = {
+            "code": code,
+            "file_extension": file_extension or "",
+            "verdict": TaskSolution.VERDICT_PENDING,
+            "dl_comment": "",
+            "model_key": model_key,
+            "model_title": model_title,
+            "external_user_id": identity.get("external_user_id", ""),
+            "created_by": identity.get("user"),
+            "queue_id": queue_id,
+            "submitted_at": timezone.now(),
+            "test_log": test_log,
+        }
+        # Тема/препромпт — из журнала последней генерации решения; когда
+        # контекста нет (пустые), существующие значения не затираем.
+        log = last_solve_log(node_id)
+        if log is not None:
+            if log.topic_id or log.topic_name:
+                defaults["topic_id"] = log.topic_id
+                defaults["topic_name"] = log.topic_name
+            if log.prompt_id or log.prompt_name:
+                defaults["prompt_id"] = log.prompt_id
+                defaults["prompt_name"] = log.prompt_name
         solution, _created = TaskSolution.objects.update_or_create(
             task_node_id=node_id,
             programming_language_id=programming_language_id or None,
-            defaults={
-                "code": code,
-                "file_extension": file_extension or "",
-                "verdict": TaskSolution.VERDICT_PENDING,
-                "dl_comment": "",
-                "model_key": model_key,
-                "model_title": model_title,
-                "external_user_id": identity.get("external_user_id", ""),
-                "created_by": identity.get("user"),
-                "queue_id": queue_id,
-                "submitted_at": timezone.now(),
-                "test_log": test_log,
-            },
+            defaults=defaults,
         )
         return solution
     except Exception:
@@ -118,17 +134,26 @@ def mark_cache_used(solution):
         logger.exception("Failed to increment times_used for TaskSolution %s", solution.pk)
 
 
+def last_solve_log(node_id):
+    """Журнал последней успешной генерации решения для узла (mode=solve).
+
+    Записи выдачи из кэша (CACHE_SERVE_LOG_MESSAGE) исключаются — они тоже
+    mode=solve/status=success, но не являются генерацией и не несут контекста.
+    """
+    return AIRequestLog.objects.filter(
+        mode=AIRequestLog.MODE_SOLVE,
+        task_node_id=node_id,
+        status=AIRequestLog.STATUS_SUCCESS,
+    ).exclude(message=CACHE_SERVE_LOG_MESSAGE).order_by("-sent_at").first()
+
+
 def last_solve_model(node_id):
     """(model_key, model_title) последней успешной генерации решения для узла.
 
     Модель, сгенерировавшая код, известна из журнала WS-генерации (mode=solve,
     status=success) — клиент модель на тестирование не передаёт.
     """
-    log = AIRequestLog.objects.filter(
-        mode=AIRequestLog.MODE_SOLVE,
-        task_node_id=node_id,
-        status=AIRequestLog.STATUS_SUCCESS,
-    ).order_by("-sent_at").first()
+    log = last_solve_log(node_id)
     if log is None:
         return "", ""
     key = (log.model_names or [""])[0] if log.model_names else ""

@@ -481,6 +481,11 @@ class TaskSolution(models.Model):
     dl_comment = models.TextField(blank=True, default="", verbose_name="Комментарий DL")
     model_key = models.CharField(max_length=128, blank=True, default="", verbose_name="Ключ модели")
     model_title = models.CharField(max_length=255, blank=True, default="", verbose_name="Название модели")
+    # Контекст последней генерации решения (как в AIRequestLog — id + имя).
+    topic_id = models.IntegerField(null=True, blank=True, verbose_name="ID темы")
+    topic_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Тема")
+    prompt_id = models.IntegerField(null=True, blank=True, verbose_name="ID препромпта")
+    prompt_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Препромпт")
     queue_id = models.PositiveIntegerField(null=True, blank=True, db_index=True, verbose_name="Queue ID DL")
     test_log = models.ForeignKey(
         "AIRequestLog", on_delete=models.SET_NULL, null=True, blank=True,

@@ -1790,6 +1790,15 @@ document.addEventListener('DOMContentLoaded', initUserDocs);
 var AI_MSGS_KEY_PREFIX = 'ai_msgs_';
 var AI_MSGS_MAX_CHARS = 2000000; // ~2 МБ上限, чтобы не упереться в квоту localStorage
 
+// [[DL]]-записи в том же массиве — DL-статусы кнопки «Тестирование» страницы
+// «Реши задачу» (restore рендерит их через _appendDlMessage страничного скрипта).
+var DL_MSG_MARKER = '[[DL]]';
+
+// True во время реплея сохранённой переписки в restorePersistedMessages:
+// без него реплей шёл бы через ws.onmessage → appendPersistedMessage и
+// УДВАИВАЛ бы историю при каждой перезагрузке (на всех страницах).
+var _restoringPersistedMessages = false;
+
 function aiMessagesKey() {
     var path = (location.pathname || '/').replace(/\/+$/, '') || '/';
     return AI_MSGS_KEY_PREFIX + client_id + ':' + path;
@@ -1818,18 +1827,46 @@ function savePersistedMessages(arr) {
 }
 
 // Сохраняем только настоящие реплики диалога: эхо пользователя и ответ ИИ.
-// Транзитные/служебные сообщения этими маркерами не обладают.
+// Транзитные/служебные сообщения этими маркерами не обладают. Отдельное
+// исключение — [[DL]]-записи (статусы кнопки «Тестирование»).
 function _isPersistableWsMessage(raw) {
     var s = String(raw || '');
     return s.indexOf('Обрабатываю запрос пользователя') !== -1
-        || s.indexOf('Запрос успешно обработан') !== -1;
+        || s.indexOf('Запрос успешно обработан') !== -1
+        || s.lastIndexOf(DL_MSG_MARKER, 0) === 0;
 }
 
 function appendPersistedMessage(raw) {
+    if (_restoringPersistedMessages) return;
     if (!_isPersistableWsMessage(raw)) return;
     var arr = loadPersistedMessages();
     arr.push(String(raw));
     savePersistedMessages(arr);
+}
+
+// === DL-статусы «Тестирование» («Реши задачу») ===
+// Пишем [[DL]]<text>; последняя [[DL]]-запись заменяется НА МЕСТЕ —
+// «DL: тестирование…» превращается в финальный вердикт без дублей
+// (иском запись с конца независимо от позиции: пока DL тестировал,
+// пользователь мог отправить новые реплики диалога).
+function persistDlMessage(text) {
+    var entry = DL_MSG_MARKER + String(text || '');
+    var arr = loadPersistedMessages();
+    for (var i = arr.length - 1; i >= 0; i--) {
+        if (String(arr[i]).lastIndexOf(DL_MSG_MARKER, 0) === 0) {
+            arr[i] = entry;
+            savePersistedMessages(arr);
+            return;
+        }
+    }
+    arr.push(entry);
+    savePersistedMessages(arr);
+}
+
+// Текст [[DL]]-записи без маркера, или null (обычное сообщение диалога).
+function parsePersistedDlMessage(raw) {
+    var s = String(raw || '');
+    return s.lastIndexOf(DL_MSG_MARKER, 0) === 0 ? s.slice(DL_MSG_MARKER.length) : null;
 }
 
 function clearPersistedMessages() {
@@ -1845,8 +1882,15 @@ function restorePersistedMessages() {
         if (!ws || typeof ws.onmessage !== 'function') return;
         var arr = loadPersistedMessages();
         if (!arr.length) return;
-        for (var i = 0; i < arr.length; i++) {
-            ws.onmessage({ data: arr[i] });
+        // Реплей идёт через ws.onmessage; глушим appendPersistedMessage,
+        // иначе каждая перезагрузка удваивала бы сохранённую переписку.
+        _restoringPersistedMessages = true;
+        try {
+            for (var i = 0; i < arr.length; i++) {
+                ws.onmessage({ data: arr[i] });
+            }
+        } finally {
+            _restoringPersistedMessages = false;
         }
         var messages = document.getElementById('messages');
         if (messages) messages.scrollTo({ top: messages.scrollHeight, behavior: 'auto' });

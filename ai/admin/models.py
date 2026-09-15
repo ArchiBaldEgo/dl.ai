@@ -597,17 +597,20 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     вызова модели. Редактирование вручную не предусмотрено — только просмотр.
     """
 
-    list_display = ("task_node_id", "programming_language_id", "verdict", "model_title", "times_used", "external_user_id", "updated_at")
+    list_display = ("task_node_id", "programming_language_id", "topic_name", "prompt_name",
+                    "submitted_at", "external_user_id", "verdict", "times_used")
     list_display_links = ("task_node_id",)
     list_filter = ("verdict",)
-    search_fields = ("task_node_id", "external_user_id", "model_key")
+    search_fields = ("task_node_id", "external_user_id", "model_key", "topic_name", "prompt_name")
     readonly_fields = ("task_node_id", "programming_language_id", "file_extension", "code", "verdict",
-                       "dl_comment", "model_key", "model_title", "queue_id", "test_log", "submitted_at",
+                       "dl_comment", "model_key", "model_title", "topic_id", "topic_name",
+                       "prompt_id", "prompt_name", "queue_id", "test_log", "submitted_at",
                        "created_by", "external_user_id", "times_used", "created_at", "updated_at")
 
     fieldsets = (
         (None, {"fields": ("task_node_id", "programming_language_id", "file_extension", "verdict")}),
         ("Решение", {"fields": ("code", "dl_comment", "model_key", "model_title")}),
+        ("Контекст", {"fields": ("topic_id", "topic_name", "prompt_id", "prompt_name")}),
         ("Метаданные", {"fields": ("queue_id", "test_log", "submitted_at", "created_by", "external_user_id", "times_used", "created_at", "updated_at")}),
     )
 

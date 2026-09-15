@@ -51,6 +51,13 @@ function initWebSocket() {
         };
 
         ws.onmessage = function(event) {
+            // Восстановленный [[DL]]-статус (см. persistDlMessage в ai-common.js) —
+            // не реплика диалога: рендерим жёлтым DL-сообщением и выходим.
+            var dlText = parsePersistedDlMessage(event.data);
+            if (dlText !== null) {
+                _appendDlMessage(dlText);
+                return;
+            }
             appendPersistedMessage(event.data);
             var messages = document.getElementById('messages');
             var message = document.createElement('li');
@@ -343,8 +350,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 // берётся последний fenced-блок ```. Отправка — POST /ai/api/send-solution/
 // (расширение файла резолвится серверно из выбранного языка программирования),
 // результат — поллинг /ai/api/get-solution-result/ раз в 3 с. Вердикт DL
-// показывается в истории чата транзитным сообщением (data-role="dl", жёлтое,
-// подпись «DL») и в localStorage НЕ пишется — после перезагрузки исчезает.
+// показывается в истории чата сообщением data-role="dl" (жёлтое, подпись
+// «DL») и ПЕРСИСТИРУЕТСЯ в localStorage [[DL]]-записью (см. persistDlMessage
+// в ai-common.js) — после перезагрузки восстанавливается, а незавершённый
+// поллинг возобновляется по сохранённому queueId (_dlQueueKey).
 
 var DL_POLL_INTERVAL_MS = 3000;
 var DL_POLL_MAX_ATTEMPTS = 40; // 40 × 3 с ≈ 2 минуты на всю проверку
@@ -410,7 +419,19 @@ function _setDlMessageText(node, text) {
     node.textContent = text;
 }
 
+// Обновление DL-статуса: узел в DOM + та же [[DL]]-запись в localStorage
+// (после перезагрузки сообщение восстанавливается уже финальным текстом).
+function _setDlMessageTextPersist(node, text) {
+    _setDlMessageText(node, text);
+    persistDlMessage(text);
+}
+
 async function _pollDlResult(queueId, statusNode) {
+    // queueId переживает перезагрузку (ai_dl_queue_<nodeId>): вердикт
+    // до-поллится при следующем открытии страницы, даже если эту закрыли.
+    function _forgetQueue() {
+        try { localStorage.removeItem(_dlQueueKey(window.AI_TASK_NODE_ID || '')); } catch (e) {}
+    }
     for (var attempt = 0; attempt < DL_POLL_MAX_ATTEMPTS; attempt++) {
         if (!statusNode || !statusNode.isConnected) return;
         try {
@@ -426,17 +447,19 @@ async function _pollDlResult(queueId, statusNode) {
             var data = await response.json().catch(function () { return null; });
             if (data && data.isFinished === true) {
                 var comment = String(data.comment || '').trim();
-                _setDlMessageText(statusNode,
+                _setDlMessageTextPersist(statusNode,
                     comment ? 'DL: ' + comment
                             : getUiString('dlEmptyComment', 'DL: тестирование завершено'));
+                _forgetQueue();
                 return;
             }
             // 401/403 (протухшая сессия) и 404 (решения нет в DL) — ждать
             // бессмысленно; остальные ошибки (502/503 DL-апстрима) считаем
             // временными и продолжаем до лимита.
             if (response.status === 401 || response.status === 403 || response.status === 404) {
-                _setDlMessageText(statusNode,
+                _setDlMessageTextPersist(statusNode,
                     'DL: ' + ((data && data.error) || 'результат тестирования недоступен'));
+                _forgetQueue();
                 return;
             }
         } catch (error) {
@@ -444,9 +467,17 @@ async function _pollDlResult(queueId, statusNode) {
         }
         await new Promise(function (resolve) { setTimeout(resolve, DL_POLL_INTERVAL_MS); });
     }
-    _setDlMessageText(statusNode,
+    // Таймаут: ключ НЕ удаляем — DL может завершиться позже, вердикт
+    // до-поллится при следующем открытии страницы.
+    _setDlMessageTextPersist(statusNode,
         getUiString('dlTimeout', 'DL: тестирование не завершилось за отведённое время'));
 }
+
+// Активный poll DL переживает перезагрузку страницы: queueId хранится в
+// localStorage, при следующем открытии поллинг возобновляется (record_result
+// на сервере сработает по isFinished). «Очистить контекст» запущенный тест
+// не отменяет — ключ при clearContext не трогаем.
+function _dlQueueKey(nodeId) { return 'ai_dl_queue_' + nodeId; }
 
 async function testOnDl() {
     if (_dlTestRunning) return;
@@ -477,7 +508,9 @@ async function testOnDl() {
     _dlTestRunning = true;
     if (btn) btn.disabled = true;
 
-    var statusNode = _appendDlMessage(getUiString('dlTesting', 'DL: тестирование…'));
+    var dlTesting = getUiString('dlTesting', 'DL: тестирование…');
+    var statusNode = _appendDlMessage(dlTesting);
+    persistDlMessage(dlTesting); // переживает перезагрузку ([[DL]]-запись)
     try {
         var response = await fetch('/ai/api/send-solution/', {
             method: 'POST',
@@ -496,19 +529,38 @@ async function testOnDl() {
         var data = await response.json().catch(function () { return null; });
         if (!response.ok || !data || !(data.queueId > 0)) {
             var detail = (data && data.error) ? (': ' + data.error) : '';
-            _setDlMessageText(statusNode,
+            _setDlMessageTextPersist(statusNode,
                 getUiString('dlSendFailed', 'DL: не удалось отправить решение на тестирование') + detail);
             return;
         }
+        try { localStorage.setItem(_dlQueueKey(nodeId), String(data.queueId)); } catch (e) {}
         await _pollDlResult(data.queueId, statusNode);
     } catch (error) {
         console.error('DL test error:', error);
-        _setDlMessageText(statusNode,
+        _setDlMessageTextPersist(statusNode,
             getUiString('dlSendFailed', 'DL: не удалось отправить решение на тестирование'));
     } finally {
         _dlTestRunning = false;
         if (btn) btn.disabled = false;
     }
+}
+
+// Незавершённый poll DL (страницу закрыли посреди «тестирования…»):
+// возобновляем по сохранённому queueId. DL-сообщение уже восстановлено из
+// localStorage ([[DL]]-запись) — обновляем его же узел, а при отсутствии
+// (например, после «Очистить контекст») создаём новое.
+function _resumePendingDlPoll() {
+    var nodeId = window.AI_TASK_NODE_ID || '';
+    var queueId = 0;
+    try {
+        queueId = parseInt(localStorage.getItem(_dlQueueKey(nodeId)), 10) || 0;
+    } catch (e) {}
+    if (!queueId) return;
+    if (_dlTestRunning) return; // параллельный ручной прогон уже идёт
+    var dlNodes = document.querySelectorAll('#messages li[data-role="dl"]');
+    var content = dlNodes.length ? dlNodes[dlNodes.length - 1].querySelector('div') : null;
+    if (!content) content = _appendDlMessage(getUiString('dlTesting', 'DL: тестирование…'));
+    _pollDlResult(queueId, content);
 }
 
 // === window.onload — init для decide_task ===
@@ -518,6 +570,7 @@ window.onload = function () {
     restoreSelections();
     initWebSocket();
     restorePersistedMessages();
+    _resumePendingDlPoll();
     document.getElementById("selectLang").dispatchEvent(new Event("change"));
     initAccordionForMessages();
     updateVoiceStatus(getVoiceStatusText('ready'));

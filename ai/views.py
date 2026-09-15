@@ -805,14 +805,17 @@ def send_solution_view(request):
     # из селектора страницы, расширение резолвится серверно через единый
     # источник соответствия язык→расширение (_guess_extension, task_registry).
     file_extension = (body.get("fileExtension") or "").strip()
+    # ID языка парсим всегда, когда передан (даже вместе с именем): он нужен
+    # не только для расширения, но и кэшу решённых задач
+    # (TaskSolution.programming_language_id) — иначе кэш не находится.
     prog_language_id = None
+    if body.get("progLanguageId") not in (None, ""):
+        try:
+            prog_language_id = int(body["progLanguageId"])
+        except (ValueError, TypeError):
+            prog_language_id = None
     if not file_extension:
         lang_name = (body.get("progLanguageName") or "").strip()
-        if not lang_name and body.get("progLanguageId") not in (None, ""):
-            try:
-                prog_language_id = int(body["progLanguageId"])
-            except (ValueError, TypeError):
-                prog_language_id = None
         if not lang_name and prog_language_id:
             try:
                 from .models import ProgrammingLanguage

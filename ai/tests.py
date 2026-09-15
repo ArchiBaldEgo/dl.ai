@@ -25,7 +25,7 @@ from ai.admin import PromptAdmin, PromptForm
 from ai.middleware import ExternalAuthMiddleware
 from ai.i18n import get_localized_name, get_ui_language_suffix
 from ai.external_account import get_or_create_user_from_external
-from ai.models import AIRequestLog, ArmPromptBinding, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic, UpdateLog
+from ai.models import AIRequestLog, ArmPromptBinding, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, TaskSolution, Topic, UpdateLog
 from ai.services import (
     ConversationHistory,
     LogWriter,
@@ -7264,6 +7264,89 @@ class SendSolutionViewTests(TestCase):
         from django.urls import reverse
         self.assertEqual(reverse("send_solution"), "/ai/api/send-solution/")
         self.assertEqual(reverse("get_solution_result"), "/ai/api/get-solution-result/")
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_prog_language_id_persisted_with_language_name(self, mock_send):
+        """Фронтенд шлёт И progLanguageId, И progLanguageName — ID должен
+        записаться в TaskSolution.programming_language_id, иначе
+        find_passed_solution(node, lang_id) никогда не найдёт запись и кэш
+        решённых задач не сработает (модель вызывается повторно)."""
+        lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        mock_send.return_value = {"queueId": 42, "message": "ok"}
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 100, "code": "begin end.",
+            "courseId": 1450, "progLanguageId": lang.id,
+            "progLanguageName": "Pascal",
+        })
+        self.assertEqual(response.status_code, 200)
+        solution = TaskSolution.objects.get(task_node_id=100)
+        self.assertEqual(solution.programming_language_id, lang.id)
+        self.assertEqual(solution.verdict, TaskSolution.VERDICT_PENDING)
+        self.assertEqual(solution.queue_id, 42)
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_prog_language_id_persisted_with_explicit_file_extension(self, mock_send):
+        """ID языка пишется в кэш и при явном fileExtension (парсинг ID
+        вынесен из-под if not file_extension)."""
+        lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        mock_send.return_value = {"queueId": 43, "message": "ok"}
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 101, "code": "begin end.",
+            "courseId": 1450, "fileExtension": ".pas", "progLanguageId": lang.id,
+        })
+        self.assertEqual(response.status_code, 200)
+        solution = TaskSolution.objects.get(task_node_id=101)
+        self.assertEqual(solution.programming_language_id, lang.id)
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_topic_and_prompt_persisted_from_last_solve_log(self, mock_send):
+        """Тема/препромпт берутся из журнала последней успешной генерации
+        решения (mode=solve); запись выдачи из кэша (CACHE_SERVE_LOG_MESSAGE)
+        контекстом не считается и существующие значения не затирает."""
+        from ai.services import CACHE_SERVE_LOG_MESSAGE
+        lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        topic = Topic.objects.create(topic_name_ru="Циклы")
+        AIRequestLog.objects.create(
+            source=AIRequestLog.SOURCE_WEBSOCKET, mode=AIRequestLog.MODE_SOLVE,
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+            model_names=["m1"], task_node_id=100,
+            topic_id=topic.id, topic_name="Циклы",
+            prompt_id=5, prompt_name="Реши по шагам",
+        )
+        # Более поздняя запись выдачи из кэша — не должна стать «последней генерацией».
+        AIRequestLog.objects.create(
+            source=AIRequestLog.SOURCE_WEBSOCKET, mode=AIRequestLog.MODE_SOLVE,
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+            model_names=["m1"], task_node_id=100,
+            message=CACHE_SERVE_LOG_MESSAGE,
+        )
+        mock_send.return_value = {"queueId": 44, "message": "ok"}
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 100, "code": "begin end.",
+            "courseId": 1450, "progLanguageId": lang.id, "progLanguageName": "Pascal",
+        })
+        self.assertEqual(response.status_code, 200)
+        solution = TaskSolution.objects.get(task_node_id=100)
+        self.assertEqual(solution.topic_id, topic.id)
+        self.assertEqual(solution.topic_name, "Циклы")
+        self.assertEqual(solution.prompt_id, 5)
+        self.assertEqual(solution.prompt_name, "Реши по шагам")
+
+    @patch("ai.dl_api_client.get_solution_result_from_dl")
+    def test_result_records_verdict_in_cache(self, mock_poll):
+        """Финальный вердикт DL закрывает кэш: passed, queue_id очищен,
+        комментарий записан — только после этого сработает выдача из кэша."""
+        TaskSolution.objects.create(
+            task_node_id=100, programming_language_id=7, code="begin end.",
+            queue_id=42, verdict=TaskSolution.VERDICT_PENDING,
+        )
+        mock_poll.return_value = {"isFinished": True, "comment": "Все тесты успешно пройдены"}
+        response = self._post_result({"sessionId": "SID", "queueId": 42})
+        self.assertEqual(response.status_code, 200)
+        solution = TaskSolution.objects.get(task_node_id=100)
+        self.assertEqual(solution.verdict, TaskSolution.VERDICT_PASSED)
+        self.assertIsNone(solution.queue_id)
+        self.assertEqual(solution.dl_comment, "Все тесты успешно пройдены")
 
 
 class SolutionPollRateLimitTests(SimpleTestCase):
