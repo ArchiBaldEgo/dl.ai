@@ -5205,6 +5205,63 @@ class ArmPromptBindingTests(TestCase):
         response = admin_prompt_defaults_view(request)
         self.assertEqual(response.status_code, 404)
 
+    def test_resolve_batch_prompt_prefers_run_language(self):
+        """arm_runner._resolve_batch_prompt: язык формы прогона приоритетнее
+        языка, сохранённого в Task (авто-определение может остаться от
+        предыдущего прогона на другом языке). Регрессия бага: та же тема,
+        привязки на два языка, Task хранит C-MPA — выбран Ассемблер,
+        но резолвилась привязка C-MPA и модель писала код под C-MPA.
+        """
+        from types import SimpleNamespace
+
+        from ai.arm_runner import _resolve_batch_prompt
+
+        asm_prompt = Prompt.objects.create(
+            prompt_name_ru="Массивы на ассемблере", prompt_text_ru="Текст",
+            topic=self.topic, owner=self.superuser,
+        )
+        # Привязки на оба языка, одна и та же тема — как в курсе
+        # «[Ассемблер i8086, C-MPA]».
+        self._binding(prompt=self.prompt)  # (Pascal, тема)
+        asm_binding = self._binding(
+            programming_language=self.other_lang, prompt=asm_prompt,
+        )
+        # Task хранит stale язык Pascal (auto-определение из прошлого прогона).
+        task = SimpleNamespace(
+            programming_language_id=self.lang.id, topic_id=self.topic.id,
+        )
+        cache: dict = {}
+        # Язык формы — другой (Assembler): привязка должна резолвиться по нему.
+        self.assertEqual(
+            _resolve_batch_prompt(task, self.other_lang.id, cache), asm_prompt.id,
+        )
+        # Кэш прогона тоже ключуется по языку формы.
+        self.assertEqual(cache, {(self.other_lang.id, self.topic.id): asm_prompt.id})
+        self.assertEqual(
+            ArmPromptBinding.objects.get(pk=asm_binding.id).prompt_id, asm_prompt.id,
+        )
+
+    def test_resolve_batch_prompt_falls_back_to_task_language(self):
+        """Без языка на форме — прежнее поведение: привязка по языку Task."""
+        from types import SimpleNamespace
+
+        from ai.arm_runner import _resolve_batch_prompt
+
+        binding = self._binding()
+        task = SimpleNamespace(
+            programming_language_id=self.lang.id, topic_id=self.topic.id,
+        )
+        self.assertEqual(
+            _resolve_batch_prompt(task, None, {}), binding.prompt_id,
+        )
+        # И когда у Task язык не проставлен вовсе.
+        task_no_lang = SimpleNamespace(
+            programming_language_id=None, topic_id=self.topic.id,
+        )
+        self.assertEqual(
+            _resolve_batch_prompt(task_no_lang, self.lang.id, {}), binding.prompt_id,
+        )
+
     def test_arm_solve_context_includes_bindings(self):
         from ai.admin.arm import admin_arm_solve_view
         binding = self._binding()

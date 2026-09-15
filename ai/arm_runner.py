@@ -119,8 +119,14 @@ def _resolve_batch_prompt(task, fallback_language_id, cache):
     форме): тема определяется per-task из ветки DL (ensure_task → Task.topic).
     Резолв кэшируется по (язык, тема) — ``cache`` живёт в рамках прогона.
     Возвращает pk Prompt или None (нет привязки → задача без препромпта).
+
+    Язык резолва — выбранный на форме прогона (``fallback_language_id``):
+    одна и та же задача DL-дерева решается на разных языках курса
+    «[Ассемблер i8086, C-MPA]», и привязки задаются per-язык. Язык самой
+    Task — лишь авто-определение (может остаться от предыдущего прогона
+    на другом языке), поэтому он только fallback, а не приоритет.
     """
-    lang_id = task.programming_language_id or fallback_language_id
+    lang_id = fallback_language_id or task.programming_language_id
     key = (lang_id, task.topic_id)
     if key not in cache:
         binding = ArmPromptBinding.resolve(

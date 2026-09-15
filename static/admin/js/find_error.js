@@ -66,7 +66,7 @@ function initWebSocket() {
                     const selectLang = document.getElementById('selectLang');
                     const langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
                     const roleLabels = {
-                        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други' },
+                        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое' },
                         English: { user: 'You', assistant: 'Assistant', other: 'Others' },
                         French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
                     };

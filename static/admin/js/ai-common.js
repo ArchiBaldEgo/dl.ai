@@ -1393,7 +1393,7 @@ function initAccordionForMessages() {
     var selectLang = document.getElementById('selectLang');
     var langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
     var roleLabels = {
-        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други', dl: 'DL' },
+        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое', dl: 'DL' },
         English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
         French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
     };
@@ -1459,7 +1459,7 @@ function updateAccordionLabels() {
     var selectLang = document.getElementById('selectLang');
     var langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
     var roleLabels = {
-        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други', dl: 'DL' },
+        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое', dl: 'DL' },
         English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
         French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
     };
@@ -1468,7 +1468,7 @@ function updateAccordionLabels() {
         return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
     }
 
-    var allMessages = document.getElementById('messages').querySelectorAll('li');
+    var allMessages = document.getElementById('messages').querySelectorAll(':scope > li');
     var roles = window._accordionRoles || [];
     allMessages.forEach(function(li, idx) {
         var btn = li.querySelector('.accordion');
@@ -1483,11 +1483,14 @@ function updateAccordionLabels() {
 }
 
 function collapseAllExceptLast() {
-    var allMessages = document.getElementById('messages').querySelectorAll('li');
+    // Только прямые потомки #messages (как в initAccordionForMessages):
+    // querySelectorAll('li') зацепил бы вложенные li из markdown-списков
+    // внутри панелей — индексы ролей съезжали бы и кнопки получали «Други».
+    var allMessages = document.getElementById('messages').querySelectorAll(':scope > li');
     var selectLang = document.getElementById('selectLang');
     var langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
     var roleLabels = {
-        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други', dl: 'DL' },
+        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое', dl: 'DL' },
         English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
         French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
     };
