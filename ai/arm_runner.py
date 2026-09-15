@@ -27,7 +27,7 @@ from django.utils.html import strip_tags
 
 from .model_clients.exceptions import humanize_model_error
 from .model_health import get_runtime_model_handlers, is_arm_solve_model
-from .models import AIAppSettings, AIModelTestResult, AIModelTestRun, AIRequestLog, ExternalDLAccount, Task
+from .models import AIAppSettings, AIModelTestResult, AIModelTestRun, AIRequestLog, ArmPromptBinding, ExternalDLAccount, Task
 
 
 User = get_user_model()
@@ -101,9 +101,35 @@ from .grading import (
     normalize_solution,
 )
 
-_VERDICT_SOLVED = "solved"
-_VERDICT_FAILED = "failed"
+# Вердикты DL живут в dl_api_client (dl_verdict_from_comment) — единственный
+# источник (DRY); здесь только алиасы под исторические локальные имена.
+from .dl_api_client import (  # noqa: E402
+    DL_VERDICT_FAILED as _VERDICT_FAILED,
+    DL_VERDICT_SOLVED as _VERDICT_SOLVED,
+    dl_verdict_from_comment as _verdict_from_dl_comment,
+)
+
 _VERDICT_SKIPPED = "skipped"
+
+
+def _resolve_batch_prompt(task, fallback_language_id, cache):
+    """Препромпт одной задачи: привязка ArmPromptBinding по её теме.
+
+    Вызывается, когда у прогона нет явного препромпта («По привязке» на
+    форме): тема определяется per-task из ветки DL (ensure_task → Task.topic).
+    Резолв кэшируется по (язык, тема) — ``cache`` живёт в рамках прогона.
+    Возвращает pk Prompt или None (нет привязки → задача без препромпта).
+    """
+    lang_id = task.programming_language_id or fallback_language_id
+    key = (lang_id, task.topic_id)
+    if key not in cache:
+        binding = ArmPromptBinding.resolve(
+            programming_language_id=lang_id,
+            topic_id=task.topic_id,
+            mode=ArmPromptBinding.MODE_SOLVE,
+        )
+        cache[key] = binding.prompt_id if binding else None
+    return cache[key]
 
 
 def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None):
@@ -744,41 +770,6 @@ def _extract_code_from_response(text):
     return text.strip()
 
 
-# Маркеры провала в ЗАВЕРШЁННОМ DL-комментарии. Проверяются ПЕРВЫМИ и
-# перекрывают success-маркеры: раньше голая подстрока «ок» матчилась внутри
-# «строке»/«token»/«broken», и комментарий вида «Ошибка компиляции в строке 5»
-# ложно помечал проваленную DL-проверку как solved.
-_DL_FAILURE_MARKERS = (
-    "неверн", "неправильн", "ошибк", "не совп", "не прош", "не пройден",
-    "не все", "не всё", "провал", "не принят", "не зачт", "отклон", "не ок",
-    "wrong", "error", "failed", "incorrect",
-)
-# Success-маркеры с границами слов: «ок»/«ok» как отдельное слово, а не
-# подстрока внутри «строке»/«token». «все тесты успешно» покрывается «все тесты».
-_DL_SUCCESS_MARKERS_RE = _re.compile(
-    r"\b(?:все тесты|ок|ok|accepted|correct|пройдены|успешно пройден)\b",
-    _re.IGNORECASE,
-)
-
-
-def _verdict_from_dl_comment(comment):
-    """Вердикт по завершённому DL-комментарию: solved / failed.
-
-    DL REST API не отдаёт структурированный вердикт (только isFinished +
-    comment), поэтому решаем по тексту. Провальные маркеры приоритетны: любой
-    комментарий провала («Ошибка…», «Неверный ответ…», «не все тесты…») —
-    failed, даже если в нём по случайности встретилось слово «ок».
-    Нераспознанный комментарий — failed (как и раньше: solved ставится только
-    при явном подтверждении).
-    """
-    comment_lower = (comment or "").lower().strip()
-    if any(m in comment_lower for m in _DL_FAILURE_MARKERS):
-        return _VERDICT_FAILED
-    if _DL_SUCCESS_MARKERS_RE.search(comment_lower):
-        return _VERDICT_SOLVED
-    return _VERDICT_FAILED
-
-
 def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None, course_id=None):
     """Send code to DL for real testing and poll for the result.
 
@@ -932,7 +923,7 @@ def _run_batch_job_worker(
     моделей (AIModelStats), из которой питается селектор моделей чата.
     """
     from .services.task_registry import EXTENSION_TO_LANG, ensure_task, _guess_extension
-    from .models import ProgrammingLanguage
+    from .models import ArmPromptBinding, ProgrammingLanguage
 
     test_run = None
     log = None
@@ -1021,13 +1012,16 @@ def _run_batch_job_worker(
 
         completed = 0
         cancelled = False
+        # Препромпты по привязке резолвятся per-task; кэш по (язык, тема) —
+        # задачи одной темы не дёргают БД повторно.
+        _prompt_cache: dict = {}
 
         for task in tasks:
             if _is_cancel_requested(run_id):
                 cancelled = True
                 break
 
-            topic_name = task.topic.topic_name if task.topic else ""
+            topic_name = task.topic.topic_name_ru if task.topic else ""
             # Расширение для DL-тестирования: ручной выбор пользователя имеет
             # приоритет над авто-определением задачи (тема из дерева DL не задаёт
             # язык однозначно — курс "[Ассемблер i8086, C-MPA]" содержит оба).
@@ -1040,6 +1034,15 @@ def _run_batch_job_worker(
             # EXTENSION_TO_LANG — канонический map из task_registry (DRY).
             if not prog_lang_name and effective_ext:
                 prog_lang_name = EXTENSION_TO_LANG.get(effective_ext, "")
+
+            # Препромпт на задачу: явный выбор пользователя приоритетен; иначе
+            # привязка ArmPromptBinding по теме задачи (тема определяется из
+            # ветки DL через ensure_task → Task.topic).
+            task_prompt_id = prompt_id
+            if task_prompt_id is None:
+                task_prompt_id = _resolve_batch_prompt(
+                    task, programming_language_id, _prompt_cache,
+                )
 
             for model in ordered_models:
                 if _is_cancel_requested(run_id):
@@ -1059,7 +1062,7 @@ def _run_batch_job_worker(
 
                 try:
                     message = _build_solve_message(
-                        task.statement, prog_lang_name, topic_name, ui_language, prompt_id,
+                        task.statement, prog_lang_name, topic_name, ui_language, task_prompt_id,
                     )
                     response = async_to_sync(model["handler"])(
                         message,

@@ -1073,6 +1073,15 @@ var localization = {
         statSeconds: "с",
         // Маркер shared-препромпта — JS-зеркало _SHARED_PROMPT_PREFIX из ai/i18n.py.
         sharedPrefix: "[Общий]",
+        // Кнопка «Тестирование» — отправка кода модели в DL (страница «Реши задачу»).
+        dlTestButton: "Тестирование",
+        dlTesting: "DL: тестирование…",
+        dlNoCode: "В последнем ответе модели не найден блок кода",
+        dlNoLanguage: "Выберите язык программирования — по нему определяется расширение файла",
+        dlNoNode: "Страница открыта без задачи — тестирование недоступно",
+        dlTimeout: "DL: тестирование не завершилось за отведённое время",
+        dlSendFailed: "DL: не удалось отправить решение на тестирование",
+        dlEmptyComment: "DL: тестирование завершено",
         voiceStatus: {
             listening: "Запись голоса",
             recognized: "Распознано: ",
@@ -1152,6 +1161,15 @@ var localization = {
         statSeconds: "s",
         // Mirror of _SHARED_PROMPT_PREFIX from ai/i18n.py.
         sharedPrefix: "[Shared]",
+        // «Testing» button — submit the model's code to DL («Реши задачу» page).
+        dlTestButton: "Testing",
+        dlTesting: "DL: testing…",
+        dlNoCode: "No code block found in the model's last reply",
+        dlNoLanguage: "Select a programming language — it determines the file extension",
+        dlNoNode: "The page is opened without a task — testing is unavailable",
+        dlTimeout: "DL: testing did not finish within the allotted time",
+        dlSendFailed: "DL: failed to submit the solution for testing",
+        dlEmptyComment: "DL: testing finished",
         voiceStatus: {
             listening: "Voice recording",
             recognized: "Recognized: ",
@@ -1231,6 +1249,15 @@ var localization = {
         statSeconds: "s",
         // Miroir de _SHARED_PROMPT_PREFIX de ai/i18n.py.
         sharedPrefix: "[Partagé]",
+        // Bouton « Test » — envoi du code du modèle vers DL (page « Реши задачу »).
+        dlTestButton: "Test",
+        dlTesting: "DL : test en cours…",
+        dlNoCode: "Aucun bloc de code trouvé dans la dernière réponse du modèle",
+        dlNoLanguage: "Choisissez un langage de programmation — il détermine l'extension du fichier",
+        dlNoNode: "La page est ouverte sans tâche — le test est indisponible",
+        dlTimeout: "DL : le test ne s'est pas terminé dans le délai imparti",
+        dlSendFailed: "DL : échec de l'envoi de la solution pour le test",
+        dlEmptyComment: "DL : test terminé",
         voiceStatus: {
             listening: "Enregistrement vocal",
             recognized: "Reconnu : ",
@@ -1342,20 +1369,33 @@ function restoreSharedText() {
 
 // === Accordion ===
 
+// Роль сообщения для accordion. Приоритет: явная метка li.dataset.role
+// (напр. 'dl' у результата тестирования), затем маркеры текста диалога
+// (эхо пользователя / ответ ИИ — consumers.py), и только потом legacy-паритет
+// i%2. Паритет ломается при вставке любого промежуточного сообщения, поэтому
+// он остаётся лишь последним фолбэком для старой сохранённой переписки.
+function _detectMessageRole(li, index) {
+    if (li.dataset && li.dataset.role) return li.dataset.role;
+    var text = li.textContent || '';
+    if (text.indexOf('Обрабатываю запрос пользователя') !== -1) return 'user';
+    if (text.indexOf('Запрос успешно обработан') !== -1) return 'assistant';
+    return index % 2 === 0 ? 'user' : 'assistant';
+}
+
 function initAccordionForMessages() {
     var messages = document.getElementById('messages');
     var allMessages = messages.querySelectorAll(':scope > li');
     var roles = [];
     for (var i = 0; i < allMessages.length; i++) {
-        roles.push(i % 2 === 0 ? 'user' : 'assistant');
+        roles.push(_detectMessageRole(allMessages[i], i));
     }
 
     var selectLang = document.getElementById('selectLang');
     var langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
     var roleLabels = {
-        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други' },
-        English: { user: 'You', assistant: 'Assistant', other: 'Others' },
-        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
+        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други', dl: 'DL' },
+        English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
+        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
     };
 
     function getRoleLabel(role, lang) {
@@ -1369,11 +1409,13 @@ function initAccordionForMessages() {
             li.classList.remove('msg-user', 'msg-assistant');
             if (role === 'user') li.classList.add('msg-user');
             if (role === 'assistant') li.classList.add('msg-assistant');
+            if (role === 'dl') li.classList.add('msg-dl');
 
             var btn = document.createElement('button');
             btn.className = 'accordion';
             if (role === 'user') btn.classList.add('accordion-user');
             if (role === 'assistant') btn.classList.add('accordion-assistant');
+            if (role === 'dl') btn.classList.add('accordion-dl');
             btn.textContent = 'Показать: ' + getRoleLabel(role, langAttr);
 
             var panel = document.createElement('div');
@@ -1417,9 +1459,9 @@ function updateAccordionLabels() {
     var selectLang = document.getElementById('selectLang');
     var langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
     var roleLabels = {
-        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други' },
-        English: { user: 'You', assistant: 'Assistant', other: 'Others' },
-        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
+        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други', dl: 'DL' },
+        English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
+        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
     };
 
     function getRoleLabel(role, lang) {
@@ -1445,9 +1487,9 @@ function collapseAllExceptLast() {
     var selectLang = document.getElementById('selectLang');
     var langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
     var roleLabels = {
-        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други' },
-        English: { user: 'You', assistant: 'Assistant', other: 'Others' },
-        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
+        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Други', dl: 'DL' },
+        English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
+        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
     };
     var roles = window._accordionRoles || [];
 

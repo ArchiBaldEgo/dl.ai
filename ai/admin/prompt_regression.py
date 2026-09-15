@@ -22,7 +22,7 @@ def _serialize_test_case(case):
         "name": case.name,
         "mode": case.mode,
         "comparator": case.comparator,
-        "topic_name": case.topic.topic_name if case.topic else "",
+        "topic_name": case.topic.topic_name_ru if case.topic else "",
         "prog_lang_name": case.programming_language.language_name if case.programming_language else "",
         "has_expected": bool(case.expected_text),
     }
@@ -32,7 +32,7 @@ def _serialize_prompt_option(prompt, ui_language="Русский"):
     # Lightweight version of serializers.prompt: only what the run form needs.
     return {
         "id": prompt.id,
-        "name": serialize_prompt(prompt, ui_language).get("name") or prompt.prompt_name or f"Prompt #{prompt.id}",
+        "name": serialize_prompt(prompt, ui_language).get("name") or prompt.prompt_name_ru or f"Prompt #{prompt.id}",
         "topic_id": prompt.topic_id,
     }
 
@@ -63,7 +63,7 @@ def admin_prompt_regression_view(request):
     ]
     prompt_options = [
         _serialize_prompt_option(p)
-        for p in Prompt.objects.select_related("topic").order_by("prompt_name", "id")
+        for p in Prompt.objects.select_related("topic").order_by("prompt_name_ru", "id")
     ]
 
     context = {

@@ -23,10 +23,11 @@ from ..models import (
     PromptTestRun,
     SharedPrompt,
     Task,
+    TaskSolution,
     Topic,
 )
 from ..querysets import prompt_queryset_for_user
-from .forms import PromptForm, SharedPromptForm
+from .forms import PromptForm, SharedPromptForm, TopicForm
 from .permissions import can_access_logs, is_prompt_developer_user, is_staff_or_superuser, is_superuser_user
 from ..dl_api_client import (
     DLApiError,
@@ -43,6 +44,7 @@ class TopicInline(admin.TabularInline):
     extra = 1
     fk_name = 'programming_language'
     show_change_link = True
+    fields = ('topic_name_ru', 'topic_name_en', 'topic_name_fr')
 
 
 class _StaffOnlyAdminMixin:
@@ -71,12 +73,13 @@ class ProgrammingLanguageAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 
 
 class TopicAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
-    list_display = ('topic_name', 'programming_language')
+    form = TopicForm
+    list_display = ('topic_name_ru', 'programming_language')
     list_filter = ('programming_language',)
-    search_fields = ('topic_name', 'topic_name_ru', 'topic_name_en', 'topic_name_fr')
+    search_fields = ('topic_name_ru', 'topic_name_en', 'topic_name_fr')
     raw_id_fields = ('programming_language',)
     fieldsets = (
-        (None, {"fields": ("topic_name", "topic_name_ru", "topic_name_en", "topic_name_fr", "programming_language")}),
+        (None, {"fields": ("topic_name_ru", "topic_name_en", "topic_name_fr", "programming_language")}),
     )
     actions = ("auto_translate_selected",)
 
@@ -122,17 +125,17 @@ class PromptUserIdFilter(admin.SimpleListFilter):
 class PromptAdmin(admin.ModelAdmin):
     form = PromptForm
     list_display = (
-        'prompt_name',
+        'prompt_name_ru',
         'programming_language_name',
         'topic',
         'owner_user_id',
         'owner_username',
         'short_prompt_text',
     )
-    list_display_links = ('prompt_name',)
+    list_display_links = ('prompt_name_ru',)
     list_filter = (PromptUserIdFilter, 'topic__programming_language', 'topic')
     list_per_page = 25
-    search_fields = ('prompt_name', 'prompt_text', 'owner__username', '=owner__id')
+    search_fields = ('prompt_name_ru', 'prompt_text_ru', 'owner__username', '=owner__id')
     autocomplete_fields = ("owner", "editors")
     actions = ("export_prompts_csv", "auto_translate_selected")
     # Prompt has no created_at field, so date_hierarchy is intentionally None.
@@ -202,16 +205,16 @@ class PromptAdmin(admin.ModelAdmin):
             "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
             "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
         )
-        advanced_fields = ("prompt_name", "prompt_text", "prompt_text_override")
+        advanced_fields = ("prompt_text_override",)
         if request.user.is_superuser:
             return (
                 (None, {"fields": main_fields}),
-                ("Базовые поля и переопределение", {"fields": advanced_fields, "classes": ("collapse",)}),
+                ("Переопределение текста", {"fields": advanced_fields, "classes": ("collapse",)}),
                 ("Доступ", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
             )
         return (
             (None, {"fields": main_fields}),
-            ("Базовые поля и переопределение", {"fields": advanced_fields, "classes": ("collapse",)}),
+            ("Переопределение текста", {"fields": advanced_fields, "classes": ("collapse",)}),
         )
 
     def get_urls(self):
@@ -260,9 +263,9 @@ class PromptAdmin(admin.ModelAdmin):
             return ()
         return (
             "programming_language", "topic",
-            "prompt_name", "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
+            "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
             "shared_prompt", "prompt_text_override",
-            "prompt_text", "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
+            "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
         )
 
     def save_model(self, request, obj, form, change):
@@ -282,12 +285,12 @@ class PromptAdmin(admin.ModelAdmin):
             language = topic.programming_language.language_name if topic and topic.programming_language else ""
             writer.writerow([
                 prompt.id,
-                prompt.prompt_name or "",
+                prompt.prompt_name_ru or "",
                 language,
-                topic.topic_name if topic else "",
+                topic.topic_name_ru if topic else "",
                 prompt.owner_id or "",
                 prompt.owner.username if prompt.owner else "",
-                prompt.prompt_text,
+                prompt.prompt_text_ru,
             ])
         return response
     export_prompts_csv.short_description = "Экспорт выбранных промптов в CSV"
@@ -333,17 +336,17 @@ class PromptAdmin(admin.ModelAdmin):
     owner_username.short_description = "Владелец"
 
     def short_prompt_text(self, obj):
-        text = obj.prompt_text or ""
+        text = obj.prompt_text_ru or ""
         return f"{text[:100]}..." if len(text) > 100 else text
     short_prompt_text.short_description = "Текст промпта"
 
 
 class SharedPromptAdmin(admin.ModelAdmin):
     form = SharedPromptForm
-    list_display = ('prompt_name', 'mode', 'language_list', 'updated_at', 'owner_username')
-    list_display_links = ('prompt_name',)
+    list_display = ('prompt_name_ru', 'mode', 'language_list', 'updated_at', 'owner_username')
+    list_display_links = ('prompt_name_ru',)
     list_filter = ('mode', 'programming_languages')
-    search_fields = ('prompt_name', 'prompt_text')
+    search_fields = ('prompt_name_ru', 'prompt_text_ru')
     autocomplete_fields = ('owner', 'editors')
     # 'editors' is rendered by autocomplete_fields above (autocomplete wins in
     # Django's formfield_for_manytomany), so only 'programming_languages' uses
@@ -394,9 +397,9 @@ class SharedPromptAdmin(admin.ModelAdmin):
     def get_fieldsets(self, request, obj=None):
         return (
             (None, {"fields": (
-                "prompt_name", "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
+                "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
                 "mode",
-                "prompt_text", "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
+                "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
                 "programming_languages",
             )}),
             ("Доступ", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
@@ -584,6 +587,39 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
             updated += 1
         self.message_user(request, f"Обновлено из DL: {updated}, ошибок: {failed}.")
     refresh_from_dl.short_description = "Обновить название и условие из DL"
+
+
+class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Кэш решённых задач «Реши задачу» (узел DL + язык → проверенный код).
+
+    Записи создаются автоматически (send-solution + успешное тестирование со
+    страницы «Реши задачу») и выдаются повторным запросам той же задачи без
+    вызова модели. Редактирование вручную не предусмотрено — только просмотр.
+    """
+
+    list_display = ("task_node_id", "programming_language_id", "verdict", "model_title", "times_used", "external_user_id", "updated_at")
+    list_display_links = ("task_node_id",)
+    list_filter = ("verdict",)
+    search_fields = ("task_node_id", "external_user_id", "model_key")
+    readonly_fields = ("task_node_id", "programming_language_id", "file_extension", "code", "verdict",
+                       "dl_comment", "model_key", "model_title", "queue_id", "test_log", "submitted_at",
+                       "created_by", "external_user_id", "times_used", "created_at", "updated_at")
+
+    fieldsets = (
+        (None, {"fields": ("task_node_id", "programming_language_id", "file_extension", "verdict")}),
+        ("Решение", {"fields": ("code", "dl_comment", "model_key", "model_title")}),
+        ("Метаданные", {"fields": ("queue_id", "test_log", "submitted_at", "created_by", "external_user_id", "times_used", "created_at", "updated_at")}),
+    )
+
+    # Кэш пишется только автоматикой; ручное добавление/правка не предусмотрены.
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return is_superuser_user(request.user)
 
 
 class PromptTestCaseAdmin(admin.ModelAdmin):

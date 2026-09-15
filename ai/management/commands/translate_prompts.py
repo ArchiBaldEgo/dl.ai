@@ -27,9 +27,10 @@ _LANG_LABELS = {"en": "English", "fr": "Français"}
 _PLACEHOLDER_RE = re.compile(r"\{(language|язык|topic|тема|message|code)\}")
 
 # Field pairs translated for every object: (source_attr, target_attr_template).
+# Источник — *_ru (базовые поля prompt_name/prompt_text удалены из модели).
 _FIELD_PAIRS = (
-    ("prompt_name", "prompt_name_{}"),
-    ("prompt_text", "prompt_text_{}"),
+    ("prompt_name_ru", "prompt_name_{}"),
+    ("prompt_text_ru", "prompt_text_{}"),
 )
 
 _NAME_MAX_LENGTH = 255

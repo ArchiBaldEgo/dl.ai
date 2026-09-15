@@ -106,7 +106,7 @@ def _compose_message(case, prompt_id, ui_language):
     is the prompt-under-test (int Prompt id, ``shared_<pk>``, or None).
     """
     pl_name = case.programming_language.language_name if case.programming_language else ""
-    topic_name = case.topic.topic_name if case.topic else ""
+    topic_name = case.topic.topic_name_ru if case.topic else ""
 
     if case.mode == "solve":
         data = {
@@ -229,7 +229,7 @@ def _run_job_worker(run_id, cases, model, user_id, *, prompt_id=None, ui_languag
                 else:
                     prompt_obj = Prompt.objects.filter(id=int(prompt_id)).first()
                 if prompt_obj:
-                    prompt_name = getattr(prompt_obj, "prompt_name", "") or str(prompt_obj)
+                    prompt_name = getattr(prompt_obj, "prompt_name_ru", "") or str(prompt_obj)
             except (ValueError, Prompt.DoesNotExist, SharedPrompt.DoesNotExist):
                 prompt_name = ""
 
@@ -327,7 +327,7 @@ def _run_job_worker(run_id, cases, model, user_id, *, prompt_id=None, ui_languag
 
             duration = round(perf_counter() - started, 2)
             pl_name_snap = case.programming_language.language_name if case.programming_language else ""
-            topic_name_snap = case.topic.topic_name if case.topic else ""
+            topic_name_snap = case.topic.topic_name_ru if case.topic else ""
 
             PromptTestResult.objects.update_or_create(
                 run=test_run,

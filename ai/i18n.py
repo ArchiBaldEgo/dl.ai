@@ -42,15 +42,14 @@ def get_ui_language_suffix(ui_language: str) -> str:
 
 
 def get_localized_name(obj: Any, ui_language: str, default_attr: str = "name") -> str:
-    """Return a localized name for the object, falling back to base fields.
+    """Return a localized name for the object, falling back to Russian.
 
-    Looks for ``{default_attr}_{suffix}`` first, then the base field, then the
-    *_ru field.  Returns the object's string representation as a last resort.
+    Looks for ``{default_attr}_{suffix}`` first, then the *_ru field.
+    Returns the object's string representation as a last resort.
     """
     suffix = get_ui_language_suffix(ui_language)
     candidates = [
         f"{default_attr}_{suffix}",
-        default_attr,
         f"{default_attr}_ru",
     ]
     for attr in candidates:
@@ -61,11 +60,10 @@ def get_localized_name(obj: Any, ui_language: str, default_attr: str = "name") -
 
 
 def get_localized_text(obj: Any, ui_language: str, default_attr: str = "text") -> str:
-    """Return a localized text for the object, falling back to base fields."""
+    """Return a localized text for the object, falling back to *_ru."""
     suffix = get_ui_language_suffix(ui_language)
     candidates = [
         f"{default_attr}_{suffix}",
-        default_attr,
         f"{default_attr}_ru",
     ]
     for attr in candidates:

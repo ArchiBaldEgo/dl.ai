@@ -15,6 +15,7 @@ from ..models import (
     PromptTestRun,
     SharedPrompt,
     Task,
+    TaskSolution,
     Topic,
 )
 from .models import (
@@ -28,6 +29,7 @@ from .models import (
     RestrictedUserAdmin,
     SharedPromptAdmin,
     TaskAdmin,
+    TaskSolutionAdmin,
 )
 from .forms import PromptForm, SharedPromptForm
 from .logs import AIRequestLogAdmin, admin_request_log_detail_view, admin_request_logs_view, resend_request_view
@@ -62,6 +64,7 @@ __all__ = [
     "PromptTestRunAdmin",
     "SharedPromptAdmin",
     "TaskAdmin",
+    "TaskSolutionAdmin",
     "PromptForm",
     "SharedPromptForm",
     "AIRequestLogAdmin",
@@ -92,6 +95,7 @@ ai_admin_site.register(SharedPrompt, SharedPromptAdmin)
 ai_admin_site.register(PromptTestCase, PromptTestCaseAdmin)
 ai_admin_site.register(PromptTestRun, PromptTestRunAdmin)
 ai_admin_site.register(ExternalDLAccount, ExternalDLAccountAdmin)
+ai_admin_site.register(TaskSolution, TaskSolutionAdmin)
 # NOTE: AIRequestLog is intentionally NOT registered as a ModelAdmin. Its
 # changelist URL (/ai/admin/ai/airequestlog/) is served by the custom
 # admin_request_logs_view (ai/admin/urls.py), which renders the richer

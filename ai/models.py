@@ -156,10 +156,11 @@ class ProgrammingLanguage(models.Model):
 class Topic(models.Model):
     """Тема (раздел) в рамках языка программирования.
 
-    Поддерживает мультиязычные названия (ru/en/fr). Используется для подстановки
-    плейсхолдера {topic} в промпты и для группировки задач в ARM-отчётах.
+    Мультиязычные названия (ru/en/fr); ``topic_name_ru`` — базовый вариант и
+    fallback цепочки локализации (get_localized_name). Используется для
+    подстановки плейсхолдера {topic} в промпты и для группировки задач в
+    ARM-отчётах.
     """
-    topic_name = models.CharField(max_length=255, verbose_name="Название")
     topic_name_ru = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (RU)")
     topic_name_en = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (EN)")
     topic_name_fr = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (FR)")
@@ -244,15 +245,15 @@ class SharedPrompt(models.Model):
     Если указан mode (chat/solve/find_error), препромпт используется как
     системный шаблон по умолчанию для соответствующего режима.
     """
-    prompt_name = models.CharField(max_length=255, verbose_name="Название")
     prompt_name_ru = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (RU)")
     prompt_name_en = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (EN)")
     prompt_name_fr = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (FR)")
-    prompt_text = models.TextField(
+    prompt_text_ru = models.TextField(
+        blank=True,
+        default="",
         help_text="Доступные плейсхолдеры: {language}/{язык} - язык программирования, {topic}/{тема} - тема.",
-        verbose_name="Текст",
+        verbose_name="Текст (RU)",
     )
-    prompt_text_ru = models.TextField(blank=True, default="", verbose_name="Текст (RU)")
     prompt_text_en = models.TextField(blank=True, default="", verbose_name="Текст (EN)")
     prompt_text_fr = models.TextField(blank=True, default="", verbose_name="Текст (FR)")
     # Языки, для которых этот общий препромпт доступен (blank = для всех)
@@ -293,7 +294,7 @@ class SharedPrompt(models.Model):
         return f"{prefix} {name}"
 
     def get_effective_text(self, ui_language="", programming_language_name="", topic_name="", message="", code=""):
-        base = get_localized_text(self, ui_language, "prompt_text") or self.prompt_text
+        base = get_localized_text(self, ui_language, "prompt_text") or self.prompt_text_ru
         return replace_placeholders(base, programming_language_name, topic_name, message, code)
 
     class Meta:
@@ -320,11 +321,9 @@ class Prompt(models.Model):
         Topic, on_delete=models.CASCADE, null=True, blank=True,
         verbose_name="Тема",
     )
-    prompt_text = models.TextField(verbose_name="Текст")
     prompt_text_ru = models.TextField(blank=True, default="", verbose_name="Текст (RU)")
     prompt_text_en = models.TextField(blank=True, default="", verbose_name="Текст (EN)")
     prompt_text_fr = models.TextField(blank=True, default="", verbose_name="Текст (FR)")
-    prompt_name = models.CharField(max_length=255, null=True, verbose_name="Название")
     prompt_name_ru = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (RU)")
     prompt_name_en = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (EN)")
     prompt_name_fr = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (FR)")
@@ -358,7 +357,7 @@ class Prompt(models.Model):
         elif self.shared_prompt:
             base = self.shared_prompt.get_effective_text(ui_language, programming_language_name, topic_name, message, code)
         else:
-            base = get_localized_text(self, ui_language, "prompt_text") or self.prompt_text
+            base = get_localized_text(self, ui_language, "prompt_text") or self.prompt_text_ru
         return replace_placeholders(base, programming_language_name, topic_name, message, code)
 
     def __str__(self):
@@ -449,6 +448,69 @@ class ArmPromptBinding(models.Model):
     def __str__(self):
         topic = self.topic if self.topic is not None else "(весь язык)"
         return f"{self.get_mode_display()}: {self.programming_language} / {topic} → {self.prompt}"
+
+
+class TaskSolution(models.Model):
+    """Кэш решённых задач «Реши задачу» (узел DL + язык → проверенный код).
+
+    Записи создаются только когда пользователь сам отправил сгенерированный
+    код на тестирование со страницы «Реши задачу» (HTTP send-solution; ARM и
+    прочие прогоны кэш не пишут). После успешного тестирования (verdict =
+    passed) код отдаётся из кэша всем, кто повторно запросит ту же задачу на
+    том же языке, — без вызова модели. ``queue_id`` — активный poll DL
+    (send-solution → get-solution-result); после финального вердикта
+    сбрасывается. ``model_key`` — модель, сгенерировавшая код (из
+    AIRequestLog последней успешной генерации для узла).
+    """
+
+    VERDICT_PENDING = "pending"
+    VERDICT_PASSED = "passed"
+    VERDICT_FAILED = "failed"
+
+    VERDICT_CHOICES = (
+        (VERDICT_PENDING, "Тестируется"),
+        (VERDICT_PASSED, "Тестирование пройдено"),
+        (VERDICT_FAILED, "Тестирование не пройдено"),
+    )
+
+    task_node_id = models.PositiveIntegerField(db_index=True, verbose_name="ID задачи DL")
+    programming_language_id = models.IntegerField(null=True, blank=True, verbose_name="ID языка программирования")
+    file_extension = models.CharField(max_length=16, blank=True, default="", verbose_name="Расширение файла")
+    code = models.TextField(verbose_name="Код решения")
+    verdict = models.CharField(max_length=16, choices=VERDICT_CHOICES, default=VERDICT_PENDING, verbose_name="Вердикт")
+    dl_comment = models.TextField(blank=True, default="", verbose_name="Комментарий DL")
+    model_key = models.CharField(max_length=128, blank=True, default="", verbose_name="Ключ модели")
+    model_title = models.CharField(max_length=255, blank=True, default="", verbose_name="Название модели")
+    queue_id = models.PositiveIntegerField(null=True, blank=True, db_index=True, verbose_name="Queue ID DL")
+    test_log = models.ForeignKey(
+        "AIRequestLog", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="task_solutions", verbose_name="Запись журнала тестирования",
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True, verbose_name="Отправлен на тестирование")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="task_solutions", verbose_name="Пользователь",
+    )
+    external_user_id = models.CharField(max_length=255, blank=True, default="", verbose_name="ID пользователя dl.gsu.by")
+    times_used = models.PositiveIntegerField(default=0, verbose_name="Сколько раз выдавался из кэша")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
+
+    class Meta:
+        db_table = "ai_task_solution"
+        verbose_name = "Решённая задача (кэш кода)"
+        verbose_name_plural = "Решённые задачи (кэш кода)"
+        ordering = ("-updated_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["task_node_id", "programming_language_id"],
+                name="unique_task_solution_node_lang",
+            ),
+        ]
+
+    def __str__(self):
+        lang = self.programming_language_id or "-"
+        return f"Задача {self.task_node_id} ({lang}): {self.verdict}"
 
 
 class AIAppSettings(models.Model):
@@ -578,10 +640,12 @@ class AIRequestLog(models.Model):
 
     SOURCE_WEBSOCKET = "websocket"
     SOURCE_ARM = "arm"
+    SOURCE_HTTP = "http"
 
     SOURCE_CHOICES = (
         (SOURCE_WEBSOCKET, "WebSocket"),
         (SOURCE_ARM, "ARM"),
+        (SOURCE_HTTP, "HTTP"),
     )
 
     MODE_CHAT = "chat"
@@ -589,6 +653,7 @@ class AIRequestLog(models.Model):
     MODE_FIND_ERROR = "find_error"
     MODE_ARM = "arm"
     MODE_BATCH_SOLVE = "batch_solve"
+    MODE_TESTING = "testing"
 
     MODE_CHOICES = (
         (MODE_CHAT, "Чат"),
@@ -596,6 +661,7 @@ class AIRequestLog(models.Model):
         (MODE_FIND_ERROR, "Найти ошибку"),
         (MODE_ARM, "ARM"),
         (MODE_BATCH_SOLVE, "Пакетное решение"),
+        (MODE_TESTING, "Тестирование"),
     )
 
     user = models.ForeignKey(

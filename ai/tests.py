@@ -621,18 +621,18 @@ class PromptAdminAccessTests(TestCase):
         self.other_prompt_developer.groups.add(prompt_developer_group)
 
         self.editable_prompt = Prompt.objects.create(
-            prompt_name="Editable prompt",
-            prompt_text="Editable prompt text",
+            prompt_name_ru="Editable prompt",
+            prompt_text_ru="Editable prompt text",
             owner=self.prompt_developer,
         )
         self.readonly_prompt = Prompt.objects.create(
-            prompt_name="Readonly prompt",
-            prompt_text="Readonly prompt text",
+            prompt_name_ru="Readonly prompt",
+            prompt_text_ru="Readonly prompt text",
             owner=self.other_prompt_developer,
         )
         self.legacy_assigned_prompt = Prompt.objects.create(
-            prompt_name="Legacy assigned prompt",
-            prompt_text="Legacy assigned prompt text",
+            prompt_name_ru="Legacy assigned prompt",
+            prompt_text_ru="Legacy assigned prompt text",
         )
         self.editable_prompt.editors.add(self.prompt_developer)
         self.legacy_assigned_prompt.editors.add(self.prompt_developer)
@@ -659,7 +659,7 @@ class PromptAdminAccessTests(TestCase):
         request = self._build_request(self.prompt_developer)
         self.assertTrue(self.prompt_admin.has_add_permission(request))
 
-        new_prompt = Prompt(prompt_name="My prompt", prompt_text="My prompt text")
+        new_prompt = Prompt(prompt_name_ru="My prompt", prompt_text_ru="My prompt text")
         self.prompt_admin.save_model(request, new_prompt, form=None, change=False)
         new_prompt.refresh_from_db()
 
@@ -670,7 +670,7 @@ class PromptAdminAccessTests(TestCase):
         request = self._build_request(self.second_prompt_developer)
         self.assertTrue(self.prompt_admin.has_add_permission(request))
 
-        prompt = Prompt(prompt_name="Second prompt", prompt_text="Second prompt text")
+        prompt = Prompt(prompt_name_ru="Second prompt", prompt_text_ru="Second prompt text")
         self.prompt_admin.save_model(request, prompt, form=None, change=False)
         prompt.refresh_from_db()
 
@@ -688,9 +688,9 @@ class PromptAdminAccessTests(TestCase):
             readonly_fields,
             (
                 "programming_language", "topic",
-                "prompt_name", "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
+                "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
                 "shared_prompt", "prompt_text_override",
-                "prompt_text", "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
+                "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
             ),
         )
 
@@ -735,8 +735,8 @@ class PromptAdminAccessTests(TestCase):
             password="test-pass",
         )
         own_prompt = Prompt.objects.create(
-            prompt_name="Superuser prompt",
-            prompt_text="Superuser prompt text",
+            prompt_name_ru="Superuser prompt",
+            prompt_text_ru="Superuser prompt text",
             owner=superuser,
         )
         request = self._build_request(superuser)
@@ -764,8 +764,8 @@ class PromptAdminAccessTests(TestCase):
             password="test-pass",
         )
         own_prompt = Prompt.objects.create(
-            prompt_name="Superuser prompt mine",
-            prompt_text="Superuser prompt text",
+            prompt_name_ru="Superuser prompt mine",
+            prompt_text_ru="Superuser prompt text",
             owner=superuser,
         )
         request = self._build_request(superuser, query_params={"mine": "1"})
@@ -789,19 +789,19 @@ class PromptFormTests(TestCase):
         self.python_language = ProgrammingLanguage.objects.create(language_name="Python")
         self.c_language = ProgrammingLanguage.objects.create(language_name="C")
         self.python_topic = Topic.objects.create(
-            topic_name="Loops",
+            topic_name_ru="Loops",
             programming_language=self.python_language,
         )
         self.c_topic = Topic.objects.create(
-            topic_name="Pointers",
+            topic_name_ru="Pointers",
             programming_language=self.c_language,
         )
 
     def test_form_sets_programming_language_from_prompt_topic(self):
         prompt = Prompt.objects.create(
             topic=self.python_topic,
-            prompt_name="Prompt",
-            prompt_text="Body",
+            prompt_name_ru="Prompt",
+            prompt_text_ru="Body",
         )
 
         form = PromptForm(instance=prompt)
@@ -818,8 +818,8 @@ class PromptFormTests(TestCase):
             data={
                 "programming_language": str(self.python_language.id),
                 "topic": str(self.python_topic.id),
-                "prompt_name": "Prompt",
-                "prompt_text": "Body",
+                "prompt_name_ru": "Prompt",
+                "prompt_text_ru": "Body",
             }
         )
 
@@ -835,8 +835,8 @@ class PromptFormTests(TestCase):
             data={
                 "programming_language": str(self.python_language.id),
                 "topic": str(self.c_topic.id),
-                "prompt_name": "Prompt",
-                "prompt_text": "Body",
+                "prompt_name_ru": "Prompt",
+                "prompt_text_ru": "Body",
             }
         )
 
@@ -852,7 +852,7 @@ class LocalizationHelpersTests(TestCase):
         self.assertEqual(get_ui_language_suffix("Russian"), "ru")
 
     def test_get_localized_name_falls_back(self):
-        topic = Topic(topic_name="Base", topic_name_ru="Рус", topic_name_en="Eng", topic_name_fr="Fra")
+        topic = Topic(topic_name_ru="Рус", topic_name_en="Eng", topic_name_fr="Fra")
         self.assertEqual(get_localized_name(topic, "Русский", "topic_name"), "Рус")
         self.assertEqual(get_localized_name(topic, "English", "topic_name"), "Eng")
         self.assertEqual(get_localized_name(topic, "Français", "topic_name"), "Fra")
@@ -865,8 +865,7 @@ class PromptEffectiveTextTests(TestCase):
 
     def test_effective_text_uses_ui_language(self):
         prompt = Prompt(
-            prompt_name="P",
-            prompt_text="Base {language}",
+            prompt_name_ru="P",
             prompt_text_ru="Рус {language}",
             prompt_text_en="Eng {language}",
         )
@@ -874,10 +873,12 @@ class PromptEffectiveTextTests(TestCase):
         self.assertEqual(prompt.get_effective_text("English", "Python"), "Eng Python")
 
     def test_shared_prompt_text_uses_ui_language(self):
-        shared = SharedPrompt(prompt_name="S", prompt_text="Base {language}", prompt_text_ru="Рус {language}")
-        prompt = Prompt(prompt_name="P", shared_prompt=shared)
+        # Базовые поля удалены: цепочка локализации _en → _ru. Без _en английский
+        # UI видит русский текст (fallback на _ru).
+        shared = SharedPrompt(prompt_name_ru="S", prompt_text_ru="Рус {language}")
+        prompt = Prompt(prompt_name_ru="P", shared_prompt=shared)
         self.assertEqual(prompt.get_effective_text("Русский", "C++"), "Рус C++")
-        self.assertEqual(prompt.get_effective_text("English", "C++"), "Base C++")
+        self.assertEqual(prompt.get_effective_text("English", "C++"), "Рус C++")
 
 
 class ProblemDataApiUiLanguageTests(TestCase):
@@ -898,17 +899,15 @@ class ProblemDataApiUiLanguageTests(TestCase):
     def test_problem_data_localizes_topic_and_prompt_names(self):
         pl = ProgrammingLanguage.objects.create(language_name="Python")
         topic = Topic.objects.create(
-            topic_name="Base topic",
             topic_name_ru="Русская тема",
             topic_name_en="English topic",
             programming_language=pl,
         )
         Prompt.objects.create(
             topic=topic,
-            prompt_name="Base prompt",
             prompt_name_ru="Русский промпт",
             prompt_name_en="English prompt",
-            prompt_text="text",
+            prompt_text_ru="text",
         )
 
         response_en = get_problem_data(self._request("English"))
@@ -929,15 +928,15 @@ class ProblemDataApiUiLanguageTests(TestCase):
         entered in the admin (prompt_name_en field)."""
         pl = ProgrammingLanguage.objects.create(language_name="Python")
         topic = Topic.objects.create(
-            topic_name="Base topic",
+            topic_name_ru="Base topic",
             topic_name_en="English topic",
             programming_language=pl,
         )
         Prompt.objects.create(
             topic=topic,
-            prompt_name="Русский оригинал",
+            prompt_name_ru="Русский оригинал",
             prompt_name_en="",  # no English translation entered
-            prompt_text="text",
+            prompt_text_ru="text",
         )
 
         data_en = json.loads(get_problem_data(self._request("English")).content)
@@ -2095,8 +2094,8 @@ class TranslatePromptsCommandTests(TestCase):
     def setUp(self):
         from ai.models import SharedPrompt, Prompt, Topic
         self.shared = SharedPrompt.objects.create(
-            prompt_name="Решить задачу",
-            prompt_text="Реши задачу на {language} по теме {тема}. Код: {code}",
+            prompt_name_ru="Решить задачу",
+            prompt_text_ru="Реши задачу на {language} по теме {тема}. Код: {code}",
             prompt_name_en="",
             prompt_text_en="already-en",
             prompt_name_fr="",
@@ -2350,7 +2349,7 @@ class BatchRunnerIntegrationTests(TestCase):
         from ai.models import Task
         self.user = get_user_model().objects.create_user(username="batcher", password="x")
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
         self.t1 = Task.objects.create(
             node_id=1001, task_id=2001, name="A", statement="Сложите a и b",
             topic=self.topic, programming_language=self.lang, file_extension=".pas",
@@ -2567,7 +2566,7 @@ class TaskRegistryTests(TestCase):
     def setUp(self):
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
         self.other_lang = ProgrammingLanguage.objects.create(language_name="Python")
-        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
 
     def test_apply_dl_task_info_sets_truthy_fields_only(self):
         from ai.models import Task
@@ -2735,7 +2734,7 @@ class PromptRegressionRunnerTests(TestCase):
         from ai.models import PromptTestCase
         self.user = get_user_model().objects.create_user(username="prompt-tester", password="x")
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
         self.case_match = PromptTestCase.objects.create(
             name="Solve match", mode="solve",
             input_text="Сложите a и b",
@@ -2962,9 +2961,9 @@ class ProblemDataApiTests(TestCase):
     def test_problem_data_returns_topics_filtered_by_language(self):
         pl1 = ProgrammingLanguage.objects.create(language_name="Python")
         pl2 = ProgrammingLanguage.objects.create(language_name="C++")
-        Topic.objects.create(topic_name="Loops", programming_language=pl1)
-        Topic.objects.create(topic_name="Arrays", programming_language=pl1)
-        Topic.objects.create(topic_name="Pointers", programming_language=pl2)
+        Topic.objects.create(topic_name_ru="Loops", programming_language=pl1)
+        Topic.objects.create(topic_name_ru="Arrays", programming_language=pl1)
+        Topic.objects.create(topic_name_ru="Pointers", programming_language=pl2)
         response = get_problem_data(self._request("Russian"))
         data = json.loads(response.content)
         self.assertEqual(len(data["topics"]), 3)
@@ -2976,8 +2975,8 @@ class ProblemDataApiTests(TestCase):
 
     def test_problem_data_returns_prompts(self):
         pl = ProgrammingLanguage.objects.create(language_name="Python")
-        topic = Topic.objects.create(topic_name="Loops", programming_language=pl)
-        Prompt.objects.create(topic=topic, prompt_name="Loop helper", prompt_text="Help with loops")
+        topic = Topic.objects.create(topic_name_ru="Loops", programming_language=pl)
+        Prompt.objects.create(topic=topic, prompt_name_ru="Loop helper", prompt_text_ru="Help with loops")
         response = get_problem_data(self._request("Russian"))
         data = json.loads(response.content)
         self.assertGreaterEqual(len(data["prompts"]), 1)
@@ -2993,7 +2992,7 @@ class ProblemDataApiTests(TestCase):
 
     def test_problem_data_returns_shared_prompts(self):
         pl = ProgrammingLanguage.objects.create(language_name="Python")
-        sp = SharedPrompt.objects.create(prompt_name="Common prep", prompt_text="Common text")
+        sp = SharedPrompt.objects.create(prompt_name_ru="Common prep", prompt_text_ru="Common text")
         sp.programming_languages.add(pl)
         response = get_problem_data(self._request("Russian"))
         data = json.loads(response.content)
@@ -3486,6 +3485,7 @@ class OllamaRegistryTests(SimpleTestCase):
     """Ollama-модели зарегистрированы в registry с правильными capabilities."""
 
     OLLAMA_KEYS = [
+        "Ollama_Glm_5_3_Flash_Cloud",
         "Ollama_Glm_5_2_Cloud",
         "Ollama_DeepSeek_V4_1_Flash_Cloud",
         "Ollama_Gemma_4_Cloud",
@@ -3871,7 +3871,7 @@ class BatchLogSnapshotTests(TestCase):
         from ai.models import AIModelTestRun, AIModelTestResult, Task
         self.user = get_user_model().objects.create_user(username="snap", password="x")
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
         self.t1 = Task.objects.create(
             node_id=5001, task_id=6001, name="A", statement="x",
             topic=self.topic, programming_language=self.lang, file_extension=".pas",
@@ -3988,7 +3988,7 @@ class BatchLogStatusSemanticsTests(TestCase):
         from ai.models import Task
         self.user = get_user_model().objects.create_user(username="batchstat", password="x")
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
         self.t1 = Task.objects.create(
             node_id=3101, task_id=3201, name="A", statement="x",
             topic=self.topic, programming_language=self.lang, file_extension=".pas",
@@ -4084,7 +4084,7 @@ class BatchLogRowContextsTests(TestCase):
         from ai.models import AIModelTestRun, AIModelTestResult, Task
         self.user = get_user_model().objects.create_user(username="rowctx", password="x")
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
         self.t1 = Task.objects.create(
             node_id=5001, task_id=6001, name="A", statement="x",
             topic=self.topic, programming_language=self.lang, file_extension=".pas",
@@ -4185,7 +4185,7 @@ class RequestLogXlsxTests(TestCase):
         )
         self.normal_user = get_user_model().objects.create_user(username="csv_user", password="x")
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name="Линейные", programming_language=self.lang)
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
         self.t1 = Task.objects.create(
             node_id=5101, task_id=6101, name="A", statement="x",
             topic=self.topic, programming_language=self.lang, file_extension=".pas",
@@ -4970,13 +4970,13 @@ class ArmPromptBindingTests(TestCase):
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
         self.other_lang = ProgrammingLanguage.objects.create(language_name="Python")
         self.topic = Topic.objects.create(
-            topic_name="Массивы", programming_language=self.lang,
+            topic_name_ru="Массивы", programming_language=self.lang,
         )
         self.other_topic = Topic.objects.create(
-            topic_name="Файлы", programming_language=self.other_lang,
+            topic_name_ru="Файлы", programming_language=self.other_lang,
         )
         self.prompt = Prompt.objects.create(
-            prompt_name="Массивы базовый", prompt_text="Текст",
+            prompt_name_ru="Массивы базовый", prompt_text_ru="Текст",
             topic=self.topic, owner=self.superuser,
         )
 
@@ -5376,9 +5376,9 @@ class SolveMessageTests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="sol", password="x")
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name="Массивы", programming_language=self.lang)
+        self.topic = Topic.objects.create(topic_name_ru="Массивы", programming_language=self.lang)
         self.prompt = Prompt.objects.create(
-            prompt_name="С особым стилем", prompt_text="ПИШИ КАПСОМ: {message}",
+            prompt_name_ru="С особым стилем", prompt_text_ru="ПИШИ КАПСОМ: {message}",
             topic=self.topic, owner=self.user,
         )
 
@@ -5403,7 +5403,7 @@ class SolveMessageTests(TestCase):
 
     def test_task_statement_always_included(self):
         # Промпт без {message}: условие дописывается явно (гарантия полного входа).
-        self.prompt.prompt_text = "Стиль без плейсхолдера"
+        self.prompt.prompt_text_ru = "Стиль без плейсхолдера"
         self.prompt.save()
         message = self._message(prompt_id=self.prompt.id)
         self.assertIn("Условие задачи:", message)
@@ -5430,9 +5430,9 @@ class ArmSolveStartViewTests(TestCase):
             username="ss_staff", password="x", is_staff=True,
         )
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name="Массивы", programming_language=self.lang)
+        self.topic = Topic.objects.create(topic_name_ru="Массивы", programming_language=self.lang)
         self.prompt = Prompt.objects.create(
-            prompt_name="Массивы базовый", prompt_text="Текст",
+            prompt_name_ru="Массивы базовый", prompt_text_ru="Текст",
             topic=self.topic, owner=self.superuser,
         )
         self.binding = ArmPromptBinding.objects.create(
@@ -5470,23 +5470,24 @@ class ArmSolveStartViewTests(TestCase):
         self.assertEqual(kwargs["programming_language_id"], self.lang.id)
         self.assertIsNone(kwargs["prompt_id"])  # привязки нет → без препромпта
 
-    def test_start_resolves_binding_prompt_server_side(self):
+    def test_start_nonexistent_prompt_id_leaves_choice_to_worker(self):
         payload = {
             "node_ids": [101], "models": ["FakeModel"],
             "language_id": self.lang.id, "arm_topic_id": self.topic.id,
-            # Несуществующий prompt_id → фолбэк на привязку (ручного выбора нет).
+            # Несуществующий prompt_id → «по привязке»: worker сам подбирает
+            # препромпт на каждую задачу (по теме из ветки DL).
             "prompt_id": 99999,
         }
         response, start_mock = self._post(self.superuser, payload)
         self.assertEqual(response.status_code, 200)
         kwargs = start_mock.call_args.kwargs
-        self.assertEqual(kwargs["prompt_id"], self.prompt.id)
-        self.assertEqual(kwargs["prompt_name"], "Массивы базовый")
+        self.assertIsNone(kwargs["prompt_id"])
+        self.assertEqual(kwargs["prompt_name"], "")
 
     def test_start_manual_prompt_id_overrides_binding(self):
         """Существующий prompt_id (выбор из списка) перекрывает привязку."""
         other = Prompt.objects.create(
-            prompt_name="Общий препромпт", prompt_text="Текст 2",
+            prompt_name_ru="Общий препромпт", prompt_text_ru="Текст 2",
             topic=self.topic, owner=self.superuser,
         )
         payload = {
@@ -5500,7 +5501,7 @@ class ArmSolveStartViewTests(TestCase):
         self.assertEqual(kwargs["prompt_id"], other.id)
         self.assertEqual(kwargs["prompt_name"], "Общий препромпт")
 
-    def test_start_empty_prompt_id_uses_binding(self):
+    def test_start_empty_prompt_id_leaves_choice_to_worker(self):
         payload = {
             "node_ids": [101], "models": ["FakeModel"],
             "language_id": self.lang.id, "arm_topic_id": self.topic.id,
@@ -5509,7 +5510,10 @@ class ArmSolveStartViewTests(TestCase):
         response, start_mock = self._post(self.superuser, payload)
         self.assertEqual(response.status_code, 200)
         kwargs = start_mock.call_args.kwargs
-        self.assertEqual(kwargs["prompt_id"], self.prompt.id)
+        # «По привязке»: prompt_id не резолвится на старте — worker подбирает
+        # привязку на каждую задачу по её теме (см. arm_runner._resolve_batch_prompt).
+        self.assertIsNone(kwargs["prompt_id"])
+        self.assertEqual(kwargs["prompt_name"], "")
 
     def test_start_passes_run_name(self):
         """Ручное название прогона тримится и передаётся в запуск."""
@@ -5682,9 +5686,9 @@ class ArmFindErrorBindingTests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="fe_bind", password="x")
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name="Массивы", programming_language=self.lang)
+        self.topic = Topic.objects.create(topic_name_ru="Массивы", programming_language=self.lang)
         self.prompt = Prompt.objects.create(
-            prompt_name="Стиль FE", prompt_text="ОТВЕЧАЙ КРАТКО",
+            prompt_name_ru="Стиль FE", prompt_text_ru="ОТВЕЧАЙ КРАТКО",
             topic=self.topic, owner=self.user,
         )
 
@@ -6050,7 +6054,7 @@ class BatchLogDetailTemplateTests(TestCase):
         )
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
         self.topic = Topic.objects.create(
-            topic_name="Линейные", programming_language=self.lang,
+            topic_name_ru="Линейные", programming_language=self.lang,
         )
         task = Task.objects.create(
             node_id=7101, task_id=7201, name="BD", statement="s",
@@ -6129,7 +6133,7 @@ class ArmFindErrorTopicsKeyTests(TestCase):
         )
         self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
         self.topic = Topic.objects.create(
-            topic_name="Массивы", programming_language=self.lang,
+            topic_name_ru="Массивы", programming_language=self.lang,
         )
 
     def test_view_topics_carry_programming_language_key(self):
@@ -6623,7 +6627,7 @@ class RestrictedUserEditorsInlineTests(TestCase):
         self.assertNotIn(PromptEditorshipInline, inlines)
 
     def test_through_model_links_editor(self):
-        prompt = Prompt.objects.create(prompt_name="t", prompt_text="текст")
+        prompt = Prompt.objects.create(prompt_name_ru="t", prompt_text_ru="текст")
         editor = self.user_model.objects.create_user(username="inline-editor", password="x")
         Prompt.editors.through.objects.create(prompt=prompt, user=editor)
         self.assertIn(editor, prompt.editors.all())
@@ -6787,7 +6791,7 @@ class BatchRunNameTests(TestCase):
         from ai.models import Task
 
         lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        topic = Topic.objects.create(topic_name="Линейные", programming_language=lang)
+        topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=lang)
         t1 = Task.objects.create(
             node_id=7001, task_id=7101, name="A", statement="x",
             topic=topic, programming_language=lang, file_extension=".pas",
@@ -7148,3 +7152,137 @@ class ChatUserDocsLangTests(TestCase):
         response = chat_user_docs_view(request)
         data = json.loads(response.content)
         self.assertEqual(data["lang"], "ru")
+
+
+class SendSolutionViewTests(TestCase):
+    """send_solution_view / get_solution_result_view — URL-прокси к DL REST
+    для кнопки «Тестирование» страницы «Реши задачу» (/ai/api/send-solution/,
+    /ai/api/get-solution-result/ в DjangoTest/urls.py). fileExtension можно не
+    передавать: расширение резолвится серверно из языка программирования через
+    _guess_extension (единый источник соответствия язык→расширение)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="ss_admin", password="***", email="ss@t.com",
+        )
+
+    def _post_send(self, body, user_info=None):
+        from ai.views import send_solution_view
+        request = self.factory.post(
+            "/ai/api/send-solution/", data=json.dumps(body),
+            content_type="application/json",
+        )
+        request.user = self.superuser
+        request.session = {}
+        # _has_page_access требует внешний id (userId cookie / user_info).
+        request.COOKIES = {"userId": self.superuser.username}
+        if user_info is not None:
+            request.user_info = user_info
+        return send_solution_view(request)
+
+    def _post_result(self, body, user_info=None):
+        from ai.views import get_solution_result_view
+        request = self.factory.post(
+            "/ai/api/get-solution-result/", data=json.dumps(body),
+            content_type="application/json",
+        )
+        request.user = self.superuser
+        request.session = {}
+        # _has_page_access требует внешний id (userId cookie / user_info).
+        request.COOKIES = {"userId": self.superuser.username}
+        if user_info is not None:
+            request.user_info = user_info
+        return get_solution_result_view(request)
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_extension_resolved_from_language_name(self, mock_send):
+        """progLanguageName без fileExtension → расширение через _guess_extension
+        («Ассемблер i8086» → «.i86»), payload уходит в DL с ним."""
+        mock_send.return_value = {"queueId": 42, "message": "ok"}
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 100, "code": "mov ax, 1",
+            "courseId": 1450, "progLanguageName": "Ассемблер i8086",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content)["queueId"], 42)
+        self.assertEqual(mock_send.call_args.args[3], ".i86")
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_extension_resolved_from_language_id(self, mock_send):
+        ProgrammingLanguage.objects.create(language_name="C-MPA (С-МПА)")
+        lang = ProgrammingLanguage.objects.get(language_name="C-MPA (С-МПА)")
+        mock_send.return_value = {"queueId": 7, "message": "ok"}
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 100, "code": "int main(){}",
+            "courseId": 1450, "progLanguageId": lang.id,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_send.call_args.args[3], ".mpc")
+
+    def test_no_extension_and_no_language_returns_400(self):
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 100, "code": "x", "courseId": 1450,
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("error", json.loads(response.content))
+
+    def test_missing_node_id_returns_400(self):
+        response = self._post_send({
+            "sessionId": "SID", "code": "x", "courseId": 1450,
+            "progLanguageName": "Pascal",
+        })
+        self.assertEqual(response.status_code, 400)
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_dl_error_mapped_to_json_response(self, mock_send):
+        from ai.dl_api_client import DLUnauthorizedError
+        mock_send.side_effect = DLUnauthorizedError()
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 100, "code": "x", "courseId": 1450,
+            "progLanguageName": "Pascal",
+        })
+        self.assertEqual(response.status_code, 401)
+
+    @patch("ai.dl_api_client.get_solution_result_from_dl")
+    def test_result_proxied(self, mock_poll):
+        mock_poll.return_value = {"isFinished": True, "comment": "Все тесты успешно пройдены"}
+        response = self._post_result({"sessionId": "SID", "queueId": 42})
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertTrue(data["isFinished"])
+        self.assertEqual(data["comment"], "Все тесты успешно пройдены")
+        self.assertEqual(mock_poll.call_args.args[1], 42)
+
+    def test_result_missing_queue_id_returns_400(self):
+        response = self._post_result({"sessionId": "SID"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_urls_wired(self):
+        """Маршруты /ai/api/send-solution/ и /ai/api/get-solution-result/
+        подключены в DjangoTest/urls.py (до этого вьюхи были мертвы)."""
+        from django.urls import reverse
+        self.assertEqual(reverse("send_solution"), "/ai/api/send-solution/")
+        self.assertEqual(reverse("get_solution_result"), "/ai/api/get-solution-result/")
+
+
+class SolutionPollRateLimitTests(SimpleTestCase):
+    """Поллинг результата DL-тестирования (POST /ai/api/get-solution-result/,
+    ~1 раз в 3 с) идёт в отдельный poll-лимитер, а не в action-бюджет
+    пользователя; сама отправка (send-solution) остаётся обычным действием."""
+
+    def test_get_solution_result_is_poll(self):
+        from ai.throttling import _is_poll_request
+        request = RequestFactory().post("/ai/api/get-solution-result/")
+        self.assertTrue(_is_poll_request(request))
+
+    def test_send_solution_is_not_poll(self):
+        from ai.throttling import _is_poll_request
+        request = RequestFactory().post("/ai/api/send-solution/")
+        self.assertFalse(_is_poll_request(request))
+
+    def test_get_poll_still_requires_get_method(self):
+        from ai.throttling import _is_poll_request
+        # POST по GET-пути из _POLL_PATHS — не poll (регрессия на новую ветку).
+        request = RequestFactory().post("/ai/admin/arm/models/state/")
+        self.assertFalse(_is_poll_request(request))

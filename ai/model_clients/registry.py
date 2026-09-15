@@ -104,6 +104,11 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "capabilities": _TEXT_ONLY,
     },
     # --- Ollama (cloud-модели вида <name>:cloud, обычный чат без инструментов) ---
+    "Ollama_Glm_5_3_Flash_Cloud": {
+        "title": "Ollama GLM 5.3 Flash",
+        "handler": ollama.ask_Ollama_Glm_5_3_Flash_Cloud_async,
+        "capabilities": _TEXT_ONLY,
+    },
     "Ollama_Glm_5_2_Cloud": {
         "title": "Ollama GLM 5.2",
         "handler": ollama.ask_Ollama_Glm_5_2_Cloud_async,
@@ -326,6 +331,7 @@ registry = ModelRegistry(_MODELS)
 # Ручные сокращения — точные примеры пользователя; имеют приоритет над
 # автоматическим алгоритмом.
 SHORT_MODEL_TITLE_OVERRIDES = {
+    "Ollama GLM 5.3 Flash": "OG5.3F",
     "Ollama GLM 5.2": "OG5.2",
     "Ollama GPT-OSS 120B": "GPTO120",
 }

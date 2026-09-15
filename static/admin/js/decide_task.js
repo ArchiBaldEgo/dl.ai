@@ -11,6 +11,9 @@
  *   (выбор языка/темы/препромта теперь есть на этой странице; условие задачи
  *   подставляется из DL-ссылки через loadTaskFromUrl). Селекторы опциональны.
  * - selectLang change handler — обновление UI элементов + перелокализация селекторов.
+ * - testOnDl() — кнопка «Тестирование»: последний код модели отправляется в DL
+ *   (send-solution / get-solution-result), вердикт показывается жёлтым
+ *   сообщением с подписью «DL» в общей истории (транзитное, без localStorage).
  * - DOMContentLoaded — initProblemSelectors (общая логика из ai-common.js) +
  *   автозагрузка условия задачи из DL-ссылки (loadTaskFromUrl).
  * - window.onload — init для decide_task.
@@ -209,6 +212,9 @@ document.addEventListener("DOMContentLoaded", function() {
             var clearBtn = document.querySelector("button[onclick='clearContext()']");
             if (clearBtn) clearBtn.textContent = localization[selectedLang].clear;
 
+            var testOnDlBtn = document.getElementById("testOnDlBtn");
+            if (testOnDlBtn) testOnDlBtn.textContent = localization[selectedLang].dlTestButton;
+
             var messageTextEl = document.getElementById("messageText");
             if (messageTextEl) messageTextEl.setAttribute("placeholder", localization[selectedLang].placeholder);
 
@@ -329,6 +335,181 @@ document.addEventListener("DOMContentLoaded", async () => {
         restoreSharedText();
     }
 });
+
+// === Кнопка «Тестирование» — отправка последнего кода модели в DL ===
+// Код последнего ответа ИИ достаётся из сохранённой переписки (localStorage,
+// ai-common.js): маркер «Запрос успешно обработан», think-блок вырезается
+// вручную (без escapeHtml — код вида #include <iostream> не должен искажаться),
+// берётся последний fenced-блок ```. Отправка — POST /ai/api/send-solution/
+// (расширение файла резолвится серверно из выбранного языка программирования),
+// результат — поллинг /ai/api/get-solution-result/ раз в 3 с. Вердикт DL
+// показывается в истории чата транзитным сообщением (data-role="dl", жёлтое,
+// подпись «DL») и в localStorage НЕ пишется — после перезагрузки исчезает.
+
+var DL_POLL_INTERVAL_MS = 3000;
+var DL_POLL_MAX_ATTEMPTS = 40; // 40 × 3 с ≈ 2 минуты на всю проверку
+
+var _dlTestRunning = false;
+
+// THINK_OPEN/THINK_CLOSE собираются конкатенацией: цельный литерал тега в
+// исходнике хрупок (терялся при правках). THINK_OPEN = '<think>',
+// THINK_CLOSE = '</think>'.
+var THINK_OPEN = '<' + 'think>';
+var THINK_CLOSE = '<' + '/think>';
+
+function extractLastAiCode() {
+    var arr = loadPersistedMessages();
+    for (var i = arr.length - 1; i >= 0; i--) {
+        var raw = String(arr[i] || '');
+        if (raw.indexOf('Запрос успешно обработан') === -1) continue;
+        // Шапка ответа обёрнута в think-тег (consumers.py format_success) —
+        // отрезаем всё до первого закрывающего; в самом ответе модели могут
+        // быть свои think-блоки — вырезаем и их, чтобы код из «мыслей» не
+        // ушёл в тестирование. parseThinkTag из ai-common.js не используем:
+        // он прогоняет текст через escapeHtml и искажает код (#include <iostream>).
+        var endIdx = raw.indexOf(THINK_CLOSE);
+        var text = endIdx !== -1 ? raw.substring(endIdx + THINK_CLOSE.length) : raw;
+        var openIdx;
+        while ((openIdx = text.indexOf(THINK_OPEN)) !== -1) {
+            var closeIdx = text.indexOf(THINK_CLOSE, openIdx);
+            text = closeIdx !== -1
+                ? text.substring(0, openIdx) + text.substring(closeIdx + THINK_CLOSE.length)
+                : text.substring(0, openIdx);
+        }
+        var re = /```[^\n]*\n?([\s\S]*?)```/g;
+        var match, lastCode = null;
+        while ((match = re.exec(text)) !== null) {
+            if (match[1].trim()) lastCode = match[1];
+        }
+        if (lastCode) return lastCode.trim();
+    }
+    return null;
+}
+
+// Транзитное DL-сообщение в общей истории: <li data-role="dl"> — accordion
+// (initAccordionForMessages) повесит на него жёлтые классы msg-dl/accordion-dl.
+// Возвращает текстовый узел-контейнер для последующих обновлений статуса.
+function _appendDlMessage(text) {
+    var messages = document.getElementById('messages');
+    var message = document.createElement('li');
+    message.dataset.role = 'dl';
+    var content = document.createElement('div');
+    content.textContent = text;
+    message.appendChild(content);
+    messages.appendChild(message);
+    messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
+    initAccordionForMessages();
+    collapseAllExceptLast();
+    return content;
+}
+
+// Пользователь мог нажать «Очистить контекст» (или страницу перезагрузили) —
+// в этом случае узел оторван от DOM и обновлять/поллить больше нечего.
+function _setDlMessageText(node, text) {
+    if (!node || !node.isConnected) return;
+    node.textContent = text;
+}
+
+async function _pollDlResult(queueId, statusNode) {
+    for (var attempt = 0; attempt < DL_POLL_MAX_ATTEMPTS; attempt++) {
+        if (!statusNode || !statusNode.isConnected) return;
+        try {
+            var response = await fetch('/ai/api/get-solution-result/', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCsrfToken()
+                },
+                body: JSON.stringify({ queueId: queueId })
+            });
+            var data = await response.json().catch(function () { return null; });
+            if (data && data.isFinished === true) {
+                var comment = String(data.comment || '').trim();
+                _setDlMessageText(statusNode,
+                    comment ? 'DL: ' + comment
+                            : getUiString('dlEmptyComment', 'DL: тестирование завершено'));
+                return;
+            }
+            // 401/403 (протухшая сессия) и 404 (решения нет в DL) — ждать
+            // бессмысленно; остальные ошибки (502/503 DL-апстрима) считаем
+            // временными и продолжаем до лимита.
+            if (response.status === 401 || response.status === 403 || response.status === 404) {
+                _setDlMessageText(statusNode,
+                    'DL: ' + ((data && data.error) || 'результат тестирования недоступен'));
+                return;
+            }
+        } catch (error) {
+            console.error('DL poll error:', error); // разовый сбой сети — не прерываем
+        }
+        await new Promise(function (resolve) { setTimeout(resolve, DL_POLL_INTERVAL_MS); });
+    }
+    _setDlMessageText(statusNode,
+        getUiString('dlTimeout', 'DL: тестирование не завершилось за отведённое время'));
+}
+
+async function testOnDl() {
+    if (_dlTestRunning) return;
+
+    var nodeId = window.AI_TASK_NODE_ID || '';
+    if (!nodeId) {
+        alert(getUiString('dlNoNode', 'Страница открыта без задачи — тестирование недоступно'));
+        return;
+    }
+
+    var langSelect = document.getElementById('selectProgLng');
+    var langId = langSelect ? langSelect.value : '';
+    if (!langId) {
+        alert(getUiString('dlNoLanguage',
+            'Выберите язык программирования — по нему определяется расширение файла'));
+        return;
+    }
+    var langName = (langSelect.selectedIndex >= 0)
+        ? (langSelect.options[langSelect.selectedIndex].text || '') : '';
+
+    var code = extractLastAiCode();
+    if (!code) {
+        alert(getUiString('dlNoCode', "В последнем ответе модели не найден блок кода"));
+        return;
+    }
+
+    var btn = document.getElementById('testOnDlBtn');
+    _dlTestRunning = true;
+    if (btn) btn.disabled = true;
+
+    var statusNode = _appendDlMessage(getUiString('dlTesting', 'DL: тестирование…'));
+    try {
+        var response = await fetch('/ai/api/send-solution/', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
+            },
+            body: JSON.stringify({
+                nodeId: nodeId,
+                code: code,
+                progLanguageId: langId,
+                progLanguageName: langName
+            })
+        });
+        var data = await response.json().catch(function () { return null; });
+        if (!response.ok || !data || !(data.queueId > 0)) {
+            var detail = (data && data.error) ? (': ' + data.error) : '';
+            _setDlMessageText(statusNode,
+                getUiString('dlSendFailed', 'DL: не удалось отправить решение на тестирование') + detail);
+            return;
+        }
+        await _pollDlResult(data.queueId, statusNode);
+    } catch (error) {
+        console.error('DL test error:', error);
+        _setDlMessageText(statusNode,
+            getUiString('dlSendFailed', 'DL: не удалось отправить решение на тестирование'));
+    } finally {
+        _dlTestRunning = false;
+        if (btn) btn.disabled = false;
+    }
+}
 
 // === window.onload — init для decide_task ===
 window.onload = function () {

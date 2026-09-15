@@ -1015,10 +1015,10 @@ def _rerun_arm_batch(request, log):
     if prompt_id:
         try:
             prompt_obj = Prompt.objects.select_related("topic").get(id=int(prompt_id))
-            prompt_name = prompt_obj.prompt_name or ""
+            prompt_name = prompt_obj.prompt_name_ru or ""
             if prompt_obj.topic:
                 topic_id_log = prompt_obj.topic_id
-                topic_name_log = prompt_obj.topic.topic_name or ""
+                topic_name_log = prompt_obj.topic.topic_name_ru or ""
         except (Prompt.DoesNotExist, ValueError):
             pass
 

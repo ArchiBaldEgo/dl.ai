@@ -101,6 +101,13 @@
             border-left: 5px solid #4caf50;
         }
 
+        /* Результат тестирования в DL (кнопка «Тестирование», страница
+           «Реши задачу») — жёлтая, подпись DL. */
+        .msg-dl {
+            background-color: #fff8e1;
+            border-left: 5px solid #ffb300;
+        }
+
         .accordion {
             background-color: #eee;
             color: #444;
@@ -132,6 +139,15 @@
 
         .accordion-assistant.active, .accordion-assistant:hover {
             background-color: #357a38;
+        }
+
+        .accordion-dl {
+            background-color: #ffb300;
+            color: #fff;
+        }
+
+        .accordion-dl.active, .accordion-dl:hover {
+            background-color: #c98a10;
         }
 
         .panel {
@@ -781,6 +797,13 @@ button:hover {
     border-left: 5px solid #4caf50;
 }
 
+/* Результат тестирования в DL (кнопка «Тестирование», страница
+   «Реши задачу») — жёлтая, подпись DL. */
+.msg-dl {
+    background-color: #fff8e1;
+    border-left: 5px solid #ffb300;
+}
+
 .accordion {
     background-color: #eee;
     color: #444;
@@ -814,6 +837,16 @@ button:hover {
 .accordion-assistant.active,
 .accordion-assistant:hover {
     background-color: #357a38;
+}
+
+.accordion-dl {
+    background-color: #ffb300;
+    color: #fff;
+}
+
+.accordion-dl.active,
+.accordion-dl:hover {
+    background-color: #c98a10;
 }
 
 .panel {

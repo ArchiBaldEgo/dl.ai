@@ -27,6 +27,7 @@ from django.db.models import Q
 from django.contrib.staticfiles import finders
 from django.utils.html import strip_tags
 from django.utils.http import http_date
+from django.utils import timezone
 from django.views.static import was_modified_since
 from django.middleware import csrf
 from functools import wraps
@@ -45,6 +46,7 @@ from .auth_backends import (
     normalize_external_user_id,
 )
 from .constants import PROMPT_DEVELOPER_GROUP
+from .services.auth import get_user_identity_for_log
 from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
 from .dl_api_client import (
     DLApiUnavailable,
@@ -511,7 +513,7 @@ def get_topics(request):
     ui_language = request.GET.get('ui_language', 'Русский')
     topics = [
         serialize_topic(topic, ui_language)
-        for topic in Topic.objects.select_related("programming_language").order_by('topic_name')
+        for topic in Topic.objects.select_related("programming_language").order_by('topic_name_ru')
     ]
     return JsonResponse(topics, safe=False)
 
@@ -524,7 +526,7 @@ def get_prompts(request):
     ui_language = request.GET.get('ui_language', 'Русский')
     prompts = [
         serialize_prompt(p, ui_language)
-        for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name', 'id')
+        for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name_ru', 'id')
     ]
     return JsonResponse(prompts, safe=False)
 
@@ -564,11 +566,11 @@ def get_problem_data(request):
     ]
     topics = [
         serialize_topic(topic, ui_language)
-        for topic in Topic.objects.select_related("programming_language").order_by('topic_name')
+        for topic in Topic.objects.select_related("programming_language").order_by('topic_name_ru')
     ]
     prompts = [
         serialize_prompt(p, ui_language)
-        for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name', 'id')
+        for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name_ru', 'id')
     ]
     shared_prompts = [
         serialize_shared_prompt(sp, ui_language)
@@ -776,6 +778,10 @@ def send_solution_view(request):
         nodeId (int, required): DL node id to submit to.
         code (str, required): solution source code.
         fileExtension (str, required): e.g. .pas, .cpp, .py.
+        progLanguageName (str, optional): fallback — язык из селектора страницы
+            («Реши задачу»); расширение резолвится через _guess_extension.
+        progLanguageId (int, optional): fallback — id ProgrammingLanguage, имя
+            берётся из БД, затем то же _guess_extension.
         sessionId (str, optional): falls back to session/cookie.
     """
     if not _has_page_access(request):
@@ -795,9 +801,33 @@ def send_solution_view(request):
     if not code:
         return JsonResponse({"error": "code обязателен"}, status=400)
 
+    # fileExtension можно не передавать явно: клиент шлёт язык программирования
+    # из селектора страницы, расширение резолвится серверно через единый
+    # источник соответствия язык→расширение (_guess_extension, task_registry).
     file_extension = (body.get("fileExtension") or "").strip()
+    prog_language_id = None
     if not file_extension:
-        return JsonResponse({"error": "fileExtension обязателен"}, status=400)
+        lang_name = (body.get("progLanguageName") or "").strip()
+        if not lang_name and body.get("progLanguageId") not in (None, ""):
+            try:
+                prog_language_id = int(body["progLanguageId"])
+            except (ValueError, TypeError):
+                prog_language_id = None
+        if not lang_name and prog_language_id:
+            try:
+                from .models import ProgrammingLanguage
+                lang_name = (ProgrammingLanguage.objects.filter(
+                    pk=prog_language_id,
+                ).values_list("language_name", flat=True).first() or "")
+            except (ValueError, TypeError):
+                lang_name = ""
+        from .services.task_registry import _guess_extension
+        file_extension = _guess_extension(lang_name)
+        if not file_extension:
+            return JsonResponse(
+                {"error": "Выберите язык программирования — по нему определяется расширение файла"},
+                status=400,
+            )
 
     session_id = body.get("sessionId", "").strip()
     if not session_id:
@@ -825,6 +855,40 @@ def send_solution_view(request):
         data = send_solution_to_dl(session_id, node_id, code, file_extension, course_id=course_id)
     except (DLUnauthorizedError, DLApiUnavailable, DLServerError) as exc:
         return dl_error_response(exc)
+
+    # Решение отправлено на тестирование самим пользователем со страницы —
+    # фиксируем тестирование в журнале (mode=testing) и пишем кэш решённых
+    # задач (после успешного теста код переиспользуется без вызова модели).
+    # Сбой статистики не должен ломать ответ клиенту.
+    try:
+        from .models import AIRequestLog
+        from .services.solution_cache import last_solve_model, record_submission
+        identity = get_user_identity_for_log(request.user, getattr(request, "user_info", None))
+        queue_id = data.get("queueId")
+        queue_id = int(queue_id) if queue_id else None
+        model_key, model_title = last_solve_model(node_id)
+        test_log = AIRequestLog.objects.create(
+            user=identity["user"],
+            username=identity["username"],
+            external_user_id=identity["external_user_id"],
+            user_full_name=identity["user_full_name"],
+            source=AIRequestLog.SOURCE_HTTP,
+            mode=AIRequestLog.MODE_TESTING,
+            sent_at=timezone.now(),
+            model_names=[model_key] if model_key else [],
+            message=code,
+            task_node_id=node_id,
+        )
+        record_submission(
+            node_id, code,
+            programming_language_id=prog_language_id,
+            file_extension=file_extension,
+            identity=identity,
+            queue_id=queue_id,
+            test_log=test_log,
+        )
+    except Exception:
+        logger.exception("Failed to record solution submission for node %s", node_id)
 
     return JsonResponse(data)
 
@@ -863,6 +927,16 @@ def get_solution_result_view(request):
         data = get_solution_result_from_dl(session_id, queue_id)
     except (DLUnauthorizedError, DLTaskNotFoundError, DLApiUnavailable, DLServerError) as exc:
         return dl_error_response(exc)
+
+    # Финальный вердикт DL закрывает кэш решённых задач: passed → код
+    # сохраняется для повторной выдачи, статистика модели инкрементируется
+    # (AIModelStats). Сбой учёта не должен ломать ответ клиенту.
+    if data.get("isFinished"):
+        try:
+            from .services.solution_cache import record_result
+            record_result(queue_id, data.get("comment") or "")
+        except Exception:
+            logger.exception("Failed to record solution result for queue %s", queue_id)
 
     return JsonResponse(data)
 

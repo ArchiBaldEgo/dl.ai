@@ -7,6 +7,7 @@ TaskAdmin.refresh_from_dl через apply_dl_task_info (DRY).
 """
 
 import logging
+import re
 
 from ..dl_api_client import DLApiError, fetch_task_info
 from ..models import Task
@@ -154,7 +155,7 @@ def solve_language_options():
 
 
 # Mapping from DL path fragments to local Topic names. The DL course tree
-# uses folder names that are close but not identical to Topic.topic_name, so
+# uses folder names that are close but not identical to Topic.topic_name_ru, so
 # we match by substring. Order matters: more specific patterns first.
 _PATH_TOPIC_KEYWORDS = [
     # Specific sub-folder names first (both branches share some names like
@@ -188,18 +189,33 @@ _PATH_TOPIC_KEYWORDS = [
 def _guess_topic_from_path(path: str):
     """Best-effort: find a local Topic from a DL task path.
 
-    Returns the Topic instance or None. The DL path contains folder names
-    (e.g. "Программирование [Ассемблер i8086, C-MPA]\\Условное вычисление
-    выражений\\...") that correspond to local Topic names. We match by
-    keyword substring (case-insensitive) and then look up the Topic by name.
+    Returns the Topic instance or None. Two passes:
+    1. Точное сопоставление каждого сегмента пути (название ветки/папки из
+       get-task-info ``path``) с ``Topic.topic_name_ru`` (без учёта регистра) —
+       покрывает темы, чьё название совпадает с веткой целиком (напр.
+       «Простейшая (Программы с подсказками)»).
+    2. Fallback — keyword-подстроки из ``_PATH_TOPIC_KEYWORDS``: названия
+       папок DL иногда лишь близки к теме («Одномерные числовые массивы»).
     """
     if not path:
         return None
     from ..models import Topic
+
+    # Точное совпадение сегмента с topic_name (порядок — от глубоких папок к
+    # корню: более конкретная тема приоритетна).
+    segments = re.split(r"[\\/|]", path)
+    for segment in reversed(segments):
+        name = segment.strip()
+        if not name:
+            continue
+        topic = Topic.objects.filter(topic_name_ru__iexact=name).first()
+        if topic:
+            return topic
+
     low = path.lower()
     for keyword, topic_name in _PATH_TOPIC_KEYWORDS:
         if keyword in low:
-            topic = Topic.objects.filter(topic_name__iexact=topic_name).first()
+            topic = Topic.objects.filter(topic_name_ru__iexact=topic_name).first()
             if topic:
                 return topic
     return None

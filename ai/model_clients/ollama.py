@@ -34,6 +34,10 @@ _OLLAMA_TIMEOUT = 120.0
 # --- Декларативная таблица моделей ---
 # registry-ключ → {model: имя модели Ollama, description: для __doc__}
 OLLAMA_MODELS: dict[str, dict] = {
+    "Ollama_Glm_5_3_Flash_Cloud": {
+        "model": "glm-5.3-flash:cloud",
+        "description": "Ollama GLM 5.3 Flash — обычный чат",
+    },
     "Ollama_Glm_5_2_Cloud": {
         "model": "glm-5.2:cloud",
         "description": "Ollama GLM 5.2 — обычный чат",

@@ -641,6 +641,46 @@ def get_solution_result_from_dl(
     return _decode_response_json(response)
 
 
+# --- Вердикт по завершённому DL-комментарию ---------------------------------
+
+# Маркеры провала в ЗАВЕРШЁННОМ DL-комментарии. Проверяются ПЕРВЫМИ и
+# перекрывают success-маркеры: раньше голая подстрока «ок» матчилась внутри
+# «строке»/«token»/«broken», и комментарий вида «Ошибка компиляции в строке 5»
+# ложно помечал проваленную DL-проверку как solved.
+DL_FAILURE_MARKERS = (
+    "неверн", "неправильн", "ошибк", "не совп", "не прош", "не пройден",
+    "не все", "не всё", "провал", "не принят", "не зачт", "отклон", "не ок",
+    "wrong", "error", "failed", "incorrect",
+)
+# Success-маркеры с границами слов: «ок»/«ok» как отдельное слово, а не
+# подстрока внутри «строке»/«token». «все тесты успешно» покрывается «все тесты».
+_DL_SUCCESS_MARKERS_RE = re.compile(
+    r"\b(?:все тесты|ок|ok|accepted|correct|пройдены|успешно пройден)\b",
+    re.IGNORECASE,
+)
+
+DL_VERDICT_SOLVED = "solved"
+DL_VERDICT_FAILED = "failed"
+
+
+def dl_verdict_from_comment(comment: str) -> str:
+    """Вердикт по завершённому DL-комментарию: solved / failed.
+
+    DL REST API не отдаёт структурированный вердикт (только isFinished +
+    comment), поэтому решаем по тексту. Провальные маркеры приоритетны: любой
+    комментарий провала («Ошибка…», «Неверный ответ…», «не все тесты…») —
+    failed, даже если в нём по случайности встретилось слово «ок».
+    Нераспознанный комментарий — failed (solved ставится только при явном
+    подтверждении).
+    """
+    comment_lower = (comment or "").lower().strip()
+    if any(m in comment_lower for m in DL_FAILURE_MARKERS):
+        return DL_VERDICT_FAILED
+    if _DL_SUCCESS_MARKERS_RE.search(comment_lower):
+        return DL_VERDICT_SOLVED
+    return DL_VERDICT_FAILED
+
+
 def get_solutions_from_dl(
     session_id: str,
     course_id: int,

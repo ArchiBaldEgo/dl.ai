@@ -1,34 +1,39 @@
-/* Языковые табы RU/EN/FR в форме препромпта (PromptAdmin).
+/* Языковые табы RU/EN/FR в формах админки (PromptAdmin / SharedPromptAdmin /
+ * TopicAdmin).
  *
  * Вместо громоздких 3 полей названия + 3 textarea рендерим 1 название +
  * 1 textarea с табами языков. При переключении на таб с пустыми полями
  * содержимое авто-переводится с заполненного языка (AJAX →
  * /ai/admin/ai/prompt/translate-field/ → deep-translator/Google Translate,
  * тот же сервис, что у массового автоперевода). Кнопка «Перевести» в табе
- * перезаполняет поля принудительно. Базовые поля (prompt_name / prompt_text,
- * fallback для старых записей) лежат в свёрнутом блоке; если RU-таб пуст, а
- * базовое поле заполнено, значение копируется в RU-таб (видимо для юзера).
+ * перезаполняет поля принудительно.
  *
  * Реальные input'ы формы не трогаем (никаких скрытых клонов) — табы только
  * показывают/прячут строки .form-row, поэтому сохранение работает как раньше.
+ * Конфиг полей определяется по наличию id_*_ru в форме (prompt_name_ru →
+ * Prompt/SharedPrompt, topic_name_ru → Topic).
  */
 (function () {
     'use strict';
 
     var TRANSLATE_URL = "/ai/admin/ai/prompt/translate-field/";
 
-    var LANGS = [
-        { key: "ru", label: "Русский",  nameField: "prompt_name_ru", textField: "prompt_text_ru" },
-        { key: "en", label: "English",  nameField: "prompt_name_en", textField: "prompt_text_en" },
-        { key: "fr", label: "Français", nameField: "prompt_name_fr", textField: "prompt_text_fr" }
+    // Наборы полей по типу формы. Проверяются по порядку; namePrefix обязателен,
+    // textPrefix может отсутствовать (у Topic есть только название).
+    var VARIANTS = [
+        { namePrefix: "prompt_name", textPrefix: "prompt_text" },
+        { namePrefix: "topic_name", textPrefix: null }
     ];
 
-    // Базовые (fallback) поля: RU-таб при пустых *_ru подхватывает из них.
-    var BASE_FIELDS = { name: "prompt_name", text: "prompt_text" };
+    var LANGS = [
+        { key: "ru", label: "Русский" },
+        { key: "en", label: "English" },
+        { key: "fr", label: "Français" }
+    ];
 
     var byId = function (id) { return document.getElementById(id); };
 
-    var tabs, messageEl, currentLang = "ru", busy = false;
+    var tabs, messageEl, currentLang = "ru", busy = false, variant = null;
 
     function langByKey(key) {
         for (var i = 0; i < LANGS.length; i++) {
@@ -37,9 +42,15 @@
         return null;
     }
 
-    function inputOf(fieldName) {
-        var node = byId("id_" + fieldName);
-        return node || null;
+    function fieldId(lang, kind) {
+        var prefix = kind === "name" ? variant.namePrefix : variant.textPrefix;
+        if (!prefix) return null;
+        return "id_" + prefix + "_" + lang.key;
+    }
+
+    function inputOf(lang, kind) {
+        var id = fieldId(lang, kind);
+        return id ? byId(id) : null;
     }
 
     function rowOf(input) {
@@ -62,22 +73,22 @@
         return input ? input.value : "";
     }
 
-    /* Значение поля-источника для перевода: приоритет RU → EN → FR → base. */
+    /* Значение поля-источника для перевода: приоритет RU → EN → FR. */
     function findSource(kind, targetKey) {
         var order = ["ru", "en", "fr"];
         var i, lang, value;
         for (i = 0; i < order.length; i++) {
             if (order[i] === targetKey) continue;
             lang = langByKey(order[i]);
-            value = (byId("id_" + (kind === "name" ? lang.nameField : lang.textField)) || {}).value || "";
+            var input = inputOf(lang, kind);
+            if (!input) continue;
+            value = input.value || "";
             if (value.trim()) return { key: order[i], text: value };
         }
-        var baseInput = byId("id_" + (kind === "name" ? BASE_FIELDS.name : BASE_FIELDS.text));
-        if (baseInput && baseInput.value.trim()) return { key: "base", text: baseInput.value };
         return null;
     }
 
-    function translateField(kind, targetKey, sourceText) {
+    function translateField(targetKey, sourceText) {
         var data = new FormData();
         data.append("text", sourceText);
         data.append("target", targetKey);
@@ -96,13 +107,13 @@
         });
     }
 
-    /* Перевод обоих полей таба (название + текст). overwrite=true — даже если
+    /* Перевод полей таба (название + текст). overwrite=true — даже если
        поля заполнены; иначе только пустые. */
     function fillLang(key, overwrite) {
         if (busy) return Promise.resolve();
         var lang = langByKey(key);
-        var nameInput = byId("id_" + lang.nameField);
-        var textInput = byId("id_" + lang.textField);
+        var nameInput = inputOf(lang, "name");
+        var textInput = inputOf(lang, "text");
         var jobs = [];
 
         [["name", nameInput], ["text", textInput]].forEach(function (pair) {
@@ -136,28 +147,13 @@
             });
     }
 
-    /* RU-таб пуст, а базовые поля заполнены → видимая копия base → *_ru.
-       Это не меняет данные до сохранения формы и совпадает с фактическим
-       fallback-поведением get_effective_text. */
-    function prefillRuFromBase() {
-        var lang = langByKey("ru");
-        [["name", lang.nameField, BASE_FIELDS.name], ["text", lang.textField, BASE_FIELDS.text]]
-            .forEach(function (triple) {
-                var localized = byId("id_" + triple[1]);
-                var base = byId("id_" + triple[2]);
-                if (localized && base && !localized.value.trim() && base.value.trim()) {
-                    localized.value = base.value;
-                }
-            });
-    }
-
     function selectLang(key) {
         currentLang = key;
         var lang = langByKey(key);
         LANGS.forEach(function (item) {
             var show = item.key === key;
-            [item.nameField, item.textField].forEach(function (fieldName) {
-                var row = rowOf(inputOf(fieldName));
+            ["name", "text"].forEach(function (kind) {
+                var row = rowOf(inputOf(item, kind));
                 if (row) row.hidden = !show;
             });
         });
@@ -166,11 +162,10 @@
             btn.classList.toggle("ai-lang-tab-active", active);
             btn.setAttribute("aria-selected", active ? "true" : "false");
         });
-        if (key === "ru") prefillRuFromBase();
         // Пустой таб авто-переводится с заполненного (обе стороны таба —
         // если хоть одно поле пусто, дозаполняем только пустые).
-        var nameInput = byId("id_" + lang.nameField);
-        var textInput = byId("id_" + lang.textField);
+        var nameInput = inputOf(lang, "name");
+        var textInput = inputOf(lang, "text");
         var needsFill = [nameInput, textInput].some(function (input) {
             return input && !input.value.trim();
         });
@@ -181,13 +176,23 @@
     }
 
     function init() {
-        var firstInput = byId("id_prompt_name_ru");
+        // Определяем тип формы по наличию {prefix}_ru в DOM.
+        for (var i = 0; i < VARIANTS.length; i++) {
+            if (byId("id_" + VARIANTS[i].namePrefix + "_ru")) {
+                variant = VARIANTS[i];
+                break;
+            }
+        }
+        if (!variant) return;
+
+        var firstInput = byId("id_" + variant.namePrefix + "_ru");
         var firstRow = rowOf(firstInput);
-        if (!firstRow) return; // не форма препромпта
-        // Все шесть полей должны быть в форме (у read-only форм они тоже есть,
-        // но там поля readonly — табы показываем, кнопку перевода не даём).
+        if (!firstRow) return;
+        // Все поля варианта должны быть в форме (у read-only форм они тоже
+        // есть, но там поля readonly — табы показываем, кнопку перевода не даём).
         var missing = LANGS.some(function (lang) {
-            return !byId("id_" + lang.nameField) || !byId("id_" + lang.textField);
+            if (!inputOf(lang, "name")) return true;
+            return variant.textPrefix && !inputOf(lang, "text");
         });
         if (missing) return;
 

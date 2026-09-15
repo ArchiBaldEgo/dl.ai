@@ -35,7 +35,17 @@ The project follows these rules; keep it that way and extend along them:
     `ai/model_clients/_base.py` (`bearer_headers`, `proxy_bypass_session`,
     `make_table_handlers`, `BotPoolClient`); `web_deepseek.py` / `web_kimi.py`
     are thin config wrappers over `BotPoolClient` — new web pools add a config, not a copy;
-  - identity for `AIRequestLog` → `ai/services/auth.py::get_user_identity_for_log`.
+  - identity for `AIRequestLog` → `ai/services/auth.py::get_user_identity_for_log`;
+  - DL verdict from comment → `ai/dl_api_client.py::dl_verdict_from_comment`
+    (failure markers take priority over success markers; unrecognized → failed)
+    — reused by both ARM batch-solve and the solution cache;
+  - cache of passed task solutions → `ai/services/solution_cache.py` (`TaskSolution`):
+    submissions are recorded ONLY from the page's own «Тестирование» button
+    (`send_solution_view`, HTTP), not from ARM runs; a passed solution is served
+    to any user re-requesting the same `(task_node_id, programming_language_id)`
+    in solve mode without a model call (`consumers.py::_serve_cached_solution`).
+    Testing is logged to `AIRequestLog` with `mode=testing` / `source=http` and
+    feeds `AIModelStats` via `record_batch_solve_stats`.
 - **Encapsulation.** `ConversationHistory.get()` returns a defensive copy — never
   mutate it; persist messages with `ConversationHistory.append()` only (see gotcha below).
 - **KISS / YAGNI.** No dead modules, flags, parameters or config constants — if a
@@ -56,18 +66,25 @@ The project follows these rules; keep it that way and extend along them:
 - `serializers.py` / `i18n.py` — lightweight serializers + UI-language localization (`name_ru/en/fr`); `get_language_instruction(ui_language)` appends a non-Russian reply constraint for every non-Russian message.
 - `middleware.py` — `ExternalAuthMiddleware` (validates `DLSID`, caches `user_info` in session for `AI_AUTH_CACHE_TTL` s; falls back to last cache when dl.gsu.by is down, `503` only when no cache and path not optional) and `CsrfSessionFallbackMiddleware`. Gotcha: real external-auth logic lives in `ai/external_auth.py` (`fetch_external_user_info`, `get_external_session_cookie_name`, error classes), reused by WS auth service.
 - `http_utils.py` — `safe_relative_url` (open-redirect guard) and `resolve_dl_session_id` (the only reader of the DLSID cookie outside the middleware).
-- `dl_api_client.py` — thin client for dl.gsu.by REST API (task info, sample solutions, user names via `GET /restapi/get-id-user-info`); typed `DLApiError` hierarchy + `dl_error_response(exc)` (uniform exception→JSON mapping used by all DL proxy endpoints). Backs `/ai/api/task-info/` and `/ai/api/task-solution/`; reuses external-auth SSL/proxy settings.
+- `dl_api_client.py` — thin client for dl.gsu.by REST API (task info, sample solutions, user names via `GET /restapi/get-id-user-info`); typed `DLApiError` hierarchy + `dl_error_response(exc)` (uniform exception→JSON mapping used by all DL proxy endpoints). Backs `/ai/api/task-info/` and `/ai/api/task-solution/`, plus the «Тестирование» button on «Реши задачу»: `/ai/api/send-solution/` + `/ai/api/get-solution-result/` (poll path is exempted from the action budget via `_POST_POLL_PATHS` in throttling.py); `fileExtension` resolves server-side from the page's language selector through `_guess_extension` (task_registry). Client-side logic lives in `decide_task.js` (`testOnDl`), the DL verdict renders as a transient yellow `data-role="dl"` message (accordion role labels include `dl: 'DL'`).
 - `external_account.py` — creates/updates Django users + `ExternalDLAccount` from external payload; enrolls everyone into `prompt_developer` group; enriches names via `fetch_user_names` when `get-user-info` omits them.
 - `auth_backends.py` — external admin auth backend + `prompt_developer` group management helpers.
 - `throttling.py` — per-user rate limiting (Django cache-backed; 120 WS / 200 HTTP per 60s via `AI_WS_RATE_LIMIT`/`AI_HTTP_RATE_LIMIT`/`AI_RATE_LIMIT_WINDOW`/`AI_RATE_LIMIT_ENABLED`).
 - `admin/` — custom `ai_admin_site` at `/ai/admin/` (per-module views live here; core permission logic in `site.py`). Gotcha: `_HIDDEN_NAV_OBJECT_NAMES` hides sections from nav but keeps direct URLs; left nav renders through the PROJECT override `ai/templates/admin/app_list.html` (`static/admin/js/ai_nav_filter.js` extends the stock quick filter to the AI tool groups).
 - `test_console_runner.py` — runner for the admin test console (subprocess `manage.py test ai --settings=DjangoTest.test_settings`; full raw output of each run is duplicated under `BASE_DIR/logs/test_console/`). Gotchas: `setup_test_environment` patches globals — unsafe in a live Daphne thread, hence the isolated subprocess; log filenames are validated by `_LOG_FILENAME_RE` (path-traversal barrier).
 - `model_clients/` — `registry.py` (model id → handler + title + capabilities; default-active: ollama, openrouter, web_deepseek, web_kimi; Groq/SambaNova gated by `AI_ENABLE_GROQ`/`AI_ENABLE_SAMBANOVA`), `_base.py` (shared helpers incl. `BotPoolClient` — the whole Puppeteer-pool protocol), `web_deepseek.py`/`web_kimi.py` (thin `BotPoolClient` configs: `ask_*_async`, `restart_bot_pool`/`restart_kimi_bot_pool`), `config.py` (centralized .env tokens/proxy), `exceptions.py` (`humanize_model_error`, `map_http_error`, `safe_parse_response`), `history.py` (`ConversationHistory`, Redis/Django-cache shared history), plus provider modules `groq.py`/`openrouter.py`/`sambanova.py`/`ollama.py`. Gotcha: `OR_Nemotron_Nano_12B_VL` is the first `vision:true` entry; add capabilities in `registry.py`, not the DB.
-- `arm_runner.py` — async ARM runner; in-memory live job, but DB (`AIModelTestRun`/`AIModelTestResult`, `run_type` single/batch) is the source of truth (`get_arm_run_snapshot` falls back to it). Uses `EXTENSION_TO_LANG` from `task_registry` for the language-name fallback.
+- `arm_runner.py` — async ARM runner; in-memory live job, but DB (`AIModelTestRun`/`AIModelTestResult`, `run_type` single/batch) is the source of truth (`get_arm_run_snapshot` falls back to it). Uses `EXTENSION_TO_LANG` from `task_registry` for the language-name fallback. In batch-solve, an unset (or nonexistent) `prompt_id` means «по привязке»: the worker resolves `ArmPromptBinding` PER TASK from the task's DL branch/topic (`_resolve_batch_prompt`, topic guessed from the `path` segments against `Topic.topic_name_ru`) — the start view no longer resolves a global binding.
 - Root-level non-`ai/` pieces: `WebDeepseek/` (loopback `:3000`), `WebKimi/` (loopback `:3001`, separate `KIMI_*` env namespace; manual login via `seed.js`), `REST API.md`, `test_arm_solve.py`, `mail_bridge.py`/`backup_runner.sh`/`health_check.sh` (email→ops bridge). Gotcha: `bot/` is LEGACY (stale `.env` + auth-debug screenshots), NOT referenced by code — safe to ignore.
 - `templates/` — `ai/templates/ai/` user-facing chat/task pages, `ai/templates/admin/ai/` custom admin templates. Static JS in `static/admin/js/`: `chat_template.js` (chat only), `decide_task.js`/`find_error.js` self-contained (do NOT load `chat_template.js` there), `ai_processes.js` (личное меню «мои процессы» в шапке админки — на каждой странице через `admin/base_site.html`; рендер только textContent), `test_console.js`/`prompt_regression.js` (прогон-поллинг + история логов).
 
 ## Gotchas invisible from code
+
+- Базовые поля `Prompt.prompt_name`/`Prompt.prompt_text`, `SharedPrompt.prompt_name`/
+  `prompt_text` и `Topic.topic_name` удалены из БД (миграции 0041/0042 перенесли данные
+  в `*_ru`). Единственная цепочка локализации — `ai/i18n.get_localized_name/text`:
+  `{attr}_{suffix} → {attr}_ru`; если `*_en`/`*_fr` не заполнены, UI показывает русский
+  текст. `prompt_text_override` остался (перекрывает `prompt_text_ru`), тесты и
+  `translate_prompts`/`auto_translate` берут источник из `*_ru`.
 
 - `serialize_topic` (ai/serializers.py) emits the language id under the key `programming_language` (NOT `programming_language_id`) — every client-side topic filter must read `t.programming_language` (arm_solve.html, arm_find_error.html fillTopics). Reading the wrong key leaves the topic select silently empty and breaks «Препромпты по умолчанию» by-topic bindings on that page (regression tested in `ArmFindErrorTopicsKeyTests`).
 - Named form fields shadow DOM properties: ``form.action`` with a form containing ``<input name="action">`` returns the INPUT ELEMENT, not the URL (POST to ``…/[object HTMLInputElement]`` → 404; parseJsonResponse then mislabels it «Сессия истекла…»). AJAX handlers must read the form target via ``form.getAttribute('action')`` (same for ``submit``/``method`` etc. if a field ever shares the name) — regression-guarded by `FormActionShadowingTests`.

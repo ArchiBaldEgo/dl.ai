@@ -20,7 +20,7 @@ def topic(obj, ui_language=""):
     """Сериализует Topic в словарь с локализованным названием."""
     return {
         "id": obj.id,
-        "topic_name": obj.topic_name,
+        "topic_name": obj.topic_name_ru,
         "name": get_localized_name(obj, ui_language, "topic_name"),
         "programming_language": obj.programming_language_id,
     }
@@ -32,12 +32,12 @@ def prompt(obj, ui_language=""):
         "id": obj.id,
         "topic_id": obj.topic_id,
         "topic__programming_language": obj.topic.programming_language_id if obj.topic else None,
-        "prompt_name": obj.prompt_name,
+        "prompt_name": obj.prompt_name_ru,
         "name": get_localized_name(obj, ui_language, "prompt_name"),
-        "prompt_text": obj.prompt_text,
+        "prompt_text": obj.prompt_text_ru,
         "effective_text": obj.get_effective_text(ui_language, ""),
         "shared_prompt_id": obj.shared_prompt_id,
-        "shared_prompt__prompt_name": obj.shared_prompt.prompt_name if obj.shared_prompt else None,
+        "shared_prompt__prompt_name": obj.shared_prompt.prompt_name_ru if obj.shared_prompt else None,
         "is_shared": bool(obj.shared_prompt),
     }
 
@@ -46,9 +46,9 @@ def shared_prompt(obj, ui_language=""):
     """Сериализует SharedPrompt в словарь, включая список language_ids и mode."""
     return {
         "id": obj.id,
-        "prompt_name": obj.prompt_name,
+        "prompt_name": obj.prompt_name_ru,
         "name": get_localized_name(obj, ui_language, "prompt_name"),
-        "prompt_text": obj.prompt_text,
+        "prompt_text": obj.prompt_text_ru,
         "effective_text": obj.get_effective_text(ui_language, ""),
         "language_ids": list(obj.programming_languages.values_list("id", flat=True)),
         "mode": obj.mode or "",
@@ -77,5 +77,5 @@ def arm_prompt_binding(obj):
         "topic_id": obj.topic_id,
         "mode": obj.mode,
         "prompt_id": obj.prompt_id,
-        "prompt_name": obj.prompt.prompt_name if obj.prompt else "",
+        "prompt_name": obj.prompt.prompt_name_ru if obj.prompt else "",
     }

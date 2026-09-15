@@ -24,7 +24,9 @@ from .services import (
     WebSocketAuthService,
     conversation_history,
     ensure_task,
+    find_passed_solution,
     get_user_identity_for_log,
+    mark_cache_used,
     resolve_external_account,
 )
 from .throttling import rate_limiter
@@ -218,6 +220,20 @@ class MyConsumer(AsyncWebsocketConsumer):
                 course_id=self._resolve_course_id(),
             ))
 
+        # Кэш решённых задач: если эта задача на выбранном языке уже прошла
+        # тестирование, отдаём сохранённый код сразу, без вызова модели.
+        if message_type == "2" and node_id and prog_lng_id:
+            cached_solution = None
+            try:
+                cached_solution = await sync_to_async(find_passed_solution)(
+                    node_id, int(prog_lng_id),
+                )
+            except (ValueError, TypeError):
+                cached_solution = None
+            if cached_solution is not None:
+                await self._serve_cached_solution(cached_solution)
+                return
+
         prog_lng_name, topic_name, prompt_name = await self.prompt_resolver.resolve_context_names(
             prog_lng_id, topic_id, prompt_id, language
         )
@@ -298,3 +314,58 @@ class MyConsumer(AsyncWebsocketConsumer):
             return int(prompt_id)
         except (ValueError, TypeError):
             return None
+
+    async def _serve_cached_solution(self, solution):
+        """Выдача сохранённого решения из кэша решённых задач.
+
+        Ответ форматируется как обычный ответ модели (format_success, маркер
+        «Запрос успешно обработан»), чтобы фронтенд персистировал его в
+        localStorage и extractLastAiCode() смог забрать код для
+        «Тестирования» без генерации.
+        """
+        from .models import AIRequestLog
+
+        start_time = timezone.now()
+        start_str = timezone.localtime(start_time, MOSCOW_TZ).strftime("%H:%M:%S")
+        await self.send(text_data=self.formatter.format_user_processing(
+            start_str, "Запрос сохранённого решения (кэш решённых задач)."))
+
+        identity = self._get_identity_for_log()
+        response = (
+            "Задача уже была решена ранее (тестирование пройдено) — "
+            "выдаю сохранённое решение.\n\n"
+            f"```\n{solution.code}\n```"
+        )
+        log = await self.log_writer.create(
+            user=identity["user"],
+            username=identity["username"],
+            external_user_id=identity["external_user_id"],
+            user_full_name=identity["user_full_name"],
+            client_id=self.client_id,
+            source="websocket",
+            mode=AIRequestLog.MODE_SOLVE,
+            sent_at=start_time,
+            model_names=[solution.model_key] if solution.model_key else [],
+            message="Повторный запрос задачи — выдано сохранённое решение (кэш).",
+            programming_language_id=solution.programming_language_id,
+            programming_language_name="",
+            topic_id=None,
+            topic_name="",
+            prompt_id=None,
+            prompt_name="",
+            task_node_id=solution.task_node_id,
+        )
+
+        end_time = timezone.now()
+        model_title = solution.model_title or "Сохранённое решение"
+        await self.log_writer.update_success(
+            log, f"{response}\n(решение выдано из кэша)", 0, model_title, end_time
+        )
+        end_str = timezone.localtime(end_time, MOSCOW_TZ).strftime("%H:%M:%S")
+        duration = self.formatter.format_duration((end_time - start_time).total_seconds())
+        await self.send(
+            text_data=self.formatter.format_success(
+                end_str, "Сохранённое решение", duration, response, 0,
+            )
+        )
+        await sync_to_async(mark_cache_used)(solution)

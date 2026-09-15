@@ -33,11 +33,21 @@ _POLL_PATHS = frozenset(
     }
 )
 
+# POST-опрос результата DL-тестирования со страницы «Реши задачу»
+# (раз в ~3 с, пока DL тестирует решение) — фон, в основной лимит не считаем.
+_POST_POLL_PATHS = frozenset(
+    {
+        "/ai/api/get-solution-result/",
+    }
+)
+
 
 def _is_poll_request(request) -> bool:
     """True for read-only background polling endpoints (excluded from the main
     per-user HTTP counter; counted in a separate high-limit poll counter)."""
-    return request.method == "GET" and request.path in _POLL_PATHS
+    if request.method == "GET" and request.path in _POLL_PATHS:
+        return True
+    return request.method == "POST" and request.path in _POST_POLL_PATHS
 
 
 def _get_limits():

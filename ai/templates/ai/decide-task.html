@@ -5,11 +5,17 @@
 {% endblock %}
 
 {% block js %}
-    <script src="/ai/assets/admin/js/ai-common.js?v=8" defer></script>
-    <script src="/ai/assets/admin/js/decide_task.js?v=6" defer></script>
+    <script src="/ai/assets/admin/js/ai-common.js?v=9" defer></script>
+    <script src="/ai/assets/admin/js/decide_task.js?v=7" defer></script>
 {% endblock %}
 
 {% block solve_selected %}selected{% endblock %}
+
+{% block extra_buttons %}
+    {% if node_id %}
+        <button type="button" id="testOnDlBtn" onclick="testOnDl()">Тестирование</button>
+    {% endif %}
+{% endblock %}
 
 {% block form_content %}
     <textarea type="text" id="messageText" data-node-id="{{ node_id }}"

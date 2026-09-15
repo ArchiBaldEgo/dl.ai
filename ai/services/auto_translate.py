@@ -166,8 +166,8 @@ def translate_text(text: str, target_lang: str, model_key: Optional[str] = None)
 
 
 def _get_field(obj, field_base: str, suffix: str) -> str:
-    """Get obj.field_base_suffix, falling back to field_base, then field_base_ru."""
-    for attr in (f"{field_base}_{suffix}", field_base, f"{field_base}_ru"):
+    """Get obj.field_base_suffix, falling back to field_base_ru."""
+    for attr in (f"{field_base}_{suffix}", f"{field_base}_ru"):
         val = getattr(obj, attr, None)
         if val:
             return str(val)

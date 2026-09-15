@@ -23,7 +23,7 @@ def _binding_rows():
     bindings = (
         ArmPromptBinding.objects.select_related(
             "programming_language", "topic", "prompt",
-        ).order_by("programming_language__language_name", "topic__topic_name", "mode")
+        ).order_by("programming_language__language_name", "topic__topic_name_ru", "mode")
     )
     rows = []
     for b in bindings:
@@ -50,11 +50,11 @@ def _form_data():
     ]
     topics = [
         {"id": t.id, "name": get_localized_topic_name(t), "language_id": t.programming_language_id}
-        for t in Topic.objects.select_related("programming_language").order_by("topic_name")
+        for t in Topic.objects.select_related("programming_language").order_by("topic_name_ru")
     ]
     prompts = [
         {"id": p.id, "name": str(p), "topic_id": p.topic_id}
-        for p in Prompt.objects.select_related("topic").order_by("prompt_name", "id")
+        for p in Prompt.objects.select_related("topic").order_by("prompt_name_ru", "id")
     ]
     return languages, topics, prompts
 

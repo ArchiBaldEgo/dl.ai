@@ -10,6 +10,18 @@ from django import forms
 from ..models import ProgrammingLanguage, Prompt, SharedPrompt, Topic
 
 
+class TopicForm(forms.ModelForm):
+    """Форма темы: табы RU/EN/FR через общий prompt_translate_tabs.js."""
+
+    class Meta:
+        model = Topic
+        fields = '__all__'
+        widgets = {}
+
+    class Media:
+        js = ("admin/js/prompt_translate_tabs.js",)
+
+
 class PromptForm(forms.ModelForm):
     # NOTE: ``programming_language`` is NOT a field on the Prompt model — a
     # Prompt only links to a Topic, which in turn carries the language. This
@@ -29,10 +41,6 @@ class PromptForm(forms.ModelForm):
         model = Prompt
         fields = '__all__'
         widgets = {
-            'prompt_text': forms.Textarea(attrs={
-                'rows': 25,
-                'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
-            }),
             'prompt_text_ru': forms.Textarea(attrs={
                 'rows': 25,
                 'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
@@ -66,7 +74,7 @@ class PromptForm(forms.ModelForm):
         if selected_language_id:
             self.fields["topic"].queryset = Topic.objects.filter(
                 programming_language_id=selected_language_id
-            ).order_by("topic_name")
+            ).order_by("topic_name_ru")
         elif self.instance.pk and self.instance.topic_id:
             self.fields["topic"].queryset = Topic.objects.filter(pk=self.instance.topic_id)
         else:
@@ -75,7 +83,7 @@ class PromptForm(forms.ModelForm):
             # filters client-side on language change, and clean() validates
             # topic<->language consistency server-side. Hard-disabling here
             # made topic assignment impossible if the JS failed to load.
-            self.fields["topic"].queryset = Topic.objects.all().order_by("topic_name")
+            self.fields["topic"].queryset = Topic.objects.all().order_by("topic_name_ru")
 
         if not self.is_bound and selected_language_id:
             self.fields["programming_language"].initial = selected_language_id
@@ -120,14 +128,13 @@ class PromptForm(forms.ModelForm):
 
 class SharedPromptForm(forms.ModelForm):
     """Форма для общих (shared) препромптов."""
+    class Media:
+        js = ("admin/js/prompt_translate_tabs.js",)
+
     class Meta:
         model = SharedPrompt
         fields = '__all__'
         widgets = {
-            'prompt_text': forms.Textarea(attrs={
-                'rows': 25,
-                'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
-            }),
             'prompt_text_ru': forms.Textarea(attrs={
                 'rows': 25,
                 'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'

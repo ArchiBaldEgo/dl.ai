@@ -219,10 +219,10 @@ def _prepare_arm_run_payload(form_state, user=None):
         "programming_language_id": form_state["selected_prog_lng"] or None,
         "programming_language_name": prog_lng_name,
         "topic_id": form_state["selected_topic"] or None,
-        "topic_name": topic.topic_name if topic else "",
+        "topic_name": topic.topic_name_ru if topic else "",
         "topic_name_localized": get_localized_name(topic, form_state["selected_language_ui"], "topic_name") if topic else "",
         "prompt_id": prompt_obj.prompt_id if prompt_obj else None,
-        "prompt_name": prompt_obj.prompt.prompt_name if prompt_obj else "",
+        "prompt_name": prompt_obj.prompt.prompt_name_ru if prompt_obj else "",
         "prompt_name_localized": get_localized_name(prompt_obj.prompt, form_state["selected_language_ui"], "prompt_name") if prompt_obj else "",
         # Снимок формы запуска — для восстановления состояния формы при
         # возврате на страницу прогона (?run_id=). См. AIModelTestRun.run_params.
@@ -476,12 +476,12 @@ def admin_arm_solve_view(request):
     prompt_options = [
         {
             "id": p.pk,
-            "name": p.prompt_name or f"Промпт #{p.pk}",
+            "name": p.prompt_name_ru or f"Промпт #{p.pk}",
             "topic_id": p.topic_id,
-            "topic_name": p.topic.topic_name if p.topic else "",
+            "topic_name": p.topic.topic_name_ru if p.topic else "",
         }
         for p in Prompt.objects.select_related("topic").order_by(
-            "topic__topic_name", "prompt_name"
+            "topic__topic_name_ru", "prompt_name_ru"
         )
     ]
 
@@ -688,11 +688,11 @@ def admin_arm_solve_start_view(request):
             {"ok": False, "message": lang_error or "Не выбрано расширение файла для тестирования."},
             status=400,
         )
-    # Тема выбрана пользователем; препромпт — ручной выбор из списка на
-    # странице (все промпты — студенческий контент, как в chat-facing API),
-    # иначе привязка ArmPromptBinding (mode=solve): точная (язык+тема), иначе
-    # «на весь язык» (topic IS NULL — языки без тем: Python, C++). Нет
-    # ни ручного выбора, ни привязки → прогон без препромпта.
+    # Тема выбрана пользователем (для журнала прогона). Препромпт — ручной
+    # выбор из списка на странице (все промпты — студенческий контент, как в
+    # chat-facing API); без ручного выбора препромпт резолвится на КАЖДУЮ
+    # задачу по её теме (ArmPromptBinding, mode=solve) в worker'е — тема
+    # определяется из ветки DL, а не одна на весь прогон.
     topic_id = None
     topic_id_log = None
     topic_name_log = ""
@@ -710,20 +710,17 @@ def admin_arm_solve_start_view(request):
             prompt_override = None
     if prompt_override is not None:
         prompt_id = prompt_override.pk
-        prompt_name = prompt_override.prompt_name or ""
+        prompt_name = prompt_override.prompt_name_ru or ""
     else:
-        prompt_obj = ArmPromptBinding.resolve(
-            programming_language_id=prog_lang_id,
-            topic_id=topic_id,
-            mode=ArmPromptBinding.MODE_SOLVE,
-        )
-        prompt_id = prompt_obj.prompt_id if prompt_obj else None
-        prompt_name = prompt_obj.prompt.prompt_name if prompt_obj else ""
+        # «По привязке»: без явного препромпта worker сам подбирает привязку
+        # на каждую задачу (по теме из ветки DL). prompt_id остаётся None.
+        prompt_id = None
+        prompt_name = ""
     # Название прогона — необязательно, задаётся только при запуске
     # (хранится в AIAppSettings.batch_run_names по дате-времени старта).
     run_name = str(body.get("run_name") or request.POST.get("run_name") or "").strip()[:200]
     topic_name_log = (
-        Topic.objects.filter(id=topic_id).values_list("topic_name", flat=True).first() or ""
+        Topic.objects.filter(id=topic_id).values_list("topic_name_ru", flat=True).first() or ""
     ) if topic_id else ""
     # Статистика моделей (AIModelStats): чекбокс виден только суперюзерам,
     # и флаг принимаем только от суперюзера — клиенту не доверяем.
