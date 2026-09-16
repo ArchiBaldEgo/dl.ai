@@ -13,6 +13,7 @@ from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
 from django.http import HttpResponse
 from django.urls import path
+from django.utils import timezone
 
 from ..models import (
     AIAppSettings,
@@ -35,6 +36,7 @@ from ..dl_api_client import (
 )
 from ..http_utils import resolve_dl_session_id
 from ..services.task_registry import apply_dl_task_info
+from .logs import dl_task_url
 
 User = get_user_model()
 
@@ -134,7 +136,9 @@ class PromptAdmin(admin.ModelAdmin):
         'short_prompt_text',
     )
     list_display_links = ('prompt_name_ru',)
-    list_filter = (PromptUserIdFilter, 'mode', 'topic__programming_language', 'topic')
+    # Режим первым: чипы «Все / Реши задачу / В чём ошибка» — главный
+    # селектор списка (см. MODE_SOLVE / MODE_FIND_ERROR).
+    list_filter = ('mode', PromptUserIdFilter, 'topic__programming_language', 'topic')
     list_per_page = 25
     search_fields = ('prompt_name_ru', 'prompt_text_ru', 'owner__username', '=owner__id')
     autocomplete_fields = ("owner", "editors")
@@ -610,13 +614,18 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     Записи создаются автоматически (send-solution + успешное тестирование со
     страницы «Реши задачу») и выдаются повторным запросам той же задачи без
     вызова модели. Редактирование вручную не предусмотрено — только просмотр.
+
+    Список — кастомный (change_list_template): строка показывает дату,
+    название задачи со ссылкой в DL, имя языка, тему и препромпт; клик по
+    строке (кроме ссылки на задачу) раскрывает сохранённый код.
     """
 
-    list_display = ("task_node_id", "programming_language_id", "topic_name", "prompt_name",
-                    "submitted_at", "external_user_id", "verdict", "times_used")
-    list_display_links = ("task_node_id",)
+    change_list_template = "admin/ai/tasksolution_changelist.html"
+
     list_filter = ("verdict",)
     search_fields = ("task_node_id", "external_user_id", "model_key", "topic_name", "prompt_name")
+    # Каждая строка несёт полный код решения — режем страницу.
+    list_per_page = 25
     readonly_fields = ("task_node_id", "programming_language_id", "file_extension", "code", "verdict",
                        "dl_comment", "model_key", "model_title", "topic_id", "topic_name",
                        "prompt_id", "prompt_name", "queue_id", "test_log", "submitted_at",
@@ -628,6 +637,51 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         ("Контекст", {"fields": ("topic_id", "topic_name", "prompt_id", "prompt_name")}),
         ("Метаданные", {"fields": ("queue_id", "test_log", "submitted_at", "created_by", "external_user_id", "times_used", "created_at", "updated_at")}),
     )
+
+    def changelist_view(self, request, extra_context=None):
+        """Строки списка, подготовленные для отображения: название задачи
+        (один запрос Task по node_id страницы), имя языка вместо сырого id,
+        локализованная дата (МСК), ссылка на задачу в DL.
+
+        Шаблон admin/ai/tasksolution_changelist.html рендерит sol_rows;
+        поиск/фильтр/пагинация работают штатно через cl.
+        """
+        response = super().changelist_view(request, extra_context)
+        if response.status_code != 200 or not getattr(response, "context_data", None):
+            return response
+        solutions = list(response.context_data["cl"].result_list)
+        task_names = {
+            t.node_id: t.name
+            for t in Task.objects.filter(
+                node_id__in={s.task_node_id for s in solutions}
+            ).only("node_id", "name")
+        }
+        lang_names = {
+            lang.pk: lang.language_name
+            for lang in ProgrammingLanguage.objects.filter(
+                pk__in={s.programming_language_id for s in solutions if s.programming_language_id}
+            ).only("pk", "language_name")
+        }
+        rows = []
+        for s in solutions:
+            dt = s.submitted_at or s.created_at
+            rows.append({
+                "obj": s,
+                "date": timezone.localtime(dt).strftime("%d.%m.%Y %H:%M") if dt else "—",
+                "task_name": task_names.get(s.task_node_id) or f"Задача #{s.task_node_id}",
+                "task_url": dl_task_url(s.task_node_id, s.course_id) or "",
+                "lang_name": lang_names.get(s.programming_language_id) or (
+                    str(s.programming_language_id) if s.programming_language_id else "—"
+                ),
+                "topic_name": s.topic_name or "—",
+                "prompt_name": s.prompt_name or "—",
+                "user": s.external_user_id or "—",
+                "verdict_display": s.get_verdict_display(),
+                "times_used": s.times_used,
+                "log_url": f"/ai/admin/ai/airequestlog/{s.test_log_id}/" if s.test_log_id else "",
+            })
+        response.context_data["sol_rows"] = rows
+        return response
 
     # Кэш пишется только автоматикой; ручное добавление/правка не предусмотрены.
     def has_add_permission(self, request):

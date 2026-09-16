@@ -84,7 +84,7 @@ function initWebSocket() {
             }
 
             initAccordionForMessages();
-            collapseAllExceptLast();
+            collapseAllMessages();
         };
 
         ws.onerror = function(error) {
@@ -408,7 +408,7 @@ function _appendDlMessage(text) {
     messages.appendChild(message);
     messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
     initAccordionForMessages();
-    collapseAllExceptLast();
+    collapseAllMessages();
     return content;
 }
 

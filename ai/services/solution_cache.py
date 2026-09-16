@@ -34,12 +34,13 @@ def find_passed_solution(node_id, programming_language_id):
 
 
 def record_submission(node_id, code, *, programming_language_id=None, file_extension="",
-                      identity=None, queue_id=None, test_log=None):
+                      course_id=None, identity=None, queue_id=None, test_log=None):
     """Upsert-запись кэша при отправке кода на тестирование со страницы.
 
     ``identity`` — словарь ``get_user_identity_for_log``; ``test_log`` —
-    запись AIRequestLog (mode=testing) этого тестирования. Не поднимает
-    исключений: сбой кэша не должен ломать отправку решения.
+    запись AIRequestLog (mode=testing) этого тестирования; ``course_id`` —
+    курс DL из send-solution (для пользовательской ссылки на задачу). Не
+    поднимает исключений: сбой кэша не должен ломать отправку решения.
     """
     try:
         model_key, model_title = last_solve_model(node_id)
@@ -54,6 +55,7 @@ def record_submission(node_id, code, *, programming_language_id=None, file_exten
             "external_user_id": identity.get("external_user_id", ""),
             "created_by": identity.get("user"),
             "queue_id": queue_id,
+            "course_id": course_id or None,
             "submitted_at": timezone.now(),
             "test_log": test_log,
         }

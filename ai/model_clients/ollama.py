@@ -164,7 +164,8 @@ async def _ask_ollama(
     if not content.strip():
         # Reasoning-модели (gpt-oss:cloud) иногда кладут
         # весь ответ в поле ``thinking``, оставляя content пустым — отдаём его
-        # пользователю вместо ошибки «пустой ответ».
+        # пользователю вместо ошибки «пустой ответ». Если это рассуждения без
+        # кода, они вырезаются think-фильтром в arm_runner (не попадают в код).
         if thinking.strip():
             logger.warning(
                 "Ollama model %s returned empty content, falling back to thinking (%d chars)",

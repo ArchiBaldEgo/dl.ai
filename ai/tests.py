@@ -6983,50 +6983,136 @@ class BatchRunStatusDisplayTests(SimpleTestCase):
         self.assertEqual(batch_run_status_display("weird"), "")
 
 
-class BatchRunNameTests(TestCase):
-    """Названия прогонов: словарь AIAppSettings.batch_run_names «дата-время
-    ISO → название» пишется воркером (ключ == started_at == sent_at записи
-    журнала), читается по sent_at (batch_run_name_for, окно ±2 с) и попадает
-    в строки «Настройки ИИ-приложения» и снапшот деталей журнала."""
+class TaskSolutionListTests(_AdminViewRequestMixin, TestCase):
+    """Кастомный список «Решённые задачи»: название задачи и имя языка вместо
+    сырых id, дата МСК, пользовательская ссылка task.jsp?cid=…&nid=… (не
+    admin-вьювер), препромпт юзера; фильтр по вердикту работает."""
 
     def setUp(self):
-        from ai.models import AIAppSettings
+        self.factory = RequestFactory()
+
+    def _admin(self):
+        from ai.admin.models import TaskSolutionAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import TaskSolution
+        return TaskSolutionAdmin(TaskSolution, ai_admin_site)
+
+    def _view(self, su, params=None):
+        request = self._admin_request(su, path="/ai/admin/ai/tasksolution/", data=params or {})
+        return self._admin().changelist_view(request)
+
+    def test_changelist_rows(self):
+        from ai.models import ProgrammingLanguage, Task
+
+        su = get_user_model().objects.create_user(
+            username="sol-su", password="x", is_superuser=True, is_staff=True,
+        )
+        lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        Task.objects.create(node_id=9001, task_id=9101, name="Сумма чисел", statement="x")
+        TaskSolution.objects.create(
+            task_node_id=9001, programming_language_id=lang.pk, course_id=1450,
+            file_extension=".pas", code="begin end.",
+            verdict=TaskSolution.VERDICT_PASSED,
+            topic_name="Линейные", prompt_name="Реши задачу",
+            external_user_id="4242",
+        )
+        response = self._view(su)
+        self.assertEqual(response.status_code, 200)
+        rows = response.context_data["sol_rows"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["task_name"], "Сумма чисел")
+        self.assertEqual(row["task_url"], "https://dl.gsu.by/task.jsp?cid=1450&nid=9001")
+        self.assertEqual(row["lang_name"], "Pascal")
+        self.assertEqual(row["prompt_name"], "Реши задачу")
+        self.assertRegex(row["date"], r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}")
+
+    def test_task_without_course_has_no_link(self):
+        """Без известного курса ссылки в DL нет (admin-вьювер не используем)."""
+        su = get_user_model().objects.create_user(
+            username="sol-su2", password="x", is_superuser=True, is_staff=True,
+        )
+        TaskSolution.objects.create(
+            task_node_id=9002, programming_language_id=None,
+            code="x", verdict=TaskSolution.VERDICT_FAILED,
+        )
+        response = self._view(su)
+        rows = response.context_data["sol_rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["task_url"], "")
+        self.assertEqual(rows[0]["task_name"], "Задача #9002")
+
+    def test_verdict_filter(self):
+        su = get_user_model().objects.create_user(
+            username="sol-su3", password="x", is_superuser=True, is_staff=True,
+        )
+        TaskSolution.objects.create(
+            task_node_id=9003, verdict=TaskSolution.VERDICT_PASSED, code="ok",
+        )
+        TaskSolution.objects.create(
+            task_node_id=9004, verdict=TaskSolution.VERDICT_FAILED, code="no",
+        )
+        response = self._view(su, params={"verdict__exact": TaskSolution.VERDICT_PASSED})
+        rows = response.context_data["sol_rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["obj"].task_node_id, 9003)
+
+
+class ArmCodeExtractionTests(SimpleTestCase):
+    """Извлечение чистого кода из ответа модели (_extract_code_from_response):
+    longest-fence побеждает; текст без фенсов — рассуждения, а не код (пусто);
+    think-блоки вырезаются целиком (в т.ч. незакрытые и код внутри них)."""
+
+    def _extract(self, text):
+        from ai.arm_runner import _extract_code_from_response
+        return _extract_code_from_response(text)
+
+    def test_longest_fence_wins(self):
+        text = "```asm\nmov ax, 1\n```\nмусор\n```pascal\nprogram a; begin end.\n```"
+        self.assertEqual(self._extract(text), "program a; begin end.")
+
+    def test_no_fences_returns_empty(self):
+        self.assertEqual(self._extract("We need answer code only, no explanations."), "")
+        self.assertEqual(self._extract(""), "")
+
+    def test_strip_think_blocks_full_and_unclosed(self):
+        from ai.arm_runner import _strip_think_blocks
+        # Литеральные теги собираются, чтобы не мешать парсингу этого файла.
+        open_tag = chr(60) + "think>"
+        close_tag = chr(60) + "/think>"
+        # Закрытый блок — удалён вместе с содержимым, текст после блока остаётся.
+        self.assertEqual(
+            _strip_think_blocks(f"{open_tag}рассуждения{close_tag}ответ"),
+            "ответ",
+        )
+        # Незакрытый блок — до конца текста.
+        self.assertEqual(_strip_think_blocks(f"{open_tag}only reasoning"), "")
+
+    def test_code_inside_think_is_ignored(self):
+        from ai.arm_runner import _strip_think_blocks
+        open_tag = chr(60) + "think>"
+        close_tag = chr(60) + "/think>"
+        text = _strip_think_blocks(
+            f"{open_tag}```asm\nmov ax, 1\n```{close_tag}Финальный ответ:\n```pascal\nbegin end.\n```"
+        )
+        self.assertEqual(self._extract(text), "begin end.")
+
+    def test_think_stripped_before_extraction_pipeline(self):
+        """Ответ, целиком состоящий из рассуждений → нет ни кода, ни текста."""
+        from ai.arm_runner import _strip_think_blocks
+        text = _strip_think_blocks(
+            chr(60) + "think>Need solve assembler i86. Need infer syntax."
+        )
+        self.assertEqual(self._extract(text), "")
+
+
+class BatchRunNameTests(TestCase):
+    """Названия прогонов: воркер пишет run_name прямо в AIModelTestRun,
+    журналы и таблица «Последние пакетные решения» читают его с прогона
+    (run_name_for); для старых прогонов — фолбэк на run_params."""
+
+    def setUp(self):
         self.user = get_user_model().objects.create_user(username="runname", password="x")
-        settings_obj = AIAppSettings.get_solo()
-        settings_obj.batch_run_names = {}
-        settings_obj.save()
-
-    def _write_name(self, started_at, name):
-        from ai.models import AIAppSettings
-        settings_obj = AIAppSettings.get_solo()
-        names = dict(settings_obj.batch_run_names or {})
-        names[timezone.localtime(started_at).isoformat()] = name
-        settings_obj.batch_run_names = names
-        settings_obj.save()
-
-    def test_batch_run_name_for_exact_key(self):
-        from ai.admin.logs import batch_run_name_for
-        started_at = timezone.now()
-        self._write_name(started_at, "Неделя 3")
-        self.assertEqual(batch_run_name_for(started_at), "Неделя 3")
-
-    def test_batch_run_name_for_two_second_window(self):
-        """Ключ на 1.5 с раньше sent_at — внутри окна ±2 с → название найдено."""
-        from datetime import timedelta
-
-        from ai.admin.logs import batch_run_name_for
-        started_at = timezone.now()
-        self._write_name(started_at - timedelta(seconds=1.5), "Проверка")
-        self.assertEqual(batch_run_name_for(started_at), "Проверка")
-
-    def test_batch_run_name_for_outside_window_is_dash(self):
-        from datetime import timedelta
-
-        from ai.admin.logs import batch_run_name_for
-        started_at = timezone.now()
-        self._write_name(started_at - timedelta(seconds=30), "Другой прогон")
-        self.assertEqual(batch_run_name_for(started_at), "—")
-        self.assertEqual(batch_run_name_for(None), "—")
 
     def _run_batch_with_name(self, run_id, run_name):
         """Прогон batch-воркера синхронно с run_name (как в IntegrationTests)."""
@@ -7070,25 +7156,22 @@ class BatchRunNameTests(TestCase):
         return AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
 
     def test_worker_writes_run_name_and_journals_read_it(self):
-        """Воркер пишет run_name в AIAppSettings.batch_run_names; журналы
-        восстанавливают название по sent_at записи без доп. связок."""
+        """Воркер пишет run_name в AIModelTestRun; журналы и таблица
+        «Последние пакетные решения» читают название с прогона."""
         from ai.admin.logs import (
             _build_batch_log_snapshot,
-            batch_run_name_for,
             build_recent_batch_rows,
             build_recent_log_rows,
+            run_name_for,
         )
-        from ai.models import AIAppSettings, AIModelTestRun
+        from ai.models import AIModelTestRun
 
         run_id = "b" * 32
         log = self._run_batch_with_name(run_id, "Неделя 3")
 
-        names = dict(AIAppSettings.get_solo().batch_run_names or {})
-        self.assertEqual(list(names.values()), ["Неделя 3"])
-
-        # Точное совпадение ключа: started_at прогона == sent_at записи.
         run = AIModelTestRun.objects.get(run_id=run_id)
-        self.assertEqual(batch_run_name_for(log.sent_at), "Неделя 3")
+        self.assertEqual(run.run_name, "Неделя 3")
+        self.assertEqual(run_name_for(run), "Неделя 3")
 
         request = RequestFactory().get("/ai/admin/")
         request.user = get_user_model().objects.create_user(
@@ -7106,27 +7189,37 @@ class BatchRunNameTests(TestCase):
         self.assertEqual(snapshot["run_status"], "completed")
 
     def test_worker_without_run_name_writes_nothing(self):
-        from ai.admin.logs import batch_run_name_for
-        from ai.models import AIAppSettings
+        from ai.admin.logs import run_name_for
+        from ai.models import AIModelTestRun
 
         run_id = "c" * 32
         self._run_batch_with_name(run_id, "")
-        self.assertEqual(dict(AIAppSettings.get_solo().batch_run_names or {}), {})
-        log = AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
-        self.assertEqual(batch_run_name_for(log.sent_at), "—")
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.run_name, "")
+        self.assertEqual(run_name_for(run), "—")
+        self.assertEqual(run_name_for(None), "—")
 
     def test_snapshot_from_test_run_carries_run_name(self):
-        """Снапшот страницы прогона берёт run_name из run_params."""
+        """Снапшот страницы прогона берёт run_name с прогона (фолбэк —
+        run_params для прогонов, созданных до колонки)."""
         from ai import arm_runner
         from ai.models import AIModelTestRun
         run = AIModelTestRun.objects.create(
             run_id="a" * 32,
             run_type=AIModelTestRun.RUN_TYPE_BATCH,
             status=AIModelTestRun.STATUS_RUNNING,
-            run_params={"run_name": "Неделя 3"},
+            run_name="Неделя 3",
         )
         snapshot = arm_runner._snapshot_from_test_run(run)
         self.assertEqual(snapshot["run_name"], "Неделя 3")
+
+        legacy = AIModelTestRun.objects.create(
+            run_id="d" * 32,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_RUNNING,
+            run_params={"run_name": "Старый прогон"},
+        )
+        self.assertEqual(arm_runner._snapshot_from_test_run(legacy)["run_name"], "Старый прогон")
 
 
 def _fake_translate_chunk(counter):

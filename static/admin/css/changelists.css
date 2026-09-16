@@ -129,14 +129,17 @@
     word-break: break-word;
 }
 
-/* FILTER COLUMN */
+/* FILTER BAR — горизонтальная полоса фильтров НАД таблицей
+   (ai/templates/admin/change_list.html + filter.html; не боковая колонка). */
 
 #changelist-filter {
-    flex: 0 0 240px;
-    order: 1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 5px 30px;
     background: var(--darkened-bg);
-    border-left: none;
-    margin: 0 0 0 30px;
+    padding: 10px 15px;
+    margin: 0 0 15px;
 }
 
 @media (forced-colors: active) {
@@ -146,85 +149,85 @@
 }
 
 #changelist-filter h2 {
-    font-size: 0.875rem;
+    font-size: 0.8125rem;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    padding: 5px 15px;
-    margin-bottom: 12px;
+    padding: 2px 0;
+    margin: 0;
     border-bottom: none;
+    align-self: center;
 }
 
-#changelist-filter h3,
-#changelist-filter details summary {
+#changelist-filter h3 {
     font-weight: 400;
-    padding: 0 15px;
-    margin-bottom: 10px;
+    padding: 0;
+    margin: 0 0 4px;
 }
 
-#changelist-filter details summary > * {
-    display: inline;
+#changelist-filter #changelist-filter-extra-actions {
+    font-size: 0.8125rem;
+    align-self: center;
 }
 
-#changelist-filter details > summary {
-    list-style-type: none;
+#changelist-filter #changelist-filter-extra-actions h3 {
+    margin: 0;
 }
 
-#changelist-filter details > summary::-webkit-details-marker {
-    display: none;
+/* Группа фильтров (ai/templates/admin/filter.html): заголовок + чипы. */
+#changelist-filter .ai-filter-chip-group {
+    flex: 0 1 auto;
 }
 
-#changelist-filter details > summary::before {
-    content: '→';
-    font-weight: bold;
-    color: var(--link-hover-color);
-}
-
-#changelist-filter details[open] > summary::before {
-    content: '↓';
+#changelist-filter .ai-filter-chip-group h3 {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: var(--body-quiet-color);
 }
 
 #changelist-filter ul {
-    margin: 5px 0;
-    padding: 0 15px 15px;
-    border-bottom: 1px solid var(--hairline-color);
-}
-
-#changelist-filter ul:last-child {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 0;
+    padding: 0;
     border-bottom: none;
 }
 
 #changelist-filter li {
     list-style-type: none;
-    margin-left: 0;
-    padding-left: 0;
+    margin: 0;
+    padding: 0;
 }
 
 #changelist-filter a {
-    display: block;
+    display: inline-block;
+    padding: 3px 10px;
+    border: 1px solid var(--hairline-color);
+    border-radius: 12px;
+    background: var(--body-bg);
     color: var(--body-quiet-color);
     word-break: break-word;
-}
-
-#changelist-filter li.selected {
-    border-left: 5px solid var(--hairline-color);
-    padding-left: 10px;
-    margin-left: -15px;
+    font-size: 0.8125rem;
 }
 
 #changelist-filter li.selected a {
-    color: var(--link-selected-fg);
+    background: var(--link-selected-fg);
+    border-color: var(--link-selected-fg);
+    color: var(--button-fg);
 }
 
 #changelist-filter a:focus, #changelist-filter a:hover,
 #changelist-filter li.selected a:focus,
 #changelist-filter li.selected a:hover {
     color: var(--link-hover-color);
+    border-color: var(--link-hover-color);
 }
 
-#changelist-filter #changelist-filter-extra-actions {
-    font-size: 0.8125rem;
-    margin-bottom: 10px;
-    border-bottom: 1px solid var(--hairline-color);
+#changelist-filter li.selected a:focus,
+#changelist-filter li.selected a:hover {
+    color: var(--button-fg);
+    background: var(--link-hover-color);
 }
 
 /* DATE DRILLDOWN */

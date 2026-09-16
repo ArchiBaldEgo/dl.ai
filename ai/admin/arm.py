@@ -467,7 +467,7 @@ def admin_arm_solve_start_view(request):
         prompt_id = None
         prompt_name = ""
     # Название прогона — необязательно, задаётся только при запуске
-    # (хранится в AIAppSettings.batch_run_names по дате-времени старта).
+    # (хранится в AIModelTestRun.run_name).
     run_name = str(body.get("run_name") or request.POST.get("run_name") or "").strip()[:200]
     topic_name_log = (
         Topic.objects.filter(id=topic_id).values_list("topic_name_ru", flat=True).first() or ""

@@ -233,9 +233,9 @@ window.ArmBatchResults = (function () {
   // renderResults(results, resultsEl, resultsCard, filterHost): рендер списка
   // «Ответы моделей» с учётом filterMode. filterHost — контейнер для
   // переключателя (шапка карточки); без него список рисуется целиком.
-  // Раскрытие карточек: в «Все» сохраняются ручные открытия (и возвращаются
-  // прежние после «Не пройденных»); вход в «Не пройденные» раскрывает все
-  // отфильтрованные карточки сразу — ошибки видны без клика по каждой.
+  // Раскрытие карточек: ручные открытия сохраняются при перерисовке
+  // (и переключении фильтров), но по умолчанию ВСЕ карточки свёрнуты —
+  // раскрываются только кликом.
   function renderResults(results, resultsEl, resultsCard, filterHost) {
     lastRender = { results: results, resultsEl: resultsEl, resultsCard: resultsCard, filterHost: filterHost };
     results = results || [];
@@ -251,14 +251,11 @@ window.ArmBatchResults = (function () {
     // Раскрытие (см. докстринг): domOpen читается ДО очистки DOM.
     var domOpen = collectOpenKeys(resultsEl);
     var openKeys = new Set();
-    var openAll = false;
     if (filterMode === 'all') {
       if (prevRenderedMode === 'all') { allOpenKeys = domOpen; }
       openKeys = allOpenKeys;
-    } else if (prevRenderedMode === 'failed') {
-      openKeys = domOpen; // внутри режима — ручные сворачивания сохраняются
     } else {
-      openAll = true;     // вход в режим: раскрыть все не пройденные
+      openKeys = domOpen; // внутри режима — ручные сворачивания сохраняются
     }
     prevRenderedMode = filterMode;
 
@@ -279,7 +276,7 @@ window.ArmBatchResults = (function () {
       card.className = 'arm-result ' + cls;
       var rkey = (r.task_node_id || '') + ':' + (r.model_key || '');
       card.setAttribute('data-key', rkey);
-      if (openAll || openKeys.has(rkey)) { card.setAttribute('open', ''); }
+      if (openKeys.has(rkey)) { card.setAttribute('open', ''); }
 
       var dlComment = r.dl_comment || '';
       var dlError = r.dl_error || '';

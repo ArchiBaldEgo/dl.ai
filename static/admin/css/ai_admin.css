@@ -649,3 +649,114 @@ a.ai-docs-chapter:hover {
   color: #b54708;
   font-weight: 600;
 }
+
+/* === Список «Решённые задачи (кэш кода)» (admin/ai/tasksolution_changelist.html) === */
+
+.ai-sol-row {
+  cursor: pointer;
+}
+
+.ai-sol-row:hover {
+  background: var(--selected-row);
+}
+
+#ai-sol-table .nowrap {
+  white-space: nowrap;
+}
+
+.ai-sol-task-link {
+  font-weight: 600;
+}
+
+.ai-sol-detail-row {
+  display: none;
+}
+
+.ai-sol-detail-row.open {
+  display: table-row;
+}
+
+.ai-sol-detail-cell {
+  padding: 0 !important;
+  border-left: 3px solid var(--hairline-color);
+  background: var(--darkened-bg);
+}
+
+.ai-sol-detail-content {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 12px 16px;
+}
+
+.ai-sol-detail-section {
+  padding: 8px 12px;
+}
+
+.ai-sol-detail-section h4 {
+  margin: 0 0 6px 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--body-quiet-color);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ai-sol-code-section pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.ai-sol-detail-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 4px 16px;
+  font-size: 12px;
+}
+
+.ai-sol-detail-meta div {
+  padding: 2px 0;
+}
+
+.ai-sol-detail-meta strong {
+  color: var(--body-quiet-color);
+}
+
+.ai-sol-verdict {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ai-sol-verdict-passed {
+  background: #e6f4ea;
+  color: #1e7b34;
+}
+
+.ai-sol-verdict-failed {
+  background: #fdecea;
+  color: #b42318;
+}
+
+.ai-sol-verdict-pending {
+  background: var(--darkened-bg);
+  color: var(--body-quiet-color);
+}
+
+.ai-sol-empty {
+  padding: 12px 16px;
+  color: var(--body-quiet-color);
+}
+
+@media (max-width: 800px) {
+  .ai-sol-detail-content {
+    grid-template-columns: 1fr;
+  }
+}

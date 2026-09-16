@@ -2,7 +2,7 @@
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from django.contrib import admin
 from django.core.paginator import Paginator
@@ -27,7 +27,7 @@ from ..dl_api_client import (
     fetch_task_info,
 )
 from ..http_utils import resolve_dl_session_id
-from ..models import AIAppSettings, AIModelTestRun, AIRequestLog, Task
+from ..models import AIModelTestRun, AIRequestLog, Task
 from ..model_health import get_runtime_model_handlers
 from .permissions import can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
 
@@ -42,6 +42,18 @@ def _batch_run_id_from_log(log):
     """Run id batch-прогона из записи журнала или None."""
     m = _BATCH_RUN_ID_RE.search(log.message or "")
     return m.group(1) if m else None
+
+
+def dl_task_url(node_id, course_id=None):
+    """Пользовательская ссылка на задачу в DL (не admin-вьювер).
+
+    ``/task.jsp?cid=<курс>&nid=<узел>`` — та же форма, что и в
+    ensure_course_session (ai/dl_api_client.py). Без курса ссылку не строим
+    (возвращаем None) — просмотр условия от имени админа DL запрещён.
+    """
+    if not node_id or not course_id:
+        return None
+    return f"https://dl.gsu.by/task.jsp?cid={course_id}&nid={node_id}"
 
 
 # Отображение статуса batch-прогона (AIModelTestRun.status) в журналах:
@@ -61,33 +73,14 @@ def batch_run_status_display(status):
     return _BATCH_RUN_STATUS_DISPLAY.get(status, "")
 
 
-def get_batch_run_names():
-    """Серверный словарь ручных названий прогонов «дата-время ISO → название»."""
-    return dict(AIAppSettings.get_solo().batch_run_names or {})
+def run_name_for(run):
+    """Название прогона из AIModelTestRun.run_name (фолбэк — старый run_params).
 
-
-def batch_run_name_for(started_at):
-    """Название прогона по дате-времени старта (== sent_at записи журнала).
-
-    Ключ словаря AIAppSettings.batch_run_names — ISO-дата-время старта
-    прогона; он совпадает с sent_at batch-записи журнала. Окно ±2 с —
-    защита от расхождения округления при записи ключа. Пусто → "—".
+    Нет прогона / пустое название → "—".
     """
-    if not started_at:
+    if not run:
         return "—"
-    names = get_batch_run_names()
-    target = timezone.localtime(started_at)
-    name = names.get(target.isoformat())
-    if name:
-        return name
-    for key, value in names.items():
-        try:
-            dt = datetime.fromisoformat(key)
-        except (TypeError, ValueError):
-            continue
-        if abs(dt - target) <= timedelta(seconds=2) and value:
-            return value
-    return "—"
+    return run.run_name or (run.run_params or {}).get("run_name") or "—"
 
 
 def _parse_date(value: str) -> str:
@@ -215,10 +208,14 @@ class AIRequestLogAdmin(admin.ModelAdmin):
     topic_name_display.short_description = "Тема"
 
     def task_display(self, obj):
-        """Return task name as a link to DL fullTaskviewer."""
+        """Имя задачи; пользовательская ссылка в DL — только с известным
+        курсом (см. dl_task_url), иначе просто название (без ссылки)."""
         if obj.task_node_id:
             name = obj.task_name or str(obj.task_node_id)
-            return f'<a href="https://dl.gsu.by/admin/fullTaskviewer.asp?nid={obj.task_node_id}" target="_blank" rel="noopener">{name}</a>'
+            url = dl_task_url(obj.task_node_id, getattr(obj, "course_id", None))
+            if url:
+                return f'<a href="{url}" target="_blank" rel="noopener">{name}</a>'
+            return name
         return obj.task_name or "—"
     task_display.short_description = "Задача"
     task_display.allow_tags = True
@@ -297,7 +294,7 @@ def build_recent_log_rows(request, limit=5):
                     batch_run_status_display(run.status) if run else log.get_status_display()
                 ),
                 "status_class": "ok" if status_ok else "err",
-                "run_name": batch_run_name_for(run.started_at) if run else "—",
+                "run_name": run_name_for(run),
                 "mode_display": log.get_mode_display() or "—",
                 "duration_seconds": log.duration_seconds,
                 "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
@@ -561,7 +558,7 @@ def _build_batch_log_snapshot(log):
         "report": report,
         # Статус прогона и ручное название — для шапки деталей журнала.
         "run_status": test_run.status,
-        "run_name": batch_run_name_for(test_run.started_at),
+        "run_name": run_name_for(test_run),
     }
 
 
@@ -642,7 +639,7 @@ def _batch_log_row_contexts(logs):
             # отображаются в строке журнала вместо статуса записи.
             "run_status": run_obj.status,
             "run_status_display": batch_run_status_display(run_obj.status),
-            "run_name": batch_run_name_for(run_obj.started_at),
+            "run_name": run_name_for(run_obj),
             # Свёрнутые строки для ячейки таблицы (первые 3 + «+N ещё»)
             # и полный список для title-подсказки.
             "tasks_preview": _tasks_preview(tasks),

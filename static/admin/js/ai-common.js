@@ -1446,10 +1446,11 @@ function initAccordionForMessages() {
         var lastBtn = lastLi.querySelector('.accordion');
         var lastPanel = lastLi.querySelector('.panel');
         if (lastBtn && lastPanel) {
-            lastPanel.classList.add('open');
-            lastBtn.classList.add('active');
             var lastRole = roles[allMessages.length - 1] || 'other';
-            lastBtn.textContent = 'Скрыть: ' + getRoleLabel(lastRole, langAttr);
+            // По умолчанию ВСЕ ответы свёрнуты — раскрываются только по клику.
+            lastPanel.classList.remove('open');
+            lastBtn.classList.remove('active');
+            lastBtn.textContent = 'Показать: ' + getRoleLabel(lastRole, langAttr);
         }
     }
     window._accordionRoles = roles;
@@ -1489,7 +1490,7 @@ function updateAccordionLabels() {
     });
 }
 
-function collapseAllExceptLast() {
+function collapseAllMessages() {
     // Только прямые потомки #messages (как в initAccordionForMessages):
     // querySelectorAll('li') зацепил бы вложенные li из markdown-списков
     // внутри панелей — индексы ролей съезжали бы и кнопки получали «Други».
@@ -1507,20 +1508,15 @@ function collapseAllExceptLast() {
         return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
     }
 
+    // Все ответы свёрнуты — раскрываются только вручную (клик по кнопке).
     allMessages.forEach(function(li, idx) {
         var btn = li.querySelector('.accordion');
         var panel = li.querySelector('.panel');
         var role = roles[idx] || 'other';
         if (btn && panel) {
-            if (idx === allMessages.length - 1) {
-                panel.classList.add('open');
-                btn.classList.add('active');
-                btn.textContent = 'Скрыть: ' + getRoleLabel(role, langAttr);
-            } else {
-                panel.classList.remove('open');
-                btn.classList.remove('active');
-                btn.textContent = 'Показать: ' + getRoleLabel(role, langAttr);
-            }
+            panel.classList.remove('open');
+            btn.classList.remove('active');
+            btn.textContent = 'Показать: ' + getRoleLabel(role, langAttr);
         }
     });
 }
@@ -1589,7 +1585,7 @@ function initWebSocket() {
                 notEnter = false;
             }
             initAccordionForMessages();
-            collapseAllExceptLast();
+            collapseAllMessages();
         };
 
         ws.onerror = function(error) {

@@ -167,7 +167,9 @@ async def _ask_sambanova_model_async(
 
         completion_tokens = obj.get("usage", {}).get("completion_tokens", 0)
 
-        # Извлекаем ответ: content (по умолчанию) или reasoning (GPT-OSS)
+        # Извлекаем ответ: content (по умолчанию) или reasoning (GPT-OSS).
+        # Фолбэк на reasoning может вернуть рассуждения — они вырезаются
+        # think-фильтром в arm_runner и не попадают в извлечённый код.
         message = obj["choices"][0].get("message", {})
         if response_field == "reasoning":
             assistant_content = message.get("content") or message.get("reasoning") or ""
