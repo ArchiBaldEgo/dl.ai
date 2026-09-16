@@ -1,6 +1,6 @@
 """URL-маршруты кастомного AI admin site.
 
-Содержит кастомные пути для ARM (find-error, solve), статуса моделей,
+Содержит кастомные пути для ARM (solve), статуса моделей,
 регрессионных тестов промптов, логов запросов и личных промптов.
 Стандартные admin URL подключаются через ai_admin_site.get_urls().
 """
@@ -10,9 +10,6 @@ from django.urls import include, path
 from ..views import set_password_view
 from .active_runs import admin_active_runs_view
 from .arm import (
-    admin_arm_find_error_view,
-    admin_arm_find_error_start_view,
-    admin_arm_find_error_status_view,
     admin_arm_solve_view,
     admin_arm_solve_start_view,
     admin_arm_solve_status_view,
@@ -72,8 +69,6 @@ def get_ai_admin_urls():
         path("docs/<slug:slug>/content/", ai_admin_site.admin_view(admin_docs_content_view), name="ai_docs_content"),
         path("docs/<slug:slug>/download/", ai_admin_site.admin_view(admin_docs_download_view), name="ai_docs_download"),
         path("active-runs/", ai_admin_site.admin_view(admin_active_runs_view), name="ai_active_runs"),
-        path("arm/find-error/start/", ai_admin_site.admin_view(admin_arm_find_error_start_view), name="ai_arm_find_error_start"),
-        path("arm/find-error/status/", ai_admin_site.admin_view(admin_arm_find_error_status_view), name="ai_arm_find_error_status"),
         path("arm/solve/start/", ai_admin_site.admin_view(admin_arm_solve_start_view), name="ai_arm_solve_start"),
         path("arm/solve/status/", ai_admin_site.admin_view(admin_arm_solve_status_view), name="ai_arm_solve_status"),
         path("arm/solve/load-tree/", ai_admin_site.admin_view(admin_arm_solve_load_tree_view), name="ai_arm_solve_load_tree"),
@@ -84,7 +79,6 @@ def get_ai_admin_urls():
         path("arm/models/refresh/", ai_admin_site.admin_view(admin_model_status_refresh_view), name="ai_arm_model_status_refresh"),
         path("arm/models/state/", ai_admin_site.admin_view(admin_model_status_state_view), name="ai_arm_model_status_state"),
         path("arm/models/", ai_admin_site.admin_view(admin_model_status_view), name="ai_arm_model_status"),
-        path("arm/find-error/", ai_admin_site.admin_view(admin_arm_find_error_view), name="ai_arm_find_error"),
         path("prompt-regression/start/", ai_admin_site.admin_view(admin_prompt_regression_start_view), name="ai_prompt_regression_start"),
         path("prompt-regression/status/", ai_admin_site.admin_view(admin_prompt_regression_status_view), name="ai_prompt_regression_status"),
         path("prompt-regression/", ai_admin_site.admin_view(admin_prompt_regression_view), name="ai_prompt_regression"),

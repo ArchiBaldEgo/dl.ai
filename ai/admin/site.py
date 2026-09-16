@@ -41,7 +41,6 @@ _HIDDEN_NAV_OBJECT_NAMES = {
     "PromptTestRun",      # «Прогоны регрессионных тестов промптов»
     "PromptTestCase",     # «Тест-кейсы промптов»
     "AiPromptRegression", # инструмент «Регрессионные тесты»
-    "AiArmFindError",     # инструмент «Поиск ошибки (ARM)» — временно скрыт
 }
 
 # Иконки реальных ModelAdmin-строк (объекты, видимые в левом меню) — чтобы
@@ -344,10 +343,8 @@ class AIAdminSite(admin.AdminSite):
         context["show_prompt_regression_link"] = show_prompt_regression
         show_test_console = can_access_test_console(request) and not guest
         context["show_test_console_link"] = show_test_console
-        arm_find_error_url = "/ai/admin/arm/find-error/"
         arm_solve_url = "/ai/admin/arm/solve/"
         arm_model_status_url = "/ai/admin/arm/models/"
-        context["arm_find_error_url"] = arm_find_error_url
         context["arm_solve_url"] = arm_solve_url
         context["arm_model_status_url"] = arm_model_status_url
         context["arm_model_status_refresh_url"] = "/ai/admin/arm/models/refresh/"

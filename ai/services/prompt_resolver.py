@@ -30,8 +30,15 @@ class PromptResolver:
         topic_name: str = "",
         message: str = "",
         code: str = "",
+        allowed_mode: str = "",
     ) -> str | None:
-        """Return effective prompt text or None if prompt not found."""
+        """Return effective prompt text or None if prompt not found.
+
+        allowed_mode — режим страницы ('solve'/'find_error'): обычный промпт
+        чужого режима не применяется (страховка от протухшего ai_state /
+        ручной подделки WS-пейлоада). Общие препромпты ('shared_<pk>') не
+        фильтруются.
+        """
         from ..models import Prompt, SharedPrompt
 
         shared_pk = parse_shared_prompt_id(prompt_id)
@@ -46,6 +53,8 @@ class PromptResolver:
             return None
 
         if prompt is None:
+            return None
+        if shared_pk is None and allowed_mode and prompt.mode and prompt.mode != allowed_mode:
             return None
         return prompt.get_effective_text(
             ui_language,

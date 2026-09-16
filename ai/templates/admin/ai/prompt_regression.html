@@ -70,7 +70,7 @@
       <select id="prt_prompt" name="prompt">
         <option value="">— без промпта (только режимный базовый) —</option>
         {% for p in prompt_options %}
-          <option value="{{ p.id }}">{{ p.name }}{% if p.topic_id %} (тема #{{ p.topic_id }}){% endif %}</option>
+          <option value="{{ p.id }}" data-mode="{{ p.mode }}">{{ p.name }}{% if p.topic_id %} (тема #{{ p.topic_id }}){% endif %}</option>
         {% endfor %}
       </select>
 
@@ -96,7 +96,7 @@
       <div class="prt-cases" id="prt_cases">
         {% for c in test_cases %}
           <label class="prt-case">
-            <input type="checkbox" name="cases" value="{{ c.id }}">
+            <input type="checkbox" name="cases" value="{{ c.id }}" data-mode="{{ c.mode }}">
             <span>{{ c.name }}</span>
             <span class="prt-case-meta">[{{ c.mode }} · {{ c.comparator }}{% if not c.has_expected %} · нет эталона{% endif %}]</span>
           </label>

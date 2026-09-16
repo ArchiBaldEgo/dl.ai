@@ -41,6 +41,7 @@ class PromptForm(forms.ModelForm):
         model = Prompt
         fields = '__all__'
         widgets = {
+            'mode': forms.RadioSelect,
             'prompt_text_ru': forms.Textarea(attrs={
                 'rows': 25,
                 'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'

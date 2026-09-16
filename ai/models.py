@@ -316,7 +316,24 @@ class Prompt(models.Model):
     берётся из общего препромпта с подстановкой языка и темы. Если задан
     prompt_text_override, он переопределяет текст общего препромпта.
     Поддерживает мультиязычные названия и тексты (ru/en/fr).
+
+    mode — режим чата, в котором промпт предлагается пользователю
+    (solve = «Реши задачу», find_error = «В чём ошибка»).
     """
+    MODE_SOLVE = "solve"
+    MODE_FIND_ERROR = "find_error"
+    PROMPT_MODE_CHOICES = (
+        (MODE_SOLVE, "Реши задачу"),
+        (MODE_FIND_ERROR, "В чём ошибка"),
+    )
+    mode = models.CharField(
+        max_length=16,
+        choices=PROMPT_MODE_CHOICES,
+        default=MODE_SOLVE,
+        db_index=True,
+        verbose_name="Режим",
+        help_text="В каком режиме страницы предлагается этот промпт.",
+    )
     topic = models.ForeignKey(
         Topic, on_delete=models.CASCADE, null=True, blank=True,
         verbose_name="Тема",

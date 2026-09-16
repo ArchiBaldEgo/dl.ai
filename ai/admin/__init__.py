@@ -35,9 +35,6 @@ from .forms import PromptForm, SharedPromptForm
 from .logs import AIRequestLogAdmin, admin_request_log_detail_view, admin_request_logs_view, resend_request_view
 from ..models import AIRequestLog
 from .arm import (
-    admin_arm_find_error_view,
-    admin_arm_find_error_start_view,
-    admin_arm_find_error_status_view,
     admin_arm_solve_view,
     admin_arm_solve_start_view,
     admin_arm_solve_status_view,
@@ -68,9 +65,6 @@ __all__ = [
     "PromptForm",
     "SharedPromptForm",
     "AIRequestLogAdmin",
-    "admin_arm_find_error_view",
-    "admin_arm_find_error_start_view",
-    "admin_arm_find_error_status_view",
     "admin_arm_solve_view",
     "admin_arm_solve_start_view",
     "admin_arm_solve_status_view",

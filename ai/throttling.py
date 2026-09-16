@@ -29,7 +29,6 @@ DEFAULT_WINDOW = 60
 _POLL_PATHS = frozenset(
     {
         "/ai/admin/arm/models/state/",
-        "/ai/admin/arm/find-error/status/",
     }
 )
 

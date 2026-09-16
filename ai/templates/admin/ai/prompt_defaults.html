@@ -140,11 +140,17 @@
     }
   }
 
+  var modeSelect = document.getElementById('pdMode');
+
   function fillPrompts(topicId, selectedId) {
     promptSelect.innerHTML = '';
     promptSelect.appendChild(new Option('— выберите препромпт —', ''));
     // Для темы — только её промпты; «на весь язык» — любой промпт.
+    // Плюс фильтр по режиму привязки: у привязки «Поиск ошибки» предлагаются
+    // только промпты режима «В чём ошибка» (и наоборот).
+    var selectedMode = modeSelect ? modeSelect.value : '';
     promptsData.forEach(function (p) {
+      if (selectedMode && p.mode && String(p.mode) !== String(selectedMode)) { return; }
       if (!topicId || String(p.topic_id) === String(topicId)) {
         promptSelect.appendChild(new Option(p.name, String(p.id)));
       }
@@ -158,14 +164,19 @@
     fillPrompts('');
   });
   topicSelect.addEventListener('change', function () { fillPrompts(this.value); });
+  if (modeSelect) {
+    modeSelect.addEventListener('change', function () {
+      fillPrompts(topicSelect.value);
+    });
+  }
 
   // Prefill при редактировании ?edit=<id>: язык уже в HTML, ставим value.
+  // Режим — ДО fillPrompts, чтобы дропдаун сразу был отфильтрован по нему.
   if (editing) {
     languageSelect.value = String(editing.language_id);
+    if (modeSelect) { modeSelect.value = editing.mode; }
     fillTopics(editing.language_id, editing.topic_id);
     fillPrompts(editing.topic_id, editing.prompt_id);
-    var modeSelect = document.getElementById('pdMode');
-    if (modeSelect) { modeSelect.value = editing.mode; }
   }
 
   function getCookie(name) {

@@ -134,7 +134,11 @@ def _resolve_batch_prompt(task, fallback_language_id, cache):
             topic_id=task.topic_id,
             mode=ArmPromptBinding.MODE_SOLVE,
         )
-        cache[key] = binding.prompt_id if binding else None
+        cache[key] = (
+            binding.prompt_id
+            if binding and binding.prompt.mode == ArmPromptBinding.MODE_SOLVE
+            else None
+        )
     return cache[key]
 
 
@@ -1626,7 +1630,10 @@ def list_user_runs(user_id, since_ts=0.0):
             runs.append({
                 "run_id": job.get("run_id", ""),
                 "run_type": "batch" if is_batch else "single",
-                "page_url": "/ai/admin/arm/solve/" if is_batch else "/ai/admin/arm/find-error/",
+                # У single-прогонов нет своей страницы (старый ARM-скрипт
+                # «В чём ошибка» удалён, новый пока не сделан) — исторические
+                # запуски просто не ссылаются никуда.
+                "page_url": "/ai/admin/arm/solve/" if is_batch else "",
                 "status": status,
                 "completed": completed,
                 "total": total,

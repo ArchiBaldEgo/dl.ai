@@ -4,6 +4,7 @@
 # соответствующие проверки pyright/Pylance на весь файл.
 # pyright: basic, reportAttributeAccessIssue=false, reportAssignmentIssue=false
 from django.contrib.admin.sites import AdminSite
+from django.contrib.messages.storage.cookie import CookieStorage
 from django.contrib.auth import SESSION_KEY, get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.auth.models import Group
@@ -1364,10 +1365,9 @@ class RateLimiterTests(SimpleTestCase):
             return req
 
         self.assertTrue(_is_poll_request(mk("GET", "/ai/admin/arm/models/state/")))
-        self.assertTrue(_is_poll_request(mk("GET", "/ai/admin/arm/find-error/status/")))
         # Non-poll paths and non-GET methods are not poll requests.
         self.assertFalse(_is_poll_request(mk("GET", "/ai/api/problem-data/")))
-        self.assertFalse(_is_poll_request(mk("POST", "/ai/admin/arm/find-error/status/")))
+        self.assertFalse(_is_poll_request(mk("POST", "/ai/admin/arm/models/state/")))
 
 
 class RateLimitMiddlewarePollTests(SimpleTestCase):
@@ -3075,6 +3075,25 @@ class ProblemDataApiTests(TestCase):
         self.assertIn("prompts", data)
         self.assertIn("shared_prompts", data)
 
+    def test_problem_data_prompts_carry_mode(self):
+        """Каждый промпт в payload несёт mode (solve/find_error) — клиент
+        фильтрует список по режиму страницы на фронте."""
+        pl = ProgrammingLanguage.objects.create(language_name="Python")
+        topic = Topic.objects.create(topic_name_ru="Loops", programming_language=pl)
+        Prompt.objects.create(
+            topic=topic, prompt_name_ru="Solve it", prompt_text_ru="S",
+            mode=Prompt.MODE_SOLVE,
+        )
+        Prompt.objects.create(
+            topic=topic, prompt_name_ru="Find bug", prompt_text_ru="F",
+            mode=Prompt.MODE_FIND_ERROR,
+        )
+        response = get_problem_data(self._request("Russian"))
+        data = json.loads(response.content)
+        modes = {p["prompt_name"]: p["mode"] for p in data["prompts"]}
+        self.assertEqual(modes["Solve it"], "solve")
+        self.assertEqual(modes["Find bug"], "find_error")
+
 
 # ===================================================================
 # Tests for _get_user_top_model_keys with real AIRequestLog data
@@ -4521,7 +4540,9 @@ class ActiveRunsEndpointTests(TestCase):
                 {"batch", "single", "prompt_regression", "test_console"},
             )
             self.assertEqual(by_type["batch"]["page_url"], "/ai/admin/arm/solve/")
-            self.assertEqual(by_type["single"]["page_url"], "/ai/admin/arm/find-error/")
+            # У single-прогонов нет своей страницы (старый ARM-скрипт
+            # «В чём ошибка» удалён) — ссылка пустая.
+            self.assertEqual(by_type["single"]["page_url"], "")
             self.assertEqual(by_type["prompt_regression"]["page_url"], "/ai/admin/prompt-regression/")
             self.assertEqual(by_type["test_console"]["page_url"], "/ai/admin/test-console/")
             self.assertEqual(by_type["batch"]["completed"], 1)
@@ -4951,51 +4972,6 @@ class TestConsoleRunnerTests(TestCase):
                 self.assertEqual(traversal_response.status_code, 404)
 
 
-class ArmFindErrorRestoreTests(TestCase):
-    """Возврат на /ai/admin/arm/find-error/?run_id=: форма восстанавливается
-    из AIModelTestRun.run_params (модели, язык, тема, тексты)."""
-
-    def setUp(self):
-        self.factory = RequestFactory()
-        self.superuser = get_user_model().objects.create_superuser(
-            username="fe_admin", password="x", email="a@t.com",
-        )
-
-    def test_run_params_prefill(self):
-        from ai.admin.arm import admin_arm_find_error_view
-        from ai.models import AIModelTestRun
-        run_id = "find-error-restore-1"
-        AIModelTestRun.objects.create(
-            run_id=run_id, run_type=AIModelTestRun.RUN_TYPE_SINGLE,
-            status=AIModelTestRun.STATUS_COMPLETED, user=self.superuser,
-            run_params={
-                "model_keys": ["FakeModel"], "interface_language": "English",
-                "programming_language": "Pascal", "topic": "Тесты",
-                "task_text": "Текст задачи",
-                "code_text": "Код задачи",
-            },
-        )
-        request = self.factory.get(f"/ai/admin/arm/find-error/", {"run_id": run_id})
-        request.user = self.superuser
-        request.session = {}
-        response = admin_arm_find_error_view(request)
-        ctx = response.context_data
-        self.assertEqual(ctx["selected_models"], ["FakeModel"])
-        self.assertEqual(ctx["selected_language_ui"], "English")
-        self.assertEqual(ctx["selected_prog_lng"], "Pascal")
-        self.assertEqual(ctx["selected_topic"], "Тесты")
-        self.assertEqual(ctx["task_text"], "Текст задачи")
-        self.assertEqual(ctx["code_text"], "Код задачи")
-        # Ручной выбор препромпта убран: в контексте и run_params его нет —
-        # привязка резолвится серверно.
-        self.assertNotIn("selected_prompt", ctx)
-        self.assertNotIn("prompt", ctx["active_run_snapshot"]["run_params"])
-        # Снапшот тоже содержит run_params — JS-поллинг не нужен для restore.
-        self.assertEqual(
-            ctx["active_run_snapshot"]["run_params"]["model_keys"], ["FakeModel"],
-        )
-
-
 class EachContextSuperUserFlagTests(TestCase):
     """each_context отдаёт is_super_user: предупреждение «не покидайте
     страницу» в тестовой консоли — только для не-суперпользователей
@@ -5024,8 +5000,8 @@ class EachContextSuperUserFlagTests(TestCase):
 class ArmPromptBindingTests(TestCase):
     """Инструмент «Препромпты по умолчанию» (ArmPromptBinding): unique
     (язык, тема, вид ARM), суперюзер-гейт страницы, save/delete через AJAX,
-    привязки отдаются в контекст /arm/solve/ и /arm/find-error/ для
-    JS авто-подстановки."""
+    привязки обоих режимов отдаются в контекст /arm/solve/ для
+    JS авто-подстановки (новый ARM-скрипт «В чём ошибка» переиспользует)."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -5124,9 +5100,9 @@ class ArmPromptBindingTests(TestCase):
 
     def test_save_language_level_binding(self):
         """save без topic_id создаёт привязку «на весь язык»: до двух строк
-        (solve + find_error), upsert, промпт может быть любым (не только
-        безтематическим) — языку без тем (Python, C++) нужно дефолтное
-        правило, а тем у него нет."""
+        (solve + find_error), upsert, промпт может быть любой темы (не только
+        безтематической), но обязан совпадать режимом привязки — языку без
+        тем (Python, C++) нужно дефолтное правило, а тем у него нет."""
         from ai.admin.prompt_defaults import admin_prompt_defaults_view
 
         def post(topic_id):
@@ -5155,11 +5131,16 @@ class ArmPromptBindingTests(TestCase):
         self.assertTrue(data["ok"], data)
         self.assertEqual(ArmPromptBinding.objects.count(), 1)
 
-        # Другой вид с той же пустой темой — вторая строка.
+        # Другой вид с той же пустой темой — вторая строка. Промпт обязан
+        # относиться к режиму привязки (find_error) — берём find_error-промпт.
+        find_error_prompt = Prompt.objects.create(
+            prompt_name_ru="Python find bug", prompt_text_ru="Текст",
+            owner=self.superuser, mode=Prompt.MODE_FIND_ERROR,
+        )
         payload = {
             "action": "save", "mode": "find_error",
             "language_id": str(self.other_lang.id),
-            "prompt_id": str(self.prompt.id),
+            "prompt_id": str(find_error_prompt.id),
         }
         request = self.factory.post("/ai/admin/prompt-defaults/", payload)
         request.user = self.superuser
@@ -5385,13 +5366,15 @@ class ArmPromptBindingTests(TestCase):
         self.assertEqual(serialized[0]["topic_id"], self.topic.id)
         self.assertEqual(serialized[0]["mode"], binding.mode)
 
-    def test_find_error_context_includes_bindings(self):
-        from ai.admin.arm import admin_arm_find_error_view
+    def test_arm_solve_context_includes_find_error_bindings(self):
+        """Старый ARM-скрипт «В чём ошибка» удалён, но привязки обоих режимов
+        по-прежнему отдаются в контекст /arm/solve/ (новый скрипт их переиспользует)."""
+        from ai.admin.arm import admin_arm_solve_view
         self._binding(mode=ArmPromptBinding.MODE_FIND_ERROR)
-        request = self.factory.get("/ai/admin/arm/find-error/")
+        request = self.factory.get("/ai/admin/arm/solve/")
         request.user = self.superuser
         request.session = {}
-        response = admin_arm_find_error_view(request)
+        response = admin_arm_solve_view(request)
         serialized = response.context_data["arm_prompt_bindings"]
         self.assertEqual(len(serialized), 1)
         self.assertEqual(serialized[0]["mode"], "find_error")
@@ -5842,64 +5825,6 @@ class LogsDeveloperAccessTests(TestCase):
 
 
 # ===================================================================
-# W9: find-error — привязка резолвится серверно, без ручного препромпта
-# ===================================================================
-
-class ArmFindErrorBindingTests(TestCase):
-    """_prepare_arm_run_payload (find_error): препромпт берётся только из
-    ArmPromptBinding(mode=find_error); нет темы или привязки — текст без
-    препромпта, run_params не содержит ключ 'prompt'."""
-
-    def setUp(self):
-        self.user = get_user_model().objects.create_user(username="fe_bind", password="x")
-        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name_ru="Массивы", programming_language=self.lang)
-        self.prompt = Prompt.objects.create(
-            prompt_name_ru="Стиль FE", prompt_text_ru="ОТВЕЧАЙ КРАТКО",
-            topic=self.topic, owner=self.user,
-        )
-
-    def _form_state(self, **overrides):
-        state = {
-            "selected_models": ["FakeModel"],
-            "selected_language_ui": "Русский",
-            "selected_prog_lng": str(self.lang.id),
-            "selected_topic": str(self.topic.id),
-            "task_text": "Условие",
-            "code_text": "begin end.",
-        }
-        state.update(overrides)
-        return state
-
-    def test_binding_prompt_appended_to_message(self):
-        from ai.admin.arm import _prepare_arm_run_payload
-        ArmPromptBinding.objects.create(
-            programming_language=self.lang, topic=self.topic,
-            mode=ArmPromptBinding.MODE_FIND_ERROR, prompt=self.prompt,
-        )
-        payload, error = _prepare_arm_run_payload(self._form_state(), self.user)
-        self.assertEqual(error, "")
-        self.assertIn("ОТВЕЧАЙ КРАТКО", payload["message"])
-        self.assertEqual(payload["prompt_id"], self.prompt.id)
-
-    def test_no_binding_means_no_prompt_in_message(self):
-        from ai.admin.arm import _prepare_arm_run_payload
-        payload, error = _prepare_arm_run_payload(self._form_state(), self.user)
-        self.assertEqual(error, "")
-        self.assertNotIn("ОТВЕЧАЙ КРАТКО", payload["message"])
-        self.assertIsNone(payload["prompt_id"])
-
-    def test_run_params_without_prompt_key(self):
-        from ai.admin.arm import _prepare_arm_run_payload
-        ArmPromptBinding.objects.create(
-            programming_language=self.lang, topic=self.topic,
-            mode=ArmPromptBinding.MODE_FIND_ERROR, prompt=self.prompt,
-        )
-        payload, _ = _prepare_arm_run_payload(self._form_state(), self.user)
-        self.assertNotIn("prompt", payload["run_params"])
-
-
-# ===================================================================
 # Левое меню админки: сгруппированные AI-инструменты + скрытие разделов
 # ===================================================================
 
@@ -5910,9 +5835,7 @@ class AdminNavToolGroupTests(TestCase):
     (Промпты → ARM → Диагностика → Система), каждый с иконкой и подсказкой;
     реальные приложения («Раздел ИИ») рендерятся той же единой разметкой
     .ai-nav-group с иконками; дубликаты ModelAdmin-строк в инструменты не
-    добавляются; «Поиск ошибки (ARM)» временно скрыт из меню
-    (_HIDDEN_NAV_OBJECT_NAMES), страница остаётся доступной по прямому
-    URL."""
+    добавляются."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -5938,18 +5861,6 @@ class AdminNavToolGroupTests(TestCase):
             [a["name"] for a in tools],
             ["Закреплено", "Промпты", "ARM", "Диагностика", "Система"],
         )
-
-    def test_find_error_tool_hidden_from_nav(self):
-        """«Поиск ошибки (ARM)» скрыт из левого меню и дашборда, но
-        объект остаётся в скрытом множестве — вернуть можно, удалив имя."""
-        from ai.admin.site import _HIDDEN_NAV_OBJECT_NAMES
-        self.assertIn("AiArmFindError", _HIDDEN_NAV_OBJECT_NAMES)
-        ctx = self._each_context(self.superuser)
-        names = [
-            m["object_name"]
-            for app in ctx["available_apps"] for m in app["models"]
-        ]
-        self.assertNotIn("AiArmFindError", names)
 
     def test_tool_models_carry_icon_and_hint(self):
         ctx = self._each_context(self.superuser)
@@ -6283,15 +6194,15 @@ class BatchLogDetailTemplateTests(TestCase):
 
 
 # ===================================================================
-# ARM «Поиск ошибки»: регрессия ключа тем в fillTopics
+# ARM solve: регрессия ключа тем (serialize_topic → programming_language)
 # ===================================================================
 
-class ArmFindErrorTopicsKeyTests(TestCase):
-    """fillTopics в arm_find_error.html обязан фильтровать темы по ключу
-    сериализатора serialize_topic (``programming_language``). Регрессия:
-    JS читал ``programming_language_id`` — такого ключа сериализатор не
-    отдаёт, селектор тем был всегда пуст, и привязки «Препромпты по
-    умолчанию» по темам не действовали на странице «Поиск ошибки»."""
+class ArmSolveTopicsKeyTests(TestCase):
+    """Темы в контексте /arm/solve/ обязаны нести ключ сериализатора
+    serialize_topic (``programming_language``): JS arm_solve.html фильтрует
+    темы по ``String(t.programming_language) === langId`` — чтение другого
+    ключа оставляет селектор тем пустым и ломает привязки «Препромпты по
+    умолчанию» (регрессия из удалённой страницы arm_find_error.html)."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -6304,11 +6215,11 @@ class ArmFindErrorTopicsKeyTests(TestCase):
         )
 
     def test_view_topics_carry_programming_language_key(self):
-        from ai.admin.arm import admin_arm_find_error_view
-        request = self.factory.get("/ai/admin/arm/find-error/")
+        from ai.admin.arm import admin_arm_solve_view
+        request = self.factory.get("/ai/admin/arm/solve/")
         request.user = self.superuser
         request.session = {}
-        response = admin_arm_find_error_view(request)
+        response = admin_arm_solve_view(request)
         self.assertEqual(response.status_code, 200)
         topics = response.context_data["topics"]
         self.assertTrue(topics)
@@ -6317,11 +6228,177 @@ class ArmFindErrorTopicsKeyTests(TestCase):
 
     def test_js_filltopics_matches_serializer_key(self):
         from django.template.loader import get_template
-        src = get_template("admin/ai/arm_find_error.html").template.source
+        src = get_template("admin/ai/arm_solve.html").template.source
         self.assertIn(
-            "String(item.programming_language) === String(languageId)", src,
+            "String(t.programming_language) === langId", src,
         )
-        self.assertNotIn("item.programming_language_id", src)
+        self.assertNotIn("t.programming_language_id", src)
+
+
+# ===================================================================
+# Разделение промптов по режимам (Prompt.mode)
+# ===================================================================
+
+class PromptModeTests(TestCase):
+    """Prompt.mode: режим «Реши задачу»/«В чём ошибка» — дефолт, массовые
+    действия админки, страховка композитора, ARM-фильтры."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(username="pm_user", password="x")
+        self.superuser = get_user_model().objects.create_superuser(
+            username="pm_admin", password="x", email="pm@t.com",
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name_ru="Массивы", programming_language=self.lang)
+        self.solve_prompt = Prompt.objects.create(
+            prompt_name_ru="Solve prep", prompt_text_ru="РЕШАЙ ПО ШАГАМ",
+            topic=self.topic, owner=self.user,
+        )
+        self.find_error_prompt = Prompt.objects.create(
+            prompt_name_ru="Find bug prep", prompt_text_ru="НАЙДИ ОШИБКУ",
+            topic=self.topic, owner=self.user,
+            mode=Prompt.MODE_FIND_ERROR,
+        )
+
+    def test_prompt_mode_default_is_solve(self):
+        """Промпт без явного режима — «Реши задачу» (дефолт поля)."""
+        p = Prompt.objects.create(prompt_name_ru="No mode", prompt_text_ru="T")
+        self.assertEqual(p.mode, Prompt.MODE_SOLVE)
+
+    # --- Композитор: чужой preprompt не применяется ---
+
+    async def _compose(self, type_key, prompt_id):
+        composer = MessageComposer()
+        data = {
+            "type": type_key,
+            "message": "Условие задачи",
+            "code": "begin end." if type_key == "3" else "",
+            "language": "Русский",
+            "preprompt": prompt_id,
+        }
+        return await composer.compose(data)
+
+    async def test_solve_builder_ignores_find_error_prompt(self):
+        message, log_mode = await self._compose("2", self.find_error_prompt.id)
+        self.assertEqual(log_mode, "solve")
+        self.assertNotIn("НАЙДИ ОШИБКУ", message)
+        self.assertNotIn("Препромпт:", message)
+
+    async def test_find_error_builder_ignores_solve_prompt(self):
+        message, log_mode = await self._compose("3", self.solve_prompt.id)
+        self.assertEqual(log_mode, "find_error")
+        self.assertNotIn("Препромпт:", message)
+
+    async def test_matching_mode_prompt_is_applied(self):
+        message, log_mode = await self._compose("2", self.solve_prompt.id)
+        self.assertEqual(log_mode, "solve")
+        self.assertIn("Препромпт: РЕШАЙ ПО ШАГАМ", message)
+
+    async def test_shared_prompt_preprompt_works_in_both_modes(self):
+        """Общие препромпты ('shared_<pk>') не фильтруются по режиму."""
+        sp = await sync_to_async(SharedPrompt.objects.create)(
+            prompt_name_ru="Common", prompt_text_ru="ОБЩИЙ ТЕКСТ",
+        )
+        message, _ = await self._compose("2", f"shared_{sp.id}")
+        self.assertIn("Препромпт: ОБЩИЙ ТЕКСТ", message)
+        message, _ = await self._compose("3", f"shared_{sp.id}")
+        self.assertIn("Препромпт: ОБЩИЙ ТЕКСТ", message)
+
+    # --- ARM solve: только solve-промпты ---
+
+    def _arm_request(self, user, url="/ai/admin/arm/solve/"):
+        request = self.factory.get(url)
+        request.user = user
+        request.session = {}
+        return request
+
+    def test_arm_solve_prompt_options_only_solve(self):
+        from ai.admin.arm import admin_arm_solve_view
+        response = admin_arm_solve_view(self._arm_request(self.superuser))
+        options = response.context_data["prompt_options"]
+        self.assertEqual(len(options), 1)
+        self.assertEqual(options[0]["id"], self.solve_prompt.id)
+
+    def test_arm_solve_start_rejects_find_error_prompt(self):
+        from ai.admin.arm import admin_arm_solve_start_view
+        request = self.factory.post(
+            "/ai/admin/arm/solve/start/",
+            data=json.dumps({
+                "prompt_id": str(self.find_error_prompt.id),
+                "models": ["FakeModel"], "model_keys": ["FakeModel"],
+                "file_extension": ".pas",
+            }),
+            content_type="application/json",
+        )
+        request.user = self.superuser
+        request.session = {}
+        response = admin_arm_solve_start_view(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("не относится к режиму", json.loads(response.content)["message"])
+
+    def test_resolve_batch_prompt_rejects_find_error_binding(self):
+        """Привязка с промптом чужого режима не подставляется в пакетное решение."""
+        from ai.arm_runner import _resolve_batch_prompt
+        from ai.models import Task
+        task = Task.objects.create(name="T1", node_id=1, topic=self.topic)
+        ArmPromptBinding.objects.create(
+            programming_language=self.lang, topic=self.topic,
+            mode=ArmPromptBinding.MODE_SOLVE, prompt=self.find_error_prompt,
+        )
+        self.assertIsNone(_resolve_batch_prompt(task, self.lang.id, {}))
+
+    # --- «Препромпты по умолчанию»: промпт обязан совпадать режимом ---
+
+    def test_prompt_defaults_save_rejects_mode_mismatch(self):
+        from ai.admin.prompt_defaults import admin_prompt_defaults_view
+        request = self.factory.post(
+            "/ai/admin/prompt-defaults/",
+            data={
+                "action": "save",
+                "language_id": str(self.lang.id),
+                "topic_id": str(self.topic.id),
+                "mode": "solve",
+                "prompt_id": str(self.find_error_prompt.id),
+            },
+        )
+        request.user = self.superuser
+        response = admin_prompt_defaults_view(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("не относится к выбранному режиму", json.loads(response.content)["error"])
+
+    # --- Админка: массовое назначение режима ---
+
+    def test_admin_bulk_set_mode_actions(self):
+        from ai.admin.models import PromptAdmin
+        admin = PromptAdmin(Prompt, AdminSite())
+        request = self.factory.get("/ai/admin/")
+        request.user = self.superuser
+        # message_user требует хранилище сообщений, которого у RequestFactory нет.
+        request._messages = CookieStorage(request)
+        queryset = Prompt.objects.filter(pk=self.solve_prompt.pk)
+        admin.set_mode_find_error(request, queryset)
+        self.solve_prompt.refresh_from_db()
+        self.assertEqual(self.solve_prompt.mode, Prompt.MODE_FIND_ERROR)
+        admin.set_mode_solve(request, queryset)
+        self.solve_prompt.refresh_from_db()
+        self.assertEqual(self.solve_prompt.mode, Prompt.MODE_SOLVE)
+
+    # --- Старые URL /ai/admin/arm/find-error… удалены ---
+
+    def test_arm_find_error_urls_removed(self):
+        from django.urls import reverse
+        from django.urls.exceptions import NoReverseMatch
+        for name in ("ai_arm_find_error", "ai_arm_find_error_start", "ai_arm_find_error_status"):
+            with self.assertRaises(NoReverseMatch):
+                reverse(name)
+
+    def test_arm_find_error_pages_404(self):
+        from ai.admin.urls import get_ai_admin_urls
+        from django.urls import resolve, Resolver404
+        # URL-паттерны отсутствуют в таблице маршрутов админки.
+        patterns = [str(p.pattern) for p in get_ai_admin_urls()]
+        self.assertFalse(any("find-error" in p for p in patterns))
 
 
 # ===================================================================

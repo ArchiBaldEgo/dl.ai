@@ -34,6 +34,7 @@ def _serialize_prompt_option(prompt, ui_language="Русский"):
         "id": prompt.id,
         "name": serialize_prompt(prompt, ui_language).get("name") or prompt.prompt_name_ru or f"Prompt #{prompt.id}",
         "topic_id": prompt.topic_id,
+        "mode": prompt.mode,
     }
 
 

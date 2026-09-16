@@ -64,7 +64,6 @@ def admin_model_status_view(request):
         "refresh_message": refresh_message,
         "refresh_error": refresh_error,
         "refresh_in_progress": is_model_health_refresh_running(),
-        "arm_find_error_url": "/ai/admin/arm/find-error/",
         "arm_model_status_refresh_url": "/ai/admin/arm/models/refresh/",
         "arm_model_status_state_url": "/ai/admin/arm/models/state/",
     }

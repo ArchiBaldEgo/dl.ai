@@ -1,10 +1,12 @@
 """Инструмент «Препромпты по умолчанию» (только суперпользователь).
 
 Привязка (язык программирования, тема, вид ARM) → препромпт: после выбора
-темы на /arm/solve/ и /arm/find-error/ препромпт подтягивается автоматически
-(см. ``ArmPromptBinding`` и JS авто-подстановку на ARM-страницах). Сам промпт
-редактируется по обычным правилам ACL (PromptAdmin: владелец/редактор/
-суперюзер) — привязка ссылается на него по FK и всегда тянет актуальный текст.
+темы на /arm/solve/ препромпт подтягивается автоматически (см.
+``ArmPromptBinding`` и JS авто-подстановку на ARM-страницах). Привязки
+режима «Поиск ошибки» нужны будущему ARM-скрипту «В чём ошибка» (старый
+удалён). Сам промпт редактируется по обычным правилам ACL (PromptAdmin:
+владелец/редактор/суперюзер) — привязка ссылается на него по FK и всегда
+тянет актуальный текст.
 """
 
 from django.http import HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
@@ -53,7 +55,7 @@ def _form_data():
         for t in Topic.objects.select_related("programming_language").order_by("topic_name_ru")
     ]
     prompts = [
-        {"id": p.id, "name": str(p), "topic_id": p.topic_id}
+        {"id": p.id, "name": str(p), "topic_id": p.topic_id, "mode": p.mode}
         for p in Prompt.objects.select_related("topic").order_by("prompt_name_ru", "id")
     ]
     return languages, topics, prompts
@@ -141,6 +143,12 @@ def _handle_save_or_delete(request):
     prompt = Prompt.objects.filter(pk=int(prompt_id)).first()
     if prompt is None:
         return JsonResponse({"ok": False, "error": "Препромпт не найден"}, status=404)
+    # Промпт должен относиться к режиму привязки («Реши задачу»/«Поиск ошибки»)
+    # — иначе привязка подставит промпт не в тот режим ARM-страницы.
+    if prompt.mode != mode:
+        return JsonResponse(
+            {"ok": False, "error": "Препромпт не относится к выбранному режиму"}, status=400,
+        )
     # Для привязки «на весь язык» промпт может быть любым (в т.ч. без темы);
     # для темы — только промптом этой темы.
     if topic is not None and prompt.topic_id != topic.id:

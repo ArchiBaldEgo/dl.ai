@@ -246,7 +246,7 @@ function simulateSend() {
 
 document.addEventListener("DOMContentLoaded", async () => {
     // Селекторы языка программирования / темы / препромпта — общая логика в ai-common.js (DRY).
-    var problemSelectors = initProblemSelectors();
+    var problemSelectors = initProblemSelectors('find_error');
 
     const taskText = document.getElementById('taskText');
     const codeText = document.getElementById('codeText');

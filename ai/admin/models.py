@@ -128,16 +128,27 @@ class PromptAdmin(admin.ModelAdmin):
         'prompt_name_ru',
         'programming_language_name',
         'topic',
+        'mode_name',
         'owner_user_id',
         'owner_username',
         'short_prompt_text',
     )
     list_display_links = ('prompt_name_ru',)
-    list_filter = (PromptUserIdFilter, 'topic__programming_language', 'topic')
+    list_filter = (PromptUserIdFilter, 'mode', 'topic__programming_language', 'topic')
     list_per_page = 25
     search_fields = ('prompt_name_ru', 'prompt_text_ru', 'owner__username', '=owner__id')
     autocomplete_fields = ("owner", "editors")
-    actions = ("export_prompts_csv", "auto_translate_selected")
+    actions = ("export_prompts_csv", "auto_translate_selected", "set_mode_solve", "set_mode_find_error")
+
+    @admin.action(description='Назначить режим «Реши задачу»')
+    def set_mode_solve(self, request, queryset):
+        queryset.update(mode=Prompt.MODE_SOLVE)
+        self.message_user(request, "Выбранным промптам назначен режим «Реши задачу».")
+
+    @admin.action(description='Назначить режим «В чём ошибка»')
+    def set_mode_find_error(self, request, queryset):
+        queryset.update(mode=Prompt.MODE_FIND_ERROR)
+        self.message_user(request, "Выбранным промптам назначен режим «В чём ошибка».")
     # Prompt has no created_at field, so date_hierarchy is intentionally None.
     date_hierarchy = None
 
@@ -152,6 +163,10 @@ class PromptAdmin(admin.ModelAdmin):
         if is_mine_only_request(request):
             return prompt_queryset_for_user(queryset, request.user)
         return queryset
+
+    @admin.display(description="Режим", ordering="mode")
+    def mode_name(self, obj):
+        return obj.get_mode_display()
 
     def lookup_allowed(self, lookup, value, request=None):
         if lookup == "mine":
@@ -201,7 +216,7 @@ class PromptAdmin(admin.ModelAdmin):
         # prompt_text (fallback для старых записей) и переопределение текста
         # спрятаны в свёрнутый блок, чтобы не громоздить форму.
         main_fields = (
-            "programming_language", "topic", "shared_prompt",
+            "mode", "programming_language", "topic", "shared_prompt",
             "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
             "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
         )

@@ -389,9 +389,13 @@ async function fetchProblemData() {
 }
 
 // Инициализирует селекторы #selectProgLng/#selectTheme/#selectPrompt на странице.
+// mode — режим страницы ('solve' | 'find_error'); промпты с чужим mode скрываются
+// из селектора препромптов (общие препромпты не фильтруются — режимные SharedPrompt
+// не попадают в /ai/api/problem-data/ и на сервере).
 // Если хоть одного элемента нет (например, на /ai/chat/) — no-op, возвращает null.
 // Возвращает handle с repopulateOnUiLanguageChange() для перелокализации при смене UI-языка.
-function initProblemSelectors() {
+function initProblemSelectors(mode) {
+    mode = mode || '';
     var selectProgLng = document.getElementById('selectProgLng');
     var selectTheme = document.getElementById('selectTheme');
     var selectPrompt = document.getElementById('selectPrompt');
@@ -436,6 +440,9 @@ function initProblemSelectors() {
         const topicValue = topicId ? String(topicId) : "";
 
         return prompts.filter(prompt => {
+            // Режим страницы: промпты «не того» режима не предлагаются
+            // (mode у промпта обязателен, но для страховки пустой mode пропускаем).
+            if (mode && prompt.mode && prompt.mode !== mode) return false;
             const hasTopic = prompt.topic_id !== null && prompt.topic_id !== undefined && prompt.topic_id !== "";
             if (!hasTopic) return true;
             if (topicValue) return String(prompt.topic_id) === topicValue;

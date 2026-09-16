@@ -5,6 +5,7 @@
 """
 
 from .i18n import get_localized_name
+from .models import Prompt
 
 
 def programming_language(language):
@@ -39,6 +40,9 @@ def prompt(obj, ui_language=""):
         "shared_prompt_id": obj.shared_prompt_id,
         "shared_prompt__prompt_name": obj.shared_prompt.prompt_name_ru if obj.shared_prompt else None,
         "is_shared": bool(obj.shared_prompt),
+        # Режим страницы, на которой промпт предлагается (solve/find_error).
+        # Фолбэк "solve" — страховка для строк, записанных до миграции 0044.
+        "mode": obj.mode or Prompt.MODE_SOLVE,
     }
 
 

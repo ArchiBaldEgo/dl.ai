@@ -279,7 +279,7 @@ document.addEventListener("DOMContentLoaded", function() {
 // Общая логика в ai-common.js (initProblemSelectors): populate + change handlers
 // + savePageState/restorePageState. Возвращает handle для repopulateOnUiLanguageChange.
 document.addEventListener("DOMContentLoaded", function() {
-    problemSelectors = initProblemSelectors();
+    problemSelectors = initProblemSelectors('solve');
 });
 
 // === Автозагрузка условия задачи из DL-ссылки ===

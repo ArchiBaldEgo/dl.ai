@@ -44,6 +44,7 @@
 
   function runUrl(run) {
     var url = String(run.page_url || "");
+    if (!url) return "";
     if (run.run_id) {
       url += (url.indexOf("?") >= 0 ? "&" : "?") + "run_id=" + encodeURIComponent(run.run_id);
     }
@@ -130,6 +131,11 @@
 
     var link = el("a", "ai-processes-link", "Открыть →");
     link.href = runUrl(run);
+    // Прогон без страницы (single-запуски после удаления старого
+    // ARM-скрипта «В чём ошибка») — ссылку не показываем.
+    if (!link.href || link.getAttribute("href") === "") {
+      link.remove();
+    }
     item.appendChild(link);
     return item;
   }
@@ -169,6 +175,9 @@
       (STATUS_LABELS[run.status] ? " — " + STATUS_LABELS[run.status] : "")));
     var link = el("a", null, "Открыть страницу прогона →");
     link.href = runUrl(run);
+    if (!link.href || link.getAttribute("href") === "") {
+      link.remove();
+    }
     toast.appendChild(link);
     var close = el("button", "ai-processes-toast-close", "×");
     close.type = "button";

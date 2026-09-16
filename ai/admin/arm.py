@@ -1,9 +1,12 @@
 """ARM (AI Run Manager) — admin views для запуска и мониторинга тестирования моделей.
 
 Содержит views для:
-- Find-error: запуск одной модели на задачу+код, проверка через DL.
-- Batch solve: запуск набора задач × набор моделей с проверкой через DL API.
+- Batch solve («Пакетное решение»): запуск набора задач × набор моделей
+  с проверкой через DL API.
 - Статус прогонов (polling для фронтенда).
+
+Старый ARM-скрипт «В чём ошибка» (/ai/admin/arm/find-error/) удалён;
+новый будет сделан отдельно (раннер single-run в arm_runner.py сохранён).
 """
 
 import re
@@ -11,20 +14,17 @@ import re
 from .site import ai_admin_site
 from django.core.cache import cache
 from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import get_object_or_404
 from django.template.response import TemplateResponse
 
 from ..arm_runner import (
     cancel_arm_run,
     get_arm_run_snapshot,
     get_latest_batch_run_snapshot,
-    start_arm_sequential_run,
     start_batch_solve_run,
 )
-from ..i18n import get_language_instruction, get_localized_name
 from ..model_health import (
     get_arm_solve_model_options,
-    get_available_model_options,
     get_health_window_date,
 )
 from ..models import (
@@ -32,14 +32,12 @@ from ..models import (
     ArmPromptBinding,
     ProgrammingLanguage,
     Prompt,
-    SharedPrompt,
     Task,
     Topic,
 )
 from ..http_utils import resolve_dl_session_id
 from ..serializers import (
     arm_prompt_binding as serialize_arm_prompt_binding,
-    programming_language as serialize_programming_language,
     topic as serialize_topic,
 )
 from ..services.task_registry import (
@@ -135,259 +133,6 @@ def _resolve_active_course_id(request):
     return _resolve_active_course_id_for_session(_resolve_session_id(request))
 
 
-def _build_find_error_message(task_text, code_text, prog_lang_name, topic_name, prompt_text, ui_language):
-    try:
-        default_prompt = SharedPrompt.objects.get(mode="find_error")
-        message = default_prompt.get_effective_text(
-            ui_language, prog_lang_name, topic_name, task_text, code_text
-        )
-    except SharedPrompt.DoesNotExist:
-        message = (
-            "У меня есть задача по программированию, я написал для нее код на языке "
-            f"{prog_lang_name}, код не работает, найди пожалуйста ошибку. "
-            f"Задача: {task_text}. Код: {code_text}."
-        )
-    if prompt_text:
-        message += f"\n\nПрепромпт: {prompt_text}"
-    message += get_language_instruction(ui_language)
-    return message
-
-
-def _collect_arm_form_state(request):
-    return {
-        "selected_models": request.POST.getlist("models"),
-        "selected_language_ui": request.POST.get("interface_language", "Русский"),
-        "selected_prog_lng": request.POST.get("programming_language", ""),
-        "selected_topic": request.POST.get("topic", ""),
-        "task_text": (request.POST.get("task_text") or "").strip(),
-        "code_text": (request.POST.get("code_text") or "").strip(),
-    }
-
-
-def _prepare_arm_run_payload(form_state, user=None):
-    selected_models = form_state["selected_models"]
-    task_text = form_state["task_text"]
-    code_text = form_state["code_text"]
-
-    if not selected_models:
-        return None, "Выберите хотя бы одну модель"
-
-    if not task_text and not code_text:
-        return None, "Заполните условие задачи или код"
-
-    prog_lng_name = ProgrammingLanguage.objects.filter(
-        id=form_state["selected_prog_lng"]
-    ).values_list("language_name", flat=True).first() or "Python"
-
-    topic = None
-    if form_state["selected_topic"]:
-        topic = Topic.objects.filter(id=form_state["selected_topic"]).first()
-
-    # Препромпт — только привязка ArmPromptBinding («Препромпты по умолчанию»,
-    # суперюзерский инструмент): точная (язык+тема), иначе «на весь язык».
-    # Ручной выбор убран: нет привязки → прогон без препромпта.
-    prompt_obj = None
-    if form_state["selected_prog_lng"]:
-        prompt_obj = ArmPromptBinding.resolve(
-            programming_language_id=form_state["selected_prog_lng"],
-            topic_id=topic.id if topic is not None else None,
-            mode=ArmPromptBinding.MODE_FIND_ERROR,
-        )
-    topic_name_localized = (
-        get_localized_name(topic, form_state["selected_language_ui"], "topic_name")
-        if topic else ""
-    )
-    prompt_text = (
-        prompt_obj.prompt.get_effective_text(
-            form_state["selected_language_ui"], prog_lng_name, topic_name_localized
-        )
-        if prompt_obj else ""
-    )
-
-    message = _build_find_error_message(
-        task_text=task_text,
-        code_text=code_text,
-        prog_lang_name=prog_lng_name,
-        topic_name=topic_name_localized,
-        prompt_text=prompt_text,
-        ui_language=form_state["selected_language_ui"],
-    )
-
-    return {
-        "selected_models": selected_models,
-        "message": message,
-        "programming_language_id": form_state["selected_prog_lng"] or None,
-        "programming_language_name": prog_lng_name,
-        "topic_id": form_state["selected_topic"] or None,
-        "topic_name": topic.topic_name_ru if topic else "",
-        "topic_name_localized": get_localized_name(topic, form_state["selected_language_ui"], "topic_name") if topic else "",
-        "prompt_id": prompt_obj.prompt_id if prompt_obj else None,
-        "prompt_name": prompt_obj.prompt.prompt_name_ru if prompt_obj else "",
-        "prompt_name_localized": get_localized_name(prompt_obj.prompt, form_state["selected_language_ui"], "prompt_name") if prompt_obj else "",
-        # Снимок формы запуска — для восстановления состояния формы при
-        # возврате на страницу прогона (?run_id=). См. AIModelTestRun.run_params.
-        "run_params": {
-            "model_keys": list(selected_models),
-            "interface_language": form_state["selected_language_ui"],
-            "programming_language": str(form_state["selected_prog_lng"] or ""),
-            "topic": str(form_state["selected_topic"] or ""),
-            "task_text": task_text,
-            "code_text": code_text,
-        },
-    }, ""
-
-
-def _start_arm_from_payload(run_payload, user_id):
-    return start_arm_sequential_run(
-        run_payload["message"],
-        run_payload["selected_models"],
-        user_id,
-        programming_language_id=run_payload.get("programming_language_id"),
-        programming_language_name=run_payload.get("programming_language_name"),
-        topic_id=run_payload.get("topic_id"),
-        topic_name=run_payload.get("topic_name_localized") or run_payload.get("topic_name"),
-        prompt_id=run_payload.get("prompt_id"),
-        prompt_name=run_payload.get("prompt_name_localized") or run_payload.get("prompt_name"),
-        run_params=run_payload.get("run_params") or {},
-    )
-
-
-def admin_arm_find_error_view(request):
-    if not can_access_arm(request):
-        return HttpResponseForbidden("Access denied")
-
-    selected_language_ui = "Русский"
-    languages = [
-        serialize_programming_language(lang)
-        for lang in ProgrammingLanguage.objects.all()
-    ]
-    topics = [
-        serialize_topic(t, selected_language_ui)
-        for t in Topic.objects.all()
-    ]
-
-    selected_models = []
-    selected_prog_lng = ""
-    selected_topic = ""
-    task_text = ""
-    code_text = ""
-    results = []
-    report = None
-    error_message = ""
-    active_run_id = (request.GET.get("run_id") or "").strip()
-    active_run_snapshot = None
-
-    if request.method == "POST":
-        form_state = _collect_arm_form_state(request)
-        selected_models = form_state["selected_models"]
-        selected_language_ui = form_state["selected_language_ui"]
-        selected_prog_lng = form_state["selected_prog_lng"]
-        selected_topic = form_state["selected_topic"]
-        task_text = form_state["task_text"]
-        code_text = form_state["code_text"]
-
-        run_payload, error_message = _prepare_arm_run_payload(form_state, request.user)
-        if not error_message:
-            run_id, start_error = _start_arm_from_payload(run_payload, request.user.id)
-            if run_id:
-                return redirect(f"/ai/admin/arm/find-error/?run_id={run_id}")
-            error_message = start_error or "Не удалось запустить ARM процесс"
-
-    if active_run_id:
-        active_run_snapshot = get_arm_run_snapshot(active_run_id)
-        if active_run_snapshot:
-            results = active_run_snapshot.get("results") or []
-            report = active_run_snapshot.get("report")
-            if active_run_snapshot.get("status") == "failed":
-                error_message = active_run_snapshot.get("error_message") or "ARM процесс завершился с ошибкой"
-            # Восстановление формы: перезаполняем поля тем, что пользователь
-            # отправлял при запуске (снимок в AIModelTestRun.run_params), чтобы
-            # возврат на страницу прогона не требовал ввода заново.
-            rp = active_run_snapshot.get("run_params") or {}
-            if rp:
-                selected_models = rp.get("model_keys") or []
-                selected_language_ui = rp.get("interface_language") or "Русский"
-                selected_prog_lng = str(rp.get("programming_language") or "")
-                selected_topic = str(rp.get("topic") or "")
-                task_text = rp.get("task_text") or ""
-                code_text = rp.get("code_text") or ""
-        else:
-            error_message = "ARM процесс не найден или уже завершен"
-
-    from ..http_utils import safe_relative_url
-    arm_back_url = safe_relative_url(request.session.get("ai_testpanel_back_url"), "/")
-    prompt_bindings = [
-        serialize_arm_prompt_binding(b) for b in ArmPromptBinding.objects.select_related("prompt")
-    ]
-    context = {
-        **ai_admin_site.each_context(request),
-        "title": "ARM: В чем ошибка",
-        "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
-        "arm_back_url": arm_back_url,
-        "arm_prompt_bindings": prompt_bindings,
-        "languages": languages,
-        "topics": topics,
-        "model_options": get_available_model_options(),
-        "selected_models": selected_models,
-        "selected_language_ui": selected_language_ui,
-        "selected_prog_lng": selected_prog_lng,
-        "selected_topic": selected_topic,
-        "task_text": task_text,
-        "code_text": code_text,
-        "results": results,
-        "report": report,
-        "error_message": error_message,
-        "arm_find_error_start_url": "/ai/admin/arm/find-error/start/",
-        "arm_find_error_status_url": "/ai/admin/arm/find-error/status/",
-        "active_run_id": active_run_id,
-        "active_run_snapshot": active_run_snapshot or {},
-    }
-    return TemplateResponse(request, "admin/ai/arm_find_error.html", context)
-
-
-def admin_arm_find_error_start_view(request):
-    if not can_access_arm(request):
-        return HttpResponseForbidden("Access denied")
-
-    if request.method != "POST":
-        return HttpResponseNotAllowed(["POST"])
-
-    form_state = _collect_arm_form_state(request)
-    run_payload, error_message = _prepare_arm_run_payload(form_state, request.user)
-    if error_message:
-        return JsonResponse({"ok": False, "message": error_message}, status=400)
-
-    run_id, start_error = _start_arm_from_payload(run_payload, request.user.id)
-    if not run_id:
-        return JsonResponse(
-            {"ok": False, "message": start_error or "Не удалось запустить ARM процесс"},
-            status=400,
-        )
-
-    return JsonResponse({"ok": True, "run_id": run_id, "run": get_arm_run_snapshot(run_id)})
-
-
-def admin_arm_find_error_status_view(request):
-    if not can_access_arm(request):
-        return HttpResponseForbidden("Access denied")
-
-    if request.method != "GET":
-        return HttpResponseNotAllowed(["GET"])
-
-    run_id = (request.GET.get("run_id") or "").strip()
-    if not run_id:
-        return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
-
-    run_snapshot = get_arm_run_snapshot(run_id)
-    if not run_snapshot:
-        return JsonResponse(
-            {"ok": False, "message": "ARM процесс не найден или уже завершен"},
-            status=404,
-        )
-
-    return JsonResponse({"ok": True, "run": run_snapshot})
-
-
 # ---------------------------------------------------------------------------
 # Batch-solve ARM: load tasks from DL tree, send each model the statement,
 # test the code via DL (send-solution / get-solution-result).
@@ -470,9 +215,9 @@ def admin_arm_solve_view(request):
         serialize_arm_prompt_binding(b) for b in ArmPromptBinding.objects.select_related("prompt")
     ]
 
-    # Список всех препромптов для ручного выбора на странице. Препромпты —
-    # студенческий контент: тот же контракт, что у chat-facing get_prompts
-    # (см. querysets.prompt_queryset_for_user — здесь ACL не режем).
+    # Список препромптов режима «Реши задачу» для ручного выбора на странице.
+    # Препромпты — студенческий контент: тот же контракт, что у chat-facing
+    # get_prompts (см. querysets.prompt_queryset_for_user — здесь ACL не режем).
     prompt_options = [
         {
             "id": p.pk,
@@ -480,7 +225,7 @@ def admin_arm_solve_view(request):
             "topic_id": p.topic_id,
             "topic_name": p.topic.topic_name_ru if p.topic else "",
         }
-        for p in Prompt.objects.select_related("topic").order_by(
+        for p in Prompt.objects.filter(mode=Prompt.MODE_SOLVE).select_related("topic").order_by(
             "topic__topic_name_ru", "prompt_name_ru"
         )
     ]
@@ -708,6 +453,11 @@ def admin_arm_solve_start_view(request):
             prompt_override = Prompt.objects.filter(id=int(raw_prompt_id)).first()
         except (ValueError, TypeError):
             prompt_override = None
+        if prompt_override is not None and prompt_override.mode != Prompt.MODE_SOLVE:
+            return JsonResponse(
+                {"ok": False, "message": "Выбранный промпт не относится к режиму «Реши задачу»"},
+                status=400,
+            )
     if prompt_override is not None:
         prompt_id = prompt_override.pk
         prompt_name = prompt_override.prompt_name_ru or ""

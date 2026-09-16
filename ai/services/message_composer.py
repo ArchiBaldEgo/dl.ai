@@ -48,7 +48,10 @@ class SolveModeBuilder(ModeMessageBuilder):
         else:
             base = self._build_default_message(language, prog_lng_name, topic_name, message)
 
-        prompt_text = await resolver.resolve_text(prompt_id, language, prog_lng_name, topic_name, message)
+        prompt_text = await resolver.resolve_text(
+            prompt_id, language, prog_lng_name, topic_name, message,
+            allowed_mode="solve",
+        )
         if prompt_text:
             prefix = "Preprompt" if language not in ("Русский", "Russian") else "Препромпт"
             base += f"\n\n{prefix}: {prompt_text}"
@@ -98,7 +101,10 @@ class FindErrorModeBuilder(ModeMessageBuilder):
         else:
             base = self._build_default_message(language, prog_lng_name, topic_name, message, code)
 
-        prompt_text = await resolver.resolve_text(prompt_id, language, prog_lng_name, topic_name, message, code)
+        prompt_text = await resolver.resolve_text(
+            prompt_id, language, prog_lng_name, topic_name, message, code,
+            allowed_mode="find_error",
+        )
         if prompt_text:
             prefix = "Preprompt" if language not in ("Русский", "Russian") else "Препромпт"
             base += f"\n\n{prefix}: {prompt_text}"

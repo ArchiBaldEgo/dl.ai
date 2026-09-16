@@ -1,7 +1,7 @@
 /* Prompt regression tests admin page.
  *
- * Mirrors the inlined ARM admin JS (ai/templates/admin/ai/arm_find_error.html):
- * CSRF retrieval, start-run POST, 1.5s status polling, report + result render.
+ * Inlined ARM admin JS pattern (CSRF retrieval, start-run POST, 1.5s status
+ * polling, report + result render) as a standalone file.
  * URLs and the initial run snapshot are injected from the template via
  * window.PROMPT_REGRESSION_CONFIG and the #prompt-regression-initial-run
  * json_script tag (the JS file cannot use Django template tags).
@@ -30,6 +30,29 @@
 
   var currentRunId = "";
   var pollTimer = null;
+
+  /* Селектор «Тестируемый промпт» фильтруется по режиму выбранных кейсов:
+   * если все отмеченные кейсы одного режима — показываем только промпты
+   * этого режима (у промпта Prompt.mode), при смешанном наборе/пустой
+   * отметке — все. data-mode расставлены в prompt_regression.html. */
+  function filterPromptSelectByCases() {
+    var promptSelect = document.getElementById("prt_prompt");
+    if (!promptSelect) return;
+    var modes = [];
+    runForm.querySelectorAll('input[name="cases"]:checked').forEach(function (cb) {
+      var m = cb.getAttribute("data-mode") || "";
+      if (m && modes.indexOf(m) === -1) modes.push(m);
+    });
+    var allowed = modes.length === 1 ? modes[0] : "";
+    Array.prototype.forEach.call(promptSelect.options, function (opt) {
+      var mode = opt.getAttribute("data-mode") || "";
+      opt.hidden = Boolean(allowed && mode && mode !== allowed);
+    });
+  }
+  runForm.addEventListener("change", function (event) {
+    if (event.target && event.target.name === "cases") filterPromptSelectByCases();
+  });
+  filterPromptSelectByCases();
 
   var initialRun = {};
   var initialNode = document.getElementById("prompt-regression-initial-run");
