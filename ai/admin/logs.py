@@ -6,7 +6,7 @@ from datetime import datetime
 
 from django.contrib import admin
 from django.core.paginator import Paginator
-from django.db.models import Q
+from django.db.models import Count, Q
 from .site import ai_admin_site
 from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
@@ -27,7 +27,7 @@ from ..dl_api_client import (
     fetch_task_info,
 )
 from ..http_utils import resolve_dl_session_id
-from ..models import AIModelTestRun, AIRequestLog, Task
+from ..models import AIModelTestResult, AIModelTestRun, AIRequestLog, Task
 from ..model_health import get_runtime_model_handlers
 from .permissions import can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
 
@@ -322,15 +322,18 @@ def build_recent_batch_rows(request, limit=5):
 
     Отбирает записи журнала пакетного решения (source="arm",
     mode=batch_solve|solve, sentinel "Batch solve run " в message) с учётом
-    ограничения видимости («только свои» для prompt_developer). Для каждого
-    прогона собирает snapshot тем же кодом, что и страницу деталей
-    (``_build_batch_log_snapshot`` → results + report), чтобы по клику на
-    строку развернуть ту же таблицу результатов, что на /arm/solve/ после
-    прогона (window.ArmBatchResults).
+    ограничения видимости («только свои» для prompt_developer).
+
+    Строка — ЛЁГКАЯ: шапка прогона (один запрос AIModelTestRun) и
+    count-агрегат результатов (AIModelTestResult) — без текстов решений:
+    раньше полные снапшоты (results + report) встраивались в HTML страницы
+    через {% json_script %} и большой прогон раздувал её до ~6 МБ. Теперь
+    развёртка грузится ЛЕНИВО по клику — AJAX GET на ``snapshot_url`` →
+    ``admin_batch_snapshot_view`` (тот же формат снапшота, что потребляет
+    window.ArmBatchResults на /arm/solve/).
 
     Возвращает словарь для ``extra_context``: ``recent_batch_runs`` (список
-    строк; у строки без прогонов в БД snapshot=None — развёртка недоступна),
-    ``recent_batch_limit`` и ``moscow_tz``.
+    лёгких строк), ``recent_batch_limit`` и ``moscow_tz``.
     """
     can_view = can_access_logs(request)
     rows = []
@@ -341,10 +344,47 @@ def build_recent_batch_rows(request, limit=5):
             .filter(message__icontains="Batch solve run ")
             .order_by("-sent_at")
         )
-        for log in qs[: max(0, int(limit))]:
-            snapshot = _build_batch_log_snapshot(log)
-            report = (snapshot or {}).get("report") or {}
-            run_status = (snapshot or {}).get("run_status", "")
+        logs = list(qs[: max(0, int(limit))])
+        run_ids = {}
+        for log in logs:
+            run_hex = _batch_run_id_from_log(log)
+            if run_hex:
+                run_ids[log.pk] = run_hex
+        runs = {
+            r.run_id: r
+            for r in AIModelTestRun.objects.filter(run_id__in=set(run_ids.values()))
+        }
+        # Сводка по результатам прогонов — count-запросом, без текстов;
+        # семантика как в _build_batch_report (total/solved/failed).
+        counters = {}
+        first_ext = {}
+        if run_ids:
+            for row in (
+                AIModelTestResult.objects
+                .filter(run__run_id__in=set(run_ids.values()))
+                .values("run__run_id")
+                .annotate(
+                    total=Count("pk"),
+                    solved=Count("pk", filter=Q(verdict=AIModelTestResult.VERDICT_SOLVED)),
+                    failed=Count("pk", filter=Q(verdict=AIModelTestResult.VERDICT_FAILED)),
+                )
+            ):
+                counters[row["run__run_id"]] = row
+            # file_extension строки — первый непустой снимок результата прогона
+            # (тот же приоритет, что в _build_batch_log_snapshot).
+            for row in (
+                AIModelTestResult.objects
+                .filter(run__run_id__in=set(run_ids.values()))
+                .exclude(file_extension_snapshot="")
+                .order_by("pk")
+                .values("run__run_id", "file_extension_snapshot")
+            ):
+                first_ext.setdefault(row["run__run_id"], row["file_extension_snapshot"])
+        for log in logs:
+            run_hex = run_ids.get(log.pk)
+            run = runs.get(run_hex) if run_hex else None
+            counter = counters.get(run_hex, {})
+            run_status = run.status if run else ""
             rows.append({
                 "id": log.id,
                 "sent_at": log.sent_at,
@@ -355,25 +395,44 @@ def build_recent_batch_rows(request, limit=5):
                 # Сырой статус прогона — для класса цвета в шаблоне
                 # (прогон стёрт из БД → старый статус записи журнала).
                 "run_status": run_status or log.status,
-                "run_name": (snapshot or {}).get("run_name", "—"),
-                # Развёртка доступна только когда прогон ещё есть в БД.
-                "snapshot": snapshot,
-                "run_id": (snapshot or {}).get("run_id", ""),
-                "course_id": (snapshot or {}).get("course_id"),
-                "file_extension": (snapshot or {}).get("file_extension", ""),
-                "total_pairs": report.get("total_pairs"),
-                "solved": report.get("solved"),
-                "failed": report.get("failed"),
+                "run_name": run_name_for(run),
+                "run_id": run_hex or "",
+                "course_id": run.course_id if run else None,
+                "file_extension": first_ext.get(run_hex, ""),
+                "total_pairs": counter.get("total"),
+                "solved": counter.get("solved"),
+                "failed": counter.get("failed"),
                 "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
-                # Уникальный id для {% json_script %} — по нему JS находит
-                # snapshot строки и лениво рендерит развёртку.
-                "json_id": f"batch-snap-{log.id}",
+                # Полные результаты — лениво, AJAX-ом по клику: страница
+                # настроек больше не встраивает снапшоты в HTML.
+                "snapshot_url": f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/",
             })
     return {
         "recent_batch_runs": rows,
         "recent_batch_limit": limit,
         "moscow_tz": MOSCOW_TZ,
     }
+
+
+def admin_batch_snapshot_view(request, log_id):
+    """AJAX-снапшот результатов пакетного прогона по записи журнала.
+
+    Ленивая загрузка для страницы «Настройки ИИ-приложения»: полные
+    результаты (results + report) не встраиваются в HTML страницы, а
+    подтягиваются по клику на строку. Права — как у журнала
+    (can_access_logs + скоуп «только свои»); формат — тот же
+    ``_build_batch_log_snapshot``, что потребляет window.ArmBatchResults.
+    """
+    if not can_access_logs(request):
+        return HttpResponseForbidden("Access denied")
+    log = _scope_logs_qs(AIRequestLog.objects.filter(pk=int(log_id)), request.user).first()
+    if log is None or not _is_batch_solve_log(log):
+        return JsonResponse({"error": "not-found"}, status=404)
+    snapshot = _build_batch_log_snapshot(log)
+    if snapshot is None:
+        # Прогон стёрт из БД — развёртка недоступна (как и раньше).
+        return JsonResponse({"error": "run-not-found"}, status=404)
+    return JsonResponse(snapshot)
 
 
 def admin_request_logs_view(request):

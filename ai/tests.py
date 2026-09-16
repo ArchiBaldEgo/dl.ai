@@ -7214,12 +7214,13 @@ class TemplateInlineCommentTests(SimpleTestCase):
         self.assertEqual(offenders, [])
 
 
-class BatchRunNameTests(TestCase):
+class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
     """Названия прогонов: воркер пишет run_name прямо в AIModelTestRun,
     журналы и таблица «Последние пакетные решения» читают его с прогона
     (run_name_for); для старых прогонов — фолбэк на run_params."""
 
     def setUp(self):
+        self.factory = RequestFactory()
         self.user = get_user_model().objects.create_user(username="runname", password="x")
 
     def _run_batch_with_name(self, run_id, run_name):
@@ -7306,6 +7307,73 @@ class BatchRunNameTests(TestCase):
         self.assertEqual(run.run_name, "")
         self.assertEqual(run_name_for(run), "—")
         self.assertEqual(run_name_for(None), "—")
+
+    def test_recent_batch_rows_are_lazy(self):
+        """Строки «Последних пакетных решений» лёгкие: полные снапшоты
+        (тексты решений) в HTML страницы больше не встраиваются — только
+        шапка + count-агрегат + snapshot_url для ленивой загрузки AJAX-ом.
+        Иначе большой прогон раздувал страницу настроек до ~6 МБ."""
+        from ai.admin.logs import build_recent_batch_rows
+
+        run_id = "e" * 32
+        log = self._run_batch_with_name(run_id, "Неделя 5")
+        request = RequestFactory().get("/ai/admin/")
+        request.user = get_user_model().objects.create_user(
+            username="lazy-su", password="x", is_superuser=True, is_staff=True,
+        )
+        rows = build_recent_batch_rows(request)["recent_batch_runs"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertNotIn("snapshot", row)
+        self.assertNotIn("json_id", row)
+        self.assertEqual(row["snapshot_url"], f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/")
+        self.assertEqual(row["run_name"], "Неделя 5")
+        # Count-агрегат по результатам прогона (1 задача × 1 модель, solved).
+        self.assertEqual(row["total_pairs"], 1)
+        self.assertEqual(row["solved"], 1)
+        self.assertEqual(row["failed"], 0)
+        self.assertEqual(row["file_extension"], ".pas")
+
+    def test_batch_snapshot_endpoint(self):
+        """AJAX-снапшот прогона: суперюзеру — 200 с JSON снапшота;
+        не-батч запись журнала — 404; без доступа к журналу — 403.
+        Вьюха зовётся напрямую (site-level has_permission в ai_admin_site
+        требует внешний DLSID — это проверяется уровнем выше, см.
+        _AdminViewRequestMixin)."""
+        from ai.admin.logs import admin_batch_snapshot_view
+        from ai.models import AIRequestLog
+
+        run_id = "f" * 32
+        log = self._run_batch_with_name(run_id, "Неделя 6")
+        su = get_user_model().objects.create_user(
+            username="snap-su", password="x", is_superuser=True, is_staff=True,
+        )
+        url = f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/"
+
+        request = self._admin_request(su, path=url)
+        response = admin_batch_snapshot_view(request, log_id=log.id)
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertEqual(data["run_name"], "Неделя 6")
+        self.assertEqual(data["run_status"], "completed")
+        self.assertEqual(data["run_id"], run_id)
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["report"]["solved"], 1)
+
+        # Не-батч запись журнала (обычный чат) — снапшота нет → 404.
+        plain = AIRequestLog.objects.create(
+            source=AIRequestLog.SOURCE_HTTP, mode=AIRequestLog.MODE_CHAT,
+            sent_at=timezone.now(), message="привет",
+        )
+        request = self._admin_request(su, path=f"/ai/admin/ai/airequestlog/{plain.id}/batch-snapshot/")
+        response = admin_batch_snapshot_view(request, log_id=plain.id)
+        self.assertEqual(response.status_code, 404)
+
+        # Без доступа к журналу (аноним) — 403 от самой вьюхи.
+        from django.contrib.auth.models import AnonymousUser
+        request = self._admin_request(AnonymousUser(), path=url)
+        response = admin_batch_snapshot_view(request, log_id=log.id)
+        self.assertEqual(response.status_code, 403)
 
     def test_snapshot_from_test_run_carries_run_name(self):
         """Снапшот страницы прогона берёт run_name с прогона (фолбэк —
