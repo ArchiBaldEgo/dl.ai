@@ -2,7 +2,7 @@
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 
 from django.contrib import admin
 from django.core.paginator import Paginator
@@ -433,6 +433,96 @@ def admin_batch_snapshot_view(request, log_id):
         # Прогон стёрт из БД — развёртка недоступна (как и раньше).
         return JsonResponse({"error": "run-not-found"}, status=404)
     return JsonResponse(snapshot)
+
+
+def admin_daily_report_view(request):
+    """Дневной отчёт журнала: студенты × сегодняшняя активность (МСК).
+
+    День — календарный по МСК (00:00–23:59). Строка — студент (внешний
+    dl-аккаунт или локальный юзер): фамилия, время последней отправки (без
+    даты), последняя тема и препромпт, последний режим («какой чат») и
+    сколько всего запросов за сегодня. Клик по колонке «Запросов»
+    разворачивает свёрнутый список всех его записей дня — данные уже в
+    HTML страницы, второго запроса не нужно.
+
+    Права — как у журнала (can_access_logs + скоуп «только свои» для
+    prompt_developer). ARM-прогоны (source=arm) — операторские пакетные
+    запуски, а не активность студентов, в отчёт не попадают.
+    """
+    if not can_access_logs(request):
+        return HttpResponseForbidden("Access denied")
+
+    now_msk = timezone.localtime(timezone.now(), MOSCOW_TZ)
+    day_start = now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = now_msk.replace(hour=23, minute=59, second=59, microsecond=999_000)
+    # .only() — без message/response_text: тексты тяжёлые, отчёту не нужны.
+    logs = list(
+        _scope_logs_qs(AIRequestLog.objects.all(), request.user)
+        .exclude(source=AIRequestLog.SOURCE_ARM)
+        .filter(
+            sent_at__gte=day_start.astimezone(dt_timezone.utc),
+            sent_at__lte=day_end.astimezone(dt_timezone.utc),
+        )
+        .only(
+            "id", "sent_at", "external_user_id", "username", "user_full_name",
+            "topic_id", "topic_name", "prompt_id", "prompt_name", "mode",
+            "status", "model_names",
+        )
+        .order_by("sent_at")
+    )
+
+    students = {}
+    for log in logs:
+        key = log.external_user_id or f"local:{log.username or '?'}"
+        rec = students.get(key)
+        if rec is None:
+            rec = students[key] = {
+                "display_name": log.user_full_name or log.username or key,
+                "external_user_id": log.external_user_id or "",
+                "count": 0,
+                "last": None,
+                "requests": [],
+            }
+        rec["count"] += 1
+        rec["last"] = log
+        rec["requests"].append(log)
+
+    def _request_row(log):
+        return {
+            "time": timezone.localtime(log.sent_at, MOSCOW_TZ).strftime("%H:%M:%S"),
+            "mode": log.get_mode_display() or "—",
+            "topic": log.topic_name or "—",
+            "prompt": log.prompt_name or "—",
+            "model": ", ".join(log.model_names or []) or "—",
+            "status": log.get_status_display() or log.status or "—",
+            "status_class": "ok" if log.status == AIRequestLog.STATUS_SUCCESS else "err",
+        }
+
+    rows = []
+    for rec in students.values():
+        last = rec["last"]
+        rows.append({
+            "display_name": rec["display_name"],
+            "external_user_id": rec["external_user_id"],
+            "last_sent": timezone.localtime(last.sent_at, MOSCOW_TZ).strftime("%H:%M"),
+            "last_topic": last.topic_name or "—",
+            "last_prompt": last.prompt_name or "—",
+            "last_mode": last.get_mode_display() or "—",
+            "count": rec["count"],
+            # Все записи дня, новые сверху (журнал тоже читается сверху вниз).
+            "requests": [_request_row(l) for l in reversed(rec["requests"])],
+        })
+    # По фамилии — алфавит, без учёта регистра.
+    rows.sort(key=lambda r: (r["display_name"].casefold(), r["last_sent"]))
+
+    context = {
+        **ai_admin_site.each_context(request),
+        "title": "DL.AI: Дневной отчёт",
+        "date_label": now_msk.strftime("%d.%m.%Y"),
+        "rows": rows,
+        "total_count": len(logs),
+    }
+    return TemplateResponse(request, "admin/ai/daily_report.html", context)
 
 
 def admin_request_logs_view(request):

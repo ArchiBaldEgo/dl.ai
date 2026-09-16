@@ -7398,6 +7398,131 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(arm_runner._snapshot_from_test_run(legacy)["run_name"], "Старый прогон")
 
 
+class DailyReportTests(_AdminViewRequestMixin, TestCase):
+    """Дневной отчёт журнала: день по МСК (00:00–23:59), строки — студенты
+    (фамилия / время последней отправки без даты / последняя тема и
+    препромпт / последний режим / всего запросов за день), развёртка —
+    все записи дня; ARM (source=arm) в отчёт не попадает;
+    prompt_developer видит только свои записи."""
+
+    def setUp(self):
+        from django.contrib.auth.models import Group
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.su = self.user_model.objects.create_user(
+            username="daily-su", password="***", is_superuser=True, is_staff=True,
+        )
+        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+
+    @staticmethod
+    def _msk_at(hour, minute=0, second=0, *, day_offset=0):
+        """Сегодня (или день_offset назад) в hour:minute по МСК → aware UTC."""
+        from datetime import timedelta
+        from zoneinfo import ZoneInfo
+        now_msk = timezone.localtime(timezone.now(), ZoneInfo("Europe/Moscow"))
+        naive = (now_msk + timedelta(days=day_offset)).replace(
+            hour=hour, minute=minute, second=second, microsecond=0,
+        )
+        return naive.astimezone(ZoneInfo("Europe/Moscow"))
+
+    def _log(self, *, user, external_user_id, full_name, sent_at, topic="",
+             prompt="", mode=None, status=None, source=None):
+        from ai.models import AIRequestLog
+        return AIRequestLog.objects.create(
+            user=user,
+            source=source or AIRequestLog.SOURCE_WEBSOCKET,
+            mode=mode or AIRequestLog.MODE_CHAT,
+            status=status or AIRequestLog.STATUS_SUCCESS,
+            sent_at=sent_at,
+            external_user_id=external_user_id,
+            username=f"user_{external_user_id}" if external_user_id else user.username,
+            user_full_name=full_name,
+            topic_name=topic,
+            prompt_name=prompt,
+            model_names=["FakeModel"],
+        )
+
+    def _report(self, user):
+        from ai.admin.logs import admin_daily_report_view
+        request = self._admin_request(user, path="/ai/admin/ai/airequestlog/daily-report/")
+        return admin_daily_report_view(request)
+
+    def test_daily_report_aggregates_students(self):
+        """Строки — по студенту: количество, последнее время/тема/препромпт/
+        режим; записи дня в развёртке — новые сверху; сортировка по фамилии;
+        ARM-запись в счёт не идёт."""
+        from ai.models import AIRequestLog
+
+        ivanov = "Иванов Иван"
+        petrov = "Петров Пётр"
+        self._log(user=self.su, external_user_id="101", full_name=ivanov,
+                  sent_at=self._msk_at(9, 15), topic="Циклы", prompt="Реши по шагам")
+        self._log(user=self.su, external_user_id="101", full_name=ivanov,
+                  sent_at=self._msk_at(12, 30), topic="Массивы", prompt="Реши задачу",
+                  mode=AIRequestLog.MODE_SOLVE)
+        self._log(user=self.su, external_user_id="200", full_name=petrov,
+                  sent_at=self._msk_at(10, 0), topic="Строки", prompt="Найди ошибку",
+                  mode=AIRequestLog.MODE_FIND_ERROR)
+        # ARM-прогон — операторская запись, в студенческом отчёте не считается.
+        self._log(user=self.su, external_user_id="101", full_name=ivanov,
+                  sent_at=self._msk_at(11, 0), source=AIRequestLog.SOURCE_ARM,
+                  mode=AIRequestLog.MODE_BATCH_SOLVE)
+        # Вчерашняя запись — не в сегодняшнем дне.
+        self._log(user=self.su, external_user_id="101", full_name=ivanov,
+                  sent_at=self._msk_at(23, 59, 59, day_offset=-1), topic="Вчера")
+
+        response = self._report(self.su)
+        self.assertEqual(response.status_code, 200)
+        rows = response.context_data["rows"]
+        self.assertEqual([r["display_name"] for r in rows], [ivanov, petrov])
+
+        row_ivanov = rows[0]
+        self.assertEqual(row_ivanov["count"], 2)  # без ARM и без вчерашней
+        self.assertEqual(row_ivanov["last_sent"], "12:30")
+        self.assertEqual(row_ivanov["last_topic"], "Массивы")
+        self.assertEqual(row_ivanov["last_prompt"], "Реши задачу")
+        self.assertEqual(row_ivanov["last_mode"], "Решить задачу")
+        # Развёртка: все записи дня, новые сверху, время без даты.
+        self.assertEqual(len(row_ivanov["requests"]), 2)
+        self.assertEqual(row_ivanov["requests"][0]["time"], "12:30:00")
+        self.assertEqual(row_ivanov["requests"][0]["topic"], "Массивы")
+        self.assertEqual(rows[1]["count"], 1)
+        self.assertEqual(rows[1]["last_mode"], "Найти ошибку")
+        self.assertEqual(response.context_data["total_count"], 3)
+
+    def test_daily_report_msk_day_bounds(self):
+        """День — по МСК: запись в 00:00:01 МСК включается, в 23:59 вчера —
+        нет (границы дня локальные, не UTC)."""
+        first_today = self._log(user=self.su, external_user_id="300", full_name="Сидоров",
+                                sent_at=self._msk_at(0, 0, 1))
+        before = self._log(user=self.su, external_user_id="300", full_name="Сидоров",
+                           sent_at=self._msk_at(23, 59, 59, day_offset=-1), topic="Вчера вечером")
+        rows = self._report(self.su).context_data["rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["count"], 1)  # только сегодняшняя 00:00:01
+        self.assertNotEqual(rows[0]["requests"][0]["time"], "23:59:59")
+
+    def test_daily_report_access_and_scope(self):
+        """Аноним — 403; prompt_developer видит только свои записи (скоуп)."""
+        from django.contrib.auth.models import AnonymousUser
+
+        self._log(user=self.su, external_user_id="101", full_name="Иванов Иван",
+                  sent_at=self._msk_at(9, 0))
+        response = self._report(AnonymousUser())
+        self.assertEqual(response.status_code, 403)
+
+        pd = self.user_model.objects.create_user(
+            username="daily-pd", password="***",
+        )
+        pd.groups.add(self.pd_group)
+        self._log(user=pd, external_user_id="400", full_name="Разработчик Препромптов",
+                  sent_at=self._msk_at(8, 0), prompt="Мой препромпт")
+        rows = self._report(pd).context_data["rows"]
+        self.assertEqual([r["display_name"] for r in rows], ["Разработчик Препромптов"])
+        self.assertEqual(rows[0]["count"], 1)
+
+
 def _fake_translate_chunk(counter):
     """Мок _translate_chunk: считает вызовы, возвращает «[lang]текст»."""
     def fake(chunk, google_lang):

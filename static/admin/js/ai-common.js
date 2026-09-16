@@ -151,7 +151,8 @@ function modelOptionStats(opt) {
 // Человекочитаемый суффикс названия: «Model X␣␣␣␣66␣·␣␣12» — только целые
 // числа (десятичные отбрасываются), данные прижаты вправо и выровнены в один
 // столбец. Знаки единиц (% и сек) в строках НЕ повторяются — они показаны
-// один раз на уровне заголовка группы (см. applyModelGroupUnitLabels).
+// один раз в заголовке группы, выровненные над колонками (см.
+// applyModelGroupUnitLabels).
 // Название добивается неразрывными пробелами до пиксельной ширины самого
 // длинного названия (замер canvas'ом шрифтом селекта; canvas недоступен →
 // добивание посимвольно), процент и время — до одинаковой символьной ширины
@@ -170,8 +171,9 @@ var _statMeasureCtx = null;
 // Ширина текста шрифтом селекта моделей — для пиксельного добивания названий
 // до одного столбца. Canvas measureText даёт метрику того же шрифта, которым
 // рендерятся опции. Недоступен → 0, вызывающий код падает на посимвольный
-// запасной вариант.
-function measureStatText(text) {
+// запасной вариант. weightOverride — для заголовков групп (браузер рендерит
+// их жирным).
+function measureStatText(text, weightOverride) {
     var select = document.getElementById('select');
     if (!select || !document.createElement) return 0;
     if (!_statMeasureCtx) {
@@ -180,7 +182,7 @@ function measureStatText(text) {
     }
     if (!_statMeasureCtx) return 0;
     var style = window.getComputedStyle(select);
-    _statMeasureCtx.font = [style.fontStyle, style.fontWeight, style.fontSize, style.fontFamily].join(' ');
+    _statMeasureCtx.font = [style.fontStyle, weightOverride || style.fontWeight, style.fontSize, style.fontFamily].join(' ');
     return _statMeasureCtx.measureText(text).width;
 }
 
@@ -212,20 +214,41 @@ function applyModelOptionSuffix(item, cols) {
     item.opt.textContent = text;
 }
 
-// Единицы (% и сек) показываются ОДИН РАЗ — на уровне заголовков групп
-// селектора: «Все модели␣(%·с)». Базовые подписи групп кешируются в
-// data-base-label; суффикс вешается только группам, у которых есть строки
-// со статистикой, и снимается при закрытии списка (stripModelOptionSuffixes) —
-// закрытый селектор и поиск группы по подписи («Все модели») не ломаются.
-function applyModelGroupUnitLabels(modelSelect, items) {
-    var suffix = '(%' + NBSP + '·' + NBSP + getUiString('statSeconds', 'с') + ')';
+// Единицы (% и сек) показываются ОДИН РАЗ — в заголовках групп селектора,
+// и ВЫРОВНЕНЫ над колонками показателей: подпись группы добивается NBSP до
+// начала столбца данных (тот же пиксельный замер, что у строк; заголовок
+// браузер рендерит жирным — меряем жирным), знак «%» прижат вправо внутри
+// колонки процента, «с» — внутри колонки секунд, разделитель «·» стоит на
+// колонке строк. Базовые подписи групп кешируются в data-base-label;
+// суффикс вешается только группам, у которых есть строки со статистикой,
+// и снимается при закрытии списка (stripModelOptionSuffixes) — закрытый
+// селектор и поиск группы по подписи («Все модели») не ломаются.
+function applyModelGroupUnitLabels(modelSelect, items, cols) {
+    var secUnit = getUiString('statSeconds', 'с');
     Array.prototype.forEach.call(modelSelect.querySelectorAll('optgroup'), function (group) {
         if (!group.hasAttribute('data-base-label')) {
             group.setAttribute('data-base-label', group.label);
         }
         var base = group.getAttribute('data-base-label');
         var hasStats = items.some(function (item) { return item.opt.parentElement === group; });
-        var next = hasStats ? base + NBSP + suffix : base;
+        if (!hasStats) {
+            if (group.label !== base) group.label = base;
+            return;
+        }
+        var gap;
+        if (cols.nbspW > 0) {
+            var colStart = cols.maxTitleW + MODEL_STAT_GAP_MIN * cols.nbspW;
+            var labelW = measureStatText(base, 'bold');
+            // Минимум 1 NBSP (не лепить знак к подписи), но приоритет —
+            // точное попадание над колонкой, поэтому без MODEL_STAT_GAP_MIN.
+            gap = Math.max(1, Math.round((colStart - labelW) / cols.nbspW));
+        } else {
+            gap = Math.max(1, cols.maxTitleLen + MODEL_STAT_GAP_MIN - base.length);
+        }
+        var next = base + padStat(gap)
+            + padStat(Math.max(0, cols.pctW - 1)) + '%'
+            + NBSP + '·' + NBSP
+            + padStat(Math.max(0, cols.secW - secUnit.length)) + secUnit;
         if (group.label !== next) group.label = next;
     });
 }
@@ -268,7 +291,7 @@ function applyModelOptionSuffixes() {
     if (!items.length) return;
     cols.nbspW = measureStatText(NBSP) || measureStatText(' ');
     items.forEach(function (item) { applyModelOptionSuffix(item, cols); });
-    applyModelGroupUnitLabels(modelSelect, items);
+    applyModelGroupUnitLabels(modelSelect, items, cols);
 }
 
 // Обратное применение: закрытый селектор показывает чистые названия

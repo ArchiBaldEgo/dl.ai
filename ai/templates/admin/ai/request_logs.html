@@ -375,11 +375,14 @@
     <div class="filter-field">
       <button type="submit" class="default">Фильтровать</button>
       <a class="button" href="{{ request.path }}?reset=1">Сбросить</a>
+      <a class="button" href="/ai/admin/ai/airequestlog/daily-report/"
+         title="Студенты × запросы за сегодня (00:00–23:59 МСК)">Дневной отчёт →</a>
     </div>
   </form>
 
   {% load tz %}
   {% if page_obj.object_list %}
+    <div class="ai-scroll">
     <table class="ai-logs-table">
       <thead>
         <tr>
@@ -546,6 +549,7 @@
         {% endtimezone %}
       </tbody>
     </table>
+    </div>
 
     <div class="ai-logs-paginator">
       {% if page_obj.has_previous %}

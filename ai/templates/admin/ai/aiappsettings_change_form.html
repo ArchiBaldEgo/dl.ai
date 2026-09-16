@@ -23,6 +23,12 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
 {% block after_field_sets %}
   {{ block.super }}
 
+  {# Дневной отчёт журнала — под вкл/выкл приложения, над таблицей прогонов. #}
+  <div class="ai-daily-report-bar">
+    <a class="button" href="/ai/admin/ai/airequestlog/daily-report/"
+       title="Студенты × запросы за сегодня (00:00–23:59 МСК)">Дневной отчёт →</a>
+  </div>
+
   <fieldset class="module aligned ai-settings-logs">
     <h2>Последние пакетные решения ({{ recent_batch_limit|default:5 }})</h2>
     <div class="ai-settings-logs-body">
@@ -34,8 +40,8 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
 
       {% if can_view_logs %}
         {% if recent_batch_runs %}
-          {# CSS + window.ArmBatchResults — тот же рендер, что после прогона на /arm/solve/ #}
           {% include "admin/ai/_ai_batch_results.html" %}
+          <div class="ai-scroll">
           <table class="ai-recent-logs-table ai-batch-table">
             <thead>
               <tr>
@@ -76,6 +82,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
               {% endtimezone %}
             </tbody>
           </table>
+          </div>
         {% else %}
           <p class="ai-recent-logs-empty">Пакетных решений пока не было.</p>
         {% endif %}
@@ -101,6 +108,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
 
       {% if can_view_logs %}
         {% if recent_logs %}
+          <div class="ai-scroll">
           <table class="ai-recent-logs-table">
             <thead>
               <tr>
@@ -139,6 +147,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
               {% endtimezone %}
             </tbody>
           </table>
+          </div>
         {% else %}
           <p class="ai-recent-logs-empty">Записей пока нет.</p>
         {% endif %}
@@ -167,6 +176,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
     .ai-recent-logs-err { color: #b42318; font-weight: 600; }
     .ai-recent-logs-empty { color: var(--body-quiet-color); padding: 8px 0; }
     .ai-settings-logs-actions { margin-top: 10px; }
+    .ai-daily-report-bar { margin: 6px 0 10px; }
     .ai-batch-row-clickable { cursor: pointer; }
     .ai-batch-row-clickable:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }
     .ai-batch-row-open td { font-weight: 600; }

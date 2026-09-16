@@ -27,6 +27,7 @@ from .docs import (
 from .guest_mode import admin_toggle_guest_view
 from .logs import (
     admin_batch_snapshot_view,
+    admin_daily_report_view,
     admin_request_log_detail_view,
     admin_request_log_task_text_view,
     admin_request_log_xlsx_view,
@@ -93,6 +94,7 @@ def get_ai_admin_urls():
         path("updates/", ai_admin_site.admin_view(admin_updates_view), name="ai_updates"),
         path("ai/airequestlog/task-text/", ai_admin_site.admin_view(admin_request_log_task_text_view), name="ai_request_log_task_text"),
         path("ai/airequestlog/<int:log_id>/xlsx/", ai_admin_site.admin_view(admin_request_log_xlsx_view), name="ai_request_log_xlsx"),
+        path("ai/airequestlog/daily-report/", ai_admin_site.admin_view(admin_daily_report_view), name="ai_request_log_daily_report"),
         path("ai/airequestlog/<int:log_id>/batch-snapshot/", ai_admin_site.admin_view(admin_batch_snapshot_view), name="ai_request_log_batch_snapshot"),
         path("ai/airequestlog/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
         path("ai/airequestlog/<int:log_id>/resend/", ai_admin_site.admin_view(resend_request_view), name="ai_request_log_resend"),

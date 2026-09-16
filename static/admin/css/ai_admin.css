@@ -740,6 +740,21 @@ a.ai-docs-chapter:hover {
   color: var(--body-quiet-color);
 }
 
+/* === Масштабирование под увеличенный интерфейс (браузерный зум 150–170%) ===
+   Зум даёт эффективную ширину окна ~900–1300px: широкие таблицы
+   прокручиваются внутри своих контейнеров (.ai-scroll), а не распирают
+   страницу; двухколоночные развёртки складываются в одну колонку. */
+.ai-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.results { overflow-x: auto; }
+
+@media (max-width: 1150px) {
+  .ai-sol-detail-content { grid-template-columns: 1fr; }
+  .ai-daily-req-table th, .ai-daily-req-table td { padding: 4px 6px; }
+}
+
 @media (max-width: 800px) {
   .ai-sol-detail-content {
     grid-template-columns: 1fr;
