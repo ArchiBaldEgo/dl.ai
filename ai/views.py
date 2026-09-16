@@ -890,6 +890,7 @@ def send_solution_view(request):
             identity=identity,
             queue_id=queue_id,
             test_log=test_log,
+            session_id=session_id,
         )
     except Exception:
         logger.exception("Failed to record solution submission for node %s", node_id)

@@ -668,6 +668,14 @@ a.ai-docs-chapter:hover {
   font-weight: 600;
 }
 
+/* Приписка под названием задачи — путь в дереве задач DL (TaskSolution.tree_path). */
+.ai-sol-tree-path {
+  font-size: 11px;
+  color: var(--body-quiet-color);
+  margin-top: 2px;
+  word-break: break-word;
+}
+
 .ai-sol-detail-row {
   display: none;
 }

@@ -495,6 +495,13 @@ class TaskSolution(models.Model):
     # Нужен для пользовательской ссылки на задачу: /task.jsp?nid=…&cid=…
     # (admin-вьювер fullTaskviewer не используется — просмотр от имени админа).
     course_id = models.IntegerField(null=True, blank=True, verbose_name="ID курса DL")
+    # Путь задачи в дереве задач DL (get-task-info → path при известном
+    # курсе), напр. «Программирование\Циклы\Сумма». Заполняется best-effort
+    # при отправке решения на тестирование; старые записи получают путь при
+    # повторном решении той же задачи.
+    tree_path = models.CharField(
+        max_length=512, blank=True, default="", verbose_name="Путь в дереве задач DL",
+    )
     programming_language_id = models.IntegerField(null=True, blank=True, verbose_name="ID языка программирования")
     file_extension = models.CharField(max_length=16, blank=True, default="", verbose_name="Расширение файла")
     code = models.TextField(verbose_name="Код решения")

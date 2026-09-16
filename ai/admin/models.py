@@ -631,7 +631,8 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     вызова модели. Редактирование вручную не предусмотрено — только просмотр.
 
     Список — кастомный (change_list_template): строка показывает дату,
-    название задачи со ссылкой в DL, имя языка, тему и препромпт; клик по
+    название задачи со ссылкой в DL (с припиской — путь задачи в дереве
+    задач DL, TaskSolution.tree_path), имя языка, тему и препромпт; клик по
     строке (кроме ссылки на задачу) раскрывает сохранённый код.
     """
 
@@ -642,13 +643,13 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     search_fields = ("task_node_id", "external_user_id", "model_key", "topic_name", "prompt_name")
     # Каждая строка несёт полный код решения — режем страницу.
     list_per_page = 25
-    readonly_fields = ("task_node_id", "programming_language_id", "file_extension", "code", "verdict",
+    readonly_fields = ("task_node_id", "programming_language_id", "tree_path", "file_extension", "code", "verdict",
                        "dl_comment", "model_key", "model_title", "topic_id", "topic_name",
                        "prompt_id", "prompt_name", "queue_id", "test_log", "submitted_at",
                        "created_by", "external_user_id", "times_used", "created_at", "updated_at")
 
     fieldsets = (
-        (None, {"fields": ("task_node_id", "programming_language_id", "file_extension", "verdict")}),
+        (None, {"fields": ("task_node_id", "programming_language_id", "tree_path", "file_extension", "verdict")}),
         ("Решение", {"fields": ("code", "dl_comment", "model_key", "model_title")}),
         ("Контекст", {"fields": ("topic_id", "topic_name", "prompt_id", "prompt_name")}),
         ("Метаданные", {"fields": ("queue_id", "test_log", "submitted_at", "created_by", "external_user_id", "times_used", "created_at", "updated_at")}),
@@ -686,6 +687,8 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                 "date": timezone.localtime(dt).strftime("%d.%m.%Y %H:%M") if dt else "—",
                 "task_name": task_names.get(s.task_node_id) or f"Задача #{s.task_node_id}",
                 "task_url": dl_task_url(s.task_node_id, s.course_id) or "",
+                # Приписка — путь задачи в дереве задач DL (tree_path).
+                "tree_path": s.tree_path or "",
                 "lang_name": lang_names.get(s.programming_language_id) or (
                     str(s.programming_language_id) if s.programming_language_id else "—"
                 ),

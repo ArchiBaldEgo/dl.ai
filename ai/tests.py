@@ -816,12 +816,15 @@ class PromptFormTests(TestCase):
         )
 
     def test_form_filters_topics_by_selected_language(self):
+        # mode обязателен в форме с «Разделения промптов по режимам» (132a3ef):
+        # без него form.is_valid() падает на 'This field is required.'
         form = PromptForm(
             data={
                 "programming_language": str(self.python_language.id),
                 "topic": str(self.python_topic.id),
                 "prompt_name_ru": "Prompt",
                 "prompt_text_ru": "Body",
+                "mode": Prompt.MODE_SOLVE,
             }
         )
 
@@ -6986,8 +6989,9 @@ class BatchRunStatusDisplayTests(SimpleTestCase):
 
 class TaskSolutionListTests(_AdminViewRequestMixin, TestCase):
     """Кастомный список «Решённые задачи»: название задачи (ссылка в DL по
-    клику), имя языка вместо сырого id, дата МСК, препромпт юзера; без
-    фильтров (в кэш попадают только passed) — работает поиск."""
+    клику) с припиской — путь в дереве задач DL (tree_path), имя языка
+    вместо сырого id, дата МСК, препромпт юзера; без фильтров (в кэш
+    попадают только passed) — работает поиск."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -7016,6 +7020,7 @@ class TaskSolutionListTests(_AdminViewRequestMixin, TestCase):
             verdict=TaskSolution.VERDICT_PASSED,
             topic_name="Линейные", prompt_name="Реши задачу",
             external_user_id="4242",
+            tree_path="Программирование\\Линейные\\Сумма чисел",
         )
         response = self._view(su)
         self.assertEqual(response.status_code, 200)
@@ -7024,12 +7029,15 @@ class TaskSolutionListTests(_AdminViewRequestMixin, TestCase):
         row = rows[0]
         self.assertEqual(row["task_name"], "Сумма чисел")
         self.assertEqual(row["task_url"], "https://dl.gsu.by/task.jsp?nid=9001&cid=1450")
+        self.assertEqual(row["tree_path"], "Программирование\\Линейные\\Сумма чисел")
         self.assertEqual(row["lang_name"], "Pascal")
         self.assertEqual(row["prompt_name"], "Реши задачу")
         self.assertRegex(row["date"], r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}")
 
-    def test_task_without_course_links_nid_only(self):
-        """Без известного курса — nid-only ссылка task.jsp (не admin-вьювер)."""
+    def test_task_without_course_links_default_tree(self):
+        """Без известного курса (старые записи) cid всё равно ставится:
+        DL_DEFAULT_COURSE_ID — единственное дерево задач DL (приписка
+        &cid=<дерево> в конце ссылки не должна пропадать)."""
         su = get_user_model().objects.create_user(
             username="sol-su2", password="x", is_superuser=True, is_staff=True,
         )
@@ -7040,7 +7048,7 @@ class TaskSolutionListTests(_AdminViewRequestMixin, TestCase):
         response = self._view(su)
         rows = response.context_data["sol_rows"]
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["task_url"], "https://dl.gsu.by/task.jsp?nid=9002")
+        self.assertEqual(rows[0]["task_url"], "https://dl.gsu.by/task.jsp?nid=9002&cid=1450")
         self.assertEqual(rows[0]["task_name"], "Задача #9002")
 
     def test_search_filters_rows(self):
@@ -7734,6 +7742,43 @@ class SendSolutionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         solution = TaskSolution.objects.get(task_node_id=101)
         self.assertEqual(solution.programming_language_id, lang.id)
+
+    @patch("ai.dl_api_client.fetch_task_info")
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_tree_path_persisted_from_task_info(self, mock_send, mock_info):
+        """Приписка в дереве задач: tree_path пишется best-effort из
+        get-task-info (поле path) после записи кэша — приписка появляется
+        в списке «Решённые задачи» (шаблон tasksolution_changelist)."""
+        mock_send.return_value = {"queueId": 44, "message": "ok"}
+        mock_info.return_value = {
+            "taskId": 111, "name": "Сумма",
+            "path": "Программирование\\Линейные\\Сумма",
+        }
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 102, "code": "begin end.",
+            "courseId": 1450, "fileExtension": ".pas",
+        })
+        self.assertEqual(response.status_code, 200)
+        solution = TaskSolution.objects.get(task_node_id=102)
+        self.assertEqual(solution.tree_path, "Программирование\\Линейные\\Сумма")
+        kwargs = mock_info.call_args.kwargs
+        self.assertEqual(kwargs.get("session_id"), "SID")
+        self.assertEqual(kwargs.get("course_id"), 1450)
+
+    @patch("ai.dl_api_client.fetch_task_info")
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_tree_path_fetch_failure_does_not_break_submission(self, mock_send, mock_info):
+        """Сбой get-task-info (путь в дереве) не ломает отправку решения и
+        запись кэша — приписка best-effort, повторное решение допишет путь."""
+        mock_send.return_value = {"queueId": 45, "message": "ok"}
+        mock_info.side_effect = Exception("DL down")
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 103, "code": "begin end.",
+            "courseId": 1450, "fileExtension": ".pas",
+        })
+        self.assertEqual(response.status_code, 200)
+        solution = TaskSolution.objects.get(task_node_id=103)
+        self.assertEqual(solution.tree_path, "")
 
     @patch("ai.dl_api_client.send_solution_to_dl")
     def test_topic_and_prompt_persisted_from_last_solve_log(self, mock_send):

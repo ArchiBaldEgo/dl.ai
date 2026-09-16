@@ -46,7 +46,7 @@ from ..services.task_registry import (
     extension_to_language_ids,
     solve_language_options,
 )
-from ..constants import AI_CACHE_KEY_PREFIX
+from ..constants import AI_CACHE_KEY_PREFIX, DL_DEFAULT_COURSE_ID
 from .permissions import can_access_arm, is_superuser_user
 
 # TTL кэша дерева задач курса в Redis (см. admin_arm_solve_load_tree_view).
@@ -98,7 +98,7 @@ def _resolve_active_course_id_for_session(session_id):
         .order_by("-id")
         .first()
     )
-    fallback_course_id = 1450
+    fallback_course_id = DL_DEFAULT_COURSE_ID
     if last_run and last_run.results.exists():
         first_result = last_run.results.first()
         if first_result.task and first_result.task.node_id:

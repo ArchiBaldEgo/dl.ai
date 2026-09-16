@@ -2,9 +2,10 @@
 {% load i18n %}
 
 {% comment %}Список «Решённые задачи (кэш кода)»: строка — дата / задача (ссылка в DL) /
-   язык / тема / препромпт / пользователь / вердикт / использован; клик по
-   строке (кроме ссылки на задачу) раскрывает сохранённый код.
-   Поиск, фильтры и пагинация — из change_list.html (cl).{% endcomment %}
+   приписка — путь в дереве задач DL / язык / тема / препромпт / пользователь /
+   вердикт / использован; клик по строке (кроме ссылки на задачу) раскрывает
+   сохранённый код. Поиск, фильтры и пагинация — из change_list.html (cl).
+   {% endcomment %}
 
 {% block result_list %}
   {% if cl.result_count %}
@@ -32,6 +33,9 @@
                 {% else %}
                   {{ row.task_name }}
                 {% endif %}
+                {% if row.tree_path %}
+                  <div class="ai-sol-tree-path" title="Путь задачи в дереве задач DL">{{ row.tree_path }}</div>
+                {% endif %}
               </td>
               <td>{{ row.lang_name }}</td>
               <td>{{ row.topic_name }}</td>
@@ -50,6 +54,7 @@
                     <h4>Детали</h4>
                     <div class="ai-sol-detail-meta">
                       <div><strong>Комментарий DL:</strong> {{ row.obj.dl_comment|default:"—" }}</div>
+                      <div><strong>Дерево задач:</strong> {{ row.tree_path|default:"—" }}</div>
                       <div><strong>Модель:</strong> {{ row.obj.model_title|default:row.obj.model_key|default:"—" }}</div>
                       <div><strong>Тема:</strong> {{ row.topic_name }}{% if row.obj.topic_id %} (id {{ row.obj.topic_id }}){% endif %}</div>
                       <div><strong>Препромпт:</strong> {{ row.prompt_name }}{% if row.obj.prompt_id %} (id {{ row.obj.prompt_id }}){% endif %}</div>

@@ -15,7 +15,7 @@ from django.utils.html import strip_tags
 from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
-from ..constants import MOSCOW_TZ
+from ..constants import DL_DEFAULT_COURSE_ID, MOSCOW_TZ
 from ..dl_api_client import (
     DLApiError,
     DLApiUnavailable,
@@ -47,16 +47,17 @@ def _batch_run_id_from_log(log):
 def dl_task_url(node_id, course_id=None):
     """Пользовательская ссылка на задачу в DL (не admin-вьювер).
 
-    ``/task.jsp?nid=<узел>&cid=<курс>`` (nid первым, cid вторым). Без
-    известного курса — nid-only фолбэк (старые записи; DL сопоставит
-    активный курс сессии). Просмотр условия от имени админа DL
-    (fullTaskviewer) не используется.
+    ``/task.jsp?nid=<узел>&cid=<курс>`` (nid первым, cid вторым). cid —
+    это дерево задач: приписка ``&cid=`` ставится ВСЕГДА — если курс записи
+    не известен (старые записи кэша/журнала), подставляем единственное
+    дерево DL (DL_DEFAULT_COURSE_ID), иначе DL откроет задачу без контекста
+    дерева. Просмотр условия от имени админа DL (fullTaskviewer) не
+    используется.
     """
     if not node_id:
         return None
-    if course_id:
-        return f"https://dl.gsu.by/task.jsp?nid={node_id}&cid={course_id}"
-    return f"https://dl.gsu.by/task.jsp?nid={node_id}"
+    cid = course_id or DL_DEFAULT_COURSE_ID
+    return f"https://dl.gsu.by/task.jsp?nid={node_id}&cid={cid}"
 
 
 # Отображение статуса batch-прогона (AIModelTestRun.status) в журналах:
@@ -211,8 +212,8 @@ class AIRequestLogAdmin(admin.ModelAdmin):
     topic_name_display.short_description = "Тема"
 
     def task_display(self, obj):
-        """Имя задачи; пользовательская ссылка в DL — только с известным
-        курсом (см. dl_task_url), иначе просто название (без ссылки)."""
+        """Имя задачи; пользовательская ссылка в DL — всегда с cid (дерево
+        задач: курс записи или единственное дерево DL, см. dl_task_url)."""
         if obj.task_node_id:
             name = obj.task_name or str(obj.task_node_id)
             url = dl_task_url(obj.task_node_id, getattr(obj, "course_id", None))
