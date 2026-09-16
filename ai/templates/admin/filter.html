@@ -1,6 +1,6 @@
-{# Группа фильтров changelist — горизонтальные чипы вместо стокового details.
+{% comment %}Группа фильтров changelist — горизонтальные чипы вместо стокового details.
    Тот же контракт choices (choice.selected / query_string / display), что и в
-   стоковом admin/filter.html; filters.js не нужен — нет details. #}
+   стоковом admin/filter.html; filters.js не нужен — нет details.{% endcomment %}
 {% load i18n %}
 <div class="ai-filter-chip-group" data-filter-title="{{ title }}">
   <h3>{% blocktranslate with filter_title=title %} By {{ filter_title }} {% endblocktranslate %}</h3>

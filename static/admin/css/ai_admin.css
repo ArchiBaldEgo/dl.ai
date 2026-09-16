@@ -727,29 +727,6 @@ a.ai-docs-chapter:hover {
   color: var(--body-quiet-color);
 }
 
-.ai-sol-verdict {
-  display: inline-block;
-  padding: 2px 10px;
-  border-radius: 10px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.ai-sol-verdict-passed {
-  background: #e6f4ea;
-  color: #1e7b34;
-}
-
-.ai-sol-verdict-failed {
-  background: #fdecea;
-  color: #b42318;
-}
-
-.ai-sol-verdict-pending {
-  background: var(--darkened-bg);
-  color: var(--body-quiet-color);
-}
-
 .ai-sol-empty {
   padding: 12px 16px;
   color: var(--body-quiet-color);

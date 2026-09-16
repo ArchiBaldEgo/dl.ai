@@ -48,12 +48,15 @@ def dl_task_url(node_id, course_id=None):
     """Пользовательская ссылка на задачу в DL (не admin-вьювер).
 
     ``/task.jsp?cid=<курс>&nid=<узел>`` — та же форма, что и в
-    ensure_course_session (ai/dl_api_client.py). Без курса ссылку не строим
-    (возвращаем None) — просмотр условия от имени админа DL запрещён.
+    ensure_course_session (ai/dl_api_client.py). Без известного курса —
+    nid-only (DL сам сопоставит активный курс сессии). Просмотр условия
+    от имени админа DL (fullTaskviewer) не используется.
     """
-    if not node_id or not course_id:
+    if not node_id:
         return None
-    return f"https://dl.gsu.by/task.jsp?cid={course_id}&nid={node_id}"
+    if course_id:
+        return f"https://dl.gsu.by/task.jsp?cid={course_id}&nid={node_id}"
+    return f"https://dl.gsu.by/task.jsp?nid={node_id}"
 
 
 # Отображение статуса batch-прогона (AIModelTestRun.status) в журналах:

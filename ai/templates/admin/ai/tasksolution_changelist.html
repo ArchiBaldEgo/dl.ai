@@ -1,10 +1,10 @@
 {% extends "admin/change_list.html" %}
 {% load i18n %}
 
-{# Список «Решённые задачи (кэш кода)»: строка — дата / задача (ссылка в DL) /
+{% comment %}Список «Решённые задачи (кэш кода)»: строка — дата / задача (ссылка в DL) /
    язык / тема / препромпт / пользователь / вердикт / использован; клик по
    строке (кроме ссылки на задачу) раскрывает сохранённый код.
-   Поиск, фильтры и пагинация — из change_list.html (cl). #}
+   Поиск, фильтры и пагинация — из change_list.html (cl).{% endcomment %}
 
 {% block result_list %}
   {% if cl.result_count %}
@@ -18,7 +18,6 @@
             <th scope="col">Тема</th>
             <th scope="col">Препромпт</th>
             <th scope="col">Пользователь</th>
-            <th scope="col">Вердикт</th>
             <th scope="col">Из кэша</th>
           </tr>
         </thead>
@@ -38,11 +37,10 @@
               <td>{{ row.topic_name }}</td>
               <td>{{ row.prompt_name }}</td>
               <td>{{ row.user }}</td>
-              <td><span class="ai-sol-verdict ai-sol-verdict-{{ row.obj.verdict }}">{{ row.verdict_display }}</span></td>
               <td>{{ row.times_used }}</td>
             </tr>
             <tr class="ai-sol-detail-row">
-              <td colspan="8" class="ai-sol-detail-cell">
+              <td colspan="7" class="ai-sol-detail-cell">
                 <div class="ai-sol-detail-content">
                   <div class="ai-sol-detail-section ai-sol-code-section">
                     <h4>Код решения{% if row.obj.file_extension %} ({{ row.obj.file_extension }}){% endif %}</h4>

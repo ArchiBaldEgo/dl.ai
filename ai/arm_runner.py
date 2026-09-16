@@ -773,6 +773,17 @@ _THINK_RE = _re.compile(
     _re.DOTALL | _re.IGNORECASE,
 )
 
+# Маркеры «строка похожа на код»: синтаксис (скобка после идентификатора,
+# ; { } =) и ключевые слова распространённых языков (Pascal/C/Python/asm).
+# Нужен, чтобы текст без markdown-фенсов принимался как код только тогда,
+# когда он и правда код, а не рассуждения модели (reasoning попадает в ответ
+# целиком — например, фолбэк ollama/sambanova на thinking-поле).
+_CODE_HINT_RE = _re.compile(
+    r"\w\(|[;{}=]|\b(?:begin|end|program|var|const|procedure|function|mov|push|pop|jmp|"
+    r"cmp|call|ret|include|import|def|class|print|writeln|printf|main|void|int|char|return)\b",
+    _re.IGNORECASE,
+)
+
 
 def _strip_think_blocks(text):
     """Удалить think-блоки рассуждений вместе с содержимым."""
@@ -781,12 +792,25 @@ def _strip_think_blocks(text):
     return _THINK_RE.sub("", text)
 
 
+def _looks_like_code(text):
+    """Похож ли текст без markdown-фенсов на код, а не на прозу-рассуждения.
+
+    Доля строк с кодовыми маркерами (синтаксис/ключевые слова) должна быть
+    ощутимой: у рассуждений она околонулевая, у кода — высокая.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    hints = sum(1 for line in lines if _CODE_HINT_RE.search(line))
+    return hints >= 1 and hints / len(lines) >= 0.4
+
+
 def _extract_code_from_response(text):
     """Extract pure code from an AI response.
 
     Strips markdown code fences (```cpp\n...\n```) and returns the code inside.
-    If no fences found, returns "" — unfenced text is model reasoning/prose,
-    not code.
+    Without fences the text is accepted as code only when it looks like code —
+    reasoning prose (no fences) yields "" instead.
     """
     if not text:
         return ""
@@ -794,6 +818,8 @@ def _extract_code_from_response(text):
     if matches:
         # Return the longest code block (likely the solution).
         return max(matches, key=len).strip()
+    if _looks_like_code(text):
+        return text.strip()
     return ""
 
 

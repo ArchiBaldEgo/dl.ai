@@ -6,10 +6,10 @@
   {% include "admin/ai/_ai_back_nav.html" %}
 
   {% if is_batch_log %}
-    {# Пакетное решение (ARM): показываем ТОЛЬКО таблицу результатов — ту же,
+    {% comment %}Пакетное решение (ARM): показываем ТОЛЬКО таблицу результатов — ту же,
        что на странице «Пакетное решение» после прогона (общий partial
        _ai_batch_results.html / window.ArmBatchResults). Никаких метаданных
-       запроса и прочих блоков — по ТЗ это именно «развёртка» результата. #}
+       запроса и прочих блоков — по ТЗ это именно «развёртка» результата.{% endcomment %}
     <h1>Пакетное решение (ARM) — результаты прогона</h1>
     <div class="ai-batch-run-meta">
       <div><strong>Статус:</strong> <span class="{% if batch_snapshot.run_status == 'completed' %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">{{ batch_snapshot.run_status_display|default:"—" }}</span></div>

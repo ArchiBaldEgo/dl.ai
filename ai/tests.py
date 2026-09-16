@@ -6984,9 +6984,9 @@ class BatchRunStatusDisplayTests(SimpleTestCase):
 
 
 class TaskSolutionListTests(_AdminViewRequestMixin, TestCase):
-    """Кастомный список «Решённые задачи»: название задачи и имя языка вместо
-    сырых id, дата МСК, пользовательская ссылка task.jsp?cid=…&nid=… (не
-    admin-вьювер), препромпт юзера; фильтр по вердикту работает."""
+    """Кастомный список «Решённые задачи»: название задачи (ссылка в DL по
+    клику), имя языка вместо сырого id, дата МСК, препромпт юзера; без
+    фильтров (в кэш попадают только passed) — работает поиск."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -7027,8 +7027,8 @@ class TaskSolutionListTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(row["prompt_name"], "Реши задачу")
         self.assertRegex(row["date"], r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}")
 
-    def test_task_without_course_has_no_link(self):
-        """Без известного курса ссылки в DL нет (admin-вьювер не используем)."""
+    def test_task_without_course_links_nid_only(self):
+        """Без известного курса — nid-only ссылка task.jsp (не admin-вьювер)."""
         su = get_user_model().objects.create_user(
             username="sol-su2", password="x", is_superuser=True, is_staff=True,
         )
@@ -7039,20 +7039,23 @@ class TaskSolutionListTests(_AdminViewRequestMixin, TestCase):
         response = self._view(su)
         rows = response.context_data["sol_rows"]
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["task_url"], "")
+        self.assertEqual(rows[0]["task_url"], "https://dl.gsu.by/task.jsp?nid=9002")
         self.assertEqual(rows[0]["task_name"], "Задача #9002")
 
-    def test_verdict_filter(self):
+    def test_search_filters_rows(self):
+        """Поиск (без list_filter — в кэш попадают только passed) работает."""
         su = get_user_model().objects.create_user(
             username="sol-su3", password="x", is_superuser=True, is_staff=True,
         )
         TaskSolution.objects.create(
             task_node_id=9003, verdict=TaskSolution.VERDICT_PASSED, code="ok",
+            prompt_name="Реши задачу",
         )
         TaskSolution.objects.create(
-            task_node_id=9004, verdict=TaskSolution.VERDICT_FAILED, code="no",
+            task_node_id=9004, verdict=TaskSolution.VERDICT_PASSED, code="no",
+            prompt_name="Другой промпт",
         )
-        response = self._view(su, params={"verdict__exact": TaskSolution.VERDICT_PASSED})
+        response = self._view(su, params={"q": "Реши задачу"})
         rows = response.context_data["sol_rows"]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["obj"].task_node_id, 9003)
@@ -7074,6 +7077,27 @@ class ArmCodeExtractionTests(SimpleTestCase):
     def test_no_fences_returns_empty(self):
         self.assertEqual(self._extract("We need answer code only, no explanations."), "")
         self.assertEqual(self._extract(""), "")
+
+    def test_no_fences_code_like_text_is_accepted(self):
+        """Код без фенсов (фейковые/короткие ответы моделей) не теряется."""
+        self.assertEqual(
+            self._extract("program a; begin writeln(1); end."),
+            "program a; begin writeln(1); end.",
+        )
+
+    def test_prose_with_stray_punctuation_is_rejected(self):
+        """Рассуждения со случайными ';'/скобками — не код (реальный кейс из чата)."""
+        prose = (
+            "We need answer code only, no explanations.\n"
+            "Need solve assembler i86.\n"
+            "Need infer syntax? Likely x86 16-bit? maybe MASM/TASM.\n"
+            "Need determine variables sizes: a,b,RES word (2 bytes signed?); c,d byte (signed).\n"
+            "Need compute based on condition b>0 or c>0 -> first; if b<0 and c<=0 -> second.\n"
+            "Need produce assembly code.\n"
+            "Need include data segment? Need compute expression.\n"
+            "Let's parse expressions carefully.."
+        )
+        self.assertEqual(self._extract(prose), "")
 
     def test_strip_think_blocks_full_and_unclosed(self):
         from ai.arm_runner import _strip_think_blocks
@@ -7104,6 +7128,25 @@ class ArmCodeExtractionTests(SimpleTestCase):
             chr(60) + "think>Need solve assembler i86. Need infer syntax."
         )
         self.assertEqual(self._extract(text), "")
+
+
+class TemplateInlineCommentTests(SimpleTestCase):
+    """Регрессия: однострочные комментарии {# … #} в шаблонах НЕ могут
+    переносить строки — Django рендерит их содержимое как текст прямо
+    на странице (реальный кейс с чипами фильтров). Многострочный текст
+    оформляем тегом {% comment %}…{% endcomment %}."""
+
+    def test_no_multiline_inline_comments(self):
+        import glob
+        import os
+        base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates")
+        offenders = []
+        for path in glob.glob(os.path.join(base, "**", "*.html"), recursive=True):
+            with open(path, encoding="utf-8") as fh:
+                for lineno, line in enumerate(fh, 1):
+                    if "{#" in line and "#}" not in line:
+                        offenders.append(f"{os.path.relpath(path, base)}:{lineno}")
+        self.assertEqual(offenders, [])
 
 
 class BatchRunNameTests(TestCase):

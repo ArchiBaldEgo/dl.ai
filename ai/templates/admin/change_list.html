@@ -1,9 +1,9 @@
-{# Копия стокового admin/change_list.html (Django 5.1.4) с одним отличием:
+{% extends "admin/base_site.html" %}
+{% comment %}Копия стокового admin/change_list.html (Django 5.1.4) с одним отличием:
    панель фильтров (#changelist-filter) вынесена ИЗНУТРИ #changelist наверх —
    рендерится сразу после object-tools, перед таблицей, горизонтальной
    полосой (см. ai-filter-chips в changelists.css). При обновлении Django
-   сверять со стоковым шаблоном версии. #}
-{% extends "admin/base_site.html" %}
+   сверять со стоковым шаблоном версии.{% endcomment %}
 {% load i18n admin_urls static admin_list %}
 
 {% block extrastyle %}

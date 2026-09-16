@@ -78,6 +78,8 @@ class TopicAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     form = TopicForm
     list_display = ('topic_name_ru', 'programming_language')
     list_filter = ('programming_language',)
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     search_fields = ('topic_name_ru', 'topic_name_en', 'topic_name_fr')
     raw_id_fields = ('programming_language',)
     fieldsets = (
@@ -139,6 +141,8 @@ class PromptAdmin(admin.ModelAdmin):
     # Режим первым: чипы «Все / Реши задачу / В чём ошибка» — главный
     # селектор списка (см. MODE_SOLVE / MODE_FIND_ERROR).
     list_filter = ('mode', PromptUserIdFilter, 'topic__programming_language', 'topic')
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     list_per_page = 25
     search_fields = ('prompt_name_ru', 'prompt_text_ru', 'owner__username', '=owner__id')
     autocomplete_fields = ("owner", "editors")
@@ -365,6 +369,8 @@ class SharedPromptAdmin(admin.ModelAdmin):
     list_display = ('prompt_name_ru', 'mode', 'language_list', 'updated_at', 'owner_username')
     list_display_links = ('prompt_name_ru',)
     list_filter = ('mode', 'programming_languages')
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     search_fields = ('prompt_name_ru', 'prompt_text_ru')
     autocomplete_fields = ('owner', 'editors')
     # 'editors' is rendered by autocomplete_fields above (autocomplete wins in
@@ -427,6 +433,9 @@ class SharedPromptAdmin(admin.ModelAdmin):
 
 class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     list_display = ("is_enabled", "updated_at")
+    # favorites_epoch на форме не нужен (меняется только командой
+    # reset_favorites_epoch); updated_at — авторасчётное, тоже не редактируем.
+    exclude = ("favorites_epoch", "updated_at")
     change_form_template = "admin/ai/aiappsettings_change_form.html"
 
     def has_add_permission(self, request):
@@ -465,6 +474,8 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                     "user_link", "created_at", "updated_at")
     list_display_links = ("external_user_id",)
     list_filter = ("created_at", "updated_at")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     search_fields = ("external_user_id", "external_login",
                      "external_first_name", "external_last_name",
                      "dl_email", "education_school_no", "user__username")
@@ -516,6 +527,8 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
     list_display = ("last_name", "first_name", "dl_id", "email", "is_staff_badge")
     list_display_links = ("dl_id",)
     list_filter = ("is_staff", "is_superuser", "groups")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     search_fields = ("username", "first_name", "last_name", "email")
     ordering = ("last_name", "first_name")
 
@@ -556,6 +569,8 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     list_display = ("node_id", "name", "topic", "programming_language", "file_extension", "active", "updated_at")
     list_display_links = ("node_id", "name")
     list_filter = ("active", "topic", "topic__programming_language")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     list_editable = ("file_extension", "active")
     search_fields = ("node_id", "task_id", "name", "statement")
     autocomplete_fields = ("topic", "programming_language")
@@ -622,7 +637,8 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 
     change_list_template = "admin/ai/tasksolution_changelist.html"
 
-    list_filter = ("verdict",)
+    # Без list_filter: в кэш попадают только решения, прошедшие тестирование
+    # (verdict=passed всегда); на странице нужны только поиск и пагинация.
     search_fields = ("task_node_id", "external_user_id", "model_key", "topic_name", "prompt_name")
     # Каждая строка несёт полный код решения — режем страницу.
     list_per_page = 25
@@ -676,7 +692,6 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                 "topic_name": s.topic_name or "—",
                 "prompt_name": s.prompt_name or "—",
                 "user": s.external_user_id or "—",
-                "verdict_display": s.get_verdict_display(),
                 "times_used": s.times_used,
                 "log_url": f"/ai/admin/ai/airequestlog/{s.test_log_id}/" if s.test_log_id else "",
             })
@@ -719,6 +734,8 @@ class PromptTestCaseAdmin(admin.ModelAdmin):
     list_display = ("name", "mode", "topic", "programming_language", "comparator", "active", "updated_at")
     list_display_links = ("name",)
     list_filter = ("mode", "active", "topic", "comparator")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     list_editable = ("active",)
     search_fields = ("name", "input_text", "expected_text")
     autocomplete_fields = ("topic", "programming_language")
@@ -747,6 +764,8 @@ class PromptTestRunAdmin(admin.ModelAdmin):
 
     list_display = ("run_id", "model_title", "prompt_name", "status", "total_cases", "started_at", "finished_at")
     list_filter = ("status", "model_key")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     search_fields = ("run_id", "model_title", "prompt_name", "error_message")
     readonly_fields = (
         "run_id", "status", "model_key", "model_title", "prompt_id", "prompt_name",
