@@ -47,15 +47,15 @@ def _batch_run_id_from_log(log):
 def dl_task_url(node_id, course_id=None):
     """Пользовательская ссылка на задачу в DL (не admin-вьювер).
 
-    ``/task.jsp?cid=<курс>&nid=<узел>`` — та же форма, что и в
-    ensure_course_session (ai/dl_api_client.py). Без известного курса —
-    nid-only (DL сам сопоставит активный курс сессии). Просмотр условия
-    от имени админа DL (fullTaskviewer) не используется.
+    ``/task.jsp?nid=<узел>&cid=<курс>`` (nid первым, cid вторым). Без
+    известного курса — nid-only фолбэк (старые записи; DL сопоставит
+    активный курс сессии). Просмотр условия от имени админа DL
+    (fullTaskviewer) не используется.
     """
     if not node_id:
         return None
     if course_id:
-        return f"https://dl.gsu.by/task.jsp?cid={course_id}&nid={node_id}"
+        return f"https://dl.gsu.by/task.jsp?nid={node_id}&cid={course_id}"
     return f"https://dl.gsu.by/task.jsp?nid={node_id}"
 
 

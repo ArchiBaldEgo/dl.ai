@@ -71,6 +71,19 @@
             </h3>{% endif %}
           </div>{% endif %}
           {% for spec in cl.filter_specs %}{% admin_list_filter cl spec %}{% endfor %}
+          <script>
+            // Селекторы фильтров: выбор опции = переход на choice.query_string
+            // (в ней уже сохранены остальные активные фильтры и поиск).
+            (function () {
+              var bar = document.getElementById('changelist-filter');
+              if (!bar) return;
+              bar.addEventListener('change', function (event) {
+                var select = event.target.closest('select[data-ai-filter]');
+                if (!select) return;
+                window.location.href = window.location.pathname + select.value;
+              });
+            })();
+          </script>
         </nav>
       {% endif %}
     {% endblock %}

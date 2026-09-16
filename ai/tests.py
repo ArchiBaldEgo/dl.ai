@@ -12,6 +12,7 @@ from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import SimpleTestCase, RequestFactory, TestCase, override_settings
 from pathlib import Path
 import json
+import re
 import tempfile
 import time
 
@@ -7022,7 +7023,7 @@ class TaskSolutionListTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(len(rows), 1)
         row = rows[0]
         self.assertEqual(row["task_name"], "Сумма чисел")
-        self.assertEqual(row["task_url"], "https://dl.gsu.by/task.jsp?cid=1450&nid=9001")
+        self.assertEqual(row["task_url"], "https://dl.gsu.by/task.jsp?nid=9001&cid=1450")
         self.assertEqual(row["lang_name"], "Pascal")
         self.assertEqual(row["prompt_name"], "Реши задачу")
         self.assertRegex(row["date"], r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}")
@@ -7059,6 +7060,62 @@ class TaskSolutionListTests(_AdminViewRequestMixin, TestCase):
         rows = response.context_data["sol_rows"]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["obj"].task_node_id, 9003)
+
+
+class FilterSelectBarTests(_AdminViewRequestMixin, TestCase):
+    """Фильтры changelist — селекторы НАД таблицей (не чипы и не боковая
+    колонка): каждая группа рендерится как select[data-ai-filter], активная
+    опция помечена selected, выбор уводит на choice.query_string."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def _render(self, params=None):
+        from ai.admin.models import PromptAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import Prompt
+
+        su = get_user_model().objects.create_user(
+            username="filt-su", password="x", is_superuser=True, is_staff=True,
+        )
+        admin = PromptAdmin(Prompt, ai_admin_site)
+        request = self._admin_request(
+            su, path="/ai/admin/ai/prompt/", data=params or {},
+        )
+        response = admin.changelist_view(request)
+        self.assertEqual(response.status_code, 200)
+        return response.rendered_content
+
+    def test_filters_render_as_selects(self):
+        html = self._render()
+        self.assertIn('<select data-ai-filter', html)
+        # Каждая группа — подпись + селектор; «Все» — первая опция.
+        groups = re.findall(r'<label class="ai-filter-select">(.*?)</label>', html, re.DOTALL)
+        self.assertTrue(groups)
+        for group in groups:
+            self.assertIn("<select", group)
+            self.assertIn("<option", group)
+
+    def test_active_filter_preselected_and_preserved_in_target(self):
+        """Активный фильтр ?mode__exact=solve: опция selected, опция «Все»
+        сбрасывает свой параметр («?») — query_string приходит из стокового
+        контракта choices (ChoicesFieldListFilter, параметр mode__exact)."""
+        from ai.models import ProgrammingLanguage, Topic
+
+        lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        Topic.objects.create(topic_name_ru="Линейные", programming_language=lang)
+        html = self._render(params={"mode__exact": "solve"})
+        mode_group = re.search(
+            r'<select data-ai-filter[^>]*>(.*?)</select>', html, re.DOTALL,
+        )
+        self.assertIn('value="?mode__exact=solve" selected', mode_group.group(1))
+        self.assertIn('value="?"', mode_group.group(1))
+        # Языковая группа предлагает созданный язык.
+        self.assertIn("Pascal", html)
+
+    def test_chip_markup_is_gone(self):
+        html = self._render()
+        self.assertNotIn("ai-filter-chip-group", html)
 
 
 class ArmCodeExtractionTests(SimpleTestCase):

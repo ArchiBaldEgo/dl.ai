@@ -96,11 +96,9 @@ thead th.sorted .text {
     margin-right: 0;
 }
 
-#changelist-filter li.selected {
-    border-left: none;
-    border-right: none;
-    padding-left: 0;
-    margin-left: 0;
+#changelist-filter select[data-ai-filter] {
+    padding-left: 6px;
+    padding-right: 6px;
 }
 
 #changelist table tbody td:first-child, #changelist table tbody th:first-child {

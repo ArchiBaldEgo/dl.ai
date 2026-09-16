@@ -492,7 +492,7 @@ class TaskSolution(models.Model):
 
     task_node_id = models.PositiveIntegerField(db_index=True, verbose_name="ID задачи DL")
     # Курс, в контексте которого задача тестировалась (из send-solution).
-    # Нужен для пользовательской ссылки на задачу: /task.jsp?cid=…&nid=…
+    # Нужен для пользовательской ссылки на задачу: /task.jsp?nid=…&cid=…
     # (admin-вьювер fullTaskviewer не используется — просмотр от имени админа).
     course_id = models.IntegerField(null=True, blank=True, verbose_name="ID курса DL")
     programming_language_id = models.IntegerField(null=True, blank=True, verbose_name="ID языка программирования")

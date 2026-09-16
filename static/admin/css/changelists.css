@@ -129,14 +129,14 @@
     word-break: break-word;
 }
 
-/* FILTER BAR — горизонтальная полоса фильтров НАД таблицей
+/* FILTER BAR — горизонтальная строка СЕЛЕКТОРОВ фильтров НАД таблицей
    (ai/templates/admin/change_list.html + filter.html; не боковая колонка). */
 
 #changelist-filter {
     display: flex;
     flex-wrap: wrap;
-    align-items: flex-start;
-    gap: 5px 30px;
+    align-items: flex-end;
+    gap: 8px 20px;
     background: var(--darkened-bg);
     padding: 10px 15px;
     margin: 0 0 15px;
@@ -158,76 +158,44 @@
     align-self: center;
 }
 
-#changelist-filter h3 {
-    font-weight: 400;
-    padding: 0;
-    margin: 0 0 4px;
-}
-
 #changelist-filter #changelist-filter-extra-actions {
     font-size: 0.8125rem;
     align-self: center;
+    margin-bottom: 4px;
 }
 
 #changelist-filter #changelist-filter-extra-actions h3 {
     margin: 0;
+    font-weight: 400;
 }
 
-/* Группа фильтров (ai/templates/admin/filter.html): заголовок + чипы. */
-#changelist-filter .ai-filter-chip-group {
-    flex: 0 1 auto;
+/* Группа фильтров (ai/templates/admin/filter.html): подпись + селектор. */
+#changelist-filter .ai-filter-select {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    margin: 0;
+    font-weight: 400;
 }
 
-#changelist-filter .ai-filter-chip-group h3 {
-    font-size: 0.75rem;
+#changelist-filter .ai-filter-select-label {
+    font-size: 0.6875rem;
     text-transform: uppercase;
     letter-spacing: 0.3px;
     color: var(--body-quiet-color);
 }
 
-#changelist-filter ul {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
+#changelist-filter select[data-ai-filter] {
+    min-width: 170px;
+    max-width: 340px;
+    height: 2.2em;
     margin: 0;
-    padding: 0;
-    border-bottom: none;
-}
-
-#changelist-filter li {
-    list-style-type: none;
-    margin: 0;
-    padding: 0;
-}
-
-#changelist-filter a {
-    display: inline-block;
-    padding: 3px 10px;
-    border: 1px solid var(--hairline-color);
-    border-radius: 12px;
+    padding: 2px 6px;
     background: var(--body-bg);
-    color: var(--body-quiet-color);
-    word-break: break-word;
+    border: 1px solid var(--hairline-color);
+    border-radius: 4px;
     font-size: 0.8125rem;
-}
-
-#changelist-filter li.selected a {
-    background: var(--link-selected-fg);
-    border-color: var(--link-selected-fg);
-    color: var(--button-fg);
-}
-
-#changelist-filter a:focus, #changelist-filter a:hover,
-#changelist-filter li.selected a:focus,
-#changelist-filter li.selected a:hover {
-    color: var(--link-hover-color);
-    border-color: var(--link-hover-color);
-}
-
-#changelist-filter li.selected a:focus,
-#changelist-filter li.selected a:hover {
-    color: var(--button-fg);
-    background: var(--link-hover-color);
 }
 
 /* DATE DRILLDOWN */
