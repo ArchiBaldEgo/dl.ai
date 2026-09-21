@@ -763,21 +763,76 @@ def start_arm_sequential_run(
 import re as _re
 
 _CODE_FENCE_RE = _re.compile(r"```(?:[a-zA-Z]*\n)?(.*?)```", _re.DOTALL)
+# Сырые рассуждения моделей (web-пулы в DeepThink-режиме, thinking-fallback
+# ollama.py при пустом content): think-блоки вырезаются ДО поиска оградок,
+# иначе оградка внутри «мыслей» выигрывает как «самый длинный блок».
+_THINK_BLOCK_RE = _re.compile(
+    # Литерал тега в исходнике хрупок (как в decide_task.js THINK_OPEN/THINK_CLOSE)
+    # и рвётся при правках — собираем регулярку из кусков.
+    "<" + "think" + ">.*?(?:<" + "/think>|$)",
+    _re.DOTALL | _re.IGNORECASE,
+)
+
+
+# Функциональные слова EN/RU. Если их доля в тексте высока — это связная проза
+# (цепочка рассуждений модели), а не код. Ключевые слова Pascal/ассемблера
+# (if/then/else/for/to/begin/end/do/with/uses/case, mov/idiv/…) в список НЕ
+# входят, чтобы настоящий код с плотными операторами не браковался как проза.
+_PROSE_STOPWORDS = frozenset({
+    "we", "need", "needs", "the", "this", "that", "these", "those",
+    "it", "its", "is", "are", "was", "were", "be", "been", "being",
+    "our", "their", "they", "them", "have", "has", "had",
+    "can", "could", "will", "would", "should", "must", "shall",
+    "may", "might", "also", "but", "because", "which", "what",
+    "how", "why", "when", "where", "there", "here", "into", "from",
+    "per", "via", "please", "note", "just", "very", "more", "most",
+    "some", "any", "each", "both", "one", "two", "now", "so", "all",
+    "нужно", "нужен", "нужна", "если", "чтобы", "это", "этот", "эта",
+    "как", "или", "также", "должен", "должна", "можно", "нельзя",
+    "потом", "затем", "поэтому", "который", "которая", "быть", "было",
+    "будут", "может", "наш", "наши", "они", "она", "его", "их",
+    "для", "при", "всё", "все", "так", "вот", "есть", "там", "где",
+    "когда", "почему", "какой",
+})
+_PROSE_WORD_RE = _re.compile(r"[A-Za-zА-Яа-яЁё]{2,}")
+
+
+def _looks_like_prose(text):
+    """True, если текст похож на связную прозу (рассуждения модели), а не код.
+
+    Порог подобран на реальном CoT (доля функциональных слов ≫ 0.15 при сотнях
+    слов), а «голый» код и код с русскими комментариями долю не набирают.
+    """
+    words = _PROSE_WORD_RE.findall(text)
+    if len(words) < 20:
+        return False
+    hits = sum(1 for w in words if w.lower() in _PROSE_STOPWORDS)
+    return hits >= 12 and hits / len(words) >= 0.15
 
 
 def _extract_code_from_response(text):
     """Extract pure code from an AI response.
 
     Strips markdown code fences (```cpp\n...\n```) and returns the code inside.
-    If no fences found, returns the whole text (it may be pure code already).
+    Think-блоки вырезаются до поиска оградок; блоки-оградки, похожие на прозу
+    (цепочка рассуждений), отбрасываются — иначе «самый длинный блок» может
+    оказаться рассуждением, а не кодом. Если кода в ответе нет вовсе,
+    возвращается пустая строка (воркер засчитает «код не извлечён»), а не
+    простыня рассуждений. Ответ без оградок возвращается как есть, только если
+    сам не является прозой (может быть «голым» кодом).
     """
     if not text:
         return ""
-    matches = _CODE_FENCE_RE.findall(text)
+    cleaned = _THINK_BLOCK_RE.sub("", text).strip()
+    matches = _CODE_FENCE_RE.findall(cleaned)
+    code_blocks = [m for m in matches if not _looks_like_prose(m)]
+    if code_blocks:
+        # Return the longest non-prose code block (likely the solution).
+        return max(code_blocks, key=len).strip()
     if matches:
-        # Return the longest code block (likely the solution).
-        return max(matches, key=len).strip()
-    return text.strip()
+        # Оградки есть, но все похожи на прозу — кода в ответе нет.
+        return ""
+    return "" if _looks_like_prose(cleaned) else cleaned
 
 
 def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None, course_id=None):
@@ -1118,7 +1173,7 @@ def _run_batch_job_worker(
                         )
                         if not code_only:
                             verdict = _VERDICT_FAILED
-                            dl_test_comment = "Модель не вернула код для тестирования"
+                            dl_test_comment = "Не удалось извлечь код из ответа модели"
                         elif can_run_dl:
                             dl_result = _test_solution_on_dl(
                                 session_id, task.node_id, code_only, effective_ext,

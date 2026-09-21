@@ -2334,6 +2334,76 @@ class TaskModelTests(TestCase):
         self.assertTrue(t.active)
 
 
+class ExtractCodeFromResponseTests(SimpleTestCase):
+    """_extract_code_from_response: оградки, проза и think-блоки (ARM batch).
+
+    Регрессия на баг: «Извлечённый код программы» получал цепочку рассуждений
+    модели («We need answer solve task…») вместо кода.
+    """
+
+    def setUp(self):
+        from ai.arm_runner import _extract_code_from_response
+        self.extract = _extract_code_from_response
+
+    # Литерал think-тега в исходнике хрупок (см. decide_task.js THINK_OPEN) —
+    # собираем из кусков.
+    THINK = "<" + "think>"
+    THINK_END = "<" + "/think>"
+
+    def test_plain_code_without_fences_passthrough(self):
+        code = "program a; begin writeln(1); end."
+        self.assertEqual(self.extract(code), code)
+
+    def test_code_fence_extracted(self):
+        text = "Вот решение:\n```asm\nmov ax, 1\nadd ax, 2\n```\nУдачи!"
+        self.assertEqual(self.extract(text), "mov ax, 1\nadd ax, 2")
+
+    def test_cot_without_fences_returns_empty(self):
+        cot = (
+            "We need answer solve task in i8086 assembly per rules. "
+            "Need provide code only. We need check the condition first, "
+            "it is simple: if y >= x then we must compute the product and "
+            "the quotient, so all operands can be converted to words, "
+            "and the result is stored in R because idiv needs signed "
+            "division here. We need use intermediate variables for that."
+        )
+        self.assertEqual(self.extract(cot), "")
+
+    def test_prose_fence_skipped_real_code_chosen(self):
+        prose = (
+            "Need check the condition, it is simple: all operands "
+            "are converted to words first, so we must use idiv and "
+            "the result is stored in R. We need be careful with the "
+            "signed division because it is not the same as div, and "
+            "the quotient can be wrong if we forget cwd. There is no "
+            "overflow in our example, so it is fine."
+        )
+        real = "mov al, a\ncbw\nmov a_16, ax\nidiv b_16\nmov R, ax"
+        text = f"```asm\n{prose}\n```\n```asm\n{real}\n```"
+        self.assertEqual(self.extract(text), real)
+
+    def test_think_wrapped_code_extracted(self):
+        think = (
+            self.THINK + "Need think about the condition, we must check "
+            "the variables first, it is simple enough for the signed "
+            "arithmetic and the result is stored in R." + self.THINK_END
+        )
+        code = "mov ax, x\nsub ax, y\nimul a_16\nmov R, ax"
+        text = f"{think}\n```asm\n{code}\n```"
+        self.assertEqual(self.extract(text), code)
+
+    def test_all_fences_are_prose_returns_empty(self):
+        prose = (
+            "Need check the condition, it is simple: all operands "
+            "are converted to words first, so we must use idiv and "
+            "the result is stored in R because the quotient can be "
+            "negative here, and the overflow is not possible in our "
+            "case at all."
+        )
+        text = f"```asm\n{prose}\n```"
+        self.assertEqual(self.extract(text), "")
+
+
 class BatchRunnerIntegrationTests(TestCase):
     """End-to-end batch solve with mocked handlers + DL sample fetch.
 
@@ -2994,6 +3064,51 @@ class ModelSortingTests(SimpleTestCase):
         self.assertEqual(keys[3], "Web_DeepSeek_Thinking")
         self.assertEqual(len(keys), len(set(keys)))
 
+    def test_default_model_first_without_user_top(self):
+        """Без фаворита модель по умолчанию — первая, ключ уходит в шаблон (selected)."""
+        from ai.views import _render_ai_page
+        from ai.model_clients.registry import DEFAULT_MODEL_KEY
+        models_data = [
+            {"key": "Aaa_Model", "title": "Aaa Model", "capabilities": {}},
+            {"key": DEFAULT_MODEL_KEY, "title": "Ollama Gemma 4", "capabilities": {}},
+            {"key": "Zzz_Model", "title": "Zzz Model", "capabilities": {}},
+        ]
+        request = self.factory.get("/ai/chat/")
+        request.user = self._make_user(pk=1)
+        request.session = {}
+        request.user_info = {"userId": "sort-user"}
+        request.COOKIES = {"userId": "sort-user"}
+        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=[]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
+            _render_ai_page(request, "ai/chat.html")
+        context = mock_render.call_args[0][2]
+        keys = [m["key"] for m in context["available_models"]]
+        self.assertEqual(keys[0], DEFAULT_MODEL_KEY)
+        self.assertEqual(keys[1], "Aaa_Model")
+        self.assertEqual(keys[2], "Zzz_Model")
+        self.assertEqual(context["default_model_key"], DEFAULT_MODEL_KEY)
+
+    def test_user_top_beats_default_model(self):
+        """Фаворит сильнее дефолта: default_model_key пуст, дефолт остаётся в списке."""
+        from ai.views import _render_ai_page
+        from ai.model_clients.registry import DEFAULT_MODEL_KEY
+        models_data = [
+            {"key": "Aaa_Model", "title": "Aaa Model", "capabilities": {}},
+            {"key": DEFAULT_MODEL_KEY, "title": "Ollama Gemma 4", "capabilities": {}},
+            {"key": "Zzz_Model", "title": "Zzz Model", "capabilities": {}},
+        ]
+        request = self.factory.get("/ai/chat/")
+        request.user = self._make_user(pk=1)
+        request.session = {}
+        request.user_info = {"userId": "sort-user"}
+        request.COOKIES = {"userId": "sort-user"}
+        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["Zzz_Model"]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
+            _render_ai_page(request, "ai/chat.html")
+        context = mock_render.call_args[0][2]
+        keys = [m["key"] for m in context["available_models"]]
+        self.assertEqual(keys[0], "Zzz_Model")
+        self.assertIn(DEFAULT_MODEL_KEY, keys)
+        self.assertEqual(context["default_model_key"], "")
+
 
 # ===================================================================
 # Tests for problem-data API (languages, topics, prompts)
@@ -3575,8 +3690,8 @@ class OllamaRegistryTests(SimpleTestCase):
         "Ollama_Glm_5_3_Flash_Cloud",
         "Ollama_Glm_5_2_Cloud",
         "Ollama_DeepSeek_V4_1_Flash_Cloud",
+        "Ollama_DeepSeek_V4_Pro_Cloud",
         "Ollama_Gemma_4_Cloud",
-        "Ollama_Qwen_3_5_Cloud",
         "Ollama_Nemotron_3_Super_Cloud",
         "Ollama_Kimi_K2_7_Code_Cloud",
         "Ollama_Kimi_K2_6_Cloud",
@@ -3715,8 +3830,8 @@ class OllamaHandlerTests(SimpleTestCase):
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", ""), \
              patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
-            qwen_3_5 = getattr(ollama, "ask_Ollama_Qwen_3_5_Cloud_async")
-            result = await qwen_3_5("hi", "client")
+            gemma_4 = getattr(ollama, "ask_Ollama_Gemma_4_Cloud_async")
+            result = await gemma_4("hi", "client")
             self.assertIn("Ollama API ключ не настроен", result[0])
             mock_client_cls.assert_not_called()
 

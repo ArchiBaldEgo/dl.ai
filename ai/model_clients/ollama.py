@@ -1,9 +1,9 @@
 """Ollama API клиент — cloud-модели (вид ``<name>:cloud``) и локальный Ollama.
 
 Использует официальную Python-библиотеку ``ollama`` (``from ollama import Client``).
-Cloud-модели (glm-5.2:cloud, deepseek-v4.1-flash:cloud, gemma4:cloud, qwen3.5:cloud,
-nemotron-3-super:cloud, kimi-k2.7-code:cloud, kimi-k2.6:cloud, gpt-oss:20b-cloud,
-gpt-oss:120b-cloud) требуют bearer-токен ``OLLAMA_API_KEY`` и
+Cloud-модели (glm-5.2:cloud, deepseek-v4.1-flash:cloud, deepseek-v4-pro:cloud,
+gemma4:cloud, nemotron-3-super:cloud, kimi-k2.7-code:cloud, kimi-k2.6:cloud,
+gpt-oss:20b-cloud, gpt-oss:120b-cloud) требуют bearer-токен ``OLLAMA_API_KEY`` и
 хост ``https://api.ollama.com``. Локальный Ollama работает без ключа на
 ``http://localhost:11434``.
 
@@ -46,13 +46,13 @@ OLLAMA_MODELS: dict[str, dict] = {
         "model": "deepseek-v4.1-flash:cloud",
         "description": "Ollama DeepSeek 4.1 Flash — обычный чат",
     },
+    "Ollama_DeepSeek_V4_Pro_Cloud": {
+        "model": "deepseek-v4-pro:cloud",
+        "description": "Ollama DeepSeek V4 Pro — обычный чат",
+    },
     "Ollama_Gemma_4_Cloud": {
         "model": "gemma4:cloud",
         "description": "Ollama Gemma 4 — обычный чат",
-    },
-    "Ollama_Qwen_3_5_Cloud": {
-        "model": "qwen3.5:cloud",
-        "description": "Ollama Qwen 3.5 — обычный чат",
     },
     "Ollama_Nemotron_3_Super_Cloud": {
         "model": "nemotron-3-super:cloud",

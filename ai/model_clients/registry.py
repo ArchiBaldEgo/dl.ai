@@ -23,6 +23,10 @@ _TEXT_ONLY = {"text": True, "vision": False, "reasoning": False}
 # Reasoning / "thinking" models: text-only but advertised as reasoning-capable.
 _REASONING = {"text": True, "vision": False, "reasoning": True}
 
+# Модель по умолчанию для селектора на страницах AI: предвыбирается, когда у
+# пользователя нет своего топ-1 фаворита (см. views._render_ai_page).
+DEFAULT_MODEL_KEY = "Ollama_Gemma_4_Cloud"
+
 
 _MODELS: Dict[str, Dict[str, object]] = {
     # --- Web DeepSeek (бот-пул через Puppeteer) — бесплатные, идут первыми ---
@@ -119,14 +123,14 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "handler": ollama.ask_Ollama_DeepSeek_V4_1_Flash_Cloud_async,
         "capabilities": _TEXT_ONLY,
     },
+    "Ollama_DeepSeek_V4_Pro_Cloud": {
+        "title": "Ollama DeepSeek V4 Pro",
+        "handler": ollama.ask_Ollama_DeepSeek_V4_Pro_Cloud_async,
+        "capabilities": _TEXT_ONLY,
+    },
     "Ollama_Gemma_4_Cloud": {
         "title": "Ollama Gemma 4",
         "handler": ollama.ask_Ollama_Gemma_4_Cloud_async,
-        "capabilities": _TEXT_ONLY,
-    },
-    "Ollama_Qwen_3_5_Cloud": {
-        "title": "Ollama Qwen 3.5",
-        "handler": ollama.ask_Ollama_Qwen_3_5_Cloud_async,
         "capabilities": _TEXT_ONLY,
     },
     "Ollama_Nemotron_3_Super_Cloud": {

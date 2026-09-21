@@ -56,7 +56,7 @@
                         {% endif %}
                         <optgroup label="Все модели">
                             {% for model in other_models %}
-                                <option value="{{ model.key }}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}">
+                                <option value="{{ model.key }}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}"{% if model.key == default_model_key %} selected{% endif %}>
                                     {{ model.title }}
                                 </option>
                             {% endfor %}

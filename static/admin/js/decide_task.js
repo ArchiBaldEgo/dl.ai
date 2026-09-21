@@ -366,6 +366,37 @@ var _dlTestRunning = false;
 var THINK_OPEN = '<' + 'think>';
 var THINK_CLOSE = '<' + '/think>';
 
+// Прозовые оградки (цепочка рассуждений модели со случайно закрывшейся ```)
+// пропускаем при поиске кода — тот же порог, что в ai/arm_runner.py
+// (_looks_like_prose): доля функциональных слов EN/RU >= 0.15 при >= 12
+// совпадениях и >= 20 словах. Ключевые слова Pascal/ассемблера в стоп-лист
+// не входят, чтобы настоящий код не браковался как проза.
+function _looksLikeProse(text) {
+    var words = String(text).match(/[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё]+/g) || [];
+    if (words.length < 20) return false;
+    var stop = {
+        we:1, need:1, needs:1, the:1, this:1, that:1, these:1, those:1,
+        it:1, its:1, is:1, are:1, was:1, were:1, be:1, been:1, being:1,
+        our:1, their:1, they:1, them:1, have:1, has:1, had:1,
+        can:1, could:1, will:1, would:1, should:1, must:1, shall:1,
+        may:1, might:1, also:1, but:1, because:1, which:1, what:1,
+        how:1, why:1, when:1, where:1, there:1, here:1, into:1, from:1,
+        per:1, via:1, please:1, note:1, just:1, very:1, more:1, most:1,
+        some:1, any:1, each:1, both:1, one:1, two:1, now:1, so:1, all:1,
+        нужно:1, нужен:1, нужна:1, если:1, чтобы:1, это:1, этот:1, эта:1,
+        как:1, или:1, также:1, должен:1, должна:1, можно:1, нельзя:1,
+        потом:1, затем:1, поэтому:1, который:1, которая:1, быть:1, было:1,
+        будут:1, может:1, наш:1, наши:1, они:1, она:1, его:1, их:1,
+        для:1, при:1, всё:1, все:1, так:1, вот:1, есть:1, там:1, где:1,
+        когда:1, почему:1, какой:1
+    };
+    var hits = 0;
+    for (var i = 0; i < words.length; i++) {
+        if (stop[words[i].toLowerCase()]) hits++;
+    }
+    return hits >= 12 && hits / words.length >= 0.15;
+}
+
 function extractLastAiCode() {
     var arr = loadPersistedMessages();
     for (var i = arr.length - 1; i >= 0; i--) {
@@ -388,7 +419,7 @@ function extractLastAiCode() {
         var re = /```[^\n]*\n?([\s\S]*?)```/g;
         var match, lastCode = null;
         while ((match = re.exec(text)) !== null) {
-            if (match[1].trim()) lastCode = match[1];
+            if (match[1].trim() && !_looksLikeProse(match[1])) lastCode = match[1];
         }
         if (lastCode) return lastCode.trim();
     }

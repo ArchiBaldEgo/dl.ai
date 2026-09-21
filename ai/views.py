@@ -36,6 +36,7 @@ from django.views.decorators.http import require_http_methods
 from django.conf import settings
 from .throttling import rate_limited
 from .model_health import get_available_model_options, trigger_model_health_refresh_async
+from .model_clients.registry import DEFAULT_MODEL_KEY
 from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
 from .auth_backends import (
     ADMIN_EXTERNAL_AUTH_BACKEND,
@@ -292,9 +293,10 @@ def _render_ai_page(request, template_name, extra_context=None):
     """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
 
     Проверяет доступ, загружает список доступных моделей (с self-heal при пустом
-    списке), сортирует их (топ-1 фаворит пользователя → алфавит) и разбивает на
-    группы favorite_models/other_models для optgroup-разделителя в шаблоне, и
-    добавляет external_session_id + сохранённый из куки язык.
+    списке), сортирует их (топ-1 фаворит пользователя → модель по умолчанию →
+    алфавит) и разбивает на группы favorite_models/other_models для
+    optgroup-разделителя в шаблоне, и добавляет external_session_id +
+    сохранённый из куки язык.
     """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
@@ -322,25 +324,36 @@ def _render_ai_page(request, template_name, extra_context=None):
         # Остальные — строго по алфавиту (title). Без отдельного приоритета
         # Web_DeepSeek: фаворит наверху, далее алфавит (включая Web_DeepSeek).
         used_keys = set(user_top)
+        # Модель по умолчанию — первое место среди «остальных», только когда у
+        # пользователя нет своего топ-1 фаворита (шаблон ставит ей selected).
+        default_model_key = ""
+        if not user_picks and DEFAULT_MODEL_KEY in model_map:
+            default_model_key = DEFAULT_MODEL_KEY
+            used_keys.add(default_model_key)
         rest = sorted(
             [item for item in available_models if item["key"] not in used_keys],
             key=lambda x: x["title"].lower(),
         )
+        if default_model_key:
+            rest.insert(0, model_map[default_model_key])
 
         # Плоский список для обратной совместимости (тесты проверяют порядок).
         available_models = user_picks + rest
-        # Группы для optgroup-разделителя в шаблоне: топ-1 фаворит + остальные.
+        # Группы для optgroup-разделителя в шаблоне: топ-1 фаворит + остальные
+        # (rest уже отсортирован и содержит дефолт первым, если тот применён).
         favorite_models = user_picks[:1]
-        other_models = sorted(rest + user_picks[1:], key=lambda x: x["title"].lower())
+        other_models = rest
     else:
         favorite_models = []
         other_models = []
+        default_model_key = ""
     saved_state = _read_ai_state(request)
     external_session_id = request.session.get('external_session_id')
     context = {
         'available_models': available_models,
         'favorite_models': favorite_models,
         'other_models': other_models,
+        'default_model_key': default_model_key,
         'external_session_id': external_session_id,
         'last_update_date': _get_last_update_date(),
         'saved_lang': saved_state.get('lang') or '',
