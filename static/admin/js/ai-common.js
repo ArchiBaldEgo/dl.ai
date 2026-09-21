@@ -136,7 +136,7 @@ function initSelectionPersistence() {
 // сверху) не трогаем. Режим хранится в localStorage: серверу он не нужен.
 // Модели без данных всегда в конце (внутри группы — исходный алфавитный
 // порядок). В закрытом селекторе — чистые названия; суффикс статистики
-// («45%·12.3с») виден только в развёрнутом списке (см. initModelSortSelector).
+// («66␣·␣12», целые без единиц — они на заголовке группы) виден только в развёрнутом списке (см. initModelSortSelector).
 var MODEL_SORT_KEY = 'ai_model_sort_mode';
 
 function modelOptionStats(opt) {
@@ -148,32 +148,150 @@ function modelOptionStats(opt) {
     };
 }
 
-// Человекочитаемый суффикс названия: «Model X — 45%·12.3с» (компактный формат,
-// сначала процент решённых, затем время; единица «с» локализована через
-// getUiString). Если данных по модели нет вообще — суффикс не показывается
-// (голое название); если есть только один показатель — показывается только он.
-// Идемпотентен: базовое название кешируется в data-base-title при первом проходе.
-function applyModelOptionSuffix(opt) {
-    if (!opt.value) return;  // заглушка «Сегодня нет доступных моделей» — не модель
-    if (!opt.hasAttribute('data-base-title')) {
-        opt.setAttribute('data-base-title', opt.textContent.trim());
+// Человекочитаемый суффикс названия: «Model X␣␣␣␣66␣·␣␣12» — только целые
+// числа (десятичные отбрасываются), данные прижаты вправо и выровнены в один
+// столбец. Знаки единиц (% и сек) в строках НЕ повторяются — они показаны
+// один раз в заголовке группы, выровненные над колонками (см.
+// applyModelGroupUnitLabels).
+// Название добивается неразрывными пробелами до пиксельной ширины самого
+// длинного названия (замер canvas'ом шрифтом селекта; canvas недоступен →
+// добивание посимвольно), процент и время — до одинаковой символьной ширины
+// блока (выравнивание вправо). Если данных по модели нет вообще — суффикс
+// не показывается (голое название); если есть только один показатель —
+// показывается только он на своём месте в общем столбце. Идемпотентен:
+// базовое название кешируется в data-base-title при первом проходе.
+
+// Неразрывный пробел: обычные пробелы в <option> схлопываются, NBSP — нет.
+var NBSP = '\u00A0';
+// Минимальный зазор название → столбец данных, в NBSP.
+var MODEL_STAT_GAP_MIN = 3;
+
+var _statMeasureCtx = null;
+
+// Ширина текста шрифтом селекта моделей — для пиксельного добивания названий
+// до одного столбца. Canvas measureText даёт метрику того же шрифта, которым
+// рендерятся опции. Недоступен → 0, вызывающий код падает на посимвольный
+// запасной вариант. weightOverride — для заголовков групп (браузер рендерит
+// их жирным).
+function measureStatText(text, weightOverride) {
+    var select = document.getElementById('select');
+    if (!select || !document.createElement) return 0;
+    if (!_statMeasureCtx) {
+        var canvas = document.createElement('canvas');
+        _statMeasureCtx = canvas.getContext ? canvas.getContext('2d') : null;
     }
-    var title = opt.getAttribute('data-base-title');
-    var stats = modelOptionStats(opt);
-    var parts = [];
-    if (stats.percentSolved !== null) parts.push(String(stats.percentSolved) + '%');
-    if (stats.avgSeconds !== null) {
-        parts.push(stats.avgSeconds.toFixed(1) + getUiString('statSeconds', 'с'));
+    if (!_statMeasureCtx) return 0;
+    var style = window.getComputedStyle(select);
+    _statMeasureCtx.font = [style.fontStyle, weightOverride || style.fontWeight, style.fontSize, style.fontFamily].join(' ');
+    return _statMeasureCtx.measureText(text).width;
+}
+
+// n неразрывных пробелов (n <= 0 → пусто).
+function padStat(n) {
+    return n > 0 ? new Array(n + 1).join(NBSP) : '';
+}
+
+// Вешает суффикс на одну опцию по заранее посчитанным колонкам (cols).
+// Вызывается из applyModelOptionSuffixes вторым проходом: колонки считаются
+// по ВСЕМ опциям селекта, иначе каждая строка выравнивалась бы сама по себе.
+// Столбец данных стартует от maxTitleW + минимальный зазор — иначе у самой
+// длинной строки зазор был бы, а у остальных нет, и столбец съезжал бы.
+// В строках только целые числа; единицы (% и сек) живут в заголовке группы.
+function applyModelOptionSuffix(item, cols) {
+    var text = item.title;
+    if (item.hasStats) {
+        var gap = cols.nbspW > 0
+            ? Math.max(MODEL_STAT_GAP_MIN, Math.round((cols.maxTitleW + MODEL_STAT_GAP_MIN * cols.nbspW - item.titleW) / cols.nbspW))
+            : Math.max(MODEL_STAT_GAP_MIN, cols.maxTitleLen + MODEL_STAT_GAP_MIN - item.title.length);
+        text += padStat(gap);
+        if (item.pct) {
+            text += padStat(cols.pctW - item.pct.length) + item.pct;
+        }
+        if (item.sec) {
+            text += (item.pct ? NBSP + '·' + NBSP : '') + padStat(cols.secW - item.sec.length) + item.sec;
+        }
     }
-    opt.textContent = parts.length ? title + ' — ' + parts.join('·') : title;
+    item.opt.textContent = text;
+}
+
+// Единицы (% и сек) показываются ОДИН РАЗ — в заголовках групп селектора,
+// и ВЫРОВНЕНЫ над колонками показателей: подпись группы добивается NBSP до
+// начала столбца данных (тот же пиксельный замер, что у строк; заголовок
+// браузер рендерит жирным — меряем жирным), знак «%» прижат вправо внутри
+// колонки процента, «с» — внутри колонки секунд, разделитель «·» стоит на
+// колонке строк. Базовые подписи групп кешируются в data-base-label;
+// суффикс вешается только группам, у которых есть строки со статистикой,
+// и снимается при закрытии списка (stripModelOptionSuffixes) — закрытый
+// селектор и поиск группы по подписи («Все модели») не ломаются.
+function applyModelGroupUnitLabels(modelSelect, items, cols) {
+    var secUnit = getUiString('statSeconds', 'с');
+    Array.prototype.forEach.call(modelSelect.querySelectorAll('optgroup'), function (group) {
+        if (!group.hasAttribute('data-base-label')) {
+            group.setAttribute('data-base-label', group.label);
+        }
+        var base = group.getAttribute('data-base-label');
+        var hasStats = items.some(function (item) { return item.opt.parentElement === group; });
+        if (!hasStats) {
+            if (group.label !== base) group.label = base;
+            return;
+        }
+        var gap;
+        if (cols.nbspW > 0) {
+            var colStart = cols.maxTitleW + MODEL_STAT_GAP_MIN * cols.nbspW;
+            var labelW = measureStatText(base, 'bold');
+            // Минимум 1 NBSP (не лепить знак к подписи), но приоритет —
+            // точное попадание над колонкой, поэтому без MODEL_STAT_GAP_MIN.
+            gap = Math.max(1, Math.round((colStart - labelW) / cols.nbspW));
+        } else {
+            gap = Math.max(1, cols.maxTitleLen + MODEL_STAT_GAP_MIN - base.length);
+        }
+        var next = base + padStat(gap)
+            + padStat(Math.max(0, cols.pctW - 1)) + '%'
+            + NBSP + '·' + NBSP
+            + padStat(Math.max(0, cols.secW - secUnit.length)) + secUnit;
+        if (group.label !== next) group.label = next;
+    });
 }
 
 // Суффикс статистики вешается на ВСЕ опции селектора (включая «Часто
 // используемые»), а пересортировка — только на optgroup «Все модели».
+// Два прохода: первый собирает по всем опциям ширины колонок (название,
+// процент, время), второй вешает суффиксы — тогда данные во всех строках
+// стоят ровно в одном столбце, а не «каждая строка сама по себе».
 function applyModelOptionSuffixes() {
     var modelSelect = document.getElementById('select');
     if (!modelSelect) return;
-    Array.prototype.forEach.call(modelSelect.options, applyModelOptionSuffix);
+    var items = [];
+    var cols = { maxTitleW: 0, maxTitleLen: 0, pctW: 0, secW: 0, nbspW: 0 };
+    Array.prototype.forEach.call(modelSelect.options, function (opt) {
+        if (!opt.value) return;  // заглушка «Сегодня нет доступных моделей» — не модель
+        if (!opt.hasAttribute('data-base-title')) {
+            opt.setAttribute('data-base-title', opt.textContent.trim());
+        }
+        var title = opt.getAttribute('data-base-title');
+        var stats = modelOptionStats(opt);
+        var item = {
+            opt: opt,
+            title: title,
+            // Десятичные отбрасываем (Math.floor) — в строках целые числа;
+            // знаки единиц (% и сек) не дублируем в каждой строке.
+            pct: stats.percentSolved !== null ? String(Math.floor(stats.percentSolved)) : '',
+            sec: stats.avgSeconds !== null ? String(Math.floor(stats.avgSeconds)) : '',
+        };
+        item.hasStats = !!(item.pct || item.sec);
+        if (item.hasStats) {
+            item.titleW = measureStatText(title);
+            cols.maxTitleW = Math.max(cols.maxTitleW, item.titleW);
+            cols.maxTitleLen = Math.max(cols.maxTitleLen, title.length);
+            if (item.pct) cols.pctW = Math.max(cols.pctW, item.pct.length);
+            if (item.sec) cols.secW = Math.max(cols.secW, item.sec.length);
+            items.push(item);
+        }
+    });
+    if (!items.length) return;
+    cols.nbspW = measureStatText(NBSP) || measureStatText(' ');
+    items.forEach(function (item) { applyModelOptionSuffix(item, cols); });
+    applyModelGroupUnitLabels(modelSelect, items, cols);
 }
 
 // Обратное применение: закрытый селектор показывает чистые названия
@@ -186,11 +304,18 @@ function stripModelOptionSuffixes() {
         var base = opt.getAttribute('data-base-title');
         if (base !== null) opt.textContent = base;
     });
+    // Заголовки групп: вернуть базовые подписи без суффикса единиц (%·с) —
+    // закрытый селектор показывает чистые названия.
+    Array.prototype.forEach.call(modelSelect.querySelectorAll('optgroup[data-base-label]'), function (group) {
+        group.label = group.getAttribute('data-base-label');
+    });
 }
 
 function sortModelOptions(mode) {
     var modelSelect = document.getElementById('select');
-    var group = modelSelect && modelSelect.querySelector('optgroup[label="Все модели"]');
+    // ^=: подпись группы временно расширяется суффиксом единиц (%·с),
+    // пока список открыт (applyModelGroupUnitLabels).
+    var group = modelSelect && modelSelect.querySelector('optgroup[label^="Все модели"]');
     if (!group || !group.children.length) return;
 
     var selectedValue = modelSelect.value;
@@ -248,7 +373,9 @@ function initModelSortSelector() {
     var modelSelect = document.getElementById('select');
     var sortSelect = document.getElementById('selectModelSort');
     if (!modelSelect || !sortSelect) return;
-    var group = modelSelect.querySelector('optgroup[label="Все модели"]');
+    // ^=: подпись группы временно расширяется суффиксом единиц (%·с),
+    // пока список открыт (applyModelGroupUnitLabels).
+    var group = modelSelect.querySelector('optgroup[label^="Все модели"]');
     if (!group || !group.children.length) {
         sortSelect.style.display = 'none';
         return;
@@ -271,7 +398,8 @@ function initModelSortSelector() {
         });
     }
 
-    // Статистика («Model — 45%·12.3с») показывается ТОЛЬКО в развёрнутом
+    // Статистика («Model␣66␣·␣12», целые; единицы — на заголовке группы)
+    // показывается ТОЛЬКО в развёрнутом
     // списке: нативный select рендерит опции в момент открытия, поэтому
     // суффиксы вешаем на открытие (mousedown — мышь, keydown — клавиатура:
     // Enter/Space/стрелки/F4) и снимаем при закрытии (change/blur/Escape).
@@ -1446,10 +1574,11 @@ function initAccordionForMessages() {
         var lastBtn = lastLi.querySelector('.accordion');
         var lastPanel = lastLi.querySelector('.panel');
         if (lastBtn && lastPanel) {
-            lastPanel.classList.add('open');
-            lastBtn.classList.add('active');
             var lastRole = roles[allMessages.length - 1] || 'other';
-            lastBtn.textContent = 'Скрыть: ' + getRoleLabel(lastRole, langAttr);
+            // По умолчанию ВСЕ ответы свёрнуты — раскрываются только по клику.
+            lastPanel.classList.remove('open');
+            lastBtn.classList.remove('active');
+            lastBtn.textContent = 'Показать: ' + getRoleLabel(lastRole, langAttr);
         }
     }
     window._accordionRoles = roles;
@@ -1489,7 +1618,7 @@ function updateAccordionLabels() {
     });
 }
 
-function collapseAllExceptLast() {
+function collapseAllMessages() {
     // Только прямые потомки #messages (как в initAccordionForMessages):
     // querySelectorAll('li') зацепил бы вложенные li из markdown-списков
     // внутри панелей — индексы ролей съезжали бы и кнопки получали «Други».
@@ -1507,20 +1636,15 @@ function collapseAllExceptLast() {
         return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
     }
 
+    // Все ответы свёрнуты — раскрываются только вручную (клик по кнопке).
     allMessages.forEach(function(li, idx) {
         var btn = li.querySelector('.accordion');
         var panel = li.querySelector('.panel');
         var role = roles[idx] || 'other';
         if (btn && panel) {
-            if (idx === allMessages.length - 1) {
-                panel.classList.add('open');
-                btn.classList.add('active');
-                btn.textContent = 'Скрыть: ' + getRoleLabel(role, langAttr);
-            } else {
-                panel.classList.remove('open');
-                btn.classList.remove('active');
-                btn.textContent = 'Показать: ' + getRoleLabel(role, langAttr);
-            }
+            panel.classList.remove('open');
+            btn.classList.remove('active');
+            btn.textContent = 'Показать: ' + getRoleLabel(role, langAttr);
         }
     });
 }
@@ -1589,7 +1713,7 @@ function initWebSocket() {
                 notEnter = false;
             }
             initAccordionForMessages();
-            collapseAllExceptLast();
+            collapseAllMessages();
         };
 
         ws.onerror = function(error) {

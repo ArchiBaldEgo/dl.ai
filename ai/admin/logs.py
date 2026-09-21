@@ -2,11 +2,11 @@
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timezone as dt_timezone
 
 from django.contrib import admin
 from django.core.paginator import Paginator
-from django.db.models import Q
+from django.db.models import Count, Q
 from .site import ai_admin_site
 from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
@@ -15,7 +15,7 @@ from django.utils.html import strip_tags
 from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
-from ..constants import MOSCOW_TZ
+from ..constants import DL_DEFAULT_COURSE_ID, MOSCOW_TZ
 from ..dl_api_client import (
     DLApiError,
     DLApiUnavailable,
@@ -27,7 +27,7 @@ from ..dl_api_client import (
     fetch_task_info,
 )
 from ..http_utils import resolve_dl_session_id
-from ..models import AIAppSettings, AIModelTestRun, AIRequestLog, Task
+from ..models import AIModelTestResult, AIModelTestRun, AIRequestLog, Task
 from ..model_health import get_runtime_model_handlers
 from .permissions import can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
 
@@ -42,6 +42,22 @@ def _batch_run_id_from_log(log):
     """Run id batch-прогона из записи журнала или None."""
     m = _BATCH_RUN_ID_RE.search(log.message or "")
     return m.group(1) if m else None
+
+
+def dl_task_url(node_id, course_id=None):
+    """Пользовательская ссылка на задачу в DL (не admin-вьювер).
+
+    ``/task.jsp?nid=<узел>&cid=<курс>`` (nid первым, cid вторым). cid —
+    это дерево задач: приписка ``&cid=`` ставится ВСЕГДА — если курс записи
+    не известен (старые записи кэша/журнала), подставляем единственное
+    дерево DL (DL_DEFAULT_COURSE_ID), иначе DL откроет задачу без контекста
+    дерева. Просмотр условия от имени админа DL (fullTaskviewer) не
+    используется.
+    """
+    if not node_id:
+        return None
+    cid = course_id or DL_DEFAULT_COURSE_ID
+    return f"https://dl.gsu.by/task.jsp?nid={node_id}&cid={cid}"
 
 
 # Отображение статуса batch-прогона (AIModelTestRun.status) в журналах:
@@ -61,33 +77,14 @@ def batch_run_status_display(status):
     return _BATCH_RUN_STATUS_DISPLAY.get(status, "")
 
 
-def get_batch_run_names():
-    """Серверный словарь ручных названий прогонов «дата-время ISO → название»."""
-    return dict(AIAppSettings.get_solo().batch_run_names or {})
+def run_name_for(run):
+    """Название прогона из AIModelTestRun.run_name (фолбэк — старый run_params).
 
-
-def batch_run_name_for(started_at):
-    """Название прогона по дате-времени старта (== sent_at записи журнала).
-
-    Ключ словаря AIAppSettings.batch_run_names — ISO-дата-время старта
-    прогона; он совпадает с sent_at batch-записи журнала. Окно ±2 с —
-    защита от расхождения округления при записи ключа. Пусто → "—".
+    Нет прогона / пустое название → "—".
     """
-    if not started_at:
+    if not run:
         return "—"
-    names = get_batch_run_names()
-    target = timezone.localtime(started_at)
-    name = names.get(target.isoformat())
-    if name:
-        return name
-    for key, value in names.items():
-        try:
-            dt = datetime.fromisoformat(key)
-        except (TypeError, ValueError):
-            continue
-        if abs(dt - target) <= timedelta(seconds=2) and value:
-            return value
-    return "—"
+    return run.run_name or (run.run_params or {}).get("run_name") or "—"
 
 
 def _parse_date(value: str) -> str:
@@ -215,10 +212,14 @@ class AIRequestLogAdmin(admin.ModelAdmin):
     topic_name_display.short_description = "Тема"
 
     def task_display(self, obj):
-        """Return task name as a link to DL fullTaskviewer."""
+        """Имя задачи; пользовательская ссылка в DL — всегда с cid (дерево
+        задач: курс записи или единственное дерево DL, см. dl_task_url)."""
         if obj.task_node_id:
             name = obj.task_name or str(obj.task_node_id)
-            return f'<a href="https://dl.gsu.by/admin/fullTaskviewer.asp?nid={obj.task_node_id}" target="_blank" rel="noopener">{name}</a>'
+            url = dl_task_url(obj.task_node_id, getattr(obj, "course_id", None))
+            if url:
+                return f'<a href="{url}" target="_blank" rel="noopener">{name}</a>'
+            return name
         return obj.task_name or "—"
     task_display.short_description = "Задача"
     task_display.allow_tags = True
@@ -297,7 +298,7 @@ def build_recent_log_rows(request, limit=5):
                     batch_run_status_display(run.status) if run else log.get_status_display()
                 ),
                 "status_class": "ok" if status_ok else "err",
-                "run_name": batch_run_name_for(run.started_at) if run else "—",
+                "run_name": run_name_for(run),
                 "mode_display": log.get_mode_display() or "—",
                 "duration_seconds": log.duration_seconds,
                 "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
@@ -321,15 +322,18 @@ def build_recent_batch_rows(request, limit=5):
 
     Отбирает записи журнала пакетного решения (source="arm",
     mode=batch_solve|solve, sentinel "Batch solve run " в message) с учётом
-    ограничения видимости («только свои» для prompt_developer). Для каждого
-    прогона собирает snapshot тем же кодом, что и страницу деталей
-    (``_build_batch_log_snapshot`` → results + report), чтобы по клику на
-    строку развернуть ту же таблицу результатов, что на /arm/solve/ после
-    прогона (window.ArmBatchResults).
+    ограничения видимости («только свои» для prompt_developer).
+
+    Строка — ЛЁГКАЯ: шапка прогона (один запрос AIModelTestRun) и
+    count-агрегат результатов (AIModelTestResult) — без текстов решений:
+    раньше полные снапшоты (results + report) встраивались в HTML страницы
+    через {% json_script %} и большой прогон раздувал её до ~6 МБ. Теперь
+    развёртка грузится ЛЕНИВО по клику — AJAX GET на ``snapshot_url`` →
+    ``admin_batch_snapshot_view`` (тот же формат снапшота, что потребляет
+    window.ArmBatchResults на /arm/solve/).
 
     Возвращает словарь для ``extra_context``: ``recent_batch_runs`` (список
-    строк; у строки без прогонов в БД snapshot=None — развёртка недоступна),
-    ``recent_batch_limit`` и ``moscow_tz``.
+    лёгких строк), ``recent_batch_limit`` и ``moscow_tz``.
     """
     can_view = can_access_logs(request)
     rows = []
@@ -340,10 +344,47 @@ def build_recent_batch_rows(request, limit=5):
             .filter(message__icontains="Batch solve run ")
             .order_by("-sent_at")
         )
-        for log in qs[: max(0, int(limit))]:
-            snapshot = _build_batch_log_snapshot(log)
-            report = (snapshot or {}).get("report") or {}
-            run_status = (snapshot or {}).get("run_status", "")
+        logs = list(qs[: max(0, int(limit))])
+        run_ids = {}
+        for log in logs:
+            run_hex = _batch_run_id_from_log(log)
+            if run_hex:
+                run_ids[log.pk] = run_hex
+        runs = {
+            r.run_id: r
+            for r in AIModelTestRun.objects.filter(run_id__in=set(run_ids.values()))
+        }
+        # Сводка по результатам прогонов — count-запросом, без текстов;
+        # семантика как в _build_batch_report (total/solved/failed).
+        counters = {}
+        first_ext = {}
+        if run_ids:
+            for row in (
+                AIModelTestResult.objects
+                .filter(run__run_id__in=set(run_ids.values()))
+                .values("run__run_id")
+                .annotate(
+                    total=Count("pk"),
+                    solved=Count("pk", filter=Q(verdict=AIModelTestResult.VERDICT_SOLVED)),
+                    failed=Count("pk", filter=Q(verdict=AIModelTestResult.VERDICT_FAILED)),
+                )
+            ):
+                counters[row["run__run_id"]] = row
+            # file_extension строки — первый непустой снимок результата прогона
+            # (тот же приоритет, что в _build_batch_log_snapshot).
+            for row in (
+                AIModelTestResult.objects
+                .filter(run__run_id__in=set(run_ids.values()))
+                .exclude(file_extension_snapshot="")
+                .order_by("pk")
+                .values("run__run_id", "file_extension_snapshot")
+            ):
+                first_ext.setdefault(row["run__run_id"], row["file_extension_snapshot"])
+        for log in logs:
+            run_hex = run_ids.get(log.pk)
+            run = runs.get(run_hex) if run_hex else None
+            counter = counters.get(run_hex, {})
+            run_status = run.status if run else ""
             rows.append({
                 "id": log.id,
                 "sent_at": log.sent_at,
@@ -354,25 +395,134 @@ def build_recent_batch_rows(request, limit=5):
                 # Сырой статус прогона — для класса цвета в шаблоне
                 # (прогон стёрт из БД → старый статус записи журнала).
                 "run_status": run_status or log.status,
-                "run_name": (snapshot or {}).get("run_name", "—"),
-                # Развёртка доступна только когда прогон ещё есть в БД.
-                "snapshot": snapshot,
-                "run_id": (snapshot or {}).get("run_id", ""),
-                "course_id": (snapshot or {}).get("course_id"),
-                "file_extension": (snapshot or {}).get("file_extension", ""),
-                "total_pairs": report.get("total_pairs"),
-                "solved": report.get("solved"),
-                "failed": report.get("failed"),
+                "run_name": run_name_for(run),
+                "run_id": run_hex or "",
+                "course_id": run.course_id if run else None,
+                "file_extension": first_ext.get(run_hex, ""),
+                "total_pairs": counter.get("total"),
+                "solved": counter.get("solved"),
+                "failed": counter.get("failed"),
                 "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
-                # Уникальный id для {% json_script %} — по нему JS находит
-                # snapshot строки и лениво рендерит развёртку.
-                "json_id": f"batch-snap-{log.id}",
+                # Полные результаты — лениво, AJAX-ом по клику: страница
+                # настроек больше не встраивает снапшоты в HTML.
+                "snapshot_url": f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/",
             })
     return {
         "recent_batch_runs": rows,
         "recent_batch_limit": limit,
         "moscow_tz": MOSCOW_TZ,
     }
+
+
+def admin_batch_snapshot_view(request, log_id):
+    """AJAX-снапшот результатов пакетного прогона по записи журнала.
+
+    Ленивая загрузка для страницы «Настройки ИИ-приложения»: полные
+    результаты (results + report) не встраиваются в HTML страницы, а
+    подтягиваются по клику на строку. Права — как у журнала
+    (can_access_logs + скоуп «только свои»); формат — тот же
+    ``_build_batch_log_snapshot``, что потребляет window.ArmBatchResults.
+    """
+    if not can_access_logs(request):
+        return HttpResponseForbidden("Access denied")
+    log = _scope_logs_qs(AIRequestLog.objects.filter(pk=int(log_id)), request.user).first()
+    if log is None or not _is_batch_solve_log(log):
+        return JsonResponse({"error": "not-found"}, status=404)
+    snapshot = _build_batch_log_snapshot(log)
+    if snapshot is None:
+        # Прогон стёрт из БД — развёртка недоступна (как и раньше).
+        return JsonResponse({"error": "run-not-found"}, status=404)
+    return JsonResponse(snapshot)
+
+
+def admin_daily_report_view(request):
+    """Дневной отчёт журнала: студенты × сегодняшняя активность (МСК).
+
+    День — календарный по МСК (00:00–23:59). Строка — студент (внешний
+    dl-аккаунт или локальный юзер): фамилия, время последней отправки (без
+    даты), последняя тема и препромпт, последний режим («какой чат») и
+    сколько всего запросов за сегодня. Клик по колонке «Запросов»
+    разворачивает свёрнутый список всех его записей дня — данные уже в
+    HTML страницы, второго запроса не нужно.
+
+    Права — как у журнала (can_access_logs + скоуп «только свои» для
+    prompt_developer). ARM-прогоны (source=arm) — операторские пакетные
+    запуски, а не активность студентов, в отчёт не попадают.
+    """
+    if not can_access_logs(request):
+        return HttpResponseForbidden("Access denied")
+
+    now_msk = timezone.localtime(timezone.now(), MOSCOW_TZ)
+    day_start = now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = now_msk.replace(hour=23, minute=59, second=59, microsecond=999_000)
+    # .only() — без message/response_text: тексты тяжёлые, отчёту не нужны.
+    logs = list(
+        _scope_logs_qs(AIRequestLog.objects.all(), request.user)
+        .exclude(source=AIRequestLog.SOURCE_ARM)
+        .filter(
+            sent_at__gte=day_start.astimezone(dt_timezone.utc),
+            sent_at__lte=day_end.astimezone(dt_timezone.utc),
+        )
+        .only(
+            "id", "sent_at", "external_user_id", "username", "user_full_name",
+            "topic_id", "topic_name", "prompt_id", "prompt_name", "mode",
+            "status", "model_names",
+        )
+        .order_by("sent_at")
+    )
+
+    students = {}
+    for log in logs:
+        key = log.external_user_id or f"local:{log.username or '?'}"
+        rec = students.get(key)
+        if rec is None:
+            rec = students[key] = {
+                "display_name": log.user_full_name or log.username or key,
+                "external_user_id": log.external_user_id or "",
+                "count": 0,
+                "last": None,
+                "requests": [],
+            }
+        rec["count"] += 1
+        rec["last"] = log
+        rec["requests"].append(log)
+
+    def _request_row(log):
+        return {
+            "time": timezone.localtime(log.sent_at, MOSCOW_TZ).strftime("%H:%M:%S"),
+            "mode": log.get_mode_display() or "—",
+            "topic": log.topic_name or "—",
+            "prompt": log.prompt_name or "—",
+            "model": ", ".join(log.model_names or []) or "—",
+            "status": log.get_status_display() or log.status or "—",
+            "status_class": "ok" if log.status == AIRequestLog.STATUS_SUCCESS else "err",
+        }
+
+    rows = []
+    for rec in students.values():
+        last = rec["last"]
+        rows.append({
+            "display_name": rec["display_name"],
+            "external_user_id": rec["external_user_id"],
+            "last_sent": timezone.localtime(last.sent_at, MOSCOW_TZ).strftime("%H:%M"),
+            "last_topic": last.topic_name or "—",
+            "last_prompt": last.prompt_name or "—",
+            "last_mode": last.get_mode_display() or "—",
+            "count": rec["count"],
+            # Все записи дня, новые сверху (журнал тоже читается сверху вниз).
+            "requests": [_request_row(l) for l in reversed(rec["requests"])],
+        })
+    # По фамилии — алфавит, без учёта регистра.
+    rows.sort(key=lambda r: (r["display_name"].casefold(), r["last_sent"]))
+
+    context = {
+        **ai_admin_site.each_context(request),
+        "title": "DL.AI: Дневной отчёт",
+        "date_label": now_msk.strftime("%d.%m.%Y"),
+        "rows": rows,
+        "total_count": len(logs),
+    }
+    return TemplateResponse(request, "admin/ai/daily_report.html", context)
 
 
 def admin_request_logs_view(request):
@@ -561,7 +711,7 @@ def _build_batch_log_snapshot(log):
         "report": report,
         # Статус прогона и ручное название — для шапки деталей журнала.
         "run_status": test_run.status,
-        "run_name": batch_run_name_for(test_run.started_at),
+        "run_name": run_name_for(test_run),
     }
 
 
@@ -642,7 +792,7 @@ def _batch_log_row_contexts(logs):
             # отображаются в строке журнала вместо статуса записи.
             "run_status": run_obj.status,
             "run_status_display": batch_run_status_display(run_obj.status),
-            "run_name": batch_run_name_for(run_obj.started_at),
+            "run_name": run_name_for(run_obj),
             # Свёрнутые строки для ячейки таблицы (первые 3 + «+N ещё»)
             # и полный список для title-подсказки.
             "tasks_preview": _tasks_preview(tasks),

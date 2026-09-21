@@ -1,0 +1,104 @@
+{% extends "admin/change_list.html" %}
+{% load i18n %}
+
+{% comment %}Список «Решённые задачи (кэш кода)»: строка — дата / задача (ссылка в DL) /
+   приписка — путь в дереве задач DL / язык / тема / препромпт / пользователь /
+   вердикт / использован; клик по строке (кроме ссылки на задачу) раскрывает
+   сохранённый код. Поиск, фильтры и пагинация — из change_list.html (cl).
+   {% endcomment %}
+
+{% block result_list %}
+  {% if cl.result_count %}
+    <div class="results">
+      <table id="ai-sol-table">
+        <thead>
+          <tr>
+            <th scope="col">Отправлен</th>
+            <th scope="col">Задача</th>
+            <th scope="col">Язык</th>
+            <th scope="col">Тема</th>
+            <th scope="col">Препромпт</th>
+            <th scope="col">Пользователь</th>
+            <th scope="col">Из кэша</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in sol_rows %}
+            <tr class="ai-sol-row ai-sol-{{ row.obj.verdict }}">
+              <td class="nowrap">{{ row.date }}</td>
+              <td>
+                {% if row.task_url %}
+                  <a href="{{ row.task_url }}" target="_blank" rel="noopener"
+                     class="ai-sol-task-link" title="Открыть задачу в DL">{{ row.task_name }}</a>
+                {% else %}
+                  {{ row.task_name }}
+                {% endif %}
+                {% if row.tree_path %}
+                  <div class="ai-sol-tree-path" title="Путь задачи в дереве задач DL">{{ row.tree_path }}</div>
+                {% endif %}
+              </td>
+              <td>{{ row.lang_name }}</td>
+              <td>{{ row.topic_name }}</td>
+              <td>{{ row.prompt_name }}</td>
+              <td>{{ row.user }}</td>
+              <td>{{ row.times_used }}</td>
+            </tr>
+            <tr class="ai-sol-detail-row">
+              <td colspan="7" class="ai-sol-detail-cell">
+                <div class="ai-sol-detail-content">
+                  <div class="ai-sol-detail-section ai-sol-code-section">
+                    <h4>Код решения{% if row.obj.file_extension %} ({{ row.obj.file_extension }}){% endif %}</h4>
+                    <pre>{{ row.obj.code }}</pre>
+                  </div>
+                  <div class="ai-sol-detail-section">
+                    <h4>Детали</h4>
+                    <div class="ai-sol-detail-meta">
+                      <div><strong>Комментарий DL:</strong> {{ row.obj.dl_comment|default:"—" }}</div>
+                      <div><strong>Дерево задач:</strong> {{ row.tree_path|default:"—" }}</div>
+                      <div><strong>Модель:</strong> {{ row.obj.model_title|default:row.obj.model_key|default:"—" }}</div>
+                      <div><strong>Тема:</strong> {{ row.topic_name }}{% if row.obj.topic_id %} (id {{ row.obj.topic_id }}){% endif %}</div>
+                      <div><strong>Препромпт:</strong> {{ row.prompt_name }}{% if row.obj.prompt_id %} (id {{ row.obj.prompt_id }}){% endif %}</div>
+                      <div><strong>Queue ID DL:</strong> {{ row.obj.queue_id|default:"—" }}</div>
+                      <div><strong>Обновлён:</strong> {{ row.obj.updated_at|date:"d.m.Y H:i" }}</div>
+                      <div>
+                        {% if row.log_url %}<a href="{{ row.log_url }}">Запись журнала тестирования</a>{% else %}<strong>Журнал:</strong> —{% endif %}
+                      </div>
+                      {% if row.obj.created_by %}
+                        <div><strong>Локальный пользователь:</strong> {{ row.obj.created_by.username }}</div>
+                      {% endif %}
+                    </div>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <script>
+      // Клик по строке раскрывает сохранённый код; клик по ссылке на задачу —
+      // нет (она ведёт в DL). Открыта одна деталь за раз (паттерн request_logs).
+      (function () {
+        document.addEventListener('click', function (event) {
+          if (event.target.closest('a')) return;
+          var row = event.target.closest('.ai-sol-row');
+          if (!row || !row.closest('#ai-sol-table')) return;
+          var detailRow = row.nextElementSibling;
+          if (!detailRow || !detailRow.classList.contains('ai-sol-detail-row')) return;
+          var isOpen = detailRow.classList.contains('open');
+          document.querySelectorAll('.ai-sol-detail-row.open').forEach(function (r) {
+            r.classList.remove('open');
+          });
+          if (!isOpen) detailRow.classList.add('open');
+        });
+      })();
+    </script>
+  {% else %}
+    <p class="ai-sol-empty">Нет записей.</p>
+  {% endif %}
+{% endblock %}
+
+{% block pagination %}
+  {# Пагинация только когда есть что листать: пустой changelist без записей #}
+  {% if cl.result_count %}{{ block.super }}{% endif %}
+{% endblock %}

@@ -6,10 +6,13 @@
 сайту) добавляем два блока:
 
 1. «Последние пакетные решения» — последние 5 batch-solve прогонов (ARM).
-   Клик по строке разворачивает ту же таблицу результатов, что показывается
-   на /arm/solve/ после окончания прогона (общий partial
-   _ai_batch_results.html / window.ArmBatchResults — единый источник правды
-   с детальной страницей записи журнала).
+   Строки лёгкие (шапка + count-агрегат, без текстов решений); клик по строке
+   разворачивает ту же таблицу результатов, что показывается на /arm/solve/
+   после окончания прогона (общий partial _ai_batch_results.html /
+   window.ArmBatchResults — единый источник правды с детальной страницей
+   записи журнала). Полный снапшот НЕ встраивается в HTML — грузится лениво
+   AJAX-ом по клику (batch-snapshot view): иначе большой прогон раздувал
+   страницу до ~6 МБ.
 2. «Последние запросы» — последние 5 записей «Журнала запросов».
 
 Контекст готовит AIAppSettingsAdmin.changeform_view →
@@ -19,6 +22,12 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
 
 {% block after_field_sets %}
   {{ block.super }}
+
+  {# Дневной отчёт журнала — под вкл/выкл приложения, над таблицей прогонов. #}
+  <div class="ai-daily-report-bar">
+    <a class="button" href="/ai/admin/ai/airequestlog/daily-report/"
+       title="Студенты × запросы за сегодня (00:00–23:59 МСК)">Дневной отчёт →</a>
+  </div>
 
   <fieldset class="module aligned ai-settings-logs">
     <h2>Последние пакетные решения ({{ recent_batch_limit|default:5 }})</h2>
@@ -31,8 +40,8 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
 
       {% if can_view_logs %}
         {% if recent_batch_runs %}
-          {# CSS + window.ArmBatchResults — тот же рендер, что после прогона на /arm/solve/ #}
           {% include "admin/ai/_ai_batch_results.html" %}
+          <div class="ai-scroll">
           <table class="ai-recent-logs-table ai-batch-table">
             <thead>
               <tr>
@@ -50,8 +59,8 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
             <tbody>
               {% timezone moscow_tz %}
               {% for row in recent_batch_runs %}
-                <tr class="ai-batch-row{% if row.snapshot %} ai-batch-row-clickable{% endif %}"
-                    data-json-id="{{ row.json_id }}" data-run-id="{{ row.run_id }}"{% if row.snapshot %} title="Кликните, чтобы развернуть результаты прогона"{% endif %}>
+                <tr class="ai-batch-row{% if row.snapshot_url %} ai-batch-row-clickable{% endif %}"
+                    data-snapshot-url="{{ row.snapshot_url }}" data-run-id="{{ row.run_id }}"{% if row.snapshot_url %} title="Кликните, чтобы развернуть результаты прогона"{% endif %}>
                   <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
                   <td>{{ row.run_name|default:"—" }}</td>
                   <td>{{ row.course_id|default:"—" }}</td>
@@ -62,18 +71,18 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
                   <td class="{% if row.run_status == 'completed' or row.run_status == 'success' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.run_status_display }}</td>
                   <td><a href="{{ row.detail_url }}">Детали →</a></td>
                 </tr>
-                {# Развёртка: сводка + ответы моделей прогона (ленивый рендер по первому клику). #}
+                {# Развёртка: сводка + ответы моделей прогона (ленивая загрузка — AJAX по первому клику). #}
                 <tr class="ai-batch-detail" hidden>
                   <td colspan="9">
-                    {% if row.snapshot %}{{ row.snapshot|json_script:row.json_id }}{% endif %}
                     <div class="ai-batch-detail-body"></div>
-                    {% if not row.snapshot %}<p class="ai-recent-logs-empty">Прогон не найден в БД — результаты недоступны.</p>{% endif %}
+                    {% if not row.snapshot_url %}<p class="ai-recent-logs-empty">Прогон не найден в БД — результаты недоступны.</p>{% endif %}
                   </td>
                 </tr>
               {% endfor %}
               {% endtimezone %}
             </tbody>
           </table>
+          </div>
         {% else %}
           <p class="ai-recent-logs-empty">Пакетных решений пока не было.</p>
         {% endif %}
@@ -99,6 +108,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
 
       {% if can_view_logs %}
         {% if recent_logs %}
+          <div class="ai-scroll">
           <table class="ai-recent-logs-table">
             <thead>
               <tr>
@@ -137,6 +147,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
               {% endtimezone %}
             </tbody>
           </table>
+          </div>
         {% else %}
           <p class="ai-recent-logs-empty">Записей пока нет.</p>
         {% endif %}
@@ -165,6 +176,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
     .ai-recent-logs-err { color: #b42318; font-weight: 600; }
     .ai-recent-logs-empty { color: var(--body-quiet-color); padding: 8px 0; }
     .ai-settings-logs-actions { margin-top: 10px; }
+    .ai-daily-report-bar { margin: 6px 0 10px; }
     .ai-batch-row-clickable { cursor: pointer; }
     .ai-batch-row-clickable:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }
     .ai-batch-row-open td { font-weight: 600; }
@@ -174,9 +186,10 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
   <script>
     (function () {
       // Клик по строке пакетного решения → развёртка результатов прогона
-      // (та же таблица, что на /arm/solve/ после прогона). Snapshot строки
-      // лежит в json_script-теге внутри скрытой строки; рендер ленивый —
-      // при первом раскрытии.
+      // (та же таблица, что на /arm/solve/ после прогона). Snapshot в HTML
+      // страницы НЕ встраивается (ленивая загрузка): по первому клику он
+      // подтягивается AJAX-ом (GET data-snapshot-url → batch-snapshot view)
+      // и рендерится через window.ArmBatchResults.
       document.querySelectorAll('.ai-batch-row-clickable').forEach(function (row) {
         row.addEventListener('click', function (event) {
           if (event.target.closest('a')) { return; } // клик по «Детали →» — обычный переход
@@ -184,14 +197,28 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
           if (!detailRow || !detailRow.classList.contains('ai-batch-detail')) { return; }
           var willOpen = detailRow.hidden;
           var body = detailRow.querySelector('.ai-batch-detail-body');
-          if (willOpen && body && !body.dataset.rendered) {
-            var raw = document.getElementById(row.getAttribute('data-json-id'));
-            if (!raw) { return; }
-            var snapshot = JSON.parse(raw.textContent);
-            window.ArmBatchResults.init(
-              body, snapshot, snapshot.run_id || row.getAttribute('data-run-id') || ''
-            );
-            body.dataset.rendered = '1';
+          if (willOpen && body && !body.dataset.rendered && !body.dataset.loading) {
+            var url = row.getAttribute('data-snapshot-url');
+            if (!url) { return; }
+            body.dataset.loading = '1';
+            body.innerHTML = '<p class="ai-recent-logs-empty">Загрузка результатов…</p>';
+            fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+              .then(function (response) {
+                if (!response.ok) { throw new Error('HTTP ' + response.status); }
+                return response.json();
+              })
+              .then(function (snapshot) {
+                body.innerHTML = '';
+                window.ArmBatchResults.init(
+                  body, snapshot, snapshot.run_id || row.getAttribute('data-run-id') || ''
+                );
+                body.dataset.rendered = '1';
+                delete body.dataset.loading;
+              })
+              .catch(function () {
+                body.innerHTML = '<p class="ai-recent-logs-empty">Не удалось загрузить результаты прогона — попробуйте ещё раз.</p>';
+                delete body.dataset.loading; // повторная попытка при следующем клике
+              });
           }
           detailRow.hidden = !willOpen;
           row.classList.toggle('ai-batch-row-open', willOpen);

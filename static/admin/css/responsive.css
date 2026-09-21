@@ -152,7 +152,7 @@ input[type="submit"], button {
     }
 
     #changelist-filter {
-        flex-basis: 200px;
+        gap: 5px 20px;
     }
 
     .change-list .filtered .results,
@@ -492,6 +492,7 @@ input[type="submit"], button {
 
     #changelist-filter {
         margin-left: 0;
+        gap: 5px 15px;
     }
 
     #changelist .actions label {
@@ -510,7 +511,8 @@ input[type="submit"], button {
     #changelist-filter {
         position: static;
         width: auto;
-        margin-top: 30px;
+        margin-top: 0;
+        margin-bottom: 10px;
     }
 
     .object-tools {

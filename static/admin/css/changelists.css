@@ -129,14 +129,17 @@
     word-break: break-word;
 }
 
-/* FILTER COLUMN */
+/* FILTER BAR — горизонтальная строка СЕЛЕКТОРОВ фильтров НАД таблицей
+   (ai/templates/admin/change_list.html + filter.html; не боковая колонка). */
 
 #changelist-filter {
-    flex: 0 0 240px;
-    order: 1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 8px 20px;
     background: var(--darkened-bg);
-    border-left: none;
-    margin: 0 0 0 30px;
+    padding: 10px 15px;
+    margin: 0 0 15px;
 }
 
 @media (forced-colors: active) {
@@ -146,85 +149,53 @@
 }
 
 #changelist-filter h2 {
-    font-size: 0.875rem;
+    font-size: 0.8125rem;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    padding: 5px 15px;
-    margin-bottom: 12px;
+    padding: 2px 0;
+    margin: 0;
     border-bottom: none;
-}
-
-#changelist-filter h3,
-#changelist-filter details summary {
-    font-weight: 400;
-    padding: 0 15px;
-    margin-bottom: 10px;
-}
-
-#changelist-filter details summary > * {
-    display: inline;
-}
-
-#changelist-filter details > summary {
-    list-style-type: none;
-}
-
-#changelist-filter details > summary::-webkit-details-marker {
-    display: none;
-}
-
-#changelist-filter details > summary::before {
-    content: '→';
-    font-weight: bold;
-    color: var(--link-hover-color);
-}
-
-#changelist-filter details[open] > summary::before {
-    content: '↓';
-}
-
-#changelist-filter ul {
-    margin: 5px 0;
-    padding: 0 15px 15px;
-    border-bottom: 1px solid var(--hairline-color);
-}
-
-#changelist-filter ul:last-child {
-    border-bottom: none;
-}
-
-#changelist-filter li {
-    list-style-type: none;
-    margin-left: 0;
-    padding-left: 0;
-}
-
-#changelist-filter a {
-    display: block;
-    color: var(--body-quiet-color);
-    word-break: break-word;
-}
-
-#changelist-filter li.selected {
-    border-left: 5px solid var(--hairline-color);
-    padding-left: 10px;
-    margin-left: -15px;
-}
-
-#changelist-filter li.selected a {
-    color: var(--link-selected-fg);
-}
-
-#changelist-filter a:focus, #changelist-filter a:hover,
-#changelist-filter li.selected a:focus,
-#changelist-filter li.selected a:hover {
-    color: var(--link-hover-color);
+    align-self: center;
 }
 
 #changelist-filter #changelist-filter-extra-actions {
     font-size: 0.8125rem;
-    margin-bottom: 10px;
-    border-bottom: 1px solid var(--hairline-color);
+    align-self: center;
+    margin-bottom: 4px;
+}
+
+#changelist-filter #changelist-filter-extra-actions h3 {
+    margin: 0;
+    font-weight: 400;
+}
+
+/* Группа фильтров (ai/templates/admin/filter.html): подпись + селектор. */
+#changelist-filter .ai-filter-select {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    margin: 0;
+    font-weight: 400;
+}
+
+#changelist-filter .ai-filter-select-label {
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: var(--body-quiet-color);
+}
+
+#changelist-filter select[data-ai-filter] {
+    min-width: 170px;
+    max-width: 340px;
+    height: 2.2em;
+    margin: 0;
+    padding: 2px 6px;
+    background: var(--body-bg);
+    border: 1px solid var(--hairline-color);
+    border-radius: 4px;
+    font-size: 0.8125rem;
 }
 
 /* DATE DRILLDOWN */

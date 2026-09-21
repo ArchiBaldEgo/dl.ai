@@ -108,7 +108,7 @@ function initWebSocket() {
             }
 
             initAccordionForMessages();
-            collapseAllExceptLast();
+            collapseAllMessages();
         };
 
         ws.onerror = function(error) {

@@ -12,6 +12,7 @@ from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import SimpleTestCase, RequestFactory, TestCase, override_settings
 from pathlib import Path
 import json
+import re
 import tempfile
 import time
 
@@ -815,12 +816,15 @@ class PromptFormTests(TestCase):
         )
 
     def test_form_filters_topics_by_selected_language(self):
+        # mode обязателен в форме с «Разделения промптов по режимам» (132a3ef):
+        # без него form.is_valid() падает на 'This field is required.'
         form = PromptForm(
             data={
                 "programming_language": str(self.python_language.id),
                 "topic": str(self.python_topic.id),
                 "prompt_name_ru": "Prompt",
                 "prompt_text_ru": "Body",
+                "mode": Prompt.MODE_SOLVE,
             }
         )
 
@@ -7098,50 +7102,241 @@ class BatchRunStatusDisplayTests(SimpleTestCase):
         self.assertEqual(batch_run_status_display("weird"), "")
 
 
-class BatchRunNameTests(TestCase):
-    """Названия прогонов: словарь AIAppSettings.batch_run_names «дата-время
-    ISO → название» пишется воркером (ключ == started_at == sent_at записи
-    журнала), читается по sent_at (batch_run_name_for, окно ±2 с) и попадает
-    в строки «Настройки ИИ-приложения» и снапшот деталей журнала."""
+class TaskSolutionListTests(_AdminViewRequestMixin, TestCase):
+    """Кастомный список «Решённые задачи»: название задачи (ссылка в DL по
+    клику) с припиской — путь в дереве задач DL (tree_path), имя языка
+    вместо сырого id, дата МСК, препромпт юзера; без фильтров (в кэш
+    попадают только passed) — работает поиск."""
 
     def setUp(self):
-        from ai.models import AIAppSettings
+        self.factory = RequestFactory()
+
+    def _admin(self):
+        from ai.admin.models import TaskSolutionAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import TaskSolution
+        return TaskSolutionAdmin(TaskSolution, ai_admin_site)
+
+    def _view(self, su, params=None):
+        request = self._admin_request(su, path="/ai/admin/ai/tasksolution/", data=params or {})
+        return self._admin().changelist_view(request)
+
+    def test_changelist_rows(self):
+        from ai.models import ProgrammingLanguage, Task
+
+        su = get_user_model().objects.create_user(
+            username="sol-su", password="x", is_superuser=True, is_staff=True,
+        )
+        lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        Task.objects.create(node_id=9001, task_id=9101, name="Сумма чисел", statement="x")
+        TaskSolution.objects.create(
+            task_node_id=9001, programming_language_id=lang.pk, course_id=1450,
+            file_extension=".pas", code="begin end.",
+            verdict=TaskSolution.VERDICT_PASSED,
+            topic_name="Линейные", prompt_name="Реши задачу",
+            external_user_id="4242",
+            tree_path="Программирование\\Линейные\\Сумма чисел",
+        )
+        response = self._view(su)
+        self.assertEqual(response.status_code, 200)
+        rows = response.context_data["sol_rows"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["task_name"], "Сумма чисел")
+        self.assertEqual(row["task_url"], "https://dl.gsu.by/task.jsp?nid=9001&cid=1450")
+        self.assertEqual(row["tree_path"], "Программирование\\Линейные\\Сумма чисел")
+        self.assertEqual(row["lang_name"], "Pascal")
+        self.assertEqual(row["prompt_name"], "Реши задачу")
+        self.assertRegex(row["date"], r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}")
+
+    def test_task_without_course_links_default_tree(self):
+        """Без известного курса (старые записи) cid всё равно ставится:
+        DL_DEFAULT_COURSE_ID — единственное дерево задач DL (приписка
+        &cid=<дерево> в конце ссылки не должна пропадать)."""
+        su = get_user_model().objects.create_user(
+            username="sol-su2", password="x", is_superuser=True, is_staff=True,
+        )
+        TaskSolution.objects.create(
+            task_node_id=9002, programming_language_id=None,
+            code="x", verdict=TaskSolution.VERDICT_FAILED,
+        )
+        response = self._view(su)
+        rows = response.context_data["sol_rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["task_url"], "https://dl.gsu.by/task.jsp?nid=9002&cid=1450")
+        self.assertEqual(rows[0]["task_name"], "Задача #9002")
+
+    def test_search_filters_rows(self):
+        """Поиск (без list_filter — в кэш попадают только passed) работает."""
+        su = get_user_model().objects.create_user(
+            username="sol-su3", password="x", is_superuser=True, is_staff=True,
+        )
+        TaskSolution.objects.create(
+            task_node_id=9003, verdict=TaskSolution.VERDICT_PASSED, code="ok",
+            prompt_name="Реши задачу",
+        )
+        TaskSolution.objects.create(
+            task_node_id=9004, verdict=TaskSolution.VERDICT_PASSED, code="no",
+            prompt_name="Другой промпт",
+        )
+        response = self._view(su, params={"q": "Реши задачу"})
+        rows = response.context_data["sol_rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["obj"].task_node_id, 9003)
+
+
+class FilterSelectBarTests(_AdminViewRequestMixin, TestCase):
+    """Фильтры changelist — селекторы НАД таблицей (не чипы и не боковая
+    колонка): каждая группа рендерится как select[data-ai-filter], активная
+    опция помечена selected, выбор уводит на choice.query_string."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def _render(self, params=None):
+        from ai.admin.models import PromptAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import Prompt
+
+        su = get_user_model().objects.create_user(
+            username="filt-su", password="x", is_superuser=True, is_staff=True,
+        )
+        admin = PromptAdmin(Prompt, ai_admin_site)
+        request = self._admin_request(
+            su, path="/ai/admin/ai/prompt/", data=params or {},
+        )
+        response = admin.changelist_view(request)
+        self.assertEqual(response.status_code, 200)
+        return response.rendered_content
+
+    def test_filters_render_as_selects(self):
+        html = self._render()
+        self.assertIn('<select data-ai-filter', html)
+        # Каждая группа — подпись + селектор; «Все» — первая опция.
+        groups = re.findall(r'<label class="ai-filter-select">(.*?)</label>', html, re.DOTALL)
+        self.assertTrue(groups)
+        for group in groups:
+            self.assertIn("<select", group)
+            self.assertIn("<option", group)
+
+    def test_active_filter_preselected_and_preserved_in_target(self):
+        """Активный фильтр ?mode__exact=solve: опция selected, опция «Все»
+        сбрасывает свой параметр («?») — query_string приходит из стокового
+        контракта choices (ChoicesFieldListFilter, параметр mode__exact)."""
+        from ai.models import ProgrammingLanguage, Topic
+
+        lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        Topic.objects.create(topic_name_ru="Линейные", programming_language=lang)
+        html = self._render(params={"mode__exact": "solve"})
+        mode_group = re.search(
+            r'<select data-ai-filter[^>]*>(.*?)</select>', html, re.DOTALL,
+        )
+        self.assertIn('value="?mode__exact=solve" selected', mode_group.group(1))
+        self.assertIn('value="?"', mode_group.group(1))
+        # Языковая группа предлагает созданный язык.
+        self.assertIn("Pascal", html)
+
+    def test_chip_markup_is_gone(self):
+        html = self._render()
+        self.assertNotIn("ai-filter-chip-group", html)
+
+
+class ArmCodeExtractionTests(SimpleTestCase):
+    """Извлечение чистого кода из ответа модели (_extract_code_from_response):
+    longest-fence побеждает; текст без фенсов — рассуждения, а не код (пусто);
+    think-блоки вырезаются целиком (в т.ч. незакрытые и код внутри них)."""
+
+    def _extract(self, text):
+        from ai.arm_runner import _extract_code_from_response
+        return _extract_code_from_response(text)
+
+    def test_longest_fence_wins(self):
+        text = "```asm\nmov ax, 1\n```\nмусор\n```pascal\nprogram a; begin end.\n```"
+        self.assertEqual(self._extract(text), "program a; begin end.")
+
+    def test_no_fences_returns_empty(self):
+        self.assertEqual(self._extract("We need answer code only, no explanations."), "")
+        self.assertEqual(self._extract(""), "")
+
+    def test_no_fences_code_like_text_is_accepted(self):
+        """Код без фенсов (фейковые/короткие ответы моделей) не теряется."""
+        self.assertEqual(
+            self._extract("program a; begin writeln(1); end."),
+            "program a; begin writeln(1); end.",
+        )
+
+    def test_prose_with_stray_punctuation_is_rejected(self):
+        """Рассуждения со случайными ';'/скобками — не код (реальный кейс из чата)."""
+        prose = (
+            "We need answer code only, no explanations.\n"
+            "Need solve assembler i86.\n"
+            "Need infer syntax? Likely x86 16-bit? maybe MASM/TASM.\n"
+            "Need determine variables sizes: a,b,RES word (2 bytes signed?); c,d byte (signed).\n"
+            "Need compute based on condition b>0 or c>0 -> first; if b<0 and c<=0 -> second.\n"
+            "Need produce assembly code.\n"
+            "Need include data segment? Need compute expression.\n"
+            "Let's parse expressions carefully.."
+        )
+        self.assertEqual(self._extract(prose), "")
+
+    def test_strip_think_blocks_full_and_unclosed(self):
+        from ai.arm_runner import _strip_think_blocks
+        # Литеральные теги собираются, чтобы не мешать парсингу этого файла.
+        open_tag = chr(60) + "think>"
+        close_tag = chr(60) + "/think>"
+        # Закрытый блок — удалён вместе с содержимым, текст после блока остаётся.
+        self.assertEqual(
+            _strip_think_blocks(f"{open_tag}рассуждения{close_tag}ответ"),
+            "ответ",
+        )
+        # Незакрытый блок — до конца текста.
+        self.assertEqual(_strip_think_blocks(f"{open_tag}only reasoning"), "")
+
+    def test_code_inside_think_is_ignored(self):
+        from ai.arm_runner import _strip_think_blocks
+        open_tag = chr(60) + "think>"
+        close_tag = chr(60) + "/think>"
+        text = _strip_think_blocks(
+            f"{open_tag}```asm\nmov ax, 1\n```{close_tag}Финальный ответ:\n```pascal\nbegin end.\n```"
+        )
+        self.assertEqual(self._extract(text), "begin end.")
+
+    def test_think_stripped_before_extraction_pipeline(self):
+        """Ответ, целиком состоящий из рассуждений → нет ни кода, ни текста."""
+        from ai.arm_runner import _strip_think_blocks
+        text = _strip_think_blocks(
+            chr(60) + "think>Need solve assembler i86. Need infer syntax."
+        )
+        self.assertEqual(self._extract(text), "")
+
+
+class TemplateInlineCommentTests(SimpleTestCase):
+    """Регрессия: однострочные комментарии {# … #} в шаблонах НЕ могут
+    переносить строки — Django рендерит их содержимое как текст прямо
+    на странице (реальный кейс с чипами фильтров). Многострочный текст
+    оформляем тегом {% comment %}…{% endcomment %}."""
+
+    def test_no_multiline_inline_comments(self):
+        import glob
+        import os
+        base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates")
+        offenders = []
+        for path in glob.glob(os.path.join(base, "**", "*.html"), recursive=True):
+            with open(path, encoding="utf-8") as fh:
+                for lineno, line in enumerate(fh, 1):
+                    if "{#" in line and "#}" not in line:
+                        offenders.append(f"{os.path.relpath(path, base)}:{lineno}")
+        self.assertEqual(offenders, [])
+
+
+class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
+    """Названия прогонов: воркер пишет run_name прямо в AIModelTestRun,
+    журналы и таблица «Последние пакетные решения» читают его с прогона
+    (run_name_for); для старых прогонов — фолбэк на run_params."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
         self.user = get_user_model().objects.create_user(username="runname", password="x")
-        settings_obj = AIAppSettings.get_solo()
-        settings_obj.batch_run_names = {}
-        settings_obj.save()
-
-    def _write_name(self, started_at, name):
-        from ai.models import AIAppSettings
-        settings_obj = AIAppSettings.get_solo()
-        names = dict(settings_obj.batch_run_names or {})
-        names[timezone.localtime(started_at).isoformat()] = name
-        settings_obj.batch_run_names = names
-        settings_obj.save()
-
-    def test_batch_run_name_for_exact_key(self):
-        from ai.admin.logs import batch_run_name_for
-        started_at = timezone.now()
-        self._write_name(started_at, "Неделя 3")
-        self.assertEqual(batch_run_name_for(started_at), "Неделя 3")
-
-    def test_batch_run_name_for_two_second_window(self):
-        """Ключ на 1.5 с раньше sent_at — внутри окна ±2 с → название найдено."""
-        from datetime import timedelta
-
-        from ai.admin.logs import batch_run_name_for
-        started_at = timezone.now()
-        self._write_name(started_at - timedelta(seconds=1.5), "Проверка")
-        self.assertEqual(batch_run_name_for(started_at), "Проверка")
-
-    def test_batch_run_name_for_outside_window_is_dash(self):
-        from datetime import timedelta
-
-        from ai.admin.logs import batch_run_name_for
-        started_at = timezone.now()
-        self._write_name(started_at - timedelta(seconds=30), "Другой прогон")
-        self.assertEqual(batch_run_name_for(started_at), "—")
-        self.assertEqual(batch_run_name_for(None), "—")
 
     def _run_batch_with_name(self, run_id, run_name):
         """Прогон batch-воркера синхронно с run_name (как в IntegrationTests)."""
@@ -7185,25 +7380,22 @@ class BatchRunNameTests(TestCase):
         return AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
 
     def test_worker_writes_run_name_and_journals_read_it(self):
-        """Воркер пишет run_name в AIAppSettings.batch_run_names; журналы
-        восстанавливают название по sent_at записи без доп. связок."""
+        """Воркер пишет run_name в AIModelTestRun; журналы и таблица
+        «Последние пакетные решения» читают название с прогона."""
         from ai.admin.logs import (
             _build_batch_log_snapshot,
-            batch_run_name_for,
             build_recent_batch_rows,
             build_recent_log_rows,
+            run_name_for,
         )
-        from ai.models import AIAppSettings, AIModelTestRun
+        from ai.models import AIModelTestRun
 
         run_id = "b" * 32
         log = self._run_batch_with_name(run_id, "Неделя 3")
 
-        names = dict(AIAppSettings.get_solo().batch_run_names or {})
-        self.assertEqual(list(names.values()), ["Неделя 3"])
-
-        # Точное совпадение ключа: started_at прогона == sent_at записи.
         run = AIModelTestRun.objects.get(run_id=run_id)
-        self.assertEqual(batch_run_name_for(log.sent_at), "Неделя 3")
+        self.assertEqual(run.run_name, "Неделя 3")
+        self.assertEqual(run_name_for(run), "Неделя 3")
 
         request = RequestFactory().get("/ai/admin/")
         request.user = get_user_model().objects.create_user(
@@ -7221,27 +7413,229 @@ class BatchRunNameTests(TestCase):
         self.assertEqual(snapshot["run_status"], "completed")
 
     def test_worker_without_run_name_writes_nothing(self):
-        from ai.admin.logs import batch_run_name_for
-        from ai.models import AIAppSettings
+        from ai.admin.logs import run_name_for
+        from ai.models import AIModelTestRun
 
         run_id = "c" * 32
         self._run_batch_with_name(run_id, "")
-        self.assertEqual(dict(AIAppSettings.get_solo().batch_run_names or {}), {})
-        log = AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
-        self.assertEqual(batch_run_name_for(log.sent_at), "—")
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.run_name, "")
+        self.assertEqual(run_name_for(run), "—")
+        self.assertEqual(run_name_for(None), "—")
+
+    def test_recent_batch_rows_are_lazy(self):
+        """Строки «Последних пакетных решений» лёгкие: полные снапшоты
+        (тексты решений) в HTML страницы больше не встраиваются — только
+        шапка + count-агрегат + snapshot_url для ленивой загрузки AJAX-ом.
+        Иначе большой прогон раздувал страницу настроек до ~6 МБ."""
+        from ai.admin.logs import build_recent_batch_rows
+
+        run_id = "e" * 32
+        log = self._run_batch_with_name(run_id, "Неделя 5")
+        request = RequestFactory().get("/ai/admin/")
+        request.user = get_user_model().objects.create_user(
+            username="lazy-su", password="x", is_superuser=True, is_staff=True,
+        )
+        rows = build_recent_batch_rows(request)["recent_batch_runs"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertNotIn("snapshot", row)
+        self.assertNotIn("json_id", row)
+        self.assertEqual(row["snapshot_url"], f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/")
+        self.assertEqual(row["run_name"], "Неделя 5")
+        # Count-агрегат по результатам прогона (1 задача × 1 модель, solved).
+        self.assertEqual(row["total_pairs"], 1)
+        self.assertEqual(row["solved"], 1)
+        self.assertEqual(row["failed"], 0)
+        self.assertEqual(row["file_extension"], ".pas")
+
+    def test_batch_snapshot_endpoint(self):
+        """AJAX-снапшот прогона: суперюзеру — 200 с JSON снапшота;
+        не-батч запись журнала — 404; без доступа к журналу — 403.
+        Вьюха зовётся напрямую (site-level has_permission в ai_admin_site
+        требует внешний DLSID — это проверяется уровнем выше, см.
+        _AdminViewRequestMixin)."""
+        from ai.admin.logs import admin_batch_snapshot_view
+        from ai.models import AIRequestLog
+
+        run_id = "f" * 32
+        log = self._run_batch_with_name(run_id, "Неделя 6")
+        su = get_user_model().objects.create_user(
+            username="snap-su", password="x", is_superuser=True, is_staff=True,
+        )
+        url = f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/"
+
+        request = self._admin_request(su, path=url)
+        response = admin_batch_snapshot_view(request, log_id=log.id)
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertEqual(data["run_name"], "Неделя 6")
+        self.assertEqual(data["run_status"], "completed")
+        self.assertEqual(data["run_id"], run_id)
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["report"]["solved"], 1)
+
+        # Не-батч запись журнала (обычный чат) — снапшота нет → 404.
+        plain = AIRequestLog.objects.create(
+            source=AIRequestLog.SOURCE_HTTP, mode=AIRequestLog.MODE_CHAT,
+            sent_at=timezone.now(), message="привет",
+        )
+        request = self._admin_request(su, path=f"/ai/admin/ai/airequestlog/{plain.id}/batch-snapshot/")
+        response = admin_batch_snapshot_view(request, log_id=plain.id)
+        self.assertEqual(response.status_code, 404)
+
+        # Без доступа к журналу (аноним) — 403 от самой вьюхи.
+        from django.contrib.auth.models import AnonymousUser
+        request = self._admin_request(AnonymousUser(), path=url)
+        response = admin_batch_snapshot_view(request, log_id=log.id)
+        self.assertEqual(response.status_code, 403)
 
     def test_snapshot_from_test_run_carries_run_name(self):
-        """Снапшот страницы прогона берёт run_name из run_params."""
+        """Снапшот страницы прогона берёт run_name с прогона (фолбэк —
+        run_params для прогонов, созданных до колонки)."""
         from ai import arm_runner
         from ai.models import AIModelTestRun
         run = AIModelTestRun.objects.create(
             run_id="a" * 32,
             run_type=AIModelTestRun.RUN_TYPE_BATCH,
             status=AIModelTestRun.STATUS_RUNNING,
-            run_params={"run_name": "Неделя 3"},
+            run_name="Неделя 3",
         )
         snapshot = arm_runner._snapshot_from_test_run(run)
         self.assertEqual(snapshot["run_name"], "Неделя 3")
+
+        legacy = AIModelTestRun.objects.create(
+            run_id="d" * 32,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_RUNNING,
+            run_params={"run_name": "Старый прогон"},
+        )
+        self.assertEqual(arm_runner._snapshot_from_test_run(legacy)["run_name"], "Старый прогон")
+
+
+class DailyReportTests(_AdminViewRequestMixin, TestCase):
+    """Дневной отчёт журнала: день по МСК (00:00–23:59), строки — студенты
+    (фамилия / время последней отправки без даты / последняя тема и
+    препромпт / последний режим / всего запросов за день), развёртка —
+    все записи дня; ARM (source=arm) в отчёт не попадает;
+    prompt_developer видит только свои записи."""
+
+    def setUp(self):
+        from django.contrib.auth.models import Group
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.su = self.user_model.objects.create_user(
+            username="daily-su", password="***", is_superuser=True, is_staff=True,
+        )
+        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+
+    @staticmethod
+    def _msk_at(hour, minute=0, second=0, *, day_offset=0):
+        """Сегодня (или день_offset назад) в hour:minute по МСК → aware UTC."""
+        from datetime import timedelta
+        from zoneinfo import ZoneInfo
+        now_msk = timezone.localtime(timezone.now(), ZoneInfo("Europe/Moscow"))
+        naive = (now_msk + timedelta(days=day_offset)).replace(
+            hour=hour, minute=minute, second=second, microsecond=0,
+        )
+        return naive.astimezone(ZoneInfo("Europe/Moscow"))
+
+    def _log(self, *, user, external_user_id, full_name, sent_at, topic="",
+             prompt="", mode=None, status=None, source=None):
+        from ai.models import AIRequestLog
+        return AIRequestLog.objects.create(
+            user=user,
+            source=source or AIRequestLog.SOURCE_WEBSOCKET,
+            mode=mode or AIRequestLog.MODE_CHAT,
+            status=status or AIRequestLog.STATUS_SUCCESS,
+            sent_at=sent_at,
+            external_user_id=external_user_id,
+            username=f"user_{external_user_id}" if external_user_id else user.username,
+            user_full_name=full_name,
+            topic_name=topic,
+            prompt_name=prompt,
+            model_names=["FakeModel"],
+        )
+
+    def _report(self, user):
+        from ai.admin.logs import admin_daily_report_view
+        request = self._admin_request(user, path="/ai/admin/ai/airequestlog/daily-report/")
+        return admin_daily_report_view(request)
+
+    def test_daily_report_aggregates_students(self):
+        """Строки — по студенту: количество, последнее время/тема/препромпт/
+        режим; записи дня в развёртке — новые сверху; сортировка по фамилии;
+        ARM-запись в счёт не идёт."""
+        from ai.models import AIRequestLog
+
+        ivanov = "Иванов Иван"
+        petrov = "Петров Пётр"
+        self._log(user=self.su, external_user_id="101", full_name=ivanov,
+                  sent_at=self._msk_at(9, 15), topic="Циклы", prompt="Реши по шагам")
+        self._log(user=self.su, external_user_id="101", full_name=ivanov,
+                  sent_at=self._msk_at(12, 30), topic="Массивы", prompt="Реши задачу",
+                  mode=AIRequestLog.MODE_SOLVE)
+        self._log(user=self.su, external_user_id="200", full_name=petrov,
+                  sent_at=self._msk_at(10, 0), topic="Строки", prompt="Найди ошибку",
+                  mode=AIRequestLog.MODE_FIND_ERROR)
+        # ARM-прогон — операторская запись, в студенческом отчёте не считается.
+        self._log(user=self.su, external_user_id="101", full_name=ivanov,
+                  sent_at=self._msk_at(11, 0), source=AIRequestLog.SOURCE_ARM,
+                  mode=AIRequestLog.MODE_BATCH_SOLVE)
+        # Вчерашняя запись — не в сегодняшнем дне.
+        self._log(user=self.su, external_user_id="101", full_name=ivanov,
+                  sent_at=self._msk_at(23, 59, 59, day_offset=-1), topic="Вчера")
+
+        response = self._report(self.su)
+        self.assertEqual(response.status_code, 200)
+        rows = response.context_data["rows"]
+        self.assertEqual([r["display_name"] for r in rows], [ivanov, petrov])
+
+        row_ivanov = rows[0]
+        self.assertEqual(row_ivanov["count"], 2)  # без ARM и без вчерашней
+        self.assertEqual(row_ivanov["last_sent"], "12:30")
+        self.assertEqual(row_ivanov["last_topic"], "Массивы")
+        self.assertEqual(row_ivanov["last_prompt"], "Реши задачу")
+        self.assertEqual(row_ivanov["last_mode"], "Решить задачу")
+        # Развёртка: все записи дня, новые сверху, время без даты.
+        self.assertEqual(len(row_ivanov["requests"]), 2)
+        self.assertEqual(row_ivanov["requests"][0]["time"], "12:30:00")
+        self.assertEqual(row_ivanov["requests"][0]["topic"], "Массивы")
+        self.assertEqual(rows[1]["count"], 1)
+        self.assertEqual(rows[1]["last_mode"], "Найти ошибку")
+        self.assertEqual(response.context_data["total_count"], 3)
+
+    def test_daily_report_msk_day_bounds(self):
+        """День — по МСК: запись в 00:00:01 МСК включается, в 23:59 вчера —
+        нет (границы дня локальные, не UTC)."""
+        first_today = self._log(user=self.su, external_user_id="300", full_name="Сидоров",
+                                sent_at=self._msk_at(0, 0, 1))
+        before = self._log(user=self.su, external_user_id="300", full_name="Сидоров",
+                           sent_at=self._msk_at(23, 59, 59, day_offset=-1), topic="Вчера вечером")
+        rows = self._report(self.su).context_data["rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["count"], 1)  # только сегодняшняя 00:00:01
+        self.assertNotEqual(rows[0]["requests"][0]["time"], "23:59:59")
+
+    def test_daily_report_access_and_scope(self):
+        """Аноним — 403; prompt_developer видит только свои записи (скоуп)."""
+        from django.contrib.auth.models import AnonymousUser
+
+        self._log(user=self.su, external_user_id="101", full_name="Иванов Иван",
+                  sent_at=self._msk_at(9, 0))
+        response = self._report(AnonymousUser())
+        self.assertEqual(response.status_code, 403)
+
+        pd = self.user_model.objects.create_user(
+            username="daily-pd", password="***",
+        )
+        pd.groups.add(self.pd_group)
+        self._log(user=pd, external_user_id="400", full_name="Разработчик Препромптов",
+                  sent_at=self._msk_at(8, 0), prompt="Мой препромпт")
+        rows = self._report(pd).context_data["rows"]
+        self.assertEqual([r["display_name"] for r in rows], ["Разработчик Препромптов"])
+        self.assertEqual(rows[0]["count"], 1)
 
 
 def _fake_translate_chunk(counter):
@@ -7656,6 +8050,43 @@ class SendSolutionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         solution = TaskSolution.objects.get(task_node_id=101)
         self.assertEqual(solution.programming_language_id, lang.id)
+
+    @patch("ai.dl_api_client.fetch_task_info")
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_tree_path_persisted_from_task_info(self, mock_send, mock_info):
+        """Приписка в дереве задач: tree_path пишется best-effort из
+        get-task-info (поле path) после записи кэша — приписка появляется
+        в списке «Решённые задачи» (шаблон tasksolution_changelist)."""
+        mock_send.return_value = {"queueId": 44, "message": "ok"}
+        mock_info.return_value = {
+            "taskId": 111, "name": "Сумма",
+            "path": "Программирование\\Линейные\\Сумма",
+        }
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 102, "code": "begin end.",
+            "courseId": 1450, "fileExtension": ".pas",
+        })
+        self.assertEqual(response.status_code, 200)
+        solution = TaskSolution.objects.get(task_node_id=102)
+        self.assertEqual(solution.tree_path, "Программирование\\Линейные\\Сумма")
+        kwargs = mock_info.call_args.kwargs
+        self.assertEqual(kwargs.get("session_id"), "SID")
+        self.assertEqual(kwargs.get("course_id"), 1450)
+
+    @patch("ai.dl_api_client.fetch_task_info")
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_tree_path_fetch_failure_does_not_break_submission(self, mock_send, mock_info):
+        """Сбой get-task-info (путь в дереве) не ломает отправку решения и
+        запись кэша — приписка best-effort, повторное решение допишет путь."""
+        mock_send.return_value = {"queueId": 45, "message": "ok"}
+        mock_info.side_effect = Exception("DL down")
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 103, "code": "begin end.",
+            "courseId": 1450, "fileExtension": ".pas",
+        })
+        self.assertEqual(response.status_code, 200)
+        solution = TaskSolution.objects.get(task_node_id=103)
+        self.assertEqual(solution.tree_path, "")
 
     @patch("ai.dl_api_client.send_solution_to_dl")
     def test_topic_and_prompt_persisted_from_last_solve_log(self, mock_send):

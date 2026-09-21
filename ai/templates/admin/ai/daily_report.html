@@ -1,0 +1,152 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+{% comment %}Дневной отчёт журнала запросов (кнопка «Дневной отчёт» в журнале
+   и на странице «Настройки ИИ-приложения»): студенты × сегодняшний день
+   (00:00–23:59 МСК). Строка — фамилия / время последней отправки (без
+   даты) / последняя тема и препромпт / последний режим / всего запросов
+   за сегодня. Клик по колонке «Запросов» разворачивает свёрнутый список
+   всех его записей дня (данные уже в HTML, второго запроса не нужно).
+   Таблица живёт в .ai-scroll-контейнере — при увеличении интерфейса
+   (зум 150–170%) прокручивается внутри себя, не распирая страницу.
+   Контекст готовит ai.admin.logs.admin_daily_report_view.{% endcomment %}
+
+{% block content %}
+<style>
+  .ai-daily-header {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: baseline; justify-content: space-between;
+    margin: 0 0 8px;
+  }
+  .ai-daily-header h2 { margin: 0; }
+  .ai-daily-note { color: var(--body-quiet-color); font-size: 12px; margin: 0 0 10px; }
+  .ai-daily-table { width: 100%; border-collapse: collapse; }
+  .ai-daily-table .nowrap { white-space: nowrap; }
+  .ai-daily-table th, .ai-daily-table td {
+    border: 1px solid var(--hairline-color); padding: 8px 10px;
+    text-align: left; vertical-align: top;
+  }
+  .ai-daily-table th { background: var(--darkened-bg); }
+  .ai-daily-count {
+    cursor: pointer; font-weight: 600; white-space: nowrap;
+    user-select: none;
+  }
+  .ai-daily-count:hover { background: var(--selected-row); }
+  .ai-daily-caret {
+    display: inline-block; margin-left: 4px;
+    transition: transform .12s ease; color: var(--body-quiet-color);
+  }
+  .ai-daily-count.open .ai-daily-caret { transform: rotate(180deg); }
+  .ai-daily-detail > td {
+    background: var(--darkened-bg);
+    border-left: 3px solid var(--hairline-color);
+  }
+  .ai-daily-requests { max-height: 60vh; overflow: auto; }
+  .ai-daily-req-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .ai-daily-req-table th, .ai-daily-req-table td {
+    border: 1px solid var(--hairline-color); padding: 5px 8px;
+    text-align: left; vertical-align: top;
+  }
+  .ai-daily-req-table th { background: var(--darkened-bg); font-weight: 600; }
+  .ai-daily-ok { color: #067647; font-weight: 600; }
+  .ai-daily-err { color: #b42318; font-weight: 600; }
+  .ai-daily-empty {
+    padding: 20px; text-align: center; color: var(--body-quiet-color);
+  }
+</style>
+
+{% include "admin/ai/_ai_back_nav.html" %}
+<div class="ai-daily-wrap">
+  <div class="ai-daily-header">
+    <h2>{% trans "Дневной отчёт" %} — {{ date_label }} (МСК)</h2>
+    <a class="button" href="/ai/admin/ai/airequestlog/">{% trans "← Весь журнал" %}</a>
+  </div>
+  <p class="ai-daily-note">
+    Сегодняшний день по МСК: {{ date_label }} 00:00–23:59.
+    Студентов: {{ rows|length }}, записей: {{ total_count }}.
+    Нажмите на число в колонке «Запросов», чтобы развернуть все запросы студента за день.
+  </p>
+
+  <div class="ai-scroll">
+    <table class="ai-daily-table">
+      <thead>
+        <tr>
+          <th>Фамилия студента</th>
+          <th>Последняя отправка</th>
+          <th>Последняя тема</th>
+          <th>Последний препромпт</th>
+          <th>Чат</th>
+          <th>Запросов</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr class="ai-daily-row">
+            <td>
+              {% if row.external_user_id %}
+                <a href="https://dl.gsu.by/report.asp?id={{ row.external_user_id }}"
+                   target="_blank" rel="noopener" title="Открыть отчёт студента в DL">{{ row.display_name }}</a>
+              {% else %}
+                {{ row.display_name }}
+              {% endif %}
+            </td>
+            <td class="nowrap">{{ row.last_sent }}</td>
+            <td>{{ row.last_topic }}</td>
+            <td>{{ row.last_prompt }}</td>
+            <td>{{ row.last_mode }}</td>
+            <td class="ai-daily-count" title="Показать все запросы за сегодня">{{ row.count }}<span class="ai-daily-caret">▾</span></td>
+          </tr>
+          <tr class="ai-daily-detail" hidden>
+            <td colspan="6">
+              <div class="ai-daily-requests">
+                <table class="ai-daily-req-table">
+                  <thead>
+                    <tr>
+                      <th>Время</th>
+                      <th>Режим</th>
+                      <th>Тема</th>
+                      <th>Препромпт</th>
+                      <th>Модель</th>
+                      <th>Статус</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for r in row.requests %}
+                      <tr>
+                        <td class="nowrap">{{ r.time }}</td>
+                        <td>{{ r.mode }}</td>
+                        <td>{{ r.topic }}</td>
+                        <td>{{ r.prompt }}</td>
+                        <td>{{ r.model }}</td>
+                        <td class="{% if r.status_class == 'ok' %}ai-daily-ok{% else %}ai-daily-err{% endif %}">{{ r.status }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="6" class="ai-daily-empty">За сегодня записей нет.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  (function () {
+    // Клик по колонке «Запросов» → развёртка всех запросов студента за
+    // сегодня (свёрнутый блок уже в HTML — без запроса к серверу).
+    document.querySelectorAll('.ai-daily-count').forEach(function (cell) {
+      cell.addEventListener('click', function () {
+        var row = cell.closest('.ai-daily-row');
+        var detail = row && row.nextElementSibling;
+        if (!detail || !detail.classList.contains('ai-daily-detail')) { return; }
+        var willOpen = detail.hidden;
+        detail.hidden = !willOpen;
+        cell.classList.toggle('open', willOpen);
+      });
+    });
+  })();
+</script>
+{% endblock %}

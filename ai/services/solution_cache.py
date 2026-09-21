@@ -34,12 +34,14 @@ def find_passed_solution(node_id, programming_language_id):
 
 
 def record_submission(node_id, code, *, programming_language_id=None, file_extension="",
-                      identity=None, queue_id=None, test_log=None):
+                      course_id=None, identity=None, queue_id=None, test_log=None,
+                      session_id=None):
     """Upsert-запись кэша при отправке кода на тестирование со страницы.
 
     ``identity`` — словарь ``get_user_identity_for_log``; ``test_log`` —
-    запись AIRequestLog (mode=testing) этого тестирования. Не поднимает
-    исключений: сбой кэша не должен ломать отправку решения.
+    запись AIRequestLog (mode=testing) этого тестирования; ``course_id`` —
+    курс DL из send-solution (для пользовательской ссылки на задачу). Не
+    поднимает исключений: сбой кэша не должен ломать отправку решения.
     """
     try:
         model_key, model_title = last_solve_model(node_id)
@@ -54,6 +56,7 @@ def record_submission(node_id, code, *, programming_language_id=None, file_exten
             "external_user_id": identity.get("external_user_id", ""),
             "created_by": identity.get("user"),
             "queue_id": queue_id,
+            "course_id": course_id or None,
             "submitted_at": timezone.now(),
             "test_log": test_log,
         }
@@ -72,10 +75,38 @@ def record_submission(node_id, code, *, programming_language_id=None, file_exten
             programming_language_id=programming_language_id or None,
             defaults=defaults,
         )
+        # Путь в дереве задач DL — best-effort уже после записи: сбой/таймаут
+        # DL не должен ни ломать отправку решения, ни задерживать её (кэш уже
+        # записан). Старые записи получают путь при повторном решении.
+        _update_tree_path(solution, session_id=session_id, course_id=course_id)
         return solution
     except Exception:
         logger.exception("Failed to record TaskSolution submission for node %s", node_id)
         return None
+
+
+def _update_tree_path(solution, *, session_id=None, course_id=None):
+    """Дописать ``tree_path`` (путь задачи в дереве задач DL) к записи кэша.
+
+    Источник — get-task-info (поле ``path``, возвращается только при
+    известном course_id — см. dl_api_client.fetch_task_info). Без сессии,
+    курса или при ошибке DL путь не трогаем: приписка не критична. Пишет
+    напрямую через .update() — не трогает updated_at (порядок списка).
+    """
+    if not session_id or not course_id:
+        return
+    try:
+        from ..dl_api_client import fetch_task_info
+        data = fetch_task_info(
+            solution.task_node_id, session_id=session_id,
+            remove_html_tags=True, course_id=course_id,
+        )
+    except Exception:
+        logger.info("tree_path fetch skipped for node %s", solution.task_node_id)
+        return
+    path = (data or {}).get("path") or ""
+    if path and path != solution.tree_path:
+        TaskSolution.objects.filter(pk=solution.pk).update(tree_path=path)
 
 
 def record_result(queue_id, comment, *, finished=True):

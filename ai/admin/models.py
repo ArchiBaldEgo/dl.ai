@@ -13,6 +13,7 @@ from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
 from django.http import HttpResponse
 from django.urls import path
+from django.utils import timezone
 
 from ..models import (
     AIAppSettings,
@@ -35,6 +36,7 @@ from ..dl_api_client import (
 )
 from ..http_utils import resolve_dl_session_id
 from ..services.task_registry import apply_dl_task_info
+from .logs import dl_task_url
 
 User = get_user_model()
 
@@ -76,6 +78,8 @@ class TopicAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     form = TopicForm
     list_display = ('topic_name_ru', 'programming_language')
     list_filter = ('programming_language',)
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     search_fields = ('topic_name_ru', 'topic_name_en', 'topic_name_fr')
     raw_id_fields = ('programming_language',)
     fieldsets = (
@@ -134,7 +138,11 @@ class PromptAdmin(admin.ModelAdmin):
         'short_prompt_text',
     )
     list_display_links = ('prompt_name_ru',)
-    list_filter = (PromptUserIdFilter, 'mode', 'topic__programming_language', 'topic')
+    # Режим первым: чипы «Все / Реши задачу / В чём ошибка» — главный
+    # селектор списка (см. MODE_SOLVE / MODE_FIND_ERROR).
+    list_filter = ('mode', PromptUserIdFilter, 'topic__programming_language', 'topic')
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     list_per_page = 25
     search_fields = ('prompt_name_ru', 'prompt_text_ru', 'owner__username', '=owner__id')
     autocomplete_fields = ("owner", "editors")
@@ -361,6 +369,8 @@ class SharedPromptAdmin(admin.ModelAdmin):
     list_display = ('prompt_name_ru', 'mode', 'language_list', 'updated_at', 'owner_username')
     list_display_links = ('prompt_name_ru',)
     list_filter = ('mode', 'programming_languages')
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     search_fields = ('prompt_name_ru', 'prompt_text_ru')
     autocomplete_fields = ('owner', 'editors')
     # 'editors' is rendered by autocomplete_fields above (autocomplete wins in
@@ -423,6 +433,9 @@ class SharedPromptAdmin(admin.ModelAdmin):
 
 class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     list_display = ("is_enabled", "updated_at")
+    # favorites_epoch на форме не нужен (меняется только командой
+    # reset_favorites_epoch); updated_at — авторасчётное, тоже не редактируем.
+    exclude = ("favorites_epoch", "updated_at")
     change_form_template = "admin/ai/aiappsettings_change_form.html"
 
     def has_add_permission(self, request):
@@ -440,11 +453,12 @@ class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     def changeform_view(self, request, object_id=None, form_url="", extra_context=None):
         """Добавляем на страницу настроек таблицы последних запросов.
 
-        Два блока: последние 5 batch-solve прогонов (по клику на строку
-        разворачивается та же таблица результатов, что после прогона на
-        /arm/solve/) и последние 5 записей журнала — те же, что в «Журнале
+        Два блока: последние 5 batch-solve прогонов (строки лёгкие — шапка и
+        count-агрегат; полные результаты грузятся ЛЕНИВО по клику через
+        admin_batch_snapshot_view — иначе большой прогон раздувал страницу
+        до ~6 МБ) и последние 5 записей журнала — те же, что в «Журнале
         запросов», но сокращённые. Если нужно искать конкретную запись —
-        кнопка ведёт в полный журнал с поиском по всему журналу.
+        кнопка ведёт в полный журнал с поиском.
         """
         from .logs import build_recent_batch_rows, build_recent_log_rows
 
@@ -461,6 +475,8 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                     "user_link", "created_at", "updated_at")
     list_display_links = ("external_user_id",)
     list_filter = ("created_at", "updated_at")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     search_fields = ("external_user_id", "external_login",
                      "external_first_name", "external_last_name",
                      "dl_email", "education_school_no", "user__username")
@@ -512,6 +528,8 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
     list_display = ("last_name", "first_name", "dl_id", "email", "is_staff_badge")
     list_display_links = ("dl_id",)
     list_filter = ("is_staff", "is_superuser", "groups")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     search_fields = ("username", "first_name", "last_name", "email")
     ordering = ("last_name", "first_name")
 
@@ -552,6 +570,8 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     list_display = ("node_id", "name", "topic", "programming_language", "file_extension", "active", "updated_at")
     list_display_links = ("node_id", "name")
     list_filter = ("active", "topic", "topic__programming_language")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     list_editable = ("file_extension", "active")
     search_fields = ("node_id", "task_id", "name", "statement")
     autocomplete_fields = ("topic", "programming_language")
@@ -610,24 +630,77 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     Записи создаются автоматически (send-solution + успешное тестирование со
     страницы «Реши задачу») и выдаются повторным запросам той же задачи без
     вызова модели. Редактирование вручную не предусмотрено — только просмотр.
+
+    Список — кастомный (change_list_template): строка показывает дату,
+    название задачи со ссылкой в DL (с припиской — путь задачи в дереве
+    задач DL, TaskSolution.tree_path), имя языка, тему и препромпт; клик по
+    строке (кроме ссылки на задачу) раскрывает сохранённый код.
     """
 
-    list_display = ("task_node_id", "programming_language_id", "topic_name", "prompt_name",
-                    "submitted_at", "external_user_id", "verdict", "times_used")
-    list_display_links = ("task_node_id",)
-    list_filter = ("verdict",)
+    change_list_template = "admin/ai/tasksolution_changelist.html"
+
+    # Без list_filter: в кэш попадают только решения, прошедшие тестирование
+    # (verdict=passed всегда); на странице нужны только поиск и пагинация.
     search_fields = ("task_node_id", "external_user_id", "model_key", "topic_name", "prompt_name")
-    readonly_fields = ("task_node_id", "programming_language_id", "file_extension", "code", "verdict",
+    # Каждая строка несёт полный код решения — режем страницу.
+    list_per_page = 25
+    readonly_fields = ("task_node_id", "programming_language_id", "tree_path", "file_extension", "code", "verdict",
                        "dl_comment", "model_key", "model_title", "topic_id", "topic_name",
                        "prompt_id", "prompt_name", "queue_id", "test_log", "submitted_at",
                        "created_by", "external_user_id", "times_used", "created_at", "updated_at")
 
     fieldsets = (
-        (None, {"fields": ("task_node_id", "programming_language_id", "file_extension", "verdict")}),
+        (None, {"fields": ("task_node_id", "programming_language_id", "tree_path", "file_extension", "verdict")}),
         ("Решение", {"fields": ("code", "dl_comment", "model_key", "model_title")}),
         ("Контекст", {"fields": ("topic_id", "topic_name", "prompt_id", "prompt_name")}),
         ("Метаданные", {"fields": ("queue_id", "test_log", "submitted_at", "created_by", "external_user_id", "times_used", "created_at", "updated_at")}),
     )
+
+    def changelist_view(self, request, extra_context=None):
+        """Строки списка, подготовленные для отображения: название задачи
+        (один запрос Task по node_id страницы), имя языка вместо сырого id,
+        локализованная дата (МСК), ссылка на задачу в DL.
+
+        Шаблон admin/ai/tasksolution_changelist.html рендерит sol_rows;
+        поиск/фильтр/пагинация работают штатно через cl.
+        """
+        response = super().changelist_view(request, extra_context)
+        if response.status_code != 200 or not getattr(response, "context_data", None):
+            return response
+        solutions = list(response.context_data["cl"].result_list)
+        task_names = {
+            t.node_id: t.name
+            for t in Task.objects.filter(
+                node_id__in={s.task_node_id for s in solutions}
+            ).only("node_id", "name")
+        }
+        lang_names = {
+            lang.pk: lang.language_name
+            for lang in ProgrammingLanguage.objects.filter(
+                pk__in={s.programming_language_id for s in solutions if s.programming_language_id}
+            ).only("pk", "language_name")
+        }
+        rows = []
+        for s in solutions:
+            dt = s.submitted_at or s.created_at
+            rows.append({
+                "obj": s,
+                "date": timezone.localtime(dt).strftime("%d.%m.%Y %H:%M") if dt else "—",
+                "task_name": task_names.get(s.task_node_id) or f"Задача #{s.task_node_id}",
+                "task_url": dl_task_url(s.task_node_id, s.course_id) or "",
+                # Приписка — путь задачи в дереве задач DL (tree_path).
+                "tree_path": s.tree_path or "",
+                "lang_name": lang_names.get(s.programming_language_id) or (
+                    str(s.programming_language_id) if s.programming_language_id else "—"
+                ),
+                "topic_name": s.topic_name or "—",
+                "prompt_name": s.prompt_name or "—",
+                "user": s.external_user_id or "—",
+                "times_used": s.times_used,
+                "log_url": f"/ai/admin/ai/airequestlog/{s.test_log_id}/" if s.test_log_id else "",
+            })
+        response.context_data["sol_rows"] = rows
+        return response
 
     # Кэш пишется только автоматикой; ручное добавление/правка не предусмотрены.
     def has_add_permission(self, request):
@@ -665,6 +738,8 @@ class PromptTestCaseAdmin(admin.ModelAdmin):
     list_display = ("name", "mode", "topic", "programming_language", "comparator", "active", "updated_at")
     list_display_links = ("name",)
     list_filter = ("mode", "active", "topic", "comparator")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     list_editable = ("active",)
     search_fields = ("name", "input_text", "expected_text")
     autocomplete_fields = ("topic", "programming_language")
@@ -693,6 +768,8 @@ class PromptTestRunAdmin(admin.ModelAdmin):
 
     list_display = ("run_id", "model_title", "prompt_name", "status", "total_cases", "started_at", "finished_at")
     list_filter = ("status", "model_key")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
     search_fields = ("run_id", "model_title", "prompt_name", "error_message")
     readonly_fields = (
         "run_id", "status", "model_key", "model_title", "prompt_id", "prompt_name",

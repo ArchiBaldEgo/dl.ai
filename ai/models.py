@@ -491,6 +491,17 @@ class TaskSolution(models.Model):
     )
 
     task_node_id = models.PositiveIntegerField(db_index=True, verbose_name="ID задачи DL")
+    # Курс, в контексте которого задача тестировалась (из send-solution).
+    # Нужен для пользовательской ссылки на задачу: /task.jsp?nid=…&cid=…
+    # (admin-вьювер fullTaskviewer не используется — просмотр от имени админа).
+    course_id = models.IntegerField(null=True, blank=True, verbose_name="ID курса DL")
+    # Путь задачи в дереве задач DL (get-task-info → path при известном
+    # курсе), напр. «Программирование\Циклы\Сумма». Заполняется best-effort
+    # при отправке решения на тестирование; старые записи получают путь при
+    # повторном решении той же задачи.
+    tree_path = models.CharField(
+        max_length=512, blank=True, default="", verbose_name="Путь в дереве задач DL",
+    )
     programming_language_id = models.IntegerField(null=True, blank=True, verbose_name="ID языка программирования")
     file_extension = models.CharField(max_length=16, blank=True, default="", verbose_name="Расширение файла")
     code = models.TextField(verbose_name="Код решения")
@@ -553,17 +564,6 @@ class AIAppSettings(models.Model):
         null=True, blank=True, default=timezone.now,
         verbose_name="Дата отсечки фаворитов",
     )
-    # Ручные названия прогонов пакетного решения, задаваемые при запуске на
-    # /arm/solve/. Словарь «дата-время ISO → название»: ключ —
-    # timezone.localtime(AIModelTestRun.started_at).isoformat() (он совпадает с
-    # sent_at одноимённой записи AIRequestLog, поэтому по журналу имя
-    # восстанавливается без правки логов). Хранится на сервере, а не в логе —
-    # название может задаваться после создания прогона.
-    batch_run_names = models.JSONField(
-        default=dict, blank=True,
-        verbose_name="Названия прогонов (ключ — дата-время ISO)",
-    )
-
     class Meta:
         verbose_name = "Настройки ИИ-приложения"
         verbose_name_plural = "Настройки ИИ-приложения"
@@ -801,6 +801,10 @@ class AIModelTestRun(models.Model):
     # Снимок параметров формы на момент запуска — для восстановления состояния
     # формы при возврате на страницу прогона (?run_id=). См. докстринг модели.
     run_params = models.JSONField(default=dict, blank=True, verbose_name="Параметры запуска (форма)")
+    # Ручное название прогона, задаваемое при запуске на /arm/solve/. Хранится
+    # на самом прогоне — журнал и таблица «Последние пакетные решения» читают
+    # его без дополнительных связок.
+    run_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Название прогона")
 
     class Meta:
         db_table = "ai_ai_model_test_run"

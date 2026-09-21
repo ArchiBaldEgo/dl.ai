@@ -27,7 +27,7 @@ from django.utils.html import strip_tags
 
 from .model_clients.exceptions import humanize_model_error
 from .model_health import get_runtime_model_handlers, is_arm_solve_model
-from .models import AIAppSettings, AIModelTestResult, AIModelTestRun, AIRequestLog, ArmPromptBinding, ExternalDLAccount, Task
+from .models import AIModelTestResult, AIModelTestRun, AIRequestLog, ArmPromptBinding, ExternalDLAccount, Task
 
 
 User = get_user_model()
@@ -517,7 +517,7 @@ def _run_job_worker(
                 )
                 response_text, tokens = _extract_model_response(response)
 
-                cleaned_text = strip_tags(response_text).strip()
+                cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
                 if not cleaned_text:
                     cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
                     logger.warning("ARM single-run: model %s returned empty response", model["key"])
@@ -763,15 +763,6 @@ def start_arm_sequential_run(
 import re as _re
 
 _CODE_FENCE_RE = _re.compile(r"```(?:[a-zA-Z]*\n)?(.*?)```", _re.DOTALL)
-# Сырые рассуждения моделей (web-пулы в DeepThink-режиме, thinking-fallback
-# ollama.py при пустом content): think-блоки вырезаются ДО поиска оградок,
-# иначе оградка внутри «мыслей» выигрывает как «самый длинный блок».
-_THINK_BLOCK_RE = _re.compile(
-    # Литерал тега в исходнике хрупок (как в decide_task.js THINK_OPEN/THINK_CLOSE)
-    # и рвётся при правках — собираем регулярку из кусков.
-    "<" + "think" + ">.*?(?:<" + "/think>|$)",
-    _re.DOTALL | _re.IGNORECASE,
-)
 
 
 # Функциональные слова EN/RU. Если их доля в тексте высока — это связная проза
@@ -809,6 +800,46 @@ def _looks_like_prose(text):
     hits = sum(1 for w in words if w.lower() in _PROSE_STOPWORDS)
     return hits >= 12 and hits / len(words) >= 0.15
 
+# Think-блоки модели (рассуждения): вырезаются целиком, вместе с содержимым —
+# иначе strip_tags удаляет только разметку и рассуждения попадают в
+# raw_response/«Извлечённый код программы» (модель может класть рассуждения
+# прямо в ответ, а фолбэк ollama/sambanova возвращает thinking как ответ).
+_THINK_RE = _re.compile(
+    r"<think\b[^>]*>.*?(?:</think\s*>|\Z)",
+    _re.DOTALL | _re.IGNORECASE,
+)
+
+# Маркеры «строка похожа на код»: синтаксис (скобка после идентификатора,
+# ; { } =) и ключевые слова распространённых языков (Pascal/C/Python/asm).
+# Нужен, чтобы текст без markdown-фенсов принимался как код только тогда,
+# когда он и правда код, а не рассуждения модели (reasoning попадает в ответ
+# целиком — например, фолбэк ollama/sambanova на thinking-поле).
+_CODE_HINT_RE = _re.compile(
+    r"\w\(|[;{}=]|\b(?:begin|end|program|var|const|procedure|function|mov|push|pop|jmp|"
+    r"cmp|call|ret|include|import|def|class|print|writeln|printf|main|void|int|char|return)\b",
+    _re.IGNORECASE,
+)
+
+
+def _strip_think_blocks(text):
+    """Удалить think-блоки рассуждений вместе с содержимым."""
+    if not text:
+        return ""
+    return _THINK_RE.sub("", text)
+
+
+def _looks_like_code(text):
+    """Похож ли текст без markdown-фенсов на код, а не на прозу-рассуждения.
+
+    Доля строк с кодовыми маркерами (синтаксис/ключевые слова) должна быть
+    ощутимой: у рассуждений она околонулевая, у кода — высокая.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    hints = sum(1 for line in lines if _CODE_HINT_RE.search(line))
+    return hints >= 1 and hints / len(lines) >= 0.4
+
 
 def _extract_code_from_response(text):
     """Extract pure code from an AI response.
@@ -818,12 +849,12 @@ def _extract_code_from_response(text):
     (цепочка рассуждений), отбрасываются — иначе «самый длинный блок» может
     оказаться рассуждением, а не кодом. Если кода в ответе нет вовсе,
     возвращается пустая строка (воркер засчитает «код не извлечён»), а не
-    простыня рассуждений. Ответ без оградок возвращается как есть, только если
-    сам не является прозой (может быть «голым» кодом).
+    простыня рассуждений. Ответ без оградок принимается только если он похож
+    на код (маркеры строк, _looks_like_code) и не является прозой.
     """
     if not text:
         return ""
-    cleaned = _THINK_BLOCK_RE.sub("", text).strip()
+    cleaned = _strip_think_blocks(text).strip()
     matches = _CODE_FENCE_RE.findall(cleaned)
     code_blocks = [m for m in matches if not _looks_like_prose(m)]
     if code_blocks:
@@ -832,7 +863,10 @@ def _extract_code_from_response(text):
     if matches:
         # Оградки есть, но все похожи на прозу — кода в ответе нет.
         return ""
-    return "" if _looks_like_prose(cleaned) else cleaned
+    # Без оградок: проза-рассуждения и текст без кодовых маркеров — не код.
+    if _looks_like_prose(cleaned):
+        return ""
+    return cleaned if _looks_like_code(cleaned) else ""
 
 
 def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None, course_id=None):
@@ -1013,6 +1047,7 @@ def _run_batch_job_worker(
             prompt_name=prompt_name or "",
             course_id=course_id or None,
             run_params=run_params or {},
+            run_name=(run_name or "")[:255],
         )
         log = AIRequestLog.objects.create(
             user=user,
@@ -1031,17 +1066,6 @@ def _run_batch_job_worker(
             prompt_id=prompt_id,
             prompt_name=prompt_name or "",
         )
-
-        # Ручное название прогона → серверный словарь AIAppSettings.batch_run_names.
-        # Ключ — ISO дата-время старта прогона; он совпадает с sent_at записи
-        # AIRequestLog, поэтому журналы восстанавливают название по записи без
-        # дополнительных связок.
-        if run_name:
-            settings_obj = AIAppSettings.get_solo()
-            names = dict(settings_obj.batch_run_names or {})
-            names[timezone.localtime(test_run.started_at).isoformat()] = run_name[:255]
-            settings_obj.batch_run_names = names
-            settings_obj.save()
 
         # Resolve node_ids → Task objects via DL get-task-info + ensure_task.
         # Язык формы прогона прокидывается в ensure_task: задача получает язык
@@ -1146,7 +1170,7 @@ def _run_batch_job_worker(
                         cancelled = True
                         break
                     response_text, tokens = _extract_model_response(response)
-                    cleaned_text = strip_tags(response_text).strip()
+                    cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
                     if not cleaned_text:
                         cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
                         logger.warning("ARM batch: model %s returned empty response for task node_id=%s", model["key"], task.node_id)
@@ -1429,7 +1453,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         (перекрывает task.file_extension; пусто → браться из задачи).
     solve_prog_lang_name — название языка для препромпта под выбранным расширением.
     run_name — необязательное ручное название прогона (задаётся только при
-        запуске; сохраняется в AIAppSettings.batch_run_names по дате-времени).
+        запуске; сохраняется в AIModelTestRun.run_name).
     """
     handlers = get_runtime_model_handlers()
     # В solve допущены только Web_* и Ollama_* (нет жёсткого лимита вывода);
@@ -1539,7 +1563,7 @@ def _snapshot_from_test_run(test_run):
             "run_type": "batch",
             "status": status_map.get(test_run.status, test_run.status),
             "error_message": test_run.error_message or ("Batch solve завершился с ошибкой" if is_failed else ""),
-            "run_name": (test_run.run_params or {}).get("run_name", ""),
+            "run_name": test_run.run_name or (test_run.run_params or {}).get("run_name", ""),
             "total_models": test_run.total_models or 0,
             "total_pairs": total_pairs or len(results),
             "completed_pairs": len(results),

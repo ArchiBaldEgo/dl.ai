@@ -899,9 +899,11 @@ def send_solution_view(request):
             node_id, code,
             programming_language_id=prog_language_id,
             file_extension=file_extension,
+            course_id=course_id,
             identity=identity,
             queue_id=queue_id,
             test_log=test_log,
+            session_id=session_id,
         )
     except Exception:
         logger.exception("Failed to record solution submission for node %s", node_id)
