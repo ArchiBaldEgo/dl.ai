@@ -319,6 +319,8 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
                   l.is_batch
                     ? '<h4>Прогон</h4><div><strong>Название:</strong> ' + escapeDetailHtml(l.run_name || '—')
                       + ' · <strong>Статус:</strong> ' + escapeDetailHtml(l.run_status_display || '—')
+                      + ' · <strong>Окончание:</strong> ' + escapeDetailHtml(l.run_finished_at || '—')
+                      + ' · <strong>Общее время:</strong> ' + escapeDetailHtml(l.run_duration_display || '—')
                       + ' · результаты прогона — в блоке «Последние пакетные решения» выше или в <a href="' + escapeDetailHtml(l.detail_url) + '">полной записи</a>.</div>'
                     : '<h4>Текст запроса</h4><pre>' + escapeDetailHtml(l.message || '(пусто)') + '</pre>',
                   l.is_batch ? '' : '<h4>Ответ модели</h4><pre>' + escapeDetailHtml(l.response_text || '(пусто)') + '</pre>',

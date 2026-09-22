@@ -4645,6 +4645,32 @@ class BatchLogRowContextsTests(TestCase):
         log = self._make_log("batch_solve", f"Batch solve run {'d' * 32}")
         self.assertEqual(_batch_log_row_contexts([log]), {})
 
+    def test_finish_meta_completed_run(self):
+        """Завершённый прогон → run_finished_at (МСК) и run_duration_display."""
+        from datetime import timedelta
+
+        from ai.admin.logs import _batch_log_row_contexts
+        from ai.constants import MOSCOW_TZ
+        from ai.models import AIModelTestRun
+        finished = timezone.localtime(timezone.now(), MOSCOW_TZ).replace(microsecond=0)
+        AIModelTestRun.objects.filter(pk=self.test_run.pk).update(
+            started_at=finished - timedelta(seconds=45), finished_at=finished,
+        )
+        log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
+        c = _batch_log_row_contexts([log])[log.pk]
+        self.assertEqual(c["run_finished_at"], finished.strftime("%d.%m.%Y %H:%M:%S"))
+        self.assertEqual(c["run_duration_display"], "45 с")
+
+    def test_finish_meta_running_run_absent(self):
+        """Незавершённый (running) прогон → пустые строки (шаблон — «—»)."""
+        from ai.admin.logs import _batch_log_row_contexts
+        from ai.models import AIModelTestRun
+        AIModelTestRun.objects.filter(pk=self.test_run.pk).update(finished_at=None)
+        log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
+        c = _batch_log_row_contexts([log])[log.pk]
+        self.assertEqual(c["run_finished_at"], "")
+        self.assertEqual(c["run_duration_display"], "")
+
 
 class RequestLogXlsxTests(TestCase):
     """XLSX-выгрузка результатов batch-прогона (матрица задача×модель,
@@ -8912,6 +8938,47 @@ class RequestLogDetailJsonTests(TestCase):
         self.assertEqual(data["log"]["response_text"], "ответ модели")
         self.assertEqual(data["log"]["task_node_id"], 2606749)
         self.assertIn("detail_url", data["log"])
+
+    def test_batch_log_finish_meta(self):
+        """Batch-запись: JSON несёт время окончания и общее время прогона."""
+        from datetime import timedelta
+
+        from ai.constants import MOSCOW_TZ
+        from ai.models import AIModelTestRun
+        run_id = "e" * 32
+        AIModelTestRun.objects.create(
+            run_id=run_id, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED, course_id=1450,
+            started_at=timezone.now() - timedelta(seconds=90),
+            finished_at=timezone.now(),
+        )
+        batch_log = AIRequestLog.objects.create(
+            user=self.admin, source="arm", mode="batch_solve",
+            message=f"Batch solve run {run_id}",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        data = json.loads(self._get(self.admin, batch_log.id).content)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["log"]["is_batch"])
+        self.assertRegex(data["log"]["run_finished_at"], r"^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}$")
+        self.assertEqual(data["log"]["run_duration_display"], "1 мин 30 с")
+
+    def test_batch_log_running_no_finish_meta(self):
+        """Идущий (finished_at пуст) прогон → пустые строки (JS покажет «—»)."""
+        from ai.models import AIModelTestRun
+        run_id = "f" * 32
+        AIModelTestRun.objects.create(
+            run_id=run_id, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_RUNNING, course_id=1450,
+        )
+        batch_log = AIRequestLog.objects.create(
+            user=self.admin, source="arm", mode="batch_solve",
+            message=f"Batch solve run {run_id}",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        data = json.loads(self._get(self.admin, batch_log.id).content)
+        self.assertEqual(data["log"]["run_finished_at"], "")
+        self.assertEqual(data["log"]["run_duration_display"], "")
 
     def test_prompt_developer_foreign_log_forbidden(self):
         resp = self._get(self.pd)

@@ -556,6 +556,8 @@
                     <div class="ai-log-detail-meta">
                       <div><strong>Название прогона:</strong> {{ batch.run_name|default:"—" }}</div>
                       <div><strong>Статус прогона:</strong> {{ batch.run_status_display|default:"—" }}</div>
+                      <div><strong>Окончание:</strong> {{ batch.run_finished_at|default:"—" }}</div>
+                      <div><strong>Общее время:</strong> {{ batch.run_duration_display|default:"—" }}</div>
                       <div><strong>Расширение:</strong> {{ batch.file_extension|default:"—" }}</div>
                       <div><strong>Детали:</strong> <a href="{% url 'ai_request_log_detail' log.id %}">результаты прогона →</a></div>
                     </div>

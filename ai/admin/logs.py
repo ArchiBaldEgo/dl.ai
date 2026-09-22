@@ -87,6 +87,36 @@ def run_name_for(run):
     return run.run_name or (run.run_params or {}).get("run_name") or "—"
 
 
+def run_finish_meta(run):
+    """«Окончание» и «Общее время» завершённого прогона — для инлайн-блоков
+    «Прогон» в списках журнала и «Настройки ИИ-приложения».
+
+    run is None / не завершён (finished_at пуст) → пустые строки: шаблон
+    покажет «—» (default/|| срабатывают и на пустой строке). Длительность
+    в человекочитаемый вид — зеркало fmtDuration из _ai_batch_results.html
+    («1 ч 27 мин» / «12 мин 3 с» / «45 с»).
+    """
+    finished_at = run.finished_at if run else None
+    if not finished_at:
+        return {"run_finished_at": "", "run_duration_display": ""}
+    duration = (finished_at - run.started_at).total_seconds() if run.started_at else None
+    if duration is not None and duration > 0:
+        h, rem = divmod(int(duration), 3600)
+        m, s = divmod(rem, 60)
+        if h:
+            duration_display = f"{h} ч {m} мин"
+        elif m:
+            duration_display = f"{m} мин" + (f" {s} с" if s else "")
+        else:
+            duration_display = f"{s} с"
+    else:
+        duration_display = ""
+    return {
+        "run_finished_at": timezone.localtime(finished_at, MOSCOW_TZ).strftime("%d.%m.%Y %H:%M:%S"),
+        "run_duration_display": duration_display,
+    }
+
+
 def _parse_date(value: str) -> str:
     """Return ``value`` only if it is a real ``YYYY-MM-DD`` date, else "".
 
@@ -457,6 +487,9 @@ def admin_request_log_detail_json_view(request, log_id):
             "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
             "run_name": run_name_for(run) if run else "",
             "run_status_display": batch_run_status_display(run.status) if run else "",
+            # Время окончания и общее время завершённого прогона (инлайн-блок
+            # «Прогон» в развёртке «Последних запросов»; не завершён → «—»).
+            **run_finish_meta(run),
         },
     })
 
@@ -900,6 +933,9 @@ def _batch_log_row_contexts(logs, user=None):
             "run_status": run_obj.status,
             "run_status_display": batch_run_status_display(run_obj.status),
             "run_name": run_name_for(run_obj),
+            # Время окончания и общее время завершённого прогона (инлайн-блок
+            # «Прогон» в развёртке строки; не завершён → пустые строки → «—»).
+            **run_finish_meta(run_obj),
             # Свёрнутые строки для ячейки таблицы (первые 3 + «+N ещё»)
             # и полный список для title-подсказки.
             "tasks_preview": _tasks_preview(tasks),
