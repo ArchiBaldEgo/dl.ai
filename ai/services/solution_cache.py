@@ -1,9 +1,11 @@
 """Кэш решённых задач «Реши задачу» (узел DL + язык → проверенный код).
 
-Все операции с ``TaskSolution`` — здесь (SRP). Кэш пишется только когда
-пользователь сам отправил сгенерированный код на тестирование со страницы
-(HTTP send-solution); ARM и прочие прогоны его не пишут. После вердикта
-passed код отдаётся из кэша без вызова модели.
+Все операции с ``TaskSolution`` — здесь (SRP). Кэш пишется когда пользователь
+сам отправил сгенерированный код на тестирование со страницы (HTTP
+send-solution), либо когда оператор включил чекбокс «Сохранять решённые
+задачи» в batch-solve ARM (record_batch_solution: только пары, прошедшие
+DL-тест; уже решённые не трогаются). После вердикта passed код отдаётся из
+кэша без вызова модели.
 """
 
 import logging
@@ -20,6 +22,63 @@ logger = logging.getLogger(__name__)
 # _serve_cached_solution). Такие записи не являются генерацией решения —
 # их нужно исключать при поиске контекста последней генерации.
 CACHE_SERVE_LOG_MESSAGE = "Повторный запрос задачи — выдано сохранённое решение (кэш)."
+
+
+def record_batch_solution(*, node_id, programming_language_id=None, file_extension="",
+                          code="", dl_comment="", model_key="", model_title="",
+                          topic_id=None, topic_name="", prompt_id=None, prompt_name="",
+                          course_id=None, created_by=None, external_user_id="",
+                          tree_path="", session_id=None, test_log=None):
+    """Сохранить решение из batch-solve ARM в кэш «Решённых задач».
+
+    Те же правила, что в пользовательском флоу (record_submission +
+    record_result): вердикт passed, код модели, модель/препромпт/тема из
+    прогона, курс и путь в дереве — для пользовательской ссылки. Отличия:
+    вердикт уже известен (DL-тест сделан в worker'е), поэтому пишем сразу
+    passed без queue_id; связанный AIRequestLog (test_log) — лог всего
+    прогона, его статус/длительность НЕ трогаем (статистика моделей
+    записывается отдельно по record_stats).
+
+    Если passed-решение для (узел, язык) уже есть — НЕ ТРОГАЕМ: кэш уже
+    отдаёт проверенный код. Возвращает "saved" | "skipped" | None (сбой).
+    Не поднимает исключений: сбой кэша не должен ломать прогон.
+    """
+    try:
+        if not node_id or not code:
+            return None
+        if find_passed_solution(node_id, programming_language_id) is not None:
+            return "skipped"
+        defaults = {
+            "code": code or "",
+            "file_extension": file_extension or "",
+            "verdict": TaskSolution.VERDICT_PASSED,
+            "dl_comment": dl_comment or "",
+            "model_key": model_key or "",
+            "model_title": model_title or "",
+            "topic_id": topic_id,
+            "topic_name": topic_name or "",
+            "prompt_id": prompt_id,
+            "prompt_name": prompt_name or "",
+            "course_id": course_id or None,
+            "external_user_id": external_user_id or "",
+            "created_by": created_by,
+            "queue_id": None,
+            "submitted_at": timezone.now(),
+            "test_log": test_log,
+        }
+        solution, _created = TaskSolution.objects.update_or_create(
+            task_node_id=node_id,
+            programming_language_id=programming_language_id or None,
+            defaults=defaults,
+        )
+        if tree_path and tree_path != solution.tree_path:
+            TaskSolution.objects.filter(pk=solution.pk).update(tree_path=tree_path)
+        elif not solution.tree_path:
+            _update_tree_path(solution, session_id=session_id, course_id=course_id)
+        return "saved"
+    except Exception:
+        logger.exception("Failed to record batch solution for node %s", node_id)
+        return None
 
 
 def find_passed_solution(node_id, programming_language_id):

@@ -1,0 +1,206 @@
+{% extends "admin/base_site.html" %}
+{% load tz %}
+
+{% comment %}
+Страница «Закреплённые пакетные решения» (навигация под «Настройкой
+ИИ-приложения», ai/admin/pinned.py). Хранит закреплённые (★) завершённые
+batch-прогоны текущего пользователя: закрепление — из «Журнала запросов»
+или из блока «Последние пакетные решения» на «Настройке ИИ-приложения».
+
+Строки — те же лёгкие build_batch_rows_for_logs (шапка прогона + count,
+без текстов), развёртка результатов — ленивый AJAX по snapshot_url в тот же
+partial window.ArmBatchResults, что и на настройке/журнале. Кнопка ★ здесь
+снимает закрепление (повторный toggle), пустое состояние — подсказка, где
+ставится ★.
+{% endcomment %}
+
+{% block content %}
+<style>
+  .ai-pinned-wrap { max-width: 100%; }
+  .ai-pinned-table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+  .ai-pinned-table th,
+  .ai-pinned-table td {
+    border: 1px solid var(--hairline-color); padding: 6px 9px;
+    text-align: left; vertical-align: top; font-size: 13px;
+  }
+  .ai-pinned-table th { background: var(--darkened-bg); font-weight: 600; }
+  .ai-pinned-empty { color: var(--body-quiet-color); padding: 12px 0; }
+  .ai-batch-row-clickable { cursor: pointer; }
+  .ai-batch-row-clickable:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }
+  .ai-batch-row-open td { font-weight: 600; }
+  .ai-batch-detail > td { background: var(--darkened-bg); }
+  .ai-recent-logs-ok { color: #067647; font-weight: 600; }
+  .ai-recent-logs-err { color: #b42318; font-weight: 600; }
+  .ai-recent-logs-empty { color: var(--body-quiet-color); padding: 8px 0; }
+  .ai-scroll { overflow-x: auto; }
+  .ai-log-pin-cell { white-space: nowrap; text-align: center; }
+  .ai-log-pin-btn {
+    background: none; border: 1px solid var(--hairline-color); border-radius: 4px;
+    cursor: pointer; font-size: 15px; line-height: 1; padding: 3px 7px;
+    color: var(--body-quiet-color);
+  }
+  .ai-log-pin-btn:hover:not(:disabled) { border-color: var(--link-fg); color: var(--link-fg); }
+  .ai-log-pin-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .ai-log-pin-btn-active { color: #d97706; border-color: #d97706; }
+  .ai-log-pin-btn.busy { opacity: 0.6; pointer-events: none; }
+</style>
+
+<div class="ai-pinned-wrap">
+  <p class="help">
+    Закреплённые завершённые прогоны «Пакетного решения». Закрепить (☆→★) можно
+    в «Журнале запросов» или в блоке «Последние пакетные решения» на странице
+    «Настройка ИИ-приложения»; повторный клик по ★ снимает закрепление.
+    Закрепления персональны — у каждого пользователя свой список.
+  </p>
+
+  {% if rows %}
+    {% include "admin/ai/_ai_batch_results.html" %}
+    <div class="ai-scroll">
+    <table class="ai-pinned-table">
+      <thead>
+        <tr>
+          <th title="Убрать из «Закреплённых»">★</th>
+          <th>Отправлен</th>
+          <th>Название прогона</th>
+          <th>Курс</th>
+          <th>Расширение</th>
+          <th>Решено</th>
+          <th>Не решено</th>
+          <th>Всего пар</th>
+          <th>Статус</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% timezone moscow_tz %}
+        {% for row in rows %}
+          <tr class="ai-batch-row{% if row.snapshot_url %} ai-batch-row-clickable{% endif %}"
+              data-snapshot-url="{{ row.snapshot_url }}" data-run-id="{{ row.run_id }}" data-log-id="{{ row.id }}"{% if row.snapshot_url %} title="Кликните, чтобы развернуть результаты прогона"{% endif %}>
+            <td class="ai-log-pin-cell">
+              <button type="button"
+                      class="ai-log-pin-btn{% if row.pinned %} ai-log-pin-btn-active{% endif %}"
+                      data-pin-url="{{ row.pin_url }}"
+                      {% if row.run_status == 'running' %}disabled title="Прогон ещё выполняется"{% else %}title="Убрать из «Закреплённых»"{% endif %}>{{ row.pinned|yesno:"★,☆" }}</button>
+            </td>
+            <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
+            <td>{{ row.run_name|default:"—" }}</td>
+            <td>{{ row.course_id|default:"—" }}</td>
+            <td>{{ row.file_extension|default:"—" }}</td>
+            <td class="ai-recent-logs-ok">{{ row.solved|default:"—" }}</td>
+            <td class="ai-recent-logs-err">{{ row.failed|default:"—" }}</td>
+            <td>{{ row.total_pairs|default:"—" }}</td>
+            <td class="{% if row.run_status == 'completed' or row.run_status == 'success' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.run_status_display }}</td>
+            <td><a href="{{ row.detail_url }}">Детали →</a></td>
+          </tr>
+          {# Развёртка: сводка + ответы моделей прогона (ленивая загрузка — AJAX по первому клику). #}
+          <tr class="ai-batch-detail" hidden>
+            <td colspan="10">
+              <div class="ai-batch-detail-body"></div>
+              {% if not row.snapshot_url %}<p class="ai-recent-logs-empty">Прогон не найден в БД — результаты недоступны.</p>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        {% endtimezone %}
+      </tbody>
+    </table>
+    </div>
+  {% else %}
+    <p class="ai-pinned-empty">
+      Пока ничего не закреплено. Откройте «Журнал запросов» (или блок
+      «Последние пакетные решения» в «Настройке ИИ-приложения») и нажмите ☆
+      у завершённого прогона.
+    </p>
+  {% endif %}
+
+  <p class="ai-pinned-actions">
+    <a class="button" href="/ai/admin/ai/airequestlog/">Журнал запросов →</a>
+    <a class="button" href="/ai/admin/ai/aiappsettings/">Настройка ИИ-приложения →</a>
+  </p>
+</div>
+
+<style>
+  .ai-pinned-actions { margin-top: 12px; display: flex; gap: 8px; }
+</style>
+
+<script>
+  (function () {
+    // Клик по строке → ленивая развёртка результатов (тот же приём, что на
+    // «Настройке ИИ-приложения»: GET data-snapshot-url → ArmBatchResults).
+    document.querySelectorAll('.ai-batch-row-clickable').forEach(function (row) {
+      row.addEventListener('click', function (event) {
+        if (event.target.closest('a')) { return; }
+        if (event.target.closest('button')) { return; } // клик по ★ — открепление
+        var detailRow = row.nextElementSibling;
+        if (!detailRow || !detailRow.classList.contains('ai-batch-detail')) { return; }
+        var willOpen = detailRow.hidden;
+        var body = detailRow.querySelector('.ai-batch-detail-body');
+        if (willOpen && body && !body.dataset.rendered && !body.dataset.loading) {
+          var url = row.getAttribute('data-snapshot-url');
+          if (!url) { return; }
+          body.dataset.loading = '1';
+          body.innerHTML = '<p class="ai-recent-logs-empty">Загрузка результатов…</p>';
+          fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+            .then(function (response) {
+              if (!response.ok) { throw new Error('HTTP ' + response.status); }
+              return response.json();
+            })
+            .then(function (snapshot) {
+              body.innerHTML = '';
+              window.ArmBatchResults.init(
+                body, snapshot, snapshot.run_id || row.getAttribute('data-run-id') || ''
+              );
+              body.dataset.rendered = '1';
+              delete body.dataset.loading;
+            })
+            .catch(function () {
+              body.innerHTML = '<p class="ai-recent-logs-empty">Не удалось загрузить результаты прогона — попробуйте ещё раз.</p>';
+              delete body.dataset.loading;
+            });
+        }
+        detailRow.hidden = !willOpen;
+        row.classList.toggle('ai-batch-row-open', willOpen);
+      });
+    });
+
+    // ★ (здесь — открепление): toggle + удаление строки со страницы при снятии.
+    function pinCsrfToken() {
+      var input = document.querySelector('input[name="csrfmiddlewaretoken"]');
+      if (input && input.value) return input.value;
+      var m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+      return m ? decodeURIComponent(m[1]) : '';
+    }
+    document.querySelectorAll('.ai-log-pin-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        if (btn.disabled || btn.classList.contains('busy')) return;
+        btn.classList.add('busy');
+        fetch(btn.getAttribute('data-pin-url'), {
+          method: 'POST',
+          headers: { 'X-CSRFToken': pinCsrfToken(), 'X-Requested-With': 'XMLHttpRequest' },
+          credentials: 'same-origin',
+        })
+          .then(function (resp) {
+            return resp.json().catch(function () { throw new Error('HTTP ' + resp.status); });
+          })
+          .then(function (data) {
+            if (!data.ok) { throw new Error(data.message || 'Не удалось изменить закрепление'); }
+            if (data.pinned) {
+              btn.classList.add('ai-log-pin-btn-active');
+              btn.textContent = '★';
+              btn.title = 'Убрать из «Закреплённых»';
+            } else {
+              // Сняли закрепление — строка больше не относится к этой странице.
+              var tr = btn.closest('tr');
+              var detail = tr && tr.nextElementSibling;
+              if (detail && detail.classList.contains('ai-batch-detail')) { detail.remove(); }
+              if (tr) { tr.remove(); }
+            }
+          })
+          .catch(function (err) {
+            alert('Закрепление: ' + err.message);
+          })
+          .finally(function () { btn.classList.remove('busy'); });
+      });
+    });
+  })();
+</script>
+{% endblock %}

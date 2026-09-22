@@ -45,6 +45,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
           <table class="ai-recent-logs-table ai-batch-table">
             <thead>
               <tr>
+                <th></th>
                 <th>Отправлен</th>
                 <th>Название прогона</th>
                 <th>Курс</th>
@@ -60,7 +61,13 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
               {% timezone moscow_tz %}
               {% for row in recent_batch_runs %}
                 <tr class="ai-batch-row{% if row.snapshot_url %} ai-batch-row-clickable{% endif %}"
-                    data-snapshot-url="{{ row.snapshot_url }}" data-run-id="{{ row.run_id }}"{% if row.snapshot_url %} title="Кликните, чтобы развернуть результаты прогона"{% endif %}>
+                    data-snapshot-url="{{ row.snapshot_url }}" data-run-id="{{ row.run_id }}" data-log-id="{{ row.id }}"{% if row.snapshot_url %} title="Кликните, чтобы развернуть результаты прогона"{% endif %}>
+                  <td class="ai-log-pin-cell">
+                    <button type="button"
+                            class="ai-log-pin-btn{% if row.pinned %} ai-log-pin-btn-active{% endif %}"
+                            data-pin-url="{{ row.pin_url }}"
+                            {% if row.run_status == 'running' %}disabled title="Прогон ещё выполняется — закрепить можно только завершённые"{% else %}title="{% if row.pinned %}Убрать из «Закреплённых»{% else %}Закрепить в «Закреплённых пакетных решениях»{% endif %}"{% endif %}>{{ row.pinned|yesno:"★,☆" }}</button>
+                  </td>
                   <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
                   <td>{{ row.run_name|default:"—" }}</td>
                   <td>{{ row.course_id|default:"—" }}</td>
@@ -73,7 +80,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
                 </tr>
                 {# Развёртка: сводка + ответы моделей прогона (ленивая загрузка — AJAX по первому клику). #}
                 <tr class="ai-batch-detail" hidden>
-                  <td colspan="9">
+                  <td colspan="10">
                     <div class="ai-batch-detail-body"></div>
                     {% if not row.snapshot_url %}<p class="ai-recent-logs-empty">Прогон не найден в БД — результаты недоступны.</p>{% endif %}
                   </td>
@@ -126,7 +133,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
             <tbody>
               {% timezone moscow_tz %}
               {% for row in recent_logs %}
-                <tr>
+                <tr class="ai-recent-log-row" data-log-id="{{ row.id }}" data-detail-url="/ai/admin/ai/airequestlog/{{ row.id }}/detail-json/">
                   <td><a href="{{ row.detail_url }}">{{ row.id }}</a></td>
                   <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
                   <td>
@@ -142,6 +149,12 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
                   <td class="{% if row.status_class == 'ok' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.status_display }}</td>
                   <td>{{ row.mode_display }}</td>
                   <td>{{ row.duration_seconds|floatformat:0|default:"—" }}</td>
+                </tr>
+                {# Развёртка: подробная информация по записи (лениво — AJAX по первому клику). #}
+                <tr class="ai-recent-log-detail" hidden>
+                  <td colspan="9">
+                    <div class="ai-recent-log-detail-body"></div>
+                  </td>
                 </tr>
               {% endfor %}
               {% endtimezone %}
@@ -181,6 +194,27 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
     .ai-batch-row-clickable:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }
     .ai-batch-row-open td { font-weight: 600; }
     .ai-batch-detail > td { background: var(--darkened-bg); }
+    .ai-recent-log-row { cursor: pointer; }
+    .ai-recent-log-row:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }
+    .ai-recent-log-detail > td { background: var(--darkened-bg); }
+    .ai-recent-log-detail-body { padding: 6px 2px; }
+    .ai-recent-log-detail-body h4 { margin: 10px 0 4px; font-size: 13px; }
+    .ai-recent-log-detail-body pre {
+      white-space: pre-wrap; word-break: break-word;
+      max-height: 320px; overflow: auto; margin: 0 0 8px;
+      border: 1px solid var(--hairline-color); border-radius: 4px;
+      padding: 8px; background: var(--body-bg);
+    }
+    .ai-log-pin-cell { white-space: nowrap; text-align: center; }
+    .ai-log-pin-btn {
+      background: none; border: 1px solid var(--hairline-color); border-radius: 4px;
+      cursor: pointer; font-size: 15px; line-height: 1; padding: 3px 7px;
+      color: var(--body-quiet-color);
+    }
+    .ai-log-pin-btn:hover:not(:disabled) { border-color: var(--link-fg); color: var(--link-fg); }
+    .ai-log-pin-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .ai-log-pin-btn-active { color: #d97706; border-color: #d97706; }
+    .ai-log-pin-btn.busy { opacity: 0.6; pointer-events: none; }
   </style>
 
   <script>
@@ -193,6 +227,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
       document.querySelectorAll('.ai-batch-row-clickable').forEach(function (row) {
         row.addEventListener('click', function (event) {
           if (event.target.closest('a')) { return; } // клик по «Детали →» — обычный переход
+          if (event.target.closest('button')) { return; } // клик по ★ — закрепление, не развёртка
           var detailRow = row.nextElementSibling;
           if (!detailRow || !detailRow.classList.contains('ai-batch-detail')) { return; }
           var willOpen = detailRow.hidden;
@@ -222,6 +257,122 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
           }
           detailRow.hidden = !willOpen;
           row.classList.toggle('ai-batch-row-open', willOpen);
+        });
+      });
+
+      // «Последние запросы»: клик по строке → ленивая развёртка деталей
+      // (JSON GET detail-json → метаданные + текст запроса + ответ модели).
+      // Полные тексты в HTML страницы не вшиты — записи журнала бывают
+      // большими; подгрузка по первому клику, как у пакетных решений.
+      function escapeDetailHtml(value) {
+        return String(value == null ? '' : value)
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      }
+      document.querySelectorAll('.ai-recent-log-row').forEach(function (row) {
+        row.addEventListener('click', function (event) {
+          if (event.target.closest('a')) { return; } // клик по ссылке ID — обычный переход
+          var detailRow = row.nextElementSibling;
+          if (!detailRow || !detailRow.classList.contains('ai-recent-log-detail')) { return; }
+          var willOpen = detailRow.hidden;
+          var body = detailRow.querySelector('.ai-recent-log-detail-body');
+          if (willOpen && body && !body.dataset.rendered && !body.dataset.loading) {
+            var url = row.getAttribute('data-detail-url');
+            if (!url) { return; }
+            body.dataset.loading = '1';
+            body.innerHTML = '<p class="ai-recent-logs-empty">Загрузка подробностей…</p>';
+            fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+              .then(function (response) {
+                if (!response.ok) { throw new Error('HTTP ' + response.status); }
+                return response.json();
+              })
+              .then(function (data) {
+                if (!data || !data.ok || !data.log) { throw new Error('Нет данных'); }
+                var l = data.log;
+                var sender = l.external_user_id
+                  ? '<a href="https://dl.gsu.by/report.asp?id=' + encodeURIComponent(l.external_user_id) + '" target="_blank" rel="noopener">' + escapeDetailHtml(l.sender) + '</a>'
+                  : escapeDetailHtml(l.sender);
+                var prompt = l.prompt_id
+                  ? '<a href="/ai/admin/ai/prompt/' + encodeURIComponent(l.prompt_id) + '/change/" target="_blank" rel="noopener">' + escapeDetailHtml(l.prompt_name) + '</a>'
+                  : escapeDetailHtml(l.prompt_name);
+                var task = l.task_node_id
+                  ? escapeDetailHtml(l.task_name || l.task_node_id) + ' (' + escapeDetailHtml(l.task_node_id) + ')'
+                  : escapeDetailHtml(l.task_name || '—');
+                var html = [
+                  '<h4>Параметры запроса</h4>',
+                  '<div>',
+                  '<div><strong>ID:</strong> ' + escapeDetailHtml(l.id) + '</div>',
+                  '<div><strong>Источник:</strong> ' + escapeDetailHtml(l.source_display) + '</div>',
+                  '<div><strong>Режим:</strong> ' + escapeDetailHtml(l.mode_display) + '</div>',
+                  '<div><strong>Модель:</strong> ' + escapeDetailHtml(l.model_names) + '</div>',
+                  '<div><strong>Статус:</strong> ' + escapeDetailHtml(l.status_display) + '</div>',
+                  '<div><strong>Время ответа:</strong> ' + escapeDetailHtml(l.duration_seconds) + ' с</div>',
+                  '<div><strong>Токенов:</strong> ' + escapeDetailHtml(l.tokens == null ? '—' : l.tokens) + '</div>',
+                  '<div><strong>Отправлен:</strong> ' + escapeDetailHtml(l.sent_at) + '</div>',
+                  '<div><strong>Получен:</strong> ' + escapeDetailHtml(l.received_at) + '</div>',
+                  '<div><strong>Кто:</strong> ' + sender + '</div>',
+                  '<div><strong>Язык:</strong> ' + escapeDetailHtml(l.programming_language_name) + '</div>',
+                  '<div><strong>Тема:</strong> ' + escapeDetailHtml(l.topic_name) + '</div>',
+                  '<div><strong>Задача:</strong> ' + task + '</div>',
+                  '<div><strong>Препромпт:</strong> ' + prompt + '</div>',
+                  '</div>',
+                  l.is_batch
+                    ? '<h4>Прогон</h4><div><strong>Название:</strong> ' + escapeDetailHtml(l.run_name || '—')
+                      + ' · <strong>Статус:</strong> ' + escapeDetailHtml(l.run_status_display || '—')
+                      + ' · результаты прогона — в блоке «Последние пакетные решения» выше или в <a href="' + escapeDetailHtml(l.detail_url) + '">полной записи</a>.</div>'
+                    : '<h4>Текст запроса</h4><pre>' + escapeDetailHtml(l.message || '(пусто)') + '</pre>',
+                  l.is_batch ? '' : '<h4>Ответ модели</h4><pre>' + escapeDetailHtml(l.response_text || '(пусто)') + '</pre>',
+                  l.error_message
+                    ? '<h4>Ошибка</h4><pre>' + escapeDetailHtml(l.error_message) + '</pre>'
+                    : '',
+                  '<p style="margin:8px 0 0;"><a href="' + escapeDetailHtml(l.detail_url) + '">Полная запись журнала →</a></p>',
+                ].join('');
+                body.innerHTML = html;
+                body.dataset.rendered = '1';
+                delete body.dataset.loading;
+              })
+              .catch(function () {
+                body.innerHTML = '<p class="ai-recent-logs-empty">Не удалось загрузить подробности — попробуйте ещё раз.</p>';
+                delete body.dataset.loading;
+              });
+          }
+          detailRow.hidden = !willOpen;
+        });
+      });
+
+      // ★ Закрепить/открепить batch-прогон прямо из блока «Последние пакетные
+      // решения» (POST toggle, ai/admin/pinned.py). CSRF — из куки csrftoken
+      // (админские страницы всегда её выставляют через {% csrf_token %} форм).
+      function pinCsrfToken() {
+        var input = document.querySelector('input[name="csrfmiddlewaretoken"]');
+        if (input && input.value) return input.value;
+        var m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+        return m ? decodeURIComponent(m[1]) : '';
+      }
+      document.querySelectorAll('.ai-log-pin-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          if (btn.disabled || btn.classList.contains('busy')) return;
+          btn.classList.add('busy');
+          fetch(btn.getAttribute('data-pin-url'), {
+            method: 'POST',
+            headers: { 'X-CSRFToken': pinCsrfToken(), 'X-Requested-With': 'XMLHttpRequest' },
+            credentials: 'same-origin',
+          })
+            .then(function (resp) {
+              return resp.json().catch(function () { throw new Error('HTTP ' + resp.status); });
+            })
+            .then(function (data) {
+              if (!data.ok) { throw new Error(data.message || 'Не удалось изменить закрепление'); }
+              btn.classList.toggle('ai-log-pin-btn-active', data.pinned);
+              btn.textContent = data.pinned ? '★' : '☆';
+              btn.title = data.pinned
+                ? 'Убрать из «Закреплённых»'
+                : 'Закрепить в «Закреплённых пакетных решениях»';
+            })
+            .catch(function (err) {
+              alert('Закрепление: ' + err.message);
+            })
+            .finally(function () { btn.classList.remove('busy'); });
         });
       });
     })();

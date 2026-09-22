@@ -572,10 +572,18 @@ function initProblemSelectors(mode) {
             // (mode у промпта обязателен, но для страховки пустой mode пропускаем).
             if (mode && prompt.mode && prompt.mode !== mode) return false;
             const hasTopic = prompt.topic_id !== null && prompt.topic_id !== undefined && prompt.topic_id !== "";
-            if (!hasTopic) return true;
-            if (topicValue) return String(prompt.topic_id) === topicValue;
-            if (!languageValue) return false;
-            return String(prompt.topic__programming_language) === languageValue;
+            if (hasTopic) {
+                if (topicValue) return String(prompt.topic_id) === topicValue;
+                if (!languageValue) return false;
+                return String(prompt.topic__programming_language) === languageValue;
+            }
+            // Промпт без темы, но с собственным языком («на весь язык»):
+            // показываем только для этого языка.
+            const promptLangId = prompt.programming_language_id;
+            if (promptLangId !== null && promptLangId !== undefined && promptLangId !== "") {
+                return !!languageValue && String(promptLangId) === languageValue;
+            }
+            return true;
         });
     }
 

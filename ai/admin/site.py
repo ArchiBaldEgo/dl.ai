@@ -366,6 +366,7 @@ class AIAdminSite(admin.AdminSite):
         context["updates_url"] = updates_url
         aiappsettings_url = self._aiappsettings_url()
         docs_url = "/ai/admin/docs/"
+        pinned_runs_url = "/ai/admin/pinned-runs/"
 
         # --- AI tools in the left navigation sidebar (#nav-sidebar) ---
         # The left nav renders `available_apps` (separate from the dashboard's
@@ -382,6 +383,11 @@ class AIAdminSite(admin.AdminSite):
                 # admin/app_list.html). Раньше это была строка группы «Раздел
                 # ИИ» — из real_apps ниже она убирается, чтобы не дублировалась.
                 ("Закреплено", "Настройка ИИ-приложения", "AiAppSettings", aiappsettings_url, is_staff and not guest, "⚙", "Вкл/выкл доступ к ИИ, последние запросы и пакетные прогоны"),
+                # «Закреплённые пакетные решения» — сразу под «Настройкой ИИ-приложения»
+                # (та же беззаголовочная группа «ai-pinned»): закреплённые завершённые
+                # пакетные прогоны (★ в журнале и на «Настройке ИИ-приложения»).
+                # В гостевом режиме скрыта, как и вся группа настройки.
+                ("Закреплено", "Закреплённые пакетные решения", "AiPinnedBatchRuns", pinned_runs_url, show_logs and not guest, "★", "Закреплённые завершённые пакетные прогоны"),
                 # NB: остальные дубликаты реальных ModelAdmin-строк («Препромпты»)
                 # сюда НЕ добавляем — они и так есть в группе «Раздел ИИ» ниже.
                 # Здесь — только кастомные инструменты.

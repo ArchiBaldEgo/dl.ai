@@ -27,7 +27,7 @@ from ..dl_api_client import (
     fetch_task_info,
 )
 from ..http_utils import resolve_dl_session_id
-from ..models import AIModelTestResult, AIModelTestRun, AIRequestLog, Task
+from ..models import AIModelTestResult, AIModelTestRun, AIRequestLog, AIPinnedBatchRun, Task
 from ..model_health import get_runtime_model_handlers
 from .permissions import can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
 
@@ -316,6 +316,151 @@ def build_recent_log_rows(request, limit=5):
     }
 
 
+def build_batch_rows_for_logs(request, logs):
+    """Лёгкие строки batch-прогонов для списка записей журнала.
+
+    Общий хелпер «Последних пакетных решений» на «Настройке ИИ-приложения» и
+    страницы «Закреплённые пакетные решения»: для каждой batch-записи журнала
+    — шапка прогона (AIModelTestRun) + count-агрегат результатов, без текстов;
+    развёртка результатов — лениво, AJAX по snapshot_url. Для каждого прогона
+    проставляется флаг ``pinned`` (закреплён ли текущим пользователем).
+    """
+    run_ids = {}
+    for log in logs:
+        run_hex = _batch_run_id_from_log(log)
+        if run_hex:
+            run_ids[log.pk] = run_hex
+    runs = {
+        r.run_id: r
+        for r in AIModelTestRun.objects.filter(run_id__in=set(run_ids.values()))
+    }
+    pinned_log_ids = set(
+        AIPinnedBatchRun.objects.filter(user=request.user, log_id__in=[l.pk for l in logs])
+        .values_list("log_id", flat=True)
+    ) if logs else set()
+    # Сводка по результатам прогонов — count-запросом, без текстов;
+    # семантика как в _build_batch_report (total/solved/failed).
+    counters = {}
+    first_ext = {}
+    if run_ids:
+        for row in (
+            AIModelTestResult.objects
+            .filter(run__run_id__in=set(run_ids.values()))
+            .values("run__run_id")
+            .annotate(
+                total=Count("pk"),
+                solved=Count("pk", filter=Q(verdict=AIModelTestResult.VERDICT_SOLVED)),
+                failed=Count("pk", filter=Q(verdict=AIModelTestResult.VERDICT_FAILED)),
+            )
+        ):
+            counters[row["run__run_id"]] = row
+        # file_extension строки — первый непустой снимок результата прогона
+        # (тот же приоритет, что в _build_batch_log_snapshot).
+        for row in (
+            AIModelTestResult.objects
+            .filter(run__run_id__in=set(run_ids.values()))
+            .exclude(file_extension_snapshot="")
+            .order_by("pk")
+            .values("run__run_id", "file_extension_snapshot")
+        ):
+            first_ext.setdefault(row["run__run_id"], row["file_extension_snapshot"])
+    rows = []
+    for log in logs:
+        run_hex = run_ids.get(log.pk)
+        run = runs.get(run_hex) if run_hex else None
+        counter = counters.get(run_hex, {})
+        run_status = run.status if run else ""
+        rows.append({
+            "id": log.id,
+            "sent_at": log.sent_at,
+            "status": log.status,
+            # Статус прогона («Выполнен»/«Прерван»); прогон стёрт из БД →
+            # старое отображение по записи журнала.
+            "run_status_display": batch_run_status_display(run_status) or log.get_status_display(),
+            # Сырой статус прогона — для класса цвета в шаблоне
+            # (прогон стёрт из БД → старый статус записи журнала).
+            "run_status": run_status or log.status,
+            "run_name": run_name_for(run),
+            "run_id": run_hex or "",
+            "course_id": run.course_id if run else None,
+            "file_extension": first_ext.get(run_hex, ""),
+            "total_pairs": counter.get("total"),
+            "solved": counter.get("solved"),
+            "failed": counter.get("failed"),
+            "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
+            # Полные результаты — лениво, AJAX-ом по клику: страница
+            # настроек больше не встраивает снапшоты в HTML.
+            "snapshot_url": f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/",
+            # Закреплён ли прогон текущим пользователем (★ кнопки на страницах)
+            # и адрес переключения (POST, см. pinned.py).
+            "pinned": log.pk in pinned_log_ids,
+            "pin_url": f"/ai/admin/ai/airequestlog/{log.id}/pin/",
+        })
+    return rows
+
+
+def admin_request_log_detail_json_view(request, log_id):
+    """JSON-детали записи журнала для ленивой развёртки на «Настройке ИИ».
+
+    Клик по строке блока «Последние запросы» на странице «Настройка
+    ИИ-приложения» подтягивает полный текст запроса/ответа/ошибки (в HTML
+    страницы они не вшиты — как и batch-снапшоты, они могут быть большими).
+    Права — те же, что у журнала: can_access_logs + «только свои» для
+    prompt_developer (_get_scoped_log).
+    """
+    if request.method != "GET":
+        return JsonResponse({"ok": False, "error": "Метод не поддерживается"}, status=405)
+    if not can_access_logs(request):
+        return HttpResponseForbidden("Access denied")
+
+    log, error = _get_scoped_log(request, log_id)
+    if log is None:
+        return error
+
+    is_batch = _is_batch_solve_log(log)
+    run = None
+    if is_batch:
+        run_hex = _batch_run_id_from_log(log)
+        run = AIModelTestRun.objects.filter(run_id=run_hex).first() if run_hex else None
+
+    return JsonResponse({
+        "ok": True,
+        "log": {
+            "id": log.id,
+            "source_display": log.get_source_display() or "—",
+            "mode_display": log.get_mode_display() or "—",
+            "status_display": log.get_status_display(),
+            "model_names": ", ".join(log.model_names or []) or "—",
+            "tokens": log.tokens,
+            "duration_seconds": log.duration_seconds,
+            "sent_at": timezone.localtime(log.sent_at).strftime("%d.%m.%Y %H:%M:%S"),
+            "received_at": (
+                timezone.localtime(log.received_at).strftime("%d.%m.%Y %H:%M:%S")
+                if log.received_at else "—"
+            ),
+            "sender": (
+                log.user_full_name or log.username or "—"
+            ),
+            "external_user_id": log.external_user_id or "",
+            "programming_language_name": log.programming_language_name or "—",
+            "topic_name": log.topic_name or "—",
+            "prompt_name": log.prompt_name or "—",
+            "prompt_id": log.prompt_id,
+            "task_node_id": log.task_node_id,
+            "task_name": log.task_name or "",
+            # Для batch-записей тексты не отдаём (могут быть десятки МБ;
+            # результаты прогона — через batch-snapshot в блоке выше).
+            "message": log.message or "",
+            "response_text": "" if is_batch else (log.response_text or ""),
+            "is_batch": is_batch,
+            "error_message": log.error_message or "",
+            "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
+            "run_name": run_name_for(run) if run else "",
+            "run_status_display": batch_run_status_display(run.status) if run else "",
+        },
+    })
+
+
 def build_recent_batch_rows(request, limit=5):
     """Контекст-хелпер: последние N batch-solve прогонов (для страницы
     «Настройки ИИ-приложения»).
@@ -345,68 +490,7 @@ def build_recent_batch_rows(request, limit=5):
             .order_by("-sent_at")
         )
         logs = list(qs[: max(0, int(limit))])
-        run_ids = {}
-        for log in logs:
-            run_hex = _batch_run_id_from_log(log)
-            if run_hex:
-                run_ids[log.pk] = run_hex
-        runs = {
-            r.run_id: r
-            for r in AIModelTestRun.objects.filter(run_id__in=set(run_ids.values()))
-        }
-        # Сводка по результатам прогонов — count-запросом, без текстов;
-        # семантика как в _build_batch_report (total/solved/failed).
-        counters = {}
-        first_ext = {}
-        if run_ids:
-            for row in (
-                AIModelTestResult.objects
-                .filter(run__run_id__in=set(run_ids.values()))
-                .values("run__run_id")
-                .annotate(
-                    total=Count("pk"),
-                    solved=Count("pk", filter=Q(verdict=AIModelTestResult.VERDICT_SOLVED)),
-                    failed=Count("pk", filter=Q(verdict=AIModelTestResult.VERDICT_FAILED)),
-                )
-            ):
-                counters[row["run__run_id"]] = row
-            # file_extension строки — первый непустой снимок результата прогона
-            # (тот же приоритет, что в _build_batch_log_snapshot).
-            for row in (
-                AIModelTestResult.objects
-                .filter(run__run_id__in=set(run_ids.values()))
-                .exclude(file_extension_snapshot="")
-                .order_by("pk")
-                .values("run__run_id", "file_extension_snapshot")
-            ):
-                first_ext.setdefault(row["run__run_id"], row["file_extension_snapshot"])
-        for log in logs:
-            run_hex = run_ids.get(log.pk)
-            run = runs.get(run_hex) if run_hex else None
-            counter = counters.get(run_hex, {})
-            run_status = run.status if run else ""
-            rows.append({
-                "id": log.id,
-                "sent_at": log.sent_at,
-                "status": log.status,
-                # Статус прогона («Выполнен»/«Прерван»); прогон стёрт из БД →
-                # старое отображение по записи журнала.
-                "run_status_display": batch_run_status_display(run_status) or log.get_status_display(),
-                # Сырой статус прогона — для класса цвета в шаблоне
-                # (прогон стёрт из БД → старый статус записи журнала).
-                "run_status": run_status or log.status,
-                "run_name": run_name_for(run),
-                "run_id": run_hex or "",
-                "course_id": run.course_id if run else None,
-                "file_extension": first_ext.get(run_hex, ""),
-                "total_pairs": counter.get("total"),
-                "solved": counter.get("solved"),
-                "failed": counter.get("failed"),
-                "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
-                # Полные результаты — лениво, AJAX-ом по клику: страница
-                # настроек больше не встраивает снапшоты в HTML.
-                "snapshot_url": f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/",
-            })
+        rows = build_batch_rows_for_logs(request, logs)
     return {
         "recent_batch_runs": rows,
         "recent_batch_limit": limit,
@@ -591,7 +675,7 @@ def admin_request_logs_view(request):
 
     # Строки страницы парами (log, batch-контекст) — batch-контекст None для
     # обычных записей. Так шаблон читает его без dict-lookup по pk.
-    batch_contexts = _batch_log_row_contexts(page_obj.object_list)
+    batch_contexts = _batch_log_row_contexts(page_obj.object_list, user=request.user)
     rows = [(log, batch_contexts.get(log.pk)) for log in page_obj.object_list]
 
     # Build the query string carried by pagination links. ``urlencode`` over a
@@ -686,8 +770,19 @@ def _build_batch_log_snapshot(log):
     except AIModelTestRun.DoesNotExist:
         return None
 
-    results = _batch_results_from_db(test_run)
+    # Лёгкие результаты (lazy_body): деталь журнала не встраивает мегабайты
+    # текста в HTML — тело результата подтягивается по AJAX при раскрытии
+    # строки (тот же эндпоинт, что у /arm/solve/).
+    results = _batch_results_from_db(test_run, light=True)
     report = _build_batch_report(results)
+    # Карточка «Прогон» (время) — та же, что на /arm/solve/.
+    from ..arm_runner import _attach_run_meta
+    _attach_run_meta(
+        report,
+        test_run.started_at.timestamp() if test_run.started_at else None,
+        test_run.finished_at.timestamp() if test_run.finished_at else None,
+        now_ts=time.time() if test_run.status == AIModelTestRun.STATUS_RUNNING else None,
+    )
 
     # file_extension — первый непустой снимок из результатов.
     file_extension = ""
@@ -715,17 +810,20 @@ def _build_batch_log_snapshot(log):
     }
 
 
-def _batch_log_row_contexts(logs):
+def _batch_log_row_contexts(logs, user=None):
     """Bulk-контекст batch-строк для страницы списка журнала.
 
     Для каждой batch-solve записи страницы (одним запросом AIModelTestRun и
     одним запросом AIModelTestResult с select_related('task')) собирает
     {log.pk: {run_id, course_id, file_extension, tasks: [{node_id, name}],
-    run_status_display, run_name}}.
+    run_status_display, run_name, pinned}}.
     В tasks попадают только НЕрешённые задачи прогона (ни одна модель не дала
     solved) — решённые в списке журнала не показываются.
     Отличие от _build_batch_log_snapshot: НЕ тянет raw_response/results —
     списку нужен только курс/задачи, без N+1 по 50 строкам.
+
+    ``user`` — для флага ``pinned`` (закреплён ли прогон этим пользователем,
+    ★ кнопка закрепления в списке журнала); None — флаг не проставляется.
     """
     from ..models import AIModelTestResult
 
@@ -738,6 +836,15 @@ def _batch_log_row_contexts(logs):
             run_ids[log.pk] = run_id
     if not run_ids:
         return {}
+
+    # Закрепления пользователя — одним запросом (★ в строках журнала).
+    pinned_log_pks = set()
+    if user is not None and getattr(user, "is_authenticated", False):
+        pinned_log_pks = set(
+            AIPinnedBatchRun.objects.filter(
+                user=user, log_id__in=set(run_ids)
+            ).values_list("log_id", flat=True)
+        )
 
     contexts = {}
     runs = {
@@ -797,6 +904,9 @@ def _batch_log_row_contexts(logs):
             # и полный список для title-подсказки.
             "tasks_preview": _tasks_preview(tasks),
             "tasks_title": "; ".join(f"{t['name']} ({t['node_id']})" for t in tasks),
+            # Закреплён ли прогон этим пользователем (★ кнопка закрепления).
+            "pinned": log_pk in pinned_log_pks,
+            "pin_url": f"/ai/admin/ai/airequestlog/{log_pk}/pin/",
         }
     return contexts
 

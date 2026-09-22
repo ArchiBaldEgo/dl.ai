@@ -23,14 +23,12 @@ class TopicForm(forms.ModelForm):
 
 
 class PromptForm(forms.ModelForm):
-    # NOTE: ``programming_language`` is NOT a field on the Prompt model — a
-    # Prompt only links to a Topic, which in turn carries the language. This
-    # declared form field exists so the admin change form can offer a language
-    # <select> that drives the topic <select> (see prompt_language_topic.js).
-    # It MUST stay declared here: PromptAdmin.get_fieldsets lists it, and for
-    # read-only users PromptAdmin.programming_language (the display method in
-    # models.py) renders it. Remove either side and the readonly/fieldset
-    # rendering raises FieldError / "Unable to lookup …".
+    # ``programming_language`` — FK-поле модели Prompt (миграция 0048). Явная
+    # декларация нужна для упорядоченного queryset и атрибута data-topics-url
+    # для каскада «язык → темы» (prompt_language_topic.js). Язык может быть
+    # задан БЕЗ темы («общий» промпт на весь язык); если заданы оба — тема
+    # обязана принадлежать языку (clean). Раньше поле было виртуальным
+    # (язык выводился только из темы) — и не сохранялось.
     programming_language = forms.ModelChoiceField(
         queryset=ProgrammingLanguage.objects.none(),
         required=False,
@@ -102,7 +100,8 @@ class PromptForm(forms.ModelForm):
 
         if self.instance.pk and self.instance.topic_id:
             return self.instance.topic.programming_language_id
-        return None
+        # Темы нет — берём собственный язык промпта (препромпт «на весь язык»).
+        return self.instance.programming_language_id
 
     def clean(self):
         cleaned_data = super().clean()

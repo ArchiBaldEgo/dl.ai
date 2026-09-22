@@ -31,6 +31,16 @@
   }
   .ai-log-row { cursor: pointer; }
   .ai-log-row:hover { background: var(--selected-row); }
+  .ai-log-pin-cell { white-space: nowrap; text-align: center; }
+  .ai-log-pin-btn {
+    background: none; border: 1px solid var(--hairline-color); border-radius: 4px;
+    cursor: pointer; font-size: 15px; line-height: 1; padding: 3px 7px;
+    color: var(--body-quiet-color);
+  }
+  .ai-log-pin-btn:hover:not(:disabled) { border-color: var(--link-fg); color: var(--link-fg); }
+  .ai-log-pin-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .ai-log-pin-btn-active { color: #d97706; border-color: #d97706; }
+  .ai-log-pin-btn.busy { opacity: 0.6; pointer-events: none; }
   .ai-log-task-link {
     background: none; border: none; padding: 0;
     color: var(--link-fg); cursor: pointer;
@@ -307,6 +317,42 @@
           });
       });
     });
+
+    // ★ Закрепить/открепить batch-прогон из журнала (POST toggle,
+    // ai/admin/pinned.py). Кнопка вне форм — CSRF берём из скрытых input-ов
+    // страницы (rerun-формы), с фолбэком на куку csrftoken.
+    function pinCsrfToken() {
+      var input = document.querySelector('input[name="csrfmiddlewaretoken"]');
+      if (input && input.value) return input.value;
+      var m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+      return m ? decodeURIComponent(m[1]) : '';
+    }
+    document.querySelectorAll('.ai-log-pin-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        if (btn.disabled || btn.classList.contains('busy')) return;
+        btn.classList.add('busy');
+        fetch(btn.getAttribute('data-pin-url'), {
+          method: 'POST',
+          headers: { 'X-CSRFToken': pinCsrfToken(), 'X-Requested-With': 'XMLHttpRequest' },
+          credentials: 'same-origin',
+        })
+          .then(function (resp) {
+            return resp.json().catch(function () { throw new Error('HTTP ' + resp.status); });
+          })
+          .then(function (data) {
+            if (!data.ok) { throw new Error(data.message || 'Не удалось изменить закрепление'); }
+            btn.classList.toggle('ai-log-pin-btn-active', data.pinned);
+            btn.textContent = data.pinned ? '★' : '☆';
+            btn.title = data.pinned
+              ? 'Убрать из «Закреплённых»'
+              : 'Закрепить в «Закреплённых пакетных решениях»';
+          })
+          .catch(function (err) {
+            alert('Закрепление: ' + err.message);
+          })
+          .finally(function () { btn.classList.remove('busy'); });
+      });
+    });
   });
 </script>
 
@@ -398,6 +444,7 @@
           <th>Статус</th>
           <th>Режим</th>
           <th>с</th>
+          <th title="Закрепить завершённый пакетный прогон">★</th>
         </tr>
       </thead>
       <tbody>
@@ -436,11 +483,19 @@
               {{ log.get_mode_display|default:"—" }}
             </td>
             <td>{{ log.duration_seconds|floatformat:0|default:"—" }}</td>
+            <td class="ai-log-pin-cell">
+              {% if batch %}
+                <button type="button"
+                        class="ai-log-pin-btn{% if batch.pinned %} ai-log-pin-btn-active{% endif %}"
+                        data-pin-url="{{ batch.pin_url }}" data-log-id="{{ log.id }}"
+                        {% if batch.run_status == 'running' %}disabled title="Прогон ещё выполняется — закрепить можно только завершённые"{% else %}title="{% if batch.pinned %}Убрать из «Закреплённых»{% else %}Закрепить в «Закреплённых пакетных решениях»{% endif %}"{% endif %}>{{ batch.pinned|yesno:"★,☆" }}</button>
+              {% endif %}
+            </td>
           </tr>
 
           {# === Скрытая строка с деталями (аккордеон) === #}
           <tr class="ai-log-detail-row">
-            <td class="ai-log-detail-cell" colspan="12">
+            <td class="ai-log-detail-cell" colspan="13">
               <div class="ai-log-detail-content">
 
                 {# Левая колонка: метаданные (+ задачи прогона для batch) #}

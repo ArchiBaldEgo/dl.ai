@@ -45,7 +45,10 @@ def get_localized_name(obj: Any, ui_language: str, default_attr: str = "name") -
     """Return a localized name for the object, falling back to Russian.
 
     Looks for ``{default_attr}_{suffix}`` first, then the *_ru field.
-    Returns the object's string representation as a last resort.
+    Если оба пусты — НЕ ``str(obj)``: модели Prompt/Topic/SharedPrompt
+    реализуют ``__str__`` через этот же хелпер, и пустые *_ru поля уводили
+    его в бесконечную рекурсию (RecursionError → 500 на /admin/ai/prompt/add/
+    и везде, где строки приводятся к str). Безопасный фолбэк — подпись по pk.
     """
     suffix = get_ui_language_suffix(ui_language)
     candidates = [
@@ -56,7 +59,10 @@ def get_localized_name(obj: Any, ui_language: str, default_attr: str = "name") -
         value = getattr(obj, attr, None)
         if value:
             return str(value)
-    return str(obj)
+    pk = getattr(obj, "pk", None)
+    if pk is None:
+        return obj.__class__.__name__
+    return f"{obj.__class__.__name__} #{pk}"
 
 
 def get_localized_text(obj: Any, ui_language: str, default_attr: str = "text") -> str:

@@ -9,9 +9,12 @@
 новый будет сделан отдельно (раннер single-run в arm_runner.py сохранён).
 """
 
+import logging
 import re
 
 from .site import ai_admin_site
+
+logger = logging.getLogger(__name__)
 from django.core.cache import cache
 from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import get_object_or_404
@@ -173,7 +176,7 @@ def admin_arm_solve_view(request):
     is_previous_run = False
 
     if active_run_id:
-        active_run_snapshot = get_arm_run_snapshot(active_run_id)
+        active_run_snapshot = get_arm_run_snapshot(active_run_id, light_results=True)
         if active_run_snapshot:
             results = active_run_snapshot.get("results") or []
             report = active_run_snapshot.get("report")
@@ -185,7 +188,9 @@ def admin_arm_solve_view(request):
         # Без ?run_id= показываем последний batch-прогон пользователя
         # («таблица с прошлого запуска»). Форма при этом восстанавливается
         # из localStorage, а не из run_params этого прогона.
-        active_run_snapshot = get_latest_batch_run_snapshot(request.user.id)
+        # Снапшот лёгкий (без raw_response/code — lazy_body): большой прогон
+        # это десятки МБ текста, иначе страница грузится катастрофически долго.
+        active_run_snapshot = get_latest_batch_run_snapshot(request.user.id, light_results=True)
         if active_run_snapshot:
             is_previous_run = True
             results = active_run_snapshot.get("results") or []
@@ -218,16 +223,21 @@ def admin_arm_solve_view(request):
     # Список препромптов режима «Реши задачу» для ручного выбора на странице.
     # Препромпты — студенческий контент: тот же контракт, что у chat-facing
     # get_prompts (см. querysets.prompt_queryset_for_user — здесь ACL не режем).
+    # language_name — для промптов «на весь язык» (без темы).
     prompt_options = [
         {
             "id": p.pk,
             "name": p.prompt_name_ru or f"Промпт #{p.pk}",
             "topic_id": p.topic_id,
             "topic_name": p.topic.topic_name_ru if p.topic else "",
+            "language_name": (
+                p.programming_language.language_name if p.programming_language
+                else (p.topic.programming_language.language_name if p.topic and p.topic.programming_language else "")
+            ),
         }
-        for p in Prompt.objects.filter(mode=Prompt.MODE_SOLVE).select_related("topic").order_by(
-            "topic__topic_name_ru", "prompt_name_ru"
-        )
+        for p in Prompt.objects.select_related("topic", "topic__programming_language", "programming_language").filter(
+            mode=Prompt.MODE_SOLVE
+        ).order_by("topic__topic_name_ru", "prompt_name_ru")
     ]
 
     context = {
@@ -292,9 +302,20 @@ def admin_arm_solve_load_tree_view(request):
     # Дерево курса стабильно — кэшируем в Redis по course_id, чтобы не бить в DL
     # API при каждом открытии. Переключение course_id → другой ключ (старый
     # остаётся до TTL); инвалидация — по TTL. DLSID нужен только для промаха.
+    # Рядом держим БЕССРОЧНУЮ «несвежую» копию (dl_tree_stale): у обычных
+    # пользователей (prompt_developer с студенческим DLSID) DL отдаёт 403 на
+    # get-course-node/get-node-tree — им отдаём последнее дерево, которое
+    # удалось загрузить любому пользователю с правами (оператор грузит дерево
+    # один раз, дальше оно доступно всем).
     tree_cache_key = f"{AI_CACHE_KEY_PREFIX}:dl_tree:{course_id}"
+    tree_cache_key_stale = f"{AI_CACHE_KEY_PREFIX}:dl_tree_stale:{course_id}"
     cached = cache.get(tree_cache_key)
     if cached:
+        # Подстраховка переходного периода (после выката): бессрочную копию
+        # заводим и из свежего кэша, чтобы 403-юзеры не ждали перезагрузки
+        # дерева оператором после истечения старого TTL.
+        if not cache.get(tree_cache_key_stale):
+            cache.set(tree_cache_key_stale, cached, timeout=None)
         return JsonResponse({
             "ok": True,
             "tree": cached["tree"],
@@ -378,6 +399,21 @@ def admin_arm_solve_load_tree_view(request):
         if enriched_tree:
             cache.set(tree_cache_key, {"tree": enriched_tree, "task_count": task_count},
                       timeout=_DL_TREE_CACHE_TTL)
+            # Бессрочные резервные копии: у пользователей без прав на DL-дерево
+            # это единственный источник после истечения свежего TTL. Redis —
+            # на случай TTL; БД (AICourseTreeCache) — на случай очистки Redis:
+            # после одной успешной загрузки дерево доступно всем всегда.
+            cache.set(tree_cache_key_stale,
+                      {"tree": enriched_tree, "task_count": task_count}, timeout=None)
+            try:
+                from ..models import AICourseTreeCache
+                AICourseTreeCache.objects.update_or_create(
+                    course_id=course_id,
+                    defaults={"tree": enriched_tree, "task_count": task_count},
+                )
+            except Exception:
+                logger.warning("Не удалось сохранить дерево курса %s в БД",
+                               course_id, exc_info=True)
 
         return JsonResponse({
             "ok": True,
@@ -386,7 +422,41 @@ def admin_arm_solve_load_tree_view(request):
         })
 
     except DLApiError as exc:
-        return JsonResponse({"ok": False, "message": f"Ошибка DL API: {exc}"}, status=400)
+        # DL отказал (403 «Доступ запрещён» у пользователей без активного
+        # курса в DL-сессии, 401, недоступность) — отдаём резервную копию
+        # дерева: сначала бессрочную Redis-копию, затем сохранённую в БД
+        # (переживает очистку Redis). Прогон по сохранённым задачам не должен
+        # блокироваться правами DL на чтение дерева.
+        stale = cache.get(tree_cache_key_stale)
+        if not stale:
+            try:
+                from ..models import AICourseTreeCache
+                db_tree = AICourseTreeCache.objects.filter(course_id=course_id).first()
+                if db_tree and db_tree.tree:
+                    stale = {"tree": db_tree.tree, "task_count": db_tree.task_count}
+                    # Реанимируем и Redis-копию — до очередного успеха DL.
+                    cache.set(tree_cache_key_stale, stale, timeout=None)
+            except Exception:
+                logger.warning("Не удалось прочитать дерево курса %s из БД",
+                               course_id, exc_info=True)
+        if stale:
+            return JsonResponse({
+                "ok": True,
+                "tree": stale["tree"],
+                "task_count": stale["task_count"],
+                "stale": True,
+                "message": f"Дерево из кэша (DL недоступен: {exc})",
+            })
+        hint = ""
+        exc_text = str(exc)
+        if "запрещён" in exc_text or "запрещен" in exc_text or "permission" in exc_text.lower():
+            hint = (" · Зайдите на dl.gsu.by в курс (откройте любую его задачу), "
+                    "чтобы DL-сессия активировала курс, и повторите загрузку. "
+                    "После одной успешной загрузки дерево сохраняется и "
+                    "становится доступно всем.")
+        return JsonResponse(
+            {"ok": False, "message": f"Ошибка DL API: {exc}{hint}"}, status=400
+        )
     except Exception as exc:
         return JsonResponse({"ok": False, "message": f"Ошибка: {exc}"}, status=500)
 
@@ -478,6 +548,12 @@ def admin_arm_solve_start_view(request):
         body.get("record_stats")
         or request.POST.get("record_stats") in ("1", "true", "True", "on")
     )
+    # «Решённые задачи»: чекбокс оператора — сохранять в кэш (TaskSolution)
+    # решения пар, прошедших DL-тест. Уже решённые (на этом языке) не трогаются.
+    save_solutions = bool(
+        body.get("save_solutions")
+        or request.POST.get("save_solutions") in ("1", "true", "True", "on")
+    )
     # Course ID: берём из активного курса пользователя (не из запроса).
     # Фронтенд больше не отправляет course_id — он определяется автоматически.
     course_id_from_body = body.get("course_id") or request.POST.get("course_id")
@@ -530,6 +606,7 @@ def admin_arm_solve_start_view(request):
         topic_name=topic_name_log,
         record_stats=record_stats,
         run_name=run_name,
+        save_solutions=save_solutions,
     )
     if not run_id:
         return JsonResponse(
@@ -537,7 +614,7 @@ def admin_arm_solve_start_view(request):
             status=400,
         )
 
-    return JsonResponse({"ok": True, "run_id": run_id, "run": get_arm_run_snapshot(run_id)})
+    return JsonResponse({"ok": True, "run_id": run_id, "run": get_arm_run_snapshot(run_id, light_results=True)})
 
 
 def admin_arm_solve_status_view(request):
@@ -551,7 +628,9 @@ def admin_arm_solve_status_view(request):
     if not run_id:
         return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
 
-    run_snapshot = get_arm_run_snapshot(run_id)
+    # Поллинг каждые 2с: лёгкие результаты (lazy_body) — без поллинга десятков
+    # МБ текста; тело результата грузится отдельно при раскрытии строки.
+    run_snapshot = get_arm_run_snapshot(run_id, light_results=True)
     if not run_snapshot:
         return JsonResponse(
             {"ok": False, "message": "Процесс не найден или уже завершен"},
@@ -625,6 +704,32 @@ def admin_arm_solve_result_download_view(request, result_id):
     response = HttpResponse(code, content_type="text/plain; charset=utf-8")
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
+
+
+def admin_arm_solve_result_body_view(request, result_id):
+    """Тело одного batch-результата (lazy-загрузка для /arm/solve/).
+
+    Страница «Пакетное решение» и поллинг статуса получают только метаданные
+    результатов (light-снапшот с lazy_body=True) — иначе большой прогон
+    раздувал HTML/JSON до десятков МБ. Тяжёлое тело (полный ответ, извлечённый
+    код, DL-комментарии) подтягивается здесь при первом раскрытии строки.
+    Права — те же, что у всей ARM (can_access_arm), GET only.
+    """
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "GET":
+        return HttpResponseNotAllowed(["GET"])
+
+    result = get_object_or_404(AIModelTestResult, pk=result_id)
+    return JsonResponse({"ok": True, "result": {
+        "result_id": result.pk,
+        "raw_response": result.raw_response or "",
+        "code": result.code or "",
+        "short_response": result.short_response or "",
+        "dl_comment": result.dl_comment or "",
+        "dl_error": result.dl_error or "",
+    }})
 
 
 def admin_arm_solve_report_xlsx_view(request, run_id):

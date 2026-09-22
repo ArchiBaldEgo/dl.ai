@@ -36,6 +36,42 @@ function getSelectorValue(id) {
     return el ? el.value : "";
 }
 
+// === Хранение текста задачи ПО УЗЛУ (per-node) ===
+// Общий SHARED_TEXT_KEY (restoreSharedText из ai-common.js) хранит ОДИН текст
+// на все страницы: при открытии задачи B после задачи A поле подставляло
+// сохранённый текст задачи A — «совершенно другой текст». Здесь текст
+// сохраняется с nodeId, и восстанавливается ТОЛЬКО для того же узла: сбой
+// загрузки оставляет поле пустым, но никогда не подставляет чужую задачу.
+function taskTextStorageKey() {
+    return 'ai_task_text_' + (window.AI_TASK_NODE_ID || 'no-node');
+}
+
+function saveTaskTextForNode() {
+    try {
+        var messageText = document.getElementById('messageText');
+        if (!messageText) return;
+        localStorage.setItem(taskTextStorageKey(), JSON.stringify({
+            nodeId: window.AI_TASK_NODE_ID || '',
+            message: messageText.value,
+        }));
+    } catch (e) {}
+}
+
+function restoreTaskTextForNode() {
+    // Восстанавливаем только текст ЭТОЙ же задачи (nodeId совпадает):
+    // сохранение от другой задачи — молча игнорируем, поле остаётся пустым.
+    try {
+        var raw = localStorage.getItem(taskTextStorageKey());
+        if (!raw) return false;
+        var saved = JSON.parse(raw);
+        if (!saved || typeof saved.message !== 'string') return false;
+        if ((saved.nodeId || '') !== (window.AI_TASK_NODE_ID || '')) return false;
+        var messageText = document.getElementById('messageText');
+        if (messageText && saved.message) messageText.value = saved.message;
+        return !!saved.message;
+    } catch (e) { return false; }
+}
+
 // === override initWebSocket — type=2, accordion в onmessage ===
 function initWebSocket() {
     try {
@@ -159,7 +195,7 @@ function sendMessage(event) {
     notEnter = true;
     // НЕ очищаем поле ввода в режиме «Реши задачу» — условие задачи
     // должно сохраняться при смене модели ИИ (пользовательские жалобы).
-    saveSharedText();
+    saveTaskTextForNode();
 }
 
 // === override simulateSend — с nodeId (язык/тема/препромт убраны) ===
@@ -203,7 +239,7 @@ function simulateSend() {
     updateVoiceStatus(getVoiceStatusText('messageSent'));
     // НЕ очищаем поле ввода в режиме «Реши задачу» — условие задачи
     // должно сохраняться при смене модели ИИ.
-    saveSharedText();
+    saveTaskTextForNode();
 }
 
 // === selectLang change handler — специфичный для decide_task ===
@@ -295,51 +331,107 @@ function currentUiLanguage() {
     return 'Russian';
 }
 
+// Счётчик вызовов loadTaskFromUrl: ответ БОЛЕЕ раннего запроса не должен
+// затирать поле после более позднего (гонка «раз через раз»: автозагрузка на
+// DOMContentLoaded стартует раньше, а завершается позже, чем повторная
+// загрузка из обработчика смены языка UI в window.onload — и кто позже
+// завершился, тот и выигрывал поле, даже если его запрос был инициирован
+// раньше). Пишет в поле только самый свежий вызов.
+var _taskLoadSeq = 0;
+
+// Флаг «самая свежая загрузка условия закончилась неудачей»: сброс — успешной
+// загрузкой, взвод — финальным отказом последнего вызова. Фолбэк
+// restoreTaskTextForNode (per-node) в DOMContentLoaded срабатывает только с ним —
+// иначе поздний отказ раннего запроса стирал бы текст, успевший придти от
+// более позднего.
+var _taskLoadLastFailed = false;
+
 async function loadTaskFromUrl() {
+    var seq = ++_taskLoadSeq;
     var messageTextEl = document.getElementById('messageText');
     var nodeId = window.AI_TASK_NODE_ID || (messageTextEl && messageTextEl.dataset.nodeId) || '';
     if (!nodeId) return false;
 
-    try {
-        var url = new URL('/ai/api/task-info/', window.location.origin);
-        url.searchParams.set('nodeId', nodeId);
-        url.searchParams.set('removeHtmlTags', 'true');
-        // Текст задачи должен быть на языке интерфейса, выбранном на странице
-        // (русский/английский/французский): сервер переведёт условие в этот язык.
-        url.searchParams.set('ui_language', currentUiLanguage());
-        var response = await fetch(url.toString());
-        if (response.status === 404) {
-            updateVoiceStatus(getUiString('taskNotFound', 'Задача не найдена'));
-            return false;
+    // Один повтор на кратковременный сбой DL/сети: «раз через раз» нередко —
+    // единичный таймаут/5xx апстрима, второй запрос почти всегда проходит.
+    var lastError = null;
+    for (var attempt = 0; attempt < 2; attempt++) {
+        try {
+            var url = new URL('/ai/api/task-info/', window.location.origin);
+            url.searchParams.set('nodeId', nodeId);
+            url.searchParams.set('removeHtmlTags', 'true');
+            // Текст задачи должен быть на языке интерфейса, выбранном на странице
+            // (русский/английский/французский): сервер переведёт условие в этот язык.
+            url.searchParams.set('ui_language', currentUiLanguage());
+            var response = await fetch(url.toString());
+            if (response.status === 404) {
+                updateVoiceStatus(getUiString('taskNotFound', 'Задача не найдена'));
+                return false;
+            }
+            if (!response.ok) {
+                var errorText = await response.text();
+                throw new Error('HTTP ' + response.status + ': ' + errorText);
+            }
+            var data = await response.json();
+            var statement = data.statement || data.currentStatement || '';
+            // Пустой statement (DL иногда сам возвращает пустой statement
+            // после снятия HTML) — это НЕУДАЧА: раньше в поле записывалась
+            // пустая строка и стирался восстановленный из localStorage текст.
+            if (!statement.trim()) {
+                throw new Error('Пустое условие задачи');
+            }
+            if (seq !== _taskLoadSeq) {
+                // Уже инициирована более свежая загрузка — не перебиваем её.
+                return true;
+            }
+            _taskLoadLastFailed = false;
+            if (messageTextEl) {
+                messageTextEl.value = statement;
+                saveTaskTextForNode();
+            }
+            return true;
+        } catch (error) {
+            lastError = error;
+            if (attempt === 0) {
+                // Пауза перед повтором — короткая, чтобы не чувствовалась,
+                // но достаточная для прохода транзиентного сбоя.
+                await new Promise(function (resolve) { setTimeout(resolve, 700); });
+                if (seq !== _taskLoadSeq) { return false; } // свежее уже идёт
+            }
         }
-        if (!response.ok) {
-            var errorText = await response.text();
-            throw new Error('HTTP ' + response.status + ': ' + errorText);
-        }
-        var data = await response.json();
-        var statement = data.statement || data.currentStatement || '';
-        if (messageTextEl) {
-            messageTextEl.value = statement;
-            saveSharedText();
-        }
-        return true;
-    } catch (error) {
-        console.error('Error loading task statement:', error);
-        updateVoiceStatus(getUiString('taskLoadError', 'Не удалось загрузить условие задачи'));
-        return false;
     }
+    console.error('Error loading task statement:', lastError);
+    if (seq === _taskLoadSeq) {
+        _taskLoadLastFailed = true;
+        // Фолбэк: в поле пусто (наш — самый свежий — запрос не принёс текста)
+        // — возвращаем ранее сохранённый текст ТОЛЬКО ЭТОЙ ЖЕ задачи
+        // (restoreTaskTextForNode проверяет nodeId). Текст другой задачи в
+        // поле не подставляем никогда: пользователь мог бы отправить её.
+        if (messageTextEl && !messageTextEl.value.trim()) {
+            restoreTaskTextForNode();
+        }
+    }
+    updateVoiceStatus(getUiString('taskLoadError', 'Не удалось загрузить условие задачи'));
+    return false;
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
     var messageText = document.getElementById('messageText');
     if (messageText) messageText.addEventListener('input', function () {
         userEditedTaskText = true;
-        saveSharedText();
+        saveTaskTextForNode();
     });
 
+    // window.onload диспатчит change на selectLang — его async-обработчик
+    // сам перезагрузит условие (см. selectLang change handler). Но он ждёт
+    // repopulateOnUiLanguageChange, поэтому автозагрузка здесь — чтобы текст
+    // появился как можно раньше. Отказ (DL недоступен) — фолбэк на сохранённый
+    // текст, но только если наш вызов всё ещё самый свежий (иначе затрём
+    // текст, успевший придти от более поздней загрузки).
     var taskLoaded = await loadTaskFromUrl();
-    if (!taskLoaded) {
-        restoreSharedText();
+    if (!taskLoaded && _taskLoadLastFailed) {
+        // Чужой текст не подставляем (per-node restore молча откажется).
+        restoreTaskTextForNode();
     }
 });
 

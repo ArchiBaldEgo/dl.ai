@@ -33,6 +33,9 @@ def prompt(obj, ui_language=""):
         "id": obj.id,
         "topic_id": obj.topic_id,
         "topic__programming_language": obj.topic.programming_language_id if obj.topic else None,
+        # Собственный язык промпта (FK, миграция 0048): без темы — промпт
+        # действует на весь язык; фронт-фильтр препромптов учитывает его.
+        "programming_language_id": obj.programming_language_id,
         "prompt_name": obj.prompt_name_ru,
         "name": get_localized_name(obj, ui_language, "prompt_name"),
         "prompt_text": obj.prompt_text_ru,
