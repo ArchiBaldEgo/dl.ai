@@ -47,9 +47,47 @@ docker compose --env-file .env exec -T web python manage.py shell -c "from ai.mo
 docker compose --env-file .env exec -T web python manage.py shell -c "from django.contrib.auth.models import User; print(*[f'{u.id}: {u.username}' for u in User.objects.order_by('username')], sep='\n')"
 ```
 
-## Локальный запуск (без Docker)
+## Локальный запуск (без Docker, WSL-native)
 
-Нужны: `Python 3.10+`, `PostgreSQL 14+`, `psql`.
+> Полный путь «с нуля» для человека без опыта — в [docs/getting_started.md](docs/getting_started.md) (WSL2, вплоть до кнопок). Ниже — краткий рецепт для уже установленной машины.
+
+Нужны только `Python 3.10+` и существующий `.venv` — Postgres/Redis/DLSID-кука не нужны. `'daphne'` стоит первым в `INSTALLED_APPS`, поэтому `manage.py runserver` обслуживает WebSocket (+static при `DEBUG=1`) наряду с HTTP; prod не затронут (Dockerfile CMD запускает daphne напрямую).
+
+1. Создайте `.env.local` (untracked, в git не попадает). Он накладывается **поверх** `.env`: `settings.py` грузит `.env` через `load_dotenv(..., override=False)`, так что экспортированные отсюда значения побеждают, а сам секретный `.env` в шелл сурсить не нужно.
+
+```bash
+DEBUG=1
+AI_DEV_AUTH_BYPASS=1                 # авто-логин dev_admin (суперпользователь) без DLSID
+DB_ENGINE=django.db.backends.sqlite3
+DB_NAME=/mnt/d/GitHub/dlai/local_db.sqlite3
+REDIS_URL=                           # без Redis: LocMemCache
+AI_CHANNEL_LAYER=inmemory            # без Redis-сервера: слой Channels в памяти
+AI_DISABLE_HEALTH_SCHEDULER=1
+AI_WEB_DEEPSEEK_AUTORECOVERY=0       # пулов :3000/:3001 локально нет
+AI_WEB_KIMI_AUTORECOVERY=0
+CSRF_COOKIE_DOMAIN=                  # критично: .env прибивает домен кук к .gsu.by —
+SESSION_COOKIE_DOMAIN=               # на localhost браузер их не сохранит (WS → close 4403)
+SECURE_SSL_REDIRECT=0
+```
+
+2. Загрузите overrides и запустите (`.env` подхватывается кодом сам):
+
+```bash
+cd /mnt/d/GitHub/dlai
+set -a; source .env.local; set +a
+.venv/bin/python manage.py migrate
+.venv/bin/python manage.py runserver
+```
+
+   Забыли сурснуть `.env.local` → молча стартует прод-конфиг (`DEBUG=0` → редирект на dl.gsu.by и всё).
+
+3. Откройте в браузере `http://localhost:8000/ai/chat/` — именно `localhost` (WSL2-форвардинг + `ALLOWED_HOSTS`), не eth0-IP WSL. Вы автоматически залогинены под `dev_admin`; `/ai/admin/` доступен полностью, set-password не нужен.
+
+Ожидаемые локально деградации (это не баги): фичи, требующие живую сессию dl.gsu.by («Реши задачу» через DL, «Тестирование», ARM batch-solve), сообщат «sessionId обязателен» / «Нет DLSID»; модели `Web_DeepSeek`/`Web_Kimi` офлайн (пулы :3000/:3001 не подняты); API-модели ходят через корп-прокси из `.env`.
+
+### Альтернатива — нативный PostgreSQL
+
+Нужны `PostgreSQL 14+`, `psql`:
 
 1. Создайте БД и пользователя в PostgreSQL:
 

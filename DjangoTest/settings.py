@@ -60,6 +60,10 @@ ALLOWED_HOSTS = _env_csv(
 # Application definition
 
 INSTALLED_APPS = [
+    # 'daphne' должен стоять ПЕРВЫМ: его ASGI-runserver обслуживает WebSocket +
+    # static (DEBUG) и перекрывает WSGI-runserver от staticfiles (channels 4.x).
+    # Prod не затронут: Dockerfile CMD запускает daphne напрямую, минуя runserver.
+    'daphne',
     # 'ai' должен идти ДО django.contrib.admin: иначе его собственный
     # admin/base_site.html (тулбар «Инструменты ИИ» в {% block header %})
     # затеняется стандартным шаблоном из site-packages при APP_DIRS=True.
@@ -125,15 +129,22 @@ else:
     }
 
 # Channels layer: Redis for production (multi-worker), InMemory for dev.
-# NOTE: channels_redis must be installed in the Docker image. If the package
-# is missing, fall back to InMemory to keep the app running.
-try:
-    import channels_redis  # noqa: F401
-    _CHANNELS_BACKEND = "channels_redis.core.RedisChannelLayer"
-    _CHANNELS_CONFIG = {"hosts": [REDIS_URL]} if REDIS_URL else {}
-except ImportError:
+# AI_CHANNEL_LAYER=inmemory — явный opt-in для локального запуска без
+# Redis-сервера (иначе при установленном channels_redis слой втыкается
+# в redis://localhost:6379 и чат по WS падает). Unset → поведение как раньше.
+if os.getenv("AI_CHANNEL_LAYER", "").strip().lower() == "inmemory":
     _CHANNELS_BACKEND = "channels.layers.InMemoryChannelLayer"
     _CHANNELS_CONFIG = {}
+else:
+    # NOTE: channels_redis must be installed in the Docker image. If the package
+    # is missing, fall back to InMemory to keep the app running.
+    try:
+        import channels_redis  # noqa: F401
+        _CHANNELS_BACKEND = "channels_redis.core.RedisChannelLayer"
+        _CHANNELS_CONFIG = {"hosts": [REDIS_URL]} if REDIS_URL else {}
+    except ImportError:
+        _CHANNELS_BACKEND = "channels.layers.InMemoryChannelLayer"
+        _CHANNELS_CONFIG = {}
 
 CHANNEL_LAYERS = {
     "default": {
