@@ -111,6 +111,17 @@ from .dl_api_client import (  # noqa: E402
 
 _VERDICT_SKIPPED = "skipped"
 
+# Лимит позиций в строке «Ошибки по темам» (остальное — «+ ещё N»):
+# отчёт не должен разбухать на больших прогонах.
+_REPORT_ERRORS_ITEM_CAP = 6
+
+# Тяжёлые поля batch-результата (тело ответа): не встраиваются в снапшот
+# страницы / поллинга (light-режим), подтягиваются по AJAX при раскрытии
+# строки (см. _light_batch_result_item / admin_arm_solve_result_body_view).
+_BATCH_LAZY_BODY_KEYS = (
+    "raw_response", "code", "short_response", "dl_comment", "dl_error",
+)
+
 
 def _resolve_batch_prompt(task, fallback_language_id, cache):
     """Препромпт одной задачи: привязка ArmPromptBinding по её теме.
@@ -287,7 +298,13 @@ def _per_bucket(results, key_fn, label_fn):
 
 
 def _build_batch_report(results):
-    """Batch-solve report: per-model + per-topic tables + overall counters."""
+    """Batch-solve report: per-model + per-topic tables + overall counters.
+
+    Добавлено (2026-09): models_count / tasks_count (объём прогона из
+    результатов) и errors_by_topic — нерешённые пары (failed/skipped),
+    сгруппированные по темам с ограничением на количество позиций в строке
+    (компактность отчёта на больших прогонах).
+    """
     if not results:
         return None
     solved = sum(1 for r in results if r.get("verdict") == _VERDICT_SOLVED)
@@ -305,6 +322,38 @@ def _build_batch_report(results):
         key_fn=lambda r: r.get("topic_name") or "Без темы",
         label_fn=lambda r: r.get("topic_name") or "Без темы",
     )
+
+    # Объём прогона: уникальные модели и задачи из результатов.
+    models_count = len({r.get("model_key") or r.get("model_title") for r in results} - {None})
+    tasks_count = len({r.get("task_node_id") for r in results if r.get("task_node_id")})
+
+    # Ошибки по темам: пары с вердиктом «не решено» (failed) и «пропущено»
+    # (не протестировано) — они и есть проблемы прогона. Items сокращаются
+    # до _REPORT_ERRORS_ITEM_CAP позиций на тему (остальное — «+ ещё N»).
+    errors_map: dict = {}
+    for r in results:
+        verdict = r.get("verdict")
+        if verdict in (_VERDICT_SOLVED, None):
+            continue
+        topic = r.get("topic_name") or "Без темы"
+        bucket = errors_map.setdefault(topic, {"count": 0, "items": []})
+        bucket["count"] += 1
+        task_label = str(r.get("task_name") or ("#" + str(r.get("task_node_id") or "")))
+        model_label = str(r.get("model_title") or r.get("model_key") or "?")
+        if len(bucket["items"]) < _REPORT_ERRORS_ITEM_CAP:
+            bucket["items"].append(f"{task_label} × {model_label}")
+    errors_by_topic = [
+        {
+            "topic": topic,
+            "count": bucket["count"],
+            "items": bucket["items"],
+            "hidden": bucket["count"] - len(bucket["items"]),
+        }
+        for topic, bucket in sorted(
+            errors_map.items(), key=lambda kv: (-kv[1]["count"], kv[0])
+        )
+    ]
+
     return {
         "total_pairs": len(results),
         "solved": solved,
@@ -313,6 +362,31 @@ def _build_batch_report(results):
         "tokens_total": tokens_total,
         "per_model": per_model,
         "per_topic": per_topic,
+        "models_count": models_count,
+        "tasks_count": tasks_count,
+        "errors_by_topic": errors_by_topic,
+    }
+
+
+def _attach_run_meta(report, started_ts, finished_ts=None, now_ts=None):
+    """Время прогона в отчёт (компактная карточка «Прогон» на фронте).
+
+    started_ts/finished_ts — epoch-секунды (AIModelTestRun.started_at/
+    finished_at или job created_at_ts/updated_at_ts). finished_ts None →
+    прогон ещё идёт: длительность считается до now_ts (elapsed).
+    """
+    if report is None:
+        return
+    duration = None
+    if started_ts:
+        end = finished_ts if finished_ts else now_ts
+        if end:
+            duration = max(0.0, float(end) - float(started_ts))
+    report["run_meta"] = {
+        "started_at_ts": started_ts or None,
+        "finished_at_ts": finished_ts,
+        "duration_seconds": duration,
+        "running": finished_ts is None,
     }
 
 
@@ -383,6 +457,51 @@ def _is_cancel_requested(run_id):
         if not job:
             return False
         return job.get("cancel_requested", False)
+
+
+def _save_batch_task_solution(*, task, model, code, dl_comment, file_extension, topic_name,
+                              task_prompt_id, prompt_name_cache, course_id, session_id,
+                              created_by, external_user_id, programming_language_id,
+                              test_log):
+    """Сохранить решённую пару batch-прогона в кэш «Решённых задач».
+
+    Обёртка над solution_cache.record_batch_solution (не бросает исключений).
+    Возвращает True, если решение реально записано ("saved"); False — если
+    пропущено (уже решено) или произошёл сбой.
+    """
+    from .services.solution_cache import record_batch_solution
+    try:
+        prompt_id = int(task_prompt_id) if task_prompt_id else None
+    except (TypeError, ValueError):
+        prompt_id, task_prompt_id = None, None
+    prompt_name = ""
+    if prompt_id:
+        if prompt_id not in prompt_name_cache:
+            from .models import Prompt
+            prompt_name_cache[prompt_id] = (
+                Prompt.objects.filter(pk=prompt_id)
+                .values_list("prompt_name_ru", flat=True).first() or ""
+            )
+        prompt_name = prompt_name_cache[prompt_id]
+    outcome = record_batch_solution(
+        node_id=task.node_id,
+        programming_language_id=programming_language_id,
+        file_extension=file_extension or "",
+        code=code or "",
+        dl_comment=dl_comment or "",
+        model_key=model["key"],
+        model_title=model["title"],
+        topic_id=task.topic_id,
+        topic_name=topic_name or "",
+        prompt_id=prompt_id,
+        prompt_name=prompt_name,
+        course_id=course_id,
+        created_by=created_by,
+        external_user_id=external_user_id or "",
+        session_id=session_id,
+        test_log=test_log,
+    )
+    return outcome == "saved"
 
 
 def _resolve_user(user_id):
@@ -1010,6 +1129,7 @@ def _run_batch_job_worker(
     run_params=None,
     record_stats=False,
     run_name="",
+    save_solutions=False,
 ):
     """Daemon worker for a batch-solve run.
 
@@ -1020,6 +1140,10 @@ def _run_batch_job_worker(
     ``run_params`` — снимок формы запуска (см. AIModelTestRun.run_params).
     ``record_stats`` — по завершении инкрементировать глобальную статистику
     моделей (AIModelStats), из которой питается селектор моделей чата.
+    ``save_solutions`` — по каждой паре, прошедшей DL-тест (verdict solved),
+    сохранять решение в кэш «Решённых задач» (TaskSolution) по правилам
+    ``solution_cache.record_batch_solution``: уже решённые (на этом языке) не
+    трогаются, сбой кэша не влияет на прогон.
     """
     from .services.task_registry import EXTENSION_TO_LANG, ensure_task, _guess_extension
     from .models import ArmPromptBinding, ProgrammingLanguage
@@ -1111,6 +1235,8 @@ def _run_batch_job_worker(
         # Препромпты по привязке резолвятся per-task; кэш по (язык, тема) —
         # задачи одной темы не дёргают БД повторно.
         _prompt_cache: dict = {}
+        # Кэш имён препромптов для записи в «Решённые задачи» (save_solutions).
+        _prompt_name_cache: dict = {}
 
         for task in tasks:
             if _is_cancel_requested(run_id):
@@ -1284,6 +1410,29 @@ def _run_batch_job_worker(
                 }
 
                 completed += 1
+                if save_solutions and verdict == _VERDICT_SOLVED:
+                    # «Решённые задачи»: та же запись кэша, что при пользовательском
+                    # тестировании (solution_cache.record_batch_solution). Сбои
+                    # кэша прогон не ломают; уже решённые (на этом языке) пропускаются.
+                    # Имя препромпта — кэш по id: одна привязка обслуживает много задач.
+                    if _save_batch_task_solution(
+                        task=task,
+                        model=model,
+                        code=code_only,
+                        dl_comment=dl_test_comment,
+                        file_extension=effective_ext,
+                        topic_name=topic_name,
+                        task_prompt_id=task_prompt_id,
+                        prompt_name_cache=_prompt_name_cache,
+                        course_id=course_id,
+                        session_id=session_id,
+                        created_by=user,
+                        external_user_id=external_id,
+                        programming_language_id=programming_language_id,
+                        test_log=log,
+                    ):
+                        result_item["saved_solution"] = True
+
                 with _jobs_lock:
                     job = _jobs.get(run_id)
                     if job is None:
@@ -1305,6 +1454,13 @@ def _run_batch_job_worker(
                 # cancelled, чтобы UI корректно показал «Прервано».
                 was_cancelled = cancelled or job.get("cancelled", False)
                 job["report"] = _build_batch_report(job.get("results") or [])
+                # Карточка «Прогон» (время): старт — job.created_at_ts, финиш —
+                # момент финализации (updated_at_ts, ставится ниже).
+                _attach_run_meta(
+                    job["report"],
+                    job.get("created_at_ts"),
+                    time.time(),
+                )
                 job["status"] = "cancelled" if was_cancelled else "completed"
                 if was_cancelled:
                     job["cancelled"] = True
@@ -1316,6 +1472,11 @@ def _run_batch_job_worker(
         if evicted:
             db_results = _batch_results_from_db(test_run)
             report = _build_batch_report(db_results)
+            _attach_run_meta(
+                report,
+                test_run.started_at.timestamp() if test_run.started_at else None,
+                timezone.now().timestamp(),
+            )
 
         end_time = timezone.now()
         if evicted:
@@ -1414,8 +1575,57 @@ def _run_batch_job_worker(
             )
 
 
-def _batch_results_from_db(test_run):
-    """Rebuild batch result items from persisted AIModelTestResult rows."""
+def _light_batch_result_item(item):
+    """Легковесная копия batch-результата без тяжёлого тела (lazy_body=True).
+
+    Полный ответ модели / код / DL-комментарии не идут в снапшот страницы и
+    поллинга: большой прогон — это десятки мегабайт текста. Тело подтягивается
+    отдельно через /arm/solve/result/<id>/body/ при раскрытии строки (см.
+    _ai_batch_results.html). Метаданные (верdict/время/токены/тема) остаются —
+    по ним строится таблица и отчёт.
+    """
+    light = {
+        k: v for k, v in item.items()
+        if k not in _BATCH_LAZY_BODY_KEYS
+    }
+    light["lazy_body"] = True
+    return light
+
+
+def _batch_results_from_db(test_run, light=False):
+    """Rebuild batch result items from persisted AIModelTestResult rows.
+
+    light=True — только метаданные (без raw_response/code/short_response/
+    dl_comment/dl_error, флаг lazy_body=True): страница /arm/solve/ и поллинг
+    не должны таскать мегабайты текста; тело результата грузится по AJAX при
+    раскрытии строки. Полный вариант — для XLSX-экспорта и body-эндпоинта.
+    """
+    if light:
+        results = []
+        rows = test_run.results.values(
+            "pk", "model_key", "model_title", "duration_seconds", "tokens",
+            "status", "verdict", "dl_queue_id", "file_extension_snapshot",
+            "topic_name_snapshot", "prog_lang_snapshot",
+            "task__node_id", "task__name", "task__file_extension",
+        ).order_by("model_title")
+        for r in rows:
+            results.append({
+                "result_id": r["pk"],
+                "task_node_id": r["task__node_id"] if r["task__node_id"] is not None else "",
+                "task_name": r["task__name"] or "",
+                "model_key": r["model_key"],
+                "model_title": r["model_title"],
+                "duration": r["duration_seconds"] or 0.0,
+                "tokens": r["tokens"] or 0,
+                "status": r["status"],
+                "verdict": r["verdict"] or _VERDICT_FAILED,
+                "dl_queue_id": r["dl_queue_id"] or 0,
+                "file_extension": r["file_extension_snapshot"] or (r["task__file_extension"] or ""),
+                "topic_name": r["topic_name_snapshot"],
+                "prog_lang_name": r["prog_lang_snapshot"],
+                "lazy_body": True,
+            })
+        return results
     results = []
     for r in test_run.results.select_related("task").order_by("model_title"):
         node_id = r.task.node_id if r.task else ""
@@ -1443,7 +1653,7 @@ def _batch_results_from_db(test_run):
     return results
 
 
-def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name="", record_stats=False, run_name=""):
+def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name="", record_stats=False, run_name="", save_solutions=False):
     """Запускает batch-solve ARM: задачи из DL дерева × модели в фоновом потоке.
 
     Принимает node_ids — список DL node ID (из дерева задач dl.gsu.by).
@@ -1489,6 +1699,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "language_id": programming_language_id,
         "topic_id": topic_id,
         "record_stats": bool(record_stats),
+        "save_solutions": bool(save_solutions),
         "run_name": (run_name or "").strip(),
     }
 
@@ -1525,7 +1736,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, node_ids, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params, "record_stats": record_stats, "run_name": (run_name or "").strip()},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params, "record_stats": record_stats, "run_name": (run_name or "").strip(), "save_solutions": bool(save_solutions)},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )
@@ -1533,7 +1744,9 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     return run_id, ""
 
 
-def _snapshot_from_test_run(test_run):
+def _snapshot_from_test_run(test_run, light_results=False):
+    """Снапшот прогона из БД; light_results=True — без тяжёлого тела результатов
+    (batch; см. get_arm_run_snapshot)."""
     is_batch = test_run.run_type == AIModelTestRun.RUN_TYPE_BATCH
     status_map = {
         AIModelTestRun.STATUS_RUNNING: "running",
@@ -1554,8 +1767,16 @@ def _snapshot_from_test_run(test_run):
             current_task_name = job.get("current_task_name", "")
 
     if is_batch:
-        results = _batch_results_from_db(test_run)
+        results = _batch_results_from_db(test_run, light=light_results)
         report = _build_batch_report(results)
+        # Карточка «Прогон» (время): из БД-прогона; для живого прогона
+        # finished_at пуст — длительность считается до текущего момента.
+        _attach_run_meta(
+            report,
+            test_run.started_at.timestamp() if test_run.started_at else None,
+            test_run.finished_at.timestamp() if test_run.finished_at else None,
+            now_ts=time.time() if test_run.status == AIModelTestRun.STATUS_RUNNING else None,
+        )
         is_failed = test_run.status == AIModelTestRun.STATUS_FAILED
         total_pairs = (test_run.report or {}).get("total_pairs") if test_run.report else None
         return {
@@ -1632,7 +1853,7 @@ def _mark_orphaned_run_failed(test_run):
     return test_run
 
 
-def get_latest_batch_run_snapshot(user_id):
+def get_latest_batch_run_snapshot(user_id, light_results=False):
     """Снапшот последнего batch-прогона пользователя (для /arm/solve/ без run_id).
 
     Страница «Пакетное решение» показывает таблицу предыдущего запуска, когда
@@ -1651,14 +1872,19 @@ def get_latest_batch_run_snapshot(user_id):
     )
     if last is None:
         return None
-    return get_arm_run_snapshot(last.run_id)
+    return get_arm_run_snapshot(last.run_id, light_results=light_results)
 
 
-def get_arm_run_snapshot(run_id):
+def get_arm_run_snapshot(run_id, light_results=False):
     """Возвращает снимок состояния ARM-прогона по run_id.
 
     Сначала ищет in-memory job (живой прогресс), затем — в БД (AIModelTestRun).
     Возвращает None, если прогон не найден.
+
+    light_results=True — batch-результаты без тяжёлого тела (raw_response/code/
+    short_response/dl_comment/dl_error, флаг lazy_body=True): для страницы
+    /arm/solve/ и поллинга статуса. Полный вариант — по умолчанию (XLSX-экспорт
+    и body-эндпоинт тянут текст из БД напрямую).
     """
     if not run_id:
         return None
@@ -1667,6 +1893,18 @@ def get_arm_run_snapshot(run_id):
     with _jobs_lock:
         job = _jobs.get(run_id)
         if job:
+            if light_results:
+                # Лёгкий снапшот БЕЗ deepcopy: строки иммутабельны, вложенные
+                # report/run_params воркер заменяет целиком (не мутирует в
+                # месте), а results уходит новой список лёгких словарей —
+                # согласованность обеспечена замком, а не обходом десятков
+                # мегабайт текста на каждый поллинг.
+                snapshot = dict(job)
+                snapshot["results"] = [
+                    _light_batch_result_item(item)
+                    for item in job.get("results") or []
+                ]
+                return snapshot
             return copy.deepcopy(job)
 
     # Source of truth for completed/evicted runs: the database.
@@ -1679,7 +1917,7 @@ def get_arm_run_snapshot(run_id):
     # «выполняется» и кнопка/спиннер сбросились.
     if test_run.status == AIModelTestRun.STATUS_RUNNING:
         test_run = _mark_orphaned_run_failed(test_run)
-    return _snapshot_from_test_run(test_run)
+    return _snapshot_from_test_run(test_run, light_results=light_results)
 
 
 def list_user_runs(user_id, since_ts=0.0):

@@ -279,6 +279,20 @@
   }
   .arm-tree-badge.ok { color: #166534; background: #dcfce7; }
   .arm-tree-badge.no { color: #475467; background: #f1f5f9; }
+
+  /* Строки списка «Процессы» (несколько одновременных прогонов) */
+  .arm-proc-row {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 10px; margin-bottom: 6px;
+    border: 1px solid var(--hairline-color); border-radius: 6px;
+  }
+  .arm-proc-row.focused { border-color: var(--body-fg); box-shadow: 0 0 0 1px var(--body-fg) inset; }
+  .arm-proc-name { font-weight: 600; }
+  .arm-proc-status { flex: 1; min-width: 180px; font-size: 13px; }
+  .arm-proc-status.ok { color: #166534; }
+  .arm-proc-status.no { color: #991b1b; }
+  .arm-proc-actions { display: flex; gap: 6px; }
+  .arm-proc-actions .arm-button { font-size: 12px; padding: 4px 10px; }
 </style>
 
 <div class="arm-wrap">
@@ -339,19 +353,24 @@
       <input type="hidden" name="interface_language" value="Русский">
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
-          <h2>Язык программирования</h2>
-          <p class="arm-section-note">DL REST send-solution требует расширение файла — оно определяется выбранным языком автоматически. Курс может содержать задачи разных языков (например «[Ассемблер i8086, C-MPA]» — каждая задача допускает и .i86, и .mpc), поэтому язык задаёт расширение для всех задач прогона.</p>
+          <h2>Язык(и) программирования</h2>
+          <p class="arm-section-note">DL REST send-solution требует расширение файла — оно определяется языком автоматически. Можно выбрать НЕСКОЛЬКО языков (например сразу .i86 и .mpc): по каждому языку запускается ОТДЕЛЬНЫЙ процесс с теми же задачами и моделями; процессы идут параллельно и видны в списке «Процессы».</p>
         </div>
       </div>
-      <select name="language_id" id="armLanguageSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:8px;">
-        <option value="" disabled selected>— выберите язык —</option>
-        {% for lang in language_options %}
-          <option value="{{ lang.id }}" data-ext="{{ lang.extension }}">{{ lang.name }}</option>
-        {% endfor %}
-      </select>
-      <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
-        <input type="text" name="file_extension" id="armExtensionInput" readonly placeholder="расширение" style="padding:6px 10px; width:120px;">
-        <span class="arm-section-note" style="margin:0;">Расширение выводится из языка автоматически</span>
+      {% if language_options %}
+        <div class="arm-models" id="armLanguageChecks">
+          {% for lang in language_options %}
+            <label class="arm-model">
+              <input type="checkbox" class="arm-lang-check" data-ext="{{ lang.extension }}" data-name="{{ lang.name }}"> {{ lang.name }}
+            </label>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="arm-empty">Нет языков, допущенных к пакетному решению.</div>
+      {% endif %}
+      <div style="display:flex; gap:8px; align-items:center; margin-top:8px; margin-bottom:12px;">
+        <input type="text" name="file_extension" id="armExtensionInput" readonly placeholder="расширение" style="padding:6px 10px; width:180px;">
+        <span class="arm-section-note" style="margin:0;">Расширение выводится из выбранных языков автоматически</span>
       </div>
 
       <div class="arm-section-head" style="margin-top:18px;">
@@ -373,10 +392,20 @@
       <select name="prompt_id" id="armPromptSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:4px;">
         <option value="">По привязке (по умолчанию)</option>
         {% for p in prompt_options %}
-          <option value="{{ p.id }}">{{ p.name }}{% if p.topic_name %} — {{ p.topic_name }}{% endif %}</option>
+          <option value="{{ p.id }}">{{ p.name }}{% if p.topic_name %} — {{ p.topic_name }}{% elif p.language_name %} — на весь язык ({{ p.language_name }}){% endif %}</option>
         {% endfor %}
       </select>
       <p id="armBoundPromptLabel" class="arm-section-note" style="display:none; margin:0 0 12px;"></p>
+
+      <div class="arm-section-head" style="margin-top:18px;">
+        <div>
+          <h2>Решённые задачи</h2>
+          <p class="arm-section-note">Если пара «задача × модель» прошла тестирование на dl.gsu.by, её код сохранится в «Решённые задачи» (кэш) — пользователи получат его без вызова модели. Задачи, уже решённые на выбранном языке, не трогаются.</p>
+        </div>
+      </div>
+      <label class="arm-model" style="max-width:500px; margin-bottom:12px;">
+        <input type="checkbox" name="save_solutions" id="armSaveSolutions" value="1"> Сохранять решённые задачи в «Решённые задачи»
+      </label>
 
       {% if is_super_user %}
       <div class="arm-section-head" style="margin-top:18px;">
@@ -411,17 +440,29 @@
     </section>
   </form>
 
+  <section id="armSolveProcessesCard" class="arm-card" style="display:none;">
+    <div class="arm-section-head">
+      <div>
+        <h2>Процессы — запущенные пакеты</h2>
+        <p class="arm-section-note">Каждая строка — отдельный запуск (свой язык и название). Кнопка «Открыть» показывает результаты этого прогона в таблице ниже, «Прервать» останавливает его. Прогоны идут параллельно и обновляются автоматически.</p>
+      </div>
+    </div>
+    <div id="armSolveProcessesList"></div>
+  </section>
+
   <section id="armSolveReportCard" class="arm-card"{% if not report %} style="display:none;"{% endif %}>
     <div class="arm-section-head">
       <div>
         <h2>Сводка</h2>
         <p class="arm-section-note" id="armSolveReportNote" data-base="{% if is_previous_run %}Результаты предыдущего запуска (без ?run_id= — показывается последний завершённый прогон){% else %}Результаты последнего запуска{% endif %}">{% if is_previous_run %}Результаты предыдущего запуска (без ?run_id= — показывается последний завершённый прогон){% else %}Результаты последнего запуска{% endif %}</p>
       </div>
+      <button type="button" class="button" id="armSolveRetryUnsolvedBtn" style="font-size:13px; display:none;" title="Перезапустить те же модели и язык, но только по задачам, которые не решены в этом прогоне">Повторить нерешённые</button>
       <a class="button" id="armSolveDownloadXlsxBtn" style="font-size:13px; display:none;" href="#">Скачать результаты (XLSX)</a>
     </div>
     <ul id="armSolveReportList" class="arm-report"></ul>
     <div id="armSolvePerModelWrap"></div>
     <div id="armSolvePerTopicWrap" style="margin-top:16px;"></div>
+    <div id="armSolveErrorsWrap" style="margin-top:16px;"></div>
   </section>
 
   <section id="armSolveResultsCard" class="arm-card"{% if not results %} style="display:none;"{% endif %}>
@@ -453,21 +494,26 @@
     const reportList = document.getElementById('armSolveReportList');
     const perModelWrap = document.getElementById('armSolvePerModelWrap');
     const perTopicWrap = document.getElementById('armSolvePerTopicWrap');
+    const errorsWrap = document.getElementById('armSolveErrorsWrap');
     const resultsCard = document.getElementById('armSolveResultsCard');
     const resultsEl = document.getElementById('armSolveResults');
     const startUrl = '{{ arm_solve_start_url }}';
     const statusUrl = '{{ arm_solve_status_url }}';
-    const languageSelect = document.getElementById('armLanguageSelect');
-    const extensionInput = document.getElementById('armExtensionInput');
+    const processesCard = document.getElementById('armSolveProcessesCard');
+    const processesList = document.getElementById('armSolveProcessesList');
+    // Мультипроцессы: страница ведёт список запущенных прогонов (по одному
+    // на каждый выбранный язык), поллит их параллельно и переключает основную
+    // таблицу на выбранный процесс. focusedRunId — чей снапшот в таблице.
+    let focusedRunId = '';
+    const runStates = new Map();   // runId -> {timer, running, snapshot, ext, name, errors}
+    const procRows = new Map();    // runId -> {row, nameEl, statusEl, showBtn, cancelBtn}
     const topicSelect = document.getElementById('armTopicSelect');
     const boundPromptLabel = document.getElementById('armBoundPromptLabel');
     const promptSelect = document.getElementById('armPromptSelect');
     const runNameInput = document.getElementById('armRunName');
     const filterHost = document.getElementById('armSolveFilterHost');
     const selectAllModelsCb = document.getElementById('armSelectAllModels');
-    let currentRunId = '';
-    let pollTimer = null;
-
+    const extensionInput = document.getElementById('armExtensionInput');
     function getCsrfToken() {
       const input = form.querySelector('input[name="csrfmiddlewaretoken"]');
       return (document.cookie.split('; ').find(function (r) { return r.startsWith('csrftoken='); }) || '').split('=').slice(1).join('=') || (input ? input.value : '');
@@ -483,8 +529,10 @@
       return response.json();
     }
     function setSubmitDisabled(disabled) {
+      // Блокировка только на время ЗАПУСКА: сами прогоны идут параллельно и
+      // форму не блокируют — можно запускать следующие пакеты, не дожидаясь.
       submitBtn.disabled = disabled;
-      submitBtn.textContent = disabled ? 'Выполняется...' : 'Запустить пакет';
+      submitBtn.textContent = disabled ? 'Запускаем...' : 'Запустить пакет';
     }
     function setError(text) {
       if (!text) { errorEl.textContent = ''; errorEl.style.display = 'none'; return; }
@@ -511,7 +559,7 @@
     // «Пакетное решение». Локальные обёртки пробрасывают closure-элементы;
     // filterHost — куда partial ставит переключатель «Все / Не пройденные».
     function renderReport(report) {
-      ArmBatchResults.renderReport(report, { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap });
+      ArmBatchResults.renderReport(report, { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap, errors: errorsWrap });
     }
     function renderResults(results) {
       ArmBatchResults.renderResults(results, resultsEl, resultsCard, filterHost);
@@ -538,51 +586,211 @@
           downloadBtn.href = '/ai/admin/arm/solve/report/' + encodeURIComponent(run.run_id) + '/xlsx/';
         }
       }
+      updateRetryUnsolvedButton(run);
       if (run.status === 'running') {
         const done = run.completed_pairs != null ? run.completed_pairs : 0;
         const total = run.total_pairs != null ? run.total_pairs : 0;
         const cur = run.current_task_name ? (' · ' + run.current_task_name + ' / ' + (run.current_model_title || '')) : '';
         setProgress('Выполняется: ' + done + ' / ' + total + cur, true);
-        submitBtn.disabled = true;
-        submitBtn.textContent = 'Выполняется...';
+        // Форму больше не блокируем: прогоны идут параллельно, можно запускать
+        // следующие пакеты. Отмена — по строкам «Процессов» и кнопке ниже
+        // (отменяет ФОКУСИРОВАННЫЙ прогон).
         setCancelVisible(true);
       } else if (run.status === 'cancelled') {
         // Мгновенная отмена: cancel_arm_run уже перевёл прогон в cancelled.
         // Частичные результаты/report уже отрендерены выше — показываем «Прервано».
         setProgress('Прервано.', false);
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Запустить пакет';
         setCancelVisible(false);
       } else if (run.status === 'completed') {
         const cancelled = run.cancelled || run.error_message === 'Прервано пользователем';
         if (cancelled) { setProgress('Прервано.', false); } else { stopProgress(); }
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Запустить пакет';
         setCancelVisible(false);
       } else if (run.status === 'failed') {
         stopProgress();
         setError(run.error_message || 'Batch solve завершился с ошибкой');
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Запустить пакет';
         setCancelVisible(false);
       }
     }
-    async function pollRunStatus() {
-      if (!currentRunId) { return; }
+    // ── Мультипроцессы: параллельные прогоны этой страницы ─────────────────
+    // Каждый выбранный язык — отдельный процесс (отдельный run в БД, свой
+    // отчёт/XLSX/журнал/отмена). runStates держит снапшоты и таймеры, строки
+    // «Процессов» обновляются по каждому тику; focusedRunId решает, чей
+    // снапшот рендерится в основной таблице.
+    function trackRun(runId, meta) {
+      if (!runId) { return null; }
+      let st = runStates.get(runId);
+      if (!st) {
+        st = { timer: null, running: true, snapshot: null, ext: '', name: '', lang: '', errors: 0 };
+        runStates.set(runId, st);
+        addProcessesRow(runId);
+      }
+      if (meta) {
+        if (meta.ext != null) { st.ext = meta.ext; }
+        if (meta.name != null) { st.name = meta.name; }
+        if (meta.lang != null) { st.lang = meta.lang; }
+        if (meta.snapshot) { st.snapshot = meta.snapshot; st.running = (st.snapshot.status || '') === 'running'; updateProcessesRow(runId); }
+      }
+      if (st.running && !st.timer) {
+        st.timer = window.setTimeout(function () { st.timer = null; pollRunOnce(runId); }, 1000);
+      }
+      return st;
+    }
+    function addProcessesRow(runId) {
+      if (procRows.has(runId)) { return; }
+      if (processesCard) { processesCard.style.display = ''; }
+      const row = document.createElement('div');
+      row.className = 'arm-proc-row';
+      row.dataset.run = runId;
+      const nameEl = document.createElement('span');
+      nameEl.className = 'arm-proc-name';
+      const statusEl = document.createElement('span');
+      statusEl.className = 'arm-proc-status';
+      const actions = document.createElement('div');
+      actions.className = 'arm-proc-actions';
+      const showBtn = document.createElement('button');
+      showBtn.type = 'button'; showBtn.className = 'arm-button';
+      showBtn.textContent = 'Открыть';
+      showBtn.title = 'Показать результаты этого прогона в таблице ниже';
+      const cancelBtnEl = document.createElement('button');
+      cancelBtnEl.type = 'button'; cancelBtnEl.className = 'arm-button'; cancelBtnEl.textContent = 'Прервать';
+      cancelBtnEl.style.display = 'none';
+      actions.appendChild(showBtn); actions.appendChild(cancelBtnEl);
+      row.appendChild(nameEl); row.appendChild(statusEl); row.appendChild(actions);
+      if (processesList) { processesList.appendChild(row); }
+      showBtn.addEventListener('click', function () { focusRun(runId); });
+      cancelBtnEl.addEventListener('click', async function () {
+        cancelBtnEl.disabled = true;
+        try { await cancelRunRequest(runId); await pollRunOnce(runId); }
+        catch (e) { setError(e.message || 'Ошибка прерывания'); }
+        cancelBtnEl.disabled = false;
+      });
+      procRows.set(runId, { row: row, nameEl: nameEl, statusEl: statusEl, showBtn: showBtn, cancelBtn: cancelBtnEl });
+    }
+    function procRunLabel(runId, st) {
+      const langLabel = st.lang || st.ext;
+      return (st.name || 'Пакет') + (langLabel ? ' · ' + langLabel : '') + ' · #' + String(runId).slice(0, 8);
+    }
+    function updateProcessesRow(runId) {
+      const st = runStates.get(runId);
+      const ui = procRows.get(runId);
+      if (!st || !ui) { return; }
+      ui.nameEl.textContent = procRunLabel(runId, st);
+      const s = st.snapshot || {};
+      ui.statusEl.classList.remove('ok', 'no');
+      if (s.status === 'running') {
+        const done = s.completed_pairs != null ? s.completed_pairs : 0;
+        const total = s.total_pairs != null ? s.total_pairs : 0;
+        const cur = s.current_task_name ? ' · сейчас: ' + s.current_task_name + ' / ' + (s.current_model_title || '') : '';
+        ui.statusEl.textContent = 'Выполняется: ' + done + ' из ' + total + cur;
+      } else if (s.status === 'completed') {
+        const wasCancelled = s.cancelled || s.error_message === 'Прервано пользователем';
+        ui.statusEl.textContent = wasCancelled ? 'Прервано (частичные результаты сохранены)' : 'Выполнен';
+        ui.statusEl.classList.add(wasCancelled ? 'no' : 'ok');
+      } else if (s.status === 'cancelled') {
+        ui.statusEl.textContent = 'Прервано';
+        ui.statusEl.classList.add('no');
+      } else if (s.status === 'failed') {
+        ui.statusEl.textContent = 'Ошибка: ' + (s.error_message || 'прогон завершился с ошибкой');
+        ui.statusEl.classList.add('no');
+      } else {
+        ui.statusEl.textContent = s.status || '—';
+      }
+      ui.cancelBtn.style.display = st.running ? '' : 'none';
+      ui.showBtn.classList.toggle('active', runId === focusedRunId);
+      ui.row.classList.toggle('focused', runId === focusedRunId);
+    }
+    async function pollRunOnce(runId) {
+      const st = runStates.get(runId);
+      if (!st) { return; }
       try {
-        const response = await fetch(statusUrl + '?run_id=' + encodeURIComponent(currentRunId), {
+        const response = await fetch(statusUrl + '?run_id=' + encodeURIComponent(runId), {
           method: 'GET', credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' },
         });
         const data = await parseJsonResponse(response);
-        if (!response.ok || !data.ok) { throw new Error(data.message || 'Не удалось получить статус'); }
-        applyRunSnapshot(data.run || {});
-        if (data.run && data.run.status === 'running') { pollTimer = window.setTimeout(pollRunStatus, 2000); }
+        if (!response.ok || !data.ok) {
+          const err = new Error(data.message || 'Не удалось получить статус');
+          err.fatal = response.status === 404;
+          throw err;
+        }
+        st.errors = 0;
+        st.snapshot = data.run || {};
+        st.running = st.snapshot.status === 'running';
+        updateProcessesRow(runId);
+        if (runId === focusedRunId) {
+          // Сбой отрисовки не должен ронять поллинг/таймер — логируем и живём.
+          try { applyRunSnapshot(st.snapshot); } catch (renderError) { console.error('ARM render error:', renderError); }
+        }
       } catch (error) {
-        setError(error.message || 'Ошибка обновления статуса');
-        stopProgress();
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Запустить пакет';
-        setCancelVisible(false);
+        if (error.fatal) {
+          // Прогон исчез из памяти и БД — считаем завершённым, поллинг останавливаем.
+          st.running = false;
+          st.timer = null;
+          if (!st.snapshot) { st.snapshot = { status: 'failed', error_message: error.message }; }
+          updateProcessesRow(runId);
+          return;
+        }
+        st.errors = (st.errors || 0) + 1;
+        updateProcessesRow(runId);
+        const ui = procRows.get(runId);
+        if (ui) { ui.statusEl.textContent = 'Ошибка обновления (' + (st.errors || 0) + '): ' + error.message; }
+        // Сетевые сбои не убивают поллинг — пробуем следующим тиком (до 5 раз подряд).
+        if (st.errors > 5) { st.timer = null; return; }
+      }
+      if (st.running && !st.timer) { st.timer = window.setTimeout(function () { st.timer = null; pollRunOnce(runId); }, 2000); }
+    }
+    const retryBtnEl = document.getElementById('armSolveRetryUnsolvedBtn');
+    if (retryBtnEl) {
+      retryBtnEl.addEventListener('click', async function () {
+        if (!retryUnsolvedPayload || retryBtnEl.disabled) { return; }
+        const { nodes, params } = retryUnsolvedPayload;
+        retryBtnEl.disabled = true;
+        retryBtnEl.textContent = 'Запускаем повтор...';
+        try {
+          const body = new URLSearchParams();
+          // Только нерешённые задачи (узлы из снапшота показанного прогона).
+          nodes.forEach(function (n) { body.append('node_ids', String(n)); });
+          (params.model_keys || []).forEach(function (m) { body.append('models', String(m)); });
+          body.set('interface_language', params.ui_language || 'Русский');
+          body.set('dl_test', params.dl_test ? '1' : '');
+          body.set('language_id', params.language_id || '');
+          body.set('file_extension', params.file_extension || '');
+          body.set('prompt_id', params.prompt_id ? String(params.prompt_id) : '');
+          if (params.topic_id) { body.set('arm_topic_id', String(params.topic_id)); }
+          if (params.course_id) { body.set('course_id', String(params.course_id)); }
+          if (params.record_stats) { body.set('record_stats', '1'); }
+          if (params.save_solutions) { body.set('save_solutions', '1'); }
+          body.set('run_name', params.run_name ? (params.run_name + ' — повтор') : 'Повтор нерешённых');
+          const data = await postStart(body);
+          const runId = data.run_id || '';
+          if (runId) {
+            trackRun(runId, {
+              ext: params.file_extension || '',
+              name: params.run_name ? (params.run_name + ' — повтор') : 'Повтор нерешённых',
+              lang: params.programming_language_name || '',
+              snapshot: data.run || {},
+            });
+            focusRun(runId);
+            document.dispatchEvent(new Event('ai-processes:refresh'));
+          }
+        } catch (error) {
+          setError(error.message || 'Не удалось запустить повтор нерешённых');
+        }
+        retryBtnEl.disabled = false;
+      });
+    }
+
+    function focusRun(runId) {
+      if (!runId || !runStates.has(runId)) { return; }
+      focusedRunId = runId;
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState({}, '', window.location.pathname + '?run_id=' + encodeURIComponent(runId));
+      }
+      runStates.forEach(function (_st, rid) { updateProcessesRow(rid); });
+      const st = runStates.get(runId);
+      if (st && st.snapshot) {
+        try { applyRunSnapshot(st.snapshot); } catch (e) { console.error('ARM render error:', e); }
+      } else {
+        pollRunOnce(runId); // снапшота нет — тянем немедленно, не ждём тика
       }
     }
     // Load tree from DL
@@ -739,8 +947,10 @@
         });
         const data = await parseJsonResponse(response);
         if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка загрузки дерева'); }
-        loadTreeMsg.style.color = '#067647';
-        loadTreeMsg.textContent = '✓ Загружено задач: ' + (data.task_count || 0);
+        loadTreeMsg.style.color = data.stale ? '#92400e' : '#067647';
+        loadTreeMsg.textContent = data.message
+          ? data.message + ' · задач: ' + (data.task_count || 0)
+          : '✓ Загружено задач: ' + (data.task_count || 0);
         // Снапшот localStorage читаем ДО renderTree: renderTree →
         // refreshAllFolderStates → saveSelectedNodes перезаписал бы ключ
         // пустым выбором раньше, чем мы успели прочитать сохранённое.
@@ -843,7 +1053,34 @@
           + (manual ? (manual.name || 'Prompt #' + manual.id) : 'Prompt #' + manualId);
         return;
       }
-      const languageId = languageSelect ? languageSelect.value : '';
+      const sel = selectedLanguages();
+      if (!sel.length) {
+        boundPromptLabel.style.display = 'none';
+        return;
+      }
+      if (sel.length > 1) {
+        // Мультиязычный запуск: показываем привязку КАЖДОГО выбранного языка
+        // (для языка выбранной темы — точная привязка «язык+тема», для
+        // остальных — «на весь язык»; тем без привязки — «без препромпта»).
+        const chosenTopicId = topicSelect ? String(topicSelect.value || '') : '';
+        const chosenTopic = chosenTopicId
+          ? allTopics.find(function (t) { return String(t.id) === chosenTopicId; })
+          : null;
+        const lines = sel.map(function (lang) {
+          const tid = (chosenTopic && String(chosenTopic.programming_language) === String(lang.id))
+            ? chosenTopicId : '';
+          const binding = findBoundPrompt(lang.id, tid, 'solve');
+          return lang.name + ': '
+            + (binding
+              ? 'препромпт по умолчанию — «' + (binding.prompt_name || 'Prompt #' + binding.prompt_id) + '»'
+              : 'привязка не задана — прогон без препромпта');
+        });
+        boundPromptLabel.style.display = '';
+        boundPromptLabel.style.whiteSpace = 'pre-line';
+        boundPromptLabel.textContent = 'Препромпты по привязке:\n' + lines.join('\n');
+        return;
+      }
+      const languageId = sel[0].id;
       const topicId = topicSelect ? topicSelect.value : '';
       const binding = languageId ? findBoundPrompt(languageId, topicId, 'solve') : null;
       if (!binding) {
@@ -881,19 +1118,46 @@
       topicSelect.disabled = !topics.length;
     }
 
-    // Язык → расширение (readonly, из data-ext) + темы, отфильтрованные по
-    // языку (serialize_topic отдаёт programming_language — id языка). Смена
-    // языка сбрасывает тему (ручной выбор препромпта не сбрасывается).
-    function applyLanguageSelection(languageId) {
-      const opt = languageSelect
-        ? Array.prototype.find.call(languageSelect.options, function (o) { return o.value === String(languageId); })
-        : null;
-      if (extensionInput) { extensionInput.value = opt ? (opt.getAttribute('data-ext') || '') : ''; }
-      const langId = opt ? String(languageId) : '';
-      const langTopics = langId
-        ? allTopics.filter(function (t) { return String(t.programming_language) === langId; })
-        : [];
-      setTopicOptions(langTopics);
+    // Язык(и) → чекбоксы: расширения выбранных языков (readonly), темы
+    // (только при ровно одном языке — при нескольких тема для журнала не
+    // задаётся, привязки всё равно резолвятся per-task в worker'е). Смена
+    // набора языков сбрасывает тему (ручной выбор препромпта не сбрасывается).
+    function selectedLanguages() {
+      return Array.prototype.map.call(
+        document.querySelectorAll('input.arm-lang-check:checked'),
+        function (cb) {
+          return {
+            id: cb.value,
+            ext: cb.getAttribute('data-ext') || '',
+            name: cb.getAttribute('data-name') || '',
+          };
+        }
+      );
+    }
+    function syncLanguageSelection() {
+      const sel = selectedLanguages();
+      if (extensionInput) { extensionInput.value = sel.map(function (l) { return l.ext; }).join(', '); }
+      // Темы — объединение тем ВСЕХ выбранных языков (тема принадлежит ровно
+      // одному языку); при ни одном выбранном — селект выключен.
+      const langIds = new Set(sel.map(function (l) { return String(l.id); }));
+      const langTopics = allTopics
+        .filter(function (t) { return langIds.has(String(t.programming_language)); })
+        .sort(function (a, b) {
+          return String(a.name || a.topic_name || '').localeCompare(
+            String(b.name || b.topic_name || ''), 'ru');
+        });
+      if (topicSelect) {
+        if (langIds.size) {
+          setTopicOptions(langTopics);
+        } else {
+          topicSelect.innerHTML = '';
+          const ph = document.createElement('option');
+          ph.value = '';
+          ph.textContent = '— выберите язык(и) —';
+          topicSelect.appendChild(ph);
+          topicSelect.disabled = true;
+        }
+      }
       applyTopicSelection('');
     }
 
@@ -903,11 +1167,11 @@
       });
     }
 
-    if (languageSelect) {
-      languageSelect.addEventListener('change', function () {
-        applyLanguageSelection(languageSelect.value);
-      });
-    }
+    document.querySelectorAll('input.arm-lang-check').forEach(function (cb) {
+      cb.addEventListener('change', syncLanguageSelection);
+    });
+    // Начальное состояние: расширение/тема/подпись привязки по текущим отметкам.
+    syncLanguageSelection();
 
     // «Выбрать все модели» одним кликом; три состояния чекбоса отражают
     // ручные отметки (всё / часть / ничего).
@@ -934,30 +1198,34 @@
       c.addEventListener('change', syncSelectAllModelsCheckbox);
     });
 
-    // Cancel button
+    // Cancel button — отменяет ФОКУСИРОВАННЫЙ прогон (в «Процессах» можно
+    // прервать любой построчно).
+    async function cancelRunRequest(runId) {
+      const response = await fetch(cancelUrl, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({ run_id: runId }),
+      });
+      const data = await parseJsonResponse(response);
+      if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка'); }
+      return data;
+    }
     if (cancelBtn) {
       cancelBtn.addEventListener('click', async function () {
-        if (!currentRunId) { return; }
+        if (!focusedRunId) { return; }
         cancelBtn.disabled = true;
         cancelBtn.textContent = 'Прерывание...';
         try {
-          const response = await fetch(cancelUrl, {
-            method: 'POST', credentials: 'same-origin',
-            headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-            body: JSON.stringify({ run_id: currentRunId }),
-          });
-          const data = await parseJsonResponse(response);
-          if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка'); }
+          await cancelRunRequest(focusedRunId);
           // Мгновенная отмена: бэкенд уже перевёл прогон в cancelled. Тянем
           // свежий snapshot сразу (без ожидания 2с поллинга) и показываем
           // «Прервано» с частичными результатами.
-          if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
-          pollRunStatus();
+          await pollRunOnce(focusedRunId);
         } catch (error) {
           setError(error.message || 'Ошибка прерывания');
-          cancelBtn.disabled = false;
-          cancelBtn.textContent = 'Прервать тестирование';
         }
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = 'Прервать тестирование';
       });
     }
 
@@ -974,45 +1242,103 @@
     // applyRunSnapshot. Клиентская CSV-генерация удалена (DRY: один
     // серверный генератор в ai/admin/export.py). ──
 
+    async function postStart(body) {
+      const response = await fetch(startUrl, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
+        body: body.toString(),
+      });
+      const data = await parseJsonResponse(response);
+      if (!response.ok || !data.ok) { throw new Error(data.message || 'Не удалось запустить batch solve'); }
+      return data;
+    }
+
+    // ── «Повторить нерешённые»: перезапуск прогона на тех же моделях и языке,
+    // но только по задачам без решённой пары (verdict !== solved). Список
+    // задач берётся из снапшота показанного прогона; параметры — из его
+    // run_params (снимок формы запуска). Появляется после завершения прогона.
+    let retryUnsolvedPayload = null;
+
+    function collectUnsolvedNodes(run) {
+      // Уникальные задачи, у которых хоть одна пара не решена
+      // (failed/skipped/прочее) — они и уходят в повтор.
+      const seen = new Set();
+      (run.results || []).forEach(function (r) {
+        if (r && r.verdict !== 'solved' && r.task_node_id) { seen.add(String(r.task_node_id)); }
+      });
+      return Array.from(seen);
+    }
+
+    function updateRetryUnsolvedButton(run) {
+      const retryBtn = document.getElementById('armSolveRetryUnsolvedBtn');
+      if (!retryBtn) { return; }
+      retryUnsolvedPayload = null;
+      const isDone = run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
+      const rp = run.run_params || {};
+      const nodes = isDone ? collectUnsolvedNodes(run) : [];
+      const canRetry = isDone && nodes.length > 0
+        && Array.isArray(rp.model_keys) && rp.model_keys.length > 0
+        && rp.language_id;
+      if (!canRetry) { retryBtn.style.display = 'none'; return; }
+      retryBtn.style.display = '';
+      retryBtn.textContent = 'Повторить нерешённые (' + nodes.length + ')';
+      retryUnsolvedPayload = { nodes: nodes, params: rp };
+    }
+
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
       if (submitBtn.disabled) { return; }
-      // Язык обязателен (дублирует серверную валидацию) — из него выводится
-      // расширение файла. Препромпт: prompt_id из селекта ("" = по привязке)
-      // и run_name уходят в FormData автоматически.
-      const langId = languageSelect ? languageSelect.value.trim() : '';
-      if (!langId) { setError('Сначала выберите язык программирования.'); return; }
-      if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
+      // Языки обязательны (дублируем серверную валидацию). На каждый выбранный
+      // язык запускается ОТДЕЛЬНЫЙ процесс (те же задачи/модели): БД хранит
+      // результат как (прогон, модель, задача), поэтому языки нельзя смешивать
+      // в одном прогоне — а так они идут параллельно и независимы.
+      const langs = selectedLanguages();
+      if (!langs.length) { setError('Выберите хотя бы один язык программирования.'); return; }
       setSubmitDisabled(true);
       setError('');
-      renderReport(null);
-      renderResults([]);
-      setProgress('Запускаем batch solve...', true);
-      const body = new URLSearchParams(new FormData(form));
-      try {
-        const response = await fetch(startUrl, {
-          method: 'POST', credentials: 'same-origin',
-          headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
-          body: body.toString(),
-        });
-        const data = await parseJsonResponse(response);
-        if (!response.ok || !data.ok) { throw new Error(data.message || 'Не удалось запустить batch solve'); }
-        currentRunId = data.run_id || '';
-        if (currentRunId && window.history && window.history.replaceState) {
-          window.history.replaceState({}, '', window.location.pathname + '?run_id=' + encodeURIComponent(currentRunId));
+      // Старую таблицу не гасим: она останется до первого снапшота нового
+      // прогона (при неудаче запуска таблица сохраняется — не теряем данные).
+      setProgress('Запускаем batch solve' + (langs.length > 1 ? ' (' + langs.length + ' процесса)...' : '...'), true);
+      const baseBody = new URLSearchParams(new FormData(form));
+      // Чекбоксы языков без name в FormData не попадают; language_id и
+      // расширение подставляются per-язык ниже.
+      baseBody.delete('language_id');
+      const startedRuns = [];
+      const failedLangs = [];
+      const baseRunName = runNameInput ? runNameInput.value.trim() : '';
+      for (let i = 0; i < langs.length; i++) {
+        const lang = langs[i];
+        const body = new URLSearchParams(baseBody);
+        body.set('language_id', lang.id);
+        body.set('file_extension', lang.ext);
+        // При нескольких языках различаем прогоны в журнале по расширению.
+        const runName = (baseRunName && langs.length > 1) ? (baseRunName + ' — ' + lang.ext) : baseRunName;
+        body.set('run_name', runName);
+        try {
+          const data = await postStart(body);
+          const runId = data.run_id || '';
+          if (runId) {
+            startedRuns.push(runId);
+            trackRun(runId, { ext: lang.ext, name: runName, lang: lang.name, snapshot: data.run || {} });
+          }
+        } catch (error) {
+          failedLangs.push((lang.name || lang.ext || 'язык') + ': ' + (error.message || 'ошибка'));
         }
-        applyRunSnapshot(data.run || {});
-        if (data.run && data.run.status === 'running') { pollRunStatus(); }
-        // Прогон должен попасть в меню «Процессы» в шапке сразу, а не на
-        // следующем 15-секундном тике поллинга.
-        document.dispatchEvent(new Event('ai-processes:refresh'));
-      } catch (error) {
-        setError(error.message || 'Ошибка запуска batch solve');
-        stopProgress();
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Запустить пакет';
-        setCancelVisible(false);
       }
+      setSubmitDisabled(false);
+      if (!startedRuns.length) {
+        setError(failedLangs.join('; ') || 'Ошибка запуска batch solve');
+        stopProgress();
+        setCancelVisible(false);
+        return;
+      }
+      if (failedLangs.length) { setError('Не удалось запустить: ' + failedLangs.join('; ')); }
+      // Фокус — на последний запущенный (его снапшот уже в ответе старта);
+      // остальные видны и переключаемы в списке «Процессов».
+      focusRun(startedRuns[startedRuns.length - 1]);
+      // Прогон должен попасть в меню «Процессы» в шапке сразу, а не на
+      // следующем 15-секундном тике поллинга.
+      document.dispatchEvent(new Event('ai-processes:refresh'));
     });
     // Surface a server-rendered error (e.g. "процесс не найден") without the
     // now-removed |tojson filter — read the auto-escaped text content directly.
@@ -1023,9 +1349,19 @@
     let initialRun = null;
     try { initialRun = JSON.parse(initialEl ? initialEl.textContent : '{}') || {}; } catch (e) { initialRun = {}; }
     if (initialRun && initialRun.run_id) {
-      currentRunId = initialRun.run_id;
-      applyRunSnapshot(initialRun);
-      if (initialRun.status === 'running') { setSubmitDisabled(true); pollRunStatus(); }
+      focusedRunId = initialRun.run_id;
+      const rp = initialRun.run_params || {};
+      // Строку в «Процессах» заводим сразу (в т.ч. для завершённого прогона):
+      // она — якорь для переключения после запуска новых процессов.
+      trackRun(initialRun.run_id, {
+        ext: rp.file_extension || '',
+        name: initialRun.run_name || rp.run_name || '',
+        lang: rp.programming_language_name || '',
+        snapshot: initialRun,
+      });
+      try { applyRunSnapshot(initialRun); } catch (e) { console.error('ARM render error:', e); }
+      // Поллинг стартует в trackRun, если прогон живой. Форму не блокируем:
+      // прогоны идут параллельно.
     }
 
     // Восстановление формы из снимка запуска (AIModelTestRun.run_params):
@@ -1073,7 +1409,8 @@
     // задачи/модели/язык/тему заново. Отсутствующие в списке значения (задача
     // ушла из дерева) просто не отмечаются. Старые run_params без language_id
     // деградируют мягко: язык подбирается по сохранённому расширению.
-    let pendingNodeIds = null; // узлы для отметки после loadTree (?run_id=)
+    // pendingNodeIds — узлы для отметки после loadTree (?run_id=).
+    let pendingNodeIds = null;
 
     function restoreFormFromRunParams(rp) {
       try {
@@ -1084,24 +1421,29 @@
         });
         syncSelectAllModelsCheckbox();
         let languageRestored = false;
-        if (languageSelect && rp.language_id) {
-          const exists = Array.prototype.some.call(
-            languageSelect.options, function (o) { return o.value === String(rp.language_id); }
+        if (rp.language_id) {
+          const langCb = document.querySelector(
+            'input.arm-lang-check[value="' + String(rp.language_id) + '"]'
           );
-          if (exists) {
-            languageSelect.value = String(rp.language_id);
+          if (langCb) {
+            document.querySelectorAll('input.arm-lang-check').forEach(function (x) { x.checked = false; });
+            langCb.checked = true;
             languageRestored = true;
           }
         }
-        if (!languageRestored && rp.file_extension && languageSelect) {
+        if (!languageRestored && rp.file_extension) {
           // Legacy run_params: подбор языка по расширению прогона.
           const byExt = Array.prototype.find.call(
-            languageSelect.options,
-            function (o) { return o.getAttribute('data-ext') === rp.file_extension; }
+            document.querySelectorAll('input.arm-lang-check'),
+            function (x) { return x.getAttribute('data-ext') === rp.file_extension; }
           );
-          if (byExt) { languageSelect.value = byExt.value; languageRestored = true; }
+          if (byExt) {
+            document.querySelectorAll('input.arm-lang-check').forEach(function (x) { x.checked = false; });
+            byExt.checked = true;
+            languageRestored = true;
+          }
         }
-        applyLanguageSelection(languageRestored ? languageSelect.value : '');
+        syncLanguageSelection();
         if (languageRestored && rp.topic_id && topicSelect) {
           const topicExists = Array.prototype.some.call(
             topicSelect.options, function (o) { return o.value === String(rp.topic_id); }

@@ -104,6 +104,35 @@ window.ArmBatchResults = (function () {
   var prevRenderedMode = null;   // режим текущей отрисовки списка в DOM
   var allOpenKeys = new Set();   // ручные раскрытия карточек в режиме «Все»
   var lastRender = null;         // аргументы последнего рендера (для re-render переключателем)
+  var lastRenderSig = null;      // сигнатура последнего рендера (длина+режим) для скипа
+
+  // ── Ленивые тела результатов (lazy_body) ─────────────────────────────────
+  // Снапшот страницы/поллинга не содержит raw_response/code/short_response/
+  // dl_comment/dl_error (большой прогон — десятки МБ текста). Тело каждой
+  // записи подтягивается GET-ом при первом раскрытии карточки и кэшируется
+  // в памяти — перерисовки и переключения фильтров не дёргают сервер повторно.
+  var bodyCache = {};            // result_id -> Promise | разрешённое тело
+  function fetchResultBody(resultId) {
+    if (!resultId) { return Promise.reject(new Error('Нет result_id')); }
+    // В кэше может лежать и обещание, и уже разрешённое тело — Promise.resolve
+    // нормализует оба: у вызывающего всегда есть .then/.catch (иначе после
+    // разрешения кэша возвращался голый объект → «.then is not a function»,
+    // что обрывало поллинг и ре-рендер).
+    if (bodyCache[resultId]) { return Promise.resolve(bodyCache[resultId]); }
+    var promise = fetch('/ai/admin/arm/solve/result/' + encodeURIComponent(resultId) + '/body/', {
+      method: 'GET', credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' },
+    })
+      .then(function (response) { return response.json(); })
+      .then(function (data) {
+        if (!data || !data.ok || !data.result) { throw new Error('Тело результата недоступно'); }
+        bodyCache[resultId] = data.result;
+        return data.result;
+      });
+    bodyCache[resultId] = promise;
+    // Не оставляем отказ в кэше: следующий клик повторит попытку.
+    promise.catch(function () { delete bodyCache[resultId]; });
+    return promise;
+  }
 
   function escapeHtml(value) {
     return String(value == null ? '' : value)
@@ -142,23 +171,61 @@ window.ArmBatchResults = (function () {
     wrapEl.insertAdjacentHTML('beforeend', '<table class="arm-summary-table">' + head + '<tbody>' + body + '</tbody></table>');
   }
 
-  // els = {card, list, perModel, perTopic}
+  // Компактные подписи отчёта: время и объём прогона (report.run_meta).
+  function fmtTs(ts) {
+    if (!ts) { return ''; }
+    return new Date(ts * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  }
+  function fmtDuration(sec) {
+    sec = Math.round(Number(sec) || 0);
+    if (!(sec > 0)) { return ''; }
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h) { return h + ' ч ' + m + ' мин'; }
+    if (m) { return m + ' мин' + (s ? ' ' + s + ' с' : ''); }
+    return s + ' с';
+  }
+  function runMetaLine(report) {
+    const meta = report.run_meta || {};
+    if (!meta.started_at_ts) { return ''; }
+    const started = fmtTs(meta.started_at_ts);
+    if (meta.finished_at_ts) {
+      return started + ' → ' + fmtTs(meta.finished_at_ts)
+        + (meta.duration_seconds ? ' · ' + fmtDuration(meta.duration_seconds) : '');
+    }
+    return started + ' · идёт' + (meta.duration_seconds ? ' ' + fmtDuration(meta.duration_seconds) : '');
+  }
+  function runVolumeLine(report) {
+    if (report.models_count == null && report.tasks_count == null) { return ''; }
+    return (report.models_count != null ? report.models_count + ' мод. · ' : '')
+      + (report.tasks_count != null ? report.tasks_count + ' задач · ' : '')
+      + report.total_pairs + ' пар';
+  }
+
+  // els = {card, list, perModel, perTopic, errors}
   function renderReport(report, els) {
     if (!report) {
       if (els.card) { els.card.style.display = 'none'; }
       if (els.list) { els.list.innerHTML = ''; }
       if (els.perModel) { els.perModel.innerHTML = ''; }
       if (els.perTopic) { els.perTopic.innerHTML = ''; }
+      if (els.errors) { els.errors.innerHTML = ''; }
       return;
     }
     if (els.list) {
-      els.list.innerHTML = [
+      const lines = [
         'Всего пар: ' + escapeHtml(report.total_pairs),
         'Решено: ' + escapeHtml(report.solved),
         'Не решено: ' + escapeHtml(report.failed),
         'Пропущено: ' + escapeHtml(report.skipped),
         'Токенов: ' + escapeHtml(report.tokens_total),
-      ].map(function (line) { return '<li>' + line + '</li>'; }).join('');
+      ];
+      const timeLine = runMetaLine(report);
+      if (timeLine) { lines.push('<strong>Прогон:</strong> ' + escapeHtml(timeLine)); }
+      const volumeLine = runVolumeLine(report);
+      if (volumeLine) { lines.push('<strong>Объём:</strong> ' + escapeHtml(volumeLine)); }
+      els.list.innerHTML = lines.map(function (line) { return '<li>' + line + '</li>'; }).join('');
     }
     if (els.perModel) {
       els.perModel.innerHTML = '<h3>Итог по моделям</h3><p class="arm-section-note">Сортировка: процент решённых ↓, среднее время ответа ↑</p>';
@@ -173,7 +240,26 @@ window.ArmBatchResults = (function () {
         els.perTopic.innerHTML = '';
       }
     }
+    renderErrorsByTopic(report.errors_by_topic || [], els.errors);
     if (els.card) { els.card.style.display = 'block'; }
+  }
+
+  // «Ошибки по темам»: нерешённые пары (failed/skipped), компактно — до 6
+  // позиций на тему (сервер режет, остаток приходит в hidden).
+  function renderErrorsByTopic(rows, wrapEl) {
+    if (!wrapEl) { return; }
+    if (!rows || !rows.length) { wrapEl.innerHTML = ''; return; }
+    const body = rows.map(function (row) {
+      const items = (row.items || []).map(function (x) { return escapeHtml(x); }).join(', ')
+        + (row.hidden > 0 ? ' <span class="arm-section-note">+ ещё ' + escapeHtml(row.hidden) + '</span>' : '');
+      return '<tr><td>' + escapeHtml(row.topic) + '</td>'
+        + '<td class="arm-col-num">' + escapeHtml(row.count) + '</td>'
+        + '<td>' + items + '</td></tr>';
+    });
+    wrapEl.innerHTML = '<h3>Ошибки по темам</h3>'
+      + '<table class="arm-summary-table"><thead><tr><th>Тема</th>'
+      + '<th class="arm-col-num">Не решено</th><th>Что не решено</th></tr></thead>'
+      + '<tbody>' + body.join('') + '</tbody></table>';
   }
 
   function collectOpenKeys(resultsEl) {
@@ -248,6 +334,13 @@ window.ArmBatchResults = (function () {
     var visible = filterMode === 'failed' ? failedRows : results;
     if (resultsCard) { resultsCard.style.display = results.length ? 'block' : 'none'; }
 
+    // Скип перерисовки: во время живого прогона поллинг каждые 2с приносит
+    // новый массив с тем же количеством записей (ничего не завершилось с
+    // прошлого тика) — пересобирать тысячу DOM-узлов бессмысленно.
+    var renderSig = results.length + ':' + visible.length + ':' + filterMode + ':' + (resultsEl ? resultsEl.id || 'noid' : '');
+    if (renderSig === lastRenderSig && resultsEl && resultsEl.childElementCount) { return; }
+    lastRenderSig = renderSig;
+
     // Раскрытие (см. докстринг): domOpen читается ДО очистки DOM.
     var domOpen = collectOpenKeys(resultsEl);
     var openKeys = new Set();
@@ -278,6 +371,7 @@ window.ArmBatchResults = (function () {
       card.setAttribute('data-key', rkey);
       if (openKeys.has(rkey)) { card.setAttribute('open', ''); }
 
+      var lazy = !!r.lazy_body;               // тело подтягивается по AJAX
       var dlComment = r.dl_comment || '';
       var dlError = r.dl_error || '';
       var dlQueueId = r.dl_queue_id || 0;
@@ -306,6 +400,7 @@ window.ArmBatchResults = (function () {
       var dlHtml = '<strong>DL тест:</strong> ';
       if (dlComment) { dlHtml += escapeHtml(dlComment); } else { dlHtml += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
       if (dlQueueId) { dlHtml += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
+      if (r.saved_solution) { dlHtml += ' <span style="color:#166534;">· ✓ сохранено в «Решённые задачи»</span>'; }
       if (dlError) { dlHtml += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
       dlBlock.innerHTML = dlHtml;
       body.appendChild(dlBlock);
@@ -315,7 +410,6 @@ window.ArmBatchResults = (function () {
       answerLabel.textContent = 'Полный ответ модели:';
       body.appendChild(answerLabel);
       var answerPre = document.createElement('pre');
-      answerPre.textContent = r.raw_response || r.short_response || '';
       body.appendChild(answerPre);
 
       var codeLabel = document.createElement('div');
@@ -323,15 +417,57 @@ window.ArmBatchResults = (function () {
       codeLabel.textContent = 'Извлечённый код программы:';
       body.appendChild(codeLabel);
       var codePre = document.createElement('pre');
-      codePre.textContent = code || '— код не извлечён —';
       body.appendChild(codePre);
-      if (code && resultId) {
-        var link = document.createElement('a');
-        link.href = downloadBase + encodeURIComponent(resultId) + '/download/';
-        link.className = 'arm-button';
-        link.style.cssText = 'display:inline-block; margin-top:6px;';
-        link.textContent = 'Скачать код';
-        body.appendChild(link);
+      var downloadLink = null;
+      if (resultId) {
+        downloadLink = document.createElement('a');
+        downloadLink.href = downloadBase + encodeURIComponent(resultId) + '/download/';
+        downloadLink.className = 'arm-button';
+        downloadLink.style.cssText = 'display:inline-block; margin-top:6px;';
+        downloadLink.textContent = 'Скачать код';
+        body.appendChild(downloadLink);
+      }
+
+      if (lazy) {
+        // Тело ещё не в снапшоте: плейсхолдеры + подгрузка при раскрытии.
+        // Содержимое dl-блока тоже приходит из body-эндпоинта.
+        dlBlock.innerHTML = '<strong>DL тест:</strong> <span style="color:#6b7280;">' +
+          (card.open ? 'загрузка…' : 'раскройте строку для загрузки') + '</span>';
+        answerPre.textContent = '';
+        codePre.textContent = '';
+        if (downloadLink) { downloadLink.style.display = 'none'; }
+        var bodyLoaded = false;
+        var fillBody = function (b) {
+          bodyLoaded = true;
+          dlComment = b.dl_comment || '';
+          dlError = b.dl_error || '';
+          var dlHtml2 = '<strong>DL тест:</strong> ';
+          if (dlComment) { dlHtml2 += escapeHtml(dlComment); } else { dlHtml2 += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
+          if (dlQueueId) { dlHtml2 += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
+          if (r.saved_solution) { dlHtml2 += ' <span style="color:#166534;">· ✓ сохранено в «Решённые задачи»</span>'; }
+          if (dlError) { dlHtml2 += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
+          dlBlock.innerHTML = dlHtml2;
+          answerPre.textContent = b.raw_response || b.short_response || '';
+          codePre.textContent = b.code || '— код не извлечён —';
+          if (downloadLink) { downloadLink.style.display = b.code ? '' : 'none'; }
+        };
+        var loadBody = function () {
+          if (bodyLoaded) { return; }
+          fetchResultBody(resultId).then(fillBody).catch(function () {
+            dlBlock.innerHTML = '<strong>DL тест:</strong> <span style="color:#6b7280;">итог тестов отсутствует</span>';
+            answerPre.textContent = 'Не удалось загрузить ответ модели.';
+            codePre.textContent = '— код недоступен —';
+          });
+        };
+        if (card.open) { loadBody(); }  // карточка восстановлена раскрытой
+        card.addEventListener('toggle', function () {
+          if (card.open) { loadBody(); }
+        });
+      } else {
+        // Полный item в снапшоте (обратная совместимость) — рендер как раньше.
+        answerPre.textContent = r.raw_response || r.short_response || '';
+        codePre.textContent = code || '— код не извлечён —';
+        if (downloadLink && !code) { downloadLink.style.display = 'none'; }
       }
 
       card.appendChild(summary);
@@ -372,6 +508,7 @@ window.ArmBatchResults = (function () {
     reportCard.appendChild(reportList);
     var perModelWrap = document.createElement('div'); reportCard.appendChild(perModelWrap);
     var perTopicWrap = document.createElement('div'); perTopicWrap.style.marginTop = '16px'; reportCard.appendChild(perTopicWrap);
+    var errorsWrap = document.createElement('div'); errorsWrap.style.marginTop = '16px'; reportCard.appendChild(errorsWrap);
     rootEl.appendChild(reportCard);
 
     var resultsCard = document.createElement('section');
@@ -386,7 +523,7 @@ window.ArmBatchResults = (function () {
     var resultsEl = document.createElement('div'); resultsCard.appendChild(resultsEl);
     rootEl.appendChild(resultsCard);
 
-    renderReport(snapshot.report || null, { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap });
+    renderReport(snapshot.report || null, { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap, errors: errorsWrap });
     // В шапке карточки — переключатель «Все / Не пройденные».
     renderResults(snapshot.results || [], resultsEl, resultsCard, resultsHead);
 

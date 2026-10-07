@@ -126,6 +126,31 @@ class PromptUserIdFilter(admin.SimpleListFilter):
         return queryset.filter(Q(owner_id=value) | Q(editors__id=value)).distinct()
 
 
+class PromptLanguageFilter(admin.SimpleListFilter):
+    """Единый фильтр языка для Prompt: и тема-язык, и собственный FK.
+
+    Промпт может быть привязан к языку без темы («на весь язык») — фильтр по
+    topic__programming_language такие записи терял бы.
+    """
+
+    title = "Язык программирования"
+    parameter_name = "lang"
+
+    def lookups(self, request, model_admin):
+        return [
+            (str(lang.pk), lang.language_name)
+            for lang in ProgrammingLanguage.objects.order_by("language_name")
+        ]
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if not value:
+            return queryset
+        return queryset.filter(
+            Q(topic__programming_language_id=value) | Q(programming_language_id=value)
+        )
+
+
 class PromptAdmin(admin.ModelAdmin):
     form = PromptForm
     list_display = (
@@ -140,7 +165,7 @@ class PromptAdmin(admin.ModelAdmin):
     list_display_links = ('prompt_name_ru',)
     # Режим первым: чипы «Все / Реши задачу / В чём ошибка» — главный
     # селектор списка (см. MODE_SOLVE / MODE_FIND_ERROR).
-    list_filter = ('mode', PromptUserIdFilter, 'topic__programming_language', 'topic')
+    list_filter = ('mode', PromptUserIdFilter, PromptLanguageFilter, 'topic')
     # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
     show_facets = admin.ShowFacets.NEVER
     list_per_page = 25
@@ -303,9 +328,13 @@ class PromptAdmin(admin.ModelAdmin):
         response["Content-Disposition"] = 'attachment; filename="prompts.csv"'
         writer = csv.writer(response)
         writer.writerow(["id", "prompt_name", "language", "topic", "owner_id", "owner_username", "prompt_text"])
-        for prompt in queryset.select_related("topic", "topic__programming_language", "owner"):
+        for prompt in queryset.select_related("topic", "topic__programming_language", "programming_language", "owner"):
             topic = prompt.topic
-            language = topic.programming_language.language_name if topic and topic.programming_language else ""
+            language = (
+                topic.programming_language.language_name
+                if topic and topic.programming_language
+                else (prompt.programming_language.language_name if prompt.programming_language else "")
+            )
             writer.writerow([
                 prompt.id,
                 prompt.prompt_name_ru or "",
@@ -335,8 +364,13 @@ class PromptAdmin(admin.ModelAdmin):
         self.message_user(request, msg, level=("success" if not failed else "warning"))
 
     def programming_language_name(self, obj):
+        # Язык препромпта: приоритет у темы (тема всегда принадлежит языку);
+        # без темы — собственный язык («промпт на весь язык»). Раньше для
+        # промптов без темы здесь всегда был «-».
         if obj.topic and obj.topic.programming_language:
             return obj.topic.programming_language.language_name
+        if obj.programming_language_id:
+            return obj.programming_language.language_name
         return "-"
     programming_language_name.short_description = "Язык программирования"
     programming_language_name.admin_order_field = "topic__programming_language__language_name"

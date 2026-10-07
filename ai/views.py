@@ -539,7 +539,7 @@ def get_prompts(request):
     ui_language = request.GET.get('ui_language', 'Русский')
     prompts = [
         serialize_prompt(p, ui_language)
-        for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name_ru', 'id')
+        for p in Prompt.objects.select_related("topic", "topic__programming_language", "programming_language", "owner", "shared_prompt").order_by('prompt_name_ru', 'id')
     ]
     return JsonResponse(prompts, safe=False)
 
@@ -583,7 +583,7 @@ def get_problem_data(request):
     ]
     prompts = [
         serialize_prompt(p, ui_language)
-        for p in Prompt.objects.select_related("topic", "topic__programming_language", "owner", "shared_prompt").order_by('prompt_name_ru', 'id')
+        for p in Prompt.objects.select_related("topic", "topic__programming_language", "programming_language", "owner", "shared_prompt").order_by('prompt_name_ru', 'id')
     ]
     shared_prompts = [
         serialize_shared_prompt(sp, ui_language)
@@ -690,6 +690,20 @@ def get_task_info_view(request):
         except (DLUnauthorizedError, DLForbiddenError, DLTaskNotFoundError,
                 DLApiUnavailable, DLServerError):
             pass  # keep the original (empty-statement) response
+
+    # DL складывает в statement вместе с условием мусор страницы задачи:
+    # хвостовой ярлык кнопки «Подсмотреть решение» (и §nbsp-пустоту вокруг).
+    # Чистим хвост — модели и пользователю ярлык не нужен. Только хвост:
+    # остальное (включая заголовок-«шапку», который DL хранит в тексте
+    # некоторых задач) — данные DL, их не трогаем.
+    for key in ("statement", "currentStatement"):
+        val = (data.get(key) or "").strip()
+        if val:
+            cleaned = val.replace("\u00a0", " ").rstrip()
+            while cleaned.endswith("Подсмотреть решение"):
+                cleaned = cleaned[: -len("Подсмотреть решение")].rstrip()
+            if cleaned != val:
+                data[key] = cleaned
 
     # Translate the task statement into the page's UI language. DL returns
     # statements in Russian, so for the English/French UI languages we

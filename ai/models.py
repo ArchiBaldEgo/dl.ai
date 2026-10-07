@@ -338,6 +338,18 @@ class Prompt(models.Model):
         Topic, on_delete=models.CASCADE, null=True, blank=True,
         verbose_name="Тема",
     )
+    # Собственный язык препромпта. Раньше язык выводился только из темы, из-за
+    # чего у «общих» промптов (без темы, напр. «ASM i86 - общий») язык нельзя
+    # было задать: селект в форме был виртуальным и не сохранялся. Теперь
+    # промпт может быть привязан к языку целиком (тема пустая) — как
+    # ArmPromptBinding («пустая тема — привязка на весь язык»). Если заданы и
+    # тема, и язык — форма следит, чтобы тема принадлежала языку.
+    programming_language = models.ForeignKey(
+        ProgrammingLanguage, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="prompts",
+        verbose_name="Язык программирования",
+        help_text="Без темы — препромпт действует на весь язык.",
+    )
     prompt_text_ru = models.TextField(blank=True, default="", verbose_name="Текст (RU)")
     prompt_text_en = models.TextField(blank=True, default="", verbose_name="Текст (EN)")
     prompt_text_fr = models.TextField(blank=True, default="", verbose_name="Текст (FR)")
@@ -730,6 +742,72 @@ class AIRequestLog(models.Model):
 
     def __str__(self):
         return f"{self.sent_at} — {self.user_full_name or self.username or self.external_user_id}"
+
+
+class AIPinnedBatchRun(models.Model):
+    """Закреплённый завершённый пакетный прогон (персонально для пользователя).
+
+    Хранит пару (пользователь, запись журнала batch-solve) — ссылку на
+    завершённый прогон «Пакетного решения» (source=arm), закреплённую кнопкой
+    в журнале запросов или на «Настройке ИИ-приложения». Список закреплённых
+    показывается на странице «Закреплённые пакетные решения» (пункт навигации
+    под «Настройкой ИИ-приложения»); результаты прогона — та же ленивая
+    развёртка (batch-snapshot), что в журнале.
+    """
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="pinned_batch_runs",
+        verbose_name="Кто закрепил",
+    )
+    log = models.ForeignKey(
+        AIRequestLog,
+        on_delete=models.CASCADE,
+        related_name="pinned_by",
+        verbose_name="Запись журнала (прогон)",
+    )
+    created_at = models.DateTimeField(default=timezone.now, verbose_name="Закреплён")
+
+    class Meta:
+        verbose_name = "Закреплённый пакетный прогон"
+        verbose_name_plural = "Закреплённые пакетные прогоны"
+        ordering = ("-created_at", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user", "log"),
+                name="ai_pinned_batch_run_user_log_uniq",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} → log {self.log_id}"
+
+
+class AICourseTreeCache(models.Model):
+    """Сохранённое дерево курса dl.gsu.by (последняя успешная загрузка).
+
+    get-node-tree у DL требует АКТИВНЫЙ курс в DL-сессии (courseID>0): у
+    пользователя, который не «зашёл» в курс на dl.gsu.by, DL отвечает 403
+    «Доступ запрещён» — и до вката бессрочного кэша дерево не грузилось НИ у
+    кого. Redis-копия (dl_tree_stale) переживает TTL, но не переживает
+    очистку Redis; эта таблица — последняя линия обороны: при успехе
+    (load-tree) сюда пишется копия дерева, при отказе DL она отдаётся всем,
+    поэтому «Пакетное решение» работает у всех после одной успешной загрузки.
+    """
+
+    course_id = models.PositiveIntegerField(
+        unique=True, verbose_name="Курс DL (courseId)"
+    )
+    tree = models.JSONField(default=list, verbose_name="Дерево (JSON)")
+    task_count = models.PositiveIntegerField(default=0, verbose_name="Задач в дереве")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлено")
+
+    class Meta:
+        verbose_name = "Кэш дерева курса DL"
+        verbose_name_plural = "Кэши деревьев курсов DL"
+
+    def __str__(self):
+        return f"course {self.course_id} · {self.task_count} задач"
 
 
 class AIModelTestRun(models.Model):

@@ -17,6 +17,7 @@ from .arm import (
     admin_arm_solve_cancel_view,
     admin_arm_solve_report_xlsx_view,
     admin_arm_solve_result_download_view,
+    admin_arm_solve_result_body_view,
 )
 from .docs import (
     admin_docs_content_view,
@@ -41,6 +42,8 @@ from .model_status import (
     admin_model_status_state_view,
 )
 from .my_prompt import admin_my_prompt_view
+from .logs import admin_request_log_detail_json_view
+from .pinned import admin_pinned_run_toggle_view, admin_pinned_runs_view
 from .prompt_defaults import admin_prompt_defaults_view
 from .prompt_regression import (
     admin_prompt_regression_view,
@@ -76,6 +79,7 @@ def get_ai_admin_urls():
         path("arm/solve/load-tree/", ai_admin_site.admin_view(admin_arm_solve_load_tree_view), name="ai_arm_solve_load_tree"),
         path("arm/solve/cancel/", ai_admin_site.admin_view(admin_arm_solve_cancel_view), name="ai_arm_solve_cancel"),
         path("arm/solve/result/<int:result_id>/download/", ai_admin_site.admin_view(admin_arm_solve_result_download_view), name="ai_arm_solve_result_download"),
+        path("arm/solve/result/<int:result_id>/body/", ai_admin_site.admin_view(admin_arm_solve_result_body_view), name="ai_arm_solve_result_body"),
         path("arm/solve/report/<str:run_id>/xlsx/", ai_admin_site.admin_view(admin_arm_solve_report_xlsx_view), name="ai_arm_solve_report_xlsx"),
         path("arm/solve/", ai_admin_site.admin_view(admin_arm_solve_view), name="ai_arm_solve"),
         path("arm/models/refresh/", ai_admin_site.admin_view(admin_model_status_refresh_view), name="ai_arm_model_status_refresh"),
@@ -90,6 +94,7 @@ def get_ai_admin_urls():
         path("test-console/logs/", ai_admin_site.admin_view(admin_test_console_logs_view), name="ai_test_console_logs"),
         path("test-console/", ai_admin_site.admin_view(admin_test_console_view), name="ai_test_console"),
         path("prompts/my/", ai_admin_site.admin_view(admin_my_prompt_view), name="ai_my_prompt"),
+        path("pinned-runs/", ai_admin_site.admin_view(admin_pinned_runs_view), name="ai_pinned_runs"),
         path("prompt-defaults/", ai_admin_site.admin_view(admin_prompt_defaults_view), name="ai_prompt_defaults"),
         path("updates/", ai_admin_site.admin_view(admin_updates_view), name="ai_updates"),
         path("ai/airequestlog/task-text/", ai_admin_site.admin_view(admin_request_log_task_text_view), name="ai_request_log_task_text"),
@@ -98,6 +103,8 @@ def get_ai_admin_urls():
         path("ai/airequestlog/<int:log_id>/batch-snapshot/", ai_admin_site.admin_view(admin_batch_snapshot_view), name="ai_request_log_batch_snapshot"),
         path("ai/airequestlog/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
         path("ai/airequestlog/<int:log_id>/resend/", ai_admin_site.admin_view(resend_request_view), name="ai_request_log_resend"),
+        path("ai/airequestlog/<int:log_id>/pin/", ai_admin_site.admin_view(admin_pinned_run_toggle_view), name="ai_request_log_pin"),
+        path("ai/airequestlog/<int:log_id>/detail-json/", ai_admin_site.admin_view(admin_request_log_detail_json_view), name="ai_request_log_detail_json"),
         path("ai/airequestlog/<int:log_id>/rerun-arm/", ai_admin_site.admin_view(rerun_arm_batch_view), name="ai_request_log_rerun_arm"),
         path("ai/airequestlog/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),
     ]
