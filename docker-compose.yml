@@ -35,8 +35,11 @@ services:
     # -> 401 not_autorized. WebDeepseek/worker/bot.js resolveProxy() already
     # falls back to PUPPETEER_PROXY_* when BOT_PROXY is empty, so both naming
     # schemes work without any mapping here.
+    # AI_POOL_HEALTHCHECK_DISABLED=1 (локальный .env) — пулы без сидирования
+    # (Kimi требует ручного seed-логина) держат контейнер вечно unhealthy;
+    # флаг проверяет только Daphne. Без флага — прежняя проверка байт-в-байт.
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null && python3 -c \"import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://localhost:3000/health', timeout=5)); k=json.load(urllib.request.urlopen('http://localhost:3001/health', timeout=5)); sys.exit(0 if d.get('ok') and d.get('ready_count',0) > 0 and k.get('ok') else 1)\""]
+      test: ["CMD-SHELL", "if [ \"$$AI_POOL_HEALTHCHECK_DISABLED\" = \"1\" ]; then curl -fsS http://localhost:8000/health >/dev/null; else curl -fsS http://localhost:8000/health >/dev/null && python3 -c \"import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://localhost:3000/health', timeout=5)); k=json.load(urllib.request.urlopen('http://localhost:3001/health', timeout=5)); sys.exit(0 if d.get('ok') and d.get('ready_count',0) > 0 and k.get('ok') else 1)\"; fi"]
       interval: 30s
       timeout: 10s
       retries: 10

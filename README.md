@@ -86,12 +86,34 @@ cp .env.example .env
 
 2. Убедитесь, что в `.env`:
 - `DB_HOST=db`
+- `DEBUG=1`
 - `HTTP_PROXY`, `HTTPS_PROXY`, `PROXY` пустые (или удалены), если прокси не нужен
 
-3. Запустите контейнеры:
+3. Для тестирования **без куки DLSID и без dl.gsu.by** добавьте в `.env` флаги
+локального режима (все работают только с пустым prod-`.env`, где их нет):
 
 ```bash
-docker compose up -d --build --no-cache
+AI_BOOTSTRAP_ON_START=1          # migrate + collectstatic при старте контейнера
+AI_DEV_AUTH_BYPASS=1             # auto-login dev_admin (суперпользователь) без DLSID
+AI_POOL_HEALTHCHECK_DISABLED=1   # healthcheck только Daphne (пулы без seed-логина не ready)
+AI_DISABLE_HEALTH_SCHEDULER=1    # без 04:00 модельного health-скедулера
+```
+
+   затем — одна команда, без ручных exec-шагов:
+
+```bash
+docker compose up -d --build
+```
+
+4. Откройте `http://localhost:8080/ai/chat/` — вы автоматически залогинены
+под `dev_admin` (суперпользователь); `/ai/admin/` доступен полностью.
+DL-функции («Реши задачу», отправка решения) требуют реальной сессии dl.gsu.by —
+локально вернут понятный 401/«Нет DLSID», это штатно.
+
+Без этих флагов — прежний путь (ручные шаги после `up`):
+
+```bash
+docker compose up -d --build
 docker compose exec -T web python manage.py migrate
 docker compose exec -T web python manage.py collectstatic --noinput
 docker compose exec -T web python manage.py sync_update_log

@@ -22,6 +22,13 @@ from django.utils import timezone
 from asgiref.sync import sync_to_async
 from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
+import os
+
+# Dev-bypass аутентификации выключен на весь тестовый процесс: прогон с
+# обычными settings наследует локальный .env (load_dotenv в DjangoTest/settings.py),
+# и без-DLSID тесты middleware провижинили бы fake-юзера вместо 302.
+# DevAuthBypassTests включает флаг точечно через patch.dict.
+os.environ["AI_DEV_AUTH_BYPASS"] = "0"
 
 from ai.admin import PromptAdmin, PromptForm
 from ai.middleware import ExternalAuthMiddleware
@@ -266,6 +273,189 @@ class ExternalAuthMiddlewareTests(TestCase):
             response = self.middleware(request)
 
         self.assertEqual(response.status_code, 503)
+
+
+class DevAuthBypassTests(TestCase):
+    """AI_DEV_AUTH_BYPASS: fake-суперпользователь без DLSID, только при DEBUG.
+
+    Инварианты bypass: request.user_info + session["external_user_info"]
+    (WS-фолбэк), login + rotate CSRF, _ai_provisioned_user, usable password
+    (иначе admin_view уводит на set-password). При DEBUG=False или без флага
+    middleware ведёт себя как раньше (302).
+    """
+
+    def setUp(self):
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        self.factory = RequestFactory()
+        self.middleware = ExternalAuthMiddleware(lambda req: HttpResponse("ok"))
+        self.user_model = get_user_model()
+        # Базовое состояние — флаг выключен; отдельные тесты включают точечно.
+        env = patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": ""})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _add_session(self, request):
+        SessionMiddleware(lambda req: None).process_request(request)
+
+    @override_settings(DEBUG=True)
+    def test_bypass_provisions_local_superuser_without_dlsid(self):
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = AnonymousUser()
+
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        user = request._ai_provisioned_user
+        self.assertTrue(user.is_authenticated)
+        self.assertTrue(user.is_superuser)
+        self.assertTrue(user.is_staff)
+        self.assertEqual(user.username, "dev_admin")
+        self.assertTrue(user.has_usable_password())
+        self.assertEqual(request.user_info["userId"], "999999")
+        self.assertEqual(request.user.pk, user.pk)
+        self.assertTrue(ExternalDLAccount.objects.filter(external_user_id="999999").exists())
+        self.assertEqual(request.session["external_user_info"]["userId"], "999999")
+        self.assertTrue(request.session["admin_fresh_auth"])
+
+    @override_settings(DEBUG=True)
+    def test_bypass_reuses_existing_user(self):
+        # Два запроса с независимыми сессиями — один и тот же юзер,
+        # дублей username нет, права сохраняются.
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            first = self.factory.get("/ai/chat/")
+            self._add_session(first)
+            first.user = AnonymousUser()
+            self.middleware(first)
+
+            second = self.factory.get("/ai/chat/")
+            self._add_session(second)
+            second.user = AnonymousUser()
+            self.middleware(second)
+
+        self.assertEqual(self.user_model.objects.filter(username="dev_admin").count(), 1)
+        self.assertEqual(second._ai_provisioned_user.pk, first._ai_provisioned_user.pk)
+        self.assertTrue(second._ai_provisioned_user.is_superuser)
+
+    @override_settings(DEBUG=True)
+    def test_bypass_promotes_existing_non_superuser(self):
+        # Юзер dev_admin уже существовал (копия БД / прошлый прогон) со своим
+        # ExternalDLAccount на 999999, но без прав — bypass повышает его
+        # (промоут idempotent, не только при created=True).
+        existed = self.user_model.objects.create_user(username="dev_admin", password="x")
+        ExternalDLAccount.objects.create(user=existed, external_user_id="999999")
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = AnonymousUser()
+
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            self.middleware(request)
+
+        user = self.user_model.objects.get(username="dev_admin")
+        self.assertEqual(request._ai_provisioned_user.pk, existed.pk)
+        self.assertTrue(user.is_superuser)
+        self.assertTrue(user.is_staff)
+
+    @override_settings(DEBUG=False)
+    def test_bypass_inert_when_debug_false(self):
+        # Prod-защита: любой флаг при DEBUG=False игнорируется — редирект как раньше.
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = AnonymousUser()
+
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "https://dl.gsu.by")
+        self.assertEqual(ExternalDLAccount.objects.count(), 0)
+
+    def test_bypass_inert_without_flag(self):
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = AnonymousUser()
+
+        with override_settings(DEBUG=True):
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(ExternalDLAccount.objects.count(), 0)
+
+    @override_settings(DEBUG=True)
+    def test_bypass_does_not_shadow_valid_dlsid_session(self):
+        # Валидная DLSID-кука — обычный путь, bypass не мешает и
+        # ничего не повышает в правах.
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = AnonymousUser()
+        request.COOKIES["DLSID"] = "session-123"
+
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            with patch(
+                "ai.middleware.fetch_external_user_info",
+                return_value={"userId": "77", "login": "alice", "firstName": "Alice"},
+            ):
+                response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(request.user_info["userId"], "77")
+        self.assertFalse(request.user.is_superuser)
+        self.assertFalse(ExternalDLAccount.objects.filter(external_user_id="999999").exists())
+
+    @override_settings(DEBUG=True)
+    def test_bypass_fallback_on_dlsid_unauthorized(self):
+        from ai.external_auth import ExternalAuthUnauthorized
+
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = AnonymousUser()
+        request.COOKIES["DLSID"] = "stale-session"
+
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            with patch(
+                "ai.middleware.fetch_external_user_info",
+                side_effect=ExternalAuthUnauthorized("invalid DLSID"),
+            ):
+                response = self.middleware(request)
+
+        # Протухшая DLSID не зацикливает на редиректе: bypass перелогинит
+        # fake-пользователем, локальная сессия не сломана.
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(request.user.is_authenticated)
+        self.assertEqual(request.user_info["userId"], "999999")
+
+    @override_settings(DEBUG=True)
+    def test_bypass_end_to_end_chat_and_admin(self):
+        # Интеграционно, через реальный стек middleware: чат отвечает без
+        # куки, админка не уводит на login/set-password/dl.gsu.by.
+        # Триггер self-heal свипа глушим: он стартует поток с отдельным
+        # соединением, которое коммитит AIModelHealthRun(window_date=сегодня)
+        # в обход TestCase-rollback и ломает последующие ModelHealth-тесты.
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            with patch("ai.views.trigger_model_health_refresh_async"):
+                chat = self.client.get("/ai/chat/")
+                self.assertEqual(chat.status_code, 200)
+
+                admin_page = self.client.get("/ai/admin/")
+                self.assertEqual(admin_page.status_code, 200)
+                self.assertNotEqual(admin_page.get("Location", ""), "/ai/admin/set-password/")
+                self.assertNotIn("dl.gsu.by", admin_page.get("Location", ""))
+
+    @override_settings(DEBUG=True)
+    def test_bypass_does_not_affect_skipped_paths(self):
+        # /health в skip-листе — провижининга нет, пользователь анонимный.
+        request = self.factory.get("/health")
+        self._add_session(request)
+        request.user = AnonymousUser()
+
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(request.user.is_authenticated)
+        self.assertEqual(ExternalDLAccount.objects.count(), 0)
 
 
 class AdminExternalAuthTests(TestCase):

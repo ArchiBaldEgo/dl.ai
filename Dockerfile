@@ -128,4 +128,9 @@ ENV PATH="/opt/venv/bin:$PATH" \
 WORKDIR /app
 EXPOSE 8000 3000 3001
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["bash", "-c", "python manage.py sync_update_log || true; exec node /app/WebDeepseek/api/index.js & exec node /app/WebKimi/api/index.js & exec daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application & wait -n"]
+# AI_BOOTSTRAP_ON_START=1 (локальный .env): миграции + collectstatic на старте —
+# «docker compose up -d --build» достаточно без ручных exec-шагов. В prod флаг
+# не задан → CMD поведением не отличается (миграции — по DEPLOY.md). until-цикл:
+# depends_on дожидается только старта контейнера db, postgres может ещё не
+# принимать соединения; после 30 попыток — громкий exit 1 без маскировки.
+CMD ["bash", "-c", "if [ \"${AI_BOOTSTRAP_ON_START:-0}\" = \"1\" ]; then tries=0; until python manage.py migrate --noinput; do tries=$((tries+1)); [ \"$tries\" -ge 30 ] && { echo 'migrate failed (db not ready?)'; exit 1; }; echo \"db not ready, retry migrate in 2s ($tries/30)\"; sleep 2; done; python manage.py collectstatic --noinput; fi; python manage.py sync_update_log || true; exec node /app/WebDeepseek/api/index.js & exec node /app/WebKimi/api/index.js & exec daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application & wait -n"]
