@@ -7409,15 +7409,16 @@ class BatchLogDetailTemplateTests(TestCase):
         self.assertNotIn("Текст, который отправил пользователь", html)
         self.assertNotIn("Текст, который ответила модель", html)
 
-    def test_batch_detail_actions_at_top_same_size(self):
-        """«Повторить прогон» — вверху страницы (до карточки результатов)
-        и тот же размер, что кнопка XLSX (.button, 13px), не «default»."""
+    def test_batch_detail_rerun_left_of_xlsx_same_style(self):
+        """«Повторить прогон» вставляется скриптом карточки слева от кнопки
+        «Скачать результаты (XLSX)» (тот же стиль .arm-button), «Назад к
+        логам» — отдельной строкой ссылок, не в стиле .default."""
         html = self._detail(self.batch_log)
-        actions_idx = html.index('class="ai-log-actions"')
-        card_idx = html.index('id="batch-results-card"')
-        self.assertLess(actions_idx, card_idx)
-        self.assertIn('id="resend-btn" class="button"', html)
-        self.assertNotIn('class="default" data-log-id', html)
+        self.assertIn('id="resend-btn" class="arm-button"', html)
+        self.assertIn("group.className = 'arm-head-actions'", html)
+        self.assertIn("group.appendChild(built.downloadBtn)", html)
+        self.assertNotIn('id="resend-btn" class="default"', html)
+        self.assertIn("← Назад к логам", html)
 
     def test_plain_detail_keeps_full_layout(self):
         html = self._detail(self.plain_log)
@@ -8769,11 +8770,10 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(rows[1]["count"], 1)
         self.assertEqual(rows[1]["last_mode"], "Найти ошибку")
         self.assertEqual(response.context_data["total_count"], 3)
-        # Клик по запросу открывает детальный лог (та же страница, что из журнала).
+        # Клик по запросу разворачивает информацию на месте (lazy-загрузка):
+        # id записи — в data-атрибуте, рендер — через detail-json эндпоинт.
         self.assertEqual(row_ivanov["requests"][0]["log_id"], log_1230.id)
-        self.assertContains(
-            response, f'href="/ai/admin/ai/airequestlog/{log_1230.id}/"',
-        )
+        self.assertContains(response, f'data-log-id="{log_1230.id}"')
 
     def test_daily_report_msk_day_bounds(self):
         """День — по МСК: запись в 00:00:01 МСК включается, в 23:59 вчера —
