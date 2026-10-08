@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# backup_runner.sh — Фоновый демон:每周一 04:00 UTC делает бэкап БД и отправляет в Telegram.
+# backup_runner.sh — Фоновый демон: каждый понедельник 04:00 UTC делает бэкап БД и отправляет в Telegram.
 #
 # Логика:
 #   1. Ждёт до следующего понедельника 04:00 UTC
@@ -9,12 +9,15 @@
 #   4. Отправляет новый файл в Telegram через Bot API
 #   5. Повторяет
 #
-# Запуск: nohup /home/vlad/v0.9/backup_runner.sh &>/dev/null &
+# Запуск (рекомендуется): systemd user-юнит dlai-backup.service:
+#   systemctl --user enable --now dlai-backup.service   (логи: journalctl --user -u dlai-backup)
+# Разовый бэкап без ожидания понедельника:
+#   /home/archi/dlai/backup_runner.sh --now
 #
 
 set -euo pipefail
 
-PROJECT_DIR="/home/vlad/v0.9"
+PROJECT_DIR="/home/archi/dlai/"
 BACKUP_DIR="$PROJECT_DIR/backups"
 DB_CONTAINER="dl_ai_db"
 DB_NAME="dl_ai"
@@ -22,7 +25,7 @@ DB_USER="vlad"
 MAX_BACKUPS=3
 
 # Telegram
-TG_BOT_TOKEN="8344403193:AAEsizOuLe4uh6RRUFrbIVRyIGs14drMyec"
+TG_BOT_TOKEN="8344403193:AAHuysyAXDssd_aDroBcBz2YMWVEuG-AGp8"
 TG_CHAT_ID="690979160"
 
 LOG_FILE="$BACKUP_DIR/backup.log"
@@ -87,6 +90,12 @@ do_backup() {
 # === Главный цикл — ждём до каждого понедельника 04:00 UTC ===
 log "backup_runner started — waiting for Mon 04:00 UTC"
 
+# Разовый запуск бэкапа (для теста/ручного восстановления): после do_backup — выход.
+if [ "${1:-}" = "--now" ]; then
+    do_backup && log "--- one-off backup finished (--now) ---"
+    exit $?
+fi
+
 while true; do
     current_epoch=$(date +%s)
 
@@ -109,6 +118,11 @@ while true; do
     mins=$(((sleep_seconds % 3600) / 60))
     log "Next backup: Mon 04:00 UTC — waiting ${hours}h ${mins}m"
 
+    # Страховка: при дрифте/скачке часов sleep_seconds мог стать ≤0 — тогда
+    # sleep упал бы (set -e убил бы демона). Ждём минуту и пересчитываем.
+    if [ "$sleep_seconds" -le 0 ]; then
+        sleep_seconds=60
+    fi
     sleep "$sleep_seconds"
 
     # Делаем бэкап
