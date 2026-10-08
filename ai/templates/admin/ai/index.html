@@ -22,6 +22,13 @@ visible on every page.{% endcomment %}
     <p class="ai-dashboard-role">
       {{ user_role_label }} · {% now "d.m.Y" %}
     </p>
+    {% comment %}Повторный показ онбординг-тура админки (ai-wizard.js):
+    клик по кнопке запускает заново тур текущего scope без повторной отметки.{% endcomment %}
+    <p class="ai-dashboard-hint">
+      <button type="button" class="button" data-ai-wizard-restart data-scope="admin">
+        Показать подсказки
+      </button>
+    </p>
   </div>
 </div>
 {% endblock %}

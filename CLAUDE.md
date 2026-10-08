@@ -84,6 +84,19 @@ The project follows these rules; keep it that way and extend along them:
 - `external_account.py` — creates/updates Django users + `ExternalDLAccount` from external payload; enrolls everyone into `prompt_developer` group; enriches names via `fetch_user_names` when `get-user-info` omits them.
 - `auth_backends.py` — external admin auth backend + `prompt_developer` group management helpers.
 - `throttling.py` — per-user rate limiting (Django cache-backed; 120 WS / 200 HTTP per 60s via `AI_WS_RATE_LIMIT`/`AI_HTTP_RATE_LIMIT`/`AI_RATE_LIMIT_WINDOW`/`AI_RATE_LIMIT_ENABLED`).
+- Онбординг-wizard — `ai/services/onboarding.py` (единственный владелец правила «каждый пусть хоть раз видел тур»:
+  per-user флаг `AIWizardSeen` (user+scope, `db_table="ai_wizard_seen"`; сессию нельзя — 8 ч + сброс при инвалидации
+  DLSID) против `WIZARD_VERSION` из `ai/constants.py`; правишь шаги/тексты — бампни номер, все увидят тур заново ОДИН
+  раз; любое закрытие тура (Готово/Скрыть/Escape) = отметке, POST `/ai/api/wizard-seen/` (юзеры) / `/ai/admin/wizard/seen/`
+  (админка, через `admin_view`); гостевой режим не показывается и не отмечается). Конфиг на страницу —
+  `{{ ai_wizard|json_script:"ai-wizard-config" }}`: юзерские страницы через `_render_ai_page(wizard_scope=…)` в
+  `views.py` (`chat`/`solve`/`find_error`), админка через `AIAdminSite.each_context` + `ai/admin/onboarding.py::wizard_context_for_request`
+  (scope по пути: `/arm/solve/` и `/arm/models/` — свои туры, остальное «admin»; роль `super`/`staff`/`pd` в конфиг).
+  Движок — `static/admin/js/ai-wizard.js` + `static/admin/css/ai-wizard.css` (чистый vanilla, нет deps; реестр шагов
+  всех 6 scope'ов ВНУТРИ js; отсутствующий в DOM элемент = шаг пропущен — так шаги режутся по роли без рендер-ветвления;
+  слои z-index 12000+, выше админских модалок и спиннера 9999; boot строго по `DOMContentLoaded` — `window.onload`
+  страницы перезаписывают). Повторный показ: `#aiDocsTourBtn` («Подсказки» в модалке «?», юзерские страницы, без
+  отметки) и `[data-ai-wizard-restart]` (кнопка «Показать подсказки» на dashboard админки).
 - `admin/` — custom `ai_admin_site` at `/ai/admin/` (per-module views live here; core permission logic in `site.py`). Gotcha: `_HIDDEN_NAV_OBJECT_NAMES` hides sections from nav but keeps direct URLs; left nav renders through the PROJECT override `ai/templates/admin/app_list.html` (`static/admin/js/ai_nav_filter.js` extends the stock quick filter to the AI tool groups). Changelist filters are NOT the stock side column: project override `ai/templates/admin/change_list.html` (a copy of stock Django 5.1 — re-diff when upgrading) renders `#changelist-filter` as a horizontal row of SELECTORS above the table, and `ai/templates/admin/filter.html` renders each filter as a labeled `<select data-ai-filter>` (no `<details>`, so stock `filters.js` is inert; picking an option navigates to `choice.query_string` — handler inline in change_list.html). Links to DL tasks use the USER url `/task.jsp?nid=…&cid=…` (nid first, cid second; `ai/admin/logs.py::dl_task_url`) — the admin viewer `fullTaskviewer.asp` is NOT used anywhere (viewing task text as DL admin is forbidden).
 - `test_console_runner.py` — runner for the admin test console (subprocess `manage.py test ai --settings=DjangoTest.test_settings`; full raw output of each run is duplicated under `BASE_DIR/logs/test_console/`). Gotchas: `setup_test_environment` patches globals — unsafe in a live Daphne thread, hence the isolated subprocess; log filenames are validated by `_LOG_FILENAME_RE` (path-traversal barrier).
 - `model_clients/` — `registry.py` (model id → handler + title + capabilities; default-active: ollama, openrouter, web_deepseek, web_kimi; Groq/SambaNova gated by `AI_ENABLE_GROQ`/`AI_ENABLE_SAMBANOVA`), `_base.py` (shared helpers incl. `BotPoolClient` — the whole Puppeteer-pool protocol), `web_deepseek.py`/`web_kimi.py` (thin `BotPoolClient` configs: `ask_*_async`, `restart_bot_pool`/`restart_kimi_bot_pool`), `config.py` (centralized .env tokens/proxy), `exceptions.py` (`humanize_model_error`, `map_http_error`, `safe_parse_response`), `history.py` (`ConversationHistory`, Redis/Django-cache shared history), plus provider modules `groq.py`/`openrouter.py`/`sambanova.py`/`ollama.py`. Gotcha: `OR_Nemotron_Nano_12B_VL` is the first `vision:true` entry; add capabilities in `registry.py`, not the DB.
@@ -110,6 +123,11 @@ The project follows these rules; keep it that way and extend along them:
 - AJAX админки всегда ждёт JSON: при протухшей сессии `admin_view` редиректит fetch на страницу логина (HTML с пустой первой строкой → сырая ошибка «JSON.parse … line 2 column 1»). Все AJAX-хендлеры обязаны идти через локальный хелпер `parseJsonResponse(response)` (есть в каждом файле — `arm_find_error.html`, `arm_solve.html`, `model_status.html`, `prompt_regression.js`, `test_console.js`) и показывать «Сессия истекла…», а не ошибку парсинга.
 - Прогресс обновления моделей — модульное состояние `ai/model_health.py` (`_refresh_progress` + `get_refresh_progress`/`list_model_refresh_runs`), пишется только победителем guard'а в `run_model_health_check` (ранние `return False` состояние не трогают). Запись глобальная и безличная — видна каждому админу в меню «Процессы».
 - `RateLimitMiddleware` already enforces the HTTP per-user limit on every `/ai/` path — do NOT also `@rate_limited` those views (double-counts).
+- Тесты, реально рендерящие шаблон на RequestFactory-запросе: НЕ ставь `request.META["CSRF_COOKIE"]`
+  вручную — у маскировки CSRF-токена Django строгий алфавит («test-token» падает
+  `ValueError: substring not found`); не ставь ничего — `get_token` сгенерирует сам. Для admin-view POST с
+  JSON-телом `_AdminViewRequestMixin._admin_request` принимает `content_type="application/json"` (encode_multipart
+  понимает только словари). У прямого JsonResponse нет `.json()` (это метод тест-клиента) — `json.loads(response.content)`.
 - Django-шаблоны: комментарий `{# … #}` допустим ТОЛЬКО в одну строку — многострочный
   рендерится на странице как обычный текст (реальный кейс: текст комментария над чипами
   фильтров changelist'ов). Многострочный текст оформляйте тегом `{% comment %}…{% endcomment %}`;

@@ -422,6 +422,10 @@ class AIAdminSite(admin.AdminSite):
                 if m.get("object_name") != "AIAppSettings"
             ]
         context["available_apps"] = tools_apps + real_apps
+        # Онбординг-wizard: конфиг для json_script в base_site.html
+        # (читает static/admin/js/ai-wizard.js). В гостевом режиме show=False.
+        from .onboarding import wizard_context_for_request
+        context["ai_wizard"] = wizard_context_for_request(request)
         return context
 
     @staticmethod

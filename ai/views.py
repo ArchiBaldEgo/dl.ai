@@ -50,6 +50,12 @@ from .constants import PROMPT_DEVELOPER_GROUP
 from .middleware import _dev_bypass_enabled
 from .services.auth import get_user_identity_for_log
 from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
+from .services.onboarding import (
+    MARK_URL_USER,
+    record_wizard_seen,
+    scope_from_request_body,
+    wizard_boot_payload,
+)
 from .dl_api_client import (
     DLApiUnavailable,
     DLForbiddenError,
@@ -297,7 +303,7 @@ def _read_ai_state(request):
         return {}
 
 
-def _render_ai_page(request, template_name, extra_context=None):
+def _render_ai_page(request, template_name, extra_context=None, wizard_scope=None):
     """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
 
     Проверяет доступ, загружает список доступных моделей (с self-heal при пустом
@@ -305,6 +311,10 @@ def _render_ai_page(request, template_name, extra_context=None):
     алфавит) и разбивает на группы favorite_models/other_models для
     optgroup-разделителя в шаблоне, и добавляет external_session_id +
     сохранённый из куки язык.
+
+    wizard_scope — scope онбординг-wizard для этой страницы (ai/services/
+    onboarding.py); с ним в контекст попадает конфиг тур-подсказок
+    (ai_wizard → json_script в base_chat.html).
     """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
@@ -366,6 +376,13 @@ def _render_ai_page(request, template_name, extra_context=None):
         'last_update_date': _get_last_update_date(),
         'saved_lang': saved_state.get('lang') or '',
     }
+    if wizard_scope:
+        # Онбординг-wizard этой страницы: решение «показывать ли» принимает
+        # сервис по флагу в БД (ai/services/onboarding.py), шаблон рендерит его
+        # через json_script — ai-wizard.js конфиг читает с DOM.
+        context["ai_wizard"] = wizard_boot_payload(
+            request.user, wizard_scope, mark_url=MARK_URL_USER,
+        )
     if extra_context:
         context.update(extra_context)
     response = render(request, template_name, context)
@@ -497,7 +514,7 @@ def set_password_view(request):
 
 def chat_view(request):
     """Страница чата с AI-моделью."""
-    return _render_ai_page(request, 'ai/chat.html')
+    return _render_ai_page(request, 'ai/chat.html', wizard_scope="chat")
 
 
 def decide_task_view(request):
@@ -508,12 +525,30 @@ def decide_task_view(request):
         extra_context={
             "node_id": request.GET.get("nid", ""),
         },
+        wizard_scope="solve",
     )
 
 
 def find_error_view(request):
     """Страница поиска ошибок в коде с помощью AI."""
-    return _render_ai_page(request, 'ai/find-error.html')
+    return _render_ai_page(request, 'ai/find-error.html', wizard_scope="find_error")
+
+
+@require_http_methods(["POST"])
+def wizard_seen_view(request):
+    """Отметка «онбординг-wizard закрыт» с клиентских страниц (ai-wizard.js).
+
+    Любое закрытие тура (Готово/Скрыть/Escape) считается «просмотрено» —
+    тур больше не надоедает. Идемпотентный: повторный POST не создаёт
+    дубликат. Без @rate_limited: RateLimitMiddleware уже покрывает /ai/.
+    """
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+    scope = scope_from_request_body(request.body)
+    if scope is None:
+        return JsonResponse({"ok": False, "error": "bad_scope"}, status=400)
+    record_wizard_seen(request.user, scope)
+    return JsonResponse({"ok": True})
 
 
 def get_languages(request):

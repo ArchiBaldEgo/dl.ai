@@ -40,6 +40,7 @@ from ai.models import (
     AuthorAlias,
     AIRequestLog,
     AIPinnedBatchRun,
+    AIWizardSeen,
     ArmPromptBinding,
     ExternalDLAccount,
     ProgrammingLanguage,
@@ -7870,11 +7871,18 @@ class _AdminViewRequestMixin:
     """Request с сессией, провижненным пользователем и admin_fresh_auth —
     чтобы @ai_admin_site.admin_view пропустил запрос (патчится внешний id)."""
 
-    def _admin_request(self, user, method="get", path="/ai/admin/", data=None):
+    def _admin_request(self, user, method="get", path="/ai/admin/", data=None, content_type=None):
         from django.contrib.messages.middleware import MessageMiddleware
         from django.contrib.sessions.middleware import SessionMiddleware
 
-        request = getattr(self.factory, method)(path, data=data or {})
+        # content_type="application/json" — когда data сырой JSON-текст
+        # (encode_multipart понимает только словари).
+        if content_type is not None:
+            request = getattr(self.factory, method)(
+                path, data=data or {}, content_type=content_type,
+            )
+        else:
+            request = getattr(self.factory, method)(path, data=data or {})
         SessionMiddleware(lambda req: None).process_request(request)
         MessageMiddleware(lambda req: None).process_request(request)
         request.user = user
@@ -9726,3 +9734,357 @@ class AssetViewAccessTests(TestCase):
         with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
             response = self._get(user=user)
         self.assertEqual(response.status_code, 200)
+
+
+class OnboardingServiceTests(TestCase):
+    """ai/services/onboarding.py: контракт флага «wizard просмотрено»."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="wz-user", password="x")
+
+    def test_scope_validation(self):
+        from ai.services.onboarding import scope_name_valid
+        self.assertTrue(scope_name_valid("chat"))
+        self.assertTrue(scope_name_valid("admin_arm_solve"))
+        self.assertFalse(scope_name_valid("nope"))
+        self.assertFalse(scope_name_valid(None))
+
+    def test_no_row_means_show(self):
+        from ai.services.onboarding import should_show_wizard
+        self.assertTrue(should_show_wizard(self.user, "chat"))
+
+    def test_record_then_nag_disappears(self):
+        from ai.services.onboarding import record_wizard_seen, should_show_wizard, WIZARD_VERSION
+        record_wizard_seen(self.user, "chat")
+        self.assertFalse(should_show_wizard(self.user, "chat"))
+        row = AIWizardSeen.objects.get(user=self.user, scope="chat")
+        self.assertEqual(row.version, WIZARD_VERSION)
+
+    def test_record_is_idempotent_single_row(self):
+        from ai.services.onboarding import record_wizard_seen
+        record_wizard_seen(self.user, "chat")
+        record_wizard_seen(self.user, "chat")
+        self.assertEqual(AIWizardSeen.objects.filter(user=self.user).count(), 1)
+
+    def test_unknown_scope_is_not_recorded(self):
+        from ai.services.onboarding import record_wizard_seen
+        record_wizard_seen(self.user, "nope")
+        record_wizard_seen(self.user, None)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_version_bump_resurrects_the_tour(self):
+        from ai.services.onboarding import record_wizard_seen, should_show_wizard
+        record_wizard_seen(self.user, "chat")
+        self.assertFalse(should_show_wizard(self.user, "chat"))
+        with patch("ai.services.onboarding.WIZARD_VERSION", 2):
+            # Содержимое тура обновилось → все видят его заново один раз.
+            self.assertTrue(should_show_wizard(self.user, "chat"))
+            record_wizard_seen(self.user, "chat")
+            self.assertFalse(should_show_wizard(self.user, "chat"))
+        # Записанная версия 2 > актуальной 1 — после отката константы не показываем.
+        self.assertFalse(should_show_wizard(self.user, "chat"))
+
+    def test_anonymous_user_is_never_shown_and_never_recorded(self):
+        from ai.services.onboarding import record_wizard_seen, should_show_wizard
+        anonymous = SimpleNamespace(is_authenticated=False)
+        self.assertFalse(should_show_wizard(anonymous, "chat"))
+        record_wizard_seen(anonymous, "chat")
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+
+class WizardSeenUserEndpointTests(TestCase):
+    """POST /ai/api/wizard-seen/ (пользовательские страницы, ai-wizard.js)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(username="wz-http-user", password="x")
+
+    def _post(self, body, user=None):
+        from ai.views import wizard_seen_view
+
+        request = self.factory.post(
+            "/ai/api/wizard-seen/", data=body, content_type="application/json",
+        )
+        request.user = user if user is not None else self.user
+        request.session = {}
+        request.user_info = {"userId": "wz-http-user"}
+        request.COOKIES = {"userId": "wz-http-user"}
+        return wizard_seen_view(request)
+
+    def test_requires_auth(self):
+        stranger = SimpleNamespace(is_authenticated=False, is_active=True)
+        response = self._post(json.dumps({"scope": "chat"}), user=stranger)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_get_is_405(self):
+        from ai.views import wizard_seen_view
+
+        request = self.factory.get("/ai/api/wizard-seen/")
+        request.user = self.user
+        request.session = {}
+        request.user_info = {"userId": "wz-http-user"}
+        request.COOKIES = {"userId": "wz-http-user"}
+        self.assertEqual(wizard_seen_view(request).status_code, 405)
+
+    def test_unknown_scope_is_400(self):
+        # Валидатор scope общий для обоих эндпоинтов (ai/services/onboarding.py);
+        # «admin» по нему — валидный scope, поэтому тест на явно неизвестный.
+        response = self._post(json.dumps({"scope": "nope"}))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_broken_json_is_400(self):
+        response = self._post(b"{not json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_valid_post_marks_seen_once(self):
+        response = self._post(json.dumps({"scope": "chat"}))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content), {"ok": True})
+        self.assertEqual(
+            AIWizardSeen.objects.get(user=self.user, scope="chat").scope, "chat",
+        )
+        # Повторный POST не плодит строк.
+        self._post(json.dumps({"scope": "chat"}))
+        self.assertEqual(
+            AIWizardSeen.objects.filter(user=self.user, scope="chat").count(), 1,
+        )
+
+
+class WizardSeenAdminEndpointTests(_AdminViewRequestMixin, TestCase):
+    """POST /ai/admin/wizard/seen/ (админка; admin_view-гейты)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+
+    def _pd_user(self):
+        user = self.user_model.objects.create_user(username="wz-pd", password="x")
+        user.groups.add(self.pd_group)
+        return user
+
+    def _post(self, user, body, method="post", path="/ai/admin/wizard/seen/"):
+        from unittest.mock import patch as _patch
+        from ai.admin.onboarding import admin_wizard_seen_view
+
+        request = self._admin_request(
+            user, method=method, path=path, data=body,
+            content_type="application/json" if body else None,
+        )
+        with _patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return admin_wizard_seen_view(request)
+
+    def test_anonymous_is_denied(self):
+        response = self._post(AnonymousUser(), '{"scope": "admin"}')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_get_is_405(self):
+        response = self._post(self._pd_user(), "", method="get")
+        self.assertEqual(response.status_code, 405)
+
+    def test_unknown_scope_is_400(self):
+        response = self._post(self._pd_user(), '{"scope": "nope"}')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_valid_post_marks_seen(self):
+        pd_user = self._pd_user()
+        response = self._post(pd_user, '{"scope": "admin_arm_solve"}')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content), {"ok": True})
+        self.assertTrue(
+            AIWizardSeen.objects.filter(user=pd_user, scope="admin_arm_solve").exists(),
+        )
+
+    def test_plain_user_without_roles_is_403(self):
+        stranger = self.user_model.objects.create_user(username="wz-nobody", password="x")
+        response = self._post(stranger, '{"scope": "admin"}')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_guest_mode_post_is_ok_but_not_recorded(self):
+        from ai.admin.guest_mode import SESSION_KEY
+        from ai.admin.onboarding import admin_wizard_seen_view
+
+        superuser = self.user_model.objects.create_user(
+            username="wz-super", password="x", is_superuser=True,
+        )
+        request = self._admin_request(
+            superuser, method="post", path="/ai/admin/wizard/seen/",
+            data='{"scope": "admin"}', content_type="application/json",
+        )
+        request.session[SESSION_KEY] = True
+        response = admin_wizard_seen_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content), {"ok": True})
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+
+class WizardUserPageContextTests(TestCase):
+    """Рендер страниц юзеров: конфиг тура в json_script + линки wizard-ассетов."""
+
+    def _render(self, view, url, user=None):
+        request = self.factory.get(url)
+        request.user = user if user is not None else self.user
+        request.session = {}
+        request.user_info = {"userId": "wz-context-user"}
+        request.COOKIES = {"userId": "wz-context-user"}
+        # CSRF_COOKIE не задаём: get_token(request) сам сгенерирует свежий
+        # токен (свой алфавит маскировки — произвольная строка не годится).
+        with patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)), \
+             patch("ai.views.get_available_model_options", return_value=[]):
+            response = view(request)
+        return response.content.decode("utf-8")
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(
+            username="wz-context-user", password="x",
+        )
+
+    def test_chat_page_contains_wizard_config_and_assets(self):
+        html = self._render(chat_view, "/ai/chat/")
+        self.assertIn('id="ai-wizard-config"', html)
+        self.assertIn('"scope": "chat"', html)
+        self.assertIn("/ai/assets/admin/js/ai-wizard.js", html)
+        self.assertIn("/ai/assets/admin/css/ai-wizard.css", html)
+        self.assertIn("aiDocsTourBtn", html)
+
+    def test_solve_page_wizard_scope(self):
+        from ai.views import decide_task_view
+
+        html = self._render(decide_task_view, "/ai/solve-problem/")
+        self.assertIn('"scope": "solve"', html)
+
+    def test_find_error_page_wizard_scope(self):
+        from ai.views import find_error_view
+
+        html = self._render(find_error_view, "/ai/find-error/")
+        self.assertIn('"scope": "find_error"', html)
+
+    def test_seen_tour_renders_show_false(self):
+        from ai.services.onboarding import record_wizard_seen
+
+        record_wizard_seen(self.user, "chat")
+        html = self._render(chat_view, "/ai/chat/", user=self.user)
+        self.assertIn('"show": false', html)
+
+
+class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
+    """each_context: ai_wizard — scope по пути, роль, гостевой режим, отметка."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+
+    def _context(self, user, path="/ai/admin/", guest=False):
+        from ai.admin.site import ai_admin_site
+
+        request = self._admin_request(user, path=path)
+        if guest:
+            from ai.admin.guest_mode import SESSION_KEY
+            request.session[SESSION_KEY] = True
+        return ai_admin_site.each_context(request)["ai_wizard"]
+
+    def test_dashboard_scope_admin(self):
+        user = self.user_model.objects.create_user(username="wz-ctx-super", password="x", is_superuser=True)
+        ctx = self._context(user)
+        self.assertEqual(ctx["scope"], "admin")
+        self.assertEqual(ctx["role"], "super")
+        self.assertTrue(ctx["show"])
+
+    def test_arm_solve_and_model_status_scopes(self):
+        user = self.user_model.objects.create_user(username="wz-ctx-super", password="x", is_superuser=True)
+        self.assertEqual(self._context(user, path="/ai/admin/arm/solve/")["scope"], "admin_arm_solve")
+        self.assertEqual(self._context(user, path="/ai/admin/arm/models/")["scope"], "admin_model_status")
+
+    def test_pd_role_and_staff_role(self):
+        pd_user = self.user_model.objects.create_user(username="wz-ctx-pd", password="x")
+        pd_user.groups.add(self.pd_group)
+        staff_user = self.user_model.objects.create_user(
+            username="wz-ctx-staff", password="x", is_staff=True,
+        )
+        self.assertEqual(self._context(pd_user)["role"], "pd")
+        self.assertEqual(self._context(staff_user)["role"], "staff")
+
+    def test_guest_mode_suppresses_show(self):
+        superuser = self.user_model.objects.create_user(
+            username="wz-ctx-guest", password="x", is_superuser=True,
+        )
+        ctx = self._context(superuser, guest=True)
+        self.assertFalse(ctx["show"])
+
+    def test_seen_scope_is_suppressed(self):
+        from ai.services.onboarding import record_wizard_seen
+
+        user = self.user_model.objects.create_user(username="wz-ctx-seen", password="x", is_superuser=True)
+        record_wizard_seen(user, "admin")
+        self.assertFalse(self._context(user)["show"])
+        self.assertTrue(self._context(user, path="/ai/admin/arm/solve/")["show"])
+
+
+class WizardAssetAccessTests(TestCase):
+    """asset_view отдаёт новый JS/CSS wizard'а (форма AssetViewAccessTests)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def _get(self, asset_path, cookies=None, user=None):
+        from ai.views import asset_view
+
+        request = self.factory.get(f"/ai/assets/{asset_path}")
+        if cookies:
+            request.COOKIES = cookies
+        if user is not None:
+            request.user = user
+        return asset_view(request, asset_path)
+
+    def test_wizard_js_served_with_user_id_cookie(self):
+        user = get_user_model().objects.create_user(username="wz-asset", password="x")
+        response = self._get(
+            "admin/js/ai-wizard.js",
+            cookies={"userId": "wz-asset"},
+            user=user,
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_wizard_css_served_with_user_id_cookie(self):
+        user = get_user_model().objects.create_user(username="wz-asset", password="x")
+        response = self._get(
+            "admin/css/ai-wizard.css",
+            cookies={"userId": "wz-asset"},
+            user=user,
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_assets_require_external_id(self):
+        user = get_user_model().objects.create_user(username="wz-asset", password="x")
+        self.assertEqual(
+            self._get("admin/js/ai-wizard.js", user=user).status_code, 403,
+        )
+
+
+class DashboardWizardRestartLinkTests(TestCase):
+    """Кнопка повторного показа тура на дашборде админки."""
+
+    def test_dashboard_contains_restart_button(self):
+        from django.template.loader import render_to_string
+
+        html = render_to_string(
+            "admin/ai/index.html",
+            {
+                "user_dl_id": "42",
+                "user_display_name": "Иван Иванов",
+                "user_role_label": "Суперпользователь",
+                "user": SimpleNamespace(),
+                "available_apps": [],
+            },
+        )
+        self.assertIn("data-ai-wizard-restart", html)
