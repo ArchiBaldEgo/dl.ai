@@ -91,21 +91,30 @@ WORKDIR /app/WebDeepseek
 COPY WebDeepseek/package.json WebDeepseek/package-lock.json ./
 # puppeteer 20.9.0 не имеет CLI `puppeteer` — Chromium качает его postinstall (install.js)
 # во время npm ci. Задаём PUPPETEER_CACHE_DIR и прокси, чтобы скачалось в /opt/puppeteer-cache.
+# Локальная сборка (прокси пуст — единое правило «нет прокси → локально»,
+# ai/env_mode.py) НЕ качает Chromium: puppeteer-овский postinstall (install.js)
+# без прокси виснет НАВСЕГДА на мёртвом соединении к Google-CDN (SYN проходит,
+# данных нуль, таймаута в install.js нет — 20.9.0). В prod (прокси прописан)
+# Chromium качается как раньше. Локально пулы :3000/:3001 всё равно офлайн.
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm config set proxy "$NPM_HTTP_PROXY" && \
     npm config set https-proxy "$NPM_HTTPS_PROXY" && \
+    if [ -z "$NPM_HTTP_PROXY" ]; then export PUPPETEER_SKIP_DOWNLOAD=1; fi && \
     PUPPETEER_CACHE_DIR=/opt/puppeteer-cache \
     HTTP_PROXY="$NPM_HTTP_PROXY" HTTPS_PROXY="$NPM_HTTPS_PROXY" \
     npm ci --omit=dev --no-audit --no-fund && \
     mkdir -p /opt/puppeteer-runtime && \
-    cp -r /opt/puppeteer-cache/. /opt/puppeteer-runtime/
+    if [ "$NPM_HTTP_PROXY" != "" ]; then cp -r /opt/puppeteer-cache/. /opt/puppeteer-runtime/; fi
 # Node.js зависимости для Web Kimi bot-пула (WebKimi/) — отдельный install,
 # сервисы независимы (паттерн one-service-per-dir). Зависимости идентичны WebDeepseek.
 WORKDIR /app/WebKimi
 COPY WebKimi/package.json WebKimi/package-lock.json ./
+# Web Kimi: тот же npm-шаг с тем же правилом — без прокси Chromium не качать
+# (см. комментарий к WebDeepseek выше).
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm config set proxy "$NPM_HTTP_PROXY" && \
     npm config set https-proxy "$NPM_HTTPS_PROXY" && \
+    if [ -z "$NPM_HTTP_PROXY" ]; then export PUPPETEER_SKIP_DOWNLOAD=1; fi && \
     PUPPETEER_CACHE_DIR=/opt/puppeteer-cache \
     HTTP_PROXY="$NPM_HTTP_PROXY" HTTPS_PROXY="$NPM_HTTPS_PROXY" \
     npm ci --omit=dev --no-audit --no-fund
@@ -128,9 +137,12 @@ ENV PATH="/opt/venv/bin:$PATH" \
 WORKDIR /app
 EXPOSE 8000 3000 3001
 ENTRYPOINT ["/usr/bin/tini", "--"]
-# AI_BOOTSTRAP_ON_START=1 (локальный .env): миграции + collectstatic на старте —
-# «docker compose up -d --build» достаточно без ручных exec-шагов. В prod флаг
-# не задан → CMD поведением не отличается (миграции — по DEPLOY.md). until-цикл:
-# depends_on дожидается только старта контейнера db, postgres может ещё не
-# принимать соединения; после 30 попыток — громкий exit 1 без маскировки.
-CMD ["bash", "-c", "if [ \"${AI_BOOTSTRAP_ON_START:-0}\" = \"1\" ]; then tries=0; until python manage.py migrate --noinput; do tries=$((tries+1)); [ \"$tries\" -ge 30 ] && { echo 'migrate failed (db not ready?)'; exit 1; }; echo \"db not ready, retry migrate in 2s ($tries/30)\"; sleep 2; done; python manage.py collectstatic --noinput; fi; python manage.py sync_update_log || true; exec node /app/WebDeepseek/api/index.js & exec node /app/WebKimi/api/index.js & exec daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application & wait -n"]
+# Bootstrap на старте: явный AI_BOOTSTRAP_ON_START=1 ИЛИ локальный режим по
+# единому правилу «нет прокси в окружении → локально» (ai/env_mode.py; Python
+# в shell недоступен, поэтому то же правило дублируется инлайном) — миграции +
+# collectstatic на старте, «docker compose up -d --build» достаточно без
+# exec-шагов. С прокси (prod) флаг не задаётся и CMD ведёт себя как прежде
+# (миграции — по DEPLOY.md). until-цикл: depends_on дожидается только старта
+# контейнера db, postgres может ещё не принимать соединения; после 30 попыток —
+# громкий exit 1 без маскировки.
+CMD ["bash", "-c", "if [ \"${AI_BOOTSTRAP_ON_START:-0}\" = \"1\" ] || { [ -z \"${HTTP_PROXY:-}\" ] && [ -z \"${HTTPS_PROXY:-}\" ]; }; then tries=0; until python manage.py migrate --noinput; do tries=$((tries+1)); [ \"$tries\" -ge 30 ] && { echo 'migrate failed (db not ready?)'; exit 1; }; echo \"db not ready, retry migrate in 2s ($tries/30)\"; sleep 2; done; python manage.py collectstatic --noinput; fi; python manage.py sync_update_log || true; exec node /app/WebDeepseek/api/index.js & exec node /app/WebKimi/api/index.js & exec daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application & wait -n"]

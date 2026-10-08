@@ -25,6 +25,7 @@ Django + Channels (ASGI, Daphne). UI and API live under `/ai/...`; доступ 
 - [Инструкция для системного администратора](DOCX.md#инструкция-для-системного-администратора)
 - [Инструкция для суперадмина](DOCX.md#инструкция-для-суперадмина)
 - [Инструкция для разработчика](DOCX.md#инструкция-для-разработчика) / [подробная техническая документация](doc/Документация%20для%20разработчика.md)
+- [Путь новичка: запуск с нуля (WSL2 + Docker)](docs/getting_started.md)
 - [Bot pool (Web DeepSeek)](docs/web_deepseek_bot.md)
 - [Запуск на сервере](DEPLOY.md)
 
@@ -47,123 +48,56 @@ docker compose --env-file .env exec -T web python manage.py shell -c "from ai.mo
 docker compose --env-file .env exec -T web python manage.py shell -c "from django.contrib.auth.models import User; print(*[f'{u.id}: {u.username}' for u in User.objects.order_by('username')], sep='\n')"
 ```
 
-## Локальный запуск (без Docker, WSL-native)
+## Локальный запуск (Docker, один комплект)
 
-> Полный путь «с нуля» для человека без опыта — в [docs/getting_started.md](docs/getting_started.md) (WSL2, вплоть до кнопок). Ниже — краткий рецепт для уже установленной машины.
+> Полный путь «с нуля» для человека без опыта — в [docs/getting_started.md](docs/getting_started.md) (WSL2, вплоть до кнопок). Ниже — краткий рецепт.
 
-Нужны только `Python 3.10+` и существующий `.venv` — Postgres/Redis/DLSID-кука не нужны. `'daphne'` стоит первым в `INSTALLED_APPS`, поэтому `manage.py runserver` обслуживает WebSocket (+static при `DEBUG=1`) наряду с HTTP; prod не затронут (Dockerfile CMD запускает daphne напрямую).
+Один комплект Docker обслуживает и локальный запуск, и прод: отдельных
+override-файлов и локальных флагов не нужно. Режим определяется автоматически
+по единому правилу (`ai/env_mode.py`): **есть прокси в `.env` → prod; прокси
+пуст/отсутствует → локальный запуск**.
 
-1. Создайте `.env.local` (untracked, в git не попадает). Он накладывается **поверх** `.env`: `settings.py` грузит `.env` через `load_dotenv(..., override=False)`, так что экспортированные отсюда значения побеждают, а сам секретный `.env` в шелл сурсить не нужно.
-
-```bash
-DEBUG=1
-AI_DEV_AUTH_BYPASS=1                 # авто-логин dev_admin (суперпользователь) без DLSID
-DB_ENGINE=django.db.backends.sqlite3
-DB_NAME=/mnt/d/GitHub/dlai/local_db.sqlite3
-REDIS_URL=                           # без Redis: LocMemCache
-AI_CHANNEL_LAYER=inmemory            # без Redis-сервера: слой Channels в памяти
-AI_DISABLE_HEALTH_SCHEDULER=1
-AI_WEB_DEEPSEEK_AUTORECOVERY=0       # пулов :3000/:3001 локально нет
-AI_WEB_KIMI_AUTORECOVERY=0
-CSRF_COOKIE_DOMAIN=                  # критично: .env прибивает домен кук к .gsu.by —
-SESSION_COOKIE_DOMAIN=               # на localhost браузер их не сохранит (WS → close 4403)
-SECURE_SSL_REDIRECT=0
-```
-
-2. Загрузите overrides и запустите (`.env` подхватывается кодом сам):
+1. Установите Docker и войдите в группу:
 
 ```bash
-cd /mnt/d/GitHub/dlai
-set -a; source .env.local; set +a
-.venv/bin/python manage.py migrate
-.venv/bin/python manage.py runserver
+sudo apt update && sudo apt install -y docker.io docker-compose
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER" && newgrp docker
 ```
 
-   Забыли сурснуть `.env.local` → молча стартует прод-конфиг (`DEBUG=0` → редирект на dl.gsu.by и всё).
-
-3. Откройте в браузере `http://localhost:8000/ai/chat/` — именно `localhost` (WSL2-форвардинг + `ALLOWED_HOSTS`), не eth0-IP WSL. Вы автоматически залогинены под `dev_admin`; `/ai/admin/` доступен полностью, set-password не нужен.
-
-Ожидаемые локально деградации (это не баги): фичи, требующие живую сессию dl.gsu.by («Реши задачу» через DL, «Тестирование», ARM batch-solve), сообщат «sessionId обязателен» / «Нет DLSID»; модели `Web_DeepSeek`/`Web_Kimi` офлайн (пулы :3000/:3001 не подняты); API-модели ходят через корп-прокси из `.env`.
-
-### Альтернатива — нативный PostgreSQL
-
-Нужны `PostgreSQL 14+`, `psql`:
-
-1. Создайте БД и пользователя в PostgreSQL:
-
-```sql
-CREATE USER dlaibd WITH PASSWORD 'dlaibd';
-CREATE DATABASE dl_ai OWNER dlaibd;
-```
-
-2. Создайте `.env` из шаблона и для запуска без Docker выставьте `DB_HOST=127.0.0.1`:
+2. Создайте `.env` из шаблона и заполните ключи моделей:
 
 ```bash
 cp .env.example .env
+sed -i "s/^SECRET_KEY=$/SECRET_KEY=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')/" .env
 ```
 
-3. Установите зависимости и запустите:
+   В редакторе впишите `OLLAMA_API_KEY` / `OPENROUTER_API_KEY` (запросите у владельца проекта). Строки `HTTP_PROXY=`/`HTTPS_PROXY=` НЕ заполняйте — именно пустые прокси означают «локально». Пустой `.env` из шаблона = локальный режим по умолчанию.
 
-```bash
-python -m venv .venv
-. .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-python manage.py migrate
-python manage.py runserver 0.0.0.0:8000
-```
-
-Приложение будет доступно на `http://127.0.0.1:8000/ai/...`.
-
-## Run (local, Docker, без прокси)
-
-1. Создайте `.env`:
-
-```bash
-cp .env.example .env
-```
-
-2. Убедитесь, что в `.env`:
-- `DB_HOST=db`
-- `DEBUG=1`
-- `HTTP_PROXY`, `HTTPS_PROXY`, `PROXY` пустые (или удалены), если прокси не нужен
-
-3. Для тестирования **без куки DLSID и без dl.gsu.by** добавьте в `.env` флаги
-локального режима (все работают только с пустым prod-`.env`, где их нет):
-
-```bash
-AI_BOOTSTRAP_ON_START=1          # migrate + collectstatic при старте контейнера
-AI_DEV_AUTH_BYPASS=1             # auto-login dev_admin (суперпользователь) без DLSID
-AI_POOL_HEALTHCHECK_DISABLED=1   # healthcheck только Daphne (пулы без seed-логина не ready)
-AI_DISABLE_HEALTH_SCHEDULER=1    # без 04:00 модельного health-скедулера
-```
-
-   затем — одна команда, без ручных exec-шагов:
+3. Запуск одной командой (первая сборка 10–20 минут, последующие быстрее):
 
 ```bash
 docker compose up -d --build
 ```
 
-4. Откройте `http://localhost:8080/ai/chat/` — вы автоматически залогинены
-под `dev_admin` (суперпользователь); `/ai/admin/` доступен полностью.
-DL-функции («Реши задачу», отправка решения) требуют реальной сессии dl.gsu.by —
-локально вернут понятный 401/«Нет DLSID», это штатно.
+4. Откройте `http://localhost:8000/ai/chat/` — вы автоматически залогинены под
+`dev_admin` (суперпользователь); `/ai/admin/` доступен полностью. Через nginx
+тот же сайт: `http://localhost:8080/ai/chat/`.
 
-Без этих флагов — прежний путь (ручные шаги после `up`):
-
-```bash
-docker compose up -d --build
-docker compose exec -T web python manage.py migrate
-docker compose exec -T web python manage.py collectstatic --noinput
-docker compose exec -T web python manage.py sync_update_log
-```
-
-Остановка:
+Остановить / посмотреть логи:
 
 ```bash
 docker compose down
+docker compose logs -f web
 ```
 
-По умолчанию nginx доступен на `http://localhost:8080/ai/...`.
+Ожидаемые локально деградации (это не баги): фичи, требующие живой сессии
+dl.gsu.by («Реши задачу» через DL, «Тестирование», ARM batch-solve), сообщат
+«sessionId обязателен» / «Нет DLSID»; модели `Web_DeepSeek`/`Web_Kimi` офлайн
+(пулы требуют seed-логина, см. [docs/web_deepseek_bot.md](docs/web_deepseek_bot.md)).
+
+**Prod** — тот же `docker compose up -d --build` на сервере, где в `.env`
+прописан корпоративный прокси: миграции делаются по [DEPLOY.md](DEPLOY.md).
 
 ## Run (production)
 

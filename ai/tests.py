@@ -9177,3 +9177,45 @@ class RequestLogDetailJsonTests(TestCase):
     def test_missing_log_404(self):
         resp = self._get(self.admin, log_id=999999)
         self.assertEqual(resp.status_code, 404)
+
+
+class AssetViewAccessTests(TestCase):
+    """asset_view (/ai/assets/): prod требует внешний id (user_info / userId-cookie);
+    dev-bypass (DEBUG + AI_DEV_AUTH_BYPASS) — достаточно валидной Django-сессии.
+
+    Регрессия: /ai/assets/ — skip-путь ExternalAuthMiddleware, request.user_info
+    на нём не заполняется, поэтому локально (вне dl.gsu.by, кук userId/DLID нет)
+    каждый статический файл отдавал 403 — «страница работает, но нет стилей».
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def _get(self, cookies=None, user=None):
+        from ai.views import asset_view
+
+        request = self.factory.get("/ai/assets/admin/css/ai.css")
+        if cookies:
+            request.COOKIES = cookies
+        if user is not None:
+            request.user = user
+        return asset_view(request, "admin/css/ai.css")
+
+    def test_anonymous_is_403(self):
+        self.assertEqual(self._get().status_code, 403)
+
+    def test_authenticated_without_external_id_is_403_in_prod_mode(self):
+        user = get_user_model().objects.create_user(username="plain", password="x")
+        self.assertEqual(self._get(user=user).status_code, 403)
+
+    def test_authenticated_with_user_id_cookie_is_200(self):
+        user = get_user_model().objects.create_user(username="plain", password="x")
+        response = self._get(cookies={"userId": "plain"}, user=user)
+        self.assertEqual(response.status_code, 200)
+
+    @override_settings(DEBUG=True)
+    def test_authenticated_dev_bypass_is_200_without_external_id(self):
+        user = get_user_model().objects.create_user(username="dev", password="x")
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            response = self._get(user=user)
+        self.assertEqual(response.status_code, 200)

@@ -47,6 +47,7 @@ from .auth_backends import (
     normalize_external_user_id,
 )
 from .constants import PROMPT_DEVELOPER_GROUP
+from .middleware import _dev_bypass_enabled
 from .services.auth import get_user_identity_for_log
 from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
 from .dl_api_client import (
@@ -247,6 +248,13 @@ def _has_page_access(request):
         return False
     if getattr(user, "is_active", True) is False:
         return False
+    # Dev-bypass (DEBUG-only): /ai/assets/ и /health пропускаются middleware
+    # как skip-пути, поэтому request.user_info там никогда не заполняется,
+    # а кук userId/DLID (фолбэк ниже) вне dl.gsu.by не существует — локальный
+    # запрос с валидной сессией получал 403. В prod путь недостижим:
+    # _dev_bypass_enabled() обязан DEBUG.
+    if _dev_bypass_enabled():
+        return True
     return bool(get_external_user_id_from_request(request))
 
 

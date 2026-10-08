@@ -15,6 +15,14 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
+# Режим запуска (прод/локально) определяется НАЛИЧИЕМ ПРОКСИ в окружении —
+# единое правило из ai/env_mode.py (есть прокси в .env → prod: DEBUG=0, куки
+# домена, проверка пулов; прокси пуст → локально: dev-удобства). Явные значения
+# в .env сильнее деривации: setdefault применяется до чтения конфигов ниже
+# (DEBUG, AI_* флаги), так что перекрыть деривацией заданное место не сможет.
+from ai.env_mode import apply_local_mode_defaults, is_local_mode  # noqa: E402
+apply_local_mode_defaults()
+
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
@@ -43,7 +51,13 @@ def _env_csv(name: str, default: list[str]) -> list[str]:
 
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = _env_bool("DEBUG", default=False)
+# Явный непустой DEBUG в окружении всегда сильнее; пустой или незаданный — по
+# единому правилу «есть прокси → prod (False), нет прокси → локально (True)».
+_debug_raw = os.getenv("DEBUG", "").strip()
+if _debug_raw:
+    DEBUG = _debug_raw.lower() in {"1", "true", "yes", "y", "on"}
+else:
+    DEBUG = is_local_mode()
 
 ALLOWED_HOSTS = _env_csv(
     "ALLOWED_HOSTS",
@@ -128,23 +142,16 @@ else:
         }
     }
 
-# Channels layer: Redis for production (multi-worker), InMemory for dev.
-# AI_CHANNEL_LAYER=inmemory — явный opt-in для локального запуска без
-# Redis-сервера (иначе при установленном channels_redis слой втыкается
-# в redis://localhost:6379 и чат по WS падает). Unset → поведение как раньше.
-if os.getenv("AI_CHANNEL_LAYER", "").strip().lower() == "inmemory":
+# Channels layer: Redis обязателен (prod — много воркеров; стек compose содержит
+# сервис redis). NOTE: channels_redis must be installed in the Docker image.
+# If the package is missing, fall back to InMemory to keep the app running.
+try:
+    import channels_redis  # noqa: F401
+    _CHANNELS_BACKEND = "channels_redis.core.RedisChannelLayer"
+    _CHANNELS_CONFIG = {"hosts": [REDIS_URL]} if REDIS_URL else {}
+except ImportError:
     _CHANNELS_BACKEND = "channels.layers.InMemoryChannelLayer"
     _CHANNELS_CONFIG = {}
-else:
-    # NOTE: channels_redis must be installed in the Docker image. If the package
-    # is missing, fall back to InMemory to keep the app running.
-    try:
-        import channels_redis  # noqa: F401
-        _CHANNELS_BACKEND = "channels_redis.core.RedisChannelLayer"
-        _CHANNELS_CONFIG = {"hosts": [REDIS_URL]} if REDIS_URL else {}
-    except ImportError:
-        _CHANNELS_BACKEND = "channels.layers.InMemoryChannelLayer"
-        _CHANNELS_CONFIG = {}
 
 CHANNEL_LAYERS = {
     "default": {
