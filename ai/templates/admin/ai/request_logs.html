@@ -1,382 +1,28 @@
 {% extends "admin/base_site.html" %}
 
 {% block content %}
-<style>
-  .ai-logs-wrap { max-width: 100%; }
-  .ai-logs-filters {
-    display: flex; flex-wrap: wrap; gap: 12px;
-    align-items: flex-end; margin-bottom: 16px;
-  }
-  .ai-logs-filters .filter-field { display: flex; flex-direction: column; gap: 4px; }
-  .ai-logs-filters label { font-weight: 600; font-size: 12px; }
-  .ai-logs-filters input, .ai-logs-filters select {
-    padding: 6px 8px; border: 1px solid var(--border-color);
-    border-radius: 4px; background: var(--body-bg); color: var(--body-fg);
-  }
-  .ai-logs-table { width: 100%; border-collapse: collapse; }
-  .ai-logs-table th, .ai-logs-table td {
-    border: 1px solid var(--hairline-color); padding: 8px 10px;
-    text-align: left; vertical-align: top;
-  }
-  .ai-logs-table th { background: var(--darkened-bg); }
-  .ai-logs-status-success { color: #067647; font-weight: 600; }
-  .ai-logs-status-error { color: #b42318; font-weight: 600; }
-  .ai-logs-paginator {
-    margin-top: 16px; display: flex; gap: 8px;
-    align-items: center; flex-wrap: wrap;
-  }
-  .ai-logs-empty {
-    padding: 24px; border: 1px dashed var(--hairline-color);
-    border-radius: 6px; text-align: center; color: var(--body-quiet-color);
-  }
-  .ai-log-row { cursor: pointer; }
-  .ai-log-row:hover { background: var(--selected-row); }
-  .ai-log-pin-cell { white-space: nowrap; text-align: center; }
-  .ai-log-pin-btn {
-    background: none; border: 1px solid var(--hairline-color); border-radius: 4px;
-    cursor: pointer; font-size: 15px; line-height: 1; padding: 3px 7px;
-    color: var(--body-quiet-color);
-  }
-  .ai-log-pin-btn:hover:not(:disabled) { border-color: var(--link-fg); color: var(--link-fg); }
-  .ai-log-pin-btn:disabled { opacity: 0.45; cursor: not-allowed; }
-  .ai-log-pin-btn-active { color: #d97706; border-color: #d97706; }
-  .ai-log-pin-btn.busy { opacity: 0.6; pointer-events: none; }
-  .ai-log-task-link {
-    background: none; border: none; padding: 0;
-    color: var(--link-fg); cursor: pointer;
-    text-decoration: underline; text-decoration-style: dotted;
-    text-decoration-color: var(--body-quiet-color); font: inherit;
-  }
-  .ai-log-task-link:hover { text-decoration-style: solid; }
+{% load static %}
+<link rel="stylesheet" href="{% static 'admin/ai/request_logs/index.css' %}">
+<script src="{% static 'admin/ai/request_logs/index.js' %}"></script>
 
-  /* === Модалка текста задачи === */
-  .ai-task-modal {
-    display: none; position: fixed; inset: 0; z-index: 1000;
-    background: rgba(0, 0, 0, 0.45);
-    align-items: center; justify-content: center;
-  }
-  .ai-task-modal.open { display: flex; }
-  .ai-task-modal-dialog {
-    background: var(--body-bg); color: var(--body-fg);
-    border: 1px solid var(--border-color); border-radius: 8px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-    width: min(760px, 92vw); max-height: 86vh; display: flex;
-    flex-direction: column; overflow: hidden;
-  }
-  .ai-task-modal-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 16px; border-bottom: 1px solid var(--hairline-color);
-  }
-  .ai-task-modal-header h2 { margin: 0; font-size: 16px; font-weight: 700; }
-  .ai-task-modal-close {
-    background: none; border: none; font-size: 22px; line-height: 1;
-    cursor: pointer; color: var(--body-quiet-color); padding: 0 4px;
-  }
-  .ai-task-modal-close:hover { color: var(--body-fg); }
-  .ai-task-modal-body {
-    padding: 16px; overflow: auto;
-  }
-  .ai-task-modal-body pre {
-    margin: 0; white-space: pre-wrap; word-wrap: break-word;
-    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-    font-size: 13px; line-height: 1.45;
-  }
-  .ai-task-modal-status {
-    padding: 12px 16px; color: var(--body-quiet-color); font-size: 13px;
-  }
-  .ai-task-modal-status.error { color: #b42318; }
-
-  /* === Аккордеон-раскрытие записи === */
-  .ai-log-detail-row { display: none; }
-  .ai-log-detail-row.open { display: table-row; }
-  .ai-log-detail-cell {
-    padding: 0 !important;
-    border-left: 3px solid var(--hairline-color);
-    background: var(--darkened-bg);
-  }
-  .ai-log-detail-content {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0;
-    padding: 12px 16px;
-  }
-  .ai-log-detail-section {
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--hairline-color);
-  }
-  .ai-log-detail-section h4 {
-    margin: 0 0 6px 0; font-size: 12px; font-weight: 700;
-    color: var(--body-quiet-color); text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-  .ai-log-detail-section pre {
-    margin: 0; white-space: pre-wrap; word-wrap: break-word;
-    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-    font-size: 12px; line-height: 1.4; max-height: 300px; overflow: auto;
-  }
-  .ai-log-detail-section .ai-log-error-text { color: #b42318; }
-  .ai-log-detail-meta {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 4px 16px;
-    font-size: 12px;
-  }
-  .ai-log-detail-meta div { padding: 2px 0; }
-  .ai-log-detail-meta strong { color: var(--body-quiet-color); }
-  .ai-log-detail-actions {
-    grid-column: 1 / -1;
-    padding: 8px 12px;
-    display: flex; gap: 8px; flex-wrap: wrap;
-    border-top: 2px solid var(--hairline-color);
-  }
-  .ai-log-detail-actions form { display: inline; }
-  .ai-log-detail-actions button {
-    padding: 4px 12px; font-size: 12px; cursor: pointer;
-    border: 1px solid var(--border-color); border-radius: 4px;
-    background: var(--body-bg); color: var(--body-fg);
-  }
-  .ai-log-detail-actions button:hover { background: var(--selected-row); }
-  .ai-log-detail-actions .resend-btn { border-color: #4a90d9; color: #4a90d9; }
-  .ai-log-detail-actions .resend-btn:hover { background: #4a90d9; color: #fff; }
-
-  @media (max-width: 800px) {
-    .ai-log-detail-content { grid-template-columns: 1fr; }
-  }
-</style>
-
-<script>
-  const FILTER_KEY = 'ai_logs_filters';
-  const FILTER_FIELDS = ['q', 'id', 'status', 'mode', 'model', 'user', 'task', 'date_from', 'date_to'];
-  // DOM id suffix per filter name (most are 'id_<name>'; the record-id field
-  // uses 'id_record_id' to avoid the awkward 'id_id').
-  const FILTER_DOM_ID = { id: 'id_record_id' };
-  const domIdFor = (name) => FILTER_DOM_ID[name] || ('id_' + name);
-
-  // Restore filters from localStorage on page load (unless a hard reset was requested).
-  document.addEventListener('DOMContentLoaded', function () {
-    const params = new URLSearchParams(window.location.search);
-
-    // Explicit "Сбросить" → drop saved filters and load clean. Without this the
-    // localStorage auto-restore below would immediately re-apply the saved filters
-    // right after the reset link navigated to a clean URL.
-    if (params.get('reset')) {
-      localStorage.removeItem(FILTER_KEY);
-      return;
-    }
-
-    const hasFilters = FILTER_FIELDS.some(f => params.has(f) && params.get(f));
-    if (!hasFilters) {
-      try {
-        const saved = JSON.parse(localStorage.getItem(FILTER_KEY) || '{}');
-        let restored = false;
-        FILTER_FIELDS.forEach(function (name) {
-          const el = document.getElementById(domIdFor(name));
-          if (el && saved[name]) { el.value = saved[name]; restored = true; }
-        });
-        if (restored) {
-          document.querySelector('.ai-logs-filters').submit();
-          return;
-        }
-      } catch (e) {}
-    }
-    const form = document.querySelector('.ai-logs-filters');
-    if (form) {
-      form.addEventListener('submit', function () {
-        const data = {};
-        FILTER_FIELDS.forEach(function (name) {
-          const el = document.getElementById(domIdFor(name));
-          if (el) data[name] = el.value;
-        });
-        localStorage.setItem(FILTER_KEY, JSON.stringify(data));
-      });
-    }
-  });
-
-  // Accordion toggle + task-text modal.
-  // Разметка модалки находится НИЖЕ этого <script> в шаблоне, поэтому поиск
-  // элементов нужно делать после разбора DOM — иначе getElementById вернёт null,
-  // openModal молча выйдет и клик по задаче ничего не сделает.
-  document.addEventListener('DOMContentLoaded', function () {
-    const modal = document.getElementById('aiTaskModal');
-    const modalTitle = document.getElementById('aiTaskModalTitle');
-    const modalBody = document.getElementById('aiTaskModalBody');
-    const modalStatus = document.getElementById('aiTaskModalStatus');
-
-    function openModal(nodeId) {
-      if (!modal) return;
-      modal.classList.add('open');
-      if (modalTitle) modalTitle.textContent = 'Задача #' + nodeId;
-      if (modalBody) modalBody.textContent = '';
-      if (modalStatus) {
-        modalStatus.textContent = 'Загрузка условия задачи…';
-        modalStatus.classList.remove('error');
-      }
-      fetch('/ai/admin/ai/airequestlog/task-text/?node_id=' + encodeURIComponent(nodeId))
-        .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, d: d}; }); })
-        .then(function (res) {
-          const d = res.d || {};
-          if (d.ok) {
-            if (modalTitle) modalTitle.textContent = d.name || ('Задача #' + nodeId);
-            // Security: statement may contain HTML/think-blocks — never innerHTML.
-            if (modalBody) modalBody.textContent = d.statement || '';
-            if (modalStatus) modalStatus.textContent = d.source === 'dl'
-              ? 'Из DL (live)' : 'Из локального кэша';
-          } else {
-            if (modalBody) modalBody.textContent = '';
-            if (modalStatus) {
-              modalStatus.textContent = d.error || 'Не удалось загрузить условие';
-              modalStatus.classList.add('error');
-            }
-          }
-        })
-        .catch(function () {
-          if (modalStatus) {
-            modalStatus.textContent = 'Сетевая ошибка при загрузке условия';
-            modalStatus.classList.add('error');
-          }
-        });
-    }
-
-    function closeModal() {
-      if (modal) modal.classList.remove('open');
-    }
-
-    document.addEventListener('click', function (event) {
-      // Task-text modal trigger.
-      const taskLink = event.target.closest('.ai-log-task-link');
-      if (taskLink) {
-        event.stopPropagation();
-        event.preventDefault();
-        openModal(taskLink.dataset.taskNode);
-        return;
-      }
-      if (modal && event.target === modal) { closeModal(); return; }
-      if (event.target.closest('.ai-task-modal-close')) { closeModal(); return; }
-
-      // Accordion toggle — click on row to expand/collapse detail.
-      const row = event.target.closest('.ai-log-row');
-      if (!row) return;
-      if (event.target.tagName === 'A') return;  // don't toggle on links
-      if (event.target.tagName === 'BUTTON') return;  // don't toggle on the task button
-      if (event.target.closest('.ai-log-detail-row')) return;  // don't toggle from detail
-
-      const detailRow = row.nextElementSibling;
-      if (!detailRow || !detailRow.classList.contains('ai-log-detail-row')) return;
-
-      const isOpen = detailRow.classList.contains('open');
-      document.querySelectorAll('.ai-log-detail-row.open').forEach(function (r) {
-        r.classList.remove('open');
-      });
-      if (!isOpen) {
-        detailRow.classList.add('open');
-      }
-    });
-
-    document.addEventListener('keydown', function (event) {
-      if (event.key === 'Escape') closeModal();
-    });
-
-    // Перезапуск batch-solve прогона из строки журнала: rerun-arm — JSON
-    // endpoint, поэтому POST идёт через fetch, затем переход на страницу
-    // нового прогона (как в детали записи).
-    document.querySelectorAll('.ai-batch-rerun-form').forEach(function (form) {
-      form.addEventListener('submit', function (event) {
-        event.preventDefault();
-        const statusEl = form.querySelector('.ai-batch-rerun-status');
-        const btn = form.querySelector('button[type="submit"]');
-        const csrfInput = form.querySelector('input[name="csrfmiddlewaretoken"]');
-        btn.disabled = true;
-        btn.textContent = 'Отправка...';
-        statusEl.textContent = '';
-        // getAttribute, а НЕ form.action: именованное поле формы с тем же именем
-        // затенило бы свойство DOM (как в pdForm с <input name="action">).
-        fetch(form.getAttribute('action'), {
-          method: 'POST',
-          headers: {
-            'X-CSRFToken': (csrfInput && csrfInput.value) || '',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({}),
-          credentials: 'same-origin',
-        })
-          .then(function (resp) { return resp.json(); })
-          .then(function (data) {
-            if (data.run_id) {
-              statusEl.textContent = 'Перезапуск ARM...';
-              window.location.href = '/ai/admin/arm/solve/?run_id=' + encodeURIComponent(data.run_id);
-            } else {
-              btn.disabled = false;
-              btn.textContent = '↻ Повторить запрос';
-              statusEl.textContent = 'Ошибка: ' + (data.error || 'Неизвестная ошибка');
-            }
-          })
-          .catch(function (err) {
-            btn.disabled = false;
-            btn.textContent = '↻ Повторить запрос';
-            statusEl.textContent = 'Сетевая ошибка: ' + err.message;
-          });
-      });
-    });
-
-    // ★ Закрепить/открепить batch-прогон из журнала (POST toggle,
-    // ai/admin/pinned.py). Кнопка вне форм — CSRF берём из скрытых input-ов
-    // страницы (rerun-формы), с фолбэком на куку csrftoken.
-    function pinCsrfToken() {
-      var input = document.querySelector('input[name="csrfmiddlewaretoken"]');
-      if (input && input.value) return input.value;
-      var m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
-      return m ? decodeURIComponent(m[1]) : '';
-    }
-    document.querySelectorAll('.ai-log-pin-btn').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        if (btn.disabled || btn.classList.contains('busy')) return;
-        btn.classList.add('busy');
-        fetch(btn.getAttribute('data-pin-url'), {
-          method: 'POST',
-          headers: { 'X-CSRFToken': pinCsrfToken(), 'X-Requested-With': 'XMLHttpRequest' },
-          credentials: 'same-origin',
-        })
-          .then(function (resp) {
-            return resp.json().catch(function () { throw new Error('HTTP ' + resp.status); });
-          })
-          .then(function (data) {
-            if (!data.ok) { throw new Error(data.message || 'Не удалось изменить закрепление'); }
-            btn.classList.toggle('ai-log-pin-btn-active', data.pinned);
-            btn.textContent = data.pinned ? '★' : '☆';
-            btn.title = data.pinned
-              ? 'Убрать из «Закреплённых»'
-              : 'Закрепить в «Закреплённых пакетных решениях»';
-          })
-          .catch(function (err) {
-            alert('Закрепление: ' + err.message);
-          })
-          .finally(function () { btn.classList.remove('busy'); });
-      });
-    });
-  });
-</script>
 
 <div class="ai-logs-wrap">
   {% include "admin/ai/_ai_back_nav.html" %}
 
   <form method="get" class="ai-logs-filters">
+
     <div class="filter-field">
       <label for="id_q">Поиск по журналу</label>
       <input id="id_q" type="text" name="q" value="{{ filters.q }}" placeholder="Текст запроса/ответа, промпт, тема…"{% if request.GET.focus %} autofocus{% endif %}>
     </div>
+    
+    {% if not own_logs_only %}
     <div class="filter-field">
-      <label for="id_record_id">ID записи</label>
-      <input id="id_record_id" type="text" name="id" value="{{ filters.id }}" placeholder="напр. 12345">
+      <label for="id_user">Пользователь</label>
+      <input id="id_user" type="text" name="user" value="{{ filters.user }}" placeholder="ID, логин или ФИО">
     </div>
-    <div class="filter-field">
-      <label for="id_status">Статус</label>
-      <select id="id_status" name="status">
-        <option value="">Все</option>
-        {% for key, label in status_choices %}
-          <option value="{{ key }}" {% if filters.status == key %}selected{% endif %}>{{ label }}</option>
-        {% endfor %}
-      </select>
-    </div>
+    {% endif %}
+    
     <div class="filter-field">
       <label for="id_mode">Режим</label>
       <select id="id_mode" name="mode">
@@ -386,6 +32,7 @@
         {% endfor %}
       </select>
     </div>
+
     <div class="filter-field">
       <label for="id_model">Модель</label>
       <select id="id_model" name="model">
@@ -395,21 +42,7 @@
         {% endfor %}
       </select>
     </div>
-    {% if not own_logs_only %}
-    <div class="filter-field">
-      <label for="id_user">Пользователь</label>
-      <input id="id_user" type="text" name="user" value="{{ filters.user }}" placeholder="ID, логин или ФИО">
-    </div>
-    {% endif %}
-    <div class="filter-field">
-      <label for="id_task">Задача</label>
-      <select id="id_task" name="task">
-        <option value="">Все</option>
-        {% for tc in task_choices %}
-          <option value="{{ tc.node_id }}" {% if filters.task|stringformat:"s" == tc.node_id|stringformat:"s" %}selected{% endif %}>{{ tc.name }}</option>
-        {% endfor %}
-      </select>
-    </div>
+
     <div class="filter-field">
       <label for="id_date_from">С</label>
       <input id="id_date_from" type="date" name="date_from" value="{{ filters.date_from }}">
@@ -418,12 +51,14 @@
       <label for="id_date_to">По</label>
       <input id="id_date_to" type="date" name="date_to" value="{{ filters.date_to }}">
     </div>
+
     <div class="filter-field">
-      <button type="submit" class="default">Фильтровать</button>
-      <a class="button" href="{{ request.path }}?reset=1">Сбросить</a>
-      <a class="button" href="/ai/admin/ai/airequestlog/daily-report/"
+      <button type="submit" class="button" id="update_button">Обновить</button>
+      <a class="button" href="{{ request.path }}?reset=1">Сбросить фильтры</a>
+      <a class="button" href="/ai/admin/ai/request_logs/daily-report/"
          title="Студенты × запросы за сегодня (00:00–23:59 МСК)">Дневной отчёт →</a>
     </div>
+
   </form>
 
   {% load tz %}
@@ -432,18 +67,16 @@
     <table class="ai-logs-table">
       <thead>
         <tr>
-          <th>ID</th>
-          <th>Источник</th>
+          <th>Кто отправил</th>
           <th>Отправлен</th>
           <th>Получен</th>
-          <th>Кто отправлял</th>
+          <th>Режим</th>
           <th>Язык</th>
           <th>Тема</th>
           <th>Препромпт</th>
           <th>Модель</th>
           <th>Статус</th>
-          <th>Режим</th>
-          <th>с</th>
+          <th>С</th>
           <th title="Закрепить завершённый пакетный прогон">★</th>
         </tr>
       </thead>
@@ -550,7 +183,7 @@
 
                 {% if batch %}
                   {# Для batch-строк текст запроса и ответ модели не отображаем (ТЗ); #}
-                  {# подробные результаты — в деталях записи (/airequestlog/<id>/). #}
+                  {# подробные результаты — в деталях записи (/request_logs/<id>/). #}
                   <div class="ai-log-detail-section">
                     <h4>Прогон</h4>
                     <div class="ai-log-detail-meta">

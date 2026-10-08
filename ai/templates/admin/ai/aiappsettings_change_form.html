@@ -25,7 +25,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
 
   {# Дневной отчёт журнала — под вкл/выкл приложения, над таблицей прогонов. #}
   <div class="ai-daily-report-bar">
-    <a class="button" href="/ai/admin/ai/airequestlog/daily-report/"
+    <a class="button" href="/ai/admin/ai/request_logs/daily-report/"
        title="Студенты × запросы за сегодня (00:00–23:59 МСК)">Дневной отчёт →</a>
   </div>
 
@@ -133,7 +133,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
             <tbody>
               {% timezone moscow_tz %}
               {% for row in recent_logs %}
-                <tr class="ai-recent-log-row" data-log-id="{{ row.id }}" data-detail-url="/ai/admin/ai/airequestlog/{{ row.id }}/detail-json/">
+                <tr class="ai-recent-log-row" data-log-id="{{ row.id }}" data-detail-url="/ai/admin/ai/request_logs/{{ row.id }}/detail-json/">
                   <td><a href="{{ row.detail_url }}">{{ row.id }}</a></td>
                   <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
                   <td>

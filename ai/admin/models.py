@@ -731,7 +731,7 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                 "prompt_name": s.prompt_name or "—",
                 "user": s.external_user_id or "—",
                 "times_used": s.times_used,
-                "log_url": f"/ai/admin/ai/airequestlog/{s.test_log_id}/" if s.test_log_id else "",
+                "log_url": f"/ai/admin/ai/request_logs/{s.test_log_id}/" if s.test_log_id else "",
             })
         response.context_data["sol_rows"] = rows
         return response

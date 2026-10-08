@@ -158,8 +158,8 @@
       const logMessage = btn.dataset.message || '';
       const isArmBatch = source === 'arm' && (mode === 'batch_solve' || mode === 'solve') && logMessage.indexOf('Batch solve run') !== -1;
       const endpoint = isArmBatch
-        ? '/ai/admin/ai/airequestlog/' + logId + '/rerun-arm/'
-        : '/ai/admin/ai/airequestlog/' + logId + '/resend/';
+        ? '/ai/admin/ai/request_logs/' + logId + '/rerun-arm/'
+        : '/ai/admin/ai/request_logs/' + logId + '/resend/';
 
       // Disable button and show loading state.
       btn.disabled = true;
@@ -209,7 +209,7 @@
             statusDiv.textContent = 'Запрос успешно отправлен. ';
             if (data.new_log_id) {
               const link = document.createElement('a');
-              link.href = '/ai/admin/ai/airequestlog/' + data.new_log_id + '/';
+              link.href = '/ai/admin/ai/request_logs/' + data.new_log_id + '/';
               link.textContent = 'Открыть новый лог →';
               link.style.marginLeft = '8px';
               statusDiv.appendChild(link);
@@ -220,7 +220,7 @@
           statusDiv.textContent = 'Ошибка: ' + (data.error || 'Неизвестная ошибка');
           if (data.new_log_id) {
             const link = document.createElement('a');
-            link.href = '/ai/admin/ai/airequestlog/' + data.new_log_id + '/';
+            link.href = '/ai/admin/ai/request_logs/' + data.new_log_id + '/';
             link.textContent = 'Открыть лог ошибки →';
             link.style.marginLeft = '8px';
             statusDiv.appendChild(link);

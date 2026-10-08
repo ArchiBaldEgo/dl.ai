@@ -2676,6 +2676,401 @@ class ExtractCodeFromResponseTests(SimpleTestCase):
         self.assertEqual(self.extract(text), "")
 
 
+class RerunUnsolvedPairsTests(TestCase):
+    """Попарный перезапуск нерешённых пар со слиянием в тот же прогон.
+
+    Регрессия на «Перезапустить прогон» со полным новым прогоном: было
+    40 реш / 13 не реш → перезапуск 13 пар (задача × модель) → 10 решились →
+    в отчёте 50 реш / 3 не реш. Строки обновляются update_or_create в том же
+    run; финализирующий отчёт строится из всех строк прогона.
+    """
+
+    def setUp(self):
+        from django.utils import timezone as tz
+        from ai.models import AIModelTestResult, AIModelTestRun
+        from ai.models import ProgrammingLanguage, Task, Topic
+
+        self.user = get_user_model().objects.create_user(username="reruner", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=3001, task_id=30001, name="A", statement="Выведи 1",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.t2 = Task.objects.create(
+            node_id=3002, task_id=30002, name="B", statement="Выведи 2",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.started = tz.now()
+        self.run = AIModelTestRun.objects.create(
+            run_id="rerun-target-1",
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            user=self.user,
+            status=AIModelTestRun.STATUS_COMPLETED,
+            started_at=self.started,
+            finished_at=tz.now(),
+            message="Batch solve: 2 задач × 1 моделей",
+            total_models=1,
+            run_params={
+                "node_ids": [self.t1.node_id, self.t2.node_id],
+                "model_keys": ["FakeModel"],
+                "language_id": self.lang.id,
+                "file_extension": ".pas",
+                "dl_test": True,
+                "ui_language": "Русский",
+                "record_stats": False,
+                "save_solutions": False,
+                "run_name": "Контрольный",
+            },
+        )
+        # Пара 1 решена, пара 2 провалилась (код не извлечён) — кандидаты на перезапуск.
+        AIModelTestResult.objects.create(
+            run=self.run, model_key="FakeModel", model_title="FakeModel",
+            task=self.t1, status="ok", verdict="solved",
+            dl_queue_id=1, dl_comment="Все тесты успешно пройдены",
+            file_extension_snapshot=".pas", topic_name_snapshot="Линейные",
+            prog_lang_snapshot="Pascal",
+        )
+        AIModelTestResult.objects.create(
+            run=self.run, model_key="FakeModel", model_title="FakeModel",
+            task=self.t2, status="error", verdict="failed",
+            dl_queue_id=0, dl_comment="Не удалось извлечь код из ответа модели",
+            file_extension_snapshot=".pas", topic_name_snapshot="Линейные",
+            prog_lang_snapshot="Pascal",
+        )
+
+    def test_collect_unsolved_pairs_only_non_solved(self):
+        from ai.arm_runner import collect_unsolved_pairs
+
+        node_ids, pairs_map = collect_unsolved_pairs(self.run)
+        self.assertEqual(node_ids, [self.t2.node_id])
+        self.assertEqual(pairs_map, {self.t2.node_id: {"FakeModel"}})
+
+    def test_start_rerun_rejects_when_running(self):
+        from django.core.cache import cache
+
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+
+        arm_runner.AIModelTestRun.objects.filter(pk=self.run.pk).update(
+            status=AIModelTestRun.STATUS_RUNNING,
+        )
+        new_run_id, error, dropped = arm_runner.start_batch_rerun_pairs(
+            self.run.run_id, self.user.id, "DLSID-1",
+        )
+        self.assertIsNone(new_run_id)
+        self.assertIn("выполняется", error)
+        self.assertEqual(dropped, [])
+
+    def test_start_rerun_rejects_when_all_solved(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestResult
+
+        AIModelTestResult.objects.filter(run=self.run, task=self.t2).update(verdict="solved")
+        new_run_id, error, _dropped = arm_runner.start_batch_rerun_pairs(
+            self.run.run_id, self.user.id, "DLSID-1",
+        )
+        self.assertIsNone(new_run_id)
+        self.assertIn("Все пары решены", error)
+
+    def test_start_rerun_rejects_unknown_run(self):
+        from ai import arm_runner
+
+        new_run_id, error, _dropped = arm_runner.start_batch_rerun_pairs(
+            "no-such-run", self.user.id, "DLSID-1",
+        )
+        self.assertIsNone(new_run_id)
+        self.assertIn("не найден", error)
+
+    def test_rerun_merges_into_same_run(self):
+        """Перезапуск 1 пары: строка обновлена в том же run, отчёт из всех строк."""
+        import time as _t
+        from unittest.mock import patch
+
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        async def fake_handler(messages, conv_id):
+            return ("program r; begin writeln(2); end.", 5)
+
+        ordered_models = [{
+            "key": "FakeModel", "title": "FakeModel",
+            "handler": fake_handler,
+        }]
+        run_id = self.run.run_id
+        now_ts = _t.time()
+        # Pre-seed живой job перезапуска (как в start_batch_rerun_pairs).
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "rerun": True,
+            "status": "running", "error_message": "",
+            "total_models": 1, "total_pairs": 1, "completed_pairs": 0,
+            "completed_models": 0, "current_model_key": "FakeModel",
+            "current_model_title": "FakeModel", "current_task_node_id": "",
+            "current_task_name": "", "results": [], "report": None,
+            "run_name": "Контрольный · перезапуск",
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        dl_ok = lambda sid, node_id, code, ext, **kw: {
+            "verdict": "solved", "comment": "Все тесты успешно пройдены",
+            "submit_error": "", "queue_id": 1, "code_sent": code,
+        }
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", dl_ok):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t2.node_id], ordered_models, self.user.id, "DLSID-1",
+                    ui_language="Русский", dl_test=True,
+                    rerun=True, rerun_pairs={self.t2.node_id: {"FakeModel"}},
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        # Строки НЕ дублируются: update_or_create в тот же run.
+        rows = list(AIModelTestResult.objects.filter(run=run).order_by("task_id"))
+        self.assertEqual(len(rows), 2)
+        by_task = {r.task_id: r for r in rows}
+        # Перезапущенная пара стала solved; решённая строка не тронута.
+        self.assertEqual(by_task[self.t2.id].verdict, "solved")
+        self.assertEqual(by_task[self.t2.id].dl_queue_id, 1)
+        self.assertEqual(by_task[self.t1.id].verdict, "solved")
+        # Отчёт финализирован из всех строк: 2 решено / 0 не решено.
+        self.assertEqual(run.report["solved"], 2)
+        self.assertEqual(run.report["failed"], 0)
+        self.assertEqual(run.report["total_pairs"], 2)
+        # Статус прогона вернулся в completed.
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        self.assertIsNotNone(run.finished_at)
+        # Отсчёт времени «Прогон» — от исходного started_at.
+        self.assertEqual(run.started_at, self.started)
+        # Журнал: отдельная лог-строка перезапуска.
+        self.assertTrue(
+            AIRequestLog.objects.filter(message=f"Batch solve rerun {run_id}").exists(),
+        )
+
+    def test_rerun_snapshot_merges_results(self):
+        """Живой перезапуск в снапшоте — все строки прогона, сводка обновляется."""
+        import time as _t
+
+        from ai import arm_runner
+
+        run_id = self.run.run_id
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "rerun": True,
+            "status": "running", "error_message": "",
+            "total_models": 1, "total_pairs": 1, "completed_pairs": 0,
+            "completed_models": 0, "current_model_key": "FakeModel",
+            "current_model_title": "FakeModel", "current_task_node_id": "",
+            "current_task_name": "", "results": [],
+            "report": None, "run_name": "Контрольный · перезапуск",
+            "created_at_ts": _t.time(), "updated_at_ts": _t.time(),
+        }
+        try:
+            snapshot = arm_runner.get_arm_run_snapshot(run_id, light_results=True)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        # Обе строки видны, сводка — по всем парам прогона.
+        self.assertEqual(len(snapshot["results"]), 2)
+        self.assertEqual(snapshot["report"]["solved"], 1)
+        self.assertEqual(snapshot["report"]["failed"], 1)
+
+
+class RerunLogJournalTests(TestCase):
+    """Лог попарного перезапуска ("Batch solve rerun <hex>") виден журналу.
+
+    Регрессия: воркер перезапуска пишет AIRequestLog с message
+    "Batch solve rerun <run_id>" (не "run"), а весь журнал разбирал run_id
+    только по "Batch solve run <hex>" — детали перезапуска отрисовывались
+    как обычный текст без таблицы, кнопка «Повторить прогон» давала 400,
+    resend отправлял служебное сообщение модели как обычный чат.
+    """
+
+    def setUp(self):
+        from ai.models import AIModelTestRun, AIModelTestResult, Task, ProgrammingLanguage, Topic
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="rerun_log_admin", password="x", email="rl@t.com",
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.lang,
+        )
+        self.task = Task.objects.create(
+            node_id=7301, task_id=73001, name="RL", statement="s",
+            topic=self.topic, programming_language=self.lang,
+            file_extension=".pas",
+        )
+        self.run_id = "d" * 32
+        self.test_run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED,
+            course_id=1450,
+            run_name="Контрольный · перезапуск",
+        )
+        AIModelTestResult.objects.create(
+            run=self.test_run, task=self.task,
+            model_key="FakeModel", model_title="FakeModel",
+            status="ok", verdict="failed",
+            dl_comment="[test 1]: Ошибка компиляции",
+            file_extension_snapshot=".pas",
+            topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+        )
+        self.rerun_log = AIRequestLog.objects.create(
+            user=self.superuser, source="arm", mode="batch_solve",
+            message=f"Batch solve rerun {self.run_id}",
+            status=AIRequestLog.STATUS_ERROR, sent_at=timezone.now(),
+        )
+
+    def test_batch_run_id_matches_run_and_rerun(self):
+        from ai.admin.logs import _batch_run_id_from_log
+        self.assertEqual(
+            _batch_run_id_from_log(self.rerun_log), self.run_id,
+        )
+        run_log = AIRequestLog(message=f"Batch solve run {self.run_id}")
+        self.assertEqual(_batch_run_id_from_log(run_log), self.run_id)
+        # Служебные сообщения прогресса — не run-id.
+        self.assertIsNone(
+            _batch_run_id_from_log(AIRequestLog(message="Batch solve: 2 задач × 1 моделей")),
+        )
+        self.assertIsNone(_batch_run_id_from_log(AIRequestLog(message="")))
+
+    def test_is_batch_solve_log_accepts_rerun(self):
+        from ai.admin.logs import _is_batch_solve_log
+        self.assertTrue(_is_batch_solve_log(self.rerun_log))
+
+    def test_detail_of_rerun_log_shows_results_table(self):
+        from ai.admin.logs import admin_request_log_detail_view
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.rerun_log.id}/")
+        request.user = self.superuser
+        request.session = {}
+        response = admin_request_log_detail_view(request, self.rerun_log.id)
+        self.assertEqual(response.status_code, 200)
+        html = response.render().content.decode()
+        # Таблица результатов (общий partial), как у обычного batch-лога.
+        self.assertTrue(response.context_data["is_batch_log"])
+        self.assertIn("ArmBatchResults.init", html)
+
+    def test_recent_batch_rows_include_rerun_log(self):
+        from ai.admin.logs import build_recent_batch_rows
+        request = self.factory.get("/ai/admin/")
+        request.user = self.superuser
+        rows = build_recent_batch_rows(request, limit=5)
+        log_ids = {r["id"] for r in rows["recent_batch_runs"]}
+        self.assertIn(self.rerun_log.id, log_ids)
+
+    def test_resend_rerun_log_delegates_to_full_rerun(self):
+        """«Повторить запрос» на rerun-логе ведёт в rerun-arm (новый прогон
+        по всем парам), а не в resend одной модели."""
+        from ai.admin import logs as logs_mod
+        request = self.factory.post(f"/ai/admin/ai/request_logs/{self.rerun_log.id}/resend/")
+        request.user = self.superuser
+        request.session = {"external_session_id": "DLSID-1"}
+        with patch(
+            "ai.arm_runner.start_batch_solve_run",
+            return_value=("f" * 32, ""),
+        ) as start_mock:
+            response = logs_mod.resend_request_view(request, self.rerun_log.id)
+        data = json.loads(response.content)
+        # Служебный текст лога ушёл не модели, а в полный перезапуск прогона.
+        self.assertTrue(data["success"])
+        self.assertEqual(data["run_id"], "f" * 32)
+        start_mock.assert_called_once()
+        self.assertEqual(start_mock.call_args.args[0], [self.task.node_id])
+        self.assertEqual(start_mock.call_args.args[1], ["FakeModel"])
+
+    def test_resend_rerun_log_without_run_gives_error(self):
+        """Если прогона уже нет в БД — внятная ошибка, а не resend модели."""
+        from ai.admin import logs as logs_mod
+        self.test_run.delete()
+        request = self.factory.post(f"/ai/admin/ai/airequestlog/{self.rerun_log.id}/resend/")
+        request.user = self.superuser
+        request.session = {"external_session_id": "DLSID-1"}
+        response = logs_mod.resend_request_view(request, self.rerun_log.id)
+        data = json.loads(response.content)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(data["error"], "Прогон ARM не найден в БД")
+
+
+class ArmSolveRerunPairViewTests(TestCase):
+    """POST /ai/admin/arm/solve/rerun-pairs/ — эндпоинт кнопки
+    «Перезапустить нерешённые пары» (день-2026-10-08: кнопка упиралась
+    в 403 CSRF; контракт вью — JSON и понятный message при ошибках)."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="rerun_view_admin", password="x", email="rv@t.com",
+        )
+        self.run = AIModelTestRun.objects.create(
+            run_id="e" * 32,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            user=self.superuser,
+            status=AIModelTestRun.STATUS_COMPLETED,
+        )
+
+    def _view(self, request):
+        from ai.admin.arm import admin_arm_solve_rerun_pairs_view
+        return admin_arm_solve_rerun_pairs_view(request)
+
+    def _post(self, body):
+        request = self.factory.post(
+            "/ai/admin/arm/solve/rerun-pairs/",
+            data=body, content_type="application/json",
+        )
+        request.user = self.superuser
+        request.session = {}
+        return self._view(request)
+
+    def test_get_not_allowed(self):
+        request = self.factory.get("/ai/admin/arm/solve/rerun-pairs/")
+        request.user = self.superuser
+        request.session = {}
+        response = self._view(request)
+        self.assertEqual(response.status_code, 405)
+
+    def test_run_id_required(self):
+        response = self._post(json.dumps({}))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("run_id", json.loads(response.content)["message"])
+
+    def test_unknown_run_gives_friendly_message(self):
+        request = self.factory.post(
+            "/ai/admin/arm/solve/rerun-pairs/",
+            data=json.dumps({"run_id": "0" * 32}), content_type="application/json",
+        )
+        request.user = self.superuser
+        request.session = {"external_session_id": "DLSID-1"}
+        response = self._view(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(json.loads(response.content)["message"], "Прогон не найден")
+
+    def test_running_run_rejected(self):
+        from ai.models import AIModelTestRun
+        AIModelTestRun.objects.filter(pk=self.run.pk).update(
+            status=AIModelTestRun.STATUS_RUNNING,
+        )
+        request = self.factory.post(
+            "/ai/admin/arm/solve/rerun-pairs/",
+            data=json.dumps({"run_id": self.run.run_id}), content_type="application/json",
+        )
+        request.user = self.superuser
+        request.session = {"external_session_id": "DLSID-1"}
+        response = self._view(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("выполняется", json.loads(response.content)["message"])
+
+    def test_success_returns_snapshot_and_message(self):
+        with patch("ai.admin.arm.start_batch_rerun_pairs", return_value=(self.run.run_id, "", ["Web_Gone"])), \
+             patch("ai.admin.arm.get_arm_run_snapshot", return_value={"run_id": self.run.run_id, "status": "running"}):
+            response = self._post(json.dumps({"run_id": self.run.run_id}))
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["run_id"], self.run.run_id)
+        self.assertIn("Web_Gone", data["message"])
+        self.assertEqual(data["run"]["run_id"], self.run.run_id)
+
+
 class BatchRunnerIntegrationTests(TestCase):
     """End-to-end batch solve with mocked handlers + DL sample fetch.
 
@@ -4786,7 +5181,7 @@ class RequestLogXlsxTests(TestCase):
 
         from ai.admin.export import XLSX_CONTENT_TYPE
         from ai.admin.logs import admin_request_log_xlsx_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.log.id}/xlsx/")
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.log.id}/xlsx/")
         request.user = self.superuser
         response = admin_request_log_xlsx_view(request, self.log.id)
         self.assertEqual(response.status_code, 200)
@@ -4826,14 +5221,14 @@ class RequestLogXlsxTests(TestCase):
 
     def test_xlsx_endpoint_non_batch_404(self):
         from ai.admin.logs import admin_request_log_xlsx_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.plain_log.id}/xlsx/")
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.plain_log.id}/xlsx/")
         request.user = self.superuser
         response = admin_request_log_xlsx_view(request, self.plain_log.id)
         self.assertEqual(response.status_code, 404)
 
     def test_xlsx_endpoint_non_staff_403(self):
         from ai.admin.logs import admin_request_log_xlsx_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.log.id}/xlsx/")
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.log.id}/xlsx/")
         request.user = self.normal_user
         response = admin_request_log_xlsx_view(request, self.log.id)
         self.assertEqual(response.status_code, 403)
@@ -6380,7 +6775,7 @@ class LogsDeveloperAccessTests(TestCase):
 
     def test_list_shows_only_own_logs(self):
         from ai.admin.logs import admin_request_logs_view
-        request = self.factory.get("/ai/admin/ai/airequestlog/")
+        request = self.factory.get("/ai/admin/ai/request_logs/")
         request.user = self.developer
         request.session = {}
         response = admin_request_logs_view(request)
@@ -6391,7 +6786,7 @@ class LogsDeveloperAccessTests(TestCase):
 
     def test_foreign_detail_forbidden(self):
         from ai.admin.logs import admin_request_log_detail_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.foreign_log.id}/")
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.foreign_log.id}/")
         request.user = self.developer
         request.session = {}
         response = admin_request_log_detail_view(request, self.foreign_log.id)
@@ -6399,7 +6794,7 @@ class LogsDeveloperAccessTests(TestCase):
 
     def test_own_detail_allowed(self):
         from ai.admin.logs import admin_request_log_detail_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.own_log.id}/")
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.own_log.id}/")
         request.user = self.developer
         request.session = {}
         response = admin_request_log_detail_view(request, self.own_log.id)
@@ -6673,7 +7068,7 @@ class RequestLogSearchTests(TestCase):
 
     def _list(self, params, user=None):
         from ai.admin.logs import admin_request_logs_view
-        request = self.factory.get("/ai/admin/ai/airequestlog/", params)
+        request = self.factory.get("/ai/admin/ai/request_logs/", params)
         request.user = user or self.superuser
         request.session = {}
         response = admin_request_logs_view(request)
@@ -6696,7 +7091,7 @@ class RequestLogSearchTests(TestCase):
     def test_filters_echoed_in_context(self):
         from ai.admin.logs import admin_request_logs_view
         request = self.factory.get(
-            "/ai/admin/ai/airequestlog/", {"q": "тест", "id": "42"},
+            "/ai/admin/ai/request_logs/", {"q": "тест", "id": "42"},
         )
         request.user = self.superuser
         request.session = {}
@@ -6761,7 +7156,7 @@ class BatchLogDetailTemplateTests(TestCase):
 
     def _detail(self, log):
         from ai.admin.logs import admin_request_log_detail_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{log.id}/")
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{log.id}/")
         request.user = self.superuser
         request.session = {}
         response = admin_request_log_detail_view(request, log.id)
@@ -7917,7 +8312,7 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
         row = rows[0]
         self.assertNotIn("snapshot", row)
         self.assertNotIn("json_id", row)
-        self.assertEqual(row["snapshot_url"], f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/")
+        self.assertEqual(row["snapshot_url"], f"/ai/admin/ai/request_logs/{log.id}/batch-snapshot/")
         self.assertEqual(row["run_name"], "Неделя 5")
         # Count-агрегат по результатам прогона (1 задача × 1 модель, solved).
         self.assertEqual(row["total_pairs"], 1)
@@ -7939,7 +8334,7 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
         su = get_user_model().objects.create_user(
             username="snap-su", password="x", is_superuser=True, is_staff=True,
         )
-        url = f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/"
+        url = f"/ai/admin/ai/request_logs/{log.id}/batch-snapshot/"
 
         request = self._admin_request(su, path=url)
         response = admin_batch_snapshot_view(request, log_id=log.id)
@@ -7956,7 +8351,7 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
             source=AIRequestLog.SOURCE_HTTP, mode=AIRequestLog.MODE_CHAT,
             sent_at=timezone.now(), message="привет",
         )
-        request = self._admin_request(su, path=f"/ai/admin/ai/airequestlog/{plain.id}/batch-snapshot/")
+        request = self._admin_request(su, path=f"/ai/admin/ai/request_logs/{plain.id}/batch-snapshot/")
         response = admin_batch_snapshot_view(request, log_id=plain.id)
         self.assertEqual(response.status_code, 404)
 
@@ -8036,7 +8431,7 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
 
     def _report(self, user):
         from ai.admin.logs import admin_daily_report_view
-        request = self._admin_request(user, path="/ai/admin/ai/airequestlog/daily-report/")
+        request = self._admin_request(user, path="/ai/admin/ai/request_logs/daily-report/")
         return admin_daily_report_view(request)
 
     def test_daily_report_aggregates_students(self):
@@ -8900,7 +9295,7 @@ class ArmCourseTreeDbCacheTests(TestCase):
 
 class RequestLogDetailJsonTests(TestCase):
     """Ленивая развёртка подробностей записи журнала на «Настройке ИИ»: JSON
-    GET /ai/admin/ai/airequestlog/<id>/detail-json/ с правами журнала."""
+    GET /ai/admin/ai/request_logs/<id>/detail-json/ с правами журнала."""
 
     def setUp(self):
         from ai.admin.logs import admin_request_log_detail_json_view
