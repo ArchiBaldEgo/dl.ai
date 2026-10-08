@@ -717,9 +717,12 @@ def admin_arm_solve_result_download_view(request, result_id):
     """Скачать извлечённый код модели как файл программы.
 
     Отдаёт ``AIModelTestResult.code`` как ``text/plain`` во вложении. Имя файла —
-    ``arm_<модель><file_extension>`` (расширение из снимка, с ведущей точкой):
-    у одной задачи скачивают решения нескольких моделей, поэтому имя даётся по
-    модели, а не по задаче. Файлы на диске не хранятся — содержимое берётся
+    ``<модель>_<ID узла задачи><file_extension>`` (расширение из снимка, с
+    ведущей точкой): у одной задачи скачивают решения нескольких моделей, пара
+    «модель + задача» делает имя однозначным. ID узла — узкая ссылка на задачу
+    по всему журналу (DL REST API.md). У DL API поле имени файла при отправке
+    решения отсутствует — подписываем единственное, что у нас под контролем,
+    то есть скачивание. Файлы на диске не хранятся — содержимое берётся
     прямо из БД.
     """
     if not can_access_arm(request):
@@ -740,9 +743,17 @@ def admin_arm_solve_result_download_view(request, result_id):
     # точки — «K2.7» — их оставляем). Пустой title и key — fallback на id.
     model_name = (result.model_title or result.model_key or "").strip()
     model_name = re.sub(r"[^\w.]+", "_", model_name).strip("._")
+    # Задача в имя: node_id (ID узла DL — у Task он уникален и обязателен);
+    # в легаси-одиночных прогонах task может быть NULL — тогда «_result_<id>».
+    task_node_id = str(result.task.node_id).strip() if result.task else ""
+    task_node_id = re.sub(r"[^\w.]+", "_", task_node_id).strip("._")
     if not model_name:
-        model_name = f"result_{result_id}"
-    filename = f"arm_{model_name}{ext}"
+        base = f"result_{result_id}"
+    elif not task_node_id:
+        base = f"{model_name}_result_{result_id}"
+    else:
+        base = f"{model_name}_{task_node_id}"
+    filename = f"{base}{ext}"
 
     response = HttpResponse(code, content_type="text/plain; charset=utf-8")
     response["Content-Disposition"] = f'attachment; filename="{filename}"'

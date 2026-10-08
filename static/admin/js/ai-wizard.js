@@ -16,6 +16,12 @@
  *
  * Экспорт: window.AIWizard = { start, stop, isActive }.
  * (window.onload НЕ используем — пользовательские страницы сами его выставляют.)
+ *
+ * v2: автостарт ждёт window.load; отметка «seen» — только по жесту
+ * пользователя (автозакрытие цели флага не сжигает); подсветка — пересечение
+ * цели с вьюпортом (без «сжатия до 60%»); общие шаги юзер-туров (common)
+ * пропускаются, когда сервер сказал basics_seen; общий тур админки — три
+ * ролевых scope'а (admin_pd/admin_staff/admin_super).
  */
 (function () {
     "use strict";
@@ -25,12 +31,20 @@
     var SPOT_PAD = 6;        // «подушка» вокруг подсвеченного элемента
     var POPOVER_GAP = 10;    // зазор между пятном и поповером
     var VIEW_MARGIN = 8;     // гарантированный отступ от краёв окна
+    var SPOT_INSET = 8;      // подсветка цели — уже вьюпорта на этот отступ
+    var MIN_SPOT = 24;       // меньше этого пересечения — пятно не рисуем вообще
     var ARROW_INSET = 20;    // ромб стрелки не прижимается к краям поповера
     var ARROW_SIZE = 12;
-    var BIG_RATIO = 0.6;     // элемент выше 60% окна — подсвечиваем средние 60%
     var RECHECK_MS = 400;    // интервал пере-замера (живой DOM чата/меню)
-    var START_DELAY_MS = 400; // пауза после boot: даём init-кодам страниц отработать
-    var SHEET_QUERY = "(max-width: 640px)";
+    var REMEASURE_MS = 150;  // повторный замер шага: media-запросы по zoom применяются асинхронно
+    var MISSED_TICKS = 3;    // тиков без видимой цели подряд — тур сдаётся
+    var READY_DELAY_MS = 300;  // пауза ПОСЛЕ window.load перед автостартом
+    var MAX_BOOT_WAIT_MS = 3000; // load не пришёл (завис ресурс) — стартуем без него
+    // «Лист» — нижняя карточка на тесном экране; порог совпадает с breakpoint'ом
+    // перестроения панелей чата (ai.css: stack ≤ 768), иначе в полосе 641–768
+    // карточки валятся на вертикальный стек.
+    var SHEET_MAX = 768;
+    var SHEET_QUERY = "(max-width: 768px)";
 
     var POP_SHEET = "ai-wizard-popover--sheet";
     var POP_ENTER = "ai-wizard-popover--enter";
@@ -51,12 +65,53 @@
     var LABEL_SKIP = "Скрыть";
 
     // === Реестр шагов (тексты — константы языка: правятся только здесь) ===
+
+    // Общее ядро туров админки — одинаково для всех прав (pd/staff/super):
+    // приветствие, «Процессы», левое меню, поиск по меню.
+    var ADMIN_CORE = [
+        { sel: "#aiProcessesToggle", title: "Приветствие", text: "Это ты: имя и роль. Рядом счётчик «Процессы» — твои запуски.", pos: "bottom" },
+        { sel: "#aiProcessesMenu", title: "Меню «Процессы»", text: "Здесь видно свои запуски: что идёт и чем закончилось.", pos: "left", onShow: "openProcesses" },
+        { sel: "#toggle-nav-sidebar", title: "Край страницы", text: "Тонкая кнопка у левого края: открывает и закрывает меню разделов.", pos: "right" },
+        { sel: "#nav-sidebar", title: "Меню разделов", text: "Здесь все разделы. Нажми на нужный.", pos: "right", onShow: "openNav" },
+        { sel: "#nav-filter", title: "Поиск по меню", text: "Разделов много? Набери пару букв — останется нужное.", pos: "right", optional: true, onShow: "openNav" }
+    ];
+
+    // Разработчик промптов (есть у всех): документация, свой промпт, пакетное
+    // решение, журнал, закреплённые.
+    var ADMIN_PD_EXTRA = [
+        { sel: '#nav-sidebar a[href="/ai/admin/docs/prompt-developer/"]', title: "Документация", text: "Инструкция для тебя как разработчика промптов.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/prompts/my/"]', title: "Мой препромпт", text: "Здесь ты пишешь и меняешь свои промпты.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/arm/solve/"]', title: "Пакетное решение", text: "Проверка моделей сразу на всех задачах курса.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/ai/airequestlog/"]', title: "Журнал запросов", text: "Видно твои запросы к моделям.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/pinned-runs/"]', title: "Закреплённые", text: "Закреплённые пакетные решения — быстрый доступ к прогонам.", pos: "right", optional: true, onShow: "openNav" }
+    ];
+
+    // Дополнительно staff-админам: настройки приложения, модели, обновления.
+    var ADMIN_STAFF_EXTRA = [
+        { sel: '#nav-sidebar a[href="/ai/admin/ai/aiappsettings/"]', title: "Настройка ИИ-приложения", text: "Главные настройки. Только для админов.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/arm/models/"]', title: "Состояние моделей", text: "Какие модели работают, а какие нет.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/updates/"]', title: "Обновления", text: "Что нового появилось в проекте.", pos: "right", onShow: "openNav" }
+    ];
+
+    // Дополнительно суперадминам: дефолтные препромпты, регрессия, тесты,
+    // режим «посмотреть как другой», роль в шапке.
+    var ADMIN_SUPER_EXTRA = [
+        { sel: '#nav-sidebar a[href="/ai/admin/prompt-defaults/"]', title: "Препромпты по умолчанию", text: "Их меняет только суперадмин.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/prompt-regression/"]', title: "Регрессионные тесты", text: "Проверка, что промпты не сломались.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/test-console/"]', title: "Тестовая консоль", text: "Запуск тестов и логи.", pos: "right", onShow: "openNav" },
+        { sel: "#aiGuestToggle", title: "Посмотреть как другой", text: "Админка глазами гостя. Повторное нажатие вернёт всё назад.", pos: "bottom", optional: true },
+        { sel: ".ai-role-badge", title: "Твоя роль", text: "Здесь подписано, кто ты: разработчик промптов, админ или суперадмин.", pos: "bottom", optional: true }
+    ];
+
     var REGISTRY = {
 
         chat: [
-            { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français.", pos: "bottom" },
-            { sel: "#select", title: "Выбор модели", text: "Это разные помощники-модели. Нажми и выбери, кто будет тебе отвечать.", pos: "bottom" },
-            { sel: "#selectType", title: "Другие страницы", text: "Через этот список можно уйти на страницы «Реши задачу» и «В чём ошибка».", pos: "bottom" },
+            // Шаги с common: true — «общие» (язык/модель/переключатель страниц)
+            // одинаковы во всех юзер-турах; когда сервер отдал basics_seen
+            // (общая часть уже показана на другой странице), движок их отбрасывает.
+            { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français.", pos: "bottom", common: true },
+            { sel: "#select", title: "Выбор модели", text: "Это разные помощники-модели. Нажми и выбери, кто будет тебе отвечать.", pos: "bottom", common: true },
+            { sel: "#selectType", title: "Другие страницы", text: "Через этот список можно уйти на страницы «Реши задачу» и «В чём ошибка».", pos: "bottom", common: true },
             { sel: "#voiceModeBtn", title: "Голосовой режим", text: "Хочешь говорить, а не печатать? Нажми — можно говорить голосом.", pos: "bottom" },
             { sel: "#themeToggleBtn", title: "Светлое или тёмное", text: "Нажми — страница станет тёмной. Ещё раз — снова светлой.", pos: "bottom" },
             { sel: "#userDocsBtn", title: "Кнопка «?»", text: "Это инструкция. Нажми, если что-то непонятно. Там же можно снова показать эти подсказки.", pos: "bottom" },
@@ -64,13 +119,15 @@
             { sel: "#messageText", title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
             { sel: '.buttons-block button[type="submit"]', title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
             { sel: '[onclick="clearContext()"]', title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top", optional: true },
-            { sel: "#content .toggle-button", title: "Боковое меню", text: "Стрелочка справа открывает меню, там ссылка на админ-панель.", pos: "left", optional: true }
+            // Ссылка на админ-панель в боковом меню работает только у staff/super —
+            // шаг для них; обычным пользователям он не показывается (cfg.role).
+            { sel: "#content .toggle-button", title: "Боковое меню", text: "Стрелочка справа открывает меню, там ссылка на админ-панель.", pos: "left", optional: true, roles: ["super", "staff"] }
         ],
 
         solve: [
-            { sel: "#selectType", title: "Где ты", text: "Ты на странице «Реши задачу». Через этот список вернёшься в «Чат».", pos: "bottom" },
-            { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписей.", pos: "bottom" },
-            { sel: "#select", title: "Выбор модели", text: "Список моделей — помощников, которые будут решать задачу.", pos: "bottom" },
+            { sel: "#selectType", title: "Где ты", text: "Ты на странице «Реши задачу». Через этот список вернёшься в «Чат».", pos: "bottom", common: true },
+            { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписей.", pos: "bottom", common: true },
+            { sel: "#select", title: "Выбор модели", text: "Список моделей — помощников, которые будут решать задачу.", pos: "bottom", common: true },
             { sel: "#selectProgLng", title: "Язык программирования", text: "Сначала выбери язык твоего кода: C или Ассемблер.", pos: "bottom" },
             { sel: "#selectTheme", title: "Тема", text: "Выбери тему — она объясняет модели, о чём задача.", pos: "top" },
             { sel: "#selectPrompt", title: "Препромпт", text: "Препромпт — маленькая подсказка для модели. Хватит того, что выбрано.", pos: "top" },
@@ -84,9 +141,9 @@
         ],
 
         find_error: [
-            { sel: "#selectType", title: "Где ты", text: "Ты на странице «В чём ошибка». Через список вернёшься в «Чат» или в «Реши задачу».", pos: "bottom" },
-            { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписи.", pos: "bottom" },
-            { sel: "#select", title: "Выбор модели", text: "Выбери помощника-модель, которая проверит код.", pos: "bottom" },
+            { sel: "#selectType", title: "Где ты", text: "Ты на странице «В чём ошибка». Через список вернёшься в «Чат» или в «Реши задачу».", pos: "bottom", common: true },
+            { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписи.", pos: "bottom", common: true },
+            { sel: "#select", title: "Выбор модели", text: "Выбери помощника-модель, которая проверит код.", pos: "bottom", common: true },
             { sel: "#selectProgLng", title: "Язык программирования", text: "Выбери язык, на котором написан код.", pos: "top" },
             { sel: "#selectTheme", title: "Тема", text: "Тема помогает модели понять, о чём задача.", pos: "top" },
             { sel: "#selectPrompt", title: "Препромпт", text: "Подсказка для модели; хватает того, что выбрано.", pos: "top" },
@@ -97,18 +154,16 @@
             { sel: "#userDocsBtn", title: "Кнопка «?»", text: "Инструкция и повторный показ подсказок.", pos: "bottom", optional: true }
         ],
 
-        admin: [
-            { sel: "#toggle-nav-sidebar", title: "Край страницы", text: "Тонкая кнопка у левого края: открывает и закрывает меню разделов.", pos: "right" },
-            { sel: "#nav-sidebar", title: "Меню разделов", text: "Здесь все разделы админки. Нажми на нужный.", pos: "right", onShow: "openNav" },
-            { sel: '#nav-sidebar a[href="/ai/admin/arm/solve/"]', title: "Пакетное решение", text: "Тут запускают проверку моделей сразу на всех задачах курса.", pos: "right" },
-            { sel: '#nav-sidebar a[href="/ai/admin/arm/models/"]', title: "Состояние моделей", text: "Какие модели работают, а какие нет. Видно только админам.", pos: "right" },
-            { sel: '#nav-sidebar a[href="/ai/admin/docs/prompt-developer/"]', title: "Документация", text: "Инструкции лежат здесь. Начни с «Разработчика промптов».", pos: "right" },
-            { sel: "#aiProcessesToggle", title: "Приветствие", text: "Это ты: имя и роль. Рядом счётчик «Процессы» — твои запуски.", pos: "bottom" },
-            { sel: "#aiProcessesMenu", title: "Меню «Процессы»", text: "Здесь видно свои запуски: что идёт и чем закончилось.", pos: "left", onShow: "openProcesses" },
-            { sel: "#nav-filter", title: "Поиск по меню", text: "Разделов много? Набери пару букв — останется нужное.", pos: "right", optional: true },
-            { sel: "#aiGuestToggle", title: "Посмотреть как другой", text: "Суперадмин может открыть админку глазами гостя. Повторное нажатие вернёт всё назад.", pos: "bottom" },
-            { sel: ".ai-role-badge", title: "Твоя роль", text: "Здесь подписано, кто ты: разработчик промптов, админ или суперадмин.", pos: "bottom", optional: true }
-        ],
+        // Общий тур админки разделён по правам (admin_pd/admin_staff/admin_super):
+        // сборка из общего ядра + надбавок, а не три копии списка (DRY).
+        // Шаги-ссылки навигации получают onShow:"openNav" — resolveSteps не
+        // требует у них видимости (левое меню в момент старта тура чаще
+        // закрыто; хук откроет его, когда шаг дойдёт).
+        admin_pd: ADMIN_CORE.concat(ADMIN_PD_EXTRA),
+
+        admin_staff: ADMIN_CORE.concat(ADMIN_PD_EXTRA, ADMIN_STAFF_EXTRA),
+
+        admin_super: ADMIN_CORE.concat(ADMIN_PD_EXTRA, ADMIN_STAFF_EXTRA, ADMIN_SUPER_EXTRA),
 
         admin_arm_solve: [
             { sel: "#armCourseId", title: "Номер курса", text: "Это номер курса на dl.gsu.by. Он уже вписан — не меняй без нужды.", pos: "right" },
@@ -150,7 +205,10 @@
 
     var pollTimer = null;      // setInterval(RECHECK_MS)
     var bootTimer = null;      // отложенный автостарт после boot()
+    var bootCancelled = false; // ручной запуск отменяет отложенный автостарт
     var marked = false;        // отметку «seen» шлём один раз за активацию
+    var interacted = false;    // был ли в этом туре жест пользователя
+    var missedTicks = 0;       // тиков подряд без видимой цели текущего шага
     var runSeq = 0;            // номер активации: rAF с прошлого тура отбрасываем
 
     // Восстановление хуками изменённого состояния админ-хрома.
@@ -286,15 +344,19 @@
 
     // Фильтр реестра: (а) роль — шаг с roles[] участвует, только если список
     // пуст или содержит cfg.role (на пользовательских страницах role="",
-    // поэтому участвуют только шаги без roles); (б) наличие цели: элемент есть
-    // и виден. Для шагов с onShow видимость пока не требуем — хук сам покажет
-    // цель (напр. #aiProcessesMenu скрыт до openProcesses).
-    function resolveSteps(scope, role) {
+    // поэтому участвуют только шаги без roles); (б) «общие» шаги (common:
+    // язык/модель/переключатель страниц) отбрасываются, когда сервер отдал
+    // basics_seen — общая часть тура уже показана на другой странице, тур
+    // должен ДОПОЛНЯТЬ прошлые, а не повторяться; (в) наличие цели: элемент
+    // есть и виден. Для шагов с onShow видимость пока не требуем — хук сам
+    // покажет цель (напр. #aiProcessesMenu скрыт до openProcesses).
+    function resolveSteps(scope, role, basicsSeen) {
         var list = REGISTRY[scope];
         var out = [];
         if (!list || !list.length) return out;
         for (var i = 0; i < list.length; i++) {
             var s = list[i];
+            if (basicsSeen && s.common) continue;
             if (s.roles && s.roles.length) {
                 if (s.roles.indexOf(role) === -1) continue;
             }
@@ -321,10 +383,11 @@
     function show(i) {
         if (!active) return;
         if (i < 0 || i >= steps.length) {
-            stop({ mark: true });
+            stop();
             return;
         }
         index = i;
+        missedTicks = 0;
         var step = steps[i];
         // Сначала хук (он может открыть навигацию/меню под целью), затем
         // скроллим и меряем в следующем кадре.
@@ -349,20 +412,29 @@
             if (!active || runSeq !== seqAtCall) return;
             renderContent(step);
             place();
+            // Второй замер чуть позже: media-запросы по resolution (зум
+            // 80–180% меняет высоты панелей) применяются асинхронно, первый
+            // кадр может прийти со старой геометрией.
+            setTimeout(function () {
+                if (active && runSeq === seqAtCall) place();
+            }, REMEASURE_MS);
         });
     }
 
     // Шаг сам исчез (перерисовка DOM): идём дальше, на последнем — финиш.
+    // Автозакрытие без жеста отметку шлёт только когда пользователь в туре
+    // уже участвовал (см. stop) — самопрогореть флаг не может.
     function skipForward() {
         if (index + 1 < steps.length) {
             show(index + 1);
         } else {
-            stop({ mark: true });
+            stop();
         }
     }
 
     function next() {
         if (!active) return;
+        interacted = true; // «Далее»/«Готово» — жест пользователя
         if (index + 1 < steps.length) {
             show(index + 1);
         } else {
@@ -372,6 +444,7 @@
 
     function prev() {
         if (!active) return;
+        interacted = true;
         if (index > 0) show(index - 1);
     }
 
@@ -392,27 +465,17 @@
 
     // === Позиционирование ===
 
-    // Элемент выше 60% окна (напр. #messages) — подсвечиваем средние 60%.
-    function shrinkBigRect(r, viewH) {
-        var keep = viewH * BIG_RATIO;
-        var cut = (r.height - keep) / 2;
-        return {
-            left: r.left,
-            right: r.right,
-            width: r.width,
-            top: r.top + cut,
-            bottom: r.bottom - cut,
-            height: r.height - cut * 2
-        };
-    }
-
-    // Пятно не должно вылезать в невидимую зону (скроллбар/за край окна).
-    function clampToViewport(r, viewW, viewH) {
-        var left = Math.max(0, r.left);
-        var top = Math.max(0, r.top);
-        var right = Math.min(viewW, r.right);
-        var bottom = Math.min(viewH, r.bottom);
-        if (right - left < 2 || bottom - top < 2) return null; // целиком за кадром
+    // Подсветка — пересечение цели с вьюпортом (с запасом SPOT_INSET от краёв).
+    // Раньше большие цели сжимались до средних 60% окна (тёмные полосы сверху
+    // и снизу выглядели как кривые окна), а цели за кадром отдавали null и
+    // поповер центрировался вообще без пятна. Теперь рисуем ровно видимую
+    // часть цели; скроллить её должен scrollIntoView в show().
+    function rectInViewport(rect, viewW, viewH) {
+        var left = Math.max(SPOT_INSET, rect.left);
+        var top = Math.max(SPOT_INSET, rect.top);
+        var right = Math.min(viewW - SPOT_INSET, rect.right);
+        var bottom = Math.min(viewH - SPOT_INSET, rect.bottom);
+        if (right - left < MIN_SPOT || bottom - top < MIN_SPOT) return null;
         return {
             left: left, top: top, right: right, bottom: bottom,
             width: right - left, height: bottom - top
@@ -421,7 +484,7 @@
 
     function sheetMode() {
         var viewW = document.documentElement ? document.documentElement.clientWidth : window.innerWidth;
-        if (viewW <= 640) return true;
+        if (viewW <= SHEET_MAX) return true;
         try {
             if (window.matchMedia && window.matchMedia(SHEET_QUERY).matches) return true;
         } catch (e) { /* ниже порога уже поймали по ширине */ }
@@ -470,9 +533,9 @@
         var r = null;
         var el = querySel(step.sel);
         if (el && isVisible(el)) {
-            var rect = el.getBoundingClientRect();
-            if (rect.height > viewH * BIG_RATIO) rect = shrinkBigRect(rect, viewH);
-            r = clampToViewport(rect, viewW, viewH);
+            // Пересечение цели с вьюпортом: крупные/подрезанные цели рисуем
+            // только в видимой части, поповер якорится к ней же (r).
+            r = rectInViewport(el.getBoundingClientRect(), viewW, viewH);
         }
         if (r) {
             spot.style.display = "";
@@ -567,11 +630,19 @@
         if (!active) return;
         var step = steps[index];
         if (!step) return;
-        // Цель исчезла из DOM или скрылась — шаг пропускаем.
+        // Цель исчезла из DOM или скрылась: ждём (DOM может дорисоваться), а
+        // после MISSED_TICKS тиков подряд — закрываем тур. Раньше здесь был
+        // skipForward(): тур автопрогонялся до конца и stop({mark:true})
+        // СЖИГАЛ флаг «seen» ещё до первого жеста — wizard потом не
+        // показывался сам никогда. Автозакрытие отметку не шлёт.
         if (!isVisible(querySel(step.sel))) {
-            skipForward();
+            missedTicks++;
+            if (missedTicks >= MISSED_TICKS) {
+                stop({ mark: false });
+            }
             return;
         }
+        missedTicks = 0;
         place();
     }
 
@@ -703,7 +774,11 @@
         var conf = cfgArg || {};
         var scopeName = String(scope || conf.scope || "");
 
-        var resolved = resolveSteps(scopeName, conf.role ? String(conf.role) : "");
+        var resolved = resolveSteps(
+            scopeName,
+            conf.role ? String(conf.role) : "",
+            conf.basics_seen === true
+        );
         if (!resolved.length) return; // нечего показывать — тихо выходим
 
         steps = resolved;
@@ -714,6 +789,8 @@
             mark_url: conf.mark_url ? String(conf.mark_url) : ""
         };
         marked = false;
+        interacted = false;
+        missedTicks = 0;
         navOpenedByTour = false;
         procOpenedByTour = false;
         active = true;
@@ -739,9 +816,14 @@
         document.removeEventListener("keydown", onKeydown);
         removeLayers();
         restoreState();
-        // Любое закрытие (Готово/Скрыть/Escape) — «seen»; перезапуск из
-        // кнопок шлёт mark:false.
-        if (!(opts && opts.mark === false)) markSeen();
+        // Отметка «seen» — только по жесту пользователя (Готово/Скрыть/Escape/
+        // Далее) или если в туре он уже что-то нажимал. Автозакрытие без единого
+        // жеста (цели исчезли до первого щелчка) флаг НЕ сжигает — иначе wizard
+        // «показывался не сразу, а только по кнопке», прогорев до показа.
+        // Перезапуск из кнопок (mark:false) отметку тоже не шлёт.
+        var veto = opts && opts.mark === false;
+        var force = opts && opts.mark === true;
+        if (!veto && (force || interacted)) markSeen();
         steps = [];
         index = -1;
         cfg = null;
@@ -770,10 +852,13 @@
             ? String(document.body.dataset.aiWizardScope || "")
             : "";
         if (!scope) return null;
-        return { scope: scope, version: 1, show: true, role: "", mark_url: "" };
+        return { scope: scope, version: 2, show: true, role: "", mark_url: "" };
     }
 
     function restartTour(conf, scopeOverride) {
+        // Ручной запуск заменяет отложенный автостарт: иначе после закрытия
+        // вручную запущенного тура автостарт запустил бы его снова.
+        bootCancelled = true;
         if (bootTimer) {
             clearTimeout(bootTimer);
             bootTimer = null;
@@ -824,19 +909,42 @@
 
     // === Boot ===
 
-    // DOMContentLoaded (НЕ window.onload: пользовательские страницы сами его
-    // выставляют и затёрли бы наш обработчик).
+    // Слушатель всегда вешается на DOMContentLoaded (НЕ window.onload: страницы
+    // сами его выставляют и затёрли бы наш обработчик), а вот сам автостарт
+    // ждёт window.load — к нему успевает отработать и их init, и media-запросы
+    // по zoom, и восстановление персистенса: тур стартует по готовой геометрии.
+    // Слепые 400 мс после DOMContentLoaded могли опережать раскладку; цели
+    // не находились, тур автопрогонялся до конца и СЖИГАЛ флаг «seen» (потом
+    // «wizard показался не сразу, а только по кнопке»).
     function boot() {
         document.addEventListener("click", onDelegatedClick);
         var conf = readConfig();
         if (!conf || conf.show !== true) return;
-        // Небольшая пауза: восстанавление персистенса/инициализация страницы
-        // успевают успокоиться, затем раскладка не прыгает.
-        bootTimer = setTimeout(function () {
+
+        var autoStarted = false; // автостарт — ровно один за загрузку страницы
+        function autoStart() {
             bootTimer = null;
-            if (active) return;
+            if (autoStarted || active || bootCancelled) return;
+            autoStarted = true;
             start(conf.scope, conf);
-        }, START_DELAY_MS);
+        }
+
+        if (document.readyState === "complete") {
+            bootTimer = setTimeout(autoStart, READY_DELAY_MS);
+            return;
+        }
+        window.addEventListener("load", function onWinLoad() {
+            window.removeEventListener("load", onWinLoad);
+            // Страховочный таймер больше не нужен.
+            if (bootTimer) {
+                clearTimeout(bootTimer);
+                bootTimer = null;
+            }
+            bootTimer = setTimeout(autoStart, READY_DELAY_MS);
+        });
+        // Страховка: зависший ресурс (load не пришёл) не отменяет тур вовсе —
+        // стартуем без него; если load догонит, autoStart упадёт в no-op.
+        bootTimer = setTimeout(autoStart, MAX_BOOT_WAIT_MS);
     }
 
     if (document.readyState === "loading") {

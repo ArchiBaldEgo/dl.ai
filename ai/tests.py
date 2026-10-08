@@ -4837,7 +4837,7 @@ class OllamaHandlerTests(SimpleTestCase):
     """Handler вызывает ollama.Client.chat (СТРИМОМ) и возвращает (content, tokens, is_error).
 
     Стриминг обязателен: без него длинные генерации ARM-solve минутами ждут
-    готовый ответ, и шлюз api.ollama.com рвёт соединение — httpx
+    готовый ответ, и шлюз ollama.com рвёт соединение — httpx
     ServerDisconnectedError («Server disconnected without sending a response»).
     """
 
@@ -4856,7 +4856,7 @@ class OllamaHandlerTests(SimpleTestCase):
     async def test_handler_streams_and_accumulates(self):
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
-             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             # Контент приходит кусками — handler обязан собрать его в строку.
@@ -4869,7 +4869,7 @@ class OllamaHandlerTests(SimpleTestCase):
             self.assertEqual(result, ("print(1)", 5, False))
             mock_client.chat.assert_called_once()
             # Без tools= (обычный чат), но СТРИМОМ (stream=True) — иначе
-            # api.ollama.com рвёт соединение на длинных генерациях.
+            # ollama.com рвёт соединение на длинных генерациях.
             _, kwargs = mock_client.chat.call_args
             self.assertNotIn("tools", kwargs)
             self.assertIs(kwargs.get("stream"), True)
@@ -4878,7 +4878,7 @@ class OllamaHandlerTests(SimpleTestCase):
         """DeepSeek 4.1 Flash ходит через ollama.chat с model='deepseek-v4.1-flash:cloud'."""
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
-             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             mock_client.chat.return_value = self._stream("ok", eval_count=1)
@@ -4898,7 +4898,7 @@ class OllamaHandlerTests(SimpleTestCase):
         ):
             with self.subTest(key=key):
                 with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
-                     patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+                     patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
                      patch("ai.model_clients.ollama.Client") as mock_client_cls:
                     mock_client = mock_client_cls.return_value
                     mock_client.chat.return_value = self._stream("ok", eval_count=1)
@@ -4913,7 +4913,7 @@ class OllamaHandlerTests(SimpleTestCase):
         """Cloud host + пустой OLLAMA_API_KEY → guard-сообщение, без вызова Client."""
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", ""), \
-             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
             gemma_4 = getattr(ollama, "ask_Ollama_Gemma_4_Cloud_async")
             result = await gemma_4("hi", "client")
@@ -4937,7 +4937,7 @@ class OllamaHandlerTests(SimpleTestCase):
         отдаём его пользователю, а не «пустой ответ»."""
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
-             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             mock_client.chat.return_value = self._thinking_stream(
@@ -4951,7 +4951,7 @@ class OllamaHandlerTests(SimpleTestCase):
         """Пустые и content, и thinking → прежняя ошибка «пустой ответ»."""
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
-             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             mock_client.chat.return_value = self._stream("", eval_count=0)
@@ -5651,9 +5651,10 @@ class RequestLogXlsxTests(TestCase):
         response = admin_request_log_xlsx_view(request, self.log.id)
         self.assertEqual(response.status_code, 403)
 
-    def test_result_download_named_by_model(self):
-        """Имя файла решения: arm_<модель><расширение> — по модели, не по задаче
-        (у одной задачи скачивают решения нескольких моделей)."""
+    def test_result_download_named_model_and_task(self):
+        """Имя файла решения: <модель>_<ID узла задачи><расширение> (у одной
+        задачи скачивают решения нескольких моделей — пара делает имя
+        однозначной); у DL API поля имени файла нет — подписываем скачивание."""
         from ai.models import AIModelTestResult
         from ai.admin.arm import admin_arm_solve_result_download_view
         result = AIModelTestResult.objects.get(model_key="M1")
@@ -5663,7 +5664,7 @@ class RequestLogXlsxTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response["Content-Disposition"],
-            'attachment; filename="arm_Model_One.pas"',
+            'attachment; filename="Model_One_5101.pas"',
         )
 
     def test_result_download_title_fallbacks_and_403(self):
@@ -5680,13 +5681,45 @@ class RequestLogXlsxTests(TestCase):
         response = admin_arm_solve_result_download_view(request, result.id)
         self.assertEqual(
             response["Content-Disposition"],
-            'attachment; filename="arm_Model_Two_K2.7.pas"',
+            'attachment; filename="Model_Two_K2.7_5101.pas"',
         )
 
         request = self.factory.get(f"/ai/admin/arm/solve/result/{result.id}/download/")
         request.user = self.normal_user
         response = admin_arm_solve_result_download_view(request, result.id)
         self.assertEqual(response.status_code, 403)
+
+    def test_result_download_without_task_falls_back_by_id(self):
+        """task NULL (легаси-одиночные прогоны) — <модель>_result_<id>; пустые
+        title и key — result_<id> без модели."""
+        from ai.models import AIModelTestResult
+        from ai.admin.arm import admin_arm_solve_result_download_view
+
+        orphan = AIModelTestResult.objects.create(
+            run=self.test_run, task=None, model_key="M9", model_title="Model Nine",
+            status="ok", verdict="solved", duration_seconds=1.0, tokens=10,
+            code="code", file_extension_snapshot=".pas",
+        )
+        request = self.factory.get(f"/ai/admin/arm/solve/result/{orphan.id}/download/")
+        request.user = self.superuser
+        response = admin_arm_solve_result_download_view(request, orphan.id)
+        self.assertEqual(
+            response["Content-Disposition"],
+            f'attachment; filename="Model_Nine_result_{orphan.id}.pas"',
+        )
+
+        blank = AIModelTestResult.objects.create(
+            run=self.test_run, task=None, model_key="", model_title="",
+            status="ok", verdict="solved", duration_seconds=1.0, tokens=10,
+            code="code", file_extension_snapshot=".pas",
+        )
+        request = self.factory.get(f"/ai/admin/arm/solve/result/{blank.id}/download/")
+        request.user = self.superuser
+        response = admin_arm_solve_result_download_view(request, blank.id)
+        self.assertEqual(
+            response["Content-Disposition"],
+            f'attachment; filename="result_{blank.id}.pas"',
+        )
 
 
 class ArmLightSnapshotTests(TestCase):
@@ -9992,6 +10025,12 @@ class OnboardingServiceTests(TestCase):
         from ai.services.onboarding import scope_name_valid
         self.assertTrue(scope_name_valid("chat"))
         self.assertTrue(scope_name_valid("admin_arm_solve"))
+        # Общий тур админки разделён по правам: свои scope'ы на каждый уровень,
+        # объединённого «admin» больше нет.
+        self.assertTrue(scope_name_valid("admin_pd"))
+        self.assertTrue(scope_name_valid("admin_staff"))
+        self.assertTrue(scope_name_valid("admin_super"))
+        self.assertFalse(scope_name_valid("admin"))
         self.assertFalse(scope_name_valid("nope"))
         self.assertFalse(scope_name_valid(None))
 
@@ -10012,6 +10051,15 @@ class OnboardingServiceTests(TestCase):
         record_wizard_seen(self.user, "chat")
         self.assertEqual(AIWizardSeen.objects.filter(user=self.user).count(), 1)
 
+    def test_deleting_mark_restarts_the_tour(self):
+        """Удаление строки в AIWizardSeenAdmin — способ перезапустить тур
+        конкретному пользователю на конкретной странице."""
+        from ai.services.onboarding import record_wizard_seen, should_show_wizard
+        record_wizard_seen(self.user, "chat")
+        self.assertFalse(should_show_wizard(self.user, "chat"))
+        AIWizardSeen.objects.filter(user=self.user, scope="chat").delete()
+        self.assertTrue(should_show_wizard(self.user, "chat"))
+
     def test_unknown_scope_is_not_recorded(self):
         from ai.services.onboarding import record_wizard_seen
         record_wizard_seen(self.user, "nope")
@@ -10019,15 +10067,20 @@ class OnboardingServiceTests(TestCase):
         self.assertEqual(AIWizardSeen.objects.count(), 0)
 
     def test_version_bump_resurrects_the_tour(self):
-        from ai.services.onboarding import record_wizard_seen, should_show_wizard
-        record_wizard_seen(self.user, "chat")
+        from ai.services import onboarding as onboarding_service
+        record_wizard_seen = onboarding_service.record_wizard_seen
+        should_show_wizard = onboarding_service.should_show_wizard
+        record_wizard_seen(self.user, "chat")  # пишет текущий WIZARD_VERSION
         self.assertFalse(should_show_wizard(self.user, "chat"))
-        with patch("ai.services.onboarding.WIZARD_VERSION", 2):
+        with patch(
+            "ai.services.onboarding.WIZARD_VERSION",
+            onboarding_service.WIZARD_VERSION + 1,
+        ):
             # Содержимое тура обновилось → все видят его заново один раз.
             self.assertTrue(should_show_wizard(self.user, "chat"))
             record_wizard_seen(self.user, "chat")
             self.assertFalse(should_show_wizard(self.user, "chat"))
-        # Записанная версия 2 > актуальной 1 — после отката константы не показываем.
+        # Записанная версия выше актуальной (откат константы) — не показываем.
         self.assertFalse(should_show_wizard(self.user, "chat"))
 
     def test_anonymous_user_is_never_shown_and_never_recorded(self):
@@ -10036,6 +10089,28 @@ class OnboardingServiceTests(TestCase):
         self.assertFalse(should_show_wizard(anonymous, "chat"))
         record_wizard_seen(anonymous, "chat")
         self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_user_basics_seen_other_user_scope(self):
+        """Шаги-«общие» закрываются отметкой ЛЮБОЙ другой юзер-страницы."""
+        from ai.services.onboarding import record_wizard_seen, user_basics_seen
+        self.assertFalse(user_basics_seen(self.user, "solve"))
+        record_wizard_seen(self.user, "chat")
+        self.assertTrue(user_basics_seen(self.user, "solve"))
+        self.assertTrue(user_basics_seen(self.user, "find_error"))
+
+    def test_user_basics_seen_same_scope_does_not_count(self):
+        """Свой scope «общих» не закрывает — тур текущей страницы ещё не пройден."""
+        from ai.services.onboarding import record_wizard_seen, user_basics_seen
+        record_wizard_seen(self.user, "solve")
+        self.assertFalse(user_basics_seen(self.user, "solve"))
+
+    def test_user_basics_seen_ignores_admin_scopes_and_excludes_wrong_scope(self):
+        """Админские отметки и не-юзерский exclude — не «общие»."""
+        from ai.services.onboarding import record_wizard_seen, user_basics_seen
+        record_wizard_seen(self.user, "admin_pd")
+        self.assertFalse(user_basics_seen(self.user, "solve"))
+        self.assertFalse(user_basics_seen(self.user, "admin_pd"))
+        self.assertFalse(user_basics_seen(None, "solve"))
 
 
 class WizardSeenUserEndpointTests(TestCase):
@@ -10075,7 +10150,8 @@ class WizardSeenUserEndpointTests(TestCase):
 
     def test_unknown_scope_is_400(self):
         # Валидатор scope общий для обоих эндпоинтов (ai/services/onboarding.py);
-        # «admin» по нему — валидный scope, поэтому тест на явно неизвестный.
+        # «admin» с v2 им больше не валидный (разделён на ролевые), поэтому тест
+        # на явно неизвестное имя.
         response = self._post(json.dumps({"scope": "nope"}))
         self.assertEqual(response.status_code, 400)
         self.assertEqual(AIWizardSeen.objects.count(), 0)
@@ -10125,7 +10201,8 @@ class WizardSeenAdminEndpointTests(_AdminViewRequestMixin, TestCase):
             return admin_wizard_seen_view(request)
 
     def test_anonymous_is_denied(self):
-        response = self._post(AnonymousUser(), '{"scope": "admin"}')
+        # «admin» больше не валидный scope (разделён по правам), поэтому — «chat».
+        response = self._post(AnonymousUser(), '{"scope": "chat"}')
         self.assertEqual(response.status_code, 403)
         self.assertEqual(AIWizardSeen.objects.count(), 0)
 
@@ -10149,7 +10226,7 @@ class WizardSeenAdminEndpointTests(_AdminViewRequestMixin, TestCase):
 
     def test_plain_user_without_roles_is_403(self):
         stranger = self.user_model.objects.create_user(username="wz-nobody", password="x")
-        response = self._post(stranger, '{"scope": "admin"}')
+        response = self._post(stranger, '{"scope": "admin_pd"}')
         self.assertEqual(response.status_code, 403)
         self.assertEqual(AIWizardSeen.objects.count(), 0)
 
@@ -10162,7 +10239,7 @@ class WizardSeenAdminEndpointTests(_AdminViewRequestMixin, TestCase):
         )
         request = self._admin_request(
             superuser, method="post", path="/ai/admin/wizard/seen/",
-            data='{"scope": "admin"}', content_type="application/json",
+            data='{"scope": "admin_super"}', content_type="application/json",
         )
         request.session[SESSION_KEY] = True
         response = admin_wizard_seen_view(request)
@@ -10189,8 +10266,18 @@ class WizardUserPageContextTests(TestCase):
 
     def setUp(self):
         self.factory = RequestFactory()
-        self.user = get_user_model().objects.create_user(
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(
             username="wz-context-user", password="x",
+        )
+        self.plain_user = self.user_model.objects.create_user(
+            username="wz-context-plain", password="x",
+        )
+        self.staff_user = self.user_model.objects.create_user(
+            username="wz-context-staff", password="x", is_staff=True,
+        )
+        self.super_user = self.user_model.objects.create_user(
+            username="wz-context-super", password="x", is_superuser=True,
         )
 
     def test_chat_page_contains_wizard_config_and_assets(self):
@@ -10220,6 +10307,87 @@ class WizardUserPageContextTests(TestCase):
         html = self._render(chat_view, "/ai/chat/", user=self.user)
         self.assertIn('"show": false', html)
 
+    def test_payload_carries_role_for_engine_steps(self):
+        """Роль в конфиге: ролевые шаги движка (side-меню чата — super/staff)."""
+        from ai.views import decide_task_view, find_error_view
+
+        html = self._render(chat_view, "/ai/chat/", user=self.plain_user)
+        self.assertIn('"role": ""', html)
+        html = self._render(chat_view, "/ai/chat/", user=self.staff_user)
+        self.assertIn('"role": "staff"', html)
+        html = self._render(chat_view, "/ai/chat/", user=self.super_user)
+        self.assertIn('"role": "super"', html)
+        html = self._render(decide_task_view, "/ai/solve-problem/", user=self.plain_user)
+        self.assertIn('"role": ""', html)
+        html = self._render(find_error_view, "/ai/find-error/", user=self.staff_user)
+        self.assertIn('"role": "staff"', html)
+
+    def test_payload_carries_basics_seen(self):
+        """basics_seen в payload: тур другой юзер-страницы закрыл «общие» шаги
+        (семантика — в OnboardingServiceTests.user_basics_seen)."""
+        from ai.services.onboarding import record_wizard_seen
+
+        html = self._render(chat_view, "/ai/chat/", user=self.plain_user)
+        self.assertIn('"basics_seen": false', html)
+        record_wizard_seen(self.plain_user, "solve")
+        html = self._render(chat_view, "/ai/chat/", user=self.plain_user)
+        self.assertIn('"basics_seen": true', html)
+        # Админские отметки юзер-«общие» не закрывают.
+        plain2 = self.user_model.objects.create_user(
+            username="wz-context-plain2", password="x",
+        )
+        record_wizard_seen(plain2, "admin_pd")
+        html = self._render(chat_view, "/ai/chat/", user=plain2)
+        self.assertIn('"basics_seen": false', html)
+
+
+class AIWizardSeenAdminPermissionTests(_AdminViewRequestMixin, TestCase):
+    """Листинг «кто видел wizard» (AIWizardSeenAdmin): просмотр — только
+    суперюзер; удаление строки — способ перезапустить тур пользователю."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+
+    def _admin_instance(self):
+        from ai.admin.models import AIWizardSeenAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import AIWizardSeen as Model
+
+        return AIWizardSeenAdmin(Model, ai_admin_site)
+
+    def test_superuser_permissions_granted(self):
+        superuser = self.user_model.objects.create_user(
+            username="wz-list-super", password="x", is_superuser=True,
+        )
+        request = self._admin_request(superuser)
+        model_admin = self._admin_instance()
+        self.assertTrue(model_admin.has_module_permission(request))
+        self.assertTrue(model_admin.has_view_permission(request))
+        self.assertTrue(model_admin.has_delete_permission(request))
+        # add/change по смыслу бессмысленны (строки создаются движком), но
+        # права не зажаты сильнее общего супер-гейта.
+        self.assertTrue(model_admin.has_change_permission(request))
+
+    def test_prompt_developer_permissions_denied(self):
+        pd_user = self.user_model.objects.create_user(username="wz-list-pd", password="x")
+        pd_user.groups.add(self.pd_group)
+        request = self._admin_request(pd_user)
+        model_admin = self._admin_instance()
+        self.assertFalse(model_admin.has_module_permission(request))
+        self.assertFalse(model_admin.has_view_permission(request))
+        self.assertFalse(model_admin.has_delete_permission(request))
+
+    def test_staff_permissions_denied(self):
+        staff_user = self.user_model.objects.create_user(
+            username="wz-list-staff", password="x", is_staff=True,
+        )
+        request = self._admin_request(staff_user)
+        model_admin = self._admin_instance()
+        self.assertFalse(model_admin.has_view_permission(request))
+
 
 class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
     """each_context: ai_wizard — scope по пути, роль, гостевой режим, отметка."""
@@ -10239,23 +10407,42 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
             request.session[SESSION_KEY] = True
         return ai_admin_site.each_context(request)["ai_wizard"]
 
-    def test_dashboard_scope_admin(self):
-        user = self.user_model.objects.create_user(username="wz-ctx-super", password="x", is_superuser=True)
-        ctx = self._context(user)
-        self.assertEqual(ctx["scope"], "admin")
+    def test_dashboard_scope_by_role(self):
+        """Общий тур админки разделён по правам: свой scope на каждый уровень."""
+        superuser = self.user_model.objects.create_user(
+            username="wz-ctx-super", password="x", is_superuser=True,
+        )
+        ctx = self._context(superuser)
+        self.assertEqual(ctx["scope"], "admin_super")
         self.assertEqual(ctx["role"], "super")
         self.assertTrue(ctx["show"])
 
+        staff_user = self.user_model.objects.create_user(
+            username="wz-ctx-staff", password="x", is_staff=True,
+        )
+        ctx = self._context(staff_user)
+        self.assertEqual(ctx["scope"], "admin_staff")
+        self.assertEqual(ctx["role"], "staff")
+        self.assertTrue(ctx["show"])
+
+        pd_user = self.user_model.objects.create_user(username="wz-ctx-pd", password="x")
+        pd_user.groups.add(self.pd_group)
+        ctx = self._context(pd_user)
+        self.assertEqual(ctx["scope"], "admin_pd")
+        self.assertEqual(ctx["role"], "pd")
+        self.assertTrue(ctx["show"])
+
     def test_arm_solve_and_model_status_scopes(self):
+        """Большие страницы — общие туры, без деления по правам."""
         user = self.user_model.objects.create_user(username="wz-ctx-super", password="x", is_superuser=True)
         self.assertEqual(self._context(user, path="/ai/admin/arm/solve/")["scope"], "admin_arm_solve")
         self.assertEqual(self._context(user, path="/ai/admin/arm/models/")["scope"], "admin_model_status")
 
     def test_pd_role_and_staff_role(self):
-        pd_user = self.user_model.objects.create_user(username="wz-ctx-pd", password="x")
+        pd_user = self.user_model.objects.create_user(username="wz-ctx-pd2", password="x")
         pd_user.groups.add(self.pd_group)
         staff_user = self.user_model.objects.create_user(
-            username="wz-ctx-staff", password="x", is_staff=True,
+            username="wz-ctx-staff2", password="x", is_staff=True,
         )
         self.assertEqual(self._context(pd_user)["role"], "pd")
         self.assertEqual(self._context(staff_user)["role"], "staff")
@@ -10268,12 +10455,42 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
         self.assertFalse(ctx["show"])
 
     def test_seen_scope_is_suppressed(self):
+        """Закрытый ролевой тур не повторяется; «большие страницы» — свой тур."""
         from ai.services.onboarding import record_wizard_seen
 
         user = self.user_model.objects.create_user(username="wz-ctx-seen", password="x", is_superuser=True)
-        record_wizard_seen(user, "admin")
+        record_wizard_seen(user, "admin_super")
         self.assertFalse(self._context(user)["show"])
         self.assertTrue(self._context(user, path="/ai/admin/arm/solve/")["show"])
+
+    def test_role_upgrade_runs_unseen_role_tour(self):
+        """Повышение роли: pd-тур пройден → staff-тур показывается; после него
+        — и super-тур (ролевые scope'ы независимы)."""
+        from ai.services.onboarding import record_wizard_seen, should_show_wizard
+
+        user = self.user_model.objects.create_user(
+            username="wz-ctx-promo", password="x", is_staff=True,
+        )
+        record_wizard_seen(user, "admin_pd")
+        self.assertFalse(should_show_wizard(user, "admin_pd"))
+        self.assertTrue(should_show_wizard(user, "admin_staff"))
+        record_wizard_seen(user, "admin_staff")
+        self.assertTrue(should_show_wizard(user, "admin_super"))
+
+    def test_role_downgrade_does_not_replay_seen_tour(self):
+        """Понижение роли: пройденные младшие туры не переигрываются заново."""
+        from ai.services.onboarding import record_wizard_seen
+
+        user = self.user_model.objects.create_user(
+            username="wz-ctx-demoted", password="x", is_staff=True,
+        )
+        record_wizard_seen(user, "admin_pd")
+        record_wizard_seen(user, "admin_staff")
+        user.is_staff = False
+        user.save(update_fields=["is_staff"])
+        ctx = self._context(user)  # теперь «pd»
+        self.assertEqual(ctx["scope"], "admin_pd")
+        self.assertFalse(ctx["show"])
 
 
 class WizardAssetAccessTests(TestCase):

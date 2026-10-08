@@ -20,14 +20,25 @@ from .guest_mode import is_viewing_as_guest
 from .permissions import can_access_admin, is_staff_or_superuser, is_superuser_user
 
 # Пути «больших страниц» с собственным туром (первое совпадение побеждает).
+# Большие страницы — общие туры без деления по правам: ролевые различия там
+# режутся отсутствием недоступных элементов (#armRecordStats и т.п.).
 _ADMIN_SCOPES_BY_PATH = (
     ("/ai/admin/arm/solve/", "admin_arm_solve"),
     ("/ai/admin/arm/models/", "admin_model_status"),
 )
 
+# Общий тур админки — свой для каждого уровня доступа: новая роль = новый
+# scope без отметки → покажется; понижение роли вернёт старый scope с
+# отметкой → заново не показывается (требование: демо-понижение не приставуче).
+_ROLE_TO_SCOPE = {
+    "pd": "admin_pd",
+    "staff": "admin_staff",
+    "super": "admin_super",
+}
+
 
 def admin_scope_for_path(path):
-    """scope тура по URL админки: большие страницы — свой, остальное — общий."""
+    """scope тура по URL админки: большие страницы — свой, остальное — «admin»."""
     for prefix, scope in _ADMIN_SCOPES_BY_PATH:
         if path.startswith(prefix):
             return scope
@@ -51,12 +62,14 @@ def wizard_context_for_request(request):
     двигать нельзя.
     """
     user = request.user
-    scope = admin_scope_for_path(request.path)
+    role = _admin_role_label(user)
+    path_scope = admin_scope_for_path(request.path)
+    scope = _ROLE_TO_SCOPE[role] if path_scope == "admin" else path_scope
     return {
         "scope": scope,
         "version": WIZARD_VERSION,
         "show": not is_viewing_as_guest(request) and should_show_wizard(user, scope),
-        "role": _admin_role_label(user),
+        "role": role,
         "mark_url": MARK_URL_ADMIN,
     }
 

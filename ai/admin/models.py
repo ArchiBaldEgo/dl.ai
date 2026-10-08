@@ -874,3 +874,33 @@ class PromptTestRunAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
+
+
+class AIWizardSeenAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Кто какой онбординг-wizard уже видел и в какой версии.
+
+    Главная роль листинга — «отследить, получил ли пользователь тур» и сброс
+    отметки: удалить строку → тур этой страницы покажется заново при
+    следующем заходе. Только суперюзеру.
+    """
+
+    list_display = ("user", "scope", "version", "created_at")
+    list_filter = ("scope",)
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    search_fields = ("user__username", "user__first_name", "user__last_name")
+
+    def has_module_permission(self, request):
+        return is_superuser_user(request.user)
+
+    def has_view_permission(self, request, obj=None):
+        return is_superuser_user(request.user)
+
+    def has_add_permission(self, request):
+        return is_superuser_user(request.user)
+
+    def has_change_permission(self, request, obj=None):
+        return is_superuser_user(request.user)
+
+    def has_delete_permission(self, request, obj=None):
+        return is_superuser_user(request.user)

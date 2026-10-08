@@ -22,7 +22,7 @@
     {% block extra_meta %}{% endblock %}
     {% block css %}
     <link rel="stylesheet" href="/ai/assets/admin/css/ai.css?v={{ request.COOKIES.csrftoken|default:'1' }}"/>
-    <link rel="stylesheet" href="/ai/assets/admin/css/ai-wizard.css?v=1"/>
+    <link rel="stylesheet" href="/ai/assets/admin/css/ai-wizard.css?v=2"/>
     {% endblock %}
     {% block extra_css %}{% endblock %}
     <!-- Тема подключается ПОСЛЕ страничных CSS, чтобы переменные перепобивали значения. -->
@@ -37,7 +37,7 @@
          Скрипт после ai-common.js (defer-порядок), сам стартует только при
          show:true. -->
     {% if ai_wizard %}{{ ai_wizard|json_script:"ai-wizard-config" }}{% endif %}
-    <script src="/ai/assets/admin/js/ai-wizard.js?v=1" defer></script>
+    <script src="/ai/assets/admin/js/ai-wizard.js?v=2" defer></script>
     {% endblock %}
     <title>DLAPI</title>
 </head>

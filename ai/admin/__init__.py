@@ -14,6 +14,7 @@ from ..models import (
     Prompt,
     PromptTestCase,
     PromptTestRun,
+    AIWizardSeen,
     SharedPrompt,
     Task,
     TaskSolution,
@@ -29,6 +30,7 @@ from .models import (
     PromptAdmin,
     PromptTestCaseAdmin,
     PromptTestRunAdmin,
+    AIWizardSeenAdmin,
     RestrictedUserAdmin,
     SharedPromptAdmin,
     TaskAdmin,
@@ -64,6 +66,7 @@ __all__ = [
     "PromptAdmin",
     "PromptTestCaseAdmin",
     "PromptTestRunAdmin",
+    "AIWizardSeenAdmin",
     "SharedPromptAdmin",
     "TaskAdmin",
     "TaskSolutionAdmin",
@@ -97,6 +100,9 @@ ai_admin_site.register(PromptTestCase, PromptTestCaseAdmin)
 ai_admin_site.register(PromptTestRun, PromptTestRunAdmin)
 ai_admin_site.register(ExternalDLAccount, ExternalDLAccountAdmin)
 ai_admin_site.register(TaskSolution, TaskSolutionAdmin)
+# NOTE: AIWizardSeen — листинг «кто видел онбординг-wizard» (только суперюзер);
+# удаление строки перезапускает тур этого scope конкретному пользователю.
+ai_admin_site.register(AIWizardSeen, AIWizardSeenAdmin)
 # NOTE: UpdateLog is registered superuser-only (publish/hide hidden rows); it is
 # kept OUT of the left nav via _HIDDEN_NAV_OBJECT_NAMES — the custom «Обновления»
 # page links to /ai/admin/ai/updatelog/ (Скрытые записи).

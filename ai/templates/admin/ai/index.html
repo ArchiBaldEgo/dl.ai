@@ -23,9 +23,11 @@ visible on every page.{% endcomment %}
       {{ user_role_label }} · {% now "d.m.Y" %}
     </p>
     {% comment %}Повторный показ онбординг-тура админки (ai-wizard.js):
-    клик по кнопке запускает заново тур текущего scope без повторной отметки.{% endcomment %}
+    клик по кнопке запускает заново тур текущего scope без повторной отметки.
+    data-scope не ставим: общий тур разделён по правам (admin_pd/staff/super),
+    движок берёт scope из cfg — кнопка всегда перезапускает СВОЙ ролевой тур.{% endcomment %}
     <p class="ai-dashboard-hint">
-      <button type="button" class="button" data-ai-wizard-restart data-scope="admin">
+      <button type="button" class="button" data-ai-wizard-restart>
         Показать подсказки
       </button>
     </p>

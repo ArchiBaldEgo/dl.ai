@@ -59,8 +59,11 @@ DLSID), migrate+collectstatic на старте и выключенным ске
   кука `DLSID` (`ai/external_auth.py`);
 - `DEBUG` выводится из наличия прокси; куки-домен — только на проде;
 - `REDIS_URL` пустой → Django fallback на LocMemCache (однопроцессный dev);
-- `OLLAMA_HOST` → `http://localhost:11434`; Groq/SambaNova выключены,
-  пока не заданы `AI_ENABLE_GROQ`/`AI_ENABLE_SAMBANOVA`.
+- `OLLAMA_HOST` → без переменной дефолт `http://localhost:11434` (локальный
+  сервер Ollama). Локальные ОБУЧНЫЕ модели (`…:cloud`) нужно указать явно:
+  `OLLAMA_HOST=https://ollama.com` + `OLLAMA_API_KEY` (ключ ollama.com, bearer;
+  REST — `https://ollama.com/api/*`). Groq/SambaNova выключены, пока не заданы
+  `AI_ENABLE_GROQ`/`AI_ENABLE_SAMBANOVA`.
 
 Всё остальное (токены моделей, прокси, бот-пулы, mail-bridge, rate-limits,
 prod-значения) — смотрите и берите из `.env.example`: каждая переменная
