@@ -123,6 +123,18 @@ window.ArmBatchResults = (function () {
   // записи подтягивается GET-ом при первом раскрытии карточки и кэшируется
   // в памяти — перерисовки и переключения фильтров не дёргают сервер повторно.
   var bodyCache = {};            // result_id -> Promise | разрешённое тело
+  function parseJsonResponse(response) {
+    // При протухшей сессии admin_view редиректит на страницу логина (HTML) —
+    // fetch молча следует за 302, и response.json() даёт бессмысленный
+    // «Unexpected token '<'» вместо понятного сообщения (тот же контракт,
+    // что в arm_solve.html / daily_report.html).
+    return response.text().then(function (text) {
+      try { return JSON.parse(text); }
+      catch (e) {
+        throw new Error('Сессия истекла — обновите страницу и войдите заново.');
+      }
+    });
+  }
   function fetchResultBody(resultId) {
     if (!resultId) { return Promise.reject(new Error('Нет result_id')); }
     // В кэше может лежать и обещание, и уже разрешённое тело — Promise.resolve
@@ -133,7 +145,7 @@ window.ArmBatchResults = (function () {
     var promise = fetch('/ai/admin/arm/solve/result/' + encodeURIComponent(resultId) + '/body/', {
       method: 'GET', credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' },
     })
-      .then(function (response) { return response.json(); })
+      .then(parseJsonResponse)
       .then(function (data) {
         if (!data || !data.ok || !data.result) { throw new Error('Тело результата недоступно'); }
         bodyCache[resultId] = data.result;

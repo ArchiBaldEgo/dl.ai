@@ -34,9 +34,11 @@ from .permissions import can_access_logs, is_staff_or_superuser, logs_scope_is_o
 
 logger = logging.getLogger(__name__)
 
-# Run id из message batch-лога ("Batch solve run <uuid4 hex>"). Единственная
-# копия паттерна: отсюда его читают _batch_run_id_from_log и все потребители.
-_BATCH_RUN_ID_RE = re.compile(r"Batch solve run ([0-9a-f]{32})")
+# Run id из message batch-лога ("Batch solve run <uuid4 hex>"; лог попарного
+# перезапуска нерешённых пар: "Batch solve rerun <uuid4 hex>" — воркер
+# arm_runner._run_batch_job_worker с rerun=True). Единственная копия паттерна:
+# отсюда его читают _batch_run_id_from_log и все потребители.
+_BATCH_RUN_ID_RE = re.compile(r"Batch solve (?:rerun|run) ([0-9a-f]{32})")
 
 
 def _batch_run_id_from_log(log):
@@ -500,8 +502,8 @@ def build_recent_batch_rows(request, limit=5):
     «Настройки ИИ-приложения»).
 
     Отбирает записи журнала пакетного решения (source="arm",
-    mode=batch_solve|solve, sentinel "Batch solve run " в message) с учётом
-    ограничения видимости («только свои» для prompt_developer).
+    mode=batch_solve|solve, sentinel "Batch solve run|rerun <hex>" в message)
+    с учётом ограничения видимости («только свои» для prompt_developer).
 
     Строка — ЛЁГКАЯ: шапка прогона (один запрос AIModelTestRun) и
     count-агрегат результатов (AIModelTestResult) — без текстов решений:
@@ -520,7 +522,9 @@ def build_recent_batch_rows(request, limit=5):
         qs = (
             _scope_logs_qs(AIRequestLog.objects.all(), request.user)
             .filter(source="arm", mode__in=("batch_solve", "solve"))
-            .filter(message__icontains="Batch solve run ")
+            # "Batch solve run <hex>" И "Batch solve rerun <hex>" (перезапуск
+            # нерешённых пар вливается в тот же прогон — лог той же формы).
+            .filter(message__icontains="Batch solve ")
             .order_by("-sent_at")
         )
         logs = list(qs[: max(0, int(limit))])
@@ -786,7 +790,9 @@ def _is_batch_solve_log(log):
     return (
         log.source == "arm"
         and log.mode in ("batch_solve", "solve")
-        and "Batch solve run " in (log.message or "")
+        # "Batch solve run <hex>" и "Batch solve rerun <hex>" — оба ведут в
+        # таблицу результатов (см. _BATCH_RUN_ID_RE).
+        and _batch_run_id_from_log(log) is not None
     )
 
 
@@ -1041,16 +1047,12 @@ def resend_request_view(request, log_id):
     if error is not None:
         return error
 
-    # ARM batch-solve logs have message="Batch solve run <run_id>" and must be
+    # ARM batch-solve logs have message="Batch solve run|rerun <run_id>" and must be
     # rerun as a full batch (same models, tasks, prompt, language) under the
     # caller's own DLSID — a plain resend to one model would be meaningless.
     # Старые batch-логи использовали mode="solve" + sentinel; новые —
     # mode="batch_solve". Принимаем оба.
-    if (
-        log.source == "arm"
-        and log.mode in ("batch_solve", "solve")
-        and "Batch solve run " in (log.message or "")
-    ):
+    if _is_batch_solve_log(log):
         return _rerun_arm_batch(request, log)
 
     # Resolve the model handler.
@@ -1251,7 +1253,7 @@ def admin_request_log_task_text_view(request):
 def _rerun_arm_batch(request, log):
     """Перезапуск batch-solve ARM-прогона под DLSID текущего пользователя.
 
-    Извлекает run_id из ``log.message`` ("Batch solve run <uuid>"), находит
+    Извлекает run_id из ``log.message`` ("Batch solve run|rerun <uuid>"), находит
     ``AIModelTestRun``, восстанавливает параметры (node_ids, model_keys,
     file_extension, prompt_id, language) из результатов прогона и запускает
     новый batch через ``start_batch_solve_run`` с session_id текущего юзера.
