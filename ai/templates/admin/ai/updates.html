@@ -23,14 +23,15 @@
            style="padding: 4px 8px; min-width: 200px;">
     <select name="author" style="padding: 4px 8px;">
       <option value="">— {% trans "Все авторы" %} —</option>
-      {% for author in authors %}
-        <option value="{{ author }}" {% if author == selected_author %}selected{% endif %}>{{ author }}</option>
+      {% for option in authors %}
+        <option value="{{ option.0 }}" {% if option.0 == selected_author %}selected{% endif %}>{{ option.1 }}</option>
       {% endfor %}
     </select>
     <input type="date" name="date_from" value="{{ date_from }}" placeholder="{% trans 'С' %}" style="padding: 4px 8px;">
     <input type="date" name="date_to" value="{{ date_to }}" placeholder="{% trans 'По' %}" style="padding: 4px 8px;">
     <button type="submit" class="default" style="padding: 4px 16px;">{% trans 'Фильтровать' %}</button>
     <a href="{% url 'ai_updates' %}" class="button" style="padding: 4px 16px;">{% trans 'Сбросить' %}</a>
+    <a href="/ai/admin/ai/updatelog/?hidden__exact=1" class="button" style="padding: 4px 16px;">{% trans 'Скрытые записи' %}</a>
   </form>
 
   <!-- Commits table -->
@@ -43,11 +44,11 @@
       </tr>
     </thead>
     <tbody>
-      {% for entry in page_obj.object_list %}
+      {% for row in rows %}
       <tr>
-        <td style="padding: 8px; border-bottom: 1px solid #eee;">{{ entry.commit_date|date:"d.m.Y" }}</td>
-        <td style="padding: 8px; border-bottom: 1px solid #eee;">{{ entry.description }}</td>
-        <td style="padding: 8px; border-bottom: 1px solid #eee;">{{ entry.author }}</td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">{{ row.entry.commit_date|date:"d.m.Y" }}</td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">{{ row.entry.description }}</td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">{{ row.display_author }}</td>
       </tr>
       {% empty %}
       <tr>

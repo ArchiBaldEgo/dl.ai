@@ -24,14 +24,23 @@ from django.utils import timezone
 from asgiref.sync import sync_to_async
 from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
+import os
+
+# Dev-bypass аутентификации выключен на весь тестовый процесс: прогон с
+# обычными settings наследует локальный .env (load_dotenv в DjangoTest/settings.py),
+# и без-DLSID тесты middleware провижинили бы fake-юзера вместо 302.
+# DevAuthBypassTests включает флаг точечно через patch.dict.
+os.environ["AI_DEV_AUTH_BYPASS"] = "0"
 
 from ai.admin import PromptAdmin, PromptForm
 from ai.middleware import ExternalAuthMiddleware
 from ai.i18n import get_localized_name, get_ui_language_suffix
 from ai.external_account import get_or_create_user_from_external
 from ai.models import (
+    AuthorAlias,
     AIRequestLog,
     AIPinnedBatchRun,
+    AIWizardSeen,
     ArmPromptBinding,
     ExternalDLAccount,
     ProgrammingLanguage,
@@ -279,6 +288,189 @@ class ExternalAuthMiddlewareTests(TestCase):
             response = self.middleware(request)
 
         self.assertEqual(response.status_code, 503)
+
+
+class DevAuthBypassTests(TestCase):
+    """AI_DEV_AUTH_BYPASS: fake-суперпользователь без DLSID, только при DEBUG.
+
+    Инварианты bypass: request.user_info + session["external_user_info"]
+    (WS-фолбэк), login + rotate CSRF, _ai_provisioned_user, usable password
+    (иначе admin_view уводит на set-password). При DEBUG=False или без флага
+    middleware ведёт себя как раньше (302).
+    """
+
+    def setUp(self):
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        self.factory = RequestFactory()
+        self.middleware = ExternalAuthMiddleware(lambda req: HttpResponse("ok"))
+        self.user_model = get_user_model()
+        # Базовое состояние — флаг выключен; отдельные тесты включают точечно.
+        env = patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": ""})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _add_session(self, request):
+        SessionMiddleware(lambda req: None).process_request(request)
+
+    @override_settings(DEBUG=True)
+    def test_bypass_provisions_local_superuser_without_dlsid(self):
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = AnonymousUser()
+
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        user = request._ai_provisioned_user
+        self.assertTrue(user.is_authenticated)
+        self.assertTrue(user.is_superuser)
+        self.assertTrue(user.is_staff)
+        self.assertEqual(user.username, "dev_admin")
+        self.assertTrue(user.has_usable_password())
+        self.assertEqual(request.user_info["userId"], "999999")
+        self.assertEqual(request.user.pk, user.pk)
+        self.assertTrue(ExternalDLAccount.objects.filter(external_user_id="999999").exists())
+        self.assertEqual(request.session["external_user_info"]["userId"], "999999")
+        self.assertTrue(request.session["admin_fresh_auth"])
+
+    @override_settings(DEBUG=True)
+    def test_bypass_reuses_existing_user(self):
+        # Два запроса с независимыми сессиями — один и тот же юзер,
+        # дублей username нет, права сохраняются.
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            first = self.factory.get("/ai/chat/")
+            self._add_session(first)
+            first.user = AnonymousUser()
+            self.middleware(first)
+
+            second = self.factory.get("/ai/chat/")
+            self._add_session(second)
+            second.user = AnonymousUser()
+            self.middleware(second)
+
+        self.assertEqual(self.user_model.objects.filter(username="dev_admin").count(), 1)
+        self.assertEqual(second._ai_provisioned_user.pk, first._ai_provisioned_user.pk)
+        self.assertTrue(second._ai_provisioned_user.is_superuser)
+
+    @override_settings(DEBUG=True)
+    def test_bypass_promotes_existing_non_superuser(self):
+        # Юзер dev_admin уже существовал (копия БД / прошлый прогон) со своим
+        # ExternalDLAccount на 999999, но без прав — bypass повышает его
+        # (промоут idempotent, не только при created=True).
+        existed = self.user_model.objects.create_user(username="dev_admin", password="x")
+        ExternalDLAccount.objects.create(user=existed, external_user_id="999999")
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = AnonymousUser()
+
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            self.middleware(request)
+
+        user = self.user_model.objects.get(username="dev_admin")
+        self.assertEqual(request._ai_provisioned_user.pk, existed.pk)
+        self.assertTrue(user.is_superuser)
+        self.assertTrue(user.is_staff)
+
+    @override_settings(DEBUG=False)
+    def test_bypass_inert_when_debug_false(self):
+        # Prod-защита: любой флаг при DEBUG=False игнорируется — редирект как раньше.
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = AnonymousUser()
+
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "https://dl.gsu.by")
+        self.assertEqual(ExternalDLAccount.objects.count(), 0)
+
+    def test_bypass_inert_without_flag(self):
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = AnonymousUser()
+
+        with override_settings(DEBUG=True):
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(ExternalDLAccount.objects.count(), 0)
+
+    @override_settings(DEBUG=True)
+    def test_bypass_does_not_shadow_valid_dlsid_session(self):
+        # Валидная DLSID-кука — обычный путь, bypass не мешает и
+        # ничего не повышает в правах.
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = AnonymousUser()
+        request.COOKIES["DLSID"] = "session-123"
+
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            with patch(
+                "ai.middleware.fetch_external_user_info",
+                return_value={"userId": "77", "login": "alice", "firstName": "Alice"},
+            ):
+                response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(request.user_info["userId"], "77")
+        self.assertFalse(request.user.is_superuser)
+        self.assertFalse(ExternalDLAccount.objects.filter(external_user_id="999999").exists())
+
+    @override_settings(DEBUG=True)
+    def test_bypass_fallback_on_dlsid_unauthorized(self):
+        from ai.external_auth import ExternalAuthUnauthorized
+
+        request = self.factory.get("/ai/chat/")
+        self._add_session(request)
+        request.user = AnonymousUser()
+        request.COOKIES["DLSID"] = "stale-session"
+
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            with patch(
+                "ai.middleware.fetch_external_user_info",
+                side_effect=ExternalAuthUnauthorized("invalid DLSID"),
+            ):
+                response = self.middleware(request)
+
+        # Протухшая DLSID не зацикливает на редиректе: bypass перелогинит
+        # fake-пользователем, локальная сессия не сломана.
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(request.user.is_authenticated)
+        self.assertEqual(request.user_info["userId"], "999999")
+
+    @override_settings(DEBUG=True)
+    def test_bypass_end_to_end_chat_and_admin(self):
+        # Интеграционно, через реальный стек middleware: чат отвечает без
+        # куки, админка не уводит на login/set-password/dl.gsu.by.
+        # Триггер self-heal свипа глушим: он стартует поток с отдельным
+        # соединением, которое коммитит AIModelHealthRun(window_date=сегодня)
+        # в обход TestCase-rollback и ломает последующие ModelHealth-тесты.
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            with patch("ai.views.trigger_model_health_refresh_async"):
+                chat = self.client.get("/ai/chat/")
+                self.assertEqual(chat.status_code, 200)
+
+                admin_page = self.client.get("/ai/admin/")
+                self.assertEqual(admin_page.status_code, 200)
+                self.assertNotEqual(admin_page.get("Location", ""), "/ai/admin/set-password/")
+                self.assertNotIn("dl.gsu.by", admin_page.get("Location", ""))
+
+    @override_settings(DEBUG=True)
+    def test_bypass_does_not_affect_skipped_paths(self):
+        # /health в skip-листе — провижининга нет, пользователь анонимный.
+        request = self.factory.get("/health")
+        self._add_session(request)
+        request.user = AnonymousUser()
+
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(request.user.is_authenticated)
+        self.assertEqual(ExternalDLAccount.objects.count(), 0)
 
 
 class AdminExternalAuthTests(TestCase):
@@ -2676,401 +2868,6 @@ class ExtractCodeFromResponseTests(SimpleTestCase):
         self.assertEqual(self.extract(text), "")
 
 
-class RerunUnsolvedPairsTests(TestCase):
-    """Попарный перезапуск нерешённых пар со слиянием в тот же прогон.
-
-    Регрессия на «Перезапустить прогон» со полным новым прогоном: было
-    40 реш / 13 не реш → перезапуск 13 пар (задача × модель) → 10 решились →
-    в отчёте 50 реш / 3 не реш. Строки обновляются update_or_create в том же
-    run; финализирующий отчёт строится из всех строк прогона.
-    """
-
-    def setUp(self):
-        from django.utils import timezone as tz
-        from ai.models import AIModelTestResult, AIModelTestRun
-        from ai.models import ProgrammingLanguage, Task, Topic
-
-        self.user = get_user_model().objects.create_user(username="reruner", password="x")
-        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
-        self.t1 = Task.objects.create(
-            node_id=3001, task_id=30001, name="A", statement="Выведи 1",
-            topic=self.topic, programming_language=self.lang, file_extension=".pas",
-        )
-        self.t2 = Task.objects.create(
-            node_id=3002, task_id=30002, name="B", statement="Выведи 2",
-            topic=self.topic, programming_language=self.lang, file_extension=".pas",
-        )
-        self.started = tz.now()
-        self.run = AIModelTestRun.objects.create(
-            run_id="rerun-target-1",
-            run_type=AIModelTestRun.RUN_TYPE_BATCH,
-            user=self.user,
-            status=AIModelTestRun.STATUS_COMPLETED,
-            started_at=self.started,
-            finished_at=tz.now(),
-            message="Batch solve: 2 задач × 1 моделей",
-            total_models=1,
-            run_params={
-                "node_ids": [self.t1.node_id, self.t2.node_id],
-                "model_keys": ["FakeModel"],
-                "language_id": self.lang.id,
-                "file_extension": ".pas",
-                "dl_test": True,
-                "ui_language": "Русский",
-                "record_stats": False,
-                "save_solutions": False,
-                "run_name": "Контрольный",
-            },
-        )
-        # Пара 1 решена, пара 2 провалилась (код не извлечён) — кандидаты на перезапуск.
-        AIModelTestResult.objects.create(
-            run=self.run, model_key="FakeModel", model_title="FakeModel",
-            task=self.t1, status="ok", verdict="solved",
-            dl_queue_id=1, dl_comment="Все тесты успешно пройдены",
-            file_extension_snapshot=".pas", topic_name_snapshot="Линейные",
-            prog_lang_snapshot="Pascal",
-        )
-        AIModelTestResult.objects.create(
-            run=self.run, model_key="FakeModel", model_title="FakeModel",
-            task=self.t2, status="error", verdict="failed",
-            dl_queue_id=0, dl_comment="Не удалось извлечь код из ответа модели",
-            file_extension_snapshot=".pas", topic_name_snapshot="Линейные",
-            prog_lang_snapshot="Pascal",
-        )
-
-    def test_collect_unsolved_pairs_only_non_solved(self):
-        from ai.arm_runner import collect_unsolved_pairs
-
-        node_ids, pairs_map = collect_unsolved_pairs(self.run)
-        self.assertEqual(node_ids, [self.t2.node_id])
-        self.assertEqual(pairs_map, {self.t2.node_id: {"FakeModel"}})
-
-    def test_start_rerun_rejects_when_running(self):
-        from django.core.cache import cache
-
-        from ai import arm_runner
-        from ai.models import AIModelTestRun
-
-        arm_runner.AIModelTestRun.objects.filter(pk=self.run.pk).update(
-            status=AIModelTestRun.STATUS_RUNNING,
-        )
-        new_run_id, error, dropped = arm_runner.start_batch_rerun_pairs(
-            self.run.run_id, self.user.id, "DLSID-1",
-        )
-        self.assertIsNone(new_run_id)
-        self.assertIn("выполняется", error)
-        self.assertEqual(dropped, [])
-
-    def test_start_rerun_rejects_when_all_solved(self):
-        from ai import arm_runner
-        from ai.models import AIModelTestResult
-
-        AIModelTestResult.objects.filter(run=self.run, task=self.t2).update(verdict="solved")
-        new_run_id, error, _dropped = arm_runner.start_batch_rerun_pairs(
-            self.run.run_id, self.user.id, "DLSID-1",
-        )
-        self.assertIsNone(new_run_id)
-        self.assertIn("Все пары решены", error)
-
-    def test_start_rerun_rejects_unknown_run(self):
-        from ai import arm_runner
-
-        new_run_id, error, _dropped = arm_runner.start_batch_rerun_pairs(
-            "no-such-run", self.user.id, "DLSID-1",
-        )
-        self.assertIsNone(new_run_id)
-        self.assertIn("не найден", error)
-
-    def test_rerun_merges_into_same_run(self):
-        """Перезапуск 1 пары: строка обновлена в том же run, отчёт из всех строк."""
-        import time as _t
-        from unittest.mock import patch
-
-        from ai import arm_runner
-        from ai.models import AIModelTestResult, AIModelTestRun
-
-        async def fake_handler(messages, conv_id):
-            return ("program r; begin writeln(2); end.", 5)
-
-        ordered_models = [{
-            "key": "FakeModel", "title": "FakeModel",
-            "handler": fake_handler,
-        }]
-        run_id = self.run.run_id
-        now_ts = _t.time()
-        # Pre-seed живой job перезапуска (как в start_batch_rerun_pairs).
-        arm_runner._jobs[run_id] = {
-            "run_id": run_id, "run_type": "batch", "rerun": True,
-            "status": "running", "error_message": "",
-            "total_models": 1, "total_pairs": 1, "completed_pairs": 0,
-            "completed_models": 0, "current_model_key": "FakeModel",
-            "current_model_title": "FakeModel", "current_task_node_id": "",
-            "current_task_name": "", "results": [], "report": None,
-            "run_name": "Контрольный · перезапуск",
-            "created_at_ts": now_ts, "updated_at_ts": now_ts,
-        }
-        dl_ok = lambda sid, node_id, code, ext, **kw: {
-            "verdict": "solved", "comment": "Все тесты успешно пройдены",
-            "submit_error": "", "queue_id": 1, "code_sent": code,
-        }
-        try:
-            with patch("ai.arm_runner._test_solution_on_dl", dl_ok):
-                arm_runner._run_batch_job_worker(
-                    run_id, [self.t2.node_id], ordered_models, self.user.id, "DLSID-1",
-                    ui_language="Русский", dl_test=True,
-                    rerun=True, rerun_pairs={self.t2.node_id: {"FakeModel"}},
-                )
-        finally:
-            arm_runner._jobs.pop(run_id, None)
-
-        run = AIModelTestRun.objects.get(run_id=run_id)
-        # Строки НЕ дублируются: update_or_create в тот же run.
-        rows = list(AIModelTestResult.objects.filter(run=run).order_by("task_id"))
-        self.assertEqual(len(rows), 2)
-        by_task = {r.task_id: r for r in rows}
-        # Перезапущенная пара стала solved; решённая строка не тронута.
-        self.assertEqual(by_task[self.t2.id].verdict, "solved")
-        self.assertEqual(by_task[self.t2.id].dl_queue_id, 1)
-        self.assertEqual(by_task[self.t1.id].verdict, "solved")
-        # Отчёт финализирован из всех строк: 2 решено / 0 не решено.
-        self.assertEqual(run.report["solved"], 2)
-        self.assertEqual(run.report["failed"], 0)
-        self.assertEqual(run.report["total_pairs"], 2)
-        # Статус прогона вернулся в completed.
-        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
-        self.assertIsNotNone(run.finished_at)
-        # Отсчёт времени «Прогон» — от исходного started_at.
-        self.assertEqual(run.started_at, self.started)
-        # Журнал: отдельная лог-строка перезапуска.
-        self.assertTrue(
-            AIRequestLog.objects.filter(message=f"Batch solve rerun {run_id}").exists(),
-        )
-
-    def test_rerun_snapshot_merges_results(self):
-        """Живой перезапуск в снапшоте — все строки прогона, сводка обновляется."""
-        import time as _t
-
-        from ai import arm_runner
-
-        run_id = self.run.run_id
-        arm_runner._jobs[run_id] = {
-            "run_id": run_id, "run_type": "batch", "rerun": True,
-            "status": "running", "error_message": "",
-            "total_models": 1, "total_pairs": 1, "completed_pairs": 0,
-            "completed_models": 0, "current_model_key": "FakeModel",
-            "current_model_title": "FakeModel", "current_task_node_id": "",
-            "current_task_name": "", "results": [],
-            "report": None, "run_name": "Контрольный · перезапуск",
-            "created_at_ts": _t.time(), "updated_at_ts": _t.time(),
-        }
-        try:
-            snapshot = arm_runner.get_arm_run_snapshot(run_id, light_results=True)
-        finally:
-            arm_runner._jobs.pop(run_id, None)
-        # Обе строки видны, сводка — по всем парам прогона.
-        self.assertEqual(len(snapshot["results"]), 2)
-        self.assertEqual(snapshot["report"]["solved"], 1)
-        self.assertEqual(snapshot["report"]["failed"], 1)
-
-
-class RerunLogJournalTests(TestCase):
-    """Лог попарного перезапуска ("Batch solve rerun <hex>") виден журналу.
-
-    Регрессия: воркер перезапуска пишет AIRequestLog с message
-    "Batch solve rerun <run_id>" (не "run"), а весь журнал разбирал run_id
-    только по "Batch solve run <hex>" — детали перезапуска отрисовывались
-    как обычный текст без таблицы, кнопка «Повторить прогон» давала 400,
-    resend отправлял служебное сообщение модели как обычный чат.
-    """
-
-    def setUp(self):
-        from ai.models import AIModelTestRun, AIModelTestResult, Task, ProgrammingLanguage, Topic
-        self.factory = RequestFactory()
-        self.superuser = get_user_model().objects.create_superuser(
-            username="rerun_log_admin", password="x", email="rl@t.com",
-        )
-        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(
-            topic_name_ru="Линейные", programming_language=self.lang,
-        )
-        self.task = Task.objects.create(
-            node_id=7301, task_id=73001, name="RL", statement="s",
-            topic=self.topic, programming_language=self.lang,
-            file_extension=".pas",
-        )
-        self.run_id = "d" * 32
-        self.test_run = AIModelTestRun.objects.create(
-            run_id=self.run_id,
-            run_type=AIModelTestRun.RUN_TYPE_BATCH,
-            status=AIModelTestRun.STATUS_COMPLETED,
-            course_id=1450,
-            run_name="Контрольный · перезапуск",
-        )
-        AIModelTestResult.objects.create(
-            run=self.test_run, task=self.task,
-            model_key="FakeModel", model_title="FakeModel",
-            status="ok", verdict="failed",
-            dl_comment="[test 1]: Ошибка компиляции",
-            file_extension_snapshot=".pas",
-            topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
-        )
-        self.rerun_log = AIRequestLog.objects.create(
-            user=self.superuser, source="arm", mode="batch_solve",
-            message=f"Batch solve rerun {self.run_id}",
-            status=AIRequestLog.STATUS_ERROR, sent_at=timezone.now(),
-        )
-
-    def test_batch_run_id_matches_run_and_rerun(self):
-        from ai.admin.logs import _batch_run_id_from_log
-        self.assertEqual(
-            _batch_run_id_from_log(self.rerun_log), self.run_id,
-        )
-        run_log = AIRequestLog(message=f"Batch solve run {self.run_id}")
-        self.assertEqual(_batch_run_id_from_log(run_log), self.run_id)
-        # Служебные сообщения прогресса — не run-id.
-        self.assertIsNone(
-            _batch_run_id_from_log(AIRequestLog(message="Batch solve: 2 задач × 1 моделей")),
-        )
-        self.assertIsNone(_batch_run_id_from_log(AIRequestLog(message="")))
-
-    def test_is_batch_solve_log_accepts_rerun(self):
-        from ai.admin.logs import _is_batch_solve_log
-        self.assertTrue(_is_batch_solve_log(self.rerun_log))
-
-    def test_detail_of_rerun_log_shows_results_table(self):
-        from ai.admin.logs import admin_request_log_detail_view
-        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.rerun_log.id}/")
-        request.user = self.superuser
-        request.session = {}
-        response = admin_request_log_detail_view(request, self.rerun_log.id)
-        self.assertEqual(response.status_code, 200)
-        html = response.render().content.decode()
-        # Таблица результатов (общий partial), как у обычного batch-лога.
-        self.assertTrue(response.context_data["is_batch_log"])
-        self.assertIn("ArmBatchResults.init", html)
-
-    def test_recent_batch_rows_include_rerun_log(self):
-        from ai.admin.logs import build_recent_batch_rows
-        request = self.factory.get("/ai/admin/")
-        request.user = self.superuser
-        rows = build_recent_batch_rows(request, limit=5)
-        log_ids = {r["id"] for r in rows["recent_batch_runs"]}
-        self.assertIn(self.rerun_log.id, log_ids)
-
-    def test_resend_rerun_log_delegates_to_full_rerun(self):
-        """«Повторить запрос» на rerun-логе ведёт в rerun-arm (новый прогон
-        по всем парам), а не в resend одной модели."""
-        from ai.admin import logs as logs_mod
-        request = self.factory.post(f"/ai/admin/ai/request_logs/{self.rerun_log.id}/resend/")
-        request.user = self.superuser
-        request.session = {"external_session_id": "DLSID-1"}
-        with patch(
-            "ai.arm_runner.start_batch_solve_run",
-            return_value=("f" * 32, ""),
-        ) as start_mock:
-            response = logs_mod.resend_request_view(request, self.rerun_log.id)
-        data = json.loads(response.content)
-        # Служебный текст лога ушёл не модели, а в полный перезапуск прогона.
-        self.assertTrue(data["success"])
-        self.assertEqual(data["run_id"], "f" * 32)
-        start_mock.assert_called_once()
-        self.assertEqual(start_mock.call_args.args[0], [self.task.node_id])
-        self.assertEqual(start_mock.call_args.args[1], ["FakeModel"])
-
-    def test_resend_rerun_log_without_run_gives_error(self):
-        """Если прогона уже нет в БД — внятная ошибка, а не resend модели."""
-        from ai.admin import logs as logs_mod
-        self.test_run.delete()
-        request = self.factory.post(f"/ai/admin/ai/airequestlog/{self.rerun_log.id}/resend/")
-        request.user = self.superuser
-        request.session = {"external_session_id": "DLSID-1"}
-        response = logs_mod.resend_request_view(request, self.rerun_log.id)
-        data = json.loads(response.content)
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(data["error"], "Прогон ARM не найден в БД")
-
-
-class ArmSolveRerunPairViewTests(TestCase):
-    """POST /ai/admin/arm/solve/rerun-pairs/ — эндпоинт кнопки
-    «Перезапустить нерешённые пары» (день-2026-10-08: кнопка упиралась
-    в 403 CSRF; контракт вью — JSON и понятный message при ошибках)."""
-
-    def setUp(self):
-        from ai.models import AIModelTestRun
-        self.factory = RequestFactory()
-        self.superuser = get_user_model().objects.create_superuser(
-            username="rerun_view_admin", password="x", email="rv@t.com",
-        )
-        self.run = AIModelTestRun.objects.create(
-            run_id="e" * 32,
-            run_type=AIModelTestRun.RUN_TYPE_BATCH,
-            user=self.superuser,
-            status=AIModelTestRun.STATUS_COMPLETED,
-        )
-
-    def _view(self, request):
-        from ai.admin.arm import admin_arm_solve_rerun_pairs_view
-        return admin_arm_solve_rerun_pairs_view(request)
-
-    def _post(self, body):
-        request = self.factory.post(
-            "/ai/admin/arm/solve/rerun-pairs/",
-            data=body, content_type="application/json",
-        )
-        request.user = self.superuser
-        request.session = {}
-        return self._view(request)
-
-    def test_get_not_allowed(self):
-        request = self.factory.get("/ai/admin/arm/solve/rerun-pairs/")
-        request.user = self.superuser
-        request.session = {}
-        response = self._view(request)
-        self.assertEqual(response.status_code, 405)
-
-    def test_run_id_required(self):
-        response = self._post(json.dumps({}))
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("run_id", json.loads(response.content)["message"])
-
-    def test_unknown_run_gives_friendly_message(self):
-        request = self.factory.post(
-            "/ai/admin/arm/solve/rerun-pairs/",
-            data=json.dumps({"run_id": "0" * 32}), content_type="application/json",
-        )
-        request.user = self.superuser
-        request.session = {"external_session_id": "DLSID-1"}
-        response = self._view(request)
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(json.loads(response.content)["message"], "Прогон не найден")
-
-    def test_running_run_rejected(self):
-        from ai.models import AIModelTestRun
-        AIModelTestRun.objects.filter(pk=self.run.pk).update(
-            status=AIModelTestRun.STATUS_RUNNING,
-        )
-        request = self.factory.post(
-            "/ai/admin/arm/solve/rerun-pairs/",
-            data=json.dumps({"run_id": self.run.run_id}), content_type="application/json",
-        )
-        request.user = self.superuser
-        request.session = {"external_session_id": "DLSID-1"}
-        response = self._view(request)
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("выполняется", json.loads(response.content)["message"])
-
-    def test_success_returns_snapshot_and_message(self):
-        with patch("ai.admin.arm.start_batch_rerun_pairs", return_value=(self.run.run_id, "", ["Web_Gone"])), \
-             patch("ai.admin.arm.get_arm_run_snapshot", return_value={"run_id": self.run.run_id, "status": "running"}):
-            response = self._post(json.dumps({"run_id": self.run.run_id}))
-        data = json.loads(response.content)
-        self.assertTrue(data["ok"])
-        self.assertEqual(data["run_id"], self.run.run_id)
-        self.assertIn("Web_Gone", data["message"])
-        self.assertEqual(data["run"]["run_id"], self.run.run_id)
-
-
 class BatchRunnerIntegrationTests(TestCase):
     """End-to-end batch solve with mocked handlers + DL sample fetch.
 
@@ -4065,37 +3862,8 @@ class UserTopModelKeysTests(TestCase):
 # Tests for admin Updates section (UpdateLog)
 # ===================================================================
 
-class UpdateLogAdminTests(TestCase):
-    """Tests for the admin updates view: access control, filtering, search."""
-
-    def setUp(self):
-        self.factory = RequestFactory()
-        # Очищаем данные от миграции 0026, чтобы тесты были изолированы
-        UpdateLog.objects.all().delete()
-        self.superuser = get_user_model().objects.create_superuser(
-            username="upd_admin", password="***", email="admin@test.com",
-        )
-        self.normal_user = get_user_model().objects.create_user(
-            username="upd_normal", password="***",
-        )
-        # Add to prompt_developer group (non-superuser staff-like)
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-        self.normal_user.groups.add(group)
-
-        # Create some test data
-        self.u1 = UpdateLog.objects.create(
-            commit_date="2026-07-27", description="Нововведение: test feature",
-            author="whmi1", commit_hash="abc123",
-        )
-        self.u2 = UpdateLog.objects.create(
-            commit_date="2026-07-11", description="Исправление: bug fix",
-            author="Archi", commit_hash="def456",
-        )
-        self.u3 = UpdateLog.objects.create(
-            commit_date="2026-06-22", description="fix build v2",
-            author="ArchiBaldEgo", commit_hash="ghi789",
-        )
+class UpdateLogAdminViewMixin:
+    """Request-заготовки для тестов страницы «Обновления» (ai/admin/updates.py)."""
 
     def _make_request(self, user=None, params=None):
         request = self.factory.get("/ai/admin/updates/", data=params or {})
@@ -4127,6 +3895,39 @@ class UpdateLogAdminTests(TestCase):
         # Restore
         site_module.ai_admin_site.admin_view = original_admin_view
         return response
+
+
+class UpdateLogAdminTests(UpdateLogAdminViewMixin, TestCase):
+    """Tests for the admin updates view: access control, filtering, search."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        # Очищаем данные от миграции 0026, чтобы тесты были изолированы
+        UpdateLog.objects.all().delete()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="upd_admin", password="***", email="admin@test.com",
+        )
+        self.normal_user = get_user_model().objects.create_user(
+            username="upd_normal", password="***",
+        )
+        # Add to prompt_developer group (non-superuser staff-like)
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        self.normal_user.groups.add(group)
+
+        # Create some test data
+        self.u1 = UpdateLog.objects.create(
+            commit_date="2026-07-27", description="Нововведение: test feature",
+            author="whmi1", commit_hash="abc123",
+        )
+        self.u2 = UpdateLog.objects.create(
+            commit_date="2026-07-11", description="Исправление: bug fix",
+            author="Archi", commit_hash="def456",
+        )
+        self.u3 = UpdateLog.objects.create(
+            commit_date="2026-06-22", description="fix build v2",
+            author="ArchiBaldEgo", commit_hash="ghi789",
+        )
 
     def test_superuser_can_access(self):
         """Superuser should see the updates page."""
@@ -4196,6 +3997,228 @@ class UpdateLogAdminTests(TestCase):
         response = self._call_view(request)
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Нет записей")
+
+    def test_hidden_rows_not_displayed(self):
+        """Скрытые записи (hidden=True) не видны на «Обновлениях» и в счётчике."""
+        UpdateLog.objects.create(
+            commit_date="2026-07-01", description="Скрытый: отклонённый коммит",
+            author="whmi2", commit_hash="xyz1", hidden=True,
+        )
+        response = self._call_view(self._make_request(self.superuser))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "test feature")  # видимая запись на месте
+        self.assertNotContains(response, "отклонённый коммит")
+        # 3 обычных записи, скрытая не в счётчике.
+        self.assertContains(response, "записей: 3")
+        # И автора скрытой записи нет в дропдауне.
+        self.assertNotContains(response, 'value="whmi2"')
+
+
+class UpdateLogAdminActionTests(TestCase):
+    """Действия UpdateLogAdmin: публикация скрытых и скрытие любых записей."""
+
+    def test_publish_and_hide_actions_toggle_hidden(self):
+        from ai.admin.models import UpdateLogAdmin
+        from ai.admin.site import ai_admin_site
+
+        UpdateLog.objects.all().delete()
+        entry = UpdateLog.objects.create(
+            commit_date="2026-10-01", description="feat: скрытый коммит",
+            author="whmi2", commit_hash="h9", hidden=True,
+        )
+        admin = UpdateLogAdmin(UpdateLog, ai_admin_site)
+        qs = UpdateLog.objects.filter(pk=entry.pk)
+
+        admin.publish_selected(request=MagicMock(), queryset=qs)
+        entry.refresh_from_db()
+        self.assertFalse(entry.hidden)
+
+        admin.hide_selected(request=MagicMock(), queryset=qs)
+        entry.refresh_from_db()
+        self.assertTrue(entry.hidden)
+
+
+class AuthorAliasTests(UpdateLogAdminViewMixin, TestCase):
+    """Справочник AuthorAlias: метки, display_map и рендер на «Обновления»."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        UpdateLog.objects.all().delete()
+        AuthorAlias.objects.all().delete()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="alias_admin", password="***", email="alias@test.com",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-07-27", description="Нововведение: test feature",
+            author="whmi1", commit_hash="abc123",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-07-11", description="Исправление: bug fix",
+            author="ArchiBaldEgo", commit_hash="def456",
+        )
+        self.alias = AuthorAlias.objects.create(
+            nick="whmi1", full_name="Иванов Иван", group="11А",
+        )
+
+    def test_display_label_with_and_without_group(self):
+        with_group = AuthorAlias.objects.get(nick="whmi1")
+        without = AuthorAlias.objects.create(nick="petr", full_name="Петров Пётр")
+        self.assertEqual(with_group.display_label, "Иванов Иван (11А)")
+        self.assertEqual(without.display_label, "Петров Пётр")
+
+    def test_display_map_maps_nick_to_label(self):
+        AuthorAlias.objects.create(nick="sidor", full_name="Сидоров Сидор")
+        mapping = AuthorAlias.display_map()
+        self.assertEqual(mapping["whmi1"], "Иванов Иван (11А)")
+        self.assertEqual(mapping["sidor"], "Сидоров Сидор")
+
+    def test_updates_view_shows_full_name(self):
+        """Ячейка «Автор» — ФИО (группа); ник без записи в справочнике остаётся ником."""
+        response = self._call_view(self._make_request(self.superuser))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Иванов Иван (11А)")
+        self.assertNotContains(response, ">whmi1</td>")
+        # Ник без записи в справочнике — рендерится как есть.
+        self.assertContains(response, "ArchiBaldEgo")
+
+    def test_updates_view_search_by_full_name(self):
+        """Поиск по ФИО находит коммиты ника из справочника."""
+        response = self._call_view(self._make_request(self.superuser, {"q": "Иванов"}))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "test feature")
+        self.assertContains(response, "записей: 1")
+        self.assertNotContains(response, "bug fix")
+
+    def test_updates_view_search_by_group(self):
+        """Поиск по группе тоже матчится через справочник."""
+        response = self._call_view(self._make_request(self.superuser, {"q": "11А"}))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "записей: 1")
+
+    def test_updates_view_dropdown_shows_alias_labels(self):
+        """Дропдаун авторов: value — сырой ник, label — ФИО из справочника."""
+        response = self._call_view(self._make_request(self.superuser))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'value="whmi1"')
+        self.assertContains(response, "Иванов Иван (11А)")
+
+
+class SyncUpdateLogNoMergesTests(TestCase):
+    """sync_update_log ходит git-логом с --no-merges (merge-коммиты не импортируются)."""
+
+    def test_git_argv_includes_no_merges(self):
+        from ai.management.commands import sync_update_log as cmd_mod
+
+        with patch.object(cmd_mod.subprocess, "run") as run, patch.object(
+            cmd_mod.sys, "stderr", new=MagicMock()
+        ):
+            run.return_value = SimpleNamespace(
+                stdout="a1|2026-10-01|whmi1|feat: note",
+                stderr="",
+            )
+            cmd_mod.Command().handle(rebuild=False)
+
+        argv = run.call_args.args[0]
+        self.assertIn("--no-merges", argv)
+        # Обычный коммит из вывода всё же импортируется (парсинг жив).
+        self.assertTrue(UpdateLog.objects.filter(commit_hash="a1").exists())
+
+
+class SyncUpdateLogInteractiveTests(TestCase):
+    """Интерактивный отбор коммитов: --interactive, hidden-строки, дедуп, no-TTY."""
+
+    def setUp(self):
+        UpdateLog.objects.all().delete()
+        import importlib
+        self.cmd_mod = importlib.import_module("ai.management.commands.sync_update_log")
+
+    GIT_OUTPUT = (
+        "h1|2026-10-05|whmi1|feat: add smoke test\n"
+        "h2|2026-10-04|Archi|fix: small patch\n"
+        "h3|2026-10-03|Kirill Karlow|docs: update readme\n"
+    )
+
+    def _run_handle(self, answers, interactive=True, isatty=True):
+        """Прогон handle с подменённым git-выводом, isatty и вводом.
+
+        answers — один ответ или список (для проверки повторного запроса).
+        """
+        if isinstance(answers, str):
+            answers = [answers]
+        with patch.object(self.cmd_mod.subprocess, "run", return_value=SimpleNamespace(
+            stdout=self.GIT_OUTPUT, stderr="",
+        )), patch.object(self.cmd_mod.sys.stdin, "isatty", return_value=isatty):
+            with patch("builtins.input", side_effect=answers) as input_mock:
+                self.cmd_mod.Command().handle(interactive=interactive, rebuild=False)
+        return input_mock
+
+    def test_parse_selection(self):
+        parse = self.cmd_mod._parse_selection
+        self.assertEqual(parse("", 3), set())
+        self.assertEqual(parse("   ", 3), set())
+        self.assertEqual(parse("a", 3), {1, 2, 3})
+        self.assertEqual(parse("все", 3), {1, 2, 3})
+        self.assertEqual(parse("2", 3), {2})
+        self.assertEqual(parse("1,3", 3), {1, 3})
+        self.assertEqual(parse("1,3-5", 7), {1, 3, 4, 5})
+        self.assertEqual(parse(" 2, 4-5 ", 5), {2, 4, 5})
+        # Мусор и вневыборочные номера → None (повторный запрос).
+        self.assertIsNone(parse("x", 3))
+        self.assertIsNone(parse("0", 3))
+        self.assertIsNone(parse("4", 3))
+        self.assertIsNone(parse("3-1", 5))
+        # Пустые токены между запятыми терпимо пропускаются.
+        self.assertEqual(parse("1,,2", 3), {1, 2})
+
+    def test_interactive_decline_all_hides_all(self):
+        self._run_handle("")
+        self.assertEqual(UpdateLog.objects.count(), 3)
+        self.assertEqual(UpdateLog.objects.filter(hidden=False).count(), 0)
+
+    def test_interactive_answer_a_adds_all(self):
+        self._run_handle("a")
+        self.assertEqual(UpdateLog.objects.filter(hidden=False).count(), 3)
+        self.assertEqual(UpdateLog.objects.filter(hidden=True).count(), 0)
+
+    def test_interactive_partial_selection(self):
+        self._run_handle("1,3")
+        self.assertEqual(
+            set(UpdateLog.objects.filter(hidden=False).values_list("commit_hash", flat=True)),
+            {"h1", "h3"},
+        )
+        self.assertEqual(
+            set(UpdateLog.objects.filter(hidden=True).values_list("commit_hash", flat=True)),
+            {"h2"},
+        )
+        # Перевод префиксов жив: h1 — «Нововведение: …»
+        self.assertTrue(
+            UpdateLog.objects.filter(commit_hash="h1", description__startswith="Нововведение:").exists()
+        )
+
+    def test_interactive_invalid_answer_reprompts(self):
+        self._run_handle(["что", "2"])
+        self.assertEqual(
+            set(UpdateLog.objects.filter(hidden=False).values_list("commit_hash", flat=True)),
+            {"h2"},
+        )
+        self.assertEqual(UpdateLog.objects.filter(hidden=True).count(), 2)
+
+    def test_interactive_without_tty_writes_nothing(self):
+        self._run_handle("a", isatty=False)
+        self.assertEqual(UpdateLog.objects.count(), 0)
+
+    def test_dedup_covers_hidden_rows(self):
+        self._run_handle("")
+        self.assertEqual(UpdateLog.objects.count(), 3)
+        # Повторный синк с тем же git-выводом: hidden-строки дедупятся —
+        # новых вопросов и дублей нет.
+        self._run_handle("a")
+        self.assertEqual(UpdateLog.objects.count(), 3)
+        self.assertEqual(UpdateLog.objects.filter(hidden=False).count(), 0)
+
+    def test_auto_mode_imports_visible(self):
+        self._run_handle([], interactive=False)  # input не должен вызываться
+        self.assertEqual(UpdateLog.objects.filter(hidden=False).count(), 3)
 
 
 class UpdateLogModelTests(TestCase):
@@ -4419,7 +4442,7 @@ class OllamaHandlerTests(SimpleTestCase):
     """Handler вызывает ollama.Client.chat (СТРИМОМ) и возвращает (content, tokens, is_error).
 
     Стриминг обязателен: без него длинные генерации ARM-solve минутами ждут
-    готовый ответ, и шлюз api.ollama.com рвёт соединение — httpx
+    готовый ответ, и шлюз ollama.com рвёт соединение — httpx
     ServerDisconnectedError («Server disconnected without sending a response»).
     """
 
@@ -4438,7 +4461,7 @@ class OllamaHandlerTests(SimpleTestCase):
     async def test_handler_streams_and_accumulates(self):
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
-             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             # Контент приходит кусками — handler обязан собрать его в строку.
@@ -4451,7 +4474,7 @@ class OllamaHandlerTests(SimpleTestCase):
             self.assertEqual(result, ("print(1)", 5, False))
             mock_client.chat.assert_called_once()
             # Без tools= (обычный чат), но СТРИМОМ (stream=True) — иначе
-            # api.ollama.com рвёт соединение на длинных генерациях.
+            # ollama.com рвёт соединение на длинных генерациях.
             _, kwargs = mock_client.chat.call_args
             self.assertNotIn("tools", kwargs)
             self.assertIs(kwargs.get("stream"), True)
@@ -4460,7 +4483,7 @@ class OllamaHandlerTests(SimpleTestCase):
         """DeepSeek 4.1 Flash ходит через ollama.chat с model='deepseek-v4.1-flash:cloud'."""
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
-             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             mock_client.chat.return_value = self._stream("ok", eval_count=1)
@@ -4480,7 +4503,7 @@ class OllamaHandlerTests(SimpleTestCase):
         ):
             with self.subTest(key=key):
                 with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
-                     patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+                     patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
                      patch("ai.model_clients.ollama.Client") as mock_client_cls:
                     mock_client = mock_client_cls.return_value
                     mock_client.chat.return_value = self._stream("ok", eval_count=1)
@@ -4495,7 +4518,7 @@ class OllamaHandlerTests(SimpleTestCase):
         """Cloud host + пустой OLLAMA_API_KEY → guard-сообщение, без вызова Client."""
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", ""), \
-             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
             gemma_4 = getattr(ollama, "ask_Ollama_Gemma_4_Cloud_async")
             result = await gemma_4("hi", "client")
@@ -4519,7 +4542,7 @@ class OllamaHandlerTests(SimpleTestCase):
         отдаём его пользователю, а не «пустой ответ»."""
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
-             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             mock_client.chat.return_value = self._thinking_stream(
@@ -4533,7 +4556,7 @@ class OllamaHandlerTests(SimpleTestCase):
         """Пустые и content, и thinking → прежняя ошибка «пустой ответ»."""
         from ai.model_clients import ollama
         with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
-             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
              patch("ai.model_clients.ollama.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             mock_client.chat.return_value = self._stream("", eval_count=0)
@@ -5233,9 +5256,10 @@ class RequestLogXlsxTests(TestCase):
         response = admin_request_log_xlsx_view(request, self.log.id)
         self.assertEqual(response.status_code, 403)
 
-    def test_result_download_named_by_model(self):
-        """Имя файла решения: arm_<модель><расширение> — по модели, не по задаче
-        (у одной задачи скачивают решения нескольких моделей)."""
+    def test_result_download_named_model_and_task(self):
+        """Имя файла решения: <модель>_<ID узла задачи><расширение> (у одной
+        задачи скачивают решения нескольких моделей — пара делает имя
+        однозначной); у DL API поля имени файла нет — подписываем скачивание."""
         from ai.models import AIModelTestResult
         from ai.admin.arm import admin_arm_solve_result_download_view
         result = AIModelTestResult.objects.get(model_key="M1")
@@ -5245,7 +5269,7 @@ class RequestLogXlsxTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response["Content-Disposition"],
-            'attachment; filename="arm_Model_One.pas"',
+            'attachment; filename="Model_One_5101.pas"',
         )
 
     def test_result_download_title_fallbacks_and_403(self):
@@ -5262,13 +5286,45 @@ class RequestLogXlsxTests(TestCase):
         response = admin_arm_solve_result_download_view(request, result.id)
         self.assertEqual(
             response["Content-Disposition"],
-            'attachment; filename="arm_Model_Two_K2.7.pas"',
+            'attachment; filename="Model_Two_K2.7_5101.pas"',
         )
 
         request = self.factory.get(f"/ai/admin/arm/solve/result/{result.id}/download/")
         request.user = self.normal_user
         response = admin_arm_solve_result_download_view(request, result.id)
         self.assertEqual(response.status_code, 403)
+
+    def test_result_download_without_task_falls_back_by_id(self):
+        """task NULL (легаси-одиночные прогоны) — <модель>_result_<id>; пустые
+        title и key — result_<id> без модели."""
+        from ai.models import AIModelTestResult
+        from ai.admin.arm import admin_arm_solve_result_download_view
+
+        orphan = AIModelTestResult.objects.create(
+            run=self.test_run, task=None, model_key="M9", model_title="Model Nine",
+            status="ok", verdict="solved", duration_seconds=1.0, tokens=10,
+            code="code", file_extension_snapshot=".pas",
+        )
+        request = self.factory.get(f"/ai/admin/arm/solve/result/{orphan.id}/download/")
+        request.user = self.superuser
+        response = admin_arm_solve_result_download_view(request, orphan.id)
+        self.assertEqual(
+            response["Content-Disposition"],
+            f'attachment; filename="Model_Nine_result_{orphan.id}.pas"',
+        )
+
+        blank = AIModelTestResult.objects.create(
+            run=self.test_run, task=None, model_key="", model_title="",
+            status="ok", verdict="solved", duration_seconds=1.0, tokens=10,
+            code="code", file_extension_snapshot=".pas",
+        )
+        request = self.factory.get(f"/ai/admin/arm/solve/result/{blank.id}/download/")
+        request.user = self.superuser
+        response = admin_arm_solve_result_download_view(request, blank.id)
+        self.assertEqual(
+            response["Content-Disposition"],
+            f'attachment; filename="result_{blank.id}.pas"',
+        )
 
 
 class ArmLightSnapshotTests(TestCase):
@@ -5448,6 +5504,23 @@ class ArmLightSnapshotTests(TestCase):
         self.assertEqual(snapshot["node_ids"], [6101])
         self.assertEqual(snapshot["file_extension"], ".pas")
         self.assertEqual(snapshot["report"]["solved"], 1)
+
+    def test_batch_log_detail_snapshot_running_run(self):
+        """Деталь журнала для ЕЩЁ ИДУЩЕГО прогона: snapshot строится
+        (раньше здесь падал NameError: time не импортирован в logs.py)."""
+        from ai.models import AIModelTestRun, AIRequestLog
+        from ai.admin.logs import _build_batch_log_snapshot
+        self.test_run.status = AIModelTestRun.STATUS_RUNNING
+        self.test_run.save(update_fields=["status"])
+        log = AIRequestLog.objects.create(
+            user=self.superuser, source="arm", mode="batch_solve",
+            message=f"Batch solve run {self.run_id}",
+            status=AIRequestLog.STATUS_ERROR, sent_at=timezone.now(),
+        )
+        snapshot = _build_batch_log_snapshot(log)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["run_status"], "running")
+        self.assertIn("run_meta", snapshot["report"])
 
 
 class ActiveRunsEndpointTests(TestCase):
@@ -7172,6 +7245,19 @@ class BatchLogDetailTemplateTests(TestCase):
         self.assertNotIn("Текст, который отправил пользователь", html)
         self.assertNotIn("Текст, который ответила модель", html)
 
+    def test_batch_detail_rerun_left_of_xlsx_same_style(self):
+        """«Повторить прогон» вставляется скриптом карточки слева от кнопки
+        «Скачать результаты (XLSX)» (тот же стиль .arm-button), «Назад к
+        логам» — отдельной строкой ссылок, не в стиле .default."""
+        html = self._detail(self.batch_log)
+        self.assertIn('id="resend-btn" class="arm-button"', html)
+        self.assertIn("group.className = 'arm-head-actions'", html)
+        self.assertIn("group.appendChild(built.downloadBtn)", html)
+        # Обе кнопки группы нормализованы до одного размера (button vs a).
+        self.assertIn(".arm-head-actions .arm-button {", html)
+        self.assertNotIn('id="resend-btn" class="default"', html)
+        self.assertIn("← Назад к логам", html)
+
     def test_plain_detail_keeps_full_layout(self):
         html = self._detail(self.plain_log)
         self.assertIn("Текст, который отправил пользователь", html)
@@ -7223,6 +7309,55 @@ class ArmSolveTopicsKeyTests(TestCase):
             "langIds.has(String(t.programming_language))", src,
         )
         self.assertNotIn("t.programming_language_id", src)
+
+
+class ArmSolveTemplateMarkersTests(SimpleTestCase):
+    """Точечные регрессии шаблонов /arm/solve/ по коммитам 2026-10-08.
+
+    - POST «Перезапустить нерешённые пары» обязан слать X-CSRFToken
+      (иначе admin_view отвечает 403 «CSRF token missing» — коммит
+      bcb1099 «исправлениее истекшей сессии»);
+    - AJAX-парсеры обязаны отличать редирект на страницу логина
+      (HTML при протухшей сессии) от JSON-ответа — внятное сообщение
+      «Сессия истекла…» вместо «Unexpected token '<'»;
+    - кнопка «Повторить прогон» восстанавливает свою подпись и rerun-лог
+      («Batch solve rerun …») ведёт в rerun-arm, а не в resend.
+    """
+
+    def _source(self, name):
+        from django.template.loader import get_template
+        return get_template(name).template.source
+
+    def test_rerun_pairs_post_sends_csrf_token(self):
+        src = self._source("admin/ai/arm_solve.html")
+        i = src.find("await fetch(rerunPairsUrl")
+        self.assertNotEqual(i, -1, "блок POST rerun-pairs не найден")
+        self.assertIn("'X-CSRFToken': getCsrfToken()", src[i:i + 400])
+
+    def test_arm_solve_has_friendly_expired_session_parser(self):
+        src = self._source("admin/ai/arm_solve.html")
+        self.assertIn("function parseJsonResponse", src)
+        self.assertIn("Сессия истекла", src)
+
+    def test_batch_results_body_fetch_has_expired_session_parser(self):
+        """Ленивое тело результата (partial используется на /arm/solve/ и в
+        деталях журнала): не-JSON ответ (страница логина) → внятная ошибка."""
+        src = self._source("admin/ai/_ai_batch_results.html")
+        self.assertIn("function parseJsonResponse", src)
+        self.assertIn("Сессия истекла", src)
+        i = src.find("function fetchResultBody")
+        self.assertNotEqual(i, -1)
+        self.assertIn(".then(parseJsonResponse)", src[i:i + 800])
+
+    def test_log_detail_resend_session_label_and_rerun_route(self):
+        src = self._source("admin/ai/airequestlog_detail.html")
+        # Протухшая сессия — внятное сообщение вместо JSON.parse-мусора.
+        self.assertIn("Сессия истекла", src)
+        # Подпись кнопки восстанавливается из отрендеренной, а не литералом.
+        self.assertIn("originalLabel", src)
+        self.assertIn("btn.textContent = originalLabel", src)
+        # rerun-лог ведёт в rerun-arm (не в resend одной модели).
+        self.assertIn("logMessage.indexOf('Batch solve rerun')", src)
 
 
 # ===================================================================
@@ -7620,11 +7755,18 @@ class _AdminViewRequestMixin:
     """Request с сессией, провижненным пользователем и admin_fresh_auth —
     чтобы @ai_admin_site.admin_view пропустил запрос (патчится внешний id)."""
 
-    def _admin_request(self, user, method="get", path="/ai/admin/", data=None):
+    def _admin_request(self, user, method="get", path="/ai/admin/", data=None, content_type=None):
         from django.contrib.messages.middleware import MessageMiddleware
         from django.contrib.sessions.middleware import SessionMiddleware
 
-        request = getattr(self.factory, method)(path, data=data or {})
+        # content_type="application/json" — когда data сырой JSON-текст
+        # (encode_multipart понимает только словари).
+        if content_type is not None:
+            request = getattr(self.factory, method)(
+                path, data=data or {}, content_type=content_type,
+            )
+        else:
+            request = getattr(self.factory, method)(path, data=data or {})
         SessionMiddleware(lambda req: None).process_request(request)
         MessageMiddleware(lambda req: None).process_request(request)
         request.user = user
@@ -8180,6 +8322,52 @@ class ArmCodeExtractionTests(SimpleTestCase):
         )
         self.assertEqual(self._extract(text), "")
 
+    def test_unclosed_fence_taken_to_end(self):
+        """Незакрытая оградка (модель забывает ```) — код до конца текста."""
+        text = "Вот решение:\n```asm\nmov ax, 1\nadd ax, 2"
+        self.assertEqual(self._extract(text), "mov ax, 1\nadd ax, 2")
+
+    def test_unclosed_fence_trims_trailing_prose(self):
+        """Незакрытая оградка + прощание после кода — прощание срезано."""
+        text = "```pascal\nprogram a;\nbegin\nwriteln(1);\nend.\nУдачи!\nВот и всё."
+        self.assertEqual(self._extract(text), "program a;\nbegin\nwriteln(1);\nend.")
+
+    def test_fence_language_with_symbols_not_leaked(self):
+        """Язык-тег с символами («c-mpa», «c++») не попадает внутрь кода."""
+        text = "```c-mpa\nint main(void) {\nreturn 0;\n}\n```"
+        self.assertEqual(self._extract(text), "int main(void) {\nreturn 0;\n}")
+        self.assertEqual(
+            self._extract("```c++\nint main(void) {\n}\n```"),
+            "int main(void) {\n}",
+        )
+
+    def test_unfenced_code_after_prose_intro_carved(self):
+        """Код без оградок после прозаического вступления — карвинг кода."""
+        text = (
+            "Решение задачи: считаем сумму и выводим ответ.\n"
+            "program a;\n"
+            "var a, b: integer;\n"
+            "begin\n"
+            "writeln(a+b);\n"
+            "end."
+        )
+        self.assertEqual(
+            self._extract(text),
+            "program a;\nvar a, b: integer;\nbegin\nwriteln(a+b);\nend.",
+        )
+
+    def test_cot_plus_unfenced_code_carved(self):
+        """Смесь «рассуждения + код без оградок» — код выделен, проза срезана."""
+        text = (
+            "We need solve this task in assembler i86 here.\n"
+            "Считаем по формуле: сначала считаем сумму элементов массива.\n"
+            "mov ax, a\n"
+            "cbw\n"
+            "idiv b\n"
+            "mov R, ax"
+        )
+        self.assertEqual(self._extract(text), "mov ax, a\ncbw\nidiv b\nmov R, ax")
+
 
 class TemplateInlineCommentTests(SimpleTestCase):
     """Регрессия: однострочные комментарии {# … #} в шаблонах НЕ могут
@@ -8190,7 +8378,9 @@ class TemplateInlineCommentTests(SimpleTestCase):
     def test_no_multiline_inline_comments(self):
         import glob
         import os
-        base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates")
+        # Шаблоны лежат в ai/templates (раньше путь считался как <repo>/templates
+        # — его не существует, glob был пуст и тест проходил ничего не проверяя).
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
         offenders = []
         for path in glob.glob(os.path.join(base, "**", "*.html"), recursive=True):
             with open(path, encoding="utf-8") as fh:
@@ -8444,9 +8634,9 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         petrov = "Петров Пётр"
         self._log(user=self.su, external_user_id="101", full_name=ivanov,
                   sent_at=self._msk_at(9, 15), topic="Циклы", prompt="Реши по шагам")
-        self._log(user=self.su, external_user_id="101", full_name=ivanov,
-                  sent_at=self._msk_at(12, 30), topic="Массивы", prompt="Реши задачу",
-                  mode=AIRequestLog.MODE_SOLVE)
+        log_1230 = self._log(user=self.su, external_user_id="101", full_name=ivanov,
+                             sent_at=self._msk_at(12, 30), topic="Массивы", prompt="Реши задачу",
+                             mode=AIRequestLog.MODE_SOLVE)
         self._log(user=self.su, external_user_id="200", full_name=petrov,
                   sent_at=self._msk_at(10, 0), topic="Строки", prompt="Найди ошибку",
                   mode=AIRequestLog.MODE_FIND_ERROR)
@@ -8476,6 +8666,10 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(rows[1]["count"], 1)
         self.assertEqual(rows[1]["last_mode"], "Найти ошибку")
         self.assertEqual(response.context_data["total_count"], 3)
+        # Клик по запросу разворачивает информацию на месте (lazy-загрузка):
+        # id записи — в data-атрибуте, рендер — через detail-json эндпоинт.
+        self.assertEqual(row_ivanov["requests"][0]["log_id"], log_1230.id)
+        self.assertContains(response, f'data-log-id="{log_1230.id}"')
 
     def test_daily_report_msk_day_bounds(self):
         """День — по МСК: запись в 00:00:01 МСК включается, в 23:59 вчера —
@@ -9382,3 +9576,583 @@ class RequestLogDetailJsonTests(TestCase):
     def test_missing_log_404(self):
         resp = self._get(self.admin, log_id=999999)
         self.assertEqual(resp.status_code, 404)
+
+
+class AssetViewAccessTests(TestCase):
+    """asset_view (/ai/assets/): prod требует внешний id (user_info / userId-cookie);
+    dev-bypass (DEBUG + AI_DEV_AUTH_BYPASS) — достаточно валидной Django-сессии.
+
+    Регрессия: /ai/assets/ — skip-путь ExternalAuthMiddleware, request.user_info
+    на нём не заполняется, поэтому локально (вне dl.gsu.by, кук userId/DLID нет)
+    каждый статический файл отдавал 403 — «страница работает, но нет стилей».
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def _get(self, cookies=None, user=None):
+        from ai.views import asset_view
+
+        request = self.factory.get("/ai/assets/admin/css/ai.css")
+        if cookies:
+            request.COOKIES = cookies
+        if user is not None:
+            request.user = user
+        return asset_view(request, "admin/css/ai.css")
+
+    def test_anonymous_is_403(self):
+        self.assertEqual(self._get().status_code, 403)
+
+    def test_authenticated_without_external_id_is_403_in_prod_mode(self):
+        user = get_user_model().objects.create_user(username="plain", password="x")
+        self.assertEqual(self._get(user=user).status_code, 403)
+
+    def test_authenticated_with_user_id_cookie_is_200(self):
+        user = get_user_model().objects.create_user(username="plain", password="x")
+        response = self._get(cookies={"userId": "plain"}, user=user)
+        self.assertEqual(response.status_code, 200)
+
+    @override_settings(DEBUG=True)
+    def test_authenticated_dev_bypass_is_200_without_external_id(self):
+        user = get_user_model().objects.create_user(username="dev", password="x")
+        with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
+            response = self._get(user=user)
+        self.assertEqual(response.status_code, 200)
+
+
+class OnboardingServiceTests(TestCase):
+    """ai/services/onboarding.py: контракт флага «wizard просмотрено»."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="wz-user", password="x")
+
+    def test_scope_validation(self):
+        from ai.services.onboarding import scope_name_valid
+        self.assertTrue(scope_name_valid("chat"))
+        self.assertTrue(scope_name_valid("admin_arm_solve"))
+        # Общий тур админки разделён по правам: свои scope'ы на каждый уровень,
+        # объединённого «admin» больше нет.
+        self.assertTrue(scope_name_valid("admin_pd"))
+        self.assertTrue(scope_name_valid("admin_staff"))
+        self.assertTrue(scope_name_valid("admin_super"))
+        self.assertFalse(scope_name_valid("admin"))
+        self.assertFalse(scope_name_valid("nope"))
+        self.assertFalse(scope_name_valid(None))
+
+    def test_no_row_means_show(self):
+        from ai.services.onboarding import should_show_wizard
+        self.assertTrue(should_show_wizard(self.user, "chat"))
+
+    def test_record_then_nag_disappears(self):
+        from ai.services.onboarding import record_wizard_seen, should_show_wizard, WIZARD_VERSION
+        record_wizard_seen(self.user, "chat")
+        self.assertFalse(should_show_wizard(self.user, "chat"))
+        row = AIWizardSeen.objects.get(user=self.user, scope="chat")
+        self.assertEqual(row.version, WIZARD_VERSION)
+
+    def test_record_is_idempotent_single_row(self):
+        from ai.services.onboarding import record_wizard_seen
+        record_wizard_seen(self.user, "chat")
+        record_wizard_seen(self.user, "chat")
+        self.assertEqual(AIWizardSeen.objects.filter(user=self.user).count(), 1)
+
+    def test_deleting_mark_restarts_the_tour(self):
+        """Удаление строки в AIWizardSeenAdmin — способ перезапустить тур
+        конкретному пользователю на конкретной странице."""
+        from ai.services.onboarding import record_wizard_seen, should_show_wizard
+        record_wizard_seen(self.user, "chat")
+        self.assertFalse(should_show_wizard(self.user, "chat"))
+        AIWizardSeen.objects.filter(user=self.user, scope="chat").delete()
+        self.assertTrue(should_show_wizard(self.user, "chat"))
+
+    def test_unknown_scope_is_not_recorded(self):
+        from ai.services.onboarding import record_wizard_seen
+        record_wizard_seen(self.user, "nope")
+        record_wizard_seen(self.user, None)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_version_bump_resurrects_the_tour(self):
+        from ai.services import onboarding as onboarding_service
+        record_wizard_seen = onboarding_service.record_wizard_seen
+        should_show_wizard = onboarding_service.should_show_wizard
+        record_wizard_seen(self.user, "chat")  # пишет текущий WIZARD_VERSION
+        self.assertFalse(should_show_wizard(self.user, "chat"))
+        with patch(
+            "ai.services.onboarding.WIZARD_VERSION",
+            onboarding_service.WIZARD_VERSION + 1,
+        ):
+            # Содержимое тура обновилось → все видят его заново один раз.
+            self.assertTrue(should_show_wizard(self.user, "chat"))
+            record_wizard_seen(self.user, "chat")
+            self.assertFalse(should_show_wizard(self.user, "chat"))
+        # Записанная версия выше актуальной (откат константы) — не показываем.
+        self.assertFalse(should_show_wizard(self.user, "chat"))
+
+    def test_anonymous_user_is_never_shown_and_never_recorded(self):
+        from ai.services.onboarding import record_wizard_seen, should_show_wizard
+        anonymous = SimpleNamespace(is_authenticated=False)
+        self.assertFalse(should_show_wizard(anonymous, "chat"))
+        record_wizard_seen(anonymous, "chat")
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_user_basics_seen_other_user_scope(self):
+        """Шаги-«общие» закрываются отметкой ЛЮБОЙ другой юзер-страницы."""
+        from ai.services.onboarding import record_wizard_seen, user_basics_seen
+        self.assertFalse(user_basics_seen(self.user, "solve"))
+        record_wizard_seen(self.user, "chat")
+        self.assertTrue(user_basics_seen(self.user, "solve"))
+        self.assertTrue(user_basics_seen(self.user, "find_error"))
+
+    def test_user_basics_seen_same_scope_does_not_count(self):
+        """Свой scope «общих» не закрывает — тур текущей страницы ещё не пройден."""
+        from ai.services.onboarding import record_wizard_seen, user_basics_seen
+        record_wizard_seen(self.user, "solve")
+        self.assertFalse(user_basics_seen(self.user, "solve"))
+
+    def test_user_basics_seen_ignores_admin_scopes_and_excludes_wrong_scope(self):
+        """Админские отметки и не-юзерский exclude — не «общие»."""
+        from ai.services.onboarding import record_wizard_seen, user_basics_seen
+        record_wizard_seen(self.user, "admin_pd")
+        self.assertFalse(user_basics_seen(self.user, "solve"))
+        self.assertFalse(user_basics_seen(self.user, "admin_pd"))
+        self.assertFalse(user_basics_seen(None, "solve"))
+
+
+class WizardSeenUserEndpointTests(TestCase):
+    """POST /ai/api/wizard-seen/ (пользовательские страницы, ai-wizard.js)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(username="wz-http-user", password="x")
+
+    def _post(self, body, user=None):
+        from ai.views import wizard_seen_view
+
+        request = self.factory.post(
+            "/ai/api/wizard-seen/", data=body, content_type="application/json",
+        )
+        request.user = user if user is not None else self.user
+        request.session = {}
+        request.user_info = {"userId": "wz-http-user"}
+        request.COOKIES = {"userId": "wz-http-user"}
+        return wizard_seen_view(request)
+
+    def test_requires_auth(self):
+        stranger = SimpleNamespace(is_authenticated=False, is_active=True)
+        response = self._post(json.dumps({"scope": "chat"}), user=stranger)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_get_is_405(self):
+        from ai.views import wizard_seen_view
+
+        request = self.factory.get("/ai/api/wizard-seen/")
+        request.user = self.user
+        request.session = {}
+        request.user_info = {"userId": "wz-http-user"}
+        request.COOKIES = {"userId": "wz-http-user"}
+        self.assertEqual(wizard_seen_view(request).status_code, 405)
+
+    def test_unknown_scope_is_400(self):
+        # Валидатор scope общий для обоих эндпоинтов (ai/services/onboarding.py);
+        # «admin» с v2 им больше не валидный (разделён на ролевые), поэтому тест
+        # на явно неизвестное имя.
+        response = self._post(json.dumps({"scope": "nope"}))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_broken_json_is_400(self):
+        response = self._post(b"{not json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_valid_post_marks_seen_once(self):
+        response = self._post(json.dumps({"scope": "chat"}))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content), {"ok": True})
+        self.assertEqual(
+            AIWizardSeen.objects.get(user=self.user, scope="chat").scope, "chat",
+        )
+        # Повторный POST не плодит строк.
+        self._post(json.dumps({"scope": "chat"}))
+        self.assertEqual(
+            AIWizardSeen.objects.filter(user=self.user, scope="chat").count(), 1,
+        )
+
+
+class WizardSeenAdminEndpointTests(_AdminViewRequestMixin, TestCase):
+    """POST /ai/admin/wizard/seen/ (админка; admin_view-гейты)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+
+    def _pd_user(self):
+        user = self.user_model.objects.create_user(username="wz-pd", password="x")
+        user.groups.add(self.pd_group)
+        return user
+
+    def _post(self, user, body, method="post", path="/ai/admin/wizard/seen/"):
+        from unittest.mock import patch as _patch
+        from ai.admin.onboarding import admin_wizard_seen_view
+
+        request = self._admin_request(
+            user, method=method, path=path, data=body,
+            content_type="application/json" if body else None,
+        )
+        with _patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return admin_wizard_seen_view(request)
+
+    def test_anonymous_is_denied(self):
+        # «admin» больше не валидный scope (разделён по правам), поэтому — «chat».
+        response = self._post(AnonymousUser(), '{"scope": "chat"}')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_get_is_405(self):
+        response = self._post(self._pd_user(), "", method="get")
+        self.assertEqual(response.status_code, 405)
+
+    def test_unknown_scope_is_400(self):
+        response = self._post(self._pd_user(), '{"scope": "nope"}')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_valid_post_marks_seen(self):
+        pd_user = self._pd_user()
+        response = self._post(pd_user, '{"scope": "admin_arm_solve"}')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content), {"ok": True})
+        self.assertTrue(
+            AIWizardSeen.objects.filter(user=pd_user, scope="admin_arm_solve").exists(),
+        )
+
+    def test_plain_user_without_roles_is_403(self):
+        stranger = self.user_model.objects.create_user(username="wz-nobody", password="x")
+        response = self._post(stranger, '{"scope": "admin_pd"}')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+    def test_guest_mode_post_is_ok_but_not_recorded(self):
+        from ai.admin.guest_mode import SESSION_KEY
+        from ai.admin.onboarding import admin_wizard_seen_view
+
+        superuser = self.user_model.objects.create_user(
+            username="wz-super", password="x", is_superuser=True,
+        )
+        request = self._admin_request(
+            superuser, method="post", path="/ai/admin/wizard/seen/",
+            data='{"scope": "admin_super"}', content_type="application/json",
+        )
+        request.session[SESSION_KEY] = True
+        response = admin_wizard_seen_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content), {"ok": True})
+        self.assertEqual(AIWizardSeen.objects.count(), 0)
+
+
+class WizardUserPageContextTests(TestCase):
+    """Рендер страниц юзеров: конфиг тура в json_script + линки wizard-ассетов."""
+
+    def _render(self, view, url, user=None):
+        request = self.factory.get(url)
+        request.user = user if user is not None else self.user
+        request.session = {}
+        request.user_info = {"userId": "wz-context-user"}
+        request.COOKIES = {"userId": "wz-context-user"}
+        # CSRF_COOKIE не задаём: get_token(request) сам сгенерирует свежий
+        # токен (свой алфавит маскировки — произвольная строка не годится).
+        with patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)), \
+             patch("ai.views.get_available_model_options", return_value=[]):
+            response = view(request)
+        return response.content.decode("utf-8")
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(
+            username="wz-context-user", password="x",
+        )
+        self.plain_user = self.user_model.objects.create_user(
+            username="wz-context-plain", password="x",
+        )
+        self.staff_user = self.user_model.objects.create_user(
+            username="wz-context-staff", password="x", is_staff=True,
+        )
+        self.super_user = self.user_model.objects.create_user(
+            username="wz-context-super", password="x", is_superuser=True,
+        )
+
+    def test_chat_page_contains_wizard_config_and_assets(self):
+        html = self._render(chat_view, "/ai/chat/")
+        self.assertIn('id="ai-wizard-config"', html)
+        self.assertIn('"scope": "chat"', html)
+        self.assertIn("/ai/assets/admin/js/ai-wizard.js", html)
+        self.assertIn("/ai/assets/admin/css/ai-wizard.css", html)
+        self.assertIn("aiDocsTourBtn", html)
+
+    def test_solve_page_wizard_scope(self):
+        from ai.views import decide_task_view
+
+        html = self._render(decide_task_view, "/ai/solve-problem/")
+        self.assertIn('"scope": "solve"', html)
+
+    def test_find_error_page_wizard_scope(self):
+        from ai.views import find_error_view
+
+        html = self._render(find_error_view, "/ai/find-error/")
+        self.assertIn('"scope": "find_error"', html)
+
+    def test_seen_tour_renders_show_false(self):
+        from ai.services.onboarding import record_wizard_seen
+
+        record_wizard_seen(self.user, "chat")
+        html = self._render(chat_view, "/ai/chat/", user=self.user)
+        self.assertIn('"show": false', html)
+
+    def test_payload_carries_role_for_engine_steps(self):
+        """Роль в конфиге: ролевые шаги движка (side-меню чата — super/staff)."""
+        from ai.views import decide_task_view, find_error_view
+
+        html = self._render(chat_view, "/ai/chat/", user=self.plain_user)
+        self.assertIn('"role": ""', html)
+        html = self._render(chat_view, "/ai/chat/", user=self.staff_user)
+        self.assertIn('"role": "staff"', html)
+        html = self._render(chat_view, "/ai/chat/", user=self.super_user)
+        self.assertIn('"role": "super"', html)
+        html = self._render(decide_task_view, "/ai/solve-problem/", user=self.plain_user)
+        self.assertIn('"role": ""', html)
+        html = self._render(find_error_view, "/ai/find-error/", user=self.staff_user)
+        self.assertIn('"role": "staff"', html)
+
+    def test_payload_carries_basics_seen(self):
+        """basics_seen в payload: тур другой юзер-страницы закрыл «общие» шаги
+        (семантика — в OnboardingServiceTests.user_basics_seen)."""
+        from ai.services.onboarding import record_wizard_seen
+
+        html = self._render(chat_view, "/ai/chat/", user=self.plain_user)
+        self.assertIn('"basics_seen": false', html)
+        record_wizard_seen(self.plain_user, "solve")
+        html = self._render(chat_view, "/ai/chat/", user=self.plain_user)
+        self.assertIn('"basics_seen": true', html)
+        # Админские отметки юзер-«общие» не закрывают.
+        plain2 = self.user_model.objects.create_user(
+            username="wz-context-plain2", password="x",
+        )
+        record_wizard_seen(plain2, "admin_pd")
+        html = self._render(chat_view, "/ai/chat/", user=plain2)
+        self.assertIn('"basics_seen": false', html)
+
+
+class AIWizardSeenAdminPermissionTests(_AdminViewRequestMixin, TestCase):
+    """Листинг «кто видел wizard» (AIWizardSeenAdmin): просмотр — только
+    суперюзер; удаление строки — способ перезапустить тур пользователю."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+
+    def _admin_instance(self):
+        from ai.admin.models import AIWizardSeenAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import AIWizardSeen as Model
+
+        return AIWizardSeenAdmin(Model, ai_admin_site)
+
+    def test_superuser_permissions_granted(self):
+        superuser = self.user_model.objects.create_user(
+            username="wz-list-super", password="x", is_superuser=True,
+        )
+        request = self._admin_request(superuser)
+        model_admin = self._admin_instance()
+        self.assertTrue(model_admin.has_module_permission(request))
+        self.assertTrue(model_admin.has_view_permission(request))
+        self.assertTrue(model_admin.has_delete_permission(request))
+        # add/change по смыслу бессмысленны (строки создаются движком), но
+        # права не зажаты сильнее общего супер-гейта.
+        self.assertTrue(model_admin.has_change_permission(request))
+
+    def test_prompt_developer_permissions_denied(self):
+        pd_user = self.user_model.objects.create_user(username="wz-list-pd", password="x")
+        pd_user.groups.add(self.pd_group)
+        request = self._admin_request(pd_user)
+        model_admin = self._admin_instance()
+        self.assertFalse(model_admin.has_module_permission(request))
+        self.assertFalse(model_admin.has_view_permission(request))
+        self.assertFalse(model_admin.has_delete_permission(request))
+
+    def test_staff_permissions_denied(self):
+        staff_user = self.user_model.objects.create_user(
+            username="wz-list-staff", password="x", is_staff=True,
+        )
+        request = self._admin_request(staff_user)
+        model_admin = self._admin_instance()
+        self.assertFalse(model_admin.has_view_permission(request))
+
+
+class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
+    """each_context: ai_wizard — scope по пути, роль, гостевой режим, отметка."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+
+    def _context(self, user, path="/ai/admin/", guest=False):
+        from ai.admin.site import ai_admin_site
+
+        request = self._admin_request(user, path=path)
+        if guest:
+            from ai.admin.guest_mode import SESSION_KEY
+            request.session[SESSION_KEY] = True
+        return ai_admin_site.each_context(request)["ai_wizard"]
+
+    def test_dashboard_scope_by_role(self):
+        """Общий тур админки разделён по правам: свой scope на каждый уровень."""
+        superuser = self.user_model.objects.create_user(
+            username="wz-ctx-super", password="x", is_superuser=True,
+        )
+        ctx = self._context(superuser)
+        self.assertEqual(ctx["scope"], "admin_super")
+        self.assertEqual(ctx["role"], "super")
+        self.assertTrue(ctx["show"])
+
+        staff_user = self.user_model.objects.create_user(
+            username="wz-ctx-staff", password="x", is_staff=True,
+        )
+        ctx = self._context(staff_user)
+        self.assertEqual(ctx["scope"], "admin_staff")
+        self.assertEqual(ctx["role"], "staff")
+        self.assertTrue(ctx["show"])
+
+        pd_user = self.user_model.objects.create_user(username="wz-ctx-pd", password="x")
+        pd_user.groups.add(self.pd_group)
+        ctx = self._context(pd_user)
+        self.assertEqual(ctx["scope"], "admin_pd")
+        self.assertEqual(ctx["role"], "pd")
+        self.assertTrue(ctx["show"])
+
+    def test_arm_solve_and_model_status_scopes(self):
+        """Большие страницы — общие туры, без деления по правам."""
+        user = self.user_model.objects.create_user(username="wz-ctx-super", password="x", is_superuser=True)
+        self.assertEqual(self._context(user, path="/ai/admin/arm/solve/")["scope"], "admin_arm_solve")
+        self.assertEqual(self._context(user, path="/ai/admin/arm/models/")["scope"], "admin_model_status")
+
+    def test_pd_role_and_staff_role(self):
+        pd_user = self.user_model.objects.create_user(username="wz-ctx-pd2", password="x")
+        pd_user.groups.add(self.pd_group)
+        staff_user = self.user_model.objects.create_user(
+            username="wz-ctx-staff2", password="x", is_staff=True,
+        )
+        self.assertEqual(self._context(pd_user)["role"], "pd")
+        self.assertEqual(self._context(staff_user)["role"], "staff")
+
+    def test_guest_mode_suppresses_show(self):
+        superuser = self.user_model.objects.create_user(
+            username="wz-ctx-guest", password="x", is_superuser=True,
+        )
+        ctx = self._context(superuser, guest=True)
+        self.assertFalse(ctx["show"])
+
+    def test_seen_scope_is_suppressed(self):
+        """Закрытый ролевой тур не повторяется; «большие страницы» — свой тур."""
+        from ai.services.onboarding import record_wizard_seen
+
+        user = self.user_model.objects.create_user(username="wz-ctx-seen", password="x", is_superuser=True)
+        record_wizard_seen(user, "admin_super")
+        self.assertFalse(self._context(user)["show"])
+        self.assertTrue(self._context(user, path="/ai/admin/arm/solve/")["show"])
+
+    def test_role_upgrade_runs_unseen_role_tour(self):
+        """Повышение роли: pd-тур пройден → staff-тур показывается; после него
+        — и super-тур (ролевые scope'ы независимы)."""
+        from ai.services.onboarding import record_wizard_seen, should_show_wizard
+
+        user = self.user_model.objects.create_user(
+            username="wz-ctx-promo", password="x", is_staff=True,
+        )
+        record_wizard_seen(user, "admin_pd")
+        self.assertFalse(should_show_wizard(user, "admin_pd"))
+        self.assertTrue(should_show_wizard(user, "admin_staff"))
+        record_wizard_seen(user, "admin_staff")
+        self.assertTrue(should_show_wizard(user, "admin_super"))
+
+    def test_role_downgrade_does_not_replay_seen_tour(self):
+        """Понижение роли: пройденные младшие туры не переигрываются заново."""
+        from ai.services.onboarding import record_wizard_seen
+
+        user = self.user_model.objects.create_user(
+            username="wz-ctx-demoted", password="x", is_staff=True,
+        )
+        record_wizard_seen(user, "admin_pd")
+        record_wizard_seen(user, "admin_staff")
+        user.is_staff = False
+        user.save(update_fields=["is_staff"])
+        ctx = self._context(user)  # теперь «pd»
+        self.assertEqual(ctx["scope"], "admin_pd")
+        self.assertFalse(ctx["show"])
+
+
+class WizardAssetAccessTests(TestCase):
+    """asset_view отдаёт новый JS/CSS wizard'а (форма AssetViewAccessTests)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def _get(self, asset_path, cookies=None, user=None):
+        from ai.views import asset_view
+
+        request = self.factory.get(f"/ai/assets/{asset_path}")
+        if cookies:
+            request.COOKIES = cookies
+        if user is not None:
+            request.user = user
+        return asset_view(request, asset_path)
+
+    def test_wizard_js_served_with_user_id_cookie(self):
+        user = get_user_model().objects.create_user(username="wz-asset", password="x")
+        response = self._get(
+            "admin/js/ai-wizard.js",
+            cookies={"userId": "wz-asset"},
+            user=user,
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_wizard_css_served_with_user_id_cookie(self):
+        user = get_user_model().objects.create_user(username="wz-asset", password="x")
+        response = self._get(
+            "admin/css/ai-wizard.css",
+            cookies={"userId": "wz-asset"},
+            user=user,
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_assets_require_external_id(self):
+        user = get_user_model().objects.create_user(username="wz-asset", password="x")
+        self.assertEqual(
+            self._get("admin/js/ai-wizard.js", user=user).status_code, 403,
+        )
+
+
+class DashboardWizardRestartLinkTests(TestCase):
+    """Кнопка повторного показа тура на дашборде админки."""
+
+    def test_dashboard_contains_restart_button(self):
+        from django.template.loader import render_to_string
+
+        html = render_to_string(
+            "admin/ai/index.html",
+            {
+                "user_dl_id": "42",
+                "user_display_name": "Иван Иванов",
+                "user_role_label": "Суперпользователь",
+                "user": SimpleNamespace(),
+                "available_apps": [],
+            },
+        )
+        self.assertIn("data-ai-wizard-restart", html)

@@ -22,22 +22,35 @@
     {% include "admin/ai/_ai_batch_results.html" %}
     {{ batch_snapshot|json_script:"batch-snapshot-data" }}
     <div id="batch-results-card"></div>
+    {# Кнопка рендерится здесь скрытой и подставляется скриптом карточки ВЛЕВО от #}
+    {# «Скачать результаты (XLSX)» — тот же стиль .arm-button, тот же размер. #}
+    <button type="button" id="resend-btn" class="arm-button" style="display:none;" data-log-id="{{ log.id }}" data-source="{{ log.source }}" data-mode="{{ log.mode }}" data-message="{{ log.message|truncatechars:60 }}">Повторить прогон</button>
     <script>
       (function () {
         var raw = document.getElementById('batch-snapshot-data');
         var snapshot = raw ? JSON.parse(raw.textContent) : {};
-        window.ArmBatchResults.init(
+        var built = window.ArmBatchResults.init(
           document.getElementById('batch-results-card'),
           snapshot,
           snapshot.run_id || ''
         );
+        var btn = document.getElementById('resend-btn');
+        if (btn && built && built.downloadBtn && built.downloadBtn.parentNode) {
+          btn.style.display = '';
+          // Группа справа: «Повторить прогон» + «Скачать результаты (XLSX)»
+          // рядом (space-between шапки иначе разнёс бы их по краям).
+          var group = document.createElement('span');
+          group.className = 'arm-head-actions';
+          built.downloadBtn.parentNode.insertBefore(group, built.downloadBtn);
+          group.appendChild(btn);
+          group.appendChild(built.downloadBtn);
+        }
       })();
     </script>
 
     <div class="ai-log-actions">
       {% include "admin/ai/_ai_back_nav.html" %}
       <a class="button" href="{% url 'ai_request_logs' %}">← Назад к логам</a>
-      <button type="button" id="resend-btn" class="default" data-log-id="{{ log.id }}" data-source="{{ log.source }}" data-mode="{{ log.mode }}" data-message="{{ log.message|truncatechars:60 }}">Повторить прогон</button>
     </div>
     {% csrf_token %}
   {% else %}
@@ -125,9 +138,6 @@
     display: flex;
     gap: 8px;
   }
-  #resend-btn {
-    margin-left: auto;
-  }
   .resend-status {
     margin-top: 12px;
     padding: 10px 14px;
@@ -150,13 +160,19 @@
   document.addEventListener('DOMContentLoaded', function () {
     const btn = document.getElementById('resend-btn');
     if (!btn) return;
+    // Восстановление подписи после клика: на batch-странице кнопка называется
+    // «Повторить прогон», на обычной — «Повторить запрос» — верная подпись —
+    // та, что отрендерил шаблон (литерал в коде раньше затирал прогонный).
+    const originalLabel = btn.textContent.trim() || 'Повторить запрос';
 
     btn.addEventListener('click', function () {
       const logId = btn.dataset.logId;
       const source = btn.dataset.source || '';
       const mode = btn.dataset.mode || '';
       const logMessage = btn.dataset.message || '';
-      const isArmBatch = source === 'arm' && (mode === 'batch_solve' || mode === 'solve') && logMessage.indexOf('Batch solve run') !== -1;
+      // Rerun-лог («Batch solve rerun <hex>») — тоже ARM batch: после
+      // попарного перезапуска кнопка должна вести в rerun-arm, а не в resend.
+      const isArmBatch = source === 'arm' && (mode === 'batch_solve' || mode === 'solve') && (logMessage.indexOf('Batch solve run') !== -1 || logMessage.indexOf('Batch solve rerun') !== -1);
       const endpoint = isArmBatch
         ? '/ai/admin/ai/request_logs/' + logId + '/rerun-arm/'
         : '/ai/admin/ai/request_logs/' + logId + '/resend/';
@@ -189,11 +205,18 @@
         body: JSON.stringify({}),
       })
       .then(function (response) {
-        return response.json();
+        // При протухшей сессии POST редиректит на страницу логина (HTML) —
+        // показываем внятное сообщение вместо «Unexpected token '<'».
+        return response.text().then(function (text) {
+          try { return JSON.parse(text); }
+          catch (e) {
+            throw new Error('Сессия истекла — обновите страницу и войдите заново.');
+          }
+        });
       })
       .then(function (data) {
         btn.disabled = false;
-        btn.textContent = 'Повторить запрос';
+        btn.textContent = originalLabel;
         if (data.success || data.run_id) {
           statusDiv.className = 'resend-status success';
           if (isArmBatch && data.run_id) {
@@ -229,7 +252,7 @@
       })
       .catch(function (err) {
         btn.disabled = false;
-        btn.textContent = 'Повторить запрос';
+        btn.textContent = originalLabel;
         statusDiv.className = 'resend-status error';
         statusDiv.textContent = 'Сетевая ошибка: ' + err.message;
       });

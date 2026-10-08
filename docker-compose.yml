@@ -35,8 +35,13 @@ services:
     # -> 401 not_autorized. WebDeepseek/worker/bot.js resolveProxy() already
     # falls back to PUPPETEER_PROXY_* when BOT_PROXY is empty, so both naming
     # schemes work without any mapping here.
+    # Пулы без сидирования (Kimi требует ручного seed-логина) держат контейнер
+    # вечно unhealthy, поэтому проверка пулов гейтится: явный
+    # AI_POOL_HEALTHCHECK_DISABLED=1 ИЛИ локальный режим по единому правилу
+    # «нет прокси в окружении → локально» (ai/env_mode.py) — тогда проверяется
+    # только Daphne. С прокси (prod) и без флага — прежняя проверка байт-в-байт.
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null && python3 -c \"import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://localhost:3000/health', timeout=5)); k=json.load(urllib.request.urlopen('http://localhost:3001/health', timeout=5)); sys.exit(0 if d.get('ok') and d.get('ready_count',0) > 0 and k.get('ok') else 1)\""]
+      test: ["CMD-SHELL", "if [ \"$$AI_POOL_HEALTHCHECK_DISABLED\" = \"1\" ] || { [ -z \"$$HTTP_PROXY\" ] && [ -z \"$$HTTPS_PROXY\" ]; }; then curl -fsS http://localhost:8000/health >/dev/null; else curl -fsS http://localhost:8000/health >/dev/null && python3 -c \"import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://localhost:3000/health', timeout=5)); k=json.load(urllib.request.urlopen('http://localhost:3001/health', timeout=5)); sys.exit(0 if d.get('ok') and d.get('ready_count',0) > 0 and k.get('ok') else 1)\"; fi"]
       interval: 30s
       timeout: 10s
       retries: 10
@@ -50,6 +55,9 @@ services:
   db:
     image: postgres:14
     container_name: dl_ai_db
+    # Без restart-политики db не поднимался следом за остальными после
+    # перезагрузки WSL/хоста — web из-за этого циклился на migrate-retry.
+    restart: unless-stopped
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:

@@ -24,6 +24,7 @@ from ..arm_runner import (
     cancel_arm_run,
     get_arm_run_snapshot,
     get_latest_batch_run_snapshot,
+    start_batch_rerun_pairs,
     start_batch_solve_run,
 )
 from ..model_health import (
@@ -670,13 +671,58 @@ def admin_arm_solve_cancel_view(request):
     return JsonResponse({"ok": True, "message": "Прерывание запрошено"})
 
 
+def admin_arm_solve_rerun_pairs_view(request):
+    """Перезапуск нерешённых пар (задача × модель) со слиянием в тот же прогон.
+
+    Пары берутся из БД прогона (verdict != solved); клиент передаёт только
+    run_id. Результаты вливаются в тот же run, отчёт пересобирается из всех
+    строк. Возвращает обновлённый снапшот — страница продолжает поллить тот
+    же run_id.
+    """
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    import json as _json
+    body = {}
+    try:
+        body = _json.loads(request.body or b"{}")
+    except (ValueError, _json.JSONDecodeError):
+        body = {}
+
+    run_id = body.get("run_id") or request.POST.get("run_id", "")
+    run_id = run_id.strip()
+    if not run_id:
+        return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
+
+    session_id = _resolve_session_id(request)
+    run_id_rerun, error, dropped_models = start_batch_rerun_pairs(run_id, request.user.id, session_id)
+    if not run_id_rerun:
+        return JsonResponse({"ok": False, "message": error or "Не удалось запустить перезапуск"}, status=400)
+
+    message = "Перезапуск нерешённых пар запущен"
+    if dropped_models:
+        message += f" (модели недоступны, пропущены: {', '.join(dropped_models)})"
+    return JsonResponse({
+        "ok": True,
+        "message": message,
+        "run_id": run_id_rerun,
+        "run": get_arm_run_snapshot(run_id_rerun, light_results=True),
+    })
+
+
 def admin_arm_solve_result_download_view(request, result_id):
     """Скачать извлечённый код модели как файл программы.
 
     Отдаёт ``AIModelTestResult.code`` как ``text/plain`` во вложении. Имя файла —
-    ``arm_<модель><file_extension>`` (расширение из снимка, с ведущей точкой):
-    у одной задачи скачивают решения нескольких моделей, поэтому имя даётся по
-    модели, а не по задаче. Файлы на диске не хранятся — содержимое берётся
+    ``<модель>_<ID узла задачи><file_extension>`` (расширение из снимка, с
+    ведущей точкой): у одной задачи скачивают решения нескольких моделей, пара
+    «модель + задача» делает имя однозначным. ID узла — узкая ссылка на задачу
+    по всему журналу (DL REST API.md). У DL API поле имени файла при отправке
+    решения отсутствует — подписываем единственное, что у нас под контролем,
+    то есть скачивание. Файлы на диске не хранятся — содержимое берётся
     прямо из БД.
     """
     if not can_access_arm(request):
@@ -697,9 +743,17 @@ def admin_arm_solve_result_download_view(request, result_id):
     # точки — «K2.7» — их оставляем). Пустой title и key — fallback на id.
     model_name = (result.model_title or result.model_key or "").strip()
     model_name = re.sub(r"[^\w.]+", "_", model_name).strip("._")
+    # Задача в имя: node_id (ID узла DL — у Task он уникален и обязателен);
+    # в легаси-одиночных прогонах task может быть NULL — тогда «_result_<id>».
+    task_node_id = str(result.task.node_id).strip() if result.task else ""
+    task_node_id = re.sub(r"[^\w.]+", "_", task_node_id).strip("._")
     if not model_name:
-        model_name = f"result_{result_id}"
-    filename = f"arm_{model_name}{ext}"
+        base = f"result_{result_id}"
+    elif not task_node_id:
+        base = f"{model_name}_result_{result_id}"
+    else:
+        base = f"{model_name}_{task_node_id}"
+    filename = f"{base}{ext}"
 
     response = HttpResponse(code, content_type="text/plain; charset=utf-8")
     response["Content-Disposition"] = f'attachment; filename="{filename}"'

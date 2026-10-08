@@ -25,6 +25,7 @@ Django + Channels (ASGI, Daphne). UI and API live under `/ai/...`; доступ 
 - [Инструкция для системного администратора](DOCX.md#инструкция-для-системного-администратора)
 - [Инструкция для суперадмина](DOCX.md#инструкция-для-суперадмина)
 - [Инструкция для разработчика](DOCX.md#инструкция-для-разработчика) / [подробная техническая документация](doc/Документация%20для%20разработчика.md)
+- [Путь новичка: запуск с нуля (WSL2 + Docker)](docs/getting_started.md)
 - [Bot pool (Web DeepSeek)](docs/web_deepseek_bot.md)
 - [Запуск на сервере](DEPLOY.md)
 
@@ -47,63 +48,55 @@ docker compose --env-file .env exec -T web python manage.py shell -c "from ai.mo
 docker compose --env-file .env exec -T web python manage.py shell -c "from django.contrib.auth.models import User; print(*[f'{u.id}: {u.username}' for u in User.objects.order_by('username')], sep='\n')"
 ```
 
-## Локальный запуск (без Docker)
+## Локальный запуск (Docker, один комплект)
 
-Нужны: `Python 3.10+`, `PostgreSQL 14+`, `psql`.
+> Полный путь «с нуля» для человека без опыта — в [docs/getting_started.md](docs/getting_started.md) (WSL2, вплоть до кнопок). Ниже — краткий рецепт.
 
-1. Создайте БД и пользователя в PostgreSQL:
+Один комплект Docker обслуживает и локальный запуск, и прод: отдельных
+override-файлов и локальных флагов не нужно. Режим определяется автоматически
+по единому правилу (`ai/env_mode.py`): **есть прокси в `.env` → prod; прокси
+пуст/отсутствует → локальный запуск**.
 
-```sql
-CREATE USER dlaibd WITH PASSWORD 'dlaibd';
-CREATE DATABASE dl_ai OWNER dlaibd;
-```
-
-2. Создайте `.env` из шаблона и для запуска без Docker выставьте `DB_HOST=127.0.0.1`:
+1. Установите Docker и войдите в группу:
 
 ```bash
-cp .env.example .env
+sudo apt update && sudo apt install -y docker.io docker-compose
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER" && newgrp docker
 ```
 
-3. Установите зависимости и запустите:
+2. Создайте минимальный `.env` (секрет Django + учётка локальной БД — всё прочее приложение подставит само):
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-python manage.py migrate
-python manage.py runserver 0.0.0.0:8000
+printf 'SECRET_KEY=django-insecure-%s\nDB_USER=localai\nDB_PASSWORD=local-ai-db-pass-01\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(40))')" > .env
 ```
 
-Приложение будет доступно на `http://127.0.0.1:8000/ai/...`.
+   Ключи моделей (`OLLAMA_API_KEY`/`OPENROUTER_API_KEY`) допишите в `.env` через редактор (запросите у владельца проекта). Строки `HTTP_PROXY=`/`HTTPS_PROXY=` НЕ заполняйте — именно пустые прокси означают «локально». Остальные переменные, если понадобятся, — с подписями в `.env.example`.
 
-## Run (local, Docker, без прокси)
-
-1. Создайте `.env`:
+3. Запуск одной командой (первая сборка 10–20 минут, последующие быстрее):
 
 ```bash
-cp .env.example .env
+docker compose up -d --build
 ```
 
-2. Убедитесь, что в `.env`:
-- `DB_HOST=db`
-- `HTTP_PROXY`, `HTTPS_PROXY`, `PROXY` пустые (или удалены), если прокси не нужен
+4. Откройте `http://localhost:8000/ai/chat/` — вы автоматически залогинены под
+`dev_admin` (суперпользователь); `/ai/admin/` доступен полностью. Через nginx
+тот же сайт: `http://localhost:8080/ai/chat/`.
 
-3. Запустите контейнеры:
-
-```bash
-docker compose up -d --build --no-cache
-docker compose exec -T web python manage.py migrate
-docker compose exec -T web python manage.py collectstatic --noinput
-docker compose exec -T web python manage.py sync_update_log
-```
-
-Остановка:
+Остановить / посмотреть логи:
 
 ```bash
 docker compose down
+docker compose logs -f web
 ```
 
-По умолчанию nginx доступен на `http://localhost:8080/ai/...`.
+Ожидаемые локально деградации (это не баги): фичи, требующие живой сессии
+dl.gsu.by («Реши задачу» через DL, «Тестирование», ARM batch-solve), сообщат
+«sessionId обязателен» / «Нет DLSID»; модели `Web_DeepSeek`/`Web_Kimi` офлайн
+(пулы требуют seed-логина, см. [docs/web_deepseek_bot.md](docs/web_deepseek_bot.md)).
+
+**Prod** — тот же `docker compose up -d --build` на сервере, где в `.env`
+прописан корпоративный прокси: миграции делаются по [DEPLOY.md](DEPLOY.md).
 
 ## Run (production)
 

@@ -51,6 +51,31 @@ def _is_optional_auth_path(path: str) -> bool:
     return _is_admin_path(normalized)
 
 
+_DEV_TRUTHY = {"1", "true", "yes", "y", "on"}
+
+
+def _dev_bypass_enabled() -> bool:
+    """Dev-bypass аутентификации: только при DEBUG, иначе флаг игнорируется.
+
+    AI_DEV_AUTH_BYPASS=1 локально провижинит fake-суперпользователя без
+    DLSID-куки и без обращения к dl.gsu.by. В prod (DEBUG=False) любое
+    значение флага молча игнорируется.
+    """
+    if not getattr(settings, "DEBUG", False):
+        return False
+    return os.getenv("AI_DEV_AUTH_BYPASS", "").strip().lower() in _DEV_TRUTHY
+
+
+def _dev_bypass_user_info() -> dict:
+    """Fake user_info для dev-bypass (userId/login переопределяются env)."""
+    return {
+        "userId": os.getenv("AI_DEV_AUTH_USERID", "999999"),
+        "login": os.getenv("AI_DEV_AUTH_LOGIN", "dev_admin"),
+        "firstName": "Dev",
+        "lastName": "Admin",
+    }
+
+
 class CsrfSessionFallbackMiddleware:
     """Восстанавливает CSRF-токен из сессии при отсутствии куки.
 
@@ -170,65 +195,13 @@ class ExternalAuthMiddleware:
             return self.get_response(request)
         return HttpResponseRedirect(self.redirect_url)
 
-    def __call__(self, request):
-        # Пропуск путей
-        request_path = _normalize_path(request.path)
-        if self._is_skipped_path(request_path):
-            return self.get_response(request)
+    def _provision_from_user_info(self, request, user_info: dict):
+        """Провижинит и сессионно логинит пользователя по внешнему user_info.
 
-        # An already-authenticated Django session does NOT mean the
-        # request is fresh — the DLSID chain might have changed (user
-        # signed in as someone else on dl.gsu.by) or a stale session
-        # cookie from a different account could be sitting in the
-        # browser. Always revalidate against the external API and
-        # rebind the local session to the user the API just confirmed.
-        raw_session_id = request.COOKIES.get(self.session_cookie_name)
-        if not raw_session_id:
-            # No DLSID at all — anything other than admin entry points
-            # redirects to dl.gsu.by.
-            return self._redirect_or_optional(request, request_path)
-
-        session_id = unquote(raw_session_id)
-        logger.debug("Session ID decoded")
-
-        try:
-            cached_user_info = self._get_cached_user_info(request, session_id)
-            fetched_at = self._cached_fetched_at(request)
-            if cached_user_info and (time.time() - fetched_at) < self.auth_cache_ttl:
-                # Свежий кэш (< TTL) — используем без повторной проверки DLSID.
-                user_info = cached_user_info
-            else:
-                # Кэша нет либо он протух (> TTL) — ревалидируем DLSID через внешний API.
-                user_info = fetch_external_user_info(session_id, api_url=self.api_url)
-                self._store_cached_user_info(request, session_id, user_info)
-            logger.debug("External user_info fetched (userId=%s)", (user_info or {}).get("userId"))
-        except ExternalAuthUnauthorized:
-            # DLSID is no longer valid — drop the local session and
-            # bounce the user back to dl.gsu.by so they re-authenticate.
-            from django.contrib.auth import logout as auth_logout
-            if request.user.is_authenticated:
-                auth_logout(request)
-            return self._redirect_or_optional(request, request_path)
-        except ExternalAuthMisconfigured as exc:
-            logger.error(f"External auth misconfigured: {exc}")
-            if _is_optional_auth_path(request_path):
-                return self.get_response(request)
-            return JsonResponse(
-                {"error": "Authentication service misconfigured"},
-                status=500,
-            )
-        except ExternalAuthUnavailable as exc:
-            # dl.gsu.by недоступен — падаем на stale-кэш (graceful degradation):
-            # пользуемся последним подтверждённым user_info, не закрывая доступ.
-            logger.error(f"Request to external API failed: {exc}")
-            cached_user_info = self._get_cached_user_info(request, session_id)
-            if cached_user_info:
-                user_info = cached_user_info
-            elif _is_optional_auth_path(request_path):
-                return self.get_response(request)
-            else:
-                return JsonResponse({"error": "Authentication service unavailable"}, status=503)
-
+        Общий «хвост» обычного пути и dev-bypass: get_or_create_user_from_external,
+        перелогин сессии под подтверждённого пользователя (защита от stale-сессий),
+        rotate CSRF, маркер admin_fresh_auth, request._ai_provisioned_user.
+        """
         request.user_info = user_info
 
         # Auto-provision user if needed. We do this for /ai/admin/...
@@ -263,3 +236,102 @@ class ExternalAuthMiddleware:
             return JsonResponse({"error": "User provisioning failed"}, status=500)
 
         return self.get_response(request)
+
+    def _process_dev_bypass(self, request, user_info: dict):
+        """DEBUG-ONLY: провижинит и логинит локального fake-пользователя без DLSID.
+
+        Все инварианты — как у обычного пути (request.user_info, login +
+        rotate, _ai_provisioned_user); дополнительно кладёт
+        session["external_user_info"] — тот же ключ кэша middleware, его
+        читает WS-фолбэк consumers._resolve_course_id. В сессию
+        external_session_id не пишем: DL-фичи не должны считать, что у
+        запроса есть валидная DL-сессия.
+        """
+        if hasattr(request, "session"):
+            request.session[self.cache_user_key] = user_info
+            request.session.modified = True
+        response = self._provision_from_user_info(request, user_info)
+        # Локальное удобство: промоутим на каждый запрос (idempotent) —
+        # bypass-юзер мог уже существовать (копия прод-БД, прошлый прогон).
+        user = getattr(request, "_ai_provisioned_user", None)
+        if user is not None and not (user.is_superuser and user.is_staff):
+            user.is_superuser = True
+            user.is_staff = True
+            user.save(update_fields=["is_superuser", "is_staff"])
+        # AIAdminSite.admin_view уводит на set-password при unusable
+        # password — ручной шаг, которого dev-bypass избегает.
+        if user is not None and not user.has_usable_password():
+            user.set_password(os.getenv("AI_DEV_AUTH_PASSWORD", "dev-local"))
+            user.save(update_fields=["password"])
+        return response
+
+    def __call__(self, request):
+        # Пропуск путей
+        request_path = _normalize_path(request.path)
+        if self._is_skipped_path(request_path):
+            return self.get_response(request)
+
+        # An already-authenticated Django session does NOT mean the
+        # request is fresh — the DLSID chain might have changed (user
+        # signed in as someone else on dl.gsu.by) or a stale session
+        # cookie from a different account could be sitting in the
+        # browser. Always revalidate against the external API and
+        # rebind the local session to the user the API just confirmed.
+        raw_session_id = request.COOKIES.get(self.session_cookie_name)
+        if not raw_session_id:
+            # No DLSID at all — anything other than admin entry points
+            # redirects to dl.gsu.by (или dev-bypass при DEBUG).
+            if _dev_bypass_enabled():
+                return self._process_dev_bypass(request, _dev_bypass_user_info())
+            return self._redirect_or_optional(request, request_path)
+
+        session_id = unquote(raw_session_id)
+        logger.debug("Session ID decoded")
+
+        try:
+            cached_user_info = self._get_cached_user_info(request, session_id)
+            fetched_at = self._cached_fetched_at(request)
+            if cached_user_info and (time.time() - fetched_at) < self.auth_cache_ttl:
+                # Свежий кэш (< TTL) — используем без повторной проверки DLSID.
+                user_info = cached_user_info
+            else:
+                # Кэша нет либо он протух (> TTL) — ревалидируем DLSID через внешний API.
+                user_info = fetch_external_user_info(session_id, api_url=self.api_url)
+                self._store_cached_user_info(request, session_id, user_info)
+            logger.debug("External user_info fetched (userId=%s)", (user_info or {}).get("userId"))
+        except ExternalAuthUnauthorized:
+            # DLSID is no longer valid — drop the local session and
+            # bounce the user back to dl.gsu.by so they re-authenticate.
+            # Dev-bypass: не логаутим и не зацикливаемся на редиректе —
+            # перелогинит fake-пользователем.
+            if _dev_bypass_enabled():
+                return self._process_dev_bypass(request, _dev_bypass_user_info())
+            from django.contrib.auth import logout as auth_logout
+            if request.user.is_authenticated:
+                auth_logout(request)
+            return self._redirect_or_optional(request, request_path)
+        except ExternalAuthMisconfigured as exc:
+            logger.error(f"External auth misconfigured: {exc}")
+            if _dev_bypass_enabled():
+                return self._process_dev_bypass(request, _dev_bypass_user_info())
+            if _is_optional_auth_path(request_path):
+                return self.get_response(request)
+            return JsonResponse(
+                {"error": "Authentication service misconfigured"},
+                status=500,
+            )
+        except ExternalAuthUnavailable as exc:
+            # dl.gsu.by недоступен — падаем на stale-кэш (graceful degradation):
+            # пользуемся последним подтверждённым user_info, не закрывая доступ.
+            logger.error(f"Request to external API failed: {exc}")
+            cached_user_info = self._get_cached_user_info(request, session_id)
+            if cached_user_info:
+                user_info = cached_user_info
+            elif _dev_bypass_enabled():
+                return self._process_dev_bypass(request, _dev_bypass_user_info())
+            elif _is_optional_auth_path(request_path):
+                return self.get_response(request)
+            else:
+                return JsonResponse({"error": "Authentication service unavailable"}, status=503)
+
+        return self._provision_from_user_info(request, user_info)
