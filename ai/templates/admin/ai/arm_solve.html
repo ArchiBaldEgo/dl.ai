@@ -51,6 +51,17 @@
     line-height: 1.3;
   }
 
+  {# Кнопки шапки «Сводка»: «Перезапустить нерешённые пары» (<button class="button">) и #}
+  {# «Скачать результаты (XLSX)» (<a class="button">) получают РАЗНЫЙ padding из #}
+  {# админского base.css (.button = 10px 15px, a.button = 4px 5px) — выравниваем #}
+  {# до общего вида настоящей admin-кнопки. #}
+  #armSolveReportCard .arm-section-head .button,
+  #armSolveReportCard .arm-section-head a.button {
+    padding: 10px 15px;
+    line-height: 1.4;
+    box-sizing: border-box;
+  }
+
   .arm-section-note {
     margin: 4px 0 0;
     color: var(--body-quiet-color);

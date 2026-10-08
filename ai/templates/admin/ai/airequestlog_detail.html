@@ -22,8 +22,8 @@
     {% include "admin/ai/_ai_batch_results.html" %}
     {{ batch_snapshot|json_script:"batch-snapshot-data" }}
     <div id="batch-results-card"></div>
-    {# Кнопка рендерится здесь скрытой и подставляется скриптом карточки ВЛЕВО от
-       «Скачать результаты (XLSX)» — тот же стиль .arm-button, тот же размер. #}
+    {# Кнопка рендерится здесь скрытой и подставляется скриптом карточки ВЛЕВО от #}
+    {# «Скачать результаты (XLSX)» — тот же стиль .arm-button, тот же размер. #}
     <button type="button" id="resend-btn" class="arm-button" style="display:none;" data-log-id="{{ log.id }}" data-source="{{ log.source }}" data-mode="{{ log.mode }}" data-message="{{ log.message|truncatechars:60 }}">Повторить прогон</button>
     <script>
       (function () {

@@ -8486,7 +8486,9 @@ class TemplateInlineCommentTests(SimpleTestCase):
     def test_no_multiline_inline_comments(self):
         import glob
         import os
-        base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates")
+        # Шаблоны лежат в ai/templates (раньше путь считался как <repo>/templates
+        # — его не существует, glob был пуст и тест проходил ничего не проверяя).
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
         offenders = []
         for path in glob.glob(os.path.join(base, "**", "*.html"), recursive=True):
             with open(path, encoding="utf-8") as fh:
