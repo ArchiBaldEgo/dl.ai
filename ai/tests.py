@@ -7417,6 +7417,8 @@ class BatchLogDetailTemplateTests(TestCase):
         self.assertIn('id="resend-btn" class="arm-button"', html)
         self.assertIn("group.className = 'arm-head-actions'", html)
         self.assertIn("group.appendChild(built.downloadBtn)", html)
+        # Обе кнопки группы нормализованы до одного размера (button vs a).
+        self.assertIn(".arm-head-actions .arm-button {", html)
         self.assertNotIn('id="resend-btn" class="default"', html)
         self.assertIn("← Назад к логам", html)
 

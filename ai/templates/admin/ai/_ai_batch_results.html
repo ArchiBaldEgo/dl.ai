@@ -31,6 +31,14 @@ NB: комментарии с решёткой Django вырезает толь�
   /* Правая группа кнопок в шапке карточки (страница batch-лога подставляет
      сюда «Повторить прогон» слева от «Скачать результаты (XLSX)»). */
   .arm-head-actions { display: inline-flex; gap: 8px; align-items: center; flex: none; }
+  /* <button> в отличие от <a> не наследует шрифт/line-height (и admin CSS его
+     не нормализует) — выравниваем ОБЕ кнопки группы до одного размера. */
+  .arm-head-actions .arm-button {
+    box-sizing: border-box; appearance: none; height: auto;
+    font-family: var(--font-family-primary); font-size: 13px;
+    line-height: normal; vertical-align: middle;
+    padding: 6px 12px;
+  }
 
   .arm-summary-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
   .arm-summary-table th, .arm-summary-table td {
