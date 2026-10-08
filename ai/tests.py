@@ -5669,6 +5669,23 @@ class ArmLightSnapshotTests(TestCase):
         self.assertEqual(snapshot["file_extension"], ".pas")
         self.assertEqual(snapshot["report"]["solved"], 1)
 
+    def test_batch_log_detail_snapshot_running_run(self):
+        """Деталь журнала для ЕЩЁ ИДУЩЕГО прогона: snapshot строится
+        (раньше здесь падал NameError: time не импортирован в logs.py)."""
+        from ai.models import AIModelTestRun, AIRequestLog
+        from ai.admin.logs import _build_batch_log_snapshot
+        self.test_run.status = AIModelTestRun.STATUS_RUNNING
+        self.test_run.save(update_fields=["status"])
+        log = AIRequestLog.objects.create(
+            user=self.superuser, source="arm", mode="batch_solve",
+            message=f"Batch solve run {self.run_id}",
+            status=AIRequestLog.STATUS_ERROR, sent_at=timezone.now(),
+        )
+        snapshot = _build_batch_log_snapshot(log)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["run_status"], "running")
+        self.assertIn("run_meta", snapshot["report"])
+
 
 class ActiveRunsEndpointTests(TestCase):
     """/ai/admin/active-runs/: личное меню «мои процессы» в шапке админки.
