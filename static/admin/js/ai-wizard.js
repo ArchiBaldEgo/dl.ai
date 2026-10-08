@@ -87,14 +87,18 @@
     // позиция зависит от состояния левого меню.
 
     // Топ-бар («весь бар») и левое меню — хром главного экрана админки.
+    // Порядок рангов = эталон пользователя: приветствие (внутри ФИО + права +
+    // счётчик «Процессы») → открытые процессы → «Просмотр сайта» → поиск по
+    // меню → левый бар; guest/выход — полезное дополнение (optional).
     var ADMIN_BAR = [
-        { sel: "#aiProcessesToggle", title: "Приветствие", rank: 10, pos: "bottom", text: "Это ты: имя и уровень прав. Клик по имени открывает меню процессов." },
-        { sel: "#aiProcessesMenu", title: "Меню «Процессы»", rank: 11, pos: "left", onShow: "openProcesses", text: "Свои запуски: что идёт сейчас и чем закончилось." },
-        { sel: "#aiGuestToggle", title: "Посмотреть как другой", rank: 12, pos: "bottom", optional: true, text: "Кнопка суперадмина: админка глазами разработчика промптов. Повторное нажатие вернёт всё назад." },
-        { sel: "#logout-form button", title: "Выход", rank: 13, pos: "bottom", optional: true, text: "Выход из админки. Рядом смена пароля, если она доступна." },
-        { sel: "#toggle-nav-sidebar", title: "Край страницы", rank: 20, pos: "right", text: "Тонкая кнопка у левого края: открывает и закрывает меню разделов." },
-        { sel: "#nav-sidebar", title: "Меню разделов", rank: 21, pos: "right", onShow: "openNav", text: "Все разделы слева. Дальше — по каждому." },
-        { sel: "#nav-filter", title: "Поиск по меню", rank: 22, pos: "right", optional: true, onShow: "openNav", text: "Разделов много? Набери пару букв — останется нужное." }
+        { sel: "#aiProcessesToggle", title: "Приветствие", rank: 10, pos: "bottom", text: "Это приветствие. Внутри — твоё ФИО, бейдж уровня прав и счётчик «Процессы». Клик по имени открывает меню." },
+        { sel: "#aiProcessesMenu", title: "Открытые процессы", rank: 11, pos: "left", onShow: "openProcesses", text: "Меню «Процессы»: свои запуски — что идёт сейчас и чем закончилось." },
+        { sel: '#user-tools a[href="/ai/chat/"]', title: "Просмотр сайта", rank: 12, pos: "bottom", text: "Ссылка ведёт на пользовательскую часть: чат на /ai/chat/." },
+        { sel: "#aiGuestToggle", title: "Посмотреть как другой", rank: 13, pos: "bottom", optional: true, text: "Кнопка суперадмина: админка глазами разработчика промптов. Повторное нажатие вернёт всё назад." },
+        { sel: "#logout-form button", title: "Выход", rank: 14, pos: "bottom", optional: true, text: "Выход из админки. Рядом смена пароля, если она доступна." },
+        { sel: "#nav-filter", title: "Поиск по меню", rank: 20, pos: "right", optional: true, onShow: "openNav", text: "Поиск: разделов много? Набери пару букв — останется нужное." },
+        { sel: "#toggle-nav-sidebar", title: "Край страницы", rank: 21, pos: "right", text: "Тонкая кнопка у левого края: открывает и закрывает левый бар с разделами." },
+        { sel: "#nav-sidebar", title: "Левый бар", rank: 22, pos: "right", onShow: "openNav", text: "Левый бар: все разделы. Дальше — по каждому." }
     ];
 
     // Каждый раздел меню — свой шаг главного экрана («расписать каждую
@@ -127,11 +131,12 @@
             // (общая часть уже показана на другой странице), движок их отбрасывает.
             { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français.", pos: "bottom", common: true },
             { sel: "#select", title: "Выбор модели", text: "Это разные помощники-модели. Нажми и выбери, кто будет тебе отвечать.", pos: "bottom", common: true },
-            { sel: "#selectType", title: "Другие страницы", text: "Через этот список можно уйти на страницы «Реши задачу» и «В чём ошибка».", pos: "bottom", common: true },
-            { sel: "#voiceModeBtn", title: "Голосовой режим", text: "Хочешь говорить, а не печатать? Нажми — можно говорить голосом.", pos: "bottom" },
+            { sel: "#selectType", title: "Режим", text: "Режимы: чат, «Реши задачу», «В чём ошибка». Через список переключаешься.", pos: "bottom", common: true },
+            { sel: "#selectModelSort", title: "Сортировка моделей", text: "Можно показывать более быстрые или более точные модели сверху.", pos: "bottom", optional: true },
+            { sel: "#voiceModeBtn", title: "Голосовой ввод", text: "Хочешь говорить, а не печатать? Нажми — можно говорить голосом.", pos: "bottom" },
             { sel: "#themeToggleBtn", title: "Светлое или тёмное", text: "Нажми — страница станет тёмной. Ещё раз — снова светлой.", pos: "bottom" },
             { sel: "#userDocsBtn", title: "Кнопка «?»", text: "Это инструкция. Нажми, если что-то непонятно. Там же можно снова показать эти подсказки.", pos: "bottom" },
-            { sel: "#messages", title: "Здесь появляются ответы", text: "Всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
+            { sel: "#messages", title: "История", text: "История: всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
             { sel: "#messageText", title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
             { sel: '.buttons-block button[type="submit"]', title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
             { sel: '[onclick="clearContext()"]', title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top", optional: true },
@@ -140,34 +145,27 @@
             { sel: "#content .toggle-button", title: "Боковое меню", text: "Стрелочка справа открывает меню, там ссылка на админ-панель.", pos: "left", optional: true, roles: ["super", "staff"] }
         ],
 
+        // Эталон пользователя (v4): «Реши задачу — Язык программирования, тема,
+        // промпт». Общие шаги (язык/модель/режим) добавляются сами, когда базу
+        // ещё не показывали; всё остальное — только на чате.
         solve: [
             { sel: "#selectType", title: "Где ты", text: "Ты на странице «Реши задачу». Через этот список вернёшься в «Чат».", pos: "bottom", common: true },
             { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписей.", pos: "bottom", common: true },
             { sel: "#select", title: "Выбор модели", text: "Список моделей — помощников, которые будут решать задачу.", pos: "bottom", common: true },
             { sel: "#selectProgLng", title: "Язык программирования", text: "Сначала выбери язык твоего кода: C или Ассемблер.", pos: "bottom" },
             { sel: "#selectTheme", title: "Тема", text: "Выбери тему — она объясняет модели, о чём задача.", pos: "top" },
-            { sel: "#selectPrompt", title: "Препромпт", text: "Препромпт — маленькая подсказка для модели. Хватит того, что выбрано.", pos: "top" },
-            { sel: "#messages", title: "Тут придёт решение", text: "Готовое решение появится в этом окне.", pos: "center" },
-            { sel: "#messageText", title: "Поле задания", text: "Опиши здесь задачу или то, что не получается.", pos: "top" },
-            { sel: '.buttons-block button[type="submit"]', title: "Отправить", text: "Жми — и жди решение в окне чата.", pos: "top" },
-            { sel: "#userDocsBtn", title: "Кнопка «?»", text: "Инструкция. Там же снова показываются эти подсказки.", pos: "bottom" },
-            { sel: '[onclick="clearContext()"]', title: "Стереть всё", text: "Стирает переписку и начинает сначала.", pos: "top", optional: true },
-            { sel: "#testOnDlBtn", title: "Тестирование в DL", text: "Отправит решение на проверку в dl.gsu.by. Кнопка видна, когда задача пришла с номером из DL.", pos: "top", optional: true },
-            { sel: "#selectModelSort", title: "Сортировка моделей", text: "Можно показывать более быстрые или более точные модели сверху.", pos: "bottom", optional: true }
+            { sel: "#selectPrompt", title: "Препромпт", text: "Препромпт — маленькая подсказка для модели. Хватит того, что выбрано.", pos: "top" }
         ],
 
+        // Эталон пользователя (v4): «В чём ошибка — текст для задачи, текст для
+        // кода». Селекты языка/темы/промпта объясняет тур «Реши задачу» —
+        // здесь их не повторяем.
         find_error: [
             { sel: "#selectType", title: "Где ты", text: "Ты на странице «В чём ошибка». Через список вернёшься в «Чат» или в «Реши задачу».", pos: "bottom", common: true },
             { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписи.", pos: "bottom", common: true },
             { sel: "#select", title: "Выбор модели", text: "Выбери помощника-модель, которая проверит код.", pos: "bottom", common: true },
-            { sel: "#selectProgLng", title: "Язык программирования", text: "Выбери язык, на котором написан код.", pos: "top" },
-            { sel: "#selectTheme", title: "Тема", text: "Тема помогает модели понять, о чём задача.", pos: "top" },
-            { sel: "#selectPrompt", title: "Препромпт", text: "Подсказка для модели; хватает того, что выбрано.", pos: "top" },
-            { sel: "#taskText", title: "Условие задачи", text: "Скопируй сюда условие задачи из dl.gsu.by.", pos: "top" },
-            { sel: "#codeText", title: "Твой код", text: "А сюда вставь программу целиком.", pos: "top" },
-            { sel: '.buttons-block button[type="submit"]', title: "Отправить", text: "Жми — модель покажет, что не так в коде.", pos: "top" },
-            { sel: "#messages", title: "Тут будет ответ", text: "Ответ модели появится в этом окне.", pos: "center" },
-            { sel: "#userDocsBtn", title: "Кнопка «?»", text: "Инструкция и повторный показ подсказок.", pos: "bottom", optional: true }
+            { sel: "#taskText", title: "Текст для задачи", text: "Скопируй сюда условие задачи из dl.gsu.by.", pos: "top" },
+            { sel: "#codeText", title: "Текст для кода", text: "А сюда вставь программу целиком.", pos: "top" }
         ],
 
         // Главный экран админки — свой scope на каждый уровень прав (флаг
@@ -1036,7 +1034,7 @@
             ? String(document.body.dataset.aiWizardScope || "")
             : "";
         if (!scope) return null;
-        return { scope: scope, version: 3, show: true, role: "", mark_url: "" };
+        return { scope: scope, version: 4, show: true, role: "", mark_url: "" };
     }
 
     function restartTour(conf, scopeOverride) {
