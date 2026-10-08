@@ -160,13 +160,19 @@
   document.addEventListener('DOMContentLoaded', function () {
     const btn = document.getElementById('resend-btn');
     if (!btn) return;
+    // Восстановление подписи после клика: на batch-странице кнопка называется
+    // «Повторить прогон», на обычной — «Повторить запрос» — верная подпись —
+    // та, что отрендерил шаблон (литерал в коде раньше затирал прогонный).
+    const originalLabel = btn.textContent.trim() || 'Повторить запрос';
 
     btn.addEventListener('click', function () {
       const logId = btn.dataset.logId;
       const source = btn.dataset.source || '';
       const mode = btn.dataset.mode || '';
       const logMessage = btn.dataset.message || '';
-      const isArmBatch = source === 'arm' && (mode === 'batch_solve' || mode === 'solve') && logMessage.indexOf('Batch solve run') !== -1;
+      // Rerun-лог («Batch solve rerun <hex>») — тоже ARM batch: после
+      // попарного перезапуска кнопка должна вести в rerun-arm, а не в resend.
+      const isArmBatch = source === 'arm' && (mode === 'batch_solve' || mode === 'solve') && (logMessage.indexOf('Batch solve run') !== -1 || logMessage.indexOf('Batch solve rerun') !== -1);
       const endpoint = isArmBatch
         ? '/ai/admin/ai/airequestlog/' + logId + '/rerun-arm/'
         : '/ai/admin/ai/airequestlog/' + logId + '/resend/';
@@ -199,11 +205,18 @@
         body: JSON.stringify({}),
       })
       .then(function (response) {
-        return response.json();
+        // При протухшей сессии POST редиректит на страницу логина (HTML) —
+        // показываем внятное сообщение вместо «Unexpected token '<'».
+        return response.text().then(function (text) {
+          try { return JSON.parse(text); }
+          catch (e) {
+            throw new Error('Сессия истекла — обновите страницу и войдите заново.');
+          }
+        });
       })
       .then(function (data) {
         btn.disabled = false;
-        btn.textContent = 'Повторить запрос';
+        btn.textContent = originalLabel;
         if (data.success || data.run_id) {
           statusDiv.className = 'resend-status success';
           if (isArmBatch && data.run_id) {
@@ -239,7 +252,7 @@
       })
       .catch(function (err) {
         btn.disabled = false;
-        btn.textContent = 'Повторить запрос';
+        btn.textContent = originalLabel;
         statusDiv.className = 'resend-status error';
         statusDiv.textContent = 'Сетевая ошибка: ' + err.message;
       });

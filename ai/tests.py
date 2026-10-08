@@ -3065,6 +3065,203 @@ class RerunUnsolvedPairsTests(TestCase):
         self.assertEqual(snapshot["report"]["failed"], 1)
 
 
+class RerunLogJournalTests(TestCase):
+    """Лог попарного перезапуска ("Batch solve rerun <hex>") виден журналу.
+
+    Регрессия: воркер перезапуска пишет AIRequestLog с message
+    "Batch solve rerun <run_id>" (не "run"), а весь журнал разбирал run_id
+    только по "Batch solve run <hex>" — детали перезапуска отрисовывались
+    как обычный текст без таблицы, кнопка «Повторить прогон» давала 400,
+    resend отправлял служебное сообщение модели как обычный чат.
+    """
+
+    def setUp(self):
+        from ai.models import AIModelTestRun, AIModelTestResult, Task, ProgrammingLanguage, Topic
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="rerun_log_admin", password="x", email="rl@t.com",
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.lang,
+        )
+        self.task = Task.objects.create(
+            node_id=7301, task_id=73001, name="RL", statement="s",
+            topic=self.topic, programming_language=self.lang,
+            file_extension=".pas",
+        )
+        self.run_id = "d" * 32
+        self.test_run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED,
+            course_id=1450,
+            run_name="Контрольный · перезапуск",
+        )
+        AIModelTestResult.objects.create(
+            run=self.test_run, task=self.task,
+            model_key="FakeModel", model_title="FakeModel",
+            status="ok", verdict="failed",
+            dl_comment="[test 1]: Ошибка компиляции",
+            file_extension_snapshot=".pas",
+            topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+        )
+        self.rerun_log = AIRequestLog.objects.create(
+            user=self.superuser, source="arm", mode="batch_solve",
+            message=f"Batch solve rerun {self.run_id}",
+            status=AIRequestLog.STATUS_ERROR, sent_at=timezone.now(),
+        )
+
+    def test_batch_run_id_matches_run_and_rerun(self):
+        from ai.admin.logs import _batch_run_id_from_log
+        self.assertEqual(
+            _batch_run_id_from_log(self.rerun_log), self.run_id,
+        )
+        run_log = AIRequestLog(message=f"Batch solve run {self.run_id}")
+        self.assertEqual(_batch_run_id_from_log(run_log), self.run_id)
+        # Служебные сообщения прогресса — не run-id.
+        self.assertIsNone(
+            _batch_run_id_from_log(AIRequestLog(message="Batch solve: 2 задач × 1 моделей")),
+        )
+        self.assertIsNone(_batch_run_id_from_log(AIRequestLog(message="")))
+
+    def test_is_batch_solve_log_accepts_rerun(self):
+        from ai.admin.logs import _is_batch_solve_log
+        self.assertTrue(_is_batch_solve_log(self.rerun_log))
+
+    def test_detail_of_rerun_log_shows_results_table(self):
+        from ai.admin.logs import admin_request_log_detail_view
+        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.rerun_log.id}/")
+        request.user = self.superuser
+        request.session = {}
+        response = admin_request_log_detail_view(request, self.rerun_log.id)
+        self.assertEqual(response.status_code, 200)
+        html = response.render().content.decode()
+        # Таблица результатов (общий partial), как у обычного batch-лога.
+        self.assertTrue(response.context_data["is_batch_log"])
+        self.assertIn("ArmBatchResults.init", html)
+
+    def test_recent_batch_rows_include_rerun_log(self):
+        from ai.admin.logs import build_recent_batch_rows
+        request = self.factory.get("/ai/admin/")
+        request.user = self.superuser
+        rows = build_recent_batch_rows(request, limit=5)
+        log_ids = {r["id"] for r in rows["recent_batch_runs"]}
+        self.assertIn(self.rerun_log.id, log_ids)
+
+    def test_resend_rerun_log_delegates_to_full_rerun(self):
+        """«Повторить запрос» на rerun-логе ведёт в rerun-arm (новый прогон
+        по всем парам), а не в resend одной модели."""
+        from ai.admin import logs as logs_mod
+        request = self.factory.post(f"/ai/admin/ai/airequestlog/{self.rerun_log.id}/resend/")
+        request.user = self.superuser
+        request.session = {"external_session_id": "DLSID-1"}
+        with patch(
+            "ai.arm_runner.start_batch_solve_run",
+            return_value=("f" * 32, ""),
+        ) as start_mock:
+            response = logs_mod.resend_request_view(request, self.rerun_log.id)
+        data = json.loads(response.content)
+        # Служебный текст лога ушёл не модели, а в полный перезапуск прогона.
+        self.assertTrue(data["success"])
+        self.assertEqual(data["run_id"], "f" * 32)
+        start_mock.assert_called_once()
+        self.assertEqual(start_mock.call_args.args[0], [self.task.node_id])
+        self.assertEqual(start_mock.call_args.args[1], ["FakeModel"])
+
+    def test_resend_rerun_log_without_run_gives_error(self):
+        """Если прогона уже нет в БД — внятная ошибка, а не resend модели."""
+        from ai.admin import logs as logs_mod
+        self.test_run.delete()
+        request = self.factory.post(f"/ai/admin/ai/airequestlog/{self.rerun_log.id}/resend/")
+        request.user = self.superuser
+        request.session = {"external_session_id": "DLSID-1"}
+        response = logs_mod.resend_request_view(request, self.rerun_log.id)
+        data = json.loads(response.content)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(data["error"], "Прогон ARM не найден в БД")
+
+
+class ArmSolveRerunPairViewTests(TestCase):
+    """POST /ai/admin/arm/solve/rerun-pairs/ — эндпоинт кнопки
+    «Перезапустить нерешённые пары» (день-2026-10-08: кнопка упиралась
+    в 403 CSRF; контракт вью — JSON и понятный message при ошибках)."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="rerun_view_admin", password="x", email="rv@t.com",
+        )
+        self.run = AIModelTestRun.objects.create(
+            run_id="e" * 32,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            user=self.superuser,
+            status=AIModelTestRun.STATUS_COMPLETED,
+        )
+
+    def _view(self, request):
+        from ai.admin.arm import admin_arm_solve_rerun_pairs_view
+        return admin_arm_solve_rerun_pairs_view(request)
+
+    def _post(self, body):
+        request = self.factory.post(
+            "/ai/admin/arm/solve/rerun-pairs/",
+            data=body, content_type="application/json",
+        )
+        request.user = self.superuser
+        request.session = {}
+        return self._view(request)
+
+    def test_get_not_allowed(self):
+        request = self.factory.get("/ai/admin/arm/solve/rerun-pairs/")
+        request.user = self.superuser
+        request.session = {}
+        response = self._view(request)
+        self.assertEqual(response.status_code, 405)
+
+    def test_run_id_required(self):
+        response = self._post(json.dumps({}))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("run_id", json.loads(response.content)["message"])
+
+    def test_unknown_run_gives_friendly_message(self):
+        request = self.factory.post(
+            "/ai/admin/arm/solve/rerun-pairs/",
+            data=json.dumps({"run_id": "0" * 32}), content_type="application/json",
+        )
+        request.user = self.superuser
+        request.session = {"external_session_id": "DLSID-1"}
+        response = self._view(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(json.loads(response.content)["message"], "Прогон не найден")
+
+    def test_running_run_rejected(self):
+        from ai.models import AIModelTestRun
+        AIModelTestRun.objects.filter(pk=self.run.pk).update(
+            status=AIModelTestRun.STATUS_RUNNING,
+        )
+        request = self.factory.post(
+            "/ai/admin/arm/solve/rerun-pairs/",
+            data=json.dumps({"run_id": self.run.run_id}), content_type="application/json",
+        )
+        request.user = self.superuser
+        request.session = {"external_session_id": "DLSID-1"}
+        response = self._view(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("выполняется", json.loads(response.content)["message"])
+
+    def test_success_returns_snapshot_and_message(self):
+        with patch("ai.admin.arm.start_batch_rerun_pairs", return_value=(self.run.run_id, "", ["Web_Gone"])), \
+             patch("ai.admin.arm.get_arm_run_snapshot", return_value={"run_id": self.run.run_id, "status": "running"}):
+            response = self._post(json.dumps({"run_id": self.run.run_id}))
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["run_id"], self.run.run_id)
+        self.assertIn("Web_Gone", data["message"])
+        self.assertEqual(data["run"]["run_id"], self.run.run_id)
+
+
 class BatchRunnerIntegrationTests(TestCase):
     """End-to-end batch solve with mocked handlers + DL sample fetch.
 
@@ -7473,6 +7670,55 @@ class ArmSolveTopicsKeyTests(TestCase):
             "langIds.has(String(t.programming_language))", src,
         )
         self.assertNotIn("t.programming_language_id", src)
+
+
+class ArmSolveTemplateMarkersTests(SimpleTestCase):
+    """Точечные регрессии шаблонов /arm/solve/ по коммитам 2026-10-08.
+
+    - POST «Перезапустить нерешённые пары» обязан слать X-CSRFToken
+      (иначе admin_view отвечает 403 «CSRF token missing» — коммит
+      bcb1099 «исправлениее истекшей сессии»);
+    - AJAX-парсеры обязаны отличать редирект на страницу логина
+      (HTML при протухшей сессии) от JSON-ответа — внятное сообщение
+      «Сессия истекла…» вместо «Unexpected token '<'»;
+    - кнопка «Повторить прогон» восстанавливает свою подпись и rerun-лог
+      («Batch solve rerun …») ведёт в rerun-arm, а не в resend.
+    """
+
+    def _source(self, name):
+        from django.template.loader import get_template
+        return get_template(name).template.source
+
+    def test_rerun_pairs_post_sends_csrf_token(self):
+        src = self._source("admin/ai/arm_solve.html")
+        i = src.find("await fetch(rerunPairsUrl")
+        self.assertNotEqual(i, -1, "блок POST rerun-pairs не найден")
+        self.assertIn("'X-CSRFToken': getCsrfToken()", src[i:i + 400])
+
+    def test_arm_solve_has_friendly_expired_session_parser(self):
+        src = self._source("admin/ai/arm_solve.html")
+        self.assertIn("function parseJsonResponse", src)
+        self.assertIn("Сессия истекла", src)
+
+    def test_batch_results_body_fetch_has_expired_session_parser(self):
+        """Ленивое тело результата (partial используется на /arm/solve/ и в
+        деталях журнала): не-JSON ответ (страница логина) → внятная ошибка."""
+        src = self._source("admin/ai/_ai_batch_results.html")
+        self.assertIn("function parseJsonResponse", src)
+        self.assertIn("Сессия истекла", src)
+        i = src.find("function fetchResultBody")
+        self.assertNotEqual(i, -1)
+        self.assertIn(".then(parseJsonResponse)", src[i:i + 800])
+
+    def test_log_detail_resend_session_label_and_rerun_route(self):
+        src = self._source("admin/ai/airequestlog_detail.html")
+        # Протухшая сессия — внятное сообщение вместо JSON.parse-мусора.
+        self.assertIn("Сессия истекла", src)
+        # Подпись кнопки восстанавливается из отрендеренной, а не литералом.
+        self.assertIn("originalLabel", src)
+        self.assertIn("btn.textContent = originalLabel", src)
+        # rerun-лог ведёт в rerun-arm (не в resend одной модели).
+        self.assertIn("logMessage.indexOf('Batch solve rerun')", src)
 
 
 # ===================================================================
