@@ -65,14 +65,13 @@ sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER" && newgrp docker
 ```
 
-2. Создайте `.env` из шаблона и заполните ключи моделей:
+2. Создайте минимальный `.env` (секрет Django + учётка локальной БД — всё прочее приложение подставит само):
 
 ```bash
-cp .env.example .env
-sed -i "s/^SECRET_KEY=$/SECRET_KEY=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')/" .env
+printf 'SECRET_KEY=django-insecure-%s\nDB_USER=localai\nDB_PASSWORD=local-ai-db-pass-01\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(40))')" > .env
 ```
 
-   В редакторе впишите `OLLAMA_API_KEY` / `OPENROUTER_API_KEY` (запросите у владельца проекта). Строки `HTTP_PROXY=`/`HTTPS_PROXY=` НЕ заполняйте — именно пустые прокси означают «локально». Пустой `.env` из шаблона = локальный режим по умолчанию.
+   Ключи моделей (`OLLAMA_API_KEY`/`OPENROUTER_API_KEY`) допишите в `.env` через редактор (запросите у владельца проекта). Строки `HTTP_PROXY=`/`HTTPS_PROXY=` НЕ заполняйте — именно пустые прокси означают «локально». Остальные переменные, если понадобятся, — с подписями в `.env.example`.
 
 3. Запуск одной командой (первая сборка 10–20 минут, последующие быстрее):
 

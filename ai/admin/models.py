@@ -538,6 +538,65 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     education_summary.short_description = "Учебные данные"
 
 
+class UpdateLogAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Управление записями «Обновлений»: публикация отклонённых и скрытие шумных.
+
+    Интерактивная синхронизация (sync_update_log --interactive) пишет невыбранные
+    коммиты со hidden=True; отсюда их можно опубликовать (action «Показать
+    выбранные») или скрыть любой другой коммит. Из навигации спрятан
+    (_HIDDEN_NAV_OBJECT_NAMES) — на «Обновления» ведёт ссылка «Скрытые записи».
+    """
+    list_display = ("commit_date", "author", "short_description", "hidden", "commit_hash")
+    list_display_links = ("commit_date",)
+    list_filter = ("hidden", "commit_date")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    search_fields = ("description", "author")
+
+    def has_module_permission(self, request):
+        return is_superuser_user(request.user)
+
+    def has_view_permission(self, request, obj=None):
+        return is_superuser_user(request.user)
+
+    def has_add_permission(self, request):
+        return is_superuser_user(request.user)
+
+    def has_change_permission(self, request, obj=None):
+        return is_superuser_user(request.user)
+
+    def has_delete_permission(self, request, obj=None):
+        return is_superuser_user(request.user)
+
+    def short_description(self, obj):
+        text = obj.description or ""
+        return f"{text[:100]}..." if len(text) > 100 else text
+    short_description.short_description = "Содержание обновления"
+
+    @admin.action(description="Показать выбранные")
+    def publish_selected(self, request, queryset):
+        updated = queryset.update(hidden=False)
+        self.message_user(request, f"Опубликовано записей: {updated}.")
+
+    @admin.action(description="Скрыть выбранные")
+    def hide_selected(self, request, queryset):
+        updated = queryset.update(hidden=True)
+        self.message_user(request, f"Скрыто записей: {updated}.")
+
+    actions = ("publish_selected", "hide_selected")
+
+
+class AuthorAliasAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Справочник ников git → ФИО + группа для страницы «Обновления».
+
+    Ведётся вручную (нет автопривязки к ExternalDLAccount: git-ник не обязан
+    совпадать с DL-логином); отображение на /ai/admin/updates/ резолвится при
+    рендере — правка записи ретроактивно чинит прошлые строки.
+    """
+    list_display = ("nick", "full_name", "group")
+    search_fields = ("nick", "full_name", "group")
+
+
 class PromptEditorshipInline(admin.TabularInline):
     """Права редактирования промптов на странице пользователя (суперюзер).
 

@@ -1211,6 +1211,36 @@ class PromptTestResult(models.Model):
         return f"{self.run.run_id} / {self.case_name_snapshot or self.model_title} — {self.verdict}"
 
 
+class AuthorAlias(models.Model):
+    """Справочник авторов git-коммитов: ник → ФИО + группа.
+
+    В UpdateLog.author хранится сырой ник из git (%an); ФИО/группа подставляются
+    ПРИ РЕНДЕРЕ страницы «Обновления» (правка справочника ретроактивно чинит
+    все прошлые строки). Ведётся вручную через /ai/admin/.
+    """
+    nick = models.CharField(max_length=255, unique=True, verbose_name="Ник в git")
+    full_name = models.CharField(max_length=255, verbose_name="ФИО")
+    group = models.CharField(max_length=255, blank=True, default="", verbose_name="Группа")
+
+    class Meta:
+        db_table = "ai_author_alias"
+        verbose_name = "Автор коммитов (справочник)"
+        verbose_name_plural = "Авторы коммитов (справочник)"
+        ordering = ("full_name",)
+
+    def __str__(self):
+        return f"{self.nick} — {self.display_label}"
+
+    @property
+    def display_label(self):
+        return f"{self.full_name} ({self.group})" if self.group else self.full_name
+
+    @classmethod
+    def display_map(cls):
+        """{nick: display_label} — один запрос, единственный источник для рендера."""
+        return {alias.nick: alias.display_label for alias in cls.objects.all()}
+
+
 class UpdateLog(models.Model):
     """Журнал обновлений проекта.
 
@@ -1221,6 +1251,10 @@ class UpdateLog(models.Model):
     description = models.TextField(verbose_name="Содержание обновления")
     author = models.CharField(max_length=255, verbose_name="Автор")
     commit_hash = models.CharField(max_length=40, blank=True, default="", verbose_name="Хэш коммита")
+    # Скрытые строки — коммиты, отклонённые при интерактивной синхронизации
+    # (sync_update_log --interactive). Не видны на «Обновлениях», видны только
+    # в UpdateLogAdmin — там выбираются публикацией/скрытием.
+    hidden = models.BooleanField(default=False, verbose_name="Скрыто")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
 
     class Meta:

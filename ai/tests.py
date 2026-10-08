@@ -37,6 +37,7 @@ from ai.middleware import ExternalAuthMiddleware
 from ai.i18n import get_localized_name, get_ui_language_suffix
 from ai.external_account import get_or_create_user_from_external
 from ai.models import (
+    AuthorAlias,
     AIRequestLog,
     AIPinnedBatchRun,
     ArmPromptBinding,
@@ -2866,6 +2867,204 @@ class ExtractCodeFromResponseTests(SimpleTestCase):
         self.assertEqual(self.extract(text), "")
 
 
+class RerunUnsolvedPairsTests(TestCase):
+    """Попарный перезапуск нерешённых пар со слиянием в тот же прогон.
+
+    Регрессия на «Перезапустить прогон» со полным новым прогоном: было
+    40 реш / 13 не реш → перезапуск 13 пар (задача × модель) → 10 решились →
+    в отчёте 50 реш / 3 не реш. Строки обновляются update_or_create в том же
+    run; финализирующий отчёт строится из всех строк прогона.
+    """
+
+    def setUp(self):
+        from django.utils import timezone as tz
+        from ai.models import AIModelTestResult, AIModelTestRun
+        from ai.models import ProgrammingLanguage, Task, Topic
+
+        self.user = get_user_model().objects.create_user(username="reruner", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=3001, task_id=30001, name="A", statement="Выведи 1",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.t2 = Task.objects.create(
+            node_id=3002, task_id=30002, name="B", statement="Выведи 2",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.started = tz.now()
+        self.run = AIModelTestRun.objects.create(
+            run_id="rerun-target-1",
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            user=self.user,
+            status=AIModelTestRun.STATUS_COMPLETED,
+            started_at=self.started,
+            finished_at=tz.now(),
+            message="Batch solve: 2 задач × 1 моделей",
+            total_models=1,
+            run_params={
+                "node_ids": [self.t1.node_id, self.t2.node_id],
+                "model_keys": ["FakeModel"],
+                "language_id": self.lang.id,
+                "file_extension": ".pas",
+                "dl_test": True,
+                "ui_language": "Русский",
+                "record_stats": False,
+                "save_solutions": False,
+                "run_name": "Контрольный",
+            },
+        )
+        # Пара 1 решена, пара 2 провалилась (код не извлечён) — кандидаты на перезапуск.
+        AIModelTestResult.objects.create(
+            run=self.run, model_key="FakeModel", model_title="FakeModel",
+            task=self.t1, status="ok", verdict="solved",
+            dl_queue_id=1, dl_comment="Все тесты успешно пройдены",
+            file_extension_snapshot=".pas", topic_name_snapshot="Линейные",
+            prog_lang_snapshot="Pascal",
+        )
+        AIModelTestResult.objects.create(
+            run=self.run, model_key="FakeModel", model_title="FakeModel",
+            task=self.t2, status="error", verdict="failed",
+            dl_queue_id=0, dl_comment="Не удалось извлечь код из ответа модели",
+            file_extension_snapshot=".pas", topic_name_snapshot="Линейные",
+            prog_lang_snapshot="Pascal",
+        )
+
+    def test_collect_unsolved_pairs_only_non_solved(self):
+        from ai.arm_runner import collect_unsolved_pairs
+
+        node_ids, pairs_map = collect_unsolved_pairs(self.run)
+        self.assertEqual(node_ids, [self.t2.node_id])
+        self.assertEqual(pairs_map, {self.t2.node_id: {"FakeModel"}})
+
+    def test_start_rerun_rejects_when_running(self):
+        from django.core.cache import cache
+
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+
+        arm_runner.AIModelTestRun.objects.filter(pk=self.run.pk).update(
+            status=AIModelTestRun.STATUS_RUNNING,
+        )
+        new_run_id, error, dropped = arm_runner.start_batch_rerun_pairs(
+            self.run.run_id, self.user.id, "DLSID-1",
+        )
+        self.assertIsNone(new_run_id)
+        self.assertIn("выполняется", error)
+        self.assertEqual(dropped, [])
+
+    def test_start_rerun_rejects_when_all_solved(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestResult
+
+        AIModelTestResult.objects.filter(run=self.run, task=self.t2).update(verdict="solved")
+        new_run_id, error, _dropped = arm_runner.start_batch_rerun_pairs(
+            self.run.run_id, self.user.id, "DLSID-1",
+        )
+        self.assertIsNone(new_run_id)
+        self.assertIn("Все пары решены", error)
+
+    def test_start_rerun_rejects_unknown_run(self):
+        from ai import arm_runner
+
+        new_run_id, error, _dropped = arm_runner.start_batch_rerun_pairs(
+            "no-such-run", self.user.id, "DLSID-1",
+        )
+        self.assertIsNone(new_run_id)
+        self.assertIn("не найден", error)
+
+    def test_rerun_merges_into_same_run(self):
+        """Перезапуск 1 пары: строка обновлена в том же run, отчёт из всех строк."""
+        import time as _t
+        from unittest.mock import patch
+
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        async def fake_handler(messages, conv_id):
+            return ("program r; begin writeln(2); end.", 5)
+
+        ordered_models = [{
+            "key": "FakeModel", "title": "FakeModel",
+            "handler": fake_handler,
+        }]
+        run_id = self.run.run_id
+        now_ts = _t.time()
+        # Pre-seed живой job перезапуска (как в start_batch_rerun_pairs).
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "rerun": True,
+            "status": "running", "error_message": "",
+            "total_models": 1, "total_pairs": 1, "completed_pairs": 0,
+            "completed_models": 0, "current_model_key": "FakeModel",
+            "current_model_title": "FakeModel", "current_task_node_id": "",
+            "current_task_name": "", "results": [], "report": None,
+            "run_name": "Контрольный · перезапуск",
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        dl_ok = lambda sid, node_id, code, ext, **kw: {
+            "verdict": "solved", "comment": "Все тесты успешно пройдены",
+            "submit_error": "", "queue_id": 1, "code_sent": code,
+        }
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", dl_ok):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t2.node_id], ordered_models, self.user.id, "DLSID-1",
+                    ui_language="Русский", dl_test=True,
+                    rerun=True, rerun_pairs={self.t2.node_id: {"FakeModel"}},
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        # Строки НЕ дублируются: update_or_create в тот же run.
+        rows = list(AIModelTestResult.objects.filter(run=run).order_by("task_id"))
+        self.assertEqual(len(rows), 2)
+        by_task = {r.task_id: r for r in rows}
+        # Перезапущенная пара стала solved; решённая строка не тронута.
+        self.assertEqual(by_task[self.t2.id].verdict, "solved")
+        self.assertEqual(by_task[self.t2.id].dl_queue_id, 1)
+        self.assertEqual(by_task[self.t1.id].verdict, "solved")
+        # Отчёт финализирован из всех строк: 2 решено / 0 не решено.
+        self.assertEqual(run.report["solved"], 2)
+        self.assertEqual(run.report["failed"], 0)
+        self.assertEqual(run.report["total_pairs"], 2)
+        # Статус прогона вернулся в completed.
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        self.assertIsNotNone(run.finished_at)
+        # Отсчёт времени «Прогон» — от исходного started_at.
+        self.assertEqual(run.started_at, self.started)
+        # Журнал: отдельная лог-строка перезапуска.
+        self.assertTrue(
+            AIRequestLog.objects.filter(message=f"Batch solve rerun {run_id}").exists(),
+        )
+
+    def test_rerun_snapshot_merges_results(self):
+        """Живой перезапуск в снапшоте — все строки прогона, сводка обновляется."""
+        import time as _t
+
+        from ai import arm_runner
+
+        run_id = self.run.run_id
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "rerun": True,
+            "status": "running", "error_message": "",
+            "total_models": 1, "total_pairs": 1, "completed_pairs": 0,
+            "completed_models": 0, "current_model_key": "FakeModel",
+            "current_model_title": "FakeModel", "current_task_node_id": "",
+            "current_task_name": "", "results": [],
+            "report": None, "run_name": "Контрольный · перезапуск",
+            "created_at_ts": _t.time(), "updated_at_ts": _t.time(),
+        }
+        try:
+            snapshot = arm_runner.get_arm_run_snapshot(run_id, light_results=True)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        # Обе строки видны, сводка — по всем парам прогона.
+        self.assertEqual(len(snapshot["results"]), 2)
+        self.assertEqual(snapshot["report"]["solved"], 1)
+        self.assertEqual(snapshot["report"]["failed"], 1)
+
+
 class BatchRunnerIntegrationTests(TestCase):
     """End-to-end batch solve with mocked handlers + DL sample fetch.
 
@@ -3860,37 +4059,8 @@ class UserTopModelKeysTests(TestCase):
 # Tests for admin Updates section (UpdateLog)
 # ===================================================================
 
-class UpdateLogAdminTests(TestCase):
-    """Tests for the admin updates view: access control, filtering, search."""
-
-    def setUp(self):
-        self.factory = RequestFactory()
-        # Очищаем данные от миграции 0026, чтобы тесты были изолированы
-        UpdateLog.objects.all().delete()
-        self.superuser = get_user_model().objects.create_superuser(
-            username="upd_admin", password="***", email="admin@test.com",
-        )
-        self.normal_user = get_user_model().objects.create_user(
-            username="upd_normal", password="***",
-        )
-        # Add to prompt_developer group (non-superuser staff-like)
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-        self.normal_user.groups.add(group)
-
-        # Create some test data
-        self.u1 = UpdateLog.objects.create(
-            commit_date="2026-07-27", description="Нововведение: test feature",
-            author="whmi1", commit_hash="abc123",
-        )
-        self.u2 = UpdateLog.objects.create(
-            commit_date="2026-07-11", description="Исправление: bug fix",
-            author="Archi", commit_hash="def456",
-        )
-        self.u3 = UpdateLog.objects.create(
-            commit_date="2026-06-22", description="fix build v2",
-            author="ArchiBaldEgo", commit_hash="ghi789",
-        )
+class UpdateLogAdminViewMixin:
+    """Request-заготовки для тестов страницы «Обновления» (ai/admin/updates.py)."""
 
     def _make_request(self, user=None, params=None):
         request = self.factory.get("/ai/admin/updates/", data=params or {})
@@ -3922,6 +4092,39 @@ class UpdateLogAdminTests(TestCase):
         # Restore
         site_module.ai_admin_site.admin_view = original_admin_view
         return response
+
+
+class UpdateLogAdminTests(UpdateLogAdminViewMixin, TestCase):
+    """Tests for the admin updates view: access control, filtering, search."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        # Очищаем данные от миграции 0026, чтобы тесты были изолированы
+        UpdateLog.objects.all().delete()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="upd_admin", password="***", email="admin@test.com",
+        )
+        self.normal_user = get_user_model().objects.create_user(
+            username="upd_normal", password="***",
+        )
+        # Add to prompt_developer group (non-superuser staff-like)
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        self.normal_user.groups.add(group)
+
+        # Create some test data
+        self.u1 = UpdateLog.objects.create(
+            commit_date="2026-07-27", description="Нововведение: test feature",
+            author="whmi1", commit_hash="abc123",
+        )
+        self.u2 = UpdateLog.objects.create(
+            commit_date="2026-07-11", description="Исправление: bug fix",
+            author="Archi", commit_hash="def456",
+        )
+        self.u3 = UpdateLog.objects.create(
+            commit_date="2026-06-22", description="fix build v2",
+            author="ArchiBaldEgo", commit_hash="ghi789",
+        )
 
     def test_superuser_can_access(self):
         """Superuser should see the updates page."""
@@ -3991,6 +4194,228 @@ class UpdateLogAdminTests(TestCase):
         response = self._call_view(request)
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Нет записей")
+
+    def test_hidden_rows_not_displayed(self):
+        """Скрытые записи (hidden=True) не видны на «Обновлениях» и в счётчике."""
+        UpdateLog.objects.create(
+            commit_date="2026-07-01", description="Скрытый: отклонённый коммит",
+            author="whmi2", commit_hash="xyz1", hidden=True,
+        )
+        response = self._call_view(self._make_request(self.superuser))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "test feature")  # видимая запись на месте
+        self.assertNotContains(response, "отклонённый коммит")
+        # 3 обычных записи, скрытая не в счётчике.
+        self.assertContains(response, "записей: 3")
+        # И автора скрытой записи нет в дропдауне.
+        self.assertNotContains(response, 'value="whmi2"')
+
+
+class UpdateLogAdminActionTests(TestCase):
+    """Действия UpdateLogAdmin: публикация скрытых и скрытие любых записей."""
+
+    def test_publish_and_hide_actions_toggle_hidden(self):
+        from ai.admin.models import UpdateLogAdmin
+        from ai.admin.site import ai_admin_site
+
+        UpdateLog.objects.all().delete()
+        entry = UpdateLog.objects.create(
+            commit_date="2026-10-01", description="feat: скрытый коммит",
+            author="whmi2", commit_hash="h9", hidden=True,
+        )
+        admin = UpdateLogAdmin(UpdateLog, ai_admin_site)
+        qs = UpdateLog.objects.filter(pk=entry.pk)
+
+        admin.publish_selected(request=MagicMock(), queryset=qs)
+        entry.refresh_from_db()
+        self.assertFalse(entry.hidden)
+
+        admin.hide_selected(request=MagicMock(), queryset=qs)
+        entry.refresh_from_db()
+        self.assertTrue(entry.hidden)
+
+
+class AuthorAliasTests(UpdateLogAdminViewMixin, TestCase):
+    """Справочник AuthorAlias: метки, display_map и рендер на «Обновления»."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        UpdateLog.objects.all().delete()
+        AuthorAlias.objects.all().delete()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="alias_admin", password="***", email="alias@test.com",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-07-27", description="Нововведение: test feature",
+            author="whmi1", commit_hash="abc123",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-07-11", description="Исправление: bug fix",
+            author="ArchiBaldEgo", commit_hash="def456",
+        )
+        self.alias = AuthorAlias.objects.create(
+            nick="whmi1", full_name="Иванов Иван", group="11А",
+        )
+
+    def test_display_label_with_and_without_group(self):
+        with_group = AuthorAlias.objects.get(nick="whmi1")
+        without = AuthorAlias.objects.create(nick="petr", full_name="Петров Пётр")
+        self.assertEqual(with_group.display_label, "Иванов Иван (11А)")
+        self.assertEqual(without.display_label, "Петров Пётр")
+
+    def test_display_map_maps_nick_to_label(self):
+        AuthorAlias.objects.create(nick="sidor", full_name="Сидоров Сидор")
+        mapping = AuthorAlias.display_map()
+        self.assertEqual(mapping["whmi1"], "Иванов Иван (11А)")
+        self.assertEqual(mapping["sidor"], "Сидоров Сидор")
+
+    def test_updates_view_shows_full_name(self):
+        """Ячейка «Автор» — ФИО (группа); ник без записи в справочнике остаётся ником."""
+        response = self._call_view(self._make_request(self.superuser))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Иванов Иван (11А)")
+        self.assertNotContains(response, ">whmi1</td>")
+        # Ник без записи в справочнике — рендерится как есть.
+        self.assertContains(response, "ArchiBaldEgo")
+
+    def test_updates_view_search_by_full_name(self):
+        """Поиск по ФИО находит коммиты ника из справочника."""
+        response = self._call_view(self._make_request(self.superuser, {"q": "Иванов"}))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "test feature")
+        self.assertContains(response, "записей: 1")
+        self.assertNotContains(response, "bug fix")
+
+    def test_updates_view_search_by_group(self):
+        """Поиск по группе тоже матчится через справочник."""
+        response = self._call_view(self._make_request(self.superuser, {"q": "11А"}))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "записей: 1")
+
+    def test_updates_view_dropdown_shows_alias_labels(self):
+        """Дропдаун авторов: value — сырой ник, label — ФИО из справочника."""
+        response = self._call_view(self._make_request(self.superuser))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'value="whmi1"')
+        self.assertContains(response, "Иванов Иван (11А)")
+
+
+class SyncUpdateLogNoMergesTests(TestCase):
+    """sync_update_log ходит git-логом с --no-merges (merge-коммиты не импортируются)."""
+
+    def test_git_argv_includes_no_merges(self):
+        from ai.management.commands import sync_update_log as cmd_mod
+
+        with patch.object(cmd_mod.subprocess, "run") as run, patch.object(
+            cmd_mod.sys, "stderr", new=MagicMock()
+        ):
+            run.return_value = SimpleNamespace(
+                stdout="a1|2026-10-01|whmi1|feat: note",
+                stderr="",
+            )
+            cmd_mod.Command().handle(rebuild=False)
+
+        argv = run.call_args.args[0]
+        self.assertIn("--no-merges", argv)
+        # Обычный коммит из вывода всё же импортируется (парсинг жив).
+        self.assertTrue(UpdateLog.objects.filter(commit_hash="a1").exists())
+
+
+class SyncUpdateLogInteractiveTests(TestCase):
+    """Интерактивный отбор коммитов: --interactive, hidden-строки, дедуп, no-TTY."""
+
+    def setUp(self):
+        UpdateLog.objects.all().delete()
+        import importlib
+        self.cmd_mod = importlib.import_module("ai.management.commands.sync_update_log")
+
+    GIT_OUTPUT = (
+        "h1|2026-10-05|whmi1|feat: add smoke test\n"
+        "h2|2026-10-04|Archi|fix: small patch\n"
+        "h3|2026-10-03|Kirill Karlow|docs: update readme\n"
+    )
+
+    def _run_handle(self, answers, interactive=True, isatty=True):
+        """Прогон handle с подменённым git-выводом, isatty и вводом.
+
+        answers — один ответ или список (для проверки повторного запроса).
+        """
+        if isinstance(answers, str):
+            answers = [answers]
+        with patch.object(self.cmd_mod.subprocess, "run", return_value=SimpleNamespace(
+            stdout=self.GIT_OUTPUT, stderr="",
+        )), patch.object(self.cmd_mod.sys.stdin, "isatty", return_value=isatty):
+            with patch("builtins.input", side_effect=answers) as input_mock:
+                self.cmd_mod.Command().handle(interactive=interactive, rebuild=False)
+        return input_mock
+
+    def test_parse_selection(self):
+        parse = self.cmd_mod._parse_selection
+        self.assertEqual(parse("", 3), set())
+        self.assertEqual(parse("   ", 3), set())
+        self.assertEqual(parse("a", 3), {1, 2, 3})
+        self.assertEqual(parse("все", 3), {1, 2, 3})
+        self.assertEqual(parse("2", 3), {2})
+        self.assertEqual(parse("1,3", 3), {1, 3})
+        self.assertEqual(parse("1,3-5", 7), {1, 3, 4, 5})
+        self.assertEqual(parse(" 2, 4-5 ", 5), {2, 4, 5})
+        # Мусор и вневыборочные номера → None (повторный запрос).
+        self.assertIsNone(parse("x", 3))
+        self.assertIsNone(parse("0", 3))
+        self.assertIsNone(parse("4", 3))
+        self.assertIsNone(parse("3-1", 5))
+        # Пустые токены между запятыми терпимо пропускаются.
+        self.assertEqual(parse("1,,2", 3), {1, 2})
+
+    def test_interactive_decline_all_hides_all(self):
+        self._run_handle("")
+        self.assertEqual(UpdateLog.objects.count(), 3)
+        self.assertEqual(UpdateLog.objects.filter(hidden=False).count(), 0)
+
+    def test_interactive_answer_a_adds_all(self):
+        self._run_handle("a")
+        self.assertEqual(UpdateLog.objects.filter(hidden=False).count(), 3)
+        self.assertEqual(UpdateLog.objects.filter(hidden=True).count(), 0)
+
+    def test_interactive_partial_selection(self):
+        self._run_handle("1,3")
+        self.assertEqual(
+            set(UpdateLog.objects.filter(hidden=False).values_list("commit_hash", flat=True)),
+            {"h1", "h3"},
+        )
+        self.assertEqual(
+            set(UpdateLog.objects.filter(hidden=True).values_list("commit_hash", flat=True)),
+            {"h2"},
+        )
+        # Перевод префиксов жив: h1 — «Нововведение: …»
+        self.assertTrue(
+            UpdateLog.objects.filter(commit_hash="h1", description__startswith="Нововведение:").exists()
+        )
+
+    def test_interactive_invalid_answer_reprompts(self):
+        self._run_handle(["что", "2"])
+        self.assertEqual(
+            set(UpdateLog.objects.filter(hidden=False).values_list("commit_hash", flat=True)),
+            {"h2"},
+        )
+        self.assertEqual(UpdateLog.objects.filter(hidden=True).count(), 2)
+
+    def test_interactive_without_tty_writes_nothing(self):
+        self._run_handle("a", isatty=False)
+        self.assertEqual(UpdateLog.objects.count(), 0)
+
+    def test_dedup_covers_hidden_rows(self):
+        self._run_handle("")
+        self.assertEqual(UpdateLog.objects.count(), 3)
+        # Повторный синк с тем же git-выводом: hidden-строки дедупятся —
+        # новых вопросов и дублей нет.
+        self._run_handle("a")
+        self.assertEqual(UpdateLog.objects.count(), 3)
+        self.assertEqual(UpdateLog.objects.filter(hidden=False).count(), 0)
+
+    def test_auto_mode_imports_visible(self):
+        self._run_handle([], interactive=False)  # input не должен вызываться
+        self.assertEqual(UpdateLog.objects.filter(hidden=False).count(), 3)
 
 
 class UpdateLogModelTests(TestCase):
@@ -7974,6 +8399,52 @@ class ArmCodeExtractionTests(SimpleTestCase):
             chr(60) + "think>Need solve assembler i86. Need infer syntax."
         )
         self.assertEqual(self._extract(text), "")
+
+    def test_unclosed_fence_taken_to_end(self):
+        """Незакрытая оградка (модель забывает ```) — код до конца текста."""
+        text = "Вот решение:\n```asm\nmov ax, 1\nadd ax, 2"
+        self.assertEqual(self._extract(text), "mov ax, 1\nadd ax, 2")
+
+    def test_unclosed_fence_trims_trailing_prose(self):
+        """Незакрытая оградка + прощание после кода — прощание срезано."""
+        text = "```pascal\nprogram a;\nbegin\nwriteln(1);\nend.\nУдачи!\nВот и всё."
+        self.assertEqual(self._extract(text), "program a;\nbegin\nwriteln(1);\nend.")
+
+    def test_fence_language_with_symbols_not_leaked(self):
+        """Язык-тег с символами («c-mpa», «c++») не попадает внутрь кода."""
+        text = "```c-mpa\nint main(void) {\nreturn 0;\n}\n```"
+        self.assertEqual(self._extract(text), "int main(void) {\nreturn 0;\n}")
+        self.assertEqual(
+            self._extract("```c++\nint main(void) {\n}\n```"),
+            "int main(void) {\n}",
+        )
+
+    def test_unfenced_code_after_prose_intro_carved(self):
+        """Код без оградок после прозаического вступления — карвинг кода."""
+        text = (
+            "Решение задачи: считаем сумму и выводим ответ.\n"
+            "program a;\n"
+            "var a, b: integer;\n"
+            "begin\n"
+            "writeln(a+b);\n"
+            "end."
+        )
+        self.assertEqual(
+            self._extract(text),
+            "program a;\nvar a, b: integer;\nbegin\nwriteln(a+b);\nend.",
+        )
+
+    def test_cot_plus_unfenced_code_carved(self):
+        """Смесь «рассуждения + код без оградок» — код выделен, проза срезана."""
+        text = (
+            "We need solve this task in assembler i86 here.\n"
+            "Считаем по формуле: сначала считаем сумму элементов массива.\n"
+            "mov ax, a\n"
+            "cbw\n"
+            "idiv b\n"
+            "mov R, ax"
+        )
+        self.assertEqual(self._extract(text), "mov ax, a\ncbw\nidiv b\nmov R, ax")
 
 
 class TemplateInlineCommentTests(SimpleTestCase):

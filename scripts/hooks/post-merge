@@ -18,11 +18,16 @@ if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q t
     exit 0
 fi
 
-echo "[post-merge] Синхронизация UpdateLog с новыми коммитами..."
-if docker exec "$CONTAINER" python manage.py sync_update_log; then
+echo "[post-merge] Синхронизация UpdateLog (интерактивный отбор коммитов)..."
+# -it — stdin/TTY из терминала git-операции; --interactive показывает список
+# новых коммитов и спрашивает, какие добавить (невыбранные пишутся скрытыми).
+# Нет TTY (pull из IDE/CI) или сбой — ничего не импортируем, коммиты будут
+# предложены при следующем интерактивном запуске.
+if docker exec -it "$CONTAINER" python manage.py sync_update_log --interactive; then
     echo "[post-merge] Готово"
 else
-    echo "[post-merge] ОШИБКА: sync_update_log завершился с ошибкой (см. вывод выше)"
+    echo "[post-merge] Нет TTY или сбой — коммиты не импортированы (запустите:"
+    echo "[post-merge]   docker exec -it dl_ai_web python manage.py sync_update_log --interactive)"
 fi
 # Не блокируем git-операцию при сбое синхронизации.
 exit 0

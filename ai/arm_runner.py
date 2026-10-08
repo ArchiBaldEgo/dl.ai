@@ -881,7 +881,13 @@ def start_arm_sequential_run(
 
 import re as _re
 
-_CODE_FENCE_RE = _re.compile(r"```(?:[a-zA-Z]*\n)?(.*?)```", _re.DOTALL)
+# Открывающая строка оградки может содержать любой «язык» (c-mpa, c++, c#…)
+# и \r\n — прежний паттерн ([a-zA-Z]*\n) пропускал эти теги, и слово «c-mpa»
+# попадало внутрь извлечённого кода первой строкой (ошибка компиляции на DL).
+_CODE_FENCE_RE = _re.compile(r"```[^\n]*\r?\n(.*?)```", _re.DOTALL)
+# Незакрытая оградка (модель забывает закрывающие ``` — чаще при обрезке ответа):
+# всё после открывающей строки трактуется как код до конца текста.
+_UNCLOSED_FENCE_RE = _re.compile(r"```[^\n]*\r?\n(.*)\Z", _re.DOTALL)
 
 
 # Функциональные слова EN/RU. Если их доля в тексте высока — это связная проза
@@ -960,6 +966,105 @@ def _looks_like_code(text):
     return hints >= 1 and hints / len(lines) >= 0.4
 
 
+def _is_prose_sentence(line):
+    """True, если строка — связное предложение (проза), а не строка кода.
+
+    Строки CoT часто содержат редкие «кодовые» символы («Need determine
+    sizes: a,b,RES word (2 bytes?); c,d byte.»), поэтому только `_CODE_HINT_RE`
+    мало. Два признака прозы: (1) предложение, кончающееся точкой, — код
+    кончается «;»/«}»/«end.», а у «end.» есть маркер «end»; (2) много словарных
+    слов, из которых ощутимая доля — функциональные (EN/RU стоп-слова).
+    """
+    stripped = line.strip()
+    # Точка в конце + связные слова — предложение (но «end.» держится на маркере).
+    if stripped.endswith(".") and len(_PROSE_WORD_RE.findall(stripped)) >= 3:
+        return True
+    words = _PROSE_WORD_RE.findall(line)
+    if len(words) < 5:
+        return False
+    hits = sum(1 for w in words if w.lower() in _PROSE_STOPWORDS)
+    return hits / len(words) >= 0.3
+
+
+def _line_is_code(line):
+    """Код-подобная строка: есть `_CODE_HINT_RE`-маркер и это не проза."""
+    if not _CODE_HINT_RE.search(line):
+        return False
+    return not _is_prose_sentence(line)
+
+
+# Синтаксис, отсутствующий у хвостовых прощальных строк: конец оператора,
+# блок, присваивание, Pascal-объявления/метки. Прощание («Удачи!») не содержит
+# ни одного из них.
+_CODE_SYNTAX_RE = _re.compile(r'[;{}=:]\s*$|[;{}=]')
+
+
+def _is_trailing_prose(line):
+    """True, если строка может стоять ПОСЛЕ кода как прощание/комментарий.
+
+    Строки кода («end.», метки «L1:», «mov ax, 1») содержат маркер или синтаксис
+    и не срезаются; строки без всего этого — прозаический мусор, ломающий
+    компиляцию.
+    """
+    stripped = line.strip()
+    if _CODE_HINT_RE.search(stripped) or _CODE_SYNTAX_RE.search(stripped):
+        return False
+    words = _PROSE_WORD_RE.findall(stripped)
+    if not words:
+        return True  # «—», «:)» и прочий мусор без букв
+    return stripped.endswith((".", "!", "?")) or len(words) >= 4
+
+
+def _trim_prose_tail(lines):
+    """Срезать с конца списка строк хвостовой прозаический мусор.
+
+    Модель после кода может добавить «Удачи!» («Вот и всё!») — без
+    `_is_trailing_prose` такая строка попала бы в файл и сломала компиляцию
+    на DL. Незакрытая при обрезке ответа строка кода обычно содержит
+    маркеры/синтаксис и не срезается.
+    """
+    result = list(lines)
+    while result and _is_trailing_prose(result[-1]):
+        result.pop()
+    return result
+
+
+def _carve_code_block(cleaned):
+    """Вырезать самый длинный непрерывный фрагмент кода из текста без оградок.
+
+    Ответ вида «проза-вступление… \n код \n проза-заключение» целиком заваливает
+    `_looks_like_code` (доля кодовых строк мала), поэтому ищем прогоны код-подобных
+    строк (_line_is_code), допуская ≤2 подряд некодовых строк внутри (пустые
+    строки, комментарии языка). Берём самое длинное окно и валидируем его
+    существующими проверками: ≥2 кодовых строк, `_looks_like_code`, не проза.
+    """
+    lines = [line for line in cleaned.splitlines() if line.strip()]
+    code_idx = [i for i, line in enumerate(lines) if _line_is_code(line)]
+    if len(code_idx) < 2:
+        return ""
+    # Разбиваем индексы кодовых строк на прогоны с «зазором» ≤2 некодовых строк.
+    runs = []
+    run = [code_idx[0]]
+    for prev, cur in zip(code_idx, code_idx[1:]):
+        if cur - prev <= 3:  # зазор ≤2 некодовых строк (строки prev/cur соседние)
+            run.append(cur)
+        else:
+            runs.append((run[0], run[-1]))
+            run = [cur]
+    runs.append((run[0], run[-1]))
+
+    # Самый длинный прогон — кандидат на код (по числу строк, потом по длине).
+    start, end = max(runs, key=lambda se: (se[1] - se[0] + 1))
+    window_lines = _trim_prose_tail(lines[start:end + 1])
+    window = "\n".join(window_lines).strip()
+    code_lines = sum(1 for line in window_lines if _line_is_code(line))
+    if code_lines < 2 or not window:
+        return ""
+    if _looks_like_prose(window):
+        return ""
+    return window if _looks_like_code(window) else ""
+
+
 def _extract_code_from_response(text):
     """Extract pure code from an AI response.
 
@@ -970,6 +1075,11 @@ def _extract_code_from_response(text):
     возвращается пустая строка (воркер засчитает «код не извлечён»), а не
     простыня рассуждений. Ответ без оградок принимается только если он похож
     на код (маркеры строк, _looks_like_code) и не является прозой.
+
+    Модели вольно обращаются с markdown: забывают закрыть оградку
+    (```asm\ncode без ```) или пишут код вовсе без неё (проза + код). Обе
+    ситуации покрыты: незакрытая оградка → всё после открывающей строки,
+    смесь «проза + код» без оградок → карвинг через _carve_code_block.
     """
     if not text:
         return ""
@@ -982,6 +1092,19 @@ def _extract_code_from_response(text):
     if matches:
         # Оградки есть, но все похожи на прозу — кода в ответе нет.
         return ""
+    # Незакрытая оградка: всё после открывающей строки — код (маркер сильный,
+    # бракуем только очевидную прозу).
+    unclosed = _UNCLOSED_FENCE_RE.search(cleaned)
+    if unclosed:
+        tail_lines = [line for line in unclosed.group(1).splitlines() if line.strip()]
+        tail_lines = _trim_prose_tail(tail_lines)
+        candidate = "\n".join(tail_lines).strip()
+        if candidate and not _looks_like_prose(candidate):
+            return candidate
+    # Смесь «проза + код» без оградок — карвинг самого длинного код-фрагмента.
+    carved = _carve_code_block(cleaned)
+    if carved:
+        return carved
     # Без оградок: проза-рассуждения и текст без кодовых маркеров — не код.
     if _looks_like_prose(cleaned):
         return ""
@@ -1130,6 +1253,8 @@ def _run_batch_job_worker(
     record_stats=False,
     run_name="",
     save_solutions=False,
+    rerun=False,
+    rerun_pairs=None,
 ):
     """Daemon worker for a batch-solve run.
 
@@ -1144,6 +1269,11 @@ def _run_batch_job_worker(
     сохранять решение в кэш «Решённых задач» (TaskSolution) по правилам
     ``solution_cache.record_batch_solution``: уже решённые (на этом языке) не
     трогаются, сбой кэша не влияет на прогон.
+    ``rerun`` (+ ``rerun_pairs``) — попарный перезапуск нерешённых пар:
+    строки прогона переиспользуются (update_or_create в тот же run), отсчёт
+    времени — от исходного started_at, отчёт в конце строится из всех строк
+    прогона (job["results"] содержит только пары перезапуска). См.
+    start_batch_rerun_pairs.
     """
     from .services.task_registry import EXTENSION_TO_LANG, ensure_task, _guess_extension
     from .models import ArmPromptBinding, ProgrammingLanguage
@@ -1155,24 +1285,37 @@ def _run_batch_job_worker(
         user, username, external_id, full_name = _resolve_user(user_id)
         models_titles = [m["title"] for m in ordered_models]
 
-        test_run = AIModelTestRun.objects.create(
-            run_id=run_id,
-            run_type=AIModelTestRun.RUN_TYPE_BATCH,
-            user=user,
-            status=AIModelTestRun.STATUS_RUNNING,
-            started_at=start_time,
-            message=f"Batch solve: {len(node_ids)} задач × {len(ordered_models)} моделей",
-            total_models=len(ordered_models),
-            programming_language_id=programming_language_id,
-            programming_language_name=programming_language_name or "",
-            topic_id=topic_id,
-            topic_name=topic_name or "",
-            prompt_id=prompt_id,
-            prompt_name=prompt_name or "",
-            course_id=course_id or None,
-            run_params=run_params or {},
-            run_name=(run_name or "")[:255],
-        )
+        if rerun:
+            # Перезапуск нерешённых пар: прогон уже есть в БД — переиспользуем
+            # его строку (результаты вольются update_or_create'ом в тот же run);
+            # отсчёт «Прогон» на фронте — от исходного started_at.
+            rerun_pairs_count = sum(len(keys) for keys in (rerun_pairs or {}).values())
+            AIModelTestRun.objects.filter(run_id=run_id).update(
+                status=AIModelTestRun.STATUS_RUNNING,
+                finished_at=None,
+                error_message="",
+                message=f"Batch solve rerun {run_id}: {rerun_pairs_count} нерешённых пар",
+            )
+            test_run = AIModelTestRun.objects.get(run_id=run_id)
+        else:
+            test_run = AIModelTestRun.objects.create(
+                run_id=run_id,
+                run_type=AIModelTestRun.RUN_TYPE_BATCH,
+                user=user,
+                status=AIModelTestRun.STATUS_RUNNING,
+                started_at=start_time,
+                message=f"Batch solve: {len(node_ids)} задач × {len(ordered_models)} моделей",
+                total_models=len(ordered_models),
+                programming_language_id=programming_language_id,
+                programming_language_name=programming_language_name or "",
+                topic_id=topic_id,
+                topic_name=topic_name or "",
+                prompt_id=prompt_id,
+                prompt_name=prompt_name or "",
+                course_id=course_id or None,
+                run_params=run_params or {},
+                run_name=(run_name or "")[:255],
+            )
         log = AIRequestLog.objects.create(
             user=user,
             username=username,
@@ -1182,7 +1325,7 @@ def _run_batch_job_worker(
             mode=AIRequestLog.MODE_BATCH_SOLVE,
             sent_at=start_time,
             model_names=models_titles,
-            message=f"Batch solve run {run_id}",
+            message=f"Batch solve rerun {run_id}" if rerun else f"Batch solve run {run_id}",
             programming_language_id=programming_language_id,
             programming_language_name=programming_language_name or "",
             topic_id=topic_id,
@@ -1206,7 +1349,14 @@ def _run_batch_job_worker(
                 continue
             tasks.append(task)
 
+        # Перезапуск: у каждой задачи — СВОЙ набор моделей (только нерешённые
+        # пары), поэтому объём считается попарно, а не tasks × models.
         total_pairs = len(tasks) * len(ordered_models)
+        if rerun_pairs is not None:
+            total_pairs = sum(
+                1 for task in tasks for model in ordered_models
+                if model["key"] in (rerun_pairs.get(task.node_id) or ())
+            )
         _update_job(
             run_id,
             total_pairs=total_pairs,
@@ -1267,6 +1417,10 @@ def _run_batch_job_worker(
                 )
 
             for model in ordered_models:
+                # Перезапуск: у задачи фиксированный список моделей (только
+                # нерешённые пары) — остальные модели пропускаются.
+                if rerun_pairs is not None and model["key"] not in (rerun_pairs.get(task.node_id) or ()):
+                    continue
                 if _is_cancel_requested(run_id):
                     cancelled = True
                     break
@@ -1443,8 +1597,10 @@ def _run_batch_job_worker(
                         job["updated_at_ts"] = time.time()
 
         # Finalize: build report from in-memory results (or DB if evicted).
+        # Перезапуск: сводка ВСЕГДА из БД — job["results"] содержит только пары
+        # перезапуска, а вердикты вливались в тот же прогон (update_or_create).
         results = []
-        db_results = []
+        db_results = _batch_results_from_db(test_run) if rerun else []
         with _jobs_lock:
             job = _jobs.get(run_id)
             evicted = job is None
@@ -1453,12 +1609,15 @@ def _run_batch_job_worker(
                 # flip). Не перетираем отмену обратно в completed — сохраняем
                 # cancelled, чтобы UI корректно показал «Прервано».
                 was_cancelled = cancelled or job.get("cancelled", False)
-                job["report"] = _build_batch_report(job.get("results") or [])
-                # Карточка «Прогон» (время): старт — job.created_at_ts, финиш —
-                # момент финализации (updated_at_ts, ставится ниже).
+                report_source = db_results if rerun else (job.get("results") or [])
+                job["report"] = _build_batch_report(report_source)
+                # Карточка «Прогон» (время): у перезапуска — исходный started_at,
+                # у обычного прогона — job.created_at_ts; финиш — момент
+                # финализации (updated_at_ts, ставится ниже).
                 _attach_run_meta(
                     job["report"],
-                    job.get("created_at_ts"),
+                    (test_run.started_at.timestamp() if test_run.started_at else None)
+                    if rerun else job.get("created_at_ts"),
                     time.time(),
                 )
                 job["status"] = "cancelled" if was_cancelled else "completed"
@@ -1479,7 +1638,7 @@ def _run_batch_job_worker(
             )
 
         end_time = timezone.now()
-        if evicted:
+        if evicted or rerun:
             batch_results = db_results
         else:
             batch_results = results
@@ -1552,7 +1711,21 @@ def _run_batch_job_worker(
         if record_stats and batch_results:
             from .services.model_stats import record_batch_solve_stats
 
-            record_batch_solve_stats(batch_results)
+            stats_results = batch_results
+            if rerun:
+                # Перезапуск: batch_results — ВСЕ строки прогона, а старые
+                # решённые/проваленные пары уже посчитаны первым проходом.
+                # Считаем только перезапущенные пары.
+                rerun_keys = {
+                    (model_key, node_id)
+                    for node_id, keys in (rerun_pairs or {}).items()
+                    for model_key in keys
+                }
+                stats_results = [
+                    r for r in batch_results
+                    if (r.get("model_key"), r.get("task_node_id")) in rerun_keys
+                ]
+            record_batch_solve_stats(stats_results)
 
     except Exception as exc:
         _update_job(
@@ -1744,6 +1917,156 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     return run_id, ""
 
 
+def collect_unsolved_pairs(test_run):
+    """Нерешённые пары прогона для попарного перезапуска.
+
+    Возвращает (node_ids, pairs_map), где pairs_map — node_id → set(model_key)
+    по строкам AIModelTestResult с вердиктом не «решено» (failed после
+    DL-теста или вообще не тестились). Ровно эти пары перезапускает
+    start_batch_rerun_pairs; результаты вливаются в тот же прогон через
+    update_or_create в `_run_batch_job_worker`.
+    """
+    node_ids = []
+    pairs_map: dict = {}
+    rows = (
+        AIModelTestResult.objects.select_related("task")
+        .filter(run=test_run)
+        .exclude(verdict=_VERDICT_SOLVED)
+        .values_list("task__node_id", "model_key")
+    )
+    for node_id, model_key in rows:
+        if not node_id or not model_key:
+            continue
+        if node_id not in pairs_map:
+            pairs_map[node_id] = set()
+            node_ids.append(node_id)
+        pairs_map[node_id].add(model_key)
+    return node_ids, pairs_map
+
+
+def start_batch_rerun_pairs(run_id, user_id, session_id):
+    """Перезапуск нерешённых пар (задача × модель) со слиянием в тот же прогон.
+
+    Берёт из БД пары с вердиктом не «решено» и запускает для них модели заново.
+    Каждая пара через update_or_create обновляет строку исходного прогона,
+    отчёт в конце пересобирается из всех строк (40 реш / 13 не реш → 50 / 3).
+    Триггер — кнопка «Перезапустить нерешённые пары» на странице прогона.
+    Возвращает (run_id | None, error_message, dropped_models).
+    """
+    if not run_id:
+        return None, "Не передан run_id прогона", []
+    if not session_id:
+        return None, "Нет DLSID — требуется авторизация на dl.gsu.by.", []
+
+    try:
+        test_run = AIModelTestRun.objects.get(run_id=run_id)
+    except AIModelTestRun.DoesNotExist:
+        return None, "Прогон не найден", []
+
+    if test_run.status == AIModelTestRun.STATUS_RUNNING:
+        return None, "Прогон ещё выполняется — дождитесь окончания", []
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if job and job.get("status") == "running":
+            return None, "Прогон ещё выполняется — дождитесь окончания", []
+
+    node_ids, rerun_pairs = collect_unsolved_pairs(test_run)
+    if not rerun_pairs:
+        return None, "Все пары решены — перезапускать нечего", []
+
+    # Модели перезапуска: только доступные сейчас (Web/Ollama). Недоступные
+    # отбрасываются и возвращаются списком (их пары остаются нерешёнными).
+    wanted_models = {k for keys in rerun_pairs.values() for k in keys}
+    handlers = get_runtime_model_handlers()
+    ordered_models = [
+        {"key": key, "title": handlers[key]["title"], "handler": handlers[key]["handler"]}
+        for key in handlers
+        if key in wanted_models and is_arm_solve_model(key)
+    ]
+    dropped_models = sorted(wanted_models - {m["key"] for m in ordered_models})
+    if not ordered_models:
+        return (None, "Нет доступных моделей для перезапуска (Web/Ollama): "
+                + ", ".join(dropped_models), dropped_models)
+
+    # Пары, чья модель unavailable, вылетают целиком.
+    valid_keys = {m["key"] for m in ordered_models}
+    rerun_pairs = {
+        node_id: keys & valid_keys
+        for node_id, keys in rerun_pairs.items()
+        if keys & valid_keys
+    }
+    node_ids = [node_id for node_id in node_ids if node_id in rerun_pairs]
+    pair_count = sum(len(keys) for keys in rerun_pairs.values())
+    if not rerun_pairs or not node_ids:
+        return (None, "Нет перезапускаемых пар: модели недоступны ("
+                + ", ".join(dropped_models) + ")", dropped_models)
+
+    # Параметры формы — из снимка запуска; run_name перезапуска помечается,
+    # чтобы различать проходы в «Процессах» (в БД run_name не трогаем).
+    form_params = dict(test_run.run_params or {})
+    base_name = form_params.get("run_name") or test_run.run_name or ""
+    rerun_run_name = (base_name + " · перезапуск") if base_name else "Перезапуск нерешённых"
+
+    now_ts = time.time()
+    job = {
+        "run_id": run_id,
+        "user_id": user_id,
+        "run_type": "batch",
+        "rerun": True,
+        "status": "running",
+        "error_message": "",
+        "cancel_requested": False,
+        "cancelled": False,
+        "total_models": len(ordered_models),
+        "total_pairs": pair_count,
+        "completed_pairs": 0,
+        "completed_models": 0,
+        "current_model_key": ordered_models[0]["key"],
+        "current_model_title": ordered_models[0]["title"],
+        "current_task_node_id": "",
+        "current_task_name": "",
+        "results": [],
+        "report": None,
+        "run_name": rerun_run_name,
+        "run_params": form_params,
+        "created_at_ts": now_ts,
+        "updated_at_ts": now_ts,
+    }
+    with _jobs_lock:
+        _prune_old_jobs(now_ts)
+        _jobs[run_id] = job
+
+    worker = threading.Thread(
+        target=_run_batch_job_worker,
+        args=(run_id, node_ids, ordered_models, user_id, session_id),
+        kwargs={
+            "ui_language": form_params.get("ui_language") or "Русский",
+            "dl_test": bool(form_params.get("dl_test", True)),
+            "prompt_id": form_params.get("prompt_id") or None,
+            "course_id": form_params.get("course_id"),
+            "solve_file_extension": form_params.get("file_extension") or "",
+            # prog_lang_name: имя языка для проптомпта; при пустом снимке
+            # выведется из расширения внутри воркера (EXTENSION_TO_LANG).
+            "solve_prog_lang_name": "",
+            "programming_language_id": form_params.get("language_id"),
+            "programming_language_name": test_run.programming_language_name or "",
+            "prompt_name": test_run.prompt_name or "",
+            "topic_id": form_params.get("topic_id"),
+            "topic_name": test_run.topic_name or "",
+            "run_params": form_params,
+            "record_stats": bool(form_params.get("record_stats")),
+            "run_name": rerun_run_name,
+            "save_solutions": bool(form_params.get("save_solutions")),
+            "rerun": True,
+            "rerun_pairs": rerun_pairs,
+        },
+        name=f"arm-batch-rerun-{run_id[:8]}",
+        daemon=True,
+    )
+    worker.start()
+    return run_id, "", dropped_models
+
+
 def _snapshot_from_test_run(test_run, light_results=False):
     """Снапшот прогона из БД; light_results=True — без тяжёлого тела результатов
     (batch; см. get_arm_run_snapshot)."""
@@ -1875,6 +2198,40 @@ def get_latest_batch_run_snapshot(user_id, light_results=False):
     return get_arm_run_snapshot(last.run_id, light_results=light_results)
 
 
+def _rerun_snapshot(rerun_job, live_items, light_results):
+    """Снапшот попарного перезапуска: результаты — ВСЕ строки прогона.
+
+    В in-memory job перезапуска лежат только перезапущенные пары, а UI должен
+    видеть весь прогон: старые строки из БД + свежие живые поверх (по ключу
+    (model_key, task_node_id)). Сводка строится по merged-строкам и обновляется
+    по мере прохождения перезапуска; в конце воркер финализирует её из полных
+    БД-строк.
+    """
+    try:
+        test_run = AIModelTestRun.objects.get(run_id=rerun_job.get("run_id"))
+    except AIModelTestRun.DoesNotExist:
+        snapshot = dict(rerun_job)
+        snapshot["results"] = list(live_items)
+        return snapshot
+    live_index = {
+        (r.get("model_key"), r.get("task_node_id")): r for r in live_items
+    }
+    results = [
+        live_index.get((row.get("model_key"), row.get("task_node_id")), row)
+        for row in _batch_results_from_db(test_run, light=light_results)
+    ]
+    snapshot = dict(rerun_job)
+    snapshot["results"] = results
+    snapshot["report"] = _build_batch_report(results)
+    _attach_run_meta(
+        snapshot["report"],
+        test_run.started_at.timestamp() if test_run.started_at else None,
+        test_run.finished_at.timestamp() if test_run.finished_at else None,
+        now_ts=time.time() if test_run.status == AIModelTestRun.STATUS_RUNNING else None,
+    )
+    return snapshot
+
+
 def get_arm_run_snapshot(run_id, light_results=False):
     """Возвращает снимок состояния ARM-прогона по run_id.
 
@@ -1890,9 +2247,19 @@ def get_arm_run_snapshot(run_id, light_results=False):
         return None
 
     # Live in-memory job takes precedence while the run is in flight.
+    rerun_job = None
+    live_items = []
     with _jobs_lock:
         job = _jobs.get(run_id)
-        if job:
+        if job and job.get("rerun"):
+            # Перезапуск: job["results"] содержит только перезапущенные пары —
+            # забираем копию прогресса под локом, merge с БД делаем вне лока.
+            rerun_job = dict(job)
+            live_items = [
+                _light_batch_result_item(item) if light_results else item
+                for item in job.get("results") or []
+            ]
+        elif job:
             if light_results:
                 # Лёгкий снапшот БЕЗ deepcopy: строки иммутабельны, вложенные
                 # report/run_params воркер заменяет целиком (не мутирует в
@@ -1906,6 +2273,8 @@ def get_arm_run_snapshot(run_id, light_results=False):
                 ]
                 return snapshot
             return copy.deepcopy(job)
+    if rerun_job is not None:
+        return _rerun_snapshot(rerun_job, live_items, light_results)
 
     # Source of truth for completed/evicted runs: the database.
     try:
