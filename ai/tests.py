@@ -10025,11 +10025,18 @@ class OnboardingServiceTests(TestCase):
         from ai.services.onboarding import scope_name_valid
         self.assertTrue(scope_name_valid("chat"))
         self.assertTrue(scope_name_valid("admin_arm_solve"))
-        # Общий тур админки разделён по правам: свои scope'ы на каждый уровень,
-        # объединённого «admin» больше нет.
+        # Тур главного экрана админки разделён по правам: свои scope'ы на
+        # каждый уровень, объединённого «admin» больше нет.
         self.assertTrue(scope_name_valid("admin_pd"))
         self.assertTrue(scope_name_valid("admin_staff"))
         self.assertTrue(scope_name_valid("admin_super"))
+        # Главные страницы админки — свой тур у каждой (контент страницы).
+        for page_scope in (
+            "admin_my_prompt", "admin_prompt_defaults", "admin_logs",
+            "admin_pinned_runs", "admin_aiappsettings", "admin_updates",
+            "admin_regression", "admin_test_console", "admin_tasksolution",
+        ):
+            self.assertTrue(scope_name_valid(page_scope))
         self.assertFalse(scope_name_valid("admin"))
         self.assertFalse(scope_name_valid("nope"))
         self.assertFalse(scope_name_valid(None))
@@ -10111,6 +10118,20 @@ class OnboardingServiceTests(TestCase):
         self.assertFalse(user_basics_seen(self.user, "solve"))
         self.assertFalse(user_basics_seen(self.user, "admin_pd"))
         self.assertFalse(user_basics_seen(None, "solve"))
+
+    def test_user_basics_seen_requires_current_version(self):
+        """Закрыть «общие» может отметка ТОЛЬКО текущей версии: после бампа
+        туры обновились, и их общая часть ещё не показывалась (строка старой
+        версии не выпадала бы общие шаги молча)."""
+        from ai.services import onboarding as onboarding_service
+        from ai.services.onboarding import user_basics_seen
+
+        row = AIWizardSeen.objects.create(user=self.user, scope="chat", version=1)
+        self.assertGreater(onboarding_service.WIZARD_VERSION, 1)
+        self.assertFalse(user_basics_seen(self.user, "solve"))
+        row.version = onboarding_service.WIZARD_VERSION
+        row.save(update_fields=["version"])
+        self.assertTrue(user_basics_seen(self.user, "solve"))
 
 
 class WizardSeenUserEndpointTests(TestCase):
@@ -10408,7 +10429,7 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
         return ai_admin_site.each_context(request)["ai_wizard"]
 
     def test_dashboard_scope_by_role(self):
-        """Общий тур админки разделён по правам: свой scope на каждый уровень."""
+        """Тур ГЛАВНОГО ЭКРАНА разделён по правам: свой scope на каждый уровень."""
         superuser = self.user_model.objects.create_user(
             username="wz-ctx-super", password="x", is_superuser=True,
         )
@@ -10491,6 +10512,43 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
         ctx = self._context(user)  # теперь «pd»
         self.assertEqual(ctx["scope"], "admin_pd")
         self.assertFalse(ctx["show"])
+
+    def test_page_scopes_by_path(self):
+        """Главные страницы админки — свой тур (контент страницы, без хрома:
+        бар и меню расписывает главный экран)."""
+        user = self.user_model.objects.create_user(
+            username="wz-ctx-pages", password="x", is_superuser=True,
+        )
+        expectations = (
+            ("/ai/admin/ai/airequestlog/", "admin_logs"),
+            ("/ai/admin/ai/airequestlog/123/", "admin_logs"),
+            ("/ai/admin/pinned-runs/", "admin_pinned_runs"),
+            ("/ai/admin/ai/tasksolution/", "admin_tasksolution"),
+            ("/ai/admin/ai/aiappsettings/", "admin_aiappsettings"),
+            ("/ai/admin/ai/aiappsettings/1/change/", "admin_aiappsettings"),
+            ("/ai/admin/updates/", "admin_updates"),
+            ("/ai/admin/prompt-defaults/", "admin_prompt_defaults"),
+            ("/ai/admin/prompt-regression/", "admin_regression"),
+            ("/ai/admin/test-console/", "admin_test_console"),
+            ("/ai/admin/prompts/my/", "admin_my_prompt"),
+        )
+        for path, expected_scope in expectations:
+            self.assertEqual(
+                self._context(user, path=path)["scope"], expected_scope,
+                msg=path,
+            )
+
+    def test_stock_changelist_paths_have_no_autostart(self):
+        """Стоковые таблицы/доки: автостарта нет — главный экран уже расписал
+        бар и все разделы; повторять его на каждой таблице нельзя. Ролевой
+        scope в payload остаётся (data-фоллбэк для ручного запуска)."""
+        user = self.user_model.objects.create_user(
+            username="wz-ctx-stock", password="x", is_superuser=True,
+        )
+        for path in ("/ai/admin/ai/topic/", "/ai/admin/docs/developer/", "/ai/admin/login/"):
+            ctx = self._context(user, path=path)
+            self.assertFalse(ctx["show"], msg=path)
+            self.assertEqual(ctx["scope"], "admin_super", msg=path)
 
 
 class WizardAssetAccessTests(TestCase):

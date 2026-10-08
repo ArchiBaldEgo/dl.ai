@@ -23,9 +23,11 @@ from ..models import AIWizardSeen
 logger = logging.getLogger(__name__)
 
 #: scope'ы — ключ шага «где показывать тур» (реестр шагов — в ai-wizard.js).
-#: Общий тур админки разделён по правам (admin_pd/admin_staff/admin_super):
-#: повышение роли → свой тур ещё не был пройден → показ; понижение — строка
-#: младшего тура уже есть → заново не показывается.
+#: Общий тур админки (главный экран) разделён по правам
+#: (admin_pd/admin_staff/admin_super): повышение роли → свой тур ещё не был
+#: пройден → показ; понижение — строка младшего тура уже есть → заново
+#: не показывается. У главных страниц админки — свой тур
+#: (admin_*; контент страницы, без хрома — хром расписывает главный экран).
 SCOPES = (
     "chat",
     "solve",
@@ -35,6 +37,15 @@ SCOPES = (
     "admin_super",
     "admin_arm_solve",
     "admin_model_status",
+    "admin_my_prompt",
+    "admin_prompt_defaults",
+    "admin_logs",
+    "admin_pinned_runs",
+    "admin_aiappsettings",
+    "admin_updates",
+    "admin_regression",
+    "admin_test_console",
+    "admin_tasksolution",
 )
 
 #: Юзерские scope'ы с «общими» шагами (язык/модель/переключатель страниц):
@@ -54,7 +65,10 @@ def user_basics_seen(user, exclude_scope):
     """True — юзер уже видел тур любой ДРУГОЙ юзер-страницы.
 
     Шаги-«общие» (язык/модель/переключатель, common в реестре движка) одинаковы
-    во всех юзер-турах: показав их один раз, повтор не нужен.
+    во всех юзер-турах: показав их один раз, повтор не нужен. Учитываются
+    ТОЛЬКО отметки текущей версии: строка прошлого тура (version меньше
+    WIZARD_VERSION после бампа) не закрывает общие шаги — их только что
+    обновлённый тур ещё не показывали.
     """
     if exclude_scope not in USER_SCOPES:
         return False
@@ -62,7 +76,9 @@ def user_basics_seen(user, exclude_scope):
         return False
     others = tuple(s for s in USER_SCOPES if s != exclude_scope)
     try:
-        return AIWizardSeen.objects.filter(user=user, scope__in=others).exists()
+        return AIWizardSeen.objects.filter(
+            user=user, scope__in=others, version__gte=WIZARD_VERSION,
+        ).exists()
     except Exception:
         # Нет таблицы до миграции — не повод ронять ради подсказок страницу.
         logger.exception("Failed to read wizard basics: exclude=%s", exclude_scope)
