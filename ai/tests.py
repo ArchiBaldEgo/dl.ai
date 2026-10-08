@@ -7409,6 +7409,16 @@ class BatchLogDetailTemplateTests(TestCase):
         self.assertNotIn("Текст, который отправил пользователь", html)
         self.assertNotIn("Текст, который ответила модель", html)
 
+    def test_batch_detail_actions_at_top_same_size(self):
+        """«Повторить прогон» — вверху страницы (до карточки результатов)
+        и тот же размер, что кнопка XLSX (.button, 13px), не «default»."""
+        html = self._detail(self.batch_log)
+        actions_idx = html.index('class="ai-log-actions"')
+        card_idx = html.index('id="batch-results-card"')
+        self.assertLess(actions_idx, card_idx)
+        self.assertIn('id="resend-btn" class="button"', html)
+        self.assertNotIn('class="default" data-log-id', html)
+
     def test_plain_detail_keeps_full_layout(self):
         html = self._detail(self.plain_log)
         self.assertIn("Текст, который отправил пользователь", html)
@@ -8727,9 +8737,9 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         petrov = "Петров Пётр"
         self._log(user=self.su, external_user_id="101", full_name=ivanov,
                   sent_at=self._msk_at(9, 15), topic="Циклы", prompt="Реши по шагам")
-        self._log(user=self.su, external_user_id="101", full_name=ivanov,
-                  sent_at=self._msk_at(12, 30), topic="Массивы", prompt="Реши задачу",
-                  mode=AIRequestLog.MODE_SOLVE)
+        log_1230 = self._log(user=self.su, external_user_id="101", full_name=ivanov,
+                             sent_at=self._msk_at(12, 30), topic="Массивы", prompt="Реши задачу",
+                             mode=AIRequestLog.MODE_SOLVE)
         self._log(user=self.su, external_user_id="200", full_name=petrov,
                   sent_at=self._msk_at(10, 0), topic="Строки", prompt="Найди ошибку",
                   mode=AIRequestLog.MODE_FIND_ERROR)
@@ -8759,6 +8769,11 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(rows[1]["count"], 1)
         self.assertEqual(rows[1]["last_mode"], "Найти ошибку")
         self.assertEqual(response.context_data["total_count"], 3)
+        # Клик по запросу открывает детальный лог (та же страница, что из журнала).
+        self.assertEqual(row_ivanov["requests"][0]["log_id"], log_1230.id)
+        self.assertContains(
+            response, f'href="/ai/admin/ai/airequestlog/{log_1230.id}/"',
+        )
 
     def test_daily_report_msk_day_bounds(self):
         """День — по МСК: запись в 00:00:01 МСК включается, в 23:59 вчера —

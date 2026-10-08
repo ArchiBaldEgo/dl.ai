@@ -607,6 +607,8 @@ def admin_daily_report_view(request):
 
     def _request_row(log):
         return {
+            # Ссылка на детальный лог (та же страница, что из журнала запросов).
+            "log_id": log.id,
             "time": timezone.localtime(log.sent_at, MOSCOW_TZ).strftime("%H:%M:%S"),
             "mode": log.get_mode_display() or "—",
             "topic": log.topic_name or "—",

@@ -19,16 +19,17 @@
   }
   .ai-daily-header h2 { margin: 0; }
   .ai-daily-note { color: var(--body-quiet-color); font-size: 12px; margin: 0 0 10px; }
-  .ai-daily-table { width: 100%; border-collapse: collapse; }
+  {# Фиксированные ширины колонок — таблица не «пляшет» от длинных строк. #}
+  .ai-daily-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
   .ai-daily-table .nowrap { white-space: nowrap; }
   .ai-daily-table th, .ai-daily-table td {
     border: 1px solid var(--hairline-color); padding: 8px 10px;
-    text-align: left; vertical-align: top;
+    text-align: left; vertical-align: top; word-wrap: break-word; overflow-wrap: anywhere;
   }
   .ai-daily-table th { background: var(--darkened-bg); }
   .ai-daily-count {
     cursor: pointer; font-weight: 600; white-space: nowrap;
-    user-select: none;
+    user-select: none; text-align: right;
   }
   .ai-daily-count:hover { background: var(--selected-row); }
   .ai-daily-caret {
@@ -41,12 +42,16 @@
     border-left: 3px solid var(--hairline-color);
   }
   .ai-daily-requests { max-height: 60vh; overflow: auto; }
-  .ai-daily-req-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .ai-daily-req-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
   .ai-daily-req-table th, .ai-daily-req-table td {
     border: 1px solid var(--hairline-color); padding: 5px 8px;
-    text-align: left; vertical-align: top;
+    text-align: left; vertical-align: top; word-wrap: break-word; overflow-wrap: anywhere;
   }
   .ai-daily-req-table th { background: var(--darkened-bg); font-weight: 600; }
+  {# Клик по строке запроса → детальный лог из журнала запросов. #}
+  .ai-daily-req-row { cursor: pointer; }
+  .ai-daily-req-row:hover { background: var(--selected-row); }
+  .ai-daily-req-cell-link { color: inherit; text-decoration: none; }
   .ai-daily-ok { color: #067647; font-weight: 600; }
   .ai-daily-err { color: #b42318; font-weight: 600; }
   .ai-daily-empty {
@@ -68,6 +73,10 @@
 
   <div class="ai-scroll">
     <table class="ai-daily-table">
+      <colgroup>
+        <col style="width: 24%"><col style="width: 10%"><col style="width: 22%">
+        <col style="width: 22%"><col style="width: 12%"><col style="width: 10%">
+      </colgroup>
       <thead>
         <tr>
           <th>Фамилия студента</th>
@@ -99,6 +108,10 @@
             <td colspan="6">
               <div class="ai-daily-requests">
                 <table class="ai-daily-req-table">
+                  <colgroup>
+                    <col style="width: 12%"><col style="width: 14%"><col style="width: 20%">
+                    <col style="width: 20%"><col style="width: 18%"><col style="width: 16%">
+                  </colgroup>
                   <thead>
                     <tr>
                       <th>Время</th>
@@ -111,8 +124,8 @@
                   </thead>
                   <tbody>
                     {% for r in row.requests %}
-                      <tr>
-                        <td class="nowrap">{{ r.time }}</td>
+                      <tr class="ai-daily-req-row" data-log-id="{{ r.log_id }}" title="Открыть в журнале запросов">
+                        <td class="nowrap"><a class="ai-daily-req-cell-link" href="/ai/admin/ai/airequestlog/{{ r.log_id }}/">{{ r.time }}</a></td>
                         <td>{{ r.mode }}</td>
                         <td>{{ r.topic }}</td>
                         <td>{{ r.prompt }}</td>
@@ -145,6 +158,16 @@
         var willOpen = detail.hidden;
         detail.hidden = !willOpen;
         cell.classList.toggle('open', willOpen);
+      });
+    });
+    // Клик по строке запроса → детальный лог — та же страница, что
+    // открывается из журнала запросов (клик по ссылке работает сам).
+    document.querySelectorAll('.ai-daily-req-row').forEach(function (row) {
+      row.addEventListener('click', function (event) {
+        var link = row.querySelector('.ai-daily-req-cell-link');
+        if (!link) { return; }
+        if (event.target.closest('a')) { return; }  // обычная навигация по ссылке
+        window.location.href = link.href;
       });
     });
   })();

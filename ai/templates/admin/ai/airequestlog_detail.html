@@ -15,6 +15,11 @@
       <div><strong>Статус:</strong> <span class="{% if batch_snapshot.run_status == 'completed' %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">{{ batch_snapshot.run_status_display|default:"—" }}</span></div>
       <div><strong>Название прогона:</strong> {{ batch_snapshot.run_name|default:"—" }}</div>
     </div>
+    {# Действия вверху страницы — на уровне кнопки «Скачать результаты (XLSX)» карточки ниже, тот же размер (.button, 13px). #}
+    <div class="ai-log-actions">
+      <a class="button" href="{% url 'ai_request_logs' %}">← Назад к логам</a>
+      <button type="button" id="resend-btn" class="button" data-log-id="{{ log.id }}" data-source="{{ log.source }}" data-mode="{{ log.mode }}" data-message="{{ log.message|truncatechars:60 }}">Повторить прогон</button>
+    </div>
     {% if log.error_message %}
       {# Прогон упал — без этой строки таблица была бы пустой без объяснения. #}
       <pre class="ai-log-block ai-log-error">{{ log.error_message }}</pre>
@@ -34,11 +39,6 @@
       })();
     </script>
 
-    <div class="ai-log-actions">
-      {% include "admin/ai/_ai_back_nav.html" %}
-      <a class="button" href="{% url 'ai_request_logs' %}">← Назад к логам</a>
-      <button type="button" id="resend-btn" class="default" data-log-id="{{ log.id }}" data-source="{{ log.source }}" data-mode="{{ log.mode }}" data-message="{{ log.message|truncatechars:60 }}">Повторить прогон</button>
-    </div>
     {% csrf_token %}
   {% else %}
   {% timezone moscow_tz %}
@@ -127,6 +127,7 @@
   }
   #resend-btn {
     margin-left: auto;
+    font-size: 13px;
   }
   .resend-status {
     margin-top: 12px;
