@@ -19,8 +19,9 @@
  *
  * v2: автостарт ждёт window.load; отметка «seen» — только по жесту
  * пользователя (автозакрытие цели флага не сжигает); подсветка — пересечение
- * цели с вьюпортом (без «сжатия до 60%»); общие шаги юзер-туров (common)
- * пропускаются, когда сервер сказал basics_seen; общий тур админки — три
+ * цели с вьюпортом (без «сжатия до 60%»); общие шаги solve/find_error (common)
+ * пропускаются, когда сервер сказал basics_seen; шаги чата common не имеют —
+ * чат-тур всегда полный (строгий порядок — ранги); общий тур админки — три
  * ролевых scope'а (admin_pd/admin_staff/admin_super).
  *
  * v3: тур обязан идти СВЕРХУ ВНИЗ — порядок шагов движок сортирует по
@@ -39,8 +40,6 @@
     var SPOT_PAD = 6;        // «подушка» вокруг подсвеченного элемента
     var POPOVER_GAP = 10;    // зазор между пятном и поповером
     var VIEW_MARGIN = 8;     // гарантированный отступ от краёв окна
-    var SPOT_INSET = 8;      // подсветка цели — уже вьюпорта на этот отступ
-    var MIN_SPOT = 24;       // меньше этого пересечения — пятно не рисуем вообще
     var ARROW_INSET = 20;    // ромб стрелки не прижимается к краям поповера
     var ARROW_SIZE = 12;
     var RECHECK_MS = 400;    // интервал пере-замера (живой DOM чата/меню)
@@ -89,14 +88,14 @@
     // Топ-бар («весь бар») и левое меню — хром главного экрана админки.
     // Порядок рангов = эталон пользователя: приветствие (внутри ФИО + права +
     // счётчик «Процессы») → открытые процессы → «Просмотр сайта» → поиск по
-    // меню → левый бар; guest/выход — полезное дополнение (optional).
+    // меню → левый бар; guest/выход — дополнительные шаги.
     var ADMIN_BAR = [
         { sel: "#aiProcessesToggle", title: "Приветствие", rank: 10, pos: "bottom", text: "Это приветствие. Внутри — твоё ФИО, бейдж уровня прав и счётчик «Процессы». Клик по имени открывает меню." },
         { sel: "#aiProcessesMenu", title: "Открытые процессы", rank: 11, pos: "left", onShow: "openProcesses", text: "Меню «Процессы»: свои запуски — что идёт сейчас и чем закончилось." },
         { sel: '#user-tools a[href="/ai/chat/"]', title: "Просмотр сайта", rank: 12, pos: "bottom", text: "Ссылка ведёт на пользовательскую часть: чат на /ai/chat/." },
-        { sel: "#aiGuestToggle", title: "Посмотреть как другой", rank: 13, pos: "bottom", optional: true, text: "Кнопка суперадмина: админка глазами разработчика промптов. Повторное нажатие вернёт всё назад." },
-        { sel: "#logout-form button", title: "Выход", rank: 14, pos: "bottom", optional: true, text: "Выход из админки. Рядом смена пароля, если она доступна." },
-        { sel: "#nav-filter", title: "Поиск по меню", rank: 20, pos: "right", optional: true, onShow: "openNav", text: "Поиск: разделов много? Набери пару букв — останется нужное." },
+        { sel: "#aiGuestToggle", title: "Посмотреть как другой", rank: 13, pos: "bottom", text: "Кнопка суперадмина: админка глазами разработчика промптов. Повторное нажатие вернёт всё назад." },
+        { sel: "#logout-form button", title: "Выход", rank: 14, pos: "bottom", text: "Выход из админки. Рядом смена пароля, если она доступна." },
+        { sel: "#nav-filter", title: "Поиск по меню", rank: 20, pos: "right", onShow: "openNav", text: "Поиск: разделов много? Набери пару букв — останется нужное." },
         { sel: "#toggle-nav-sidebar", title: "Край страницы", rank: 21, pos: "right", text: "Тонкая кнопка у левого края: открывает и закрывает левый бар с разделами." },
         { sel: "#nav-sidebar", title: "Левый бар", rank: 22, pos: "right", onShow: "openNav", text: "Левый бар: все разделы. Дальше — по каждому." }
     ];
@@ -105,6 +104,9 @@
     // страницу»): что там и зачем. Движок сортирует эти шаги по позиции
     // ссылок в меню сверху вниз. Раздел, скрытый правами (флаг ссылки в
     // ai/admin/site.py), отсутствует в DOM — шаг выпадает у этой роли.
+    // Инструменты, скрытые из бара через _HIDDEN_NAV_OBJECT_NAMES (сейчас —
+    // «Регрессионные тесты»), нав-шага не имеют вовсе: их страницы не в
+    // меню и имеют собственный тур. Вернёшь инструмент в бар — верни шаг.
     var ADMIN_NAV_PAGES = [
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/aiappsettings/"]', title: "Настройка ИИ-приложения", text: "Главные настройки: доступ к ИИ, сводка за сутки, последние прогоны. Свой тур — на самой странице.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/pinned-runs/"]', title: "Закреплённые прогоны", text: "Закреплённые (★) завершённые прогоны — быстрый доступ.", pos: "right", onShow: "openNav" },
@@ -116,7 +118,6 @@
         { sel: '#nav-sidebar a[href^="/ai/admin/arm/solve/"]', title: "Пакетное решение", text: "Прогон моделей по всем задачам курса.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/arm/models/"]', title: "Состояние моделей", text: "Какие модели доступны и почему нет.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/airequestlog/"]', title: "Журнал запросов", text: "Все запросы к моделям: кто, что и чем закончилось.", pos: "right", onShow: "openNav" },
-        { sel: '#nav-sidebar a[href^="/ai/admin/prompt-regression/"]', title: "Регрессионные тесты", text: "Проверка промптов на контрольных примерах.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/test-console/"]', title: "Тестовая консоль", text: "Запуск тестов приложения и логи прошлых запусков.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/tasksolution/"]', title: "Решённые задачи", text: "Кэш: задания, прошедшие тест в DL, достаются без модели.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/updates/"]', title: "Обновления", text: "Что нового появилось в проекте.", pos: "right", onShow: "openNav" },
@@ -126,23 +127,23 @@
     var REGISTRY = {
 
         chat: [
-            // Шаги с common: true — «общие» (язык/модель/переключатель страниц)
-            // одинаковы во всех юзер-турах; когда сервер отдал basics_seen
-            // (общая часть уже показана на другой странице), движок их отбрасывает.
-            { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français.", pos: "bottom", common: true },
-            { sel: "#select", title: "Выбор модели", text: "Это разные помощники-модели. Нажми и выбери, кто будет тебе отвечать.", pos: "bottom", common: true },
-            { sel: "#selectType", title: "Режим", text: "Режимы: чат, «Реши задачу», «В чём ошибка». Через список переключаешься.", pos: "bottom", common: true },
-            { sel: "#selectModelSort", title: "Сортировка моделей", text: "Можно показывать более быстрые или более точные модели сверху.", pos: "bottom", optional: true },
-            { sel: "#voiceModeBtn", title: "Голосовой ввод", text: "Хочешь говорить, а не печатать? Нажми — можно говорить голосом.", pos: "bottom" },
-            { sel: "#themeToggleBtn", title: "Светлое или тёмное", text: "Нажми — страница станет тёмной. Ещё раз — снова светлой.", pos: "bottom" },
-            { sel: "#userDocsBtn", title: "Кнопка «?»", text: "Это инструкция. Нажми, если что-то непонятно. Там же можно снова показать эти подсказки.", pos: "bottom" },
-            { sel: "#messages", title: "История", text: "История: всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
-            { sel: "#messageText", title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
-            { sel: '.buttons-block button[type="submit"]', title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
-            { sel: '[onclick="clearContext()"]', title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top", optional: true },
-            // Ссылка на админ-панель в боковом меню работает только у staff/super —
-            // шаг для них; обычным пользователям он не показывается (cfg.role).
-            { sel: "#content .toggle-button", title: "Боковое меню", text: "Стрелочка справа открывает меню, там ссылка на админ-панель.", pos: "left", optional: true, roles: ["super", "staff"] }
+            // Строгий порядок чата (ранг: явный rank сильнее геометрии):
+            // язык → модель → сортировка → режим → тема → «?» → голосовой →
+            // боковое меню (супер/штаб) → история → ввод → отправить → очистить.
+            // Шагов с common в чате НЕТ: basics_seen не режет чат — тур всегда
+            // полный и строгий (ранги).
+            { sel: "#selectLang", rank: 10, title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français.", pos: "bottom" },
+            { sel: "#select", rank: 11, title: "Выбор модели", text: "Это разные помощники-модели. Нажми и выбери, кто будет тебе отвечать.", pos: "bottom" },
+            { sel: "#selectModelSort", rank: 12, title: "Сортировка моделей", text: "Можно показывать более быстрые или более точные модели сверху.", pos: "bottom" },
+            { sel: "#selectType", rank: 13, title: "Режим", text: "Режимы: чат, «Реши задачу», «В чём ошибка». Через список переключаешься.", pos: "bottom" },
+            { sel: "#themeToggleBtn", rank: 14, title: "Светлое или тёмное", text: "Нажми — страница станет тёмной. Ещё раз — снова светлой.", pos: "bottom" },
+            { sel: "#userDocsBtn", rank: 15, title: "Кнопка «?»", text: "Это инструкция. Нажми, если что-то непонятно. Там же можно снова показать эти подсказки.", pos: "bottom" },
+            { sel: "#voiceModeBtn", rank: 16, title: "Голосовой ввод", text: "Хочешь говорить, а не печатать? Нажми — можно говорить голосом.", pos: "bottom" },
+            { sel: "#content .toggle-button", rank: 17, title: "Боковое меню", text: "Стрелочка справа открывает меню, там ссылка на админ-панель.", pos: "left", roles: ["super", "staff"] },
+            { sel: "#messages", rank: 18, title: "История", text: "История: всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
+            { sel: "#messageText", rank: 19, title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
+            { sel: '.buttons-block button[type="submit"]', rank: 20, title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
+            { sel: '[onclick="clearContext()"]', rank: 21, title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top" }
         ],
 
         // Эталон пользователя (v4): «Реши задачу — Язык программирования, тема,
@@ -181,26 +182,26 @@
         admin_arm_solve: [
             { sel: "#armCourseId", title: "Номер курса", text: "Это номер курса на dl.gsu.by. Он уже вписан — не меняй без нужды.", pos: "right" },
             { sel: "#armLoadTreeBtn", title: "Загрузить задачи", text: "Нажми — подтянутся задачи курса из dl.gsu.by.", pos: "right" },
-            { sel: "#armTreeContainer", title: "Дерево задач", text: "Отметь задачи, на которых проверить модели.", pos: "right", optional: true },
-            { sel: "#armTreeSelectAll", title: "Выбрать всё", text: "Отметит все задачи разом. Появляется после загрузки.", pos: "right", optional: true },
-            { sel: "#armSelectAllModels", title: "Модели", text: "Отметь модели, которые будут решать. Ничего не отмечено — значит все.", pos: "bottom", optional: true },
-            { sel: "#armLanguageChecks", title: "Языки", text: "Выбери один или несколько языков: на каждый запустится свой процесс.", pos: "bottom", optional: true },
+            { sel: "#armTreeContainer", title: "Дерево задач", text: "Отметь задачи, на которых проверить модели.", pos: "right" },
+            { sel: "#armTreeSelectAll", title: "Выбрать всё", text: "Отметит все задачи разом. Появляется после загрузки.", pos: "right" },
+            { sel: "#armSelectAllModels", title: "Модели", text: "Отметь модели, которые будут решать. Ничего не отмечено — значит все.", pos: "bottom" },
+            { sel: "#armLanguageChecks", title: "Языки", text: "Выбери один или несколько языков: на каждый запустится свой процесс.", pos: "bottom" },
             { sel: "#armExtensionInput", title: "Расширение", text: "Расширение файла определяется само, из выбранных языков.", pos: "right" },
-            { sel: "#armTopicSelect", title: "Тема", text: "Станет доступной после выбора языка.", pos: "right", optional: true },
+            { sel: "#armTopicSelect", title: "Тема", text: "Станет доступной после выбора языка.", pos: "right" },
             { sel: "#armPromptSelect", title: "Препромпт", text: "Обычно «По привязке» — подставится препромпт по умолчанию. Можно выбрать свой.", pos: "right" },
             { sel: "#armSaveSolutions", title: "Кэш решений", text: "Если задача прошла тест в DL, её решение сохранится — потом достанется без вызова модели.", pos: "right" },
-            { sel: "#armRecordStats", title: "Статистика", text: "Суперадмин может заносить результаты в базу — они попадут в селектор моделей чата.", pos: "right", optional: true },
+            { sel: "#armRecordStats", title: "Статистика", text: "Суперадмин может заносить результаты в базу — они попадут в селектор моделей чата.", pos: "right" },
             { sel: "#armRunName", title: "Название прогона", text: "Придумай короткое имя — так прогон потом легко найти в журнале.", pos: "right" },
-            { sel: ".arm-warning", title: "Важно", text: "Пока идёт прогон, лучше не уходить со страницы — тестирование прервётся.", pos: "bottom", optional: true },
+            { sel: ".arm-warning", title: "Важно", text: "Пока идёт прогон, лучше не уходить со страницы — тестирование прервётся.", pos: "bottom" },
             { sel: "#armSolveSubmit", title: "Запустить", text: "Всё выбрал — жми эту кнопку. Прогон появится в «Процессах» в шапке.", pos: "top" },
-            { sel: "#armSolveProcessesCard", title: "Процессы", text: "Здесь список запущенных прогонов. Оттуда он открывается в таблицу результатов.", pos: "top", optional: true }
+            { sel: "#armSolveProcessesCard", title: "Процессы", text: "Здесь список запущенных прогонов. Оттуда он открывается в таблицу результатов.", pos: "top" }
         ],
 
         admin_model_status: [
             { sel: "#statusHealthWindowDate", title: "Окно проверки", text: "Модели проверяются раз в сутки в 04:00. Дата последнего окна — здесь.", pos: "bottom" },
             { sel: "#refreshModelsBtn", title: "Обновить сейчас", text: "Не хочешь ждать ночи — нажми, и модели проверятся сразу.", pos: "bottom" },
-            { sel: "#refreshInProgressHint", title: "Идёт проверка", text: "Пока работает проверка, страница обновляется сама.", pos: "right", optional: true },
-            { sel: "#modelStatusRowsBody", title: "Список моделей", text: "«Активна» — работает; «Неактивна» — надо разбираться. В таблице время, код и расшифровка.", pos: "top", optional: true }
+            { sel: "#refreshInProgressHint", title: "Идёт проверка", text: "Пока работает проверка, страница обновляется сама.", pos: "right" },
+            { sel: "#modelStatusRowsBody", title: "Список моделей", text: "«Активна» — работает; «Неактивна» — надо разбираться. В таблице время, код и расшифровка.", pos: "top" }
         ],
 
         // === Туры главных страниц админки: только КОНТЕНТ страницы — бар и
@@ -215,14 +216,14 @@
             { sel: "#id_mode", title: "Режим", text: "Чат, «Реши задачу», «В чём ошибка», пакетное решение.", pos: "bottom" },
             { sel: "#id_model", title: "Модель", text: "Какая модель отвечала.", pos: "bottom" },
             { sel: "#id_user", title: "Пользователь", text: "Кто запрашивал: ID, логин или ФИО.", pos: "bottom" },
-            { sel: "#id_date_from", title: "Период", text: "С какой даты смотреть.", pos: "bottom", optional: true },
+            { sel: "#id_date_from", title: "Период", text: "С какой даты смотреть.", pos: "bottom" },
             { sel: ".ai-logs-table", title: "Таблица запросов", text: "Клик по строке — полный запрос, ответ и задача.", pos: "bottom" },
-            { sel: "#resend-btn", title: "Повторить", text: "Отправит тот же вопрос модели ещё раз.", pos: "bottom", optional: true }
+            { sel: "#resend-btn", title: "Повторить", text: "Отправит тот же вопрос модели ещё раз.", pos: "bottom" }
         ],
 
         admin_pinned_runs: [
-            { sel: ".ai-pinned-table", title: "Закреплённые прогоны", text: "Клик по строке — результаты прогона откроются прямо здесь.", pos: "bottom", optional: true },
-            { sel: ".ai-log-pin-btn", title: "Снять закрепление", text: "★ убирает прогон из закреплённых. Поставить ★ — в журнале запросов.", pos: "bottom", optional: true }
+            { sel: ".ai-pinned-table", title: "Закреплённые прогоны", text: "Клик по строке — результаты прогона откроются прямо здесь.", pos: "bottom" },
+            { sel: ".ai-log-pin-btn", title: "Снять закрепление", text: "★ убирает прогон из закреплённых. Поставить ★ — в журнале запросов.", pos: "bottom" }
         ],
 
         admin_tasksolution: [
@@ -231,17 +232,17 @@
 
         admin_aiappsettings: [
             { sel: "#id_is_enabled", title: "Главный выключатель", text: "Выкл — доступ к ИИ закрыт у всех. Вкл — работать можно.", pos: "right" },
-            { sel: ".ai-daily-report-bar", title: "Сводка за сутки", text: "Сколько было запросов и решённых задач.", pos: "right", optional: true },
-            { sel: "table.ai-batch-table", title: "Последние пакетные решения", text: "Клик по строке — результаты прогона.", pos: "bottom", optional: true },
+            { sel: ".ai-daily-report-bar", title: "Сводка за сутки", text: "Сколько было запросов и решённых задач.", pos: "right" },
+            { sel: "table.ai-batch-table", title: "Последние пакетные решения", text: "Клик по строке — результаты прогона.", pos: "bottom" },
             { sel: ".submit-row input[name=_save]", title: "Сохранить", text: "После изменения настроек не забудь нажать.", pos: "right" }
         ],
 
         admin_updates: [
             { sel: '.ai-updates-filter input[name="q"]', title: "Поиск", text: "Ищет по описанию и автору коммита.", pos: "bottom" },
             { sel: '.ai-updates-filter select[name="author"]', title: "Автор", text: "Записи одного человека. Поправить его имя — в справочнике AuthorAlias.", pos: "bottom" },
-            { sel: '.ai-updates-filter input[name="date_from"]', title: "Период", text: "С какой даты показывать.", pos: "bottom", optional: true },
+            { sel: '.ai-updates-filter input[name="date_from"]', title: "Период", text: "С какой даты показывать.", pos: "bottom" },
             { sel: "#content-main table", title: "История изменений", text: "Дата, автор, что сделано — новые сверху.", pos: "bottom" },
-            { sel: 'a[href*="updatelog/"]', title: "Скрытые записи", text: "Коммиты, ещё не показанные пользователям в этом списке.", pos: "bottom", optional: true }
+            { sel: 'a[href*="updatelog/"]', title: "Скрытые записи", text: "Коммиты, ещё не показанные пользователям в этом списке.", pos: "bottom" }
         ],
 
         admin_regression: [
@@ -250,32 +251,32 @@
             { sel: "#prt_models", title: "Модели", text: "Какими моделями прогнать тест.", pos: "right" },
             { sel: "#prt_cases", title: "Тест-кейсы", text: "Контрольные примеры: вопрос и правильный ответ.", pos: "right" },
             { sel: "#prtRunSubmitBtn", title: "Запустить", text: "Старт проверки; ход будет виден под формой.", pos: "right" },
-            { sel: "#prtReportCard", title: "Сводка", text: "Сколько совпало и сколько промахов.", pos: "top", optional: true },
-            { sel: "#prtResultsCard", title: "Подробности", text: "Разбор случаев, где ответ разошёлся с эталоном.", pos: "top", optional: true }
+            { sel: "#prtReportCard", title: "Сводка", text: "Сколько совпало и сколько промахов.", pos: "top" },
+            { sel: "#prtResultsCard", title: "Подробности", text: "Разбор случаев, где ответ разошёлся с эталоном.", pos: "top" }
         ],
 
         admin_test_console: [
             { sel: "#tcRunSubmitBtn", title: "Запустить проверки", text: "Полный прогон тестов приложения; ход — полоса рядом.", pos: "right" },
-            { sel: "#tcSimpleBanner", title: "Что происходит", text: "Короткий статус: что запущено и чем окончилось.", pos: "bottom", optional: true },
-            { sel: "#tcSummary", title: "Итог", text: "Сколько тестов прошло и сколько упало.", pos: "top", optional: true },
-            { sel: "#tcLog", title: "Лог прогона", text: "Полный вывод тестов.", pos: "top", optional: true },
+            { sel: "#tcSimpleBanner", title: "Что происходит", text: "Короткий статус: что запущено и чем окончилось.", pos: "bottom" },
+            { sel: "#tcSummary", title: "Итог", text: "Сколько тестов прошло и сколько упало.", pos: "top" },
+            { sel: "#tcLog", title: "Лог прогона", text: "Полный вывод тестов.", pos: "top" },
             { sel: "#tcHistoryList", title: "История запусков", text: "Прошлые прогоны; клик — открыть их лог.", pos: "top" }
         ],
 
         admin_my_prompt: [
             { sel: "a.addlink", title: "Добавить промпт", text: "Откроется форма нового промпта: имя и текст на трёх языках, темы.", pos: "bottom" },
             { sel: '#changelist input[name="q"]', title: "Поиск", text: "Ищет по названию и тексту промпта.", pos: "bottom" },
-            { sel: "#changelist-filter", title: "Фильтры", text: "Оставить только нужное: язык, тема, владелец.", pos: "bottom", optional: true },
+            { sel: "#changelist-filter", title: "Фильтры", text: "Оставить только нужное: язык, тема, владелец.", pos: "bottom" },
             { sel: "#result_list", title: "Список промптов", text: "Твои промпты. Клик по названию — открыть и править.", pos: "top" }
         ],
 
         admin_prompt_defaults: [
             { sel: "#pdLanguage", title: "Язык", text: "Для какого языка программирования задаём привязку.", pos: "right" },
-            { sel: "#pdTopic", title: "Тема", text: "Подтема курса; станет активной, когда выбран язык.", pos: "right", optional: true },
+            { sel: "#pdTopic", title: "Тема", text: "Подтема курса; станет активной, когда выбран язык.", pos: "right" },
             { sel: "#pdMode", title: "Вид ARM", text: "Где подставлять: на «Реши задачу» или «В чём ошибка».", pos: "right" },
             { sel: "#pdPrompt", title: "Препромпт", text: "Он подставится по умолчанию у всех пользователей.", pos: "right" },
             { sel: "#pdSaveBtn", title: "Сохранить", text: "Жми — привязка появится в списке ниже.", pos: "right" },
-            { sel: "#content-main table", title: "Существующие привязки", text: "Всё, что задано: «Изменить» — поправить, «Удалить» — убрать.", pos: "top", optional: true }
+            { sel: "#content-main table", title: "Существующие привязки", text: "Всё, что задано: «Изменить» — поправить, «Удалить» — убрать.", pos: "top" }
         ]
     };
 
@@ -471,9 +472,10 @@
     // Фильтр реестра: (а) роль — шаг с roles[] участвует, только если список
     // пуст или содержит cfg.role (на пользовательских страницах role="",
     // поэтому участвуют только шаги без roles); (б) «общие» шаги (common:
-    // язык/модель/переключатель страниц) отбрасываются, когда сервер отдал
-    // basics_seen — общая часть тура уже показана на другой странице, тур
-    // должен ДОПОЛНЯТЬ прошлые, а не повторяться; (в) наличие цели: элемент
+    // язык/модель/переключатель solve/find_error) отбрасываются, когда сервер
+    // отдал basics_seen — общая часть уже показана на другой странице, тур
+    // должен ДОПОЛНЯТЬ прошлые, а не повторяться (в чате common нет — тур
+    // чата всегда полный); (в) наличие цели: элемент
     // есть и виден. Для шагов с onShow видимость пока не требуем — хук сам
     // покажет цель (напр. #aiProcessesMenu скрыт до openProcesses), а ожидание
     // появления берёт на себя waitAndShow в show().
@@ -636,17 +638,21 @@
 
     // === Позиционирование ===
 
-    // Подсветка — пересечение цели с вьюпортом (с запасом SPOT_INSET от краёв).
-    // Раньше большие цели сжимались до средних 60% окна (тёмные полосы сверху
-    // и снизу выглядели как кривые окна), а цели за кадром отдавали null и
-    // поповер центрировался вообще без пятна. Теперь рисуем ровно видимую
-    // часть цели; скроллить её должен scrollIntoView в show().
+    // Подсветка — пересечение цели с вьюпортом. Раньше здесь были два
+    // само-ограничения, гасившие пятно у реальных целей: MIN_SPOT=24
+    // («мелкая цель не заслуживает пятна»: приветствие админки 14–21px,
+    // селект препромпта 19px) и SPOT_INSET=8, отъедавший цели, прижатые
+    // к краям окна (стрелочка чата: right:0 → пересечение 16px). Для всех
+    // таких шагов пятна не было, поповер уезжал «в центр» без якоря и
+    // стрелки — в глазах пользователя «шаг не отображается». Теперь пятно
+    // рисуется на любом непустом пересечении с вьюпортом; куда встанет
+    // поповер, решает sideFits (VIEW_MARGIN), а не размер цели.
     function rectInViewport(rect, viewW, viewH) {
-        var left = Math.max(SPOT_INSET, rect.left);
-        var top = Math.max(SPOT_INSET, rect.top);
-        var right = Math.min(viewW - SPOT_INSET, rect.right);
-        var bottom = Math.min(viewH - SPOT_INSET, rect.bottom);
-        if (right - left < MIN_SPOT || bottom - top < MIN_SPOT) return null;
+        var left = Math.max(0, rect.left);
+        var top = Math.max(0, rect.top);
+        var right = Math.min(viewW, rect.right);
+        var bottom = Math.min(viewH, rect.bottom);
+        if (right - left <= 0 || bottom - top <= 0) return null;
         return {
             left: left, top: top, right: right, bottom: bottom,
             width: right - left, height: bottom - top

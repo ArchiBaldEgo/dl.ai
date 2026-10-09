@@ -23,6 +23,22 @@ logger = logging.getLogger(__name__)
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+
+# Хелперы распознавания прозы/кода живут в services/code_carver.py
+# (services — их домен по CLAUDE.md); ре-экспорт для совместимости.
+from .services.code_carver import (  # noqa: E402
+    _PROSE_WORD_RE,
+    _THINK_RE,
+    _is_prose_sentence,
+    _is_trailing_prose,
+    _line_is_code,
+    _looks_like_code,
+    _looks_like_prose,
+    _mid_prose_lines,
+    _strip_think_blocks,
+    _trim_prose_tail,
+    has_language_marker,
+)
 from django.utils.html import strip_tags
 
 from .model_clients.exceptions import humanize_model_error
@@ -892,143 +908,6 @@ _UNCLOSED_FENCE_RE = _re.compile(r"```[^\n]*\r?\n(.*)\Z", _re.DOTALL)
 
 # Функциональные слова EN/RU. Если их доля в тексте высока — это связная проза
 # (цепочка рассуждений модели), а не код. Ключевые слова Pascal/ассемблера
-# (if/then/else/for/to/begin/end/do/with/uses/case, mov/idiv/…) в список НЕ
-# входят, чтобы настоящий код с плотными операторами не браковался как проза.
-_PROSE_STOPWORDS = frozenset({
-    "we", "need", "needs", "the", "this", "that", "these", "those",
-    "it", "its", "is", "are", "was", "were", "be", "been", "being",
-    "our", "their", "they", "them", "have", "has", "had",
-    "can", "could", "will", "would", "should", "must", "shall",
-    "may", "might", "also", "but", "because", "which", "what",
-    "how", "why", "when", "where", "there", "here", "into", "from",
-    "per", "via", "please", "note", "just", "very", "more", "most",
-    "some", "any", "each", "both", "one", "two", "now", "so", "all",
-    "нужно", "нужен", "нужна", "если", "чтобы", "это", "этот", "эта",
-    "как", "или", "также", "должен", "должна", "можно", "нельзя",
-    "потом", "затем", "поэтому", "который", "которая", "быть", "было",
-    "будут", "может", "наш", "наши", "они", "она", "его", "их",
-    "для", "при", "всё", "все", "так", "вот", "есть", "там", "где",
-    "когда", "почему", "какой",
-})
-_PROSE_WORD_RE = _re.compile(r"[A-Za-zА-Яа-яЁё]{2,}")
-
-
-def _looks_like_prose(text):
-    """True, если текст похож на связную прозу (рассуждения модели), а не код.
-
-    Порог подобран на реальном CoT (доля функциональных слов ≫ 0.15 при сотнях
-    слов), а «голый» код и код с русскими комментариями долю не набирают.
-    """
-    words = _PROSE_WORD_RE.findall(text)
-    if len(words) < 20:
-        return False
-    hits = sum(1 for w in words if w.lower() in _PROSE_STOPWORDS)
-    return hits >= 12 and hits / len(words) >= 0.15
-
-# Think-блоки модели (рассуждения): вырезаются целиком, вместе с содержимым —
-# иначе strip_tags удаляет только разметку и рассуждения попадают в
-# raw_response/«Извлечённый код программы» (модель может класть рассуждения
-# прямо в ответ, а фолбэк ollama/sambanova возвращает thinking как ответ).
-_THINK_RE = _re.compile(
-    r"<think\b[^>]*>.*?(?:</think\s*>|\Z)",
-    _re.DOTALL | _re.IGNORECASE,
-)
-
-# Маркеры «строка похожа на код»: синтаксис (скобка после идентификатора,
-# ; { } =) и ключевые слова распространённых языков (Pascal/C/Python/asm).
-# Нужен, чтобы текст без markdown-фенсов принимался как код только тогда,
-# когда он и правда код, а не рассуждения модели (reasoning попадает в ответ
-# целиком — например, фолбэк ollama/sambanova на thinking-поле).
-_CODE_HINT_RE = _re.compile(
-    r"\w\(|[;{}=]|\b(?:begin|end|program|var|const|procedure|function|mov|push|pop|jmp|"
-    r"cmp|call|ret|include|import|def|class|print|writeln|printf|main|void|int|char|return)\b",
-    _re.IGNORECASE,
-)
-
-
-def _strip_think_blocks(text):
-    """Удалить think-блоки рассуждений вместе с содержимым."""
-    if not text:
-        return ""
-    return _THINK_RE.sub("", text)
-
-
-def _looks_like_code(text):
-    """Похож ли текст без markdown-фенсов на код, а не на прозу-рассуждения.
-
-    Доля строк с кодовыми маркерами (синтаксис/ключевые слова) должна быть
-    ощутимой: у рассуждений она околонулевая, у кода — высокая.
-    """
-    lines = [line for line in text.splitlines() if line.strip()]
-    if not lines:
-        return False
-    hints = sum(1 for line in lines if _CODE_HINT_RE.search(line))
-    return hints >= 1 and hints / len(lines) >= 0.4
-
-
-def _is_prose_sentence(line):
-    """True, если строка — связное предложение (проза), а не строка кода.
-
-    Строки CoT часто содержат редкие «кодовые» символы («Need determine
-    sizes: a,b,RES word (2 bytes?); c,d byte.»), поэтому только `_CODE_HINT_RE`
-    мало. Два признака прозы: (1) предложение, кончающееся точкой, — код
-    кончается «;»/«}»/«end.», а у «end.» есть маркер «end»; (2) много словарных
-    слов, из которых ощутимая доля — функциональные (EN/RU стоп-слова).
-    """
-    stripped = line.strip()
-    # Точка в конце + связные слова — предложение (но «end.» держится на маркере).
-    if stripped.endswith(".") and len(_PROSE_WORD_RE.findall(stripped)) >= 3:
-        return True
-    words = _PROSE_WORD_RE.findall(line)
-    if len(words) < 5:
-        return False
-    hits = sum(1 for w in words if w.lower() in _PROSE_STOPWORDS)
-    return hits / len(words) >= 0.3
-
-
-def _line_is_code(line):
-    """Код-подобная строка: есть `_CODE_HINT_RE`-маркер и это не проза."""
-    if not _CODE_HINT_RE.search(line):
-        return False
-    return not _is_prose_sentence(line)
-
-
-# Синтаксис, отсутствующий у хвостовых прощальных строк: конец оператора,
-# блок, присваивание, Pascal-объявления/метки. Прощание («Удачи!») не содержит
-# ни одного из них.
-_CODE_SYNTAX_RE = _re.compile(r'[;{}=:]\s*$|[;{}=]')
-
-
-def _is_trailing_prose(line):
-    """True, если строка может стоять ПОСЛЕ кода как прощание/комментарий.
-
-    Строки кода («end.», метки «L1:», «mov ax, 1») содержат маркер или синтаксис
-    и не срезаются; строки без всего этого — прозаический мусор, ломающий
-    компиляцию.
-    """
-    stripped = line.strip()
-    if _CODE_HINT_RE.search(stripped) or _CODE_SYNTAX_RE.search(stripped):
-        return False
-    words = _PROSE_WORD_RE.findall(stripped)
-    if not words:
-        return True  # «—», «:)» и прочий мусор без букв
-    return stripped.endswith((".", "!", "?")) or len(words) >= 4
-
-
-def _trim_prose_tail(lines):
-    """Срезать с конца списка строк хвостовой прозаический мусор.
-
-    Модель после кода может добавить «Удачи!» («Вот и всё!») — без
-    `_is_trailing_prose` такая строка попала бы в файл и сломала компиляцию
-    на DL. Незакрытая при обрезке ответа строка кода обычно содержит
-    маркеры/синтаксис и не срезается.
-    """
-    result = list(lines)
-    while result and _is_trailing_prose(result[-1]):
-        result.pop()
-    return result
-
-
 def _carve_code_block(cleaned):
     """Вырезать самый длинный непрерывный фрагмент кода из текста без оградок.
 
@@ -1065,50 +944,105 @@ def _carve_code_block(cleaned):
     return window if _looks_like_code(window) else ""
 
 
-def _extract_code_from_response(text):
+def _extract_code_from_response(text, file_extension=""):
+    """Extract pure code from an AI response (gated). См. _extract_code_pipeline.
+
+    После конвейера — гейт мусора: для языков курса (.i86/.asm/.mpc) код без
+    ни одного структурного маркера (window.HYDRATION-JSON, «[ВСТАВЬТЕ ВАШ
+    КОД]», протекшие рассуждения) возвращает "" — в DL такой текст не ходит
+    и в code не пишется (реальные кейсы res#194/206/180).
+    """
+    from .services.code_carver import has_language_marker
+    code = _extract_code_pipeline(text, file_extension)
+    if code and not has_language_marker(code, file_extension or ""):
+        return ""
+    return code
+
+
+def _extract_code_pipeline(text, file_extension):
     """Extract pure code from an AI response.
 
-    Strips markdown code fences (```cpp\n...\n```) and returns the code inside.
-    Think-блоки вырезаются до поиска оградок; блоки-оградки, похожие на прозу
-    (цепочка рассуждений), отбрасываются — иначе «самый длинный блок» может
-    оказаться рассуждением, а не кодом. Если кода в ответе нет вовсе,
-    возвращается пустая строка (воркер засчитает «код не извлечён»), а не
-    простыня рассуждений. Ответ без оградок принимается только если он похож
-    на код (маркеры строк, _looks_like_code) и не является прозой.
+    Структурные экстракторы С-МПА (services/code_carver.py) идут ПЕРВЫМИ,
+    когда известно расширение: сначала по всему текст (мульти-анкер +
+    валидация кандидатов внутри), затем по закрытым код-фенсам. Без
+    расширения структурники пробуются только как последняя надежда
+    (маркеры видны в сыром ответе). Структурники бракуют склейки
+    «болванка из CoT + программа» и вырезают проза-вставки из середины
+    (res#3987); победившего кандидата выбирают по полноте (больше строк).
 
-    Модели вольно обращаются с markdown: забывают закрыть оградку
-    (```asm\ncode без ```) или пишут код вовсе без неё (проза + код). Обе
-    ситуации покрыты: незакрытая оградка → всё после открывающей строки,
-    смесь «проза + код» без оградок → карвинг через _carve_code_block.
+    Дальше прежний конвейер: закрытые фенсы (не проза, код-подобные, БЕЗ
+    прози посреди), незакрытая оградка, карвинг прогона код-строк; каждый
+    кандидат проверяется тем же «мид-контролем». Prose-In-Fence (res#5170)
+    отбрасывается; утечка оградок срезается strip_code_fence_lines().
+
+    Если кода в ответе нет вовсе, возвращается пустая строка (воркер
+    засчитает «код не извлечён»), а не простыня рассуждений.
     """
     if not text:
         return ""
     cleaned = _strip_think_blocks(text).strip()
+    ext = (file_extension or "").strip().lower()
+
+    # === Вариант B: структурные экстракторы языков курса ===
+    from .services import code_carver
+    structural = None
+    if ext in (".i86", ".asm"):
+        structural = code_carver.extract_asm_i86
+    elif ext == ".mpc":
+        structural = code_carver.extract_mpa_c
+    elif not ext:
+        if code_carver.has_asm_markers(cleaned):
+            structural = code_carver.extract_asm_i86
+        elif code_carver.has_mpa_markers(cleaned):
+            structural = code_carver.extract_mpa_c
+    if structural is not None:
+        found = structural(cleaned)
+        if found:
+            return found
+        # По фенс-блокам: внутри ограды кандидата границы естественны;
+        # последний валидный фенс обычно финальный ответ модели.
+        for block in _CODE_FENCE_RE.findall(cleaned):
+            block = block.strip()
+            if not block or _looks_like_prose(block):
+                continue
+            found = structural(block)
+            if found:
+                return code_carver.strip_code_fence_lines(found)
+
     matches = _CODE_FENCE_RE.findall(cleaned)
     code_blocks = [m for m in matches if not _looks_like_prose(m)]
     if code_blocks:
-        # Return the longest non-prose code block (likely the solution).
-        return max(code_blocks, key=len).strip()
-    if matches:
-        # Оградки есть, но все похожи на прозу — кода в ответе нет.
-        return ""
+        # Самый длинный не-прозрачный код-подобный БЛОК без рассуждений
+        # посреди (проза-строки в середине = не код).
+        for candidate in sorted(code_blocks, key=len, reverse=True):
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            if _mid_prose_lines(candidate):
+                continue  # рассуждения внутри блока — это не код
+            if _looks_like_code(candidate):
+                return code_carver.strip_code_fence_lines(candidate)
+        # все оградки — проза/мусор; продолжаем конвейер (незакрытая/карвинг ниже)
     # Незакрытая оградка: всё после открывающей строки — код (маркер сильный,
-    # бракуем только очевидную прозу).
+    # бракуем только очевидную прозу и рассуждения посреди).
     unclosed = _UNCLOSED_FENCE_RE.search(cleaned)
     if unclosed:
         tail_lines = [line for line in unclosed.group(1).splitlines() if line.strip()]
         tail_lines = _trim_prose_tail(tail_lines)
         candidate = "\n".join(tail_lines).strip()
-        if candidate and not _looks_like_prose(candidate):
-            return candidate
+        if candidate and not _looks_like_prose(candidate) and not _mid_prose_lines(candidate):
+            return code_carver.strip_code_fence_lines(candidate)
     # Смесь «проза + код» без оградок — карвинг самого длинного код-фрагмента.
     carved = _carve_code_block(cleaned)
-    if carved:
-        return carved
+    if carved and not _mid_prose_lines(carved):
+        return code_carver.strip_code_fence_lines(carved)
     # Без оградок: проза-рассуждения и текст без кодовых маркеров — не код.
     if _looks_like_prose(cleaned):
         return ""
-    return cleaned if _looks_like_code(cleaned) else ""
+    whole = code_carver.strip_code_fence_lines(cleaned)
+    if _looks_like_code(whole) and not _mid_prose_lines(whole):
+        return whole
+    return ""
 
 
 def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None, course_id=None):
@@ -1469,13 +1403,33 @@ def _run_batch_job_worker(
                             "..." if len(friendly or cleaned_text) > 300 else ""
                         )
                     else:
-                        # Извлекаем только код модели (без markdown-оградок).
-                        code_only = _extract_code_from_response(cleaned_text)
+                        # Извлекаем только код модели (без markdown-оградок);
+                        # расширение подсказывает структурному экстрактору
+                        # (services/code_carver.py — вариант B).
+                        code_only = _extract_code_from_response(
+                            cleaned_text, file_extension=effective_ext or ""
+                        )
+
+                        # Гейт мусора: без структурного маркера языка курса
+                        # (HYDRATION-мусор веб-пула, «[ВСТАВЬТЕ ВАШ КОД]»,
+                        # протекшие рассуждения) в DL не отправляем — очередь
+                        # не занимаем, причина честная.
+                        junk_code = bool(code_only) and effective_ext in (
+                            ".i86", ".asm", ".mpc"
+                        ) and not has_language_marker(code_only, effective_ext)
+                        if junk_code:
+                            code_only = ""
 
                         can_run_dl = bool(
                             dl_test and code_only and effective_ext and session_id
                         )
-                        if not code_only:
+                        if not code_only and junk_code:
+                            verdict = _VERDICT_FAILED
+                            dl_test_comment = (
+                                "Извлечённый текст не похож на программу языка "
+                                "курса (нет структурных маркеров) — DL не тестировал"
+                            )
+                        elif not code_only:
                             verdict = _VERDICT_FAILED
                             dl_test_comment = "Не удалось извлечь код из ответа модели"
                         elif can_run_dl:

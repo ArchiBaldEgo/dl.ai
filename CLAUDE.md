@@ -96,7 +96,9 @@ The project follows these rules; keep it that way and extend along them:
   `super`/`staff`/`""` и `basics_seen` = «общая часть уже показана на другой юзер-странице» (учитываются
   ТОЛЬКО отметки текущей версии — `version__gte=WIZARD_VERSION`, иначе после бампа общие шаги молча
   выпадали бы, хоть обновлённый тур ещё не показывали) → движок
-  выкидывает шаги с `common: true` — туры ДОПОЛНЯЮТ друг друга, а не повторяют язык/модель/переключатель),
+  выкидывает шаги с `common: true` — туры ДОПОЛНЯЮТ друг друга, а не повторяют язык/модель/переключатель;
+  ОДНАКО шаги ЧАТА common не несут (в реестре их нет): basics_seen чат-тур не режет — чат всегда
+  полный строгий тур, 12 шагов),
   админка через `AIAdminSite.each_context` + `ai/admin/onboarding.py::wizard_context_for_request`.
   Туры страниц админки — по `_ADMIN_SCOPES_BY_PATH` (префиксы: /arm/solve/, /arm/models/, журнал,
   pinned-runs, tasksolution, aiappsettings, updates, prompt-defaults, regression, test-console,
@@ -108,9 +110,10 @@ The project follows these rules; keep it that way and extend along them:
   href-селекторы пунктов — `a[href^=…]`, у aiappsettings href с pk навсегда; ADMIN_BAR = эталон 2026-10:
   приветствие с ФИО/правами/счётчиком → открытые процессы → «Просмотр сайта» (`#user-tools a[href="/ai/chat/"]`,
   стоковая ссылка, site_url из site.py) → guest/выход → поиск по меню (#nav-filter) → левый бар).
-  Юзер-туры — ЭТАЛОН пользователя: чат = язык/модели/сортировка (#selectModelSort только здесь)/режим/
-  тема/вопрос+ввод (один textarea #messageText)/голосовой/стрелочка (toggle-button, roles super+staff)/
-  история/отправить/очистить; solve = ТОЛЬКО язык программирования+тема+промпт; find_error = ТОЛЬКО
+  Юзер-туры — ЭТАЛОН пользователя: чат — СТРОГИЙ порядок (ранги в реестре, геометрию
+  не перебивают): язык → модели → сортировка (#selectModelSort только здесь) → режим →
+  тема → «?» → голосовой → боковое меню (toggle-button, roles super+staff) → история →
+  ввод (#messageText) → отправить → очистить; solve = ТОЛЬКО язык программирования+тема+промпт; find_error = ТОЛЬКО
   текст задачи + текст кода (плюс три common); лишние шаги с solve/find_error убраны. ПРОЧИЕ пути админки
   (стоковые таблицы, доки, login) — без автостарта (`show:false`; ролевой scope в payload остаётся).
   Движок — `static/admin/js/ai-wizard.js` + `static/admin/css/ai-wizard.css` (чистый vanilla, нет deps; реестр шагов
@@ -122,7 +125,11 @@ The project follows these rules; keep it that way and extend along them:
   (явный rank сильнее: только хром админки — цели скрыты на старте или зависят от состояния меню). Цель,
   которую открыл хук, ДОЖИДАЕТСЯ ограниченным ожиданием (waitAndShow, 120 мс × 14; мгновенный замер при
   анимируемом открытии левого меню ронял ВСЕ шаги меню — «в админке кучу всего» без зоны), `pendingWait`
-  держит тики от преждевременной сдачи. Подсветка — пересечение цели с вьюпортом (`rectInViewport`, inset 8),
+  держит тики от преждевременной сдачи. Подсветка — пересечение цели с вьюпортом
+  (rectInViewport: рисуется ЛЮБОЕ непустое пересечение; раньше MIN_SPOT=24 +
+  inset 8 гасили пятно у мелких/прижатых к краю целей — шапка админки 14–21px,
+  препромпт-селект, стрелочка чата — поповер уезжал «в центр» без якоря и выглядел
+  как «шаг не отображается»),
   скролл цели — scrollIntoView обеими осями (селекты лежат в горизонтально скроллируемой панели), серия
   повторов замера шага (150/400/750 мс — media-запросы по zoom и переходы меню доезжают асинхронно) +
   пере-замер каждые 400 мс; 3 тика подряд без видимой цели → `stop(mark:false)`.
@@ -131,7 +138,12 @@ The project follows these rules; keep it that way and extend along them:
   Повторный показ: `#aiDocsTourBtn` («Подсказки» в модалке «?», юзерские страницы, без отметки) и
   `[data-ai-wizard-restart]` (кнопка «Показать подсказки» на dashboard админки; scope берётся из cfg —
   своя ролевая версия). Кто какому тур что видел — листинг `AIWizardSeenAdmin` (только суперюзер; удаление
-  строки = флаг сброшен, тур покажется заново).
+  строки = флаг сброшен, тур покажется заново). Инструменты, скрытые из бара через
+  `_HIDDEN_NAV_OBJECT_NAMES` (сейчас — «Регрессионные тесты»), нав-шага в
+  ADMIN_NAV_PAGES не имеют: их страниц нет в меню (у каждой свой тур по path);
+  вернёшь инструмент в бар — верни и нав-шаг. Бамп WIZARD_VERSION — когда меняются
+  ВИДИМЫЕ шаги/тексты тура; мёртвый конфиг (неиспользуемые флаги, нав-шаги скрытых
+  из бара пунктов) чистится без бампа — видимой части тура это не меняет.
 - `admin/` — custom `ai_admin_site` at `/ai/admin/` (per-module views live here; core permission logic in `site.py`). Gotcha: `_HIDDEN_NAV_OBJECT_NAMES` hides sections from nav but keeps direct URLs; left nav renders through the PROJECT override `ai/templates/admin/app_list.html` (`static/admin/js/ai_nav_filter.js` extends the stock quick filter to the AI tool groups). Changelist filters are NOT the stock side column: project override `ai/templates/admin/change_list.html` (a copy of stock Django 5.1 — re-diff when upgrading) renders `#changelist-filter` as a horizontal row of SELECTORS above the table, and `ai/templates/admin/filter.html` renders each filter as a labeled `<select data-ai-filter>` (no `<details>`, so stock `filters.js` is inert; picking an option navigates to `choice.query_string` — handler inline in change_list.html). Links to DL tasks use the USER url `/task.jsp?nid=…&cid=…` (nid first, cid second; `ai/admin/logs.py::dl_task_url`) — the admin viewer `fullTaskviewer.asp` is NOT used anywhere (viewing task text as DL admin is forbidden).
 - `test_console_runner.py` — runner for the admin test console (subprocess `manage.py test ai --settings=DjangoTest.test_settings`; full raw output of each run is duplicated under `BASE_DIR/logs/test_console/`). Gotchas: `setup_test_environment` patches globals — unsafe in a live Daphne thread, hence the isolated subprocess; log filenames are validated by `_LOG_FILENAME_RE` (path-traversal barrier).
 - `model_clients/` — `registry.py` (model id → handler + title + capabilities; default-active: ollama, openrouter, web_deepseek, web_kimi; Groq/SambaNova gated by `AI_ENABLE_GROQ`/`AI_ENABLE_SAMBANOVA`), `_base.py` (shared helpers incl. `BotPoolClient` — the whole Puppeteer-pool protocol), `web_deepseek.py`/`web_kimi.py` (thin `BotPoolClient` configs: `ask_*_async`, `restart_bot_pool`/`restart_kimi_bot_pool`), `config.py` (centralized .env tokens/proxy), `exceptions.py` (`humanize_model_error`, `map_http_error`, `safe_parse_response`), `history.py` (`ConversationHistory`, Redis/Django-cache shared history), plus provider modules `groq.py`/`openrouter.py`/`sambanova.py`/`ollama.py`. Gotcha: `OR_Nemotron_Nano_12B_VL` is the first `vision:true` entry; add capabilities in `registry.py`, not the DB. Gotcha: Ollama cloud-модели `…:cloud` живут на `https://ollama.com/api/*` (bearer `OLLAMA_API_KEY`; `OLLAMA_HOST` пустой → дефолт `http://localhost:11434` — если локально не задать переменные, модель вешает соединение «устанавливается соединение», а модель не в селекторе — health-ping недоступен; client — ollama SDK на httpx, он НЕ видит `PROXY` из config.py, но httpx читает HTTP(S)_PROXY из env, `trust_env` не отключается).

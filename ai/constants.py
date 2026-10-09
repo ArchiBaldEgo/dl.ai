@@ -17,4 +17,4 @@ AI_CACHE_KEY_PREFIX = "ai"
 DL_DEFAULT_COURSE_ID = 1450
 # Версия текстов онбординг-wizard (ai-wizard.js + ai/services/onboarding.py).
 # Меняешь шаги/тексты тура — поднимай номер: все увидят этот тур заново один раз.
-WIZARD_VERSION = 4
+WIZARD_VERSION = 5

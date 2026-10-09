@@ -8764,6 +8764,214 @@ class ArmCodeExtractionTests(SimpleTestCase):
         self.assertEqual(self._extract(text), "mov ax, a\ncbw\nidiv b\nmov R, ax")
 
 
+class StructuralCarverTests(SimpleTestCase):
+    """Структурные экстракторы С-МПА (services/code_carver.py):
+
+    Регрессии реальных прогонов: res#3987 (цитата-болванка каркаса в CoT
+    притягивала экстрактор — прозя и болванка склеивались с программой),
+    res#4160 (программа дана дважды — грязный первый заход с хвост-прозой
+    затирал чистый финал), res#3980 (рассуждение-вставка посреди кода).
+    """
+
+    def _c(self, text, ext=""):
+        from ai.arm_runner import _extract_code_from_response
+        return _extract_code_from_response(text, file_extension=ext).strip()
+
+    # --- asm .i86 ---
+
+    def test_asm_outline_in_cot_rejected_real_wins(self):
+        """res#3987: болванка в мини-фенсе внутри CoT + настоящая программа.
+
+        Болванке не хватает концевика → её кандидат тянется до концевика
+        настоящей программы и бракуется по повторному «jmp begin»;
+        анкер настоящей программы даёт чистый кандидат.
+        """
+        outline = "```asm\njmp begin\nn dw 5\nb dw 3,5,4-1,2\na dw 0,0\ntemp1 dw 0\n```"
+        cot = ("We need solve the task in assembler i86 now here.\n"
+               "Need sort array b into array a. Wait, allowed commands? jge fine.\n")
+        real = ("jmp begin\nb dw 3,5,4\na dw 0,0,0\nn dw 5\n"
+                "begin:\nmov si, 0\nouter_loop:\nmov ax, si\n"
+                "cmp ax, bx\njge sort_done\nmov min_off, si\n"
+                "Ends:\njmp Ends ;$E")
+        text = cot + "\n" + outline + "\n" + cot + "\n" + real
+        got = self._c(text, ext=".i86")
+        self.assertIn("jmp begin", got)
+        self.assertIn(";$E", got)
+        self.assertNotIn("We need solve", got)
+
+    def test_asm_program_repeated_clean_last_wins(self):
+        """res#4160: модель дала программу дважды; первый заход с CoT-хвостом,
+        второй чистый с «jmp Ends ;$E» — берётся ПОСЛЕДНИЙ валидный."""
+        tail_quote = ("```\nEnds:\njmp Ends ;$E\n```\n"
+                      "So okay.\n\nNeed structure: start jmp begin, then variables, then"
+                      " begin label. End with Ends: jmp Ends ;$E. They want `Ends:` and"
+                      " `jmp Ends ;$E`. In example they have `Ends:` then `jmp Ends ; done`.")
+        attempt1 = ("jmp begin\n\nn dw 12345\nz dw 0\nten dw 10\n\nbegin:\n"
+                    "mov z, 0\nloop_start:\nmov ax, n\n")
+        attempt2 = ("jmp begin\n\nn dw 12345\nz dw 0\nten dw 10\nplace dw 1\n\n"
+                    "begin:\nmov z, 0\nmov place, 1\nloop_start:\nmov ax, n\n"
+                    "cmp ax, 0\nje done\n\ndone:\njmp Ends ;$E")
+        text = attempt1 + "\n" + tail_quote + "\n" + attempt2
+        got = self._c(text, ext=".i86")
+        self.assertIn("place dw 1", got)
+        self.assertIn("je done", got)
+        self.assertTrue(got.rstrip().endswith("jmp Ends ;$E"))
+        self.assertNotIn("So okay", got)
+        self.assertNotIn("Need structure", got)
+
+    def test_asm_mid_prose_cut_keeps_program(self):
+        """res#3980: рассуждение-вставка посреди кода срезается, код жив."""
+        code = ("jmp begin\n\nn dw 5\nb dw 3,5,4\na dw 0,0,0\n\n"
+                "begin:\nmov cx, n\nmov si, 0\ncopy_loop:\n"
+                "Need implement with byte offsets carefully. Let n be small.\n"
+                "copy_done:\nmov di, a\n"
+                "Ends:\njmp Ends ;$E")
+        got = self._c(code, ext=".i86")
+        self.assertIn("copy_done:", got)
+        self.assertNotIn("Need implement", got)
+
+    def test_asm_short_cot_noise_line_cut(self):
+        """CoT-фразы без точки («Need maybe `step`? Not») — тоже мусор."""
+        code = ("jmp begin\nn dw 5\nb dw 3\n\nbegin:\nmov ax, n\n"
+                "Need maybe `step`? Not\nmov R, ax\nEnds:\njmp Ends ;$E")
+        got = self._c(code, ext=".i86")
+        self.assertNotIn("Need maybe", got)
+        self.assertIn("mov R, ax", got)
+
+    def test_asm_marker_in_cot_quote_not_end(self):
+        """;$E внутри CoT-цитаты (простыня со словом jmp) — не конец программы;
+        настоящий концевик ниже перехватывает span."""
+        long_cot = ("Need structure: start jmp begin, then variables, then begin label."
+                    " End with Ends: jmp Ends ;$E The user theory says ok then done")
+        real2 = "jmp begin\nb dw 2\nbegin:\nmov ax, b\nmov R, ax\nEnds:\njmp Ends ;$E"
+        text = "jmp begin\nb dw 1\nbegin:\nmov ax, b\n" + long_cot + "\n" + real2
+        got = self._c(text, ext=".i86")
+        self.assertIn("mov R, ax", got)
+        self.assertTrue(got.endswith("jmp Ends ;$E"))
+
+    def test_asm_data_section_not_cut(self):
+        """Дата-секция (dw/db/dup) и русский коммент не считаются прозя."""
+        code = ("jmp begin\n\n; Входные данные\nx dw 2\ny dw -1\na db 1\nc db 3\n"
+                "RES dw 0\n\nbegin:\nmov al, a\ncbw\nmov a_16, ax\n"
+                "Ends:\njmp Ends ;$E")
+        got = self._c(code, ext=".i86")
+        self.assertIn("x dw 2", got)
+        self.assertIn("Входные данные", got)
+
+    # --- С-МПА .mpc ---
+
+    def test_mpc_decls_plus_prose_plus_main(self):
+        """Прозя между декларациями и main срезается; полный кандидат жив."""
+        text = ("Разбор задачи: считаем сумму двух байтов.\n"
+                "int __in __bits(8) a;\nint __in __bits(8) b;\nint __out __bits(8) y;\n\n"
+                "Также нужно помнить правило про промежуточные переменные.\n"
+                "void main()\n{\ny = a + b;\n}\n\nУдачи!")
+        got = self._c(text, ext=".mpc")
+        self.assertIn("int __in __bits(8) a;", got)
+        self.assertIn("void main()", got)
+        self.assertIn("y = a + b;", got)
+        self.assertNotIn("Также нужно помнить", got)
+        self.assertNotIn("Удачи!", got)
+
+    def test_mpc_outline_glue_rejected_final_main_wins(self):
+        """res#1225-класс: болванки-фенсы в CoT; склейка «болванка + финал»
+        бракуется по двум main; финальный main-блок — единственный валидный."""
+        globals_quote = "```c\nint __in __bits(16) X;\nint __in __bits(16) Y;\n```"
+        main_quote = "```c\nvoid main() {\nRES = X + Y;\n}\n```"
+        final = "void main() {\nif (X * Y >= 0) {\nRES = ((X - Y) * 2 + 1) / Y;\n} else {\nRES = X;\n}\n}"
+        cot = ("*   Wait, check Rule 5 (Conditional expressions): Составные условия"
+               " раскрывай явно. Need think about this problem now.")
+        text = "Thinking Process:\n" + globals_quote + "\n" + main_quote + "\n" + cot + "\n" + final
+        got = self._c(text, ext=".mpc")
+        self.assertIn("void main()", got)
+        self.assertIn("RES = X", got)
+        self.assertNotIn("__bits(16) X", got)  # болванка-декларации НЕ склеены
+
+    def test_mpc_hydration_junk_empty(self):
+        """HYDRATION-мусор веб-пула — не код (гейт до DL)."""
+        from ai.services.code_carver import has_language_marker as _hlm
+        junk = 'window.HYDRATION_INIT_STATE={"mutations":[],"queries":[{"dehydratedAt":1788301366911}]}'
+        self.assertEqual(self._c(junk, ext=".mpc"), "")
+        self.assertEqual(self._c("[ВСТАВЬТЕ ВАШ КОД]", ext=".mpc"), "")
+        self.assertFalse(_hlm(junk, ".mpc"))
+
+    def test_mpc_comments_and_braces_legit(self):
+        """//-комменты и фигурные скобки — часть кода, не мусор."""
+        code = ("// Объявление глобальных переменных\n"
+                "int __in __bits(8) a;\nint __out __bits(8) y;\n\n"
+                "// Главная функция программы\nvoid main()\n{\n\n// Вычисление суммы\ny = a + b;\n\nreturn 0;\n}")
+        got = self._c(code, ext=".mpc")
+        self.assertIn(int_text := "int __in __bits(8) a;", got)
+        self.assertIn("// Главная функция", got)
+        self.assertTrue(got.rstrip().endswith("}"))
+
+    # --- Гейт языковых маркеров ---
+
+    def test_gate_markers(self):
+        from ai.services.code_carver import has_language_marker
+        self.assertTrue(has_language_marker("jmp begin\na dw 2\n", ".i86"))
+        self.assertTrue(has_language_marker(".model tiny\n.code\norg 100h\nmov ax, 1\n", ".i86"))
+        self.assertTrue(has_language_marker("int __in __bits(8) a;\n", ".mpc"))
+        self.assertTrue(has_language_marker("void main(){}\n", ".mpc"))
+        self.assertFalse(has_language_marker("window.HYDRATION...{},", ".i86"))
+        self.assertFalse(has_language_marker("Need answer only in Russian.", ".mpc"))
+        # Не-курсовые расширения гейт не отвергает
+        self.assertTrue(has_language_marker("anything at all", ""))
+        self.assertTrue(has_language_marker("anything at all", ".pas"))
+
+    def test_worker_gate_rejects_junk_before_dl(self):
+        """Батч-воркер: мусору без маркеров не ходит в DL (проверка константы)."""
+        from ai.arm_runner import has_language_marker
+        self.assertFalse(has_language_marker('[ВСТАВЬТЕ ВАШ КОД]', '.mpc'))
+
+
+class ArmVerdictFixCommandTests(TestCase):
+    """fix_arm_verdicts: пересчёт вердиктов по dl_comment (dry-run/commit)."""
+
+    @staticmethod
+    def _make_row(run, **kw):
+        from ai.models import AIModelTestResult
+        return AIModelTestResult.objects.create(
+            run=run, model_key=kw.get("model_key", "M"), model_title=kw.get("model_key", "M"),
+            verdict=kw.get("verdict", "solved"),
+            dl_comment=kw.get("dl_comment", ""),
+            code=kw.get("code", "jmp begin\nEnds:\njmp Ends ;$E"),
+            status=kw.get("status", "ok"),
+        )
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from ai.models import AIModelTestRun
+        self.run = AIModelTestRun.objects.create(
+            run_id="verdict-fix-1", run_type=AIModelTestRun.RUN_TYPE_BATCH)
+
+    def test_dry_run_touches_nothing(self):
+        from django.core.management import call_command
+        self._make_row(self.run, verdict="solved", dl_comment="[test1]: Ошибка компиляции: Ошибка синтаксиса (строка 1): junk.", model_key="M1")
+        call_command("fix_arm_verdicts")
+        row = self.run.results.first()
+        self.assertEqual(row.verdict, "solved")
+        self.assertEqual(row.status, "ok")
+
+    def test_commit_fixes_compile_error_solved(self):
+        from django.core.management import call_command
+        self._make_row(self.run, verdict="solved", dl_comment="[test1]: Ошибка компиляции: junk.", model_key="M2")
+        good = self._make_row(self.run, verdict="solved", dl_comment="[test1]: Все тесты пройдены.", model_key="M3")
+        call_command("fix_arm_verdicts", commit=True)
+        bad = self.run.results.get(model_key="M2")
+        self.assertEqual(bad.verdict, "failed")
+        self.assertEqual(bad.status, "error")
+        good.refresh_from_db()
+        self.assertEqual(good.verdict, "solved")
+
+    def test_empty_comment_untouched(self):
+        from django.core.management import call_command
+        self._make_row(self.run, verdict="solved", dl_comment="")
+        call_command("fix_arm_verdicts", commit=True)
+        row = self.run.results.first()
+        self.assertEqual(row.verdict, "solved")  # пустую не трогаем
+
+
 class TemplateInlineCommentTests(SimpleTestCase):
     """Регрессия: однострочные комментарии {# … #} в шаблонах НЕ могут
     переносить строки — Django рендерит их содержимое как текст прямо
@@ -8783,6 +8991,53 @@ class TemplateInlineCommentTests(SimpleTestCase):
                     if "{#" in line and "#}" not in line:
                         offenders.append(f"{os.path.relpath(path, base)}:{lineno}")
         self.assertEqual(offenders, [])
+
+
+class ReextractArmCodesCommandTests(TestCase):
+    """reextract_arm_codes: восстановление кода по сырому ответу;
+    solved не трогает; мусор без маркеров языка в code не пишет."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun
+        self.run = AIModelTestRun.objects.create(
+            run_id="reextract-1", run_type=AIModelTestRun.RUN_TYPE_BATCH)
+
+    @staticmethod
+    def _raw_real():
+        return ("Вот решение:\n```asm\njmp begin\nn dw 5\nb dw 3\na dw 0\n\n"
+                "begin:\nmov ax, b\nadd ax, n\nmov a, ax\nEnds:\njmp Ends ;$E\n```\nУдачи!")
+
+    def _make(self, model_key, verdict, raw, code="", ext=".i86"):
+        from ai.models import AIModelTestResult
+        return AIModelTestResult.objects.create(
+            run=self.run, model_key=model_key, model_title=model_key,
+            verdict=verdict, raw_response=raw, code=code,
+            dl_comment="Не удалось извлечь код из ответа модели",
+            file_extension_snapshot=ext,
+        )
+
+    def test_commit_fills_missing_code_skips_solved_and_junk(self):
+        from django.core.management import call_command
+        from ai.models import AIModelTestResult
+        missing = self._make("A1", "failed", self._raw_real())
+        solved = self._make("A2", "solved", self._raw_real(), code="")
+        junk = self._make("A3", "failed", "window.HYDRATION_INIT_STATE={}\n", code="", ext=".mpc")
+        call_command("reextract_arm_codes", run_ids=[self.run.pk], commit=True)
+        missing.refresh_from_db()
+        solved.refresh_from_db()
+        junk.refresh_from_db()
+        self.assertIn("jmp Ends ;$E", missing.code)
+        self.assertEqual(solved.code, "")   # solved не трогаем
+        self.assertEqual(junk.code, "")     # мусор в code не пишется
+
+    def test_dry_run_writes_nothing(self):
+        from django.core.management import call_command
+        missing = self._make("B1", "failed", self._raw_real())
+        call_command("reextract_arm_codes", run_ids=[self.run.pk])
+        missing.refresh_from_db()
+        self.assertEqual(missing.code, "")
+
+
 
 
 class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
@@ -10133,7 +10388,6 @@ class OnboardingServiceTests(TestCase):
         row.save(update_fields=["version"])
         self.assertTrue(user_basics_seen(self.user, "solve"))
 
-
 class WizardSeenUserEndpointTests(TestCase):
     """POST /ai/api/wizard-seen/ (пользовательские страницы, ai-wizard.js)."""
 
@@ -10355,7 +10609,7 @@ class WizardUserPageContextTests(TestCase):
         self.assertIn('"basics_seen": true', html)
         # Админские отметки юзер-«общие» не закрывают.
         plain2 = self.user_model.objects.create_user(
-            username="wz-context-plain2", password="x",
+            username="wz-context-plain2", password="***",
         )
         record_wizard_seen(plain2, "admin_pd")
         html = self._render(chat_view, "/ai/chat/", user=plain2)
