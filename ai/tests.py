@@ -4340,6 +4340,133 @@ class OllamaHandlerTests(SimpleTestCase):
             self.assertIn("пустой ответ", content)
 
 
+class OllamaRateLimitTests(SimpleTestCase):
+    """Защита от 429 Ollama Cloud: per-process семафор + ретраи с backoff.
+
+    Ollama Cloud лимитирует одновременные запросы по тарифу (не rpm) —
+    превышение отдаёт 429 (ollama.ResponseError со status_code=429).
+    """
+
+    def setUp(self):
+        from ai.model_clients import ollama
+        ollama._reset_limiter()
+
+    def tearDown(self):
+        from ai.model_clients import ollama
+        ollama._reset_limiter()
+
+    @staticmethod
+    def _stream(*pieces, eval_count=0):
+        """Фейковые чанки стрима — как в OllamaHandlerTests (тот же формат чанков)."""
+        chunks = []
+        for piece in pieces:
+            chunks.append(SimpleNamespace(
+                message=SimpleNamespace(content=piece), eval_count=0))
+        chunks.append(SimpleNamespace(
+            message=SimpleNamespace(content=""), eval_count=eval_count))
+        return iter(chunks)
+
+    @staticmethod
+    def _429():
+        from ollama import ResponseError
+        return ResponseError("rate limit exceeded", status_code=429)
+
+    async def test_429_retries_then_succeeds(self):
+        """Первый вызов кидает 429, второй успешен — ретрай с паузой, без ошибки."""
+        from ai.model_clients import ollama
+        with patch.dict(os.environ, {"OLLAMA_MAX_RETRIES": "3"}), \
+             patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama._sleep",
+                   new=AsyncMock(return_value=None)) as mock_sleep, \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.side_effect = [
+                self._429(),
+                self._stream("ok", eval_count=3),
+            ]
+            glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
+            result = await glm_5_2("hi", "client")
+            self.assertEqual(result, ("ok", 3, False))
+            self.assertEqual(mock_client.chat.call_count, 2)
+            self.assertEqual(mock_sleep.await_count, 1)
+            delay = mock_sleep.await_args.args[0]
+            self.assertGreater(delay, 0)
+            self.assertLessEqual(delay, 30 * 1.2)
+
+    async def test_429_exhausted_returns_friendly(self):
+        """Все ретраи исчерпаны → friendly-сообщение map_http_error с растущими паузами."""
+        from ai.model_clients import ollama
+        from ai.model_clients.exceptions import map_http_error
+        with patch.dict(os.environ, {"OLLAMA_MAX_RETRIES": "3"}), \
+             patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama._sleep",
+                   new=AsyncMock(return_value=None)) as mock_sleep, \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.side_effect = self._429()
+            glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
+            content, tokens, is_error = await glm_5_2("hi", "client")
+            # 1 первая попытка + 3 ретрая
+            self.assertEqual(mock_client.chat.call_count, 4)
+            self.assertTrue(is_error)
+            self.assertEqual(tokens, 0)
+            self.assertEqual(content, map_http_error(429, "ollama"))
+            self.assertNotIn("status code", content)
+            # Лестница пауз ~5 / ~15 / ~30 сек (джиттер ±20%).
+            delays = [c.args[0] for c in mock_sleep.await_args_list]
+            self.assertEqual(len(delays), 3)
+            for actual, base in zip(delays, (5.0, 15.0, 30.0)):
+                self.assertGreaterEqual(actual, base * 0.8)
+                self.assertLessEqual(actual, base * 1.2)
+
+    async def test_other_response_error_not_retried(self):
+        """ResponseError с иным кодом (500) не ретраится — прежний текст ошибки."""
+        from ai.model_clients import ollama
+        from ollama import ResponseError
+        with patch.dict(os.environ, {"OLLAMA_MAX_RETRIES": "3"}), \
+             patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama._sleep", new=AsyncMock(return_value=None)) as mock_sleep, \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.side_effect = ResponseError("boom", status_code=500)
+            glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
+            content, tokens, is_error = await glm_5_2("hi", "client")
+            self.assertEqual(mock_client.chat.call_count, 1)
+            self.assertTrue(is_error)
+            self.assertIn("Ошибка Ollama API:", content)
+            mock_sleep.assert_not_awaited()
+
+    async def test_semaphore_limits_concurrency(self):
+        """OLLAMA_MAX_CONCURRENCY=1 → вызовы строго по одному, очередь, не отказ."""
+        import asyncio
+        from ai.model_clients import ollama
+        with patch.dict(os.environ, {"OLLAMA_MAX_CONCURRENCY": "1"}), \
+             patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            active = {"now": 0, "max": 0}
+
+            def fake_chat(**kwargs):
+                active["now"] += 1
+                active["max"] = max(active["max"], active["now"])
+                time.sleep(0.02)
+                active["now"] -= 1
+                return self._stream("ok", eval_count=1)
+
+            mock_client.chat.side_effect = fake_chat
+            handler = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
+            results = await asyncio.gather(
+                *(handler(f"msg{i}", "client") for i in range(4))
+            )
+            self.assertEqual(active["max"], 1)
+            self.assertEqual(len(results), 4)
+            self.assertTrue(all(r == ("ok", 1, False) for r in results))
+
+
 class ArmBatchResultsPartialTests(SimpleTestCase):
     """Частичный шаблон _ai_batch_results.html не должен утекать комментариями:
     Django вырезает {# #} только в одну строку — многострочный комментарий
