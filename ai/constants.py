@@ -15,3 +15,6 @@ AI_CACHE_KEY_PREFIX = "ai"
 # и fallback в admin/arm.py). Если в DL появятся другие курсы — сюда их не
 # складывать: константа ровно про «дефолтное дерево», а не список курсов.
 DL_DEFAULT_COURSE_ID = 1450
+# Версия текстов онбординг-wizard (ai-wizard.js + ai/services/onboarding.py).
+# Меняешь шаги/тексты тура — поднимай номер: все увидят этот тур заново один раз.
+WIZARD_VERSION = 5

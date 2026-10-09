@@ -19,16 +19,17 @@
   }
   .ai-daily-header h2 { margin: 0; }
   .ai-daily-note { color: var(--body-quiet-color); font-size: 12px; margin: 0 0 10px; }
-  .ai-daily-table { width: 100%; border-collapse: collapse; }
+  {# Фиксированные ширины колонок — таблица не «пляшет» от длинных строк. #}
+  .ai-daily-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
   .ai-daily-table .nowrap { white-space: nowrap; }
   .ai-daily-table th, .ai-daily-table td {
     border: 1px solid var(--hairline-color); padding: 8px 10px;
-    text-align: left; vertical-align: top;
+    text-align: left; vertical-align: top; word-wrap: break-word; overflow-wrap: anywhere;
   }
   .ai-daily-table th { background: var(--darkened-bg); }
   .ai-daily-count {
     cursor: pointer; font-weight: 600; white-space: nowrap;
-    user-select: none;
+    user-select: none; text-align: right;
   }
   .ai-daily-count:hover { background: var(--selected-row); }
   .ai-daily-caret {
@@ -41,12 +42,35 @@
     border-left: 3px solid var(--hairline-color);
   }
   .ai-daily-requests { max-height: 60vh; overflow: auto; }
-  .ai-daily-req-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .ai-daily-req-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
   .ai-daily-req-table th, .ai-daily-req-table td {
     border: 1px solid var(--hairline-color); padding: 5px 8px;
-    text-align: left; vertical-align: top;
+    text-align: left; vertical-align: top; word-wrap: break-word; overflow-wrap: anywhere;
   }
   .ai-daily-req-table th { background: var(--darkened-bg); font-weight: 600; }
+  {# Клик по строке запроса: разворачивает на месте ровно ту же информацию, #}
+  {# что в журнале запросов (тексты тянутся лениво, по клику). #}
+  .ai-daily-req-row { cursor: pointer; }
+  .ai-daily-req-row:hover { background: var(--selected-row); }
+  .ai-daily-req-detail > td {
+    background: var(--darkened-bg);
+    border-left: 3px solid var(--hairline-color);
+    padding: 10px 12px;
+  }
+  .ai-daily-req-detail-meta {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 4px 16px; font-size: 12px; margin-bottom: 10px;
+  }
+  .ai-daily-req-detail h4 { margin: 10px 0 4px; font-size: 13px; }
+  .ai-daily-req-block {
+    background: var(--body-bg); border: 1px solid var(--hairline-color);
+    border-radius: 4px; padding: 8px; margin: 0;
+    white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;
+    max-height: 320px; overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 12px; line-height: 1.45;
+  }
+  .ai-daily-req-error { color: #b42318; }
   .ai-daily-ok { color: #067647; font-weight: 600; }
   .ai-daily-err { color: #b42318; font-weight: 600; }
   .ai-daily-empty {
@@ -68,6 +92,10 @@
 
   <div class="ai-scroll">
     <table class="ai-daily-table">
+      <colgroup>
+        <col style="width: 24%"><col style="width: 10%"><col style="width: 22%">
+        <col style="width: 22%"><col style="width: 12%"><col style="width: 10%">
+      </colgroup>
       <thead>
         <tr>
           <th>Фамилия студента</th>
@@ -99,6 +127,10 @@
             <td colspan="6">
               <div class="ai-daily-requests">
                 <table class="ai-daily-req-table">
+                  <colgroup>
+                    <col style="width: 12%"><col style="width: 14%"><col style="width: 20%">
+                    <col style="width: 20%"><col style="width: 18%"><col style="width: 16%">
+                  </colgroup>
                   <thead>
                     <tr>
                       <th>Время</th>
@@ -111,7 +143,7 @@
                   </thead>
                   <tbody>
                     {% for r in row.requests %}
-                      <tr>
+                      <tr class="ai-daily-req-row" data-log-id="{{ r.log_id }}" title="Показать информацию запроса">
                         <td class="nowrap">{{ r.time }}</td>
                         <td>{{ r.mode }}</td>
                         <td>{{ r.topic }}</td>
@@ -145,6 +177,121 @@
         var willOpen = detail.hidden;
         detail.hidden = !willOpen;
         cell.classList.toggle('open', willOpen);
+      });
+    });
+    // Клик по строке запроса: разворачивает на месте информацию запроса —
+    // ровно ту же, что в журнале запросов. Тексты запроса/ответа в дневном
+    // отчёте не хранятся (страница лёгкая) — подтягиваются один раз по клику
+    // через существующий JSON-эндпоинт детального лога (DIP: его же использует
+    // блок «Последние запросы» на «Настройке ИИ-приложения»).
+    function renderLogInfo(cell, log) {
+      cell.textContent = '';
+      var meta = document.createElement('div');
+      meta.className = 'ai-daily-req-detail-meta';
+      var duration = (log.duration_seconds ? Math.round(log.duration_seconds) + ' с' : '—');
+      var who = log.sender || '—';
+      if (log.external_user_id) { who += ' [' + log.external_user_id + ']'; }
+      var pairs = [
+        ['ID', String(log.id)],
+        ['Статус', log.status_display],
+        ['Режим', log.mode_display],
+        ['Модель', log.model_names],
+        ['Кто', who],
+        ['Язык', log.programming_language_name],
+        ['Тема', log.topic_name],
+        ['Препромпт', log.prompt_name],
+        ['Задача', log.task_name || log.task_node_id],
+        ['Отправлен', log.sent_at],
+        ['Получен', log.received_at],
+        ['Время ответа', duration],
+        ['Токенов', log.tokens],
+      ];
+      pairs.forEach(function (pair) {
+        var item = document.createElement('div');
+        var label = document.createElement('strong');
+        label.textContent = pair[0] + ': ';
+        item.appendChild(label);
+        // Препромпт — кликабелен, как в журнале запросов (открыть промпт).
+        if (pair[0] === 'Препромпт' && log.prompt_id) {
+          var a = document.createElement('a');
+          a.href = '/ai/admin/ai/prompt/' + log.prompt_id + '/change/';
+          a.target = '_blank';
+          a.rel = 'noopener';
+          a.textContent = pair[1] || '—';
+          item.appendChild(a);
+        } else {
+          item.appendChild(document.createTextNode(pair[1] !== null && pair[1] !== undefined ? pair[1] : '—'));
+        }
+        meta.appendChild(item);
+      });
+      cell.appendChild(meta);
+
+      // Batch-записи: тексты не отдаём (могут быть десятки МБ) — как и на
+      // «Настройке ИИ», отправляем в детальную страницу лога.
+      if (log.is_batch) {
+        var h4b = document.createElement('h4'); h4b.textContent = 'Результаты прогона';
+        cell.appendChild(h4b);
+        var ab = document.createElement('a');
+        ab.href = log.detail_url;
+        ab.textContent = 'Открыть детальную страницу лога →';
+        cell.appendChild(ab);
+        return;
+      }
+
+      var h4q = document.createElement('h4'); h4q.textContent = 'Текст запроса';
+      cell.appendChild(h4q);
+      var preQ = document.createElement('pre');
+      preQ.className = 'ai-daily-req-block';
+      preQ.textContent = log.message || '(пусто)';
+      cell.appendChild(preQ);
+
+      var h4a = document.createElement('h4'); h4a.textContent = 'Ответ модели';
+      cell.appendChild(h4a);
+      var preA = document.createElement('pre');
+      preA.className = 'ai-daily-req-block';
+      preA.textContent = log.response_text || '(пусто)';
+      cell.appendChild(preA);
+
+      if (log.error_message) {
+        var h4e = document.createElement('h4'); h4e.textContent = 'Ошибка';
+        cell.appendChild(h4e);
+        var preE = document.createElement('pre');
+        preE.className = 'ai-daily-req-block ai-daily-req-error';
+        preE.textContent = log.error_message;
+        cell.appendChild(preE);
+      }
+    }
+
+    function parseJsonResponse(response) {
+      // При протухшей сессии admin_view редиректит на страницу логина
+      // (HTML) — показываем понятное сообщение, а не ошибку JSON.parse.
+      return response.text().then(function (text) {
+        try { return JSON.parse(text); }
+        catch (e) {
+          throw new Error('Сессия истекла — обновите страницу и войдите заново.');
+        }
+      });
+    }
+
+    document.querySelectorAll('.ai-daily-req-row').forEach(function (row) {
+      row.addEventListener('click', function () {
+        var detail = row.nextElementSibling;
+        if (detail && detail.classList.contains('ai-daily-req-detail')) {
+          detail.hidden = !detail.hidden;  // повторный клик сворачивает
+          return;
+        }
+        detail = document.createElement('tr');
+        detail.className = 'ai-daily-req-detail';
+        var cell = document.createElement('td'); cell.colSpan = 6;
+        cell.textContent = 'Загрузка…';
+        detail.appendChild(cell);
+        row.parentNode.insertBefore(detail, row.nextSibling);
+        fetch('/ai/admin/ai/airequestlog/' + row.dataset.logId + '/detail-json/')
+          .then(parseJsonResponse)
+          .then(function (data) { renderLogInfo(cell, data.log); })
+          .catch(function (err) {
+            cell.textContent = 'Ошибка: ' + err.message;
+          });
       });
     });
   })();

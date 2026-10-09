@@ -1,0 +1,258 @@
+/* ==========================================================================
+   ai-wizard.css — стили онбординг-тура (static/admin/js/ai-wizard.js).
+
+   Слои .ai-wizard-blocker / .ai-wizard-spot / .ai-wizard-popover вешаются
+   движком на document.body; z-index 12000+ — выше админских слоёв (шапка,
+   левая навигация) и модалки документации (все <= 3000), поэтому сужать
+   диапазон нельзя. Классы с префиксом ai-wizard- — других страниц не касаемся.
+
+   Палитра — CSS-переменные с двойным фолбэком: пользовательские страницы
+   (ai_theme.css: --bg-surface/--text-primary/--accent-blue/…) и админка
+   (stock base.css: --body-bg/--body-fg/--button-bg/--darkened-bg/…). Светлая
+   и тёмная темы обеих систем подхватываются без отдельных правил.
+   ========================================================================== */
+
+/* --- Палитра (на слоях тура; поповер наследует) --- */
+.ai-wizard-blocker,
+.ai-wizard-spot,
+.ai-wizard-popover {
+    --aiwiz-surface: var(--bg-surface, var(--body-bg, #fff));
+    --aiwiz-fg: var(--text-primary, var(--body-fg, #333));
+    --aiwiz-muted: var(--text-muted, var(--body-quiet-color, #666));
+    --aiwiz-border: var(--border, var(--border-color, #ccc));
+    --aiwiz-accent: var(--accent-blue, var(--primary, #79aec8));
+    --aiwiz-btn: var(--accent-blue, var(--button-bg, #79aec8));
+    --aiwiz-btn-fg: var(--bg-surface, var(--button-fg, #fff));
+    --aiwiz-hover: var(--bg-accordion, var(--darkened-bg, #f5f5f5));
+    --aiwiz-shadow: rgba(13, 18, 28, 0.62);
+}
+
+/* --- Затемнение: тонкий слой над страницей (click sink) --- */
+.ai-wizard-blocker {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 12000;
+    background: transparent;
+    pointer-events: auto;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* --- «Дырка» вокруг цели: бокс-тень гасит всё вокруг неё --- */
+.ai-wizard-spot {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 12010;
+    pointer-events: none;
+    border-radius: 10px;
+    background: transparent;
+    box-shadow: 0 0 0 9999px var(--aiwiz-shadow);
+    outline: 2px solid var(--aiwiz-accent);
+    transition: all 0.18s ease;
+}
+
+/* --- Поповер с текстом шага --- */
+.ai-wizard-popover {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 12020;
+    max-width: 340px;
+    padding: 16px 18px;
+    border-radius: 12px;
+    background: var(--aiwiz-surface);
+    color: var(--aiwiz-fg);
+    border: 1px solid var(--aiwiz-border);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+    font-size: 14px;
+    line-height: 1.45;
+    text-align: left;
+    overflow-wrap: break-word;
+}
+
+.ai-wizard-popover--sheet {
+    top: auto;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    max-width: none;
+    transform: none;
+}
+
+/* Вхождение: лёгкий fade + scale; переигрывается на каждом шаге движком. */
+@keyframes aiwiz-pop-in {
+    from {
+        opacity: 0;
+        transform: scale(0.96);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.ai-wizard-popover--enter {
+    animation: aiwiz-pop-in 0.18s ease-out;
+}
+
+/* --- Контент --- */
+.ai-wizard-step-title {
+    margin: 0 0 6px;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.3;
+    color: var(--aiwiz-fg);
+}
+
+.ai-wizard-step-text {
+    margin: 0 0 10px;
+    font-size: 13.5px;
+    line-height: 1.5;
+    color: var(--aiwiz-fg);
+    opacity: 0.8;
+}
+
+.ai-wizard-progress {
+    margin: 0 0 10px;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    color: var(--aiwiz-muted);
+}
+
+/* --- Кнопки (нижний ряд: Скрыть слева, Назад/Далее справа) --- */
+.ai-wizard-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ai-wizard-btn {
+    padding: 7px 14px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.2;
+    cursor: pointer;
+}
+
+.ai-wizard-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.ai-wizard-btn:focus-visible {
+    outline: 2px solid var(--aiwiz-accent);
+    outline-offset: 1px;
+}
+
+/* Основные: Далее / Готово */
+.ai-wizard-btn-next,
+.ai-wizard-btn-done {
+    background: var(--aiwiz-btn);
+    color: var(--aiwiz-btn-fg);
+}
+
+.ai-wizard-btn-next:hover,
+.ai-wizard-btn-done:hover {
+    filter: brightness(0.92);
+}
+
+/* Второстепенные: Назад / Скрыть */
+.ai-wizard-btn-prev,
+.ai-wizard-btn-skip {
+    background: transparent;
+    border-color: var(--aiwiz-border);
+    color: var(--aiwiz-fg);
+}
+
+.ai-wizard-btn-prev:hover,
+.ai-wizard-btn-skip:hover {
+    background: var(--aiwiz-hover);
+}
+
+.ai-wizard-btn-skip {
+    margin-right: auto; /* «Скрыть» — у левого края футера */
+}
+
+/* --- Стрелка-ромб: 12px квадрат под 45°, кромка и борта задаются классом --- */
+.ai-wizard-arrow {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    background: var(--aiwiz-surface);
+    transform: rotate(45deg);
+    pointer-events: none;
+}
+
+.ai-wizard-arrow--hidden {
+    display: none;
+}
+
+/* Позиция «низ» (поповер под целью): ромб на верхней кромке, остриём вверх. */
+.ai-wizard-arrow--top {
+    top: -6px;
+    border-top: 1px solid var(--aiwiz-border);
+    border-left: 1px solid var(--aiwiz-border);
+}
+
+/* Позиция «верх»: ромб на нижней кромке, остриём вниз. */
+.ai-wizard-arrow--bottom {
+    bottom: -6px;
+    border-right: 1px solid var(--aiwiz-border);
+    border-bottom: 1px solid var(--aiwiz-border);
+}
+
+/* Позиция «правее цели»: ромб на левой кромке, остриём вправо. */
+.ai-wizard-arrow--left {
+    left: -6px;
+    border-top: 1px solid var(--aiwiz-border);
+    border-right: 1px solid var(--aiwiz-border);
+}
+
+/* Позиция «левее цели»: ромб на правой кромке, остриём влево. */
+.ai-wizard-arrow--right {
+    right: -6px;
+    border-bottom: 1px solid var(--aiwiz-border);
+    border-left: 1px solid var(--aiwiz-border);
+}
+
+/* На «листе» стрелка не нужна. */
+.ai-wizard-popover--sheet .ai-wizard-arrow {
+    display: none;
+}
+
+/* --- Кнопка «Подсказки» в шапке модалки «?» (страницы юзеров) ------------
+   Живёт здесь, а не в ai_theme.css: она — точка повторного запуска тура,
+   и правка ai_theme.css потребовала бы бампа ?v= у всей темы. Тема берётся
+   переменными ai_theme.css, как у соседей по шапке модалки. */
+.ai-docs-modal-tour {
+    padding: 4px 10px;
+    border: 1px solid var(--accent-blue, #2196F3);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--accent-blue, #2196F3);
+    font-size: 13px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.ai-docs-modal-tour:hover {
+    background: var(--bg-accordion, #eee);
+}
+
+/* Уважаем системную настройку «меньше движения». */
+@media (prefers-reduced-motion: reduce) {
+    .ai-wizard-spot {
+        transition: none;
+    }
+
+    .ai-wizard-popover--enter {
+        animation: none;
+    }
+}

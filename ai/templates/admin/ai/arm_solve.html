@@ -51,6 +51,17 @@
     line-height: 1.3;
   }
 
+  {# Кнопки шапки «Сводка»: «Перезапустить нерешённые пары» (<button class="button">) и #}
+  {# «Скачать результаты (XLSX)» (<a class="button">) получают РАЗНЫЙ padding из #}
+  {# админского base.css (.button = 10px 15px, a.button = 4px 5px) — выравниваем #}
+  {# до общего вида настоящей admin-кнопки. #}
+  #armSolveReportCard .arm-section-head .button,
+  #armSolveReportCard .arm-section-head a.button {
+    padding: 10px 15px;
+    line-height: 1.4;
+    box-sizing: border-box;
+  }
+
   .arm-section-note {
     margin: 4px 0 0;
     color: var(--body-quiet-color);
@@ -456,7 +467,7 @@
         <h2>Сводка</h2>
         <p class="arm-section-note" id="armSolveReportNote" data-base="{% if is_previous_run %}Результаты предыдущего запуска (без ?run_id= — показывается последний завершённый прогон){% else %}Результаты последнего запуска{% endif %}">{% if is_previous_run %}Результаты предыдущего запуска (без ?run_id= — показывается последний завершённый прогон){% else %}Результаты последнего запуска{% endif %}</p>
       </div>
-      <button type="button" class="button" id="armSolveRetryUnsolvedBtn" style="font-size:13px; display:none;" title="Перезапустить те же модели и язык, но только по задачам, которые не решены в этом прогоне">Повторить нерешённые</button>
+      <button type="button" class="button" id="armSolveRetryUnsolvedBtn" style="font-size:13px; display:none;" title="Заново решить только нерешённые пары (задача × модель) — результаты вольются в этот же прогон, счётчики сводки обновятся">Перезапустить нерешённые пары</button>
       <a class="button" id="armSolveDownloadXlsxBtn" style="font-size:13px; display:none;" href="#">Скачать результаты (XLSX)</a>
     </div>
     <ul id="armSolveReportList" class="arm-report"></ul>
@@ -469,7 +480,7 @@
     <div class="arm-section-head">
       <div>
         <h2>Ответы моделей</h2>
-        <p class="arm-section-note">Откройте строку, чтобы увидеть полный ответ</p>
+        <p class="arm-section-note">Раскройте модель — внутри её задачи, вердикты и полные ответы</p>
       </div>
       <div id="armSolveFilterHost"></div>
     </div>
@@ -590,7 +601,8 @@
       if (run.status === 'running') {
         const done = run.completed_pairs != null ? run.completed_pairs : 0;
         const total = run.total_pairs != null ? run.total_pairs : 0;
-        const cur = run.current_task_name ? (' · ' + run.current_task_name + ' / ' + (run.current_model_title || '')) : '';
+        const cur = perModelProgressText(run) ||
+          (run.current_task_name ? (' · ' + run.current_task_name + ' / ' + (run.current_model_title || '')) : '');
         setProgress('Выполняется: ' + done + ' / ' + total + cur, true);
         // Форму больше не блокируем: прогоны идут параллельно, можно запускать
         // следующие пакеты. Отмена — по строкам «Процессов» и кнопке ниже
@@ -670,6 +682,19 @@
       const langLabel = st.lang || st.ext;
       return (st.name || 'Пакет') + (langLabel ? ' · ' + langLabel : '') + ' · #' + String(runId).slice(0, 8);
     }
+    // Per-model прогресс параллельного прогона: run.model_progress — список по
+    // моделям ({model_title, done, total, current_task_name, status}); модели
+    // решают независимо, поэтому общий «сейчас: X / Y» заменяется строками
+    // «Модель: done/total («текущая задача»)». Возвращаем null, если поля нет
+    // (старые job/DB-снапшоты) — вызывающий код падает обратно на current_*.
+    function perModelProgressText(snapshot) {
+      const mp = snapshot.model_progress || [];
+      if (!mp.length) { return null; }
+      return ' · ' + mp.map(function (m) {
+        const task = m.current_task_name ? ' («' + m.current_task_name + '»)' : '';
+        return (m.model_title || m.model_key || '?') + ': ' + (m.done || 0) + '/' + (m.total || 0) + task;
+      }).join(', ');
+    }
     function updateProcessesRow(runId) {
       const st = runStates.get(runId);
       const ui = procRows.get(runId);
@@ -680,7 +705,8 @@
       if (s.status === 'running') {
         const done = s.completed_pairs != null ? s.completed_pairs : 0;
         const total = s.total_pairs != null ? s.total_pairs : 0;
-        const cur = s.current_task_name ? ' · сейчас: ' + s.current_task_name + ' / ' + (s.current_model_title || '') : '';
+        const cur = perModelProgressText(s) ||
+          (s.current_task_name ? ' · сейчас: ' + s.current_task_name + ' / ' + (s.current_model_title || '') : '');
         ui.statusEl.textContent = 'Выполняется: ' + done + ' из ' + total + cur;
       } else if (s.status === 'completed') {
         const wasCancelled = s.cancelled || s.error_message === 'Прервано пользователем';
@@ -739,43 +765,41 @@
       if (st.running && !st.timer) { st.timer = window.setTimeout(function () { st.timer = null; pollRunOnce(runId); }, 2000); }
     }
     const retryBtnEl = document.getElementById('armSolveRetryUnsolvedBtn');
+    const rerunPairsUrl = '/ai/admin/arm/solve/rerun-pairs/';
     if (retryBtnEl) {
+      // Попарный перезапуск нерешённых пар со слиянием в ТОТ ЖЕ прогон: сервер
+      // сам собирает пары (задача × модель, вердикт != solved) из БД прогона —
+      // клиент передаёт только run_id. Отчёт после пересобирается из всех строк.
       retryBtnEl.addEventListener('click', async function () {
-        if (!retryUnsolvedPayload || retryBtnEl.disabled) { return; }
-        const { nodes, params } = retryUnsolvedPayload;
+        if (retryBtnEl.disabled) { return; }
+        const runId = focusedRunId;
+        if (!runId) { return; }
         retryBtnEl.disabled = true;
-        retryBtnEl.textContent = 'Запускаем повтор...';
+        retryBtnEl.textContent = 'Запускаем перезапуск...';
         try {
-          const body = new URLSearchParams();
-          // Только нерешённые задачи (узлы из снапшота показанного прогона).
-          nodes.forEach(function (n) { body.append('node_ids', String(n)); });
-          (params.model_keys || []).forEach(function (m) { body.append('models', String(m)); });
-          body.set('interface_language', params.ui_language || 'Русский');
-          body.set('dl_test', params.dl_test ? '1' : '');
-          body.set('language_id', params.language_id || '');
-          body.set('file_extension', params.file_extension || '');
-          body.set('prompt_id', params.prompt_id ? String(params.prompt_id) : '');
-          if (params.topic_id) { body.set('arm_topic_id', String(params.topic_id)); }
-          if (params.course_id) { body.set('course_id', String(params.course_id)); }
-          if (params.record_stats) { body.set('record_stats', '1'); }
-          if (params.save_solutions) { body.set('save_solutions', '1'); }
-          body.set('run_name', params.run_name ? (params.run_name + ' — повтор') : 'Повтор нерешённых');
-          const data = await postStart(body);
-          const runId = data.run_id || '';
-          if (runId) {
-            trackRun(runId, {
-              ext: params.file_extension || '',
-              name: params.run_name ? (params.run_name + ' — повтор') : 'Повтор нерешённых',
-              lang: params.programming_language_name || '',
-              snapshot: data.run || {},
-            });
-            focusRun(runId);
-            document.dispatchEvent(new Event('ai-processes:refresh'));
+          const response = await fetch(rerunPairsUrl, {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'X-CSRFToken': getCsrfToken(), 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+            body: new URLSearchParams({ run_id: runId }),
+          });
+          const data = await parseJsonResponse(response);
+          if (!response.ok || !data.ok) {
+            throw new Error(data.message || 'Не удалось запустить перезапуск');
           }
+          setError('');
+          if (data.run) {
+            try { applyRunSnapshot(data.run); } catch (e) { console.error('ARM render error:', e); }
+          }
+          // trackRun обновляет снапшот, ставит running и заводит поллер;
+          // focusRun держит этот прогон в основной таблице.
+          trackRun(runId, { snapshot: data.run || {} });
+          focusRun(runId);
+          document.dispatchEvent(new Event('ai-processes:refresh'));
         } catch (error) {
-          setError(error.message || 'Не удалось запустить повтор нерешённых');
+          setError(error.message || 'Не удалось запустить перезапуск');
         }
         retryBtnEl.disabled = false;
+        retryBtnEl.textContent = 'Перезапустить нерешённые пары';
       });
     }
 
@@ -1253,36 +1277,30 @@
       return data;
     }
 
-    // ── «Повторить нерешённые»: перезапуск прогона на тех же моделях и языке,
-    // но только по задачам без решённой пары (verdict !== solved). Список
-    // задач берётся из снапшота показанного прогона; параметры — из его
-    // run_params (снимок формы запуска). Появляется после завершения прогона.
-    let retryUnsolvedPayload = null;
-
-    function collectUnsolvedNodes(run) {
-      // Уникальные задачи, у которых хоть одна пара не решена
-      // (failed/skipped/прочее) — они и уходят в повтор.
-      const seen = new Set();
-      (run.results || []).forEach(function (r) {
-        if (r && r.verdict !== 'solved' && r.task_node_id) { seen.add(String(r.task_node_id)); }
-      });
-      return Array.from(seen);
+    // ── «Перезапустить нерешённые пары»: попарный (задача × модель) rerun
+    // нерешённых пар со слиянием в тот же прогон. Сервер берёт пары из БД
+    // (verdict != solved) — клиент передаёт только run_id. Появляется после
+    // завершения прогона; счётчик — число нерешённых пар.
+    function countUnsolvedPairs(run) {
+      const pairs = (run.results || []).filter(function (r) {
+        return r && r.verdict !== 'solved';
+      }).length;
+      if (pairs > 0) { return pairs; }
+      // Фолбэк для снапшотов без results: счётчики отчёта.
+      const report = run.report || {};
+      return (report.failed || 0) + (report.skipped || 0);
     }
 
     function updateRetryUnsolvedButton(run) {
       const retryBtn = document.getElementById('armSolveRetryUnsolvedBtn');
       if (!retryBtn) { return; }
-      retryUnsolvedPayload = null;
       const isDone = run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
-      const rp = run.run_params || {};
-      const nodes = isDone ? collectUnsolvedNodes(run) : [];
-      const canRetry = isDone && nodes.length > 0
-        && Array.isArray(rp.model_keys) && rp.model_keys.length > 0
-        && rp.language_id;
+      // Во время перезапуска прогон снова 'running' — кнопка скрыта isDone-веткой.
+      const pairs = isDone ? countUnsolvedPairs(run) : 0;
+      const canRetry = isDone && pairs > 0 && run.run_id;
       if (!canRetry) { retryBtn.style.display = 'none'; return; }
       retryBtn.style.display = '';
-      retryBtn.textContent = 'Повторить нерешённые (' + nodes.length + ')';
-      retryUnsolvedPayload = { nodes: nodes, params: rp };
+      retryBtn.textContent = 'Перезапустить нерешённые пары (' + pairs + ')';
     }
 
     form.addEventListener('submit', async function (event) {

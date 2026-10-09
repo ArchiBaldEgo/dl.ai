@@ -22,6 +22,7 @@
     {% block extra_meta %}{% endblock %}
     {% block css %}
     <link rel="stylesheet" href="/ai/assets/admin/css/ai.css?v={{ request.COOKIES.csrftoken|default:'1' }}"/>
+    <link rel="stylesheet" href="/ai/assets/admin/css/ai-wizard.css?v=2"/>
     {% endblock %}
     {% block extra_css %}{% endblock %}
     <!-- Тема подключается ПОСЛЕ страничных CSS, чтобы переменные перепобивали значения. -->
@@ -30,7 +31,14 @@
     <script src="/ai/assets/admin/js/ai-common.js?v=16" defer></script>
     <script src="/ai/assets/admin/js/chat_template.js?v=4" defer></script>
     {% endblock %}
-    {% block extra_js %}{% endblock %}
+    {% block extra_js %}
+    <!-- Онбординг-wizard: решение «показывать ли» принимает сервер
+         (ai/services/onboarding.py), конфиг рендерится сюда; движок — ai-wizard.js.
+         Скрипт после ai-common.js (defer-порядок), сам стартует только при
+         show:true. -->
+    {% if ai_wizard %}{{ ai_wizard|json_script:"ai-wizard-config" }}{% endif %}
+    <script src="/ai/assets/admin/js/ai-wizard.js?v=5" defer></script>
+    {% endblock %}
     <title>DLAPI</title>
 </head>
 
@@ -178,6 +186,7 @@
         <div class="ai-docs-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="aiDocsTitle">
             <div class="ai-docs-modal-header">
                 <h2 id="aiDocsTitle"></h2>
+                <button type="button" id="aiDocsTourBtn" class="ai-docs-modal-tour">Подсказки</button>
                 <a id="aiDocsDownload" class="ai-docs-modal-download" download>&#8681; Скачать .md</a>
                 <button type="button" id="aiDocsClose" class="ai-docs-modal-close" aria-label="Закрыть">&#10005;</button>
             </div>

@@ -41,6 +41,7 @@ _HIDDEN_NAV_OBJECT_NAMES = {
     "PromptTestRun",      # «Прогоны регрессионных тестов промптов»
     "PromptTestCase",     # «Тест-кейсы промптов»
     "AiPromptRegression", # инструмент «Регрессионные тесты»
+    "UpdateLog",          # публикация скрытых записей «Обновлений»
 }
 
 # Иконки реальных ModelAdmin-строк (объекты, видимые в левом меню) — чтобы
@@ -421,6 +422,10 @@ class AIAdminSite(admin.AdminSite):
                 if m.get("object_name") != "AIAppSettings"
             ]
         context["available_apps"] = tools_apps + real_apps
+        # Онбординг-wizard: конфиг для json_script в base_site.html
+        # (читает static/admin/js/ai-wizard.js). В гостевом режиме show=False.
+        from .onboarding import wizard_context_for_request
+        context["ai_wizard"] = wizard_context_for_request(request)
         return context
 
     @staticmethod

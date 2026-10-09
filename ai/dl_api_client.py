@@ -533,7 +533,8 @@ def _send_solution_payload_context(node_id, code, file_extension, course_id=0) -
     code_head = " ".join((code or "").split())[:120]
     return (
         f"send-solution(nodeId={node_id}, courseId={course_id}, "
-        f"fileExtension={file_extension!r}, codeLen={len(code or '')}, "
+        f"fileExtension={file_extension!r}, "
+        f"codeLen={len(code or '')}, "
         f"codeHead={code_head!r})"
     )
 
@@ -590,24 +591,32 @@ def send_solution_to_dl(
     страницы (``cid``). По умолчанию 0 — только для обратной совместимости
     сигнатуры, все in-tree вызовы должны передавать реальный course_id.
 
+    NB (2026-10, проверено): имя файла решения (``api_solution_XXXXXXXX``)
+    задаёт сам DL-сервер — контракт ``/restapi/send-solution`` поля имени
+    файла НЕ содержит, его невозможно задать (эксперимент с
+    ``fileName``/``solutionFileName`` убран: прогоны с нестандартными полями
+    тела отдавали 400). Читаемое имя остаётся только в скачках из админки
+    (admin_arm_solve_result_download_view); разработчикам DL — фича-запрос.
+
     Returns the raw JSON response. Raises DLUnauthorizedError (401),
     DLServerError (500), DLApiUnavailable on network failure.
     """
+    payload = {
+        "sessionId": session_id,
+        "nodeId": node_id,
+        "code": code,
+        "fileExtension": file_extension,
+        "courseId": course_id,
+    }
     response = _dl_request(
         "POST",
         "/restapi/send-solution",
-        json={
-            "sessionId": session_id,
-            "nodeId": node_id,
-            "code": code,
-            "fileExtension": file_extension,
-            "courseId": course_id,
-        },
+        json=payload,
     )
 
     # 400/413/5xx: DL отдаёт голое «Bad Request» без указания поля — прикладываем
-    # контекст payload (nodeId/courseId/extension/длина кода/начало кода) для
-    # диагностики. 401/403/404 оставляем типизированными (не оборачиваем).
+    # контекст payload (nodeId/courseId/extension/имя файла/длина кода/начало кода)
+    # для диагностики. 401/403/404 оставляем типизированными (не оборачиваем).
     try:
         _raise_for_status(response)
         return _decode_response_json(response)

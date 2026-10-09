@@ -8,28 +8,34 @@ from django.contrib.auth import get_user_model
 from .site import ai_admin_site
 from ..models import (
     AIAppSettings,
+    AuthorAlias,
     ExternalDLAccount,
     ProgrammingLanguage,
     Prompt,
     PromptTestCase,
     PromptTestRun,
+    AIWizardSeen,
     SharedPrompt,
     Task,
     TaskSolution,
     Topic,
+    UpdateLog,
 )
 from .models import (
     AIAppSettingsAdmin,
+    AuthorAliasAdmin,
     ExternalDLAccountAdmin,
     ProgrammingLanguageAdmin,
     TopicAdmin,
     PromptAdmin,
     PromptTestCaseAdmin,
     PromptTestRunAdmin,
+    AIWizardSeenAdmin,
     RestrictedUserAdmin,
     SharedPromptAdmin,
     TaskAdmin,
     TaskSolutionAdmin,
+    UpdateLogAdmin,
 )
 from .forms import PromptForm, SharedPromptForm
 from .logs import AIRequestLogAdmin, admin_request_log_detail_view, admin_request_logs_view, resend_request_view
@@ -54,14 +60,17 @@ from .prompt_regression import (
 __all__ = [
     "ai_admin_site",
     "AIAppSettingsAdmin",
+    "AuthorAliasAdmin",
     "ProgrammingLanguageAdmin",
     "TopicAdmin",
     "PromptAdmin",
     "PromptTestCaseAdmin",
     "PromptTestRunAdmin",
+    "AIWizardSeenAdmin",
     "SharedPromptAdmin",
     "TaskAdmin",
     "TaskSolutionAdmin",
+    "UpdateLogAdmin",
     "PromptForm",
     "SharedPromptForm",
     "AIRequestLogAdmin",
@@ -81,6 +90,7 @@ __all__ = [
 
 # Register AI models on the custom admin site so they appear in /ai/admin/.
 ai_admin_site.register(AIAppSettings, AIAppSettingsAdmin)
+ai_admin_site.register(AuthorAlias, AuthorAliasAdmin)
 ai_admin_site.register(ProgrammingLanguage, ProgrammingLanguageAdmin)
 ai_admin_site.register(Task, TaskAdmin)
 ai_admin_site.register(Topic, TopicAdmin)
@@ -90,6 +100,13 @@ ai_admin_site.register(PromptTestCase, PromptTestCaseAdmin)
 ai_admin_site.register(PromptTestRun, PromptTestRunAdmin)
 ai_admin_site.register(ExternalDLAccount, ExternalDLAccountAdmin)
 ai_admin_site.register(TaskSolution, TaskSolutionAdmin)
+# NOTE: AIWizardSeen — листинг «кто видел онбординг-wizard» (только суперюзер);
+# удаление строки перезапускает тур этого scope конкретному пользователю.
+ai_admin_site.register(AIWizardSeen, AIWizardSeenAdmin)
+# NOTE: UpdateLog is registered superuser-only (publish/hide hidden rows); it is
+# kept OUT of the left nav via _HIDDEN_NAV_OBJECT_NAMES — the custom «Обновления»
+# page links to /ai/admin/ai/updatelog/ (Скрытые записи).
+ai_admin_site.register(UpdateLog, UpdateLogAdmin)
 # NOTE: AIRequestLog is intentionally NOT registered as a ModelAdmin. Its
 # changelist URL (/ai/admin/ai/airequestlog/) is served by the custom
 # admin_request_logs_view (ai/admin/urls.py), which renders the richer

@@ -26,31 +26,53 @@ bash scripts/setup_hooks.sh
 ```
 
 Устанавливает:
-- **post-merge** — после `git pull` автоматически добавляет новые коммиты в БД (раздел «Обновления» в админке).
-- **pre-push** — перед `git push` синхронизирует таблицу обновлений с локальными коммитами.
+- **post-merge** — после `git pull` показывает список новых коммитов в терминале и спрашивает, какие добавить в БД (раздел «Обновления» в админке): `a` = все, номера/диапазоны (`1,3-5`), Enter = ничего. Невыбранные коммиты сохраняются скрытыми — опубликовать их позже можно через `/ai/admin/ai/updatelog/` (ссылка «Скрытые записи» на странице «Обновлений»). Без терминала (TTY) импорт просто откладывается до следующего интерактивного запуска.
+- **pre-push** — то же самое по вашим локальным коммитам перед `git push`.
 
 ## 2. Создать `.env`
 
-Скопируйте шаблон:
+**Минимум, без которого локально не запустится.** В `.env` должны быть
+обязательно две вещи: `SECRET_KEY` Django и учётка БД (`DB_USER`/`DB_PASSWORD`) —
+у всего остального в проекте есть дефолты:
+
+```bash
+cat > .env <<'EOF'
+# Секрет Django — свой: python -c "import secrets; print('django-insecure-' + secrets.token_urlsafe(40))"
+SECRET_KEY=
+DB_USER=dlaibd
+DB_PASSWORD=свой-пароль-БД
+EOF
+# Вставьте SECRET_KEY, затем:
+docker compose up -d --build
+# → http://localhost:8000/ai/
+```
+
+Прокси в `.env` не заданы → по правилу `ai/env_mode.py` «пустой прокси →
+локально» контейнер сам стартует с `DEBUG=1`, авто-логином dev_admin (без
+DLSID), migrate+collectstatic на старте и выключенным скедулером свитков.
+
+Дефолты, на которые можно опираться (все — в коде/компоузе, в `.env` НЕ нужны):
+
+- `DB_NAME=dl_ai`, `DB_HOST=db`, `DB_PORT=5432` (сервис `db` создаётся
+  с `POSTGRES_*` из `DB_USER`/`DB_PASSWORD`/`DB_NAME`);
+- `EXTERNAL_AUTH_API_URL` → `https://dl.gsu.by/restapi/get-user-info`,
+  кука `DLSID` (`ai/external_auth.py`);
+- `DEBUG` выводится из наличия прокси; куки-домен — только на проде;
+- `REDIS_URL` пустой → Django fallback на LocMemCache (однопроцессный dev);
+- `OLLAMA_HOST` → без переменной дефолт `http://localhost:11434` (локальный
+  сервер Ollama). Локальные ОБУЧНЫЕ модели (`…:cloud`) нужно указать явно:
+  `OLLAMA_HOST=https://ollama.com` + `OLLAMA_API_KEY` (ключ ollama.com, bearer;
+  REST — `https://ollama.com/api/*`). Groq/SambaNova выключены, пока не заданы
+  `AI_ENABLE_GROQ`/`AI_ENABLE_SAMBANOVA`.
+
+Всё остальное (токены моделей, прокси, бот-пулы, mail-bridge, rate-limits,
+prod-значения) — смотрите и берите из `.env.example`: каждая переменная
+там подписана. Для PRODUCTION копируйте `.env.example` и заполняйте вручную:
 
 ```bash
 cp .env.example .env
 nano .env
 ```
-
-Заполните в `.env` минимум эти поля:
-
-- `SECRET_KEY`
-- `DB_USER`
-- `DB_PASSWORD`
-- `DB_NAME`
-- `HTTP_PROXY` (опционально)
-- `HTTPS_PROXY` (опционально)
-- `ALL_PROXY` (опционально; некоторые утилиты/библиотеки читают именно его)
-- `NO_PROXY` (опционально)
-- `PROXY` (опционально)
-- `REDIS_URL` (обязательно для production)
-- `REDIS_VOLUME_NAME` (опционально; имя Docker volume для Redis)
 
 ### Redis
 

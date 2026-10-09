@@ -19,6 +19,7 @@ file AND admin/app_list.html are not shadowed by the stock admin templates
 {% block extrastyle %}
   {{ block.super }}
   <link rel="stylesheet" href="{% static 'admin/css/ai_admin.css' %}">
+  <link rel="stylesheet" href="{% static 'admin/css/ai-wizard.css' %}">
 {% endblock %}
 
 {% block extrahead %}
@@ -26,6 +27,11 @@ file AND admin/app_list.html are not shadowed by the stock admin templates
   <script src="{% static 'admin/js/ai_processes.js' %}" defer></script>
   <script src="{% static 'admin/js/ai_admin_state.js' %}" defer></script>
   <script src="{% static 'admin/js/ai_nav_filter.js' %}" defer></script>
+  {% comment %}Онбординг-wizard на каждой странице админки: решение «показывать ли»
+  принимает сервер (ai/admin/onboarding.py ← each_context), конфиг рендерится
+  сюда json_script'ом; ПОСЛЕ трёх глобальных скриптов (defer-порядок).{% endcomment %}
+  {% if ai_wizard %}{{ ai_wizard|json_script:"ai-wizard-config" }}{% endif %}
+  <script src="{% static 'admin/js/ai-wizard.js' %}" defer></script>
 {% endblock %}
 
 {% comment %}Приветствие кликабельно: рядом с именем чип-счётчик «Процессы (N)»

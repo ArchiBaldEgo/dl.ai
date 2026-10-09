@@ -4,8 +4,8 @@
 Cloud-модели (glm-5.2:cloud, deepseek-v4.1-flash:cloud, deepseek-v4-pro:cloud,
 gemma4:cloud, nemotron-3-super:cloud, kimi-k2.7-code:cloud, kimi-k2.6:cloud,
 gpt-oss:20b-cloud, gpt-oss:120b-cloud) требуют bearer-токен ``OLLAMA_API_KEY`` и
-хост ``https://api.ollama.com``. Локальный Ollama работает без ключа на
-``http://localhost:11434``.
+хост ``https://ollama.com`` (облачный REST живёт на ``https://ollama.com/api/*``).
+Локальный Ollama работает без ключа на ``http://localhost:11434``.
 
 Архитектура: generic ``_ask_ollama()`` + декларативная таблица ``OLLAMA_MODELS``;
 внешние функции-обёртки генерируются автоматически через ``_make_handler`` (по
@@ -257,8 +257,8 @@ async def _ask_ollama(
     Ретраит ollama.ResponseError 429 (rate limit тарифа) с эскалирующим backoff;
     конкурентность входящих вызова ограничена per-process семафором в _chat_sync.
     """
-    # Cloud-эндпоинт требует bearer-токен.
-    if "api.ollama.com" in OLLAMA_HOST and not OLLAMA_API_KEY:
+    # Cloud-эндпоинт (ollama.com/api/*) требует bearer-токен.
+    if "ollama.com" in OLLAMA_HOST and not OLLAMA_API_KEY:
         return "Ollama API ключ не настроен. Добавьте OLLAMA_API_KEY в .env", 0, True
 
     attempts = max(1, int(os.getenv("OLLAMA_MAX_RETRIES", "3")) + 1)
