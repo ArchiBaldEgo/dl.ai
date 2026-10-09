@@ -2,7 +2,10 @@
 Общий CSS + JS мини-таблицы результатов batch-solve. Используется страницей
 /arm/solve/ (arm_solve.html) и детальной страницей записи Журнала запросов
 в режиме «Пакетное решение» (airequestlog_detail.html), чтобы рендеринг был
-идентичен. Единый источник правды — window.ArmBatchResults. Экспорт XLSX —
+идентичен. Единый источник правды — window.ArmBatchResults. Список «Ответы
+модели» группируется по моделям: первым уровнем карточка модели (счётчики,
+цветная кромка итога), внутри — её задачи с вердиктами и полными ответами.
+Экспорт XLSX —
 серверный (ai/admin/export.py), кнопка здесь — ссылка на эндпоинт по run_id.
 Переключатель «Все / Не пройденные» в шапке карточки «Ответы моделей»
 (счётчики, авто-раскрытие не пройденных, режим в localStorage) живёт здесь же —
@@ -76,6 +79,21 @@ NB: комментарии с решёткой Django вырезает толь�
   .arm-result-title { font-weight: 700; }
   .arm-meta { color: var(--body-quiet-color); font-size: 12px; margin-top: 4px; }
   .arm-result-body { border-top: 1px solid var(--hairline-color); padding: 12px 14px 14px; }
+  /* Группировка «модель → её задачи»: summary карточки модели — шапка со
+     счётчиками; задачи рендерятся вложенными .arm-result. */
+  .arm-model-group { border: 1px solid var(--hairline-color); border-left-width: 4px; border-radius: 8px; margin-bottom: 12px; background: var(--body-bg); }
+  .arm-model-group.all-solved { border-left-color: #16a34a; }
+  .arm-model-group.none-solved { border-left-color: #dc2626; }
+  .arm-model-group.part-solved { border-left-color: #94a3b8; }
+  .arm-model-group summary { cursor: pointer; list-style: none; padding: 12px 14px; }
+  .arm-model-group summary::-webkit-details-marker { display: none; }
+  .arm-model-group[open] summary { border-bottom: 1px solid var(--hairline-color); }
+  .arm-model-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .arm-model-title { font-weight: 700; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  .arm-model-arrow { display: inline-block; transition: transform 0.15s; color: var(--body-quiet-color); }
+  .arm-model-group[open] .arm-model-arrow { transform: rotate(90deg); }
+  .arm-model-meta { color: var(--body-quiet-color); font-size: 12px; margin-top: 4px; }
+  .arm-model-tasks { padding: 10px 10px 12px; }
   .arm-result-body pre {
     margin: 0; white-space: pre-wrap; word-wrap: break-word;
     font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
@@ -386,116 +404,173 @@ window.ArmBatchResults = (function () {
     }
 
     var downloadBase = '/ai/admin/arm/solve/result/';
+    // Группировка «модель → её задачи»: первым уровнем показываются модели
+    // (раскрытие — список задач с вердиктами и полными ответами), внутри —
+    // прежние карточки задач. Группируются только видимые строки, поэтому в
+    // режиме «Не пройденные» модели без провальных пар не выводятся вовсе.
+    var groups = [];
+    var byKey = {};
     visible.forEach(function (r) {
-      var cls = r.verdict === 'solved' ? 'solved' : (r.verdict === 'failed' ? 'failed' : 'skipped');
-      var card = document.createElement('details');
-      card.className = 'arm-result ' + cls;
-      var rkey = (r.task_node_id || '') + ':' + (r.model_key || '');
-      card.setAttribute('data-key', rkey);
-      if (openKeys.has(rkey)) { card.setAttribute('open', ''); }
-
-      var lazy = !!r.lazy_body;               // тело подтягивается по AJAX
-      var dlComment = r.dl_comment || '';
-      var dlError = r.dl_error || '';
-      var dlQueueId = r.dl_queue_id || 0;
-      var code = r.code || '';
-      var resultId = r.result_id || '';
-
-      var summary = document.createElement('summary');
-      var top = document.createElement('div');
-      top.className = 'arm-result-top';
-      var title = document.createElement('span');
-      title.className = 'arm-result-title';
-      title.textContent = '#' + (r.task_node_id || '') + ' ' + (r.task_name || '') + ' — ' + (r.model_title || '');
-      top.appendChild(title);
-      top.insertAdjacentHTML('beforeend', verdictBadge(r.verdict));
-      var meta = document.createElement('div');
-      meta.className = 'arm-meta';
-      meta.textContent = (r.duration != null ? r.duration : '') + ' сек | ' + (r.tokens != null ? r.tokens : '') + ' ток.';
-      summary.appendChild(top);
-      summary.appendChild(meta);
-
-      var body = document.createElement('div');
-      body.className = 'arm-result-body';
-
-      var dlBlock = document.createElement('div');
-      dlBlock.style.cssText = 'padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:13px; color:#1f2937; background:' + (r.verdict === 'solved' ? '#dcfce7' : '#fee2e2') + ';';
-      var dlHtml = '<strong>DL тест:</strong> ';
-      if (dlComment) { dlHtml += escapeHtml(dlComment); } else { dlHtml += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
-      if (dlQueueId) { dlHtml += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
-      if (r.saved_solution) { dlHtml += ' <span style="color:#166534;">· ✓ сохранено в «Решённые задачи»</span>'; }
-      if (dlError) { dlHtml += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
-      dlBlock.innerHTML = dlHtml;
-      body.appendChild(dlBlock);
-
-      var answerLabel = document.createElement('div');
-      answerLabel.style.cssText = 'margin:8px 0 4px; font-weight:600; font-size:13px;';
-      answerLabel.textContent = 'Полный ответ модели:';
-      body.appendChild(answerLabel);
-      var answerPre = document.createElement('pre');
-      body.appendChild(answerPre);
-
-      var codeLabel = document.createElement('div');
-      codeLabel.style.cssText = 'margin:10px 0 4px; font-weight:600; font-size:13px;';
-      codeLabel.textContent = 'Извлечённый код программы:';
-      body.appendChild(codeLabel);
-      var codePre = document.createElement('pre');
-      body.appendChild(codePre);
-      var downloadLink = null;
-      if (resultId) {
-        downloadLink = document.createElement('a');
-        downloadLink.href = downloadBase + encodeURIComponent(resultId) + '/download/';
-        downloadLink.className = 'arm-button';
-        downloadLink.style.cssText = 'display:inline-block; margin-top:6px;';
-        downloadLink.textContent = 'Скачать код';
-        body.appendChild(downloadLink);
+      var gk = r.model_key || r.model_title || '—';
+      if (!byKey[gk]) {
+        byKey[gk] = { key: gk, title: r.model_title || r.model_key || '—', tasks: [] };
+        groups.push(byKey[gk]);
       }
+      byKey[gk].tasks.push(r);
+    });
+    groups.sort(function (a, b) { return String(a.title).localeCompare(String(b.title), 'ru'); });
 
-      if (lazy) {
-        // Тело ещё не в снапшоте: плейсхолдеры + подгрузка при раскрытии.
-        // Содержимое dl-блока тоже приходит из body-эндпоинта.
-        dlBlock.innerHTML = '<strong>DL тест:</strong> <span style="color:#6b7280;">' +
-          (card.open ? 'загрузка…' : 'раскройте строку для загрузки') + '</span>';
-        answerPre.textContent = '';
-        codePre.textContent = '';
-        if (downloadLink) { downloadLink.style.display = 'none'; }
-        var bodyLoaded = false;
-        var fillBody = function (b) {
-          bodyLoaded = true;
-          dlComment = b.dl_comment || '';
-          dlError = b.dl_error || '';
-          var dlHtml2 = '<strong>DL тест:</strong> ';
-          if (dlComment) { dlHtml2 += escapeHtml(dlComment); } else { dlHtml2 += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
-          if (dlQueueId) { dlHtml2 += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
-          if (r.saved_solution) { dlHtml2 += ' <span style="color:#166534;">· ✓ сохранено в «Решённые задачи»</span>'; }
-          if (dlError) { dlHtml2 += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
-          dlBlock.innerHTML = dlHtml2;
-          answerPre.textContent = b.raw_response || b.short_response || '';
-          codePre.textContent = b.code || '— код не извлечён —';
-          if (downloadLink) { downloadLink.style.display = b.code ? '' : 'none'; }
-        };
-        var loadBody = function () {
-          if (bodyLoaded) { return; }
-          fetchResultBody(resultId).then(fillBody).catch(function () {
-            dlBlock.innerHTML = '<strong>DL тест:</strong> <span style="color:#6b7280;">итог тестов отсутствует</span>';
-            answerPre.textContent = 'Не удалось загрузить ответ модели.';
-            codePre.textContent = '— код недоступен —';
+    groups.forEach(function (group) {
+      var solvedCount = group.tasks.filter(function (t) { return t.verdict === 'solved'; }).length;
+      var totalTokens = group.tasks.reduce(function (s, t) { return s + (t.tokens || 0); }, 0);
+      var withTime = group.tasks.filter(function (t) { return t.duration != null; });
+      var avgTime = withTime.length
+        ? (withTime.reduce(function (s, t) { return s + (t.duration || 0); }, 0) / withTime.length).toFixed(1)
+        : '';
+
+      var modelCard = document.createElement('details');
+      // Кромка группы — итог модели: зелёная (всё решено), красная (ни одной),
+      // серая (частично).
+      modelCard.className = 'arm-model-group '
+        + (solvedCount === group.tasks.length ? 'all-solved'
+          : (solvedCount === 0 ? 'none-solved' : 'part-solved'));
+      var mkey = 'm:' + group.key;
+      modelCard.setAttribute('data-key', mkey);
+      if (openKeys.has(mkey)) { modelCard.setAttribute('open', ''); }
+
+      var mSummary = document.createElement('summary');
+      var mHead = document.createElement('div');
+      mHead.className = 'arm-model-head';
+      var mTitle = document.createElement('span');
+      mTitle.className = 'arm-model-title';
+      mTitle.innerHTML = '<span class="arm-model-arrow">▸</span>' + escapeHtml(group.title);
+      mHead.appendChild(mTitle);
+      var mMeta = document.createElement('div');
+      mMeta.className = 'arm-model-meta';
+      mMeta.textContent = 'Решено: ' + solvedCount + ' из ' + group.tasks.length
+        + (avgTime ? ' · среднее время: ' + avgTime + ' сек' : '')
+        + (totalTokens ? ' · токенов: ' + totalTokens : '');
+      mSummary.appendChild(mHead);
+      mSummary.appendChild(mMeta);
+      modelCard.appendChild(mSummary);
+
+      var tasksEl = document.createElement('div');
+      tasksEl.className = 'arm-model-tasks';
+      group.tasks.forEach(function (r) {
+        var cls = r.verdict === 'solved' ? 'solved' : (r.verdict === 'failed' ? 'failed' : 'skipped');
+        var card = document.createElement('details');
+        card.className = 'arm-result ' + cls;
+        var rkey = (r.task_node_id || '') + ':' + (r.model_key || '');
+        card.setAttribute('data-key', rkey);
+        if (openKeys.has(rkey)) { card.setAttribute('open', ''); }
+
+        var lazy = !!r.lazy_body;               // тело подтягивается по AJAX
+        var dlComment = r.dl_comment || '';
+        var dlError = r.dl_error || '';
+        var dlQueueId = r.dl_queue_id || 0;
+        var code = r.code || '';
+        var resultId = r.result_id || '';
+
+        var summary = document.createElement('summary');
+        var top = document.createElement('div');
+        top.className = 'arm-result-top';
+        var title = document.createElement('span');
+        title.className = 'arm-result-title';
+        // Модель уже в шапке группы — в заголовке задачи только её имя.
+        title.textContent = '#' + (r.task_node_id || '') + ' ' + (r.task_name || '');
+        top.appendChild(title);
+        top.insertAdjacentHTML('beforeend', verdictBadge(r.verdict));
+        var meta = document.createElement('div');
+        meta.className = 'arm-meta';
+        meta.textContent = (r.duration != null ? r.duration : '') + ' сек | ' + (r.tokens != null ? r.tokens : '') + ' ток.';
+        summary.appendChild(top);
+        summary.appendChild(meta);
+
+        var body = document.createElement('div');
+        body.className = 'arm-result-body';
+
+        var dlBlock = document.createElement('div');
+        dlBlock.style.cssText = 'padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:13px; color:#1f2937; background:' + (r.verdict === 'solved' ? '#dcfce7' : '#fee2e2') + ';';
+        var dlHtml = '<strong>DL тест:</strong> ';
+        if (dlComment) { dlHtml += escapeHtml(dlComment); } else { dlHtml += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
+        if (dlQueueId) { dlHtml += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
+        if (r.saved_solution) { dlHtml += ' <span style="color:#166534;">· ✓ сохранено в «Решённые задачи»</span>'; }
+        if (dlError) { dlHtml += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
+        dlBlock.innerHTML = dlHtml;
+        body.appendChild(dlBlock);
+
+        var answerLabel = document.createElement('div');
+        answerLabel.style.cssText = 'margin:8px 0 4px; font-weight:600; font-size:13px;';
+        answerLabel.textContent = 'Полный ответ модели:';
+        body.appendChild(answerLabel);
+        var answerPre = document.createElement('pre');
+        body.appendChild(answerPre);
+
+        var codeLabel = document.createElement('div');
+        codeLabel.style.cssText = 'margin:10px 0 4px; font-weight:600; font-size:13px;';
+        codeLabel.textContent = 'Извлечённый код программы:';
+        body.appendChild(codeLabel);
+        var codePre = document.createElement('pre');
+        body.appendChild(codePre);
+        var downloadLink = null;
+        if (resultId) {
+          downloadLink = document.createElement('a');
+          downloadLink.href = downloadBase + encodeURIComponent(resultId) + '/download/';
+          downloadLink.className = 'arm-button';
+          downloadLink.style.cssText = 'display:inline-block; margin-top:6px;';
+          downloadLink.textContent = 'Скачать код';
+          body.appendChild(downloadLink);
+        }
+
+        if (lazy) {
+          // Тело ещё не в снапшоте: плейсхолдеры + подгрузка при раскрытии.
+          // Содержимое dl-блока тоже приходит из body-эндпоинта.
+          dlBlock.innerHTML = '<strong>DL тест:</strong> <span style="color:#6b7280;">' +
+            (card.open ? 'загрузка…' : 'раскройте строку для загрузки') + '</span>';
+          answerPre.textContent = '';
+          codePre.textContent = '';
+          if (downloadLink) { downloadLink.style.display = 'none'; }
+          var bodyLoaded = false;
+          var fillBody = function (b) {
+            bodyLoaded = true;
+            dlComment = b.dl_comment || '';
+            dlError = b.dl_error || '';
+            var dlHtml2 = '<strong>DL тест:</strong> ';
+            if (dlComment) { dlHtml2 += escapeHtml(dlComment); } else { dlHtml2 += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
+            if (dlQueueId) { dlHtml2 += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
+            if (r.saved_solution) { dlHtml2 += ' <span style="color:#166534;">· ✓ сохранено в «Решённые задачи»</span>'; }
+            if (dlError) { dlHtml2 += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
+            dlBlock.innerHTML = dlHtml2;
+            answerPre.textContent = b.raw_response || b.short_response || '';
+            codePre.textContent = b.code || '— код не извлечён —';
+            if (downloadLink) { downloadLink.style.display = b.code ? '' : 'none'; }
+          };
+          var loadBody = function () {
+            if (bodyLoaded) { return; }
+            fetchResultBody(resultId).then(fillBody).catch(function () {
+              dlBlock.innerHTML = '<strong>DL тест:</strong> <span style="color:#6b7280;">итог тестов отсутствует</span>';
+              answerPre.textContent = 'Не удалось загрузить ответ модели.';
+              codePre.textContent = '— код недоступен —';
+            });
+          };
+          if (card.open) { loadBody(); }  // карточка восстановлена раскрытой
+          card.addEventListener('toggle', function () {
+            if (card.open) { loadBody(); }
           });
-        };
-        if (card.open) { loadBody(); }  // карточка восстановлена раскрытой
-        card.addEventListener('toggle', function () {
-          if (card.open) { loadBody(); }
-        });
-      } else {
-        // Полный item в снапшоте (обратная совместимость) — рендер как раньше.
-        answerPre.textContent = r.raw_response || r.short_response || '';
-        codePre.textContent = code || '— код не извлечён —';
-        if (downloadLink && !code) { downloadLink.style.display = 'none'; }
-      }
+        } else {
+          // Полный item в снапшоте (обратная совместимость) — рендер как раньше.
+          answerPre.textContent = r.raw_response || r.short_response || '';
+          codePre.textContent = code || '— код не извлечён —';
+          if (downloadLink && !code) { downloadLink.style.display = 'none'; }
+        }
 
-      card.appendChild(summary);
-      card.appendChild(body);
-      if (resultsEl) { resultsEl.appendChild(card); }
+        card.appendChild(summary);
+        card.appendChild(body);
+        tasksEl.appendChild(card);
+      });
+
+      modelCard.appendChild(tasksEl);
+      if (resultsEl) { resultsEl.appendChild(modelCard); }
     });
   }
 
@@ -539,7 +614,8 @@ window.ArmBatchResults = (function () {
     var resultsHead = document.createElement('div'); resultsHead.className = 'arm-section-head';
     var resultsHeadLeft = document.createElement('div');
     var resultsH2 = document.createElement('h2'); resultsH2.textContent = 'Ответы моделей';
-    var resultsNote = document.createElement('p'); resultsNote.className = 'arm-section-note'; resultsNote.textContent = 'Откройте строку, чтобы увидеть полный ответ';
+    var resultsNote = document.createElement('p'); resultsNote.className = 'arm-section-note';
+    resultsNote.textContent = 'Раскройте модель — внутри её задачи, вердикты и полные ответы';
     resultsHeadLeft.appendChild(resultsH2); resultsHeadLeft.appendChild(resultsNote);
     resultsHead.appendChild(resultsHeadLeft);
     resultsCard.appendChild(resultsHead);

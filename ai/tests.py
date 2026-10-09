@@ -9,7 +9,7 @@ from django.contrib.auth import SESSION_KEY, get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.auth.models import Group
 from django.contrib.sessions.middleware import SessionMiddleware
-from django.test import SimpleTestCase, RequestFactory, TestCase, override_settings
+from django.test import SimpleTestCase, RequestFactory, TestCase, TransactionTestCase, override_settings
 from pathlib import Path
 import json
 import re
@@ -46,6 +46,7 @@ from ai.models import (
     ProgrammingLanguage,
     Prompt,
     SharedPrompt,
+    Task,
     TaskSolution,
     Topic,
     UpdateLog,
@@ -3271,7 +3272,10 @@ class BatchRunnerIntegrationTests(TestCase):
     thread runs on a separate DB connection which a TestCase's per-test
     transaction would hide. The worker function is the unit that owns the
     handler calls, grading, persistence and report — exercising it directly is a
-    faithful, deterministic test of that logic.
+    faithful, deterministic test of that logic. Одно-модельный прогон после
+    распараллеливания выполняется inline в вызывающем потоке (model-loop при
+    N==1 не создаёт потоков), поэтому ORM в теле пары остаётся на коннекции
+    вызывающего потока и TestCase-транзакция по-прежнему видна.
     """
 
     def setUp(self):
@@ -3353,6 +3357,448 @@ class BatchRunnerIntegrationTests(TestCase):
         self.assertEqual(log.error_message, "")
 
 
+class BatchParallelWorkerTests(TransactionTestCase):
+    """Параллельное решение batch-solve: каждая модель — независимый цикл.
+
+    Model-потоки работают с БД на собственных соединениях, TestData TestCase
+    транзакции им не видна — поэтому TransactionTestCase (данные реально
+    закоммичены). Воркер вызывается синхронно в тестовом потоке (как в
+    BatchRunnerIntegrationTests), но сам он поднимает model-потоки (при
+    единственной модели её цикл выполняется inline). DL-фаза сериализована
+    run-level локом: перекрывается генерация кода, а send-solution + полл
+    идут по очереди (одна DLSID-сессия на прогон).
+    """
+
+    def setUp(self):
+        from ai.models import Task
+        self.user = get_user_model().objects.create_user(username="parallel", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name_ru="Параллельные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=9101, task_id=9201, name="A", statement="Сложите a и b",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.t2 = Task.objects.create(
+            node_id=9102, task_id=9202, name="B", statement="Выведите n",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+    def _seed_job(self, run_id, total_pairs, rerun=False):
+        import time as _t
+        from ai import arm_runner
+
+        now_ts = _t.time()
+        job = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 2, "total_pairs": total_pairs,
+            "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "", "current_model_title": "",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        if rerun:
+            job["rerun"] = True
+        arm_runner._jobs[run_id] = job
+        return job
+
+    @staticmethod
+    def _dl_ok():
+        def dl_mock(sid, node_id, code, ext, **kw):
+            return {
+                "verdict": "solved", "comment": "Все тесты успешно пройдены",
+                "submit_error": "", "queue_id": 21, "code_sent": code,
+            }
+        return dl_mock
+
+    @staticmethod
+    def _make_handler(key, calls):
+        """Хендлер, записывающий (модель, нода, поток, интервал) вызова."""
+        import asyncio
+        import threading
+
+        async def handler(messages, conv_id):
+            started = time.monotonic()
+            node_id = int(conv_id.rsplit("-", 1)[1])
+            await asyncio.sleep(0.3)
+            calls.append({
+                "model_key": key, "node_id": node_id,
+                "thread": threading.get_ident(),
+                "start": started, "end": time.monotonic(),
+            })
+            return ("program p; begin writeln(1); end.", 7)
+
+        return handler
+
+    def _calls_for(self, calls, key):
+        return [c for c in calls if c["model_key"] == key]
+
+    def test_parallel_models_solve_independently(self):
+        """2 модели × 2 задачи: каждая пара решена ровно один раз, циклы моделей
+        перекрываются по времени (модель не ждёт другую), прогресс per-model полный."""
+        import threading
+        import time as _t
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+        models = [
+            {"key": "ModelA", "title": "Model A", "handler": self._make_handler("ModelA", calls)},
+            {"key": "ModelB", "title": "Model B", "handler": self._make_handler("ModelB", calls)},
+        ]
+        node_ids = [self.t1.node_id, self.t2.node_id]
+        run_id = "par-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=4)
+        # Циклы моделей выполняются в РАЗНЫХ потоках. Идентичность потока
+        # снимаем spy-обёрткой вокруг _process_batch_pair: внутри самого
+        # хендлера get_ident() не равен потоку цикла — корутину исполняет
+        # event-loop asgiref'а, а не поток model-loop'а.
+        pair_threads = {}
+        orig_pair = arm_runner._process_batch_pair
+
+        def spy_pair(ctx, task_ctx, model, dl_lock):
+            pair_threads.setdefault(
+                model["key"], set()
+            ).add((threading.get_ident(), task_ctx["node_id"]))
+            return orig_pair(ctx, task_ctx, model, dl_lock)
+
+        try:
+            with patch.object(arm_runner, "_process_batch_pair", spy_pair):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, node_ids, models, self.user.id, "DLSID-1",
+                        ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        # Каждая пара (модель × задача) записана ровно один раз.
+        rows = list(AIModelTestResult.objects.filter(run=run))
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(
+            {(r.model_key, r.task.node_id) for r in rows},
+            {(m["key"], t.node_id) for m in models for t in (self.t1, self.t2)},
+        )
+        a, b = self._calls_for(calls, "ModelA"), self._calls_for(calls, "ModelB")
+        self.assertEqual(len(a), 2)
+        self.assertEqual(len(b), 2)
+        # Обе пары модели — в одном потоке; потоки моделей различаются.
+        self.assertEqual(len({tid for tid, _ in pair_threads["ModelA"]}), 1)
+        self.assertEqual(len({tid for tid, _ in pair_threads["ModelB"]}), 1)
+        self.assertNotEqual(
+            next(iter(pair_threads["ModelA"])), next(iter(pair_threads["ModelB"]))
+        )
+        overlap = any(
+            max(c1["start"], c2["start"]) < min(c1["end"], c2["end"])
+            for c1 in a for c2 in b
+        )
+        self.assertTrue(overlap, "model loops should run concurrently")
+        # Вердикты по DL-моку: все решены; per-model прогресс полный.
+        self.assertTrue(all(r.verdict == "solved" for r in rows))
+        self.assertEqual(job["completed_pairs"], 4)
+        self.assertEqual(
+            sorted((e["model_key"], e["done"], e["total"], e["status"])
+                   for e in job["model_progress"]),
+            [("ModelA", 2, 2, "done"), ("ModelB", 2, 2, "done")],
+        )
+
+    def test_one_model_failure_does_not_stop_others(self):
+        """Хендлер одной модели всегда падает: её пары — failed с дружелюбной
+        ошибкой, вторая модель решает свои пары, прогон всё равно completed."""
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        async def broken_handler(messages, conv_id):
+            raise RuntimeError("handler exploded")
+
+        async def ok_handler(messages, conv_id):
+            return ("program p; begin writeln(1); end.", 7)
+
+        models = [
+            {"key": "ModelA", "title": "Model A", "handler": broken_handler},
+            {"key": "ModelB", "title": "Model B", "handler": ok_handler},
+        ]
+        run_id = "parfail-" + uuid.uuid4().hex[:8]
+        self._seed_job(run_id, total_pairs=4)
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t1.node_id, self.t2.node_id], models,
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        rows = list(AIModelTestResult.objects.filter(run=run))
+        self.assertEqual(len(rows), 4)
+        a_rows = [r for r in rows if r.model_key == "ModelA"]
+        b_rows = [r for r in rows if r.model_key == "ModelB"]
+        # Модель A: каждая пара честно записана как ошибка модели.
+        self.assertEqual(len(a_rows), 2)
+        self.assertTrue(all(r.verdict == "failed" for r in a_rows))
+        self.assertTrue(all("handler exploded" in (r.dl_error or "") for r in a_rows))
+        # Модель B: обе пары решены — падение соседа её не задело.
+        self.assertTrue(all(r.verdict == "solved" for r in b_rows))
+
+    def test_model_loop_crash_marks_progress_error(self):
+        """Падение цикла модели вне тела пары (сбой БД-записи): статус модели
+        «error» в model_progress, вторая модель дорешивает, прогон completed,
+        в ошибке журнала — примечание о прерванной модели."""
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        async def ok_handler(messages, conv_id):
+            return ("program p; begin writeln(1); end.", 7)
+
+        real_update = AIModelTestResult.objects.update_or_create
+
+        def flaky_update_or_create(**kwargs):
+            if kwargs.get("model_key") == "ModelA":
+                raise RuntimeError("db write exploded")
+            return real_update(**kwargs)
+
+        models = [
+            {"key": "ModelA", "title": "Model A", "handler": ok_handler},
+            {"key": "ModelB", "title": "Model B", "handler": ok_handler},
+        ]
+        run_id = "parcrash-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=4)
+        try:
+            with patch.object(AIModelTestResult.objects, "update_or_create", flaky_update_or_create):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id, self.t2.node_id], models,
+                        self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        # Падение одного model-цикла НЕ валит прогон в FAILED.
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        # ModelB решила все свои пары; ModelA — ни одной (каждая запись падала).
+        rows = [r.model_key for r in AIModelTestResult.objects.filter(run=run)]
+        self.assertEqual(rows, ["ModelB", "ModelB"])
+        progress = {e["model_key"]: e for e in job["model_progress"]}
+        self.assertEqual(progress["ModelA"]["status"], "error")
+        self.assertEqual(progress["ModelB"]["status"], "done")
+        # Примечание о прерванной модели — в журнале; статус лога Error.
+        log = AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
+        self.assertEqual(log.status, AIRequestLog.STATUS_ERROR)
+        self.assertIn("Модели, прерванные ошибкой цикла: «Model A»", log.error_message)
+
+    def test_cancel_mid_run_stops_models_and_keeps_partial(self):
+        """Отмена на середине прогона: обе модели обрывают текущую пару, БД —
+        STATUS_CANCELLED, записаны только завершённые пары."""
+        import time as _t
+        import threading
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+
+        gate = threading.Event()
+
+        def make_blocked_handler(key):
+            async def handler(messages, conv_id):
+                node_id = int(conv_id.rsplit("-", 1)[1])
+                if node_id == self.t2.node_id:
+                    # Вторая пара блокируется до отмены.
+                    gate.wait(timeout=15)
+                return ("program p; begin writeln(1); end.", 7)
+            return handler
+
+        models = [
+            {"key": "ModelA", "title": "Model A", "handler": make_blocked_handler("ModelA")},
+            {"key": "ModelB", "title": "Model B", "handler": make_blocked_handler("ModelB")},
+        ]
+        run_id = "parcancel-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=4)
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                worker = threading.Thread(
+                    target=lambda: arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id, self.t2.node_id], models,
+                        self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                    ),
+                    daemon=True,
+                )
+                worker.start()
+                # Ждём, пока обе модели решат первую пару (по одной на модель).
+                deadline = _t.time() + 15
+                while _t.time() < deadline and job["completed_pairs"] < 2:
+                    _t.sleep(0.05)
+                self.assertEqual(job["completed_pairs"], 2)
+                self.assertEqual(
+                    {(e["done"], e["total"]) for e in job["model_progress"]},
+                    {(1, 2)},
+                )
+                arm_runner.cancel_arm_run(run_id)
+                gate.set()
+                worker.join(timeout=30)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_CANCELLED)
+        # Мгновенный flip cancel_arm_run уже выставил job-статус; финализация
+        # его не перетёрла и частичные результаты сохранились.
+        self.assertEqual(job["status"], "cancelled")
+        self.assertEqual(len(job["results"]), 2)
+        # Блокированные вторые пары не записаны: каждая модель по одной паре.
+        self.assertTrue(
+            all(e["done"] == 1 and e["total"] == 2 for e in job["model_progress"]),
+        )
+
+    def test_rerun_parallel_merges_into_same_run_and_skips_other_models(self):
+        """Попарный перезапуск на двух моделях: каждая модель перезапускает
+        ТОЛЬКО свои нерешённые пары, строки вливаются в тот же прогон без
+        дублирования, отчёт — из всех строк, started_at сохранён."""
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        started_at = timezone.now()
+        run_id = "parrerun-" + uuid.uuid4().hex[:8]
+        test_run = AIModelTestRun.objects.create(
+            run_id=run_id, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            user=self.user, status=AIModelTestRun.STATUS_COMPLETED,
+            started_at=started_at, finished_at=timezone.now(),
+            total_models=2,
+            message=f"Batch solve: 2 задач × 2 моделей",
+        )
+        async def solved_handler(messages, conv_id):
+            return ("program p; begin writeln(1); end.", 7)
+
+        models = [
+            {"key": "ModelA", "title": "Model A", "handler": solved_handler},
+            {"key": "ModelB", "title": "Model B", "handler": solved_handler},
+        ]
+        # 4 строки: перезапускать нечего... перезапускаем ровно 2 нерешённые
+        # пары (t1×ModelA, t2×ModelB); строки соседних моделей не трогаем.
+        for model in models:
+            for task in (self.t1, self.t2):
+                solved = (task is self.t2 and model["key"] == "ModelA") or \
+                         (task is self.t1 and model["key"] == "ModelB")
+                AIModelTestResult.objects.create(
+                    run=test_run, model_key=model["key"], task=task,
+                    model_title=model["title"],
+                    status="ok" if solved else "error",
+                    verdict="solved" if solved else "failed",
+                    duration_seconds=1.0,
+                )
+        rerun_pairs = {self.t1.node_id: {"ModelA"}, self.t2.node_id: {"ModelB"}}
+        job = self._seed_job(run_id, total_pairs=2, rerun=True)
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t1.node_id, self.t2.node_id], models,
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                    rerun=True, rerun_pairs=rerun_pairs,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        rows = list(AIModelTestResult.objects.filter(run=run).order_by("model_key", "task_id"))
+        # Строки НЕ дублируются (update_or_create в тот же run).
+        self.assertEqual(len(rows), 4)
+        by_pair = {(r.model_key, r.task_id): r for r in rows}
+        # Перезапущенные пары решены; соседние строки (чужие модели) не тронуты
+        # ни вердиктом, ни DL-комментарием (переперезапуск не задел «не мою» пару).
+        self.assertEqual(by_pair[("ModelA", self.t1.id)].verdict, "solved")
+        self.assertEqual(by_pair[("ModelB", self.t2.id)].verdict, "solved")
+        for untouched in (("ModelA", self.t2.id), ("ModelB", self.t1.id)):
+            row = by_pair[untouched]
+            self.assertEqual(row.verdict, "solved")          # решена была — не перезапускали
+            self.assertEqual(row.dl_comment, "")             # DL-мок перезапуска её не касался
+            self.assertEqual(row.duration_seconds, 1.0)      # исходные значения сохранены
+        # Отчёт финализирован из ВСЕХ строк прогона: 4 решено / 0 провалено.
+        self.assertEqual(run.report["total_pairs"], 4)
+        self.assertEqual(run.report["solved"], 4)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        # Отсчёт «Прогон» — от исходного started_at.
+        self.assertEqual(run.started_at, started_at)
+        self.assertTrue(
+            AIRequestLog.objects.filter(message=f"Batch solve rerun {run_id}").exists(),
+        )
+
+
+class ArmModelProgressSnapshotTests(TestCase):
+    """job["model_progress"] доезжает до снапшотов: light-пасsthrough живого
+    job и _snapshot_from_test_run (БД-путь с живым job)."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="snapshots", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
+        self.task = Task.objects.create(
+            node_id=9501, task_id=9601, name="A", statement="do",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+    @staticmethod
+    def _progress():
+        return [
+            {"model_key": "ModelA", "model_title": "Model A", "done": 1, "total": 2,
+             "current_task_node_id": 9501, "current_task_name": "A", "status": "running"},
+            {"model_key": "ModelB", "model_title": "Model B", "done": 2, "total": 2,
+             "current_task_node_id": "", "current_task_name": "", "status": "done"},
+        ]
+
+    def _seed(self, run_id, rerun=False):
+        import time as _t
+        from ai import arm_runner
+
+        now_ts = _t.time()
+        job = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 2, "total_pairs": 4,
+            "completed_pairs": 3, "completed_models": 1,
+            "current_model_key": "ModelA", "current_model_title": "Model A",
+            "current_task_node_id": 9501, "current_task_name": "A",
+            "model_progress": self._progress(), "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        if rerun:
+            job["rerun"] = True
+        arm_runner._jobs[run_id] = job
+        return job
+
+    def test_light_snapshot_carries_model_progress(self):
+        from ai import arm_runner
+
+        run_id = "mp-snap-" + uuid.uuid4().hex[:8]
+        job = self._seed(run_id)
+        try:
+            snapshot = arm_runner.get_arm_run_snapshot(run_id, light_results=True)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        self.assertEqual(snapshot["model_progress"], self._progress())
+        self.assertEqual(snapshot["current_task_name"], "A")
+        self.assertEqual(snapshot["current_model_title"], "Model A")
+
+    def test_db_snapshot_reads_model_progress_from_live_job(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+
+        run_id = "mp-db-" + uuid.uuid4().hex[:8]
+        test_run = AIModelTestRun.objects.create(
+            run_id=run_id, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            user=self.user, status=AIModelTestRun.STATUS_RUNNING,
+            started_at=timezone.now(), total_models=2,
+        )
+        job = self._seed(run_id)
+        try:
+            snapshot = arm_runner._snapshot_from_test_run(test_run, light_results=True)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        self.assertEqual(len(snapshot["results"]), 0)
+        self.assertEqual(snapshot["model_progress"], self._progress())
+        self.assertEqual(snapshot["current_model_key"], "ModelA")
+
+
 class TestSolutionOnDlTests(SimpleTestCase):
     """``_test_solution_on_dl``: на любой отказ send-solution (400/500/…)
     пробует taskId вместо nodeId (гипотеза пользователя: «с твоим nodeId —
@@ -3365,7 +3811,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
 
         calls = []
 
-        def fake_send(session_id, node_id, code, file_extension, course_id=0):
+        def fake_send(session_id, node_id, code, file_extension, course_id=0, **kw):
             calls.append(node_id)
             if node_id == 2606747:
                 raise DLServerError(
@@ -3398,7 +3844,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
 
         calls = []
 
-        def fake_send(session_id, node_id, code, file_extension, course_id=0):
+        def fake_send(session_id, node_id, code, file_extension, course_id=0, **kw):
             calls.append(node_id)
             if node_id == 2606747:
                 raise DLServerError(
@@ -3427,7 +3873,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
         from ai import arm_runner
         from ai.dl_api_client import DLServerError
 
-        def fake_send(session_id, node_id, code, file_extension, course_id=0):
+        def fake_send(session_id, node_id, code, file_extension, course_id=0, **kw):
             raise DLServerError(
                 f"send-solution(nodeId={node_id}, fileExtension='.mpc', "
                 f"codeLen=111, codeHead='...'): DL API вернул ошибку "
@@ -3456,7 +3902,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
 
         calls = []
 
-        def fake_send(session_id, node_id, code, file_extension, course_id=0):
+        def fake_send(session_id, node_id, code, file_extension, course_id=0, **kw):
             calls.append(node_id)
             raise DLServerError(
                 f"send-solution(nodeId={node_id}, ...): DL API вернул ошибку "
@@ -5033,6 +5479,29 @@ class SendSolutionCourseIdTests(SimpleTestCase):
 
         # Обратная совместимость: без явного course_id поле всё равно есть (=0).
         self.assertEqual(captured["json"]["courseId"], 0)
+
+    def test_body_has_no_undocumented_filename_fields(self):
+        """Контракт send-solution — строго задокументированные поля: имя файла
+        решения DL генерирует сама (api_solution_*), «экспериментальные»
+        fileName/solutionFileName из тела убраны (прогоны с ними отдавали 400)."""
+        from ai import dl_api_client
+
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+            content = b'{"queueId": 42, "message": "ok"}'
+
+        def fake_dl_request(method, path, **kwargs):
+            captured["json"] = kwargs.get("json")
+            return FakeResponse()
+
+        with patch("ai.dl_api_client._dl_request", fake_dl_request):
+            dl_api_client.send_solution_to_dl("SID", 9101, "program a;", ".pas")
+        self.assertEqual(
+            set(captured["json"]),
+            {"sessionId", "nodeId", "code", "fileExtension", "courseId"},
+        )
 
     def test_payload_context_includes_course_id(self):
         from ai.dl_api_client import _send_solution_payload_context

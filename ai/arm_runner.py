@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
+from django.db import close_old_connections
 from django.utils import timezone
 
 # Хелперы распознавания прозы/кода живут в services/code_carver.py
@@ -493,11 +494,7 @@ def _save_batch_task_solution(*, task, model, code, dl_comment, file_extension, 
     prompt_name = ""
     if prompt_id:
         if prompt_id not in prompt_name_cache:
-            from .models import Prompt
-            prompt_name_cache[prompt_id] = (
-                Prompt.objects.filter(pk=prompt_id)
-                .values_list("prompt_name_ru", flat=True).first() or ""
-            )
+            prompt_name_cache[prompt_id] = _prompt_display_name(prompt_id)
         prompt_name = prompt_name_cache[prompt_id]
     outcome = record_batch_solution(
         node_id=task.node_id,
@@ -1165,6 +1162,253 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
     return result
 
 
+def _build_batch_model_progress(ordered_models, tasks, rerun_pairs):
+    """Per-model прогресс прогона (job["model_progress"]); порядок = ordered_models.
+
+    total — сколько пар у модели в этом прогоне (у перезапуска — только её
+    нерешённые пары); done/current_*/status ведут model-потоки под _jobs_lock.
+    """
+    entries = []
+    for model in ordered_models:
+        if rerun_pairs is not None:
+            total = sum(
+                1 for task in tasks
+                if model["key"] in (rerun_pairs.get(task.node_id) or ())
+            )
+        else:
+            total = len(tasks)
+        entries.append({
+            "model_key": model["key"],
+            "model_title": model["title"],
+            "done": 0,
+            "total": total,
+            "current_task_node_id": "",
+            "current_task_name": "",
+            "status": "running",
+        })
+    return entries
+
+
+def _acquire_dl_run_lock(dl_lock, run_id):
+    """Взять run-level DL-лок, оставаясь отзывчивым к отмене.
+
+    Фаза тестирования на DL (ensure_course_session + send-solution + полл) —
+    единственный общий ресурс model-потоков прогона (одна DLSID-сессия на весь
+    прогон), поэтому сериализуется локом. Ожидание чужого DL-теста может
+    длиться до max_polls*poll_interval (до 90с) — крутим acquire с таймаутом,
+    между попытками проверяя cancel_requested. True — лок ВЗЯТ (обязательно
+    вызвать dl_lock.release()); False — отмена/нет прогона, лок не взят.
+    """
+    while True:
+        if dl_lock.acquire(timeout=1.0):
+            if _is_cancel_requested(run_id):
+                dl_lock.release()
+                return False
+            return True
+        if _is_cancel_requested(run_id):
+            return False
+
+
+def _prepare_batch_run(
+    state, run_id, node_ids, ordered_models, user_id, session_id, *,
+    ui_language, dl_test, prompt_id, course_id, solve_file_extension,
+    solve_prog_lang_name, programming_language_id, programming_language_name,
+    prompt_name, topic_id, topic_name, run_params, rerun, rerun_pairs,
+    start_time, run_name="", save_solutions=False,
+):
+    """Однопоточная подготовка batch-прогона (фаза воркера до model-потоков).
+
+    Создаёт/переиспользует AIModelTestRun + AIRequestLog, резолвит задачи
+    (ensure_task) и вычисляет per-task контекст (расширение/язык/тема/
+    препромпт) — model-потоки получают готовые данные и не мутируют общих
+    кэшей. ``state`` — изменяемый dict, куда test_run/log кладутся сразу после
+    создания: если подготовка упадёт дальше, внешний обработчик воркера всё
+    ещё сможет пометить их FAILED. Возвращает ctx для model-потоков; None —
+    писать нечего (guard «нет задач/моделей»: failed-записи сделаны здесь же,
+    воркер просто завершается).
+    """
+    from .services.task_registry import EXTENSION_TO_LANG, ensure_task
+
+    user, username, external_id, full_name = _resolve_user(user_id)
+    models_titles = [m["title"] for m in ordered_models]
+    run_name = run_name or (run_params or {}).get("run_name", "")
+
+    if rerun:
+        # Перезапуск нерешённых пар: прогон уже есть в БД — переиспользуем
+        # его строку (результаты вольются update_or_create'ом в тот же run);
+        # отсчёт «Прогон» на фронте — от исходного started_at.
+        rerun_pairs_count = sum(len(keys) for keys in (rerun_pairs or {}).values())
+        AIModelTestRun.objects.filter(run_id=run_id).update(
+            status=AIModelTestRun.STATUS_RUNNING,
+            finished_at=None,
+            error_message="",
+            message=f"Batch solve rerun {run_id}: {rerun_pairs_count} нерешённых пар",
+        )
+        test_run = AIModelTestRun.objects.get(run_id=run_id)
+    else:
+        test_run = AIModelTestRun.objects.create(
+            run_id=run_id,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            user=user,
+            status=AIModelTestRun.STATUS_RUNNING,
+            started_at=start_time,
+            message=f"Batch solve: {len(node_ids)} задач × {len(ordered_models)} моделей",
+            total_models=len(ordered_models),
+            programming_language_id=programming_language_id,
+            programming_language_name=programming_language_name or "",
+            topic_id=topic_id,
+            topic_name=topic_name or "",
+            prompt_id=prompt_id,
+            prompt_name=prompt_name or "",
+            course_id=course_id or None,
+            run_params=run_params or {},
+            run_name=(run_name or "")[:255],
+        )
+    state["test_run"] = test_run
+    log = AIRequestLog.objects.create(
+        user=user,
+        username=username,
+        external_user_id=external_id,
+        user_full_name=full_name,
+        source=AIRequestLog.SOURCE_ARM,
+        mode=AIRequestLog.MODE_BATCH_SOLVE,
+        sent_at=start_time,
+        model_names=models_titles,
+        message=f"Batch solve rerun {run_id}" if rerun else f"Batch solve run {run_id}",
+        programming_language_id=programming_language_id,
+        programming_language_name=programming_language_name or "",
+        topic_id=topic_id,
+        topic_name=topic_name or "",
+        prompt_id=prompt_id,
+        prompt_name=prompt_name or "",
+    )
+    state["log"] = log
+
+    # Resolve node_ids → Task objects via DL get-task-info + ensure_task.
+    # Язык формы прогона прокидывается в ensure_task: задача получает язык
+    # текущего прогона, а тема чужого языка перегадывается из path с
+    # фильтром по этому языку — иначе _resolve_batch_prompt резолвит
+    # (новый язык, stale-тема старого) и не находит точную привязку.
+    tasks = []
+    for node_id in node_ids:
+        task = ensure_task(
+            node_id, session_id=session_id, course_id=course_id,
+            programming_language_id=programming_language_id,
+        )
+        if task is None:
+            continue
+        tasks.append(task)
+
+    # Refetch со select_related: model-потоки читают task.topic.* /
+    # task.programming_language.* в теле пары — ленивая загрузка FK дала бы
+    # лишний запрос на каждую пару и работала на чужом соединении.
+    fetched = Task.objects.filter(
+        pk__in=[t.pk for t in tasks]
+    ).select_related("topic", "programming_language").in_bulk()
+    tasks = [fetched[t.pk] for t in tasks if t.pk in fetched]
+
+    # Перезапуск: у каждой задачи — СВОЙ набор моделей (только нерешённые
+    # пары), поэтому объём считается попарно, а не tasks × models.
+    total_pairs = len(tasks) * len(ordered_models)
+    if rerun_pairs is not None:
+        total_pairs = sum(
+            1 for task in tasks for model in ordered_models
+            if model["key"] in (rerun_pairs.get(task.node_id) or ())
+        )
+    _update_job(
+        run_id,
+        total_pairs=total_pairs,
+        completed_pairs=0,
+        model_progress=_build_batch_model_progress(ordered_models, tasks, rerun_pairs),
+        current_task_node_id=tasks[0].node_id if tasks else "",
+        current_task_name=tasks[0].name if tasks else "",
+        current_model_key=ordered_models[0]["key"] if ordered_models else "",
+        current_model_title=ordered_models[0]["title"] if ordered_models else "",
+    )
+
+    if not tasks or not ordered_models:
+        _update_job(run_id, status="failed", error_message="Нет задач или моделей для запуска.")
+        end_time = timezone.now()
+        AIModelTestRun.objects.filter(pk=test_run.pk).update(
+            status=AIModelTestRun.STATUS_FAILED, finished_at=end_time,
+            error_message="Нет задач или моделей для запуска",
+        )
+        AIRequestLog.objects.filter(pk=log.pk).update(
+            received_at=end_time, status=AIRequestLog.STATUS_ERROR,
+            error_message="Нет задач или моделей для запуска",
+        )
+        return None
+
+    # Препромпты по привязке резолвятся per-task; кэш по (язык, тема) —
+    # задачи одной темы не дёргают БД повторно. Строится ЗДЕСЬ (однопоточно),
+    # дальше model-потоки его только читают.
+    prompt_cache: dict = {}
+    task_ctxs = []
+    for task in tasks:
+        topic_name = task.topic.topic_name_ru if task.topic else ""
+        # Расширение для DL-тестирования: ручной выбор пользователя имеет
+        # приоритет над авто-определением задачи (тема из дерева DL не задаёт
+        # язык однозначно — курс "[Ассемблер i8086, C-MPA]" содержит оба).
+        effective_ext = (solve_file_extension or task.file_extension or "").strip()
+        prog_lang_name = solve_prog_lang_name or (
+            task.programming_language.language_name if task.programming_language else ""
+        )
+        # Fallback: derive language name from effective file_extension for
+        # DL tree tasks that have no programming_language set.
+        # EXTENSION_TO_LANG — канонический map из task_registry (DRY).
+        if not prog_lang_name and effective_ext:
+            prog_lang_name = EXTENSION_TO_LANG.get(effective_ext, "")
+
+        # Препромпт на задачу: явный выбор пользователя приоритетен; иначе
+        # привязка ArmPromptBinding по теме задачи (тема определяется из
+        # ветки DL через ensure_task → Task.topic).
+        task_prompt_id = prompt_id
+        if task_prompt_id is None:
+            task_prompt_id = _resolve_batch_prompt(
+                task, programming_language_id, prompt_cache,
+            )
+        task_ctxs.append({
+            "task": task,
+            "node_id": task.node_id,
+            "task_name": task.name,
+            "effective_ext": effective_ext,
+            "prog_lang_name": prog_lang_name,
+            "topic_name": topic_name,
+            "prompt_id": task_prompt_id,
+        })
+
+    # Кэш имён препромптов для записи в «Решённые задачи» (save_solutions):
+    # предзаполняем всеми используемыми prompt_id ЗДЕСЬ (однопоточно) — в
+    # model-потоках кэш дальше только читается.
+    prompt_name_cache: dict = {}
+    for pid in {tc["prompt_id"] for tc in task_ctxs if tc["prompt_id"]}:
+        try:
+            pid_int = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if pid_int not in prompt_name_cache:
+            prompt_name_cache[pid_int] = _prompt_display_name(pid_int)
+
+    return {
+        "run_id": run_id,
+        "session_id": session_id,
+        "user_id": user_id,
+        "user": user,
+        "external_id": external_id,
+        "course_id": course_id,
+        "ui_language": ui_language,
+        "dl_test": dl_test,
+        "save_solutions": bool(save_solutions),
+        "programming_language_id": programming_language_id,
+        "test_run": test_run,
+        "log": log,
+        "task_ctxs": task_ctxs,
+        "prompt_name_cache": prompt_name_cache,
+        "rerun_pairs": rerun_pairs,
+        "start_time": start_time,
+    }
+
+
 def _run_batch_job_worker(
     run_id,
     node_ids,
@@ -1194,7 +1438,13 @@ def _run_batch_job_worker(
 
     Takes DL node_ids (NOT DB task IDs). For each node_id, fetches task info
     from DL (get-task-info) and creates/updates a Task in DB via ensure_task.
-    Then iterates tasks in the outer loop and models in the inner loop.
+
+    Модели решают ПАРАЛЛЕЛЬНО и независимо: каждая выбранная модель получает
+    собственный поток со СВОЕЙ очередью задач («решил → сразу следующая»),
+    модели друг друга не ожидают; при единственной модели её цикл выполняется
+    inline в потоке воркера. Единственный общий ресурс прогона — DLSID-сессия
+    DL: фаза тестирования (send-solution + полл + запись решения в кэш)
+    сериализуется run-level локом, генерация кода у моделей перекрывается.
     Вердикт ставится строго по DL-тесту (send-solution / get-solution-result).
     ``run_params`` — снимок формы запуска (см. AIModelTestRun.run_params).
     ``record_stats`` — по завершении инкрементировать глобальную статистику
@@ -1209,484 +1459,54 @@ def _run_batch_job_worker(
     прогона (job["results"] содержит только пары перезапуска). См.
     start_batch_rerun_pairs.
     """
-    from .services.task_registry import EXTENSION_TO_LANG, ensure_task, _guess_extension
-    from .models import ArmPromptBinding, ProgrammingLanguage
-
-    test_run = None
-    log = None
     start_time = timezone.now()
+    state = {}
     try:
-        user, username, external_id, full_name = _resolve_user(user_id)
-        models_titles = [m["title"] for m in ordered_models]
-
-        if rerun:
-            # Перезапуск нерешённых пар: прогон уже есть в БД — переиспользуем
-            # его строку (результаты вольются update_or_create'ом в тот же run);
-            # отсчёт «Прогон» на фронте — от исходного started_at.
-            rerun_pairs_count = sum(len(keys) for keys in (rerun_pairs or {}).values())
-            AIModelTestRun.objects.filter(run_id=run_id).update(
-                status=AIModelTestRun.STATUS_RUNNING,
-                finished_at=None,
-                error_message="",
-                message=f"Batch solve rerun {run_id}: {rerun_pairs_count} нерешённых пар",
-            )
-            test_run = AIModelTestRun.objects.get(run_id=run_id)
-        else:
-            test_run = AIModelTestRun.objects.create(
-                run_id=run_id,
-                run_type=AIModelTestRun.RUN_TYPE_BATCH,
-                user=user,
-                status=AIModelTestRun.STATUS_RUNNING,
-                started_at=start_time,
-                message=f"Batch solve: {len(node_ids)} задач × {len(ordered_models)} моделей",
-                total_models=len(ordered_models),
-                programming_language_id=programming_language_id,
-                programming_language_name=programming_language_name or "",
-                topic_id=topic_id,
-                topic_name=topic_name or "",
-                prompt_id=prompt_id,
-                prompt_name=prompt_name or "",
-                course_id=course_id or None,
-                run_params=run_params or {},
-                run_name=(run_name or "")[:255],
-            )
-        log = AIRequestLog.objects.create(
-            user=user,
-            username=username,
-            external_user_id=external_id,
-            user_full_name=full_name,
-            source=AIRequestLog.SOURCE_ARM,
-            mode=AIRequestLog.MODE_BATCH_SOLVE,
-            sent_at=start_time,
-            model_names=models_titles,
-            message=f"Batch solve rerun {run_id}" if rerun else f"Batch solve run {run_id}",
+        ctx = _prepare_batch_run(
+            state, run_id, node_ids, ordered_models, user_id, session_id,
+            ui_language=ui_language, dl_test=dl_test, prompt_id=prompt_id,
+            course_id=course_id, solve_file_extension=solve_file_extension,
+            solve_prog_lang_name=solve_prog_lang_name,
             programming_language_id=programming_language_id,
-            programming_language_name=programming_language_name or "",
-            topic_id=topic_id,
-            topic_name=topic_name or "",
-            prompt_id=prompt_id,
-            prompt_name=prompt_name or "",
+            programming_language_name=programming_language_name,
+            prompt_name=prompt_name, topic_id=topic_id, topic_name=topic_name,
+            run_params=run_params, rerun=rerun, rerun_pairs=rerun_pairs,
+            start_time=start_time, run_name=run_name,
+            save_solutions=save_solutions,
         )
-
-        # Resolve node_ids → Task objects via DL get-task-info + ensure_task.
-        # Язык формы прогона прокидывается в ensure_task: задача получает язык
-        # текущего прогона, а тема чужого языка перегадывается из path с
-        # фильтром по этому языку — иначе _resolve_batch_prompt резолвит
-        # (новый язык, stale-тема старого) и не находит точную привязку.
-        tasks = []
-        for node_id in node_ids:
-            task = ensure_task(
-                node_id, session_id=session_id, course_id=course_id,
-                programming_language_id=programming_language_id,
-            )
-            if task is None:
-                continue
-            tasks.append(task)
-
-        # Перезапуск: у каждой задачи — СВОЙ набор моделей (только нерешённые
-        # пары), поэтому объём считается попарно, а не tasks × models.
-        total_pairs = len(tasks) * len(ordered_models)
-        if rerun_pairs is not None:
-            total_pairs = sum(
-                1 for task in tasks for model in ordered_models
-                if model["key"] in (rerun_pairs.get(task.node_id) or ())
-            )
-        _update_job(
-            run_id,
-            total_pairs=total_pairs,
-            completed_pairs=0,
-            current_task_node_id=tasks[0].node_id if tasks else "",
-            current_task_name=tasks[0].name if tasks else "",
-            current_model_key=ordered_models[0]["key"] if ordered_models else "",
-            current_model_title=ordered_models[0]["title"] if ordered_models else "",
-        )
-
-        if not tasks or not ordered_models:
-            _update_job(run_id, status="failed", error_message="Нет задач или моделей для запуска.")
-            end_time = timezone.now()
-            AIModelTestRun.objects.filter(pk=test_run.pk).update(
-                status=AIModelTestRun.STATUS_FAILED, finished_at=end_time,
-                error_message="Нет задач или моделей для запуска",
-            )
-            AIRequestLog.objects.filter(pk=log.pk).update(
-                received_at=end_time, status=AIRequestLog.STATUS_ERROR,
-                error_message="Нет задач или моделей для запуска",
-            )
+        if ctx is None:
             return
 
-        completed = 0
-        cancelled = False
-        # Препромпты по привязке резолвятся per-task; кэш по (язык, тема) —
-        # задачи одной темы не дёргают БД повторно.
-        _prompt_cache: dict = {}
-        # Кэш имён препромптов для записи в «Решённые задачи» (save_solutions).
-        _prompt_name_cache: dict = {}
-
-        for task in tasks:
-            if _is_cancel_requested(run_id):
-                cancelled = True
-                break
-
-            topic_name = task.topic.topic_name_ru if task.topic else ""
-            # Расширение для DL-тестирования: ручной выбор пользователя имеет
-            # приоритет над авто-определением задачи (тема из дерева DL не задаёт
-            # язык однозначно — курс "[Ассемблер i8086, C-MPA]" содержит оба).
-            effective_ext = (solve_file_extension or task.file_extension or "").strip()
-            prog_lang_name = solve_prog_lang_name or (
-                task.programming_language.language_name if task.programming_language else ""
-            )
-            # Fallback: derive language name from effective file_extension for
-            # DL tree tasks that have no programming_language set.
-            # EXTENSION_TO_LANG — канонический map из task_registry (DRY).
-            if not prog_lang_name and effective_ext:
-                prog_lang_name = EXTENSION_TO_LANG.get(effective_ext, "")
-
-            # Препромпт на задачу: явный выбор пользователя приоритетен; иначе
-            # привязка ArmPromptBinding по теме задачи (тема определяется из
-            # ветки DL через ensure_task → Task.topic).
-            task_prompt_id = prompt_id
-            if task_prompt_id is None:
-                task_prompt_id = _resolve_batch_prompt(
-                    task, programming_language_id, _prompt_cache,
-                )
-
-            for model in ordered_models:
-                # Перезапуск: у задачи фиксированный список моделей (только
-                # нерешённые пары) — остальные модели пропускаются.
-                if rerun_pairs is not None and model["key"] not in (rerun_pairs.get(task.node_id) or ()):
-                    continue
-                if _is_cancel_requested(run_id):
-                    cancelled = True
-                    break
-                started = perf_counter()
-                verdict = _VERDICT_FAILED
-                status = "error"
-                short_response = ""
-                raw_response = ""
-                cleaned_text = ""
-                tokens = 0
-                code_only = ""
-                dl_test_comment = ""
-                dl_submit_error = ""
-                dl_queue_id = 0
-
-                try:
-                    message = _build_solve_message(
-                        task.statement, prog_lang_name, topic_name, ui_language, task_prompt_id,
-                    )
-                    response = async_to_sync(model["handler"])(
-                        message,
-                        f"admin-batch-{user_id}-{model['key']}-{run_id}-{task.node_id}",
-                    )
-                    # Отмена могла прийти во время LLM-вызова (его самого не
-                    # прервать) — не тратим время на DL-тест и запись пары.
-                    if _is_cancel_requested(run_id):
-                        cancelled = True
-                        break
-                    response_text, tokens = _extract_model_response(response)
-                    cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
-                    if not cleaned_text:
-                        cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
-                        logger.warning("ARM batch: model %s returned empty response for task node_id=%s", model["key"], task.node_id)
-                    friendly, detailed = humanize_model_error(cleaned_text, include_detail=True)
-                    # Полный вербатим ответ модели — без обрезки и без добавочного
-                    # DL-блока (код/DL-коммент хранятся в отдельных полях).
-                    raw_response = cleaned_text
-
-                    # Модель вернула ошибку (таймаут/401/429/…) — кода нет, DL не
-                    # тестируем. Вердикт строго failed (solved — только через DL).
-                    if _is_model_error(response):
-                        verdict = _VERDICT_FAILED
-                        status = "error"
-                        dl_submit_error = (friendly or cleaned_text)[:2000]
-                        short_response = (friendly or cleaned_text)[:300] + (
-                            "..." if len(friendly or cleaned_text) > 300 else ""
-                        )
-                    else:
-                        # Извлекаем только код модели (без markdown-оградок);
-                        # расширение подсказывает структурному экстрактору
-                        # (services/code_carver.py — вариант B).
-                        code_only = _extract_code_from_response(
-                            cleaned_text, file_extension=effective_ext or ""
-                        )
-
-                        # Гейт мусора: без структурного маркера языка курса
-                        # (HYDRATION-мусор веб-пула, «[ВСТАВЬТЕ ВАШ КОД]»,
-                        # протекшие рассуждения) в DL не отправляем — очередь
-                        # не занимаем, причина честная.
-                        junk_code = bool(code_only) and effective_ext in (
-                            ".i86", ".asm", ".mpc"
-                        ) and not has_language_marker(code_only, effective_ext)
-                        if junk_code:
-                            code_only = ""
-
-                        can_run_dl = bool(
-                            dl_test and code_only and effective_ext and session_id
-                        )
-                        if not code_only and junk_code:
-                            verdict = _VERDICT_FAILED
-                            dl_test_comment = (
-                                "Извлечённый текст не похож на программу языка "
-                                "курса (нет структурных маркеров) — DL не тестировал"
-                            )
-                        elif not code_only:
-                            verdict = _VERDICT_FAILED
-                            dl_test_comment = "Не удалось извлечь код из ответа модели"
-                        elif can_run_dl:
-                            dl_result = _test_solution_on_dl(
-                                session_id, task.node_id, code_only, effective_ext,
-                                task_id=task.task_id or 0,
-                                run_id=run_id,
-                                course_id=course_id,
-                            )
-                            # Отмена пришла во время поллинга DL — прерываем без
-                            # записи пары (вердикт не определён).
-                            if dl_result.get("cancelled") or _is_cancel_requested(run_id):
-                                cancelled = True
-                                break
-                            dl_test_comment = dl_result.get("comment", "") or ""
-                            dl_submit_error = dl_result.get("submit_error", "") or ""
-                            dl_verdict = dl_result.get("verdict")
-                            dl_queue_id = dl_result.get("queue_id", 0) or 0
-                            # solved — только если DL явно подтвердил; иное → failed.
-                            verdict = dl_verdict if dl_verdict is not None else _VERDICT_FAILED
-                        else:
-                            verdict = _VERDICT_FAILED
-                            dl_test_comment = (
-                                "Не задано расширение файла для тестирования на DL "
-                                "(выберите язык/расширение в форме запуска)"
-                            )
-
-                        status = "ok" if verdict == _VERDICT_SOLVED else "error"
-                        short_response = (friendly or cleaned_text)[:300] + (
-                            "..." if len(friendly or cleaned_text) > 300 else ""
-                        )
-                except Exception as exc:
-                    exc_text = str(exc)
-                    friendly, detailed = humanize_model_error(exc_text, include_detail=True)
-                    verdict = _VERDICT_FAILED
-                    status = "error"
-                    short_response = friendly or f"Ошибка вызова модели: {exc_text}"
-                    raw_response = detailed or cleaned_text
-                    dl_submit_error = exc_text[:2000]
-
-                duration = round(perf_counter() - started, 2)
-
-                result_obj, _ = AIModelTestResult.objects.update_or_create(
-                    run=test_run,
-                    model_key=model["key"],
-                    task=task,
-                    defaults={
-                        "model_title": model["title"],
-                        "status": status,
-                        "verdict": verdict,
-                        "duration_seconds": duration,
-                        "tokens": tokens,
-                        "short_response": short_response,
-                        "raw_response": raw_response or "",
-                        "code": code_only or "",
-                        "dl_comment": dl_test_comment or "",
-                        "dl_error": dl_submit_error or "",
-                        "dl_queue_id": dl_queue_id or 0,
-                        "file_extension_snapshot": effective_ext or "",
-                        "topic_id_snapshot": task.topic_id,
-                        "topic_name_snapshot": topic_name,
-                        "prog_lang_snapshot": prog_lang_name,
-                    },
-                )
-
-                result_item = {
-                    "result_id": result_obj.pk,
-                    "task_id": task.id,
-                    "task_node_id": task.node_id,
-                    "task_name": task.name,
-                    "model_key": model["key"],
-                    "model_title": model["title"],
-                    "duration": duration,
-                    "tokens": tokens,
-                    "short_response": short_response,
-                    "status": status,
-                    "verdict": verdict,
-                    "raw_response": raw_response,
-                    "code": code_only,
-                    "dl_comment": dl_test_comment,
-                    "dl_error": dl_submit_error,
-                    "dl_queue_id": dl_queue_id,
-                    "file_extension": effective_ext or "",
-                    "topic_name": topic_name,
-                    "prog_lang_name": prog_lang_name,
-                }
-
-                completed += 1
-                if save_solutions and verdict == _VERDICT_SOLVED:
-                    # «Решённые задачи»: та же запись кэша, что при пользовательском
-                    # тестировании (solution_cache.record_batch_solution). Сбои
-                    # кэша прогон не ломают; уже решённые (на этом языке) пропускаются.
-                    # Имя препромпта — кэш по id: одна привязка обслуживает много задач.
-                    if _save_batch_task_solution(
-                        task=task,
-                        model=model,
-                        code=code_only,
-                        dl_comment=dl_test_comment,
-                        file_extension=effective_ext,
-                        topic_name=topic_name,
-                        task_prompt_id=task_prompt_id,
-                        prompt_name_cache=_prompt_name_cache,
-                        course_id=course_id,
-                        session_id=session_id,
-                        created_by=user,
-                        external_user_id=external_id,
-                        programming_language_id=programming_language_id,
-                        test_log=log,
-                    ):
-                        result_item["saved_solution"] = True
-
-                with _jobs_lock:
-                    job = _jobs.get(run_id)
-                    if job is None:
-                        pass
-                    else:
-                        job.setdefault("results", []).append(result_item)
-                        job["completed_pairs"] = completed
-                        job["updated_at_ts"] = time.time()
-
-        # Finalize: build report from in-memory results (or DB if evicted).
-        # Перезапуск: сводка ВСЕГДА из БД — job["results"] содержит только пары
-        # перезапуска, а вердикты вливались в тот же прогон (update_or_create).
-        results = []
-        db_results = _batch_results_from_db(test_run) if rerun else []
-        with _jobs_lock:
-            job = _jobs.get(run_id)
-            evicted = job is None
-            if not evicted:
-                # cancel_arm_run мог уже перевести job в cancelled (мгновенный
-                # flip). Не перетираем отмену обратно в completed — сохраняем
-                # cancelled, чтобы UI корректно показал «Прервано».
-                was_cancelled = cancelled or job.get("cancelled", False)
-                report_source = db_results if rerun else (job.get("results") or [])
-                job["report"] = _build_batch_report(report_source)
-                # Карточка «Прогон» (время): у перезапуска — исходный started_at,
-                # у обычного прогона — job.created_at_ts; финиш — момент
-                # финализации (updated_at_ts, ставится ниже).
-                _attach_run_meta(
-                    job["report"],
-                    (test_run.started_at.timestamp() if test_run.started_at else None)
-                    if rerun else job.get("created_at_ts"),
-                    time.time(),
-                )
-                job["status"] = "cancelled" if was_cancelled else "completed"
-                if was_cancelled:
-                    job["cancelled"] = True
-                    cancelled = True
-                job["updated_at_ts"] = time.time()
-                results = list(job.get("results") or [])
-                report = job["report"]
-
-        if evicted:
-            db_results = _batch_results_from_db(test_run)
-            report = _build_batch_report(db_results)
-            _attach_run_meta(
-                report,
-                test_run.started_at.timestamp() if test_run.started_at else None,
-                timezone.now().timestamp(),
-            )
-
-        end_time = timezone.now()
-        if evicted or rerun:
-            batch_results = db_results
+        dl_lock = threading.Lock()
+        if len(ordered_models) == 1:
+            # Одиночная модель — цикл inline в потоке воркера: существующие
+            # тесты вызывают воркер синхронно в тестовом потоке, тело пары
+            # остаётся на коннекции вызывающего потока (TestCase-транзакция).
+            _run_batch_model_loop(ctx, ordered_models[0], 0, dl_lock)
         else:
-            batch_results = results
-        any_ok_batch = any(r.get("status") == "ok" for r in batch_results)
-        # Статус batch-лога: Success строго если ВСЕ пары задача×модель решены
-        # (включая прерванные/частичные прогоны — они всегда Error).
-        solved_pairs = sum(1 for r in batch_results if r.get("verdict") == _VERDICT_SOLVED)
-        all_solved_batch = bool(batch_results) and solved_pairs == len(batch_results)
-        # Сводный ответ для журнала: per-model вердикты + ошибки (до 5000 символов).
-        batch_summary_parts = []
-        for r in batch_results:
-            verdict = r.get("verdict") or "failed"
-            model_title = r.get("model_title") or r.get("model_key") or "?"
-            task_name = r.get("task_name") or ""
-            node_id = r.get("task_node_id") or ""
-            dl_err = r.get("dl_error") or ""
-            line = f"[{verdict}] {node_id} {task_name} — {model_title}"
-            if dl_err:
-                line += f" :: {dl_err[:200]}"
-            batch_summary_parts.append(line)
-        batch_response_text = "\n".join(batch_summary_parts)[:5000]
-        batch_error_message = ""
-        if not all_solved_batch:
-            # Краткая причина: сколько пар решено; уникальные DL-ошибки в конце.
-            if not batch_results:
-                batch_error_message = "Ни одна пара задача×модель не была выполнена."
-            elif not any_ok_batch:
-                batch_error_message = "Все пары провалены. "
-            else:
-                batch_error_message = f"Решено {solved_pairs} из {len(batch_results)} пар (задача×модель). "
-            unique_errs = []
-            seen = set()
-            for r in batch_results:
-                dl_err = (r.get("dl_error") or "").split("\n")[0][:200]
-                if dl_err and dl_err not in seen:
-                    seen.add(dl_err)
-                    unique_errs.append(dl_err)
-            if unique_errs:
-                batch_error_message += "Ошибки: " + " | ".join(unique_errs[:5])[:2000]
-            else:
-                batch_error_message = batch_error_message[:2000]
-        if cancelled:
-            batch_error_message = (batch_error_message + " Прервано пользователем.")[:2000]
-        AIRequestLog.objects.filter(pk=log.pk).update(
-            received_at=end_time,
-            duration_seconds=(end_time - start_time).total_seconds(),
-            status=AIRequestLog.STATUS_SUCCESS if all_solved_batch else AIRequestLog.STATUS_ERROR,
-            response_text=batch_response_text,
-            error_message=batch_error_message,
-        )
-        if cancelled:
-            # Прогон уже переведён в STATUS_CANCELLED методом cancel_arm_run
-            # (мгновенный flip). Не перетираем status/finished_at — только
-            # сохраняем частичный report, чтобы он был виден на странице прогона.
-            AIModelTestRun.objects.filter(
-                pk=test_run.pk, status=AIModelTestRun.STATUS_CANCELLED
-            ).update(report=report or {})
-        else:
-            AIModelTestRun.objects.filter(pk=test_run.pk).update(
-                status=AIModelTestRun.STATUS_COMPLETED,
-                finished_at=end_time,
-                report=report or {},
-                error_message="",
-            )
-        _update_job(run_id, status="cancelled" if cancelled else "completed", cancelled=cancelled)
+            threads = [
+                threading.Thread(
+                    target=_run_batch_model_loop,
+                    args=(ctx, model, model_index, dl_lock),
+                    name=f"arm-batch-{run_id[:8]}-{model['key']}",
+                    daemon=True,
+                )
+                for model_index, model in enumerate(ordered_models)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
 
-        # Глобальная статистика моделей (селектор чата): инкремент по парам
-        # этого прогона. Только вне _jobs_lock (нереентерабельный лок) и только
-        # по флагу суперюзера; частичные (прерванные) результаты тоже считаются.
-        if record_stats and batch_results:
-            from .services.model_stats import record_batch_solve_stats
-
-            stats_results = batch_results
-            if rerun:
-                # Перезапуск: batch_results — ВСЕ строки прогона, а старые
-                # решённые/проваленные пары уже посчитаны первым проходом.
-                # Считаем только перезапущенные пары.
-                rerun_keys = {
-                    (model_key, node_id)
-                    for node_id, keys in (rerun_pairs or {}).items()
-                    for model_key in keys
-                }
-                stats_results = [
-                    r for r in batch_results
-                    if (r.get("model_key"), r.get("task_node_id")) in rerun_keys
-                ]
-            record_batch_solve_stats(stats_results)
-
+        _finalize_batch_run(ctx, record_stats=record_stats, rerun=rerun, rerun_pairs=rerun_pairs)
     except Exception as exc:
         _update_job(
             run_id, status="failed",
             error_message=f"Batch solve завершился с ошибкой: {exc}",
         )
         end_time = timezone.now()
+        log = state.get("log")
+        test_run = state.get("test_run")
         if log is not None:
             AIRequestLog.objects.filter(pk=log.pk).update(
                 received_at=end_time,
@@ -1700,6 +1520,524 @@ def _run_batch_job_worker(
                 finished_at=end_time,
                 error_message=str(exc)[:2000],
             )
+
+def _prompt_display_name(prompt_id):
+    """Имя препромпта (prompt_name_ru) по pk; нет записи/пусто → ""."""
+    from .models import Prompt
+
+    return (
+        Prompt.objects.filter(pk=prompt_id)
+        .values_list("prompt_name_ru", flat=True).first() or ""
+    )
+
+
+def _batch_progress_entry(job, model_index):
+    """Запись job["model_progress"] для модели model_index (или None)."""
+    entries = job.get("model_progress") or []
+    return entries[model_index] if model_index < len(entries) else None
+
+
+def _mark_batch_pair_started(run_id, model_index, model, task_ctx):
+    """Пометить начало пары в прогрессе (под _jobs_lock)."""
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        entry = _batch_progress_entry(job, model_index)
+        if entry:
+            entry["current_task_node_id"] = task_ctx["node_id"]
+            entry["current_task_name"] = task_ctx["task_name"]
+        job["current_model_key"] = model["key"]
+        job["current_model_title"] = model["title"]
+        job["current_task_node_id"] = task_ctx["node_id"]
+        job["current_task_name"] = task_ctx["task_name"]
+        job["updated_at_ts"] = time.time()
+
+
+def _mark_batch_pair_finished(run_id, model_index, item=None):
+    """Записать результат пары и сдвинуть прогресс (под _jobs_lock).
+
+    ``completed_pairs`` выводится из фактического числа результатов, а не из
+    независимого счётчика: model-потоки завершают пары вперемешку, общий
+    счётчик ``+= 1`` терял бы обновления (classic lost update). Отменённые
+    пары результата не пишут — инвариант ``completed_pairs == len(results)``
+    сохраняется и для обычного прогона, и для перезапуска.
+    """
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        entry = _batch_progress_entry(job, model_index)
+        if item is not None:
+            job.setdefault("results", []).append(item)
+            job["completed_pairs"] = len(job["results"])
+            if entry:
+                entry["done"] += 1
+        if entry:
+            entry["current_task_node_id"] = ""
+            entry["current_task_name"] = ""
+        job["updated_at_ts"] = time.time()
+
+
+def _mark_batch_model_finished(run_id, model_index):
+    """Модель закрыла свой цикл: done/error в прогрессе + completed_models."""
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        entry = _batch_progress_entry(job, model_index)
+        if entry:
+            if entry.get("status") == "running":
+                entry["status"] = "done"
+            entry["current_task_node_id"] = ""
+            entry["current_task_name"] = ""
+        job["completed_models"] = sum(
+            1 for e in (job.get("model_progress") or [])
+            if e.get("status") != "running"
+        )
+        job["updated_at_ts"] = time.time()
+
+
+def _mark_batch_model_failed(run_id, model_index):
+    """Цикл модели упал с исключением: статус «error»; модель не валит прогон."""
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        entry = _batch_progress_entry(job, model_index)
+        if entry:
+            entry["status"] = "error"
+        job["updated_at_ts"] = time.time()
+
+
+def _process_batch_pair(ctx, task_ctx, model, dl_lock):
+    """Тело одной пары задача×модель. Возвращает result_item; None — отмена.
+
+    Отмена возвращает None (пара не пишется) в трёх точках: после LLM-вызова,
+    в ожидании DL-лока и после поллинга DL — model-loop прекращает цикл модели
+    (остальные модели не задеваются). Фаза тестирования на DL — общий ресурс
+    прогона (одна DLSID-сессия) — сериализована ``dl_lock``: лок удерживается
+    до записи решения в кэш «Решённых задач», сохраняя «первый решённый
+    побеждает» при двух моделях на одном node_id.
+    """
+    task = task_ctx["task"]
+    node_id = task_ctx["node_id"]
+    effective_ext = task_ctx["effective_ext"]
+    prog_lang_name = task_ctx["prog_lang_name"]
+    topic_name = task_ctx["topic_name"]
+    task_prompt_id = task_ctx["prompt_id"]
+
+    started = perf_counter()
+    verdict = _VERDICT_FAILED
+    status = "error"
+    short_response = ""
+    raw_response = ""
+    cleaned_text = ""
+    tokens = 0
+    code_only = ""
+    dl_test_comment = ""
+    dl_submit_error = ""
+    dl_queue_id = 0
+
+    held_dl_lock = False
+    try:
+        message = _build_solve_message(
+            task.statement, prog_lang_name, topic_name, ctx["ui_language"], task_prompt_id,
+        )
+        response = async_to_sync(model["handler"])(
+            message,
+            f"admin-batch-{ctx['user_id']}-{model['key']}-{ctx['run_id']}-{node_id}",
+        )
+        # Отмена могла прийти во время LLM-вызова (его самого не
+        # прервать) — не тратим время на DL-тест и запись пары.
+        if _is_cancel_requested(ctx["run_id"]):
+            return None
+        response_text, tokens = _extract_model_response(response)
+        cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
+        if not cleaned_text:
+            cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
+            logger.warning("ARM batch: model %s returned empty response for task node_id=%s", model["key"], node_id)
+        friendly, detailed = humanize_model_error(cleaned_text, include_detail=True)
+        # Полный вербатим ответ модели — без обрезки и без добавочного
+        # DL-блока (код/DL-коммент хранятся в отдельных полях).
+        raw_response = cleaned_text
+
+        # Модель вернула ошибку (таймаут/401/429/…) — кода нет, DL не
+        # тестируем. Вердикт строго failed (solved — только через DL).
+        if _is_model_error(response):
+            verdict = _VERDICT_FAILED
+            status = "error"
+            dl_submit_error = (friendly or cleaned_text)[:2000]
+            short_response = (friendly or cleaned_text)[:300] + (
+                "..." if len(friendly or cleaned_text) > 300 else ""
+            )
+        else:
+            # Извлекаем только код модели (без markdown-оградок);
+            # расширение подсказывает структурному экстрактору
+            # (services/code_carver.py — вариант B).
+            code_only = _extract_code_from_response(
+                cleaned_text, file_extension=effective_ext or ""
+            )
+
+            # Гейт мусора: без структурного маркера языка курса
+            # (HYDRATION-мусор веб-пула, «[ВСТАВЬТЕ ВАШ КОД]»,
+            # протекшие рассуждения) в DL не отправляем — очередь
+            # не занимаем, причина честная.
+            junk_code = bool(code_only) and effective_ext in (
+                ".i86", ".asm", ".mpc"
+            ) and not has_language_marker(code_only, effective_ext)
+            if junk_code:
+                code_only = ""
+
+            can_run_dl = bool(
+                ctx["dl_test"] and code_only and effective_ext and ctx["session_id"]
+            )
+            if not code_only and junk_code:
+                verdict = _VERDICT_FAILED
+                dl_test_comment = (
+                    "Извлечённый текст не похож на программу языка "
+                    "курса (нет структурных маркеров) — DL не тестировал"
+                )
+            elif not code_only:
+                verdict = _VERDICT_FAILED
+                dl_test_comment = "Не удалось извлечь код из ответа модели"
+            elif can_run_dl:
+                if not _acquire_dl_run_lock(dl_lock, ctx["run_id"]):
+                    return None
+                held_dl_lock = True
+                dl_result = _test_solution_on_dl(
+                    ctx["session_id"], node_id, code_only, effective_ext,
+                    task_id=task.task_id or 0,
+                    run_id=ctx["run_id"],
+                    course_id=ctx["course_id"],
+                )
+                # Отмена пришла во время поллинга DL — прерываем без записи
+                # пары (вердикт не определён). Лок после DL-фазы удерживается
+                # до записи пары — отпускаем его явно.
+                if dl_result.get("cancelled") or _is_cancel_requested(ctx["run_id"]):
+                    dl_lock.release()
+                    return None
+                dl_test_comment = dl_result.get("comment", "") or ""
+                dl_submit_error = dl_result.get("submit_error", "") or ""
+                dl_verdict = dl_result.get("verdict")
+                dl_queue_id = dl_result.get("queue_id", 0) or 0
+                # solved — только если DL явно подтвердил; иное → failed.
+                verdict = dl_verdict if dl_verdict is not None else _VERDICT_FAILED
+            else:
+                verdict = _VERDICT_FAILED
+                dl_test_comment = (
+                    "Не задано расширение файла для тестирования на DL "
+                    "(выберите язык/расширение в форме запуска)"
+                )
+
+            status = "ok" if verdict == _VERDICT_SOLVED else "error"
+            short_response = (friendly or cleaned_text)[:300] + (
+                "..." if len(friendly or cleaned_text) > 300 else ""
+            )
+    except Exception as exc:
+        exc_text = str(exc)
+        friendly, detailed = humanize_model_error(exc_text, include_detail=True)
+        verdict = _VERDICT_FAILED
+        status = "error"
+        short_response = friendly or f"Ошибка вызова модели: {exc_text}"
+        raw_response = detailed or cleaned_text
+        dl_submit_error = exc_text[:2000]
+    def _write_pair_row():
+        """Запись результата пары + решение-кэш. Единый хвост для обеих веток
+        ниже; лок держится на всё время записи."""
+        duration = round(perf_counter() - started, 2)
+
+        result_obj, _ = AIModelTestResult.objects.update_or_create(
+            run=ctx["test_run"],
+            model_key=model["key"],
+            task=task,
+            defaults={
+                "model_title": model["title"],
+                "status": status,
+                "verdict": verdict,
+                "duration_seconds": duration,
+                "tokens": tokens,
+                "short_response": short_response,
+                "raw_response": raw_response or "",
+                "code": code_only or "",
+                "dl_comment": dl_test_comment or "",
+                "dl_error": dl_submit_error or "",
+                "dl_queue_id": dl_queue_id or 0,
+                "file_extension_snapshot": effective_ext or "",
+                "topic_id_snapshot": task.topic_id,
+                "topic_name_snapshot": topic_name,
+                "prog_lang_snapshot": prog_lang_name,
+            },
+        )
+
+        result_item = {
+            "result_id": result_obj.pk,
+            "task_id": task.id,
+            "task_node_id": task.node_id,
+            "task_name": task.name,
+            "model_key": model["key"],
+            "model_title": model["title"],
+            "duration": duration,
+            "tokens": tokens,
+            "short_response": short_response,
+            "status": status,
+            "verdict": verdict,
+            "raw_response": raw_response,
+            "code": code_only,
+            "dl_comment": dl_test_comment,
+            "dl_error": dl_submit_error,
+            "dl_queue_id": dl_queue_id,
+            "file_extension": effective_ext or "",
+            "topic_name": topic_name,
+            "prog_lang_name": prog_lang_name,
+        }
+
+        if ctx["save_solutions"] and verdict == _VERDICT_SOLVED:
+            # «Решённые задачи»: та же запись кэша, что при пользовательском
+            # тестировании (solution_cache.record_batch_solution). Сбои
+            # кэша прогон не ломают; уже решённые (на этом языке) пропускаются.
+            # Имя препромпта — кэш по id: одна привязка обслуживает много задач.
+            # Вызов под dl_lock: строго после DL-теста этой пары, до следующего —
+            # паре моделей на одном node_id не перепутать «кто решил первым».
+            if _save_batch_task_solution(
+                task=task,
+                model=model,
+                code=code_only,
+                dl_comment=dl_test_comment,
+                file_extension=effective_ext,
+                topic_name=topic_name,
+                task_prompt_id=task_prompt_id,
+                prompt_name_cache=ctx["prompt_name_cache"],
+                course_id=ctx["course_id"],
+                session_id=ctx["session_id"],
+                created_by=ctx["user"],
+                external_user_id=ctx["external_id"],
+                programming_language_id=ctx["programming_language_id"],
+                test_log=ctx["log"],
+            ):
+                result_item["saved_solution"] = True
+
+        return result_item
+
+    # Запись строки прогона — под тем же dl_lock: серийные записи результатов
+    # (sqlite-тесты и «первый решённый побеждает» для кэша решений). Пары,
+    # дошедшие до DL-фазы, уже держат лок — пишут под ним же; прочим
+    # (сбой LLM / гейт мусора) лок берётся только на запись.
+    if held_dl_lock:
+        try:
+            return _write_pair_row()
+        finally:
+            dl_lock.release()
+    if _acquire_dl_run_lock(dl_lock, ctx["run_id"]):
+        try:
+            return _write_pair_row()
+        finally:
+            dl_lock.release()
+    # Отмена пришла в ожидании лока записи — пара не пишется.
+    return None
+
+
+def _run_batch_model_loop(ctx, model, model_index, dl_lock):
+    """Цикл ОДНОЙ модели по её задачам — таргет model-потока (или inline при N=1).
+
+    Модели независимы: «решил задачу → сразу следующая», остальные модели не
+    ожидаются; перекрывается генерация кода — фаза DL сериализована
+    ``dl_lock``. Прогресс модели ведётся в job["model_progress"][model_index]
+    (мутации — только под _jobs_lock); падение цикла одной модели с
+    исключением не задевает остальные и не валит прогон в FAILED
+    (финализация добавит примечание в batch_error_message).
+    """
+    close_old_connections()
+    run_id = ctx["run_id"]
+    try:
+        for task_ctx in ctx["task_ctxs"]:
+            # Перезапуск: у задачи фиксированный список моделей (только
+            # нерешённые пары) — остальные модели пропускаются.
+            if ctx["rerun_pairs"] is not None and model["key"] not in (
+                ctx["rerun_pairs"].get(task_ctx["node_id"]) or ()
+            ):
+                continue
+            if _is_cancel_requested(run_id):
+                break
+            _mark_batch_pair_started(run_id, model_index, model, task_ctx)
+            item = _process_batch_pair(ctx, task_ctx, model, dl_lock)
+            _mark_batch_pair_finished(run_id, model_index, item)
+            if item is None:
+                # Отмена — модель прекращает работу; записанные другими
+                # моделями результаты остаются.
+                break
+    except Exception:
+        logger.exception("ARM batch: цикл модели %s упал", model["key"])
+        _mark_batch_model_failed(run_id, model_index)
+    finally:
+        _mark_batch_model_finished(run_id, model_index)
+        close_old_connections()
+
+def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
+    """Финализация batch-прогона: ОДИН раз, после join всех model-потоков.
+
+    Отчёт из in-memory результатов (или БД при evict; у перезапуска — всегда
+    из БД), guard «не перетираем отмену», AIRequestLog, AIModelTestRun,
+    record_batch_solve_stats. Модели, чьи циклы упали с исключением, прогон
+    НЕ валят в FAILED (модели независимы) — примечание добавляется в
+    batch_error_message и лог становится Error.
+    """
+    run_id = ctx["run_id"]
+    test_run = ctx["test_run"]
+    log = ctx["log"]
+    start_time = ctx["start_time"]
+    model_loop_errors: list = []
+    cancelled = False
+
+    # Finalize: build report from in-memory results (or DB if evicted).
+    # Перезапуск: сводка ВСЕГДА из БД — job["results"] содержит только пары
+    # перезапуска, а вердикты вливались в тот же прогон (update_or_create).
+    results = []
+    db_results = _batch_results_from_db(test_run) if rerun else []
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        evicted = job is None
+        if not evicted:
+            # cancel_arm_run мог уже перевести job в cancelled (мгновенный
+            # flip). Не перетираем отмену обратно в completed — сохраняем
+            # cancelled, чтобы UI корректно показал «Прервано».
+            was_cancelled = job.get("cancelled", False)
+            report_source = db_results if rerun else (job.get("results") or [])
+            job["report"] = _build_batch_report(report_source)
+            # Карточка «Прогон» (время): у перезапуска — исходный started_at,
+            # у обычного прогона — job.created_at_ts; финиш — момент
+            # финализации (updated_at_ts, ставится ниже).
+            _attach_run_meta(
+                job["report"],
+                (test_run.started_at.timestamp() if test_run.started_at else None)
+                if rerun else job.get("created_at_ts"),
+                time.time(),
+            )
+            job["status"] = "cancelled" if was_cancelled else "completed"
+            if was_cancelled:
+                job["cancelled"] = True
+            cancelled = was_cancelled
+            model_loop_errors = [
+                entry for entry in (job.get("model_progress") or [])
+                if entry.get("status") == "error"
+            ]
+            job["updated_at_ts"] = time.time()
+            results = list(job.get("results") or [])
+            report = job["report"]
+
+    if evicted:
+        db_results = _batch_results_from_db(test_run)
+        report = _build_batch_report(db_results)
+        _attach_run_meta(
+            report,
+            test_run.started_at.timestamp() if test_run.started_at else None,
+            timezone.now().timestamp(),
+        )
+
+    end_time = timezone.now()
+    if evicted or rerun:
+        batch_results = db_results
+    else:
+        batch_results = results
+    any_ok_batch = any(r.get("status") == "ok" for r in batch_results)
+    # Статус batch-лога: Success строго если ВСЕ пары задача×модель решены
+    # (включая прерванные/частичные прогоны — они всегда Error) и ни один
+    # model-цикл не упал с исключением.
+    solved_pairs = sum(1 for r in batch_results if r.get("verdict") == _VERDICT_SOLVED)
+    all_solved_batch = (
+        bool(batch_results) and solved_pairs == len(batch_results)
+        and not model_loop_errors
+    )
+    # Сводный ответ для журнала: per-model вердикты + ошибки (до 5000 символов).
+    batch_summary_parts = []
+    for r in batch_results:
+        verdict = r.get("verdict") or "failed"
+        model_title = r.get("model_title") or r.get("model_key") or "?"
+        task_name = r.get("task_name") or ""
+        node_id = r.get("task_node_id") or ""
+        dl_err = r.get("dl_error") or ""
+        line = f"[{verdict}] {node_id} {task_name} — {model_title}"
+        if dl_err:
+            line += f" :: {dl_err[:200]}"
+        batch_summary_parts.append(line)
+    batch_response_text = "\n".join(batch_summary_parts)[:5000]
+    batch_error_message = ""
+    if not all_solved_batch:
+        # Краткая причина: сколько пар решено; уникальные DL-ошибки в конце.
+        if not batch_results:
+            batch_error_message = "Ни одна пара задача×модель не была выполнена."
+        elif not any_ok_batch:
+            batch_error_message = "Все пары провалены. "
+        else:
+            batch_error_message = (
+                f"Решено {solved_pairs} из {len(batch_results)} пар (задача×модель). "
+            )
+        unique_errs = []
+        seen = set()
+        for r in batch_results:
+            dl_err = (r.get("dl_error") or "").split("\n")[0][:200]
+            if dl_err and dl_err not in seen:
+                seen.add(dl_err)
+                unique_errs.append(dl_err)
+        if unique_errs:
+            batch_error_message += "Ошибки: " + " | ".join(unique_errs[:5])[:2000]
+        else:
+            batch_error_message = batch_error_message[:2000]
+    if model_loop_errors:
+        batch_error_message = (
+            batch_error_message + (" " if batch_error_message else "")
+            + "Модели, прерванные ошибкой цикла: "
+            + ", ".join(
+                "«%s»" % (e.get("model_title") or e.get("model_key") or "?")
+                for e in model_loop_errors
+            )
+        )[:2000]
+    if cancelled:
+        batch_error_message = (batch_error_message + " Прервано пользователем.")[:2000]
+    AIRequestLog.objects.filter(pk=log.pk).update(
+        received_at=end_time,
+        duration_seconds=(end_time - start_time).total_seconds(),
+        status=AIRequestLog.STATUS_SUCCESS if all_solved_batch else AIRequestLog.STATUS_ERROR,
+        response_text=batch_response_text,
+        error_message=batch_error_message,
+    )
+    if cancelled:
+        # Прогон уже переведён в STATUS_CANCELLED методом cancel_arm_run
+        # (мгновенный flip). Не перетираем status/finished_at — только
+        # сохраняем частичный report, чтобы он был виден на странице прогона.
+        AIModelTestRun.objects.filter(
+            pk=test_run.pk, status=AIModelTestRun.STATUS_CANCELLED
+        ).update(report=report or {})
+    else:
+        AIModelTestRun.objects.filter(pk=test_run.pk).update(
+            status=AIModelTestRun.STATUS_COMPLETED,
+            finished_at=end_time,
+            report=report or {},
+            error_message="",
+        )
+    _update_job(run_id, status="cancelled" if cancelled else "completed", cancelled=cancelled)
+
+    # Глобальная статистика моделей (селектор чата): инкремент по парам
+    # этого прогона. Только вне _jobs_lock (нереентерабельный лок) и только
+    # по флагу суперюзера; частичные (прерванные) результаты тоже считаются.
+    if record_stats and batch_results:
+        from .services.model_stats import record_batch_solve_stats
+
+        stats_results = batch_results
+        if rerun:
+            # Перезапуск: batch_results — ВСЕ строки прогона, а старые
+            # решённые/проваленные пары уже посчитаны первым проходом.
+            # Считаем только перезапущенные пары.
+            rerun_keys = {
+                (model_key, node_id)
+                for node_id, keys in (rerun_pairs or {}).items()
+                for model_key in keys
+            }
+            stats_results = [
+                r for r in batch_results
+                if (r.get("model_key"), r.get("task_node_id")) in rerun_keys
+            ]
+        record_batch_solve_stats(stats_results)
 
 
 def _light_batch_result_item(item):
@@ -1849,6 +2187,9 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "current_model_title": ordered_models[0]["title"],
         "current_task_node_id": "",
         "current_task_name": "",
+        # Per-model прогресс заполняет воркер в _prepare_batch_run (здесь —
+        # плейсхолдер, чтобы потребители снапшотов не увидели absent-ключ).
+        "model_progress": [],
         "results": [],
         "report": None,
         "run_name": (run_name or "").strip(),
@@ -1979,6 +2320,9 @@ def start_batch_rerun_pairs(run_id, user_id, session_id):
         "current_model_title": ordered_models[0]["title"],
         "current_task_node_id": "",
         "current_task_name": "",
+        # Per-model прогресс заполняет воркер в _prepare_batch_run (здесь —
+        # плейсхолдер, чтобы потребители снапшотов не увидели absent-ключ).
+        "model_progress": [],
         "results": [],
         "report": None,
         "run_name": rerun_run_name,
@@ -2035,6 +2379,7 @@ def _snapshot_from_test_run(test_run, light_results=False):
     current_title = ""
     current_task_node_id = ""
     current_task_name = ""
+    model_progress = []
     with _jobs_lock:
         job = _jobs.get(test_run.run_id)
         if job:
@@ -2042,6 +2387,9 @@ def _snapshot_from_test_run(test_run, light_results=False):
             current_title = job.get("current_model_title", "")
             current_task_node_id = job.get("current_task_node_id", "")
             current_task_name = job.get("current_task_name", "")
+            # Per-model прогресс — только из живого job (в БД его нет); при
+            # пустом/завершённом прогоне остаётся пустым списком.
+            model_progress = job.get("model_progress") or []
 
     if is_batch:
         results = _batch_results_from_db(test_run, light=light_results)
@@ -2069,6 +2417,7 @@ def _snapshot_from_test_run(test_run, light_results=False):
             "current_model_title": current_title,
             "current_task_node_id": current_task_node_id,
             "current_task_name": current_task_name,
+            "model_progress": model_progress,
             "results": results,
             "report": report,
             "run_params": test_run.run_params or {},
