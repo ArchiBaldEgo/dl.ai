@@ -43,6 +43,7 @@ partial window.ArmBatchResults, что и на настройке/журнале
   .ai-log-pin-btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .ai-log-pin-btn-active { color: #d97706; border-color: #d97706; }
   .ai-log-pin-btn.busy { opacity: 0.6; pointer-events: none; }
+  .ai-log-pin-static { font-size: 15px; color: var(--body-quiet-color); }
 </style>
 
 <div class="ai-pinned-wrap">
@@ -50,7 +51,8 @@ partial window.ArmBatchResults, что и на настройке/журнале
     Закреплённые завершённые прогоны «Пакетного решения». Закрепить (☆→★) можно
     в «Журнале запросов» или в блоке «Последние пакетные решения» на странице
     «Настройка ИИ-приложения»; повторный клик по ★ снимает закрепление.
-    Закрепления персональны — у каждого пользователя свой список.
+    Список общий: видны закрепления всех участников с указанием автора;
+    открепить (★) можно только своё, чужие показаны как метка ★.
   </p>
 
   {% if rows %}
@@ -60,6 +62,7 @@ partial window.ArmBatchResults, что и на настройке/журнале
       <thead>
         <tr>
           <th title="Убрать из «Закреплённых»">★</th>
+          <th>Автор</th>
           <th>Отправлен</th>
           <th>Название прогона</th>
           <th>Курс</th>
@@ -77,11 +80,16 @@ partial window.ArmBatchResults, что и на настройке/журнале
           <tr class="ai-batch-row{% if row.snapshot_url %} ai-batch-row-clickable{% endif %}"
               data-snapshot-url="{{ row.snapshot_url }}" data-run-id="{{ row.run_id }}" data-log-id="{{ row.id }}"{% if row.snapshot_url %} title="Кликните, чтобы развернуть результаты прогона"{% endif %}>
             <td class="ai-log-pin-cell">
-              <button type="button"
-                      class="ai-log-pin-btn{% if row.pinned %} ai-log-pin-btn-active{% endif %}"
-                      data-pin-url="{{ row.pin_url }}"
-                      {% if row.run_status == 'running' %}disabled title="Прогон ещё выполняется"{% else %}title="Убрать из «Закреплённых»"{% endif %}>{{ row.pinned|yesno:"★,☆" }}</button>
+              {% if row.is_own %}
+                <button type="button"
+                        class="ai-log-pin-btn{% if row.pinned %} ai-log-pin-btn-active{% endif %}"
+                        data-pin-url="{{ row.pin_url }}"
+                        {% if row.run_status == 'running' %}disabled title="Прогон ещё выполняется"{% else %}title="Убрать из «Закреплённых»"{% endif %}>{{ row.pinned|yesno:"★,☆" }}</button>
+              {% else %}
+                <span class="ai-log-pin-static" title="Закреплено: {{ row.pin_authors }}">★</span>
+              {% endif %}
             </td>
+            <td>{{ row.pin_authors|default:"—" }}</td>
             <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>{{ row.run_name|default:"—" }}</td>
             <td>{{ row.course_id|default:"—" }}</td>
@@ -94,7 +102,7 @@ partial window.ArmBatchResults, что и на настройке/журнале
           </tr>
           {# Развёртка: сводка + ответы моделей прогона (ленивая загрузка — AJAX по первому клику). #}
           <tr class="ai-batch-detail" hidden>
-            <td colspan="10">
+            <td colspan="11">
               <div class="ai-batch-detail-body"></div>
               {% if not row.snapshot_url %}<p class="ai-recent-logs-empty">Прогон не найден в БД — результаты недоступны.</p>{% endif %}
             </td>
