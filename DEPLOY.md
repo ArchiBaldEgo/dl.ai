@@ -314,11 +314,73 @@ sudo systemctl reload nginx
 Проверка:
 
 ```bash
-curl -I https://dl.gsu.by/ai/static/admin/css/chat_template.css
+curl -I https://dl.gsu.by/ai/static/admin/css/ai.css
 curl -I https://dl.gsu.by/ai/static/admin/js/chat_template.js
 ```
 
 Ожидается `HTTP 200` и корректные MIME-типы (`text/css`, `application/javascript`/`text/javascript`).
+
+## 8. Еженедельный бэкап БД в Telegram
+
+Бэкапом управляет фоновый демон `backup_runner.sh` (systemd-юнит
+`scripts/systemd/dlai-backup.service`, лежит в репо): каждый понедельник в
+04:00 UTC он делает `pg_dump` через `docker exec`, кладёт архив в
+`backups/` рядом с проектом, держит в ротации 3 свежих файла и отправляет
+архив в Telegram.
+
+### Куда записать токен Telegram-бота
+
+Секреты НЕ хранятся ни в скрипте, ни в git. На сервере создайте отдельный
+файл `/home/archi/dlai/backup.env` рядом со скриптом:
+
+```bash
+# 1. На сервере создайте файл с токенами
+cat > /home/archi/dlai/backup.env <<'EOF'
+TG_BOT_TOKEN=1234567890:AA...ваш_токен_от_BotFather
+TG_CHAT_ID=123456789
+EOF
+
+# 2. Закройте от чужих глаз (обязательно)
+chmod 600 /home/archi/dlai/backup.env
+```
+
+- `TG_BOT_TOKEN` выдаёт [@BotFather](https://t.me/BotFather) командой
+  `/newbot` (или возьмите существующий бота командой `/mybots`).
+- `TG_CHAT_ID` — числовой id чата, куда складывать бэкапы. Узнать его
+  можно так: напишите что-нибудь боту в нужном чате, затем откройте в
+  браузере `https://api.telegram.org/bot<TG_BOT_TOKEN>/getUpdates` и
+  найдите `"chat":{"id":` в ответе.
+
+### Запустить бэкап
+
+```bash
+# Юнит запускается от пользователя (без sudo); скопируйте его в user-системд:
+mkdir -p ~/.config/systemd/user
+cp scripts/systemd/dlai-backup.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now dlai-backup.service
+
+# Логи живого демона:
+journalctl --user -u dlai-backup -f
+# либо tail файла бэкапов:
+tail -f backups/backup.log
+```
+
+### Разовый бэкап (проверка, что токен работает)
+
+Не ждём понедельника — делаем бэкап прямо сейчас:
+
+```bash
+MAX_BACKUPS=99 /home/archi/dlai/backup_runner.sh --now
+```
+
+В Telegram должны прийти текстовое сообщение и файл `.sql.gz` из бэкапов. Если в
+`backups/backup.log` появилось `FATAL: TG_BOT_TOKEN/TG_CHAT_ID не найдены` —
+проверьте, что создан `/home/archi/dlai/backup.env` и права `chmod 600`.
+
+Заметка: `api.telegram.org` с этого сервера доступен только через прокси
+(см. `EnvironmentFile=/etc/environment` в юните). Если Telegram-этап падает,
+сначала проверьте переменные прокси в `/etc/environment`.
 
 ---
 
