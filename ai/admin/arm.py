@@ -794,7 +794,7 @@ def admin_arm_solve_report_xlsx_view(request, run_id):
     и для живого in-memory прогона, и для завершённого (DB-fallback внутри
     get_arm_run_snapshot).
     """
-    from .logs import _arm_results_xlsx_response
+    from .request_logs import _arm_results_xlsx_response
 
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")

@@ -78,7 +78,7 @@ def dl_error_response(exc: DLApiError, extra: dict | None = None) -> JsonRespons
     """Преобразовать исключение DL API в единый JSON error-ответ.
 
     Единственная точка маппинга DL-исключений на HTTP-статусы и сообщения
-    (DRY: раньше 5 копий этой лестницы жили в views.py и admin/logs.py):
+    (DRY: раньше 5 копий этой лестницы жили в views.py и admin/request_logs.py):
     DLUnauthorizedError→401, DLForbiddenError→403, DLTaskNotFoundError→404,
     DLApiUnavailable→503, DLServerError/прочие DLApiError→502.
 

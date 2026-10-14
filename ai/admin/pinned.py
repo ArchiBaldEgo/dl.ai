@@ -14,7 +14,7 @@ from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
 
 from ..models import AIModelTestRun, AIPinnedBatchRun
-from .logs import (
+from .request_logs import (
     MOSCOW_TZ,
     _batch_run_id_from_log,
     _get_scoped_log,

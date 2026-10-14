@@ -311,6 +311,8 @@ class AIAdminSite(admin.AdminSite):
     def each_context(self, request):
         from .guest_mode import is_viewing_as_guest
         from .my_prompt import get_my_prompt_admin_url
+        from .test_data import ( get_test_data_url, can_access_test_data )
+
         context = super().each_context(request)
         is_pd = is_prompt_developer_user(request.user)
         is_staff = is_staff_or_superuser(request.user)
@@ -369,6 +371,9 @@ class AIAdminSite(admin.AdminSite):
         docs_url = "/ai/admin/docs/"
         pinned_runs_url = "/ai/admin/pinned-runs/"
 
+        test_data_url = get_test_data_url()
+        show_test_data = can_access_test_data(request) and is_super
+
         # --- AI tools in the left navigation sidebar (#nav-sidebar) ---
         # The left nav renders `available_apps` (separate from the dashboard's
         # main `app_list`), so we inject the custom (non-ModelAdmin) tool pages
@@ -402,6 +407,11 @@ class AIAdminSite(admin.AdminSite):
                 ("Диагностика", "Журнал запросов", "AiRequestLogs", ai_logs_url, show_logs, "≣", "Все запросы к моделям, с поиском"),
                 ("Диагностика", "Регрессионные тесты", "AiPromptRegression", prompt_regression_url, show_prompt_regression, "✓", "Проверка препромптов на тест-кейсах"),
                 ("Диагностика", "Тестовая консоль", "AiTestConsole", test_console_url, show_test_console, "⌘", "Запуск набора тестов приложения"),
+                ("Диагностика",
+                 "Тестовые данные",
+                 "AiTestData",
+                 test_data_url,
+                 show_test_data, "⚙", "Создание и редактирование тестовых данных"),
                 ("Система", "Обновления", "AiUpdates", updates_url, show_updates, "↻", "История изменений проекта"),
             ],
         )

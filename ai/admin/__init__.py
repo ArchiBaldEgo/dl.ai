@@ -38,7 +38,7 @@ from .models import (
     UpdateLogAdmin,
 )
 from .forms import PromptForm, SharedPromptForm
-from .logs import AIRequestLogAdmin, admin_request_log_detail_view, admin_request_logs_view, resend_request_view
+from .request_logs import AIRequestLogAdmin, admin_request_log_detail_view, admin_request_logs_view, resend_request_view
 from ..models import AIRequestLog
 from .arm import (
     admin_arm_solve_view,
@@ -55,6 +55,10 @@ from .prompt_regression import (
     admin_prompt_regression_view,
     admin_prompt_regression_start_view,
     admin_prompt_regression_status_view,
+)
+from .test_data import (
+    test_data_view,
+    test_data_emit_request_view
 )
 
 __all__ = [
@@ -86,6 +90,9 @@ __all__ = [
     "admin_prompt_regression_status_view",
     "admin_request_logs_view",
     "resend_request_view",
+
+    "test_data_view",
+    "test_data_emit_request_view"
 ]
 
 # Register AI models on the custom admin site so they appear in /ai/admin/.

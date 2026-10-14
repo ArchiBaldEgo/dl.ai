@@ -1,0 +1,15 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+{% load static %}
+<link rel="stylesheet" href="{% static 'admin/test_data/index.css' %}">
+<script src="{% static 'admin/test_data/index.js' %}"></script>
+
+<iframe name="emit-target" style="display:none"></iframe>
+<form method="post" action="{% url 'ai_test_data_emit_request' %}" target="emit-target">
+  {% csrf_token %}
+  <button type="submit" class="button">Emit Request</button>
+</form>
+
+
+{% endblock %}

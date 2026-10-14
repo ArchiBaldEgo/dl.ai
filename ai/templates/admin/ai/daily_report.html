@@ -286,7 +286,7 @@
         cell.textContent = 'Загрузка…';
         detail.appendChild(cell);
         row.parentNode.insertBefore(detail, row.nextSibling);
-        fetch('/ai/admin/ai/airequestlog/' + row.dataset.logId + '/detail-json/')
+        fetch('/ai/admin/ai/request_logs/' + row.dataset.logId + '/detail-json/')
           .then(parseJsonResponse)
           .then(function (data) { renderLogInfo(cell, data.log); })
           .catch(function (err) {

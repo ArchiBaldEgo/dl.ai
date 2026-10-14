@@ -1,3 +1,4 @@
+# ai/admin/request_logs.py
 """Логи запросов к AI-моделям: admin view и кастомная страница списка."""
 
 import logging
@@ -319,22 +320,7 @@ def build_recent_log_rows(request, limit=5):
             run = batch_run_by_log.get(log.pk)
             status_ok = (run.status == "completed") if run else (log.status == "success")
             rows.append({
-                "id": log.id,
-                "sent_at": log.sent_at,
-                "sender": log.user_full_name or log.username or "—",
-                "external_user_id": log.external_user_id or "",
-                "programming_language_name": log.programming_language_name or "—",
-                "topic_name": log.topic_name or "—",
-                "model_names": ", ".join(log.model_names or []) or "—",
-                "status": log.status,
-                "status_display": (
-                    batch_run_status_display(run.status) if run else log.get_status_display()
-                ),
-                "status_class": "ok" if status_ok else "err",
-                "run_name": run_name_for(run),
-                "mode_display": log.get_mode_display() or "—",
-                "duration_seconds": log.duration_seconds,
-                "detail_url": f"/ai/admin/ai/request_logs/{log.id}/",
+                
             })
     return {
         "recent_logs": rows,
@@ -348,7 +334,6 @@ def build_recent_log_rows(request, limit=5):
         "moscow_tz": MOSCOW_TZ,
     }
 
-
 def build_batch_rows_for_logs(request, logs):
     """Лёгкие строки batch-прогонов для списка записей журнала.
 
@@ -358,6 +343,7 @@ def build_batch_rows_for_logs(request, logs):
     развёртка результатов — лениво, AJAX по snapshot_url. Для каждого прогона
     проставляется флаг ``pinned`` (закреплён ли текущим пользователем).
     """
+
     run_ids = {}
     for log in logs:
         run_hex = _batch_run_id_from_log(log)
@@ -650,21 +636,24 @@ def admin_daily_report_view(request):
 
 
 def admin_request_logs_view(request):
+    # 1. 
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
 
+
+    # 2. 
     qs = _scope_logs_qs(AIRequestLog.objects.all(), request.user)
 
     status = request.GET.get("status", "").strip()
     source = request.GET.get("source", "").strip()
-    mode = request.GET.get("mode", "").strip()
-    model = request.GET.get("model", "").strip()
+    mode   = request.GET.get("mode", "").strip()
+    model  = request.GET.get("model", "").strip()
     user_q = request.GET.get("user", "").strip()
     task_q = request.GET.get("task", "").strip()
     log_id = request.GET.get("id", "").strip()
     text_q = request.GET.get("q", "").strip()
     date_from = _parse_date(request.GET.get("date_from", ""))
-    date_to = _parse_date(request.GET.get("date_to", ""))
+    date_to   = _parse_date(request.GET.get("date_to", ""))
 
     status_values = dict(AIRequestLog.STATUS_CHOICES)
     source_values = dict(AIRequestLog.SOURCE_CHOICES)
@@ -780,7 +769,14 @@ def admin_request_logs_view(request):
             "date_to": date_to,
         },
     }
-    return TemplateResponse(request, "admin/ai/request_logs.html", context)
+
+    template = (
+        "admin/ai/request_logs_table.html"
+        if request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        else "admin/ai/request_logs.html"
+    )
+
+    return TemplateResponse(request, template, context)
 
 
 def _is_batch_solve_log(log):
@@ -1027,7 +1023,7 @@ def admin_request_log_detail_view(request, log_id):
             context["is_batch_log"] = True
             context["batch_snapshot"] = snapshot
 
-    return TemplateResponse(request, "admin/ai/airequestlog_detail.html", context)
+    return TemplateResponse(request, "admin/ai/request_logs_detail.html", context)
 
 
 @require_POST

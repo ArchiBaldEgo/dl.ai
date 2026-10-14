@@ -82,7 +82,7 @@
         { sel: '#nav-sidebar a[href="/ai/admin/docs/prompt-developer/"]', title: "Документация", text: "Инструкция для тебя как разработчика промптов.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href="/ai/admin/prompts/my/"]', title: "Мой препромпт", text: "Здесь ты пишешь и меняешь свои промпты.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href="/ai/admin/arm/solve/"]', title: "Пакетное решение", text: "Проверка моделей сразу на всех задачах курса.", pos: "right", onShow: "openNav" },
-        { sel: '#nav-sidebar a[href="/ai/admin/ai/airequestlog/"]', title: "Журнал запросов", text: "Видно твои запросы к моделям.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/ai/request_logs/"]', title: "Журнал запросов", text: "Видно твои запросы к моделям.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href="/ai/admin/pinned-runs/"]', title: "Закреплённые", text: "Закреплённые пакетные решения — быстрый доступ к прогонам.", pos: "right", optional: true, onShow: "openNav" }
     ];
 
