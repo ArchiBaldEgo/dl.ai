@@ -17,6 +17,7 @@
 .ai-logs-table th { background: var(--darkened-bg); }
 .ai-logs-status-success { color: #067647; font-weight: 600; }
 .ai-logs-status-error { color: #b42318; font-weight: 600; }
+.ai-logs-status-neutral { color: #b45309; font-weight: 600; }
 .ai-logs-paginator {
   margin-top: 16px; display: flex; gap: 8px;
   align-items: center; flex-wrap: wrap;
@@ -44,6 +45,26 @@
   text-decoration-color: var(--body-quiet-color); font: inherit;
 }
 .ai-log-task-link:hover { text-decoration-style: solid; }
+/* === «Показать все задачи» (ленивый блок в развёртке batch-строки) === */
+.ai-log-tasks-block { padding: 8px 12px; border-top: 1px solid var(--hairline-color); }
+.ai-log-all-tasks-btn {
+  padding: 4px 12px; font-size: 12px; cursor: pointer;
+  border: 1px solid var(--border-color); border-radius: 4px;
+  background: var(--body-bg); color: var(--body-fg);
+}
+.ai-log-all-tasks-btn:hover { background: var(--selected-row); }
+.ai-log-all-tasks-btn:disabled { opacity: 0.6; cursor: default; }
+.ai-log-all-tasks-list {
+  margin-top: 8px; max-height: 320px; overflow: auto;
+  font-size: 12px; display: grid; gap: 2px;
+}
+.ai-log-all-tasks-list .ai-alltask { display: flex; gap: 6px; align-items: baseline; }
+.ai-log-all-tasks-list .ai-alltask-solved { color: #067647; }
+.ai-log-all-tasks-list .ai-alltask-failed { color: #b42318; }
+.ai-log-all-tasks-loading, .ai-log-all-tasks-error {
+  margin-top: 8px; font-size: 12px; color: var(--body-quiet-color);
+}
+.ai-log-all-tasks-error { color: #b42318; }
 /* === Модалка текста задачи === */
 .ai-task-modal {
   display: none; position: fixed; inset: 0; z-index: 1000;
