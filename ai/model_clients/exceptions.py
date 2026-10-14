@@ -2,10 +2,33 @@
 
 Содержит функции для классификации сетевых ошибок, извлечения контента
 из ответов API (SambaNova-style choices), и преобразования технических
-ошибок API в понятные русские сообщения (humanize_model_error).
+ошибок API в понятные сообщения (humanize_model_error).
+
+Локализация: ``humanize_model_error`` принимает ``language`` (имя из
+#selectLang). ``map_http_error``/``classify_network_error`` и прочие
+хелперы внутри клиентов моделей остаются русскими — язык интерфейса туда
+не протекает (хендлеры имеют фиксированную сигнатуру handler(message,
+client_id)), а их тексты до-humanize'ятся выше в consumer'е уже с языком
+пользователя. ARM/админские вызовы получают русский по умолчанию.
 """
 
 from typing import Tuple, Optional
+
+
+def _t(table: dict, language: str) -> str:
+    """Выбрать текст из таблицы ``{"ru":…, "en":…, "fr":…}`` по языку UI."""
+    suffix = _ui_suffix(language)
+    return table[suffix] if suffix in table else table["ru"]
+
+
+def _ui_suffix(language: str) -> str:
+    """Suffix 'ru'/'en'/'fr' без импорта ai.i18n (плоский модуль, без циклов)."""
+    low = (language or "").lower()
+    if low.startswith("en"):
+        return "en"
+    if low.startswith("fr"):
+        return "fr"
+    return "ru"
 
 
 def classify_network_error(error: Exception) -> str:
@@ -93,6 +116,9 @@ def extract_api_error_text(response_text: str) -> str:
 # Сообщения, совпадающие у провайдеров, — общие (413); отличающиеся —
 # индивидуальны по ``provider``. ``map_http_error`` возвращает None только для
 # status == 200 (успех); для любого не-200 всегда есть friendly-fallback.
+# Тексты остаются русскими: клиенты моделей не знают язык интерфейса, а в
+# чатовой цепочке текст до-humanize'ится с языком пользователя (см. модульный
+# докстринг).
 
 # 413 — общий для OpenRouter и Groq (одинаковая формулировка в обоих клиентах).
 _TOO_MANY_TOKENS = "Превышен лимит токенов для модели. Попробуйте сократить запрос или выберите другую модель."
@@ -158,37 +184,110 @@ def map_http_error(status: int, provider: str) -> Optional[str]:
     return f"Ошибка API (код {status})."
 
 
+# --- Паттерны технического текста → понятное сообщение (три языка) ---
+#
+# (substrings, slug); сами тексты — в _MODEL_ERROR_TR. Словарь-хелпер
+# держит ru/en/fr версии одной формулировки рядом (одна строка правки
+# меняет сразу три языка — правило триязычной клиентской части).
+
+_MODEL_ERROR_TR = {
+    "bad_request": {
+        "ru": "Ошибка запроса к модели (400). Обычно это значит, что запрос слишком длинный, "
+              "содержит неподдерживаемый формат или лишние спецсимволы. "
+              "Попробуйте сократить условие/код и отправить снова.",
+        "en": "Model request error (400). Usually this means the request is too long, "
+              "contains an unsupported format or extra special characters. "
+              "Try to shorten the task/code and send it again.",
+        "fr": "Erreur de requête au modèle (400). Cela signifie généralement que la requête est "
+              "trop longue, contient un format non pris en charge ou des caractères spéciaux "
+              "superflus. Essayez de raccourcir l'énoncé/le code et de renvoyer.",
+    },
+    "unauthorized": {
+        "ru": "Ошибка авторизации модели (401). Проверьте API-ключ/токен и права доступа к модели.",
+        "en": "Model authorization error (401). Check the API key/token and access rights to the model.",
+        "fr": "Erreur d'autorisation du modèle (401). Vérifiez la clé API/le jeton et les droits d'accès au modèle.",
+    },
+    "credits": {
+        "ru": "Закончились кредиты у провайдера модели (402). Пополните баланс, чтобы продолжить.",
+        "en": "The model provider's credits are exhausted (402). Top up the balance to continue.",
+        "fr": "Les crédits du fournisseur du modèle sont épuisés (402). Rechargez le solde pour continuer.",
+    },
+    "forbidden": {
+        "ru": "Доступ к модели запрещен (403). У текущего ключа нет нужных прав или доступ ограничен политикой сервиса.",
+        "en": "Access to the model is forbidden (403). The current key lacks the required rights or access is restricted by the service policy.",
+        "fr": "L'accès au modèle est interdit (403). La clé actuelle n'a pas les droits requis ou l'accès est restreint par la politique du service.",
+    },
+    "not_found": {
+        "ru": "Модель не найдена (404). Возможно, имя модели устарело или эта модель сейчас недоступна у провайдера.",
+        "en": "Model not found (404). The model name may be outdated or the model is currently unavailable at the provider.",
+        "fr": "Modèle introuvable (404). Le nom du modèle est peut-être obsolète ou ce modèle est actuellement indisponible chez le fournisseur.",
+    },
+    "rate_limit": {
+        "ru": "Сервис модели ограничил частоту запросов (429). Подождите немного и запустите проверку снова.",
+        "en": "The model service has limited the request rate (429). Wait a moment and run the check again.",
+        "fr": "Le service du modèle a limité la fréquence des requêtes (429). Patientez un peu et relancez la vérification.",
+    },
+    "timeout": {
+        "ru": "Модель не ответила вовремя (таймаут). Попробуйте повторить запрос позже или сократить объем задачи/кода.",
+        "en": "The model did not respond in time (timeout). Try repeating the request later or reducing the size of the task/code.",
+        "fr": "Le modèle n'a pas répondu à temps (délai dépassé). Réessayez plus tard ou réduisez le volume de la tâche/du code.",
+    },
+    "unavailable_5xx": {
+        "ru": "Сервис модели временно недоступен (5xx). Это серверная ошибка провайдера, попробуйте позже.",
+        "en": "The model service is temporarily unavailable (5xx). This is a provider-side error, try again later.",
+        "fr": "Le service du modèle est temporairement indisponible (5xx). C'est une erreur côté fournisseur, réessayez plus tard.",
+    },
+    "connection": {
+        "ru": "Ошибка подключения к сервису модели. Проверьте сеть/прокси и доступность внешнего API.",
+        "en": "Connection error to the model service. Check the network/proxy and the external API availability.",
+        "fr": "Erreur de connexion au service du modèle. Vérifiez le réseau/le proxy et la disponibilité de l'API externe.",
+    },
+    "empty_raw": {
+        "ru": "Модель вернула пустой ответ. Попробуйте позже.",
+        "en": "The model returned an empty response. Please try again later.",
+        "fr": "Le modèle a renvoyé une réponse vide. Réessayez plus tard.",
+    },
+    "api_generic": {
+        "ru": "Сервис модели вернул ошибку API. Проверьте параметры запроса и повторите попытку чуть позже.",
+        "en": "The model service returned an API error. Check the request parameters and try again a bit later.",
+        "fr": "Le service du modèle a renvoyé une erreur API. Vérifiez les paramètres de la requête et réessayez un peu plus tard.",
+    },
+}
+_DETAIL_LABEL = {
+    "ru": "Техническая деталь",
+    "en": "Technical detail",
+    "fr": "Détail technique",
+}
+
 _MODEL_ERROR_PATTERNS = (
-    # (sequence of substrings, friendly message)
+    # (sequence of substrings, slug в _MODEL_ERROR_TR)
     (
         ("неправильный запрос", "код 400", "error 400", "status 400", "bad request"),
-        "Ошибка запроса к модели (400). Обычно это значит, что запрос слишком длинный, "
-        "содержит неподдерживаемый формат или лишние спецсимволы. "
-        "Попробуйте сократить условие/код и отправить снова.",
+        "bad_request",
     ),
     (
         ("код 401", "error 401", "status 401", "unauthorized", "не авториз"),
-        "Ошибка авторизации модели (401). Проверьте API-ключ/токен и права доступа к модели.",
+        "unauthorized",
     ),
     (
         ("код 402", "error 402", "status 402", "credits_exhausted", "закончились кредиты", "payment required"),
-        "Закончились кредиты у провайдера модели (402). Пополните баланс, чтобы продолжить.",
+        "credits",
     ),
     (
         ("код 403", "error 403", "status 403", "forbidden", "доступ запрещ"),
-        "Доступ к модели запрещен (403). У текущего ключа нет нужных прав или доступ ограничен политикой сервиса.",
+        "forbidden",
     ),
     (
         ("код 404", "error 404", "status 404", "not found", "не найден"),
-        "Модель не найдена (404). Возможно, имя модели устарело или эта модель сейчас недоступна у провайдера.",
+        "not_found",
     ),
     (
         ("код 429", "error 429", "status 429", "rate limit", "превышен лимит", "все боты заняты"),
-        "Сервис модели ограничил частоту запросов (429). Подождите немного и запустите проверку снова.",
+        "rate_limit",
     ),
     (
         ("таймаут", "timeout", "timed out", "код 408", "status 408"),
-        "Модель не ответила вовремя (таймаут). Попробуйте повторить запрос позже или сократить объем задачи/кода.",
+        "timeout",
     ),
     (
         (
@@ -199,7 +298,7 @@ _MODEL_ERROR_PATTERNS = (
             "bad gateway", "gateway", "server error", "ошибка сервера",
             "временно недоступ", "инициализируется слишком долго",
         ),
-        "Сервис модели временно недоступен (5xx). Это серверная ошибка провайдера, попробуйте позже.",
+        "unavailable_5xx",
     ),
     (
         (
@@ -207,21 +306,24 @@ _MODEL_ERROR_PATTERNS = (
             "connectionerror", "failed to resolve", "name resolution",
             "max retries exceeded", "httpsconnectionpool", "не удалось подключ",
         ),
-        "Ошибка подключения к сервису модели. Проверьте сеть/прокси и доступность внешнего API.",
+        "connection",
     ),
 )
 
 
-def humanize_model_error(raw_text: str, include_detail: bool = False) -> tuple[str, str]:
+def humanize_model_error(raw_text: str, include_detail: bool = False, language: str = "") -> tuple[str, str]:
     """Return a user-friendly error message and, optionally, a detailed variant.
 
     The detailed message keeps the original technical text after the friendly
     explanation.  When ``include_detail`` is False both returned values are the
-    same friendly string.
+    same friendly string.  ``language`` — имя UI-языка («Русский»/«English»/
+    «Français», см. #selectLang); пустое значение = русский (ARM/админские
+    вызовы и старые потребители).
     """
     text = (raw_text or "").strip()
     if not text:
-        return "Модель вернула пустой ответ. Попробуйте позже.", "Модель вернула пустой ответ. Попробуйте позже."
+        empty = _t(_MODEL_ERROR_TR["empty_raw"], language)
+        return empty, empty
 
     low = text.lower()
 
@@ -229,20 +331,21 @@ def humanize_model_error(raw_text: str, include_detail: bool = False) -> tuple[s
     if len(low) > 350 and not low.startswith(("ошибка", "error", "exception", "traceback")):
         return text, text
 
-    for markers, friendly_text in _MODEL_ERROR_PATTERNS:
+    for markers, slug in _MODEL_ERROR_PATTERNS:
         if any(marker in low for marker in markers):
+            friendly_text = _t(_MODEL_ERROR_TR[slug], language)
             if not include_detail:
                 return friendly_text, friendly_text
             detailed_text = friendly_text
             if text and text != friendly_text:
-                detailed_text += f"\n\nТехническая деталь: {text}"
+                detailed_text += f"\n\n{_t(_DETAIL_LABEL, language)}: {text}"
             return friendly_text, detailed_text
 
     if low.startswith("ошибка api") or "api (код" in low:
-        friendly_text = "Сервис модели вернул ошибку API. Проверьте параметры запроса и повторите попытку чуть позже."
+        friendly_text = _t(_MODEL_ERROR_TR["api_generic"], language)
         if not include_detail:
             return friendly_text, friendly_text
-        detailed_text = f"{friendly_text}\n\nТехническая деталь: {text}"
+        detailed_text = f"{friendly_text}\n\n{_t(_DETAIL_LABEL, language)}: {text}"
         return friendly_text, detailed_text
 
     return text, text

@@ -95,9 +95,10 @@ function initWebSocket() {
                 return;
             }
             appendPersistedMessage(event.data);
+            var wsData = stripAiStatus(event.data);
             var messages = document.getElementById('messages');
             var message = document.createElement('li');
-            var parsed = parseThinkTag(event.data);
+            var parsed = parseThinkTag(wsData);
             var inThinkTag = document.createElement('div');
             inThinkTag.classList.add('think');
             inThinkTag.innerHTML = parsed.thinkContent;
@@ -147,18 +148,18 @@ function sendMessage(event) {
     event.preventDefault();
     if (!ws) {
         console.log("WebSocket is not initialized");
-        alert("Соединение не установлено. Пожалуйста, подождите...");
+        alert(getUiString('notConnected', "Соединение не установлено. Пожалуйста, подождите..."));
         return;
     }
 
     if (ws.readyState !== WebSocket.OPEN) {
         console.log("WebSocket is not open. State:", ws.readyState);
-        alert("Соединение не установлено. Пожалуйста, подождите...");
+        alert(getUiString('notConnected', "Соединение не установлено. Пожалуйста, подождите..."));
         return;
     }
 
     if (requestInFlight) {
-        alert("Дождитесь ответа модели перед новым запросом.");
+        alert(getUiString('waitResponse', "Дождитесь ответа модели перед новым запросом."));
         return;
     }
 
@@ -170,12 +171,12 @@ function sendMessage(event) {
     var preprompt = getSelectorValue("selectPrompt");
 
     if (!value) {
-        alert("Сегодня нет доступных моделей. Повторите позже.");
+        alert(getUiString('noModelsToday', "Сегодня нет доступных моделей. Повторите позже."));
         return;
     }
 
     if (!input.value.trim()) {
-        alert("Пожалуйста, введите сообщение");
+        alert(getUiString('enterMessage', "Пожалуйста, введите сообщение"));
         return;
     }
 
@@ -378,7 +379,7 @@ async function loadTaskFromUrl() {
             // после снятия HTML) — это НЕУДАЧА: раньше в поле записывалась
             // пустая строка и стирался восстановленный из localStorage текст.
             if (!statement.trim()) {
-                throw new Error('Пустое условие задачи');
+                throw new Error(getUiString('emptyTaskText', 'Пустое условие задачи'));
             }
             if (seq !== _taskLoadSeq) {
                 // Уже инициирована более свежая загрузка — не перебиваем её.
@@ -581,7 +582,7 @@ async function _pollDlResult(queueId, statusNode) {
             // временными и продолжаем до лимита.
             if (response.status === 401 || response.status === 403 || response.status === 404) {
                 _setDlMessageTextPersist(statusNode,
-                    'DL: ' + ((data && data.error) || 'результат тестирования недоступен'));
+                    'DL: ' + ((data && data.error) || getUiString('dlResultUnavailableRaw', 'результат тестирования недоступен')));
                 _forgetQueue();
                 return;
             }

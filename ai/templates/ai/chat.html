@@ -10,6 +10,6 @@
 
 {% block form_content %}
     <textarea type="text" id="messageText"
-        placeholder="Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)"
+        placeholder="{{ t.placeholder }}"
         autocomplete="off"></textarea>
 {% endblock %}

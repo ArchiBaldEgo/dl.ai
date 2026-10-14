@@ -13,13 +13,13 @@
 
 {% block extra_buttons %}
     {% if node_id %}
-        <button type="button" id="testOnDlBtn" onclick="testOnDl()">Тестирование</button>
+        <button type="button" id="testOnDlBtn" onclick="testOnDl()">{{ t.dlTestButton }}</button>
     {% endif %}
 {% endblock %}
 
 {% block form_content %}
     <textarea type="text" id="messageText" data-node-id="{{ node_id }}"
-        placeholder="Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)"
+        placeholder="{{ t.placeholder }}"
         autocomplete="off"></textarea>
 {% endblock %}
 
@@ -29,7 +29,7 @@
     <select id="selectTheme">
     </select>
     <div class="top-preprompt">
-        <div class="preprompt">Препромпт:</div>
+        <div class="preprompt">{{ t.preprompt }}:</div>
         <select id="selectPrompt">
         </select>
     </div>
