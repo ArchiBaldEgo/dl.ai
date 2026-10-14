@@ -2961,8 +2961,6 @@ class ResetModelStatsCommandTests(TestCase):
     """reset_model_stats: удаляет накопленную статистику моделей."""
 
     def test_command_deletes_stats_rows(self):
-        from django.core.management import call_command
-        from io import StringIO
         from ai.models import AIModelStats
         AIModelStats.objects.create(
             model_key="Ollama_X", model_title="X",
@@ -2972,6 +2970,145 @@ class ResetModelStatsCommandTests(TestCase):
         call_command("reset_model_stats", stdout=out)
         self.assertEqual(AIModelStats.objects.count(), 0)
         self.assertIn("удалено 1", out.getvalue())
+
+
+from io import StringIO
+from django.core.management import call_command
+
+
+class DeleteArmRunCommandTests(TestCase):
+    """delete_arm_run: точечное удаление batch-прогона из БД.
+
+    Удаляет прогон (+CASCADE результаты), запись журнала прогона (CASCADE —
+    закрепления), опционально решения кэша; вычитает вклад пар прогона из
+    AIModelStats (только при run_params.record_stats) с полом на нуле.
+    """
+
+    RUN_ID = "a" * 32
+
+    def _make_fixtures(self):
+        self.superuser = get_user_model().objects.create_superuser(username='dr_admin', password='x', email='d@t.com')
+        from ai.models import (
+            AIModelStats, AIModelTestResult, AIModelTestRun, AIRequestLog,
+            AIPinnedBatchRun, TaskSolution,
+        )
+        run = AIModelTestRun.objects.create(
+            run_id=self.RUN_ID, run_type="batch", status="completed",
+            run_name="Плохой прогон", run_params={"record_stats": True},
+            started_at=timezone.now(), finished_at=timezone.now(),
+        )
+        AIModelTestResult.objects.create(
+            run=run, model_key="M_1", model_title="M1", status="ok",
+            verdict="solved", duration_seconds=10.0,
+        )
+        AIModelTestResult.objects.create(
+            run=run, model_key="M_2", model_title="M2", status="error",
+            verdict="failed", duration_seconds=8.0,
+        )
+        AIModelTestResult.objects.create(
+            run=run, model_key="M_3", model_title="M3", status="error",
+            verdict="skipped", duration_seconds=None,
+        )
+        AIModelStats.objects.create(
+            model_key="M_1", model_title="M1", solved_count=5, total_count=8,
+            duration_count=4, duration_sum=40.0,
+        )
+        AIModelStats.objects.create(
+            model_key="M_2", model_title="M2", solved_count=2, total_count=3,
+            duration_count=2, duration_sum=12.0,
+        )
+        log = AIRequestLog.objects.create(
+            user=None, source="arm", mode="batch_solve",
+            message=f"Batch solve run {self.RUN_ID}",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        pin = AIPinnedBatchRun.objects.create(user=self.superuser, log=log)
+        sol = TaskSolution.objects.create(
+            task_node_id=1, programming_language_id=1, code="x", verdict="passed",
+            test_log=log,
+        )
+        return run, log, pin, sol
+
+    def test_dry_run_deletes_nothing(self):
+        run, log, pin, sol = self._make_fixtures()
+        out = StringIO()
+        call_command("delete_arm_run", run_id=self.RUN_ID, stdout=out)
+        self.assertIn("DRY-RUN", out.getvalue())
+        self.assertTrue(run.__class__.objects.filter(pk=run.pk).exists())
+
+    def test_dry_run_keeps_stats_untouched(self):
+        # DRY-RUN не только не удаляет прогон — он и статистику не вычитает.
+        from ai.models import AIModelStats
+        self._make_fixtures()
+        call_command("delete_arm_run", run_id=self.RUN_ID, stdout=StringIO())
+        m1 = AIModelStats.objects.get(model_key="M_1")
+        self.assertEqual((m1.solved_count, m1.total_count), (5, 8))
+        self.assertEqual((m1.duration_count, m1.duration_sum), (4, 40.0))
+
+    def test_yes_deletes_run_log_pin_and_subtracts_stats(self):
+        run, log, pin, sol = self._make_fixtures()
+        from ai.models import (
+            AIModelStats, AIModelTestResult, AIModelTestRun, AIPinnedBatchRun,
+            AIRequestLog, TaskSolution,
+        )
+        out = StringIO()
+        call_command("delete_arm_run", run_id=self.RUN_ID, yes=True, stdout=out)
+        # Прогон, результаты, лог и закрепление ушли; решение кэша осталось.
+        self.assertEqual(AIModelTestRun.objects.count(), 0)
+        self.assertEqual(AIModelTestResult.objects.count(), 0)
+        self.assertEqual(AIRequestLog.objects.count(), 0)
+        self.assertEqual(AIPinnedBatchRun.objects.count(), 0)
+        self.assertTrue(TaskSolution.objects.filter(pk=sol.pk).exists())
+        # M_1 вычтено (1 solved/1 пара, 1 замер/10 сек), M_2 (0/1, 1/8).
+        m1 = AIModelStats.objects.get(model_key="M_1")
+        self.assertEqual((m1.solved_count, m1.total_count), (4, 7))
+        self.assertEqual((m1.duration_count, m1.duration_sum), (3, 30.0))
+        m2 = AIModelStats.objects.get(model_key="M_2")
+        self.assertEqual((m2.solved_count, m2.total_count), (2, 2))
+        self.assertEqual((m2.duration_count, m2.duration_sum), (1, 4.0))
+        # M_3 был только skipped — в статистику не вносил, строк нет.
+        self.assertFalse(AIModelStats.objects.filter(model_key="M_3").exists())
+
+    def test_record_stats_off_keeps_stats(self):
+        run, log, pin, sol = self._make_fixtures()
+        from ai.models import AIModelStats
+        run.run_params = {}
+        run.save(update_fields=["run_params"])
+        AIModelStats.objects.update_or_create(
+            model_key="M_1",
+            defaults={"solved_count": 3, "total_count": 4,
+                      "duration_count": 2, "duration_sum": 20.0},
+        )
+        call_command("delete_arm_run", run_id=self.RUN_ID, yes=True, stdout=StringIO())
+        stats = AIModelStats.objects.get(model_key="M_1")
+        self.assertEqual((stats.solved_count, stats.total_count), (3, 4))
+
+    def test_stats_floor_at_zero(self):
+        run, log, pin, sol = self._make_fixtures()
+        from ai.models import AIModelStats
+        AIModelStats.objects.update_or_create(
+            model_key="M_1",
+            defaults={"solved_count": 1, "total_count": 1,
+                      "duration_count": 1, "duration_sum": 1.0},
+        )
+        call_command("delete_arm_run", run_id=self.RUN_ID, yes=True, stdout=StringIO())
+        stats = AIModelStats.objects.get(model_key="M_1")
+        self.assertEqual(stats.solved_count, 0)
+        self.assertEqual(stats.duration_sum, 0.0)
+
+    def test_drop_solutions_removes_cached_solutions(self):
+        run, log, pin, sol = self._make_fixtures()
+        from ai.models import TaskSolution
+        call_command("delete_arm_run", run_id=self.RUN_ID, yes=True,
+                     drop_solutions=True, stdout=StringIO())
+        self.assertEqual(TaskSolution.objects.count(), 0)
+
+    def test_list_lists_batch_runs(self):
+        self._make_fixtures()
+        out = StringIO()
+        call_command("delete_arm_run", **{"list": True}, stdout=out)
+        self.assertIn(self.RUN_ID, out.getvalue())
+        self.assertIn("Плохой прогон", out.getvalue())
 
 
 class RerunUnsolvedPairsTests(TestCase):

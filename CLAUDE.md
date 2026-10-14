@@ -213,6 +213,7 @@ Non-obvious management commands (see `--help` for flags):
 - `translate_prompts` — LLM-based translation of Prompt/SharedPrompt fields via a registered model handler (fills empty unless `--overwrite`).
 - `reset_favorites_epoch` — sets `AIAppSettings.favorites_epoch = now` for all users; `_get_user_top_model_keys` then counts only logs newer than the epoch, so every user's list goes alphabetical until new successful requests rebuild the top-1 (logs not deleted).
 - `reset_model_stats` — deletes all `AIModelStats` rows (the cumulative avg-seconds/percent-solved feeding the chat-model selector suffixes). Use after a change in duration semantics — duration of a batch pair counts ONLY the model call (generation), not the DL-polling/record-lock wait or the Ollama semaphore backoff.
+- `delete_arm_run` — точечно удаляет один batch-прогон из БД (AIModelTestRun + CASCADE результатов, запись журнала AIRequestLog → CASCADE закреплений) и вычитает вклад пар из `AIModelStats` зеркально `record_batch_solve_stats` (только при `run_params.record_stats`, пол на нуле). `--list` — последние прогоны; без `--yes` — dry-run; `--drop-solutions` заодно удаляет решения кэша, записанные прогоном (`test_log` = лог прогона).
 
 ## Security baseline
 
