@@ -2905,6 +2905,74 @@ class ExtractCodeFromResponseTests(SimpleTestCase):
         text = f"```asm\n{prose}\n```"
         self.assertEqual(self.extract(text), "")
 
+    # === «Альтернатива/Вариант 2» с кодом второго решения (срез) ===
+
+    def test_alternative_section_cut_keeps_main_code(self):
+        # Второй блок длиннее первого — без среза «победил бы» он (longest wins).
+        main = "mov ax, x\nsub ax, y\nmov R, ax"
+        alt = "mov bx, z\nadd bx, 3\nadd bx, 4\nadd bx, 5\nmov R, bx"
+        text = f"```asm\n{main}\n```\nАльтернатива:\n```asm\n{alt}\n```"
+        self.assertEqual(self.extract(text), main)
+
+    def test_alternative_heading_in_unclosed_fence_cut(self):
+        # Модель не закрыла оградку: всё после неё тянулось бы в код вместе
+        # с заголовком «Альтернатива:» и вторым вариантом.
+        main = "mov ax, x\nsub ax, y"
+        text = f"```asm\n{main}\nАльтернатива:\nmov bx, z\nadd bx, 1"
+        self.assertEqual(self.extract(text), main)
+
+    def test_carved_section_skips_alternative_code(self):
+        # Без оградок: карвинг «перепрыгивал» заголовок зазором ≤2 не-кодовых
+        # строк и клеил оба решения в один фрагмент.
+        main = "mov ax, x\nsub ax, y\nmov R, ax"
+        alt = "mov bx, z\nadd bx, 1"
+        text = f"{main}\nАльтернатива:\n{alt}"
+        extracted = self.extract(text)
+        self.assertIn("mov ax, x", extracted)
+        self.assertNotIn("Альтернатива", extracted)
+        self.assertNotIn("mov bx, z", extracted)
+
+    def test_variant_heading_before_code_not_cut(self):
+        # «Вариант 1:» открывает ЕДИНСТВЕННЫЙ код-блок — среза быть не должно.
+        text = "Вариант 1:\n```asm\nmov ax, x\nsub ax, y\nmov R, ax\n```"
+        self.assertEqual(self.extract(text), "mov ax, x\nsub ax, y\nmov R, ax")
+
+    def test_english_alternative_heading_cut(self):
+        main = "mov ax, x\nsub ax, y\nmov R, ax"
+        text = f"```asm\n{main}\n```\nAlternative solution:\n```asm\nmov bx, z\nadd bx, 1\n```"
+        self.assertEqual(self.extract(text), main)
+
+
+class OllamaNumPredictTests(SimpleTestCase):
+    """Потолок генерации Ollama: env OLLAMA_NUM_PREDICT, дефолт 8192
+    (4096 обрезал большие ответы — «обрезание ответа если он большой»)."""
+
+    def test_default_8192_and_env_override(self):
+        from ai.model_clients import ollama
+        self.assertEqual(ollama._default_num_predict(), 8192)
+        with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "2048"}):
+            self.assertEqual(ollama._default_num_predict(), 2048)
+        with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "16"}):
+            # Слишком малые значения не допускаются (нижняя граница 1024).
+            self.assertEqual(ollama._default_num_predict(), 1024)
+
+
+class ResetModelStatsCommandTests(TestCase):
+    """reset_model_stats: удаляет накопленную статистику моделей."""
+
+    def test_command_deletes_stats_rows(self):
+        from django.core.management import call_command
+        from io import StringIO
+        from ai.models import AIModelStats
+        AIModelStats.objects.create(
+            model_key="Ollama_X", model_title="X",
+            solved_count=1, total_count=2, duration_count=1, duration_sum=10.0,
+        )
+        out = StringIO()
+        call_command("reset_model_stats", stdout=out)
+        self.assertEqual(AIModelStats.objects.count(), 0)
+        self.assertIn("удалено 1", out.getvalue())
+
 
 class RerunUnsolvedPairsTests(TestCase):
     """Попарный перезапуск нерешённых пар со слиянием в тот же прогон.
@@ -7715,6 +7783,14 @@ class SolveMessageTests(TestCase):
         message = self._message(prompt_id=self.prompt.id)
         self.assertIn("Условие задачи:", message)
         self.assertIn("Найти максимум в массиве", message)
+
+    def test_no_comments_instruction_appended_always(self):
+        # Требование «без комментариев» приписывается к ЛЮБОМУ сообщению
+        # пакетного решения — и с привязкой, и без неё.
+        self.assertIn("никаких комментариев", self._message())
+        message = self._message(prompt_id=self.prompt.id)
+        self.assertIn("никаких комментариев", message)
+        self.assertIn("ПИШИ КАПСОМ", message)
 
 
 # ===================================================================

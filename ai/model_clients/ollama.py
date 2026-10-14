@@ -143,6 +143,17 @@ OLLAMA_MODELS: dict[str, dict] = {
 }
 
 
+def _default_num_predict() -> int:
+    """Потолок генерации (num_predict) Ollama-моделей.
+
+    Значение по умолчанию 4096 ОБРЕЗАЛО большие ответы (длинные решения с
+    кодом обрывались на полуслове): дефолт поднят до 8192 и переопределяется
+    через OLLAMA_NUM_PREDICT в .env. Читается лениво (как прочие env-лимиты
+    модуля) — тесты переопределяют через patch.dict.
+    """
+    return max(1024, int(os.getenv("OLLAMA_NUM_PREDICT", "8192")))
+
+
 def _get_client() -> Client:
     """Создаёт Ollama Client с явным host/headers из config (не полагаемся на env SDK)."""
     headers = {"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else None
@@ -153,7 +164,7 @@ def _stream_once(model: str, msg: str, temperature: float, num_predict: int) -> 
     """Синхронный streaming-вызов ollama.chat (запускается через asyncio.to_thread).
 
     Возвращает ``(content, eval_count, thinking)``. Стриминг обязателен: без
-    него длинные генерации ARM-solve (промпт ~5k символов + num_predict=4096)
+    него длинные генерации ARM-solve (промпт ~5k символов + большой num_predict)
     идут минутами без единого байта в ответ, и шлюз api.ollama.com закрывает
     соединение, не дождавшись готового ответа — httpx поднимает
     ServerDisconnectedError («Server disconnected without sending a response»).
@@ -250,7 +261,7 @@ async def _ask_ollama(
     model_id: str,
     *,
     temperature: float = 0.7,
-    num_predict: int = 4096,
+    num_predict: int | None = None,
 ) -> Tuple[str, int, bool]:
     """Общий обработчик для всех моделей Ollama. Обычный чат без инструментов.
 
@@ -262,6 +273,10 @@ async def _ask_ollama(
         return "Ollama API ключ не настроен. Добавьте OLLAMA_API_KEY в .env", 0, True
 
     attempts = max(1, int(os.getenv("OLLAMA_MAX_RETRIES", "3")) + 1)
+    # None → берём env-потолок (_default_num_predict): прежний жёсткий
+    # 4096 обрезал большие ответы моделей.
+    if num_predict is None:
+        num_predict = _default_num_predict()
     result: Tuple[str, int, str] | None = None
     for attempt in range(1, attempts + 1):
         try:

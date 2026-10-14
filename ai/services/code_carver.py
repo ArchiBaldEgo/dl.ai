@@ -157,6 +157,53 @@ def _trim_prose_tail(lines):
 
 
 
+# Заголовок «второго решения»: после основного кода модели часто дают
+# «Альтернатива:/Вариант 2:/Another solution:» и второй код-блок. Проза-гейты
+# заголовок пропускают (короткие строки < 4 слов), а _carve_code_block
+# «перепрыгивает» одиночную не-кодовую строку зазором ≤2 — без отдельного
+# среза в сохранённое решение попадает и заголовок, и чужой код второй версии.
+_ALT_HEADING_RE = _re.compile(
+    r"^\s*(?:"
+    r"альтернат\w*"
+    r"|вариант\s*(?:№\s*)?\d"
+    r"|вариант\s+[БбАа]?"
+    r"|\d\s*[-—–]\s*[йя]?\s*вариант"
+    r"|втор(?:ой|ая)\s+(?:вариант|версия|реализация|способ)"
+    r"|alternative(?:\s+(?:variant|solution|approach|option|way))?"
+    r"|another\s+(?:variant|solution|approach|option|way)"
+    r"|second\s+(?:variant|solution|approach|option|way)"
+    r"|способ\s+\d"
+    r")[\s:—–-]*",
+    _re.IGNORECASE,
+)
+
+
+def _is_alternative_heading(line):
+    """True, если строка — заголовок второго варианта решения."""
+    return bool(_ALT_HEADING_RE.match(line))
+
+
+def cut_after_alternative_heading(text):
+    """Срезать текст ПОСЛЕ первого заголовка «второго решения».
+
+    Срез делается только когда до заголовка уже есть ≥2 кодовых индикатора
+    (кодовая строка или строка-оградка): заголовок, открывающий ЕДИНСТВЕННЫЙ
+    вариант («Вариант 1: …код»), код не трогает. Оградка считается — у
+    инструкций вроде «sub ax, y» нет ни одного кодового маркера из
+    _CODE_HINT_RE, а «mov + оградка» перед заголовком — уже основное решение.
+    Возвращает укороченный текст (или исходный, если срезать нечего).
+    """
+    lines = text.splitlines()
+    code_seen = 0
+    for index, line in enumerate(lines):
+        if _is_alternative_heading(line):
+            if code_seen >= 2:
+                return "\n".join(lines[:index]).rstrip()
+        elif _line_is_code(line) or line.lstrip().startswith("```"):
+            code_seen += 1
+    return text
+
+
 # Строка-оградка: ```, ```lang, отступы слева допустимы
 _FENCE_LINE_RE = _re.compile(r"^\s*```[^\n]*$", _re.MULTILINE)
 

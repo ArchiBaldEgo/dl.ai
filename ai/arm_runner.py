@@ -170,6 +170,18 @@ def _resolve_batch_prompt(task, fallback_language_id, cache):
     return cache[key]
 
 
+# Требование «без комментариев» — во ВСЕ сообщения пакетного решения
+# (/arm/solve/), поверх привязки/базовой инструкции. Язык приписки — язык UI
+# прогона (сразу после get_language_instruction модель обязана отвечать на
+# том же языке). Комментарии внутри кода ломают стиль решения и путают
+# студентов.
+_NO_COMMENTS_INSTRUCTION = {
+    "ru": "Не добавляй никаких комментариев в код — выведи только чистый код решения.",
+    "en": "Do not add any comments to the code — output only the clean solution code.",
+    "fr": "N'ajoute aucun commentaire au code — produis uniquement le code propre de la solution.",
+}
+
+
 def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None):
     """Compose the solve prompt for one task.
 
@@ -178,7 +190,7 @@ def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language
     fallback'ов (topic-bound Prompt, SharedPrompt mode=solve) больше нет:
     нет привязки → прогон без препромпта, только базовая инструкция.
     """
-    from .i18n import get_language_instruction
+    from .i18n import get_language_instruction, get_ui_language_suffix
     from .models import Prompt
 
     message = None
@@ -203,6 +215,7 @@ def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language
     if task_statement and task_statement.strip() and task_statement.strip() not in (message or ""):
         message = (message or "").rstrip() + f"\n\nУсловие задачи:\n{task_statement}"
     message += get_language_instruction(ui_language)
+    message += "\n" + _NO_COMMENTS_INSTRUCTION[get_ui_language_suffix(ui_language)]
     return message
 
 
@@ -982,6 +995,9 @@ def _extract_code_pipeline(text, file_extension):
 
     # === Вариант B: структурные экстракторы языков курса ===
     from .services import code_carver
+    # «Альтернатива:/Вариант 2:…» с кодом второго решения срезаются ДО всех
+    # экстракторов (структурники, фенсы и карвинг работают по одному тексту).
+    cleaned = code_carver.cut_after_alternative_heading(cleaned)
     structural = None
     if ext in (".i86", ".asm"):
         structural = code_carver.extract_asm_i86
@@ -1627,7 +1643,12 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     topic_name = task_ctx["topic_name"]
     task_prompt_id = task_ctx["prompt_id"]
 
-    started = perf_counter()
+    # «Время обработки» пары меряет ТОЛЬКО вызов модели (генерацию): из
+    # показателя не должны вылезать чужие ожидания — DL-поллинг, ожидание
+    # locа записи, очередь семафора Ollama — иначе накопленная статистика
+    # моделей (AIModelStats → суффиксы «≈N сек» селектора) раздувается.
+    gen_started = perf_counter()
+    gen_seconds = 0.0
     verdict = _VERDICT_FAILED
     status = "error"
     short_response = ""
@@ -1644,10 +1665,12 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         message = _build_solve_message(
             task.statement, prog_lang_name, topic_name, ctx["ui_language"], task_prompt_id,
         )
+        gen_started = perf_counter()
         response = async_to_sync(model["handler"])(
             message,
             f"admin-batch-{ctx['user_id']}-{model['key']}-{ctx['run_id']}-{node_id}",
         )
+        gen_seconds = round(perf_counter() - gen_started, 2)
         # Отмена могла прийти во время LLM-вызова (его самого не
         # прервать) — не тратим время на DL-тест и запись пары.
         if _is_cancel_requested(ctx["run_id"]):
@@ -1742,10 +1765,13 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         short_response = friendly or f"Ошибка вызова модели: {exc_text}"
         raw_response = detailed or cleaned_text
         dl_submit_error = exc_text[:2000]
+        if not gen_seconds:
+            gen_seconds = round(perf_counter() - gen_started, 2)
+
     def _write_pair_row():
         """Запись результата пары + решение-кэш. Единый хвост для обеих веток
         ниже; лок держится на всё время записи."""
-        duration = round(perf_counter() - started, 2)
+        duration = gen_seconds
 
         result_obj, _ = AIModelTestResult.objects.update_or_create(
             run=ctx["test_run"],
