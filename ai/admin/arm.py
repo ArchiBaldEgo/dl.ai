@@ -24,6 +24,8 @@ from ..arm_runner import (
     cancel_arm_run,
     get_arm_run_snapshot,
     get_latest_batch_run_snapshot,
+    pause_arm_run,
+    resume_arm_run,
     start_batch_rerun_pairs,
     start_batch_solve_run,
 )
@@ -641,6 +643,17 @@ def admin_arm_solve_status_view(request):
     return JsonResponse({"ok": True, "run": run_snapshot})
 
 
+def _run_id_from_request(request):
+    """run_id из тела POST (JSON или form) — общий хвост cancel/pause/resume/rerun."""
+    import json as _json
+    body = {}
+    try:
+        body = _json.loads(request.body or b"{}")
+    except (ValueError, _json.JSONDecodeError):
+        body = {}
+    return (body.get("run_id") or request.POST.get("run_id", "")).strip()
+
+
 def admin_arm_solve_cancel_view(request):
     """Cancel a running batch-solve ARM job."""
     if not can_access_arm(request):
@@ -649,15 +662,7 @@ def admin_arm_solve_cancel_view(request):
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
 
-    import json as _json
-    body = {}
-    try:
-        body = _json.loads(request.body or b"{}")
-    except (ValueError, _json.JSONDecodeError):
-        body = {}
-
-    run_id = body.get("run_id") or request.POST.get("run_id", "")
-    run_id = run_id.strip()
+    run_id = _run_id_from_request(request)
     if not run_id:
         return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
 
@@ -669,6 +674,56 @@ def admin_arm_solve_cancel_view(request):
         )
 
     return JsonResponse({"ok": True, "message": "Прерывание запрошено"})
+
+
+def admin_arm_solve_pause_view(request):
+    """Приостановка batch-прогона на границе пар (текущая пара доживает)."""
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    run_id = _run_id_from_request(request)
+    if not run_id:
+        return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
+
+    if not pause_arm_run(run_id):
+        return JsonResponse(
+            {"ok": False, "message": "Процесс не найден или уже завершен"},
+            status=404,
+        )
+
+    return JsonResponse({
+        "ok": True,
+        "message": "Прогон приостановлен (текущая пара завершится)",
+        "run": get_arm_run_snapshot(run_id, light_results=True),
+    })
+
+
+def admin_arm_solve_resume_view(request):
+    """Снятие паузы: воркер продолжит с следующей пары."""
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    run_id = _run_id_from_request(request)
+    if not run_id:
+        return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
+
+    if not resume_arm_run(run_id):
+        return JsonResponse(
+            {"ok": False, "message": "Процесс не найден или уже завершен"},
+            status=404,
+        )
+
+    return JsonResponse({
+        "ok": True,
+        "message": "Прогон продолжается",
+        "run": get_arm_run_snapshot(run_id, light_results=True),
+    })
 
 
 def admin_arm_solve_rerun_pairs_view(request):
@@ -685,15 +740,7 @@ def admin_arm_solve_rerun_pairs_view(request):
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
 
-    import json as _json
-    body = {}
-    try:
-        body = _json.loads(request.body or b"{}")
-    except (ValueError, _json.JSONDecodeError):
-        body = {}
-
-    run_id = body.get("run_id") or request.POST.get("run_id", "")
-    run_id = run_id.strip()
+    run_id = _run_id_from_request(request)
     if not run_id:
         return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
 

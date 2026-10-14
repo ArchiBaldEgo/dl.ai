@@ -31,7 +31,12 @@
   var STATUS_LABELS = {
     completed: "Завершён",
     failed: "Ошибка",
-    cancelled: "Прерван"
+    cancelled: "Прерван",
+    // Кооперативная пауза batch-прогона (на границе пар; текущая пара доживает).
+    paused: "Пауза"
+  };
+  var IS_ACTIVE_STATUS = function (status) {
+    return status === "running" || status === "paused";
   };
 
   var toggle = document.getElementById("aiProcessesToggle");
@@ -90,7 +95,7 @@
   function renderChip(runs) {
     var activeCount = 0;
     for (var i = 0; i < runs.length; i++) {
-      if (runs[i].status === "running") activeCount += 1;
+      if (IS_ACTIVE_STATUS(runs[i].status)) activeCount += 1;
     }
     chip.textContent = "Процессы (" + activeCount + ") ▾";
     chip.classList.toggle("idle", activeCount === 0 && runs.length === 0);
@@ -105,6 +110,12 @@
     }
     item.appendChild(title);
 
+    // Название прогона (задаётся при запуске batch-solve) — второй строкой
+    // под типом; пусто — строка вообще не добавляется.
+    if (run.name) {
+      item.appendChild(el("div", "ai-processes-item-name", run.name));
+    }
+
     if (run.current) {
       item.appendChild(el("div", "ai-processes-item-stage", run.current));
     }
@@ -114,14 +125,14 @@
     var progress = el("div", "ai-processes-progress");
     if (total > 0) {
       // Проценты считаем на фронте: в бекенде только счётчики N/M.
-      var percent = run.status === "running"
+      var percent = IS_ACTIVE_STATUS(run.status)
         ? Math.min(100, Math.round((completed / total) * 100))
         : 100;
       progress.appendChild(el("div", "ai-processes-progress-fill"));
       progress.firstChild.style.width = percent + "%";
       item.appendChild(el("div", "ai-processes-item-stage",
         completed + " / " + total + " · " + percent + "%"));
-    } else if (run.status === "running") {
+    } else if (IS_ACTIVE_STATUS(run.status)) {
       // У тестовой консоли total неизвестен до итоговой строки unittest.
       progress.classList.add("indeterminate");
       progress.appendChild(el("div", "ai-processes-progress-fill"));
@@ -200,7 +211,7 @@
   function notifyFinished(runs) {
     for (var i = 0; i < runs.length; i++) {
       var run = runs[i];
-      if (run.status === "running" || !run.run_id) continue;
+      if (IS_ACTIVE_STATUS(run.status) || !run.run_id) continue;
       var key = NOTIFIED_KEY_PREFIX + run.run_id;
       try {
         if (window.sessionStorage.getItem(key)) continue;

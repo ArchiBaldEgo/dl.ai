@@ -580,6 +580,7 @@ def list_user_runs(user_id, since_ts=0.0):
             runs.append({
                 "run_id": job.get("run_id", ""),
                 "run_type": "prompt_regression",
+                "name": "",
                 "page_url": "/ai/admin/prompt-regression/",
                 "status": status,
                 "completed": job.get("completed_cases", 0),

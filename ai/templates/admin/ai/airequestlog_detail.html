@@ -1,7 +1,8 @@
 {% extends "admin/base_site.html" %}
 
-{% block content %}
 {% load tz %}
+{% load ai_duration %}
+{% block content %}
 <div class="ai-log-detail">
   {% include "admin/ai/_ai_back_nav.html" %}
 
@@ -12,8 +13,16 @@
        запроса и прочих блоков — по ТЗ это именно «развёртка» результата.{% endcomment %}
     <h1>Пакетное решение (ARM) — результаты прогона</h1>
     <div class="ai-batch-run-meta">
-      <div><strong>Статус:</strong> <span class="{% if batch_snapshot.run_status == 'completed' %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">{{ batch_snapshot.run_status_display|default:"—" }}</span></div>
+      <div><strong>Статус:</strong> <span class="{% if batch_snapshot.run_status == 'completed' %}ai-logs-status-success{% elif batch_snapshot.run_status == 'running' or batch_snapshot.run_status == 'paused' %}ai-logs-status-neutral{% else %}ai-logs-status-error{% endif %}">{{ batch_snapshot.run_status_display|default:"—" }}</span></div>
       <div><strong>Название прогона:</strong> {{ batch_snapshot.run_name|default:"—" }}</div>
+      <div><strong>Препромпты:</strong>
+        {# Снимки фактически использованных промптов пар (по привязке); пусто — «—». #}
+        {% for p in batch_snapshot.prompts %}
+          <a href="/ai/admin/ai/prompt/{{ p.id }}/change/" target="_blank" rel="noopener">{{ p.name }}</a>{% if not forloop.last %}, {% endif %}
+        {% empty %}
+          —
+        {% endfor %}
+      </div>
     </div>
     {% if log.error_message %}
       {# Прогон упал — без этой строки таблица была бы пустой без объяснения. #}
@@ -77,7 +86,7 @@
     </div>
     <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
     <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
-    <div><strong>Время ответа:</strong> {{ log.duration_seconds|floatformat:0|default:"—" }} с</div>
+    <div><strong>Время ответа:</strong> {% if log.duration_seconds %}{{ log.duration_seconds|human_duration }}{% else %}—{% endif %}</div>
   </div>
   {% endtimezone %}
 
@@ -111,6 +120,7 @@
   }
   .ai-logs-status-success { color: #067647; font-weight: 600; }
   .ai-logs-status-error { color: #b42318; font-weight: 600; }
+  .ai-logs-status-neutral { color: #b45309; font-weight: 600; }
   .ai-log-meta {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

@@ -6391,6 +6391,83 @@ class BatchLogRowContextsTests(TestCase):
         self.assertEqual(c["run_finished_at"], "")
         self.assertEqual(c["run_duration_display"], "")
 
+    def test_tasks_all_with_marks(self):
+        """Полный список задач (2026-10): решённые + нерешённые с пометками
+        по моделям и dl_url; счётчики solved/unsolved."""
+        from ai.models import AIModelTestResult
+        from ai.admin.logs import _batch_log_row_contexts
+        AIModelTestResult.objects.create(
+            run=self.test_run, task=self.t2,
+            model_key="FakeModel2", model_title="FakeModel2",
+            status="ok", verdict="failed",
+            duration_seconds=1.0, tokens=10,
+            short_response="r", raw_response="raw", code="code",
+            dl_comment="c", dl_queue_id=1,
+            file_extension_snapshot=".pas",
+            topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+        )
+        log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
+        c = _batch_log_row_contexts([log])[log.pk]
+        tasks_all = c["tasks_all"]
+        self.assertEqual([t["node_id"] for t in tasks_all], [5001, 5002])
+        by_node = {t["node_id"]: t for t in tasks_all}
+        self.assertTrue(by_node[5001]["solved"])
+        self.assertEqual(by_node[5001]["solved_models"], ["FakeModel"])
+        self.assertEqual(by_node[5001]["total_models"], ["FakeModel"])
+        # Вторая модель на t2 пыталась (failed) — в total_models есть.
+        self.assertFalse(by_node[5002]["solved"])
+        self.assertEqual(by_node[5002]["total_models"], ["FakeModel", "FakeModel2"])
+        self.assertEqual(by_node[5002]["solved_models"], [])
+        self.assertEqual(c["tasks_total"], 2)
+        self.assertEqual(c["tasks_solved_count"], 1)
+        self.assertEqual(c["tasks_unsolved_count"], 1)
+        self.assertIn("task.jsp?nid=5001", by_node[5001]["dl_url"])
+        self.assertIn("cid=1450", by_node[5001]["dl_url"])
+
+    def test_tasks_all_empty_run_prompts_absent(self):
+        """Без промптов у пар → пустой список prompts (шаблон покажет «—»)."""
+        from ai.admin.logs import _batch_log_row_contexts
+        log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
+        c = _batch_log_row_contexts([log])[log.pk]
+        self.assertEqual(c["tasks_total"], 2)
+        self.assertEqual(c["tasks_solved_count"], 1)
+        self.assertEqual(c["prompts"], [])
+
+    def test_prompts_distinct_ordered(self):
+        """Фактически использованные препромпты: distinct по prompt_id,
+        insertion-порядок; дубли (две пары с одним промптом) не задваиваются."""
+        from ai.models import AIModelTestResult
+        from ai.admin.logs import _batch_log_row_contexts
+        p1 = Prompt.objects.create(prompt_name_ru="Учитель", prompt_text_ru="t")
+        p2 = Prompt.objects.create(prompt_name_ru="Наставник", prompt_text_ru="t")
+        AIModelTestResult.objects.filter(run=self.test_run, task=self.t1).update(
+            prompt_id=p1.id, prompt_name="Учитель",
+        )
+        AIModelTestResult.objects.filter(run=self.test_run, task=self.t2).update(
+            prompt_id=p2.id, prompt_name="Наставник",
+        )
+        # Дубль: та же пара перезапущена — update_or_create перезаписал бы
+        # снимок; эмулируем второй строкой с тем же prompt (легаси-NULL не
+        # проходит фильтр).
+        AIModelTestResult.objects.create(
+            run=self.test_run, task=self.t2,
+            model_key="FakeModel3", model_title="FakeModel3",
+            status="ok", verdict="failed",
+            duration_seconds=1.0, tokens=10,
+            short_response="r", raw_response="raw", code="code",
+            dl_comment="c", dl_queue_id=1,
+            file_extension_snapshot=".pas",
+            topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+            prompt_id=p2.id, prompt_name="Наставник",
+        )
+        log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
+        c = _batch_log_row_contexts([log])[log.pk]
+        prompts = c["prompts"]
+        self.assertEqual(
+            sorted((p["id"], p["name"]) for p in prompts),
+            [(p1.id, "Учитель"), (p2.id, "Наставник")],
+        )
+
 
 class RequestLogXlsxTests(TestCase):
     """XLSX-выгрузка результатов batch-прогона (матрица задача×модель,
@@ -7020,6 +7097,42 @@ class ActiveRunsEndpointTests(TestCase):
         data = json.loads(response.content)
         self.assertTrue(data["ok"])
         self.assertEqual(data["runs"], [])
+
+    def test_batch_entry_carries_run_name(self):
+        """Название прогона (2026-10) — в entry «моих процессов»; у прочих
+        раннеров поля нет (пусто)"""
+        from ai import arm_runner
+        from ai.admin.active_runs import admin_active_runs_view
+        now_ts = time.time()
+        arm_runner._jobs["badge-named"] = {
+            "run_id": "badge-named", "user_id": self.superuser.id,
+            "run_type": "batch", "status": "running",
+            "completed_pairs": 0, "total_pairs": 3, "current_task_name": "A",
+            "run_name": "Лаба 3 (2 модели)",
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        try:
+            response = admin_active_runs_view(self._make_request(self.superuser))
+            data = json.loads(response.content)
+            entry = next(r for r in data["runs"] if r["run_id"] == "badge-named")
+            self.assertEqual(entry["name"], "Лаба 3 (2 модели)")
+        finally:
+            arm_runner._jobs.pop("badge-named", None)
+
+        # Прогон без run_name → пустая строка (фронт строку не рисует).
+        arm_runner._jobs["badge-unnamed"] = {
+            "run_id": "badge-unnamed", "user_id": self.superuser.id,
+            "run_type": "batch", "status": "running",
+            "completed_pairs": 0, "total_pairs": 1, "current_task_name": "A",
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        try:
+            response = admin_active_runs_view(self._make_request(self.superuser))
+            data = json.loads(response.content)
+            entry = next(r for r in data["runs"] if r["run_id"] == "badge-unnamed")
+            self.assertEqual(entry["name"], "")
+        finally:
+            arm_runner._jobs.pop("badge-unnamed", None)
 
 
 class TestConsoleRunnerTests(TestCase):
@@ -12010,3 +12123,596 @@ class BaseChatTemplateLocalizationTests(SimpleTestCase):
         self.assertIn('label="Tous les modèles"', html)
         self.assertIn("Envoyer", html)
         self.assertIn("Panneau Admin", html)
+
+
+class BatchRunStatusPausedDisplayTests(SimpleTestCase):
+    """Пауза batch-прогона — «Пауза» в журнале и «Настройке ИИ» (2026-10)."""
+
+    def test_status_mapping(self):
+        from ai.admin.logs import batch_run_status_display
+        from ai.models import AIModelTestRun
+        self.assertEqual(batch_run_status_display(AIModelTestRun.STATUS_PAUSED), "Пауза")
+
+
+class DurationFormatTests(SimpleTestCase):
+    """format_human_duration: нули старших разрядов опускаются, None/0 → ""."""
+
+    def test_boundaries(self):
+        from ai.templatetags.ai_duration import format_human_duration
+        self.assertEqual(format_human_duration(4462), "1 ч 14 мин")
+        self.assertEqual(format_human_duration(3630), "1 ч 0 мин")
+        self.assertEqual(format_human_duration(3660), "1 ч 1 мин")
+        self.assertEqual(format_human_duration(63), "1 мин 3 с")
+        self.assertEqual(format_human_duration(60), "1 мин")
+        self.assertEqual(format_human_duration(30), "30 с")
+        self.assertEqual(format_human_duration(7.3), "7 с")
+        self.assertEqual(format_human_duration(None), "")
+        self.assertEqual(format_human_duration(0), "")
+
+
+class MpaMultiWindowExtractionTests(SimpleTestCase):
+    """Multi-window экстрактор С-МПА (лог #2606801, «выкусывания навсегда»):
+    модель пишет СПЛОШНУЮ простыню рассуждения без фенсов и внутри неё
+    ПОЛНОСТЬЮ проговаривает программу (иногда несколько раз). Конвейер
+    должен вернуть финальную программу, а не «Не удалось извлечь код»."""
+
+    def _c(self, text, ext=".mpc"):
+        from ai.arm_runner import _extract_code_from_response
+        return _extract_code_from_response(text, file_extension=ext)
+
+    def _wall(self, prog, repeat=2):
+        """Простыня размышлений: программа внутри прозы, repeat раз."""
+        wall = "We need to answer only code.\n" + prog
+        for _ in range(repeat - 1):
+            wall += "\nLet me re-verify. The final answer program is:\n" + prog
+        return wall
+
+    def test_program_extracted_from_prose_wall(self):
+        """Проза-простыня без фенсов вокруг программы → извлекается программа,
+        проза не тянетя и не склеивает две программы в одного кандидата."""
+        prog = (
+            "int __in __bits(16) a;\nint __in __bits(16) b;\n"
+            "int __out __bits(16) y;\nvoid main() {\n"
+            "  if (a > b) { { y = a; } } else { { y = b; } }\n}"
+        )
+        got = self._c(self._wall(prog), ext=".mpc")
+        self.assertEqual(got, prog)
+
+    def test_duplicate_program_between_windows_not_rejected(self):
+        """Модель описывает программу дважды в разных местах текста: дубли
+        МЕЖДУ окнами — норма (каждое окно закрывается на своём балансе скобок,
+        а не растягивается до последней скобки файла)."""
+        prog = (
+            "int __in __bits(8) x;\nint __out __bits(8) z;\n"
+            "void main() {\nz = x;\n}"
+        )
+        got = self._c(self._wall(prog, repeat=2), ext=".mpc")
+        self.assertEqual(got, prog)
+
+    def test_unbalanced_prose_window_dropped(self):
+        """Фрагмент с `{` без закрытия внутри прозы отбрасывается СВОИМ окном:
+        полная программа рядом всё равно извлекается."""
+        small = "int __in __bits(8) x;\nint __out __bits(8) z;\nvoid main() {\nz = x;\n}"
+        wall = (
+            "Intro prose includes a broken fragment:\n"
+            "void main() {\ny = something and then more prose never closes it\n"
+            "Now the correct program:\n" + small + "\nDone."
+        )
+        self.assertEqual(self._c(wall, ext=".mpc"), small)
+
+    def test_window_closes_at_first_balanced_main(self):
+        """Окно закрывается на ПЕРВОМ балансе скобок: два main подряд дают
+        отдельных кандидатов («от анкера до конца файла» больше не существует)."""
+        text = (
+            "int __in __bits(8) x;\nvoid main() {\nx = 1;\n}\n"
+            "Now reconsider: rewrite it again.\n"
+            "void main() {\nx = 2;\n}\n"
+        )
+        # У decl+main-окна 4 строки против 3 у main-окон — выигрывает decl+main1.
+        self.assertEqual(
+            self._c(text, ext=".mpc"),
+            "int __in __bits(8) x;\nvoid main() {\nx = 1;\n}",
+        )
+
+    def test_relaxed_keeps_prose_inside_window(self):
+        """Relaxed-тир (прямые вызовы code_carver): строгий режим срезает прозу
+        ВНУТРИ кандидата, relaxed сохраняет кандидата как есть."""
+        from ai.services.code_carver import extract_mpa_c
+        wall = "We need to answer only code.\n" + (
+            "int __in __bits(8) x;\nint __out __bits(8) z;\nvoid main() {\n"
+            "Here the model reasons at length in plain English and only later "
+            "arrives at the assignment for the output bit.\n"
+            "z = x;\n}"
+        )
+        strict = extract_mpa_c(wall)
+        relaxed = extract_mpa_c(wall, relaxed=True)
+        self.assertIn("z = x;", strict)
+        self.assertNotIn("Here the model", strict)
+        self.assertIn("z = x;", relaxed)
+        self.assertIn("Here the model", relaxed)
+
+    def test_gate_blocks_markerless_prose(self):
+        """Гейт has_language_marker в _extract_code_from_response — единственный,
+        relaxing не снимает его: без структурных маркеров (нет ни decl
+        `__bits`, ни `void main()`) простыня → пусто."""
+        self.assertEqual(self._c("We need to answer only code. No program here."), "")
+        self.assertEqual(
+            self._c("Sure. Here we go. Let me write it. Yes I will. Very short."), ""
+        )
+
+    def test_asm_program_extracted_from_prose_wall(self):
+        """То же для i8086: программа-концевик внутри прозы возвращается целиком."""
+        asm = "jmp begin\nbegin:\nmov ax, 1\nout 1\nEnds:\njmp Ends ;$E"
+        self.assertEqual(self._c(self._wall(asm), ext=".i86"), asm)
+
+
+class ArmPromptResultPersistenceTests(TestCase):
+    """Снимок препромпта пары (AIModelTestResult.prompt_id/prompt_name):
+    явный prompt_id → записан в пару; «по привязке»/без промпта → NULL/"" ;
+    снимок доезжает до снапшотов (light-строки и журнал)."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="ppsnap", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=7101, task_id=8101, name="A", statement="Сложите a и b",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.prompt = Prompt.objects.create(
+            prompt_name_ru="Учитель Паскаля",
+            prompt_text_ru="Ты учитель Паскаля.",
+        )
+
+    @staticmethod
+    def _dl_ok():
+        def dl_mock(sid, node_id, code, ext, **kw):
+            return {
+                "verdict": "solved", "comment": "Все тесты успешно пройдены",
+                "submit_error": "", "queue_id": 11, "code_sent": code,
+            }
+        return dl_mock
+
+    def _run(self, prompt_id):
+        from ai import arm_runner
+
+        async def fake_handler(messages, conv_id):
+            return ("program a; begin writeln(1); end.", 12)
+
+        run_id = uuid.uuid4().hex
+        now_ts = time.time()
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "user_id": self.user.id, "run_type": "batch",
+            "status": "running", "error_message": "",
+            "cancel_requested": False, "cancelled": False,
+            "pause_requested": False, "paused": False,
+            "total_models": 1, "total_pairs": 1, "completed_pairs": 0,
+            "completed_models": 0, "current_model_key": "FakeModel",
+            "current_model_title": "FakeModel",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t1.node_id],
+                    [{"key": "FakeModel", "title": "FakeModel", "handler": fake_handler}],
+                    self.user.id, "DLSID-1",
+                    ui_language="Русский", dl_test=True,
+                    solve_file_extension=".pas", solve_prog_lang_name="Pascal",
+                    programming_language_id=self.lang.id,
+                    course_id=1450, prompt_id=prompt_id,
+                    run_params={"record_stats": False},
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        return run_id
+
+    def _row(self, run_id):
+        from ai.models import AIModelTestResult, AIModelTestRun
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        return AIModelTestResult.objects.get(run=run)
+
+    def test_explicit_prompt_saved(self):
+        row = self._row(self._run(self.prompt.id))
+        self.assertEqual(row.prompt_id, self.prompt.id)
+        self.assertEqual(row.prompt_name, "Учитель Паскаля")
+
+    def test_no_prompt_is_null(self):
+        """prompt_id не задан и привязки нет → NULL/"" (в UI «—»)."""
+        row = self._row(self._run(None))
+        self.assertIsNone(row.prompt_id)
+        self.assertEqual(row.prompt_name, "")
+
+    def test_snapshot_covers_light_and_full(self):
+        """Снимок пары доезжает до light-строк и до снапшота журнала."""
+        from ai import arm_runner
+        from ai.admin.logs import _build_batch_log_snapshot
+        from ai.models import AIModelTestRun
+        run_id = self._run(self.prompt.id)
+        run_obj = AIModelTestRun.objects.get(run_id=run_id)
+        light = arm_runner._batch_results_from_db(run_obj, light=True)[0]
+        self.assertEqual(light["prompt_name"], "Учитель Паскаля")
+        sn = _build_batch_log_snapshot(
+            AIRequestLog.objects.create(
+                user=self.user, source="arm", mode="batch_solve",
+                message=f"Batch solve run {run_id}",
+                status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+            )
+        )
+        self.assertEqual(
+            sn["prompts"], [{"id": self.prompt.id, "name": "Учитель Паскаля"}]
+        )
+
+    def test_light_row_without_prompt_is_empty(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        run_id = self._run(None)
+        run_obj = AIModelTestRun.objects.get(run_id=run_id)
+        light = arm_runner._batch_results_from_db(run_obj, light=True)[0]
+        self.assertEqual(light["prompt_id"], None)
+        self.assertEqual(light["prompt_name"], "")
+
+
+class ArmPauseTests(TestCase):
+    """Приостановка batch-прогона (2026-10): flip job+БД, снятие, отмена из
+    паузы, отказ rerun-гварда, снапшот и orphan-самоисцеление по paused."""
+
+    def setUp(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        self.run_id = "d" * 32
+        self.test_run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_RUNNING,
+        )
+        now = time.time()
+        self.job = {
+            "run_id": self.run_id, "user_id": 1, "run_type": "batch",
+            "status": "running", "error_message": "",
+            "cancel_requested": False, "cancelled": False,
+            "pause_requested": False, "paused": False,
+            "total_models": 1, "total_pairs": 2, "completed_pairs": 1,
+            "completed_models": 0, "current_model_key": "FakeModel",
+            "current_model_title": "FakeModel",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "created_at_ts": now, "updated_at_ts": now,
+        }
+        arm_runner._jobs[self.run_id] = self.job
+
+    def tearDown(self):
+        from ai import arm_runner
+        arm_runner._jobs.pop(self.run_id, None)
+
+    def test_pause_and_resume_flip_job_and_db(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        self.assertTrue(arm_runner.pause_arm_run(self.run_id))
+        self.assertEqual(self.job["status"], "paused")
+        self.assertTrue(self.job["pause_requested"])
+        self.test_run.refresh_from_db()
+        self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_PAUSED)
+
+        self.assertTrue(arm_runner.resume_arm_run(self.run_id))
+        self.assertEqual(self.job["status"], "running")
+        self.assertFalse(self.job["paused"])
+        self.test_run.refresh_from_db()
+        self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_RUNNING)
+
+    def test_pause_without_live_job_returns_false(self):
+        """БД-прогон без живого job НЕ ставится на паузу (орфан добьёт
+        orphan-детектор) — вью вернёт отказ «Процесс не найден…»."""
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        arm_runner._jobs.pop(self.run_id, None)
+        self.assertFalse(arm_runner.pause_arm_run(self.run_id))
+        self.test_run.refresh_from_db()
+        self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_RUNNING)
+
+    def test_cancel_from_pause(self):
+        """Отмена работает из паузы: job и БД сразу CANCELLED."""
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        arm_runner.pause_arm_run(self.run_id)
+        self.assertTrue(arm_runner.cancel_arm_run(self.run_id))
+        self.assertEqual(self.job["status"], "cancelled")
+        self.test_run.refresh_from_db()
+        self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_CANCELLED)
+        self.assertEqual(self.test_run.error_message, "Прервано пользователем")
+
+    def test_wait_resume_breaks_on_cancel(self):
+        from ai import arm_runner
+        with patch("ai.arm_runner.time.sleep"):
+            arm_runner.pause_arm_run(self.run_id)
+            arm_runner.cancel_arm_run(self.run_id)
+            self.assertFalse(arm_runner._wait_resume(self.run_id))
+
+    def test_rerun_guard_refuses_paused(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        AIModelTestRun.objects.filter(pk=self.test_run.pk).update(
+            status=AIModelTestRun.STATUS_PAUSED,
+        )
+        run_id, message, dropped = arm_runner.start_batch_rerun_pairs(
+            self.run_id, 1, "DLSID-1"
+        )
+        self.assertIsNone(run_id)
+        self.assertIn("паузе", message)
+        self.assertEqual(dropped, [])
+
+    def test_batch_snapshot_reports_paused(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        AIModelTestRun.objects.filter(pk=self.test_run.pk).update(
+            status=AIModelTestRun.STATUS_PAUSED,
+        )
+        arm_runner._jobs.pop(self.run_id, None)  # чистый DB-снапшот
+        snapshot = arm_runner.get_arm_run_snapshot(self.run_id, light_results=True)
+        self.assertEqual(snapshot["status"], "paused")
+
+    def test_orphan_detector_heals_paused_run(self):
+        """Осиротевший (после рестарта) PAUSED-прогон → FAILED
+        («Процесс потерян»), а не вечная «пауза» для фронтенда."""
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        AIModelTestRun.objects.filter(pk=self.test_run.pk).update(
+            status=AIModelTestRun.STATUS_PAUSED,
+        )
+        arm_runner._jobs.pop(self.run_id, None)
+        run_obj = AIModelTestRun.objects.get(pk=self.test_run.pk)
+        arm_runner._mark_orphaned_run_failed(run_obj)
+        run_obj.refresh_from_db()
+        self.assertEqual(run_obj.status, AIModelTestRun.STATUS_FAILED)
+        self.assertEqual(run_obj.error_message, "Процесс потерян (перезапуск сервера)")
+
+
+class ArmPauseIntegrationTests(TransactionTestCase):
+    """Интеграционная проверка паузы в цикле модели: in-flight пара доживает,
+    следующая не стартует; отмена из паузы обрывает цикл."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="pauser", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name_ru="Паузные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=9301, task_id=9401, name="A", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.t2 = Task.objects.create(
+            node_id=9302, task_id=9402, name="B", statement="y",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+    @staticmethod
+    def _dl_ok():
+        def dl_mock(sid, node_id, code, ext, **kw):
+            return {
+                "verdict": "solved", "comment": "Все тесты успешно пройдены",
+                "submit_error": "", "queue_id": 21, "code_sent": code,
+            }
+        return dl_mock
+
+    def _seed_job(self, run_id):
+        from ai import arm_runner
+        now_ts = time.time()
+        job = {
+            "run_id": run_id, "user_id": self.user.id, "run_type": "batch",
+            "status": "running", "error_message": "",
+            "cancel_requested": False, "cancelled": False,
+            "pause_requested": False, "paused": False,
+            "total_models": 1, "total_pairs": 2, "completed_pairs": 0,
+            "completed_models": 0, "current_model_key": "ModelA",
+            "current_model_title": "Model A",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        arm_runner._jobs[run_id] = job
+        return job
+
+    @staticmethod
+    def _handler(calls):
+        import asyncio
+
+        async def handler(messages, conv_id):
+            node_id = int(conv_id.rsplit("-", 1)[1])
+            calls.append(node_id)
+            # Генерация подольше пары — watcher успевает поставить паузу
+            # ПОКА идёт пара 1 (in-flight доживает, проверка паузы — на
+            # границе пар).
+            await asyncio.sleep(0.4)
+            return ("program p; begin writeln(1); end.", 7)
+
+        return handler
+
+    def _watcher(self, run_id, action, calls):
+        """Отдельный поток: видит первый вызов модели → ставит паузу (sync-ORM
+        возможен только вне async-контекста — из вьюхи это работает, из
+        async-хендлера теста нет); видит paused → resume/cancel."""
+        import threading
+        from ai import arm_runner
+
+        def tick():
+            for _ in range(200):
+                if len(calls) >= 1:
+                    arm_runner.pause_arm_run(run_id)
+                    break
+                time.sleep(0.02)
+            for _ in range(200):
+                job = arm_runner._jobs.get(run_id)
+                if job and job.get("paused"):
+                    if action == "resume":
+                        arm_runner.resume_arm_run(run_id)
+                    else:
+                        arm_runner.cancel_arm_run(run_id)
+                    return
+                time.sleep(0.05)
+
+        thread = threading.Thread(target=tick, daemon=True)
+        thread.start()
+        return thread
+
+    def test_pause_holds_next_pair_until_resume(self):
+        """Пара на паузе завершена, вторая не стартует до resume; после снятия
+        прогон доводится до completed со ВСЕМИ парами."""
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+        run_id = "parpause-" + uuid.uuid4().hex[:8]
+        self._seed_job(run_id)
+        watcher = self._watcher(run_id, "resume", calls)
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t1.node_id, self.t2.node_id],
+                    [{"key": "ModelA", "title": "Model A",
+                      "handler": self._handler(calls)}],
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        watcher.join(timeout=2)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        self.assertEqual(
+            sorted(r.task.node_id for r in AIModelTestResult.objects.filter(run=run)),
+            [self.t1.node_id, self.t2.node_id],
+        )
+        # Пауза была запрошена внутри пары 1 и снята ДО пары 2.
+        self.assertEqual(calls, [self.t1.node_id, self.t2.node_id])
+
+    def test_cancel_from_pause_interrupts_loop(self):
+        """Отмена из паузы: цикл модели прерывается, завершённая пара записана,
+        прогон остаётся CANCELLED (finalize не перетирает)."""
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+        run_id = "parcancel-" + uuid.uuid4().hex[:8]
+        self._seed_job(run_id)
+        watcher = self._watcher(run_id, "cancel", calls)
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t1.node_id, self.t2.node_id],
+                    [{"key": "ModelA", "title": "Model A",
+                      "handler": self._handler(calls)}],
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        watcher.join(timeout=2)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_CANCELLED)
+        # Вторая пара не решалась.
+        self.assertEqual(calls, [self.t1.node_id])
+        # In-flight пара отменилась по контракту отмены (после LLM-вызова
+        # пара отбрасывается) — решённых пар 0, строк максимум одна
+        # (failed, гонка с моментом отмены).
+        self.assertEqual(
+            AIModelTestResult.objects.filter(run=run, verdict="solved").count(), 0
+        )
+        self.assertLessEqual(
+            AIModelTestResult.objects.filter(run=run).count(), 1
+        )
+
+
+class ArmPauseViewTests(TestCase):
+    """POST pause/resume на /arm/solve/ — JSON-контракт как у rerun-pairs."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="pause_view_admin", password="x", email="pv@t.com",
+        )
+        self.run_id = "f" * 32
+        self.test_run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_RUNNING,
+        )
+        self.job = {
+            "run_id": self.run_id, "user_id": self.superuser.id,
+            "run_type": "batch", "status": "running", "error_message": "",
+            "cancel_requested": False, "cancelled": False,
+            "pause_requested": False, "paused": False,
+            "total_models": 1, "total_pairs": 1, "completed_pairs": 0,
+            "completed_models": 0, "current_model_key": "FakeModel",
+            "current_model_title": "FakeModel",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "created_at_ts": time.time(), "updated_at_ts": time.time(),
+        }
+
+    def _inject(self):
+        from ai import arm_runner
+        self.addCleanup(arm_runner._jobs.pop, self.run_id, None)
+        arm_runner._jobs[self.run_id] = self.job
+
+    def _post(self, url, body=None):
+        from ai.admin import arm as arm_admin
+        path = "/ai/admin" + url
+        request = self.factory.post(path, data=body or {},
+                                    content_type="application/json")
+        request.user = self.superuser
+        request.session = {}
+        if url.startswith("/arm/solve/pause"):
+            return arm_admin.admin_arm_solve_pause_view(request)
+        return arm_admin.admin_arm_solve_resume_view(request)
+
+    def test_get_not_allowed(self):
+        from ai.admin import arm as arm_admin
+        request = self.factory.get("/ai/admin/arm/solve/pause/")
+        request.user = self.superuser
+        request.session = {}
+        self.assertEqual(arm_admin.admin_arm_solve_pause_view(request).status_code, 405)
+        self.assertEqual(arm_admin.admin_arm_solve_resume_view(request).status_code, 405)
+
+    def test_run_id_required(self):
+        response = self._post("/arm/solve/pause/")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("run_id", json.loads(response.content)["message"])
+
+    def test_unknown_run_404(self):
+        request = self.factory.post(
+            "/ai/admin/arm/solve/pause/",
+            data=json.dumps({"run_id": "0" * 32}), content_type="application/json",
+        )
+        request.user = self.superuser
+        request.session = {}
+        from ai.admin.arm import admin_arm_solve_pause_view
+        response = admin_arm_solve_pause_view(request)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            json.loads(response.content)["message"], "Процесс не найден или уже завершен"
+        )
+
+    def test_pause_returns_paused_snapshot(self):
+        from ai.models import AIModelTestRun
+        self._inject()
+        response = self._post("/arm/solve/pause/", {"run_id": self.run_id})
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"])
+        self.assertIn("приостановлен", data["message"])
+        self.assertEqual(data["run"]["status"], "paused")
+        self.test_run.refresh_from_db()
+        self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_PAUSED)
+
+    def test_resume_returns_running_snapshot(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        self._inject()
+        arm_runner.pause_arm_run(self.run_id)
+        response = self._post("/arm/solve/resume/", {"run_id": self.run_id})
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["run"]["status"], "running")
+        self.test_run.refresh_from_db()
+        self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_RUNNING)

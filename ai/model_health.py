@@ -523,6 +523,7 @@ def list_model_refresh_runs(since_ts=0.0):
     return [{
         "run_id": progress.get("run_id", ""),
         "run_type": "model_refresh",
+        "name": "",
         "page_url": "/ai/admin/arm/models/",
         "status": status,
         "completed": int(progress.get("completed") or 0),

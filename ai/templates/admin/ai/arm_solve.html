@@ -608,6 +608,11 @@
         // следующие пакеты. Отмена — по строкам «Процессов» и кнопке ниже
         // (отменяет ФОКУСИРОВАННЫЙ прогон).
         setCancelVisible(true);
+      } else if (run.status === 'paused') {
+        const done = run.completed_pairs != null ? run.completed_pairs : 0;
+        const total = run.total_pairs != null ? run.total_pairs : 0;
+        setProgress('Пауза: ' + done + ' / ' + total + ' (текущая пара завершится)', true);
+        setCancelVisible(true);
       } else if (run.status === 'cancelled') {
         // Мгновенная отмена: cancel_arm_run уже перевёл прогон в cancelled.
         // Частичные результаты/report уже отрендерены выше — показываем «Прервано».
@@ -640,7 +645,7 @@
         if (meta.ext != null) { st.ext = meta.ext; }
         if (meta.name != null) { st.name = meta.name; }
         if (meta.lang != null) { st.lang = meta.lang; }
-        if (meta.snapshot) { st.snapshot = meta.snapshot; st.running = (st.snapshot.status || '') === 'running'; updateProcessesRow(runId); }
+        if (meta.snapshot) { st.snapshot = meta.snapshot; st.running = ['running', 'paused'].indexOf(st.snapshot.status || '') !== -1; updateProcessesRow(runId); }
       }
       if (st.running && !st.timer) {
         st.timer = window.setTimeout(function () { st.timer = null; pollRunOnce(runId); }, 1000);
@@ -666,7 +671,12 @@
       const cancelBtnEl = document.createElement('button');
       cancelBtnEl.type = 'button'; cancelBtnEl.className = 'arm-button'; cancelBtnEl.textContent = 'Прервать';
       cancelBtnEl.style.display = 'none';
-      actions.appendChild(showBtn); actions.appendChild(cancelBtnEl);
+      // Приостановка на границе пар (running → Пауза) и продолжение (paused →
+      // Продолжить); видимость ведёт updateProcessesRow по статусу снапшота.
+      const pauseBtnEl = document.createElement('button');
+      pauseBtnEl.type = 'button'; pauseBtnEl.className = 'arm-button';
+      pauseBtnEl.style.display = 'none';
+      actions.appendChild(showBtn); actions.appendChild(pauseBtnEl); actions.appendChild(cancelBtnEl);
       row.appendChild(nameEl); row.appendChild(statusEl); row.appendChild(actions);
       if (processesList) { processesList.appendChild(row); }
       showBtn.addEventListener('click', function () { focusRun(runId); });
@@ -676,7 +686,23 @@
         catch (e) { setError(e.message || 'Ошибка прерывания'); }
         cancelBtnEl.disabled = false;
       });
-      procRows.set(runId, { row: row, nameEl: nameEl, statusEl: statusEl, showBtn: showBtn, cancelBtn: cancelBtnEl });
+      pauseBtnEl.addEventListener('click', async function () {
+        pauseBtnEl.disabled = true;
+        const resuming = pauseBtnEl.textContent.indexOf('Продолжить') !== -1;
+        try {
+          const data = await pauseRunRequest(runId, resuming);
+          setError('');
+          if (data.run && runStates.has(runId) && runStates.get(runId).snapshot) {
+            Object.assign(runStates.get(runId).snapshot, data.run);
+            runStates.get(runId).running = ['running', 'paused'].indexOf((data.run.status || '')) !== -1;
+            updateProcessesRow(runId);
+          }
+          document.dispatchEvent(new Event('ai-processes:refresh'));
+          await pollRunOnce(runId);
+        } catch (e) { setError(e.message || 'Ошибка паузы'); }
+        pauseBtnEl.disabled = false;
+      });
+      procRows.set(runId, { row: row, nameEl: nameEl, statusEl: statusEl, showBtn: showBtn, cancelBtn: cancelBtnEl, pauseBtn: pauseBtnEl });
     }
     function procRunLabel(runId, st) {
       const langLabel = st.lang || st.ext;
@@ -712,6 +738,10 @@
         const wasCancelled = s.cancelled || s.error_message === 'Прервано пользователем';
         ui.statusEl.textContent = wasCancelled ? 'Прервано (частичные результаты сохранены)' : 'Выполнен';
         ui.statusEl.classList.add(wasCancelled ? 'no' : 'ok');
+      } else if (s.status === 'paused') {
+        const done = s.completed_pairs != null ? s.completed_pairs : 0;
+        const total = s.total_pairs != null ? s.total_pairs : 0;
+        ui.statusEl.textContent = 'Пауза: ' + done + ' из ' + total + ' (текущая пара завершится)';
       } else if (s.status === 'cancelled') {
         ui.statusEl.textContent = 'Прервано';
         ui.statusEl.classList.add('no');
@@ -722,6 +752,19 @@
         ui.statusEl.textContent = s.status || '—';
       }
       ui.cancelBtn.style.display = st.running ? '' : 'none';
+      // Кнопка Пауза/Продолжить: running → Пауза; paused → Продолжить; прочее — скрыта.
+      if (ui.pauseBtn) {
+        if (s.status === 'running') {
+          ui.pauseBtn.textContent = 'Пауза';
+          ui.pauseBtn.style.display = '';
+        } else if (s.status === 'paused') {
+          ui.pauseBtn.textContent = 'Продолжить';
+          ui.pauseBtn.style.display = '';
+        } else {
+          ui.pauseBtn.style.display = 'none';
+        }
+        ui.pauseBtn.disabled = false;
+      }
       ui.showBtn.classList.toggle('active', runId === focusedRunId);
       ui.row.classList.toggle('focused', runId === focusedRunId);
     }
@@ -740,7 +783,7 @@
         }
         st.errors = 0;
         st.snapshot = data.run || {};
-        st.running = st.snapshot.status === 'running';
+        st.running = ['running', 'paused'].indexOf(st.snapshot.status || '') !== -1;
         updateProcessesRow(runId);
         if (runId === focusedRunId) {
           // Сбой отрисовки не должен ронять поллинг/таймер — логируем и живём.
@@ -1224,6 +1267,16 @@
 
     // Cancel button — отменяет ФОКУСИРОВАННЫЙ прогон (в «Процессах» можно
     // прервать любой построчно).
+    async function pauseRunRequest(runId, resume) {
+      const response = await fetch(resume ? '/ai/admin/arm/solve/resume/' : '/ai/admin/arm/solve/pause/', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({ run_id: runId }),
+      });
+      const data = await parseJsonResponse(response);
+      if (!response.ok || !data.ok) { throw new Error(data.message || 'Ошибка'); }
+      return data;
+    }
     async function cancelRunRequest(runId) {
       const response = await fetch(cancelUrl, {
         method: 'POST', credentials: 'same-origin',

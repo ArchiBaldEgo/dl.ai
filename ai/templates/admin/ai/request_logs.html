@@ -1,5 +1,7 @@
 {% extends "admin/base_site.html" %}
 
+{% load ai_duration %}
+
 {% block content %}
 <style>
   .ai-logs-wrap { max-width: 100%; }
@@ -21,6 +23,7 @@
   .ai-logs-table th { background: var(--darkened-bg); }
   .ai-logs-status-success { color: #067647; font-weight: 600; }
   .ai-logs-status-error { color: #b42318; font-weight: 600; }
+  .ai-logs-status-neutral { color: #b45309; font-weight: 600; }
   .ai-logs-paginator {
     margin-top: 16px; display: flex; gap: 8px;
     align-items: center; flex-wrap: wrap;
@@ -41,6 +44,27 @@
   .ai-log-pin-btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .ai-log-pin-btn-active { color: #d97706; border-color: #d97706; }
   .ai-log-pin-btn.busy { opacity: 0.6; pointer-events: none; }
+  /* === «Показать все задачи» (ленивый блок в развёртке batch-строки) === */
+  .ai-log-tasks-block { padding: 8px 12px; border-top: 1px solid var(--hairline-color); }
+  .ai-log-all-tasks-btn {
+    padding: 4px 12px; font-size: 12px; cursor: pointer;
+    border: 1px solid var(--border-color); border-radius: 4px;
+    background: var(--body-bg); color: var(--body-fg);
+  }
+  .ai-log-all-tasks-btn:hover { background: var(--selected-row); }
+  .ai-log-all-tasks-btn:disabled { opacity: 0.6; cursor: default; }
+  .ai-log-all-tasks-list {
+    margin-top: 8px; max-height: 320px; overflow: auto;
+    font-size: 12px; display: grid; gap: 2px;
+  }
+  .ai-log-all-tasks-list .ai-alltask { display: flex; gap: 6px; align-items: baseline; }
+  .ai-log-all-tasks-list .ai-alltask-solved { color: #067647; }
+  .ai-log-all-tasks-list .ai-alltask-failed { color: #b42318; }
+  .ai-log-all-tasks-loading, .ai-log-all-tasks-error {
+    margin-top: 8px; font-size: 12px; color: var(--body-quiet-color);
+  }
+  .ai-log-all-tasks-error { color: #b42318; }
+
   .ai-log-task-link {
     background: none; border: none; padding: 0;
     color: var(--link-fg); cursor: pointer;
@@ -318,6 +342,68 @@
       });
     });
 
+    // «Показать все задачи»: ленивый загруз batch-снапшота (решённые И
+    // нерешённые задачи с пометками моделей). Рендер только
+    // createElement+textContent — ответ может нести текст модели.
+    document.querySelectorAll('.ai-log-all-tasks-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const list = btn.parentElement.querySelector('.ai-log-all-tasks-list');
+        if (!list) return;
+        if (!list.hidden) { list.hidden = true; btn.textContent = 'Показать все задачи'; return; }
+        if (list.dataset.loaded === '1') { list.hidden = false; btn.textContent = 'Скрыть задачи'; return; }
+        btn.disabled = true;
+        btn.textContent = 'Загрузка…';
+        fetch(btn.getAttribute('data-snapshot-url'), {
+          method: 'GET',
+          credentials: 'same-origin',
+        })
+          .then(function (resp) {
+            return resp.json().catch(function () { throw new Error('HTTP ' + resp.status); });
+          })
+          .then(function (snap) {
+            if (snap && snap.error) { throw new Error('Прогон не найден'); }
+            list.textContent = '';
+            (snap.tasks || []).forEach(function (t) {
+              const line = document.createElement('div');
+              line.className = 'ai-alltask';
+              const mark = document.createElement('span');
+              mark.className = t.solved ? 'ai-alltask-solved' : 'ai-alltask-failed';
+              const solvedCount = (t.solved_models || []).length;
+              const totalCount = (t.total_models || []).length;
+              mark.textContent = t.solved
+                ? '\u2713 решено ' + solvedCount + '/' + totalCount
+                : '\u2717 решено ' + solvedCount + '/' + totalCount;
+              const link = document.createElement('a');
+              if (t.dl_url) { link.href = t.dl_url; link.target = '_blank'; link.rel = 'noopener'; }
+              link.textContent = t.name + ' (' + t.node_id + ')';
+              line.appendChild(mark);
+              line.appendChild(link);
+              list.appendChild(line);
+            });
+            if (!(snap.tasks || []).length) {
+              const empty = document.createElement('div');
+              empty.textContent = '—';
+              list.appendChild(empty);
+            }
+            list.dataset.loaded = '1';
+            list.hidden = false;
+            btn.disabled = false;
+            btn.textContent = 'Скрыть задачи';
+          })
+          .catch(function (err) {
+            btn.disabled = false;
+            btn.textContent = 'Показать все задачи';
+            const msg = document.createElement('div');
+            msg.className = 'ai-log-all-tasks-error';
+            msg.textContent = 'Не удалось загрузить задачи: ' + err.message;
+            // Перезагружаем содержимое блока ошибки при каждом клике.
+            list.textContent = '';
+            list.appendChild(msg);
+            list.hidden = false;
+          });
+      });
+    });
+
     // ★ Закрепить/открепить batch-прогон из журнала (POST toggle,
     // ai/admin/pinned.py). Кнопка вне форм — CSRF берём из скрытых input-ов
     // страницы (rerun-формы), с фолбэком на куку csrftoken.
@@ -476,13 +562,13 @@
             <td>
               {{ log.model_names|join:", "|default:"—" }}
             </td>
-            <td class="{% if batch %}{% if batch.run_status == 'completed' %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}{% else %}{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}{% endif %}">
+            <td class="{% if batch %}{% if batch.run_status == 'completed' %}ai-logs-status-success{% elif batch.run_status == 'running' or batch.run_status == 'paused' %}ai-logs-status-neutral{% else %}ai-logs-status-error{% endif %}{% else %}{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}{% endif %}">
               {% if batch %}{{ batch.run_status_display }}{% else %}{{ log.get_status_display }}{% endif %}
             </td>
             <td>
               {{ log.get_mode_display|default:"—" }}
             </td>
-            <td>{{ log.duration_seconds|floatformat:0|default:"—" }}</td>
+            <td>{{ log.duration_seconds|human_duration|default:"—" }}</td>
             <td class="ai-log-pin-cell">
               {% if batch %}
                 <button type="button"
@@ -507,7 +593,7 @@
                     <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
                     <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
                     <div><strong>Статус:</strong> {% if batch %}{{ batch.run_status_display|default:log.get_status_display }}{% else %}{{ log.get_status_display }}{% endif %}</div>
-                    <div><strong>Время ответа:</strong> {{ log.duration_seconds|floatformat:2|default:"—" }} с{% if batch %} (общее){% endif %}</div>
+                    <div><strong>Время ответа:</strong> {% if log.duration_seconds %}{{ log.duration_seconds|human_duration }}{% else %}—{% endif %}{% if batch %} (общее){% endif %}</div>
                     {% if not batch %}<div><strong>Токенов:</strong> {{ log.tokens|default:"—" }}</div>{% endif %}
                     <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y:H:i:s" }}</div>
                     <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</div>
@@ -522,12 +608,10 @@
                     <div><strong>Тема:</strong> {{ log.topic_name|default:"—" }}</div>
                     {% if batch %}
                       <div><strong>ID дерева:</strong> {{ batch.course_id|default:"—" }}</div>
-                      <div><strong>Нерешённые задачи ({{ batch.tasks|length }}):</strong>
-                        {% for t in batch.tasks %}
-                          <div>{{ t.name }} ({{ t.node_id }})</div>
-                        {% empty %}
-                          —
-                        {% endfor %}
+                      <div><strong>Задачи:</strong>
+                        {# Держим счётчики решено/нерешено; полный перечень (решённые #}
+                        {# и нерешённые с пометками моделей) грузится лениво по кнопке. #}
+                        нерешено {{ batch.tasks_unsolved_count }} из {{ batch.tasks_total }}
                       </div>
                     {% else %}
                       <div><strong>Задача:</strong>
@@ -539,7 +623,15 @@
                       </div>
                     {% endif %}
                     <div><strong>Препромпт:</strong>
-                      {% if log.prompt_id %}
+                      {% if batch %}
+                        {# Снимки фактически использованных промптов (по привязке #}
+                        {# у каждой задачи свой): один или несколько, пусто — «—». #}
+                        {% for p in batch.prompts %}
+                          <a href="/ai/admin/ai/prompt/{{ p.id }}/change/" target="_blank" rel="noopener">{{ p.name }}</a>{% if not forloop.last %}, {% endif %}
+                        {% empty %}
+                          —
+                        {% endfor %}
+                      {% elif log.prompt_id %}
                         <a href="/ai/admin/ai/prompt/{{ log.prompt_id }}/change/" target="_blank" rel="noopener">{{ log.prompt_name|default:"—" }}</a>
                       {% else %}
                         {{ log.prompt_name|default:"—" }}
@@ -560,6 +652,10 @@
                       <div><strong>Общее время:</strong> {{ batch.run_duration_display|default:"—" }}</div>
                       <div><strong>Расширение:</strong> {{ batch.file_extension|default:"—" }}</div>
                       <div><strong>Детали:</strong> <a href="{% url 'ai_request_log_detail' log.id %}">результаты прогона →</a></div>
+                    </div>
+                    <div class="ai-log-tasks-block">
+                      <button type="button" class="ai-log-all-tasks-btn" data-log-id="{{ log.id }}" data-snapshot-url="{% url 'ai_request_log_batch_snapshot' log.id %}">Показать все задачи</button>
+                      <div class="ai-log-all-tasks-list" hidden></div>
                     </div>
                   </div>
                 {% else %}

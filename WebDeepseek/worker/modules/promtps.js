@@ -433,7 +433,41 @@ async function getRobustLastAnswerHtml(page) {
 
     const bubble = pickLastWithText(container) || pickLastWithText(document.body);
     if (!bubble) return '';
-    return bubble.outerHTML || '';
+
+    // Reasoning/«размышления» НЕ должны попадать в content ответа: python-сторона
+    // срезает только think-теги, а у веб-пула модельного текста их нет — склеенный
+    // «reasoning + ответ» превращается в простыню прозы, из которой экстрактор
+    // кода на бэкенде не извлекает код. Контейнеры размышлений вырезаем по
+    // классам (think/reason) и data-testid; заголовки («Thought for 12 s» /
+    // «思考中…) — отдельные короткие надписи, тоже удаляются. Отсутствие
+    // контейнеров не меняет поведение (удаление — нулевой ущерб).
+    const classOf = (node) =>
+      String(node.getAttribute && node.getAttribute('class') || '');
+    const isThinkNode = (node) =>
+      (node.hasAttribute && node.hasAttribute('data-testid') &&
+        /think/i.test(node.getAttribute('data-testid') || '')) ||
+      /think/i.test(classOf(node)) ||
+      /reason/i.test(classOf(node));
+    const clone = bubble.cloneNode(true);
+    clone.querySelectorAll('*').forEach((n) => {
+      if (isThinkNode(n)) { n.remove(); return; }
+    });
+    // Сверху вниз: большие контейнеры (длина ≥ 160) не режем — только надписи.
+    clone.querySelectorAll('*').forEach((n) => {
+      const label = (n.innerText || '').trim();
+      if (label && label.length < 160 && /^(Thought for|Thinking|思考|已深度思考|Поразмышлял)/i.test(label)) {
+        n.remove();
+      }
+    });
+
+    // В пузыре может быть НЕСКОЛЬКО markdown-блоков (размышления + ответ);
+    // ответ = ПОСЛЕДНИЙ БЛОК С ТЕКСТОМ — финал модели всегда последним.
+    const blocks = Array.from(clone.querySelectorAll('[class*=\'ds-markdown\'], [class*=\'markdown\']'))
+      .filter((n) => (n.innerText || '').trim().length > 0);
+    if (blocks.length > 1) {
+      return blocks[blocks.length - 1].outerHTML || '';
+    }
+    return clone.outerHTML || '';
   });
 }
 
@@ -578,10 +612,17 @@ async function sendMessage(ctx, payload = {}) {
         //
         // Fallback XPath selectors: if the primary selector fails (DeepSeek
         // changed their HTML), try alternative selectors before giving up.
+        const NOT_THINK = " and not(contains(@class,'think')) and not(contains(@class,'reason'))";
         const answerXPaths = [
             data.xpaths.chat.answer[currentService],
             // Fallback 1: any element with ds-markdown class inside a message
             "//div[contains(@class,'ds-message')]//div[contains(@class,'ds-markdown')]",
+            // ВАРИАНТЫ БЕЗ reasoning: контейнер размышлений тоже носит
+            // ds-markdown — без исключения fallback ловит «простыню размышлений»
+            // (в content ответа не должно быть reasoning; python-сторона срезает
+            // только think-теги, здесь их нет).
+            "//div[contains(@class,'ds-message')]/div[contains(@class,'ds-markdown')" + NOT_THINK + "]",
+            "//div[contains(@class,'ds-markdown')" + NOT_THINK + "]",
             // Fallback 2: any element with ds-markdown class (broader)
             "//div[contains(@class,'ds-markdown')]",
             // Fallback 3: any element with markdown class inside a chat message
