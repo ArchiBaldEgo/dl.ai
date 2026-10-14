@@ -382,7 +382,8 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         # сервис по флагу в БД (ai/services/onboarding.py), шаблон рендерит его
         # через json_script — ai-wizard.js конфиг читает с DOM. Роль отдаётся
         # движку для ролевых шагов (super/staff видят шаг про админ-панель),
-        # basics_seen — были ли уже показаны общие шаги в туре другой страницы.
+        # basics_seen — были ли уже показаны «общие» шаги в туре другой страницы
+        # (режут они только common-шаги solve/find_error; чат всегда полный).
         user = request.user
         if getattr(user, "is_superuser", False):
             role = "super"

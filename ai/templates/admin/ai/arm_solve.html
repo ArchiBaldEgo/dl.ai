@@ -480,7 +480,7 @@
     <div class="arm-section-head">
       <div>
         <h2>Ответы моделей</h2>
-        <p class="arm-section-note">Откройте строку, чтобы увидеть полный ответ</p>
+        <p class="arm-section-note">Раскройте модель — внутри её задачи, вердикты и полные ответы</p>
       </div>
       <div id="armSolveFilterHost"></div>
     </div>
@@ -601,7 +601,8 @@
       if (run.status === 'running') {
         const done = run.completed_pairs != null ? run.completed_pairs : 0;
         const total = run.total_pairs != null ? run.total_pairs : 0;
-        const cur = run.current_task_name ? (' · ' + run.current_task_name + ' / ' + (run.current_model_title || '')) : '';
+        const cur = perModelProgressText(run) ||
+          (run.current_task_name ? (' · ' + run.current_task_name + ' / ' + (run.current_model_title || '')) : '');
         setProgress('Выполняется: ' + done + ' / ' + total + cur, true);
         // Форму больше не блокируем: прогоны идут параллельно, можно запускать
         // следующие пакеты. Отмена — по строкам «Процессов» и кнопке ниже
@@ -681,6 +682,19 @@
       const langLabel = st.lang || st.ext;
       return (st.name || 'Пакет') + (langLabel ? ' · ' + langLabel : '') + ' · #' + String(runId).slice(0, 8);
     }
+    // Per-model прогресс параллельного прогона: run.model_progress — список по
+    // моделям ({model_title, done, total, current_task_name, status}); модели
+    // решают независимо, поэтому общий «сейчас: X / Y» заменяется строками
+    // «Модель: done/total («текущая задача»)». Возвращаем null, если поля нет
+    // (старые job/DB-снапшоты) — вызывающий код падает обратно на current_*.
+    function perModelProgressText(snapshot) {
+      const mp = snapshot.model_progress || [];
+      if (!mp.length) { return null; }
+      return ' · ' + mp.map(function (m) {
+        const task = m.current_task_name ? ' («' + m.current_task_name + '»)' : '';
+        return (m.model_title || m.model_key || '?') + ': ' + (m.done || 0) + '/' + (m.total || 0) + task;
+      }).join(', ');
+    }
     function updateProcessesRow(runId) {
       const st = runStates.get(runId);
       const ui = procRows.get(runId);
@@ -691,7 +705,8 @@
       if (s.status === 'running') {
         const done = s.completed_pairs != null ? s.completed_pairs : 0;
         const total = s.total_pairs != null ? s.total_pairs : 0;
-        const cur = s.current_task_name ? ' · сейчас: ' + s.current_task_name + ' / ' + (s.current_model_title || '') : '';
+        const cur = perModelProgressText(s) ||
+          (s.current_task_name ? ' · сейчас: ' + s.current_task_name + ' / ' + (s.current_model_title || '') : '');
         ui.statusEl.textContent = 'Выполняется: ' + done + ' из ' + total + cur;
       } else if (s.status === 'completed') {
         const wasCancelled = s.cancelled || s.error_message === 'Прервано пользователем';

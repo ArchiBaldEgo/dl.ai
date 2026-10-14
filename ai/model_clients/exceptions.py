@@ -104,7 +104,8 @@ def map_http_error(status: int, provider: str) -> Optional[str]:
     Args:
         status: HTTP status code ответа.
         provider: один из ``"openrouter"``, ``"groq"``, ``"web_deepseek"``,
-            ``"web_kimi"`` (определяет формулировки для 401/429/5xx и generic-fallback).
+            ``"web_kimi"``, ``"ollama"`` (определяет формулировки для 401/429/5xx и
+            generic-fallback).
 
     Returns:
         Friendly-сообщение; для ``status == 200`` — None (вызов успешен).
@@ -138,6 +139,9 @@ def map_http_error(status: int, provider: str) -> Optional[str]:
             return "Превышен лимит запросов OpenRouter (free tier). Попробуйте позже."
         if provider == "groq":
             return "Превышен лимит запросов Groq. Попробуйте позже."
+        if provider == "ollama":
+            return ("Ollama Cloud перегружен: слишком много одновременных запросов "
+                    "на тарифе. Попробуйте ещё раз через пару минут.")
 
     if status >= 503 and provider in ("web_deepseek", "web_kimi"):
         return "Бот инициализируется слишком долго. Попробуйте позже."

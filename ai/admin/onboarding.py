@@ -19,30 +19,51 @@ from ..services.onboarding import (
 from .guest_mode import is_viewing_as_guest
 from .permissions import can_access_admin, is_staff_or_superuser, is_superuser_user
 
-# Пути «больших страниц» с собственным туром (первое совпадение побеждает).
-# Большие страницы — общие туры без деления по правам: ролевые различия там
-# режутся отсутствием недоступных элементов (#armRecordStats и т.п.).
+# Пути с собственным туром страницы (первое совпадение побеждает). Туры этих
+# страниц рассказывают КОНТЕНТ страницы — без хрома: топ-бар и меню расписывает
+# главный экран (wizard_context_for_request), чтобы не повторяться.
 _ADMIN_SCOPES_BY_PATH = (
     ("/ai/admin/arm/solve/", "admin_arm_solve"),
     ("/ai/admin/arm/models/", "admin_model_status"),
+    ("/ai/admin/ai/airequestlog/", "admin_logs"),
+    ("/ai/admin/pinned-runs/", "admin_pinned_runs"),
+    ("/ai/admin/ai/tasksolution/", "admin_tasksolution"),
+    ("/ai/admin/ai/aiappsettings/", "admin_aiappsettings"),
+    ("/ai/admin/updates/", "admin_updates"),
+    ("/ai/admin/prompt-defaults/", "admin_prompt_defaults"),
+    ("/ai/admin/prompt-regression/", "admin_regression"),
+    ("/ai/admin/test-console/", "admin_test_console"),
+    ("/ai/admin/prompts/my/", "admin_my_prompt"),
 )
 
-# Общий тур админки — свой для каждого уровня доступа: новая роль = новый
-# scope без отметки → покажется; понижение роли вернёт старый scope с
-# отметкой → заново не показывается (требование: демо-понижение не приставуче).
+# Тур ГЛАВНОГО ЭКРАНА админки («весь бар» + каждый раздел меню) — свой для
+# каждого уровня доступа: новая роль = новый scope без отметки → покажется;
+# понижение роли вернёт старый scope с отметкой → заново не показывается
+# (требование: демо-понижение не приставуче).
 _ROLE_TO_SCOPE = {
     "pd": "admin_pd",
     "staff": "admin_staff",
     "super": "admin_super",
 }
 
+# Путь главного экрана (точное совпадение — только индекс, не стоковые таблицы).
+_DASHBOARD_PATHS = ("/ai/admin/", "/ai/admin/index")
+
 
 def admin_scope_for_path(path):
-    """scope тура по URL админки: большие страницы — свой, остальное — «admin»."""
+    """scope тура по URL админки.
+
+    Свой scope — у главных страниц (`_ADMIN_SCOPES_BY_PATH`, префикс);
+    «dashboard» — главный экран; None — прочие пути (стоковые таблицы,
+    документация, login): автостарта там нет — главный экран уже расписал
+    бар и все разделы меню.
+    """
     for prefix, scope in _ADMIN_SCOPES_BY_PATH:
         if path.startswith(prefix):
             return scope
-    return "admin"
+    if path == "/ai/admin/" or path.rstrip("/") == "/ai/admin/index":
+        return "dashboard"
+    return None
 
 
 def _admin_role_label(user):
@@ -63,8 +84,20 @@ def wizard_context_for_request(request):
     """
     user = request.user
     role = _admin_role_label(user)
+    role_scope = _ROLE_TO_SCOPE[role]
     path_scope = admin_scope_for_path(request.path)
-    scope = _ROLE_TO_SCOPE[role] if path_scope == "admin" else path_scope
+    if path_scope is None:
+        # Стоковые таблицы/доки: без автостарта. В payload всё равно отдаём
+        # ролевой scope (data-атрибут/body-фоллбэк для ручного запуска), но
+        # движок по show:false молчит.
+        return {
+            "scope": role_scope,
+            "version": WIZARD_VERSION,
+            "show": False,
+            "role": role,
+            "mark_url": MARK_URL_ADMIN,
+        }
+    scope = role_scope if path_scope == "dashboard" else path_scope
     return {
         "scope": scope,
         "version": WIZARD_VERSION,

@@ -1,0 +1,16 @@
+[Unit]
+Description=dl.ai weekly backup (Mon 04:00 UTC: pg_dump -> backups/ -> Telegram)
+Documentation=file:///home/archi/dlai/backup_runner.sh
+
+[Service]
+Type=simple
+WorkingDirectory=/home/archi/dlai
+ExecStart=/bin/bash /home/archi/dlai/backup_runner.sh
+# Прокси (api.telegram.org с этого хоста доступен ТОЛЬКО через прокси):
+# прямое соединение не работает, env нужен скриптовым curl-ам.
+EnvironmentFile=/etc/environment
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

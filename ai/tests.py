@@ -9,7 +9,7 @@ from django.contrib.auth import SESSION_KEY, get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.auth.models import Group
 from django.contrib.sessions.middleware import SessionMiddleware
-from django.test import SimpleTestCase, RequestFactory, TestCase, override_settings
+from django.test import SimpleTestCase, RequestFactory, TestCase, TransactionTestCase, override_settings
 from pathlib import Path
 import json
 import re
@@ -46,6 +46,7 @@ from ai.models import (
     ProgrammingLanguage,
     Prompt,
     SharedPrompt,
+    Task,
     TaskSolution,
     Topic,
     UpdateLog,
@@ -2876,7 +2877,10 @@ class BatchRunnerIntegrationTests(TestCase):
     thread runs on a separate DB connection which a TestCase's per-test
     transaction would hide. The worker function is the unit that owns the
     handler calls, grading, persistence and report — exercising it directly is a
-    faithful, deterministic test of that logic.
+    faithful, deterministic test of that logic. Одно-модельный прогон после
+    распараллеливания выполняется inline в вызывающем потоке (model-loop при
+    N==1 не создаёт потоков), поэтому ORM в теле пары остаётся на коннекции
+    вызывающего потока и TestCase-транзакция по-прежнему видна.
     """
 
     def setUp(self):
@@ -2958,6 +2962,448 @@ class BatchRunnerIntegrationTests(TestCase):
         self.assertEqual(log.error_message, "")
 
 
+class BatchParallelWorkerTests(TransactionTestCase):
+    """Параллельное решение batch-solve: каждая модель — независимый цикл.
+
+    Model-потоки работают с БД на собственных соединениях, TestData TestCase
+    транзакции им не видна — поэтому TransactionTestCase (данные реально
+    закоммичены). Воркер вызывается синхронно в тестовом потоке (как в
+    BatchRunnerIntegrationTests), но сам он поднимает model-потоки (при
+    единственной модели её цикл выполняется inline). DL-фаза сериализована
+    run-level локом: перекрывается генерация кода, а send-solution + полл
+    идут по очереди (одна DLSID-сессия на прогон).
+    """
+
+    def setUp(self):
+        from ai.models import Task
+        self.user = get_user_model().objects.create_user(username="parallel", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name_ru="Параллельные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=9101, task_id=9201, name="A", statement="Сложите a и b",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.t2 = Task.objects.create(
+            node_id=9102, task_id=9202, name="B", statement="Выведите n",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+    def _seed_job(self, run_id, total_pairs, rerun=False):
+        import time as _t
+        from ai import arm_runner
+
+        now_ts = _t.time()
+        job = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 2, "total_pairs": total_pairs,
+            "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "", "current_model_title": "",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        if rerun:
+            job["rerun"] = True
+        arm_runner._jobs[run_id] = job
+        return job
+
+    @staticmethod
+    def _dl_ok():
+        def dl_mock(sid, node_id, code, ext, **kw):
+            return {
+                "verdict": "solved", "comment": "Все тесты успешно пройдены",
+                "submit_error": "", "queue_id": 21, "code_sent": code,
+            }
+        return dl_mock
+
+    @staticmethod
+    def _make_handler(key, calls):
+        """Хендлер, записывающий (модель, нода, поток, интервал) вызова."""
+        import asyncio
+        import threading
+
+        async def handler(messages, conv_id):
+            started = time.monotonic()
+            node_id = int(conv_id.rsplit("-", 1)[1])
+            await asyncio.sleep(0.3)
+            calls.append({
+                "model_key": key, "node_id": node_id,
+                "thread": threading.get_ident(),
+                "start": started, "end": time.monotonic(),
+            })
+            return ("program p; begin writeln(1); end.", 7)
+
+        return handler
+
+    def _calls_for(self, calls, key):
+        return [c for c in calls if c["model_key"] == key]
+
+    def test_parallel_models_solve_independently(self):
+        """2 модели × 2 задачи: каждая пара решена ровно один раз, циклы моделей
+        перекрываются по времени (модель не ждёт другую), прогресс per-model полный."""
+        import threading
+        import time as _t
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+        models = [
+            {"key": "ModelA", "title": "Model A", "handler": self._make_handler("ModelA", calls)},
+            {"key": "ModelB", "title": "Model B", "handler": self._make_handler("ModelB", calls)},
+        ]
+        node_ids = [self.t1.node_id, self.t2.node_id]
+        run_id = "par-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=4)
+        # Циклы моделей выполняются в РАЗНЫХ потоках. Идентичность потока
+        # снимаем spy-обёрткой вокруг _process_batch_pair: внутри самого
+        # хендлера get_ident() не равен потоку цикла — корутину исполняет
+        # event-loop asgiref'а, а не поток model-loop'а.
+        pair_threads = {}
+        orig_pair = arm_runner._process_batch_pair
+
+        def spy_pair(ctx, task_ctx, model, dl_lock):
+            pair_threads.setdefault(
+                model["key"], set()
+            ).add((threading.get_ident(), task_ctx["node_id"]))
+            return orig_pair(ctx, task_ctx, model, dl_lock)
+
+        try:
+            with patch.object(arm_runner, "_process_batch_pair", spy_pair):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, node_ids, models, self.user.id, "DLSID-1",
+                        ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        # Каждая пара (модель × задача) записана ровно один раз.
+        rows = list(AIModelTestResult.objects.filter(run=run))
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(
+            {(r.model_key, r.task.node_id) for r in rows},
+            {(m["key"], t.node_id) for m in models for t in (self.t1, self.t2)},
+        )
+        a, b = self._calls_for(calls, "ModelA"), self._calls_for(calls, "ModelB")
+        self.assertEqual(len(a), 2)
+        self.assertEqual(len(b), 2)
+        # Обе пары модели — в одном потоке; потоки моделей различаются.
+        self.assertEqual(len({tid for tid, _ in pair_threads["ModelA"]}), 1)
+        self.assertEqual(len({tid for tid, _ in pair_threads["ModelB"]}), 1)
+        self.assertNotEqual(
+            next(iter(pair_threads["ModelA"])), next(iter(pair_threads["ModelB"]))
+        )
+        overlap = any(
+            max(c1["start"], c2["start"]) < min(c1["end"], c2["end"])
+            for c1 in a for c2 in b
+        )
+        self.assertTrue(overlap, "model loops should run concurrently")
+        # Вердикты по DL-моку: все решены; per-model прогресс полный.
+        self.assertTrue(all(r.verdict == "solved" for r in rows))
+        self.assertEqual(job["completed_pairs"], 4)
+        self.assertEqual(
+            sorted((e["model_key"], e["done"], e["total"], e["status"])
+                   for e in job["model_progress"]),
+            [("ModelA", 2, 2, "done"), ("ModelB", 2, 2, "done")],
+        )
+
+    def test_one_model_failure_does_not_stop_others(self):
+        """Хендлер одной модели всегда падает: её пары — failed с дружелюбной
+        ошибкой, вторая модель решает свои пары, прогон всё равно completed."""
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        async def broken_handler(messages, conv_id):
+            raise RuntimeError("handler exploded")
+
+        async def ok_handler(messages, conv_id):
+            return ("program p; begin writeln(1); end.", 7)
+
+        models = [
+            {"key": "ModelA", "title": "Model A", "handler": broken_handler},
+            {"key": "ModelB", "title": "Model B", "handler": ok_handler},
+        ]
+        run_id = "parfail-" + uuid.uuid4().hex[:8]
+        self._seed_job(run_id, total_pairs=4)
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t1.node_id, self.t2.node_id], models,
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        rows = list(AIModelTestResult.objects.filter(run=run))
+        self.assertEqual(len(rows), 4)
+        a_rows = [r for r in rows if r.model_key == "ModelA"]
+        b_rows = [r for r in rows if r.model_key == "ModelB"]
+        # Модель A: каждая пара честно записана как ошибка модели.
+        self.assertEqual(len(a_rows), 2)
+        self.assertTrue(all(r.verdict == "failed" for r in a_rows))
+        self.assertTrue(all("handler exploded" in (r.dl_error or "") for r in a_rows))
+        # Модель B: обе пары решены — падение соседа её не задело.
+        self.assertTrue(all(r.verdict == "solved" for r in b_rows))
+
+    def test_model_loop_crash_marks_progress_error(self):
+        """Падение цикла модели вне тела пары (сбой БД-записи): статус модели
+        «error» в model_progress, вторая модель дорешивает, прогон completed,
+        в ошибке журнала — примечание о прерванной модели."""
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        async def ok_handler(messages, conv_id):
+            return ("program p; begin writeln(1); end.", 7)
+
+        real_update = AIModelTestResult.objects.update_or_create
+
+        def flaky_update_or_create(**kwargs):
+            if kwargs.get("model_key") == "ModelA":
+                raise RuntimeError("db write exploded")
+            return real_update(**kwargs)
+
+        models = [
+            {"key": "ModelA", "title": "Model A", "handler": ok_handler},
+            {"key": "ModelB", "title": "Model B", "handler": ok_handler},
+        ]
+        run_id = "parcrash-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=4)
+        try:
+            with patch.object(AIModelTestResult.objects, "update_or_create", flaky_update_or_create):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id, self.t2.node_id], models,
+                        self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        # Падение одного model-цикла НЕ валит прогон в FAILED.
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        # ModelB решила все свои пары; ModelA — ни одной (каждая запись падала).
+        rows = [r.model_key for r in AIModelTestResult.objects.filter(run=run)]
+        self.assertEqual(rows, ["ModelB", "ModelB"])
+        progress = {e["model_key"]: e for e in job["model_progress"]}
+        self.assertEqual(progress["ModelA"]["status"], "error")
+        self.assertEqual(progress["ModelB"]["status"], "done")
+        # Примечание о прерванной модели — в журнале; статус лога Error.
+        log = AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
+        self.assertEqual(log.status, AIRequestLog.STATUS_ERROR)
+        self.assertIn("Модели, прерванные ошибкой цикла: «Model A»", log.error_message)
+
+    def test_cancel_mid_run_stops_models_and_keeps_partial(self):
+        """Отмена на середине прогона: обе модели обрывают текущую пару, БД —
+        STATUS_CANCELLED, записаны только завершённые пары."""
+        import time as _t
+        import threading
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+
+        gate = threading.Event()
+
+        def make_blocked_handler(key):
+            async def handler(messages, conv_id):
+                node_id = int(conv_id.rsplit("-", 1)[1])
+                if node_id == self.t2.node_id:
+                    # Вторая пара блокируется до отмены.
+                    gate.wait(timeout=15)
+                return ("program p; begin writeln(1); end.", 7)
+            return handler
+
+        models = [
+            {"key": "ModelA", "title": "Model A", "handler": make_blocked_handler("ModelA")},
+            {"key": "ModelB", "title": "Model B", "handler": make_blocked_handler("ModelB")},
+        ]
+        run_id = "parcancel-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=4)
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                worker = threading.Thread(
+                    target=lambda: arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id, self.t2.node_id], models,
+                        self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                    ),
+                    daemon=True,
+                )
+                worker.start()
+                # Ждём, пока обе модели решат первую пару (по одной на модель).
+                deadline = _t.time() + 15
+                while _t.time() < deadline and job["completed_pairs"] < 2:
+                    _t.sleep(0.05)
+                self.assertEqual(job["completed_pairs"], 2)
+                self.assertEqual(
+                    {(e["done"], e["total"]) for e in job["model_progress"]},
+                    {(1, 2)},
+                )
+                arm_runner.cancel_arm_run(run_id)
+                gate.set()
+                worker.join(timeout=30)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_CANCELLED)
+        # Мгновенный flip cancel_arm_run уже выставил job-статус; финализация
+        # его не перетёрла и частичные результаты сохранились.
+        self.assertEqual(job["status"], "cancelled")
+        self.assertEqual(len(job["results"]), 2)
+        # Блокированные вторые пары не записаны: каждая модель по одной паре.
+        self.assertTrue(
+            all(e["done"] == 1 and e["total"] == 2 for e in job["model_progress"]),
+        )
+
+    def test_rerun_parallel_merges_into_same_run_and_skips_other_models(self):
+        """Попарный перезапуск на двух моделях: каждая модель перезапускает
+        ТОЛЬКО свои нерешённые пары, строки вливаются в тот же прогон без
+        дублирования, отчёт — из всех строк, started_at сохранён."""
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        started_at = timezone.now()
+        run_id = "parrerun-" + uuid.uuid4().hex[:8]
+        test_run = AIModelTestRun.objects.create(
+            run_id=run_id, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            user=self.user, status=AIModelTestRun.STATUS_COMPLETED,
+            started_at=started_at, finished_at=timezone.now(),
+            total_models=2,
+            message=f"Batch solve: 2 задач × 2 моделей",
+        )
+        async def solved_handler(messages, conv_id):
+            return ("program p; begin writeln(1); end.", 7)
+
+        models = [
+            {"key": "ModelA", "title": "Model A", "handler": solved_handler},
+            {"key": "ModelB", "title": "Model B", "handler": solved_handler},
+        ]
+        # 4 строки: перезапускать нечего... перезапускаем ровно 2 нерешённые
+        # пары (t1×ModelA, t2×ModelB); строки соседних моделей не трогаем.
+        for model in models:
+            for task in (self.t1, self.t2):
+                solved = (task is self.t2 and model["key"] == "ModelA") or \
+                         (task is self.t1 and model["key"] == "ModelB")
+                AIModelTestResult.objects.create(
+                    run=test_run, model_key=model["key"], task=task,
+                    model_title=model["title"],
+                    status="ok" if solved else "error",
+                    verdict="solved" if solved else "failed",
+                    duration_seconds=1.0,
+                )
+        rerun_pairs = {self.t1.node_id: {"ModelA"}, self.t2.node_id: {"ModelB"}}
+        job = self._seed_job(run_id, total_pairs=2, rerun=True)
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t1.node_id, self.t2.node_id], models,
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                    rerun=True, rerun_pairs=rerun_pairs,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        rows = list(AIModelTestResult.objects.filter(run=run).order_by("model_key", "task_id"))
+        # Строки НЕ дублируются (update_or_create в тот же run).
+        self.assertEqual(len(rows), 4)
+        by_pair = {(r.model_key, r.task_id): r for r in rows}
+        # Перезапущенные пары решены; соседние строки (чужие модели) не тронуты
+        # ни вердиктом, ни DL-комментарием (переперезапуск не задел «не мою» пару).
+        self.assertEqual(by_pair[("ModelA", self.t1.id)].verdict, "solved")
+        self.assertEqual(by_pair[("ModelB", self.t2.id)].verdict, "solved")
+        for untouched in (("ModelA", self.t2.id), ("ModelB", self.t1.id)):
+            row = by_pair[untouched]
+            self.assertEqual(row.verdict, "solved")          # решена была — не перезапускали
+            self.assertEqual(row.dl_comment, "")             # DL-мок перезапуска её не касался
+            self.assertEqual(row.duration_seconds, 1.0)      # исходные значения сохранены
+        # Отчёт финализирован из ВСЕХ строк прогона: 4 решено / 0 провалено.
+        self.assertEqual(run.report["total_pairs"], 4)
+        self.assertEqual(run.report["solved"], 4)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        # Отсчёт «Прогон» — от исходного started_at.
+        self.assertEqual(run.started_at, started_at)
+        self.assertTrue(
+            AIRequestLog.objects.filter(message=f"Batch solve rerun {run_id}").exists(),
+        )
+
+
+class ArmModelProgressSnapshotTests(TestCase):
+    """job["model_progress"] доезжает до снапшотов: light-пасsthrough живого
+    job и _snapshot_from_test_run (БД-путь с живым job)."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="snapshots", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
+        self.task = Task.objects.create(
+            node_id=9501, task_id=9601, name="A", statement="do",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+    @staticmethod
+    def _progress():
+        return [
+            {"model_key": "ModelA", "model_title": "Model A", "done": 1, "total": 2,
+             "current_task_node_id": 9501, "current_task_name": "A", "status": "running"},
+            {"model_key": "ModelB", "model_title": "Model B", "done": 2, "total": 2,
+             "current_task_node_id": "", "current_task_name": "", "status": "done"},
+        ]
+
+    def _seed(self, run_id, rerun=False):
+        import time as _t
+        from ai import arm_runner
+
+        now_ts = _t.time()
+        job = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 2, "total_pairs": 4,
+            "completed_pairs": 3, "completed_models": 1,
+            "current_model_key": "ModelA", "current_model_title": "Model A",
+            "current_task_node_id": 9501, "current_task_name": "A",
+            "model_progress": self._progress(), "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        if rerun:
+            job["rerun"] = True
+        arm_runner._jobs[run_id] = job
+        return job
+
+    def test_light_snapshot_carries_model_progress(self):
+        from ai import arm_runner
+
+        run_id = "mp-snap-" + uuid.uuid4().hex[:8]
+        job = self._seed(run_id)
+        try:
+            snapshot = arm_runner.get_arm_run_snapshot(run_id, light_results=True)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        self.assertEqual(snapshot["model_progress"], self._progress())
+        self.assertEqual(snapshot["current_task_name"], "A")
+        self.assertEqual(snapshot["current_model_title"], "Model A")
+
+    def test_db_snapshot_reads_model_progress_from_live_job(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+
+        run_id = "mp-db-" + uuid.uuid4().hex[:8]
+        test_run = AIModelTestRun.objects.create(
+            run_id=run_id, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            user=self.user, status=AIModelTestRun.STATUS_RUNNING,
+            started_at=timezone.now(), total_models=2,
+        )
+        job = self._seed(run_id)
+        try:
+            snapshot = arm_runner._snapshot_from_test_run(test_run, light_results=True)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        self.assertEqual(len(snapshot["results"]), 0)
+        self.assertEqual(snapshot["model_progress"], self._progress())
+        self.assertEqual(snapshot["current_model_key"], "ModelA")
+
+
 class TestSolutionOnDlTests(SimpleTestCase):
     """``_test_solution_on_dl``: на любой отказ send-solution (400/500/…)
     пробует taskId вместо nodeId (гипотеза пользователя: «с твоим nodeId —
@@ -2970,7 +3416,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
 
         calls = []
 
-        def fake_send(session_id, node_id, code, file_extension, course_id=0):
+        def fake_send(session_id, node_id, code, file_extension, course_id=0, **kw):
             calls.append(node_id)
             if node_id == 2606747:
                 raise DLServerError(
@@ -3003,7 +3449,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
 
         calls = []
 
-        def fake_send(session_id, node_id, code, file_extension, course_id=0):
+        def fake_send(session_id, node_id, code, file_extension, course_id=0, **kw):
             calls.append(node_id)
             if node_id == 2606747:
                 raise DLServerError(
@@ -3032,7 +3478,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
         from ai import arm_runner
         from ai.dl_api_client import DLServerError
 
-        def fake_send(session_id, node_id, code, file_extension, course_id=0):
+        def fake_send(session_id, node_id, code, file_extension, course_id=0, **kw):
             raise DLServerError(
                 f"send-solution(nodeId={node_id}, fileExtension='.mpc', "
                 f"codeLen=111, codeHead='...'): DL API вернул ошибку "
@@ -3061,7 +3507,7 @@ class TestSolutionOnDlTests(SimpleTestCase):
 
         calls = []
 
-        def fake_send(session_id, node_id, code, file_extension, course_id=0):
+        def fake_send(session_id, node_id, code, file_extension, course_id=0, **kw):
             calls.append(node_id)
             raise DLServerError(
                 f"send-solution(nodeId={node_id}, ...): DL API вернул ошибку "
@@ -4568,6 +5014,133 @@ class OllamaHandlerTests(SimpleTestCase):
             self.assertIn("пустой ответ", content)
 
 
+class OllamaRateLimitTests(SimpleTestCase):
+    """Защита от 429 Ollama Cloud: per-process семафор + ретраи с backoff.
+
+    Ollama Cloud лимитирует одновременные запросы по тарифу (не rpm) —
+    превышение отдаёт 429 (ollama.ResponseError со status_code=429).
+    """
+
+    def setUp(self):
+        from ai.model_clients import ollama
+        ollama._reset_limiter()
+
+    def tearDown(self):
+        from ai.model_clients import ollama
+        ollama._reset_limiter()
+
+    @staticmethod
+    def _stream(*pieces, eval_count=0):
+        """Фейковые чанки стрима — как в OllamaHandlerTests (тот же формат чанков)."""
+        chunks = []
+        for piece in pieces:
+            chunks.append(SimpleNamespace(
+                message=SimpleNamespace(content=piece), eval_count=0))
+        chunks.append(SimpleNamespace(
+            message=SimpleNamespace(content=""), eval_count=eval_count))
+        return iter(chunks)
+
+    @staticmethod
+    def _429():
+        from ollama import ResponseError
+        return ResponseError("rate limit exceeded", status_code=429)
+
+    async def test_429_retries_then_succeeds(self):
+        """Первый вызов кидает 429, второй успешен — ретрай с паузой, без ошибки."""
+        from ai.model_clients import ollama
+        with patch.dict(os.environ, {"OLLAMA_MAX_RETRIES": "3"}), \
+             patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama._sleep",
+                   new=AsyncMock(return_value=None)) as mock_sleep, \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.side_effect = [
+                self._429(),
+                self._stream("ok", eval_count=3),
+            ]
+            glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
+            result = await glm_5_2("hi", "client")
+            self.assertEqual(result, ("ok", 3, False))
+            self.assertEqual(mock_client.chat.call_count, 2)
+            self.assertEqual(mock_sleep.await_count, 1)
+            delay = mock_sleep.await_args.args[0]
+            self.assertGreater(delay, 0)
+            self.assertLessEqual(delay, 30 * 1.2)
+
+    async def test_429_exhausted_returns_friendly(self):
+        """Все ретраи исчерпаны → friendly-сообщение map_http_error с растущими паузами."""
+        from ai.model_clients import ollama
+        from ai.model_clients.exceptions import map_http_error
+        with patch.dict(os.environ, {"OLLAMA_MAX_RETRIES": "3"}), \
+             patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama._sleep",
+                   new=AsyncMock(return_value=None)) as mock_sleep, \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.side_effect = self._429()
+            glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
+            content, tokens, is_error = await glm_5_2("hi", "client")
+            # 1 первая попытка + 3 ретрая
+            self.assertEqual(mock_client.chat.call_count, 4)
+            self.assertTrue(is_error)
+            self.assertEqual(tokens, 0)
+            self.assertEqual(content, map_http_error(429, "ollama"))
+            self.assertNotIn("status code", content)
+            # Лестница пауз ~5 / ~15 / ~30 сек (джиттер ±20%).
+            delays = [c.args[0] for c in mock_sleep.await_args_list]
+            self.assertEqual(len(delays), 3)
+            for actual, base in zip(delays, (5.0, 15.0, 30.0)):
+                self.assertGreaterEqual(actual, base * 0.8)
+                self.assertLessEqual(actual, base * 1.2)
+
+    async def test_other_response_error_not_retried(self):
+        """ResponseError с иным кодом (500) не ретраится — прежний текст ошибки."""
+        from ai.model_clients import ollama
+        from ollama import ResponseError
+        with patch.dict(os.environ, {"OLLAMA_MAX_RETRIES": "3"}), \
+             patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama._sleep", new=AsyncMock(return_value=None)) as mock_sleep, \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.side_effect = ResponseError("boom", status_code=500)
+            glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
+            content, tokens, is_error = await glm_5_2("hi", "client")
+            self.assertEqual(mock_client.chat.call_count, 1)
+            self.assertTrue(is_error)
+            self.assertIn("Ошибка Ollama API:", content)
+            mock_sleep.assert_not_awaited()
+
+    async def test_semaphore_limits_concurrency(self):
+        """OLLAMA_MAX_CONCURRENCY=1 → вызовы строго по одному, очередь, не отказ."""
+        import asyncio
+        from ai.model_clients import ollama
+        with patch.dict(os.environ, {"OLLAMA_MAX_CONCURRENCY": "1"}), \
+             patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://api.ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            active = {"now": 0, "max": 0}
+
+            def fake_chat(**kwargs):
+                active["now"] += 1
+                active["max"] = max(active["max"], active["now"])
+                time.sleep(0.02)
+                active["now"] -= 1
+                return self._stream("ok", eval_count=1)
+
+            mock_client.chat.side_effect = fake_chat
+            handler = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
+            results = await asyncio.gather(
+                *(handler(f"msg{i}", "client") for i in range(4))
+            )
+            self.assertEqual(active["max"], 1)
+            self.assertEqual(len(results), 4)
+            self.assertTrue(all(r == ("ok", 1, False) for r in results))
+
+
 class ArmBatchResultsPartialTests(SimpleTestCase):
     """Частичный шаблон _ai_batch_results.html не должен утекать комментариями:
     Django вырезает {# #} только в одну строку — многострочный комментарий
@@ -4638,6 +5211,29 @@ class SendSolutionCourseIdTests(SimpleTestCase):
 
         # Обратная совместимость: без явного course_id поле всё равно есть (=0).
         self.assertEqual(captured["json"]["courseId"], 0)
+
+    def test_body_has_no_undocumented_filename_fields(self):
+        """Контракт send-solution — строго задокументированные поля: имя файла
+        решения DL генерирует сама (api_solution_*), «экспериментальные»
+        fileName/solutionFileName из тела убраны (прогоны с ними отдавали 400)."""
+        from ai import dl_api_client
+
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+            content = b'{"queueId": 42, "message": "ok"}'
+
+        def fake_dl_request(method, path, **kwargs):
+            captured["json"] = kwargs.get("json")
+            return FakeResponse()
+
+        with patch("ai.dl_api_client._dl_request", fake_dl_request):
+            dl_api_client.send_solution_to_dl("SID", 9101, "program a;", ".pas")
+        self.assertEqual(
+            set(captured["json"]),
+            {"sessionId", "nodeId", "code", "fileExtension", "courseId"},
+        )
 
     def test_payload_context_includes_course_id(self):
         from ai.dl_api_client import _send_solution_payload_context
@@ -8369,6 +8965,214 @@ class ArmCodeExtractionTests(SimpleTestCase):
         self.assertEqual(self._extract(text), "mov ax, a\ncbw\nidiv b\nmov R, ax")
 
 
+class StructuralCarverTests(SimpleTestCase):
+    """Структурные экстракторы С-МПА (services/code_carver.py):
+
+    Регрессии реальных прогонов: res#3987 (цитата-болванка каркаса в CoT
+    притягивала экстрактор — прозя и болванка склеивались с программой),
+    res#4160 (программа дана дважды — грязный первый заход с хвост-прозой
+    затирал чистый финал), res#3980 (рассуждение-вставка посреди кода).
+    """
+
+    def _c(self, text, ext=""):
+        from ai.arm_runner import _extract_code_from_response
+        return _extract_code_from_response(text, file_extension=ext).strip()
+
+    # --- asm .i86 ---
+
+    def test_asm_outline_in_cot_rejected_real_wins(self):
+        """res#3987: болванка в мини-фенсе внутри CoT + настоящая программа.
+
+        Болванке не хватает концевика → её кандидат тянется до концевика
+        настоящей программы и бракуется по повторному «jmp begin»;
+        анкер настоящей программы даёт чистый кандидат.
+        """
+        outline = "```asm\njmp begin\nn dw 5\nb dw 3,5,4-1,2\na dw 0,0\ntemp1 dw 0\n```"
+        cot = ("We need solve the task in assembler i86 now here.\n"
+               "Need sort array b into array a. Wait, allowed commands? jge fine.\n")
+        real = ("jmp begin\nb dw 3,5,4\na dw 0,0,0\nn dw 5\n"
+                "begin:\nmov si, 0\nouter_loop:\nmov ax, si\n"
+                "cmp ax, bx\njge sort_done\nmov min_off, si\n"
+                "Ends:\njmp Ends ;$E")
+        text = cot + "\n" + outline + "\n" + cot + "\n" + real
+        got = self._c(text, ext=".i86")
+        self.assertIn("jmp begin", got)
+        self.assertIn(";$E", got)
+        self.assertNotIn("We need solve", got)
+
+    def test_asm_program_repeated_clean_last_wins(self):
+        """res#4160: модель дала программу дважды; первый заход с CoT-хвостом,
+        второй чистый с «jmp Ends ;$E» — берётся ПОСЛЕДНИЙ валидный."""
+        tail_quote = ("```\nEnds:\njmp Ends ;$E\n```\n"
+                      "So okay.\n\nNeed structure: start jmp begin, then variables, then"
+                      " begin label. End with Ends: jmp Ends ;$E. They want `Ends:` and"
+                      " `jmp Ends ;$E`. In example they have `Ends:` then `jmp Ends ; done`.")
+        attempt1 = ("jmp begin\n\nn dw 12345\nz dw 0\nten dw 10\n\nbegin:\n"
+                    "mov z, 0\nloop_start:\nmov ax, n\n")
+        attempt2 = ("jmp begin\n\nn dw 12345\nz dw 0\nten dw 10\nplace dw 1\n\n"
+                    "begin:\nmov z, 0\nmov place, 1\nloop_start:\nmov ax, n\n"
+                    "cmp ax, 0\nje done\n\ndone:\njmp Ends ;$E")
+        text = attempt1 + "\n" + tail_quote + "\n" + attempt2
+        got = self._c(text, ext=".i86")
+        self.assertIn("place dw 1", got)
+        self.assertIn("je done", got)
+        self.assertTrue(got.rstrip().endswith("jmp Ends ;$E"))
+        self.assertNotIn("So okay", got)
+        self.assertNotIn("Need structure", got)
+
+    def test_asm_mid_prose_cut_keeps_program(self):
+        """res#3980: рассуждение-вставка посреди кода срезается, код жив."""
+        code = ("jmp begin\n\nn dw 5\nb dw 3,5,4\na dw 0,0,0\n\n"
+                "begin:\nmov cx, n\nmov si, 0\ncopy_loop:\n"
+                "Need implement with byte offsets carefully. Let n be small.\n"
+                "copy_done:\nmov di, a\n"
+                "Ends:\njmp Ends ;$E")
+        got = self._c(code, ext=".i86")
+        self.assertIn("copy_done:", got)
+        self.assertNotIn("Need implement", got)
+
+    def test_asm_short_cot_noise_line_cut(self):
+        """CoT-фразы без точки («Need maybe `step`? Not») — тоже мусор."""
+        code = ("jmp begin\nn dw 5\nb dw 3\n\nbegin:\nmov ax, n\n"
+                "Need maybe `step`? Not\nmov R, ax\nEnds:\njmp Ends ;$E")
+        got = self._c(code, ext=".i86")
+        self.assertNotIn("Need maybe", got)
+        self.assertIn("mov R, ax", got)
+
+    def test_asm_marker_in_cot_quote_not_end(self):
+        """;$E внутри CoT-цитаты (простыня со словом jmp) — не конец программы;
+        настоящий концевик ниже перехватывает span."""
+        long_cot = ("Need structure: start jmp begin, then variables, then begin label."
+                    " End with Ends: jmp Ends ;$E The user theory says ok then done")
+        real2 = "jmp begin\nb dw 2\nbegin:\nmov ax, b\nmov R, ax\nEnds:\njmp Ends ;$E"
+        text = "jmp begin\nb dw 1\nbegin:\nmov ax, b\n" + long_cot + "\n" + real2
+        got = self._c(text, ext=".i86")
+        self.assertIn("mov R, ax", got)
+        self.assertTrue(got.endswith("jmp Ends ;$E"))
+
+    def test_asm_data_section_not_cut(self):
+        """Дата-секция (dw/db/dup) и русский коммент не считаются прозя."""
+        code = ("jmp begin\n\n; Входные данные\nx dw 2\ny dw -1\na db 1\nc db 3\n"
+                "RES dw 0\n\nbegin:\nmov al, a\ncbw\nmov a_16, ax\n"
+                "Ends:\njmp Ends ;$E")
+        got = self._c(code, ext=".i86")
+        self.assertIn("x dw 2", got)
+        self.assertIn("Входные данные", got)
+
+    # --- С-МПА .mpc ---
+
+    def test_mpc_decls_plus_prose_plus_main(self):
+        """Прозя между декларациями и main срезается; полный кандидат жив."""
+        text = ("Разбор задачи: считаем сумму двух байтов.\n"
+                "int __in __bits(8) a;\nint __in __bits(8) b;\nint __out __bits(8) y;\n\n"
+                "Также нужно помнить правило про промежуточные переменные.\n"
+                "void main()\n{\ny = a + b;\n}\n\nУдачи!")
+        got = self._c(text, ext=".mpc")
+        self.assertIn("int __in __bits(8) a;", got)
+        self.assertIn("void main()", got)
+        self.assertIn("y = a + b;", got)
+        self.assertNotIn("Также нужно помнить", got)
+        self.assertNotIn("Удачи!", got)
+
+    def test_mpc_outline_glue_rejected_final_main_wins(self):
+        """res#1225-класс: болванки-фенсы в CoT; склейка «болванка + финал»
+        бракуется по двум main; финальный main-блок — единственный валидный."""
+        globals_quote = "```c\nint __in __bits(16) X;\nint __in __bits(16) Y;\n```"
+        main_quote = "```c\nvoid main() {\nRES = X + Y;\n}\n```"
+        final = "void main() {\nif (X * Y >= 0) {\nRES = ((X - Y) * 2 + 1) / Y;\n} else {\nRES = X;\n}\n}"
+        cot = ("*   Wait, check Rule 5 (Conditional expressions): Составные условия"
+               " раскрывай явно. Need think about this problem now.")
+        text = "Thinking Process:\n" + globals_quote + "\n" + main_quote + "\n" + cot + "\n" + final
+        got = self._c(text, ext=".mpc")
+        self.assertIn("void main()", got)
+        self.assertIn("RES = X", got)
+        self.assertNotIn("__bits(16) X", got)  # болванка-декларации НЕ склеены
+
+    def test_mpc_hydration_junk_empty(self):
+        """HYDRATION-мусор веб-пула — не код (гейт до DL)."""
+        from ai.services.code_carver import has_language_marker as _hlm
+        junk = 'window.HYDRATION_INIT_STATE={"mutations":[],"queries":[{"dehydratedAt":1788301366911}]}'
+        self.assertEqual(self._c(junk, ext=".mpc"), "")
+        self.assertEqual(self._c("[ВСТАВЬТЕ ВАШ КОД]", ext=".mpc"), "")
+        self.assertFalse(_hlm(junk, ".mpc"))
+
+    def test_mpc_comments_and_braces_legit(self):
+        """//-комменты и фигурные скобки — часть кода, не мусор."""
+        code = ("// Объявление глобальных переменных\n"
+                "int __in __bits(8) a;\nint __out __bits(8) y;\n\n"
+                "// Главная функция программы\nvoid main()\n{\n\n// Вычисление суммы\ny = a + b;\n\nreturn 0;\n}")
+        got = self._c(code, ext=".mpc")
+        self.assertIn(int_text := "int __in __bits(8) a;", got)
+        self.assertIn("// Главная функция", got)
+        self.assertTrue(got.rstrip().endswith("}"))
+
+    # --- Гейт языковых маркеров ---
+
+    def test_gate_markers(self):
+        from ai.services.code_carver import has_language_marker
+        self.assertTrue(has_language_marker("jmp begin\na dw 2\n", ".i86"))
+        self.assertTrue(has_language_marker(".model tiny\n.code\norg 100h\nmov ax, 1\n", ".i86"))
+        self.assertTrue(has_language_marker("int __in __bits(8) a;\n", ".mpc"))
+        self.assertTrue(has_language_marker("void main(){}\n", ".mpc"))
+        self.assertFalse(has_language_marker("window.HYDRATION...{},", ".i86"))
+        self.assertFalse(has_language_marker("Need answer only in Russian.", ".mpc"))
+        # Не-курсовые расширения гейт не отвергает
+        self.assertTrue(has_language_marker("anything at all", ""))
+        self.assertTrue(has_language_marker("anything at all", ".pas"))
+
+    def test_worker_gate_rejects_junk_before_dl(self):
+        """Батч-воркер: мусору без маркеров не ходит в DL (проверка константы)."""
+        from ai.arm_runner import has_language_marker
+        self.assertFalse(has_language_marker('[ВСТАВЬТЕ ВАШ КОД]', '.mpc'))
+
+
+class ArmVerdictFixCommandTests(TestCase):
+    """fix_arm_verdicts: пересчёт вердиктов по dl_comment (dry-run/commit)."""
+
+    @staticmethod
+    def _make_row(run, **kw):
+        from ai.models import AIModelTestResult
+        return AIModelTestResult.objects.create(
+            run=run, model_key=kw.get("model_key", "M"), model_title=kw.get("model_key", "M"),
+            verdict=kw.get("verdict", "solved"),
+            dl_comment=kw.get("dl_comment", ""),
+            code=kw.get("code", "jmp begin\nEnds:\njmp Ends ;$E"),
+            status=kw.get("status", "ok"),
+        )
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from ai.models import AIModelTestRun
+        self.run = AIModelTestRun.objects.create(
+            run_id="verdict-fix-1", run_type=AIModelTestRun.RUN_TYPE_BATCH)
+
+    def test_dry_run_touches_nothing(self):
+        from django.core.management import call_command
+        self._make_row(self.run, verdict="solved", dl_comment="[test1]: Ошибка компиляции: Ошибка синтаксиса (строка 1): junk.", model_key="M1")
+        call_command("fix_arm_verdicts")
+        row = self.run.results.first()
+        self.assertEqual(row.verdict, "solved")
+        self.assertEqual(row.status, "ok")
+
+    def test_commit_fixes_compile_error_solved(self):
+        from django.core.management import call_command
+        self._make_row(self.run, verdict="solved", dl_comment="[test1]: Ошибка компиляции: junk.", model_key="M2")
+        good = self._make_row(self.run, verdict="solved", dl_comment="[test1]: Все тесты пройдены.", model_key="M3")
+        call_command("fix_arm_verdicts", commit=True)
+        bad = self.run.results.get(model_key="M2")
+        self.assertEqual(bad.verdict, "failed")
+        self.assertEqual(bad.status, "error")
+        good.refresh_from_db()
+        self.assertEqual(good.verdict, "solved")
+
+    def test_empty_comment_untouched(self):
+        from django.core.management import call_command
+        self._make_row(self.run, verdict="solved", dl_comment="")
+        call_command("fix_arm_verdicts", commit=True)
+        row = self.run.results.first()
+        self.assertEqual(row.verdict, "solved")  # пустую не трогаем
+
+
 class TemplateInlineCommentTests(SimpleTestCase):
     """Регрессия: однострочные комментарии {# … #} в шаблонах НЕ могут
     переносить строки — Django рендерит их содержимое как текст прямо
@@ -8388,6 +9192,53 @@ class TemplateInlineCommentTests(SimpleTestCase):
                     if "{#" in line and "#}" not in line:
                         offenders.append(f"{os.path.relpath(path, base)}:{lineno}")
         self.assertEqual(offenders, [])
+
+
+class ReextractArmCodesCommandTests(TestCase):
+    """reextract_arm_codes: восстановление кода по сырому ответу;
+    solved не трогает; мусор без маркеров языка в code не пишет."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun
+        self.run = AIModelTestRun.objects.create(
+            run_id="reextract-1", run_type=AIModelTestRun.RUN_TYPE_BATCH)
+
+    @staticmethod
+    def _raw_real():
+        return ("Вот решение:\n```asm\njmp begin\nn dw 5\nb dw 3\na dw 0\n\n"
+                "begin:\nmov ax, b\nadd ax, n\nmov a, ax\nEnds:\njmp Ends ;$E\n```\nУдачи!")
+
+    def _make(self, model_key, verdict, raw, code="", ext=".i86"):
+        from ai.models import AIModelTestResult
+        return AIModelTestResult.objects.create(
+            run=self.run, model_key=model_key, model_title=model_key,
+            verdict=verdict, raw_response=raw, code=code,
+            dl_comment="Не удалось извлечь код из ответа модели",
+            file_extension_snapshot=ext,
+        )
+
+    def test_commit_fills_missing_code_skips_solved_and_junk(self):
+        from django.core.management import call_command
+        from ai.models import AIModelTestResult
+        missing = self._make("A1", "failed", self._raw_real())
+        solved = self._make("A2", "solved", self._raw_real(), code="")
+        junk = self._make("A3", "failed", "window.HYDRATION_INIT_STATE={}\n", code="", ext=".mpc")
+        call_command("reextract_arm_codes", run_ids=[self.run.pk], commit=True)
+        missing.refresh_from_db()
+        solved.refresh_from_db()
+        junk.refresh_from_db()
+        self.assertIn("jmp Ends ;$E", missing.code)
+        self.assertEqual(solved.code, "")   # solved не трогаем
+        self.assertEqual(junk.code, "")     # мусор в code не пишется
+
+    def test_dry_run_writes_nothing(self):
+        from django.core.management import call_command
+        missing = self._make("B1", "failed", self._raw_real())
+        call_command("reextract_arm_codes", run_ids=[self.run.pk])
+        missing.refresh_from_db()
+        self.assertEqual(missing.code, "")
+
+
 
 
 class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
@@ -9630,11 +10481,18 @@ class OnboardingServiceTests(TestCase):
         from ai.services.onboarding import scope_name_valid
         self.assertTrue(scope_name_valid("chat"))
         self.assertTrue(scope_name_valid("admin_arm_solve"))
-        # Общий тур админки разделён по правам: свои scope'ы на каждый уровень,
-        # объединённого «admin» больше нет.
+        # Тур главного экрана админки разделён по правам: свои scope'ы на
+        # каждый уровень, объединённого «admin» больше нет.
         self.assertTrue(scope_name_valid("admin_pd"))
         self.assertTrue(scope_name_valid("admin_staff"))
         self.assertTrue(scope_name_valid("admin_super"))
+        # Главные страницы админки — свой тур у каждой (контент страницы).
+        for page_scope in (
+            "admin_my_prompt", "admin_prompt_defaults", "admin_logs",
+            "admin_pinned_runs", "admin_aiappsettings", "admin_updates",
+            "admin_regression", "admin_test_console", "admin_tasksolution",
+        ):
+            self.assertTrue(scope_name_valid(page_scope))
         self.assertFalse(scope_name_valid("admin"))
         self.assertFalse(scope_name_valid("nope"))
         self.assertFalse(scope_name_valid(None))
@@ -9717,6 +10575,19 @@ class OnboardingServiceTests(TestCase):
         self.assertFalse(user_basics_seen(self.user, "admin_pd"))
         self.assertFalse(user_basics_seen(None, "solve"))
 
+    def test_user_basics_seen_requires_current_version(self):
+        """Закрыть «общие» может отметка ТОЛЬКО текущей версии: после бампа
+        туры обновились, и их общая часть ещё не показывалась (строка старой
+        версии не выпадала бы общие шаги молча)."""
+        from ai.services import onboarding as onboarding_service
+        from ai.services.onboarding import user_basics_seen
+
+        row = AIWizardSeen.objects.create(user=self.user, scope="chat", version=1)
+        self.assertGreater(onboarding_service.WIZARD_VERSION, 1)
+        self.assertFalse(user_basics_seen(self.user, "solve"))
+        row.version = onboarding_service.WIZARD_VERSION
+        row.save(update_fields=["version"])
+        self.assertTrue(user_basics_seen(self.user, "solve"))
 
 class WizardSeenUserEndpointTests(TestCase):
     """POST /ai/api/wizard-seen/ (пользовательские страницы, ai-wizard.js)."""
@@ -9939,7 +10810,7 @@ class WizardUserPageContextTests(TestCase):
         self.assertIn('"basics_seen": true', html)
         # Админские отметки юзер-«общие» не закрывают.
         plain2 = self.user_model.objects.create_user(
-            username="wz-context-plain2", password="x",
+            username="wz-context-plain2", password="***",
         )
         record_wizard_seen(plain2, "admin_pd")
         html = self._render(chat_view, "/ai/chat/", user=plain2)
@@ -10013,7 +10884,7 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
         return ai_admin_site.each_context(request)["ai_wizard"]
 
     def test_dashboard_scope_by_role(self):
-        """Общий тур админки разделён по правам: свой scope на каждый уровень."""
+        """Тур ГЛАВНОГО ЭКРАНА разделён по правам: свой scope на каждый уровень."""
         superuser = self.user_model.objects.create_user(
             username="wz-ctx-super", password="x", is_superuser=True,
         )
@@ -10096,6 +10967,43 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
         ctx = self._context(user)  # теперь «pd»
         self.assertEqual(ctx["scope"], "admin_pd")
         self.assertFalse(ctx["show"])
+
+    def test_page_scopes_by_path(self):
+        """Главные страницы админки — свой тур (контент страницы, без хрома:
+        бар и меню расписывает главный экран)."""
+        user = self.user_model.objects.create_user(
+            username="wz-ctx-pages", password="x", is_superuser=True,
+        )
+        expectations = (
+            ("/ai/admin/ai/airequestlog/", "admin_logs"),
+            ("/ai/admin/ai/airequestlog/123/", "admin_logs"),
+            ("/ai/admin/pinned-runs/", "admin_pinned_runs"),
+            ("/ai/admin/ai/tasksolution/", "admin_tasksolution"),
+            ("/ai/admin/ai/aiappsettings/", "admin_aiappsettings"),
+            ("/ai/admin/ai/aiappsettings/1/change/", "admin_aiappsettings"),
+            ("/ai/admin/updates/", "admin_updates"),
+            ("/ai/admin/prompt-defaults/", "admin_prompt_defaults"),
+            ("/ai/admin/prompt-regression/", "admin_regression"),
+            ("/ai/admin/test-console/", "admin_test_console"),
+            ("/ai/admin/prompts/my/", "admin_my_prompt"),
+        )
+        for path, expected_scope in expectations:
+            self.assertEqual(
+                self._context(user, path=path)["scope"], expected_scope,
+                msg=path,
+            )
+
+    def test_stock_changelist_paths_have_no_autostart(self):
+        """Стоковые таблицы/доки: автостарта нет — главный экран уже расписал
+        бар и все разделы; повторять его на каждой таблице нельзя. Ролевой
+        scope в payload остаётся (data-фоллбэк для ручного запуска)."""
+        user = self.user_model.objects.create_user(
+            username="wz-ctx-stock", password="x", is_superuser=True,
+        )
+        for path in ("/ai/admin/ai/topic/", "/ai/admin/docs/developer/", "/ai/admin/login/"):
+            ctx = self._context(user, path=path)
+            self.assertFalse(ctx["show"], msg=path)
+            self.assertEqual(ctx["scope"], "admin_super", msg=path)
 
 
 class WizardAssetAccessTests(TestCase):
