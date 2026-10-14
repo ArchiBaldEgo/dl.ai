@@ -123,7 +123,7 @@
             var source = findSource(kind, key);
             if (!source) return;
             jobs.push(
-                translateField(kind, key, source.text)
+                translateField(key, source.text)
                     .then(function (translated) { input.value = translated; })
             );
         });

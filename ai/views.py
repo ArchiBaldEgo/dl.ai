@@ -633,7 +633,7 @@ def get_prompts(request):
 
 
 def get_shared_prompts(request):
-    """Возвращает общие (shared) препромпты с привязкой к языкам."""
+    """Возвращает общие (shared) промпты с привязкой к языкам."""
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
 
@@ -642,7 +642,7 @@ def get_shared_prompts(request):
     qs = SharedPrompt.objects.prefetch_related('programming_languages').filter(Q(mode__isnull=True) | Q(mode=''))
 
     if language_id:
-        # Фильтруем: либо общий препромпт привязан к этому языку, либо без привязки (для всех)
+        # Фильтруем: либо общий промпт привязан к этому языку, либо без привязки (для всех)
         qs = qs.filter(
             models.Q(programming_languages__id=language_id) | models.Q(programming_languages__isnull=True)
         ).distinct()

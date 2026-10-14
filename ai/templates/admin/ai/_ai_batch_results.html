@@ -76,6 +76,15 @@ NB: комментарии с решёткой Django вырезает толь�
   .arm-result summary::-webkit-details-marker { display: none; }
   .arm-result-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
   .arm-result-title { font-weight: 700; }
+  /* Ссылка на задачу в DL (r.dl_url → /task.jsp?nid=…&cid=…) в заголовке
+     результата: цвет текста карточки, подчёркивание по наведению. */
+  .arm-result-title a { color: inherit; text-decoration: none; }
+  .arm-result-title a:hover { text-decoration: underline; }
+  /* Плашка промежуточного отчёта (report.interim): цифры ещё не окончательные. */
+  .arm-report-interim-note {
+    margin: 0 0 10px; padding: 8px 12px; border-radius: 6px; font-weight: 600;
+    color: #9a3412; background: #ffedd5; border: 1px solid #fdba74;
+  }
   .arm-meta { color: var(--body-quiet-color); font-size: 12px; margin-top: 4px; }
   .arm-result-body { border-top: 1px solid var(--hairline-color); padding: 12px 14px 14px; }
   /* Группировка «модель → её задачи»: summary карточки модели — шапка со
@@ -311,8 +320,10 @@ window.ArmBatchResults = (function () {
       if (els.perModel) { els.perModel.innerHTML = ''; }
       if (els.perTopic) { els.perTopic.innerHTML = ''; }
       if (els.errors) { els.errors.innerHTML = ''; }
+      setInterimNote(els.card, false);
       return;
     }
+    setInterimNote(els.card, !!report.interim);
     if (els.list) {
       const lines = [
         'Всего пар: ' + escapeHtml(report.total_pairs),
@@ -349,6 +360,20 @@ window.ArmBatchResults = (function () {
 
   // «Ошибки по темам»: нерешённые пары (failed/skipped), компактно — до 6
   // позиций на тему (сервер режет, остаток приходит в hidden).
+  // Плашка «цифры промежуточные»: ставится, пока report.interim (сервер
+  // строит «Сводку» на лету из уже завершённых пар; финал придёт без флага).
+  function setInterimNote(card, show) {
+    if (!card) { return; }
+    var note = card.querySelector('.arm-report-interim-note');
+    if (!show) { if (note) { note.remove(); } return; }
+    if (note) { return; }
+    note = document.createElement('p');
+    note.className = 'arm-report-interim-note';
+    note.textContent = 'Предварительный отчёт — прогон ещё выполняется, цифры промежуточные.';
+    var head = card.querySelector('.arm-section-head');
+    if (head && head.nextSibling) { card.insertBefore(note, head.nextSibling); }
+    else { card.appendChild(note); }
+  }
   function renderErrorsByTopic(rows, wrapEl) {
     if (!wrapEl) { return; }
     if (!rows || !rows.length) { wrapEl.innerHTML = ''; return; }
@@ -539,7 +564,19 @@ window.ArmBatchResults = (function () {
         var title = document.createElement('span');
         title.className = 'arm-result-title';
         // Модель уже в шапке группы — в заголовке задачи только её имя.
-        title.textContent = '#' + (r.task_node_id || '') + ' ' + (r.task_name || '');
+        // Есть dl_url (dl_task_url на сервере) — номер и имя задачи ведут в DL.
+        if (r.dl_url) {
+          var link = document.createElement('a');
+          link.href = r.dl_url;
+          link.target = '_blank';
+          link.rel = 'noopener';
+          link.title = 'Открыть задачу в DL';
+          link.className = 'arm-result-task-link';
+          link.textContent = '#' + (r.task_node_id || '') + ' ' + (r.task_name || '');
+          title.appendChild(link);
+        } else {
+          title.textContent = '#' + (r.task_node_id || '') + ' ' + (r.task_name || '');
+        }
         top.appendChild(title);
         top.insertAdjacentHTML('beforeend', verdictBadge(r.verdict));
         if (r.truncated) { top.insertAdjacentHTML('beforeend', truncatedBadge()); }

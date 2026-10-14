@@ -36,7 +36,7 @@ class PromptResolver:
 
         allowed_mode — режим страницы ('solve'/'find_error'): обычный промпт
         чужого режима не применяется (страховка от протухшего ai_state /
-        ручной подделки WS-пейлоада). Общие препромпты ('shared_<pk>') не
+        ручной подделки WS-пейлоада). Общие промпты ('shared_<pk>') не
         фильтруются.
         """
         from ..models import Prompt, SharedPrompt

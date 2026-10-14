@@ -95,7 +95,7 @@
                             '<div><strong>Язык:</strong> ' + escapeDetailHtml(l.programming_language_name) + '</div>',
                             '<div><strong>Тема:</strong> ' + escapeDetailHtml(l.topic_name) + '</div>',
                             '<div><strong>Задача:</strong> ' + task + '</div>',
-                            '<div><strong>Препромпт:</strong> ' + prompt + '</div>',
+                            '<div><strong>Промпт:</strong> ' + prompt + '</div>',
                             '</div>',
                             l.is_batch
                                 ? '<h4>Прогон</h4><div><strong>Название:</strong> ' + escapeDetailHtml(l.run_name || '—')

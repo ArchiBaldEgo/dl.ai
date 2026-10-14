@@ -36,7 +36,7 @@ from ..dl_api_client import (
 )
 from ..http_utils import resolve_dl_session_id
 from ..services.task_registry import apply_dl_task_info
-from .request_logs import dl_task_url
+from ..services.task_registry import dl_task_url
 
 User = get_user_model()
 
@@ -277,7 +277,7 @@ class PromptAdmin(admin.ModelAdmin):
         return custom + urls
 
     def admin_translate_field_view(self, request):
-        """AJAX-перевод для языковых табов формы препромпта.
+        """AJAX-перевод для языковых табов формы промпта.
 
         POST text + target (ru|en|fr) → Google Translate (deep-translator,
         тот же сервис, что у массового автоперевода). Только для тех, кто
@@ -364,7 +364,7 @@ class PromptAdmin(admin.ModelAdmin):
         self.message_user(request, msg, level=("success" if not failed else "warning"))
 
     def programming_language_name(self, obj):
-        # Язык препромпта: приоритет у темы (тема всегда принадлежит языку);
+        # Язык промпта: приоритет у темы (тема всегда принадлежит языку);
         # без темы — собственный язык («промпт на весь язык»). Раньше для
         # промптов без темы здесь всегда был «-».
         if obj.topic and obj.topic.programming_language:
@@ -726,7 +726,7 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 
     Список — кастомный (change_list_template): строка показывает дату,
     название задачи со ссылкой в DL (с припиской — путь задачи в дереве
-    задач DL, TaskSolution.tree_path), имя языка, тему и препромпт; клик по
+    задач DL, TaskSolution.tree_path), имя языка, тему и промпт; клик по
     строке (кроме ссылки на задачу) раскрывает сохранённый код.
     """
 

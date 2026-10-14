@@ -19,7 +19,7 @@
  * - window.onload — init для decide_task.
  */
 
-// Селекторы языка программирования / темы / препромпта — общая логика в ai-common.js.
+// Селекторы языка программирования / темы / промпта — общая логика в ai-common.js.
 // Файловая переменная, чтобы обработчик selectLang change (отдельная DOMContentLoaded)
 // мог дёрнуть repopulateOnUiLanguageChange().
 let problemSelectors = null;
@@ -296,7 +296,7 @@ document.addEventListener("DOMContentLoaded", function() {
             var speakThinkLabel = document.getElementById("speakThinkLabel");
             if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
 
-            // Перелокализация селекторов языка/темы/препромпта в новом UI-языке.
+            // Перелокализация селекторов языка/темы/промпта в новом UI-языке.
             if (problemSelectors) await problemSelectors.repopulateOnUiLanguageChange();
             saveInterfaceLanguage();
 
@@ -312,7 +312,7 @@ document.addEventListener("DOMContentLoaded", function() {
     }
 });
 
-// === DOMContentLoaded — инициализация селекторов языка/темы/препромпта ===
+// === DOMContentLoaded — инициализация селекторов языка/темы/промпта ===
 // Общая логика в ai-common.js (initProblemSelectors): populate + change handlers
 // + savePageState/restorePageState. Возвращает handle для repopulateOnUiLanguageChange.
 document.addEventListener("DOMContentLoaded", function() {

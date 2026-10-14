@@ -221,14 +221,14 @@ def admin_arm_solve_view(request):
         for t in Topic.objects.select_related("programming_language").all()
     ]
 
-    # Привязки «препромпт по умолчанию» (Инструменты → Препромпты по умолчанию):
-    # препромпт берётся только из привязки по выбранной теме, ручного выбора нет.
+    # Привязки «промпт по умолчанию» (Инструменты → Промпты по умолчанию):
+    # промпт берётся только из привязки по выбранной теме, ручного выбора нет.
     prompt_bindings = [
         serialize_arm_prompt_binding(b) for b in ArmPromptBinding.objects.select_related("prompt")
     ]
 
-    # Список препромптов режима «Реши задачу» для ручного выбора на странице.
-    # Препромпты — студенческий контент: тот же контракт, что у chat-facing
+    # Список промптов режима «Реши задачу» для ручного выбора на странице.
+    # Промпты — студенческий контент: тот же контракт, что у chat-facing
     # get_prompts (см. querysets.prompt_queryset_for_user — здесь ACL не режем).
     # language_name — для промптов «на весь язык» (без темы).
     prompt_options = [
@@ -510,9 +510,9 @@ def admin_arm_solve_start_view(request):
             {"ok": False, "message": lang_error or "Не выбрано расширение файла для тестирования."},
             status=400,
         )
-    # Тема выбрана пользователем (для журнала прогона). Препромпт — ручной
+    # Тема выбрана пользователем (для журнала прогона). Промпт — ручной
     # выбор из списка на странице (все промпты — студенческий контент, как в
-    # chat-facing API); без ручного выбора препромпт резолвится на КАЖДУЮ
+    # chat-facing API); без ручного выбора промпт резолвится на КАЖДУЮ
     # задачу по её теме (ArmPromptBinding, mode=solve) в worker'е — тема
     # определяется из ветки DL, а не одна на весь прогон.
     topic_id = None
@@ -539,7 +539,7 @@ def admin_arm_solve_start_view(request):
         prompt_id = prompt_override.pk
         prompt_name = prompt_override.prompt_name_ru or ""
     else:
-        # «По привязке»: без явного препромпта worker сам подбирает привязку
+        # «По привязке»: без явного промпта worker сам подбирает привязку
         # на каждую задачу (по теме из ветки DL). prompt_id остаётся None.
         prompt_id = None
         prompt_name = ""
@@ -898,4 +898,16 @@ def admin_arm_solve_report_xlsx_view(request, run_id):
     if not results:
         return JsonResponse({"ok": False, "message": "В прогоне нет результатов"}, status=404)
 
-    return _arm_results_xlsx_response(results, run_id)
+    # Прогон ещё идёт — файл содержит только завершённые к этому моменту
+    # пары; помечаем это прямо в шапке листа «Сводка», чтобы цифры в Excel
+    # не читались как «работа почти закончена» (см. живую «Сводку» в UI).
+    note = None
+    if run_snapshot.get("status") in ("running", "paused"):
+        total = run_snapshot.get("total_pairs") or 0
+        completed = run_snapshot.get("completed_pairs") or 0
+        note = (
+            f"ВНИМАНИЕ: работа ещё выполняется — в файле завершённые пары на момент скачивания"
+            f" ({completed} из {total})."
+        )
+
+    return _arm_results_xlsx_response(results, run_id, note=note)

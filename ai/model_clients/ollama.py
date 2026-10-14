@@ -10,7 +10,7 @@ gpt-oss:20b-cloud, gpt-oss:120b-cloud) требуют bearer-токен ``OLLAMA
 Архитектура: generic ``_ask_ollama()`` + декларативная таблица ``OLLAMA_MODELS``;
 внешние функции-обёртки генерируются автоматически через ``_make_handler`` (по
 образцу openrouter.py). Обычный чат БЕЗ tool-calling и БЕЗ истории диалога —
-препромпт подставляется на каждое сообщение (как у Groq).
+промпт подставляется на каждое сообщение (как у Groq).
 
 Контракт handler'а (см. ai/services/model_caller.py:75):
 ``async def handler(msg: str, client_id: str) -> Tuple[str, int, bool]``.

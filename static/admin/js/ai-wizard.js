@@ -216,7 +216,7 @@
     // решение, журнал, закреплённые.
     var ADMIN_PD_EXTRA = [
         { sel: '#nav-sidebar a[href="/ai/admin/docs/prompt-developer/"]', title: "Документация", text: "Инструкция для тебя как разработчика промптов.", pos: "right", onShow: "openNav" },
-        { sel: '#nav-sidebar a[href="/ai/admin/prompts/my/"]', title: "Мой препромпт", text: "Здесь ты пишешь и меняешь свои промпты.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/prompts/my/"]', title: "Мой промпт", text: "Здесь ты пишешь и меняешь свои промпты.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href="/ai/admin/arm/solve/"]', title: "Пакетное решение", text: "Проверка моделей сразу на всех задачах курса.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href="/ai/admin/ai/request_logs/"]', title: "Журнал запросов", text: "Видно твои запросы к моделям.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href="/ai/admin/pinned-runs/"]', title: "Закреплённые", text: "Закреплённые пакетные решения — быстрый доступ к прогонам.", pos: "right", optional: true, onShow: "openNav" }
@@ -229,13 +229,13 @@
         { sel: '#nav-sidebar a[href="/ai/admin/updates/"]', title: "Обновления", text: "Что нового появилось в проекте.", pos: "right", onShow: "openNav" }
     ];
 
-    // Дополнительно суперадминам: дефолтные препромпты, регрессия, тесты,
+    // Дополнительно суперадминам: дефолтные промпты, регрессия, тесты,
     // режим «посмотреть как другой», роль в шапке.
      var ADMIN_NAV_PAGES = [
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/aiappsettings/"]', title: "Настройка ИИ-приложения", text: "Главные настройки: доступ к ИИ, сводка за сутки, последние прогоны. Свой тур — на самой странице.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/pinned-runs/"]', title: "Закреплённые прогоны", text: "Закреплённые (★) завершённые прогоны — быстрый доступ.", pos: "right", onShow: "openNav" },
-        { sel: '#nav-sidebar a[href^="/ai/admin/prompts/my/"]', title: "Мой препромпт", text: "Твои промпты: список, поиск, кнопка «Добавить».", pos: "right", onShow: "openNav" },
-        { sel: '#nav-sidebar a[href^="/ai/admin/prompt-defaults/"]', title: "Препромпты по умолчанию", text: "Какие препромпты подставляются автоматически по языку и теме.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href^="/ai/admin/prompts/my/"]', title: "Мой промпт", text: "Твои промпты: список, поиск, кнопка «Добавить».", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href^="/ai/admin/prompt-defaults/"]', title: "Промпты по умолчанию", text: "Какие промпты подставляются автоматически по языку и теме.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/docs/prompt-developer/"]', title: "Инструкция промпт-разработчика", text: "Как писать промпты — читать перед работой.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/docs/developer/"]', title: "Документация разработчика", text: "Техническая документация проекта.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/docs/superuser/"]', title: "Инструкция суперадмина", text: "Что меняет только суперадмин.", pos: "right", onShow: "openNav" },
@@ -245,7 +245,7 @@
         { sel: '#nav-sidebar a[href^="/ai/admin/test-console/"]', title: "Тестовая консоль", text: "Запуск тестов приложения и логи прошлых запусков.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/tasksolution/"]', title: "Решённые задачи", text: "Кэш: задания, прошедшие тест в DL, достаются без модели.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/updates/"]', title: "Обновления", text: "Что нового появилось в проекте.", pos: "right", onShow: "openNav" },
-        { sel: '#nav-sidebar a[href^="/ai/admin/ai/prompt/"]', title: "Препромпты", text: "Таблица всех промптов; правка — по клику на название.", pos: "right", onShow: "openNav" }
+        { sel: '#nav-sidebar a[href^="/ai/admin/ai/prompt/"]', title: "Промпты", text: "Таблица всех промптов; правка — по клику на название.", pos: "right", onShow: "openNav" }
     ];
 
 
@@ -280,7 +280,7 @@
             { sel: "#select", title: "Выбор модели", text: "Список моделей — помощников, которые будут решать задачу.", pos: "bottom", common: true },
             { sel: "#selectProgLng", title: "Язык программирования", text: "Сначала выбери язык твоего кода: C или Ассемблер.", pos: "bottom" },
             { sel: "#selectTheme", title: "Тема", text: "Выбери тему — она объясняет модели, о чём задача.", pos: "top" },
-            { sel: "#selectPrompt", title: "Препромпт", text: "Препромпт — маленькая подсказка для модели. Хватит того, что выбрано.", pos: "top" }
+            { sel: "#selectPrompt", title: "Промпт", text: "Промпт — маленькая подсказка для модели. Хватит того, что выбрано.", pos: "top" }
         ],
 
         // Эталон пользователя (v4): «В чём ошибка — текст для задачи, текст для
@@ -313,7 +313,7 @@
             { sel: "#armLanguageChecks", title: "Языки", text: "Выбери один или несколько языков: на каждый запустится свой процесс.", pos: "bottom" },
             { sel: "#armExtensionInput", title: "Расширение", text: "Расширение файла определяется само, из выбранных языков.", pos: "right" },
             { sel: "#armTopicSelect", title: "Тема", text: "Станет доступной после выбора языка.", pos: "right" },
-            { sel: "#armPromptSelect", title: "Препромпт", text: "Обычно «По привязке» — подставится препромпт по умолчанию. Можно выбрать свой.", pos: "right" },
+            { sel: "#armPromptSelect", title: "Промпт", text: "Обычно «По привязке» — подставится промпт по умолчанию. Можно выбрать свой.", pos: "right" },
             { sel: "#armSaveSolutions", title: "Кэш решений", text: "Если задача прошла тест в DL, её решение сохранится — потом достанется без вызова модели.", pos: "right" },
             { sel: "#armRecordStats", title: "Статистика", text: "Суперадмин может заносить результаты в базу — они попадут в селектор моделей чата.", pos: "right" },
             { sel: "#armRunName", title: "Название прогона", text: "Придумай короткое имя — так прогон потом легко найти в журнале.", pos: "right" },
@@ -335,9 +335,6 @@
 
         // Журнал запросов (list + detail: resend-btn только там).
         admin_logs: [
-            { sel: "#id_q", title: "Поиск", text: "Ищет по тексту запроса и ответа, промпту, теме.", pos: "bottom" },
-            { sel: "#id_record_id", title: "Номер записи", text: "Нужно смотреть одну конкретную запись — впиши её номер.", pos: "bottom" },
-            { sel: "#id_status", title: "Статус", text: "Успешные или ошибочные запросы.", pos: "bottom" },
             { sel: "#id_mode", title: "Режим", text: "Чат, «Реши задачу», «В чём ошибка», пакетное решение.", pos: "bottom" },
             { sel: "#id_model", title: "Модель", text: "Какая модель отвечала.", pos: "bottom" },
             { sel: "#id_user", title: "Пользователь", text: "Кто запрашивал: ID, логин или ФИО.", pos: "bottom" },
@@ -371,7 +368,7 @@
         ],
 
         admin_regression: [
-            { sel: "#prt_prompt", title: "Промпт", text: "Какой препромпт проверяем.", pos: "right" },
+            { sel: "#prt_prompt", title: "Промпт", text: "Какой промпт проверяем.", pos: "right" },
             { sel: "#prt_interface_language", title: "Язык страницы", text: "На каком языке отвечают пользователи — тот и проверяем.", pos: "right" },
             { sel: "#prt_models", title: "Модели", text: "Какими моделями прогнать тест.", pos: "right" },
             { sel: "#prt_cases", title: "Тест-кейсы", text: "Контрольные примеры: вопрос и правильный ответ.", pos: "right" },
@@ -399,7 +396,7 @@
             { sel: "#pdLanguage", title: "Язык", text: "Для какого языка программирования задаём привязку.", pos: "right" },
             { sel: "#pdTopic", title: "Тема", text: "Подтема курса; станет активной, когда выбран язык.", pos: "right" },
             { sel: "#pdMode", title: "Вид ARM", text: "Где подставлять: на «Реши задачу» или «В чём ошибка».", pos: "right" },
-            { sel: "#pdPrompt", title: "Препромпт", text: "Он подставится по умолчанию у всех пользователей.", pos: "right" },
+            { sel: "#pdPrompt", title: "Промпт", text: "Он подставится по умолчанию у всех пользователей.", pos: "right" },
             { sel: "#pdSaveBtn", title: "Сохранить", text: "Жми — привязка появится в списке ниже.", pos: "right" },
             { sel: "#content-main table", title: "Существующие привязки", text: "Всё, что задано: «Изменить» — поправить, «Удалить» — убрать.", pos: "top" }
         ]
@@ -766,7 +763,7 @@
     // Подсветка — пересечение цели с вьюпортом. Раньше здесь были два
     // само-ограничения, гасившие пятно у реальных целей: MIN_SPOT=24
     // («мелкая цель не заслуживает пятна»: приветствие админки 14–21px,
-    // селект препромпта 19px) и SPOT_INSET=8, отъедавший цели, прижатые
+    // селект промпта 19px) и SPOT_INSET=8, отъедавший цели, прижатые
     // к краям окна (стрелочка чата: right:0 → пересечение 16px). Для всех
     // таких шагов пятна не было, поповер уезжал «в центр» без якоря и
     // стрелки — в глазах пользователя «шаг не отображается». Теперь пятно

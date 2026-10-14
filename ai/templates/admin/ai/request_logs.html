@@ -10,23 +10,6 @@
 
   <form method="get" class="ai-logs-filters">
     <div class="filter-field">
-      <label for="id_q">Поиск по журналу</label>
-      <input id="id_q" type="text" name="q" value="{{ filters.q }}" placeholder="Текст запроса/ответа, промпт, тема…"{% if request.GET.focus %} autofocus{% endif %}>
-    </div>
-    <div class="filter-field">
-      <label for="id_record_id">ID записи</label>
-      <input id="id_record_id" type="text" name="id" value="{{ filters.id }}" placeholder="напр. 12345">
-    </div>
-    <div class="filter-field">
-      <label for="id_status">Статус</label>
-      <select id="id_status" name="status">
-        <option value="">Все</option>
-        {% for key, label in status_choices %}
-          <option value="{{ key }}" {% if filters.status == key %}selected{% endif %}>{{ label }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="filter-field">
       <label for="id_mode">Режим</label>
       <select id="id_mode" name="mode">
         <option value="">Все</option>
@@ -51,15 +34,6 @@
     </div>
     {% endif %}
     <div class="filter-field">
-      <label for="id_task">Задача</label>
-      <select id="id_task" name="task">
-        <option value="">Все</option>
-        {% for tc in task_choices %}
-          <option value="{{ tc.node_id }}" {% if filters.task|stringformat:"s" == tc.node_id|stringformat:"s" %}selected{% endif %}>{{ tc.name }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="filter-field">
       <label for="id_date_from">С</label>
       <input id="id_date_from" type="date" name="date_from" value="{{ filters.date_from }}">
     </div>
@@ -73,6 +47,9 @@
       <a class="button" href="{{ request.path }}?reset=1">Сбросить</a>
       <a class="button" href="{{ request.path }}daily-report/" title="Студенты × запросы за сегодня (00:00–23:59 МСК)">Дневной отчёт →</a>
       <a class="button" href="#" id="ai-logs-table-update-button">Обновить таблицу</a>
+      {% if show_test_data_link %}
+      <a class="button" href="{% url 'ai_test_data' %}" title="Генератор тестовых записей журнала">Добавить запись</a>
+      {% endif %}
     </div>
   </form>
 

@@ -43,7 +43,7 @@ var PERSISTED_SELECT_IDS = [
     'selectType',    // тип страницы (чат/решить/ошибка)
     'selectProgLng', // язык программирования
     'selectTheme',   // тема
-    'selectPrompt',  // препромпт
+    'selectPrompt',  // промпт
 ];
 
 // === ai_state cookie (selections): {tab, lang, model, progLng, topic, prompt, voiceMode} ===
@@ -513,7 +513,7 @@ function initModelSortSelector() {
 }
 
 // === Selectors: programming language / topic / prompt (shared by find-error & solve-problem) ===
-// Логика выбора языка программирования / темы / препромпта вынесена из find_error.js,
+// Логика выбора языка программирования / темы / промпта вынесена из find_error.js,
 // чтобы /ai/solve-problem/ переиспользовал её без копипасты (DRY, см. CLAUDE.md).
 // Состояние (progLng/topic/prompt) сохраняется в куке ai_state через savePageState.
 var PROBLEM_DATA_KEY = 'ai_problem_data_cache';
@@ -553,7 +553,7 @@ async function fetchProblemData() {
 
 // Инициализирует селекторы #selectProgLng/#selectTheme/#selectPrompt на странице.
 // mode — режим страницы ('solve' | 'find_error'); промпты с чужим mode скрываются
-// из селектора препромптов (общие препромпты не фильтруются — режимные SharedPrompt
+// из селектора промптов (общие промпты не фильтруются — режимные SharedPrompt
 // не попадают в /ai/api/problem-data/ и на сервере).
 // Если хоть одного элемента нет (например, на /ai/chat/) — no-op, возвращает null.
 // Возвращает handle с repopulateOnUiLanguageChange() для перелокализации при смене UI-языка.
@@ -626,7 +626,7 @@ function initProblemSelectors(mode) {
         selectPrompt.innerHTML = '<option value="">' + getUiString('choosePrompt', 'Выберите промпт') + '</option>';
         if (!problemData) return;
 
-        // Кандидаты в селектор препромптов.
+        // Кандидаты в селектор промптов.
         // - Язык НЕ выбран: только общие (универсальные, language_ids пустой)
         //   препромты. Специфичные для языка/темы скрываются, пока пользователь
         //   не выберет язык.
@@ -663,7 +663,7 @@ function initProblemSelectors(mode) {
             selectPrompt.appendChild(option);
         });
         selectFirstIfSingle(selectPrompt);
-        // Общие промпты (topic_id=null) не требуют темы — селектор препромптов
+        // Общие промпты (topic_id=null) не требуют темы — селектор промптов
         // доступен, пока есть хоть один выбираемый промпт, даже если тема не
         // выбрана (например, у C++ нет тем).
         setSelectEnabled(selectPrompt, selectPrompt.options.length > 1);
@@ -908,9 +908,9 @@ function setRequestLock(isLocked) {
     }
 }
 
-// === Pre-send guard: тема без препромпта ===
+// === Pre-send guard: тема без промпта ===
 // На страницах «Реши задачу» / «В чём ошибка?» есть селекторы темы (selectTheme)
-// и препромпта (selectPrompt). Если выбрана тема, но препромпт не выбран —
+// и промпта (selectPrompt). Если выбрана тема, но промпт не выбран —
 // переспросить пользователя перед отправкой. Возвращает true, если можно
 // отправлять; false — если пользователь отменил. На страницах без этих
 // селекторов (чат) сразу true.
@@ -922,7 +922,7 @@ function confirmTopicWithoutPreprompt() {
     var preprompt = (promptEl.value || '').trim();
     if (topic && !preprompt) {
         return confirm(getUiString('topicWithoutPrepromptConfirm',
-            'Выбрана тема, но не выбран препромпт. Отправить запрос с выбранной темой, но без препромпта?'));
+            'Выбрана тема, но не выбран промпт. Отправить запрос с выбранной темой, но без промпта?'));
     }
     return true;
 }
@@ -1250,11 +1250,11 @@ var localization = {
         decideTask: "Реши задачу",
         findError: "В чём ошибка?",
         enterHint: "При нажатии на Enter будет отправляться вопрос (для переноса строки Enter+Shift)",
-        preprompt: "Препромпт",
+        preprompt: "Промпт",
         chooseLanguage: "Выберите язык",
         chooseTheme: "Выберите тему",
         choosePrompt: "Выберите промпт",
-        topicWithoutPrepromptConfirm: "Выбрана тема, но не выбран препромпт. Отправить запрос с выбранной темой, но без препромпта?",
+        topicWithoutPrepromptConfirm: "Выбрана тема, но не выбран промпт. Отправить запрос с выбранной темой, но без промпта?",
         voiceMode: "Голосовой режим",
         voiceInput: "Голосовой ввод",
         voiceOutput: "Озвучить ответ",
@@ -1272,7 +1272,7 @@ var localization = {
         sortAccuracy: "Порядок: по точности",
         sortBoth: "Порядок: скорость + точность",
         statSeconds: "с",
-        // Маркер shared-препромпта — JS-зеркало _SHARED_PROMPT_PREFIX из ai/i18n.py.
+        // Маркер shared-промпта — JS-зеркало _SHARED_PROMPT_PREFIX из ai/i18n.py.
         sharedPrefix: "[Общий]",
         // Кнопка «Тестирование» — отправка кода модели в DL (страница «Реши задачу»).
         dlTestButton: "Тестирование",
@@ -1359,11 +1359,11 @@ var localization = {
         decideTask: "Solve the task",
         findError: "What's the error?",
         enterHint: "Press Enter to send the question (Shift+Enter for a new line)",
-        preprompt: "Preprompt",
+        preprompt: "Prompt",
         chooseLanguage: "Choose language",
         chooseTheme: "Choose theme",
         choosePrompt: "Choose prompt",
-        topicWithoutPrepromptConfirm: "A topic is selected but no preprompt is chosen. Send the request with the selected topic but without a preprompt?",
+        topicWithoutPrepromptConfirm: "A topic is selected but no prompt is chosen. Send the request with the selected topic but without a prompt?",
         voiceMode: "Voice mode",
         voiceInput: "Voice input",
         voiceOutput: "Speak answer",
@@ -1467,11 +1467,11 @@ var localization = {
         decideTask: "Résoudre la tâche",
         findError: "Quelle est l'erreur?",
         enterHint: "Appuyez sur Entrée pour envoyer la question (Shift+Enter pour une nouvelle ligne)",
-        preprompt: "Pré-promp",
+        preprompt: "Prompt",
         chooseLanguage: "Choisir la langue",
         chooseTheme: "Choisir le thème",
-        choosePrompt: "Choisir le pré-promp",
-        topicWithoutPrepromptConfirm: "Un thème est sélectionné mais aucun pré-promp n'est choisi. Envoyer la requête avec le thème sélectionné mais sans pré-promp ?",
+        choosePrompt: "Choisir le prompt",
+        topicWithoutPrepromptConfirm: "Un thème est sélectionné mais aucun prompt n'est choisi. Envoyer la requête avec le thème sélectionné mais sans prompt ?",
         voiceMode: "Mode vocal",
         voiceInput: "Saisie vocale",
         voiceOutput: "Lire la réponse",

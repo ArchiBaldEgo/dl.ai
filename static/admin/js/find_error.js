@@ -3,7 +3,7 @@
  *
  * Общие функции (cookies, CSRF, voice, accordion, markdown, localization, etc.)
  * берутся из ai-common.js. Включая логику селекторов языка программирования /
- * темы / препромпта (initProblemSelectors / fetchProblemData) — она расшарена
+ * темы / промпта (initProblemSelectors / fetchProblemData) — она расшарена
  * с decide_task.js (DRY, см. CLAUDE.md). Этот файл содержит только переопределения:
  * - initWebSocket() — type=3 и accordion logic в onmessage
  * - sendMessage() — taskText, codeText, progLng, topic, preprompt, type=3
@@ -237,7 +237,7 @@ function simulateSend() {
 // === DOMContentLoaded: initProblemSelectors + input listeners + selectLang handler ===
 
 document.addEventListener("DOMContentLoaded", async () => {
-    // Селекторы языка программирования / темы / препромпта — общая логика в ai-common.js (DRY).
+    // Селекторы языка программирования / темы / промпта — общая логика в ai-common.js (DRY).
     var problemSelectors = initProblemSelectors('find_error');
 
     const taskText = document.getElementById('taskText');
@@ -295,7 +295,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         const speakThinkLabel = document.getElementById("speakThinkLabel");
         if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
 
-        // Перелокализация селекторов языка/темы/препромпта в новом UI-языке
+        // Перелокализация селекторов языка/темы/промпта в новом UI-языке
         // (значения-иды языка-независимы; restorePageState пере-применяет выбор).
         if (problemSelectors) await problemSelectors.repopulateOnUiLanguageChange();
         saveInterfaceLanguage();

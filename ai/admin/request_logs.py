@@ -32,6 +32,7 @@ from ..http_utils import resolve_dl_session_id
 from ..models import AIModelTestResult, AIModelTestRun, AIRequestLog, AIPinnedBatchRun, Task
 from ..templatetags.ai_duration import format_human_duration
 from ..model_health import get_runtime_model_handlers
+from ..services.task_registry import dl_task_url  # DRY: единственное определение — в task_registry
 from .permissions import can_access_arm, can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
 
 logger = logging.getLogger(__name__)
@@ -48,21 +49,6 @@ def _batch_run_id_from_log(log):
     m = _BATCH_RUN_ID_RE.search(log.message or "")
     return m.group(1) if m else None
 
-
-def dl_task_url(node_id, course_id=None):
-    """Пользовательская ссылка на задачу в DL (не admin-вьювер).
-
-    ``/task.jsp?nid=<узел>&cid=<курс>`` (nid первым, cid вторым). cid —
-    это дерево задач: приписка ``&cid=`` ставится ВСЕГДА — если курс записи
-    не известен (старые записи кэша/журнала), подставляем единственное
-    дерево DL (DL_DEFAULT_COURSE_ID), иначе DL откроет задачу без контекста
-    дерева. Просмотр условия от имени админа DL (fullTaskviewer) не
-    используется.
-    """
-    if not node_id:
-        return None
-    cid = course_id or DL_DEFAULT_COURSE_ID
-    return f"https://dl.gsu.by/task.jsp?nid={node_id}&cid={cid}"
 
 
 # Отображение статуса batch-прогона (AIModelTestRun.status) в журналах:
@@ -250,7 +236,7 @@ class AIRequestLogAdmin(admin.ModelAdmin):
 
     def prompt_name(self, obj):
         return obj.prompt_name or "—"
-    prompt_name.short_description = "Препромпт"
+    prompt_name.short_description = "Промпт"
 
     def duration_seconds_display(self, obj):
         if obj.duration_seconds is None:
@@ -333,7 +319,7 @@ def build_recent_log_rows(request, limit=5):
         "can_view_logs": can_view,
         # Полный журнал: там есть поиск/фильтры по всему журналу. Ссылка ведёт
         # на страницу журнала с фокусом на поле поиска (см. шаблон настроек).
-        "logs_search_url": "/ai/admin/ai/request_logs/?focus=1",
+        "logs_search_url": "/ai/admin/ai/request_logs/",
         # Для {% timezone moscow_tz %} в aiappsettings_change_form.html —
         # тот же контракт, что у admin_request_logs_view.
         "moscow_tz": MOSCOW_TZ,
@@ -401,7 +387,7 @@ def build_batch_rows_for_logs(request, logs):
                 timezone.localtime(log.received_at).strftime("%d.%m.%Y %H:%M:%S")
                 if log.received_at else "—"
             ),
-            "username": log.username,
+            "sender_display": log.user_full_name or log.username or "—",
             "status": log.status,
             # Статус прогона («Выполнен»/«Прерван»); прогон стёрт из БД →
             # старое отображение по записи журнала.
@@ -558,7 +544,7 @@ def admin_daily_report_view(request):
 
     День — календарный по МСК (00:00–23:59). Строка — студент (внешний
     dl-аккаунт или локальный юзер): фамилия, время последней отправки (без
-    даты), последняя тема и препромпт, последний режим («какой чат») и
+    даты), последняя тема и промпт, последний режим («какой чат») и
     сколько всего запросов за сегодня. Клик по колонке «Запросов»
     разворачивает свёрнутый список всех его записей дня — данные уже в
     HTML страницы, второго запроса не нужно.
@@ -654,25 +640,14 @@ def admin_request_logs_view(request):
     # 2. 
     qs = _scope_logs_qs(AIRequestLog.objects.all(), request.user)
 
-    status = request.GET.get("status", "").strip()
-    source = request.GET.get("source", "").strip()
     mode   = request.GET.get("mode", "").strip()
     model  = request.GET.get("model", "").strip()
     user_q = request.GET.get("user", "").strip()
-    task_q = request.GET.get("task", "").strip()
-    log_id = request.GET.get("id", "").strip()
-    text_q = request.GET.get("q", "").strip()
     date_from = _parse_date(request.GET.get("date_from", ""))
     date_to   = _parse_date(request.GET.get("date_to", ""))
 
-    status_values = dict(AIRequestLog.STATUS_CHOICES)
-    source_values = dict(AIRequestLog.SOURCE_CHOICES)
     mode_values = dict(AIRequestLog.MODE_CHOICES)
 
-    if status in status_values:
-        qs = qs.filter(status=status)
-    if source in source_values:
-        qs = qs.filter(source=source)
     if mode in mode_values:
         qs = qs.filter(mode=mode)
     if model:
@@ -683,24 +658,6 @@ def admin_request_logs_view(request):
             | Q(username__icontains=user_q)
             | Q(external_user_id__icontains=user_q)
         )
-    if log_id.isdigit():
-        qs = qs.filter(pk=int(log_id))
-    if text_q:
-        # Поиск по всему журналу: текст запроса/ответа, модель, язык, тема,
-        # препромпт, название задачи.
-        qs = qs.filter(
-            Q(message__icontains=text_q)
-            | Q(response_text__icontains=text_q)
-            | Q(prompt_name__icontains=text_q)
-            | Q(programming_language_name__icontains=text_q)
-            | Q(topic_name__icontains=text_q)
-            | Q(task_name__icontains=text_q)
-        )
-    if task_q:
-        if task_q.isdigit():
-            qs = qs.filter(task_node_id=int(task_q))
-        else:
-            qs = qs.filter(task_name__icontains=task_q)
     if date_from:
         qs = qs.filter(sent_at__date__gte=date_from)
     if date_to:
@@ -746,15 +703,6 @@ def admin_request_logs_view(request):
         for key, info in _handlers.items()
     ]
 
-    # Build task choices from distinct task_node_id/task_name pairs in logs.
-    task_choices = [
-        {"node_id": t["task_node_id"], "name": t["task_name"] or str(t["task_node_id"])}
-        for t in AIRequestLog.objects.exclude(task_node_id__isnull=True)
-            .values("task_node_id", "task_name").distinct().order_by("-task_node_id")
-    ]
-
-    
-
     context = {
         **ai_admin_site.each_context(request),
         "title": "DL.AI: Логи запросов",
@@ -762,23 +710,15 @@ def admin_request_logs_view(request):
         "rows": rows,
         # Кнопки паузы/перезапуска в развёртке строк — тем же правам, что /arm/solve/.
         "arm_actions": can_access_arm(request),
-        "status_choices": AIRequestLog.STATUS_CHOICES,
-        "source_choices": AIRequestLog.SOURCE_CHOICES,
         "mode_choices": AIRequestLog.MODE_CHOICES,
         "model_choices": model_choices,
-        "task_choices": task_choices,
         "filters_query": filters_query_str,
         "own_logs_only": logs_scope_is_own_user(request.user),
         "moscow_tz": MOSCOW_TZ,
         "filters": {
-            "status": status,
-            "source": source,
             "mode": mode,
             "model": model,
             "user": user_q,
-            "task": task_q,
-            "id": log_id,
-            "q": text_q,
             "date_from": date_from,
             "date_to": date_to,
         },
@@ -835,6 +775,11 @@ def _build_batch_log_snapshot(log):
         test_run.finished_at.timestamp() if test_run.finished_at else None,
         now_ts=time.time() if test_run.status == AIModelTestRun.STATUS_RUNNING else None,
     )
+    if test_run.status == AIModelTestRun.STATUS_RUNNING and report is not None:
+        # Отчёт построен по текущим строкам БД прогона — цифры промежуточные:
+        # та же плашка честности, что у живого снапшота (arm_runner.
+        # _interim_live_report); финал придёт без флага.
+        report["interim"] = True
 
     # file_extension — первый непустой снимок из результатов.
     file_extension = ""
@@ -850,7 +795,7 @@ def _build_batch_log_snapshot(log):
             node_ids.append(nid)
 
     # Развёртка журнала: ВСЕ задачи прогона (решённые и нерешённые) с
-    # пометками по моделям + фактически использованные препромпты (distinct
+    # пометками по моделям + фактически использованные промпты (distinct
     # по снимкам пар; легаси-строки без снимка не попадают).
     task_names = {}
     models_by_node = {}
@@ -890,6 +835,9 @@ def _build_batch_log_snapshot(log):
         # Статус прогона и ручное название — для шапки деталей журнала.
         "run_status": test_run.status,
         "run_name": run_name_for(test_run),
+        # Пар (строк результата) завершено на текущий момент — для честной
+        # пометки в XLSX выполняющегося прогона.
+        "run_completed_pairs": len(results),
         # Полный список задач с отметками решённости по моделям.
         "tasks": tasks,
         "prompts": [{"id": pid, "name": name} for pid, name in prompts_map.items()],
@@ -943,7 +891,7 @@ def _batch_log_row_contexts(logs, user=None):
     # (задача×модель с verdict='solved' есть хотя бы для одной модели) в превью
     # не показываем — интерес представляют только нерешённые; полный список с
     # пометками моделей уходит в развёртку (ленивый AJAX снапшота). Заодно
-    # собираем снимки препромптов (distinct по prompt_id — сколько использовано,
+    # собираем снимки промптов (distinct по prompt_id — сколько использовано,
     # столько и показываем; легаси-пустые снимки не попадают).
     tasks_by_run = {}
     solved_nodes_by_run = {}
@@ -1045,11 +993,11 @@ def _tasks_preview(tasks, limit=3):
     return ", ".join(parts)
 
 
-def _arm_results_xlsx_response(results, run_id):
+def _arm_results_xlsx_response(results, run_id, note=None):
     """Общий HTTP-ответ с .xlsx-матрицей задача×модель (см. export.py)."""
     from .export import XLSX_CONTENT_TYPE, build_arm_results_xlsx
 
-    payload = build_arm_results_xlsx(results)
+    payload = build_arm_results_xlsx(results, note=note)
     response = HttpResponse(
         payload, content_type=XLSX_CONTENT_TYPE,
     )
@@ -1080,7 +1028,15 @@ def admin_request_log_xlsx_view(request, log_id):
     if not snapshot["results"]:
         return JsonResponse({"error": "В прогоне нет результатов"}, status=404)
 
-    return _arm_results_xlsx_response(snapshot["results"], snapshot["run_id"])
+    # Прогон ещё идёт — в файле только завершённые к этому моменту пары
+    # (та же честная пометка, что у прямого скачивания с /arm/solve/).
+    note = None
+    if snapshot["run_status"] == AIModelTestRun.STATUS_RUNNING:
+        note = (
+            "ВНИМАНИЕ: работа ещё выполняется — в файле пары, завершённые"
+            f" на момент скачивания ({snapshot['run_completed_pairs']})."
+        )
+    return _arm_results_xlsx_response(snapshot["results"], snapshot["run_id"], note=note)
 
 
 def admin_request_log_detail_view(request, log_id):

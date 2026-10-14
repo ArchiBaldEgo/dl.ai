@@ -12,6 +12,7 @@ from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import SimpleTestCase, RequestFactory, TestCase, TransactionTestCase, override_settings
 from pathlib import Path
 import json
+from datetime import timedelta
 import re
 import tempfile
 import time
@@ -6676,7 +6677,7 @@ class BatchLogRowContextsTests(TestCase):
         self.assertEqual(c["prompts"], [])
 
     def test_prompts_distinct_ordered(self):
-        """Фактически использованные препромпты: distinct по prompt_id,
+        """Фактически использованные промпты: distinct по prompt_id,
         insertion-порядок; дубли (две пары с одним промптом) не задваиваются."""
         from ai.models import AIModelTestResult
         from ai.admin.request_logs import _batch_log_row_contexts
@@ -7776,7 +7777,7 @@ class EachContextSuperUserFlagTests(TestCase):
 
 
 class ArmPromptBindingTests(TestCase):
-    """Инструмент «Препромпты по умолчанию» (ArmPromptBinding): unique
+    """Инструмент «Промпты по умолчанию» (ArmPromptBinding): unique
     (язык, тема, вид ARM), суперюзер-гейт страницы, save/delete через AJAX,
     привязки обоих режимов отдаются в контекст /arm/solve/ для
     JS авто-подстановки (новый ARM-скрипт «В чём ошибка» переиспользует)."""
@@ -8094,7 +8095,7 @@ class ArmPromptBindingTests(TestCase):
         ensure_task с языком прогона перегадывает stale-тему из path (тема =
         имя папки DL, per-языковая), после чего _resolve_batch_prompt находит
         точную привязку нового языка. До фикса тема оставалась от языка A →
-        resolve(B, тема_A) не находил точную привязку → задача без препромпта.
+        resolve(B, тема_A) не находил точную привязку → задача без промпта.
         """
         from unittest.mock import patch as _patch
 
@@ -8158,7 +8159,7 @@ class ArmPromptBindingTests(TestCase):
         self.assertEqual(serialized[0]["mode"], "find_error")
 
     def test_arm_solve_context_language_options_and_topics(self):
-        """Ручной выбор препромпта убран: /arm/solve/ отдаёт селектор языков
+        """Ручной выбор промпта убран: /arm/solve/ отдаёт селектор языков
         (solve_language_options: {id, name, extension}) и все темы с языком
         (фильтр на клиенте), привязки — по-прежнему в arm_prompt_bindings."""
         from ai.admin.arm import admin_arm_solve_view
@@ -8176,7 +8177,7 @@ class ArmPromptBindingTests(TestCase):
         self.assertIn(self.other_topic.id, topic_ids)
 
     def test_arm_prompt_binding_serializer_includes_prompt_name(self):
-        """Подпись «Препромпт по умолчанию: …» строится на клиенте без
+        """Подпись «Промпт по умолчанию: …» строится на клиенте без
         загрузки списка промптов — serializer отдаёт prompt_name."""
         from ai.serializers import arm_prompt_binding
         data = arm_prompt_binding(self._binding())
@@ -8293,12 +8294,12 @@ class AIModelStatsTests(TestCase):
 
 
 # ===================================================================
-# W9: сообщение solve-прогона — препромпт только из привязки
+# W9: сообщение solve-прогона — промпт только из привязки
 # ===================================================================
 
 class SolveMessageTests(TestCase):
     """_build_solve_message: без привязки — базовая инструкция без текста
-    препромпта; с prompt_id (pk привязки) — текст препромпта присутствует;
+    промпта; с prompt_id (pk привязки) — текст промпта присутствует;
     условие задачи гарантированно входит в сообщение."""
 
     def setUp(self):
@@ -8358,7 +8359,7 @@ class SolveMessageTests(TestCase):
 
 class ArmSolveStartViewTests(TestCase):
     """admin_arm_solve_start_view: клиентский prompt_id — ручное перекрытие
-    привязки (существует → препромпт из списка; нет/пусто → привязка для
+    привязки (существует → промпт из списка; нет/пусто → привязка для
     вида solve); run_name прокидывается в запуск; расширение выводится из
     языка; record_stats принимается только от суперюзера."""
 
@@ -8399,7 +8400,7 @@ class ArmSolveStartViewTests(TestCase):
         return response, start_mock
 
     def test_start_without_binding_ok_and_language_resolves_extension(self):
-        self.binding.delete()  # нет привязки → прогон без препромпта
+        self.binding.delete()  # нет привязки → прогон без промпта
         payload = {
             "node_ids": [101, "102"], "models": ["FakeModel"],
             "language_id": self.lang.id, "arm_topic_id": self.topic.id,
@@ -8410,14 +8411,14 @@ class ArmSolveStartViewTests(TestCase):
         kwargs = start_mock.call_args.kwargs
         self.assertEqual(kwargs["solve_file_extension"], ".pas")
         self.assertEqual(kwargs["programming_language_id"], self.lang.id)
-        self.assertIsNone(kwargs["prompt_id"])  # привязки нет → без препромпта
+        self.assertIsNone(kwargs["prompt_id"])  # привязки нет → без промпта
 
     def test_start_nonexistent_prompt_id_leaves_choice_to_worker(self):
         payload = {
             "node_ids": [101], "models": ["FakeModel"],
             "language_id": self.lang.id, "arm_topic_id": self.topic.id,
             # Несуществующий prompt_id → «по привязке»: worker сам подбирает
-            # препромпт на каждую задачу (по теме из ветки DL).
+            # промпт на каждую задачу (по теме из ветки DL).
             "prompt_id": 99999,
         }
         response, start_mock = self._post(self.superuser, payload)
@@ -8429,7 +8430,7 @@ class ArmSolveStartViewTests(TestCase):
     def test_start_manual_prompt_id_overrides_binding(self):
         """Существующий prompt_id (выбор из списка) перекрывает привязку."""
         other = Prompt.objects.create(
-            prompt_name_ru="Общий препромпт", prompt_text_ru="Текст 2",
+            prompt_name_ru="Общий промпт", prompt_text_ru="Текст 2",
             topic=self.topic, owner=self.superuser,
         )
         payload = {
@@ -8441,7 +8442,7 @@ class ArmSolveStartViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         kwargs = start_mock.call_args.kwargs
         self.assertEqual(kwargs["prompt_id"], other.id)
-        self.assertEqual(kwargs["prompt_name"], "Общий препромпт")
+        self.assertEqual(kwargs["prompt_name"], "Общий промпт")
 
     def test_start_empty_prompt_id_leaves_choice_to_worker(self):
         payload = {
@@ -8662,7 +8663,7 @@ class AdminNavToolGroupTests(TestCase):
         self.assertTrue(solve["hint"])
 
     def test_no_duplicate_modeladmin_rows_in_tools(self):
-        """Инструменты не дублируют реальные ModelAdmin-строки: «Препромпты»
+        """Инструменты не дублируют реальные ModelAdmin-строки: «Промпты»
         живут в группе «Раздел ИИ»; «Настройка ИИ-приложения» закреплена
         отдельным пунктом и из «Раздела ИИ» убрана — дубля нет нигде."""
         ctx = self._each_context(self.superuser)
@@ -8807,7 +8808,7 @@ class RecentLogRowsTests(TestCase):
         from ai.admin.request_logs import build_recent_log_rows
         data = build_recent_log_rows(self._request(self.superuser), limit=5)
         self.assertTrue(data["can_view_logs"])
-        self.assertIn("focus=1", data["logs_search_url"])
+        self.assertEqual(data["logs_search_url"], "/ai/admin/ai/request_logs/")
 
     def test_developer_sees_only_own_logs(self):
         from ai.admin.request_logs import build_recent_log_rows
@@ -8851,9 +8852,10 @@ class RecentLogRowsTests(TestCase):
 # ===================================================================
 
 class RequestLogSearchTests(TestCase):
-    """Новые фильтры admin_request_logs_view: ``q`` — поиск по тексту
-    запроса/ответа, препромпту, теме, языку и названию задачи; ``id`` —
-    точечный поиск конкретной записи."""
+    """Фильтры admin_request_logs_view: режим, модель, пользователь,
+    период «С»/«По». Устаревшие GET-параметры (``q``, ``id``, ``status``,
+    ``task``, ``source``) игнорируются — соответствующие поля убраны из
+    формы журнала."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -8866,9 +8868,12 @@ class RequestLogSearchTests(TestCase):
             status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
         )
         self.log_b = AIRequestLog.objects.create(
-            user=self.superuser, source="chat", mode="chat",
+            user=self.superuser, source="arm", mode="batch_solve",
             message="другой запрос", response_text="ответ с меткой ZEBRA",
-            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+            model_names=["FakeModel"],
+            user_full_name="Иван Тестов",
+            status=AIRequestLog.STATUS_SUCCESS,
+            sent_at=timezone.now() - timedelta(days=3),
         )
 
     def _list(self, params, user=None):
@@ -8879,30 +8884,52 @@ class RequestLogSearchTests(TestCase):
         response = admin_request_logs_view(request)
         return list(response.context_data["page_obj"].object_list)
 
-    def test_q_searches_message(self):
-        rows = self._list({"q": "ошибк"})
-        self.assertIn(self.log_a, rows)
-        self.assertNotIn(self.log_b, rows)
-
-    def test_q_searches_response(self):
-        rows = self._list({"q": "ZEBRA"})
+    def test_mode_filter(self):
+        rows = self._list({"mode": "batch_solve"})
         self.assertIn(self.log_b, rows)
         self.assertNotIn(self.log_a, rows)
 
-    def test_id_filter_exact(self):
-        rows = self._list({"id": str(self.log_a.id)})
+    def test_model_filter(self):
+        # JSON-lookup ``contains`` не поддерживается sqlite — на Postgres
+        # (docker-compose) фильтр работает; здесь же просто не роняем SUITE.
+        from django.db import connection as db_connection
+        if db_connection.vendor == "sqlite":
+            self.skipTest("JSON contains не поддерживается sqlite")
+        rows = self._list({"model": "FakeModel"})
+        self.assertIn(self.log_b, rows)
+        self.assertNotIn(self.log_a, rows)
+
+    def test_user_filter_matches_full_name(self):
+        rows = self._list({"user": "Тестов"})
+        self.assertEqual(rows, [self.log_b])
+
+    def test_date_range_filters(self):
+        today = timezone.now().date()
+        rows = self._list({"date_from": today.isoformat()})
         self.assertEqual(rows, [self.log_a])
+        rows = self._list({"date_to": (today - timedelta(days=1)).isoformat()})
+        self.assertEqual(rows, [self.log_b])
+
+    def test_legacy_params_are_ignored(self):
+        """q/id/status/task/source не применяются: ответ 200, список полон."""
+        rows = self._list({
+            "q": "ошибк", "id": str(self.log_a.id),
+            "status": "success", "task": "7101", "source": "chat",
+        })
+        self.assertEqual(rows, [self.log_a, self.log_b])
 
     def test_filters_echoed_in_context(self):
         from ai.admin.request_logs import admin_request_logs_view
         request = self.factory.get(
-            "/ai/admin/ai/request_logs/", {"q": "тест", "id": "42"},
+            "/ai/admin/ai/request_logs/", {"mode": "chat", "user": "Иван"},
         )
         request.user = self.superuser
         request.session = {}
         response = admin_request_logs_view(request)
-        self.assertEqual(response.context_data["filters"]["q"], "тест")
-        self.assertEqual(response.context_data["filters"]["id"], "42")
+        self.assertEqual(response.context_data["filters"]["mode"], "chat")
+        self.assertEqual(response.context_data["filters"]["user"], "Иван")
+        self.assertNotIn("q", response.context_data["filters"])
+        self.assertNotIn("id", response.context_data["filters"])
 
 
 # ===================================================================
@@ -9007,7 +9034,7 @@ class ArmSolveTopicsKeyTests(TestCase):
     serialize_topic (``programming_language``): JS arm_solve.html фильтрует
     темы по ``langIds.has(String(t.programming_language))`` (объединение тем
     ВСЕХ выбранных языков) — чтение другого ключа оставляет селектор тем
-    пустым и ломает привязки «Препромпты по умолчанию» (регрессия из
+    пустым и ломает привязки «Промпты по умолчанию» (регрессия из
     удалённой страницы arm_find_error.html)."""
 
     def setUp(self):
@@ -9142,27 +9169,27 @@ class PromptModeTests(TestCase):
         message, log_mode = await self._compose("2", self.find_error_prompt.id)
         self.assertEqual(log_mode, "solve")
         self.assertNotIn("НАЙДИ ОШИБКУ", message)
-        self.assertNotIn("Препромпт:", message)
+        self.assertNotIn("Промпт:", message)
 
     async def test_find_error_builder_ignores_solve_prompt(self):
         message, log_mode = await self._compose("3", self.solve_prompt.id)
         self.assertEqual(log_mode, "find_error")
-        self.assertNotIn("Препромпт:", message)
+        self.assertNotIn("Промпт:", message)
 
     async def test_matching_mode_prompt_is_applied(self):
         message, log_mode = await self._compose("2", self.solve_prompt.id)
         self.assertEqual(log_mode, "solve")
-        self.assertIn("Препромпт: РЕШАЙ ПО ШАГАМ", message)
+        self.assertIn("Промпт: РЕШАЙ ПО ШАГАМ", message)
 
     async def test_shared_prompt_preprompt_works_in_both_modes(self):
-        """Общие препромпты ('shared_<pk>') не фильтруются по режиму."""
+        """Общие промпты ('shared_<pk>') не фильтруются по режиму."""
         sp = await sync_to_async(SharedPrompt.objects.create)(
             prompt_name_ru="Common", prompt_text_ru="ОБЩИЙ ТЕКСТ",
         )
         message, _ = await self._compose("2", f"shared_{sp.id}")
-        self.assertIn("Препромпт: ОБЩИЙ ТЕКСТ", message)
+        self.assertIn("Промпт: ОБЩИЙ ТЕКСТ", message)
         message, _ = await self._compose("3", f"shared_{sp.id}")
-        self.assertIn("Препромпт: ОБЩИЙ ТЕКСТ", message)
+        self.assertIn("Промпт: ОБЩИЙ ТЕКСТ", message)
 
     # --- ARM solve: только solve-промпты ---
 
@@ -9207,7 +9234,7 @@ class PromptModeTests(TestCase):
         )
         self.assertIsNone(_resolve_batch_prompt(task, self.lang.id, {}))
 
-    # --- «Препромпты по умолчанию»: промпт обязан совпадать режимом ---
+    # --- «Промпты по умолчанию»: промпт обязан совпадать режимом ---
 
     def test_prompt_defaults_save_rejects_mode_mismatch(self):
         from ai.admin.prompt_defaults import admin_prompt_defaults_view
@@ -9863,7 +9890,7 @@ class BatchRunStatusDisplayTests(SimpleTestCase):
 class TaskSolutionListTests(_AdminViewRequestMixin, TestCase):
     """Кастомный список «Решённые задачи»: название задачи (ссылка в DL по
     клику) с припиской — путь в дереве задач DL (tree_path), имя языка
-    вместо сырого id, дата МСК, препромпт юзера; без фильтров (в кэш
+    вместо сырого id, дата МСК, промпт юзера; без фильтров (в кэш
     попадают только passed) — работает поиск."""
 
     def setUp(self):
@@ -10484,6 +10511,29 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(run_name_for(run), "—")
         self.assertEqual(run_name_for(None), "—")
 
+    def test_batch_row_shows_full_name(self):
+        """«Кто отправлял» в таблице «Последние пакетные решения» — ФИО
+        (user_full_name), а не технический логин; при пустом ФИО — логин."""
+        from ai.admin.request_logs import build_recent_batch_rows
+
+        run_id = "d" * 32
+        log = self._run_batch_with_name(run_id, "Неделя 4")
+        AIRequestLog.objects.filter(pk=log.pk).update(
+            username="ivanov_ii", user_full_name="Иванов Иван Иванович",
+        )
+        request = RequestFactory().get("/ai/admin/")
+        request.user = get_user_model().objects.create_user(
+            username="fname-su", password="x", is_superuser=True, is_staff=True,
+        )
+        rows = build_recent_batch_rows(request)["recent_batch_runs"]
+        row = next(r for r in rows if r["id"] == log.id)
+        self.assertEqual(row["sender_display"], "Иванов Иван Иванович")
+
+        AIRequestLog.objects.filter(pk=log.pk).update(user_full_name="")
+        rows = build_recent_batch_rows(request)["recent_batch_runs"]
+        row = next(r for r in rows if r["id"] == log.id)
+        self.assertEqual(row["sender_display"], "ivanov_ii")
+
     def test_recent_batch_rows_are_lazy(self):
         """Строки «Последних пакетных решений» лёгкие: полные снапшоты
         (тексты решений) в HTML страницы больше не встраиваются — только
@@ -10577,7 +10627,7 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
 class DailyReportTests(_AdminViewRequestMixin, TestCase):
     """Дневной отчёт журнала: день по МСК (00:00–23:59), строки — студенты
     (фамилия / время последней отправки без даты / последняя тема и
-    препромпт / последний режим / всего запросов за день), развёртка —
+    промпт / последний режим / всего запросов за день), развёртка —
     все записи дня; ARM (source=arm) в отчёт не попадает;
     prompt_developer видит только свои записи."""
 
@@ -10625,7 +10675,7 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         return admin_daily_report_view(request)
 
     def test_daily_report_aggregates_students(self):
-        """Строки — по студенту: количество, последнее время/тема/препромпт/
+        """Строки — по студенту: количество, последнее время/тема/промпт/
         режим; записи дня в развёртке — новые сверху; сортировка по фамилии;
         ARM-запись в счёт не идёт."""
         from ai.models import AIRequestLog
@@ -10696,10 +10746,10 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
             username="daily-pd", password="***",
         )
         pd.groups.add(self.pd_group)
-        self._log(user=pd, external_user_id="400", full_name="Разработчик Препромптов",
-                  sent_at=self._msk_at(8, 0), prompt="Мой препромпт")
+        self._log(user=pd, external_user_id="400", full_name="Разработчик Промптов",
+                  sent_at=self._msk_at(8, 0), prompt="Мой промпт")
         rows = self._report(pd).context_data["rows"]
-        self.assertEqual([r["display_name"] for r in rows], ["Разработчик Препромптов"])
+        self.assertEqual([r["display_name"] for r in rows], ["Разработчик Промптов"])
         self.assertEqual(rows[0]["count"], 1)
 
 
@@ -11155,7 +11205,7 @@ class SendSolutionViewTests(TestCase):
 
     @patch("ai.dl_api_client.send_solution_to_dl")
     def test_topic_and_prompt_persisted_from_last_solve_log(self, mock_send):
-        """Тема/препромпт берутся из журнала последней успешной генерации
+        """Тема/промпт берутся из журнала последней успешной генерации
         решения (mode=solve); запись выдачи из кэша (CACHE_SERVE_LOG_MESSAGE)
         контекстом не считается и существующие значения не затирает."""
         from ai.services import CACHE_SERVE_LOG_MESSAGE
@@ -12604,7 +12654,7 @@ class MpaMultiWindowExtractionTests(SimpleTestCase):
 
 
 class ArmPromptResultPersistenceTests(TestCase):
-    """Снимок препромпта пары (AIModelTestResult.prompt_id/prompt_name):
+    """Снимок промпта пары (AIModelTestResult.prompt_id/prompt_name):
     явный prompt_id → записан в пару; «по привязке»/без промпта → NULL/"" ;
     снимок доезжает до снапшотов (light-строки и журнал)."""
 
@@ -13073,3 +13123,378 @@ class ArmPauseViewTests(TestCase):
         self.assertEqual(data["run"]["status"], "running")
         self.test_run.refresh_from_db()
         self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_RUNNING)
+
+
+# ===================================================================
+# Журнал запросов: 5 фильтров и 11 колонок (по ТЗ) + «Добавить запись»
+# ===================================================================
+
+class RequestLogFiltersUiTests(TestCase):
+    """Форма журнала оставляет только фильтры Режим/Модель/Пользователь/С/По
+    (q/ID/Статус/Задача убраны); таблица — 11 колонок «Кто отправлял → ★»;
+    localStorage-персистентность знает только оставшиеся поля; кнопка
+    «Добавить запись» (генератор тестовых записей) рендерится только при
+    show_test_data_link."""
+
+    def test_filter_form_has_only_remaining_fields(self):
+        from django.template.loader import get_template
+        src = get_template("admin/ai/request_logs.html").template.source
+        for fragment in (
+            "id_mode", "id_model", "id_user", "id_date_from", "id_date_to",
+        ):
+            self.assertIn(fragment, src)
+        for removed in ("id_q", "id_record_id", "id_status", "id_task"):
+            self.assertNotIn(removed, src)
+
+    def test_add_record_button_gated(self):
+        from django.template.loader import get_template
+        src = get_template("admin/ai/request_logs.html").template.source
+        self.assertIn("{% if show_test_data_link %}", src)
+        self.assertIn("Добавить запись", src)
+
+    def test_table_columns_order(self):
+        """Ровно 11 колонок в порядке ТЗ: Кто отправлял, Отправлен, Получен,
+        Режим, Язык, Тема, Промпт, Модель, Статус, с, ★ (ID и Источник
+        вынесены в развёртку)."""
+        from django.template.loader import get_template
+        src = get_template("admin/ai/request_logs_table.html").template.source
+        who = src.index("<th>Кто отправлял</th>")
+        sent = src.index("<th>Отправлен</th>")
+        got = src.index("<th>Получен</th>")
+        mode = src.index("<th>Режим</th>")
+        lang = src.index("<th>Язык</th>")
+        topic = src.index("<th>Тема</th>")
+        prompt = src.index("<th>Промпт</th>")
+        model = src.index("<th>Модель</th>")
+        status = src.index("<th>Статус</th>")
+        self.assertLess(who, sent)
+        self.assertLess(sent, got)
+        self.assertLess(got, mode)
+        self.assertLess(mode, lang)
+        self.assertLess(lang, topic)
+        self.assertLess(topic, prompt)
+        self.assertLess(prompt, model)
+        self.assertLess(model, status)
+        self.assertNotIn("<th>ID</th>", src)
+        self.assertNotIn("<th>Источник</th>", src)
+        self.assertIn('colspan="11"', src)
+        self.assertNotIn('colspan="13"', src)
+
+    def test_index_js_filter_fields(self):
+        from django.conf import settings
+        path = os.path.join(
+            settings.BASE_DIR, "static", "admin", "ai", "request_logs", "index.js",
+        )
+        with open(path, encoding="utf-8") as fh:
+            js = fh.read()
+        self.assertIn(
+            "const FILTER_FIELDS = ['mode', 'model', 'user', 'date_from', 'date_to'];",
+            js,
+        )
+
+
+# ===================================================================
+# «Промпты по умолчанию»: суперюзер + prompt_developer, гость — нет
+# ===================================================================
+
+class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
+    """«Промпты по умолчанию» (/ai/admin/prompt-defaults/) открыты
+    суперюзеру и члену группы prompt_developer; staff вне группы — 403;
+    в гостевом режиме пункт навигации скрыт."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        from django.contrib.auth.models import Group
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+
+    def _get(self, user):
+        from unittest.mock import patch
+        from ai.admin.prompt_defaults import admin_prompt_defaults_view
+        request = self._admin_request(user, path="/ai/admin/prompt-defaults/")
+        with patch(
+            "ai.admin.site.get_external_user_id_from_request", return_value="12345",
+        ):
+            return admin_prompt_defaults_view(request)
+
+    def test_superuser_allowed(self):
+        su = self.user_model.objects.create_user(
+            username="pd-super", password="x", is_superuser=True, is_staff=True,
+        )
+        response = self._get(su)
+        self.assertEqual(response.status_code, 200)
+
+    def test_prompt_developer_allowed(self):
+        dev = self.user_model.objects.create_user(username="pd-dev", password="x")
+        dev.groups.add(self.pd_group)
+        response = self._get(dev)
+        self.assertEqual(response.status_code, 200)
+
+    def test_plain_staff_forbidden(self):
+        staff = self.user_model.objects.create_user(
+            username="pd-staff", password="x", is_staff=True,
+        )
+        response = self._get(staff)
+        self.assertEqual(response.status_code, 403)
+
+    def _nav_tools(self, user, guest=False):
+        from unittest.mock import patch
+        from ai.admin.site import ai_admin_site
+        request = self._admin_request(user, path="/ai/admin/")
+        if guest:
+            from ai.admin.guest_mode import SESSION_KEY
+            request.session[SESSION_KEY] = True
+        with patch(
+            "ai.admin.site.get_external_user_id_from_request", return_value="12345",
+        ):
+            ctx = ai_admin_site.each_context(request)
+        return {
+            m["object_name"]
+            for app in ctx["available_apps"]
+            if app["app_label"].startswith("ai-tools")
+            for m in app["models"]
+        }
+
+    def test_prompt_defaults_nav_for_developer(self):
+        dev = self.user_model.objects.create_user(username="pd-nav", password="x")
+        dev.groups.add(self.pd_group)
+        self.assertIn("AiArmPromptDefaults", self._nav_tools(dev))
+
+    def test_prompt_defaults_nav_hidden_in_guest(self):
+        su = self.user_model.objects.create_user(
+            username="pd-nav-guest", password="x", is_superuser=True, is_staff=True,
+        )
+        self.assertIn("AiArmPromptDefaults", self._nav_tools(su, guest=False))
+        self.assertNotIn("AiArmPromptDefaults", self._nav_tools(su, guest=True))
+
+    def test_test_data_link_context_flag(self):
+        """show_test_data_link: суперюзер — True (кнопка «Добавить запись»
+        в журнале), гость — False."""
+        su = self.user_model.objects.create_user(
+            username="td-link", password="x", is_superuser=True, is_staff=True,
+        )
+        from unittest.mock import patch
+        from ai.admin.site import ai_admin_site
+        request = self._admin_request(su, path="/ai/admin/")
+        with patch(
+            "ai.admin.site.get_external_user_id_from_request", return_value="12345",
+        ):
+            ctx = ai_admin_site.each_context(request)
+        self.assertTrue(ctx["show_test_data_link"])
+
+
+# ===================================================================
+# Фикс 400: авто-перевод языковых табов формы промпта
+# ===================================================================
+
+class PromptTranslateTabsArityTests(SimpleTestCase):
+    """translateField(targetKey, sourceText) зовётся РОВНО двумя
+    аргументами (target, текст-источник). Раньше вызов шёл тремя
+    (kind, key, source.text): «kind» попадал в targetKey → сервер получал
+    target="name"/"text" и всегда отвечал 400 «Неизвестный целевой язык»
+    — автоперевод RU→EN/FR никогда не срабатывал."""
+
+    def _source(self):
+        from pathlib import Path
+        path = (
+            Path(__file__).resolve().parent.parent
+            / "static" / "admin" / "js" / "prompt_translate_tabs.js"
+        )
+        return path.read_text(encoding="utf-8")
+
+    def test_translate_field_called_with_two_args(self):
+        src = self._source()
+        self.assertIn("translateField(key, source.text)", src)
+        self.assertNotIn("translateField(kind, key", src)
+
+    def test_batch_results_template_renders_dl_link_and_interim_note(self):
+        """Карточка результата: r.dl_url → ссылка в DL (escapeHtml НЕ нужен —
+        link.textContent); в renderReport есть ветка плашки interim."""
+        from pathlib import Path
+        path = (
+            Path(__file__).resolve().parent / "templates" / "admin" / "ai"
+            / "_ai_batch_results.html"
+        )
+        src = path.read_text(encoding="utf-8")
+        self.assertIn("r.dl_url", src)
+        self.assertIn("link.textContent", src)
+        self.assertNotIn("innerHTML = r.", src)  # сырой контент модели не пробрасывается
+        self.assertIn("setInterimNote", src)
+        self.assertIn("report.interim", src)
+
+
+class ArmDlUrlAndInterimReportTests(TestCase):
+    """dl_url на result-item'ах (сервер: dl_task_url из task_registry) и
+    живой промежуточный отчёт выполняющегося прогона (report.interim)."""
+
+    def setUp(self):
+        from ai.models import AIModelTestResult, AIModelTestRun, ProgrammingLanguage, Task, Topic
+
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=6101, task_id=7101, name="Задача А", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.run_id = "a" * 32
+        self.test_run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED,
+            course_id=1450,
+        )
+        self.result = AIModelTestResult.objects.create(
+            run=self.test_run, task=self.t1,
+            model_key="M1", model_title="Model One",
+            status="ok", verdict="solved",
+            duration_seconds=2.0, tokens=11,
+            raw_response="полный ответ",
+        )
+
+    def _make_job(self, status="running", run_type="batch"):
+        return {
+            "run_id": self.run_id, "run_type": run_type, "status": status,
+            "total_pairs": 2, "completed_pairs": 1,
+            "results": [{
+                "result_id": self.result.id, "task_id": self.t1.id,
+                "task_node_id": 6101, "task_name": "Задача А",
+                "dl_url": "https://dl.gsu.by/task.jsp?nid=6101&cid=1450",
+                "model_key": "M1", "model_title": "Model One",
+                "duration": 2.0, "tokens": 11,
+                "short_response": "краткий", "status": "ok",
+                "verdict": "solved", "raw_response": "полный ответ",
+                "code": "begin end.", "dl_comment": "ок", "dl_error": "",
+                "dl_queue_id": 0, "file_extension": ".pas",
+                "topic_name": "Линейные", "prog_lang_name": "Pascal",
+            }],
+            "report": None,
+            "run_params": {"node_ids": [6101]},
+            "created_at_ts": 1000.0, "updated_at_ts": 1010.0,
+        }
+
+    def test_db_result_items_carry_dl_url(self):
+        """И light-, и full-ветка _batch_results_from_db отдают dl_task_url
+        с course_id прогона (nid первым, cid вторым)."""
+        from ai.arm_runner import _batch_results_from_db
+
+        for light in (True, False):
+            item = _batch_results_from_db(self.test_run, light=light)[0]
+            self.assertEqual(
+                item["dl_url"],
+                "https://dl.gsu.by/task.jsp?nid=6101&cid=1450",
+            )
+
+    def test_db_result_without_task_has_no_dl_url(self):
+        """Легаси-результаты без задачи: dl_url None, падения нет."""
+        from ai.arm_runner import _batch_results_from_db
+
+        self.result.task = None
+        self.result.save(update_fields=["task"])
+        try:
+            item = _batch_results_from_db(self.test_run, light=True)[0]
+            self.assertIsNone(item["dl_url"])
+            full = _batch_results_from_db(self.test_run)[0]
+            self.assertIsNone(full["dl_url"])
+        finally:
+            self.result.task = self.t1
+            self.result.save(update_fields=["task"])
+
+    def test_running_live_snapshot_builds_interim_report(self):
+        """Выполняющийся прогона: снапшот отдаёт отчёт по уже завершённым
+        парам c флагом interim и run_meta.running=True; job не мутируется."""
+        from ai import arm_runner
+
+        job = self._make_job(status="running")
+        arm_runner._jobs[self.run_id] = job
+        try:
+            for snapshot in (
+                arm_runner.get_arm_run_snapshot(self.run_id, light_results=True),
+                arm_runner.get_arm_run_snapshot(self.run_id),
+            ):
+                self.assertIsNotNone(snapshot["report"])
+                self.assertTrue(snapshot["report"]["interim"])
+                self.assertEqual(snapshot["report"]["total_pairs"], 1)
+                self.assertEqual(snapshot["report"]["solved"], 1)
+                self.assertTrue(snapshot["report"]["run_meta"]["running"])
+            # job сам не тронут: финальный отчёт по-прежнему не построен.
+            self.assertIsNone(job["report"])
+        finally:
+            arm_runner._jobs.pop(self.run_id, None)
+
+    def test_completed_job_gets_no_interim_flag(self):
+        """Завершённый живой job: отчёт пришёл из финала (interim нет);
+        interim-путь не подмешивается."""
+        from ai import arm_runner
+
+        job = self._make_job(status="completed")
+        job["report"] = {"total_pairs": 2, "solved": 1, "failed": 1}
+        arm_runner._jobs[self.run_id] = job
+        try:
+            snapshot = arm_runner.get_arm_run_snapshot(self.run_id, light_results=True)
+            self.assertIs(snapshot["report"], job["report"])
+            self.assertNotIn("interim", snapshot["report"])
+        finally:
+            arm_runner._jobs.pop(self.run_id, None)
+
+    def test_interim_report_skipped_for_single_runs_and_empty_results(self):
+        """_interim_live_report: single-прогоны и пустые results → None."""
+        from ai import arm_runner
+
+        self.assertIsNone(arm_runner._interim_live_report(self._make_job(run_type="single")))
+        job = self._make_job()
+        job["results"] = []
+        self.assertIsNone(arm_runner._interim_live_report(job))
+
+    def test_xlsx_running_note_lands_in_first_row(self):
+        """build_arm_results_xlsx(note=…) пишет пометку в шапку листа
+        «Сводка»; без note первая строка — заголовок матрицы (как раньше)."""
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        from ai.admin.export import build_arm_results_xlsx
+
+        results = [{
+            "task_node_id": 6101, "task_name": "Задача А",
+            "model_key": "M1", "model_title": "Model One",
+            "verdict": "solved", "duration": 2.0, "tokens": 11, "status": "ok",
+        }]
+        note = "ВНИМАНИЕ: работа ещё выполняется — в файле завершённые пары (1 из 2)."
+        ws = load_workbook(BytesIO(build_arm_results_xlsx(results, note=note)))["Сводка"]
+        self.assertEqual(ws.cell(row=1, column=1).value, note)
+        # Без note — ровно прежний файл: заголовок матрицы в первой строке.
+        ws_plain = load_workbook(BytesIO(build_arm_results_xlsx(results)))["Сводка"]
+        self.assertEqual(ws_plain.cell(row=1, column=1).value, "Node ID")
+
+    def test_journal_snapshot_running_marks_interim(self):
+        """Детали журнала выполняющегося прогона: отчёт по текущим строкам БД
+        помечен interim (та же плашка, что у живого снапшота)."""
+        import json as _json
+
+        from ai.admin.request_logs import _build_batch_log_snapshot
+        from ai.models import AIRequestLog
+
+        self.test_run.status = "running"
+        self.test_run.started_at = timezone.now() - timedelta(seconds=30)
+        self.test_run.finished_at = None
+        self.test_run.save(update_fields=["status", "started_at", "finished_at"])
+        batch_log = AIRequestLog.objects.create(
+            user=None, source="arm", mode="batch_solve",
+            message=f"Batch solve run {self.run_id}",
+            sent_at=timezone.now(),
+        )
+        try:
+            snapshot = _build_batch_log_snapshot(batch_log)
+            self.assertIsNotNone(snapshot)
+            self.assertEqual(snapshot["run_status"], "running")
+            self.assertEqual(snapshot["run_completed_pairs"], 1)
+            self.assertTrue(snapshot["report"]["interim"])
+            self.assertEqual(snapshot["report"]["total_pairs"], 1)
+            self.assertTrue(snapshot["report"]["run_meta"]["running"])
+        finally:
+            self.test_run.status = "completed"
+            self.test_run.started_at = timezone.now() - timedelta(seconds=90)
+            self.test_run.finished_at = timezone.now()
+            self.test_run.save(update_fields=["status", "started_at", "finished_at"])
+            batch_log.delete()

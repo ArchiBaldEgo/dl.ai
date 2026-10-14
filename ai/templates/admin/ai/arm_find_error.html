@@ -420,7 +420,7 @@
         <div class="arm-section-head">
           <div>
             <h2>Фильтры</h2>
-            <p class="arm-section-note">Выберите язык и тему. Препромпт подтягивается из «препромпта по умолчанию» суперюзера (привязка по языку и теме); нет привязки — прогон без препромпта.</p>
+            <p class="arm-section-note">Выберите язык и тему. Промпт подтягивается из «промпта по умолчанию» суперюзера (привязка по языку и теме); нет привязки — прогон без промпта.</p>
           </div>
         </div>
 
@@ -442,9 +442,9 @@
           <div class="arm-field">
             <label for="topic">Тема</label>
             <select id="topic" name="topic"></select>
-            <!-- Ручной выбор препромпта убран: привязка ArmPromptBinding
+            <!-- Ручной выбор промпта убран: привязка ArmPromptBinding
                  (mode=find_error) резолвится серверно. Подпись показывает,
-                 какой «препромпт по умолчанию» применится. -->
+                 какой «промпт по умолчанию» применится. -->
             <p id="armBoundPromptLabel" style="display:none; margin:4px 0 0; font-size:13px; color:var(--body-quiet-color, #666);"></p>
           </div>
         </div>
@@ -578,9 +578,9 @@
 
     const languages = JSON.parse(document.getElementById('langs-data').textContent || '[]');
     let topics = JSON.parse(document.getElementById('topics-data').textContent || '[]');
-    // Привязки «препромпт по умолчанию» (ArmPromptBinding): ручной выбор
-    // препромпта убран — привязка (mode=find_error) резолвится серверно по
-    // языку и теме; нет привязки — прогон без препромпта. Клиент показывает
+    // Привязки «промпт по умолчанию» (ArmPromptBinding): ручной выбор
+    // промпта убран — привязка (mode=find_error) резолвится серверно по
+    // языку и теме; нет привязки — прогон без промпта. Клиент показывает
     // только подпись о том, что применится.
     const promptBindings = JSON.parse(
       document.getElementById('arm-find-error-bindings').textContent || '[]'
@@ -602,9 +602,9 @@
       return binding ? (binding.prompt_name || ('Prompt #' + binding.prompt_id)) : '';
     }
 
-    // Подпись под темой: какой «препромпт по умолчанию» подтянется из
+    // Подпись под темой: какой «промпт по умолчанию» подтянется из
     // привязки — чтобы сразу видеть, что применилось (или что прогона
-    // не будет с препромптом). Тема необязательна: без темы срабатывает
+    // не будет с промптом). Тема необязательна: без темы срабатывает
     // привязка «на весь язык».
     function updateBoundPromptLabel() {
       if (!boundPromptLabel) { return; }
@@ -617,7 +617,7 @@
         return;
       }
       boundPromptLabel.style.display = '';
-      boundPromptLabel.textContent = 'Препромпт по умолчанию: ' + name;
+      boundPromptLabel.textContent = 'Промпт по умолчанию: ' + name;
     }
 
     function fillLanguages() {

@@ -17,11 +17,11 @@ document.addEventListener('DOMContentLoaded', function () {
   // сохранение при обновлении таблицы; «?reset=1» сбрасывает хранилище.
   // -----------------------------------------------------------
   const FILTER_KEY = 'ai_logs_filters';
-  const FILTER_FIELDS = ['q', 'id', 'status', 'mode', 'model', 'user', 'task', 'date_from', 'date_to'];
-  // DOM id суффикс для каждого фильтра (всё — 'id_<name>'; поле ID записи —
-  // 'id_record_id', чтобы не было корявого 'id_id').
-  const FILTER_DOM_ID = { id: 'id_record_id' };
-  const domIdFor = (name) => FILTER_DOM_ID[name] || ('id_' + name);
+  const FILTER_FIELDS = ['mode', 'model', 'user', 'date_from', 'date_to'];
+  // DOM id суффикс для каждого фильтра (всё — 'id_<name>'). Устаревшие ключи
+  // старых фильтров (q/id/status/task) в хранилище самоочищаются: рестор
+  // читает только поля из FILTER_FIELDS, первый saveFilters перезаписывает.
+  const domIdFor = (name) => 'id_' + name;
 
   function saveFilters() {
     if (!form) return;

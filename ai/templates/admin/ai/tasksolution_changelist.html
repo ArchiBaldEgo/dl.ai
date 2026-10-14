@@ -2,7 +2,7 @@
 {% load i18n %}
 
 {% comment %}Список «Решённые задачи (кэш кода)»: строка — дата / задача (ссылка в DL) /
-   приписка — путь в дереве задач DL / язык / тема / препромпт / пользователь /
+   приписка — путь в дереве задач DL / язык / тема / промпт / пользователь /
    вердикт / использован; клик по строке (кроме ссылки на задачу) раскрывает
    сохранённый код. Поиск, фильтры и пагинация — из change_list.html (cl).
    {% endcomment %}
@@ -17,7 +17,7 @@
             <th scope="col">Задача</th>
             <th scope="col">Язык</th>
             <th scope="col">Тема</th>
-            <th scope="col">Препромпт</th>
+            <th scope="col">Промпт</th>
             <th scope="col">Пользователь</th>
             <th scope="col">Из кэша</th>
           </tr>
@@ -57,7 +57,7 @@
                       <div><strong>Дерево задач:</strong> {{ row.tree_path|default:"—" }}</div>
                       <div><strong>Модель:</strong> {{ row.obj.model_title|default:row.obj.model_key|default:"—" }}</div>
                       <div><strong>Тема:</strong> {{ row.topic_name }}{% if row.obj.topic_id %} (id {{ row.obj.topic_id }}){% endif %}</div>
-                      <div><strong>Препромпт:</strong> {{ row.prompt_name }}{% if row.obj.prompt_id %} (id {{ row.obj.prompt_id }}){% endif %}</div>
+                      <div><strong>Промпт:</strong> {{ row.prompt_name }}{% if row.obj.prompt_id %} (id {{ row.obj.prompt_id }}){% endif %}</div>
                       <div><strong>Queue ID DL:</strong> {{ row.obj.queue_id|default:"—" }}</div>
                       <div><strong>Обновлён:</strong> {{ row.obj.updated_at|date:"d.m.Y H:i" }}</div>
                       <div>

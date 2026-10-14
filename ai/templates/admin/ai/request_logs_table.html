@@ -3,9 +3,12 @@
 «Обновить таблицу» запрашивает ту же страницу с фильтрами и заменяет обёртку
 #logs-table-wrapper целиком (статический admin/ai/request_logs/index.js).
 Содержимое — фикс «время + общее кол-во задач» (human_duration, счётчик
-нерешённых из total, снимки препромптов прогона, нейтральный статус «пауза»,
-колонки ID/Источник) + ленивый блок «Показать все задачи». Loads не
-наследуются от include — грузим здесь: tz для МСК, ai_duration для таймеров.
+нерешённых из total, снимки промптов прогона, нейтральный статус «пауза») +
+ленивый блок «Показать все задачи». Loads не наследуются от include —
+грузим здесь: tz для МСК, ai_duration для таймеров.
+Колонки (11): Кто отправлял, Отправлен, Получен, Режим, Язык, Тема,
+Промпт, Модель, Статус, с, ★ — ID и Источник вынесены в detail-строку.
+ID записи и источник не пропадают: они в развёрнутых деталях запроса.
 {% endcomment %}
 {% load tz ai_duration %}
 <div id="logs-table-wrapper">
@@ -16,17 +19,15 @@
     <table class="ai-logs-table">
       <thead>
         <tr>
-          <th>ID</th>
-          <th>Источник</th>
+          <th>Кто отправлял</th>
           <th>Отправлен</th>
           <th>Получен</th>
-          <th>Кто отправлял</th>
+          <th>Режим</th>
           <th>Язык</th>
           <th>Тема</th>
-          <th>Препромпт</th>
+          <th>Промпт</th>
           <th>Модель</th>
           <th>Статус</th>
-          <th>Режим</th>
           <th>с</th>
           <th title="Закрепить завершённый пакетный прогон">★</th>
         </tr>
@@ -37,16 +38,17 @@
           {# === Основная строка (кликабельная — раскрывает детали) === #}
           {# batch — не-None только для записей batch-solve (/arm/solve/) #}
           <tr class="ai-log-row" data-log-id="{{ log.id }}">
-            <td>{{ log.id }}</td>
-            <td>{{ log.get_source_display|default:"—" }}</td>
-            <td>{{ log.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
-            <td>{{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>
               {% if log.external_user_id %}
                 <a href="https://dl.gsu.by/report.asp?id={{ log.external_user_id }}" target="_blank" rel="noopener">{{ log.user_full_name|default:log.username|default:log.external_user_id }}</a>
               {% else %}
                 {{ log.user_full_name|default:log.username|default:"—" }}
               {% endif %}
+            </td>
+            <td>{{ log.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
+            <td>{{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
+            <td>
+              {{ log.get_mode_display|default:"—" }}
             </td>
             <td>{{ log.programming_language_name|default:"—" }}</td>
             <td>{{ log.topic_name|default:"—" }}</td>
@@ -63,9 +65,6 @@
             <td class="{% if batch %}{% if batch.run_status == 'completed' %}ai-logs-status-success{% elif batch.run_status == 'running' or batch.run_status == 'paused' %}ai-logs-status-neutral{% else %}ai-logs-status-error{% endif %}{% else %}{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}{% endif %}">
               {% if batch %}{{ batch.run_status_display }}{% else %}{{ log.get_status_display }}{% endif %}
             </td>
-            <td>
-              {{ log.get_mode_display|default:"—" }}
-            </td>
             <td>{{ log.duration_seconds|human_duration|default:"—" }}</td>
             <td class="ai-log-pin-cell">
               {% if batch %}
@@ -79,7 +78,7 @@
 
           {# === Скрытая строка с деталями (аккордеон) === #}
           <tr class="ai-log-detail-row">
-            <td class="ai-log-detail-cell" colspan="13">
+            <td class="ai-log-detail-cell" colspan="11">
               <div class="ai-log-detail-content">
 
                 {# Левая колонка: метаданные (+ задачи прогона для batch) #}
@@ -120,7 +119,7 @@
                         {% endif %}
                       </div>
                     {% endif %}
-                    <div><strong>Препромпт:</strong>
+                    <div><strong>Промпт:</strong>
                       {% if batch %}
                         {# Снимки фактически использованных промптов (по привязке #}
                         {# у каждой задачи свой): один или несколько, пусто — «—». #}

@@ -387,7 +387,7 @@
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
           <h2>Тема</h2>
-          <p class="arm-section-note">Тема подставляется в препромпт. По умолчанию препромпт берётся из «Препромптов по умолчанию» (привязка язык+тема, Инструменты → Препромпты по умолчанию); можно выбрать и вручную — в поле ниже.</p>
+          <p class="arm-section-note">Тема подставляется в промпт. По умолчанию промпт берётся из «Промптов по умолчанию» (привязка язык+тема, Инструменты → Промпты по умолчанию); можно выбрать и вручную — в поле ниже.</p>
         </div>
       </div>
       <select name="arm_topic_id" id="armTopicSelect" disabled style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:4px;">
@@ -396,8 +396,8 @@
 
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
-          <h2>Препромпт</h2>
-          <p class="arm-section-note">По умолчанию — привязка «препромпта по умолчанию» для выбранного языка и темы (точная, иначе привязка «на весь язык»). Вместо неё можно выбрать любой препромпт вручную.</p>
+          <h2>Промпт</h2>
+          <p class="arm-section-note">По умолчанию — привязка «промпта по умолчанию» для выбранного языка и темы (точная, иначе привязка «на весь язык»). Вместо неё можно выбрать любой промпт вручную.</p>
         </div>
       </div>
       <select name="prompt_id" id="armPromptSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:4px;">
@@ -1067,9 +1067,9 @@
       });
     }
 
-    // Препромпт: по умолчанию тема подтягивает привязку ArmPromptBinding
-    // (mode=solve) — «препромпт по умолчанию» суперюзера; можно выбрать любой
-    // препромпт вручную (селект armPromptSelect, value="" = по привязке).
+    // Промпт: по умолчанию тема подтягивает привязку ArmPromptBinding
+    // (mode=solve) — «промпт по умолчанию» суперюзера; можно выбрать любой
+    // промпт вручную (селект armPromptSelect, value="" = по привязке).
     // Список тем отдаётся сервером целиком (json_script) и фильтруется на
     // клиенте по языку.
     let allTopics = [];
@@ -1078,7 +1078,7 @@
       allTopics = JSON.parse(topicsEl ? topicsEl.textContent : '[]') || [];
     } catch (e) { allTopics = []; }
 
-    // Все препромпты для ручного выбора (сервер, json_script; промпты —
+    // Все промпты для ручного выбора (сервер, json_script; промпты —
     // студенческий контент, список полный, как в chat-facing API).
     let allPrompts = [];
     try {
@@ -1086,7 +1086,7 @@
       allPrompts = JSON.parse(promptsEl ? promptsEl.textContent : '[]') || [];
     } catch (e) { allPrompts = []; }
 
-    // Привязки «препромпт по умолчанию» отдаются сервером в json_script.
+    // Привязки «промпт по умолчанию» отдаются сервером в json_script.
     // Резолв как на сервере (ArmPromptBinding.resolve): точная (язык+тема),
     // иначе привязка «на весь язык» (topic_id === null — языки без тем).
     let promptBindings = [];
@@ -1108,15 +1108,15 @@
       }) || null;
     }
 
-    // Подпись под селектом препромпта: что фактически применится — ручной
-    // выбор, привязка «по умолчанию» (или что прогон пойдёт без препромпта).
+    // Подпись под селектом промпта: что фактически применится — ручной
+    // выбор, привязка «по умолчанию» (или что прогон пойдёт без промпта).
     function updateBoundPromptLabel() {
       if (!boundPromptLabel) { return; }
       const manualId = promptSelect ? String(promptSelect.value || '') : '';
       if (manualId) {
         const manual = allPrompts.find(function (p) { return String(p.id) === manualId; });
         boundPromptLabel.style.display = '';
-        boundPromptLabel.textContent = 'Препромпт (выбран вручную): '
+        boundPromptLabel.textContent = 'Промпт (выбран вручную): '
           + (manual ? (manual.name || 'Prompt #' + manual.id) : 'Prompt #' + manualId);
         return;
       }
@@ -1128,7 +1128,7 @@
       if (sel.length > 1) {
         // Мультиязычный запуск: показываем привязку КАЖДОГО выбранного языка
         // (для языка выбранной темы — точная привязка «язык+тема», для
-        // остальных — «на весь язык»; тем без привязки — «без препромпта»).
+        // остальных — «на весь язык»; тем без привязки — «без промпта»).
         const chosenTopicId = topicSelect ? String(topicSelect.value || '') : '';
         const chosenTopic = chosenTopicId
           ? allTopics.find(function (t) { return String(t.id) === chosenTopicId; })
@@ -1139,12 +1139,12 @@
           const binding = findBoundPrompt(lang.id, tid, 'solve');
           return lang.name + ': '
             + (binding
-              ? 'препромпт по умолчанию — «' + (binding.prompt_name || 'Prompt #' + binding.prompt_id) + '»'
-              : 'привязка не задана — прогон без препромпта');
+              ? 'промпт по умолчанию — «' + (binding.prompt_name || 'Prompt #' + binding.prompt_id) + '»'
+              : 'привязка не задана — прогон без промпта');
         });
         boundPromptLabel.style.display = '';
         boundPromptLabel.style.whiteSpace = 'pre-line';
-        boundPromptLabel.textContent = 'Препромпты по привязке:\n' + lines.join('\n');
+        boundPromptLabel.textContent = 'Промпты по привязке:\n' + lines.join('\n');
         return;
       }
       const languageId = sel[0].id;
@@ -1152,18 +1152,18 @@
       const binding = languageId ? findBoundPrompt(languageId, topicId, 'solve') : null;
       if (!binding) {
         boundPromptLabel.style.display = '';
-        boundPromptLabel.textContent = 'Препромпт по привязке не задан — прогон без препромпта';
+        boundPromptLabel.textContent = 'Промпт по привязке не задан — прогон без промпта';
         return;
       }
       boundPromptLabel.style.display = '';
-      boundPromptLabel.textContent = 'Препромпт по умолчанию: ' + (binding.prompt_name || 'Prompt #' + binding.prompt_id);
+      boundPromptLabel.textContent = 'Промпт по умолчанию: ' + (binding.prompt_name || 'Prompt #' + binding.prompt_id);
     }
 
     if (promptSelect) {
       promptSelect.addEventListener('change', updateBoundPromptLabel);
     }
 
-    // Тема меняется → пересчитать фактический препромпт (ручной выбор
+    // Тема меняется → пересчитать фактический промпт (ручной выбор
     // в селекте НЕ сбрасывается: value="" лишь значит «по привязке»).
     function applyTopicSelection(topicId) {
       updateBoundPromptLabel();
@@ -1188,7 +1188,7 @@
     // Язык(и) → чекбоксы: расширения выбранных языков (readonly), темы
     // (только при ровно одном языке — при нескольких тема для журнала не
     // задаётся, привязки всё равно резолвятся per-task в worker'е). Смена
-    // набора языков сбрасывает тему (ручной выбор препромпта не сбрасывается).
+    // набора языков сбрасывает тему (ручной выбор промпта не сбрасывается).
     function selectedLanguages() {
       return Array.prototype.map.call(
         document.querySelectorAll('input.arm-lang-check:checked'),
@@ -1438,7 +1438,7 @@
     // Восстановление формы из снимка запуска (AIModelTestRun.run_params):
     // возврат на страницу прогона (?run_id=) не требует выставлять задачи/
     // модели/расширение/препромт заново. Отсутствующие в списке значения
-    // (задача ушла из дерева, препромпт скрыт) просто не отмечаются.
+    // (задача ушла из дерева, промпт скрыт) просто не отмечаются.
     // ── Сохранение выбранных задач дерева (localStorage) ──────────────────
     // Дерево создаётся динамически (после loadTree), поэтому общему механизму
     // ai_admin_state.js оно недоступно надёжно — чекбоксы задач помечены
@@ -1524,7 +1524,7 @@
             applyTopicSelection(String(rp.topic_id));
           }
         }
-        // Препромпт прогона: ручной выбор из run_params (если опция ещё есть;
+        // Промпт прогона: ручной выбор из run_params (если опция ещё есть;
         // иначе «по привязке» — привязка могла смениться). Название прогона —
         // тоже снимок формы запуска.
         if (promptSelect) {

@@ -44,6 +44,7 @@ from django.utils.html import strip_tags
 
 from .model_clients.exceptions import humanize_model_error
 from .model_clients import is_output_truncated
+from .services.task_registry import dl_task_url
 from .i18n import get_ui_language_suffix
 from .model_health import get_runtime_model_handlers, is_arm_solve_model
 from .models import AIModelTestResult, AIModelTestRun, AIRequestLog, ArmPromptBinding, ExternalDLAccount, Task
@@ -155,12 +156,12 @@ _BATCH_LAZY_BODY_KEYS = (
 
 
 def _resolve_batch_prompt(task, fallback_language_id, cache):
-    """Препромпт одной задачи: привязка ArmPromptBinding по её теме.
+    """Промпт одной задачи: привязка ArmPromptBinding по её теме.
 
-    Вызывается, когда у прогона нет явного препромпта («По привязке» на
+    Вызывается, когда у прогона нет явного промпта («По привязке» на
     форме): тема определяется per-task из ветки DL (ensure_task → Task.topic).
     Резолв кэшируется по (язык, тема) — ``cache`` живёт в рамках прогона.
-    Возвращает pk Prompt или None (нет привязки → задача без препромпта).
+    Возвращает pk Prompt или None (нет привязки → задача без промпта).
 
     Язык резолва — выбранный на форме прогона (``fallback_language_id``):
     одна и та же задача DL-дерева решается на разных языках курса
@@ -218,10 +219,10 @@ _CUT_RETRY_INSTRUCTION = {
 def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None):
     """Compose the solve prompt for one task.
 
-    Препромпт берётся только по явному ``prompt_id`` — это pk ``Prompt`` из
+    Промпт берётся только по явному ``prompt_id`` — это pk ``Prompt`` из
     суперпюзерской привязки ArmPromptBinding (mode=solve); ручного выбора и
     fallback'ов (topic-bound Prompt, SharedPrompt mode=solve) больше нет:
-    нет привязки → прогон без препромпта, только базовая инструкция.
+    нет привязки → прогон без промпта, только базовая инструкция.
     """
     from .i18n import get_language_instruction, get_ui_language_suffix
     from .models import Prompt
@@ -458,6 +459,26 @@ def _attach_run_meta(report, started_ts, finished_ts=None, now_ts=None):
         "duration_seconds": duration,
         "running": finished_ts is None,
     }
+
+
+def _interim_live_report(job):
+    """Промежуточный отчёт выполняющегося batch-прогона.
+
+    «Сводка» не должна ждать финала: поллинг отдаёт отчёт по УЖЕ завершённым
+    парам (job["results"]) на каждом тике, флаг interim=True — фронту рисовать
+    плашку «цифры промежуточные». Итоговый отчёт (без interim) кладёт
+    _finalize_batch_run. Rerun-прогоны сюда не попадают — у них свой отчёт в
+    _rerun_snapshot. Пустые результаты → None (карточка «Сводки» просто
+    скрыта, ничего не считается).
+    """
+    if job.get("run_type") != "batch":
+        return None
+    report = _build_batch_report(job.get("results") or [])
+    if report is None:
+        return None
+    _attach_run_meta(report, job.get("created_at_ts"), None, now_ts=time.time())
+    report["interim"] = True
+    return report
 
 
 def _update_job(run_id, **updates):
@@ -1371,7 +1392,7 @@ def _prepare_batch_run(
 
     Создаёт/переиспользует AIModelTestRun + AIRequestLog, резолвит задачи
     (ensure_task) и вычисляет per-task контекст (расширение/язык/тема/
-    препромпт) — model-потоки получают готовые данные и не мутируют общих
+    промпт) — model-потоки получают готовые данные и не мутируют общих
     кэшей. ``state`` — изменяемый dict, куда test_run/log кладутся сразу после
     создания: если подготовка упадёт дальше, внешний обработчик воркера всё
     ещё сможет пометить их FAILED. Возвращает ctx для model-потоков; None —
@@ -1490,7 +1511,7 @@ def _prepare_batch_run(
         )
         return None
 
-    # Препромпты по привязке резолвятся per-task; кэш по (язык, тема) —
+    # Промпты по привязке резолвятся per-task; кэш по (язык, тема) —
     # задачи одной темы не дёргают БД повторно. Строится ЗДЕСЬ (однопоточно),
     # дальше model-потоки его только читают.
     prompt_cache: dict = {}
@@ -1510,7 +1531,7 @@ def _prepare_batch_run(
         if not prog_lang_name and effective_ext:
             prog_lang_name = EXTENSION_TO_LANG.get(effective_ext, "")
 
-        # Препромпт на задачу: явный выбор пользователя приоритетен; иначе
+        # Промпт на задачу: явный выбор пользователя приоритетен; иначе
         # привязка ArmPromptBinding по теме задачи (тема определяется из
         # ветки DL через ensure_task → Task.topic).
         task_prompt_id = prompt_id
@@ -1528,7 +1549,7 @@ def _prepare_batch_run(
             "prompt_id": task_prompt_id,
         })
 
-    # Кэш имён препромптов для записи в «Решённые задачи» (save_solutions):
+    # Кэш имён промптов для записи в «Решённые задачи» (save_solutions):
     # предзаполняем всеми используемыми prompt_id ЗДЕСЬ (однопоточно) — в
     # model-потоках кэш дальше только читается.
     prompt_name_cache: dict = {}
@@ -1673,7 +1694,7 @@ def _run_batch_job_worker(
             )
 
 def _prompt_display_name(prompt_id):
-    """Имя препромпта (prompt_name_ru) по pk; нет записи/пусто → ""."""
+    """Имя промпта (prompt_name_ru) по pk; нет записи/пусто → ""."""
     from .models import Prompt
 
     return (
@@ -1970,7 +1991,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         """Запись результата пары + решение-кэш. Единый хвост для обеих веток
         ниже; лок держится на всё время записи."""
         duration = gen_seconds
-        # Снимок фактически использованного препромпта пары (старт «по
+        # Снимок фактически использованного промпта пары (старт «по
         # привязке» у задачи свой промпт); имя — из предзаполненного кэша.
         pair_prompt_id = None
         try:
@@ -2012,6 +2033,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "task_id": task.id,
             "task_node_id": task.node_id,
             "task_name": task.name,
+            "dl_url": dl_task_url(task.node_id, ctx["course_id"]),
             "model_key": model["key"],
             "model_title": model["title"],
             "duration": duration,
@@ -2036,7 +2058,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             # «Решённые задачи»: та же запись кэша, что при пользовательском
             # тестировании (solution_cache.record_batch_solution). Сбои
             # кэша прогон не ломают; уже решённые (на этом языке) пропускаются.
-            # Имя препромпта — кэш по id: одна привязка обслуживает много задач.
+            # Имя промпта — кэш по id: одна привязка обслуживает много задач.
             # Вызов под dl_lock: строго после DL-теста этой пары, до следующего —
             # паре моделей на одном node_id не перепутать «кто решил первым».
             if _save_batch_task_solution(
@@ -2323,6 +2345,7 @@ def _batch_results_from_db(test_run, light=False):
                 "result_id": r["pk"],
                 "task_node_id": r["task__node_id"] if r["task__node_id"] is not None else "",
                 "task_name": r["task__name"] or "",
+                "dl_url": dl_task_url(r["task__node_id"], test_run.course_id),
                 "model_key": r["model_key"],
                 "model_title": r["model_title"],
                 "duration": r["duration_seconds"] or 0.0,
@@ -2347,6 +2370,7 @@ def _batch_results_from_db(test_run, light=False):
             "result_id": r.pk,
             "task_node_id": node_id,
             "task_name": task_name,
+            "dl_url": dl_task_url(r.task.node_id, test_run.course_id) if r.task else None,
             "model_key": r.model_key,
             "model_title": r.model_title,
             "duration": r.duration_seconds or 0.0,
@@ -2377,7 +2401,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     dl_test=True — отправка кода на dl.gsu.by для реальной проверки.
     solve_file_extension — расширение, выбранное пользователем для DL-тестирования
         (перекрывает task.file_extension; пусто → браться из задачи).
-    solve_prog_lang_name — название языка для препромпта под выбранным расширением.
+    solve_prog_lang_name — название языка для промпта под выбранным расширением.
     run_name — необязательное ручное название прогона (задаётся только при
         запуске; сохраняется в AIModelTestRun.run_name).
     """
@@ -2828,6 +2852,9 @@ def get_arm_run_snapshot(run_id, light_results=False):
                 for item in job.get("results") or []
             ]
         elif job:
+            interim_report = None
+            if job.get("status") in ("running", "paused"):
+                interim_report = _interim_live_report(job)
             if light_results:
                 # Лёгкий снапшот БЕЗ deepcopy: строки иммутабельны, вложенные
                 # report/run_params воркер заменяет целиком (не мутирует в
@@ -2839,8 +2866,13 @@ def get_arm_run_snapshot(run_id, light_results=False):
                     _light_batch_result_item(item)
                     for item in job.get("results") or []
                 ]
+                if interim_report is not None and snapshot.get("report") is None:
+                    snapshot["report"] = interim_report
                 return snapshot
-            return copy.deepcopy(job)
+            snapshot = copy.deepcopy(job)
+            if interim_report is not None and snapshot.get("report") is None:
+                snapshot["report"] = interim_report
+            return snapshot
     if rerun_job is not None:
         return _rerun_snapshot(rerun_job, live_items, light_results)
 

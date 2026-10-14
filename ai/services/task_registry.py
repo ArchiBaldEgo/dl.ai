@@ -9,6 +9,7 @@ TaskAdmin.refresh_from_dl через apply_dl_task_info (DRY).
 import logging
 import re
 
+from ..constants import DL_DEFAULT_COURSE_ID
 from ..dl_api_client import DLApiError, fetch_task_info
 from ..models import Task
 
@@ -67,7 +68,7 @@ _PATH_KEYWORDS = [
 ]
 
 # Канонический список расширений, принимаемых DL REST send-solution, и
-# соответствующих им названий языков для препромпта. Пользователь выбирает
+# соответствующих им названий языков для промпта. Пользователь выбирает
 # расширение вручную на /arm/solve/ (тема из дерева DL не определяет язык
 # однозначно — курс "[Ассемблер i8086, C-MPA]" содержит задачи обоих языков,
 # причём каждая задача допускает и .mpc, и .i86).
@@ -85,7 +86,7 @@ SOLVE_EXTENSION_CHOICES = [
     (".v", "Verilog"),
 ]
 
-# Обратный map: расширение → название языка (для препромпта в batch-solve).
+# Обратный map: расширение → название языка (для промпта в batch-solve).
 # Единственный источник этого соответствия (DRY) — arm_runner и админка
 # импортируют EXTENSION_TO_LANG, а не держат свои копии.
 EXTENSION_TO_LANG = {ext: name for ext, name in SOLVE_EXTENSION_CHOICES}
@@ -349,3 +350,19 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
     except Exception:
         logger.exception("ensure_task failed for node_id=%s", node_id)
         return None
+
+def dl_task_url(node_id, course_id=None):
+    """Пользовательская ссылка на задачу в DL (не admin-вьювер).
+
+    ``/task.jsp?nid=<узел>&cid=<курс>`` (nid первым, cid вторым). cid —
+    это дерево задач: приписка ``&cid=`` ставится ВСЕГДА — если курс записи
+    не известен (старые записи кэша/журнала), подставляем единственное
+    дерево DL (DL_DEFAULT_COURSE_ID), иначе DL откроет задачу без контекста
+    дерева. Просмотр условия от имени админа DL (fullTaskviewer) не
+    используется. Единственное определение: его импортируют и admin-модули
+    (request_logs, models), и arm_runner (dl_url на result-item'ах).
+    """
+    if not node_id:
+        return None
+    cid = course_id or DL_DEFAULT_COURSE_ID
+    return f"https://dl.gsu.by/task.jsp?nid={node_id}&cid={cid}"

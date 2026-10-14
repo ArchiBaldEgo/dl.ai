@@ -1,7 +1,7 @@
-"""Инструмент «Препромпты по умолчанию» (только суперпользователь).
+"""Инструмент «Промпты по умолчанию» (суперпользователь или prompt_developer).
 
-Привязка (язык программирования, тема, вид ARM) → препромпт: после выбора
-темы на /arm/solve/ препромпт подтягивается автоматически (см.
+Привязка (язык программирования, тема, вид ARM) → промпт: после выбора
+темы на /arm/solve/ промпт подтягивается автоматически (см.
 ``ArmPromptBinding`` и JS авто-подстановку на ARM-страницах). Привязки
 режима «Поиск ошибки» нужны будущему ARM-скрипту «В чём ошибка» (старый
 удалён). Сам промпт редактируется по обычным правилам ACL (PromptAdmin:
@@ -16,7 +16,7 @@ from django.template.response import TemplateResponse
 from ..i18n import get_localized_name
 from ..models import ArmPromptBinding, ProgrammingLanguage, Prompt, Topic
 from ..serializers import arm_prompt_binding
-from .permissions import is_superuser_user
+from .permissions import can_access_prompt_defaults
 from .site import ai_admin_site
 
 
@@ -62,7 +62,7 @@ def _form_data():
 
 
 def admin_prompt_defaults_view(request):
-    if not is_superuser_user(request.user):
+    if not can_access_prompt_defaults(request):
         return HttpResponseForbidden("Access denied")
 
     if request.method == "POST":
@@ -80,7 +80,7 @@ def admin_prompt_defaults_view(request):
 
     context = {
         **ai_admin_site.each_context(request),
-        "title": "AI: Препромпты по умолчанию",
+        "title": "AI: Промпты по умолчанию",
         "bindings": _binding_rows(),
         "languages": languages,
         "topics": topics,
@@ -120,7 +120,7 @@ def _handle_save_or_delete(request):
     prompt_id = (request.POST.get("prompt_id") or "").strip()
     if not (language_id.isdigit() and prompt_id.isdigit()):
         return JsonResponse(
-            {"ok": False, "error": "Выберите язык и препромпт"}, status=400,
+            {"ok": False, "error": "Выберите язык и промпт"}, status=400,
         )
     if mode not in dict(ArmPromptBinding.ARM_MODE_CHOICES):
         return JsonResponse({"ok": False, "error": "Выберите вид ARM"}, status=400)
@@ -142,18 +142,18 @@ def _handle_save_or_delete(request):
 
     prompt = Prompt.objects.filter(pk=int(prompt_id)).first()
     if prompt is None:
-        return JsonResponse({"ok": False, "error": "Препромпт не найден"}, status=404)
+        return JsonResponse({"ok": False, "error": "Промпт не найден"}, status=404)
     # Промпт должен относиться к режиму привязки («Реши задачу»/«Поиск ошибки»)
     # — иначе привязка подставит промпт не в тот режим ARM-страницы.
     if prompt.mode != mode:
         return JsonResponse(
-            {"ok": False, "error": "Препромпт не относится к выбранному режиму"}, status=400,
+            {"ok": False, "error": "Промпт не относится к выбранному режиму"}, status=400,
         )
     # Для привязки «на весь язык» промпт может быть любым (в т.ч. без темы);
     # для темы — только промптом этой темы.
     if topic is not None and prompt.topic_id != topic.id:
         return JsonResponse(
-            {"ok": False, "error": "Препромпт привязан к другой теме"}, status=400,
+            {"ok": False, "error": "Промпт привязан к другой теме"}, status=400,
         )
 
     try:

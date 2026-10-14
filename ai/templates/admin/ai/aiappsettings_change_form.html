@@ -74,7 +74,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
                 title="Прогон ещё выполняется — закрепить можно только завершённые" {% else %}title="{% if row.pinned %}Убрать из «Закреплённых»{% else %}Закрепить в «Закреплённых пакетных решениях»{% endif %}"
                 {% endif %}>{{ row.pinned|yesno:"★,☆" }}</button>
             </td>
-            <td>{{ row.username }}</td>
+            <td>{{ row.sender_display }}</td>
             <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
             <td>{{ row.received_at|default:"—" }}</td>
             <td>{{ row.run_name|default:"—" }}</td>
@@ -136,7 +136,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
             <th>Режим</th>
             <th>Язык</th>
             <th>Тема</th>
-            <th>Препромпт</th>
+            <th>Промпт</th>
             <th>Модель</th>
             <th>Статус</th>
             <th>С</th>
