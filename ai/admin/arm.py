@@ -58,6 +58,10 @@ from .permissions import can_access_arm, is_superuser_user
 # TTL кэша дерева задач курса в Redis (см. admin_arm_solve_load_tree_view).
 _DL_TREE_CACHE_TTL = 30 * 60
 
+# Жёсткий потолок окна raw_response за один запрос body-эндпоинта (символов):
+# чанковая загрузка больших ответов (обрезанные пары — десятки КБ текста).
+_BODY_RAW_CHUNK_MAX = 60000
+
 
 def _resolve_session_id(request):
     """Resolve the caller's DL session id (DLSID flow), mirroring get_task_info_view."""
@@ -814,6 +818,14 @@ def admin_arm_solve_result_body_view(request, result_id):
     результатов (light-снапшот с lazy_body=True) — иначе большой прогон
     раздувал HTML/JSON до десятков МБ. Тяжёлое тело (полный ответ, извлечённый
     код, DL-комментарии) подтягивается здесь при первом раскрытии строки.
+
+    Чанковая загрузка большого raw_response (обрезанные пары — десятки КБ
+    текста): GET-параметры ``offset`` (старт окна, по умолчанию 0) и
+    ``length`` (длина окна в символах; 0/отсутствие — весь ответ целиком,
+    обратная совместимость). При заданном ``length`` raw_response — срез +
+    метаданные raw_total/raw_offset/raw_has_more/raw_next (первый чанк грузит
+    UI, «Показать ещё» догружает остаток). Окно жёстко ограничено
+    _BODY_RAW_CHUNK_MAX символами.
     Права — те же, что у всей ARM (can_access_arm), GET only.
     """
     if not can_access_arm(request):
@@ -823,14 +835,40 @@ def admin_arm_solve_result_body_view(request, result_id):
         return HttpResponseNotAllowed(["GET"])
 
     result = get_object_or_404(AIModelTestResult, pk=result_id)
-    return JsonResponse({"ok": True, "result": {
+
+    def _int_param(name, default):
+        try:
+            return int(request.GET.get(name, "").strip() or default)
+        except (TypeError, ValueError):
+            return default
+
+    raw = result.raw_response or ""
+    offset = max(0, _int_param("offset", 0))
+    length = _int_param("length", 0)
+
+    body = {
         "result_id": result.pk,
-        "raw_response": result.raw_response or "",
-        "code": result.code or "",
         "short_response": result.short_response or "",
+        "code": result.code or "",
         "dl_comment": result.dl_comment or "",
         "dl_error": result.dl_error or "",
-    }})
+        "truncated": bool(result.truncated),
+        "raw_total": len(raw),
+    }
+    if length > 0:
+        length = min(length, _BODY_RAW_CHUNK_MAX)
+        window = raw[offset:offset + length]
+        has_more = offset + len(window) < len(raw)
+        body.update({
+            "raw_response": window,
+            "raw_offset": offset,
+            "raw_has_more": has_more,
+            "raw_next": offset + len(window) if has_more else None,
+        })
+    else:
+        body["raw_response"] = raw
+        body["raw_has_more"] = False
+    return JsonResponse({"ok": True, "result": body})
 
 
 def admin_arm_solve_report_xlsx_view(request, run_id):

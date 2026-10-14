@@ -2944,17 +2944,54 @@ class ExtractCodeFromResponseTests(SimpleTestCase):
 
 
 class OllamaNumPredictTests(SimpleTestCase):
-    """Потолок генерации Ollama: env OLLAMA_NUM_PREDICT, дефолт 8192
-    (4096 обрезал большие ответы — «обрезание ответа если он большой»)."""
+    """Потолок генерации Ollama: env OLLAMA_NUM_PREDICT, дефолт 16384
+    (4096 и 8192 обрезали большие ответы: chain-of-thought flash-моделей
+    сжигает бюджет ДО кода — «выкусывание ответа»)."""
 
-    def test_default_8192_and_env_override(self):
+    def test_default_16384_and_env_override(self):
         from ai.model_clients import ollama
-        self.assertEqual(ollama._default_num_predict(), 8192)
+        self.assertEqual(ollama._default_num_predict(), 16384)
         with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "2048"}):
             self.assertEqual(ollama._default_num_predict(), 2048)
         with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "16"}):
             # Слишком малые значения не допускаются (нижняя граница 1024).
             self.assertEqual(ollama._default_num_predict(), 1024)
+
+
+class IsOutputTruncatedTests(SimpleTestCase):
+    """is_output_truncated: обрез по факту tokens >= потолка провайдера
+    (обрезка только при известном потолке — false positives хуже пропусков)."""
+
+    def test_ollama_cut_at_num_predict(self):
+        from ai.model_clients import is_output_truncated
+        self.assertFalse(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 0))
+        self.assertFalse(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 16383))
+        self.assertTrue(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 16384))
+        with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "2048"}):
+            self.assertFalse(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 2047))
+            self.assertTrue(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 2048))
+
+    def test_unknown_provider_is_never_truncated(self):
+        from ai.model_clients import is_output_truncated
+        self.assertFalse(is_output_truncated("Web_DeepSeek", 99999))
+        self.assertFalse(is_output_truncated("Groq_Gpt_Oss_120B", 99999))
+        self.assertFalse(is_output_truncated("", 16384))
+
+    def test_sambanova_ceiling_from_table(self):
+        # Провайдер определяется по __module__ обработчика из реестра (ключи
+        # SambaNova без префикса). В тестовых сеттингах SambaNova отключена —
+        # подменяем registry.get на заглушку с фейковым handler'ом модуля.
+        from ai.model_clients import is_output_truncated, registry
+
+        class _FakeSambanovaHandler:
+            __module__ = "ai.model_clients.sambanova"
+
+        with patch.object(registry, "get", lambda key: {"handler": _FakeSambanovaHandler()}):
+            self.assertTrue(is_output_truncated("DeepSeek_V3_1", 9000))
+            self.assertFalse(is_output_truncated("DeepSeek_V3_1", 8999))
+        # Через префиксный fallback SambaNova не ловится (без реестра —
+        # консервативно «не обрезан»).
+        self.assertFalse(is_output_truncated("DeepSeek_V3_1", 9000))
 
 
 class ResetModelStatsCommandTests(TestCase):
@@ -3674,6 +3711,89 @@ class BatchParallelWorkerTests(TransactionTestCase):
 
     def _calls_for(self, calls, key):
         return [c for c in calls if c["model_key"] == key]
+
+    def test_truncated_pair_auto_retry_solves(self):
+        """Обрез по потолку генерации (is_output_truncated): без кода — один
+        авто-ретрай с припиской «сразу код»; ретрай принёс код — пара решена,
+        флаг снят (сохранённый ответ цел)."""
+        import os
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+
+        async def cut_then_code_handler(messages, conv_id):
+            calls.append(messages)
+            if len(calls) == 1:
+                # Обрезанный ответ: content пуст (рассуждения сожрали бюджет;
+                # до кода модель не дошла), tokens упёрся в потолок —
+                # обрез по факту.
+                return ("", 8192, False)
+            return ("program p; begin writeln(1); end.", 128, False)
+
+        models = [{
+            "key": "Ollama_Test_Cut", "title": "Ollama Test Cut",
+            "handler": cut_then_code_handler,
+        }]
+        run_id = "cut-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=1)
+        try:
+            with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "8192"}):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id], models, self.user.id, "DLSID-1",
+                        ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        # Ровно один авто-ретрай: второй вызов с припиской про лимит длины.
+        self.assertEqual(len(calls), 2)
+        self.assertIn("лимитом длины", calls[1])
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="Ollama_Test_Cut")
+        self.assertEqual(row.verdict, "solved")
+        self.assertFalse(row.truncated)      # ретрай дал полный ответ
+        self.assertEqual(row.tokens, 128)
+        self.assertEqual(run.report["truncated_pairs"], 0)
+
+    def test_truncated_still_cut_keeps_flag_and_failed(self):
+        """Ретрай обрезан тоже: пара failed с truncated=True, сохранены токены
+        ретрая, в отчёте счётчик truncated_pairs."""
+        import os
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+
+        async def always_cut_handler(messages, conv_id):
+            calls.append(messages)
+            return ("", 8192, False)
+
+        models = [{
+            "key": "Ollama_Test_Cut2", "title": "Ollama Test Cut2",
+            "handler": always_cut_handler,
+        }]
+        run_id = "cut2-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=1)
+        try:
+            with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "8192"}):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id], models, self.user.id, "DLSID-1",
+                        ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        self.assertEqual(len(calls), 2)
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="Ollama_Test_Cut2")
+        self.assertEqual(row.verdict, "failed")
+        self.assertTrue(row.truncated)
+        self.assertEqual(row.tokens, 8192)
+        self.assertIn("Не удалось извлечь код", row.dl_comment)
+        self.assertEqual(run.report["truncated_pairs"], 1)
 
     def test_parallel_models_solve_independently(self):
         """2 модели × 2 задачи: каждая пара решена ровно один раз, циклы моделей
@@ -6757,6 +6877,7 @@ class ArmLightSnapshotTests(TestCase):
         self.assertTrue(item["lazy_body"])
         for key in ("raw_response", "code", "short_response", "dl_comment", "dl_error"):
             self.assertNotIn(key, item)
+        self.assertFalse(item["truncated"])
         self.assertEqual(item["result_id"], self.result.id)
         self.assertEqual(item["task_node_id"], 6101)
         self.assertEqual(item["task_name"], "Задача А")
@@ -6852,6 +6973,66 @@ class ArmLightSnapshotTests(TestCase):
         request.user = self.superuser
         with self.assertRaises(Http404):
             admin_arm_solve_result_body_view(request, 999999)
+
+    def test_result_body_endpoint_chunked(self):
+        """Чанковая загрузка raw_response: окно offset/length, метаданные
+        raw_total/raw_offset/raw_has_more/raw_next, флаг truncated.
+        Без length — полный ответ (обратная совместимость)."""
+        from ai.admin.arm import admin_arm_solve_result_body_view, _BODY_RAW_CHUNK_MAX
+
+        self.result.raw_response = "полный ответ"  # 11 символов
+        self.result.truncated = True
+        self.result.save(update_fields=["raw_response", "truncated"])
+
+        request = self.factory.get(
+            f"/ai/admin/arm/solve/result/{self.result.id}/body/?offset=0&length=6"
+        )
+        request.user = self.superuser
+        data = json.loads(admin_arm_solve_result_body_view(request, self.result.id).content)["result"]
+        self.assertEqual(data["raw_response"], "полный")
+        self.assertEqual(data["raw_offset"], 0)
+        self.assertEqual(data["raw_next"], 6)
+        self.assertTrue(data["raw_has_more"])
+        self.assertEqual(data["raw_total"], 12)
+        self.assertTrue(data["truncated"])
+
+        request = self.factory.get(
+            f"/ai/admin/arm/solve/result/{self.result.id}/body/?offset=6&length=6"
+        )
+        request.user = self.superuser
+        data = json.loads(admin_arm_solve_result_body_view(request, self.result.id).content)["result"]
+        self.assertEqual(data["raw_response"], " ответ")
+        self.assertEqual(data["raw_offset"], 6)
+        self.assertFalse(data["raw_has_more"])
+        self.assertIsNone(data["raw_next"])
+
+        # Остаток за пределами длины — пустое окно, ответ не падает.
+        request = self.factory.get(
+            f"/ai/admin/arm/solve/result/{self.result.id}/body/?offset=100&length=6"
+        )
+        request.user = self.superuser
+        data = json.loads(admin_arm_solve_result_body_view(request, self.result.id).content)["result"]
+        self.assertEqual(data["raw_response"], "")
+        self.assertFalse(data["raw_has_more"])
+
+        # Жёсткий потолок окна: length выше _BODY_RAW_CHUNK_MAX срезается.
+        self.result.raw_response = "x" * (_BODY_RAW_CHUNK_MAX + 1)
+        self.result.save(update_fields=["raw_response"])
+        request = self.factory.get(
+            f"/ai/admin/arm/solve/result/{self.result.id}/body/?offset=0&length={_BODY_RAW_CHUNK_MAX * 10}"
+        )
+        request.user = self.superuser
+        data = json.loads(admin_arm_solve_result_body_view(request, self.result.id).content)["result"]
+        self.assertEqual(len(data["raw_response"]), _BODY_RAW_CHUNK_MAX)
+        self.assertTrue(data["raw_has_more"])
+        # Мусорные параметры — целый режим без окна.
+        request = self.factory.get(
+            f"/ai/admin/arm/solve/result/{self.result.id}/body/?offset=abc&length=-5"
+        )
+        request.user = self.superuser
+        data = json.loads(admin_arm_solve_result_body_view(request, self.result.id).content)["result"]
+        self.assertEqual(len(data["raw_response"]), _BODY_RAW_CHUNK_MAX + 1)
+        self.assertFalse(data["raw_has_more"])
 
     def test_status_view_returns_light_results(self):
         """Поллинг статуса /arm/solve/status/ отдаёт лёгкие результаты."""
@@ -8042,6 +8223,12 @@ class SolveMessageTests(TestCase):
         self.assertIn("никаких комментариев", message)
         self.assertIn("ПИШИ КАПСОМ", message)
 
+    def test_no_ramble_instruction_appended_always(self):
+        # Запрет рассуждений: chain-of-thought flash-моделей сжигает бюджет
+        # генерации до кода — приписка тоже ко ВСЕМ solve-сообщениям.
+        self.assertIn("Не расписывай ход рассуждений", self._message())
+        self.assertIn("Не расписывай ход рассуждений", self._message(prompt_id=self.prompt.id))
+
 
 # ===================================================================
 # W9: старт /arm/solve/ — язык, привязка, record_stats
@@ -8764,13 +8951,15 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
 
     def test_batch_results_body_fetch_has_expired_session_parser(self):
         """Ленивое тело результата (partial используется на /arm/solve/ и в
-        деталях журнала): не-JSON ответ (страница логина) → внятная ошибка."""
+        деталях журнала): не-JSON ответ (страница логина) → внятная ошибка.
+        Чанковая загрузка raw_response и агрегатор состояния — на месте."""
         src = self._source("admin/ai/_ai_batch_results.html")
         self.assertIn("function parseJsonResponse", src)
         self.assertIn("Сессия истекла", src)
-        i = src.find("function fetchResultBody")
+        i = src.find("function fetchResultChunk")
         self.assertNotEqual(i, -1)
         self.assertIn(".then(parseJsonResponse)", src[i:i + 800])
+        self.assertIn("function loadResultBodyState", src)
 
     def test_log_detail_resend_session_label_and_rerun_route(self):
         src = self._source("admin/ai/airequestlog_detail.html")

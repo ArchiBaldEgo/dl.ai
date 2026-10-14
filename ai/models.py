@@ -971,6 +971,11 @@ class AIModelTestResult(models.Model):
     # NULL/пусто, отображается «—»).
     prompt_id = models.IntegerField(null=True, blank=True, verbose_name="ID препромпта (снимок)")
     prompt_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Препромпт (снимок)")
+    # Ответ модели оборван потолком генерации провайдера (Ollama num_predict /
+    # SambaNova max_tokens — стрим остановлен ровно на лимите;
+    # is_output_truncated). Ретрай с припиской «сразу код» уже сделан во время
+    # прогона; пара помечается чинно, потому что часть ответа реально потеряна.
+    truncated = models.BooleanField(default=False, verbose_name="Ответ обрезан")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
 
     class Meta:

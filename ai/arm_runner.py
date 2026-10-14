@@ -43,6 +43,8 @@ from .services.code_carver import (  # noqa: E402
 from django.utils.html import strip_tags
 
 from .model_clients.exceptions import humanize_model_error
+from .model_clients import is_output_truncated
+from .i18n import get_ui_language_suffix
 from .model_health import get_runtime_model_handlers, is_arm_solve_model
 from .models import AIModelTestResult, AIModelTestRun, AIRequestLog, ArmPromptBinding, ExternalDLAccount, Task
 
@@ -181,6 +183,25 @@ _NO_COMMENTS_INSTRUCTION = {
     "fr": "N'ajoute aucun commentaire au code — produis uniquement le code propre de la solution.",
 }
 
+# Запрет рассуждений: flash-модели (DeepSeek) выливают chain-of-thought в
+# content, рассуждения сжигают бюджет генерации (num_predict) — ответ обрезан
+# до кода («Функция main() не определена»). Приписывается ко ВСЕМ solve-
+# сообщениям батча поверх _NO_COMMENTS_INSTRUCTION.
+_NO_RAMBLE_INSTRUCTION = {
+    "ru": "Не расписывай ход рассуждений и промежуточные вычисления — сразу выведи только финальный код решения.",
+    "en": "Do not narrate your reasoning or intermediate arithmetic — output the final solution code immediately.",
+    "fr": "Ne détaille ni ton raisonnement ni tes calculs intermédiaires — produis immédiatement le code final de la solution.",
+}
+
+# Приписка авто-ретрая обрезанной пары: ответ упёрся в потолок генерации
+# (model_clients.is_output_truncated), код не успел родиться — один повторный
+# вызов с прямой командой «только код».
+_CUT_RETRY_INSTRUCTION = {
+    "ru": "Твой предыдущий ответ был обрезан лимитом длины. Ни текста, ни вычислений, ни объяснений — выведи только окончательный код решения целиком, одним блоком.",
+    "en": "Your previous answer was cut off by the length limit. No text, no arithmetic, no explanations — output only the complete final solution code in a single block.",
+    "fr": "Ta réponse précédente a été tronquée par la limite de longueur. Ni texte, ni calculs, ni explications — produis uniquement le code final complet de la solution en un seul bloc.",
+}
+
 
 def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None):
     """Compose the solve prompt for one task.
@@ -214,8 +235,10 @@ def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language
     # явно, чтобы модели всегда приходил полный текст задачи.
     if task_statement and task_statement.strip() and task_statement.strip() not in (message or ""):
         message = (message or "").rstrip() + f"\n\nУсловие задачи:\n{task_statement}"
+    ui_suffix = get_ui_language_suffix(ui_language)
     message += get_language_instruction(ui_language)
-    message += "\n" + _NO_COMMENTS_INSTRUCTION[get_ui_language_suffix(ui_language)]
+    message += "\n" + _NO_COMMENTS_INSTRUCTION[ui_suffix]
+    message += "\n" + _NO_RAMBLE_INSTRUCTION[ui_suffix]
     return message
 
 
@@ -341,6 +364,10 @@ def _build_batch_report(results):
     failed = sum(1 for r in results if r.get("verdict") == _VERDICT_FAILED)
     skipped = sum(1 for r in results if r.get("verdict") == _VERDICT_SKIPPED)
     tokens_total = sum(_to_int(r.get("tokens")) for r in results)
+    # Пары с обрезанным ответом (упор в потолок генерации провайдера —
+    # is_output_truncated): видны бейджем «обрезан» и доступны в перезапуске
+    # нерешённых пар.
+    truncated_pairs = sum(1 for r in results if r.get("truncated"))
 
     per_model = _per_bucket(
         results,
@@ -389,6 +416,7 @@ def _build_batch_report(results):
         "solved": solved,
         "failed": failed,
         "skipped": skipped,
+        "truncated_pairs": truncated_pairs,
         "tokens_total": tokens_total,
         "per_model": per_model,
         "per_topic": per_topic,
@@ -729,6 +757,12 @@ def _run_job_worker(
                     f"admin-{user_id}-{model['key']}-{run_id}",
                 )
                 response_text, tokens = _extract_model_response(response)
+                # Флаг обреза по факту (tokens упёрся в потолок провайдера).
+                # У ошибочного вызова флага нет — это другой вид сбоя.
+                single_truncated = (
+                    not _is_model_error(response)
+                    and is_output_truncated(model["key"], tokens)
+                )
 
                 cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
                 if not cleaned_text:
@@ -747,6 +781,7 @@ def _run_job_worker(
                     "short_response": short_response,
                     "status": status,
                     "raw_response": detailed_text,
+                    "truncated": bool(single_truncated),
                 }
             except Exception as exc:
                 exc_text = str(exc)
@@ -761,6 +796,7 @@ def _run_job_worker(
                     "short_response": friendly_text or f"Ошибка вызова модели: {exc_text}",
                     "status": status,
                     "raw_response": detailed_text,
+                    "truncated": False,
                 }
 
             # Persist the per-model result row (source of truth for reports).
@@ -774,6 +810,7 @@ def _run_job_worker(
                     "tokens": result_item["tokens"],
                     "short_response": result_item["short_response"],
                     "raw_response": (result_item["raw_response"] or "")[:8000],
+                    "truncated": bool(result_item.get("truncated")),
                 },
             )
 
@@ -1738,6 +1775,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     raw_response = ""
     cleaned_text = ""
     tokens = 0
+    truncated = False
     code_only = ""
     dl_test_comment = ""
     dl_submit_error = ""
@@ -1768,9 +1806,16 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         # DL-блока (код/DL-коммент хранятся в отдельных полях).
         raw_response = cleaned_text
 
+        # Обрез по факту: стрим остановлен ровно на потолке генерации
+        # провайдера (Ollama num_predict / SambaNova max_tokens) — код после
+        # рассуждений мог не успеть родиться. У ошибочного вызова флага нет.
+        is_model_err = _is_model_error(response)
+        if not is_model_err:
+            truncated = is_output_truncated(model["key"], tokens)
+
         # Модель вернула ошибку (таймаут/401/429/…) — кода нет, DL не
         # тестируем. Вердикт строго failed (solved — только через DL).
-        if _is_model_error(response):
+        if is_model_err:
             verdict = _VERDICT_FAILED
             status = "error"
             dl_submit_error = (friendly or cleaned_text)[:2000]
@@ -1794,6 +1839,52 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             ) and not has_language_marker(code_only, effective_ext)
             if junk_code:
                 code_only = ""
+
+            # Обрез по потолку генерации и кода нет (рассуждения съели бюджет,
+            # до кода модель не дошла): один авто-ретрай с прямой припиской
+            # «сразу код». Повторный вызов НЕ срывает пару: при исключении
+            # держим первый ответ; если и ретрай обрезан — пара пишется с
+            # флагом truncated и попадает в «Перезапустить нерешённые пары».
+            if truncated and not code_only:
+                if _is_cancel_requested(ctx["run_id"]):
+                    return None
+                retry_started = perf_counter()
+                try:
+                    retry_response = async_to_sync(model["handler"])(
+                        message + "\n" + _CUT_RETRY_INSTRUCTION[get_ui_language_suffix(ctx["ui_language"])],
+                        f"admin-batch-{ctx['user_id']}-{model['key']}-{ctx['run_id']}-{node_id}",
+                    )
+                    gen_seconds += round(perf_counter() - retry_started, 2)
+                    if _is_cancel_requested(ctx["run_id"]):
+                        return None
+                    response_text, tokens = _extract_model_response(retry_response)
+                    cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
+                    if not cleaned_text:
+                        cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
+                        logger.warning(
+                            "ARM batch: retry after cut returned empty response for model %s node_id=%s",
+                            model["key"], node_id,
+                        )
+                    friendly, detailed = humanize_model_error(cleaned_text, include_detail=True)
+                    raw_response = cleaned_text
+                    truncated = is_output_truncated(model["key"], tokens)
+                    if _is_model_error(retry_response):
+                        is_model_err = True
+                        dl_submit_error = (friendly or cleaned_text)[:2000]
+                    else:
+                        is_model_err = False
+                        code_only = _extract_code_from_response(
+                            cleaned_text, file_extension=effective_ext or ""
+                        )
+                        if code_only and effective_ext in (".i86", ".asm", ".mpc") and not has_language_marker(code_only, effective_ext):
+                            code_only = ""
+                except Exception as retry_exc:  # noqa: BLE001
+                    gen_seconds += round(perf_counter() - retry_started, 2)
+                    truncated = True
+                    logger.warning(
+                        "ARM batch: retry after cut failed for model %s node_id=%s: %s",
+                        model["key"], node_id, retry_exc,
+                    )
 
             can_run_dl = bool(
                 ctx["dl_test"] and code_only and effective_ext and ctx["session_id"]
@@ -1888,6 +1979,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 "prog_lang_snapshot": prog_lang_name,
                 "prompt_id": pair_prompt_id,
                 "prompt_name": pair_prompt_name,
+                "truncated": bool(truncated),
             },
         )
 
@@ -1913,6 +2005,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "prog_lang_name": prog_lang_name,
             "prompt_id": pair_prompt_id,
             "prompt_name": pair_prompt_name,
+            "truncated": bool(truncated),
         }
 
         if ctx["save_solutions"] and verdict == _VERDICT_SOLVED:
@@ -2197,7 +2290,7 @@ def _batch_results_from_db(test_run, light=False):
         rows = test_run.results.values(
             "pk", "model_key", "model_title", "duration_seconds", "tokens",
             "status", "verdict", "dl_queue_id", "file_extension_snapshot",
-            "topic_name_snapshot", "prog_lang_snapshot",
+            "topic_name_snapshot", "prog_lang_snapshot", "truncated",
             "prompt_id", "prompt_name",
             "task__node_id", "task__name", "task__file_extension",
         ).order_by("model_title")
@@ -2212,6 +2305,7 @@ def _batch_results_from_db(test_run, light=False):
                 "tokens": r["tokens"] or 0,
                 "status": r["status"],
                 "verdict": r["verdict"] or _VERDICT_FAILED,
+                "truncated": bool(r["truncated"]),
                 "dl_queue_id": r["dl_queue_id"] or 0,
                 "file_extension": r["file_extension_snapshot"] or (r["task__file_extension"] or ""),
                 "topic_name": r["topic_name_snapshot"],
@@ -2236,6 +2330,7 @@ def _batch_results_from_db(test_run, light=False):
             "short_response": r.short_response,
             "status": r.status,
             "verdict": r.verdict or _VERDICT_FAILED,
+            "truncated": bool(r.truncated),
             "raw_response": r.raw_response,
             "code": r.code or "",
             "dl_comment": r.dl_comment or "",
