@@ -7,6 +7,7 @@
 //   3. Модалка условия задачи + аккордеон строк
 //   4. Rerun batch-solve (делегирование)
 //   5. Pin/Unpin batch-прогона (делегирование)
+//   6. «Показать все задачи» — ленивый batch-снапшот (делегирование)
 // =============================================================
 
 document.addEventListener('DOMContentLoaded', function () {
@@ -268,6 +269,73 @@ document.addEventListener('DOMContentLoaded', function () {
         alert('Закрепление: ' + err.message);
       })
       .finally(function () { btn.classList.remove('busy'); });
+  });
+
+  // -----------------------------------------------------------
+  // 6. «Показать все задачи»: ленивый загруз batch-снапшота (решённые И
+  //    нерешённые задачи с пометками моделей). Делегирование — после
+  //    replaceWith таблицы исходные биндинги мертвы. Рендер только
+  //    createElement+textContent — ответ может нести текст модели.
+  // -----------------------------------------------------------
+  document.addEventListener('click', function (event) {
+    const btn = event.target.closest('.ai-log-all-tasks-btn');
+    if (!btn || btn.disabled) return;
+    const list = btn.parentElement.querySelector('.ai-log-all-tasks-list');
+    if (!list) return;
+    event.stopPropagation();
+
+    if (!list.hidden) { list.hidden = true; btn.textContent = 'Показать все задачи'; return; }
+    if (list.dataset.loaded === '1') { list.hidden = false; btn.textContent = 'Скрыть задачи'; return; }
+    btn.disabled = true;
+    btn.textContent = 'Загрузка…';
+    fetch(btn.getAttribute('data-snapshot-url'), {
+      method: 'GET',
+      credentials: 'same-origin',
+    })
+      .then(function (resp) {
+        return resp.json().catch(function () { throw new Error('HTTP ' + resp.status); });
+      })
+      .then(function (snap) {
+        if (snap && snap.error) { throw new Error('Прогон не найден'); }
+        list.textContent = '';
+        (snap.tasks || []).forEach(function (t) {
+          const line = document.createElement('div');
+          line.className = 'ai-alltask';
+          const mark = document.createElement('span');
+          mark.className = t.solved ? 'ai-alltask-solved' : 'ai-alltask-failed';
+          const solvedCount = (t.solved_models || []).length;
+          const totalCount = (t.total_models || []).length;
+          mark.textContent = t.solved
+            ? '✓ решено ' + solvedCount + '/' + totalCount
+            : '✗ решено ' + solvedCount + '/' + totalCount;
+          const link = document.createElement('a');
+          if (t.dl_url) { link.href = t.dl_url; link.target = '_blank'; link.rel = 'noopener'; }
+          link.textContent = t.name + ' (' + t.node_id + ')';
+          line.appendChild(mark);
+          line.appendChild(link);
+          list.appendChild(line);
+        });
+        if (!(snap.tasks || []).length) {
+          const empty = document.createElement('div');
+          empty.textContent = '—';
+          list.appendChild(empty);
+        }
+        list.dataset.loaded = '1';
+        list.hidden = false;
+        btn.disabled = false;
+        btn.textContent = 'Скрыть задачи';
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        btn.textContent = 'Показать все задачи';
+        const msg = document.createElement('div');
+        msg.className = 'ai-log-all-tasks-error';
+        msg.textContent = 'Не удалось загрузить задачи: ' + err.message;
+        // Перезагружаем содержимое блока ошибки при каждом клике.
+        list.textContent = '';
+        list.appendChild(msg);
+        list.hidden = false;
+      });
   });
 
 });

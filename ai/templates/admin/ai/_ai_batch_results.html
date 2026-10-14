@@ -64,6 +64,8 @@ NB: комментарии с решёткой Django вырезает толь�
   .arm-badge.solved { color: #166534; background: #dcfce7; }
   .arm-badge.failed { color: #991b1b; background: #fee2e2; }
   .arm-badge.skipped { color: #475467; background: #f1f5f9; }
+  /* Ответ обрезан потолком генерации (num_predict/max_tokens) — см. is_output_truncated. */
+  .arm-badge.truncated { color: #9a3412; background: #ffedd5; }
 
   .arm-result { border: 1px solid var(--hairline-color); border-radius: 6px; padding: 0; margin-bottom: 8px; overflow: hidden; }
   .arm-result:nth-child(even) { background: color-mix(in srgb, var(--body-bg) 95%, var(--hairline-color)); }
@@ -132,12 +134,16 @@ window.ArmBatchResults = (function () {
   var lastRender = null;         // аргументы последнего рендера (для re-render переключателем)
   var lastRenderSig = null;      // сигнатура последнего рендера (длина+режим) для скипа
 
-  // ── Ленивые тела результатов (lazy_body) ─────────────────────────────────
+  // ── Ленивые тела результатов (lazy_body + чанковая догрузка) ─────────────
   // Снапшот страницы/поллинга не содержит raw_response/code/short_response/
   // dl_comment/dl_error (большой прогон — десятки МБ текста). Тело каждой
-  // записи подтягивается GET-ом при первом раскрытии карточки и кэшируется
-  // в памяти — перерисовки и переключения фильтров не дёргают сервер повторно.
-  var bodyCache = {};            // result_id -> Promise | разрешённое тело
+  // записи подтягивается GET-ом при первом раскрытии карточки: raw_response —
+  // ЧАНКАМИ по RAW_CHUNK_SIZE символов (обрезанные пары — десятки КБ; остаток
+  // догружается кнопкой «Показать ещё»), прочие поля — целиком. Загруженное
+  // кэшируется в памяти — перерисовки и переключения фильтров не дёргают
+  // сервер повторно.
+  var RAW_CHUNK_SIZE = 25000;    // символов raw_response за один запрос
+  var bodyCache = {};            // result_id -> Promise<state> | state
   function parseJsonResponse(response) {
     // При протухшей сессии admin_view редиректит на страницу логина (HTML) —
     // fetch молча следует за 302, и response.json() даёт бессмысленный
@@ -150,22 +156,42 @@ window.ArmBatchResults = (function () {
       }
     });
   }
-  function fetchResultBody(resultId) {
-    if (!resultId) { return Promise.reject(new Error('Нет result_id')); }
-    // В кэше может лежать и обещание, и уже разрешённое тело — Promise.resolve
-    // нормализует оба: у вызывающего всегда есть .then/.catch (иначе после
-    // разрешения кэша возвращался голый объект → «.then is not a function»,
-    // что обрывало поллинг и ре-рендер).
-    if (bodyCache[resultId]) { return Promise.resolve(bodyCache[resultId]); }
-    var promise = fetch('/ai/admin/arm/solve/result/' + encodeURIComponent(resultId) + '/body/', {
+  function fetchResultChunk(resultId, offset) {
+    var url = '/ai/admin/arm/solve/result/' + encodeURIComponent(resultId) + '/body/'
+      + '?offset=' + encodeURIComponent(offset) + '&length=' + RAW_CHUNK_SIZE;
+    return fetch(url, {
       method: 'GET', credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' },
     })
       .then(parseJsonResponse)
       .then(function (data) {
         if (!data || !data.ok || !data.result) { throw new Error('Тело результата недоступно'); }
-        bodyCache[resultId] = data.result;
         return data.result;
       });
+  }
+  // Загрузить (и закрепить в кэше) состояние тела: первый чанк raw_response —
+  // сразу, остальное догружается позже (state.has_more). В кэше может лежать
+  // и обещание, и разрешённое состояние — Promise.resolve нормализует оба:
+  // у вызывающего всегда есть .then/.catch (иначе после разрешения кэша
+  // возвращался голый объект → «.then is not a function», что обрывало
+  // поллинг и ре-рендер).
+  function loadResultBodyState(resultId) {
+    if (!resultId) { return Promise.reject(new Error('Нет result_id')); }
+    if (bodyCache[resultId]) { return Promise.resolve(bodyCache[resultId]); }
+    var promise = fetchResultChunk(resultId, 0).then(function (b) {
+      var state = {
+        raw: b.raw_response || '',
+        total: (b.raw_total != null) ? Number(b.raw_total) : (b.raw_response || '').length,
+        has_more: !!b.raw_has_more,
+        code: b.code || '',
+        short_response: b.short_response || '',
+        dl_comment: b.dl_comment || '',
+        dl_error: b.dl_error || '',
+        dl_queue_id: b.dl_queue_id || 0,
+        truncated: !!b.truncated,
+      };
+      bodyCache[resultId] = state;
+      return state;
+    });
     bodyCache[resultId] = promise;
     // Не оставляем отказ в кэше: следующий клик повторит попытку.
     promise.catch(function () { delete bodyCache[resultId]; });
@@ -181,6 +207,12 @@ window.ArmBatchResults = (function () {
     var labels = { solved: 'Решено', failed: 'Не решено', skipped: 'Пропущено' };
     var cls = v === 'solved' ? 'solved' : (v === 'failed' ? 'failed' : 'skipped');
     return '<span class="arm-badge ' + cls + '">' + escapeHtml(labels[v] || v) + '</span>';
+  }
+  // Бейдж «обрезан»: ответ упёрся в потолок генерации провайдера (Ollama
+  // num_predict / SambaNova max_tokens) — стрим остановлен ровно на лимите,
+  // часть текста (и возможно кода) потеряна (см. model_clients.is_output_truncated).
+  function truncatedBadge() {
+    return '<span class="arm-badge truncated" title="Ответ обрезан потолком генерации — модель не успела дописать текст">✂ обрезан</span>';
   }
 
   function isFailedRow(r) {
@@ -210,9 +242,18 @@ window.ArmBatchResults = (function () {
   }
 
   // Компактные подписи отчёта: время и объём прогона (report.run_meta).
-  function fmtTs(ts) {
+  function fmtTs(ts, sameDayAsTs) {
     if (!ts) { return ''; }
-    return new Date(ts * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    const d = new Date(ts * 1000);
+    // Финиш в тот же день, что и старт: время без даты («15:17»);
+    // в другой день дата повторяется («15.10, 02:07»).
+    if (sameDayAsTs != null) {
+      const other = new Date(sameDayAsTs * 1000);
+      if (d.toDateString() === other.toDateString()) {
+        return d.toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+      }
+    }
+    return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
   }
   function fmtDuration(sec) {
     sec = Math.round(Number(sec) || 0);
@@ -224,21 +265,42 @@ window.ArmBatchResults = (function () {
     if (m) { return m + ' мин' + (s ? ' ' + s + ' с' : ''); }
     return s + ' с';
   }
+  // Русские формы множественного числа: pluralRu(43, 'задача', 'задачи', 'задач')
+  function pluralRu(n, one, few, many) {
+    const abs = Math.abs(Number(n) || 0) % 100;
+    const d = abs % 10;
+    if (abs > 10 && abs < 20) { return many; }
+    if (d > 1 && d < 5) { return few; }
+    if (d === 1) { return one; }
+    return many;
+  }
+  // «Прогон: 7 мин 20 с (14.10, 15:10 → 15:17)»; для идущего — «Прогон: 5 мин (с 14.10, 15:10)».
   function runMetaLine(report) {
     const meta = report.run_meta || {};
     if (!meta.started_at_ts) { return ''; }
     const started = fmtTs(meta.started_at_ts);
+    const duration = fmtDuration(meta.duration_seconds);
     if (meta.finished_at_ts) {
-      return started + ' → ' + fmtTs(meta.finished_at_ts)
-        + (meta.duration_seconds ? ' · ' + fmtDuration(meta.duration_seconds) : '');
+      const range = started + ' → ' + fmtTs(meta.finished_at_ts, meta.started_at_ts);
+      return duration ? duration + ' (' + range + ')' : range;
     }
-    return started + ' · идёт' + (meta.duration_seconds ? ' ' + fmtDuration(meta.duration_seconds) : '');
+    return duration ? duration + ' (с ' + started + ')' : 'с ' + started;
   }
+  // «Объём: 43 задачи (1 модель)»; пара счётчиков падает на «Всего пар» выше.
   function runVolumeLine(report) {
     if (report.models_count == null && report.tasks_count == null) { return ''; }
-    return (report.models_count != null ? report.models_count + ' мод. · ' : '')
-      + (report.tasks_count != null ? report.tasks_count + ' задач · ' : '')
-      + report.total_pairs + ' пар';
+    let line = '';
+    if (report.tasks_count != null) {
+      line = report.tasks_count + ' ' + pluralRu(report.tasks_count, 'задача', 'задачи', 'задач');
+    } else if (report.models_count != null) {
+      line = report.models_count + ' ' + pluralRu(report.models_count, 'модель', 'модели', 'моделей');
+    } else {
+      line = report.total_pairs + ' ' + pluralRu(report.total_pairs, 'пара', 'пары', 'пар');
+    }
+    if (report.models_count != null && report.tasks_count != null) {
+      line += ' (' + report.models_count + ' ' + pluralRu(report.models_count, 'модель', 'модели', 'моделей') + ')';
+    }
+    return line;
   }
 
   // els = {card, list, perModel, perTopic, errors}
@@ -259,6 +321,9 @@ window.ArmBatchResults = (function () {
         'Пропущено: ' + escapeHtml(report.skipped),
         'Токенов: ' + escapeHtml(report.tokens_total),
       ];
+      if (Number(report.truncated_pairs) > 0) {
+        lines.push('Обрезано лимитом генерации: ' + escapeHtml(report.truncated_pairs));
+      }
       const timeLine = runMetaLine(report);
       if (timeLine) { lines.push('<strong>Прогон:</strong> ' + escapeHtml(timeLine)); }
       const volumeLine = runVolumeLine(report);
@@ -477,6 +542,7 @@ window.ArmBatchResults = (function () {
         title.textContent = '#' + (r.task_node_id || '') + ' ' + (r.task_name || '');
         top.appendChild(title);
         top.insertAdjacentHTML('beforeend', verdictBadge(r.verdict));
+        if (r.truncated) { top.insertAdjacentHTML('beforeend', truncatedBadge()); }
         var meta = document.createElement('div');
         meta.className = 'arm-meta';
         meta.textContent = (r.duration != null ? r.duration : '') + ' сек | ' + (r.tokens != null ? r.tokens : '') + ' ток.';
@@ -528,23 +594,59 @@ window.ArmBatchResults = (function () {
           codePre.textContent = '';
           if (downloadLink) { downloadLink.style.display = 'none'; }
           var bodyLoaded = false;
-          var fillBody = function (b) {
-            bodyLoaded = true;
-            dlComment = b.dl_comment || '';
-            dlError = b.dl_error || '';
+          var moreBtn = null;
+          var state = null;
+          var fillBody = function (st) {
+            state = st;
+            dlComment = st.dl_comment || '';
+            dlError = st.dl_error || '';
+            dlQueueId = st.dl_queue_id || dlQueueId;
             var dlHtml2 = '<strong>DL тест:</strong> ';
             if (dlComment) { dlHtml2 += escapeHtml(dlComment); } else { dlHtml2 += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
             if (dlQueueId) { dlHtml2 += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
             if (r.saved_solution) { dlHtml2 += ' <span style="color:#166534;">· ✓ сохранено в «Решённые задачи»</span>'; }
             if (dlError) { dlHtml2 += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
             dlBlock.innerHTML = dlHtml2;
-            answerPre.textContent = b.raw_response || b.short_response || '';
-            codePre.textContent = b.code || '— код не извлечён —';
-            if (downloadLink) { downloadLink.style.display = b.code ? '' : 'none'; }
+            answerPre.textContent = st.raw || st.short_response || '';
+            codePre.textContent = st.code || '— код не извлечён —';
+            if (downloadLink) { downloadLink.style.display = st.code ? '' : 'none'; }
+            // Бейдж «обрезан», если в снапшоте его не было (легаси-строки БД).
+            if (st.truncated && !top.querySelector('.arm-badge.truncated')) {
+              top.insertAdjacentHTML('beforeend', truncatedBadge());
+            }
+            if (moreBtn) { moreBtn.remove(); moreBtn = null; }
+            if (st.has_more) {
+              // Чанковая догрузка: остаток raw_response — по кнопке.
+              var remainingKb = Math.max(1, Math.round((st.total - st.raw.length) / 1024));
+              moreBtn = document.createElement('button');
+              moreBtn.type = 'button';
+              moreBtn.className = 'arm-button arm-body-more';
+              moreBtn.textContent = 'Показать ещё (' + remainingKb + ' КБ)';
+              moreBtn.addEventListener('click', function () {
+                if (!state || !state.has_more) { return; }
+                var loaded = state.raw.length;
+                moreBtn.disabled = true;
+                moreBtn.textContent = 'загрузка…';
+                fetchResultChunk(resultId, loaded).then(function (b) {
+                  state.raw += b.raw_response || '';
+                  state.has_more = !!b.raw_has_more;
+                  if (b.code && !state.code) { state.code = b.code; }
+                  state.truncated = state.truncated || !!b.truncated;
+                  fillBody(state);
+                }).catch(function () {
+                  moreBtn.disabled = false;
+                  moreBtn.textContent = 'Ошибка загрузки — повторить';
+                });
+              });
+              answerPre.insertAdjacentElement('afterend', moreBtn);
+            }
           };
           var loadBody = function () {
             if (bodyLoaded) { return; }
-            fetchResultBody(resultId).then(fillBody).catch(function () {
+            loadResultBodyState(resultId).then(function (st) {
+              bodyLoaded = true;
+              fillBody(st);
+            }).catch(function () {
               dlBlock.innerHTML = '<strong>DL тест:</strong> <span style="color:#6b7280;">итог тестов отсутствует</span>';
               answerPre.textContent = 'Не удалось загрузить ответ модели.';
               codePre.textContent = '— код недоступен —';

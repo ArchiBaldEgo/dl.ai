@@ -494,7 +494,39 @@ async function getRobustLastAnswerData(page) {
 
     const bubble = pickLastWithText(container) || pickLastWithText(document.body);
     if (!bubble) return { html: '', text: '' };
-    return { html: bubble.outerHTML || '', text: (bubble.innerText || '').trim() };
+
+    // Reasoning/«размышления» НЕ должны попадать в content ответа: python-сторона
+    // срезает только think-теги, а их у веб-пула нет. Контейнеры размышлений
+    // вырезаем: класс toolcall-content-text (там живёт текст «размышлений» Kimi),
+    // плюс общие think/reason и data-testid*='think'. Заголовки («Thought for…» /
+    // «思考…) — короткие надписи, тоже удаляются. Отсутствие контейнеров
+    // не меняет поведение (удаление — нулевой ущерб).
+    const classOf = (node) =>
+      String(node.getAttribute && node.getAttribute('class') || '');
+    const isThinkNode = (node) =>
+      (node.hasAttribute && node.hasAttribute('data-testid') &&
+        /think/i.test(node.getAttribute('data-testid') || '')) ||
+      /think/i.test(classOf(node)) ||
+      /reason/i.test(classOf(node)) ||
+      /toolcall-content-text/i.test(classOf(node));
+    const clone = bubble.cloneNode(true);
+    clone.querySelectorAll('*').forEach((n) => {
+      if (isThinkNode(n)) { n.remove(); return; }
+    });
+    // Сверху вниз: большие контейнеры (длина ≥ 160) не режем — только надписи.
+    clone.querySelectorAll('*').forEach((n) => {
+      const label = (n.innerText || '').trim();
+      if (label && label.length < 160 && /^(Thought for|Thinking|思考|已深度思考|已搜索|Поразмышлял)/i.test(label)) {
+        n.remove();
+      }
+    });
+
+    // В пузыре может быть НЕСКОЛЬКО markdown-блоков (размышления + ответ);
+    // ответ = ПОСЛЕДНИЙ БЛОК С ТЕКСТОМ — финал модели всегда последним.
+    const blocks = Array.from(clone.querySelectorAll('[class*=\'markdown\']'))
+      .filter((n) => (n.innerText || '').trim().length > 0);
+    const picked = blocks.length > 1 ? blocks[blocks.length - 1] : clone;
+    return { html: picked.outerHTML || '', text: (picked.innerText || '').trim() };
   });
   return data || { html: '', text: '' };
 }
@@ -671,8 +703,12 @@ async function sendMessage(ctx, payload = {}) {
             // Fallback 1: явно последний assistant-item (getLastOuterHtmlByXPath берёт
             // последний snapshot-узел в document order — текущий ответ).
             "//div[contains(@class,'chat-content-item-assistant')][last()]//div[contains(@class,'markdown')]",
+            // ВАРИАНТЫ БЕЗ reasoning (прецедент Fallback 2): контейнер размышлений
+            // тоже может носить 'markdown' — без исключений ловит простыню размышлений.
+            "//div[contains(@class,'chat-content-item-assistant')][last()]//div[contains(@class,'markdown') and not(contains(@class,'think')) and not(contains(@class,'toolcall-content-text'))]",
             // Fallback 2: answer-markdown без toolcall/thinking-обёртки
             "//div[contains(@class,'markdown-container') and not(contains(@class,'toolcall-content-text'))]//div[contains(@class,'markdown')]",
+            "//div[contains(@class,'markdown') and not(contains(@class,'toolcall-content-text')) and not(contains(@class,'think'))]",
             // Fallback 3: весь последний assistant-item (конвертер разберёт markdown-блоки внутри)
             "//div[contains(@class,'chat-content-item-assistant')][last()]",
             // Fallback 4: любой markdown-блок (broader — крайний случай)

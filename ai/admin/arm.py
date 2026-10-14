@@ -24,6 +24,8 @@ from ..arm_runner import (
     cancel_arm_run,
     get_arm_run_snapshot,
     get_latest_batch_run_snapshot,
+    pause_arm_run,
+    resume_arm_run,
     start_batch_rerun_pairs,
     start_batch_solve_run,
 )
@@ -55,6 +57,10 @@ from .permissions import can_access_arm, is_superuser_user
 
 # TTL кэша дерева задач курса в Redis (см. admin_arm_solve_load_tree_view).
 _DL_TREE_CACHE_TTL = 30 * 60
+
+# Жёсткий потолок окна raw_response за один запрос body-эндпоинта (символов):
+# чанковая загрузка больших ответов (обрезанные пары — десятки КБ текста).
+_BODY_RAW_CHUNK_MAX = 60000
 
 
 def _resolve_session_id(request):
@@ -641,6 +647,17 @@ def admin_arm_solve_status_view(request):
     return JsonResponse({"ok": True, "run": run_snapshot})
 
 
+def _run_id_from_request(request):
+    """run_id из тела POST (JSON или form) — общий хвост cancel/pause/resume/rerun."""
+    import json as _json
+    body = {}
+    try:
+        body = _json.loads(request.body or b"{}")
+    except (ValueError, _json.JSONDecodeError):
+        body = {}
+    return (body.get("run_id") or request.POST.get("run_id", "")).strip()
+
+
 def admin_arm_solve_cancel_view(request):
     """Cancel a running batch-solve ARM job."""
     if not can_access_arm(request):
@@ -649,15 +666,7 @@ def admin_arm_solve_cancel_view(request):
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
 
-    import json as _json
-    body = {}
-    try:
-        body = _json.loads(request.body or b"{}")
-    except (ValueError, _json.JSONDecodeError):
-        body = {}
-
-    run_id = body.get("run_id") or request.POST.get("run_id", "")
-    run_id = run_id.strip()
+    run_id = _run_id_from_request(request)
     if not run_id:
         return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
 
@@ -669,6 +678,56 @@ def admin_arm_solve_cancel_view(request):
         )
 
     return JsonResponse({"ok": True, "message": "Прерывание запрошено"})
+
+
+def admin_arm_solve_pause_view(request):
+    """Приостановка batch-прогона на границе пар (текущая пара доживает)."""
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    run_id = _run_id_from_request(request)
+    if not run_id:
+        return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
+
+    if not pause_arm_run(run_id):
+        return JsonResponse(
+            {"ok": False, "message": "Процесс не найден или уже завершен"},
+            status=404,
+        )
+
+    return JsonResponse({
+        "ok": True,
+        "message": "Прогон приостановлен (текущая пара завершится)",
+        "run": get_arm_run_snapshot(run_id, light_results=True),
+    })
+
+
+def admin_arm_solve_resume_view(request):
+    """Снятие паузы: воркер продолжит с следующей пары."""
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    run_id = _run_id_from_request(request)
+    if not run_id:
+        return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
+
+    if not resume_arm_run(run_id):
+        return JsonResponse(
+            {"ok": False, "message": "Процесс не найден или уже завершен"},
+            status=404,
+        )
+
+    return JsonResponse({
+        "ok": True,
+        "message": "Прогон продолжается",
+        "run": get_arm_run_snapshot(run_id, light_results=True),
+    })
 
 
 def admin_arm_solve_rerun_pairs_view(request):
@@ -685,15 +744,7 @@ def admin_arm_solve_rerun_pairs_view(request):
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
 
-    import json as _json
-    body = {}
-    try:
-        body = _json.loads(request.body or b"{}")
-    except (ValueError, _json.JSONDecodeError):
-        body = {}
-
-    run_id = body.get("run_id") or request.POST.get("run_id", "")
-    run_id = run_id.strip()
+    run_id = _run_id_from_request(request)
     if not run_id:
         return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
 
@@ -767,6 +818,14 @@ def admin_arm_solve_result_body_view(request, result_id):
     результатов (light-снапшот с lazy_body=True) — иначе большой прогон
     раздувал HTML/JSON до десятков МБ. Тяжёлое тело (полный ответ, извлечённый
     код, DL-комментарии) подтягивается здесь при первом раскрытии строки.
+
+    Чанковая загрузка большого raw_response (обрезанные пары — десятки КБ
+    текста): GET-параметры ``offset`` (старт окна, по умолчанию 0) и
+    ``length`` (длина окна в символах; 0/отсутствие — весь ответ целиком,
+    обратная совместимость). При заданном ``length`` raw_response — срез +
+    метаданные raw_total/raw_offset/raw_has_more/raw_next (первый чанк грузит
+    UI, «Показать ещё» догружает остаток). Окно жёстко ограничено
+    _BODY_RAW_CHUNK_MAX символами.
     Права — те же, что у всей ARM (can_access_arm), GET only.
     """
     if not can_access_arm(request):
@@ -776,14 +835,40 @@ def admin_arm_solve_result_body_view(request, result_id):
         return HttpResponseNotAllowed(["GET"])
 
     result = get_object_or_404(AIModelTestResult, pk=result_id)
-    return JsonResponse({"ok": True, "result": {
+
+    def _int_param(name, default):
+        try:
+            return int(request.GET.get(name, "").strip() or default)
+        except (TypeError, ValueError):
+            return default
+
+    raw = result.raw_response or ""
+    offset = max(0, _int_param("offset", 0))
+    length = _int_param("length", 0)
+
+    body = {
         "result_id": result.pk,
-        "raw_response": result.raw_response or "",
-        "code": result.code or "",
         "short_response": result.short_response or "",
+        "code": result.code or "",
         "dl_comment": result.dl_comment or "",
         "dl_error": result.dl_error or "",
-    }})
+        "truncated": bool(result.truncated),
+        "raw_total": len(raw),
+    }
+    if length > 0:
+        length = min(length, _BODY_RAW_CHUNK_MAX)
+        window = raw[offset:offset + length]
+        has_more = offset + len(window) < len(raw)
+        body.update({
+            "raw_response": window,
+            "raw_offset": offset,
+            "raw_has_more": has_more,
+            "raw_next": offset + len(window) if has_more else None,
+        })
+    else:
+        body["raw_response"] = raw
+        body["raw_has_more"] = False
+    return JsonResponse({"ok": True, "result": body})
 
 
 def admin_arm_solve_report_xlsx_view(request, run_id):

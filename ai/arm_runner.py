@@ -43,6 +43,8 @@ from .services.code_carver import (  # noqa: E402
 from django.utils.html import strip_tags
 
 from .model_clients.exceptions import humanize_model_error
+from .model_clients import is_output_truncated
+from .i18n import get_ui_language_suffix
 from .model_health import get_runtime_model_handlers, is_arm_solve_model
 from .models import AIModelTestResult, AIModelTestRun, AIRequestLog, ArmPromptBinding, ExternalDLAccount, Task
 
@@ -97,6 +99,18 @@ def _is_model_error(response):
     """Handler'ы возвращают (content, tokens, is_error) — возвращаем флаг ошибки."""
     if isinstance(response, tuple) and len(response) > 2:
         return bool(response[2])
+    return False
+
+
+def _response_cut_flag(response):
+    """4-й элемент handler-кортежа (провайдер сам сказал «длина обрезана»).
+
+    Ollama отдаёт done_reason != "stop" (наш num_predict или скрытый потолок
+    шлюза). Провайдеры без этого сигнала возвращают 3-кортеж — False; там
+    обрез ловится по токенам (model_clients.is_output_truncated).
+    """
+    if isinstance(response, tuple) and len(response) > 3:
+        return bool(response[3])
     return False
 
 
@@ -170,6 +184,37 @@ def _resolve_batch_prompt(task, fallback_language_id, cache):
     return cache[key]
 
 
+# Требование «без комментариев» — во ВСЕ сообщения пакетного решения
+# (/arm/solve/), поверх привязки/базовой инструкции. Язык приписки — язык UI
+# прогона (сразу после get_language_instruction модель обязана отвечать на
+# том же языке). Комментарии внутри кода ломают стиль решения и путают
+# студентов.
+_NO_COMMENTS_INSTRUCTION = {
+    "ru": "Не добавляй никаких комментариев в код — выведи только чистый код решения.",
+    "en": "Do not add any comments to the code — output only the clean solution code.",
+    "fr": "N'ajoute aucun commentaire au code — produis uniquement le code propre de la solution.",
+}
+
+# Запрет рассуждений: flash-модели (DeepSeek) выливают chain-of-thought в
+# content, рассуждения сжигают бюджет генерации (num_predict) — ответ обрезан
+# до кода («Функция main() не определена»). Приписывается ко ВСЕМ solve-
+# сообщениям батча поверх _NO_COMMENTS_INSTRUCTION.
+_NO_RAMBLE_INSTRUCTION = {
+    "ru": "Не расписывай ход рассуждений и промежуточные вычисления — сразу выведи только финальный код решения.",
+    "en": "Do not narrate your reasoning or intermediate arithmetic — output the final solution code immediately.",
+    "fr": "Ne détaille ni ton raisonnement ni tes calculs intermédiaires — produis immédiatement le code final de la solution.",
+}
+
+# Приписка авто-ретрая обрезанной пары: ответ упёрся в потолок генерации
+# (model_clients.is_output_truncated), код не успел родиться — один повторный
+# вызов с прямой командой «только код».
+_CUT_RETRY_INSTRUCTION = {
+    "ru": "Твой предыдущий ответ был обрезан лимитом длины. Ни текста, ни вычислений, ни объяснений — выведи только окончательный код решения целиком, одним блоком.",
+    "en": "Your previous answer was cut off by the length limit. No text, no arithmetic, no explanations — output only the complete final solution code in a single block.",
+    "fr": "Ta réponse précédente a été tronquée par la limite de longueur. Ni texte, ni calculs, ni explications — produis uniquement le code final complet de la solution en un seul bloc.",
+}
+
+
 def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None):
     """Compose the solve prompt for one task.
 
@@ -178,7 +223,7 @@ def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language
     fallback'ов (topic-bound Prompt, SharedPrompt mode=solve) больше нет:
     нет привязки → прогон без препромпта, только базовая инструкция.
     """
-    from .i18n import get_language_instruction
+    from .i18n import get_language_instruction, get_ui_language_suffix
     from .models import Prompt
 
     message = None
@@ -202,7 +247,10 @@ def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language
     # явно, чтобы модели всегда приходил полный текст задачи.
     if task_statement and task_statement.strip() and task_statement.strip() not in (message or ""):
         message = (message or "").rstrip() + f"\n\nУсловие задачи:\n{task_statement}"
+    ui_suffix = get_ui_language_suffix(ui_language)
     message += get_language_instruction(ui_language)
+    message += "\n" + _NO_COMMENTS_INSTRUCTION[ui_suffix]
+    message += "\n" + _NO_RAMBLE_INSTRUCTION[ui_suffix]
     return message
 
 
@@ -328,6 +376,10 @@ def _build_batch_report(results):
     failed = sum(1 for r in results if r.get("verdict") == _VERDICT_FAILED)
     skipped = sum(1 for r in results if r.get("verdict") == _VERDICT_SKIPPED)
     tokens_total = sum(_to_int(r.get("tokens")) for r in results)
+    # Пары с обрезанным ответом (упор в потолок генерации провайдера —
+    # is_output_truncated): видны бейджем «обрезан» и доступны в перезапуске
+    # нерешённых пар.
+    truncated_pairs = sum(1 for r in results if r.get("truncated"))
 
     per_model = _per_bucket(
         results,
@@ -376,6 +428,7 @@ def _build_batch_report(results):
         "solved": solved,
         "failed": failed,
         "skipped": skipped,
+        "truncated_pairs": truncated_pairs,
         "tokens_total": tokens_total,
         "per_model": per_model,
         "per_topic": per_topic,
@@ -441,10 +494,15 @@ def cancel_arm_run(run_id):
             job["updated_at_ts"] = time.time()
 
     # Немедленно фиксируем отмену в БД — фронтенд читает snapshot и выходит
-    # из «выполняется» без ожидания in-flight вызова.
+    # из «выполняется» без ожидания in-flight вызова. Пауза тоже прерывается:
+    # отмена работает и из паузы (worker на паузе увидит cancel_requested).
+    _CANCELLABLE_STATUSES = [
+        AIModelTestRun.STATUS_RUNNING,
+        AIModelTestRun.STATUS_PAUSED,
+    ]
     if run_id:
         AIModelTestRun.objects.filter(
-            run_id=run_id, status=AIModelTestRun.STATUS_RUNNING
+            run_id=run_id, status__in=_CANCELLABLE_STATUSES
         ).update(
             status=AIModelTestRun.STATUS_CANCELLED,
             finished_at=timezone.now(),
@@ -458,13 +516,76 @@ def cancel_arm_run(run_id):
     if not run_id:
         return False
     updated = AIModelTestRun.objects.filter(
-        run_id=run_id, status=AIModelTestRun.STATUS_RUNNING
+        run_id=run_id, status__in=_CANCELLABLE_STATUSES
     ).update(
         status=AIModelTestRun.STATUS_CANCELLED,
         finished_at=timezone.now(),
         error_message="Прервано пользователем",
     )
     return updated > 0
+
+
+def pause_arm_run(run_id):
+    """Запросить паузу batch-прогона (кооперативно, на границе пар).
+
+    ``pause_requested=True`` для воркера + немедленный flip БД в ``paused``
+    (UI перестаёт показывать «выполняется» в пределах одного цикла опроса);
+    текущая пара (LLM + DL + запись) доживает, новые не стартуют.
+    Возвращает True для живого job; БД-прогон без job (рестарт) НЕ ставится
+    на паузу — False: осиротевший прогон пометит orphan-детектор.
+    """
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return False
+        job["pause_requested"] = True
+        job["paused"] = True
+        job["status"] = "paused"
+        job["updated_at_ts"] = time.time()
+
+    AIModelTestRun.objects.filter(
+        run_id=run_id, status=AIModelTestRun.STATUS_RUNNING
+    ).update(status=AIModelTestRun.STATUS_PAUSED)
+    return True
+
+
+def resume_arm_run(run_id):
+    """Снять паузу: воркер продолжит с СЛЕДУЮЩЕЙ пары; БД обратно в running."""
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return False
+        job["pause_requested"] = False
+        job["paused"] = False
+        job["status"] = "running"
+        job["updated_at_ts"] = time.time()
+
+    AIModelTestRun.objects.filter(
+        run_id=run_id, status=AIModelTestRun.STATUS_PAUSED
+    ).update(status=AIModelTestRun.STATUS_RUNNING)
+    return True
+
+
+def _is_pause_requested(run_id):
+    """Thread-safe read: пауза запрошена и ещё не снята."""
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return False
+        return job.get("pause_requested", False)
+
+
+def _wait_resume(run_id):
+    """Сон на паузе (кооперативно, вне _jobs_lock — лок нереентерабелен).
+
+    Возвращает True — продолжать цикл модели; False — отмена пришла на
+    паузе (и в ожидании сна): цикл модели прерывается.
+    """
+    while _is_pause_requested(run_id):
+        time.sleep(1.0)
+        if _is_cancel_requested(run_id):
+            return False
+    return True
 
 
 def _is_cancel_requested(run_id):
@@ -648,6 +769,15 @@ def _run_job_worker(
                     f"admin-{user_id}-{model['key']}-{run_id}",
                 )
                 response_text, tokens = _extract_model_response(response)
+                # Флаг обреза по факту (tokens упёрся в потолок провайдера).
+                # У ошибочного вызова флага нет — это другой вид сбоя.
+                single_truncated = (
+                    not _is_model_error(response)
+                    and (
+                        is_output_truncated(model["key"], tokens)
+                        or _response_cut_flag(response)
+                    )
+                )
 
                 cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
                 if not cleaned_text:
@@ -666,6 +796,7 @@ def _run_job_worker(
                     "short_response": short_response,
                     "status": status,
                     "raw_response": detailed_text,
+                    "truncated": bool(single_truncated),
                 }
             except Exception as exc:
                 exc_text = str(exc)
@@ -680,6 +811,7 @@ def _run_job_worker(
                     "short_response": friendly_text or f"Ошибка вызова модели: {exc_text}",
                     "status": status,
                     "raw_response": detailed_text,
+                    "truncated": False,
                 }
 
             # Persist the per-model result row (source of truth for reports).
@@ -693,6 +825,7 @@ def _run_job_worker(
                     "tokens": result_item["tokens"],
                     "short_response": result_item["short_response"],
                     "raw_response": (result_item["raw_response"] or "")[:8000],
+                    "truncated": bool(result_item.get("truncated")),
                 },
             )
 
@@ -982,6 +1115,9 @@ def _extract_code_pipeline(text, file_extension):
 
     # === Вариант B: структурные экстракторы языков курса ===
     from .services import code_carver
+    # «Альтернатива:/Вариант 2:…» с кодом второго решения срезаются ДО всех
+    # экстракторов (структурники, фенсы и карвинг работают по одному тексту).
+    cleaned = code_carver.cut_after_alternative_heading(cleaned)
     structural = None
     if ext in (".i86", ".asm"):
         structural = code_carver.extract_asm_i86
@@ -1033,6 +1169,21 @@ def _extract_code_pipeline(text, file_extension):
     carved = _carve_code_block(cleaned)
     if carved and not _mid_prose_lines(carved):
         return code_carver.strip_code_fence_lines(carved)
+    # === Аварийный relaxed-тир: «долгое рассуждение без фенсов» ===
+    # Простыня CoT, внутри которой модель ПОЛНОСТЬЮ проговаривает программу
+    # (реальный кейс #2606801: Web_DeepSeek(Thinking), C-МПА, ни одного
+    # фенса, программы внутри прозы) — все строгие тиры выше дали пусто.
+    # Структурник с relaxed=True пропускает прозя-валидации: multi-window
+    # выцепляет программу по БАЛАНСНЫМ окнам скобок; наружный гейт
+    # has_language_marker (_extract_code_from_response) остаётся единственным.
+    if structural is not None and (ext in (".i86", ".asm", ".mpc") or not ext):
+        found = structural(cleaned, relaxed=True)
+        if found:
+            return code_carver.strip_code_fence_lines(found)
+        for block in _CODE_FENCE_RE.findall(cleaned):
+            found = structural(block.strip(), relaxed=True)
+            if found:
+                return code_carver.strip_code_fence_lines(found)
     # Без оградок: проза-рассуждения и текст без кодовых маркеров — не код.
     if _looks_like_prose(cleaned):
         return ""
@@ -1627,13 +1778,19 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     topic_name = task_ctx["topic_name"]
     task_prompt_id = task_ctx["prompt_id"]
 
-    started = perf_counter()
+    # «Время обработки» пары меряет ТОЛЬКО вызов модели (генерацию): из
+    # показателя не должны вылезать чужие ожидания — DL-поллинг, ожидание
+    # locа записи, очередь семафора Ollama — иначе накопленная статистика
+    # моделей (AIModelStats → суффиксы «≈N сек» селектора) раздувается.
+    gen_started = perf_counter()
+    gen_seconds = 0.0
     verdict = _VERDICT_FAILED
     status = "error"
     short_response = ""
     raw_response = ""
     cleaned_text = ""
     tokens = 0
+    truncated = False
     code_only = ""
     dl_test_comment = ""
     dl_submit_error = ""
@@ -1644,10 +1801,12 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         message = _build_solve_message(
             task.statement, prog_lang_name, topic_name, ctx["ui_language"], task_prompt_id,
         )
+        gen_started = perf_counter()
         response = async_to_sync(model["handler"])(
             message,
             f"admin-batch-{ctx['user_id']}-{model['key']}-{ctx['run_id']}-{node_id}",
         )
+        gen_seconds = round(perf_counter() - gen_started, 2)
         # Отмена могла прийти во время LLM-вызова (его самого не
         # прервать) — не тратим время на DL-тест и запись пары.
         if _is_cancel_requested(ctx["run_id"]):
@@ -1662,9 +1821,18 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         # DL-блока (код/DL-коммент хранятся в отдельных полях).
         raw_response = cleaned_text
 
+        # Обрез по факту: стрим остановлен лимитом генерации — либо потолок
+        # провайдера по токенам (Ollama num_predict / SambaNova max_tokens),
+        # либо done_reason != "stop" из финального чанка (скрытые потолки
+        # шлюза вроде «done на 2000 токенах среди фразы» — лог пары #2606829,
+        # 16246: thinking не дописан, content пуст). У ошибочного вызова флага нет.
+        is_model_err = _is_model_error(response)
+        if not is_model_err:
+            truncated = is_output_truncated(model["key"], tokens) or _response_cut_flag(response)
+
         # Модель вернула ошибку (таймаут/401/429/…) — кода нет, DL не
         # тестируем. Вердикт строго failed (solved — только через DL).
-        if _is_model_error(response):
+        if is_model_err:
             verdict = _VERDICT_FAILED
             status = "error"
             dl_submit_error = (friendly or cleaned_text)[:2000]
@@ -1689,6 +1857,55 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             if junk_code:
                 code_only = ""
 
+            # Обрез по потолку генерации и кода нет (рассуждения съели бюджет,
+            # до кода модель не дошла): один авто-ретрай с прямой припиской
+            # «сразу код». Повторный вызов НЕ срывает пару: при исключении
+            # держим первый ответ; если и ретрай обрезан — пара пишется с
+            # флагом truncated и попадает в «Перезапустить нерешённые пары».
+            if truncated and not code_only:
+                if _is_cancel_requested(ctx["run_id"]):
+                    return None
+                retry_started = perf_counter()
+                try:
+                    retry_response = async_to_sync(model["handler"])(
+                        message + "\n" + _CUT_RETRY_INSTRUCTION[get_ui_language_suffix(ctx["ui_language"])],
+                        f"admin-batch-{ctx['user_id']}-{model['key']}-{ctx['run_id']}-{node_id}",
+                    )
+                    gen_seconds += round(perf_counter() - retry_started, 2)
+                    if _is_cancel_requested(ctx["run_id"]):
+                        return None
+                    response_text, tokens = _extract_model_response(retry_response)
+                    cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
+                    if not cleaned_text:
+                        cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
+                        logger.warning(
+                            "ARM batch: retry after cut returned empty response for model %s node_id=%s",
+                            model["key"], node_id,
+                        )
+                    friendly, detailed = humanize_model_error(cleaned_text, include_detail=True)
+                    raw_response = cleaned_text
+                    truncated = (
+                        is_output_truncated(model["key"], tokens)
+                        or _response_cut_flag(retry_response)
+                    )
+                    if _is_model_error(retry_response):
+                        is_model_err = True
+                        dl_submit_error = (friendly or cleaned_text)[:2000]
+                    else:
+                        is_model_err = False
+                        code_only = _extract_code_from_response(
+                            cleaned_text, file_extension=effective_ext or ""
+                        )
+                        if code_only and effective_ext in (".i86", ".asm", ".mpc") and not has_language_marker(code_only, effective_ext):
+                            code_only = ""
+                except Exception as retry_exc:  # noqa: BLE001
+                    gen_seconds += round(perf_counter() - retry_started, 2)
+                    truncated = True
+                    logger.warning(
+                        "ARM batch: retry after cut failed for model %s node_id=%s: %s",
+                        model["key"], node_id, retry_exc,
+                    )
+
             can_run_dl = bool(
                 ctx["dl_test"] and code_only and effective_ext and ctx["session_id"]
             )
@@ -1700,7 +1917,11 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 )
             elif not code_only:
                 verdict = _VERDICT_FAILED
-                dl_test_comment = "Не удалось извлечь код из ответа модели"
+                dl_test_comment = (
+                    "Модель не успела вывести код — ответ оборван лимитом генерации"
+                    if truncated
+                    else "Не удалось извлечь код из ответа модели"
+                )
             elif can_run_dl:
                 if not _acquire_dl_run_lock(dl_lock, ctx["run_id"]):
                     return None
@@ -1742,10 +1963,23 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         short_response = friendly or f"Ошибка вызова модели: {exc_text}"
         raw_response = detailed or cleaned_text
         dl_submit_error = exc_text[:2000]
+        if not gen_seconds:
+            gen_seconds = round(perf_counter() - gen_started, 2)
+
     def _write_pair_row():
         """Запись результата пары + решение-кэш. Единый хвост для обеих веток
         ниже; лок держится на всё время записи."""
-        duration = round(perf_counter() - started, 2)
+        duration = gen_seconds
+        # Снимок фактически использованного препромпта пары (старт «по
+        # привязке» у задачи свой промпт); имя — из предзаполненного кэша.
+        pair_prompt_id = None
+        try:
+            pair_prompt_id = int(task_prompt_id) if task_prompt_id else None
+        except (TypeError, ValueError):
+            pair_prompt_id = None
+        pair_prompt_name = ""
+        if pair_prompt_id:
+            pair_prompt_name = ctx["prompt_name_cache"].get(pair_prompt_id, _prompt_display_name(pair_prompt_id))
 
         result_obj, _ = AIModelTestResult.objects.update_or_create(
             run=ctx["test_run"],
@@ -1767,6 +2001,9 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 "topic_id_snapshot": task.topic_id,
                 "topic_name_snapshot": topic_name,
                 "prog_lang_snapshot": prog_lang_name,
+                "prompt_id": pair_prompt_id,
+                "prompt_name": pair_prompt_name,
+                "truncated": bool(truncated),
             },
         )
 
@@ -1790,6 +2027,9 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "file_extension": effective_ext or "",
             "topic_name": topic_name,
             "prog_lang_name": prog_lang_name,
+            "prompt_id": pair_prompt_id,
+            "prompt_name": pair_prompt_name,
+            "truncated": bool(truncated),
         }
 
         if ctx["save_solutions"] and verdict == _VERDICT_SOLVED:
@@ -1858,6 +2098,10 @@ def _run_batch_model_loop(ctx, model, model_index, dl_lock):
             ):
                 continue
             if _is_cancel_requested(run_id):
+                break
+            # Пауза — на границе пар: in-flight пара выше доживает, следующая
+            # не стартует до снятия паузы.
+            if not _wait_resume(run_id):
                 break
             _mark_batch_pair_started(run_id, model_index, model, task_ctx)
             item = _process_batch_pair(ctx, task_ctx, model, dl_lock)
@@ -2070,7 +2314,8 @@ def _batch_results_from_db(test_run, light=False):
         rows = test_run.results.values(
             "pk", "model_key", "model_title", "duration_seconds", "tokens",
             "status", "verdict", "dl_queue_id", "file_extension_snapshot",
-            "topic_name_snapshot", "prog_lang_snapshot",
+            "topic_name_snapshot", "prog_lang_snapshot", "truncated",
+            "prompt_id", "prompt_name",
             "task__node_id", "task__name", "task__file_extension",
         ).order_by("model_title")
         for r in rows:
@@ -2084,10 +2329,13 @@ def _batch_results_from_db(test_run, light=False):
                 "tokens": r["tokens"] or 0,
                 "status": r["status"],
                 "verdict": r["verdict"] or _VERDICT_FAILED,
+                "truncated": bool(r["truncated"]),
                 "dl_queue_id": r["dl_queue_id"] or 0,
                 "file_extension": r["file_extension_snapshot"] or (r["task__file_extension"] or ""),
                 "topic_name": r["topic_name_snapshot"],
                 "prog_lang_name": r["prog_lang_snapshot"],
+                "prompt_id": r["prompt_id"],
+                "prompt_name": r["prompt_name"] or "",
                 "lazy_body": True,
             })
         return results
@@ -2106,6 +2354,7 @@ def _batch_results_from_db(test_run, light=False):
             "short_response": r.short_response,
             "status": r.status,
             "verdict": r.verdict or _VERDICT_FAILED,
+            "truncated": bool(r.truncated),
             "raw_response": r.raw_response,
             "code": r.code or "",
             "dl_comment": r.dl_comment or "",
@@ -2114,6 +2363,8 @@ def _batch_results_from_db(test_run, light=False):
             "file_extension": r.file_extension_snapshot or (r.task.file_extension if r.task else ""),
             "topic_name": r.topic_name_snapshot,
             "prog_lang_name": r.prog_lang_snapshot,
+            "prompt_id": r.prompt_id,
+            "prompt_name": r.prompt_name or "",
         })
     return results
 
@@ -2179,6 +2430,8 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "error_message": "",
         "cancel_requested": False,
         "cancelled": False,
+        "pause_requested": False,
+        "paused": False,
         "total_models": len(ordered_models),
         "total_pairs": total_pairs,
         "completed_pairs": 0,
@@ -2258,12 +2511,15 @@ def start_batch_rerun_pairs(run_id, user_id, session_id):
     except AIModelTestRun.DoesNotExist:
         return None, "Прогон не найден", []
 
-    if test_run.status == AIModelTestRun.STATUS_RUNNING:
-        return None, "Прогон ещё выполняется — дождитесь окончания", []
+    if test_run.status in (
+        AIModelTestRun.STATUS_RUNNING,
+        AIModelTestRun.STATUS_PAUSED,
+    ):
+        return None, "Прогон ещё выполняется (или на паузе) — дождитесь окончания", []
     with _jobs_lock:
         job = _jobs.get(run_id)
-        if job and job.get("status") == "running":
-            return None, "Прогон ещё выполняется — дождитесь окончания", []
+        if job and job.get("status") in ("running", "paused"):
+            return None, "Прогон ещё выполняется (или на паузе) — дождитесь окончания", []
 
     node_ids, rerun_pairs = collect_unsolved_pairs(test_run)
     if not rerun_pairs:
@@ -2312,6 +2568,8 @@ def start_batch_rerun_pairs(run_id, user_id, session_id):
         "error_message": "",
         "cancel_requested": False,
         "cancelled": False,
+        "pause_requested": False,
+        "paused": False,
         "total_models": len(ordered_models),
         "total_pairs": pair_count,
         "completed_pairs": 0,
@@ -2371,6 +2629,7 @@ def _snapshot_from_test_run(test_run, light_results=False):
     is_batch = test_run.run_type == AIModelTestRun.RUN_TYPE_BATCH
     status_map = {
         AIModelTestRun.STATUS_RUNNING: "running",
+        AIModelTestRun.STATUS_PAUSED: "paused",
         AIModelTestRun.STATUS_COMPLETED: "completed",
         AIModelTestRun.STATUS_FAILED: "failed",
         AIModelTestRun.STATUS_CANCELLED: "cancelled",
@@ -2400,7 +2659,11 @@ def _snapshot_from_test_run(test_run, light_results=False):
             report,
             test_run.started_at.timestamp() if test_run.started_at else None,
             test_run.finished_at.timestamp() if test_run.finished_at else None,
-            now_ts=time.time() if test_run.status == AIModelTestRun.STATUS_RUNNING else None,
+            # На паузе clock тоже тикает («Прогон» растёт со временем).
+            now_ts=time.time() if test_run.status in (
+                AIModelTestRun.STATUS_RUNNING,
+                AIModelTestRun.STATUS_PAUSED,
+            ) else None,
         )
         is_failed = test_run.status == AIModelTestRun.STATUS_FAILED
         total_pairs = (test_run.report or {}).get("total_pairs") if test_run.report else None
@@ -2461,13 +2724,15 @@ def _mark_orphaned_run_failed(test_run):
     """Помечает осиротевший RUNNING-прогон как FAILED (самоисцеление).
 
     Вызывается, когда in-memory job потерян (рестарт сервера/падение воркера),
-    а в БД прогон ещё STATUS_RUNNING — иначе фронтенд вечно видит «выполняется».
+    а в БД прогон ещё STATUS_RUNNING/STATUS_PAUSED — иначе фронтенд вечно
+    видит «выполняется»/«пауза».
     Мутирует и экземпляр, и строку БД (с защитой по статусу, чтобы не затереть
     уже завершённый прогон при гонке).
     """
     now = timezone.now()
     AIModelTestRun.objects.filter(
-        pk=test_run.pk, status=AIModelTestRun.STATUS_RUNNING
+        pk=test_run.pk,
+        status__in=(AIModelTestRun.STATUS_RUNNING, AIModelTestRun.STATUS_PAUSED),
     ).update(
         status=AIModelTestRun.STATUS_FAILED,
         finished_at=now,
@@ -2623,6 +2888,7 @@ def list_user_runs(user_id, since_ts=0.0):
                 # «В чём ошибка» удалён, новый пока не сделан) — исторические
                 # запуски просто не ссылаются никуда.
                 "page_url": "/ai/admin/arm/solve/" if is_batch else "",
+                "name": job.get("run_name", ""),
                 "status": status,
                 "completed": completed,
                 "total": total,

@@ -30,8 +30,9 @@ from ..dl_api_client import (
 )
 from ..http_utils import resolve_dl_session_id
 from ..models import AIModelTestResult, AIModelTestRun, AIRequestLog, AIPinnedBatchRun, Task
+from ..templatetags.ai_duration import format_human_duration
 from ..model_health import get_runtime_model_handlers
-from .permissions import can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
+from .permissions import can_access_arm, can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,7 @@ _BATCH_RUN_STATUS_DISPLAY = {
     "cancelled": "Прерван",
     "failed": "Прерван",
     "running": "Выполняется…",
+    "paused": "Пауза",
 }
 
 
@@ -96,28 +98,16 @@ def run_finish_meta(run):
     «Прогон» в списках журнала и «Настройки ИИ-приложения».
 
     run is None / не завершён (finished_at пуст) → пустые строки: шаблон
-    покажет «—» (default/|| срабатывают и на пустой строке). Длительность
-    в человекочитаемый вид — зеркало fmtDuration из _ai_batch_results.html
-    («1 ч 27 мин» / «12 мин 3 с» / «45 с»).
+    покажет «—» (default/|| срабатывают и на пустой строке). Форматирование —
+    единый хелпер format_human_duration («1 ч 27 мин» / «12 мин 3 с» / «45 с»).
     """
     finished_at = run.finished_at if run else None
     if not finished_at:
         return {"run_finished_at": "", "run_duration_display": ""}
     duration = (finished_at - run.started_at).total_seconds() if run.started_at else None
-    if duration is not None and duration > 0:
-        h, rem = divmod(int(duration), 3600)
-        m, s = divmod(rem, 60)
-        if h:
-            duration_display = f"{h} ч {m} мин"
-        elif m:
-            duration_display = f"{m} мин" + (f" {s} с" if s else "")
-        else:
-            duration_display = f"{s} с"
-    else:
-        duration_display = ""
     return {
         "run_finished_at": timezone.localtime(finished_at, MOSCOW_TZ).strftime("%d.%m.%Y %H:%M:%S"),
-        "run_duration_display": duration_display,
+        "run_duration_display": format_human_duration(duration),
     }
 
 
@@ -770,6 +760,8 @@ def admin_request_logs_view(request):
         "title": "DL.AI: Логи запросов",
         "page_obj": page_obj,
         "rows": rows,
+        # Кнопки паузы/перезапуска в развёртке строк — тем же правам, что /arm/solve/.
+        "arm_actions": can_access_arm(request),
         "status_choices": AIRequestLog.STATUS_CHOICES,
         "source_choices": AIRequestLog.SOURCE_CHOICES,
         "mode_choices": AIRequestLog.MODE_CHOICES,
@@ -857,6 +849,37 @@ def _build_batch_log_snapshot(log):
             seen_nodes.add(nid)
             node_ids.append(nid)
 
+    # Развёртка журнала: ВСЕ задачи прогона (решённые и нерешённые) с
+    # пометками по моделям + фактически использованные препромпты (distinct
+    # по снимкам пар; легаси-строки без снимка не попадают).
+    task_names = {}
+    models_by_node = {}
+    prompts_map = {}
+    for r in results:
+        nid = r.get("task_node_id")
+        if not nid:
+            continue
+        if nid not in task_names:
+            task_names[nid] = r.get("task_name") or ""
+        info = models_by_node.setdefault(nid, {})
+        model_title = r.get("model_title") or r.get("model_key") or "—"
+        info[model_title] = (r.get("verdict") == "solved")
+        pid = r.get("prompt_id")
+        pname = (r.get("prompt_name") or "").strip()
+        if pid and pname:
+            prompts_map.setdefault(pid, pname)
+    tasks = []
+    for nid in node_ids:
+        info = models_by_node.get(nid, {})
+        tasks.append({
+            "node_id": nid,
+            "name": task_names.get(nid, ""),
+            "solved": any(info.values()),
+            "solved_models": sorted(m for m, ok in info.items() if ok),
+            "total_models": sorted(info),
+            "dl_url": dl_task_url(nid, test_run.course_id),
+        })
+
     return {
         "run_id": run_id_hex,
         "course_id": test_run.course_id,
@@ -867,6 +890,9 @@ def _build_batch_log_snapshot(log):
         # Статус прогона и ручное название — для шапки деталей журнала.
         "run_status": test_run.status,
         "run_name": run_name_for(test_run),
+        # Полный список задач с отметками решённости по моделям.
+        "tasks": tasks,
+        "prompts": [{"id": pid, "name": name} for pid, name in prompts_map.items()],
     }
 
 
@@ -914,10 +940,15 @@ def _batch_log_row_contexts(logs, user=None):
 
     # Задачи и расширение — по прогону (run_id уникален), затем раскладываем
     # по строкам журнала: одна запись журнала = один прогон. Решённые задачи
-    # (задача×модель с verdict='solved' есть хотя бы для одной модели) в списке
-    # журнала не показываем — интерес представляют только нерешённые.
+    # (задача×модель с verdict='solved' есть хотя бы для одной модели) в превью
+    # не показываем — интерес представляют только нерешённые; полный список с
+    # пометками моделей уходит в развёртку (ленивый AJAX снапшота). Заодно
+    # собираем снимки препромптов (distinct по prompt_id — сколько использовано,
+    # столько и показываем; легаси-пустые снимки не попадают).
     tasks_by_run = {}
     solved_nodes_by_run = {}
+    models_by_run = {}
+    prompts_by_run = {}
     ext_by_run = {}
     for r in (
         AIModelTestResult.objects.select_related("task", "run")
@@ -932,7 +963,8 @@ def _batch_log_row_contexts(logs, user=None):
             ext_by_run[run_key] = ext
         node_id = r.task.node_id if r.task else None
         if node_id:
-            if r.verdict == "solved":
+            is_solved = r.verdict == "solved"
+            if is_solved:
                 solved_nodes_by_run.setdefault(run_key, set()).add(node_id)
             bucket = tasks_by_run.setdefault(run_key, [])
             if not any(t["node_id"] == node_id for t in bucket):
@@ -940,17 +972,46 @@ def _batch_log_row_contexts(logs, user=None):
                     "node_id": node_id,
                     "name": r.task.name if r.task else "",
                 })
+            # Пометки по моделям: модель → решено ли, для развёртки списка задач.
+            per_node = models_by_run.setdefault(run_key, {}).setdefault(node_id, {})
+            model_title = r.model_title or r.model_key or ""
+            if model_title and model_title not in per_node:
+                per_node[model_title] = is_solved
+        if r.prompt_id and r.prompt_name:
+            run_prompts = prompts_by_run.setdefault(run_key, {})
+            if r.prompt_id not in run_prompts:
+                run_prompts[r.prompt_id] = r.prompt_name
 
     for log_pk, run_id in run_ids.items():
         run_obj = runs.get(run_id)
         if run_obj is None:
             continue
         solved_nodes = solved_nodes_by_run.get(run_id, set())
-        tasks = [
-            t for t in tasks_by_run.get(run_id, [])
-            if t["node_id"] not in solved_nodes
+        all_tasks = tasks_by_run.get(run_id, [])
+        tasks = [t for t in all_tasks if t["node_id"] not in solved_nodes]
+        per_node_models = models_by_run.get(run_id, {})
+        tasks_all = [
+            {
+                "node_id": t["node_id"],
+                "name": t["name"],
+                "solved": t["node_id"] in solved_nodes,
+                "solved_models": sorted(m for m, ok in per_node_models.get(t["node_id"], {}).items() if ok),
+                "total_models": sorted(per_node_models.get(t["node_id"], {})),
+                "dl_url": dl_task_url(t["node_id"], run_obj.course_id),
+            }
+            for t in all_tasks
         ]
         contexts[log_pk] = {
+            # Полный список задач (решённые + нерешённые) и счётчики —
+            # для заголовка/показа всех задач в развёртке строки журнала.
+            "tasks_all": tasks_all,
+            "tasks_total": len(all_tasks),
+            "tasks_solved_count": len(all_tasks) - len(tasks),
+            "tasks_unsolved_count": len(tasks),
+            "prompts": [
+                {"id": pid, "name": name}
+                for pid, name in prompts_by_run.get(run_id, {}).items()
+            ],
             "run_id": run_id,
             "course_id": run_obj.course_id,
             "file_extension": ext_by_run.get(run_id, ""),
@@ -1035,6 +1096,8 @@ def admin_request_log_detail_view(request, log_id):
         "title": "DL.AI: Детали запроса",
         "log": log,
         "moscow_tz": MOSCOW_TZ,
+        # Кнопки паузы/перезапуска прогона в детали журнала.
+        "arm_actions": can_access_arm(request),
         "is_batch_log": False,
         "batch_snapshot": None,
     }

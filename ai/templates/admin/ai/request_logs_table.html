@@ -1,3 +1,4 @@
+{% load ai_duration %}
 <div id="logs-table-wrapper">
 
   <div id="ai-logs-table-container">
@@ -50,11 +51,11 @@
             <td>
               {{ log.model_names|join:", "|default:"—" }}
             </td>
-            <td class="{% if batch %}{% if batch.run_status == 'completed' %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}{% else %}{% if log.status == 'success' %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}{% endif %}">
+            <td class="{% if batch %}{% if batch.run_status == 'completed' %}ai-logs-status-success{% elif batch.run_status == 'running' or batch.run_status == 'paused' %}ai-logs-status-neutral{% else %}ai-logs-status-error{% endif %}{% else %}{% if log.status == 'success' %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}{% endif %}">
   {% if batch %}{{ batch.run_status_display }}{% else %}{{ log.get_status_display }}{% endif %}
 </td>
 
-            <td>{{ log.duration_seconds|floatformat:0|default:"—" }}</td>
+            <td>{{ log.duration_seconds|human_duration|default:"—" }}</td>
             <td class="ai-log-pin-cell">
               {% if batch %}
               <button type="button" class="ai-log-pin-btn{% if batch.pinned %} ai-log-pin-btn-active{% endif %}"
@@ -79,7 +80,7 @@
                     <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
                     <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
                     <div><strong>Статус:</strong> {% if batch %}{{ batch.run_status_display|default:log.get_status_display }}{% else %}{{ log.get_status_display }}{% endif %}</div>
-                    <div><strong>Время ответа:</strong> {{ log.duration_seconds|floatformat:2|default:"—" }} с{% if batch %} (общее){% endif %}</div>
+                    <div><strong>Время ответа:</strong> {% if log.duration_seconds %}{{ log.duration_seconds|human_duration }}{% else %}—{% endif %}{% if batch %} (общее){% endif %}</div>
                     {% if not batch %}<div><strong>Токенов:</strong> {{ log.tokens|default:"—" }}</div>{% endif %}
                     <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y:H:i:s" }}</div>
                     <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</div>
@@ -95,12 +96,10 @@
                     <div><strong>Тема:</strong> {{ log.topic_name|default:"—" }}</div>
                     {% if batch %}
                     <div><strong>ID дерева:</strong> {{ batch.course_id|default:"—" }}</div>
-                    <div><strong>Нерешённые задачи ({{ batch.tasks|length }}):</strong>
-                      {% for t in batch.tasks %}
-                      <div>{{ t.name }} ({{ t.node_id }})</div>
-                      {% empty %}
-                      —
-                      {% endfor %}
+                    <div><strong>Задачи:</strong>
+                      {# Держим счётчики решено/нерешено; полный перечень (решённые #}
+                      {# и нерешённые с пометками моделей) грузится лениво по кнопке. #}
+                      нерешено {{ batch.tasks_unsolved_count }} из {{ batch.tasks_total }}
                     </div>
                     {% else %}
                     <div><strong>Задача:</strong>
@@ -113,7 +112,15 @@
                     </div>
                     {% endif %}
                     <div><strong>Препромпт:</strong>
-                      {% if log.prompt_id %}
+                      {% if batch %}
+                      {# Снимки фактически использованных промптов (по привязке #}
+                      {# у каждой задачи свой): один или несколько, пусто — «—». #}
+                      {% for p in batch.prompts %}
+                      <a href="/ai/admin/ai/prompt/{{ p.id }}/change/" target="_blank" rel="noopener">{{ p.name }}</a>{% if not forloop.last %}, {% endif %}
+                      {% empty %}
+                      —
+                      {% endfor %}
+                      {% elif log.prompt_id %}
                       <a href="/ai/admin/ai/prompt/{{ log.prompt_id }}/change/" target="_blank" rel="noopener">{{
                         log.prompt_name|default:"—" }}</a>
                       {% else %}
@@ -136,6 +143,10 @@
                       <div><strong>Расширение:</strong> {{ batch.file_extension|default:"—" }}</div>
                       <div><strong>Детали:</strong> <a href="{% url 'ai_request_log_detail' log.id %}">результаты
                           прогона →</a></div>
+                    </div>
+                    <div class="ai-log-tasks-block">
+                      <button type="button" class="ai-log-all-tasks-btn" data-log-id="{{ log.id }}" data-snapshot-url="{% url 'ai_request_log_batch_snapshot' log.id %}">Показать все задачи</button>
+                      <div class="ai-log-all-tasks-list" hidden></div>
                     </div>
                   </div>
                   {% else %}

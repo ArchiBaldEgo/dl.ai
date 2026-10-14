@@ -92,14 +92,45 @@ function saveSelections() {
 // Восстановление селектов из куки ai_state.
 // progLng/topic/prompt восстанавливаются page-specific restorePageState() после
 // заполнения селектов; здесь — модель, голосовой режим (язык — в restoreInterfaceLanguage).
+
+// Модельный идентификатор без регистра и разделителей: ключи и title'ы,
+// различающиеся только подчёркиваниями/пробелами/дефисами/регистром,
+// считаются одной моделью.
+function normalizeModelId(value) {
+    return String(value || '').toLowerCase().replace(/[-_ ]+/g, '');
+}
+
+function findSelectOptionByModel(sel, stored) {
+    var opt = Array.from(sel.options).find(function (o) { return o.value === stored; });
+    if (opt) return opt;
+    // Протухший/переименованный ключ (кука живёт 1 год): совпадаем по нормализации
+    // — тогда селект тихо не «падает» на серверный дефолт, а показывает ту же модель.
+    var target = normalizeModelId(stored);
+    return target ? Array.from(sel.options).find(function (o) {
+        return o.value && normalizeModelId(o.value) === target;
+    }) : null;
+}
+
 function restoreSelections() {
     try {
         var st = getAiState();
         if (st.model) {
             var sel = document.getElementById('select');
             if (sel) {
-                var opt = Array.from(sel.options).find(function(o) { return o.value === st.model; });
-                if (opt) sel.selectedIndex = opt.index;
+                var opt = findSelectOptionByModel(sel, st.model);
+                if (opt) {
+                    sel.selectedIndex = opt.index;
+                    if (opt.value !== st.model) {
+                        // Селект не совпал с сохранённым — переписываем куку валидным
+                        // ключом (лечение переименований прошло у всех сразу).
+                        setAiState({ model: opt.value });
+                    }
+                } else {
+                    // Ключ вовсе не опознан: селект остаётся на серверном дефолте
+                    // (selected), куку переписываем реальным значением — иначе мусор
+                    // в ai_state пережил бы год тишины.
+                    setAiState({ model: sel.value });
+                }
             }
         }
         if (st.voiceMode === 1) {
@@ -124,6 +155,11 @@ function initSelectionPersistence() {
             setTimeout(saveSelections, 100);
         });
     }
+    // Общая локализация строк вне страничных апплаеров (optgroup-лейблы,
+    // aria, модалка справки) — на изменении языка и на первом рендере.
+    var langSel = document.getElementById('selectLang');
+    if (langSel) langSel.addEventListener('change', applySharedUiLanguageTexts);
+    applySharedUiLanguageTexts();
     // Сортировка «Все модели» по статистике прогонов /arm/solve/ — общий
     // механизм для всех трёх страниц чата (base_chat.html).
     initModelSortSelector();
@@ -313,9 +349,9 @@ function stripModelOptionSuffixes() {
 
 function sortModelOptions(mode) {
     var modelSelect = document.getElementById('select');
-    // ^=: подпись группы временно расширяется суффиксом единиц (%·с),
-    // пока список открыт (applyModelGroupUnitLabels).
-    var group = modelSelect && modelSelect.querySelector('optgroup[label^="Все модели"]');
+    // data-ai-group="all" (base_chat.html): локализованный label текстом
+    // селектить нельзя — подпись переведена и меняется на смене языка.
+    var group = modelSelect && modelSelect.querySelector('optgroup[data-ai-group="all"]');
     if (!group || !group.children.length) return;
 
     var selectedValue = modelSelect.value;
@@ -373,9 +409,8 @@ function initModelSortSelector() {
     var modelSelect = document.getElementById('select');
     var sortSelect = document.getElementById('selectModelSort');
     if (!modelSelect || !sortSelect) return;
-    // ^=: подпись группы временно расширяется суффиксом единиц (%·с),
-    // пока список открыт (applyModelGroupUnitLabels).
-    var group = modelSelect.querySelector('optgroup[label^="Все модели"]');
+    // data-ai-group="all" — см. sortModelOptions (label локализован).
+    var group = modelSelect.querySelector('optgroup[data-ai-group="all"]');
     if (!group || !group.children.length) {
         sortSelect.style.display = 'none';
         return;
@@ -829,8 +864,31 @@ function convertMarkdownToHTML(markdown) {
 
 // === Terminal message detection ===
 
+// === WS-статус сообщения (структурированное поле сервера) ===
+// Каждое терминальное серверное сообщение несёт в конце строку
+// «\n[[ai-status:<status>]]» (consumers.py ResponseFormatter): success /
+// error / cleared / limit / processing. Маркер срезается перед рендером
+// (stripAiStatus), но сохраняется в localStorage-персистенции — реплей
+// после перезагрузки переигрывает тот же payload и статус не теряется
+// (важно: серверные тексты теперь локализованы, русский substring-сниффинг
+// на них не срабатывает; он оставлен фолбэком для старых сохранений).
+var AI_WS_STATUS_MARKER_RE = /[\n\r]\[\[ai-status:([a-z]+)\]\]\s*$/;
+
+function getAiWsStatus(raw) {
+    var m = AI_WS_STATUS_MARKER_RE.exec(String(raw || ""));
+    return m ? m[1] : '';
+}
+
+function stripAiStatus(raw) {
+    var text = String(raw || "");
+    return text.replace(AI_WS_STATUS_MARKER_RE, '');
+}
+
 function isTerminalAiMessage(payload) {
-    var text = String(payload || "").toLowerCase();
+    var raw = String(payload || "");
+    var status = getAiWsStatus(raw);
+    if (status) return status !== 'processing';
+    var text = raw.toLowerCase();
     return text.includes("запрос успешно обработан")
         || text.includes("request processed successfully")
         || text.includes("ошибка при обработке запроса")
@@ -1268,7 +1326,28 @@ var localization = {
         groqRequests: "запросов/min",
         groqRequestsDaily: "запросов/день",
         groqRemaining: "Осталось",
-        loadTimeFooter: "Загрузка: {total} с"
+        loadTimeFooter: "Загрузка: {total} с",
+        // Строки, которые не переписываются страничными selectLang-апплерами:
+        // аккордеон, optgroup-лейблы селектора моделей, модалка справки,
+        // aria-метки, алерты отправки (см. applySharedUiLanguageTexts).
+        showLabel: "Показать:",
+        hideLabel: "Скрыть:",
+        favoritesGroup: "Часто используемые",
+        allModelsGroup: "Все модели",
+        experimentalModelsGroup: "Экспериментальные модели",
+        noModels: "Сегодня нет доступных моделей",
+        docsTour: "Подсказки",
+        openMenu: "Открыть меню",
+        notConnected: "Соединение не установлено. Пожалуйста, подождите...",
+        notConnectedShort: "Соединение не установлено",
+        waitResponse: "Дождитесь ответа модели перед новым запросом.",
+        noModelsToday: "Сегодня нет доступных моделей. Повторите позже.",
+        enterMessage: "Пожалуйста, введите сообщение",
+        enterTaskOrCode: "Пожалуйста, введите условие задачи или код программы",
+        chooseProgLangFirst: "Выберите язык программирования перед отправкой",
+        emptyTaskText: "Пустое условие задачи",
+        dlResultUnavailableRaw: "результат тестирования недоступен",
+        contextCleared: "Контекст очищен"
     },
     English: {
         send: "Send",
@@ -1356,7 +1435,27 @@ var localization = {
         groqRequests: "requests/min",
         groqRequestsDaily: "requests/day",
         groqRemaining: "Remaining",
-        loadTimeFooter: "Load: {total} s"
+        loadTimeFooter: "Load: {total} s",
+        // Strings not rewritten by per-page selectLang appliers: accordion,
+        // model-optgroup labels, docs modal, aria labels, send alerts.
+        showLabel: "Show:",
+        hideLabel: "Hide:",
+        favoritesGroup: "Frequently used",
+        allModelsGroup: "All models",
+        experimentalModelsGroup: "Experimental models",
+        noModels: "No models available today",
+        docsTour: "Guide tips",
+        openMenu: "Open menu",
+        notConnected: "Connection not established. Please wait...",
+        notConnectedShort: "Connection not established",
+        waitResponse: "Wait for the model response before a new request.",
+        noModelsToday: "No models available today. Please try again later.",
+        enterMessage: "Please enter a message",
+        enterTaskOrCode: "Please enter the task condition or the program code",
+        chooseProgLangFirst: "Select a programming language before submitting",
+        emptyTaskText: "Empty task condition",
+        dlResultUnavailableRaw: "testing result is unavailable",
+        contextCleared: "Context cleared"
     },
     French: {
         send: "Envoyer",
@@ -1444,7 +1543,27 @@ var localization = {
         groqRequests: "requêtes/min",
         groqRequestsDaily: "requêtes/jour",
         groqRemaining: "Restant",
-        loadTimeFooter: "Chargement : {total} s"
+        loadTimeFooter: "Chargement : {total} s",
+        // Chaînes non réécrites par les apllicateurs selectLang des pages :
+        // accordéon, libellés des groupes de modèles, modale d'aide, aria, alertes.
+        showLabel: "Afficher :",
+        hideLabel: "Masquer :",
+        favoritesGroup: "Fréquemment utilisés",
+        allModelsGroup: "Tous les modèles",
+        experimentalModelsGroup: "Modèles expérimentaux",
+        noModels: "Aucun modèle disponible aujourd'hui",
+        docsTour: "Aide",
+        openMenu: "Ouvrir le menu",
+        notConnected: "Connexion non établie. Veuillez patienter...",
+        notConnectedShort: "Connexion non établie",
+        waitResponse: "Attendez la réponse du modèle avant une nouvelle requête.",
+        noModelsToday: "Aucun modèle disponible aujourd'hui. Réessayez plus tard.",
+        enterMessage: "Veuillez saisir un message",
+        enterTaskOrCode: "Veuillez saisir l'énoncé de la tâche ou le code du programme",
+        chooseProgLangFirst: "Choisissez un langage de programmation avant d'envoyer",
+        emptyTaskText: "Énoncé de la tâche vide",
+        dlResultUnavailableRaw: "résultat du test indisponible",
+        contextCleared: "Contexte effacé"
     }
 };
 
@@ -1463,6 +1582,27 @@ function getUiString(key, defaultValue) {
     var lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
     var dict = localization[lang] || {};
     return dict[key] || (dict.voiceStatus && dict.voiceStatus[key]) || defaultValue;
+}
+
+// === Accordion: единый источник подписей (правило триязычного клиента) ===
+// Роли и префиксы «Показать:/Скрыть:» зависят только от текущего языка UI;
+// один хелпер вместо четырёх копий roleLabels (ai-common.js ×3, find_error.js).
+function _accordionLabels() {
+    var selectLang = document.getElementById('selectLang');
+    var langAttr = selectLang ? selectLang.options[selectLang.selectedIndex].getAttribute('language') : 'Russian';
+    var roleLabels = {
+        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое', dl: 'DL' },
+        English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
+        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
+    };
+    function getRoleLabel(role) {
+        return (roleLabels[langAttr] && roleLabels[langAttr][role]) ? roleLabels[langAttr][role] : role;
+    }
+    return {
+        role: getRoleLabel,
+        show: function (label) { return getUiString('showLabel', 'Показать:') + ' ' + label; },
+        hide: function (label) { return getUiString('hideLabel', 'Скрыть:') + ' ' + label; }
+    };
 }
 
 // === Interface language persistence (in the ai_state cookie) ===
@@ -1533,17 +1673,7 @@ function initAccordionForMessages() {
         roles.push(_detectMessageRole(allMessages[i], i));
     }
 
-    var selectLang = document.getElementById('selectLang');
-    var langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-    var roleLabels = {
-        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое', dl: 'DL' },
-        English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
-        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
-    };
-
-    function getRoleLabel(role, lang) {
-        return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
-    }
+    var L = _accordionLabels();
 
     allMessages.forEach(function(li, idx) {
         if (!li.classList.contains('accordion-li')) {
@@ -1559,7 +1689,7 @@ function initAccordionForMessages() {
             if (role === 'user') btn.classList.add('accordion-user');
             if (role === 'assistant') btn.classList.add('accordion-assistant');
             if (role === 'dl') btn.classList.add('accordion-dl');
-            btn.textContent = 'Показать: ' + getRoleLabel(role, langAttr);
+            btn.textContent = L.show(L.role(role));
 
             var panel = document.createElement('div');
             panel.className = 'panel';
@@ -1571,8 +1701,8 @@ function initAccordionForMessages() {
                 panel.classList.toggle('open');
                 btn.classList.toggle('active');
                 btn.textContent = panel.classList.contains('open')
-                    ? 'Скрыть: ' + getRoleLabel(role, langAttr)
-                    : 'Показать: ' + getRoleLabel(role, langAttr);
+                    ? L.hide(L.role(role))
+                    : L.show(L.role(role));
             });
         }
     });
@@ -1586,7 +1716,7 @@ function initAccordionForMessages() {
             // По умолчанию ВСЕ ответы свёрнуты — раскрываются только по клику.
             lastPanel.classList.remove('open');
             lastBtn.classList.remove('active');
-            lastBtn.textContent = 'Показать: ' + getRoleLabel(lastRole, langAttr);
+            lastBtn.textContent = L.show(L.role(lastRole));
         }
     }
     window._accordionRoles = roles;
@@ -1600,17 +1730,7 @@ function updateLastUpdateLabel() {
 }
 
 function updateAccordionLabels() {
-    var selectLang = document.getElementById('selectLang');
-    var langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-    var roleLabels = {
-        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое', dl: 'DL' },
-        English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
-        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
-    };
-
-    function getRoleLabel(role, lang) {
-        return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
-    }
+    var L = _accordionLabels();
 
     var allMessages = document.getElementById('messages').querySelectorAll(':scope > li');
     var roles = window._accordionRoles || [];
@@ -1620,8 +1740,8 @@ function updateAccordionLabels() {
         if (btn && panel) {
             var role = roles[idx] || 'other';
             btn.textContent = panel.classList.contains('open')
-                ? 'Скрыть: ' + getRoleLabel(role, langAttr)
-                : 'Показать: ' + getRoleLabel(role, langAttr);
+                ? L.hide(L.role(role))
+                : L.show(L.role(role));
         }
     });
 }
@@ -1631,18 +1751,8 @@ function collapseAllMessages() {
     // querySelectorAll('li') зацепил бы вложенные li из markdown-списков
     // внутри панелей — индексы ролей съезжали бы и кнопки получали «Други».
     var allMessages = document.getElementById('messages').querySelectorAll(':scope > li');
-    var selectLang = document.getElementById('selectLang');
-    var langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-    var roleLabels = {
-        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое', dl: 'DL' },
-        English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
-        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
-    };
+    var L = _accordionLabels();
     var roles = window._accordionRoles || [];
-
-    function getRoleLabel(role, lang) {
-        return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
-    }
 
     // Все ответы свёрнуты — раскрываются только вручную (клик по кнопке).
     allMessages.forEach(function(li, idx) {
@@ -1652,7 +1762,7 @@ function collapseAllMessages() {
         if (btn && panel) {
             panel.classList.remove('open');
             btn.classList.remove('active');
-            btn.textContent = 'Показать: ' + getRoleLabel(role, langAttr);
+            btn.textContent = L.show(L.role(role));
         }
     });
 }
@@ -1697,9 +1807,10 @@ function initWebSocket() {
 
         ws.onmessage = function(event) {
             appendPersistedMessage(event.data);
+            var wsData = stripAiStatus(event.data);
             var messages = document.getElementById('messages');
             var message = document.createElement('li');
-            var parsed = parseThinkTag(event.data);
+            var parsed = parseThinkTag(wsData);
             var inThinkTag = document.createElement('div');
             inThinkTag.classList.add('think');
             inThinkTag.innerHTML = parsed.thinkContent;
@@ -1973,6 +2084,12 @@ function savePersistedMessages(arr) {
 // исключение — [[DL]]-записи (статусы кнопки «Тестирование»).
 function _isPersistableWsMessage(raw) {
     var s = String(raw || '');
+    var status = getAiWsStatus(s);
+    if (status) {
+        // Диалоговые статусы («эхо запроса» и ответ ИИ); cleared/limit/error —
+        // транзитные, не сохраняются.
+        return status === 'processing' || status === 'success';
+    }
     return s.indexOf('Обрабатываю запрос пользователя') !== -1
         || s.indexOf('Запрос успешно обработан') !== -1
         || s.lastIndexOf(DL_MSG_MARKER, 0) === 0;
@@ -2049,12 +2166,56 @@ function clearContext() {
         var messages = document.getElementById('messages');
         messages.innerHTML = '';
         var clearMessage = document.createElement('li');
-        clearMessage.innerHTML = '<div style="color: green;">Контекст очищен</div>';
+        clearMessage.innerHTML = '<div style="color: green;">' + escapeHtml(getUiString('contextCleared', 'Контекст очищен')) + '</div>';
         messages.appendChild(clearMessage);
         messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
     } else {
-        alert("Соединение не установлено");
+        alert(getUiString('notConnectedShort', 'Соединение не установлено'));
     }
+}
+
+// === Общая локализация строк, которых страничные selectLang-апплеры не касаются ===
+// (optgroup-лейблы селектора моделей, aria-метки, модалка справки, заглушка
+// «нет моделей»). Языковой контекст тот же — #selectLang. Вызываем сразу
+// (первый рендер) и на каждое изменение языка; регистрируется в
+// initSelectionPersistence(), выполняющемся на всех трёх страницах.
+function applySharedUiLanguageTexts() {
+    var modelSelect = document.getElementById('select');
+    if (modelSelect) {
+        var groupLabels = {
+            favorites: getUiString('favoritesGroup', 'Часто используемые'),
+            all: getUiString('allModelsGroup', 'Все модели'),
+            experimental: getUiString('experimentalModelsGroup', 'Экспериментальные модели')
+        };
+        Array.prototype.forEach.call(modelSelect.querySelectorAll('optgroup[data-ai-group]'), function (group) {
+            var label = groupLabels[group.getAttribute('data-ai-group')];
+            if (!label) return;
+            // data-base-label — база суффиксов статистики (applyModelGroupUnitLabels);
+            // меняем оба поля согласованно, иначе суффикс прицепится к старой подписи.
+            group.setAttribute('data-base-label', label);
+            group.label = label;
+        });
+        var noModelsOpt = modelSelect.querySelector('option[value=""]');
+        if (noModelsOpt) noModelsOpt.textContent = getUiString('noModels', 'Сегодня нет доступных моделей');
+    }
+    var themeBtn = document.getElementById('themeToggleBtn');
+    if (themeBtn) {
+        var themeLabel = getUiString('themeToggle', 'Сменить тему');
+        themeBtn.setAttribute('aria-label', themeLabel);
+        themeBtn.setAttribute('title', themeLabel);
+    }
+    var menuBtn = document.querySelector('.toggle-button');
+    if (menuBtn) menuBtn.setAttribute('aria-label', getUiString('openMenu', 'Открыть меню'));
+    var docsBtn = document.getElementById('userDocsBtn');
+    if (docsBtn) {
+        var docsLabel = getUiString('userDocs', 'Инструкция пользователя');
+        docsBtn.setAttribute('aria-label', docsLabel);
+        docsBtn.setAttribute('title', docsLabel);
+    }
+    var tourBtn = document.getElementById('aiDocsTourBtn');
+    if (tourBtn) tourBtn.textContent = getUiString('docsTour', 'Подсказки');
+    var docsDownload = document.getElementById('aiDocsDownload');
+    if (docsDownload && docsDownload.lastChild) docsDownload.lastChild.textContent = ' ' + getUiString('docsDownload', 'Скачать .md');
 }
 
 // === Common: language change handler (pages can extend via selectLang listener) ===

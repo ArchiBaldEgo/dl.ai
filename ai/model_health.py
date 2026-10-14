@@ -523,6 +523,7 @@ def list_model_refresh_runs(since_ts=0.0):
     return [{
         "run_id": progress.get("run_id", ""),
         "run_type": "model_refresh",
+        "name": "",
         "page_url": "/ai/admin/arm/models/",
         "status": status,
         "completed": int(progress.get("completed") or 0),
@@ -900,10 +901,11 @@ def get_available_model_options():
 # исключены: не вытягивают по токенам пакетную генерацию кода.
 ARM_SOLVE_MODEL_PREFIXES = ("Web_", "Ollama_")
 
-# Модели, скрытые из селекторов (пока — OpenRouter): не показываются в чате и
-# ARM-инструментах, но остаются в каталоге, health-check и «Состоянии моделей».
-# Вернуть — убрать префикс из этого кортежа.
-HIDDEN_FROM_SELECTORS_PREFIXES = ("OR_",)
+# Модели, скрытые из селекторов вовсе (каталог/health-check/«Состояние моделей»
+# остаются): на 2026-10 пусто. OpenRouter ниже НЕ здесь, а в views.py — там он
+# выводится в чате отдельной «экспериментальной» группой в самом низу селектора
+# (и исключён из /arm/solve/ через ARM_SOLVE_MODEL_PREFIXES).
+HIDDEN_FROM_SELECTORS_PREFIXES = ()
 
 
 def is_hidden_from_selectors(key):

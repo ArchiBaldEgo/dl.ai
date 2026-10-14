@@ -157,6 +157,53 @@ def _trim_prose_tail(lines):
 
 
 
+# Заголовок «второго решения»: после основного кода модели часто дают
+# «Альтернатива:/Вариант 2:/Another solution:» и второй код-блок. Проза-гейты
+# заголовок пропускают (короткие строки < 4 слов), а _carve_code_block
+# «перепрыгивает» одиночную не-кодовую строку зазором ≤2 — без отдельного
+# среза в сохранённое решение попадает и заголовок, и чужой код второй версии.
+_ALT_HEADING_RE = _re.compile(
+    r"^\s*(?:"
+    r"альтернат\w*"
+    r"|вариант\s*(?:№\s*)?\d"
+    r"|вариант\s+[БбАа]?"
+    r"|\d\s*[-—–]\s*[йя]?\s*вариант"
+    r"|втор(?:ой|ая)\s+(?:вариант|версия|реализация|способ)"
+    r"|alternative(?:\s+(?:variant|solution|approach|option|way))?"
+    r"|another\s+(?:variant|solution|approach|option|way)"
+    r"|second\s+(?:variant|solution|approach|option|way)"
+    r"|способ\s+\d"
+    r")[\s:—–-]*",
+    _re.IGNORECASE,
+)
+
+
+def _is_alternative_heading(line):
+    """True, если строка — заголовок второго варианта решения."""
+    return bool(_ALT_HEADING_RE.match(line))
+
+
+def cut_after_alternative_heading(text):
+    """Срезать текст ПОСЛЕ первого заголовка «второго решения».
+
+    Срез делается только когда до заголовка уже есть ≥2 кодовых индикатора
+    (кодовая строка или строка-оградка): заголовок, открывающий ЕДИНСТВЕННЫЙ
+    вариант («Вариант 1: …код»), код не трогает. Оградка считается — у
+    инструкций вроде «sub ax, y» нет ни одного кодового маркера из
+    _CODE_HINT_RE, а «mov + оградка» перед заголовком — уже основное решение.
+    Возвращает укороченный текст (или исходный, если срезать нечего).
+    """
+    lines = text.splitlines()
+    code_seen = 0
+    for index, line in enumerate(lines):
+        if _is_alternative_heading(line):
+            if code_seen >= 2:
+                return "\n".join(lines[:index]).rstrip()
+        elif _line_is_code(line) or line.lstrip().startswith("```"):
+            code_seen += 1
+    return text
+
+
 # Строка-оградка: ```, ```lang, отступы слева допустимы
 _FENCE_LINE_RE = _re.compile(r"^\s*```[^\n]*$", _re.MULTILINE)
 
@@ -299,19 +346,22 @@ def _asm_candidates_for_anchor(lines, start):
     return (start, end, False)
 
 
-def extract_asm_i86(text):
+def extract_asm_i86(text, relaxed=False):
     """Структурный экстрактор ассемблера i8086 (DL-каркас с jmp begin).
 
     Возвращает код или "" (нет каркасных маркеров — не наш случай).
 
     Модели в CoT упоминают каркас и цитируют «болванки» программ; простая
     привязка к ПЕРВОМУ вхождению тащила болванку + прозу + программу скопом
-    (res#3987). Теперь: перебираем ВСЕ анкеры (^jmp begin / ^begin:), от
-    каждого — кандидат до ближайшего концевика, валидируем (не проза,
-    ≥4 строки, проза в середине), берём ПОСЛЕДНИЙ валидный (модели цитируют
-    болванки раньше финального ответа). Мусорная проза внутри кандидат
-    вырезается, если каркас в кандидат ровно один; при двух каркасах
-    (болванка + программа) кандидат бракуется — склейка к DL не идёт.
+    (res#3987). Поэтому: перебираем ВСЕ анкеры (^jmp begin), от каждого —
+    кандидат до ближайшего концевика, валидируем, берём ПОСЛЕДНИЙ валидный
+    (модели цитируют болванки раньше финального ответа).
+
+    relaxed=True — строгие прозя-валидации (не-проза, мид-проза) пропускаются:
+    аварийный тир «долгое рассуждение без фенсов», когда все строгие тиры
+    дали пусто; структурные минимумы (концевик, ≥4 строк, один jmp begin)
+    остаются, а вердикт определит DL. Вызывающий код применяет гейт
+    has_language_marker.
     """
     if not text:
         return ""
@@ -343,22 +393,27 @@ def extract_asm_i86(text):
             if idx is not None:
                 body = body[:idx + 1]
         candidate = strip_code_fence_lines("\n".join(body)).strip()
-        if not candidate or _looks_like_prose(candidate):
+        if not candidate:
+            continue
+        if not relaxed and _looks_like_prose(candidate):
             continue
         cand_lines = candidate.splitlines()
         if len(cand_lines) < 4:
             continue
         # Повторный «jmp begin» внутри кандидата — склейка двух каркасов
-        # (болванка из CoT + программа) — бракуем (res#3987). Строки
-        # begin:/Ends: — законная часть каркаса.
+        # (болванка из CoT + программа) — бракуем и в relaxed (res#3987):
+        # такая склейка не компилируется ни при каком прозо-допущении.
+        # Строки begin:/Ends: — законная часть каркаса.
         inner_jmp = sum(1 for j, l in enumerate(cand_lines) if j and _JMP_BEGIN_RE.match(l))
         if inner_jmp:
             continue
-        cut_code, _ = _cut_mid_prose(candidate)
-        cut_code = strip_code_fence_lines(cut_code).strip()
-        if not cut_code or _looks_like_prose(cut_code) or len(cut_code.splitlines()) < 4:
-            continue
-        candidates.append((marker_seen, cut_code))
+        if not relaxed:
+            cut_code, _ = _cut_mid_prose(candidate)
+            cut_code = strip_code_fence_lines(cut_code).strip()
+            if not cut_code or _looks_like_prose(cut_code) or len(cut_code.splitlines()) < 4:
+                continue
+            candidate = cut_code
+        candidates.append((marker_seen, candidate))
     if not candidates:
         return ""
     # Выбор: ПОСЛЕДНИЙ кандидат (модели пишут болванки/цитаты раньше финального
@@ -368,14 +423,36 @@ def extract_asm_i86(text):
     return (marked or [c for _, c in candidates])[-1]
 
 
-def extract_mpa_c(text):
+def _closing_brace_line(line):
+    """Строка, ЗАКРЫВАЮЩАЯ блочный кандидат: «}», «};» / «}» в хвосте строки.
+
+    Скобка посреди строки (текст «{…}» в прозе) закрывающей не считается —
+    окно должно кончаться на строке-скобке, как в настоящем коде.
+    """
+    stripped = (line.strip() or " ")
+    return bool(_CLOSING_BRACE_RE.match(stripped) or _re.search(r"}\s*;?\s*$", stripped))
+
+
+def extract_mpa_c(text, relaxed=False):
     """Структурный экстрактор С-МПА (псевдо-C с __in/__bits) и обычного C.
 
-    Перебор анкеров (объявления __in/__out/__bits и int/void main) с
-    валидацией: кандидат от анкера до последней закрывающей скобки,
-    скобки сбалансированы, проза в середине вырезается (res#3987-класс:
-    цитаты-болванки в CoT больше не притягивают экстрактор), берётся
-    ПОСЛЕДНИЙ валидный кандидат — финальный ответ модели обычно позже.
+    ОКНО на каждый анкер (объявления __in/__out/__bits и int/void main):
+    от анкера до БАЛАНСНОГО закрытия фигурных скобок (depth вернулся в 0),
+    а НЕ до последней скобки всего текста — прежний вариант на длинном
+    рассуждении собирал кандидата из ВСЕХ программ простыни (>1 main и дубли
+    __bits) и браковал его целиком, оставляя пару без кода. Окно без «{» или
+    с несошедшимся до конца текста балансом — отбрасывается. Валидации
+    применяются к КАЖДОМУ окну (не проза, скобки сбалансированы, ≤1 main,
+    дубли __bits — локально в окне); дубли программ МЕЖДУ окнами — норма
+    (модель переписывает программу в рассуждении). Выбор: максимум строк,
+    сортировка устойчива — при равенстве берётся ПОСЛЕДНИЙ (финальный ответ
+    модели обычно позже; res#4160).
+
+    relaxed=True — аварийный тир «долгое рассуждение без фенсов»: прозя-
+    валидации (не-проза, мид-проза, _looks_like_code) и проверка дублей
+    __bits пропускаются; окно с несколькими main обрезается до начала
+    ПОСЛЕДНЕГО main; остаются только структурные минимумы (сбалансированные
+    скобки, ≥4 строк). Вызывающий код применяет гейт has_language_marker.
     """
     if not text:
         return ""
@@ -383,43 +460,114 @@ def extract_mpa_c(text):
     anchors = [i for i, line in enumerate(lines) if _MPA_DECL_RE.match(line) or _MPA_MAIN_RE.match(line)]
     if not anchors:
         return ""
+
+    def window_end(start):
+        """Первое БАЛАНСНОЕ закрытие скобок после анкера; None — не сошлось.
+
+        Считаем depth по всем «{»/«}» строк; конец — строка-скобка
+        (_closing_brace_line), на которой depth вернулся в 0 ПОСЛЕ того,
+        как был > 0 (окно обязано что-то открыть).
+        """
+        depth = 0
+        opened = False
+        for i in range(start, len(lines)):
+            stripped = lines[i].strip() or " "
+            depth += stripped.count("{") - stripped.count("}")
+            if depth > 0:
+                opened = True
+            if opened and depth <= 0 and _closing_brace_line(lines[i]):
+                return i
+        return None
+
+    def window_end_from_decl(start):
+        """Конец программы от якоря-объявления: declи + хелперы + main.
+
+        Прежний window_end от якоря-объявления закрывался на ПЕРВОЙ
+        сбалансированной функции: если модель оформила хелперы (abs_val/sign)
+        ДО main, в кандидата попадали только declи с первым хелпером, main
+        выпадал — DL падал («Undefined variable …»). Здесь окончание окна —
+        закрытие блока main; хелперы ДО main считаются частью программы.
+        Если main так и не закрылся — последний баланс до EOF.
+        """
+        depth = 0
+        opened = False
+        saw_main = False
+        pending_end = None
+        for i in range(start, len(lines)):
+            stripped = lines[i].strip() or " "
+            depth += stripped.count("{") - stripped.count("}")
+            if depth > 0:
+                opened = True
+            if _MPA_MAIN_RE.match(lines[i]):
+                saw_main = True
+            if opened and depth <= 0 and _closing_brace_line(lines[i]):
+                pending_end = i
+                if saw_main:
+                    return i
+        return pending_end
+
+    def end_for(start):
+        """Якорь-объявление → до закрытия main (иначе теряются хелперы перед
+        main); main-якорь → тело main, как раньше."""
+        if _MPA_DECL_RE.match(lines[start]):
+            return window_end_from_decl(start)
+        return window_end(start)
+
     candidates = []
     for start in anchors:
-        end = None
-        for i in range(start, len(lines)):
-            # последняя закрывающая скобка «блочного» вида (не «{» посреди строки)
-            if _CLOSING_BRACE_RE.match(lines[i].strip() or " ") or _re.search(r"}\s*;?\s*$", lines[i].strip() or " "):
-                end = i
+        end = end_for(start)
         if end is None or end <= start:
             continue
         body = [l for l in lines[start:end + 1]]
         body = _strip_prose_tail(body)
         candidate = strip_code_fence_lines("\n".join(body)).strip()
-        if not candidate or _looks_like_prose(candidate):
+        if not candidate:
+            continue
+        cand_line_count = len(candidate.splitlines())
+        if cand_line_count < 4:
             continue
         if candidate.count("{") > candidate.count("}"):
             continue  # программа не закрыта — модель/болванка обрыв
-        # Два main-а в кандидате — склейка двух болванок/программ.
-        main_lines = sum(1 for l in candidate.splitlines() if _MPA_MAIN_RE.match(l))
-        if main_lines > 1:
-            continue
-        # Дубли С-МПА-деклараций (одна и та же __bits-переменная объявлена
-        # дважды) — склеились объявления из болванки и программы.
-        mpa_decl_names = _re.findall(
-            r"\b[\w]+\s+(?:__in\s+|__out\s+|\s)*\s*__bits\s*\(\s*\d+\s*\)\s*[A-Za-z_]\w*",
-            candidate,
-            _re.IGNORECASE,
-        )
-        mpa_decl_norm = [_re.sub(r"\s+", " ", d).strip().lower() for d in mpa_decl_names]
-        if len(mpa_decl_norm) != len(set(mpa_decl_norm)):
-            continue
-        cut_code, _ = _cut_mid_prose(candidate)
-        cut_code = strip_code_fence_lines(cut_code).strip()
-        if not cut_code or _looks_like_prose(cut_code):
-            continue
-        if not _looks_like_code(cut_code) and len(cut_code.splitlines()) < 4:
-            continue
-        candidates.append((len(cut_code.splitlines()), cut_code))
+        # Два main-а в окне — склейка двух болванок/программ; в строгом
+        # режиме бракуем, в relaxed обрезаем окно до ПОСЛЕДНЕГО main.
+        main_indices = [j for j, l in enumerate(candidate.splitlines()) if _MPA_MAIN_RE.match(l)]
+        if len(main_indices) > 1:
+            if not relaxed:
+                continue
+            truncated = "\n".join(candidate.splitlines()[main_indices[-1]:])
+            truncated = strip_code_fence_lines(truncated).strip()
+            if (
+                truncated.splitlines()
+                and len(truncated.splitlines()) >= 4
+                and truncated.count("{") <= truncated.count("}")
+            ):
+                candidate = truncated
+                cand_line_count = len(truncated.splitlines())
+            else:
+                continue
+        if not relaxed:
+            if _looks_like_prose(candidate):
+                continue
+            # Дубли С-МПА-деклараций (одна и та же __bits-переменная объявлена
+            # дважды) — склеились объявления из болванки и программы (в
+            # пределах ОДНОГО окна; между окнами дубли — норма).
+            mpa_decl_names = _re.findall(
+                r"\b[\w]+\s+(?:__in\s+|__out\s+|\s)*\s*__bits\s*\(\s*\d+\s*\)\s*[A-Za-z_]\w*",
+                candidate,
+                _re.IGNORECASE,
+            )
+            mpa_decl_norm = [_re.sub(r"\s+", " ", d).strip().lower() for d in mpa_decl_names]
+            if len(mpa_decl_norm) != len(set(mpa_decl_norm)):
+                continue
+            cut_code, _ = _cut_mid_prose(candidate)
+            cut_code = strip_code_fence_lines(cut_code).strip()
+            if not cut_code or _looks_like_prose(cut_code):
+                continue
+            if not _looks_like_code(cut_code) and len(cut_code.splitlines()) < 4:
+                continue
+            candidate = cut_code
+            cand_line_count = len(candidate.splitlines())
+        candidates.append((cand_line_count, candidate))
     if not candidates:
         return ""
     # Лучший: больше строк (полный кандидат decls+main длиннее main-одного);

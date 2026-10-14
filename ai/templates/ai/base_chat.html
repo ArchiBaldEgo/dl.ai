@@ -54,7 +54,7 @@
                 <select id="select">
                     {% if available_models %}
                         {% if favorite_models %}
-                            <optgroup label="Часто используемые">
+                            <optgroup data-ai-group="favorites" label="{{ t.favoritesGroup }}">
                                 {% for model in favorite_models %}
                                     <option value="{{ model.key }}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}">
                                         {{ model.title }}
@@ -62,15 +62,25 @@
                                 {% endfor %}
                             </optgroup>
                         {% endif %}
-                        <optgroup label="Все модели">
+                        <optgroup data-ai-group="all" label="{{ t.allModelsGroup }}">
                             {% for model in other_models %}
                                 <option value="{{ model.key }}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}"{% if model.key == default_model_key %} selected{% endif %}>
                                     {{ model.title }}
                                 </option>
                             {% endfor %}
                         </optgroup>
+                        <!-- Экспериментальные бесплатные модели (OpenRouter) — всегда самый низ селектора -->
+                        {% if experimental_models %}
+                            <optgroup data-ai-group="experimental" label="{{ t.experimentalModelsGroup }}">
+                                {% for model in experimental_models %}
+                                    <option value="{{ model.key }}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}">
+                                        {{ model.title }}
+                                    </option>
+                                {% endfor %}
+                            </optgroup>
+                        {% endif %}
                     {% else %}
-                        <option value="" selected disabled>Сегодня нет доступных моделей</option>
+                        <option value="" selected disabled>{{ t.noModels }}</option>
                     {% endif %}
                 </select>
                 <!-- Сортировка «Все модели» по статистике прогонов /arm/solve/
@@ -78,18 +88,18 @@
                      (initModelSortSelector). Пересортировка касается только
                      optgroup «Все модели» — favorite-first контракт не трогаем. -->
                 <select id="selectModelSort">
-                    <option value="default" selected>Порядок: по алфавиту</option>
-                    <option value="speed">Порядок: по скорости</option>
-                    <option value="accuracy">Порядок: по точности</option>
-                    <option value="both">Порядок: скорость + точность</option>
+                    <option value="default" selected>{{ t.sortDefault }}</option>
+                    <option value="speed">{{ t.sortSpeed }}</option>
+                    <option value="accuracy">{{ t.sortAccuracy }}</option>
+                    <option value="both">{{ t.sortBoth }}</option>
                 </select>
                 <select id="selectType" onchange="goToAiPage(this)">
-                    <option data-link="/ai/chat/" {% block chat_selected %}{% endblock %}>Чат с DLAI</option>
-                    <option data-link="/ai/solve-problem/" {% block solve_selected %}{% endblock %}>Реши задачу</option>
-                    <option data-link="/ai/find-error/" {% block error_selected %}{% endblock %}>В чём ошибка?</option>
+                    <option data-link="/ai/chat/" {% block chat_selected %}{% endblock %}>{{ t.chat }}</option>
+                    <option data-link="/ai/solve-problem/" {% block solve_selected %}{% endblock %}>{{ t.decideTask }}</option>
+                    <option data-link="/ai/find-error/" {% block error_selected %}{% endblock %}>{{ t.findError }}</option>
                 </select>
                 <button type="button" class="theme-toggle" id="themeToggleBtn"
-                    aria-label="Сменить тему" title="Сменить тему">
+                    aria-label="{{ t.themeToggle }}" title="{{ t.themeToggle }}">
                     <svg class="icon-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
                         fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
                         stroke-linejoin="round" aria-hidden="true">
@@ -112,11 +122,11 @@
                 <!-- Инструкция пользователя «?» (ai-common.js initUserDocs):
                      модалка с HTML-рендером главы DOCX.md + скачивание .md -->
                 <button type="button" class="theme-toggle doc-toggle" id="userDocsBtn"
-                    aria-label="Инструкция пользователя" title="Инструкция пользователя">?</button>
+                    aria-label="{{ t.userDocs }}" title="{{ t.userDocs }}">?</button>
             </div>
             <div class="voice-mod-div">
                 <button type="button" class="voice-mode-btn" id="voiceModeBtn" onclick="toggleVoiceControls()">
-                    Голосовой режим
+                    {{ t.voiceMode }}
                 </button>
                 <div class="voice-status" id="voiceStatus"></div>
             </div>
@@ -124,20 +134,20 @@
             <div class="voice-controls" id="voiceControls">
                 <button type="button" class="voice-btn" id="voiceInputBtn" onclick="toggleVoiceInput()">
                     <span class="voice-input-indicator" id="voiceIndicator"></span>
-                    Голосовой ввод
+                    {{ t.voiceInput }}
                 </button>
                 <button type="button" class="voice-btn" id="voiceOutputBtn" onclick="speakLastResponse()">
-                    Озвучить ответ
+                    {{ t.voiceOutput }}
                 </button>
 
                 <!-- Чекбокс для think-тегов -->
                 <div class="think-checkbox">
                     <input type="checkbox" id="speakThinkContent" checked>
-                    <label for="speakThinkContent" id="speakThinkLabel">Озвучивать think-блоки</label>
+                    <label for="speakThinkContent" id="speakThinkLabel">{{ t.speakThinkLabel }}</label>
                 </div>
             </div>
             <div id="modelLimitsWidget"></div>
-            <div class="panel-date"><span class="ai-last-update-label">Последнее обновление</span>: {{ last_update_date|date:"d.m.Y" }}</div>
+            <div class="panel-date"><span class="ai-last-update-label">{{ t.lastUpdate }}</span>: {{ last_update_date|date:"d.m.Y" }}</div>
         </div>
         <hr/>
 
@@ -150,8 +160,8 @@
                     {% csrf_token %}
                     {% block form_content %}{% endblock %}
                     <div class="buttons-block">
-                        <button type="submit">Send</button>
-                        <button type="button" onclick="clearContext()">Clear Context</button>
+                        <button type="submit">{{ t.send }}</button>
+                        <button type="button" onclick="clearContext()">{{ t.clear }}</button>
                         {% block extra_buttons %}{% endblock %}
                     </div>
 
@@ -165,12 +175,12 @@
         <div class="sidebar">
             <a href="/ai/admin/login/?next=/ai/admin/" class="sidebar-admin-link">
                 <div class="sidebar-header" id="adminPanelLink">
-                    Админ-Панель
+                    {{ t.adminPanel }}
                 </div>
             </a>
         </div>
 
-        <button class="toggle-button" type="button" aria-label="Open menu">
+        <button class="toggle-button" type="button" aria-label="{{ t.openMenu }}">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="9 18 15 12 9 6" />
@@ -186,9 +196,9 @@
         <div class="ai-docs-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="aiDocsTitle">
             <div class="ai-docs-modal-header">
                 <h2 id="aiDocsTitle"></h2>
-                <button type="button" id="aiDocsTourBtn" class="ai-docs-modal-tour">Подсказки</button>
-                <a id="aiDocsDownload" class="ai-docs-modal-download" download>&#8681; Скачать .md</a>
-                <button type="button" id="aiDocsClose" class="ai-docs-modal-close" aria-label="Закрыть">&#10005;</button>
+                <button type="button" id="aiDocsTourBtn" class="ai-docs-modal-tour">{{ t.docsTour }}</button>
+                <a id="aiDocsDownload" class="ai-docs-modal-download" download>&#8681; {{ t.docsDownload }}</a>
+                <button type="button" id="aiDocsClose" class="ai-docs-modal-close" aria-label="{{ t.docsClose }}">&#10005;</button>
             </div>
             <div class="ai-docs-modal-body" id="aiDocsBody"></div>
         </div>

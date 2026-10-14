@@ -78,6 +78,118 @@
     var LABEL_DONE = "Готово";
     var LABEL_SKIP = "Скрыть";
 
+    // === Локализация юзер-туров (правило триязычной клиентской части) ===
+    // Только scope'ы chat/solve/find_error; админские туры остаются русскими.
+    // Русские тексты живут в REGISTRY (источник истины), таблица несёт en/fr;
+    // язык читается на старте тура из #selectLang (кука ai_state — фолбэк).
+    var LABELS_TR = {
+        ru: { prev: LABEL_PREV, next: LABEL_NEXT, done: LABEL_DONE, skip: LABEL_SKIP, progress: " из " },
+        en: { prev: "Back", next: "Next", done: "Done", skip: "Hide", progress: " of " },
+        fr: { prev: "Retour", next: "Suivant", done: "Prêt", skip: "Masquer", progress: " sur " }
+    };
+
+    var USER_STEP_TR = {
+        en: {
+            chat: {
+                "#selectLang": { title: "Page language", text: "This changes the language of the interface: Russian, English, French." },
+                "#select": { title: "Model selection", text: "These are different AI helper models. Click and pick who will answer you." },
+                "#selectModelSort": { title: "Model sorting", text: "You can show faster or more precise models first." },
+                "#selectType": { title: "Mode", text: "Modes: chat, “Solve the task”, “What's the error?”. Switch through the list." },
+                "#themeToggleBtn": { title: "Light or dark", text: "Click — the page turns dark. Click again — light." },
+                "#userDocsBtn": { title: "The “?” button", text: "This is the user guide. Click if anything is unclear. You can also show these tips again there." },
+                "#voiceModeBtn": { title: "Voice mode", text: "Would you rather speak than type? Click it — you can speak by voice." },
+                "#content .toggle-button": { title: "Side menu", text: "The arrow on the right opens the menu with a link to the admin panel." },
+                "#messages": { title: "History", text: "History: everything you write and the model answers appears here." },
+                "#messageText": { title: "Type your question here", text: "Just type your question into this field." },
+                '.buttons-block button[type="submit"]': { title: "The “Send” button", text: "When the question is written, click this button." },
+                '[onclick="clearContext()"]': { title: "Erase everything", text: "This button clears the conversation and starts over." }
+            },
+            solve: {
+                "#selectType": { title: "Where you are", text: "You are on the “Solve the task” page. Use this list to return to “Chat”." },
+                "#selectLang": { title: "Page language", text: "This changes the interface language." },
+                "#select": { title: "Model selection", text: "The list of model helpers that will solve the task." },
+                "#selectProgLng": { title: "Programming language", text: "First choose the language of your code: C or Assembler." },
+                "#selectTheme": { title: "Topic", text: "Pick a topic — it tells the model what the task is about." },
+                "#selectPrompt": { title: "Preprompt", text: "A preprompt is a small hint for the model. The selected one is fine." }
+            },
+            find_error: {
+                "#selectType": { title: "Where you are", text: "You are on the “What’s the error?” page. Use the list to return to “Chat” or “Solve the task”." },
+                "#selectLang": { title: "Page language", text: "This changes the interface language." },
+                "#select": { title: "Model selection", text: "Pick the model helper that will check your code." },
+                "#taskText": { title: "Task text", text: "Copy the task condition from dl.gsu.by here." },
+                "#codeText": { title: "Code text", text: "And paste the whole program here." }
+            }
+        },
+        fr: {
+            chat: {
+                "#selectLang": { title: "Langue de la page", text: "C’est ici que change la langue des textes : Russe, English, Français." },
+                "#select": { title: "Choix du modèle", text: "Voici différents modèles-assistants. Clique et choisis celui qui te répondra." },
+                "#selectModelSort": { title: "Tri des modèles", text: "Tu peux afficher en premier les modèles plus rapides ou plus précis." },
+                "#selectType": { title: "Mode", text: "Modes : chat, « Résoudre la tâche », « Quelle est l’erreur ? ». On change via la liste." },
+                "#themeToggleBtn": { title: "Clair ou sombre", text: "Clique — la page devient sombre. Clique encore — claire à nouveau." },
+                "#userDocsBtn": { title: "Le bouton « ? »", text: "C’est le guide utilisateur. Clique si quelque chose n’est pas clair. Tu peux aussi réafficher ces astuces ici." },
+                "#voiceModeBtn": { title: "Mode vocal", text: "Tu préfères parler plutôt que taper ? Clique — tu peux parler avec la voix." },
+                "#content .toggle-button": { title: "Menu latéral", text: "La flèche à droite ouvre le menu, qui contient le lien vers le panneau admin." },
+                "#messages": { title: "Historique", text: "Historique : tout ce que tu écris et que le modèle répond s’affiche ici." },
+                "#messageText": { title: "Tu écris ta question ici", text: "Écris simplement ta question dans ce champ." },
+                '.buttons-block button[type="submit"]': { title: "Le bouton « Envoyer »", text: "Quand la question est écrite, clique sur ce bouton." },
+                '[onclick="clearContext()"]': { title: "Tout effacer", text: "Ce bouton efface la conversation et recommence." }
+            },
+            solve: {
+                "#selectType": { title: "Où tu es", text: "Tu es sur la page « Résoudre la tâche ». Par cette liste, tu reviens au « Chat »." },
+                "#selectLang": { title: "Langue de la page", text: "C’est ici que change la langue des textes." },
+                "#select": { title: "Choix du modèle", text: "La liste des modèles-assistants qui résoudront la tâche." },
+                "#selectProgLng": { title: "Langage de programmation", text: "Choisis d’abord le langage de ton code : C ou Assembleur." },
+                "#selectTheme": { title: "Thème", text: "Choisis un thème — il explique au modèle de quoi parle la tâche." },
+                "#selectPrompt": { title: "Pré-promp", text: "Le pré-prompt est une petite indication pour le modèle. Celle déjà choisie suffit." }
+            },
+            find_error: {
+                "#selectType": { title: "Où tu es", text: "Tu es sur la page « Quelle est l’erreur ? ». Par la liste, reviens au « Chat » ou à « Résoudre la tâche »." },
+                "#selectLang": { title: "Langue de la page", text: "C’est ici que change la langue des textes." },
+                "#select": { title: "Choix du modèle", text: "Choisis le modèle-assistant qui vérifiera ton code." },
+                "#taskText": { title: "Texte de la tâche", text: "Colle ici l’énoncé de la tâche depuis dl.gsu.by." },
+                "#codeText": { title: "Texte du code", text: "Et colle ici le programme en entier." }
+            }
+        }
+    };
+
+    // Язык UI («Русский»/«English»/«Français»): текущий селект, иначе кука ai_state.
+    function wizardUiLanguage() {
+        var sel = document.getElementById("selectLang");
+        if (sel && sel.value) return sel.value;
+        try {
+            var m = (document.cookie || "").match(/(?:^|;\s*)ai_state=([^;]*)/);
+            if (m) {
+                var state = JSON.parse(decodeURIComponent(m[1]));
+                if (state && state.lang) return String(state.lang);
+            }
+        } catch (e) { /* нет куки или кривой JSON — дефолт (русский) */ }
+        return "";
+    }
+
+    function uiSuffix(language) {
+        var low = String(language || "").toLowerCase();
+        if (low.indexOf("en") === 0) return "en";
+        if (low.indexOf("fr") === 0) return "fr";
+        return "ru";
+    }
+
+    // Локализация юзер-шагов по селектору цели (уникален в своём scope).
+    function localizeUserSteps(scopeName, list) {
+        var suffix = uiSuffix(wizardUiLanguage());
+        var table = (USER_STEP_TR[suffix] || {})[scopeName];
+        if (!table) return list;
+        return list.map(function (st) {
+            var tr = table[st.sel];
+            if (!tr) return st;
+            return Object.assign({}, st, { title: tr.title, text: tr.text });
+        });
+    }
+
+    function currentLabels() {
+        return LABELS_TR[cfg && cfg.lang ? cfg.lang : "ru"];
+    }
+
     // === Реестр шагов (тексты — константы языка: правятся только здесь) ===
     // v3: маршрут строит движок — sortResolved ставит шаги сверху вниз по
     // позиции цели на экране. Списки ниже — полный НАБОР целей страницы,
@@ -401,7 +513,7 @@
         parts.btnSkip = document.createElement("button");
         parts.btnSkip.type = "button";
         parts.btnSkip.className = BTN_SKIP;
-        parts.btnSkip.textContent = LABEL_SKIP;
+        parts.btnSkip.textContent = currentLabels().skip;
         parts.btnSkip.addEventListener("click", function () {
             stop({ mark: true });
         });
@@ -409,7 +521,7 @@
         parts.btnPrev = document.createElement("button");
         parts.btnPrev.type = "button";
         parts.btnPrev.className = BTN_PREV;
-        parts.btnPrev.textContent = LABEL_PREV;
+        parts.btnPrev.textContent = currentLabels().prev;
         parts.btnPrev.addEventListener("click", function () {
             prev();
         });
@@ -637,10 +749,10 @@
     function renderContent(step) {
         parts.title.textContent = step.title || "";
         parts.text.textContent = step.text || "";
-        parts.progress.textContent = (index + 1) + " из " + steps.length;
+        parts.progress.textContent = (index + 1) + currentLabels().progress + steps.length;
         parts.btnPrev.disabled = index === 0;
         var last = index === steps.length - 1;
-        parts.btnNext.textContent = last ? LABEL_DONE : LABEL_NEXT;
+        parts.btnNext.textContent = last ? currentLabels().done : currentLabels().next;
         parts.btnNext.className = last ? BTN_DONE : BTN_NEXT;
         // Вхождение — заново на каждом шаге (subtle).
         popover.classList.remove(POP_ENTER);
@@ -980,8 +1092,17 @@
         );
         if (!resolved.length) return; // нечего показывать — тихо выходим
 
+        try {
+            // Юзер-туры локализуются на старте (правило триязычной
+            // клиентской части): заменяем title/text без копирования
+            // русской истины в таблицу.
+            resolved = localizeUserSteps(scopeName, resolved);
+        } catch (e) { /* ошибка локализации не валит тур */ }
+
         steps = resolved;
         cfg = {
+            lang: ["chat", "solve", "find_error"].indexOf(scopeName) !== -1
+                ? uiSuffix(wizardUiLanguage()) : "ru",
             scope: scopeName,
             version: conf.version,
             role: conf.role ? String(conf.role) : "",

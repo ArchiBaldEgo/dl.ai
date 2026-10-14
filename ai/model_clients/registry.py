@@ -27,6 +27,12 @@ _REASONING = {"text": True, "vision": False, "reasoning": True}
 # пользователя нет своего топ-1 фаворита (см. views._render_ai_page).
 DEFAULT_MODEL_KEY = "Ollama_Gemma_4_Cloud"
 
+# Префиксы ключей «экспериментальных» моделей (сейчас — OpenRouter): в чате они
+# видны, но отдельной группой В САМОМ НИЗУ селектора и никогда не поднимаются
+# фаворитами (см. views._render_ai_page / views._get_user_top_model_keys);
+# в /arm/solve/ их нет (model_health.ARM_SOLVE_MODEL_PREFIXES).
+EXPERIMENTAL_MODEL_PREFIXES = ("OR_",)
+
 
 _MODELS: Dict[str, Dict[str, object]] = {
     # --- Web DeepSeek (бот-пул через Puppeteer) — бесплатные, идут первыми ---

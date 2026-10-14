@@ -14,6 +14,7 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from django.utils import timezone
 
 from .constants import MOSCOW_TZ
+from .i18n import ws_text
 from .model_clients import registry
 from .model_clients.exceptions import humanize_model_error
 from .services import (
@@ -34,20 +35,37 @@ from .throttling import rate_limiter
 
 logger = logging.getLogger(__name__)
 
+# Структурированный статус терминальных WS-сообщений: трейлинг-строка
+# «[[ai-status:<status>]]» (processing/success/error/cleared/limit). Протокол
+# остаётся plain-text (совместимость с персистенцией localStorage), маркер
+# фронтенд срезает перед рендером, но читает для распознавания терминальности
+# независимо от языка UI (ai-common.js getAiWsStatus/isTerminalAiMessage).
+AI_WS_STATUS_MARKER = "\n[[ai-status:{status}]]"
+
+
+def _with_status(text: str, status: str) -> str:
+    return f"{text}{AI_WS_STATUS_MARKER.format(status=status)}"
+
 
 class ResponseFormatter:
     """Форматирование исходящих WebSocket-сообщений для пользователя.
 
     Методы формируют текстовые сообщения с временными метками,
     информацией о модели, времени обработки и потраченных токенах.
-    Формат: «⏱timestamp текст» — единый протокол с фронтендом.
+    Формат: «⏱timestamp текст» — единый протокол с фронтендом. Язык текстов —
+    язык UI из payload (data["language"], кука ai_state — фолбэк); каждый
+    терминальный payload несёт trailing-маркер статуса (_with_status).
     """
 
     def format_think(self, timestamp_str: str, text: str) -> str:
-        return f"<think>{timestamp_str} {text}</think>"
+        return "<think>" + f"{timestamp_str} {text}" + "</think>"
 
-    def format_user_processing(self, timestamp_str: str, message: str) -> str:
-        return f"<think>{timestamp_str} Обрабатываю запрос пользователя. Вы: {message}</think>"
+    def format_user_processing(self, timestamp_str: str, message: str, language: str = "") -> str:
+        return _with_status(
+            "<think>" + f"{timestamp_str} "
+            + ws_text(language, "processing", message=message) + "</think>",
+            "processing",
+        )
 
     def format_success(
         self,
@@ -56,24 +74,28 @@ class ResponseFormatter:
         duration: str,
         response_text: str,
         tokens: int | str = 0,
+        language: str = "",
     ) -> str:
-        return (
-            f"<think>{timestamp_str} Запрос успешно обработан</think>\n"
-            f"Модель: {model_title}\n"
-            f"Время обработки запроса: {duration}\n"
-            f"Потрачено токенов: {tokens}\n"
-            f"{response_text}"
+        return _with_status(
+            "<think>" + f"{timestamp_str} {ws_text(language, 'success_head')}" + "</think>\n"
+            + ws_text(language, "success_full", model=model_title, duration=duration,
+                      tokens=tokens, response=response_text),
+            "success",
         )
 
-    def format_simple_success(self, timestamp_str: str, response_text: str) -> str:
-        return f"<think>{timestamp_str} Запрос успешно обработан</think>\n{response_text}"
+    def format_simple_success(self, timestamp_str: str, response_text: str, language: str = "", status: str = "success") -> str:
+        return _with_status(
+            "<think>" + f"{timestamp_str} {ws_text(language, 'success_head')}" + "</think>\n"
+            + str(response_text),
+            status,
+        )
 
-    def format_duration(self, total_seconds: float) -> str:
+    def format_duration(self, total_seconds: float, language: str = "") -> str:
         if total_seconds < 60:
-            return f"{total_seconds:.3f} сек"
+            return ws_text(language, "dur_sec", value=f"{total_seconds:.3f}")
         minutes = int(total_seconds // 60)
         seconds = total_seconds % 60
-        return f"{minutes} мин {seconds:.3f} сек"
+        return ws_text(language, "dur_min_sec", minutes=minutes, seconds=f"{seconds:.3f}")
 
 
 class MyConsumer(AsyncWebsocketConsumer):
@@ -135,6 +157,20 @@ class MyConsumer(AsyncWebsocketConsumer):
         # здесь только адаптация к полям consumer'а.
         return get_user_identity_for_log(self.user, self.user_info, self.external_account)
 
+    def _cookie_ui_language(self) -> str:
+        """Язык UI пользователя из куки ai_state (пишет ai-common.js).
+
+        payload «Обрабатываю запрос» несёт data["language"] только для сообщений
+        диалога; служебные фазы (clear_context, rate limit, некорректный JSON)
+        язык не шлют — читаем селект языка из куки напрямую.
+        """
+        try:
+            raw = (self.scope.get("cookies") or {}).get("ai_state") or ""
+            data = json.loads(raw) if raw else {}
+            return data.get("lang") if isinstance(data, dict) else ""
+        except (ValueError, TypeError):
+            return ""
+
     async def disconnect(self, close_code):
         logger.debug("Connection closed for client %s", getattr(self, "client_id", "unknown"))
 
@@ -142,7 +178,8 @@ class MyConsumer(AsyncWebsocketConsumer):
         try:
             data = json.loads(text_data)
         except json.JSONDecodeError:
-            await self.send(text_data="Ошибка: Неверный формат JSON")
+            await self.send(text_data=_with_status(
+                ws_text(self._cookie_ui_language(), "invalid_json"), "error"))
             return
 
         logger.debug("Received data: %s", data)
@@ -150,19 +187,23 @@ class MyConsumer(AsyncWebsocketConsumer):
         if data.get("action") == "clear_context":
             conversation_history.reset(self.client_id)
             self.old_language = None
-            await self.send(text_data="Контекст очищен")
+            await self.send(text_data=_with_status(
+                ws_text(self._cookie_ui_language(), "cleared"), "cleared"))
             return
 
         if not self._check_rate_limit():
-            await self.send(text_data="Слишком много сообщений. Попробуйте позже.")
+            await self.send(text_data=_with_status(
+                ws_text(self._cookie_ui_language(), "rate_limit"), "limit"))
             return
 
         try:
             await self._handle_message(data)
         except Exception as exc:
             logger.exception("Unexpected error handling WebSocket message")
-            friendly, _ = humanize_model_error(str(exc), include_detail=False)
-            await self.send(text_data=f"Что-то пошло не так. {friendly}")
+            friendly, _ = humanize_model_error(
+                str(exc), include_detail=False, language=self._cookie_ui_language())
+            await self.send(text_data=_with_status(
+                ws_text(self._cookie_ui_language(), "something_wrong", friendly=friendly), "error"))
 
     def _check_rate_limit(self) -> bool:
         if not self.user_id:
@@ -249,7 +290,7 @@ class MyConsumer(AsyncWebsocketConsumer):
 
         start_time = timezone.now()
         start_str = timezone.localtime(start_time, MOSCOW_TZ).strftime("%H:%M:%S")
-        await self.send(text_data=self.formatter.format_user_processing(start_str, message))
+        await self.send(text_data=self.formatter.format_user_processing(start_str, message, language))
 
         identity = self._get_identity_for_log()
         log = await self.log_writer.create(
@@ -273,14 +314,15 @@ class MyConsumer(AsyncWebsocketConsumer):
             task_name="",  # filled by resolve_context_names if available
         )
 
-        result = await self.caller.call(message, self.client_id, model_key)
+        result = await self.caller.call(message, self.client_id, model_key, language=language)
         end_time = timezone.now()
 
         # Treat empty response as an error, not a success.
         if not result.is_error and not (result.response_text or "").strip():
+            empty_text = ws_text(language, "empty_response")
             result.is_error = True
-            result.error_message = "Модель вернула пустой ответ"
-            result.response_text = "Модель вернула пустой ответ"
+            result.error_message = empty_text
+            result.response_text = empty_text
 
         if result.is_error:
             await self.log_writer.update_error(log, result.response_text, result.error_message, end_time)
@@ -290,10 +332,13 @@ class MyConsumer(AsyncWebsocketConsumer):
             )
 
         end_str = timezone.localtime(end_time, MOSCOW_TZ).strftime("%H:%M:%S")
-        duration = self.formatter.format_duration((end_time - start_time).total_seconds())
+        duration = self.formatter.format_duration((end_time - start_time).total_seconds(), language)
 
         if result.is_error:
-            await self.send(text_data=self.formatter.format_simple_success(end_str, result.response_text))
+            # Исторически ошибки шли через format_simple_success (think-заголовок
+            # «Запрос успешно обработан» + текст ошибки); статус честно error.
+            await self.send(text_data=self.formatter.format_simple_success(
+                end_str, result.response_text, language, status="error"))
         else:
             await self.send(
                 text_data=self.formatter.format_success(
@@ -302,6 +347,7 @@ class MyConsumer(AsyncWebsocketConsumer):
                     duration,
                     result.response_text,
                     result.tokens,
+                    language,
                 )
             )
 
@@ -326,18 +372,14 @@ class MyConsumer(AsyncWebsocketConsumer):
         """
         from .models import AIRequestLog
 
+        language = self._cookie_ui_language()
         start_time = timezone.now()
         start_str = timezone.localtime(start_time, MOSCOW_TZ).strftime("%H:%M:%S")
         await self.send(text_data=self.formatter.format_user_processing(
-            start_str, "Задача взята из базы данных (кэш решённых задач)."))
+            start_str, ws_text(language, "cached_processing"), language))
 
         identity = self._get_identity_for_log()
-        response = (
-            "Задача взята из базы данных: она уже была решена ранее "
-            "(тестирование пройдено) — выдаю сохранённый код без обращения "
-            "к модели.\n\n"
-            f"```\n{solution.code}\n```"
-        )
+        response = ws_text(language, "cached_note", code=solution.code)
         log = await self.log_writer.create(
             user=identity["user"],
             username=identity["username"],
@@ -359,15 +401,20 @@ class MyConsumer(AsyncWebsocketConsumer):
         )
 
         end_time = timezone.now()
-        model_title = solution.model_title or "Сохранённое решение (из БД)"
+        model_title = solution.model_title or ws_text(language, "cached_title")
         await self.log_writer.update_success(
-            log, f"{response}\n(решение выдано из кэша)", 0, model_title, end_time
+            log, f"{response}\n{ws_text(language, 'cached_log_note')}", 0, model_title, end_time
         )
         end_str = timezone.localtime(end_time, MOSCOW_TZ).strftime("%H:%M:%S")
         duration = self.formatter.format_duration((end_time - start_time).total_seconds())
         await self.send(
             text_data=self.formatter.format_success(
-                end_str, "Сохранённое решение (из БД)", duration, response, 0,
+                end_str,
+                ws_text(language, "cached_title"),
+                duration,
+                response,
+                0,
+                language,
             )
         )
         await sync_to_async(mark_cache_used)(solution)

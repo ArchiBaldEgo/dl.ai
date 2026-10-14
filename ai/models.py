@@ -823,19 +823,23 @@ class AIModelTestRun(models.Model):
     model_keys, file_extension, prompt_id, dl_test, ui_language, course_id;
     single: model_keys, interface_language, programming_language, topic, prompt,
     task_text, code_text) — для восстановления состояния формы при возврате
-    на страницу прогона (``?run_id=``).
+    на страницу прогона (``?run_id=``). ``paused`` — кооперативная пауза
+    batch-прогона (вступает на границе пар); осиротевший paused-прогон
+    (нет живого job) помечается «Процесс потерян», как и running.
     """
 
     STATUS_RUNNING = "running"
     STATUS_COMPLETED = "completed"
     STATUS_FAILED = "failed"
     STATUS_CANCELLED = "cancelled"
+    STATUS_PAUSED = "paused"
 
     STATUS_CHOICES = (
         (STATUS_RUNNING, "Running"),
         (STATUS_COMPLETED, "Completed"),
         (STATUS_FAILED, "Failed"),
         (STATUS_CANCELLED, "Cancelled"),
+        (STATUS_PAUSED, "Paused"),
     )
 
     RUN_TYPE_SINGLE = "single"
@@ -962,6 +966,16 @@ class AIModelTestResult(models.Model):
     topic_id_snapshot = models.IntegerField(null=True, blank=True, verbose_name="ID темы (снимок)")
     topic_name_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Тема (снимок)")
     prog_lang_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Язык программирования (снимок)")
+    # Снимок фактически использованного препромпта пары (при старте «по
+    # привязке» у задачи свой промпт; легаси-строки и прогоны без привязок —
+    # NULL/пусто, отображается «—»).
+    prompt_id = models.IntegerField(null=True, blank=True, verbose_name="ID препромпта (снимок)")
+    prompt_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Препромпт (снимок)")
+    # Ответ модели оборван потолком генерации провайдера (Ollama num_predict /
+    # SambaNova max_tokens — стрим остановлен ровно на лимите;
+    # is_output_truncated). Ретрай с припиской «сразу код» уже сделан во время
+    # прогона; пара помечается чинно, потому что часть ответа реально потеряна.
+    truncated = models.BooleanField(default=False, verbose_name="Ответ обрезан")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
 
     class Meta:

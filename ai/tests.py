@@ -1533,6 +1533,43 @@ class ModelCallerTests(SimpleTestCase):
         self.assertEqual(result.tokens, 0)
 
 
+class ModelKeyResolutionTests(SimpleTestCase):
+    """Резолв-цепочка имени модели (model_caller._resolve_model_key): точный
+    ключ → legacy-алиас → нормализованный ключ/title. Куки ai_state старых
+    пользователей хранят переименованные ключи (живут 1 год) и title'ы —
+    всё это должно сводиться к актуальному ключу, а не к ошибке «не найдена»."""
+
+    def _resolve(self, value):
+        from ai.model_clients import registry
+        from ai.services.model_caller import _resolve_model_key
+        return _resolve_model_key(registry, value)
+
+    def test_exact_key_wins(self):
+        self.assertEqual(self._resolve("Web_DeepSeek"), "Web_DeepSeek")
+
+    def test_case_and_separator_variants(self):
+        for variant in ("web deepseek", "Web-DeepSeek", "WEB_DEEPSEEK", "web_deepseek"):
+            self.assertEqual(self._resolve(variant), "Web_DeepSeek", variant)
+
+    def test_default_key_variant(self):
+        from ai.model_clients.registry import DEFAULT_MODEL_KEY
+        self.assertEqual(self._resolve("ollama gemma 4 cloud"), DEFAULT_MODEL_KEY)
+
+    def test_title_with_mixed_case(self):
+        # «Web Deepseek» — реальный ввод пользователя (без большой S) — title.
+        self.assertEqual(self._resolve("Web Deepseek"), "Web_DeepSeek")
+
+    def test_unknown_returns_empty(self):
+        self.assertEqual(self._resolve("Nonexistent_Model_Xyz"), "")
+        self.assertEqual(self._resolve(""), "")
+
+    async def test_call_error_echoes_raw_input(self):
+        """При полном промахе текст ошибки называет ТО, что пришло (диагностика)."""
+        result = await ModelCaller().call("hi", "client", "Garbage_Name")
+        self.assertTrue(result.is_error)
+        self.assertIn("Garbage_Name", result.response_text)
+
+
 class RateLimiterTests(SimpleTestCase):
     def setUp(self):
         from django.core.cache import cache
@@ -2868,6 +2905,284 @@ class ExtractCodeFromResponseTests(SimpleTestCase):
         text = f"```asm\n{prose}\n```"
         self.assertEqual(self.extract(text), "")
 
+    # === «Альтернатива/Вариант 2» с кодом второго решения (срез) ===
+
+    def test_alternative_section_cut_keeps_main_code(self):
+        # Второй блок длиннее первого — без среза «победил бы» он (longest wins).
+        main = "mov ax, x\nsub ax, y\nmov R, ax"
+        alt = "mov bx, z\nadd bx, 3\nadd bx, 4\nadd bx, 5\nmov R, bx"
+        text = f"```asm\n{main}\n```\nАльтернатива:\n```asm\n{alt}\n```"
+        self.assertEqual(self.extract(text), main)
+
+    def test_alternative_heading_in_unclosed_fence_cut(self):
+        # Модель не закрыла оградку: всё после неё тянулось бы в код вместе
+        # с заголовком «Альтернатива:» и вторым вариантом.
+        main = "mov ax, x\nsub ax, y"
+        text = f"```asm\n{main}\nАльтернатива:\nmov bx, z\nadd bx, 1"
+        self.assertEqual(self.extract(text), main)
+
+    def test_carved_section_skips_alternative_code(self):
+        # Без оградок: карвинг «перепрыгивал» заголовок зазором ≤2 не-кодовых
+        # строк и клеил оба решения в один фрагмент.
+        main = "mov ax, x\nsub ax, y\nmov R, ax"
+        alt = "mov bx, z\nadd bx, 1"
+        text = f"{main}\nАльтернатива:\n{alt}"
+        extracted = self.extract(text)
+        self.assertIn("mov ax, x", extracted)
+        self.assertNotIn("Альтернатива", extracted)
+        self.assertNotIn("mov bx, z", extracted)
+
+    def test_variant_heading_before_code_not_cut(self):
+        # «Вариант 1:» открывает ЕДИНСТВЕННЫЙ код-блок — среза быть не должно.
+        text = "Вариант 1:\n```asm\nmov ax, x\nsub ax, y\nmov R, ax\n```"
+        self.assertEqual(self.extract(text), "mov ax, x\nsub ax, y\nmov R, ax")
+
+    def test_english_alternative_heading_cut(self):
+        main = "mov ax, x\nsub ax, y\nmov R, ax"
+        text = f"```asm\n{main}\n```\nAlternative solution:\n```asm\nmov bx, z\nadd bx, 1\n```"
+        self.assertEqual(self.extract(text), main)
+
+
+class OllamaNumPredictTests(SimpleTestCase):
+    """Потолок генерации Ollama: env OLLAMA_NUM_PREDICT, дефолт 16384
+    (4096 и 8192 обрезали большие ответы: chain-of-thought flash-моделей
+    сжигает бюджет ДО кода — «выкусывание ответа»)."""
+
+    def test_default_16384_and_env_override(self):
+        from ai.model_clients import ollama
+        self.assertEqual(ollama._default_num_predict(), 16384)
+        with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "2048"}):
+            self.assertEqual(ollama._default_num_predict(), 2048)
+        with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "16"}):
+            # Слишком малые значения не допускаются (нижняя граница 1024).
+            self.assertEqual(ollama._default_num_predict(), 1024)
+
+
+class AskOllamaCutFlagTests(SimpleTestCase):
+    """_ask_ollama: 4-й элемент кортежа — честный сигнал обреза от done_reason.
+    Не «stop» (длина) → True; «stop» → False; пустой контент с непустым
+    thinking: обрезанное рассуждение → True, иначе False."""
+
+    @staticmethod
+    def _run_with_chat_sync(result):
+        from asyncio import run as _run
+        from unittest.mock import patch
+        from ai.model_clients import ollama
+        with patch.object(ollama, "_chat_sync", lambda *a, **kw: result):
+            return _run(ollama._ask_ollama("msg", 1, "test:model"))
+
+    def test_done_reason_stop_not_truncated(self):
+        text, tokens, is_err, cut = self._run_with_chat_sync(("ok", 5, "", "stop"))
+        self.assertEqual((text, tokens, is_err, cut), ("ok", 5, False, False))
+
+    def test_done_reason_length_truncated(self):
+        text, tokens, is_err, cut = self._run_with_chat_sync(("partial code block", 16384, "", "length"))
+        self.assertEqual((text, tokens, is_err, cut), ("partial code block", 16384, False, True))
+
+    def test_thinking_fallback_cut_flag(self):
+        # content пуст, thinking есть — обрезанное рассуждение → флаг True
+        text, tokens, is_err, cut = self._run_with_chat_sync(("", 1998, "We need to think...", "length"))
+        self.assertEqual((text, tokens, is_err, cut), ("We need to think...", 1998, False, True))
+        # рассуждение дошло до конца, но контента не родил — не «обрез»
+        text, tokens, is_err, cut = self._run_with_chat_sync(("", 50, "all thinking done", "stop"))
+        self.assertEqual((text, tokens, is_err, cut), ("all thinking done", 50, False, False))
+
+    def test_empty_content_is_error(self):
+        text, tokens, is_err, cut = self._run_with_chat_sync(("", 0, "", "stop"))
+        self.assertTrue(is_err)
+        self.assertFalse(cut)
+        self.assertIn("пустой ответ", text)
+
+
+class IsOutputTruncatedTests(SimpleTestCase):
+    """is_output_truncated: обрез по факту tokens >= потолка провайдера
+    (обрезка только при известном потолке — false positives хуже пропусков)."""
+
+    def test_ollama_cut_at_num_predict(self):
+        from ai.model_clients import is_output_truncated
+        self.assertFalse(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 0))
+        self.assertFalse(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 16383))
+        self.assertTrue(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 16384))
+        with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "2048"}):
+            self.assertFalse(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 2047))
+            self.assertTrue(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 2048))
+
+    def test_unknown_provider_is_never_truncated(self):
+        from ai.model_clients import is_output_truncated
+        self.assertFalse(is_output_truncated("Web_DeepSeek", 99999))
+        self.assertFalse(is_output_truncated("Groq_Gpt_Oss_120B", 99999))
+        self.assertFalse(is_output_truncated("", 16384))
+
+    def test_sambanova_ceiling_from_table(self):
+        # Провайдер определяется по __module__ обработчика из реестра (ключи
+        # SambaNova без префикса). В тестовых сеттингах SambaNova отключена —
+        # подменяем registry.get на заглушку с фейковым handler'ом модуля.
+        from ai.model_clients import is_output_truncated, registry
+
+        class _FakeSambanovaHandler:
+            __module__ = "ai.model_clients.sambanova"
+
+        with patch.object(registry, "get", lambda key: {"handler": _FakeSambanovaHandler()}):
+            self.assertTrue(is_output_truncated("DeepSeek_V3_1", 9000))
+            self.assertFalse(is_output_truncated("DeepSeek_V3_1", 8999))
+        # Через префиксный fallback SambaNova не ловится (без реестра —
+        # консервативно «не обрезан»).
+        self.assertFalse(is_output_truncated("DeepSeek_V3_1", 9000))
+
+
+class ResetModelStatsCommandTests(TestCase):
+    """reset_model_stats: удаляет накопленную статистику моделей."""
+
+    def test_command_deletes_stats_rows(self):
+        from ai.models import AIModelStats
+        AIModelStats.objects.create(
+            model_key="Ollama_X", model_title="X",
+            solved_count=1, total_count=2, duration_count=1, duration_sum=10.0,
+        )
+        out = StringIO()
+        call_command("reset_model_stats", stdout=out)
+        self.assertEqual(AIModelStats.objects.count(), 0)
+        self.assertIn("удалено 1", out.getvalue())
+
+
+from io import StringIO
+from django.core.management import call_command
+
+
+class DeleteArmRunCommandTests(TestCase):
+    """delete_arm_run: точечное удаление batch-прогона из БД.
+
+    Удаляет прогон (+CASCADE результаты), запись журнала прогона (CASCADE —
+    закрепления), опционально решения кэша; вычитает вклад пар прогона из
+    AIModelStats (только при run_params.record_stats) с полом на нуле.
+    """
+
+    RUN_ID = "a" * 32
+
+    def _make_fixtures(self):
+        self.superuser = get_user_model().objects.create_superuser(username='dr_admin', password='x', email='d@t.com')
+        from ai.models import (
+            AIModelStats, AIModelTestResult, AIModelTestRun, AIRequestLog,
+            AIPinnedBatchRun, TaskSolution,
+        )
+        run = AIModelTestRun.objects.create(
+            run_id=self.RUN_ID, run_type="batch", status="completed",
+            run_name="Плохой прогон", run_params={"record_stats": True},
+            started_at=timezone.now(), finished_at=timezone.now(),
+        )
+        AIModelTestResult.objects.create(
+            run=run, model_key="M_1", model_title="M1", status="ok",
+            verdict="solved", duration_seconds=10.0,
+        )
+        AIModelTestResult.objects.create(
+            run=run, model_key="M_2", model_title="M2", status="error",
+            verdict="failed", duration_seconds=8.0,
+        )
+        AIModelTestResult.objects.create(
+            run=run, model_key="M_3", model_title="M3", status="error",
+            verdict="skipped", duration_seconds=None,
+        )
+        AIModelStats.objects.create(
+            model_key="M_1", model_title="M1", solved_count=5, total_count=8,
+            duration_count=4, duration_sum=40.0,
+        )
+        AIModelStats.objects.create(
+            model_key="M_2", model_title="M2", solved_count=2, total_count=3,
+            duration_count=2, duration_sum=12.0,
+        )
+        log = AIRequestLog.objects.create(
+            user=None, source="arm", mode="batch_solve",
+            message=f"Batch solve run {self.RUN_ID}",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        pin = AIPinnedBatchRun.objects.create(user=self.superuser, log=log)
+        sol = TaskSolution.objects.create(
+            task_node_id=1, programming_language_id=1, code="x", verdict="passed",
+            test_log=log,
+        )
+        return run, log, pin, sol
+
+    def test_dry_run_deletes_nothing(self):
+        run, log, pin, sol = self._make_fixtures()
+        out = StringIO()
+        call_command("delete_arm_run", run_id=self.RUN_ID, stdout=out)
+        self.assertIn("DRY-RUN", out.getvalue())
+        self.assertTrue(run.__class__.objects.filter(pk=run.pk).exists())
+
+    def test_dry_run_keeps_stats_untouched(self):
+        # DRY-RUN не только не удаляет прогон — он и статистику не вычитает.
+        from ai.models import AIModelStats
+        self._make_fixtures()
+        call_command("delete_arm_run", run_id=self.RUN_ID, stdout=StringIO())
+        m1 = AIModelStats.objects.get(model_key="M_1")
+        self.assertEqual((m1.solved_count, m1.total_count), (5, 8))
+        self.assertEqual((m1.duration_count, m1.duration_sum), (4, 40.0))
+
+    def test_yes_deletes_run_log_pin_and_subtracts_stats(self):
+        run, log, pin, sol = self._make_fixtures()
+        from ai.models import (
+            AIModelStats, AIModelTestResult, AIModelTestRun, AIPinnedBatchRun,
+            AIRequestLog, TaskSolution,
+        )
+        out = StringIO()
+        call_command("delete_arm_run", run_id=self.RUN_ID, yes=True, stdout=out)
+        # Прогон, результаты, лог и закрепление ушли; решение кэша осталось.
+        self.assertEqual(AIModelTestRun.objects.count(), 0)
+        self.assertEqual(AIModelTestResult.objects.count(), 0)
+        self.assertEqual(AIRequestLog.objects.count(), 0)
+        self.assertEqual(AIPinnedBatchRun.objects.count(), 0)
+        self.assertTrue(TaskSolution.objects.filter(pk=sol.pk).exists())
+        # M_1 вычтено (1 solved/1 пара, 1 замер/10 сек), M_2 (0/1, 1/8).
+        m1 = AIModelStats.objects.get(model_key="M_1")
+        self.assertEqual((m1.solved_count, m1.total_count), (4, 7))
+        self.assertEqual((m1.duration_count, m1.duration_sum), (3, 30.0))
+        m2 = AIModelStats.objects.get(model_key="M_2")
+        self.assertEqual((m2.solved_count, m2.total_count), (2, 2))
+        self.assertEqual((m2.duration_count, m2.duration_sum), (1, 4.0))
+        # M_3 был только skipped — в статистику не вносил, строк нет.
+        self.assertFalse(AIModelStats.objects.filter(model_key="M_3").exists())
+
+    def test_record_stats_off_keeps_stats(self):
+        run, log, pin, sol = self._make_fixtures()
+        from ai.models import AIModelStats
+        run.run_params = {}
+        run.save(update_fields=["run_params"])
+        AIModelStats.objects.update_or_create(
+            model_key="M_1",
+            defaults={"solved_count": 3, "total_count": 4,
+                      "duration_count": 2, "duration_sum": 20.0},
+        )
+        call_command("delete_arm_run", run_id=self.RUN_ID, yes=True, stdout=StringIO())
+        stats = AIModelStats.objects.get(model_key="M_1")
+        self.assertEqual((stats.solved_count, stats.total_count), (3, 4))
+
+    def test_stats_floor_at_zero(self):
+        run, log, pin, sol = self._make_fixtures()
+        from ai.models import AIModelStats
+        AIModelStats.objects.update_or_create(
+            model_key="M_1",
+            defaults={"solved_count": 1, "total_count": 1,
+                      "duration_count": 1, "duration_sum": 1.0},
+        )
+        call_command("delete_arm_run", run_id=self.RUN_ID, yes=True, stdout=StringIO())
+        stats = AIModelStats.objects.get(model_key="M_1")
+        self.assertEqual(stats.solved_count, 0)
+        self.assertEqual(stats.duration_sum, 0.0)
+
+    def test_drop_solutions_removes_cached_solutions(self):
+        run, log, pin, sol = self._make_fixtures()
+        from ai.models import TaskSolution
+        call_command("delete_arm_run", run_id=self.RUN_ID, yes=True,
+                     drop_solutions=True, stdout=StringIO())
+        self.assertEqual(TaskSolution.objects.count(), 0)
+
+    def test_list_lists_batch_runs(self):
+        self._make_fixtures()
+        out = StringIO()
+        call_command("delete_arm_run", **{"list": True}, stdout=out)
+        self.assertIn(self.RUN_ID, out.getvalue())
+        self.assertIn("Плохой прогон", out.getvalue())
+
 
 class BatchRunnerIntegrationTests(TestCase):
     """End-to-end batch solve with mocked handlers + DL sample fetch.
@@ -3037,6 +3352,168 @@ class BatchParallelWorkerTests(TransactionTestCase):
 
     def _calls_for(self, calls, key):
         return [c for c in calls if c["model_key"] == key]
+
+    def test_truncated_pair_auto_retry_solves(self):
+        """Обрез по потолку генерации (is_output_truncated): без кода — один
+        авто-ретрай с припиской «сразу код»; ретрай принёс код — пара решена,
+        флаг снят (сохранённый ответ цел)."""
+        import os
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+
+        async def cut_then_code_handler(messages, conv_id):
+            calls.append(messages)
+            if len(calls) == 1:
+                # Обрезанный ответ: content пуст (рассуждения сожрали бюджет;
+                # до кода модель не дошла), tokens упёрся в потолок —
+                # обрез по факту.
+                return ("", 8192, False)
+            return ("program p; begin writeln(1); end.", 128, False)
+
+        models = [{
+            "key": "Ollama_Test_Cut", "title": "Ollama Test Cut",
+            "handler": cut_then_code_handler,
+        }]
+        run_id = "cut-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=1)
+        try:
+            with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "8192"}):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id], models, self.user.id, "DLSID-1",
+                        ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        # Ровно один авто-ретрай: второй вызов с припиской про лимит длины.
+        self.assertEqual(len(calls), 2)
+        self.assertIn("лимитом длины", calls[1])
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="Ollama_Test_Cut")
+        self.assertEqual(row.verdict, "solved")
+        self.assertFalse(row.truncated)      # ретрай дал полный ответ
+        self.assertEqual(row.tokens, 128)
+        self.assertEqual(run.report["truncated_pairs"], 0)
+
+    def test_cut_flag_from_handler_fourth_element(self):
+        """Обрез без потолка по токенам: провайдер сам сказал «длина» 4-м
+        элементом (done_reason != "stop" в Ollama — скрытый потолок шлюза на
+        ~2000 токенах, лог пары 16246/task 495). Флаг ставится, ретрай
+        разогорается, честная причина в dl_comment."""
+        import os
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+
+        async def cut_flag_handler(messages, conv_id):
+            calls.append(messages)
+            if len(calls) == 1:
+                return ("We need to think slowly and carefully about all the letters before writing anything.", 1998, False, True)
+            return ("program p; begin writeln(1); end.", 128, False, False)
+
+        models = [{
+            "key": "Web_Test_Cut", "title": "Web Test Cut",
+            "handler": cut_flag_handler,   # ключ без префикса — потолка нет, работает только 4-й элемент
+        }]
+        run_id = "cut4-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=1)
+        try:
+            with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "16384"}):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id], models, self.user.id, "DLSID-1",
+                        ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("лимитом длины", calls[1])
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="Web_Test_Cut")
+        self.assertEqual(row.verdict, "solved")
+        self.assertFalse(row.truncated)      # ретрай дал полный ответ
+        run.refresh_from_db()
+        self.assertEqual(run.report["truncated_pairs"], 0)
+
+    def test_cut_flag_still_cut_reports_reason(self):
+        """И ретрай по 4-му флагу обрезан: пара failed с truncated=True и
+        честной подписью «ответ оборван» вместо «не удалось извлечь»."""
+        import os
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+
+        async def always_flag_cut(messages, conv_id):
+            calls.append(messages)
+            return ("We need to keep reasoning silently while the model keeps adding more words without any conclusion yet.", 1800, False, True)
+
+        models = [{
+            "key": "Web_Test_Cut2", "title": "Web Test Cut2",
+            "handler": always_flag_cut,
+        }]
+        run_id = "cut5-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=1)
+        try:
+            with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "16384"}):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id], models, self.user.id, "DLSID-1",
+                        ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        self.assertEqual(len(calls), 2)
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="Web_Test_Cut2")
+        self.assertEqual(row.verdict, "failed")
+        self.assertTrue(row.truncated)
+        self.assertIn("ответ оборван", row.dl_comment)
+
+    def test_truncated_still_cut_keeps_flag_and_failed(self):
+        """Ретрай обрезан тоже: пара failed с truncated=True, сохранены токены
+        ретрая, в отчёте счётчик truncated_pairs."""
+        import os
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+
+        async def always_cut_handler(messages, conv_id):
+            calls.append(messages)
+            return ("", 8192, False)
+
+        models = [{
+            "key": "Ollama_Test_Cut2", "title": "Ollama Test Cut2",
+            "handler": always_cut_handler,
+        }]
+        run_id = "cut2-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=1)
+        try:
+            with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "8192"}):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id], models, self.user.id, "DLSID-1",
+                        ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        self.assertEqual(len(calls), 2)
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="Ollama_Test_Cut2")
+        self.assertEqual(row.verdict, "failed")
+        self.assertTrue(row.truncated)
+        self.assertEqual(row.tokens, 8192)
+        # Обрезанная пара получает честную причину вместо общего «не удалось извлечь».
+        self.assertIn("Модель не успела вывести код — ответ оборван", row.dl_comment)
+        self.assertEqual(run.report["truncated_pairs"], 1)
 
     def test_parallel_models_solve_independently(self):
         """2 модели × 2 задачи: каждая пара решена ровно один раз, циклы моделей
@@ -4019,6 +4496,48 @@ class ModelSortingTests(SimpleTestCase):
         self.assertIn(DEFAULT_MODEL_KEY, keys)
         self.assertEqual(context["default_model_key"], "")
 
+    def test_experimental_models_bottom_separate_group(self):
+        """OpenRouter (OR_*) — отдельная группа experimental_models в самом низу:
+        не попадает в «Все модели», в фавориты и в deфолт."""
+        from ai.views import _render_ai_page
+        models_data = [
+            {"key": "OR_Nemotron_Nano_12B_VL", "title": "OR Nemotron Nano 12B VL", "capabilities": {}},
+            {"key": "Web_DeepSeek", "title": "Web DeepSeek", "capabilities": {}},
+            {"key": "OR_Nemotron_Nano_9B", "title": "OR Nemotron Nano 9B", "capabilities": {}},
+            {"key": "Gemma_3_12b_it", "title": "Gemma 3 12b IT", "capabilities": {}},
+            {"key": "OR_Nemotron_Ultra_550B", "title": "OR Nemotron Ultra 550B", "capabilities": {}},
+        ]
+        request = self.factory.get("/ai/chat/")
+        request.user = self._make_user(pk=1)
+        request.session = {}
+        request.user_info = {"userId": "sort-user"}
+        request.COOKIES = {"userId": "sort-user"}
+        # Даже если OR-модель — топ-1 пользователя, она не должна вылезти на верх.
+        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["OR_Nemotron_Ultra_550B"]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
+            _render_ai_page(request, "ai/chat.html")
+        context = mock_render.call_args[0][2]
+        flat_keys = [m["key"] for m in context["available_models"]]
+        # user_top — OR-модель, но она НЕ становится фаворитом: Experimental-
+        # модели всегда в самом низу (плоский список тоже их держит в конце).
+        self.assertEqual(
+            flat_keys[-3:],
+            ["OR_Nemotron_Nano_12B_VL", "OR_Nemotron_Nano_9B", "OR_Nemotron_Ultra_550B"],
+        )
+        self.assertEqual(
+            [m["key"] for m in context["experimental_models"]],
+            ["OR_Nemotron_Nano_12B_VL", "OR_Nemotron_Nano_9B", "OR_Nemotron_Ultra_550B"],
+            "Experimental-модели — по алфавиту внизу",
+        )
+        self.assertNotIn("OR_Nemotron_Ultra_550B", [m["key"] for m in context["favorite_models"]])
+        exp_keys = {m["key"] for m in context["experimental_models"]}
+        for m in context["other_models"]:
+            self.assertNotIn(m["key"], exp_keys)
+        for m in context["favorite_models"]:
+            self.assertNotIn(m["key"], exp_keys)
+        for m in context["other_models"]:
+            self.assertNotEqual(m["key"], "OR_Nemotron_Nano_12B_VL")
+
+
 
 # ===================================================================
 # Tests for problem-data API (languages, topics, prompts)
@@ -4165,6 +4684,33 @@ class UserTopModelKeysTests(TestCase):
             message="test",
             status=status,
         )
+
+    def test_experimental_models_excluded_from_user_top(self):
+        """OR_*-модели в логах не становятся фаворитами: считаем только обычные."""
+        from ai.model_clients.registry import EXPERIMENTAL_MODEL_PREFIXES
+
+        from ai.views import _get_user_top_model_keys
+
+        self._make_log(["OR_Nemotron_Nano_9B"])
+        self._make_log(["OR_Nemotron_Nano_9B"])
+        self._make_log(["Web_DeepSeek"])
+
+        result = _get_user_top_model_keys(self._make_request(), limit=2)
+        for key in result:
+            self.assertFalse(key.startswith(EXPERIMENTAL_MODEL_PREFIXES))
+        self.assertIn("Web_DeepSeek", result)
+
+    def test_top_model_keys_read_keys_directly(self):
+        """model_names в логах содержит КЛЮЧИ (consumers.py пишет key) — фаворит
+        должен вычисляться и без title_to_key-транзита."""
+        from ai.views import _get_user_top_model_keys
+
+        self._make_log(["Web_Kimi"])
+        self._make_log(["Web_Kimi"])
+        self._make_log(["Web_DeepSeek"])
+
+        result = _get_user_top_model_keys(self._make_request(), limit=2)
+        self.assertEqual(result[0], "Web_Kimi")
 
     def test_returns_most_frequent_models(self):
         """The most frequently used models should be returned in order."""
@@ -4894,14 +5440,16 @@ class OllamaHandlerTests(SimpleTestCase):
 
     @staticmethod
     def _stream(*pieces, eval_count=0):
-        """Фейковые чанки стрима: контент по кускам, eval_count в финальном чанке."""
+        """Фейковые чанки стрима: контент по кускам, eval_count и done_reason
+        в финальном чанке (contract _stream_once — 4-кортеж)."""
         from types import SimpleNamespace
         chunks = []
         for piece in pieces:
             chunks.append(SimpleNamespace(
                 message=SimpleNamespace(content=piece), eval_count=0))
         chunks.append(SimpleNamespace(
-            message=SimpleNamespace(content=""), eval_count=eval_count))
+            message=SimpleNamespace(content=""), eval_count=eval_count,
+            done_reason="stop"))
         return iter(chunks)
 
     async def test_handler_streams_and_accumulates(self):
@@ -4917,7 +5465,7 @@ class OllamaHandlerTests(SimpleTestCase):
             # чтобы линтер не ругался на отсутствующий атрибут.
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
             result = await glm_5_2("1+1=?", "client")
-            self.assertEqual(result, ("print(1)", 5, False))
+            self.assertEqual(result, ("print(1)", 5, False, False))
             mock_client.chat.assert_called_once()
             # Без tools= (обычный чат), но СТРИМОМ (stream=True) — иначе
             # ollama.com рвёт соединение на длинных генерациях.
@@ -4936,7 +5484,7 @@ class OllamaHandlerTests(SimpleTestCase):
 
             deepseek_flash = getattr(ollama, "ask_Ollama_DeepSeek_V4_1_Flash_Cloud_async")
             result = await deepseek_flash("hi", "client")
-            self.assertEqual(result, ("ok", 1, False))
+            self.assertEqual(result, ("ok", 1, False, False))
             _, kwargs = mock_client.chat.call_args
             self.assertEqual(kwargs.get("model"), "deepseek-v4.1-flash:cloud")
 
@@ -4956,7 +5504,7 @@ class OllamaHandlerTests(SimpleTestCase):
 
                     handler = getattr(ollama, f"ask_{key}_async")
                     result = await handler("hi", "client")
-                    self.assertEqual(result, ("ok", 1, False))
+                    self.assertEqual(result, ("ok", 1, False, False))
                     _, kwargs = mock_client.chat.call_args
                     self.assertEqual(kwargs.get("model"), model_id)
 
@@ -4996,7 +5544,8 @@ class OllamaHandlerTests(SimpleTestCase):
 
             gpt_oss = getattr(ollama, "ask_Ollama_Gpt_Oss_20B_Cloud_async")
             result = await gpt_oss("hi", "client")
-            self.assertEqual(result, ("Рассуждаю и отвечаю", 7, False))
+            # thinking-фолбэк: done_reason нет в чанках → не «length» → не обрез
+            self.assertEqual(result, ("Рассуждаю и отвечаю", 7, False, False))
 
     async def test_empty_content_and_thinking_returns_error(self):
         """Пустые и content, и thinking → прежняя ошибка «пустой ответ»."""
@@ -5008,9 +5557,10 @@ class OllamaHandlerTests(SimpleTestCase):
             mock_client.chat.return_value = self._stream("", eval_count=0)
 
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
-            content, tokens, is_error = await glm_5_2("hi", "client")
+            content, tokens, is_error, cut = await glm_5_2("hi", "client")
             self.assertTrue(is_error)
             self.assertEqual(tokens, 0)
+            self.assertFalse(cut)
             self.assertIn("пустой ответ", content)
 
 
@@ -5037,7 +5587,8 @@ class OllamaRateLimitTests(SimpleTestCase):
             chunks.append(SimpleNamespace(
                 message=SimpleNamespace(content=piece), eval_count=0))
         chunks.append(SimpleNamespace(
-            message=SimpleNamespace(content=""), eval_count=eval_count))
+            message=SimpleNamespace(content=""), eval_count=eval_count,
+            done_reason="stop"))
         return iter(chunks)
 
     @staticmethod
@@ -5061,7 +5612,7 @@ class OllamaRateLimitTests(SimpleTestCase):
             ]
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
             result = await glm_5_2("hi", "client")
-            self.assertEqual(result, ("ok", 3, False))
+            self.assertEqual(result, ("ok", 3, False, False))
             self.assertEqual(mock_client.chat.call_count, 2)
             self.assertEqual(mock_sleep.await_count, 1)
             delay = mock_sleep.await_args.args[0]
@@ -5081,10 +5632,11 @@ class OllamaRateLimitTests(SimpleTestCase):
             mock_client = mock_client_cls.return_value
             mock_client.chat.side_effect = self._429()
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
-            content, tokens, is_error = await glm_5_2("hi", "client")
+            content, tokens, is_error, cut = await glm_5_2("hi", "client")
             # 1 первая попытка + 3 ретрая
             self.assertEqual(mock_client.chat.call_count, 4)
             self.assertTrue(is_error)
+            self.assertFalse(cut)
             self.assertEqual(tokens, 0)
             self.assertEqual(content, map_http_error(429, "ollama"))
             self.assertNotIn("status code", content)
@@ -5107,9 +5659,10 @@ class OllamaRateLimitTests(SimpleTestCase):
             mock_client = mock_client_cls.return_value
             mock_client.chat.side_effect = ResponseError("boom", status_code=500)
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
-            content, tokens, is_error = await glm_5_2("hi", "client")
+            content, tokens, is_error, cut = await glm_5_2("hi", "client")
             self.assertEqual(mock_client.chat.call_count, 1)
             self.assertTrue(is_error)
+            self.assertFalse(cut)
             self.assertIn("Ошибка Ollama API:", content)
             mock_sleep.assert_not_awaited()
 
@@ -5138,7 +5691,7 @@ class OllamaRateLimitTests(SimpleTestCase):
             )
             self.assertEqual(active["max"], 1)
             self.assertEqual(len(results), 4)
-            self.assertTrue(all(r == ("ok", 1, False) for r in results))
+            self.assertTrue(all(r == ("ok", 1, False, False) for r in results))
 
 
 class ArmBatchResultsPartialTests(SimpleTestCase):
@@ -5685,6 +6238,83 @@ class BatchLogRowContextsTests(TestCase):
         self.assertEqual(c["run_finished_at"], "")
         self.assertEqual(c["run_duration_display"], "")
 
+    def test_tasks_all_with_marks(self):
+        """Полный список задач (2026-10): решённые + нерешённые с пометками
+        по моделям и dl_url; счётчики solved/unsolved."""
+        from ai.models import AIModelTestResult
+        from ai.admin.logs import _batch_log_row_contexts
+        AIModelTestResult.objects.create(
+            run=self.test_run, task=self.t2,
+            model_key="FakeModel2", model_title="FakeModel2",
+            status="ok", verdict="failed",
+            duration_seconds=1.0, tokens=10,
+            short_response="r", raw_response="raw", code="code",
+            dl_comment="c", dl_queue_id=1,
+            file_extension_snapshot=".pas",
+            topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+        )
+        log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
+        c = _batch_log_row_contexts([log])[log.pk]
+        tasks_all = c["tasks_all"]
+        self.assertEqual([t["node_id"] for t in tasks_all], [5001, 5002])
+        by_node = {t["node_id"]: t for t in tasks_all}
+        self.assertTrue(by_node[5001]["solved"])
+        self.assertEqual(by_node[5001]["solved_models"], ["FakeModel"])
+        self.assertEqual(by_node[5001]["total_models"], ["FakeModel"])
+        # Вторая модель на t2 пыталась (failed) — в total_models есть.
+        self.assertFalse(by_node[5002]["solved"])
+        self.assertEqual(by_node[5002]["total_models"], ["FakeModel", "FakeModel2"])
+        self.assertEqual(by_node[5002]["solved_models"], [])
+        self.assertEqual(c["tasks_total"], 2)
+        self.assertEqual(c["tasks_solved_count"], 1)
+        self.assertEqual(c["tasks_unsolved_count"], 1)
+        self.assertIn("task.jsp?nid=5001", by_node[5001]["dl_url"])
+        self.assertIn("cid=1450", by_node[5001]["dl_url"])
+
+    def test_tasks_all_empty_run_prompts_absent(self):
+        """Без промптов у пар → пустой список prompts (шаблон покажет «—»)."""
+        from ai.admin.logs import _batch_log_row_contexts
+        log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
+        c = _batch_log_row_contexts([log])[log.pk]
+        self.assertEqual(c["tasks_total"], 2)
+        self.assertEqual(c["tasks_solved_count"], 1)
+        self.assertEqual(c["prompts"], [])
+
+    def test_prompts_distinct_ordered(self):
+        """Фактически использованные препромпты: distinct по prompt_id,
+        insertion-порядок; дубли (две пары с одним промптом) не задваиваются."""
+        from ai.models import AIModelTestResult
+        from ai.admin.logs import _batch_log_row_contexts
+        p1 = Prompt.objects.create(prompt_name_ru="Учитель", prompt_text_ru="t")
+        p2 = Prompt.objects.create(prompt_name_ru="Наставник", prompt_text_ru="t")
+        AIModelTestResult.objects.filter(run=self.test_run, task=self.t1).update(
+            prompt_id=p1.id, prompt_name="Учитель",
+        )
+        AIModelTestResult.objects.filter(run=self.test_run, task=self.t2).update(
+            prompt_id=p2.id, prompt_name="Наставник",
+        )
+        # Дубль: та же пара перезапущена — update_or_create перезаписал бы
+        # снимок; эмулируем второй строкой с тем же prompt (легаси-NULL не
+        # проходит фильтр).
+        AIModelTestResult.objects.create(
+            run=self.test_run, task=self.t2,
+            model_key="FakeModel3", model_title="FakeModel3",
+            status="ok", verdict="failed",
+            duration_seconds=1.0, tokens=10,
+            short_response="r", raw_response="raw", code="code",
+            dl_comment="c", dl_queue_id=1,
+            file_extension_snapshot=".pas",
+            topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+            prompt_id=p2.id, prompt_name="Наставник",
+        )
+        log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
+        c = _batch_log_row_contexts([log])[log.pk]
+        prompts = c["prompts"]
+        self.assertEqual(
+            sorted((p["id"], p["name"]) for p in prompts),
+            [(p1.id, "Учитель"), (p2.id, "Наставник")],
+        )
+
 
 class RequestLogXlsxTests(TestCase):
     """XLSX-выгрузка результатов batch-прогона (матрица задача×модель,
@@ -5974,6 +6604,7 @@ class ArmLightSnapshotTests(TestCase):
         self.assertTrue(item["lazy_body"])
         for key in ("raw_response", "code", "short_response", "dl_comment", "dl_error"):
             self.assertNotIn(key, item)
+        self.assertFalse(item["truncated"])
         self.assertEqual(item["result_id"], self.result.id)
         self.assertEqual(item["task_node_id"], 6101)
         self.assertEqual(item["task_name"], "Задача А")
@@ -6069,6 +6700,66 @@ class ArmLightSnapshotTests(TestCase):
         request.user = self.superuser
         with self.assertRaises(Http404):
             admin_arm_solve_result_body_view(request, 999999)
+
+    def test_result_body_endpoint_chunked(self):
+        """Чанковая загрузка raw_response: окно offset/length, метаданные
+        raw_total/raw_offset/raw_has_more/raw_next, флаг truncated.
+        Без length — полный ответ (обратная совместимость)."""
+        from ai.admin.arm import admin_arm_solve_result_body_view, _BODY_RAW_CHUNK_MAX
+
+        self.result.raw_response = "полный ответ"  # 11 символов
+        self.result.truncated = True
+        self.result.save(update_fields=["raw_response", "truncated"])
+
+        request = self.factory.get(
+            f"/ai/admin/arm/solve/result/{self.result.id}/body/?offset=0&length=6"
+        )
+        request.user = self.superuser
+        data = json.loads(admin_arm_solve_result_body_view(request, self.result.id).content)["result"]
+        self.assertEqual(data["raw_response"], "полный")
+        self.assertEqual(data["raw_offset"], 0)
+        self.assertEqual(data["raw_next"], 6)
+        self.assertTrue(data["raw_has_more"])
+        self.assertEqual(data["raw_total"], 12)
+        self.assertTrue(data["truncated"])
+
+        request = self.factory.get(
+            f"/ai/admin/arm/solve/result/{self.result.id}/body/?offset=6&length=6"
+        )
+        request.user = self.superuser
+        data = json.loads(admin_arm_solve_result_body_view(request, self.result.id).content)["result"]
+        self.assertEqual(data["raw_response"], " ответ")
+        self.assertEqual(data["raw_offset"], 6)
+        self.assertFalse(data["raw_has_more"])
+        self.assertIsNone(data["raw_next"])
+
+        # Остаток за пределами длины — пустое окно, ответ не падает.
+        request = self.factory.get(
+            f"/ai/admin/arm/solve/result/{self.result.id}/body/?offset=100&length=6"
+        )
+        request.user = self.superuser
+        data = json.loads(admin_arm_solve_result_body_view(request, self.result.id).content)["result"]
+        self.assertEqual(data["raw_response"], "")
+        self.assertFalse(data["raw_has_more"])
+
+        # Жёсткий потолок окна: length выше _BODY_RAW_CHUNK_MAX срезается.
+        self.result.raw_response = "x" * (_BODY_RAW_CHUNK_MAX + 1)
+        self.result.save(update_fields=["raw_response"])
+        request = self.factory.get(
+            f"/ai/admin/arm/solve/result/{self.result.id}/body/?offset=0&length={_BODY_RAW_CHUNK_MAX * 10}"
+        )
+        request.user = self.superuser
+        data = json.loads(admin_arm_solve_result_body_view(request, self.result.id).content)["result"]
+        self.assertEqual(len(data["raw_response"]), _BODY_RAW_CHUNK_MAX)
+        self.assertTrue(data["raw_has_more"])
+        # Мусорные параметры — целый режим без окна.
+        request = self.factory.get(
+            f"/ai/admin/arm/solve/result/{self.result.id}/body/?offset=abc&length=-5"
+        )
+        request.user = self.superuser
+        data = json.loads(admin_arm_solve_result_body_view(request, self.result.id).content)["result"]
+        self.assertEqual(len(data["raw_response"]), _BODY_RAW_CHUNK_MAX + 1)
+        self.assertFalse(data["raw_has_more"])
 
     def test_status_view_returns_light_results(self):
         """Поллинг статуса /arm/solve/status/ отдаёт лёгкие результаты."""
@@ -6314,6 +7005,42 @@ class ActiveRunsEndpointTests(TestCase):
         data = json.loads(response.content)
         self.assertTrue(data["ok"])
         self.assertEqual(data["runs"], [])
+
+    def test_batch_entry_carries_run_name(self):
+        """Название прогона (2026-10) — в entry «моих процессов»; у прочих
+        раннеров поля нет (пусто)"""
+        from ai import arm_runner
+        from ai.admin.active_runs import admin_active_runs_view
+        now_ts = time.time()
+        arm_runner._jobs["badge-named"] = {
+            "run_id": "badge-named", "user_id": self.superuser.id,
+            "run_type": "batch", "status": "running",
+            "completed_pairs": 0, "total_pairs": 3, "current_task_name": "A",
+            "run_name": "Лаба 3 (2 модели)",
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        try:
+            response = admin_active_runs_view(self._make_request(self.superuser))
+            data = json.loads(response.content)
+            entry = next(r for r in data["runs"] if r["run_id"] == "badge-named")
+            self.assertEqual(entry["name"], "Лаба 3 (2 модели)")
+        finally:
+            arm_runner._jobs.pop("badge-named", None)
+
+        # Прогон без run_name → пустая строка (фронт строку не рисует).
+        arm_runner._jobs["badge-unnamed"] = {
+            "run_id": "badge-unnamed", "user_id": self.superuser.id,
+            "run_type": "batch", "status": "running",
+            "completed_pairs": 0, "total_pairs": 1, "current_task_name": "A",
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        try:
+            response = admin_active_runs_view(self._make_request(self.superuser))
+            data = json.loads(response.content)
+            entry = next(r for r in data["runs"] if r["run_id"] == "badge-unnamed")
+            self.assertEqual(entry["name"], "")
+        finally:
+            arm_runner._jobs.pop("badge-unnamed", None)
 
 
 class TestConsoleRunnerTests(TestCase):
@@ -7215,6 +7942,20 @@ class SolveMessageTests(TestCase):
         self.assertIn("Условие задачи:", message)
         self.assertIn("Найти максимум в массиве", message)
 
+    def test_no_comments_instruction_appended_always(self):
+        # Требование «без комментариев» приписывается к ЛЮБОМУ сообщению
+        # пакетного решения — и с привязкой, и без неё.
+        self.assertIn("никаких комментариев", self._message())
+        message = self._message(prompt_id=self.prompt.id)
+        self.assertIn("никаких комментариев", message)
+        self.assertIn("ПИШИ КАПСОМ", message)
+
+    def test_no_ramble_instruction_appended_always(self):
+        # Запрет рассуждений: chain-of-thought flash-моделей сжигает бюджет
+        # генерации до кода — приписка тоже ко ВСЕМ solve-сообщениям.
+        self.assertIn("Не расписывай ход рассуждений", self._message())
+        self.assertIn("Не расписывай ход рассуждений", self._message(prompt_id=self.prompt.id))
+
 
 # ===================================================================
 # W9: старт /arm/solve/ — язык, привязка, record_stats
@@ -7937,13 +8678,15 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
 
     def test_batch_results_body_fetch_has_expired_session_parser(self):
         """Ленивое тело результата (partial используется на /arm/solve/ и в
-        деталях журнала): не-JSON ответ (страница логина) → внятная ошибка."""
+        деталях журнала): не-JSON ответ (страница логина) → внятная ошибка.
+        Чанковая загрузка raw_response и агрегатор состояния — на месте."""
         src = self._source("admin/ai/_ai_batch_results.html")
         self.assertIn("function parseJsonResponse", src)
         self.assertIn("Сессия истекла", src)
-        i = src.find("function fetchResultBody")
+        i = src.find("function fetchResultChunk")
         self.assertNotEqual(i, -1)
         self.assertIn(".then(parseJsonResponse)", src[i:i + 800])
+        self.assertIn("function loadResultBodyState", src)
 
     def test_log_detail_resend_session_label_and_rerun_route(self):
         src = self._source("admin/ai/request_logs_detail.html")
@@ -10214,7 +10957,7 @@ class PinnedBatchRunsTests(TestCase):
         resp = self.toggle_view(self._post(f"/x/{ghost.id}/pin/", self.operator), ghost.id)
         self.assertEqual(resp.status_code, 400)
 
-    def test_page_shows_only_own_pins_in_pin_order(self):
+    def test_page_shows_pins_in_pin_order(self):
         from ai.models import AIModelTestRun
         run2 = "c" * 32
         log2 = AIRequestLog.objects.create(
@@ -10237,6 +10980,62 @@ class PinnedBatchRunsTests(TestCase):
         rows = resp.context_data["rows"]
         self.assertEqual([r["id"] for r in rows], [log2.id, self.log.id])
         self.assertTrue(all(r["pinned"] for r in rows))
+
+    def test_page_lists_other_users_pins_with_authors(self):
+        """Общий вид: закрепления чужих пользователю видны, автор показан,
+        is_own различает своё/чужое; открепить можно только своё."""
+        run2 = "d" * 32
+        log2 = AIRequestLog.objects.create(
+            user=self.operator, source="arm", mode="batch_solve",
+            message=f"Batch solve run {run2}",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        from ai.models import AIModelTestRun
+        AIModelTestRun.objects.create(
+            run_id=run2, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED, course_id=1452,
+        )
+        # Чужое закрепление (other закрепляет лог, который ведёт оператор)…
+        self.toggle_view(self._post(f"/x/{self.log.id}/pin/", self.other), self.log.id)
+        # …и своё.
+        self.toggle_view(self._post(f"/x/{log2.id}/pin/", self.operator), log2.id)
+
+        request = RequestFactory().get(self.pin_url_prefix)
+        request.user = self.operator
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = self.page_view(request)
+        rows_by_id = {r["id"]: r for r in resp.context_data["rows"]}
+        self.assertIn(self.log.id, rows_by_id)
+        self.assertIn(log2.id, rows_by_id)
+        foreign = rows_by_id[self.log.id]
+        own = rows_by_id[log2.id]
+        self.assertFalse(foreign["is_own"])
+        self.assertTrue(own["is_own"])
+        self.assertIn("pin_other", foreign["pin_authors"])
+        # Суперюзер: скупа «только свои» нет — чужой прогон раскрывается.
+        self.assertTrue(foreign["snapshot_url"])
+
+    def test_page_for_prompt_developer_hides_foreign_snapshot(self):
+        """Общий список виден и разработчику промтов, но раскрывать чужие
+        прогоны он не может — snapshot_url вычищен (строка не разворачивается)."""
+        from django.contrib.auth.models import Group
+        Group.objects.get_or_create(name="prompt_developer")
+        pd_user = get_user_model().objects.create_user(
+            username="pin_pd", password="x",
+        )
+        pd_user.groups.add(Group.objects.get(name="prompt_developer"))
+        self.toggle_view(self._post(f"/x/{self.log.id}/pin/", self.operator), self.log.id)
+
+        request = RequestFactory().get(self.pin_url_prefix)
+        request.user = pd_user
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = self.page_view(request)
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.context_data["rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["is_own"])
+        self.assertIn("pin_admin", rows[0]["pin_authors"])
+        self.assertEqual(rows[0]["snapshot_url"], "")
 
     def test_page_requires_logs_access(self):
         outsider = get_user_model().objects.create_user(username="pin_nobody", password="x")
@@ -11064,3 +11863,807 @@ class DashboardWizardRestartLinkTests(TestCase):
             },
         )
         self.assertIn("data-ai-wizard-restart", html)
+
+
+# === Триязычная клиентская часть: словари строк, WS-статусы, локализация ошибок ===
+
+class ClientStringsTests(SimpleTestCase):
+    """client_strings(): словарь первого рендера для трёх языков."""
+
+    def test_all_languages_have_same_keys(self):
+        from ai.i18n import _CLIENT_STRINGS
+        key_sets = [set(table) for table in _CLIENT_STRINGS.values()]
+        self.assertEqual(key_sets[0], key_sets[1], "ключи client_strings расходятся ru/en")
+        self.assertEqual(key_sets[1], key_sets[2], "ключи client_strings расходятся en/fr")
+
+    def test_language_values(self):
+        from ai.i18n import client_strings
+        self.assertEqual(client_strings("Русский")["send"], "Отправить")
+        self.assertEqual(client_strings("English")["send"], "Send")
+        self.assertEqual(client_strings("Français")["send"], "Envoyer")
+
+    def test_unknown_language_falls_back_to_russian(self):
+        from ai.i18n import client_strings
+        self.assertEqual(client_strings(""), client_strings("Русский"))
+        self.assertEqual(client_strings("Klingon"), client_strings("Русский"))
+
+
+class WsTextTests(SimpleTestCase):
+    """ws_text(): локализованные серверные тексты WS-протокола."""
+
+    def test_langs_have_same_keys(self):
+        from ai.i18n import _WS_STRINGS
+        key_sets = [set(table) for table in _WS_STRINGS.values()]
+        self.assertEqual(key_sets[0], key_sets[1], "ключи ws_text расходятся ru/en")
+        self.assertEqual(key_sets[1], key_sets[2], "ключи ws_text расходятся en/fr")
+
+    def test_placeholder_formatting(self):
+        from ai.i18n import ws_text
+        self.assertEqual(
+            ws_text("English", "model_not_found", model_key="Web_DeepSeek"),
+            "Model Web_DeepSeek not found. Please use the available models.",
+        )
+        self.assertEqual(
+            ws_text("Français", "processing", message="Bonjour"),
+            "Traitement de votre requête. Vous : Bonjour",
+        )
+
+    def test_russian_default_and_cleared(self):
+        from ai.i18n import ws_text
+        # Пустой язык → русский; формулировки RU сниффятся фронтендом.
+        self.assertEqual(ws_text("", "cleared"), "Контекст очищен")
+        self.assertIn("Запрос успешно обработан", ws_text("Русский", "success_head"))
+
+    def test_unknown_key_returns_key(self):
+        from ai.i18n import ws_text
+        self.assertEqual(ws_text("English", "no_such_key"), "no_such_key")
+
+
+class HumanizeErrorLanguageTests(SimpleTestCase):
+    """humanize_model_error(language=...): локализация friendly-текстов."""
+
+    def test_pattern_matched_localized(self):
+        from ai.model_clients.exceptions import humanize_model_error
+        ru, _ = humanize_model_error("Код 429: превышен лимит", language="Русский")
+        en, _ = humanize_model_error("Код 429: превышен лимит", language="English")
+        fr, _ = humanize_model_error("Код 429: превышен лимит", language="Français")
+        self.assertIn("429", ru)
+        self.assertIn("429", en)
+        self.assertIn("429", fr)
+        self.assertNotEqual(en, ru)
+        self.assertNotEqual(fr, ru)
+
+    def test_detail_label_localized(self):
+        from ai.model_clients.exceptions import humanize_model_error
+        _, detailed_en = humanize_model_error(
+            "Error 401: unauthorized", include_detail=True, language="English")
+        self.assertIn("Technical detail", detailed_en)
+        _, detailed_ru = humanize_model_error(
+            "Error 401: unauthorized", include_detail=True, language="Русский")
+        self.assertIn("Техническая деталь", detailed_ru)
+
+    def test_default_language_is_russian(self):
+        from ai.model_clients.exceptions import humanize_model_error
+        no_lang, _ = humanize_model_error("Код 429: превышен лимит")
+        ru, _ = humanize_model_error("Код 429: превышен лимит")
+        self.assertEqual(no_lang, ru)
+
+    def test_long_text_passthrough_untouched(self):
+        from ai.model_clients.exceptions import humanize_model_error
+        raw = "x" * 400
+        text, _ = humanize_model_error(raw)
+        self.assertEqual(text, raw)
+
+
+class WsStatusMarkerTests(SimpleTestCase):
+    """Структурированный статус терминальных WS-сообщений (протокол фронтенда)."""
+
+    def test_with_status_appends_marker(self):
+        from ai.consumers import _with_status
+        payload = _with_status("Контекст очищен", "cleared")
+        self.assertTrue(payload.endswith("\n[[ai-status:cleared]]"))
+        self.assertTrue(payload.startswith("Контекст очищен"))
+
+    def test_format_success_carries_success_and_language(self):
+        from ai.consumers import ResponseFormatter
+        payload = ResponseFormatter().format_success(
+            "12:00:00", "Model A", "1.000 сек", "answer", 5, "English")
+        self.assertTrue(payload.endswith("[[ai-status:success]]"))
+        self.assertIn("Model:", payload)
+        self.assertIn("Tokens spent: 5", payload)
+
+    def test_processing_marker(self):
+        from ai.consumers import ResponseFormatter
+        payload = ResponseFormatter().format_user_processing("12:00:00", "Hi", "English")
+        self.assertTrue(payload.endswith("[[ai-status:processing]]"))
+        self.assertIn("Processing your request. You: Hi", payload)
+
+    def test_error_status_on_simple_success(self):
+        from ai.consumers import ResponseFormatter
+        payload = ResponseFormatter().format_simple_success(
+            "12:00:00", "boom", "English", status="error")
+        self.assertTrue(payload.endswith("[[ai-status:error]]"))
+
+    def test_format_duration_localized(self):
+        from ai.consumers import ResponseFormatter
+        f = ResponseFormatter()
+        self.assertIn("s", f.format_duration(30.5, "English"))
+        self.assertIn("сек", f.format_duration(30.5, "Русский"))
+        self.assertIn("мин", f.format_duration(120.0, "Русский"))
+        self.assertIn("min", f.format_duration(120.0, "English"))
+
+
+class BaseChatTemplateLocalizationTests(SimpleTestCase):
+    """base_chat.html рендерится во всех трёх языках из t = client_strings()."""
+
+    def _render(self, lang):
+        import datetime
+        from django.template.loader import render_to_string
+        from ai.i18n import client_strings
+        request = self.factory.get("/ai/chat/")
+        context = {
+            "request": request,
+            "t": client_strings(lang),
+            "available_models": [
+                {"key": "X_1", "title": "X 1"},
+                {"key": "OR_X", "title": "X Open"},
+            ],
+            "other_models": [{"key": "X_1", "title": "X 1"}],
+            "favorite_models": [],
+            "experimental_models": [{"key": "OR_X", "title": "X Open"}],
+            "default_model_key": "X_1",
+            "saved_lang": lang,
+            "last_update_date": timezone.make_aware(datetime.datetime(2026, 10, 13)),
+            "ai_wizard": None,
+        }
+        return render_to_string("ai/base_chat.html", context)
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def test_default_russian(self):
+        html = self._render("Русский")
+        self.assertIn('label="Все модели"', html)
+        self.assertIn("Отправить", html)
+        self.assertIn("Админ-Панель", html)
+
+    def test_english_render(self):
+        html = self._render("English")
+        self.assertIn('label="All models"', html)
+        self.assertIn(">Send<", html)
+        self.assertIn("Admin Panel", html)
+        self.assertIn('data-ai-group="experimental"', html)
+
+    def test_french_render(self):
+        html = self._render("Français")
+        self.assertIn('label="Tous les modèles"', html)
+        self.assertIn("Envoyer", html)
+        self.assertIn("Panneau Admin", html)
+
+
+class BatchRunStatusPausedDisplayTests(SimpleTestCase):
+    """Пауза batch-прогона — «Пауза» в журнале и «Настройке ИИ» (2026-10)."""
+
+    def test_status_mapping(self):
+        from ai.admin.logs import batch_run_status_display
+        from ai.models import AIModelTestRun
+        self.assertEqual(batch_run_status_display(AIModelTestRun.STATUS_PAUSED), "Пауза")
+
+
+class DurationFormatTests(SimpleTestCase):
+    """format_human_duration: нули старших разрядов опускаются, None/0 → ""."""
+
+    def test_boundaries(self):
+        from ai.templatetags.ai_duration import format_human_duration
+        self.assertEqual(format_human_duration(4462), "1 ч 14 мин")
+        self.assertEqual(format_human_duration(3630), "1 ч 0 мин")
+        self.assertEqual(format_human_duration(3660), "1 ч 1 мин")
+        self.assertEqual(format_human_duration(63), "1 мин 3 с")
+        self.assertEqual(format_human_duration(60), "1 мин")
+        self.assertEqual(format_human_duration(30), "30 с")
+        self.assertEqual(format_human_duration(7.3), "7 с")
+        self.assertEqual(format_human_duration(None), "")
+        self.assertEqual(format_human_duration(0), "")
+
+
+class MpaMultiWindowExtractionTests(SimpleTestCase):
+    """Multi-window экстрактор С-МПА (лог #2606801, «выкусывания навсегда»):
+    модель пишет СПЛОШНУЮ простыню рассуждения без фенсов и внутри неё
+    ПОЛНОСТЬЮ проговаривает программу (иногда несколько раз). Конвейер
+    должен вернуть финальную программу, а не «Не удалось извлечь код»."""
+
+    def _c(self, text, ext=".mpc"):
+        from ai.arm_runner import _extract_code_from_response
+        return _extract_code_from_response(text, file_extension=ext)
+
+    def _wall(self, prog, repeat=2):
+        """Простыня размышлений: программа внутри прозы, repeat раз."""
+        wall = "We need to answer only code.\n" + prog
+        for _ in range(repeat - 1):
+            wall += "\nLet me re-verify. The final answer program is:\n" + prog
+        return wall
+
+    def test_program_extracted_from_prose_wall(self):
+        """Проза-простыня без фенсов вокруг программы → извлекается программа,
+        проза не тянетя и не склеивает две программы в одного кандидата."""
+        prog = (
+            "int __in __bits(16) a;\nint __in __bits(16) b;\n"
+            "int __out __bits(16) y;\nvoid main() {\n"
+            "  if (a > b) { { y = a; } } else { { y = b; } }\n}"
+        )
+        got = self._c(self._wall(prog), ext=".mpc")
+        self.assertEqual(got, prog)
+
+    def test_duplicate_program_between_windows_not_rejected(self):
+        """Модель описывает программу дважды в разных местах текста: дубли
+        МЕЖДУ окнами — норма (каждое окно закрывается на своём балансе скобок,
+        а не растягивается до последней скобки файла)."""
+        prog = (
+            "int __in __bits(8) x;\nint __out __bits(8) z;\n"
+            "void main() {\nz = x;\n}"
+        )
+        got = self._c(self._wall(prog, repeat=2), ext=".mpc")
+        self.assertEqual(got, prog)
+
+    def test_unbalanced_prose_window_dropped(self):
+        """Фрагмент с `{` без закрытия внутри прозы отбрасывается СВОИМ окном:
+        полная программа рядом всё равно извлекается."""
+        small = "int __in __bits(8) x;\nint __out __bits(8) z;\nvoid main() {\nz = x;\n}"
+        wall = (
+            "Intro prose includes a broken fragment:\n"
+            "void main() {\ny = something and then more prose never closes it\n"
+            "Now the correct program:\n" + small + "\nDone."
+        )
+        self.assertEqual(self._c(wall, ext=".mpc"), small)
+
+    def test_window_closes_at_first_balanced_main(self):
+        """Окно закрывается на ПЕРВОМ балансе скобок: два main подряд дают
+        отдельных кандидатов («от анкера до конца файла» больше не существует)."""
+        text = (
+            "int __in __bits(8) x;\nvoid main() {\nx = 1;\n}\n"
+            "Now reconsider: rewrite it again.\n"
+            "void main() {\nx = 2;\n}\n"
+        )
+        # У decl+main-окна 4 строки против 3 у main-окон — выигрывает decl+main1.
+        self.assertEqual(
+            self._c(text, ext=".mpc"),
+            "int __in __bits(8) x;\nvoid main() {\nx = 1;\n}",
+        )
+
+    def test_relaxed_keeps_prose_inside_window(self):
+        """Relaxed-тир (прямые вызовы code_carver): строгий режим срезает прозу
+        ВНУТРИ кандидата, relaxed сохраняет кандидата как есть."""
+        from ai.services.code_carver import extract_mpa_c
+        wall = "We need to answer only code.\n" + (
+            "int __in __bits(8) x;\nint __out __bits(8) z;\nvoid main() {\n"
+            "Here the model reasons at length in plain English and only later "
+            "arrives at the assignment for the output bit.\n"
+            "z = x;\n}"
+        )
+        strict = extract_mpa_c(wall)
+        relaxed = extract_mpa_c(wall, relaxed=True)
+        self.assertIn("z = x;", strict)
+        self.assertNotIn("Here the model", strict)
+        self.assertIn("z = x;", relaxed)
+        self.assertIn("Here the model", relaxed)
+
+    def test_gate_blocks_markerless_prose(self):
+        """Гейт has_language_marker в _extract_code_from_response — единственный,
+        relaxing не снимает его: без структурных маркеров (нет ни decl
+        `__bits`, ни `void main()`) простыня → пусто."""
+        self.assertEqual(self._c("We need to answer only code. No program here."), "")
+        self.assertEqual(
+            self._c("Sure. Here we go. Let me write it. Yes I will. Very short."), ""
+        )
+
+    def test_asm_program_extracted_from_prose_wall(self):
+        """То же для i8086: программа-концевик внутри прозы возвращается целиком."""
+        asm = "jmp begin\nbegin:\nmov ax, 1\nout 1\nEnds:\njmp Ends ;$E"
+        self.assertEqual(self._c(self._wall(asm), ext=".i86"), asm)
+
+    def test_helper_functions_before_main_are_kept(self):
+        """Хелперы (abs_val/sign) ДО main — часть программы: окно от
+        якоря-объявления закрывается на закрытии main, а НЕ на первой
+        сбалансированной функции (иначе в code пишется голый main и DL
+        падает «Undefined variable …», лог случая задачи №470/16126)."""
+        prog = (
+            "int __in __bits(16) a;\nint __in __bits(16) b;\n"
+            "int __in __bits(8) c;\nint __in __bits(8) d;\n"
+            "int __out __bits(16) RES;\n"
+            "\n"
+            "int abs_val(int x) {\n    return (x < 0) ? -x : x;\n}\n"
+            "\n"
+            "void main() {\n"
+            "    if (c > 0) {\n        RES = abs_val(a) + d;\n"
+            "    } else {\n        RES = abs_val(b);\n    }\n"
+            "}"
+        )
+        # Голый ответ модели (без оградок и прозы): declи + хелпер + main целиком.
+        self.assertEqual(self._c(prog), prog)
+        # И внутри простыни размышлений.
+        self.assertEqual(self._c(self._wall(prog)), prog)
+
+    def test_helper_fenced_code_kept(self):
+        """То же через закрытую оградку: структурник работает по тексту фенса
+        тем же окном — хелперы не теряются."""
+        prog = (
+            "int __in __bits(8) x;\nint __out __bits(8) z;\n"
+            "int dbl(int v) {\n    return v + v;\n}\n"
+            "void main() {\nz = dbl(x);\n}"
+        )
+        self.assertEqual(
+            self._c("Ответ:\n```mpc\n" + prog + "\n```\nГотово."),
+            prog,
+        )
+
+
+class ArmPromptResultPersistenceTests(TestCase):
+    """Снимок препромпта пары (AIModelTestResult.prompt_id/prompt_name):
+    явный prompt_id → записан в пару; «по привязке»/без промпта → NULL/"" ;
+    снимок доезжает до снапшотов (light-строки и журнал)."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="ppsnap", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=7101, task_id=8101, name="A", statement="Сложите a и b",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.prompt = Prompt.objects.create(
+            prompt_name_ru="Учитель Паскаля",
+            prompt_text_ru="Ты учитель Паскаля.",
+        )
+
+    @staticmethod
+    def _dl_ok():
+        def dl_mock(sid, node_id, code, ext, **kw):
+            return {
+                "verdict": "solved", "comment": "Все тесты успешно пройдены",
+                "submit_error": "", "queue_id": 11, "code_sent": code,
+            }
+        return dl_mock
+
+    def _run(self, prompt_id):
+        from ai import arm_runner
+
+        async def fake_handler(messages, conv_id):
+            return ("program a; begin writeln(1); end.", 12)
+
+        run_id = uuid.uuid4().hex
+        now_ts = time.time()
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "user_id": self.user.id, "run_type": "batch",
+            "status": "running", "error_message": "",
+            "cancel_requested": False, "cancelled": False,
+            "pause_requested": False, "paused": False,
+            "total_models": 1, "total_pairs": 1, "completed_pairs": 0,
+            "completed_models": 0, "current_model_key": "FakeModel",
+            "current_model_title": "FakeModel",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t1.node_id],
+                    [{"key": "FakeModel", "title": "FakeModel", "handler": fake_handler}],
+                    self.user.id, "DLSID-1",
+                    ui_language="Русский", dl_test=True,
+                    solve_file_extension=".pas", solve_prog_lang_name="Pascal",
+                    programming_language_id=self.lang.id,
+                    course_id=1450, prompt_id=prompt_id,
+                    run_params={"record_stats": False},
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        return run_id
+
+    def _row(self, run_id):
+        from ai.models import AIModelTestResult, AIModelTestRun
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        return AIModelTestResult.objects.get(run=run)
+
+    def test_explicit_prompt_saved(self):
+        row = self._row(self._run(self.prompt.id))
+        self.assertEqual(row.prompt_id, self.prompt.id)
+        self.assertEqual(row.prompt_name, "Учитель Паскаля")
+
+    def test_no_prompt_is_null(self):
+        """prompt_id не задан и привязки нет → NULL/"" (в UI «—»)."""
+        row = self._row(self._run(None))
+        self.assertIsNone(row.prompt_id)
+        self.assertEqual(row.prompt_name, "")
+
+    def test_snapshot_covers_light_and_full(self):
+        """Снимок пары доезжает до light-строк и до снапшота журнала."""
+        from ai import arm_runner
+        from ai.admin.logs import _build_batch_log_snapshot
+        from ai.models import AIModelTestRun
+        run_id = self._run(self.prompt.id)
+        run_obj = AIModelTestRun.objects.get(run_id=run_id)
+        light = arm_runner._batch_results_from_db(run_obj, light=True)[0]
+        self.assertEqual(light["prompt_name"], "Учитель Паскаля")
+        sn = _build_batch_log_snapshot(
+            AIRequestLog.objects.create(
+                user=self.user, source="arm", mode="batch_solve",
+                message=f"Batch solve run {run_id}",
+                status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+            )
+        )
+        self.assertEqual(
+            sn["prompts"], [{"id": self.prompt.id, "name": "Учитель Паскаля"}]
+        )
+
+    def test_light_row_without_prompt_is_empty(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        run_id = self._run(None)
+        run_obj = AIModelTestRun.objects.get(run_id=run_id)
+        light = arm_runner._batch_results_from_db(run_obj, light=True)[0]
+        self.assertEqual(light["prompt_id"], None)
+        self.assertEqual(light["prompt_name"], "")
+
+
+class ArmPauseTests(TestCase):
+    """Приостановка batch-прогона (2026-10): flip job+БД, снятие, отмена из
+    паузы, отказ rerun-гварда, снапшот и orphan-самоисцеление по paused."""
+
+    def setUp(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        self.run_id = "d" * 32
+        self.test_run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_RUNNING,
+        )
+        now = time.time()
+        self.job = {
+            "run_id": self.run_id, "user_id": 1, "run_type": "batch",
+            "status": "running", "error_message": "",
+            "cancel_requested": False, "cancelled": False,
+            "pause_requested": False, "paused": False,
+            "total_models": 1, "total_pairs": 2, "completed_pairs": 1,
+            "completed_models": 0, "current_model_key": "FakeModel",
+            "current_model_title": "FakeModel",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "created_at_ts": now, "updated_at_ts": now,
+        }
+        arm_runner._jobs[self.run_id] = self.job
+
+    def tearDown(self):
+        from ai import arm_runner
+        arm_runner._jobs.pop(self.run_id, None)
+
+    def test_pause_and_resume_flip_job_and_db(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        self.assertTrue(arm_runner.pause_arm_run(self.run_id))
+        self.assertEqual(self.job["status"], "paused")
+        self.assertTrue(self.job["pause_requested"])
+        self.test_run.refresh_from_db()
+        self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_PAUSED)
+
+        self.assertTrue(arm_runner.resume_arm_run(self.run_id))
+        self.assertEqual(self.job["status"], "running")
+        self.assertFalse(self.job["paused"])
+        self.test_run.refresh_from_db()
+        self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_RUNNING)
+
+    def test_pause_without_live_job_returns_false(self):
+        """БД-прогон без живого job НЕ ставится на паузу (орфан добьёт
+        orphan-детектор) — вью вернёт отказ «Процесс не найден…»."""
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        arm_runner._jobs.pop(self.run_id, None)
+        self.assertFalse(arm_runner.pause_arm_run(self.run_id))
+        self.test_run.refresh_from_db()
+        self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_RUNNING)
+
+    def test_cancel_from_pause(self):
+        """Отмена работает из паузы: job и БД сразу CANCELLED."""
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        arm_runner.pause_arm_run(self.run_id)
+        self.assertTrue(arm_runner.cancel_arm_run(self.run_id))
+        self.assertEqual(self.job["status"], "cancelled")
+        self.test_run.refresh_from_db()
+        self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_CANCELLED)
+        self.assertEqual(self.test_run.error_message, "Прервано пользователем")
+
+    def test_wait_resume_breaks_on_cancel(self):
+        from ai import arm_runner
+        with patch("ai.arm_runner.time.sleep"):
+            arm_runner.pause_arm_run(self.run_id)
+            arm_runner.cancel_arm_run(self.run_id)
+            self.assertFalse(arm_runner._wait_resume(self.run_id))
+
+    def test_rerun_guard_refuses_paused(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        AIModelTestRun.objects.filter(pk=self.test_run.pk).update(
+            status=AIModelTestRun.STATUS_PAUSED,
+        )
+        run_id, message, dropped = arm_runner.start_batch_rerun_pairs(
+            self.run_id, 1, "DLSID-1"
+        )
+        self.assertIsNone(run_id)
+        self.assertIn("паузе", message)
+        self.assertEqual(dropped, [])
+
+    def test_batch_snapshot_reports_paused(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        AIModelTestRun.objects.filter(pk=self.test_run.pk).update(
+            status=AIModelTestRun.STATUS_PAUSED,
+        )
+        arm_runner._jobs.pop(self.run_id, None)  # чистый DB-снапшот
+        snapshot = arm_runner.get_arm_run_snapshot(self.run_id, light_results=True)
+        self.assertEqual(snapshot["status"], "paused")
+
+    def test_orphan_detector_heals_paused_run(self):
+        """Осиротевший (после рестарта) PAUSED-прогон → FAILED
+        («Процесс потерян»), а не вечная «пауза» для фронтенда."""
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        AIModelTestRun.objects.filter(pk=self.test_run.pk).update(
+            status=AIModelTestRun.STATUS_PAUSED,
+        )
+        arm_runner._jobs.pop(self.run_id, None)
+        run_obj = AIModelTestRun.objects.get(pk=self.test_run.pk)
+        arm_runner._mark_orphaned_run_failed(run_obj)
+        run_obj.refresh_from_db()
+        self.assertEqual(run_obj.status, AIModelTestRun.STATUS_FAILED)
+        self.assertEqual(run_obj.error_message, "Процесс потерян (перезапуск сервера)")
+
+
+class ArmPauseIntegrationTests(TransactionTestCase):
+    """Интеграционная проверка паузы в цикле модели: in-flight пара доживает,
+    следующая не стартует; отмена из паузы обрывает цикл."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="pauser", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(topic_name_ru="Паузные", programming_language=self.lang)
+        self.t1 = Task.objects.create(
+            node_id=9301, task_id=9401, name="A", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.t2 = Task.objects.create(
+            node_id=9302, task_id=9402, name="B", statement="y",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+    @staticmethod
+    def _dl_ok():
+        def dl_mock(sid, node_id, code, ext, **kw):
+            return {
+                "verdict": "solved", "comment": "Все тесты успешно пройдены",
+                "submit_error": "", "queue_id": 21, "code_sent": code,
+            }
+        return dl_mock
+
+    def _seed_job(self, run_id):
+        from ai import arm_runner
+        now_ts = time.time()
+        job = {
+            "run_id": run_id, "user_id": self.user.id, "run_type": "batch",
+            "status": "running", "error_message": "",
+            "cancel_requested": False, "cancelled": False,
+            "pause_requested": False, "paused": False,
+            "total_models": 1, "total_pairs": 2, "completed_pairs": 0,
+            "completed_models": 0, "current_model_key": "ModelA",
+            "current_model_title": "Model A",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        arm_runner._jobs[run_id] = job
+        return job
+
+    @staticmethod
+    def _handler(calls):
+        import asyncio
+
+        async def handler(messages, conv_id):
+            node_id = int(conv_id.rsplit("-", 1)[1])
+            calls.append(node_id)
+            # Генерация подольше пары — watcher успевает поставить паузу
+            # ПОКА идёт пара 1 (in-flight доживает, проверка паузы — на
+            # границе пар).
+            await asyncio.sleep(0.4)
+            return ("program p; begin writeln(1); end.", 7)
+
+        return handler
+
+    def _watcher(self, run_id, action, calls):
+        """Отдельный поток: видит первый вызов модели → ставит паузу (sync-ORM
+        возможен только вне async-контекста — из вьюхи это работает, из
+        async-хендлера теста нет); видит paused → resume/cancel."""
+        import threading
+        from ai import arm_runner
+
+        def tick():
+            for _ in range(200):
+                if len(calls) >= 1:
+                    arm_runner.pause_arm_run(run_id)
+                    break
+                time.sleep(0.02)
+            for _ in range(200):
+                job = arm_runner._jobs.get(run_id)
+                if job and job.get("paused"):
+                    if action == "resume":
+                        arm_runner.resume_arm_run(run_id)
+                    else:
+                        arm_runner.cancel_arm_run(run_id)
+                    return
+                time.sleep(0.05)
+
+        thread = threading.Thread(target=tick, daemon=True)
+        thread.start()
+        return thread
+
+    def test_pause_holds_next_pair_until_resume(self):
+        """Пара на паузе завершена, вторая не стартует до resume; после снятия
+        прогон доводится до completed со ВСЕМИ парами."""
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+        run_id = "parpause-" + uuid.uuid4().hex[:8]
+        self._seed_job(run_id)
+        watcher = self._watcher(run_id, "resume", calls)
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t1.node_id, self.t2.node_id],
+                    [{"key": "ModelA", "title": "Model A",
+                      "handler": self._handler(calls)}],
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        watcher.join(timeout=2)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
+        self.assertEqual(
+            sorted(r.task.node_id for r in AIModelTestResult.objects.filter(run=run)),
+            [self.t1.node_id, self.t2.node_id],
+        )
+        # Пауза была запрошена внутри пары 1 и снята ДО пары 2.
+        self.assertEqual(calls, [self.t1.node_id, self.t2.node_id])
+
+    def test_cancel_from_pause_interrupts_loop(self):
+        """Отмена из паузы: цикл модели прерывается, завершённая пара записана,
+        прогон остаётся CANCELLED (finalize не перетирает)."""
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+        run_id = "parcancel-" + uuid.uuid4().hex[:8]
+        self._seed_job(run_id)
+        watcher = self._watcher(run_id, "cancel", calls)
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t1.node_id, self.t2.node_id],
+                    [{"key": "ModelA", "title": "Model A",
+                      "handler": self._handler(calls)}],
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        watcher.join(timeout=2)
+
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, AIModelTestRun.STATUS_CANCELLED)
+        # Вторая пара не решалась.
+        self.assertEqual(calls, [self.t1.node_id])
+        # In-flight пара отменилась по контракту отмены (после LLM-вызова
+        # пара отбрасывается) — решённых пар 0, строк максимум одна
+        # (failed, гонка с моментом отмены).
+        self.assertEqual(
+            AIModelTestResult.objects.filter(run=run, verdict="solved").count(), 0
+        )
+        self.assertLessEqual(
+            AIModelTestResult.objects.filter(run=run).count(), 1
+        )
+
+
+class ArmPauseViewTests(TestCase):
+    """POST pause/resume на /arm/solve/ — JSON-контракт как у rerun-pairs."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="pause_view_admin", password="x", email="pv@t.com",
+        )
+        self.run_id = "f" * 32
+        self.test_run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_RUNNING,
+        )
+        self.job = {
+            "run_id": self.run_id, "user_id": self.superuser.id,
+            "run_type": "batch", "status": "running", "error_message": "",
+            "cancel_requested": False, "cancelled": False,
+            "pause_requested": False, "paused": False,
+            "total_models": 1, "total_pairs": 1, "completed_pairs": 0,
+            "completed_models": 0, "current_model_key": "FakeModel",
+            "current_model_title": "FakeModel",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "created_at_ts": time.time(), "updated_at_ts": time.time(),
+        }
+
+    def _inject(self):
+        from ai import arm_runner
+        self.addCleanup(arm_runner._jobs.pop, self.run_id, None)
+        arm_runner._jobs[self.run_id] = self.job
+
+    def _post(self, url, body=None):
+        from ai.admin import arm as arm_admin
+        path = "/ai/admin" + url
+        request = self.factory.post(path, data=body or {},
+                                    content_type="application/json")
+        request.user = self.superuser
+        request.session = {}
+        if url.startswith("/arm/solve/pause"):
+            return arm_admin.admin_arm_solve_pause_view(request)
+        return arm_admin.admin_arm_solve_resume_view(request)
+
+    def test_get_not_allowed(self):
+        from ai.admin import arm as arm_admin
+        request = self.factory.get("/ai/admin/arm/solve/pause/")
+        request.user = self.superuser
+        request.session = {}
+        self.assertEqual(arm_admin.admin_arm_solve_pause_view(request).status_code, 405)
+        self.assertEqual(arm_admin.admin_arm_solve_resume_view(request).status_code, 405)
+
+    def test_run_id_required(self):
+        response = self._post("/arm/solve/pause/")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("run_id", json.loads(response.content)["message"])
+
+    def test_unknown_run_404(self):
+        request = self.factory.post(
+            "/ai/admin/arm/solve/pause/",
+            data=json.dumps({"run_id": "0" * 32}), content_type="application/json",
+        )
+        request.user = self.superuser
+        request.session = {}
+        from ai.admin.arm import admin_arm_solve_pause_view
+        response = admin_arm_solve_pause_view(request)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            json.loads(response.content)["message"], "Процесс не найден или уже завершен"
+        )
+
+    def test_pause_returns_paused_snapshot(self):
+        from ai.models import AIModelTestRun
+        self._inject()
+        response = self._post("/arm/solve/pause/", {"run_id": self.run_id})
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"])
+        self.assertIn("приостановлен", data["message"])
+        self.assertEqual(data["run"]["status"], "paused")
+        self.test_run.refresh_from_db()
+        self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_PAUSED)
+
+    def test_resume_returns_running_snapshot(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestRun
+        self._inject()
+        arm_runner.pause_arm_run(self.run_id)
+        response = self._post("/arm/solve/resume/", {"run_id": self.run_id})
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["run"]["status"], "running")
+        self.test_run.refresh_from_db()
+        self.assertEqual(self.test_run.status, AIModelTestRun.STATUS_RUNNING)
