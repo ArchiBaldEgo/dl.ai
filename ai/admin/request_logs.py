@@ -320,7 +320,22 @@ def build_recent_log_rows(request, limit=5):
             run = batch_run_by_log.get(log.pk)
             status_ok = (run.status == "completed") if run else (log.status == "success")
             rows.append({
-                
+                "id": log.id,
+                "sent_at": log.sent_at,
+                "user_full_name": log.user_full_name or log.username or "—",
+                "external_user_id": log.external_user_id or "",
+                "programming_language_name": log.programming_language_name or "—",
+                "topic_name": log.topic_name or "—",
+                "model_names": ", ".join(log.model_names or []) or "—",
+                "status": log.status,
+                "status_display": (
+                    batch_run_status_display(run.status) if run else log.get_status_display()
+                ),
+                "status_class": "ok" if status_ok else "err",
+                "run_name": run_name_for(run),
+                "mode_display": log.get_mode_display() or "—",
+                "duration_seconds": log.duration_seconds,
+                "detail_url": f"/ai/admin/ai/request_logs/{log.id}/",
             })
     return {
         "recent_logs": rows,
@@ -392,6 +407,11 @@ def build_batch_rows_for_logs(request, logs):
         rows.append({
             "id": log.id,
             "sent_at": log.sent_at,
+            "received_at": (
+                timezone.localtime(log.received_at).strftime("%d.%m.%Y %H:%M:%S")
+                if log.received_at else "—"
+            ),
+            "username": log.username,
             "status": log.status,
             # Статус прогона («Выполнен»/«Прерван»); прогон стёрт из БД →
             # старое отображение по записи журнала.
@@ -742,6 +762,8 @@ def admin_request_logs_view(request):
         for t in AIRequestLog.objects.exclude(task_node_id__isnull=True)
             .values("task_node_id", "task_name").distinct().order_by("-task_node_id")
     ]
+
+    
 
     context = {
         **ai_admin_site.each_context(request),

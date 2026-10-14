@@ -51,29 +51,26 @@
 
   <div class="ai-log-button">
     <div class="filter-field">
-      <a class="button" href="{{ request.path }}/daily-report/"
-        title="Студенты × запросы за сегодня (00:00–23:59 МСК)">Дневной отчёт →</a>
-
+      <a class="button" href="{{ request.path }}daily-report/" title="Студенты × запросы за сегодня (00:00–23:59 МСК)">Дневной отчёт →</a>
       <a class="button" href="#" id="ai-logs-table-update-button">Обновить таблицу</a>
     </div>
   </div>
 
-  <div>
-    {% include "admin/ai/request_logs_table.html" %}
+  {% include "admin/ai/request_logs_table.html" %}
 
-    {# Модалка текста задачи (открывается по клику на название задачи) #}
-    <div class="ai-task-modal" id="aiTaskModal" role="dialog" aria-modal="true" aria-labelledby="aiTaskModalTitle">
-      <div class="ai-task-modal-dialog">
-        <div class="ai-task-modal-header">
-          <h2 id="aiTaskModalTitle">Задача</h2>
-          <button type="button" class="ai-task-modal-close" aria-label="Закрыть">&times;</button>
-        </div>
-        <div class="ai-task-modal-body">
-          <pre id="aiTaskModalBody"></pre>
-        </div>
-        <div class="ai-task-modal-status" id="aiTaskModalStatus"></div>
+  {# Модалка текста задачи (открывается по клику на название задачи) #}
+  <div class="ai-task-modal" id="aiTaskModal" role="dialog" aria-modal="true" aria-labelledby="aiTaskModalTitle">
+    <div class="ai-task-modal-dialog">
+      <div class="ai-task-modal-header">
+        <h2 id="aiTaskModalTitle">Задача</h2>
+        <button type="button" class="ai-task-modal-close" aria-label="Закрыть">&times;</button>
       </div>
+      <div class="ai-task-modal-body">
+        <pre id="aiTaskModalBody"></pre>
+      </div>
+      <div class="ai-task-modal-status" id="aiTaskModalStatus"></div>
     </div>
   </div>
+
 </div>
 {% endblock %}

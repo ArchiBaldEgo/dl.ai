@@ -46,7 +46,17 @@ def test_data_view(request: HttpRequest) -> TemplateResponse:
     }
     return TemplateResponse(request, "admin/ai/test_data.html", context)
 
+def pick_model() -> str:
+    return random.choice(["gpt-4o", "claude-3.5", "yandex-gpt"])
 
+def pick_user_full_name() -> str:
+    return random.choice(["Вадим Гурьянов", "Владислав Гулевич", "Егор Беспалов", "Михаил Долинский", "Михаил Трубецкой"])
+
+def pick_message() -> str:
+    return "Тестовый запрос: напиши функцию sum(a, b) на Python"
+
+def pick_language_name() -> str:
+    return random.choice(["Python", "C++", "Java"])
 
 # Генерирует лог о запуске промпте модели
 @require_POST
@@ -58,7 +68,9 @@ def test_data_emit_request_view(request: HttpRequest) -> HttpResponse:
     duration = round(random.uniform(0.5, 30.0), 2)
     end_time = now + timedelta(seconds=duration)
     is_error = random.random() < 0.2
-    model_title = random.choice(["gpt-4o", "claude-3.5", "yandex-gpt"])
+
+    # TODO: valid model_title select
+    model_title = pick_model()
 
     writer = LogWriter()
 
@@ -66,7 +78,7 @@ def test_data_emit_request_view(request: HttpRequest) -> HttpResponse:
         user=request.user,
         username=request.user.username,
         external_user_id="",
-        user_full_name=request.user.get_full_name() or request.user.username,
+        user_full_name=pick_user_full_name(),
         client_id=f"debug-emit-{uuid.uuid4().hex[:8]}",
         source=AIRequestLog.SOURCE_WEBSOCKET,
         mode=random.choice([
@@ -77,13 +89,17 @@ def test_data_emit_request_view(request: HttpRequest) -> HttpResponse:
         ]),
         sent_at=now,
         model_names=[model_title],
-        message="Тестовый запрос: напиши функцию sum(a, b) на Python",
+        message=pick_message(),
+        
         programming_language_id=None,
-        programming_language_name=random.choice(["Python", "C++", "Java"]),
+        programming_language_name=pick_language_name(),
+
         topic_id=None,
         topic_name=random.choice(["Циклы", "Массивы", "Рекурсия"]),
+        
         prompt_id=None,
         prompt_name=random.choice(["Помощник по Python", "Объясни ошибку"]),
+        
         task_node_id=random.randint(1000, 9999),
         task_name=random.choice(["Сумма массива", "Факториал"]),
     )
