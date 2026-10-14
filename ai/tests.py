@@ -3430,7 +3430,7 @@ class RerunLogJournalTests(TestCase):
         )
 
     def test_batch_run_id_matches_run_and_rerun(self):
-        from ai.admin.logs import _batch_run_id_from_log
+        from ai.admin.request_logs import _batch_run_id_from_log
         self.assertEqual(
             _batch_run_id_from_log(self.rerun_log), self.run_id,
         )
@@ -3443,12 +3443,12 @@ class RerunLogJournalTests(TestCase):
         self.assertIsNone(_batch_run_id_from_log(AIRequestLog(message="")))
 
     def test_is_batch_solve_log_accepts_rerun(self):
-        from ai.admin.logs import _is_batch_solve_log
+        from ai.admin.request_logs import _is_batch_solve_log
         self.assertTrue(_is_batch_solve_log(self.rerun_log))
 
     def test_detail_of_rerun_log_shows_results_table(self):
-        from ai.admin.logs import admin_request_log_detail_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.rerun_log.id}/")
+        from ai.admin.request_logs import admin_request_log_detail_view
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.rerun_log.id}/")
         request.user = self.superuser
         request.session = {}
         response = admin_request_log_detail_view(request, self.rerun_log.id)
@@ -3459,7 +3459,7 @@ class RerunLogJournalTests(TestCase):
         self.assertIn("ArmBatchResults.init", html)
 
     def test_recent_batch_rows_include_rerun_log(self):
-        from ai.admin.logs import build_recent_batch_rows
+        from ai.admin.request_logs import build_recent_batch_rows
         request = self.factory.get("/ai/admin/")
         request.user = self.superuser
         rows = build_recent_batch_rows(request, limit=5)
@@ -3469,8 +3469,8 @@ class RerunLogJournalTests(TestCase):
     def test_resend_rerun_log_delegates_to_full_rerun(self):
         """«Повторить запрос» на rerun-логе ведёт в rerun-arm (новый прогон
         по всем парам), а не в resend одной модели."""
-        from ai.admin import logs as logs_mod
-        request = self.factory.post(f"/ai/admin/ai/airequestlog/{self.rerun_log.id}/resend/")
+        from ai.admin import request_logs as logs_mod
+        request = self.factory.post(f"/ai/admin/ai/request_logs/{self.rerun_log.id}/resend/")
         request.user = self.superuser
         request.session = {"external_session_id": "DLSID-1"}
         with patch(
@@ -3488,9 +3488,9 @@ class RerunLogJournalTests(TestCase):
 
     def test_resend_rerun_log_without_run_gives_error(self):
         """Если прогона уже нет в БД — внятная ошибка, а не resend модели."""
-        from ai.admin import logs as logs_mod
+        from ai.admin import request_logs as logs_mod
         self.test_run.delete()
-        request = self.factory.post(f"/ai/admin/ai/airequestlog/{self.rerun_log.id}/resend/")
+        request = self.factory.post(f"/ai/admin/ai/request_logs/{self.rerun_log.id}/resend/")
         request.user = self.superuser
         request.session = {"external_session_id": "DLSID-1"}
         response = logs_mod.resend_request_view(request, self.rerun_log.id)
@@ -6342,7 +6342,7 @@ class BatchLogSnapshotTests(TestCase):
         )
 
     def test_is_batch_solve_log_recognizes_new_and_legacy(self):
-        from ai.admin.logs import _is_batch_solve_log
+        from ai.admin.request_logs import _is_batch_solve_log
         new_log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
         legacy_log = self._make_log("solve", f"Batch solve run {self.run_id}")
         plain_log = self._make_log("chat", "hello")
@@ -6351,7 +6351,7 @@ class BatchLogSnapshotTests(TestCase):
         self.assertFalse(_is_batch_solve_log(plain_log))
 
     def test_build_batch_log_snapshot_fields(self):
-        from ai.admin.logs import _build_batch_log_snapshot
+        from ai.admin.request_logs import _build_batch_log_snapshot
         log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
         snap = _build_batch_log_snapshot(log)
         self.assertIsNotNone(snap)
@@ -6365,7 +6365,7 @@ class BatchLogSnapshotTests(TestCase):
         self.assertEqual(snap["report"]["failed"], 1)
 
     def test_snapshot_none_when_run_missing(self):
-        from ai.admin.logs import _build_batch_log_snapshot
+        from ai.admin.request_logs import _build_batch_log_snapshot
         log = self._make_log("batch_solve", f"Batch solve run {'b' * 32}")
         self.assertIsNone(_build_batch_log_snapshot(log))
 
@@ -6556,7 +6556,7 @@ class BatchLogRowContextsTests(TestCase):
 
     def test_context_fields(self):
         """t1 решена (solved), t2 нет → в списке журнала только t2."""
-        from ai.admin.logs import _batch_log_row_contexts
+        from ai.admin.request_logs import _batch_log_row_contexts
         log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
         ctx = _batch_log_row_contexts([log])
         self.assertIn(log.pk, ctx)
@@ -6573,7 +6573,7 @@ class BatchLogRowContextsTests(TestCase):
     def test_all_solved_tasks_hidden(self):
         """Все задачи прогона решены → список задач в журнале пуст."""
         from ai.models import AIModelTestResult
-        from ai.admin.logs import _batch_log_row_contexts
+        from ai.admin.request_logs import _batch_log_row_contexts
         AIModelTestResult.objects.create(
             run=self.test_run, task=self.t2,
             model_key="FakeModel2", model_title="FakeModel2",
@@ -6592,18 +6592,18 @@ class BatchLogRowContextsTests(TestCase):
 
     def test_legacy_log_included(self):
         """Старый batch-лог (mode=solve + sentinel) тоже получает контекст."""
-        from ai.admin.logs import _batch_log_row_contexts
+        from ai.admin.request_logs import _batch_log_row_contexts
         log = self._make_log("solve", f"Batch solve run {self.run_id}")
         self.assertIn(log.pk, _batch_log_row_contexts([log]))
 
     def test_plain_log_ignored(self):
-        from ai.admin.logs import _batch_log_row_contexts
+        from ai.admin.request_logs import _batch_log_row_contexts
         plain = self._make_log("chat", "hello")
         self.assertEqual(_batch_log_row_contexts([plain]), {})
 
     def test_missing_run_skipped(self):
         """run_id из сообщения отсутствует в БД → контекста нет."""
-        from ai.admin.logs import _batch_log_row_contexts
+        from ai.admin.request_logs import _batch_log_row_contexts
         log = self._make_log("batch_solve", f"Batch solve run {'d' * 32}")
         self.assertEqual(_batch_log_row_contexts([log]), {})
 
@@ -6611,7 +6611,7 @@ class BatchLogRowContextsTests(TestCase):
         """Завершённый прогон → run_finished_at (МСК) и run_duration_display."""
         from datetime import timedelta
 
-        from ai.admin.logs import _batch_log_row_contexts
+        from ai.admin.request_logs import _batch_log_row_contexts
         from ai.constants import MOSCOW_TZ
         from ai.models import AIModelTestRun
         finished = timezone.localtime(timezone.now(), MOSCOW_TZ).replace(microsecond=0)
@@ -6625,7 +6625,7 @@ class BatchLogRowContextsTests(TestCase):
 
     def test_finish_meta_running_run_absent(self):
         """Незавершённый (running) прогон → пустые строки (шаблон — «—»)."""
-        from ai.admin.logs import _batch_log_row_contexts
+        from ai.admin.request_logs import _batch_log_row_contexts
         from ai.models import AIModelTestRun
         AIModelTestRun.objects.filter(pk=self.test_run.pk).update(finished_at=None)
         log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
@@ -6637,7 +6637,7 @@ class BatchLogRowContextsTests(TestCase):
         """Полный список задач (2026-10): решённые + нерешённые с пометками
         по моделям и dl_url; счётчики solved/unsolved."""
         from ai.models import AIModelTestResult
-        from ai.admin.logs import _batch_log_row_contexts
+        from ai.admin.request_logs import _batch_log_row_contexts
         AIModelTestResult.objects.create(
             run=self.test_run, task=self.t2,
             model_key="FakeModel2", model_title="FakeModel2",
@@ -6668,7 +6668,7 @@ class BatchLogRowContextsTests(TestCase):
 
     def test_tasks_all_empty_run_prompts_absent(self):
         """Без промптов у пар → пустой список prompts (шаблон покажет «—»)."""
-        from ai.admin.logs import _batch_log_row_contexts
+        from ai.admin.request_logs import _batch_log_row_contexts
         log = self._make_log("batch_solve", f"Batch solve run {self.run_id}")
         c = _batch_log_row_contexts([log])[log.pk]
         self.assertEqual(c["tasks_total"], 2)
@@ -6679,7 +6679,7 @@ class BatchLogRowContextsTests(TestCase):
         """Фактически использованные препромпты: distinct по prompt_id,
         insertion-порядок; дубли (две пары с одним промптом) не задваиваются."""
         from ai.models import AIModelTestResult
-        from ai.admin.logs import _batch_log_row_contexts
+        from ai.admin.request_logs import _batch_log_row_contexts
         p1 = Prompt.objects.create(prompt_name_ru="Учитель", prompt_text_ru="t")
         p2 = Prompt.objects.create(prompt_name_ru="Наставник", prompt_text_ru="t")
         AIModelTestResult.objects.filter(run=self.test_run, task=self.t1).update(
@@ -6824,8 +6824,8 @@ class RequestLogXlsxTests(TestCase):
         from openpyxl import load_workbook
 
         from ai.admin.export import XLSX_CONTENT_TYPE
-        from ai.admin.logs import admin_request_log_xlsx_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.log.id}/xlsx/")
+        from ai.admin.request_logs import admin_request_log_xlsx_view
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.log.id}/xlsx/")
         request.user = self.superuser
         response = admin_request_log_xlsx_view(request, self.log.id)
         self.assertEqual(response.status_code, 200)
@@ -6864,15 +6864,15 @@ class RequestLogXlsxTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_xlsx_endpoint_non_batch_404(self):
-        from ai.admin.logs import admin_request_log_xlsx_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.plain_log.id}/xlsx/")
+        from ai.admin.request_logs import admin_request_log_xlsx_view
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.plain_log.id}/xlsx/")
         request.user = self.superuser
         response = admin_request_log_xlsx_view(request, self.plain_log.id)
         self.assertEqual(response.status_code, 404)
 
     def test_xlsx_endpoint_non_staff_403(self):
-        from ai.admin.logs import admin_request_log_xlsx_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.log.id}/xlsx/")
+        from ai.admin.request_logs import admin_request_log_xlsx_view
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.log.id}/xlsx/")
         request.user = self.normal_user
         response = admin_request_log_xlsx_view(request, self.log.id)
         self.assertEqual(response.status_code, 403)
@@ -7173,7 +7173,7 @@ class ArmLightSnapshotTests(TestCase):
         """Деталь журнала (_build_batch_log_snapshot): результаты лёгкие,
         node_ids/file_extension по-прежнему вычисляются."""
         from ai.models import AIRequestLog
-        from ai.admin.logs import _build_batch_log_snapshot
+        from ai.admin.request_logs import _build_batch_log_snapshot
         log = AIRequestLog.objects.create(
             user=self.superuser, source="arm", mode="batch_solve",
             message=f"Batch solve run {self.run_id}",
@@ -7191,7 +7191,7 @@ class ArmLightSnapshotTests(TestCase):
         """Деталь журнала для ЕЩЁ ИДУЩЕГО прогона: snapshot строится
         (раньше здесь падал NameError: time не импортирован в logs.py)."""
         from ai.models import AIModelTestRun, AIRequestLog
-        from ai.admin.logs import _build_batch_log_snapshot
+        from ai.admin.request_logs import _build_batch_log_snapshot
         self.test_run.status = AIModelTestRun.STATUS_RUNNING
         self.test_run.save(update_fields=["status"])
         log = AIRequestLog.objects.create(
@@ -8579,8 +8579,8 @@ class LogsDeveloperAccessTests(TestCase):
         self.assertFalse(logs_scope_is_own_user(self.superuser))
 
     def test_list_shows_only_own_logs(self):
-        from ai.admin.logs import admin_request_logs_view
-        request = self.factory.get("/ai/admin/ai/airequestlog/")
+        from ai.admin.request_logs import admin_request_logs_view
+        request = self.factory.get("/ai/admin/ai/request_logs/")
         request.user = self.developer
         request.session = {}
         response = admin_request_logs_view(request)
@@ -8590,23 +8590,23 @@ class LogsDeveloperAccessTests(TestCase):
         self.assertNotIn(self.foreign_log, page_logs)
 
     def test_foreign_detail_forbidden(self):
-        from ai.admin.logs import admin_request_log_detail_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.foreign_log.id}/")
+        from ai.admin.request_logs import admin_request_log_detail_view
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.foreign_log.id}/")
         request.user = self.developer
         request.session = {}
         response = admin_request_log_detail_view(request, self.foreign_log.id)
         self.assertEqual(response.status_code, 403)
 
     def test_own_detail_allowed(self):
-        from ai.admin.logs import admin_request_log_detail_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{self.own_log.id}/")
+        from ai.admin.request_logs import admin_request_log_detail_view
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{self.own_log.id}/")
         request.user = self.developer
         request.session = {}
         response = admin_request_log_detail_view(request, self.own_log.id)
         self.assertEqual(response.status_code, 200)
 
     def test_delete_permission_denied_for_developer(self):
-        from ai.admin.logs import AIRequestLogAdmin
+        from ai.admin.request_logs import AIRequestLogAdmin
         from ai.admin.site import ai_admin_site
         model_admin = AIRequestLogAdmin(AIRequestLog, ai_admin_site)
         request = self.factory.get("/ai/admin/")
@@ -8796,7 +8796,7 @@ class RecentLogRowsTests(TestCase):
         return request
 
     def test_limit_and_order(self):
-        from ai.admin.logs import build_recent_log_rows
+        from ai.admin.request_logs import build_recent_log_rows
         data = build_recent_log_rows(self._request(self.superuser), limit=5)
         self.assertEqual(len(data["recent_logs"]), 5)
         self.assertEqual(data["recent_logs_limit"], 5)
@@ -8804,13 +8804,13 @@ class RecentLogRowsTests(TestCase):
         self.assertEqual([r["id"] for r in data["recent_logs"]], expected)
 
     def test_search_url_and_flag(self):
-        from ai.admin.logs import build_recent_log_rows
+        from ai.admin.request_logs import build_recent_log_rows
         data = build_recent_log_rows(self._request(self.superuser), limit=5)
         self.assertTrue(data["can_view_logs"])
         self.assertIn("focus=1", data["logs_search_url"])
 
     def test_developer_sees_only_own_logs(self):
-        from ai.admin.logs import build_recent_log_rows
+        from ai.admin.request_logs import build_recent_log_rows
         own = AIRequestLog.objects.create(
             user=self.developer, source="chat", mode="chat", message="dev own",
             status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
@@ -8872,8 +8872,8 @@ class RequestLogSearchTests(TestCase):
         )
 
     def _list(self, params, user=None):
-        from ai.admin.logs import admin_request_logs_view
-        request = self.factory.get("/ai/admin/ai/airequestlog/", params)
+        from ai.admin.request_logs import admin_request_logs_view
+        request = self.factory.get("/ai/admin/ai/request_logs/", params)
         request.user = user or self.superuser
         request.session = {}
         response = admin_request_logs_view(request)
@@ -8894,9 +8894,9 @@ class RequestLogSearchTests(TestCase):
         self.assertEqual(rows, [self.log_a])
 
     def test_filters_echoed_in_context(self):
-        from ai.admin.logs import admin_request_logs_view
+        from ai.admin.request_logs import admin_request_logs_view
         request = self.factory.get(
-            "/ai/admin/ai/airequestlog/", {"q": "тест", "id": "42"},
+            "/ai/admin/ai/request_logs/", {"q": "тест", "id": "42"},
         )
         request.user = self.superuser
         request.session = {}
@@ -8960,8 +8960,8 @@ class BatchLogDetailTemplateTests(TestCase):
         )
 
     def _detail(self, log):
-        from ai.admin.logs import admin_request_log_detail_view
-        request = self.factory.get(f"/ai/admin/ai/airequestlog/{log.id}/")
+        from ai.admin.request_logs import admin_request_log_detail_view
+        request = self.factory.get(f"/ai/admin/ai/request_logs/{log.id}/")
         request.user = self.superuser
         request.session = {}
         response = admin_request_log_detail_view(request, log.id)
@@ -9084,7 +9084,7 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         self.assertIn("function loadResultBodyState", src)
 
     def test_log_detail_resend_session_label_and_rerun_route(self):
-        src = self._source("admin/ai/airequestlog_detail.html")
+        src = self._source("admin/ai/request_logs_detail.html")
         # Протухшая сессия — внятное сообщение вместо JSON.parse-мусора.
         self.assertIn("Сессия истекла", src)
         # Подпись кнопки восстанавливается из отрендеренной, а не литералом.
@@ -9279,10 +9279,21 @@ class FormActionShadowingTests(SimpleTestCase):
         self.assertNotIn("fetch(form.action", src)
 
     def test_request_logs_rerun_url_uses_get_attribute(self):
+        """Журнал разрезан (2026-10): rerun-форма и её JS живут в партиале
+        request_logs_table.html + статическом index.js — маркер проверяем там."""
         from django.template.loader import get_template
-        src = get_template("admin/ai/request_logs.html").template.source
-        self.assertIn("form.getAttribute('action')", src)
+        from django.conf import settings
+
+        src = get_template("admin/ai/request_logs_table.html").template.source
+        self.assertIn("ai-batch-rerun-form", src)
         self.assertNotIn("fetch(form.action", src)
+        js_path = os.path.join(
+            settings.BASE_DIR, "static", "admin", "ai", "request_logs", "index.js",
+        )
+        with open(js_path, encoding="utf-8") as fh:
+            js = fh.read()
+        self.assertIn("rerunForm.getAttribute('action')", js)
+        self.assertNotIn("fetch(form.action", js)
 
 
 # ===================================================================
@@ -9840,7 +9851,7 @@ class BatchRunStatusDisplayTests(SimpleTestCase):
     падают на статус записи журнала). AIRequestLog.status в БД не меняется."""
 
     def test_status_mapping(self):
-        from ai.admin.logs import batch_run_status_display
+        from ai.admin.request_logs import batch_run_status_display
         self.assertEqual(batch_run_status_display("completed"), "Выполнен")
         self.assertEqual(batch_run_status_display("cancelled"), "Прерван")
         self.assertEqual(batch_run_status_display("failed"), "Прерван")
@@ -10432,7 +10443,7 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
     def test_worker_writes_run_name_and_journals_read_it(self):
         """Воркер пишет run_name в AIModelTestRun; журналы и таблица
         «Последние пакетные решения» читают название с прогона."""
-        from ai.admin.logs import (
+        from ai.admin.request_logs import (
             _build_batch_log_snapshot,
             build_recent_batch_rows,
             build_recent_log_rows,
@@ -10463,7 +10474,7 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(snapshot["run_status"], "completed")
 
     def test_worker_without_run_name_writes_nothing(self):
-        from ai.admin.logs import run_name_for
+        from ai.admin.request_logs import run_name_for
         from ai.models import AIModelTestRun
 
         run_id = "c" * 32
@@ -10478,7 +10489,7 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
         (тексты решений) в HTML страницы больше не встраиваются — только
         шапка + count-агрегат + snapshot_url для ленивой загрузки AJAX-ом.
         Иначе большой прогон раздувал страницу настроек до ~6 МБ."""
-        from ai.admin.logs import build_recent_batch_rows
+        from ai.admin.request_logs import build_recent_batch_rows
 
         run_id = "e" * 32
         log = self._run_batch_with_name(run_id, "Неделя 5")
@@ -10491,7 +10502,7 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
         row = rows[0]
         self.assertNotIn("snapshot", row)
         self.assertNotIn("json_id", row)
-        self.assertEqual(row["snapshot_url"], f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/")
+        self.assertEqual(row["snapshot_url"], f"/ai/admin/ai/request_logs/{log.id}/batch-snapshot/")
         self.assertEqual(row["run_name"], "Неделя 5")
         # Count-агрегат по результатам прогона (1 задача × 1 модель, solved).
         self.assertEqual(row["total_pairs"], 1)
@@ -10505,7 +10516,7 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
         Вьюха зовётся напрямую (site-level has_permission в ai_admin_site
         требует внешний DLSID — это проверяется уровнем выше, см.
         _AdminViewRequestMixin)."""
-        from ai.admin.logs import admin_batch_snapshot_view
+        from ai.admin.request_logs import admin_batch_snapshot_view
         from ai.models import AIRequestLog
 
         run_id = "f" * 32
@@ -10513,7 +10524,7 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
         su = get_user_model().objects.create_user(
             username="snap-su", password="x", is_superuser=True, is_staff=True,
         )
-        url = f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/"
+        url = f"/ai/admin/ai/request_logs/{log.id}/batch-snapshot/"
 
         request = self._admin_request(su, path=url)
         response = admin_batch_snapshot_view(request, log_id=log.id)
@@ -10530,7 +10541,7 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
             source=AIRequestLog.SOURCE_HTTP, mode=AIRequestLog.MODE_CHAT,
             sent_at=timezone.now(), message="привет",
         )
-        request = self._admin_request(su, path=f"/ai/admin/ai/airequestlog/{plain.id}/batch-snapshot/")
+        request = self._admin_request(su, path=f"/ai/admin/ai/request_logs/{plain.id}/batch-snapshot/")
         response = admin_batch_snapshot_view(request, log_id=plain.id)
         self.assertEqual(response.status_code, 404)
 
@@ -10609,8 +10620,8 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         )
 
     def _report(self, user):
-        from ai.admin.logs import admin_daily_report_view
-        request = self._admin_request(user, path="/ai/admin/ai/airequestlog/daily-report/")
+        from ai.admin.request_logs import admin_daily_report_view
+        request = self._admin_request(user, path="/ai/admin/ai/request_logs/daily-report/")
         return admin_daily_report_view(request)
 
     def test_daily_report_aggregates_students(self):
@@ -11441,7 +11452,7 @@ class PinnedBatchRunsTests(TestCase):
         self.assertEqual(resp.status_code, 403)
 
     def test_journal_row_contexts_carry_pinned_flag(self):
-        from ai.admin.logs import _batch_log_row_contexts
+        from ai.admin.request_logs import _batch_log_row_contexts
         self.toggle_view(self._post(f"/x/{self.log.id}/pin/", self.operator), self.log.id)
         contexts = _batch_log_row_contexts([self.log], user=self.operator)
         self.assertTrue(contexts[self.log.pk]["pinned"])
@@ -11537,7 +11548,7 @@ class RequestLogDetailJsonTests(TestCase):
     GET /ai/admin/ai/airequestlog/<id>/detail-json/ с правами журнала."""
 
     def setUp(self):
-        from ai.admin.logs import admin_request_log_detail_json_view
+        from ai.admin.request_logs import admin_request_log_detail_json_view
         from django.contrib.sessions.middleware import SessionMiddleware
         self.view = admin_request_log_detail_json_view
         self._middleware = SessionMiddleware(lambda req: None)
@@ -12169,8 +12180,8 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
             username="wz-ctx-pages", password="x", is_superuser=True,
         )
         expectations = (
-            ("/ai/admin/ai/airequestlog/", "admin_logs"),
-            ("/ai/admin/ai/airequestlog/123/", "admin_logs"),
+            ("/ai/admin/ai/request_logs/", "admin_logs"),
+            ("/ai/admin/ai/request_logs/123/", "admin_logs"),
             ("/ai/admin/pinned-runs/", "admin_pinned_runs"),
             ("/ai/admin/ai/tasksolution/", "admin_tasksolution"),
             ("/ai/admin/ai/aiappsettings/", "admin_aiappsettings"),
@@ -12440,7 +12451,7 @@ class BatchRunStatusPausedDisplayTests(SimpleTestCase):
     """Пауза batch-прогона — «Пауза» в журнале и «Настройке ИИ» (2026-10)."""
 
     def test_status_mapping(self):
-        from ai.admin.logs import batch_run_status_display
+        from ai.admin.request_logs import batch_run_status_display
         from ai.models import AIModelTestRun
         self.assertEqual(batch_run_status_display(AIModelTestRun.STATUS_PAUSED), "Пауза")
 
@@ -12674,7 +12685,7 @@ class ArmPromptResultPersistenceTests(TestCase):
     def test_snapshot_covers_light_and_full(self):
         """Снимок пары доезжает до light-строк и до снапшота журнала."""
         from ai import arm_runner
-        from ai.admin.logs import _build_batch_log_snapshot
+        from ai.admin.request_logs import _build_batch_log_snapshot
         from ai.models import AIModelTestRun
         run_id = self._run(self.prompt.id)
         run_obj = AIModelTestRun.objects.get(run_id=run_id)

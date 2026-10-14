@@ -1,4 +1,9 @@
 {% extends "admin/change_form.html" %}
+
+{% load static %}
+<link rel="stylesheet" href="{% static 'admin/ai/app_settings/index.css' %}">
+<script src="{% static 'admin/ai/app_settings/index.js' %}"></script>
+
 {% load i18n tz %}
 
 {% comment %}
@@ -6,13 +11,13 @@
 сайту) добавляем два блока:
 
 1. «Последние пакетные решения» — последние 5 batch-solve прогонов (ARM).
-   Строки лёгкие (шапка + count-агрегат, без текстов решений); клик по строке
-   разворачивает ту же таблицу результатов, что показывается на /arm/solve/
-   после окончания прогона (общий partial _ai_batch_results.html /
-   window.ArmBatchResults — единый источник правды с детальной страницей
-   записи журнала). Полный снапшот НЕ встраивается в HTML — грузится лениво
-   AJAX-ом по клику (batch-snapshot view): иначе большой прогон раздувал
-   страницу до ~6 МБ.
+Строки лёгкие (шапка + count-агрегат, без текстов решений); клик по строке
+разворачивает ту же таблицу результатов, что показывается на /arm/solve/
+после окончания прогона (общий partial _ai_batch_results.html /
+window.ArmBatchResults — единый источник правды с детальной страницей
+записи журнала). Полный снапшот НЕ встраивается в HTML — грузится лениво
+AJAX-ом по клику (batch-snapshot view): иначе большой прогон раздувал
+страницу до ~6 МБ.
 2. «Последние запросы» — последние 5 записей «Журнала запросов».
 
 Контекст готовит AIAppSettingsAdmin.changeform_view →
@@ -21,362 +26,168 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
 {% endcomment %}
 
 {% block after_field_sets %}
-  {{ block.super }}
+{{ block.super }}
 
-  {# Дневной отчёт журнала — под вкл/выкл приложения, над таблицей прогонов. #}
-  <div class="ai-daily-report-bar">
-    <a class="button" href="/ai/admin/ai/airequestlog/daily-report/"
-       title="Студенты × запросы за сегодня (00:00–23:59 МСК)">Дневной отчёт →</a>
-  </div>
+{# Дневной отчёт журнала — под вкл/выкл приложения, над таблицей прогонов. #}
+<div class="ai-daily-report-bar">
+  <a class="button" href="/ai/admin/ai/request_logs/daily-report/"
+    title="Студенты × запросы за сегодня (00:00–23:59 МСК)">Дневной отчёт →</a>
+</div>
 
-  <fieldset class="module aligned ai-settings-logs">
-    <h2>Последние пакетные решения ({{ recent_batch_limit|default:5 }})</h2>
-    <div class="ai-settings-logs-body">
-      <p class="help">
-        Последние {{ recent_batch_limit|default:5 }} прогонов «Пакетного решения» (ARM).
-        Кликните по строке, чтобы развернуть результаты прогона; найти конкретную запись
-        можно в полном журнале с поиском.
-      </p>
+<fieldset class="module aligned ai-settings-logs">
+  <h2>Последние пакетные решения ({{ recent_batch_limit|default:5 }})</h2>
+  <div class="ai-settings-logs-body">
+    <p class="help">
+      Последние {{ recent_batch_limit|default:5 }} прогонов «Пакетного решения» (ARM).
+      Кликните по строке, чтобы развернуть результаты прогона; найти конкретную запись
+      можно в полном журнале с поиском.
+    </p>
 
-      {% if can_view_logs %}
-        {% if recent_batch_runs %}
-          {% include "admin/ai/_ai_batch_results.html" %}
-          <div class="ai-scroll">
-          <table class="ai-recent-logs-table ai-batch-table">
-            <thead>
-              <tr>
-                <th></th>
-                <th>Отправлен</th>
-                <th>Название прогона</th>
-                <th>Курс</th>
-                <th>Расширение</th>
-                <th>Решено</th>
-                <th>Не решено</th>
-                <th>Всего пар</th>
-                <th>Статус</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {% timezone moscow_tz %}
-              {% for row in recent_batch_runs %}
-                <tr class="ai-batch-row{% if row.snapshot_url %} ai-batch-row-clickable{% endif %}"
-                    data-snapshot-url="{{ row.snapshot_url }}" data-run-id="{{ row.run_id }}" data-log-id="{{ row.id }}"{% if row.snapshot_url %} title="Кликните, чтобы развернуть результаты прогона"{% endif %}>
-                  <td class="ai-log-pin-cell">
-                    <button type="button"
-                            class="ai-log-pin-btn{% if row.pinned %} ai-log-pin-btn-active{% endif %}"
-                            data-pin-url="{{ row.pin_url }}"
-                            {% if row.run_status == 'running' %}disabled title="Прогон ещё выполняется — закрепить можно только завершённые"{% else %}title="{% if row.pinned %}Убрать из «Закреплённых»{% else %}Закрепить в «Закреплённых пакетных решениях»{% endif %}"{% endif %}>{{ row.pinned|yesno:"★,☆" }}</button>
-                  </td>
-                  <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
-                  <td>{{ row.run_name|default:"—" }}</td>
-                  <td>{{ row.course_id|default:"—" }}</td>
-                  <td>{{ row.file_extension|default:"—" }}</td>
-                  <td class="ai-recent-logs-ok">{{ row.solved|default:"—" }}</td>
-                  <td class="ai-recent-logs-err">{{ row.failed|default:"—" }}</td>
-                  <td>{{ row.total_pairs|default:"—" }}</td>
-                  <td class="{% if row.run_status == 'completed' or row.run_status == 'success' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.run_status_display }}</td>
-                  <td><a href="{{ row.detail_url }}">Детали →</a></td>
-                </tr>
-                {# Развёртка: сводка + ответы моделей прогона (ленивая загрузка — AJAX по первому клику). #}
-                <tr class="ai-batch-detail" hidden>
-                  <td colspan="10">
-                    <div class="ai-batch-detail-body"></div>
-                    {% if not row.snapshot_url %}<p class="ai-recent-logs-empty">Прогон не найден в БД — результаты недоступны.</p>{% endif %}
-                  </td>
-                </tr>
-              {% endfor %}
-              {% endtimezone %}
-            </tbody>
-          </table>
-          </div>
-        {% else %}
-          <p class="ai-recent-logs-empty">Пакетных решений пока не было.</p>
-        {% endif %}
-
-        <p class="ai-settings-logs-actions">
-          <a class="button" href="/ai/admin/arm/solve/">Открыть «Пакетное решение» →</a>
-        </p>
-      {% else %}
-        <p class="ai-recent-logs-empty">
-          У вас нет доступа к «Журналу запросов».
-        </p>
-      {% endif %}
+    {% if can_view_logs %}
+    {% if recent_batch_runs %}
+    {% include "admin/ai/_ai_batch_results.html" %}
+    <div class="ai-scroll">
+      <table class="ai-recent-logs-table ai-batch-table">
+        <thead>
+          <tr>
+            <th></th>
+            <th>Кто отправлял</th>
+            <th>Отправлен</th>
+            <th>Получен</th>
+            <th>Название прогона</th>
+            <th>Курс</th>
+            <th>Расширение</th>
+            <th>Решено</th>
+            <th>Не решено</th>
+            <th>Всего пар</th>
+            <th>Статус</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% timezone moscow_tz %}
+          {% for row in recent_batch_runs %}
+          <tr class="ai-batch-row{% if row.snapshot_url %} ai-batch-row-clickable{% endif %}" data-snapshot-url="{{ row.snapshot_url }}" data-run-id="{{ row.run_id }}" data-log-id="{{ row.id }}" {% if row.snapshot_url %} title="Кликните, чтобы развернуть результаты прогона" {% endif %}>
+            <td class="ai-log-pin-cell">
+              <button type="button" class="ai-log-pin-btn{% if row.pinned %} ai-log-pin-btn-active{% endif %}"
+                data-pin-url="{{ row.pin_url }}" {% if row.run_status == 'running' %}disabled
+                title="Прогон ещё выполняется — закрепить можно только завершённые" {% else %}title="{% if row.pinned %}Убрать из «Закреплённых»{% else %}Закрепить в «Закреплённых пакетных решениях»{% endif %}"
+                {% endif %}>{{ row.pinned|yesno:"★,☆" }}</button>
+            </td>
+            <td>{{ row.username }}</td>
+            <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
+            <td>{{ row.received_at|default:"—" }}</td>
+            <td>{{ row.run_name|default:"—" }}</td>
+            <td>{{ row.course_id|default:"—" }}</td>
+            <td>{{ row.file_extension|default:"—" }}</td>
+            <td class="ai-recent-logs-ok">{{ row.solved|default:"—" }}</td>
+            <td class="ai-recent-logs-err">{{ row.failed|default:"—" }}</td>
+            <td>{{ row.total_pairs|default:"—" }}</td>
+            <td
+              class="{% if row.run_status == 'completed' or row.run_status == 'success' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">
+              {{ row.run_status_display }}</td>
+            <td><a href="{{ row.detail_url }}">Детали →</a></td>
+          </tr>
+          {# Развёртка: сводка + ответы моделей прогона (ленивая загрузка — AJAX по первому клику). #}
+          <tr class="ai-batch-detail" hidden>
+            <td colspan="12">
+              <div class="ai-batch-detail-body"></div>
+              {% if not row.snapshot_url %}<p class="ai-recent-logs-empty">Прогон не найден в БД — результаты
+                недоступны.</p>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+          {% endtimezone %}
+        </tbody>
+      </table>
     </div>
-  </fieldset>
+    {% else %}
+    <p class="ai-recent-logs-empty">Пакетных решений пока не было.</p>
+    {% endif %}
 
-  <fieldset class="module aligned ai-settings-logs">
-    <h2>Последние запросы ({{ recent_logs_limit|default:5 }})</h2>
-    <div class="ai-settings-logs-body">
-      <p class="help">
-        Последние {{ recent_logs_limit|default:5 }} записей из «Журнала запросов».
-        Чтобы найти конкретную запись — откройте полный журнал с поиском.
-      </p>
+    <p class="ai-settings-logs-actions">
+      <a class="button" href="/ai/admin/arm/solve/">Открыть «Пакетное решение» →</a>
+    </p>
+    {% else %}
+    <p class="ai-recent-logs-empty">
+      У вас нет доступа к «Журналу запросов».
+    </p>
+    {% endif %}
+  </div>
+</fieldset>
 
-      {% if can_view_logs %}
-        {% if recent_logs %}
-          <div class="ai-scroll">
-          <table class="ai-recent-logs-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Отправлен</th>
-                <th>Кто отправлял</th>
-                <th>Язык</th>
-                <th>Тема</th>
-                <th>Модель</th>
-                <th>Статус</th>
-                <th>Режим</th>
-                <th>с</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% timezone moscow_tz %}
+<fieldset class="module aligned ai-settings-logs">
+  <h2>Последние запросы ({{ recent_logs_limit|default:5 }})</h2>
+  <div class="ai-settings-logs-body">
+    <p class="help">
+      Последние {{ recent_logs_limit|default:5 }} записей из «Журнала запросов».
+      Чтобы найти конкретную запись — откройте полный журнал с поиском.
+    </p>
+
+    {% if can_view_logs %}
+    {% if recent_logs %}
+    <div class="ai-scroll">
+      <table class="ai-recent-logs-table">
+        <thead>
+          <tr>
+            <th>Кто отправил</th>
+            <th>Отправлен</th>
+            <th>Получен</th>
+            <th>Режим</th>
+            <th>Язык</th>
+            <th>Тема</th>
+            <th>Препромпт</th>
+            <th>Модель</th>
+            <th>Статус</th>
+            <th>С</th>
+            <th title="Закрепить завершённый пакетный прогон">★</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% timezone moscow_tz %}
               {% for row in recent_logs %}
-                <tr class="ai-recent-log-row" data-log-id="{{ row.id }}" data-detail-url="/ai/admin/ai/airequestlog/{{ row.id }}/detail-json/">
-                  <td><a href="{{ row.detail_url }}">{{ row.id }}</a></td>
+                <tr class="ai-recent-log-row" data-log-id="{{ row.id }}" data-detail-url="/ai/admin/ai/request_logs/{{ row.id }}/detail-json/">
+              <td>
+                {% if row.external_user_id %}
+                  <a href="https://dl.gsu.by/report.asp?id={{ row.external_user_id }}" target="_blank" rel="noopener">{{ row.sender }}</a>
+                {% else %}
+                  {{ row.sender }}
+                {% endif %}
+              </td>
                   <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
-                  <td>
-                    {% if row.external_user_id %}
-                      <a href="https://dl.gsu.by/report.asp?id={{ row.external_user_id }}" target="_blank" rel="noopener">{{ row.sender }}</a>
-                    {% else %}
-                      {{ row.sender }}
-                    {% endif %}
-                  </td>
+                  <td>{{ row.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
+                  <td>{{ row.mode_display }}</td>
                   <td>{{ row.programming_language_name }}</td>
                   <td>{{ row.topic_name }}</td>
                   <td>{{ row.model_names }}</td>
                   <td class="{% if row.status_class == 'ok' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.status_display }}</td>
-                  <td>{{ row.mode_display }}</td>
                   <td>{{ row.duration_seconds|floatformat:0|default:"—" }}</td>
                 </tr>
                 {# Развёртка: подробная информация по записи (лениво — AJAX по первому клику). #}
                 <tr class="ai-recent-log-detail" hidden>
-                  <td colspan="9">
+                  <td colspan="11">
                     <div class="ai-recent-log-detail-body"></div>
                   </td>
                 </tr>
               {% endfor %}
               {% endtimezone %}
-            </tbody>
-          </table>
-          </div>
-        {% else %}
-          <p class="ai-recent-logs-empty">Записей пока нет.</p>
-        {% endif %}
-
-        <p class="ai-settings-logs-actions">
-          <a class="button" href="{{ logs_search_url }}">Поиск по всему журналу запросов →</a>
-        </p>
-      {% else %}
-        <p class="ai-recent-logs-empty">
-          У вас нет доступа к «Журналу запросов».
-        </p>
-      {% endif %}
+          
+        </tbody>
+      </table>
     </div>
-  </fieldset>
+    {% else %}
+    <p class="ai-recent-logs-empty">Записей пока нет.</p>
+    {% endif %}
 
-  <style>
-    .ai-settings-logs-body { padding: 4px 0 0; }
-    .ai-recent-logs-table { width: 100%; border-collapse: collapse; margin: 8px 0; }
-    .ai-recent-logs-table th,
-    .ai-recent-logs-table td {
-      border: 1px solid var(--hairline-color); padding: 6px 9px;
-      text-align: left; vertical-align: top; font-size: 13px;
-    }
-    .ai-recent-logs-table th { background: var(--darkened-bg); font-weight: 600; }
-    .ai-recent-logs-ok { color: #067647; font-weight: 600; }
-    .ai-recent-logs-err { color: #b42318; font-weight: 600; }
-    .ai-recent-logs-empty { color: var(--body-quiet-color); padding: 8px 0; }
-    .ai-settings-logs-actions { margin-top: 10px; }
-    .ai-daily-report-bar { margin: 6px 0 10px; }
-    .ai-batch-row-clickable { cursor: pointer; }
-    .ai-batch-row-clickable:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }
-    .ai-batch-row-open td { font-weight: 600; }
-    .ai-batch-detail > td { background: var(--darkened-bg); }
-    .ai-recent-log-row { cursor: pointer; }
-    .ai-recent-log-row:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }
-    .ai-recent-log-detail > td { background: var(--darkened-bg); }
-    .ai-recent-log-detail-body { padding: 6px 2px; }
-    .ai-recent-log-detail-body h4 { margin: 10px 0 4px; font-size: 13px; }
-    .ai-recent-log-detail-body pre {
-      white-space: pre-wrap; word-break: break-word;
-      max-height: 320px; overflow: auto; margin: 0 0 8px;
-      border: 1px solid var(--hairline-color); border-radius: 4px;
-      padding: 8px; background: var(--body-bg);
-    }
-    .ai-log-pin-cell { white-space: nowrap; text-align: center; }
-    .ai-log-pin-btn {
-      background: none; border: 1px solid var(--hairline-color); border-radius: 4px;
-      cursor: pointer; font-size: 15px; line-height: 1; padding: 3px 7px;
-      color: var(--body-quiet-color);
-    }
-    .ai-log-pin-btn:hover:not(:disabled) { border-color: var(--link-fg); color: var(--link-fg); }
-    .ai-log-pin-btn:disabled { opacity: 0.45; cursor: not-allowed; }
-    .ai-log-pin-btn-active { color: #d97706; border-color: #d97706; }
-    .ai-log-pin-btn.busy { opacity: 0.6; pointer-events: none; }
-  </style>
+    <p class="ai-settings-logs-actions">
+      <a class="button" href="{{ logs_search_url }}">Поиск по всему журналу запросов →</a>
+    </p>
+    {% else %}
+    <p class="ai-recent-logs-empty">
+      У вас нет доступа к «Журналу запросов».
+    </p>
+    {% endif %}
+  </div>
+</fieldset>
 
-  <script>
-    (function () {
-      // Клик по строке пакетного решения → развёртка результатов прогона
-      // (та же таблица, что на /arm/solve/ после прогона). Snapshot в HTML
-      // страницы НЕ встраивается (ленивая загрузка): по первому клику он
-      // подтягивается AJAX-ом (GET data-snapshot-url → batch-snapshot view)
-      // и рендерится через window.ArmBatchResults.
-      document.querySelectorAll('.ai-batch-row-clickable').forEach(function (row) {
-        row.addEventListener('click', function (event) {
-          if (event.target.closest('a')) { return; } // клик по «Детали →» — обычный переход
-          if (event.target.closest('button')) { return; } // клик по ★ — закрепление, не развёртка
-          var detailRow = row.nextElementSibling;
-          if (!detailRow || !detailRow.classList.contains('ai-batch-detail')) { return; }
-          var willOpen = detailRow.hidden;
-          var body = detailRow.querySelector('.ai-batch-detail-body');
-          if (willOpen && body && !body.dataset.rendered && !body.dataset.loading) {
-            var url = row.getAttribute('data-snapshot-url');
-            if (!url) { return; }
-            body.dataset.loading = '1';
-            body.innerHTML = '<p class="ai-recent-logs-empty">Загрузка результатов…</p>';
-            fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
-              .then(function (response) {
-                if (!response.ok) { throw new Error('HTTP ' + response.status); }
-                return response.json();
-              })
-              .then(function (snapshot) {
-                body.innerHTML = '';
-                window.ArmBatchResults.init(
-                  body, snapshot, snapshot.run_id || row.getAttribute('data-run-id') || ''
-                );
-                body.dataset.rendered = '1';
-                delete body.dataset.loading;
-              })
-              .catch(function () {
-                body.innerHTML = '<p class="ai-recent-logs-empty">Не удалось загрузить результаты прогона — попробуйте ещё раз.</p>';
-                delete body.dataset.loading; // повторная попытка при следующем клике
-              });
-          }
-          detailRow.hidden = !willOpen;
-          row.classList.toggle('ai-batch-row-open', willOpen);
-        });
-      });
-
-      // «Последние запросы»: клик по строке → ленивая развёртка деталей
-      // (JSON GET detail-json → метаданные + текст запроса + ответ модели).
-      // Полные тексты в HTML страницы не вшиты — записи журнала бывают
-      // большими; подгрузка по первому клику, как у пакетных решений.
-      function escapeDetailHtml(value) {
-        return String(value == null ? '' : value)
-          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-      }
-      document.querySelectorAll('.ai-recent-log-row').forEach(function (row) {
-        row.addEventListener('click', function (event) {
-          if (event.target.closest('a')) { return; } // клик по ссылке ID — обычный переход
-          var detailRow = row.nextElementSibling;
-          if (!detailRow || !detailRow.classList.contains('ai-recent-log-detail')) { return; }
-          var willOpen = detailRow.hidden;
-          var body = detailRow.querySelector('.ai-recent-log-detail-body');
-          if (willOpen && body && !body.dataset.rendered && !body.dataset.loading) {
-            var url = row.getAttribute('data-detail-url');
-            if (!url) { return; }
-            body.dataset.loading = '1';
-            body.innerHTML = '<p class="ai-recent-logs-empty">Загрузка подробностей…</p>';
-            fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
-              .then(function (response) {
-                if (!response.ok) { throw new Error('HTTP ' + response.status); }
-                return response.json();
-              })
-              .then(function (data) {
-                if (!data || !data.ok || !data.log) { throw new Error('Нет данных'); }
-                var l = data.log;
-                var sender = l.external_user_id
-                  ? '<a href="https://dl.gsu.by/report.asp?id=' + encodeURIComponent(l.external_user_id) + '" target="_blank" rel="noopener">' + escapeDetailHtml(l.sender) + '</a>'
-                  : escapeDetailHtml(l.sender);
-                var prompt = l.prompt_id
-                  ? '<a href="/ai/admin/ai/prompt/' + encodeURIComponent(l.prompt_id) + '/change/" target="_blank" rel="noopener">' + escapeDetailHtml(l.prompt_name) + '</a>'
-                  : escapeDetailHtml(l.prompt_name);
-                var task = l.task_node_id
-                  ? escapeDetailHtml(l.task_name || l.task_node_id) + ' (' + escapeDetailHtml(l.task_node_id) + ')'
-                  : escapeDetailHtml(l.task_name || '—');
-                var html = [
-                  '<h4>Параметры запроса</h4>',
-                  '<div>',
-                  '<div><strong>ID:</strong> ' + escapeDetailHtml(l.id) + '</div>',
-                  '<div><strong>Источник:</strong> ' + escapeDetailHtml(l.source_display) + '</div>',
-                  '<div><strong>Режим:</strong> ' + escapeDetailHtml(l.mode_display) + '</div>',
-                  '<div><strong>Модель:</strong> ' + escapeDetailHtml(l.model_names) + '</div>',
-                  '<div><strong>Статус:</strong> ' + escapeDetailHtml(l.status_display) + '</div>',
-                  '<div><strong>Время ответа:</strong> ' + escapeDetailHtml(l.duration_seconds) + ' с</div>',
-                  '<div><strong>Токенов:</strong> ' + escapeDetailHtml(l.tokens == null ? '—' : l.tokens) + '</div>',
-                  '<div><strong>Отправлен:</strong> ' + escapeDetailHtml(l.sent_at) + '</div>',
-                  '<div><strong>Получен:</strong> ' + escapeDetailHtml(l.received_at) + '</div>',
-                  '<div><strong>Кто:</strong> ' + sender + '</div>',
-                  '<div><strong>Язык:</strong> ' + escapeDetailHtml(l.programming_language_name) + '</div>',
-                  '<div><strong>Тема:</strong> ' + escapeDetailHtml(l.topic_name) + '</div>',
-                  '<div><strong>Задача:</strong> ' + task + '</div>',
-                  '<div><strong>Препромпт:</strong> ' + prompt + '</div>',
-                  '</div>',
-                  l.is_batch
-                    ? '<h4>Прогон</h4><div><strong>Название:</strong> ' + escapeDetailHtml(l.run_name || '—')
-                      + ' · <strong>Статус:</strong> ' + escapeDetailHtml(l.run_status_display || '—')
-                      + ' · <strong>Окончание:</strong> ' + escapeDetailHtml(l.run_finished_at || '—')
-                      + ' · <strong>Общее время:</strong> ' + escapeDetailHtml(l.run_duration_display || '—')
-                      + ' · результаты прогона — в блоке «Последние пакетные решения» выше или в <a href="' + escapeDetailHtml(l.detail_url) + '">полной записи</a>.</div>'
-                    : '<h4>Текст запроса</h4><pre>' + escapeDetailHtml(l.message || '(пусто)') + '</pre>',
-                  l.is_batch ? '' : '<h4>Ответ модели</h4><pre>' + escapeDetailHtml(l.response_text || '(пусто)') + '</pre>',
-                  l.error_message
-                    ? '<h4>Ошибка</h4><pre>' + escapeDetailHtml(l.error_message) + '</pre>'
-                    : '',
-                  '<p style="margin:8px 0 0;"><a href="' + escapeDetailHtml(l.detail_url) + '">Полная запись журнала →</a></p>',
-                ].join('');
-                body.innerHTML = html;
-                body.dataset.rendered = '1';
-                delete body.dataset.loading;
-              })
-              .catch(function () {
-                body.innerHTML = '<p class="ai-recent-logs-empty">Не удалось загрузить подробности — попробуйте ещё раз.</p>';
-                delete body.dataset.loading;
-              });
-          }
-          detailRow.hidden = !willOpen;
-        });
-      });
-
-      // ★ Закрепить/открепить batch-прогон прямо из блока «Последние пакетные
-      // решения» (POST toggle, ai/admin/pinned.py). CSRF — из куки csrftoken
-      // (админские страницы всегда её выставляют через {% csrf_token %} форм).
-      function pinCsrfToken() {
-        var input = document.querySelector('input[name="csrfmiddlewaretoken"]');
-        if (input && input.value) return input.value;
-        var m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
-        return m ? decodeURIComponent(m[1]) : '';
-      }
-      document.querySelectorAll('.ai-log-pin-btn').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-          if (btn.disabled || btn.classList.contains('busy')) return;
-          btn.classList.add('busy');
-          fetch(btn.getAttribute('data-pin-url'), {
-            method: 'POST',
-            headers: { 'X-CSRFToken': pinCsrfToken(), 'X-Requested-With': 'XMLHttpRequest' },
-            credentials: 'same-origin',
-          })
-            .then(function (resp) {
-              return resp.json().catch(function () { throw new Error('HTTP ' + resp.status); });
-            })
-            .then(function (data) {
-              if (!data.ok) { throw new Error(data.message || 'Не удалось изменить закрепление'); }
-              btn.classList.toggle('ai-log-pin-btn-active', data.pinned);
-              btn.textContent = data.pinned ? '★' : '☆';
-              btn.title = data.pinned
-                ? 'Убрать из «Закреплённых»'
-                : 'Закрепить в «Закреплённых пакетных решениях»';
-            })
-            .catch(function (err) {
-              alert('Закрепление: ' + err.message);
-            })
-            .finally(function () { btn.classList.remove('busy'); });
-        });
-      });
-    })();
-  </script>
 {% endblock %}

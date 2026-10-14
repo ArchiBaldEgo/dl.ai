@@ -1,0 +1,22 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+{% load static %}
+<link rel="stylesheet" href="{% static 'admin/test_data/index.css' %}">
+<script src="{% static 'admin/test_data/index.js' %}"></script>
+
+<div class="test-data-page">
+  <h2>Генератор тестовых записей журнала</h2>
+  <p class="help-test-data">
+    Создаёт случайную запись в «Журнале запросов» (чат/решение/ошибка, рандомные
+    студенты, режим и модель) — для живой проверки фильтров и таблицы без реальных
+    запросов. Только для суперюзера.
+  </p>
+  <form method="post" action="{% url 'ai_test_data_emit_request' %}" data-emit-request>
+    {% csrf_token %}
+    <button type="submit" class="button">Emit Request</button>
+    <span id="emit-status" class="emit-status" role="status"></span>
+  </form>
+</div>
+
+{% endblock %}

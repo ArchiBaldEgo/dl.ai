@@ -36,7 +36,7 @@ from ..dl_api_client import (
 )
 from ..http_utils import resolve_dl_session_id
 from ..services.task_registry import apply_dl_task_info
-from .logs import dl_task_url
+from .request_logs import dl_task_url
 
 User = get_user_model()
 
@@ -494,7 +494,7 @@ class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         запросов», но сокращённые. Если нужно искать конкретную запись —
         кнопка ведёт в полный журнал с поиском.
         """
-        from .logs import build_recent_batch_rows, build_recent_log_rows
+        from .request_logs import build_recent_batch_rows, build_recent_log_rows
 
         extra_context = {**(extra_context or {})}
         extra_context.update(build_recent_log_rows(request, limit=5))
@@ -790,7 +790,7 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                 "prompt_name": s.prompt_name or "—",
                 "user": s.external_user_id or "—",
                 "times_used": s.times_used,
-                "log_url": f"/ai/admin/ai/airequestlog/{s.test_log_id}/" if s.test_log_id else "",
+                "log_url": f"/ai/admin/ai/request_logs/{s.test_log_id}/" if s.test_log_id else "",
             })
         response.context_data["sol_rows"] = rows
         return response

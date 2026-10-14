@@ -5,7 +5,7 @@ ai.admin.TesterOrStaffAdminAuthenticationForm, etc. continues to work.
 """
 from .admin.auth import TesterOrStaffAdminAuthenticationForm, _admin_logout_view
 from .admin.models import ProgrammingLanguageAdmin, TopicAdmin, PromptAdmin, SharedPromptAdmin
-from .admin.logs import AIRequestLogAdmin
+from .admin.request_logs import AIRequestLogAdmin
 from .admin.models import AIAppSettingsAdmin
 from .admin.model_status import (
     admin_model_status_view,
@@ -13,7 +13,7 @@ from .admin.model_status import (
     admin_model_status_refresh_view,
 )
 from .admin.my_prompt import admin_my_prompt_view
-from .admin.logs import admin_request_logs_view
+from .admin.request_logs import admin_request_logs_view
 
 __all__ = [
     "TesterOrStaffAdminAuthenticationForm",

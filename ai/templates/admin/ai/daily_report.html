@@ -82,7 +82,7 @@
 <div class="ai-daily-wrap">
   <div class="ai-daily-header">
     <h2>{% trans "Дневной отчёт" %} — {{ date_label }} (МСК)</h2>
-    <a class="button" href="/ai/admin/ai/airequestlog/">{% trans "← Весь журнал" %}</a>
+    <a class="button" href="/ai/admin/ai/request_logs/">{% trans "← Весь журнал" %}</a>
   </div>
   <p class="ai-daily-note">
     Сегодняшний день по МСК: {{ date_label }} 00:00–23:59.
@@ -286,7 +286,7 @@
         cell.textContent = 'Загрузка…';
         detail.appendChild(cell);
         row.parentNode.insertBefore(detail, row.nextSibling);
-        fetch('/ai/admin/ai/airequestlog/' + row.dataset.logId + '/detail-json/')
+        fetch('/ai/admin/ai/request_logs/' + row.dataset.logId + '/detail-json/')
           .then(parseJsonResponse)
           .then(function (data) { renderLogInfo(cell, data.log); })
           .catch(function (err) {

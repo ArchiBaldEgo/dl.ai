@@ -1,3 +1,4 @@
+# ai/admin/request_logs.py
 """Логи запросов к AI-моделям: admin view и кастомная страница списка."""
 
 import logging
@@ -311,7 +312,7 @@ def build_recent_log_rows(request, limit=5):
             rows.append({
                 "id": log.id,
                 "sent_at": log.sent_at,
-                "sender": log.user_full_name or log.username or "—",
+                "user_full_name": log.user_full_name or log.username or "—",
                 "external_user_id": log.external_user_id or "",
                 "programming_language_name": log.programming_language_name or "—",
                 "topic_name": log.topic_name or "—",
@@ -324,7 +325,7 @@ def build_recent_log_rows(request, limit=5):
                 "run_name": run_name_for(run),
                 "mode_display": log.get_mode_display() or "—",
                 "duration_seconds": log.duration_seconds,
-                "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
+                "detail_url": f"/ai/admin/ai/request_logs/{log.id}/",
             })
     return {
         "recent_logs": rows,
@@ -332,12 +333,11 @@ def build_recent_log_rows(request, limit=5):
         "can_view_logs": can_view,
         # Полный журнал: там есть поиск/фильтры по всему журналу. Ссылка ведёт
         # на страницу журнала с фокусом на поле поиска (см. шаблон настроек).
-        "logs_search_url": "/ai/admin/ai/airequestlog/?focus=1",
+        "logs_search_url": "/ai/admin/ai/request_logs/?focus=1",
         # Для {% timezone moscow_tz %} в aiappsettings_change_form.html —
         # тот же контракт, что у admin_request_logs_view.
         "moscow_tz": MOSCOW_TZ,
     }
-
 
 def build_batch_rows_for_logs(request, logs):
     """Лёгкие строки batch-прогонов для списка записей журнала.
@@ -348,6 +348,7 @@ def build_batch_rows_for_logs(request, logs):
     развёртка результатов — лениво, AJAX по snapshot_url. Для каждого прогона
     проставляется флаг ``pinned`` (закреплён ли текущим пользователем).
     """
+
     run_ids = {}
     for log in logs:
         run_hex = _batch_run_id_from_log(log)
@@ -396,6 +397,11 @@ def build_batch_rows_for_logs(request, logs):
         rows.append({
             "id": log.id,
             "sent_at": log.sent_at,
+            "received_at": (
+                timezone.localtime(log.received_at).strftime("%d.%m.%Y %H:%M:%S")
+                if log.received_at else "—"
+            ),
+            "username": log.username,
             "status": log.status,
             # Статус прогона («Выполнен»/«Прерван»); прогон стёрт из БД →
             # старое отображение по записи журнала.
@@ -410,14 +416,14 @@ def build_batch_rows_for_logs(request, logs):
             "total_pairs": counter.get("total"),
             "solved": counter.get("solved"),
             "failed": counter.get("failed"),
-            "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
+            "detail_url": f"/ai/admin/ai/request_logs/{log.id}/",
             # Полные результаты — лениво, AJAX-ом по клику: страница
             # настроек больше не встраивает снапшоты в HTML.
-            "snapshot_url": f"/ai/admin/ai/airequestlog/{log.id}/batch-snapshot/",
+            "snapshot_url": f"/ai/admin/ai/request_logs/{log.id}/batch-snapshot/",
             # Закреплён ли прогон текущим пользователем (★ кнопки на страницах)
             # и адрес переключения (POST, см. pinned.py).
             "pinned": log.pk in pinned_log_ids,
-            "pin_url": f"/ai/admin/ai/airequestlog/{log.id}/pin/",
+            "pin_url": f"/ai/admin/ai/request_logs/{log.id}/pin/",
         })
     return rows
 
@@ -477,7 +483,7 @@ def admin_request_log_detail_json_view(request, log_id):
             "response_text": "" if is_batch else (log.response_text or ""),
             "is_batch": is_batch,
             "error_message": log.error_message or "",
-            "detail_url": f"/ai/admin/ai/airequestlog/{log.id}/",
+            "detail_url": f"/ai/admin/ai/request_logs/{log.id}/",
             "run_name": run_name_for(run) if run else "",
             "run_status_display": batch_run_status_display(run.status) if run else "",
             # Время окончания и общее время завершённого прогона (инлайн-блок
@@ -640,21 +646,24 @@ def admin_daily_report_view(request):
 
 
 def admin_request_logs_view(request):
+    # 1. 
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
 
+
+    # 2. 
     qs = _scope_logs_qs(AIRequestLog.objects.all(), request.user)
 
     status = request.GET.get("status", "").strip()
     source = request.GET.get("source", "").strip()
-    mode = request.GET.get("mode", "").strip()
-    model = request.GET.get("model", "").strip()
+    mode   = request.GET.get("mode", "").strip()
+    model  = request.GET.get("model", "").strip()
     user_q = request.GET.get("user", "").strip()
     task_q = request.GET.get("task", "").strip()
     log_id = request.GET.get("id", "").strip()
     text_q = request.GET.get("q", "").strip()
     date_from = _parse_date(request.GET.get("date_from", ""))
-    date_to = _parse_date(request.GET.get("date_to", ""))
+    date_to   = _parse_date(request.GET.get("date_to", ""))
 
     status_values = dict(AIRequestLog.STATUS_CHOICES)
     source_values = dict(AIRequestLog.SOURCE_CHOICES)
@@ -744,6 +753,8 @@ def admin_request_logs_view(request):
             .values("task_node_id", "task_name").distinct().order_by("-task_node_id")
     ]
 
+    
+
     context = {
         **ai_admin_site.each_context(request),
         "title": "DL.AI: Логи запросов",
@@ -772,7 +783,14 @@ def admin_request_logs_view(request):
             "date_to": date_to,
         },
     }
-    return TemplateResponse(request, "admin/ai/request_logs.html", context)
+
+    template = (
+        "admin/ai/request_logs_table.html"
+        if request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        else "admin/ai/request_logs.html"
+    )
+
+    return TemplateResponse(request, template, context)
 
 
 def _is_batch_solve_log(log):
@@ -1012,7 +1030,7 @@ def _batch_log_row_contexts(logs, user=None):
             "tasks_title": "; ".join(f"{t['name']} ({t['node_id']})" for t in tasks),
             # Закреплён ли прогон этим пользователем (★ кнопка закрепления).
             "pinned": log_pk in pinned_log_pks,
-            "pin_url": f"/ai/admin/ai/airequestlog/{log_pk}/pin/",
+            "pin_url": f"/ai/admin/ai/request_logs/{log_pk}/pin/",
         }
     return contexts
 
@@ -1090,7 +1108,7 @@ def admin_request_log_detail_view(request, log_id):
             context["is_batch_log"] = True
             context["batch_snapshot"] = snapshot
 
-    return TemplateResponse(request, "admin/ai/airequestlog_detail.html", context)
+    return TemplateResponse(request, "admin/ai/request_logs_detail.html", context)
 
 
 @require_POST

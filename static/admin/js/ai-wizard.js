@@ -212,14 +212,26 @@
         { sel: "#nav-sidebar", title: "Левый бар", rank: 22, pos: "right", onShow: "openNav", text: "Левый бар: все разделы. Дальше — по каждому." }
     ];
 
-    // Каждый раздел меню — свой шаг главного экрана («расписать каждую
-    // страницу»): что там и зачем. Движок сортирует эти шаги по позиции
-    // ссылок в меню сверху вниз. Раздел, скрытый правами (флаг ссылки в
-    // ai/admin/site.py), отсутствует в DOM — шаг выпадает у этой роли.
-    // Инструменты, скрытые из бара через _HIDDEN_NAV_OBJECT_NAMES (сейчас —
-    // «Регрессионные тесты»), нав-шага не имеют вовсе: их страницы не в
-    // меню и имеют собственный тур. Вернёшь инструмент в бар — верни шаг.
-    var ADMIN_NAV_PAGES = [
+    // Разработчик промптов (есть у всех): документация, свой промпт, пакетное
+    // решение, журнал, закреплённые.
+    var ADMIN_PD_EXTRA = [
+        { sel: '#nav-sidebar a[href="/ai/admin/docs/prompt-developer/"]', title: "Документация", text: "Инструкция для тебя как разработчика промптов.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/prompts/my/"]', title: "Мой препромпт", text: "Здесь ты пишешь и меняешь свои промпты.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/arm/solve/"]', title: "Пакетное решение", text: "Проверка моделей сразу на всех задачах курса.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/ai/request_logs/"]', title: "Журнал запросов", text: "Видно твои запросы к моделям.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/pinned-runs/"]', title: "Закреплённые", text: "Закреплённые пакетные решения — быстрый доступ к прогонам.", pos: "right", optional: true, onShow: "openNav" }
+    ];
+
+    // Дополнительно staff-админам: настройки приложения, модели, обновления.
+    var ADMIN_STAFF_EXTRA = [
+        { sel: '#nav-sidebar a[href="/ai/admin/ai/aiappsettings/"]', title: "Настройка ИИ-приложения", text: "Главные настройки. Только для админов.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/arm/models/"]', title: "Состояние моделей", text: "Какие модели работают, а какие нет.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/updates/"]', title: "Обновления", text: "Что нового появилось в проекте.", pos: "right", onShow: "openNav" }
+    ];
+
+    // Дополнительно суперадминам: дефолтные препромпты, регрессия, тесты,
+    // режим «посмотреть как другой», роль в шапке.
+     var ADMIN_NAV_PAGES = [
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/aiappsettings/"]', title: "Настройка ИИ-приложения", text: "Главные настройки: доступ к ИИ, сводка за сутки, последние прогоны. Свой тур — на самой странице.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/pinned-runs/"]', title: "Закреплённые прогоны", text: "Закреплённые (★) завершённые прогоны — быстрый доступ.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/prompts/my/"]', title: "Мой препромпт", text: "Твои промпты: список, поиск, кнопка «Добавить».", pos: "right", onShow: "openNav" },
@@ -229,12 +241,13 @@
         { sel: '#nav-sidebar a[href^="/ai/admin/docs/superuser/"]', title: "Инструкция суперадмина", text: "Что меняет только суперадмин.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/arm/solve/"]', title: "Пакетное решение", text: "Прогон моделей по всем задачам курса.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/arm/models/"]', title: "Состояние моделей", text: "Какие модели доступны и почему нет.", pos: "right", onShow: "openNav" },
-        { sel: '#nav-sidebar a[href^="/ai/admin/ai/airequestlog/"]', title: "Журнал запросов", text: "Все запросы к моделям: кто, что и чем закончилось.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href^="/ai/admin/ai/request_logs/"]', title: "Журнал запросов", text: "Все запросы к моделям: кто, что и чем закончилось.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/test-console/"]', title: "Тестовая консоль", text: "Запуск тестов приложения и логи прошлых запусков.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/tasksolution/"]', title: "Решённые задачи", text: "Кэш: задания, прошедшие тест в DL, достаются без модели.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/updates/"]', title: "Обновления", text: "Что нового появилось в проекте.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/prompt/"]', title: "Препромпты", text: "Таблица всех промптов; правка — по клику на название.", pos: "right", onShow: "openNav" }
     ];
+
 
     var REGISTRY = {
 
