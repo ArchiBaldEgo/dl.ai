@@ -12434,6 +12434,41 @@ class MpaMultiWindowExtractionTests(SimpleTestCase):
         asm = "jmp begin\nbegin:\nmov ax, 1\nout 1\nEnds:\njmp Ends ;$E"
         self.assertEqual(self._c(self._wall(asm), ext=".i86"), asm)
 
+    def test_helper_functions_before_main_are_kept(self):
+        """Хелперы (abs_val/sign) ДО main — часть программы: окно от
+        якоря-объявления закрывается на закрытии main, а НЕ на первой
+        сбалансированной функции (иначе в code пишется голый main и DL
+        падает «Undefined variable …», лог случая задачи №470/16126)."""
+        prog = (
+            "int __in __bits(16) a;\nint __in __bits(16) b;\n"
+            "int __in __bits(8) c;\nint __in __bits(8) d;\n"
+            "int __out __bits(16) RES;\n"
+            "\n"
+            "int abs_val(int x) {\n    return (x < 0) ? -x : x;\n}\n"
+            "\n"
+            "void main() {\n"
+            "    if (c > 0) {\n        RES = abs_val(a) + d;\n"
+            "    } else {\n        RES = abs_val(b);\n    }\n"
+            "}"
+        )
+        # Голый ответ модели (без оградок и прозы): declи + хелпер + main целиком.
+        self.assertEqual(self._c(prog), prog)
+        # И внутри простыни размышлений.
+        self.assertEqual(self._c(self._wall(prog)), prog)
+
+    def test_helper_fenced_code_kept(self):
+        """То же через закрытую оградку: структурник работает по тексту фенса
+        тем же окном — хелперы не теряются."""
+        prog = (
+            "int __in __bits(8) x;\nint __out __bits(8) z;\n"
+            "int dbl(int v) {\n    return v + v;\n}\n"
+            "void main() {\nz = dbl(x);\n}"
+        )
+        self.assertEqual(
+            self._c("Ответ:\n```mpc\n" + prog + "\n```\nГотово."),
+            prog,
+        )
+
 
 class ArmPromptResultPersistenceTests(TestCase):
     """Снимок препромпта пары (AIModelTestResult.prompt_id/prompt_name):

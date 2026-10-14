@@ -479,9 +479,43 @@ def extract_mpa_c(text, relaxed=False):
                 return i
         return None
 
+    def window_end_from_decl(start):
+        """Конец программы от якоря-объявления: declи + хелперы + main.
+
+        Прежний window_end от якоря-объявления закрывался на ПЕРВОЙ
+        сбалансированной функции: если модель оформила хелперы (abs_val/sign)
+        ДО main, в кандидата попадали только declи с первым хелпером, main
+        выпадал — DL падал («Undefined variable …»). Здесь окончание окна —
+        закрытие блока main; хелперы ДО main считаются частью программы.
+        Если main так и не закрылся — последний баланс до EOF.
+        """
+        depth = 0
+        opened = False
+        saw_main = False
+        pending_end = None
+        for i in range(start, len(lines)):
+            stripped = lines[i].strip() or " "
+            depth += stripped.count("{") - stripped.count("}")
+            if depth > 0:
+                opened = True
+            if _MPA_MAIN_RE.match(lines[i]):
+                saw_main = True
+            if opened and depth <= 0 and _closing_brace_line(lines[i]):
+                pending_end = i
+                if saw_main:
+                    return i
+        return pending_end
+
+    def end_for(start):
+        """Якорь-объявление → до закрытия main (иначе теряются хелперы перед
+        main); main-якорь → тело main, как раньше."""
+        if _MPA_DECL_RE.match(lines[start]):
+            return window_end_from_decl(start)
+        return window_end(start)
+
     candidates = []
     for start in anchors:
-        end = window_end(start)
+        end = end_for(start)
         if end is None or end <= start:
             continue
         body = [l for l in lines[start:end + 1]]
