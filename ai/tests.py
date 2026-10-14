@@ -2958,6 +2958,42 @@ class OllamaNumPredictTests(SimpleTestCase):
             self.assertEqual(ollama._default_num_predict(), 1024)
 
 
+class AskOllamaCutFlagTests(SimpleTestCase):
+    """_ask_ollama: 4-й элемент кортежа — честный сигнал обреза от done_reason.
+    Не «stop» (длина) → True; «stop» → False; пустой контент с непустым
+    thinking: обрезанное рассуждение → True, иначе False."""
+
+    @staticmethod
+    def _run_with_chat_sync(result):
+        from asyncio import run as _run
+        from unittest.mock import patch
+        from ai.model_clients import ollama
+        with patch.object(ollama, "_chat_sync", lambda *a, **kw: result):
+            return _run(ollama._ask_ollama("msg", 1, "test:model"))
+
+    def test_done_reason_stop_not_truncated(self):
+        text, tokens, is_err, cut = self._run_with_chat_sync(("ok", 5, "", "stop"))
+        self.assertEqual((text, tokens, is_err, cut), ("ok", 5, False, False))
+
+    def test_done_reason_length_truncated(self):
+        text, tokens, is_err, cut = self._run_with_chat_sync(("partial code block", 16384, "", "length"))
+        self.assertEqual((text, tokens, is_err, cut), ("partial code block", 16384, False, True))
+
+    def test_thinking_fallback_cut_flag(self):
+        # content пуст, thinking есть — обрезанное рассуждение → флаг True
+        text, tokens, is_err, cut = self._run_with_chat_sync(("", 1998, "We need to think...", "length"))
+        self.assertEqual((text, tokens, is_err, cut), ("We need to think...", 1998, False, True))
+        # рассуждение дошло до конца, но контента не родил — не «обрез»
+        text, tokens, is_err, cut = self._run_with_chat_sync(("", 50, "all thinking done", "stop"))
+        self.assertEqual((text, tokens, is_err, cut), ("all thinking done", 50, False, False))
+
+    def test_empty_content_is_error(self):
+        text, tokens, is_err, cut = self._run_with_chat_sync(("", 0, "", "stop"))
+        self.assertTrue(is_err)
+        self.assertFalse(cut)
+        self.assertIn("пустой ответ", text)
+
+
 class IsOutputTruncatedTests(SimpleTestCase):
     """is_output_truncated: обрез по факту tokens >= потолка провайдера
     (обрезка только при известном потолке — false positives хуже пропусков)."""
@@ -3757,6 +3793,84 @@ class BatchParallelWorkerTests(TransactionTestCase):
         self.assertEqual(row.tokens, 128)
         self.assertEqual(run.report["truncated_pairs"], 0)
 
+    def test_cut_flag_from_handler_fourth_element(self):
+        """Обрез без потолка по токенам: провайдер сам сказал «длина» 4-м
+        элементом (done_reason != "stop" в Ollama — скрытый потолок шлюза на
+        ~2000 токенах, лог пары 16246/task 495). Флаг ставится, ретрай
+        разогорается, честная причина в dl_comment."""
+        import os
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+
+        async def cut_flag_handler(messages, conv_id):
+            calls.append(messages)
+            if len(calls) == 1:
+                return ("We need to think slowly and carefully about all the letters before writing anything.", 1998, False, True)
+            return ("program p; begin writeln(1); end.", 128, False, False)
+
+        models = [{
+            "key": "Web_Test_Cut", "title": "Web Test Cut",
+            "handler": cut_flag_handler,   # ключ без префикса — потолка нет, работает только 4-й элемент
+        }]
+        run_id = "cut4-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=1)
+        try:
+            with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "16384"}):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id], models, self.user.id, "DLSID-1",
+                        ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("лимитом длины", calls[1])
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="Web_Test_Cut")
+        self.assertEqual(row.verdict, "solved")
+        self.assertFalse(row.truncated)      # ретрай дал полный ответ
+        run.refresh_from_db()
+        self.assertEqual(run.report["truncated_pairs"], 0)
+
+    def test_cut_flag_still_cut_reports_reason(self):
+        """И ретрай по 4-му флагу обрезан: пара failed с truncated=True и
+        честной подписью «ответ оборван» вместо «не удалось извлечь»."""
+        import os
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+
+        async def always_flag_cut(messages, conv_id):
+            calls.append(messages)
+            return ("We need to keep reasoning silently while the model keeps adding more words without any conclusion yet.", 1800, False, True)
+
+        models = [{
+            "key": "Web_Test_Cut2", "title": "Web Test Cut2",
+            "handler": always_flag_cut,
+        }]
+        run_id = "cut5-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=1)
+        try:
+            with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "16384"}):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id], models, self.user.id, "DLSID-1",
+                        ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        self.assertEqual(len(calls), 2)
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="Web_Test_Cut2")
+        self.assertEqual(row.verdict, "failed")
+        self.assertTrue(row.truncated)
+        self.assertIn("ответ оборван", row.dl_comment)
+
     def test_truncated_still_cut_keeps_flag_and_failed(self):
         """Ретрай обрезан тоже: пара failed с truncated=True, сохранены токены
         ретрая, в отчёте счётчик truncated_pairs."""
@@ -3792,7 +3906,8 @@ class BatchParallelWorkerTests(TransactionTestCase):
         self.assertEqual(row.verdict, "failed")
         self.assertTrue(row.truncated)
         self.assertEqual(row.tokens, 8192)
-        self.assertIn("Не удалось извлечь код", row.dl_comment)
+        # Обрезанная пара получает честную причину вместо общего «не удалось извлечь».
+        self.assertIn("Модель не успела вывести код — ответ оборван", row.dl_comment)
         self.assertEqual(run.report["truncated_pairs"], 1)
 
     def test_parallel_models_solve_independently(self):
@@ -5720,14 +5835,16 @@ class OllamaHandlerTests(SimpleTestCase):
 
     @staticmethod
     def _stream(*pieces, eval_count=0):
-        """Фейковые чанки стрима: контент по кускам, eval_count в финальном чанке."""
+        """Фейковые чанки стрима: контент по кускам, eval_count и done_reason
+        в финальном чанке (contract _stream_once — 4-кортеж)."""
         from types import SimpleNamespace
         chunks = []
         for piece in pieces:
             chunks.append(SimpleNamespace(
                 message=SimpleNamespace(content=piece), eval_count=0))
         chunks.append(SimpleNamespace(
-            message=SimpleNamespace(content=""), eval_count=eval_count))
+            message=SimpleNamespace(content=""), eval_count=eval_count,
+            done_reason="stop"))
         return iter(chunks)
 
     async def test_handler_streams_and_accumulates(self):
@@ -5743,7 +5860,7 @@ class OllamaHandlerTests(SimpleTestCase):
             # чтобы линтер не ругался на отсутствующий атрибут.
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
             result = await glm_5_2("1+1=?", "client")
-            self.assertEqual(result, ("print(1)", 5, False))
+            self.assertEqual(result, ("print(1)", 5, False, False))
             mock_client.chat.assert_called_once()
             # Без tools= (обычный чат), но СТРИМОМ (stream=True) — иначе
             # ollama.com рвёт соединение на длинных генерациях.
@@ -5762,7 +5879,7 @@ class OllamaHandlerTests(SimpleTestCase):
 
             deepseek_flash = getattr(ollama, "ask_Ollama_DeepSeek_V4_1_Flash_Cloud_async")
             result = await deepseek_flash("hi", "client")
-            self.assertEqual(result, ("ok", 1, False))
+            self.assertEqual(result, ("ok", 1, False, False))
             _, kwargs = mock_client.chat.call_args
             self.assertEqual(kwargs.get("model"), "deepseek-v4.1-flash:cloud")
 
@@ -5782,7 +5899,7 @@ class OllamaHandlerTests(SimpleTestCase):
 
                     handler = getattr(ollama, f"ask_{key}_async")
                     result = await handler("hi", "client")
-                    self.assertEqual(result, ("ok", 1, False))
+                    self.assertEqual(result, ("ok", 1, False, False))
                     _, kwargs = mock_client.chat.call_args
                     self.assertEqual(kwargs.get("model"), model_id)
 
@@ -5822,7 +5939,8 @@ class OllamaHandlerTests(SimpleTestCase):
 
             gpt_oss = getattr(ollama, "ask_Ollama_Gpt_Oss_20B_Cloud_async")
             result = await gpt_oss("hi", "client")
-            self.assertEqual(result, ("Рассуждаю и отвечаю", 7, False))
+            # thinking-фолбэк: done_reason нет в чанках → не «length» → не обрез
+            self.assertEqual(result, ("Рассуждаю и отвечаю", 7, False, False))
 
     async def test_empty_content_and_thinking_returns_error(self):
         """Пустые и content, и thinking → прежняя ошибка «пустой ответ»."""
@@ -5834,9 +5952,10 @@ class OllamaHandlerTests(SimpleTestCase):
             mock_client.chat.return_value = self._stream("", eval_count=0)
 
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
-            content, tokens, is_error = await glm_5_2("hi", "client")
+            content, tokens, is_error, cut = await glm_5_2("hi", "client")
             self.assertTrue(is_error)
             self.assertEqual(tokens, 0)
+            self.assertFalse(cut)
             self.assertIn("пустой ответ", content)
 
 
@@ -5863,7 +5982,8 @@ class OllamaRateLimitTests(SimpleTestCase):
             chunks.append(SimpleNamespace(
                 message=SimpleNamespace(content=piece), eval_count=0))
         chunks.append(SimpleNamespace(
-            message=SimpleNamespace(content=""), eval_count=eval_count))
+            message=SimpleNamespace(content=""), eval_count=eval_count,
+            done_reason="stop"))
         return iter(chunks)
 
     @staticmethod
@@ -5887,7 +6007,7 @@ class OllamaRateLimitTests(SimpleTestCase):
             ]
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
             result = await glm_5_2("hi", "client")
-            self.assertEqual(result, ("ok", 3, False))
+            self.assertEqual(result, ("ok", 3, False, False))
             self.assertEqual(mock_client.chat.call_count, 2)
             self.assertEqual(mock_sleep.await_count, 1)
             delay = mock_sleep.await_args.args[0]
@@ -5907,10 +6027,11 @@ class OllamaRateLimitTests(SimpleTestCase):
             mock_client = mock_client_cls.return_value
             mock_client.chat.side_effect = self._429()
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
-            content, tokens, is_error = await glm_5_2("hi", "client")
+            content, tokens, is_error, cut = await glm_5_2("hi", "client")
             # 1 первая попытка + 3 ретрая
             self.assertEqual(mock_client.chat.call_count, 4)
             self.assertTrue(is_error)
+            self.assertFalse(cut)
             self.assertEqual(tokens, 0)
             self.assertEqual(content, map_http_error(429, "ollama"))
             self.assertNotIn("status code", content)
@@ -5933,9 +6054,10 @@ class OllamaRateLimitTests(SimpleTestCase):
             mock_client = mock_client_cls.return_value
             mock_client.chat.side_effect = ResponseError("boom", status_code=500)
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
-            content, tokens, is_error = await glm_5_2("hi", "client")
+            content, tokens, is_error, cut = await glm_5_2("hi", "client")
             self.assertEqual(mock_client.chat.call_count, 1)
             self.assertTrue(is_error)
+            self.assertFalse(cut)
             self.assertIn("Ошибка Ollama API:", content)
             mock_sleep.assert_not_awaited()
 
@@ -5964,7 +6086,7 @@ class OllamaRateLimitTests(SimpleTestCase):
             )
             self.assertEqual(active["max"], 1)
             self.assertEqual(len(results), 4)
-            self.assertTrue(all(r == ("ok", 1, False) for r in results))
+            self.assertTrue(all(r == ("ok", 1, False, False) for r in results))
 
 
 class ArmBatchResultsPartialTests(SimpleTestCase):

@@ -102,6 +102,18 @@ def _is_model_error(response):
     return False
 
 
+def _response_cut_flag(response):
+    """4-й элемент handler-кортежа (провайдер сам сказал «длина обрезана»).
+
+    Ollama отдаёт done_reason != "stop" (наш num_predict или скрытый потолок
+    шлюза). Провайдеры без этого сигнала возвращают 3-кортеж — False; там
+    обрез ловится по токенам (model_clients.is_output_truncated).
+    """
+    if isinstance(response, tuple) and len(response) > 3:
+        return bool(response[3])
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Batch-solve ARM: grading + solve-prompt + DL sample extraction.
 #
@@ -761,7 +773,10 @@ def _run_job_worker(
                 # У ошибочного вызова флага нет — это другой вид сбоя.
                 single_truncated = (
                     not _is_model_error(response)
-                    and is_output_truncated(model["key"], tokens)
+                    and (
+                        is_output_truncated(model["key"], tokens)
+                        or _response_cut_flag(response)
+                    )
                 )
 
                 cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
@@ -1806,12 +1821,14 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         # DL-блока (код/DL-коммент хранятся в отдельных полях).
         raw_response = cleaned_text
 
-        # Обрез по факту: стрим остановлен ровно на потолке генерации
-        # провайдера (Ollama num_predict / SambaNova max_tokens) — код после
-        # рассуждений мог не успеть родиться. У ошибочного вызова флага нет.
+        # Обрез по факту: стрим остановлен лимитом генерации — либо потолок
+        # провайдера по токенам (Ollama num_predict / SambaNova max_tokens),
+        # либо done_reason != "stop" из финального чанка (скрытые потолки
+        # шлюза вроде «done на 2000 токенах среди фразы» — лог пары #2606829,
+        # 16246: thinking не дописан, content пуст). У ошибочного вызова флага нет.
         is_model_err = _is_model_error(response)
         if not is_model_err:
-            truncated = is_output_truncated(model["key"], tokens)
+            truncated = is_output_truncated(model["key"], tokens) or _response_cut_flag(response)
 
         # Модель вернула ошибку (таймаут/401/429/…) — кода нет, DL не
         # тестируем. Вердикт строго failed (solved — только через DL).
@@ -1867,7 +1884,10 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                         )
                     friendly, detailed = humanize_model_error(cleaned_text, include_detail=True)
                     raw_response = cleaned_text
-                    truncated = is_output_truncated(model["key"], tokens)
+                    truncated = (
+                        is_output_truncated(model["key"], tokens)
+                        or _response_cut_flag(retry_response)
+                    )
                     if _is_model_error(retry_response):
                         is_model_err = True
                         dl_submit_error = (friendly or cleaned_text)[:2000]
@@ -1897,7 +1917,11 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 )
             elif not code_only:
                 verdict = _VERDICT_FAILED
-                dl_test_comment = "Не удалось извлечь код из ответа модели"
+                dl_test_comment = (
+                    "Модель не успела вывести код — ответ оборван лимитом генерации"
+                    if truncated
+                    else "Не удалось извлечь код из ответа модели"
+                )
             elif can_run_dl:
                 if not _acquire_dl_run_lock(dl_lock, ctx["run_id"]):
                     return None
