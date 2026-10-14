@@ -1,11 +1,21 @@
 """Сервис вызова AI-моделей из WebSocket consumer."""
 
+import re
 from typing import Any
 
 from asgiref.sync import sync_to_async
 
+from ..i18n import ws_text
 from ..model_clients import registry
 from ..model_clients.exceptions import humanize_model_error
+
+
+# Регион/разделители не значимы: «Web_DeepSeek», «Web DeepSeek», «web-deepseek»
+# — одно и то же. Клиент пишет в куку ai_state ключ опции селектора, но у
+# пользователей со старыми куками (живут 1 год) там могут быть переименованные
+# ключи или title — резолв-цепочка ниже сводит всё к актуальному ключу.
+def _normalize_model_id(value: str) -> str:
+    return re.sub(r"[-_ ]+", "", str(value or "").strip().lower())
 
 
 _LEGACY_ALIASES = {
@@ -33,6 +43,37 @@ def _resolve_legacy_alias(value: str) -> str:
     return _LEGACY_ALIASES.get(value, value)
 
 
+def _resolve_model_key(registry_instance, model_key: str) -> str:
+    """Свести входное имя модели к актуальному ключу реестра.
+
+    Цепочка: точный ключ → legacy-алиас → нечувствительное к регистру и
+    разделителям совпадение по ключам → вход пришёл title'ом (точно или с
+    той же нормализацией). Пустая строка = не опознано.
+    """
+    if model_key and registry_instance.get(model_key):
+        return model_key
+
+    legacy = _resolve_legacy_alias(model_key)
+    if legacy != model_key and registry_instance.get(legacy):
+        return legacy
+
+    if not model_key:
+        return ""
+
+    target = _normalize_model_id(model_key)
+    for key in sorted(registry_instance.keys()):
+        if _normalize_model_id(key) == target:
+            return key
+
+    title_to_key = registry_instance.title_to_key()
+    if model_key in title_to_key:
+        return title_to_key[model_key]
+    for title, key in title_to_key.items():
+        if _normalize_model_id(title) == target:
+            return key
+    return ""
+
+
 class ModelCallResult:
     """Result of a model invocation."""
 
@@ -57,13 +98,14 @@ class ModelCaller:
     def __init__(self, registry_instance=registry):
         self.registry = registry_instance
 
-    async def call(self, message: str, client_id: str, model_key: str) -> ModelCallResult:
-        normalized_key = model_key if self.registry.get(model_key) else _resolve_legacy_alias(model_key)
+    async def call(self, message: str, client_id: str, model_key: str,
+                   language: str = "") -> ModelCallResult:
+        normalized_key = _resolve_model_key(self.registry, model_key) or _resolve_legacy_alias(model_key)
         handler = self.registry.handler(normalized_key)
         title = self.registry.title(normalized_key)
 
         if handler is None:
-            error_text = f"Модель {model_key} не найдена. Используйте доступные модели."
+            error_text = ws_text(language, "model_not_found", model_key=model_key)
             return ModelCallResult(
                 response_text=error_text,
                 model_title=model_key,
@@ -74,9 +116,9 @@ class ModelCaller:
         try:
             response = await handler(message, client_id)
         except Exception as exc:
-            friendly, detailed = humanize_model_error(str(exc), include_detail=True)
+            friendly, detailed = humanize_model_error(str(exc), include_detail=True, language=language)
             return ModelCallResult(
-                response_text=f"Ошибка при обработке запроса: {friendly}",
+                response_text=ws_text(language, "error_prefix", friendly=friendly),
                 model_title=title,
                 error_message=detailed,
                 is_error=True,
@@ -103,7 +145,7 @@ class ModelCaller:
         # itself might be empty (e.g. bot pool returned 200 with empty content
         # and a generic error). Substitute a clear message in all cases.
         if not response_text.strip():
-            response_text = "Модель вернула пустой ответ. Попробуйте позже."
+            response_text = ws_text(language, "empty_response")
             is_error = True
 
         return ModelCallResult(

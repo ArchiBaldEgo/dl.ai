@@ -36,7 +36,7 @@ from django.views.decorators.http import require_http_methods
 from django.conf import settings
 from .throttling import rate_limited
 from .model_health import get_available_model_options, trigger_model_health_refresh_async
-from .model_clients.registry import DEFAULT_MODEL_KEY
+from .model_clients.registry import DEFAULT_MODEL_KEY, EXPERIMENTAL_MODEL_PREFIXES
 from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
 from .auth_backends import (
     ADMIN_EXTERNAL_AUTH_BACKEND,
@@ -68,7 +68,13 @@ from .dl_api_client import (
     fetch_task_solution,
 )
 from .http_utils import resolve_dl_session_id, safe_relative_url
-from .i18n import get_language_instruction, get_localized_name, get_localized_text, get_ui_language_suffix
+from .i18n import (
+    client_strings,
+    get_language_instruction,
+    get_localized_name,
+    get_localized_text,
+    get_ui_language_suffix,
+)
 from .serializers import (
     programming_language as serialize_programming_language,
     prompt as serialize_prompt,
@@ -123,13 +129,18 @@ def _get_user_top_model_keys(request, limit=1):
         if epoch:
             qs = qs.filter(sent_at__gte=epoch)
 
-        # Посчитать частоту моделей для этого пользователя по последним 200 логам
+        # Посчитать частоту моделей для этого пользователя по последним 200 логам.
+        # В model_names пишутся КЛЮЧИ реестра (consumers.py), так что считаем их
+        # напрямую; title_to_key — фолбэк для записей времён, когда туда попадали
+        # title'ы. Experimental-модели (EXPERIMENTAL_MODEL_PREFIXES) не поднимаем
+        # фаворитами — они всегда в самом низу селектора отдельной группой.
+        from .model_clients.registry import EXPERIMENTAL_MODEL_PREFIXES
         c = Counter()
         for mns in qs.order_by('-sent_at').values_list('model_names', flat=True)[:200]:
             if mns:
                 for m in mns:
-                    key = title_to_key.get(m)
-                    if key:
+                    key = m if registry.get(m) else title_to_key.get(m)
+                    if key and not key.startswith(EXPERIMENTAL_MODEL_PREFIXES):
                         c[key] += 1
 
         result = [key for key, _ in c.most_common(limit)]
@@ -338,11 +349,18 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         # Топ-1 фаворит пользователя (по частоте использования) — наверх.
         user_top = _get_user_top_model_keys(request, limit=1)
         model_map = {item["key"]: item for item in available_models}
-        user_picks = [model_map[k] for k in user_top if k in model_map]
+        # Experimental-модели не становятся фаворитом даже если их чаще всего
+        # вызывали: они всегда в самом низу селектора (отдельная optgroup).
+        user_picks = [
+            model_map[k] for k in user_top
+            if k in model_map and not k.startswith(EXPERIMENTAL_MODEL_PREFIXES)
+        ]
 
         # Остальные — строго по алфавиту (title). Без отдельного приоритета
         # Web_DeepSeek: фаворит наверху, далее алфавит (включая Web_DeepSeek).
-        used_keys = set(user_top)
+        # used_keys — только РЕАЛЬНО поднятые фавориты (без OR-исключённых,
+        # иначе OR-модель выпадала бы из «Все модели»).
+        used_keys = {m["key"] for m in user_picks}
         # Модель по умолчанию — первое место среди «остальных», только когда у
         # пользователя нет своего топ-1 фаворита (шаблон ставит ей selected).
         default_model_key = ""
@@ -356,8 +374,16 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         if default_model_key:
             rest.insert(0, model_map[default_model_key])
 
+        # Experimental-модели (OpenRouter, registry.EXPERIMENTAL_MODEL_PREFIXES) —
+        # отдельная optgroup В САМОМ НИЗУ селектора: их не поднимают ни фаворит,
+        # ни алфавит, ни дефолт.
+        experimental_models = [
+            item for item in rest if item["key"].startswith(EXPERIMENTAL_MODEL_PREFIXES)
+        ]
+        rest = [item for item in rest if not item["key"].startswith(EXPERIMENTAL_MODEL_PREFIXES)]
+
         # Плоский список для обратной совместимости (тесты проверяют порядок).
-        available_models = user_picks + rest
+        available_models = user_picks + rest + experimental_models
         # Группы для optgroup-разделителя в шаблоне: топ-1 фаворит + остальные
         # (rest уже отсортирован и содержит дефолт первым, если тот применён).
         favorite_models = user_picks[:1]
@@ -365,17 +391,24 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
     else:
         favorite_models = []
         other_models = []
+        experimental_models = []
         default_model_key = ""
     saved_state = _read_ai_state(request)
     external_session_id = request.session.get('external_session_id')
+    # Клиентские строки трёхъязычного UI (ai/i18n.client_strings): язык — тот
+    # же, что у #selectLang (ai_state cookie, «Русский» по умолчанию). JS
+    # перелокализует DOM при каждой смене языка сам; серверный словарь нужен
+    # первому рендеру и строкам, которые JS-апплаеры не трогают.
     context = {
         'available_models': available_models,
         'favorite_models': favorite_models,
         'other_models': other_models,
+        'experimental_models': experimental_models,
         'default_model_key': default_model_key,
         'external_session_id': external_session_id,
         'last_update_date': _get_last_update_date(),
         'saved_lang': saved_state.get('lang') or '',
+        't': client_strings(saved_state.get('lang') or ''),
     }
     if wizard_scope:
         # Онбординг-wizard этой страницы: решение «показывать ли» принимает

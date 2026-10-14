@@ -1533,6 +1533,43 @@ class ModelCallerTests(SimpleTestCase):
         self.assertEqual(result.tokens, 0)
 
 
+class ModelKeyResolutionTests(SimpleTestCase):
+    """Резолв-цепочка имени модели (model_caller._resolve_model_key): точный
+    ключ → legacy-алиас → нормализованный ключ/title. Куки ai_state старых
+    пользователей хранят переименованные ключи (живут 1 год) и title'ы —
+    всё это должно сводиться к актуальному ключу, а не к ошибке «не найдена»."""
+
+    def _resolve(self, value):
+        from ai.model_clients import registry
+        from ai.services.model_caller import _resolve_model_key
+        return _resolve_model_key(registry, value)
+
+    def test_exact_key_wins(self):
+        self.assertEqual(self._resolve("Web_DeepSeek"), "Web_DeepSeek")
+
+    def test_case_and_separator_variants(self):
+        for variant in ("web deepseek", "Web-DeepSeek", "WEB_DEEPSEEK", "web_deepseek"):
+            self.assertEqual(self._resolve(variant), "Web_DeepSeek", variant)
+
+    def test_default_key_variant(self):
+        from ai.model_clients.registry import DEFAULT_MODEL_KEY
+        self.assertEqual(self._resolve("ollama gemma 4 cloud"), DEFAULT_MODEL_KEY)
+
+    def test_title_with_mixed_case(self):
+        # «Web Deepseek» — реальный ввод пользователя (без большой S) — title.
+        self.assertEqual(self._resolve("Web Deepseek"), "Web_DeepSeek")
+
+    def test_unknown_returns_empty(self):
+        self.assertEqual(self._resolve("Nonexistent_Model_Xyz"), "")
+        self.assertEqual(self._resolve(""), "")
+
+    async def test_call_error_echoes_raw_input(self):
+        """При полном промахе текст ошибки называет ТО, что пришло (диагностика)."""
+        result = await ModelCaller().call("hi", "client", "Garbage_Name")
+        self.assertTrue(result.is_error)
+        self.assertIn("Garbage_Name", result.response_text)
+
+
 class RateLimiterTests(SimpleTestCase):
     def setUp(self):
         from django.core.cache import cache
@@ -4414,6 +4451,48 @@ class ModelSortingTests(SimpleTestCase):
         self.assertIn(DEFAULT_MODEL_KEY, keys)
         self.assertEqual(context["default_model_key"], "")
 
+    def test_experimental_models_bottom_separate_group(self):
+        """OpenRouter (OR_*) — отдельная группа experimental_models в самом низу:
+        не попадает в «Все модели», в фавориты и в deфолт."""
+        from ai.views import _render_ai_page
+        models_data = [
+            {"key": "OR_Nemotron_Nano_12B_VL", "title": "OR Nemotron Nano 12B VL", "capabilities": {}},
+            {"key": "Web_DeepSeek", "title": "Web DeepSeek", "capabilities": {}},
+            {"key": "OR_Nemotron_Nano_9B", "title": "OR Nemotron Nano 9B", "capabilities": {}},
+            {"key": "Gemma_3_12b_it", "title": "Gemma 3 12b IT", "capabilities": {}},
+            {"key": "OR_Nemotron_Ultra_550B", "title": "OR Nemotron Ultra 550B", "capabilities": {}},
+        ]
+        request = self.factory.get("/ai/chat/")
+        request.user = self._make_user(pk=1)
+        request.session = {}
+        request.user_info = {"userId": "sort-user"}
+        request.COOKIES = {"userId": "sort-user"}
+        # Даже если OR-модель — топ-1 пользователя, она не должна вылезти на верх.
+        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["OR_Nemotron_Ultra_550B"]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
+            _render_ai_page(request, "ai/chat.html")
+        context = mock_render.call_args[0][2]
+        flat_keys = [m["key"] for m in context["available_models"]]
+        # user_top — OR-модель, но она НЕ становится фаворитом: Experimental-
+        # модели всегда в самом низу (плоский список тоже их держит в конце).
+        self.assertEqual(
+            flat_keys[-3:],
+            ["OR_Nemotron_Nano_12B_VL", "OR_Nemotron_Nano_9B", "OR_Nemotron_Ultra_550B"],
+        )
+        self.assertEqual(
+            [m["key"] for m in context["experimental_models"]],
+            ["OR_Nemotron_Nano_12B_VL", "OR_Nemotron_Nano_9B", "OR_Nemotron_Ultra_550B"],
+            "Experimental-модели — по алфавиту внизу",
+        )
+        self.assertNotIn("OR_Nemotron_Ultra_550B", [m["key"] for m in context["favorite_models"]])
+        exp_keys = {m["key"] for m in context["experimental_models"]}
+        for m in context["other_models"]:
+            self.assertNotIn(m["key"], exp_keys)
+        for m in context["favorite_models"]:
+            self.assertNotIn(m["key"], exp_keys)
+        for m in context["other_models"]:
+            self.assertNotEqual(m["key"], "OR_Nemotron_Nano_12B_VL")
+
+
 
 # ===================================================================
 # Tests for problem-data API (languages, topics, prompts)
@@ -4560,6 +4639,33 @@ class UserTopModelKeysTests(TestCase):
             message="test",
             status=status,
         )
+
+    def test_experimental_models_excluded_from_user_top(self):
+        """OR_*-модели в логах не становятся фаворитами: считаем только обычные."""
+        from ai.model_clients.registry import EXPERIMENTAL_MODEL_PREFIXES
+
+        from ai.views import _get_user_top_model_keys
+
+        self._make_log(["OR_Nemotron_Nano_9B"])
+        self._make_log(["OR_Nemotron_Nano_9B"])
+        self._make_log(["Web_DeepSeek"])
+
+        result = _get_user_top_model_keys(self._make_request(), limit=2)
+        for key in result:
+            self.assertFalse(key.startswith(EXPERIMENTAL_MODEL_PREFIXES))
+        self.assertIn("Web_DeepSeek", result)
+
+    def test_top_model_keys_read_keys_directly(self):
+        """model_names в логах содержит КЛЮЧИ (consumers.py пишет key) — фаворит
+        должен вычисляться и без title_to_key-транзита."""
+        from ai.views import _get_user_top_model_keys
+
+        self._make_log(["Web_Kimi"])
+        self._make_log(["Web_Kimi"])
+        self._make_log(["Web_DeepSeek"])
+
+        result = _get_user_top_model_keys(self._make_request(), limit=2)
+        self.assertEqual(result[0], "Web_Kimi")
 
     def test_returns_most_frequent_models(self):
         """The most frequently used models should be returned in order."""
@@ -10609,7 +10715,7 @@ class PinnedBatchRunsTests(TestCase):
         resp = self.toggle_view(self._post(f"/x/{ghost.id}/pin/", self.operator), ghost.id)
         self.assertEqual(resp.status_code, 400)
 
-    def test_page_shows_only_own_pins_in_pin_order(self):
+    def test_page_shows_pins_in_pin_order(self):
         from ai.models import AIModelTestRun
         run2 = "c" * 32
         log2 = AIRequestLog.objects.create(
@@ -10632,6 +10738,62 @@ class PinnedBatchRunsTests(TestCase):
         rows = resp.context_data["rows"]
         self.assertEqual([r["id"] for r in rows], [log2.id, self.log.id])
         self.assertTrue(all(r["pinned"] for r in rows))
+
+    def test_page_lists_other_users_pins_with_authors(self):
+        """Общий вид: закрепления чужих пользователю видны, автор показан,
+        is_own различает своё/чужое; открепить можно только своё."""
+        run2 = "d" * 32
+        log2 = AIRequestLog.objects.create(
+            user=self.operator, source="arm", mode="batch_solve",
+            message=f"Batch solve run {run2}",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        from ai.models import AIModelTestRun
+        AIModelTestRun.objects.create(
+            run_id=run2, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED, course_id=1452,
+        )
+        # Чужое закрепление (other закрепляет лог, который ведёт оператор)…
+        self.toggle_view(self._post(f"/x/{self.log.id}/pin/", self.other), self.log.id)
+        # …и своё.
+        self.toggle_view(self._post(f"/x/{log2.id}/pin/", self.operator), log2.id)
+
+        request = RequestFactory().get(self.pin_url_prefix)
+        request.user = self.operator
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = self.page_view(request)
+        rows_by_id = {r["id"]: r for r in resp.context_data["rows"]}
+        self.assertIn(self.log.id, rows_by_id)
+        self.assertIn(log2.id, rows_by_id)
+        foreign = rows_by_id[self.log.id]
+        own = rows_by_id[log2.id]
+        self.assertFalse(foreign["is_own"])
+        self.assertTrue(own["is_own"])
+        self.assertIn("pin_other", foreign["pin_authors"])
+        # Суперюзер: скупа «только свои» нет — чужой прогон раскрывается.
+        self.assertTrue(foreign["snapshot_url"])
+
+    def test_page_for_prompt_developer_hides_foreign_snapshot(self):
+        """Общий список виден и разработчику промтов, но раскрывать чужие
+        прогоны он не может — snapshot_url вычищен (строка не разворачивается)."""
+        from django.contrib.auth.models import Group
+        Group.objects.get_or_create(name="prompt_developer")
+        pd_user = get_user_model().objects.create_user(
+            username="pin_pd", password="x",
+        )
+        pd_user.groups.add(Group.objects.get(name="prompt_developer"))
+        self.toggle_view(self._post(f"/x/{self.log.id}/pin/", self.operator), self.log.id)
+
+        request = RequestFactory().get(self.pin_url_prefix)
+        request.user = pd_user
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = self.page_view(request)
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.context_data["rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["is_own"])
+        self.assertIn("pin_admin", rows[0]["pin_authors"])
+        self.assertEqual(rows[0]["snapshot_url"], "")
 
     def test_page_requires_logs_access(self):
         outsider = get_user_model().objects.create_user(username="pin_nobody", password="x")
@@ -11459,3 +11621,179 @@ class DashboardWizardRestartLinkTests(TestCase):
             },
         )
         self.assertIn("data-ai-wizard-restart", html)
+
+
+# === Триязычная клиентская часть: словари строк, WS-статусы, локализация ошибок ===
+
+class ClientStringsTests(SimpleTestCase):
+    """client_strings(): словарь первого рендера для трёх языков."""
+
+    def test_all_languages_have_same_keys(self):
+        from ai.i18n import _CLIENT_STRINGS
+        key_sets = [set(table) for table in _CLIENT_STRINGS.values()]
+        self.assertEqual(key_sets[0], key_sets[1], "ключи client_strings расходятся ru/en")
+        self.assertEqual(key_sets[1], key_sets[2], "ключи client_strings расходятся en/fr")
+
+    def test_language_values(self):
+        from ai.i18n import client_strings
+        self.assertEqual(client_strings("Русский")["send"], "Отправить")
+        self.assertEqual(client_strings("English")["send"], "Send")
+        self.assertEqual(client_strings("Français")["send"], "Envoyer")
+
+    def test_unknown_language_falls_back_to_russian(self):
+        from ai.i18n import client_strings
+        self.assertEqual(client_strings(""), client_strings("Русский"))
+        self.assertEqual(client_strings("Klingon"), client_strings("Русский"))
+
+
+class WsTextTests(SimpleTestCase):
+    """ws_text(): локализованные серверные тексты WS-протокола."""
+
+    def test_langs_have_same_keys(self):
+        from ai.i18n import _WS_STRINGS
+        key_sets = [set(table) for table in _WS_STRINGS.values()]
+        self.assertEqual(key_sets[0], key_sets[1], "ключи ws_text расходятся ru/en")
+        self.assertEqual(key_sets[1], key_sets[2], "ключи ws_text расходятся en/fr")
+
+    def test_placeholder_formatting(self):
+        from ai.i18n import ws_text
+        self.assertEqual(
+            ws_text("English", "model_not_found", model_key="Web_DeepSeek"),
+            "Model Web_DeepSeek not found. Please use the available models.",
+        )
+        self.assertEqual(
+            ws_text("Français", "processing", message="Bonjour"),
+            "Traitement de votre requête. Vous : Bonjour",
+        )
+
+    def test_russian_default_and_cleared(self):
+        from ai.i18n import ws_text
+        # Пустой язык → русский; формулировки RU сниффятся фронтендом.
+        self.assertEqual(ws_text("", "cleared"), "Контекст очищен")
+        self.assertIn("Запрос успешно обработан", ws_text("Русский", "success_head"))
+
+    def test_unknown_key_returns_key(self):
+        from ai.i18n import ws_text
+        self.assertEqual(ws_text("English", "no_such_key"), "no_such_key")
+
+
+class HumanizeErrorLanguageTests(SimpleTestCase):
+    """humanize_model_error(language=...): локализация friendly-текстов."""
+
+    def test_pattern_matched_localized(self):
+        from ai.model_clients.exceptions import humanize_model_error
+        ru, _ = humanize_model_error("Код 429: превышен лимит", language="Русский")
+        en, _ = humanize_model_error("Код 429: превышен лимит", language="English")
+        fr, _ = humanize_model_error("Код 429: превышен лимит", language="Français")
+        self.assertIn("429", ru)
+        self.assertIn("429", en)
+        self.assertIn("429", fr)
+        self.assertNotEqual(en, ru)
+        self.assertNotEqual(fr, ru)
+
+    def test_detail_label_localized(self):
+        from ai.model_clients.exceptions import humanize_model_error
+        _, detailed_en = humanize_model_error(
+            "Error 401: unauthorized", include_detail=True, language="English")
+        self.assertIn("Technical detail", detailed_en)
+        _, detailed_ru = humanize_model_error(
+            "Error 401: unauthorized", include_detail=True, language="Русский")
+        self.assertIn("Техническая деталь", detailed_ru)
+
+    def test_default_language_is_russian(self):
+        from ai.model_clients.exceptions import humanize_model_error
+        no_lang, _ = humanize_model_error("Код 429: превышен лимит")
+        ru, _ = humanize_model_error("Код 429: превышен лимит")
+        self.assertEqual(no_lang, ru)
+
+    def test_long_text_passthrough_untouched(self):
+        from ai.model_clients.exceptions import humanize_model_error
+        raw = "x" * 400
+        text, _ = humanize_model_error(raw)
+        self.assertEqual(text, raw)
+
+
+class WsStatusMarkerTests(SimpleTestCase):
+    """Структурированный статус терминальных WS-сообщений (протокол фронтенда)."""
+
+    def test_with_status_appends_marker(self):
+        from ai.consumers import _with_status
+        payload = _with_status("Контекст очищен", "cleared")
+        self.assertTrue(payload.endswith("\n[[ai-status:cleared]]"))
+        self.assertTrue(payload.startswith("Контекст очищен"))
+
+    def test_format_success_carries_success_and_language(self):
+        from ai.consumers import ResponseFormatter
+        payload = ResponseFormatter().format_success(
+            "12:00:00", "Model A", "1.000 сек", "answer", 5, "English")
+        self.assertTrue(payload.endswith("[[ai-status:success]]"))
+        self.assertIn("Model:", payload)
+        self.assertIn("Tokens spent: 5", payload)
+
+    def test_processing_marker(self):
+        from ai.consumers import ResponseFormatter
+        payload = ResponseFormatter().format_user_processing("12:00:00", "Hi", "English")
+        self.assertTrue(payload.endswith("[[ai-status:processing]]"))
+        self.assertIn("Processing your request. You: Hi", payload)
+
+    def test_error_status_on_simple_success(self):
+        from ai.consumers import ResponseFormatter
+        payload = ResponseFormatter().format_simple_success(
+            "12:00:00", "boom", "English", status="error")
+        self.assertTrue(payload.endswith("[[ai-status:error]]"))
+
+    def test_format_duration_localized(self):
+        from ai.consumers import ResponseFormatter
+        f = ResponseFormatter()
+        self.assertIn("s", f.format_duration(30.5, "English"))
+        self.assertIn("сек", f.format_duration(30.5, "Русский"))
+        self.assertIn("мин", f.format_duration(120.0, "Русский"))
+        self.assertIn("min", f.format_duration(120.0, "English"))
+
+
+class BaseChatTemplateLocalizationTests(SimpleTestCase):
+    """base_chat.html рендерится во всех трёх языках из t = client_strings()."""
+
+    def _render(self, lang):
+        import datetime
+        from django.template.loader import render_to_string
+        from ai.i18n import client_strings
+        request = self.factory.get("/ai/chat/")
+        context = {
+            "request": request,
+            "t": client_strings(lang),
+            "available_models": [
+                {"key": "X_1", "title": "X 1"},
+                {"key": "OR_X", "title": "X Open"},
+            ],
+            "other_models": [{"key": "X_1", "title": "X 1"}],
+            "favorite_models": [],
+            "experimental_models": [{"key": "OR_X", "title": "X Open"}],
+            "default_model_key": "X_1",
+            "saved_lang": lang,
+            "last_update_date": timezone.make_aware(datetime.datetime(2026, 10, 13)),
+            "ai_wizard": None,
+        }
+        return render_to_string("ai/base_chat.html", context)
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def test_default_russian(self):
+        html = self._render("Русский")
+        self.assertIn('label="Все модели"', html)
+        self.assertIn("Отправить", html)
+        self.assertIn("Админ-Панель", html)
+
+    def test_english_render(self):
+        html = self._render("English")
+        self.assertIn('label="All models"', html)
+        self.assertIn(">Send<", html)
+        self.assertIn("Admin Panel", html)
+        self.assertIn('data-ai-group="experimental"', html)
+
+    def test_french_render(self):
+        html = self._render("Français")
+        self.assertIn('label="Tous les modèles"', html)
+        self.assertIn("Envoyer", html)
+        self.assertIn("Panneau Admin", html)
