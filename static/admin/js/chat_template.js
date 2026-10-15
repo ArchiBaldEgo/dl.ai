@@ -24,7 +24,8 @@ function simulateSend() {
         type: '1',
         message: input.value,
         value: value,
-        language: language
+        language: language,
+        think: aiThinkEnabled()
     }));
     setRequestLock(true);
     notEnter = true;
@@ -49,7 +50,8 @@ function sendMessage(event) {
         type: '1',
         message: input.value,
         value: value,
-        language: language
+        language: language,
+        think: aiThinkEnabled()
     }));
     setRequestLock(true);
     notEnter = true;

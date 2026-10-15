@@ -6,7 +6,7 @@ from typing import Any
 from asgiref.sync import sync_to_async
 
 from ..i18n import ws_text
-from ..model_clients import registry
+from ..model_clients import registry, supports_think
 from ..model_clients.exceptions import humanize_model_error
 
 
@@ -99,7 +99,7 @@ class ModelCaller:
         self.registry = registry_instance
 
     async def call(self, message: str, client_id: str, model_key: str,
-                   language: str = "") -> ModelCallResult:
+                   language: str = "", think: bool | None = None) -> ModelCallResult:
         normalized_key = _resolve_model_key(self.registry, model_key) or _resolve_legacy_alias(model_key)
         handler = self.registry.handler(normalized_key)
         title = self.registry.title(normalized_key)
@@ -114,7 +114,15 @@ class ModelCaller:
             )
 
         try:
-            response = await handler(message, client_id)
+            # ``think`` — клиентский переключатель рассуждений (кнопка Think):
+            # kwarg в хендлер уходит ТОЛЬКО у провайдера с API-переключателем
+            # (ollama, docs.ollama.com/capabilities/thinking) и только когда
+            # клиент его прислал; None / прочие провайдеры — вызов без kwarg
+            # (поле в запрос не подставляется, поведение модели по умолчанию).
+            if think is not None and supports_think(handler):
+                response = await handler(message, client_id, think=bool(think))
+            else:
+                response = await handler(message, client_id)
         except Exception as exc:
             friendly, detailed = humanize_model_error(str(exc), include_detail=True, language=language)
             return ModelCallResult(

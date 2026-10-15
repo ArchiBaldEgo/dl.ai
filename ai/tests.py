@@ -1533,6 +1533,43 @@ class ModelCallerTests(SimpleTestCase):
         self.assertEqual(result.response_text, "Все боты заняты")
         self.assertEqual(result.tokens, 0)
 
+    async def test_passes_think_switch_to_thinking_provider(self):
+        # Кнопка Think (Ollama): think=true/false уходит в хендлер kwarg'ом —
+        # только у провайдера с API-переключателем (supports_think=True).
+        registry_mock = MagicMock()
+        registry_mock.get.return_value = True
+        handler = AsyncMock(return_value=("ответ", 5, False))
+        registry_mock.handler.return_value = handler
+        registry_mock.title.return_value = "Ollama Model"
+
+        with patch("ai.services.model_caller.supports_think", return_value=True):
+            await ModelCaller(registry_mock).call("hi", "client", "Ollama_X", think=False)
+        handler.assert_awaited_with("hi", "client", think=False)
+
+        with patch("ai.services.model_caller.supports_think", return_value=True):
+            await ModelCaller(registry_mock).call("hi", "client", "Ollama_X", think=True)
+        handler.assert_awaited_with("hi", "client", think=True)
+
+    async def test_think_ignored_for_providers_without_switch_and_on_default(self):
+        # Провайдер без переключателя (web-пулы, OpenRouter) и think=None
+        # (кнопка скрыта/поле не пришло) — вызов БЕЗ kwarg: поле think в запрос
+        # к такому провайдеру недоступно, None — поведение модели по умолчанию.
+        registry_mock = MagicMock()
+        registry_mock.get.return_value = True
+        handler = AsyncMock(return_value=("ответ", 5, False))
+        registry_mock.handler.return_value = handler
+        registry_mock.title.return_value = "Web Pool"
+
+        # think=False у не-ollama провайдера → kwarg не проходит.
+        with patch("ai.services.model_caller.supports_think", return_value=False):
+            await ModelCaller(registry_mock).call("hi", "client", "Web_X", think=False)
+        handler.assert_awaited_with("hi", "client")
+
+        # think=None у ollama → тоже вызов без kwarg (дефолт модели).
+        with patch("ai.services.model_caller.supports_think", return_value=True):
+            await ModelCaller(registry_mock).call("hi", "client", "Ollama_X", think=None)
+        handler.assert_awaited_with("hi", "client")
+
 
 class ModelKeyResolutionTests(SimpleTestCase):
     """Резолв-цепочка имени модели (model_caller._resolve_model_key): точный
@@ -2995,6 +3032,90 @@ class AskOllamaCutFlagTests(SimpleTestCase):
         self.assertIn("пустой ответ", text)
 
 
+class OllamaNoThinkTests(SimpleTestCase):
+    """Ретрай «без think» (Ollama API think=False — docs.ollama.com/
+    capabilities/thinking: «false → request no thinking output»): поле уходит
+    в запрос при think=False и НЕ подставляется вовсе при дефолте (совместимость
+    со старыми SDK); пары «обычный → no-think» ищутся по имени handler'а;
+    провайдер без переключателя → None. Думающие модели подводят протекшим
+    reasoning'ом — ARM переспрашивает ту же модель в режиме «только ответ»."""
+
+    @staticmethod
+    def _fake_client(seen):
+        class FakeMessage:
+            content = "x"
+            thinking = ""
+        class FakeChunk:
+            message = FakeMessage()
+            done_reason = "stop"
+            eval_count = 1
+        class FakeClient:
+            def chat(self, **kwargs):
+                seen.update(kwargs)
+                return [FakeChunk()]
+        return FakeClient()
+
+    def test_stream_once_forwards_think_false_and_default_omits(self):
+        from ai.model_clients import ollama
+        seen = {}
+        with patch.object(ollama, "_get_client", lambda: self._fake_client(seen)):
+            content, tokens, thinking, done = ollama._stream_once("m", "msg", 0.7, 100, think=False)
+        self.assertEqual(content, "x")
+        self.assertEqual(seen.get("think"), False)
+        # Дефолт — поле в запрос вообще не идёт (старые SDK без think-поля).
+        seen.clear()
+        with patch.object(ollama, "_get_client", lambda: self._fake_client(seen)):
+            ollama._stream_once("m", "msg", 0.7, 100)
+        self.assertNotIn("think", seen)
+
+    def test_nothink_handler_calls_with_think_false(self):
+        from asyncio import run as _run
+        from ai.model_clients import ollama
+        seen = {"think": "not-called"}
+        def fake_chat_sync(model, msg, temperature, num_predict, think=None):
+            seen["think"] = think
+            return ("program p;", 5, "", "stop")
+        handler = ollama.nothink_handler(ollama.ask_Ollama_Gemma_4_Cloud_async)
+        self.assertIsNotNone(handler)  # все Ollama-модели получили no-think пару
+        with patch.object(ollama, "_chat_sync", fake_chat_sync):
+            text, tokens, is_err, cut = _run(handler("м", 1))  # 4-кортеж, как у основных
+        self.assertEqual((text, tokens, is_err), ("program p;", 5, False))
+        self.assertFalse(seen["think"])
+
+    def test_get_no_think_handler_provider_dispatch(self):
+        from ai.model_clients import get_no_think_handler
+        from ai.model_clients import ollama, registry
+        handler = registry.get("Ollama_Gemma_4_Cloud")["handler"]
+        self.assertIs(get_no_think_handler(handler), ollama.nothink_handler(handler))
+        # web-пул/фейк без ollama-модуля → обычный ретрай (переключателя нет).
+        async def web_like(messages, conv_id):
+            return None
+        self.assertIsNone(get_no_think_handler(web_like))
+
+    def test_supports_think_provider_dispatch(self):
+        from ai.model_clients import supports_think
+        from ai.model_clients import ollama, registry
+        self.assertTrue(supports_think(registry.get("Ollama_Gemma_4_Cloud")["handler"]))
+        self.assertTrue(supports_think(ollama.ask_Ollama_Gemma_4_Cloud_async))
+        async def web_like(messages, conv_id):
+            return None
+        self.assertFalse(supports_think(web_like))
+
+    def test_main_handler_forwards_client_think(self):
+        # Клиентский переключатель: основной ollama-хендлер принимает kwarg
+        # think и передаёт его в _chat_sync; None — поведение модели по умолчанию.
+        from asyncio import run as _run
+        from ai.model_clients import ollama
+        seen = {"think": "not-called"}
+        def fake_chat_sync(model, msg, temperature, num_predict, think=None):
+            seen["think"] = think
+            return ("код", 9, "", "stop")
+        with patch.object(ollama, "_chat_sync", fake_chat_sync):
+            text, tokens, is_err, cut = _run(
+                ollama.ask_Ollama_Gemma_4_Cloud_async("м", 1, think=True))
+        self.assertTrue(seen["think"])
+
+
 class IsOutputTruncatedTests(SimpleTestCase):
     """is_output_truncated: обрез по факту tokens >= потолка провайдера
     (обрезка только при известном потолке — false positives хуже пропусков)."""
@@ -3910,6 +4031,137 @@ class BatchParallelWorkerTests(TransactionTestCase):
         # Обрезанная пара получает честную причину вместо общего «не удалось извлечь».
         self.assertIn("Модель не успела вывести код — ответ оборван", row.dl_comment)
         self.assertEqual(run.report["truncated_pairs"], 1)
+
+    def test_no_code_retry_resends_same_task_to_same_model(self):
+        """Код не извлёкся ПО ПРИЧИНЕ, НЕ связанной с обрезом (протекшее
+        рассуждение залило ответ): пара не срывается сразу — один повтор
+        ТОЙ ЖЕ задаче к ТОЙ ЖЕ модели тем же текстом (без приписки про
+        лимит — его причина другая). Ретрай дал код — пара решена."""
+        import os
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+
+        async def prose_then_code_handler(messages, conv_id):
+            calls.append(messages)
+            if len(calls) == 1:
+                # Проза без маркеров кода, токены далеки от потолка:
+                # «код не извлечён» БЕЗ обреза.
+                return (
+                    "Сначала я долго размышляю над условием задачи от самого начала "
+                    "и перечитываю его снова и снова, не переходя к программе.",
+                    50, False,
+                )
+            return ("program p; begin writeln(1); end.", 60, False)
+
+        models = [{
+            "key": "Prose_Test", "title": "Prose Test",
+            "handler": prose_then_code_handler,  # фейковый модуль → nothink-пути нет
+        }]
+        run_id = "nc-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=1)
+        try:
+            with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "16384"}):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id], models, self.user.id, "DLSID-1",
+                        ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        # Один повтор: та же задача, тот же текст — без «лимитом длины».
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1], calls[0])
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="Prose_Test")
+        self.assertEqual(row.verdict, "solved")
+        self.assertFalse(row.truncated)
+        run.refresh_from_db()
+        self.assertEqual(run.report["truncated_pairs"], 0)
+
+    def test_no_code_retry_failed_keeps_honest_comment(self):
+        """И повтор не помог (проза снова): пара failed с честной «Не удалось
+        извлечь код» (НЕ «обрезан» — обрезы тут ни при чём, флаг не врёт)."""
+        import os
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+
+        async def always_prose(messages, conv_id):
+            calls.append(messages)
+            return (
+                "Я снова подробно рассказываю про свои сомнения вместо программы "
+                "и обсуждения деталей условия, никаких блоков кода тут не будет.",
+                55, False,
+            )
+
+        models = [{"key": "Prose_Test2", "title": "Prose Test2", "handler": always_prose}]
+        run_id = "nc2-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=1)
+        try:
+            with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "16384"}):
+                with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                    arm_runner._run_batch_job_worker(
+                        run_id, [self.t1.node_id], models, self.user.id, "DLSID-1",
+                        ui_language="Русский", dl_test=True,
+                    )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        self.assertEqual(len(calls), 2)
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="Prose_Test2")
+        self.assertEqual(row.verdict, "failed")
+        self.assertFalse(row.truncated)
+        self.assertIn("Не удалось извлечь код", row.dl_comment)
+
+    def test_no_code_retry_prefers_nothink_handler(self):
+        """Ollama-модель: повтор идёт через no-think хендлер (get_no_think_handler;
+        Ollama API think=False по docs.ollama.com/capabilities/thinking), а не
+        через обычный. Провайдер определяется по __module__ — фейк держит
+        оllama-модуль и имя из реестра."""
+        import os
+        from ai import arm_runner
+        from ai.model_clients import get_no_think_handler
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        calls = []
+
+        async def real_handler(messages, conv_id):
+            calls.append(("plain", messages))
+            return ("мусор без кода", 50, False)
+
+        real_handler.__module__ = "ai.model_clients.ollama"
+        real_handler.__name__ = "ask_Ollama_NotInRegistry_async"  # нет в _NOTHINK_HANDLERS
+
+        async def nothink_proxy(messages, conv_id):
+            calls.append(("nothink", messages))
+            return ("program p; begin writeln(1); end.", 60, False)
+
+        models = [{"key": "Ollama_NotInRegistry", "title": "Ollama NotInRegistry",
+                   "handler": real_handler}]
+        run_id = "nc3-" + uuid.uuid4().hex[:8]
+        job = self._seed_job(run_id, total_pairs=1)
+        try:
+            with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "16384"}):
+                with patch.object(arm_runner, "get_no_think_handler",
+                                  side_effect=lambda h: get_no_think_handler(h) or nothink_proxy):
+                    with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
+                        arm_runner._run_batch_job_worker(
+                            run_id, [self.t1.node_id], models, self.user.id, "DLSID-1",
+                            ui_language="Русский", dl_test=True,
+                        )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+
+        # Первый вызов — реальный хендлер (мусор), второй — no-think прокси.
+        self.assertEqual([kind for kind, _ in calls], ["plain", "nothink"])
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="Ollama_NotInRegistry")
+        self.assertEqual(row.verdict, "solved")
 
     def test_parallel_models_solve_independently(self):
         """2 модели × 2 задачи: каждая пара решена ровно один раз, циклы моделей
@@ -14394,3 +14646,64 @@ class AutoFiltersStaticTests(TestCase):
         updates = js[js.index("admin_updates: ["): js.index("admin_regression: [")]
         self.assertIn("сузится сам", updates)
         self.assertIn("применяется само", updates)
+
+    def test_wizard_registry_admin_test_data_texts(self):
+        """Текст шага статуса «Тестовых данных» честен: записи удаляются
+        только в стоковом списке журнала, НЕ кнопкой «Сбросить»."""
+        js = self._read("static", "admin", "js", "ai-wizard.js")
+        self.assertIn("airequestlog", js)
+
+
+class ChatThinkToggleStaticTests(TestCase):
+    """Кнопка Think (переключатель рассуждений для Ollama-моделей):
+    общая шапка base_chat.html — одна кнопка на все три страницы чата;
+    механика в ai-common.js (видимость по ключу Ollama_*, состояние в
+    ai_state, триязычная подпись); WS-конверты страниц шлют think, когда
+    кнопка видима (undefined у не-Ollama — JSON.stringify поле опустит)."""
+
+    def _read(self, *parts):
+        from django.conf import settings
+        with open(os.path.join(settings.BASE_DIR, *parts), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_button_in_shared_header(self):
+        """"Кнопка в общей шапке base_chat.html — по ней достаются все 3 страницы."""
+        src = self._read("ai", "templates", "ai", "base_chat.html")
+        self.assertIn('id="thinkToggleBtn"', src)
+        self.assertIn('class="think-toggle"', src)
+        self.assertIn("hidden", src)
+
+    def test_ai_common_mechanics(self):
+        js = self._read("static", "admin", "js", "ai-common.js")
+        self.assertIn("function getThinkOn", js)
+        self.assertIn("function refreshThinkToggleVisibility", js)
+        self.assertIn("function updateThinkToggleLabel", js)
+        self.assertIn("function initThinkToggle", js)
+        self.assertIn("function aiThinkEnabled", js)
+        self.assertIn("indexOf('Ollama_')", js)
+        self.assertIn("setAiState({ think: getThinkOn() ? 0 : 1 });", js)
+        # Хук инициализации в initSelectionPersistence (после restoreSelections).
+        self.assertIn("initThinkToggle();", js)
+        # Подпись на смене языка UI (applySharedUiLanguageTexts).
+        self.assertIn("updateThinkToggleLabel();", js)
+        # Триязычные ключи подписи.
+        self.assertEqual(js.count("thinkOn:"), 3)
+        self.assertEqual(js.count("thinkOff:"), 3)
+
+    def test_envelopes_send_think(self):
+        """Конверты трёх страниц идут с think: aiThinkEnabled() — у chat type=1,
+        solve type=2 и find_error type=3 по два места отправки."""
+        self.assertEqual(
+            self._read("static", "admin", "js", "chat_template.js").count("think: aiThinkEnabled()"), 2)
+        self.assertEqual(
+            self._read("static", "admin", "js", "decide_task.js").count("think: aiThinkEnabled(),"), 2)
+        self.assertEqual(
+            self._read("static", "admin", "js", "find_error.js").count("think: aiThinkEnabled(),"), 2)
+
+    def test_css_state_styling(self):
+        css = self._read("static", "admin", "css", "ai_theme.css")
+        self.assertIn(".think-toggle {", css)
+        self.assertIn(".think-toggle.ai-think-on {", css)
+        # author-display перебивает UA-стиль [hidden] — guard обязателен,
+        # иначе кнопка светится и на не-Ollama моделях.
+        self.assertIn(".think-toggle[hidden] {", css)

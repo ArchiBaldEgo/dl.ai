@@ -8,7 +8,7 @@
 
 from .registry import registry
 
-__all__ = ["registry", "is_output_truncated"]
+__all__ = ["registry", "is_output_truncated", "get_no_think_handler", "supports_think"]
 
 # Провайдеры с известным потолком генерации (токенов ответа): модуль обработчика
 # → функция потолка. Определяем провайдера по __module__ handler'а из реестра
@@ -72,3 +72,34 @@ def is_output_truncated(model_key: str, tokens: int) -> bool:
         return False
     ceiling = _output_ceiling(model_key)
     return ceiling > 0 and tokens >= ceiling
+
+
+def supports_think(handler) -> bool:
+    """True — провайдер умеет переключать рассуждения полем ``think``
+    (chat/generate Ollama, docs.ollama.com/capabilities/thinking).
+
+    Проводная точка для клиентского переключателя: ModelCaller передаёт kwarg
+    ``think=True/False`` в хендлер только при True (ollama-хендлеры принимают
+    его keyword-аргументом), прочим провайдерам поле недоступно по API. Хвост
+    ``__module__`` — как в _output_ceiling / get_no_think_handler.
+    """
+    return _provider_module(handler) == "ollama"
+
+
+def get_no_think_handler(handler):
+    """Хендлер РЕТРАЯ «без think» того же вызова — или None, если провайдер
+    переключателя рассуждений не имеет (и ретрай пойдёт обычным хендлером).
+
+    ARM-раннер вторично отправляет задачу, когда код из ответа не извлёкся:
+    думающие модели подводят, заливая ответ протекшим reasoning'ом. По докам
+    Ollama (docs.ollama.com/capabilities/thinking) это глушится полем
+    ``think: false`` в запросе — «request no thinking output»; у прочих
+    провайдеров (web-пулы, OpenRouter) API-переключателя нет, а запрет
+    рассуждений уже сидит в базовом solve-сообщении (_NO_RAMBLE_INSTRUCTION).
+    Провайдер определяется по хвосту ``__module__`` хендлера — как в
+    _output_ceiling.
+    """
+    if _provider_module(handler) == "ollama":
+        from . import ollama as _ollama
+        return _ollama.nothink_handler(handler)
+    return None

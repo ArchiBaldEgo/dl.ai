@@ -43,7 +43,7 @@ from .services.code_carver import (  # noqa: E402
 from django.utils.html import strip_tags
 
 from .model_clients.exceptions import humanize_model_error
-from .model_clients import is_output_truncated
+from .model_clients import is_output_truncated, get_no_think_handler
 from .services.task_registry import dl_task_url
 from .i18n import get_ui_language_suffix
 from .model_health import get_runtime_model_handlers, is_arm_solve_model
@@ -1878,18 +1878,33 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             if junk_code:
                 code_only = ""
 
-            # Обрез по потолку генерации и кода нет (рассуждения съели бюджет,
-            # до кода модель не дошла): один авто-ретрай с прямой припиской
-            # «сразу код». Повторный вызов НЕ срывает пару: при исключении
-            # держим первый ответ; если и ретрай обрезан — пара пишется с
-            # флагом truncated и попадает в «Перезапустить нерешённые пары».
-            if truncated and not code_only:
+            # Кода НЕ извлекли (при любом исходе, не только обрезе) — один
+            # авто-ретрай к ТОЙ ЖЕ модели, БЕЗ think-механики. Думающие модели
+            # подводят протекшим reasoning'ом; по докам Ollama
+            # (docs.ollama.com/capabilities/thinking) он глушится полем
+            # ``think: false`` в запросе (ai.model_clients.get_no_think_handler);
+            # провайдерам без API-переключателя повтор идёт обычным хендлером —
+            # запрет рассуждений уже сидит в базовом сообщении
+            # (_NO_RAMBLE_INSTRUCTION), а повторы недетерминированную генерацию
+            # переразыгрывают. Обрез — отдельная причина: ретрай ещё и с
+            # припиской «сразу код» (_CUT_RETRY_INSTRUCTION). Повторный вызов
+            # НЕ срывает пару: при исключении держим первый ответ; если и
+            # ретрай неудачен — пара пишется как была (с truncated-флагом при
+            # обрезе) и попадает в «Перезапустить нерешённые пары».
+            if not code_only and not is_model_err:
                 if _is_cancel_requested(ctx["run_id"]):
                     return None
                 retry_started = perf_counter()
                 try:
-                    retry_response = async_to_sync(model["handler"])(
-                        message + "\n" + _CUT_RETRY_INSTRUCTION[get_ui_language_suffix(ctx["ui_language"])],
+                    # Хендлер ретрая: «без think», если провайдер умеет
+                    # (Ollama think=False); приписка «сразу код» — только при
+                    # обрезе, у прочих причин задача идёт дословно.
+                    retry_call = get_no_think_handler(model["handler"]) or model["handler"]
+                    retry_message = message
+                    if truncated:
+                        retry_message += "\n" + _CUT_RETRY_INSTRUCTION[get_ui_language_suffix(ctx["ui_language"])]
+                    retry_response = async_to_sync(retry_call)(
+                        retry_message,
                         f"admin-batch-{ctx['user_id']}-{model['key']}-{ctx['run_id']}-{node_id}",
                     )
                     gen_seconds += round(perf_counter() - retry_started, 2)
@@ -1921,9 +1936,11 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                             code_only = ""
                 except Exception as retry_exc:  # noqa: BLE001
                     gen_seconds += round(perf_counter() - retry_started, 2)
-                    truncated = True
+                    # truncated НЕ завышаем: флаг ставился по факту обреза
+                    # первого ответа; ретрай может сорваться и по иной причине
+                    # (код не извлечён) — честная подпись в dl_comment.
                     logger.warning(
-                        "ARM batch: retry after cut failed for model %s node_id=%s: %s",
+                        "ARM batch: no-code retry failed for model %s node_id=%s: %s",
                         model["key"], node_id, retry_exc,
                     )
 

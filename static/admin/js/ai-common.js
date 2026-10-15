@@ -141,6 +141,59 @@ function restoreSelections() {
 }
 
 // Сохранение при изменении любого селекта
+// === Кнопка Think (переключатель рассуждений для Ollama-моделей) ===
+// Ollama умеет глушить/включать рассуждения полем think
+// (docs.ollama.com/capabilities/thinking): ВЫКЛ = think:false («request no
+// thinking output»), ВКЛ = think:true. Поле в WS-конверт уходит ТОЛЬКО у
+// Ollama_* — остальным провайдерам API-переключателя нет. Состояние живёт в
+// куке ai_state (как voiceMode), по умолчанию — выкл.
+var AI_THINK_STATE_KEY = 'think';
+
+function getThinkOn() {
+    return getAiState()[AI_THINK_STATE_KEY] === 1;
+}
+
+// Видимость и подпись кнопки: показываем только при модели Ollama_*.
+function refreshThinkToggleVisibility() {
+    var btn = document.getElementById('thinkToggleBtn');
+    var sel = document.getElementById('select');
+    if (!btn || !sel) return;
+    btn.hidden = (sel.value || '').indexOf('Ollama_') !== 0;
+    btn.classList.toggle('ai-think-on', getThinkOn());
+    updateThinkToggleLabel();
+}
+
+function updateThinkToggleLabel() {
+    var btn = document.getElementById('thinkToggleBtn');
+    if (!btn) return;
+    var on = getThinkOn();
+    btn.textContent = getUiString(on ? 'thinkOn' : 'thinkOff',
+        on ? 'Think: вкл' : 'Think: выкл');
+}
+
+function initThinkToggle() {
+    var btn = document.getElementById('thinkToggleBtn');
+    var sel = document.getElementById('select');
+    if (!btn || !sel || btn.dataset.aiThinkInit) return;
+    btn.dataset.aiThinkInit = '1';
+    btn.addEventListener('click', function () {
+        setAiState({ think: getThinkOn() ? 0 : 1 });
+        refreshThinkToggleVisibility();
+    });
+    // restoreSelections ставит selectedIndex программно (change не диспатчится),
+    // поэтому первичный пересчёт делаем здесь, после restoreSelections.
+    sel.addEventListener('change', refreshThinkToggleVisibility);
+    refreshThinkToggleVisibility();
+}
+
+// Для WS-конвертов страниц: undefined — кнопка скрыта (модель не Ollama) и
+// поле think в JSON.stringify не попадёт; иначе true/false состояния кнопки.
+function aiThinkEnabled() {
+    var btn = document.getElementById('thinkToggleBtn');
+    if (!btn || btn.hidden) return undefined;
+    return getThinkOn();
+}
+
 function initSelectionPersistence() {
     for (var i = 0; i < PERSISTED_SELECT_IDS.length; i++) {
         var el = document.getElementById(PERSISTED_SELECT_IDS[i]);
@@ -163,6 +216,7 @@ function initSelectionPersistence() {
     // Сортировка «Все модели» по статистике прогонов /arm/solve/ — общий
     // механизм для всех трёх страниц чата (base_chat.html).
     initModelSortSelector();
+    initThinkToggle();
 }
 
 // === Сортировка селектора моделей по статистике прогонов /arm/solve/ ===
@@ -1340,6 +1394,8 @@ var localization = {
         voiceOutput: "Озвучить ответ",
         speakThinkLabel: "Озвучивать дополнительную информацию",
         themeToggle: "Сменить тему",
+        thinkOn: "Think: вкл",
+        thinkOff: "Think: выкл",
         lastUpdate: "Последнее обновление",
         // Кнопка «?» — инструкция пользователя (модалка, initUserDocs).
         userDocs: "Инструкция пользователя",
@@ -1450,6 +1506,8 @@ var localization = {
         voiceOutput: "Speak answer",
         speakThinkLabel: "Voice extra information",
         themeToggle: "Toggle theme",
+        thinkOn: "Think: on",
+        thinkOff: "Think: off",
         lastUpdate: "Last updated",
         // «?» button — user docs modal (initUserDocs).
         userDocs: "User guide",
@@ -1559,6 +1617,8 @@ var localization = {
         voiceOutput: "Lire la réponse",
         speakThinkLabel: "Informations supplémentaires vocales",
         themeToggle: "Changer le thème",
+        thinkOn: "Think : activé",
+        thinkOff: "Think : désactivé",
         lastUpdate: "Dernière mise à jour",
         // Bouton « ? » — modale du guide utilisateur (initUserDocs).
         userDocs: "Guide de l'utilisateur",
@@ -2300,6 +2360,8 @@ function applySharedUiLanguageTexts() {
         themeBtn.setAttribute('aria-label', themeLabel);
         themeBtn.setAttribute('title', themeLabel);
     }
+    var thinkBtn = document.getElementById('thinkToggleBtn');
+    if (thinkBtn) updateThinkToggleLabel();
     var menuBtn = document.querySelector('.toggle-button');
     if (menuBtn) menuBtn.setAttribute('aria-label', getUiString('openMenu', 'Открыть меню'));
     var docsBtn = document.getElementById('userDocsBtn');

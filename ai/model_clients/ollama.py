@@ -164,7 +164,10 @@ def _get_client() -> Client:
     return Client(host=OLLAMA_HOST, timeout=_OLLAMA_TIMEOUT, headers=headers)
 
 
-def _stream_once(model: str, msg: str, temperature: float, num_predict: int) -> Tuple[str, int, str, str]:
+def _stream_once(
+    model: str, msg: str, temperature: float, num_predict: int,
+    think: bool | None = None,
+) -> Tuple[str, int, str, str]:
     """Синхронный streaming-вызов ollama.chat (запускается через asyncio.to_thread).
 
     Возвращает ``(content, eval_count, thinking, done_reason)``. Стриминг
@@ -181,6 +184,11 @@ def _stream_once(model: str, msg: str, temperature: float, num_predict: int) -> 
     стримит рассуждение отдельным полем, не think-тегами в content);
     обычно отбрасывается, но спасает ответ, когда content пуст.
 
+    ``think`` — управление рассуждениями модели по докам Ollama
+    (docs.ollama.com/capabilities/thinking): ``false`` — «request no thinking
+    output»; None — поведение модели по умолчанию (поле в запрос не
+    подставляется вовсе — совместимость со старыми SDK без think-поля).
+
     ``done_reason`` — причина остановки финального чанка: "stop" — нормальное
     окончание, "length" — генерация обрезана лимитом (нашего num_predict ИЛИ
     скрытым потолком шлюза: были кейсы «done на ~2000 токенах среди фразы»).
@@ -191,11 +199,13 @@ def _stream_once(model: str, msg: str, temperature: float, num_predict: int) -> 
     thinking_parts: list[str] = []
     tokens = 0
     done_reason = ""
+    extra_kwargs: dict = {"think": think} if think is not None else {}
     for chunk in client.chat(
         model=model,
         messages=[{"role": "user", "content": msg}],
         options={"temperature": temperature, "num_predict": num_predict},
         stream=True,
+        **extra_kwargs,
     ):
         message = getattr(chunk, "message", None)
         content = getattr(message, "content", "") or ""
@@ -211,7 +221,10 @@ def _stream_once(model: str, msg: str, temperature: float, num_predict: int) -> 
     return "".join(parts), tokens, "".join(thinking_parts), done_reason
 
 
-def _chat_sync(model: str, msg: str, temperature: float, num_predict: int) -> Tuple[str, int, str]:
+def _chat_sync(
+    model: str, msg: str, temperature: float, num_predict: int,
+    think: bool | None = None,
+) -> Tuple[str, int, str]:
     """Запускает ``_stream_once`` под per-process семафором конкурентности.
 
     Блокирующий acquire — ВНУТРИ worker-потока (asyncio.to_thread), не в корутине:
@@ -230,7 +243,7 @@ def _chat_sync(model: str, msg: str, temperature: float, num_predict: int) -> Tu
                 waited, _SEM_SIZE, model,
             )
     try:
-        return _stream_once(model, msg, temperature, num_predict)
+        return _stream_once(model, msg, temperature, num_predict, think)
     finally:
         sem.release()
 
@@ -277,6 +290,7 @@ async def _ask_ollama(
     *,
     temperature: float = 0.7,
     num_predict: int | None = None,
+    think: bool | None = None,
 ) -> Tuple[str, int, bool, bool]:
     """Общий обработчик для всех моделей Ollama. Обычный чат без инструментов.
 
@@ -301,7 +315,7 @@ async def _ask_ollama(
     for attempt in range(1, attempts + 1):
         try:
             result = await asyncio.to_thread(
-                _chat_sync, model_id, msg, temperature, num_predict,
+                _chat_sync, model_id, msg, temperature, num_predict, think,
             )
             break
         except Exception as exc:  # ollama.ResponseError / httpx исключения / прочее
@@ -342,8 +356,26 @@ async def _ask_ollama(
 def _ollama_handler_factory(model_key: str, cfg: dict):
     model_id = cfg["model"]
 
+    # ``think`` — клиентский переключатель рассуждений (кнопка Think в чате):
+    # None — поле в запрос не подставляется вовсе (поведение модели по умолчанию,
+    # совместимость с вызовами без аргумента — ModelCaller передаёт kwarg только
+    # при think is not None и провайдере ollama, см. model_clients.supports_think).
+    async def handler(msg: str, user_id: int, *, think: bool | None = None) -> Tuple[str, int, bool]:
+        return await _ask_ollama(msg, user_id, model_id, think=think)
+
+    return handler
+
+
+def _nothink_handler_factory(model_key: str, cfg: dict):
+    """Фабрика РЕТРАЕВ «без think» (см. ai.model_clients.get_no_think_handler):
+    тот же generic-вызов, но с полем ``think: false`` в запросе (доки
+    docs.ollama.com/capabilities/thinking — «request no thinking output»):
+    протекшее рассуждение залило ответ → повторяем задачу у той же модели в
+    режиме «только ответ»."""
+    model_id = cfg["model"]
+
     async def handler(msg: str, user_id: int) -> Tuple[str, int, bool]:
-        return await _ask_ollama(msg, user_id, model_id)
+        return await _ask_ollama(msg, user_id, model_id, think=False)
 
     return handler
 
@@ -355,3 +387,17 @@ globals().update(
         doc_fn=lambda key, cfg: cfg["description"],
     )
 )
+
+# Отдельный dict (не в globals: registry берёт основные имена) с ТЕМИ ЖЕ
+# ключами «ask_{key}_async» — пары «обычный → no-think» ищутся по __name__.
+_NOTHINK_HANDLERS = make_table_handlers(
+    OLLAMA_MODELS,
+    _nothink_handler_factory,
+    doc_fn=lambda key, cfg: f"{cfg['description']} — ретрай без think (Ollama think=False)",
+)
+
+
+def nothink_handler(original):
+    """Хендлер «без think» для исходного ollama-handler'а (по ``__name__``);
+    None — хендлер не оllama-овый (или неизвестный): ретрай пойдёт обычным."""
+    return _NOTHINK_HANDLERS.get(getattr(original, "__name__", "")) or None

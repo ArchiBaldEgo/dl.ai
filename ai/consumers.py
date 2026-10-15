@@ -314,7 +314,13 @@ class MyConsumer(AsyncWebsocketConsumer):
             task_name="",  # filled by resolve_context_names if available
         )
 
-        result = await self.caller.call(message, self.client_id, model_key, language=language)
+        # Переключатель рассуждений (кнопка Think для Ollama-моделей): клиент
+        # шлёт true/false только по Ollama; не-булево значение мусора игнорируем.
+        # None → поле в запрос к модели не подставляется (дефолт модели).
+        raw_think = data.get("think")
+        think = bool(raw_think) if isinstance(raw_think, bool) else None
+        result = await self.caller.call(
+            message, self.client_id, model_key, language=language, think=think)
         end_time = timezone.now()
 
         # Treat empty response as an error, not a success.
