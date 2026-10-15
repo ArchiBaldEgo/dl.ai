@@ -224,10 +224,13 @@ def _markdown_to_html(text: str) -> str:
 
 
 def render_chapter_html(slug: str, lang: str = "ru") -> dict:
-    """HTML главы: {title, html, lang, fingerprint}.
+    """HTML главы: {title, html, lang, fingerprint, translated}.
 
     lang != "ru" — markdown переводится; перевод кэшируется ключом
     (slug, lang, fingerprint), правка файла меняет ключ → свежий перевод.
+    ``translated`` — честный флаг для фронтенда: False, когда переводчик
+    не смог хотя бы один блок (на проде без доступа к translate.google.com
+    весь текст остаётся русским — клиент показывает плашку о сбое).
     """
     chapter = _CHAPTERS.get(slug)
     if chapter is None:
@@ -235,7 +238,15 @@ def render_chapter_html(slug: str, lang: str = "ru") -> dict:
     fingerprint = chapter_fingerprint(slug)
     title = _chapter_title(chapter, lang)
     if lang and lang != "ru":
-        text, _failed = _translated_chapter_text(chapter, lang, fingerprint)
+        text, failed = _translated_chapter_text(chapter, lang, fingerprint)
+        translated = failed == 0
     else:
         text = _chapter_markdown(chapter)
-    return {"title": title, "html": _markdown_to_html(text), "lang": lang, "fingerprint": fingerprint}
+        translated = True  # русский — родной язык главы
+    return {
+        "title": title,
+        "html": _markdown_to_html(text),
+        "lang": lang,
+        "fingerprint": fingerprint,
+        "translated": translated,
+    }

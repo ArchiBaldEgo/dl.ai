@@ -5,15 +5,23 @@ from django.utils import timezone
 
 
 class LogWriter:
-    """Создание и обновление записей AIRequestLog из WebSocket consumer.
+    """Создание и обновление записей AIRequestLog.
 
-    Методы обёрнуты в sync_to_async для безопасного вызова из async-кода.
+    Реальная логика — в синхронных методах ``*_sync``; публичные методы
+    обёрнуты в ``sync_to_async`` для безопасного вызова из async-кода
+    (WS-consumer: ``await writer.create(...)``). Синхронный код (генератор
+    тестовых данных журнала) зовёт ``*_sync`` НАПРЯМУЮ: вызов обёрнутого
+    метода из sync-view вернул бы корутину, которая никогда не исполняется —
+    записи не создаётся.
+
     Ошибки определяются структурно (is_error из ModelCaller/клиентов);
     update_success вызывается только для успешных ответов.
     """
 
-    @sync_to_async
-    def create(
+    # ------------------------------------------------------------------
+    # Синхронное ядро (единственная реализация).
+    # ------------------------------------------------------------------
+    def create_sync(
         self,
         *,
         user,
@@ -58,8 +66,7 @@ class LogWriter:
             task_name=task_name,
         )
 
-    @sync_to_async
-    def update_success(self, log, response_text: str, tokens: int, model_title: str, end_time=None) -> None:
+    def update_success_sync(self, log, response_text: str, tokens: int, model_title: str, end_time=None) -> None:
         from ..models import AIRequestLog
 
         if end_time is None:
@@ -94,14 +101,7 @@ class LogWriter:
             ]
         )
 
-    @sync_to_async
-    def update_error(
-        self,
-        log,
-        friendly: str,
-        detailed: str,
-        end_time=None,
-    ) -> None:
+    def update_error_sync(self, log, friendly: str, detailed: str, end_time=None) -> None:
         from ..models import AIRequestLog
 
         if end_time is None:
@@ -121,3 +121,18 @@ class LogWriter:
                 "response_text",
             ]
         )
+
+    # ------------------------------------------------------------------
+    # Async-обёртки для WS-consumer (протокол не меняем) — делегируют на ядро.
+    # ------------------------------------------------------------------
+    @sync_to_async
+    def create(self, **kwargs):
+        return self.create_sync(**kwargs)
+
+    @sync_to_async
+    def update_success(self, log, response_text: str, tokens: int, model_title: str, end_time=None) -> None:
+        self.update_success_sync(log, response_text, tokens, model_title, end_time)
+
+    @sync_to_async
+    def update_error(self, log, friendly: str, detailed: str, end_time=None) -> None:
+        self.update_error_sync(log, friendly, detailed, end_time)

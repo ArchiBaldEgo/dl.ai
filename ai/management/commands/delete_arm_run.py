@@ -52,43 +52,67 @@ class Command(BaseCommand):
     # === Вычет статистики: зеркальный record_batch_solve_stats ===
 
     @staticmethod
-    def _per_model_deltas(results):
-        per_model = {}
+    def _per_scope_deltas(results, language_id):
+        """Дельты пар по скоуп-ключам (model_key, язык, тема|None).
+
+        Зеркально записи в ``model_stats.record_batch_solve_stats``: пара
+        инкрементировала тему-строку И языковую (тема NULL) → вычитаем из
+        ОБЕИХ; тема берётся из ``topic_id_snapshot`` (снимок ``task.topic_id``
+        на момент записи прогона). Языка нет (легаси-прогоны без языка в
+        ``run_params``) → приращение уходило только в легаси-глобальную строку
+        (NULL, NULL) — вычитаем из неё одной.
+        """
+        per_scope = {}
         for res in results:
             key = res.model_key or ""
             if not key:
                 continue
-            bucket = per_model.setdefault(
-                key, {"solved": 0, "total": 0, "dur_n": 0, "dur_sum": 0.0})
-            verdict = res.verdict or ""
-            if verdict in ("solved", "failed"):
-                bucket["total"] += 1
-                if verdict == "solved":
-                    bucket["solved"] += 1
-            duration = res.duration_seconds
-            if duration is not None and verdict != "skipped":
-                bucket["dur_n"] += 1
-                bucket["dur_sum"] += float(duration or 0.0)
-        return per_model
+            scope_keys = []
+            if language_id is None:
+                scope_keys.append((key, None, None))
+            else:
+                scope_keys.append((key, language_id, None))
+                if res.topic_id_snapshot:
+                    scope_keys.append((key, language_id, res.topic_id_snapshot))
+            for scope_key in scope_keys:
+                bucket = per_scope.setdefault(
+                    scope_key, {"solved": 0, "total": 0, "dur_n": 0, "dur_sum": 0.0})
+                verdict = res.verdict or ""
+                if verdict in ("solved", "failed"):
+                    bucket["total"] += 1
+                    if verdict == "solved":
+                        bucket["solved"] += 1
+                duration = res.duration_seconds
+                if duration is not None and verdict != "skipped":
+                    bucket["dur_n"] += 1
+                    bucket["dur_sum"] += float(duration or 0.0)
+        return per_scope
 
-    def _subtract_stats(self, per_model, apply=False):
+    def _subtract_stats(self, per_scope, apply=False):
         """Вычесть вклад пар из AIModelStats с полом на нуле (Greatest).
 
         ``apply=False`` (dry-run) только показывает дельты — БД не трогает.
         """
-        for key, b in per_model.items():
+        for (key, lang_id, topic_id), b in per_scope.items():
+            scope_filter = {
+                "model_key": key,
+                "programming_language_id": lang_id,
+                "topic_id": topic_id,
+            }
+            deltas = {
+                "solved_count": Greatest(F("solved_count") - b["solved"], Value(0)),
+                "total_count": Greatest(F("total_count") - b["total"], Value(0)),
+                "duration_count": Greatest(F("duration_count") - b["dur_n"], Value(0)),
+                "duration_sum": Greatest(F("duration_sum") - b["dur_sum"], Value(0.0)),
+            }
             if apply:
-                updated = AIModelStats.objects.filter(model_key=key).update(
-                    solved_count=Greatest(F("solved_count") - b["solved"], Value(0)),
-                    total_count=Greatest(F("total_count") - b["total"], Value(0)),
-                    duration_count=Greatest(F("duration_count") - b["dur_n"], Value(0)),
-                    duration_sum=Greatest(F("duration_sum") - b["dur_sum"], Value(0.0)),
-                )
+                updated = AIModelStats.objects.filter(**scope_filter).update(**deltas)
             else:
-                updated = AIModelStats.objects.filter(model_key=key).count()
+                updated = AIModelStats.objects.filter(**scope_filter).count()
+            scope_label = f"язык {lang_id}, тема {topic_id or '—'}"
             self.stdout.write(
-                f"  статистика {key}: −{b['solved']} решено, −{b['total']} пар, "
-                f"−{b['dur_sum']:.1f} сек (строк таблицы: {updated})"
+                f"  статистика {key} [{scope_label}]: −{b['solved']} решено, "
+                f"−{b['total']} пар, −{b['dur_sum']:.1f} сек (строк таблицы: {updated})"
             )
 
     def handle(self, *list_args, **options):
@@ -128,7 +152,8 @@ class Command(BaseCommand):
                           f"{solutions.count() if log_rows else 0}")
         if (run.run_params or {}).get("record_stats"):
             self.stdout.write("Выбирается из AIModelStats:")
-            self._subtract_stats(self._per_model_deltas(results), apply=options["yes"])
+            language_id = (run.run_params or {}).get("language_id") or None
+            self._subtract_stats(self._per_scope_deltas(results, language_id), apply=options["yes"])
         else:
             self.stdout.write("Вклад в AIModelStats не вычитается "
                               "(«заносить результаты в БД» не был включён).")

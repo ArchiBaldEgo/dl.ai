@@ -320,6 +320,19 @@ option {
     overflow-wrap: break-word;
 }
 
+/* Плашка о сбое рантайм-перевода (docs.translated=false): не-RU язык +
+   недоступный translate.google.com → честное «показана русская версия». */
+.ai-docs-trans-notice {
+    margin: 0 0 12px;
+    padding: 10px 14px;
+    border: 1px solid var(--border-color, #d0d5dd);
+    border-left-width: 4px;
+    border-radius: 6px;
+    background: var(--bg-secondary, #f9fafb);
+    color: var(--text-secondary, #667085);
+    font-size: 13px;
+}
+
 .ai-docs-modal-body h1,
 .ai-docs-modal-body h2,
 .ai-docs-modal-body h3,

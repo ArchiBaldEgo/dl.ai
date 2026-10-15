@@ -9,6 +9,7 @@ from .site import ai_admin_site
 from ..models import (
     AIAppSettings,
     AuthorAlias,
+    DLEducationName,
     ExternalDLAccount,
     ProgrammingLanguage,
     Prompt,
@@ -24,6 +25,7 @@ from ..models import (
 from .models import (
     AIAppSettingsAdmin,
     AuthorAliasAdmin,
+    DLEducationNameAdmin,
     ExternalDLAccountAdmin,
     ProgrammingLanguageAdmin,
     TopicAdmin,
@@ -98,6 +100,7 @@ __all__ = [
 # Register AI models on the custom admin site so they appear in /ai/admin/.
 ai_admin_site.register(AIAppSettings, AIAppSettingsAdmin)
 ai_admin_site.register(AuthorAlias, AuthorAliasAdmin)
+ai_admin_site.register(DLEducationName, DLEducationNameAdmin)
 ai_admin_site.register(ProgrammingLanguage, ProgrammingLanguageAdmin)
 ai_admin_site.register(Task, TaskAdmin)
 ai_admin_site.register(Topic, TopicAdmin)

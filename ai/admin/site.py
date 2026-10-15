@@ -373,8 +373,10 @@ class AIAdminSite(admin.AdminSite):
         pinned_runs_url = "/ai/admin/pinned-runs/"
 
         test_data_url = get_test_data_url()
+        # «Тестовые данные» остаются только пунктом меню «Диагностика»
+        # (генератор записей журнала); флаг show_test_data_link удалён вместе
+        # с кнопкой «Добавить запись» на странице журнала.
         show_test_data = can_access_test_data(request) and is_super and not guest
-        context["show_test_data_link"] = show_test_data
 
         # --- AI tools in the left navigation sidebar (#nav-sidebar) ---
         # The left nav renders `available_apps` (separate from the dashboard's

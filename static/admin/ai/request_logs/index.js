@@ -2,12 +2,12 @@
 // AI request logs admin — JS
 // =============================================================
 // Содержание:
-//   1. Авто-применение фильтров (AJAX, debounce для текстовых полей)
-//   2. Кнопка «Обновить таблицу» (AJAX, те же фильтры)
-//   3. Модалка условия задачи + аккордеон строк
-//   4. Rerun batch-solve (делегирование)
-//   5. Pin/Unpin batch-прогона (делегирование)
-//   6. «Показать все задачи» — ленивый batch-снапшот (делегирование)
+//   1. Авто-применение фильтров (AJAX: селекты/даты — мгновенно, текст —
+//      debounce 350мс, Enter — сразу)
+//   2. Модалка условия задачи + аккордеон строк
+//   3. Rerun batch-solve (делегирование)
+//   4. Pin/Unpin batch-прогона (делегирование)
+//   5. «Показать все задачи» — ленивый batch-снапшот (делегирование)
 // =============================================================
 
 document.addEventListener('DOMContentLoaded', function () {
@@ -22,6 +22,13 @@ document.addEventListener('DOMContentLoaded', function () {
   // старых фильтров (q/id/status/task) в хранилище самоочищаются: рестор
   // читает только поля из FILTER_FIELDS, первый saveFilters перезаписывает.
   const domIdFor = (name) => 'id_' + name;
+  // Объявления стоят ВЫШЕ IIFE restoreSavedFilters: она читает form — раньше
+  // const объявлялся ниже, и TDZ ReferenceError гасил ВЕСЬ
+  // DOMContentLoaded-колбэк (аккордеон, авто-фильтры, пин, rerun, модалка
+  // не навешивались вовсе; страница «работала» только с ?reset=1).
+  const form = document.querySelector('.ai-logs-filters');
+  const WRAPPER_SEL = '#logs-table-wrapper';
+  const TEXT_DEBOUNCE_MS = 350;
 
   function saveFilters() {
     if (!form) return;
@@ -62,12 +69,8 @@ document.addEventListener('DOMContentLoaded', function () {
   })();
 
   // -----------------------------------------------------------
-  // 1. Авто-применение фильтров и кнопка «Обновить таблицу»
+  // 1. Авто-применение фильтров
   // -----------------------------------------------------------
-  const form = document.querySelector('.ai-logs-filters');
-  const WRAPPER_SEL = '#logs-table-wrapper';
-  const TEXT_DEBOUNCE_MS = 350;
-
   // Параметры берём из формы, а не из URL: при смене select/даты
   // в URL ещё старые значения, а в форме — уже новые.
   function buildParams() {
@@ -143,15 +146,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Enter в любом месте формы — не навигировать, а применить AJAX.
     form.addEventListener('submit', (e) => {
-      e.preventDefault();
-      refreshTable();
-    });
-  }
-
-  // Кнопка «Обновить таблицу» — тот же refreshTable() с текущими фильтрами.
-  const refreshBtn = document.getElementById('ai-logs-table-update-button');
-  if (refreshBtn) {
-    refreshBtn.addEventListener('click', (e) => {
       e.preventDefault();
       refreshTable();
     });

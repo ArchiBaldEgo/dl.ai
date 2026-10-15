@@ -211,6 +211,10 @@ def record_result(queue_id, comment, *, finished=True):
         "model_title": solution.model_title,
         "verdict": DL_VERDICT_SOLVED if dl_verdict == DL_VERDICT_SOLVED else DL_VERDICT_FAILED,
         "duration": duration,
+        # Скоуп статистики — из кэша (язык тестирования + тема из
+        # последней генерации); без языка пара не пишется.
+        "programming_language_id": solution.programming_language_id,
+        "topic_id": solution.topic_id,
     }])
 
     return solution, dl_verdict, dl_verdict == DL_VERDICT_SOLVED

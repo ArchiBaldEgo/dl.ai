@@ -167,9 +167,12 @@ function initSelectionPersistence() {
 
 // === Сортировка селектора моделей по статистике прогонов /arm/solve/ ===
 // Статистика (среднее время, % решённых) приходит с сервера в data-атрибутах
-// опций (model_health.get_available_model_options). Управляет порядком ТОЛЬКО
-// optgroup «Все модели» — favorite-first контракт («Часто используемые»
-// сверху) не трогаем. Режим хранится в localStorage: серверу он не нужен.
+// опций (model_health.get_available_model_options — легаси-глобальный скоуп,
+// заморожен). Управляет порядком ТОЛЬКО optgroup «Все модели» —
+// favorite-first контракт («Часто используемые» сверху) не трогаем. Режим
+// хранится в localStorage: серверу он не нужен. ЦИФРОВЫЕ суффиксы с этими
+// атрибутами не связаны — на задачных страницах они из скоуп-статистики
+// (см. scopedModelOptionStats/updateScopedModelStats), в чате их нет вовсе.
 // Модели без данных всегда в конце (внутри группы — исходный алфавитный
 // порядок). В закрытом селекторе — чистые названия; суффикс статистики
 // («66␣·␣12», целые без единиц — они на заголовке группы) виден только в развёрнутом списке (см. initModelSortSelector).
@@ -182,6 +185,65 @@ function modelOptionStats(opt) {
         avgSeconds: isNaN(avg) ? null : avg,
         percentSolved: isNaN(pct) ? null : pct,
     };
+}
+
+// === Скоуп-статистика задачных страниц (язык[, тема]) ===
+// Цифры суффикса «% · сек» на «Реши задачу»/«В чём ошибка» берутся из ответа
+// /ai/api/model-stats/?progLng=&topic= — статистика по ВЫБРАННОМУ языку и
+// теме (map по model_key), а НЕ из data-атрибутов опций (те заморожены и
+// остались только сортировке #selectModelSort). Нет данных по скоупу →
+// суффикса нет («ничего», без фолбэка на глобальное). Гонка ответов:
+// применяется только ответ последнего запрошенного скоупа.
+var scopedStatsMap = null;
+var scopedStatsScope = null;
+// Хук перезамера ширины селекта моделей (ставится в initModelSortSelector):
+// пришедшая статистика меняет ширину раскрытого списка — резервируем заново.
+var _reserveModelSelectWidthHook = null;
+
+function scopedModelOptionStats(opt) {
+    var s = (scopedStatsMap && scopedStatsMap[opt.value]) || null;
+    return {
+        avgSeconds: s && s.avg_seconds != null ? s.avg_seconds : null,
+        percentSolved: s && s.percent_solved != null ? s.percent_solved : null,
+    };
+}
+
+function updateScopedModelStats() {
+    var progLng = document.getElementById('selectProgLng');
+    if (!progLng) return;  // чат: суффиксов нет вовсе (см. modelSuffixesEnabled)
+    var languageId = progLng.value;
+    var theme = document.getElementById('selectTheme');
+    var topicId = theme ? theme.value : '';
+    scopedStatsScope = languageId + '|' + topicId;
+    if (!languageId) {
+        // Язык не выбран → ничего: цифр нет и запрос не делается.
+        scopedStatsMap = null;
+        stripModelOptionSuffixes();
+        return;
+    }
+    var scope = scopedStatsScope;
+    var url = new URL('/ai/api/model-stats/', window.location.origin);
+    url.searchParams.set('progLng', languageId);
+    if (topicId) url.searchParams.set('topic', topicId);
+    fetch(url.toString())
+        .then(function (response) {
+            if (!response.ok) throw new Error('HTTP error! status: ' + response.status);
+            return response.json();
+        })
+        .then(function (data) {
+            // Гонка: применяем ответ, только если скоуп запроса ещё актуален.
+            if (scopedStatsScope !== scope) return;
+            scopedStatsMap = (data && data.stats) || null;
+            // Суффиксы строятся заново на открытии списка — снимаем старые.
+            stripModelOptionSuffixes();
+            if (_reserveModelSelectWidthHook) _reserveModelSelectWidthHook();
+        })
+        .catch(function (error) {
+            console.error('Error fetching model stats:', error);
+            if (scopedStatsScope !== scope) return;
+            scopedStatsMap = null;
+            stripModelOptionSuffixes();
+        });
 }
 
 // Человекочитаемый суффикс названия: «Model X␣␣␣␣66␣·␣␣12» — только целые
@@ -289,14 +351,23 @@ function applyModelGroupUnitLabels(modelSelect, items, cols) {
     });
 }
 
+// Суффиксы показываются ТОЛЬКО на задачных страницах («Реши задачу»/
+// «В чём ошибка» — наличие #selectProgLng): чат их не показывает вовсе
+// (пользовательского решения 2026-10). Гейт единый (DRY): все вызовы —
+// открытие списка, замер ширины — на чате превращаются в no-op.
+function modelSuffixesEnabled() {
+    return !!document.getElementById('selectProgLng');
+}
+
 // Суффикс статистики вешается на ВСЕ опции селектора (включая «Часто
 // используемые»), а пересортировка — только на optgroup «Все модели».
 // Два прохода: первый собирает по всем опциям ширины колонок (название,
 // процент, время), второй вешает суффиксы — тогда данные во всех строках
-// стоят ровно в одном столбце, а не «каждая строка сама по себе».
+// стоят ровно в одном столбце, а не «каждая строка сама по себе». Цифры
+// — скоуп-статистика выбранного языка[, темы] (scopedModelOptionStats).
 function applyModelOptionSuffixes() {
     var modelSelect = document.getElementById('select');
-    if (!modelSelect) return;
+    if (!modelSelect || !modelSuffixesEnabled()) return;
     var items = [];
     var cols = { maxTitleW: 0, maxTitleLen: 0, pctW: 0, secW: 0, nbspW: 0 };
     Array.prototype.forEach.call(modelSelect.options, function (opt) {
@@ -305,7 +376,7 @@ function applyModelOptionSuffixes() {
             opt.setAttribute('data-base-title', opt.textContent.trim());
         }
         var title = opt.getAttribute('data-base-title');
-        var stats = modelOptionStats(opt);
+        var stats = scopedModelOptionStats(opt);
         var item = {
             opt: opt,
             title: title,
@@ -485,6 +556,7 @@ function initModelSortSelector() {
         stripModelOptionSuffixes();
         if (w > 0) modelSelect.style.minWidth = w + 'px';
     }
+    _reserveModelSelectWidthHook = reserveModelSelectWidth;
     reserveModelSelectWidth();
     var resizeTimer = null;
     window.addEventListener('resize', function () {
@@ -719,6 +791,9 @@ function initProblemSelectors(mode) {
             populatePrompts(null, null);
         }
         savePageState();
+        // Скоуп-статистика (язык / язык+тема) под цифрами суффикса селекта
+        // моделей: смена языка — новый запрос; язык снят — цифр нет.
+        updateScopedModelStats();
     });
 
     selectTheme.addEventListener("change", () => {
@@ -728,6 +803,7 @@ function initProblemSelectors(mode) {
         setSelectEnabled(selectPrompt, false);
         populatePrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
         savePageState();
+        updateScopedModelStats();
     });
 
     selectPrompt.addEventListener("change", savePageState);
@@ -741,6 +817,9 @@ function initProblemSelectors(mode) {
         setSelectEnabled(selectPrompt, false);
         populatePrompts(null, null);
         restorePageState();
+        // Восстановленный ai_state может нести сохранённый язык/тему —
+        // скоуп-статистика подтягивается под восстановленный селект.
+        updateScopedModelStats();
     })();
 
     return {
@@ -758,6 +837,7 @@ function initProblemSelectors(mode) {
                 populatePrompts(null, null);
             }
             restorePageState();
+            updateScopedModelStats();
         }
     };
 }
@@ -1266,6 +1346,7 @@ var localization = {
         docsDownload: "Скачать .md",
         docsClose: "Закрыть",
         docsLoadError: "Не удалось загрузить инструкцию",
+        docsTranslationFailed: "Перевод на этот язык временно недоступен — показана русская версия.",
         // Селектор сортировки моделей (base_chat.html) + суффикс статистики.
         sortDefault: "Порядок: по алфавиту",
         sortSpeed: "Порядок: по скорости",
@@ -1375,6 +1456,7 @@ var localization = {
         docsDownload: "Download .md",
         docsClose: "Close",
         docsLoadError: "Failed to load the guide",
+        docsTranslationFailed: "This language is temporarily unavailable — showing the Russian version.",
         // Model sort selector (base_chat.html) + stats suffix.
         sortDefault: "Order: alphabetical",
         sortSpeed: "Order: by speed",
@@ -1483,6 +1565,7 @@ var localization = {
         docsDownload: "Télécharger .md",
         docsClose: "Fermer",
         docsLoadError: "Impossible de charger le guide",
+        docsTranslationFailed: "Cette langue est temporairement indisponible — la version russe est affichée.",
         // Sélecteur de tri des modèles (base_chat.html) + suffixe statistiques.
         sortDefault: "Ordre : alphabétique",
         sortSpeed: "Ordre : par vitesse",
@@ -1907,8 +1990,10 @@ function initThemeToggle() {
 
 // === Кнопка «?» — инструкция пользователя (модалка) ===
 // GET /ai/docs/?lang=… → {success, title, html, download_url, lang,
-// fingerprint} (ai/views.py chat_user_docs_view: глава «Инструкция для
-// пользователя» из DOCX.md, переводится на язык интерфейса en/fr).
+// translated, fingerprint} (ai/views.py chat_user_docs_view: глава
+// «Инструкция для пользователя» из DOCX.md, переводится на язык интерфейса
+// en/fr; translated=false — переводчик не смог перевести хотя бы один блок,
+// показываем плашку «показана русская версия»).
 // HTML приходит уже отрендеренным и экранированным сервером (markdown → HTML
 // из нашего DOCX.md, пользовательский ввод в него не попадает). Закрытие —
 // крестик, фон, Escape. Динамика: пока модалка открыта, поллинг каждые 10 с
@@ -1951,6 +2036,17 @@ function initUserDocs() {
         titleEl.textContent = data.title || getUiString('userDocs', 'Инструкция пользователя');
         var scroll = bodyEl.scrollTop;
         bodyEl.innerHTML = data.html;
+        // Честная плашка о сбое рантайм-перевода (на проде translate.google.com
+        // недоступен без PROXY — все блоки остаются русскими): не-RU язык +
+        // translated=false → предупреждение над содержимым. Только
+        // createElement+textContent — контент модели/пользователя не рендерим сырым.
+        if (data.translated === false && currentUiLang() !== 'Russian') {
+            var notice = document.createElement('p');
+            notice.className = 'ai-docs-trans-notice';
+            notice.textContent = getUiString('docsTranslationFailed',
+                'Перевод на этот язык временно недоступен — показана русская версия.');
+            bodyEl.insertBefore(notice, bodyEl.firstChild);
+        }
         bodyEl.scrollTop = scroll;
         if (downloadEl && data.download_url) downloadEl.setAttribute('href', data.download_url);
         fingerprint = data.fingerprint || null;

@@ -597,6 +597,20 @@ class AuthorAliasAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     search_fields = ("nick", "full_name", "group")
 
 
+class DLEducationNameAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Справочник DL «id → название» (schoolId/groupMaskId), ведётся вручную.
+
+    REST настоящих названий групп/вузов не отдаёт; дневной отчёт журнала
+    (и далее — другие страницы) резолвит названия при рендере через
+    education_title_maps — правка записи ретроактивно чинит прошлые строки.
+    """
+    list_display = ("kind", "key", "title")
+    list_filter = ("kind",)
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    search_fields = ("key", "title")
+
+
 class PromptEditorshipInline(admin.TabularInline):
     """Права редактирования промптов на странице пользователя (суперюзер).
 

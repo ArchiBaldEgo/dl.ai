@@ -61,6 +61,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
             <th>Не решено</th>
             <th>Всего пар</th>
             <th>Статус</th>
+            <th title="От начала прогона до его окончания">Время</th>
             <th></th>
           </tr>
         </thead>
@@ -86,11 +87,12 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
             <td
               class="{% if row.run_status == 'completed' or row.run_status == 'success' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">
               {{ row.run_status_display }}</td>
+            <td>{{ row.run_duration_display|default:"—" }}</td>
             <td><a href="{{ row.detail_url }}">Детали →</a></td>
           </tr>
           {# Развёртка: сводка + ответы моделей прогона (ленивая загрузка — AJAX по первому клику). #}
           <tr class="ai-batch-detail" hidden>
-            <td colspan="12">
+            <td colspan="13">
               <div class="ai-batch-detail-body"></div>
               {% if not row.snapshot_url %}<p class="ai-recent-logs-empty">Прогон не найден в БД — результаты
                 недоступны.</p>{% endif %}
@@ -140,7 +142,6 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
             <th>Модель</th>
             <th>Статус</th>
             <th>С</th>
-            <th title="Закрепить завершённый пакетный прогон">★</th>
           </tr>
         </thead>
         <tbody>
@@ -149,9 +150,9 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
                 <tr class="ai-recent-log-row" data-log-id="{{ row.id }}" data-detail-url="/ai/admin/ai/request_logs/{{ row.id }}/detail-json/">
               <td>
                 {% if row.external_user_id %}
-                  <a href="https://dl.gsu.by/report.asp?id={{ row.external_user_id }}" target="_blank" rel="noopener">{{ row.sender }}</a>
+                  <a href="https://dl.gsu.by/report.asp?id={{ row.external_user_id }}" target="_blank" rel="noopener">{{ row.user_full_name }}</a>
                 {% else %}
-                  {{ row.sender }}
+                  {{ row.user_full_name }}
                 {% endif %}
               </td>
                   <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
@@ -159,13 +160,18 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
                   <td>{{ row.mode_display }}</td>
                   <td>{{ row.programming_language_name }}</td>
                   <td>{{ row.topic_name }}</td>
+                  <td>
+                    {% if row.prompt_id %}
+                      <a href="/ai/admin/ai/prompt/{{ row.prompt_id }}/change/" target="_blank" rel="noopener">{{ row.prompt_name }}</a>
+                    {% else %}{{ row.prompt_name }}{% endif %}
+                  </td>
                   <td>{{ row.model_names }}</td>
                   <td class="{% if row.status_class == 'ok' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.status_display }}</td>
                   <td>{{ row.duration_seconds|floatformat:0|default:"—" }}</td>
                 </tr>
                 {# Развёртка: подробная информация по записи (лениво — AJAX по первому клику). #}
                 <tr class="ai-recent-log-detail" hidden>
-                  <td colspan="11">
+                  <td colspan="10">
                     <div class="ai-recent-log-detail-body"></div>
                   </td>
                 </tr>

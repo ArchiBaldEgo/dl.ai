@@ -36,6 +36,7 @@ from django.views.decorators.http import require_http_methods
 from django.conf import settings
 from .throttling import rate_limited
 from .model_health import get_available_model_options, trigger_model_health_refresh_async
+from .model_clients import registry
 from .model_clients.registry import DEFAULT_MODEL_KEY, EXPERIMENTAL_MODEL_PREFIXES
 from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
 from .auth_backends import (
@@ -686,6 +687,38 @@ def get_problem_data(request):
     })
 
 
+def get_model_stats_view(request):
+    """Накопленная статистика моделей по скоупу (язык[, тема]) — суффиксы
+    селектора моделей «Реши задачу»/«В чём ошибка».
+
+    GET /ai/api/model-stats/?progLng=<id>&topic=<id>. Язык обязателен: без
+    него скоуп не выбран и клиенту нечего показывать (пустой ``stats``);
+    тема уточняет скоуп до точной темы-строки, без неё читается языковая
+    строка (тема NULL). Нет строк скоупа → пустой ``stats`` («ничего», без
+    фолбэка на глобальное — см. get_model_stats_map).
+    """
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+
+    try:
+        language_id = int(request.GET.get("progLng") or "")
+    except ValueError:
+        return JsonResponse({"success": True, "stats": {}})
+    try:
+        topic_id = int(request.GET.get("topic") or "")
+    except ValueError:
+        topic_id = None
+
+    from .services.model_stats import get_model_stats_map
+
+    # Ключи зарегистрированных моделей: статистика не-зарегистрированных
+    # ключей (легаси-переименования/удалённые провайдеры) не отдаётся.
+    stats = get_model_stats_map(
+        list(registry.keys()), language_id=language_id, topic_id=topic_id,
+    )
+    return JsonResponse({"success": True, "stats": stats})
+
+
 def asset_view(request, asset_path):
     """Отдаёт статический файл из Django staticfiles по пути (для AI-страниц).
 
@@ -1158,6 +1191,7 @@ def chat_user_docs_view(request):
         'title': rendered['title'],
         'html': rendered['html'],
         'lang': rendered['lang'],
+        'translated': rendered.get('translated', True),
         'fingerprint': rendered['fingerprint'],
         'download_url': f'/ai/docs/download/?lang={lang}',
     })

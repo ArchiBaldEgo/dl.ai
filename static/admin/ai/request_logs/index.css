@@ -9,6 +9,9 @@
   padding: 6px 8px; border: 1px solid var(--border-color);
   border-radius: 4px; background: var(--body-bg); color: var(--body-fg);
 }
+/* Кнопки ПОД фильтрами («Дневной отчёт», затем «Сбросить»): flex-контейнер
+   .ai-logs-filters переносит блок на новую строку за счёт flex-basis: 100%. */
+.ai-logs-actions { flex-basis: 100%; display: flex; gap: 12px; }
 .ai-logs-table { width: 100%; border-collapse: collapse; }
 .ai-logs-table th, .ai-logs-table td {
   border: 1px solid var(--hairline-color); padding: 8px 10px;

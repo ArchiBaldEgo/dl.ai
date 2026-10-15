@@ -2048,6 +2048,10 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "dl_queue_id": dl_queue_id,
             "file_extension": effective_ext or "",
             "topic_name": topic_name,
+            # Скоуп статистики: язык прогона (в batch-прогоне язык один —
+            # CLAUDE.md) + тема задачи, как в topic_id_snapshot.
+            "programming_language_id": ctx["programming_language_id"],
+            "topic_id": task.topic_id,
             "prog_lang_name": prog_lang_name,
             "prompt_id": pair_prompt_id,
             "prompt_name": pair_prompt_name,

@@ -29,9 +29,17 @@ from ..dl_api_client import (
     fetch_task_info,
 )
 from ..http_utils import resolve_dl_session_id
-from ..models import AIModelTestResult, AIModelTestRun, AIRequestLog, AIPinnedBatchRun, Task
+from ..models import (
+    AIModelTestResult,
+    AIModelTestRun,
+    AIRequestLog,
+    AIPinnedBatchRun,
+    ExternalDLAccount,
+    Task,
+)
 from ..templatetags.ai_duration import format_human_duration
 from ..model_health import get_runtime_model_handlers
+from ..services.education_directory import education_title_maps, group_display, school_display
 from ..services.task_registry import dl_task_url  # DRY: единственное определение — в task_registry
 from .permissions import can_access_arm, can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
 
@@ -302,6 +310,10 @@ def build_recent_log_rows(request, limit=5):
                 "external_user_id": log.external_user_id or "",
                 "programming_language_name": log.programming_language_name or "—",
                 "topic_name": log.topic_name or "—",
+                # Промпт (id + имя) — колонка «Промпт» на «Настройке ИИ»;
+                # ссылка ведёт на редактирование промпта, как в журнале.
+                "prompt_id": log.prompt_id,
+                "prompt_name": log.prompt_name or "—",
                 "model_names": ", ".join(log.model_names or []) or "—",
                 "status": log.status,
                 "status_display": (
@@ -310,6 +322,8 @@ def build_recent_log_rows(request, limit=5):
                 "status_class": "ok" if status_ok else "err",
                 "run_name": run_name_for(run),
                 "mode_display": log.get_mode_display() or "—",
+                # datetime — шаблон форматирует |date:"d.m.Y:H:i:s|
+                "received_at": log.received_at,
                 "duration_seconds": log.duration_seconds,
                 "detail_url": f"/ai/admin/ai/request_logs/{log.id}/",
             })
@@ -395,6 +409,9 @@ def build_batch_rows_for_logs(request, logs):
             # Сырой статус прогона — для класса цвета в шаблоне
             # (прогон стёрт из БД → старый статус записи журнала).
             "run_status": run_status or log.status,
+            # Колонки «Окончание/Время» — тот же хелпер, что в журнале
+            # (прогон не завершён → пустые строки, шаблон покажет «—»).
+            **run_finish_meta(run),
             "run_name": run_name_for(run),
             "run_id": run_hex or "",
             "course_id": run.course_id if run else None,
@@ -621,12 +638,48 @@ def admin_daily_report_view(request):
     # По фамилии — алфавит, без учёта регистра.
     rows.sort(key=lambda r: (r["display_name"].casefold(), r["last_sent"]))
 
+    # === «Буквенная информация» + фильтры по группе и вузу/школе ===
+    # Названия резолвятся при рендере из вручную-ведомого справочника
+    # DLEducationName (education_directory — единственный читатель модели);
+    # привязка студента → ExternalDLAccount: один запрос по внешним id дня.
+    schools, groups = education_title_maps()
+    external_ids = [r["external_user_id"] for r in rows if r["external_user_id"]]
+    accounts = {
+        acc.external_user_id: acc
+        for acc in ExternalDLAccount.objects.filter(external_user_id__in=external_ids)
+        .only(
+            "external_user_id", "education_school_id", "education_school_kind",
+            "education_school_no", "education_group_mask_id",
+        )
+    } if external_ids else {}
+    for row in rows:
+        account = accounts.get(row["external_user_id"])
+        row["school_title"] = school_display(schools, account)
+        row["group_title"] = group_display(groups, account)
+
+    # GET-фильтры — точным совпадением с ОТОБРАЖАЕМЫМ названием; варианты
+    # селектов — отсортированное множество среди СЕГОДНЯШНИХ строк ДО
+    # фильтрации (иначе активный фильтр убирал бы чужие опции). Фильтр
+    # применяется к уже отсортированным строкам — порядок сохраняется.
+    group_filter = (request.GET.get("group") or "").strip()
+    school_filter = (request.GET.get("school") or "").strip()
+    group_choices = sorted({r["group_title"] for r in rows})
+    school_choices = sorted({r["school_title"] for r in rows})
+    if group_filter:
+        rows = [r for r in rows if r["group_title"] == group_filter]
+    if school_filter:
+        rows = [r for r in rows if r["school_title"] == school_filter]
+
     context = {
         **ai_admin_site.each_context(request),
         "title": "DL.AI: Дневной отчёт",
         "date_label": now_msk.strftime("%d.%m.%Y"),
         "rows": rows,
         "total_count": len(logs),
+        "group_choices": group_choices,
+        "school_choices": school_choices,
+        "filters_group": group_filter,
+        "filters_school": school_filter,
     }
     return TemplateResponse(request, "admin/ai/daily_report.html", context)
 

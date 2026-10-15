@@ -76,6 +76,20 @@
   .ai-daily-empty {
     padding: 20px; text-align: center; color: var(--body-quiet-color);
   }
+  {# Фильтры над таблицей: группа / вуз-школа (= отображаемое название; #}
+  {# варианты сервер считает из сегодняшних строк). #}
+  .ai-daily-filters {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+    margin: 0 0 12px;
+  }
+  .ai-daily-filters label {
+    display: flex; gap: 6px; align-items: center;
+    font-weight: 600; font-size: 12px;
+  }
+  .ai-daily-filters select {
+    padding: 5px 8px; border: 1px solid var(--border-color);
+    border-radius: 4px; background: var(--body-bg); color: var(--body-fg);
+  }
 </style>
 
 {% include "admin/ai/_ai_back_nav.html" %}
@@ -90,15 +104,40 @@
     Нажмите на число в колонке «Запросов», чтобы развернуть все запросы студента за день.
   </p>
 
+  {# Фильтры по группе и вузу/школе: точным совпадением с ОТОБРАЖАЕМЫМ #}
+  {# названием; названия резолвит справочник DLEducationName (нет записи — #}
+  {# сырой ключ из DL). Изменение селекта сразу отправляет форму. #}
+  <form method="get" class="ai-daily-filters">
+    <label for="daily-filter-group">Группа
+      <select id="daily-filter-group" name="group" onchange="this.form.submit()">
+        <option value="">Все</option>
+        {% for g in group_choices %}
+          <option value="{{ g }}" {% if filters_group == g %}selected{% endif %}>{{ g }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label for="daily-filter-school">Вуз/Школа
+      <select id="daily-filter-school" name="school" onchange="this.form.submit()">
+        <option value="">Все</option>
+        {% for s in school_choices %}
+          <option value="{{ s }}" {% if filters_school == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+
   <div class="ai-scroll">
     <table class="ai-daily-table">
       <colgroup>
-        <col style="width: 24%"><col style="width: 10%"><col style="width: 22%">
-        <col style="width: 22%"><col style="width: 12%"><col style="width: 10%">
+        <col style="width: 20%"><col style="width: 10%"><col style="width: 14%">
+        <col style="width: 9%"><col style="width: 16%"><col style="width: 16%">
+        <col style="width: 9%"><col style="width: 6%">
       </colgroup>
       <thead>
         <tr>
           <th>Фамилия студента</th>
+          <th>Группа</th>
+          <th>Вуз/Школа</th>
           <th>Последняя отправка</th>
           <th>Последняя тема</th>
           <th>Последний промпт</th>
@@ -117,6 +156,8 @@
                 {{ row.display_name }}
               {% endif %}
             </td>
+            <td>{{ row.group_title }}</td>
+            <td>{{ row.school_title }}</td>
             <td class="nowrap">{{ row.last_sent }}</td>
             <td>{{ row.last_topic }}</td>
             <td>{{ row.last_prompt }}</td>
@@ -124,7 +165,7 @@
             <td class="ai-daily-count" title="Показать все запросы за сегодня">{{ row.count }}<span class="ai-daily-caret">▾</span></td>
           </tr>
           <tr class="ai-daily-detail" hidden>
-            <td colspan="6">
+            <td colspan="8">
               <div class="ai-daily-requests">
                 <table class="ai-daily-req-table">
                   <colgroup>
@@ -158,7 +199,7 @@
             </td>
           </tr>
         {% empty %}
-          <tr><td colspan="6" class="ai-daily-empty">За сегодня записей нет.</td></tr>
+          <tr><td colspan="8" class="ai-daily-empty">За сегодня записей нет.</td></tr>
         {% endfor %}
       </tbody>
     </table>
