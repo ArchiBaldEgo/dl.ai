@@ -43,7 +43,7 @@ var PERSISTED_SELECT_IDS = [
     'selectType',    // тип страницы (чат/решить/ошибка)
     'selectProgLng', // язык программирования
     'selectTheme',   // тема
-    'selectPrompt',  // препромпт
+    'selectPrompt',  // промпт
 ];
 
 // === ai_state cookie (selections): {tab, lang, model, progLng, topic, prompt, voiceMode} ===
@@ -92,14 +92,45 @@ function saveSelections() {
 // Восстановление селектов из куки ai_state.
 // progLng/topic/prompt восстанавливаются page-specific restorePageState() после
 // заполнения селектов; здесь — модель, голосовой режим (язык — в restoreInterfaceLanguage).
+
+// Модельный идентификатор без регистра и разделителей: ключи и title'ы,
+// различающиеся только подчёркиваниями/пробелами/дефисами/регистром,
+// считаются одной моделью.
+function normalizeModelId(value) {
+    return String(value || '').toLowerCase().replace(/[-_ ]+/g, '');
+}
+
+function findSelectOptionByModel(sel, stored) {
+    var opt = Array.from(sel.options).find(function (o) { return o.value === stored; });
+    if (opt) return opt;
+    // Протухший/переименованный ключ (кука живёт 1 год): совпадаем по нормализации
+    // — тогда селект тихо не «падает» на серверный дефолт, а показывает ту же модель.
+    var target = normalizeModelId(stored);
+    return target ? Array.from(sel.options).find(function (o) {
+        return o.value && normalizeModelId(o.value) === target;
+    }) : null;
+}
+
 function restoreSelections() {
     try {
         var st = getAiState();
         if (st.model) {
             var sel = document.getElementById('select');
             if (sel) {
-                var opt = Array.from(sel.options).find(function(o) { return o.value === st.model; });
-                if (opt) sel.selectedIndex = opt.index;
+                var opt = findSelectOptionByModel(sel, st.model);
+                if (opt) {
+                    sel.selectedIndex = opt.index;
+                    if (opt.value !== st.model) {
+                        // Селект не совпал с сохранённым — переписываем куку валидным
+                        // ключом (лечение переименований прошло у всех сразу).
+                        setAiState({ model: opt.value });
+                    }
+                } else {
+                    // Ключ вовсе не опознан: селект остаётся на серверном дефолте
+                    // (selected), куку переписываем реальным значением — иначе мусор
+                    // в ai_state пережил бы год тишины.
+                    setAiState({ model: sel.value });
+                }
             }
         }
         if (st.voiceMode === 1) {
@@ -110,6 +141,63 @@ function restoreSelections() {
 }
 
 // Сохранение при изменении любого селекта
+// === Кнопка Think (переключатель рассуждений для Ollama-моделей) ===
+// Ollama умеет глушить/включать рассуждения полем think
+// (docs.ollama.com/capabilities/thinking): ВЫКЛ = think:false («request no
+// thinking output»), ВКЛ = think:true. Поле в WS-конверт уходит ТОЛЬКО у
+// Ollama_* — остальным провайдерам API-переключателя нет. Состояние живёт в
+// куке ai_state (как voiceMode), по умолчанию — выкл.
+var AI_THINK_STATE_KEY = 'think';
+
+function getThinkOn() {
+    return getAiState()[AI_THINK_STATE_KEY] === 1;
+}
+
+// Видимость и подпись кнопки: показываем только при модели Ollama_*.
+function refreshThinkToggleVisibility() {
+    var btn = document.getElementById('thinkToggleBtn');
+    var sel = document.getElementById('select');
+    if (!btn || !sel) return;
+    btn.hidden = (sel.value || '').indexOf('Ollama_') !== 0;
+    btn.classList.toggle('ai-think-on', getThinkOn());
+    updateThinkToggleLabel();
+}
+
+function updateThinkToggleLabel() {
+    var btn = document.getElementById('thinkToggleBtn');
+    if (!btn) return;
+    var on = getThinkOn();
+    btn.textContent = getUiString('thinkLabel', 'Think');
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    // Состояние читаем из всплывающей подсказки: chip держим коротким.
+    btn.title = getUiString(on ? 'thinkOnTitle' : 'thinkOffTitle',
+        on ? 'Включить рассуждения модели (think=true)'
+           : 'Выключить рассуждения модели (think=false)');
+}
+
+function initThinkToggle() {
+    var btn = document.getElementById('thinkToggleBtn');
+    var sel = document.getElementById('select');
+    if (!btn || !sel || btn.dataset.aiThinkInit) return;
+    btn.dataset.aiThinkInit = '1';
+    btn.addEventListener('click', function () {
+        setAiState({ think: getThinkOn() ? 0 : 1 });
+        refreshThinkToggleVisibility();
+    });
+    // restoreSelections ставит selectedIndex программно (change не диспатчится),
+    // поэтому первичный пересчёт делаем здесь, после restoreSelections.
+    sel.addEventListener('change', refreshThinkToggleVisibility);
+    refreshThinkToggleVisibility();
+}
+
+// Для WS-конвертов страниц: undefined — кнопка скрыта (модель не Ollama) и
+// поле think в JSON.stringify не попадёт; иначе true/false состояния кнопки.
+function aiThinkEnabled() {
+    var btn = document.getElementById('thinkToggleBtn');
+    if (!btn || btn.hidden) return undefined;
+    return getThinkOn();
+}
+
 function initSelectionPersistence() {
     for (var i = 0; i < PERSISTED_SELECT_IDS.length; i++) {
         var el = document.getElementById(PERSISTED_SELECT_IDS[i]);
@@ -124,16 +212,25 @@ function initSelectionPersistence() {
             setTimeout(saveSelections, 100);
         });
     }
+    // Общая локализация строк вне страничных апплаеров (optgroup-лейблы,
+    // aria, модалка справки) — на изменении языка и на первом рендере.
+    var langSel = document.getElementById('selectLang');
+    if (langSel) langSel.addEventListener('change', applySharedUiLanguageTexts);
+    applySharedUiLanguageTexts();
     // Сортировка «Все модели» по статистике прогонов /arm/solve/ — общий
     // механизм для всех трёх страниц чата (base_chat.html).
     initModelSortSelector();
+    initThinkToggle();
 }
 
 // === Сортировка селектора моделей по статистике прогонов /arm/solve/ ===
 // Статистика (среднее время, % решённых) приходит с сервера в data-атрибутах
-// опций (model_health.get_available_model_options). Управляет порядком ТОЛЬКО
-// optgroup «Все модели» — favorite-first контракт («Часто используемые»
-// сверху) не трогаем. Режим хранится в localStorage: серверу он не нужен.
+// опций (model_health.get_available_model_options — легаси-глобальный скоуп,
+// заморожен). Управляет порядком ТОЛЬКО optgroup «Все модели» —
+// favorite-first контракт («Часто используемые» сверху) не трогаем. Режим
+// хранится в localStorage: серверу он не нужен. ЦИФРОВЫЕ суффиксы с этими
+// атрибутами не связаны — на задачных страницах они из скоуп-статистики
+// (см. scopedModelOptionStats/updateScopedModelStats), в чате их нет вовсе.
 // Модели без данных всегда в конце (внутри группы — исходный алфавитный
 // порядок). В закрытом селекторе — чистые названия; суффикс статистики
 // («66␣·␣12», целые без единиц — они на заголовке группы) виден только в развёрнутом списке (см. initModelSortSelector).
@@ -146,6 +243,63 @@ function modelOptionStats(opt) {
         avgSeconds: isNaN(avg) ? null : avg,
         percentSolved: isNaN(pct) ? null : pct,
     };
+}
+
+// === Скоуп-статистика задачных страниц (язык[, тема]) ===
+// Цифры суффикса «% · сек» на «Реши задачу»/«В чём ошибка» берутся из ответа
+// /ai/api/model-stats/?progLng=&topic= — статистика по ВЫБРАННОМУ языку и
+// теме (map по model_key), а НЕ из data-атрибутов опций (те заморожены и
+// остались только сортировке #selectModelSort). Скоуп не выбран (язык пуст)
+// → общие данные по ВСЕМ темам и языкам (API отдаёт агрегат scoped-строк);
+// нет данных по скоупу → суффикса нет («ничего», без фолбэка на глобальное).
+// Гонка ответов: применяется только ответ последнего запрошенного скоупа.
+var scopedStatsMap = null;
+var scopedStatsScope = null;
+// Хук перезамера ширины селекта моделей (ставится в initModelSortSelector):
+// пришедшая статистика меняет ширину раскрытого списка — резервируем заново.
+var _reserveModelSelectWidthHook = null;
+
+function scopedModelOptionStats(opt) {
+    var s = (scopedStatsMap && scopedStatsMap[opt.value]) || null;
+    return {
+        avgSeconds: s && s.avg_seconds != null ? s.avg_seconds : null,
+        percentSolved: s && s.percent_solved != null ? s.percent_solved : null,
+    };
+}
+
+function updateScopedModelStats() {
+    var progLng = document.getElementById('selectProgLng');
+    if (!progLng) return;  // чат: суффиксов нет вовсе (см. modelSuffixesEnabled)
+    var languageId = progLng.value;
+    var theme = document.getElementById('selectTheme');
+    var topicId = theme ? theme.value : '';
+    scopedStatsScope = languageId + '|' + topicId;
+    // Язык не выбран → общий скоуп: запрос без progLng, API вернёт агрегат
+    // по всем темам и языкам (пустой languageId не шлём — битый/отсутствующий
+    // progLng сервер считает отсутствующим).
+    var scope = scopedStatsScope;
+    var url = new URL('/ai/api/model-stats/', window.location.origin);
+    if (languageId) url.searchParams.set('progLng', languageId);
+    if (topicId) url.searchParams.set('topic', topicId);
+    fetch(url.toString())
+        .then(function (response) {
+            if (!response.ok) throw new Error('HTTP error! status: ' + response.status);
+            return response.json();
+        })
+        .then(function (data) {
+            // Гонка: применяем ответ, только если скоуп запроса ещё актуален.
+            if (scopedStatsScope !== scope) return;
+            scopedStatsMap = (data && data.stats) || null;
+            // Суффиксы строятся заново на открытии списка — снимаем старые.
+            stripModelOptionSuffixes();
+            if (_reserveModelSelectWidthHook) _reserveModelSelectWidthHook();
+        })
+        .catch(function (error) {
+            console.error('Error fetching model stats:', error);
+            if (scopedStatsScope !== scope) return;
+            scopedStatsMap = null;
+            stripModelOptionSuffixes();
+        });
 }
 
 // Человекочитаемый суффикс названия: «Model X␣␣␣␣66␣·␣␣12» — только целые
@@ -253,14 +407,23 @@ function applyModelGroupUnitLabels(modelSelect, items, cols) {
     });
 }
 
+// Суффиксы показываются ТОЛЬКО на задачных страницах («Реши задачу»/
+// «В чём ошибка» — наличие #selectProgLng): чат их не показывает вовсе
+// (пользовательского решения 2026-10). Гейт единый (DRY): все вызовы —
+// открытие списка, замер ширины — на чате превращаются в no-op.
+function modelSuffixesEnabled() {
+    return !!document.getElementById('selectProgLng');
+}
+
 // Суффикс статистики вешается на ВСЕ опции селектора (включая «Часто
 // используемые»), а пересортировка — только на optgroup «Все модели».
 // Два прохода: первый собирает по всем опциям ширины колонок (название,
 // процент, время), второй вешает суффиксы — тогда данные во всех строках
-// стоят ровно в одном столбце, а не «каждая строка сама по себе».
+// стоят ровно в одном столбце, а не «каждая строка сама по себе». Цифры
+// — скоуп-статистика выбранного языка[, темы] (scopedModelOptionStats).
 function applyModelOptionSuffixes() {
     var modelSelect = document.getElementById('select');
-    if (!modelSelect) return;
+    if (!modelSelect || !modelSuffixesEnabled()) return;
     var items = [];
     var cols = { maxTitleW: 0, maxTitleLen: 0, pctW: 0, secW: 0, nbspW: 0 };
     Array.prototype.forEach.call(modelSelect.options, function (opt) {
@@ -269,7 +432,7 @@ function applyModelOptionSuffixes() {
             opt.setAttribute('data-base-title', opt.textContent.trim());
         }
         var title = opt.getAttribute('data-base-title');
-        var stats = modelOptionStats(opt);
+        var stats = scopedModelOptionStats(opt);
         var item = {
             opt: opt,
             title: title,
@@ -313,9 +476,9 @@ function stripModelOptionSuffixes() {
 
 function sortModelOptions(mode) {
     var modelSelect = document.getElementById('select');
-    // ^=: подпись группы временно расширяется суффиксом единиц (%·с),
-    // пока список открыт (applyModelGroupUnitLabels).
-    var group = modelSelect && modelSelect.querySelector('optgroup[label^="Все модели"]');
+    // data-ai-group="all" (base_chat.html): локализованный label текстом
+    // селектить нельзя — подпись переведена и меняется на смене языка.
+    var group = modelSelect && modelSelect.querySelector('optgroup[data-ai-group="all"]');
     if (!group || !group.children.length) return;
 
     var selectedValue = modelSelect.value;
@@ -373,9 +536,8 @@ function initModelSortSelector() {
     var modelSelect = document.getElementById('select');
     var sortSelect = document.getElementById('selectModelSort');
     if (!modelSelect || !sortSelect) return;
-    // ^=: подпись группы временно расширяется суффиксом единиц (%·с),
-    // пока список открыт (applyModelGroupUnitLabels).
-    var group = modelSelect.querySelector('optgroup[label^="Все модели"]');
+    // data-ai-group="all" — см. sortModelOptions (label локализован).
+    var group = modelSelect.querySelector('optgroup[data-ai-group="all"]');
     if (!group || !group.children.length) {
         sortSelect.style.display = 'none';
         return;
@@ -450,6 +612,7 @@ function initModelSortSelector() {
         stripModelOptionSuffixes();
         if (w > 0) modelSelect.style.minWidth = w + 'px';
     }
+    _reserveModelSelectWidthHook = reserveModelSelectWidth;
     reserveModelSelectWidth();
     var resizeTimer = null;
     window.addEventListener('resize', function () {
@@ -478,7 +641,7 @@ function initModelSortSelector() {
 }
 
 // === Selectors: programming language / topic / prompt (shared by find-error & solve-problem) ===
-// Логика выбора языка программирования / темы / препромпта вынесена из find_error.js,
+// Логика выбора языка программирования / темы / промпта вынесена из find_error.js,
 // чтобы /ai/solve-problem/ переиспользовал её без копипасты (DRY, см. CLAUDE.md).
 // Состояние (progLng/topic/prompt) сохраняется в куке ai_state через savePageState.
 var PROBLEM_DATA_KEY = 'ai_problem_data_cache';
@@ -518,7 +681,7 @@ async function fetchProblemData() {
 
 // Инициализирует селекторы #selectProgLng/#selectTheme/#selectPrompt на странице.
 // mode — режим страницы ('solve' | 'find_error'); промпты с чужим mode скрываются
-// из селектора препромптов (общие препромпты не фильтруются — режимные SharedPrompt
+// из селектора промптов (общие промпты не фильтруются — режимные SharedPrompt
 // не попадают в /ai/api/problem-data/ и на сервере).
 // Если хоть одного элемента нет (например, на /ai/chat/) — no-op, возвращает null.
 // Возвращает handle с repopulateOnUiLanguageChange() для перелокализации при смене UI-языка.
@@ -591,7 +754,7 @@ function initProblemSelectors(mode) {
         selectPrompt.innerHTML = '<option value="">' + getUiString('choosePrompt', 'Выберите промпт') + '</option>';
         if (!problemData) return;
 
-        // Кандидаты в селектор препромптов.
+        // Кандидаты в селектор промптов.
         // - Язык НЕ выбран: только общие (универсальные, language_ids пустой)
         //   препромты. Специфичные для языка/темы скрываются, пока пользователь
         //   не выберет язык.
@@ -628,7 +791,7 @@ function initProblemSelectors(mode) {
             selectPrompt.appendChild(option);
         });
         selectFirstIfSingle(selectPrompt);
-        // Общие промпты (topic_id=null) не требуют темы — селектор препромптов
+        // Общие промпты (topic_id=null) не требуют темы — селектор промптов
         // доступен, пока есть хоть один выбираемый промпт, даже если тема не
         // выбрана (например, у C++ нет тем).
         setSelectEnabled(selectPrompt, selectPrompt.options.length > 1);
@@ -684,6 +847,9 @@ function initProblemSelectors(mode) {
             populatePrompts(null, null);
         }
         savePageState();
+        // Скоуп-статистика (язык / язык+тема) под цифрами суффикса селекта
+        // моделей: смена языка — новый запрос; язык снят — цифр нет.
+        updateScopedModelStats();
     });
 
     selectTheme.addEventListener("change", () => {
@@ -693,6 +859,7 @@ function initProblemSelectors(mode) {
         setSelectEnabled(selectPrompt, false);
         populatePrompts(isNaN(languageId) ? null : languageId, isNaN(topicId) ? null : topicId);
         savePageState();
+        updateScopedModelStats();
     });
 
     selectPrompt.addEventListener("change", savePageState);
@@ -706,6 +873,9 @@ function initProblemSelectors(mode) {
         setSelectEnabled(selectPrompt, false);
         populatePrompts(null, null);
         restorePageState();
+        // Восстановленный ai_state может нести сохранённый язык/тему —
+        // скоуп-статистика подтягивается под восстановленный селект.
+        updateScopedModelStats();
     })();
 
     return {
@@ -723,6 +893,7 @@ function initProblemSelectors(mode) {
                 populatePrompts(null, null);
             }
             restorePageState();
+            updateScopedModelStats();
         }
     };
 }
@@ -829,8 +1000,31 @@ function convertMarkdownToHTML(markdown) {
 
 // === Terminal message detection ===
 
+// === WS-статус сообщения (структурированное поле сервера) ===
+// Каждое терминальное серверное сообщение несёт в конце строку
+// «\n[[ai-status:<status>]]» (consumers.py ResponseFormatter): success /
+// error / cleared / limit / processing. Маркер срезается перед рендером
+// (stripAiStatus), но сохраняется в localStorage-персистенции — реплей
+// после перезагрузки переигрывает тот же payload и статус не теряется
+// (важно: серверные тексты теперь локализованы, русский substring-сниффинг
+// на них не срабатывает; он оставлен фолбэком для старых сохранений).
+var AI_WS_STATUS_MARKER_RE = /[\n\r]\[\[ai-status:([a-z]+)\]\]\s*$/;
+
+function getAiWsStatus(raw) {
+    var m = AI_WS_STATUS_MARKER_RE.exec(String(raw || ""));
+    return m ? m[1] : '';
+}
+
+function stripAiStatus(raw) {
+    var text = String(raw || "");
+    return text.replace(AI_WS_STATUS_MARKER_RE, '');
+}
+
 function isTerminalAiMessage(payload) {
-    var text = String(payload || "").toLowerCase();
+    var raw = String(payload || "");
+    var status = getAiWsStatus(raw);
+    if (status) return status !== 'processing';
+    var text = raw.toLowerCase();
     return text.includes("запрос успешно обработан")
         || text.includes("request processed successfully")
         || text.includes("ошибка при обработке запроса")
@@ -850,9 +1044,9 @@ function setRequestLock(isLocked) {
     }
 }
 
-// === Pre-send guard: тема без препромпта ===
+// === Pre-send guard: тема без промпта ===
 // На страницах «Реши задачу» / «В чём ошибка?» есть селекторы темы (selectTheme)
-// и препромпта (selectPrompt). Если выбрана тема, но препромпт не выбран —
+// и промпта (selectPrompt). Если выбрана тема, но промпт не выбран —
 // переспросить пользователя перед отправкой. Возвращает true, если можно
 // отправлять; false — если пользователь отменил. На страницах без этих
 // селекторов (чат) сразу true.
@@ -864,7 +1058,7 @@ function confirmTopicWithoutPreprompt() {
     var preprompt = (promptEl.value || '').trim();
     if (topic && !preprompt) {
         return confirm(getUiString('topicWithoutPrepromptConfirm',
-            'Выбрана тема, но не выбран препромпт. Отправить запрос с выбранной темой, но без препромпта?'));
+            'Выбрана тема, но не выбран промпт. Отправить запрос с выбранной темой, но без промпта?'));
     }
     return true;
 }
@@ -1192,29 +1386,33 @@ var localization = {
         decideTask: "Реши задачу",
         findError: "В чём ошибка?",
         enterHint: "При нажатии на Enter будет отправляться вопрос (для переноса строки Enter+Shift)",
-        preprompt: "Препромпт",
+        preprompt: "Промпт",
         chooseLanguage: "Выберите язык",
         chooseTheme: "Выберите тему",
         choosePrompt: "Выберите промпт",
-        topicWithoutPrepromptConfirm: "Выбрана тема, но не выбран препромпт. Отправить запрос с выбранной темой, но без препромпта?",
+        topicWithoutPrepromptConfirm: "Выбрана тема, но не выбран промпт. Отправить запрос с выбранной темой, но без промпта?",
         voiceMode: "Голосовой режим",
         voiceInput: "Голосовой ввод",
         voiceOutput: "Озвучить ответ",
         speakThinkLabel: "Озвучивать дополнительную информацию",
         themeToggle: "Сменить тему",
+        thinkLabel: "Think",
+        thinkOnTitle: "Включить рассуждения модели (think=true)",
+        thinkOffTitle: "Выключить рассуждения модели (think=false) — ответ сразу, без think-блока",
         lastUpdate: "Последнее обновление",
         // Кнопка «?» — инструкция пользователя (модалка, initUserDocs).
         userDocs: "Инструкция пользователя",
         docsDownload: "Скачать .md",
         docsClose: "Закрыть",
         docsLoadError: "Не удалось загрузить инструкцию",
+        docsTranslationFailed: "Перевод на этот язык временно недоступен — показана русская версия.",
         // Селектор сортировки моделей (base_chat.html) + суффикс статистики.
         sortDefault: "Порядок: по алфавиту",
         sortSpeed: "Порядок: по скорости",
         sortAccuracy: "Порядок: по точности",
         sortBoth: "Порядок: скорость + точность",
         statSeconds: "с",
-        // Маркер shared-препромпта — JS-зеркало _SHARED_PROMPT_PREFIX из ai/i18n.py.
+        // Маркер shared-промпта — JS-зеркало _SHARED_PROMPT_PREFIX из ai/i18n.py.
         sharedPrefix: "[Общий]",
         // Кнопка «Тестирование» — отправка кода модели в DL (страница «Реши задачу»).
         dlTestButton: "Тестирование",
@@ -1268,7 +1466,28 @@ var localization = {
         groqRequests: "запросов/min",
         groqRequestsDaily: "запросов/день",
         groqRemaining: "Осталось",
-        loadTimeFooter: "Загрузка: {total} с"
+        loadTimeFooter: "Загрузка: {total} с",
+        // Строки, которые не переписываются страничными selectLang-апплерами:
+        // аккордеон, optgroup-лейблы селектора моделей, модалка справки,
+        // aria-метки, алерты отправки (см. applySharedUiLanguageTexts).
+        showLabel: "Показать:",
+        hideLabel: "Скрыть:",
+        favoritesGroup: "Часто используемые",
+        allModelsGroup: "Все модели",
+        experimentalModelsGroup: "Экспериментальные модели",
+        noModels: "Сегодня нет доступных моделей",
+        docsTour: "Подсказки",
+        openMenu: "Открыть меню",
+        notConnected: "Соединение не установлено. Пожалуйста, подождите...",
+        notConnectedShort: "Соединение не установлено",
+        waitResponse: "Дождитесь ответа модели перед новым запросом.",
+        noModelsToday: "Сегодня нет доступных моделей. Повторите позже.",
+        enterMessage: "Пожалуйста, введите сообщение",
+        enterTaskOrCode: "Пожалуйста, введите условие задачи или код программы",
+        chooseProgLangFirst: "Выберите язык программирования перед отправкой",
+        emptyTaskText: "Пустое условие задачи",
+        dlResultUnavailableRaw: "результат тестирования недоступен",
+        contextCleared: "Контекст очищен"
     },
     English: {
         send: "Send",
@@ -1280,22 +1499,26 @@ var localization = {
         decideTask: "Solve the task",
         findError: "What's the error?",
         enterHint: "Press Enter to send the question (Shift+Enter for a new line)",
-        preprompt: "Preprompt",
+        preprompt: "Prompt",
         chooseLanguage: "Choose language",
         chooseTheme: "Choose theme",
         choosePrompt: "Choose prompt",
-        topicWithoutPrepromptConfirm: "A topic is selected but no preprompt is chosen. Send the request with the selected topic but without a preprompt?",
+        topicWithoutPrepromptConfirm: "A topic is selected but no prompt is chosen. Send the request with the selected topic but without a prompt?",
         voiceMode: "Voice mode",
         voiceInput: "Voice input",
         voiceOutput: "Speak answer",
         speakThinkLabel: "Voice extra information",
         themeToggle: "Toggle theme",
+        thinkLabel: "Think",
+        thinkOnTitle: "Enable model reasoning (think=true)",
+        thinkOffTitle: "Disable model reasoning (think=false) — answer right away, no think block",
         lastUpdate: "Last updated",
         // «?» button — user docs modal (initUserDocs).
         userDocs: "User guide",
         docsDownload: "Download .md",
         docsClose: "Close",
         docsLoadError: "Failed to load the guide",
+        docsTranslationFailed: "This language is temporarily unavailable — showing the Russian version.",
         // Model sort selector (base_chat.html) + stats suffix.
         sortDefault: "Order: alphabetical",
         sortSpeed: "Order: by speed",
@@ -1356,7 +1579,27 @@ var localization = {
         groqRequests: "requests/min",
         groqRequestsDaily: "requests/day",
         groqRemaining: "Remaining",
-        loadTimeFooter: "Load: {total} s"
+        loadTimeFooter: "Load: {total} s",
+        // Strings not rewritten by per-page selectLang appliers: accordion,
+        // model-optgroup labels, docs modal, aria labels, send alerts.
+        showLabel: "Show:",
+        hideLabel: "Hide:",
+        favoritesGroup: "Frequently used",
+        allModelsGroup: "All models",
+        experimentalModelsGroup: "Experimental models",
+        noModels: "No models available today",
+        docsTour: "Guide tips",
+        openMenu: "Open menu",
+        notConnected: "Connection not established. Please wait...",
+        notConnectedShort: "Connection not established",
+        waitResponse: "Wait for the model response before a new request.",
+        noModelsToday: "No models available today. Please try again later.",
+        enterMessage: "Please enter a message",
+        enterTaskOrCode: "Please enter the task condition or the program code",
+        chooseProgLangFirst: "Select a programming language before submitting",
+        emptyTaskText: "Empty task condition",
+        dlResultUnavailableRaw: "testing result is unavailable",
+        contextCleared: "Context cleared"
     },
     French: {
         send: "Envoyer",
@@ -1368,22 +1611,26 @@ var localization = {
         decideTask: "Résoudre la tâche",
         findError: "Quelle est l'erreur?",
         enterHint: "Appuyez sur Entrée pour envoyer la question (Shift+Enter pour une nouvelle ligne)",
-        preprompt: "Pré-promp",
+        preprompt: "Prompt",
         chooseLanguage: "Choisir la langue",
         chooseTheme: "Choisir le thème",
-        choosePrompt: "Choisir le pré-promp",
-        topicWithoutPrepromptConfirm: "Un thème est sélectionné mais aucun pré-promp n'est choisi. Envoyer la requête avec le thème sélectionné mais sans pré-promp ?",
+        choosePrompt: "Choisir le prompt",
+        topicWithoutPrepromptConfirm: "Un thème est sélectionné mais aucun prompt n'est choisi. Envoyer la requête avec le thème sélectionné mais sans prompt ?",
         voiceMode: "Mode vocal",
         voiceInput: "Saisie vocale",
         voiceOutput: "Lire la réponse",
         speakThinkLabel: "Informations supplémentaires vocales",
         themeToggle: "Changer le thème",
+        thinkLabel: "Think",
+        thinkOnTitle: "Activer le raisonnement du modèle (think=true)",
+        thinkOffTitle: "Désactiver le raisonnement du modèle (think=false) — réponse directe, sans bloc think",
         lastUpdate: "Dernière mise à jour",
         // Bouton « ? » — modale du guide utilisateur (initUserDocs).
         userDocs: "Guide de l'utilisateur",
         docsDownload: "Télécharger .md",
         docsClose: "Fermer",
         docsLoadError: "Impossible de charger le guide",
+        docsTranslationFailed: "Cette langue est temporairement indisponible — la version russe est affichée.",
         // Sélecteur de tri des modèles (base_chat.html) + suffixe statistiques.
         sortDefault: "Ordre : alphabétique",
         sortSpeed: "Ordre : par vitesse",
@@ -1444,7 +1691,27 @@ var localization = {
         groqRequests: "requêtes/min",
         groqRequestsDaily: "requêtes/jour",
         groqRemaining: "Restant",
-        loadTimeFooter: "Chargement : {total} s"
+        loadTimeFooter: "Chargement : {total} s",
+        // Chaînes non réécrites par les apllicateurs selectLang des pages :
+        // accordéon, libellés des groupes de modèles, modale d'aide, aria, alertes.
+        showLabel: "Afficher :",
+        hideLabel: "Masquer :",
+        favoritesGroup: "Fréquemment utilisés",
+        allModelsGroup: "Tous les modèles",
+        experimentalModelsGroup: "Modèles expérimentaux",
+        noModels: "Aucun modèle disponible aujourd'hui",
+        docsTour: "Aide",
+        openMenu: "Ouvrir le menu",
+        notConnected: "Connexion non établie. Veuillez patienter...",
+        notConnectedShort: "Connexion non établie",
+        waitResponse: "Attendez la réponse du modèle avant une nouvelle requête.",
+        noModelsToday: "Aucun modèle disponible aujourd'hui. Réessayez plus tard.",
+        enterMessage: "Veuillez saisir un message",
+        enterTaskOrCode: "Veuillez saisir l'énoncé de la tâche ou le code du programme",
+        chooseProgLangFirst: "Choisissez un langage de programmation avant d'envoyer",
+        emptyTaskText: "Énoncé de la tâche vide",
+        dlResultUnavailableRaw: "résultat du test indisponible",
+        contextCleared: "Contexte effacé"
     }
 };
 
@@ -1463,6 +1730,27 @@ function getUiString(key, defaultValue) {
     var lang = selectLang.options[selectLang.selectedIndex].getAttribute('language');
     var dict = localization[lang] || {};
     return dict[key] || (dict.voiceStatus && dict.voiceStatus[key]) || defaultValue;
+}
+
+// === Accordion: единый источник подписей (правило триязычного клиента) ===
+// Роли и префиксы «Показать:/Скрыть:» зависят только от текущего языка UI;
+// один хелпер вместо четырёх копий roleLabels (ai-common.js ×3, find_error.js).
+function _accordionLabels() {
+    var selectLang = document.getElementById('selectLang');
+    var langAttr = selectLang ? selectLang.options[selectLang.selectedIndex].getAttribute('language') : 'Russian';
+    var roleLabels = {
+        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое', dl: 'DL' },
+        English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
+        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
+    };
+    function getRoleLabel(role) {
+        return (roleLabels[langAttr] && roleLabels[langAttr][role]) ? roleLabels[langAttr][role] : role;
+    }
+    return {
+        role: getRoleLabel,
+        show: function (label) { return getUiString('showLabel', 'Показать:') + ' ' + label; },
+        hide: function (label) { return getUiString('hideLabel', 'Скрыть:') + ' ' + label; }
+    };
 }
 
 // === Interface language persistence (in the ai_state cookie) ===
@@ -1533,17 +1821,7 @@ function initAccordionForMessages() {
         roles.push(_detectMessageRole(allMessages[i], i));
     }
 
-    var selectLang = document.getElementById('selectLang');
-    var langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-    var roleLabels = {
-        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое', dl: 'DL' },
-        English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
-        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
-    };
-
-    function getRoleLabel(role, lang) {
-        return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
-    }
+    var L = _accordionLabels();
 
     allMessages.forEach(function(li, idx) {
         if (!li.classList.contains('accordion-li')) {
@@ -1559,7 +1837,7 @@ function initAccordionForMessages() {
             if (role === 'user') btn.classList.add('accordion-user');
             if (role === 'assistant') btn.classList.add('accordion-assistant');
             if (role === 'dl') btn.classList.add('accordion-dl');
-            btn.textContent = 'Показать: ' + getRoleLabel(role, langAttr);
+            btn.textContent = L.show(L.role(role));
 
             var panel = document.createElement('div');
             panel.className = 'panel';
@@ -1571,8 +1849,8 @@ function initAccordionForMessages() {
                 panel.classList.toggle('open');
                 btn.classList.toggle('active');
                 btn.textContent = panel.classList.contains('open')
-                    ? 'Скрыть: ' + getRoleLabel(role, langAttr)
-                    : 'Показать: ' + getRoleLabel(role, langAttr);
+                    ? L.hide(L.role(role))
+                    : L.show(L.role(role));
             });
         }
     });
@@ -1586,7 +1864,7 @@ function initAccordionForMessages() {
             // По умолчанию ВСЕ ответы свёрнуты — раскрываются только по клику.
             lastPanel.classList.remove('open');
             lastBtn.classList.remove('active');
-            lastBtn.textContent = 'Показать: ' + getRoleLabel(lastRole, langAttr);
+            lastBtn.textContent = L.show(L.role(lastRole));
         }
     }
     window._accordionRoles = roles;
@@ -1600,17 +1878,7 @@ function updateLastUpdateLabel() {
 }
 
 function updateAccordionLabels() {
-    var selectLang = document.getElementById('selectLang');
-    var langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-    var roleLabels = {
-        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое', dl: 'DL' },
-        English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
-        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
-    };
-
-    function getRoleLabel(role, lang) {
-        return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
-    }
+    var L = _accordionLabels();
 
     var allMessages = document.getElementById('messages').querySelectorAll(':scope > li');
     var roles = window._accordionRoles || [];
@@ -1620,8 +1888,8 @@ function updateAccordionLabels() {
         if (btn && panel) {
             var role = roles[idx] || 'other';
             btn.textContent = panel.classList.contains('open')
-                ? 'Скрыть: ' + getRoleLabel(role, langAttr)
-                : 'Показать: ' + getRoleLabel(role, langAttr);
+                ? L.hide(L.role(role))
+                : L.show(L.role(role));
         }
     });
 }
@@ -1631,18 +1899,8 @@ function collapseAllMessages() {
     // querySelectorAll('li') зацепил бы вложенные li из markdown-списков
     // внутри панелей — индексы ролей съезжали бы и кнопки получали «Други».
     var allMessages = document.getElementById('messages').querySelectorAll(':scope > li');
-    var selectLang = document.getElementById('selectLang');
-    var langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-    var roleLabels = {
-        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое', dl: 'DL' },
-        English: { user: 'You', assistant: 'Assistant', other: 'Others', dl: 'DL' },
-        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres', dl: 'DL' }
-    };
+    var L = _accordionLabels();
     var roles = window._accordionRoles || [];
-
-    function getRoleLabel(role, lang) {
-        return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
-    }
 
     // Все ответы свёрнуты — раскрываются только вручную (клик по кнопке).
     allMessages.forEach(function(li, idx) {
@@ -1652,7 +1910,7 @@ function collapseAllMessages() {
         if (btn && panel) {
             panel.classList.remove('open');
             btn.classList.remove('active');
-            btn.textContent = 'Показать: ' + getRoleLabel(role, langAttr);
+            btn.textContent = L.show(L.role(role));
         }
     });
 }
@@ -1697,9 +1955,10 @@ function initWebSocket() {
 
         ws.onmessage = function(event) {
             appendPersistedMessage(event.data);
+            var wsData = stripAiStatus(event.data);
             var messages = document.getElementById('messages');
             var message = document.createElement('li');
-            var parsed = parseThinkTag(event.data);
+            var parsed = parseThinkTag(wsData);
             var inThinkTag = document.createElement('div');
             inThinkTag.classList.add('think');
             inThinkTag.innerHTML = parsed.thinkContent;
@@ -1796,8 +2055,10 @@ function initThemeToggle() {
 
 // === Кнопка «?» — инструкция пользователя (модалка) ===
 // GET /ai/docs/?lang=… → {success, title, html, download_url, lang,
-// fingerprint} (ai/views.py chat_user_docs_view: глава «Инструкция для
-// пользователя» из DOCX.md, переводится на язык интерфейса en/fr).
+// translated, fingerprint} (ai/views.py chat_user_docs_view: глава
+// «Инструкция для пользователя» из DOCX.md, переводится на язык интерфейса
+// en/fr; translated=false — переводчик не смог перевести хотя бы один блок,
+// показываем плашку «показана русская версия»).
 // HTML приходит уже отрендеренным и экранированным сервером (markdown → HTML
 // из нашего DOCX.md, пользовательский ввод в него не попадает). Закрытие —
 // крестик, фон, Escape. Динамика: пока модалка открыта, поллинг каждые 10 с
@@ -1840,6 +2101,17 @@ function initUserDocs() {
         titleEl.textContent = data.title || getUiString('userDocs', 'Инструкция пользователя');
         var scroll = bodyEl.scrollTop;
         bodyEl.innerHTML = data.html;
+        // Честная плашка о сбое рантайм-перевода (на проде translate.google.com
+        // недоступен без PROXY — все блоки остаются русскими): не-RU язык +
+        // translated=false → предупреждение над содержимым. Только
+        // createElement+textContent — контент модели/пользователя не рендерим сырым.
+        if (data.translated === false && currentUiLang() !== 'Russian') {
+            var notice = document.createElement('p');
+            notice.className = 'ai-docs-trans-notice';
+            notice.textContent = getUiString('docsTranslationFailed',
+                'Перевод на этот язык временно недоступен — показана русская версия.');
+            bodyEl.insertBefore(notice, bodyEl.firstChild);
+        }
         bodyEl.scrollTop = scroll;
         if (downloadEl && data.download_url) downloadEl.setAttribute('href', data.download_url);
         fingerprint = data.fingerprint || null;
@@ -1973,6 +2245,12 @@ function savePersistedMessages(arr) {
 // исключение — [[DL]]-записи (статусы кнопки «Тестирование»).
 function _isPersistableWsMessage(raw) {
     var s = String(raw || '');
+    var status = getAiWsStatus(s);
+    if (status) {
+        // Диалоговые статусы («эхо запроса» и ответ ИИ); cleared/limit/error —
+        // транзитные, не сохраняются.
+        return status === 'processing' || status === 'success';
+    }
     return s.indexOf('Обрабатываю запрос пользователя') !== -1
         || s.indexOf('Запрос успешно обработан') !== -1
         || s.lastIndexOf(DL_MSG_MARKER, 0) === 0;
@@ -2049,12 +2327,58 @@ function clearContext() {
         var messages = document.getElementById('messages');
         messages.innerHTML = '';
         var clearMessage = document.createElement('li');
-        clearMessage.innerHTML = '<div style="color: green;">Контекст очищен</div>';
+        clearMessage.innerHTML = '<div style="color: green;">' + escapeHtml(getUiString('contextCleared', 'Контекст очищен')) + '</div>';
         messages.appendChild(clearMessage);
         messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
     } else {
-        alert("Соединение не установлено");
+        alert(getUiString('notConnectedShort', 'Соединение не установлено'));
     }
+}
+
+// === Общая локализация строк, которых страничные selectLang-апплеры не касаются ===
+// (optgroup-лейблы селектора моделей, aria-метки, модалка справки, заглушка
+// «нет моделей»). Языковой контекст тот же — #selectLang. Вызываем сразу
+// (первый рендер) и на каждое изменение языка; регистрируется в
+// initSelectionPersistence(), выполняющемся на всех трёх страницах.
+function applySharedUiLanguageTexts() {
+    var modelSelect = document.getElementById('select');
+    if (modelSelect) {
+        var groupLabels = {
+            favorites: getUiString('favoritesGroup', 'Часто используемые'),
+            all: getUiString('allModelsGroup', 'Все модели'),
+            experimental: getUiString('experimentalModelsGroup', 'Экспериментальные модели')
+        };
+        Array.prototype.forEach.call(modelSelect.querySelectorAll('optgroup[data-ai-group]'), function (group) {
+            var label = groupLabels[group.getAttribute('data-ai-group')];
+            if (!label) return;
+            // data-base-label — база суффиксов статистики (applyModelGroupUnitLabels);
+            // меняем оба поля согласованно, иначе суффикс прицепится к старой подписи.
+            group.setAttribute('data-base-label', label);
+            group.label = label;
+        });
+        var noModelsOpt = modelSelect.querySelector('option[value=""]');
+        if (noModelsOpt) noModelsOpt.textContent = getUiString('noModels', 'Сегодня нет доступных моделей');
+    }
+    var themeBtn = document.getElementById('themeToggleBtn');
+    if (themeBtn) {
+        var themeLabel = getUiString('themeToggle', 'Сменить тему');
+        themeBtn.setAttribute('aria-label', themeLabel);
+        themeBtn.setAttribute('title', themeLabel);
+    }
+    var thinkBtn = document.getElementById('thinkToggleBtn');
+    if (thinkBtn) updateThinkToggleLabel();
+    var menuBtn = document.querySelector('.toggle-button');
+    if (menuBtn) menuBtn.setAttribute('aria-label', getUiString('openMenu', 'Открыть меню'));
+    var docsBtn = document.getElementById('userDocsBtn');
+    if (docsBtn) {
+        var docsLabel = getUiString('userDocs', 'Инструкция пользователя');
+        docsBtn.setAttribute('aria-label', docsLabel);
+        docsBtn.setAttribute('title', docsLabel);
+    }
+    var tourBtn = document.getElementById('aiDocsTourBtn');
+    if (tourBtn) tourBtn.textContent = getUiString('docsTour', 'Подсказки');
+    var docsDownload = document.getElementById('aiDocsDownload');
+    if (docsDownload && docsDownload.lastChild) docsDownload.lastChild.textContent = ' ' + getUiString('docsDownload', 'Скачать .md');
 }
 
 // === Common: language change handler (pages can extend via selectLang listener) ===

@@ -523,6 +523,7 @@ def list_model_refresh_runs(since_ts=0.0):
     return [{
         "run_id": progress.get("run_id", ""),
         "run_type": "model_refresh",
+        "name": "",
         "page_url": "/ai/admin/arm/models/",
         "status": status,
         "completed": int(progress.get("completed") or 0),
@@ -883,12 +884,15 @@ def get_available_model_options():
         if key in available_rows
     ]
     # Статистика прогонов /arm/solve/ (среднее время, % решённых) — для
-    # сортировки селектора моделей чата. Обогащаем ДО cache.set: Redis-копии
-    # из кеша мутировать нельзя (cache.get возвращает десериализованную копию).
+    # сортировки селектора моделей чата. Читается легаси-глобальный скоуп
+    # (NULL/NULL): новые приращения пишутся в скоупы язык/тема — эти данные
+    # заморозены и нужны только сортировке (цифровых суффиксов больше нет —
+    # см. ai-common.js). Обогащаем ДО cache.set: Redis-копии из кеша мутировать
+    # нельзя (cache.get возвращает десериализованную копию).
     if result:
-        from .services.model_stats import get_model_stats_map
+        from .services.model_stats import get_legacy_stats_map
 
-        stats = get_model_stats_map([opt["key"] for opt in result])
+        stats = get_legacy_stats_map([opt["key"] for opt in result])
         for opt in result:
             opt.update(stats.get(opt["key"], {}))
         cache.set(cache_key, result, 30)  # 30 c
@@ -900,10 +904,11 @@ def get_available_model_options():
 # исключены: не вытягивают по токенам пакетную генерацию кода.
 ARM_SOLVE_MODEL_PREFIXES = ("Web_", "Ollama_")
 
-# Модели, скрытые из селекторов (пока — OpenRouter): не показываются в чате и
-# ARM-инструментах, но остаются в каталоге, health-check и «Состоянии моделей».
-# Вернуть — убрать префикс из этого кортежа.
-HIDDEN_FROM_SELECTORS_PREFIXES = ("OR_",)
+# Модели, скрытые из селекторов вовсе (каталог/health-check/«Состояние моделей»
+# остаются): на 2026-10 пусто. OpenRouter ниже НЕ здесь, а в views.py — там он
+# выводится в чате отдельной «экспериментальной» группой в самом низу селектора
+# (и исключён из /arm/solve/ через ARM_SOLVE_MODEL_PREFIXES).
+HIDDEN_FROM_SELECTORS_PREFIXES = ()
 
 
 def is_hidden_from_selectors(key):

@@ -46,6 +46,7 @@ SCOPES = (
     "admin_regression",
     "admin_test_console",
     "admin_tasksolution",
+    "admin_test_data",
 )
 
 # USER_SCOPES: юзерские scope'ы с «общими» шагами (язык/модель/переключатель);

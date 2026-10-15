@@ -8,33 +8,41 @@
 Права — как у журнала (can_access_logs + скоуп «только свои» для
 prompt_developer): закрепить можно только доступную самому пользователю
 запись журнала, поэтому чужие прогоны в закладки не попадают.
+
+Страница «Закреплённые...» при этом ОБЩАЯ: у всех с доступом один список
+закреплений всех участников (с авторами); открепить можно только своё.
 """
 
 from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
 
 from ..models import AIModelTestRun, AIPinnedBatchRun
-from .logs import (
+from .request_logs import (
     MOSCOW_TZ,
     _batch_run_id_from_log,
     _get_scoped_log,
     _is_batch_solve_log,
     build_batch_rows_for_logs,
 )
-from .permissions import can_access_logs
+from .permissions import can_access_logs, logs_scope_is_own_user
 from .site import ai_admin_site
 
 PINNED_RUNS_URL = "/ai/admin/pinned-runs/"
 
 
 def admin_pinned_runs_view(request):
-    """Страница «Закреплённые пакетные решения» (навигация под «Настройкой»)."""
+    """Страница «Закреплённые пакетные решения» (навигация под «Настройкой»).
+
+    Общий вид: у каждого, кто имеет доступ к странице (стафф/суперюзеры/
+    разработчики промтов — тот же guard, что у журнала), список закреплений
+    ОДИН на всех — видны закрепления всех участников с авторами. Открепить
+    (★) можно только своё закрепление; чужое показывается меткой «★ автор».
+    """
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
 
-    pins = (
-        AIPinnedBatchRun.objects.filter(user=request.user)
-        .select_related("log")
+    pins = list(
+        AIPinnedBatchRun.objects.select_related("log", "user")
         .order_by("-created_at", "-id")
     )
     logs = [pin.log for pin in pins]
@@ -42,7 +50,23 @@ def admin_pinned_runs_view(request):
     # Порядок страницы — по дате закрепления (AIPinnedBatchRun.ordering),
     # а не по sent_at строк.
     rows_by_log_id = {row["id"]: row for row in rows}
-    ordered_rows = [rows_by_log_id[pin.log_id] for pin in pins if pin.log_id in rows_by_log_id]
+
+    # Один и тот же лог могут закрепить несколько человек — показываем один раз
+    # со списком авторов. Открепление — только своё; раскрывать чужие результаты
+    # разработчик промтов не может (скуп журнала) — такому ряду не отдаём
+    # snapshot_url, он не разворачивается кликом.
+    scope_own = logs_scope_is_own_user(request.user)
+    ordered_rows = []
+    for pin in pins:
+        row = rows_by_log_id.pop(pin.log_id, None)
+        if row is None:
+            continue
+        row_pins = [p for p in pins if p.log_id == pin.log_id]
+        row["is_own"] = any(p.user_id == request.user.pk for p in row_pins)
+        row["pin_authors"] = ", ".join(_pin_author_display(p.user) for p in row_pins)
+        if scope_own and pin.log.user_id != request.user.pk:
+            row["snapshot_url"] = ""
+        ordered_rows.append(row)
 
     context = {
         **ai_admin_site.each_context(request),
@@ -51,6 +75,12 @@ def admin_pinned_runs_view(request):
         "moscow_tz": MOSCOW_TZ,
     }
     return TemplateResponse(request, "admin/ai/pinned_runs.html", context)
+
+
+def _pin_author_display(user):
+    """Читаемое имя автора закрепления (ФИО или логин)."""
+    name = user.get_full_name() if hasattr(user, "get_full_name") else ""
+    return name.strip() or user.username
 
 
 def admin_pinned_run_toggle_view(request, log_id):

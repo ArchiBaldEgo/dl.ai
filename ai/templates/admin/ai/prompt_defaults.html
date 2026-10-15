@@ -3,10 +3,10 @@
 {% block content %}
 {% include "admin/ai/_ai_back_nav.html" %}
 <div id="content-main">
-  <h1>Препромпты по умолчанию (ARM)</h1>
+  <h1>Промпты по умолчанию (ARM)</h1>
   <p class="help">
-    Привязка «язык + тема + вид ARM → препромпт»: на страницах
-    «Пакетное решение» и «Поиск ошибки» после выбора темы препромпт подтягивается
+    Привязка «язык + тема + вид ARM → промпт»: на страницах
+    «Пакетное решение» и «Поиск ошибки» после выбора темы промпт подтягивается
     автоматически. Сам промпт редактируется по обычным правилам (владелец /
     редактор / суперюзер) — привязка всегда использует актуальный текст.
     Пустая тема — привязка «на весь язык» (для языков без тем, например
@@ -39,7 +39,7 @@
             {% endfor %}
           </select>
         </label>
-        <label>Препромпт
+        <label>Промпт
           <select name="prompt_id" id="pdPrompt" style="width:100%;" disabled></select>
         </label>
         <div style="display:flex; gap:8px;">
@@ -60,7 +60,7 @@
           <th style="text-align:left; padding:8px 10px; border-bottom:1px solid var(--hairline-color);">Язык</th>
           <th style="text-align:left; padding:8px 10px; border-bottom:1px solid var(--hairline-color);">Тема</th>
           <th style="text-align:left; padding:8px 10px; border-bottom:1px solid var(--hairline-color);">Вид ARM</th>
-          <th style="text-align:left; padding:8px 10px; border-bottom:1px solid var(--hairline-color);">Препромпт</th>
+          <th style="text-align:left; padding:8px 10px; border-bottom:1px solid var(--hairline-color);">Промпт</th>
           <th style="text-align:left; padding:8px 10px; border-bottom:1px solid var(--hairline-color);"></th>
         </tr>
       </thead>
@@ -144,7 +144,7 @@
 
   function fillPrompts(topicId, selectedId) {
     promptSelect.innerHTML = '';
-    promptSelect.appendChild(new Option('— выберите препромпт —', ''));
+    promptSelect.appendChild(new Option('— выберите промпт —', ''));
     // Для темы — только её промпты; «на весь язык» — любой промпт.
     // Плюс фильтр по режиму привязки: у привязки «Поиск ошибки» предлагаются
     // только промпты режима «В чём ошибка» (и наоборот).
@@ -214,7 +214,7 @@
     event.preventDefault();
     // Тема необязательна: пустая = привязка «на весь язык».
     if (!languageSelect.value || !promptSelect.value) {
-      showMessage('Выберите язык и препромпт.', true);
+      showMessage('Выберите язык и промпт.', true);
       return;
     }
     saveBtn.disabled = true;

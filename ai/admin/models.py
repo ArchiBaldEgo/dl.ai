@@ -11,12 +11,14 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
+from django import forms
 from django.http import HttpResponse
 from django.urls import path
 from django.utils import timezone
 
 from ..models import (
     AIAppSettings,
+    DLEducationName,
     ExternalDLAccount,
     ProgrammingLanguage,
     Prompt,
@@ -36,7 +38,7 @@ from ..dl_api_client import (
 )
 from ..http_utils import resolve_dl_session_id
 from ..services.task_registry import apply_dl_task_info
-from .logs import dl_task_url
+from ..services.task_registry import dl_task_url
 
 User = get_user_model()
 
@@ -277,7 +279,7 @@ class PromptAdmin(admin.ModelAdmin):
         return custom + urls
 
     def admin_translate_field_view(self, request):
-        """AJAX-перевод для языковых табов формы препромпта.
+        """AJAX-перевод для языковых табов формы промпта.
 
         POST text + target (ru|en|fr) → Google Translate (deep-translator,
         тот же сервис, что у массового автоперевода). Только для тех, кто
@@ -364,7 +366,7 @@ class PromptAdmin(admin.ModelAdmin):
         self.message_user(request, msg, level=("success" if not failed else "warning"))
 
     def programming_language_name(self, obj):
-        # Язык препромпта: приоритет у темы (тема всегда принадлежит языку);
+        # Язык промпта: приоритет у темы (тема всегда принадлежит языку);
         # без темы — собственный язык («промпт на весь язык»). Раньше для
         # промптов без темы здесь всегда был «-».
         if obj.topic and obj.topic.programming_language:
@@ -494,7 +496,7 @@ class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         запросов», но сокращённые. Если нужно искать конкретную запись —
         кнопка ведёт в полный журнал с поиском.
         """
-        from .logs import build_recent_batch_rows, build_recent_log_rows
+        from .request_logs import build_recent_batch_rows, build_recent_log_rows
 
         extra_context = {**(extra_context or {})}
         extra_context.update(build_recent_log_rows(request, limit=5))
@@ -595,6 +597,61 @@ class AuthorAliasAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     """
     list_display = ("nick", "full_name", "group")
     search_fields = ("nick", "full_name", "group")
+
+
+class DLEducationNameAdminForm(forms.ModelForm):
+    """Форма справочника: «Вуз/школа» — ВЫБОР из заведений справочника, а не
+    свободный ввод ключа. Заполняется только у записей «Группа/класс» и
+    хранит key school-строки (``DLEducationName.school``)."""
+
+    school = forms.ChoiceField(
+        label="Вуз/школа (key из schoolId)",
+        required=False,
+        help_text="Только для записей «Группа/класс»: заведение, к которому относится группа.",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        choices = [
+            (row.key, f"{row.key} — {row.title}")
+            for row in DLEducationName.objects.filter(kind=DLEducationName.KIND_SCHOOL).order_by("title")
+        ]
+        self.fields["school"].choices = [("", "— не выбрано —")] + choices
+
+    class Meta:
+        model = DLEducationName
+        fields = "__all__"
+
+
+class DLEducationNameAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Справочник DL «id → название» (schoolId/groupMaskId), ведётся вручную.
+
+    REST настоящих названий групп/вузов не отдаёт; дневной отчёт журнала
+    (и далее — другие страницы) резолвит названия при рендере через
+    education_title_maps — правка записи ретроактивно чинит прошлые строки.
+    Группы привязаны к заведениям (school key), фолбэк дневного отчёта
+    показывает школу студента от привязки его группы.
+    """
+    form = DLEducationNameAdminForm
+    list_display = ("kind", "key", "title", "school_title")
+    list_filter = ("kind",)
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    search_fields = ("key", "title")
+
+    @admin.display(description="Вуз/школа группы")
+    def school_title(self, obj):
+        """Название привязанного заведения (только для group-строк).
+
+        Справочник — десятки строк, lookup по (kind, key) на строку таблицы
+        дёшев; map на запрос здесь не нужен (таблица пагинирована).
+        """
+        if obj.kind != DLEducationName.KIND_GROUP or not obj.school:
+            return "—"
+        title = DLEducationName.objects.filter(
+            kind=DLEducationName.KIND_SCHOOL, key=obj.school,
+        ).values_list("title", flat=True).first()
+        return title or obj.school
 
 
 class PromptEditorshipInline(admin.TabularInline):
@@ -726,7 +783,7 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 
     Список — кастомный (change_list_template): строка показывает дату,
     название задачи со ссылкой в DL (с припиской — путь задачи в дереве
-    задач DL, TaskSolution.tree_path), имя языка, тему и препромпт; клик по
+    задач DL, TaskSolution.tree_path), имя языка, тему и промпт; клик по
     строке (кроме ссылки на задачу) раскрывает сохранённый код.
     """
 
@@ -790,7 +847,7 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                 "prompt_name": s.prompt_name or "—",
                 "user": s.external_user_id or "—",
                 "times_used": s.times_used,
-                "log_url": f"/ai/admin/ai/airequestlog/{s.test_log_id}/" if s.test_log_id else "",
+                "log_url": f"/ai/admin/ai/request_logs/{s.test_log_id}/" if s.test_log_id else "",
             })
         response.context_data["sol_rows"] = rows
         return response

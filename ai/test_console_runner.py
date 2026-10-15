@@ -866,6 +866,7 @@ def list_user_runs(user_id, since_ts=0.0):
             runs.append({
                 "run_id": job.get("run_id", ""),
                 "run_type": "test_console",
+                "name": "",
                 "page_url": "/ai/admin/test-console/",
                 "status": status,
                 "completed": job.get("completed") or 0,

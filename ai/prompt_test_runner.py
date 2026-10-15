@@ -563,7 +563,7 @@ def get_prompt_test_run_snapshot(run_id):
 
 
 def list_user_runs(user_id, since_ts=0.0):
-    """Краткие сводки прогонов регрессии препромптов одного пользователя.
+    """Краткие сводки прогонов регрессии промптов одного пользователя.
 
     Для личного меню «мои процессы» в шапке админки (active_runs.py):
     running-прогоны — всегда; завершённые — только обновлённые не раньше
@@ -580,6 +580,7 @@ def list_user_runs(user_id, since_ts=0.0):
             runs.append({
                 "run_id": job.get("run_id", ""),
                 "run_type": "prompt_regression",
+                "name": "",
                 "page_url": "/ai/admin/prompt-regression/",
                 "status": status,
                 "completed": job.get("completed_cases", 0),

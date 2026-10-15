@@ -3,7 +3,7 @@
  *
  * Общие функции (cookies, CSRF, voice, accordion, markdown, localization, etc.)
  * берутся из ai-common.js. Включая логику селекторов языка программирования /
- * темы / препромпта (initProblemSelectors / fetchProblemData) — она расшарена
+ * темы / промпта (initProblemSelectors / fetchProblemData) — она расшарена
  * с decide_task.js (DRY, см. CLAUDE.md). Этот файл содержит только переопределения:
  * - initWebSocket() — type=3 и accordion logic в onmessage
  * - sendMessage() — taskText, codeText, progLng, topic, preprompt, type=3
@@ -30,13 +30,14 @@ function initWebSocket() {
 
         ws.onmessage = function (event) {
             appendPersistedMessage(event.data);
+            var wsData = stripAiStatus(event.data);
             var messages = document.getElementById('messages');
             var message = document.createElement('li');
             var inThinkTag = document.createElement('div');
             inThinkTag.classList.add('think');
-            inThinkTag.innerHTML = parseThinkTag(event.data).thinkContent;
+            inThinkTag.innerHTML = parseThinkTag(wsData).thinkContent;
             var mainMess = document.createElement('div');
-            mainMess.innerHTML = parseThinkTag(event.data).remainingText;
+            mainMess.innerHTML = parseThinkTag(wsData).remainingText;
             const mainMessText = mainMess.innerText || "";
             const parsedHTML = convertMarkdownToHTML(mainMessText);
             const messageContent = document.createElement('div');
@@ -63,19 +64,10 @@ function initWebSocket() {
                     if (role === 'user') btn.classList.add('accordion-user');
                     if (role === 'assistant') btn.classList.add('accordion-assistant');
 
-                    const selectLang = document.getElementById('selectLang');
-                    const langAttr = selectLang.options[selectLang.selectedIndex].getAttribute('language');
-                    const roleLabels = {
-                        Russian: { user: 'Вы', assistant: 'Ассистент', other: 'Другое' },
-                        English: { user: 'You', assistant: 'Assistant', other: 'Others' },
-                        French: { user: 'Vous', assistant: 'Assistant', other: 'Autres' }
-                    };
+                    // Подписи ролей/префиксы — на общий хелпер ai-common.js.
+                    var L = _accordionLabels();
 
-                    function getRoleLabel(role, lang) {
-                        return (roleLabels[lang] && roleLabels[lang][role]) ? roleLabels[lang][role] : role;
-                    }
-
-                    btn.textContent = `Показать: ${getRoleLabel(role, langAttr)}`;
+                    btn.textContent = L.show(L.role(role));
                     const panel = document.createElement('div');
                     panel.className = 'panel';
 
@@ -89,8 +81,8 @@ function initWebSocket() {
                         panel.classList.toggle('open');
                         btn.classList.toggle('active');
                         btn.textContent = panel.classList.contains('open')
-                            ? `Скрыть: ${getRoleLabel(role, langAttr)}`
-                            : `Показать: ${getRoleLabel(role, langAttr)}`;
+                            ? L.hide(L.role(role))
+                            : L.show(L.role(role));
                     });
                 }
             });
@@ -136,18 +128,18 @@ function sendMessage(event) {
     event.preventDefault();
     if (!ws) {
         console.log("WebSocket is not initialized");
-        alert("Соединение не установлено. Пожалуйста, подождите...");
+        alert(getUiString('notConnected', "Соединение не установлено. Пожалуйста, подождите..."));
         return;
     }
 
     if (ws.readyState !== WebSocket.OPEN) {
         console.log("WebSocket is not open. State:", ws.readyState);
-        alert("Соединение не установлено. Пожалуйста, подождите...");
+        alert(getUiString('notConnected', "Соединение не установлено. Пожалуйста, подождите..."));
         return;
     }
 
     if (requestInFlight) {
-        alert("Дождитесь ответа модели перед новым запросом.");
+        alert(getUiString('waitResponse', "Дождитесь ответа модели перед новым запросом."));
         return;
     }
 
@@ -160,16 +152,16 @@ function sendMessage(event) {
     var preprompt = document.querySelector("#selectPrompt").value;
 
     if (!value) {
-        alert("Сегодня нет доступных моделей. Повторите позже.");
+        alert(getUiString('noModelsToday', "Сегодня нет доступных моделей. Повторите позже."));
         return;
     }
 
     if (!taskInput.value.trim() && !codeInput.value.trim()) {
-        alert("Пожалуйста, введите условие задачи или код программы");
+        alert(getUiString('enterTaskOrCode', "Пожалуйста, введите условие задачи или код программы"));
         return;
     }
     if (!progLng) {
-        alert("Выберите язык программирования перед отправкой");
+        alert(getUiString('chooseProgLangFirst', "Выберите язык программирования перед отправкой"));
         return;
     }
 
@@ -180,6 +172,7 @@ function sendMessage(event) {
         message: taskInput.value,
         value: value,
         language: language,
+        think: aiThinkEnabled(),
         progLng: progLng,
         topic: topic,
         code: codeInput.value,
@@ -228,6 +221,7 @@ function simulateSend() {
         message: input.value,
         value: value,
         language: language,
+        think: aiThinkEnabled(),
         progLng: progLng,
         topic: topic,
         preprompt: preprompt,
@@ -245,7 +239,7 @@ function simulateSend() {
 // === DOMContentLoaded: initProblemSelectors + input listeners + selectLang handler ===
 
 document.addEventListener("DOMContentLoaded", async () => {
-    // Селекторы языка программирования / темы / препромпта — общая логика в ai-common.js (DRY).
+    // Селекторы языка программирования / темы / промпта — общая логика в ai-common.js (DRY).
     var problemSelectors = initProblemSelectors('find_error');
 
     const taskText = document.getElementById('taskText');
@@ -303,7 +297,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         const speakThinkLabel = document.getElementById("speakThinkLabel");
         if (speakThinkLabel) speakThinkLabel.textContent = localization[selectedLang].speakThinkLabel;
 
-        // Перелокализация селекторов языка/темы/препромпта в новом UI-языке
+        // Перелокализация селекторов языка/темы/промпта в новом UI-языке
         // (значения-иды языка-независимы; restorePageState пере-применяет выбор).
         if (problemSelectors) await problemSelectors.repopulateOnUiLanguageChange();
         saveInterfaceLanguage();

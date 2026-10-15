@@ -78,6 +78,120 @@
     var LABEL_DONE = "Готово";
     var LABEL_SKIP = "Скрыть";
 
+    // === Локализация юзер-туров (правило триязычной клиентской части) ===
+    // Только scope'ы chat/solve/find_error; админские туры остаются русскими.
+    // Русские тексты живут в REGISTRY (источник истины), таблица несёт en/fr;
+    // язык читается на старте тура из #selectLang (кука ai_state — фолбэк).
+    var LABELS_TR = {
+        ru: { prev: LABEL_PREV, next: LABEL_NEXT, done: LABEL_DONE, skip: LABEL_SKIP, progress: " из " },
+        en: { prev: "Back", next: "Next", done: "Done", skip: "Hide", progress: " of " },
+        fr: { prev: "Retour", next: "Suivant", done: "Prêt", skip: "Masquer", progress: " sur " }
+    };
+
+    var USER_STEP_TR = {
+        en: {
+            chat: {
+                "#selectLang": { title: "Page language", text: "This changes the language of the interface: Russian, English, French." },
+                "#select": { title: "Model selection", text: "These are different AI helper models. Click and pick who will answer you." },
+                "#thinkToggleBtn": { title: "The Think button", text: "Visible only for Ollama models. Off — the model answers right away; on — you can first look at its reasoning (the “Thinking” block above the answer)." },
+                "#selectModelSort": { title: "Model sorting", text: "You can show faster or more precise models first." },
+                "#selectType": { title: "Mode", text: "Modes: chat, “Solve the task”, “What's the error?”. Switch through the list." },
+                "#themeToggleBtn": { title: "Light or dark", text: "Click — the page turns dark. Click again — light." },
+                "#userDocsBtn": { title: "The “?” button", text: "This is the user guide. Click if anything is unclear. You can also show these tips again there." },
+                "#voiceModeBtn": { title: "Voice mode", text: "Would you rather speak than type? Click it — you can speak by voice." },
+                "#content .toggle-button": { title: "Side menu", text: "The arrow on the right opens the menu with a link to the admin panel." },
+                "#messages": { title: "History", text: "History: everything you write and the model answers appears here." },
+                "#messageText": { title: "Type your question here", text: "Just type your question into this field." },
+                '.buttons-block button[type="submit"]': { title: "The “Send” button", text: "When the question is written, click this button." },
+                '[onclick="clearContext()"]': { title: "Erase everything", text: "This button clears the conversation and starts over." }
+            },
+            solve: {
+                "#selectType": { title: "Where you are", text: "You are on the “Solve the task” page. Use this list to return to “Chat”." },
+                "#selectLang": { title: "Page language", text: "This changes the interface language." },
+                "#select": { title: "Model selection", text: "The list of model helpers that will solve the task." },
+                "#selectProgLng": { title: "Programming language", text: "First choose the language of your code: C or Assembler." },
+                "#selectTheme": { title: "Topic", text: "Pick a topic — it tells the model what the task is about." },
+                "#selectPrompt": { title: "Preprompt", text: "A preprompt is a small hint for the model. The selected one is fine." }
+            },
+            find_error: {
+                "#selectType": { title: "Where you are", text: "You are on the “What’s the error?” page. Use the list to return to “Chat” or “Solve the task”." },
+                "#selectLang": { title: "Page language", text: "This changes the interface language." },
+                "#select": { title: "Model selection", text: "Pick the model helper that will check your code." },
+                "#taskText": { title: "Task text", text: "Copy the task condition from dl.gsu.by here." },
+                "#codeText": { title: "Code text", text: "And paste the whole program here." }
+            }
+        },
+        fr: {
+            chat: {
+                "#selectLang": { title: "Langue de la page", text: "C’est ici que change la langue des textes : Russe, English, Français." },
+                "#select": { title: "Choix du modèle", text: "Voici différents modèles-assistants. Clique et choisis celui qui te répondra." },
+                "#thinkToggleBtn": { title: "Le bouton Think", text: "Visible seulement pour les modèles Ollama. Désactivé — le modèle répond tout de suite ; activé — tu peux d’abord voir son raisonnement (le bloc « Réflexions » au-dessus de la réponse)." },
+                "#selectModelSort": { title: "Tri des modèles", text: "Tu peux afficher en premier les modèles plus rapides ou plus précis." },
+                "#selectType": { title: "Mode", text: "Modes : chat, « Résoudre la tâche », « Quelle est l’erreur ? ». On change via la liste." },
+                "#themeToggleBtn": { title: "Clair ou sombre", text: "Clique — la page devient sombre. Clique encore — claire à nouveau." },
+                "#userDocsBtn": { title: "Le bouton « ? »", text: "C’est le guide utilisateur. Clique si quelque chose n’est pas clair. Tu peux aussi réafficher ces astuces ici." },
+                "#voiceModeBtn": { title: "Mode vocal", text: "Tu préfères parler plutôt que taper ? Clique — tu peux parler avec la voix." },
+                "#content .toggle-button": { title: "Menu latéral", text: "La flèche à droite ouvre le menu, qui contient le lien vers le panneau admin." },
+                "#messages": { title: "Historique", text: "Historique : tout ce que tu écris et que le modèle répond s’affiche ici." },
+                "#messageText": { title: "Tu écris ta question ici", text: "Écris simplement ta question dans ce champ." },
+                '.buttons-block button[type="submit"]': { title: "Le bouton « Envoyer »", text: "Quand la question est écrite, clique sur ce bouton." },
+                '[onclick="clearContext()"]': { title: "Tout effacer", text: "Ce bouton efface la conversation et recommence." }
+            },
+            solve: {
+                "#selectType": { title: "Où tu es", text: "Tu es sur la page « Résoudre la tâche ». Par cette liste, tu reviens au « Chat »." },
+                "#selectLang": { title: "Langue de la page", text: "C’est ici que change la langue des textes." },
+                "#select": { title: "Choix du modèle", text: "La liste des modèles-assistants qui résoudront la tâche." },
+                "#selectProgLng": { title: "Langage de programmation", text: "Choisis d’abord le langage de ton code : C ou Assembleur." },
+                "#selectTheme": { title: "Thème", text: "Choisis un thème — il explique au modèle de quoi parle la tâche." },
+                "#selectPrompt": { title: "Pré-promp", text: "Le pré-prompt est une petite indication pour le modèle. Celle déjà choisie suffit." }
+            },
+            find_error: {
+                "#selectType": { title: "Où tu es", text: "Tu es sur la page « Quelle est l’erreur ? ». Par la liste, reviens au « Chat » ou à « Résoudre la tâche »." },
+                "#selectLang": { title: "Langue de la page", text: "C’est ici que change la langue des textes." },
+                "#select": { title: "Choix du modèle", text: "Choisis le modèle-assistant qui vérifiera ton code." },
+                "#taskText": { title: "Texte de la tâche", text: "Colle ici l’énoncé de la tâche depuis dl.gsu.by." },
+                "#codeText": { title: "Texte du code", text: "Et colle ici le programme en entier." }
+            }
+        }
+    };
+
+    // Язык UI («Русский»/«English»/«Français»): текущий селект, иначе кука ai_state.
+    function wizardUiLanguage() {
+        var sel = document.getElementById("selectLang");
+        if (sel && sel.value) return sel.value;
+        try {
+            var m = (document.cookie || "").match(/(?:^|;\s*)ai_state=([^;]*)/);
+            if (m) {
+                var state = JSON.parse(decodeURIComponent(m[1]));
+                if (state && state.lang) return String(state.lang);
+            }
+        } catch (e) { /* нет куки или кривой JSON — дефолт (русский) */ }
+        return "";
+    }
+
+    function uiSuffix(language) {
+        var low = String(language || "").toLowerCase();
+        if (low.indexOf("en") === 0) return "en";
+        if (low.indexOf("fr") === 0) return "fr";
+        return "ru";
+    }
+
+    // Локализация юзер-шагов по селектору цели (уникален в своём scope).
+    function localizeUserSteps(scopeName, list) {
+        var suffix = uiSuffix(wizardUiLanguage());
+        var table = (USER_STEP_TR[suffix] || {})[scopeName];
+        if (!table) return list;
+        return list.map(function (st) {
+            var tr = table[st.sel];
+            if (!tr) return st;
+            return Object.assign({}, st, { title: tr.title, text: tr.text });
+        });
+    }
+
+    function currentLabels() {
+        return LABELS_TR[cfg && cfg.lang ? cfg.lang : "ru"];
+    }
+
     // === Реестр шагов (тексты — константы языка: правятся только здесь) ===
     // v3: маршрут строит движок — sortResolved ставит шаги сверху вниз по
     // позиции цели на экране. Списки ниже — полный НАБОР целей страницы,
@@ -100,50 +214,66 @@
         { sel: "#nav-sidebar", title: "Левый бар", rank: 22, pos: "right", onShow: "openNav", text: "Левый бар: все разделы. Дальше — по каждому." }
     ];
 
-    // Каждый раздел меню — свой шаг главного экрана («расписать каждую
-    // страницу»): что там и зачем. Движок сортирует эти шаги по позиции
-    // ссылок в меню сверху вниз. Раздел, скрытый правами (флаг ссылки в
-    // ai/admin/site.py), отсутствует в DOM — шаг выпадает у этой роли.
-    // Инструменты, скрытые из бара через _HIDDEN_NAV_OBJECT_NAMES (сейчас —
-    // «Регрессионные тесты»), нав-шага не имеют вовсе: их страницы не в
-    // меню и имеют собственный тур. Вернёшь инструмент в бар — верни шаг.
-    var ADMIN_NAV_PAGES = [
+    // Разработчик промптов (есть у всех): документация, свой промпт, пакетное
+    // решение, журнал, закреплённые.
+    var ADMIN_PD_EXTRA = [
+        { sel: '#nav-sidebar a[href="/ai/admin/docs/prompt-developer/"]', title: "Документация", text: "Инструкция для тебя как разработчика промптов.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/prompts/my/"]', title: "Мой промпт", text: "Здесь ты пишешь и меняешь свои промпты.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/arm/solve/"]', title: "Пакетное решение", text: "Проверка моделей сразу на всех задачах курса.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/ai/request_logs/"]', title: "Журнал запросов", text: "Видно твои запросы к моделям.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/pinned-runs/"]', title: "Закреплённые", text: "Закреплённые пакетные решения — быстрый доступ к прогонам.", pos: "right", optional: true, onShow: "openNav" }
+    ];
+
+    // Дополнительно staff-админам: настройки приложения, модели, обновления.
+    var ADMIN_STAFF_EXTRA = [
+        { sel: '#nav-sidebar a[href="/ai/admin/ai/aiappsettings/"]', title: "Настройка ИИ-приложения", text: "Главные настройки. Только для админов.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/arm/models/"]', title: "Состояние моделей", text: "Какие модели работают, а какие нет.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href="/ai/admin/updates/"]', title: "Обновления", text: "Что нового появилось в проекте.", pos: "right", onShow: "openNav" }
+    ];
+
+    // Дополнительно суперадминам: дефолтные промпты, регрессия, тесты,
+    // режим «посмотреть как другой», роль в шапке.
+     var ADMIN_NAV_PAGES = [
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/aiappsettings/"]', title: "Настройка ИИ-приложения", text: "Главные настройки: доступ к ИИ, сводка за сутки, последние прогоны. Свой тур — на самой странице.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/pinned-runs/"]', title: "Закреплённые прогоны", text: "Закреплённые (★) завершённые прогоны — быстрый доступ.", pos: "right", onShow: "openNav" },
-        { sel: '#nav-sidebar a[href^="/ai/admin/prompts/my/"]', title: "Мой препромпт", text: "Твои промпты: список, поиск, кнопка «Добавить».", pos: "right", onShow: "openNav" },
-        { sel: '#nav-sidebar a[href^="/ai/admin/prompt-defaults/"]', title: "Препромпты по умолчанию", text: "Какие препромпты подставляются автоматически по языку и теме.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href^="/ai/admin/prompts/my/"]', title: "Мой промпт", text: "Твои промпты: список, поиск, кнопка «Добавить».", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href^="/ai/admin/prompt-defaults/"]', title: "Промпты по умолчанию", text: "Какие промпты подставляются автоматически по языку и теме.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/docs/prompt-developer/"]', title: "Инструкция промпт-разработчика", text: "Как писать промпты — читать перед работой.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/docs/developer/"]', title: "Документация разработчика", text: "Техническая документация проекта.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/docs/superuser/"]', title: "Инструкция суперадмина", text: "Что меняет только суперадмин.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/arm/solve/"]', title: "Пакетное решение", text: "Прогон моделей по всем задачам курса.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/arm/models/"]', title: "Состояние моделей", text: "Какие модели доступны и почему нет.", pos: "right", onShow: "openNav" },
-        { sel: '#nav-sidebar a[href^="/ai/admin/ai/airequestlog/"]', title: "Журнал запросов", text: "Все запросы к моделям: кто, что и чем закончилось.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href^="/ai/admin/ai/request_logs/"]', title: "Журнал запросов", text: "Все запросы к моделям: кто, что и чем закончилось.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/test-console/"]', title: "Тестовая консоль", text: "Запуск тестов приложения и логи прошлых запусков.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href^="/ai/admin/test_data/"]', title: "Тестовые данные", text: "Генератор образцов: создаёт тестовые записи журнала и дневного отчёта — можно проверить, как выглядят страницы, не дожидаясь реальных запросов.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/tasksolution/"]', title: "Решённые задачи", text: "Кэш: задания, прошедшие тест в DL, достаются без модели.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/updates/"]', title: "Обновления", text: "Что нового появилось в проекте.", pos: "right", onShow: "openNav" },
-        { sel: '#nav-sidebar a[href^="/ai/admin/ai/prompt/"]', title: "Препромпты", text: "Таблица всех промптов; правка — по клику на название.", pos: "right", onShow: "openNav" }
+        { sel: '#nav-sidebar a[href^="/ai/admin/ai/prompt/"]', title: "Промпты", text: "Таблица всех промптов; правка — по клику на название.", pos: "right", onShow: "openNav" }
     ];
+
 
     var REGISTRY = {
 
         chat: [
             // Строгий порядок чата (ранг: явный rank сильнее геометрии):
-            // язык → модель → сортировка → режим → тема → «?» → голосовой →
-            // боковое меню (супер/штаб) → история → ввод → отправить → очистить.
+            // язык → модель → think → сортировка → режим → тема → «?» →
+            // голосовой → боковое меню (супер/штаб) → история → ввод →
+            // отправить → очистить.
             // Шагов с common в чате НЕТ: basics_seen не режет чат — тур всегда
             // полный и строгий (ранги).
-            { sel: "#selectLang", rank: 10, title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français.", pos: "bottom" },
-            { sel: "#select", rank: 11, title: "Выбор модели", text: "Это разные помощники-модели. Нажми и выбери, кто будет тебе отвечать.", pos: "bottom" },
-            { sel: "#selectModelSort", rank: 12, title: "Сортировка моделей", text: "Можно показывать более быстрые или более точные модели сверху.", pos: "bottom" },
-            { sel: "#selectType", rank: 13, title: "Режим", text: "Режимы: чат, «Реши задачу», «В чём ошибка». Через список переключаешься.", pos: "bottom" },
-            { sel: "#themeToggleBtn", rank: 14, title: "Светлое или тёмное", text: "Нажми — страница станет тёмной. Ещё раз — снова светлой.", pos: "bottom" },
-            { sel: "#userDocsBtn", rank: 15, title: "Кнопка «?»", text: "Это инструкция. Нажми, если что-то непонятно. Там же можно снова показать эти подсказки.", pos: "bottom" },
-            { sel: "#voiceModeBtn", rank: 16, title: "Голосовой ввод", text: "Хочешь говорить, а не печатать? Нажми — можно говорить голосом.", pos: "bottom" },
-            { sel: "#content .toggle-button", rank: 17, title: "Боковое меню", text: "Стрелочка справа открывает меню, там ссылка на админ-панель.", pos: "left", roles: ["super", "staff"] },
-            { sel: "#messages", rank: 18, title: "История", text: "История: всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
-            { sel: "#messageText", rank: 19, title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
-            { sel: '.buttons-block button[type="submit"]', rank: 20, title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
-            { sel: '[onclick="clearContext()"]', rank: 21, title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top" }
+            { sel: "#selectLang", rank: 10, title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français. Сам текст вопросов и ответов — всегда на том языке, на котором ты пишешь.", pos: "bottom" },
+            { sel: "#select", rank: 11, title: "Выбор модели", text: "Это разные помощники-модели: нажми и выбери, кто будет отвечать. Не знаешь, кого взять — оставь как есть: наверху стоит обычно та, что выбиралась чаще всего.", pos: "bottom" },
+            { sel: "#thinkToggleBtn", rank: 12, skipIfHidden: true, title: "Кнопка Think", text: "Видна только у моделей Ollama. Выключено — модель отвечает сразу; включено — сначала можно посмотреть её рассуждения (блок «Размышления» над ответом).", pos: "bottom" },
+            { sel: "#selectModelSort", rank: 13, title: "Сортировка моделей", text: "Здесь можно переложить список: сначала более быстрые модели или сначала более точные. Вернуть как было — режим «по алфавиту».", pos: "bottom" },
+            { sel: "#selectType", rank: 14, title: "Режим", text: "Режимы: чат, «Реши задачу», «В чём ошибка». Через этот список переключаешься между страницами — всё твоё (модель, тема) запомнится.", pos: "bottom" },
+            { sel: "#themeToggleBtn", rank: 15, title: "Светлое или тёмное", text: "Нажми — страница станет тёмной. Ещё раз — снова светлой. Как тебе удобнее читать.", pos: "bottom" },
+            { sel: "#userDocsBtn", rank: 16, title: "Кнопка «?»", text: "Это полная инструкция — нажми, если что-то непонятно. Она есть на русском, английском и французском (язык как у страницы); если перевод не подгрузился — покажется русская версия. Там же можно снова показать эти подсказки.", pos: "bottom" },
+            { sel: "#voiceModeBtn", rank: 17, title: "Голосовой ввод", text: "Хочешь говорить, а не печатать? Нажми — можно говорить голосом.", pos: "bottom" },
+            { sel: "#content .toggle-button", rank: 18, title: "Боковое меню", text: "Стрелочка справа открывает меню, там ссылка на админ-панель.", pos: "left", roles: ["super", "staff"] },
+            { sel: "#messages", rank: 19, title: "История", text: "История: всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
+            { sel: "#messageText", rank: 20, title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
+            { sel: '.buttons-block button[type="submit"]', rank: 21, title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
+            { sel: '[onclick="clearContext()"]', rank: 22, title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top" }
         ],
 
         // Эталон пользователя (v4): «Реши задачу — Язык программирования, тема,
@@ -152,10 +282,10 @@
         solve: [
             { sel: "#selectType", title: "Где ты", text: "Ты на странице «Реши задачу». Через этот список вернёшься в «Чат».", pos: "bottom", common: true },
             { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписей.", pos: "bottom", common: true },
-            { sel: "#select", title: "Выбор модели", text: "Список моделей — помощников, которые будут решать задачу.", pos: "bottom", common: true },
-            { sel: "#selectProgLng", title: "Язык программирования", text: "Сначала выбери язык твоего кода: C или Ассемблер.", pos: "bottom" },
-            { sel: "#selectTheme", title: "Тема", text: "Выбери тему — она объясняет модели, о чём задача.", pos: "top" },
-            { sel: "#selectPrompt", title: "Препромпт", text: "Препромпт — маленькая подсказка для модели. Хватит того, что выбрано.", pos: "top" }
+            { sel: "#select", title: "Выбор модели", text: "Список моделей — помощников, которые будут решать задачу. Рядом с именем могут стоять цифры: % решённых задач и среднее время ответа. Смотри на них как на подсказку: они показывают, как модель справляется именно с твоим выбором ниже.", pos: "bottom", common: true },
+            { sel: "#selectProgLng", title: "Язык программирования", text: "Выбери, на каком языке пишешь код: C или Ассемблер. От выбора зависит всё остальное: какие будут темы, промпты и цифры у моделей выше.", pos: "bottom" },
+            { sel: "#selectTheme", title: "Тема", text: "Выбери тему — она объясняет модели, о чём задача. Выбрал тему — цифры у моделей пересчитаются под статистику именно этой темы.", pos: "top" },
+            { sel: "#selectPrompt", title: "Промпт", text: "Промпт — маленькая подсказка для модели: как ей отвечать и оформлять код. Обычно подходит тот, что уже выбран.", pos: "top" }
         ],
 
         // Эталон пользователя (v4): «В чём ошибка — текст для задачи, текст для
@@ -164,9 +294,9 @@
         find_error: [
             { sel: "#selectType", title: "Где ты", text: "Ты на странице «В чём ошибка». Через список вернёшься в «Чат» или в «Реши задачу».", pos: "bottom", common: true },
             { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписи.", pos: "bottom", common: true },
-            { sel: "#select", title: "Выбор модели", text: "Выбери помощника-модель, которая проверит код.", pos: "bottom", common: true },
-            { sel: "#taskText", title: "Текст для задачи", text: "Скопируй сюда условие задачи из dl.gsu.by.", pos: "top" },
-            { sel: "#codeText", title: "Текст для кода", text: "А сюда вставь программу целиком.", pos: "top" }
+            { sel: "#select", title: "Выбор модели", text: "Выбери помощника-модель, которая проверит код. Рядом с именем могут стоять цифры: % решённых задач и среднее время — считаются по выбранному языку и теме (нет цифр — по такому сочетанию модель ещё не прогонялась).", pos: "bottom", common: true },
+            { sel: "#taskText", title: "Текст для задачи", text: "Вставь сюда условие задачи целиком — скопируй его со страницы dl.gsu.by, где задача написана.", pos: "top" },
+            { sel: "#codeText", title: "Текст для кода", text: "А ниже вставь свою программу целиком — модель посмотрит её вместе с условием и скажет, где ошибка.", pos: "top" }
         ],
 
         // Главный экран админки — свой scope на каждый уровень прав (флаг
@@ -188,7 +318,7 @@
             { sel: "#armLanguageChecks", title: "Языки", text: "Выбери один или несколько языков: на каждый запустится свой процесс.", pos: "bottom" },
             { sel: "#armExtensionInput", title: "Расширение", text: "Расширение файла определяется само, из выбранных языков.", pos: "right" },
             { sel: "#armTopicSelect", title: "Тема", text: "Станет доступной после выбора языка.", pos: "right" },
-            { sel: "#armPromptSelect", title: "Препромпт", text: "Обычно «По привязке» — подставится препромпт по умолчанию. Можно выбрать свой.", pos: "right" },
+            { sel: "#armPromptSelect", title: "Промпт", text: "Обычно «По привязке» — подставится промпт по умолчанию. Можно выбрать свой.", pos: "right" },
             { sel: "#armSaveSolutions", title: "Кэш решений", text: "Если задача прошла тест в DL, её решение сохранится — потом достанется без вызова модели.", pos: "right" },
             { sel: "#armRecordStats", title: "Статистика", text: "Суперадмин может заносить результаты в базу — они попадут в селектор моделей чата.", pos: "right" },
             { sel: "#armRunName", title: "Название прогона", text: "Придумай короткое имя — так прогон потом легко найти в журнале.", pos: "right" },
@@ -208,17 +338,25 @@
         // меню расписывает главный экран, чтобы не повторяться. Сверху вниз
         // ставит движок; цель, которой нет в DOM, просто выпадает.
 
-        // Журнал запросов (list + detail: resend-btn только там).
+        // Журнал запросов (list + detail: resend-btn только там) + дневной
+        // отчёт (путь /daily-report/ того же scope: на нём шаги журнала
+        // выпадают сами — целей нет в DOM, и наоборот). Кнопок «Фильтровать»/
+        // «Обновить таблицу» больше нет: любой фильтр применяется сам.
         admin_logs: [
-            { sel: "#id_q", title: "Поиск", text: "Ищет по тексту запроса и ответа, промпту, теме.", pos: "bottom" },
-            { sel: "#id_record_id", title: "Номер записи", text: "Нужно смотреть одну конкретную запись — впиши её номер.", pos: "bottom" },
-            { sel: "#id_status", title: "Статус", text: "Успешные или ошибочные запросы.", pos: "bottom" },
-            { sel: "#id_mode", title: "Режим", text: "Чат, «Реши задачу», «В чём ошибка», пакетное решение.", pos: "bottom" },
-            { sel: "#id_model", title: "Модель", text: "Какая модель отвечала.", pos: "bottom" },
-            { sel: "#id_user", title: "Пользователь", text: "Кто запрашивал: ID, логин или ФИО.", pos: "bottom" },
-            { sel: "#id_date_from", title: "Период", text: "С какой даты смотреть.", pos: "bottom" },
-            { sel: ".ai-logs-table", title: "Таблица запросов", text: "Клик по строке — полный запрос, ответ и задача.", pos: "bottom" },
-            { sel: "#resend-btn", title: "Повторить", text: "Отправит тот же вопрос модели ещё раз.", pos: "bottom" }
+            { sel: "#id_mode", title: "Режим запроса", text: "Выбираешь, какие записи показывать: Чат, «Реши задачу», «В чём ошибка» или пакетное решение. Выбрал — таблица обновится СРАЗУ сама, без кнопок. Верни «Все» — снова будут видны все записи.", pos: "bottom" },
+            { sel: "#id_model", title: "Модель", text: "Ищи записи по модели: выбери её из списка — останутся только записи, где отвечала она. Работает сразу, как только выбрал.", pos: "bottom" },
+            { sel: "#id_user", title: "ФИО", text: "Начни печатать фамилию (например, «Ива») — поиск найдёт человека по ФИО, ID или логину. Срабатывает само, через мгновение после набора: кнопки нажимать не нужно.", pos: "bottom" },
+            { sel: "#id_date_from", title: "С какой даты", text: "Показать записи с этой даты включительно. Дата выбрана — таблица обновилась сама.", pos: "bottom" },
+            { sel: "#id_date_to", title: "По какую дату", text: "И до какой даты (включая её). Можно заполнить только одну из двух границ — тогда период с одной стороны открыт.", pos: "bottom" },
+            { sel: ".ai-logs-actions", title: "Кнопки под фильтрами", text: "«Дневной отчёт» — сводка за сегодня: кто из студентов сколько и о чём спрашивал. «Сбросить» — очистить все выбранные фильтры и показать журнал целиком.", pos: "bottom" },
+            { sel: ".ai-logs-table", title: "Таблица запросов", text: "Клик по строке раскроет подробный отчёт: что спрашивали, что ответила модель, к какой задаче это относится. Ничего не нашлось — чаще всего это фильтры, а не отсутствие записей: жми «Сбросить».", pos: "bottom" },
+            { sel: "#resend-btn", title: "Повторить", text: "Отправит модели тот же вопрос ещё раз — удобно сравнить свежий ответ со старым. Кнопка есть в раскрытом отчёте запроса.", pos: "bottom" },
+            // Шаги дневного отчёта: live только на его странице — из тура
+            // журнала выпадают (целей нет), как и шаги журнала на отчёте.
+            { sel: "#daily-filter-student", title: "Поиск по ФИО", text: "Начни печатать фамилию — таблица сузится сама, через мгновение после набора. Никаких кнопок нажимать не нужно.", pos: "bottom" },
+            { sel: "#daily-filter-group", title: "Фильтр «Группа»", text: "Выбери группу — в таблице останутся только её студенты. Список групп собирается из записей за сегодня, пустых групп в нём не будет. Выбор применяется сам, сразу.", pos: "bottom" },
+            { sel: "#daily-filter-school", title: "Фильтр «Вуз/Школа»", text: "То же самое, но по вузу/школе. Можно включить оба фильтра сразу — например, одна группа одного вуза. Выбор применяется сам, сразу — кнопки нет.", pos: "bottom" },
+            { sel: ".ai-daily-table", title: "Кто и сколько спрашивал", text: "Одна строка — один студент за сегодня: ФИО, группа и вуз/школа, когда спрашивал последний раз, последняя тема и промпт и сколько всего запросов. Клик по строке раскроет все его запросы за день, каждая запись — кликом ещё раз.", pos: "bottom" }
         ],
 
         admin_pinned_runs: [
@@ -231,22 +369,23 @@
         ],
 
         admin_aiappsettings: [
-            { sel: "#id_is_enabled", title: "Главный выключатель", text: "Выкл — доступ к ИИ закрыт у всех. Вкл — работать можно.", pos: "right" },
-            { sel: ".ai-daily-report-bar", title: "Сводка за сутки", text: "Сколько было запросов и решённых задач.", pos: "right" },
-            { sel: "table.ai-batch-table", title: "Последние пакетные решения", text: "Клик по строке — результаты прогона.", pos: "bottom" },
+            { sel: "#id_is_enabled", title: "Главный выключатель", text: "Выкл — доступ к ИИ закрыт у всех сразу. Вкл — работать можно. Не забудь после изменения нажать «Сохранить» внизу формы.", pos: "right" },
+            { sel: ".ai-daily-report-bar", title: "Сводка за сутки", text: "Сколько было запросов и решённых задач за последние сутки — на глаз видно, «живой» ли сервис.", pos: "right" },
+            { sel: "table.ai-recent-logs-table:not(.ai-batch-table)", title: "Последние запросы", text: "Одна строка — один запрос: кто спрашивал, время отправки и получения, из какого режима, с какого языка/темы и промпта, какая модель и чем закончилось. Клик по строке раскроет полный запрос и ответ целиком.", pos: "bottom" },
+            { sel: "table.ai-batch-table", title: "Последние пакетные решения", text: "Клик по строке — результаты прогона (раскроются под ним). Колонка «Время» показывает, сколько шёл прогон от запуска до окончания — удобно сравнить прогоны между собой.", pos: "bottom" },
             { sel: ".submit-row input[name=_save]", title: "Сохранить", text: "После изменения настроек не забудь нажать.", pos: "right" }
         ],
 
         admin_updates: [
-            { sel: '.ai-updates-filter input[name="q"]', title: "Поиск", text: "Ищет по описанию и автору коммита.", pos: "bottom" },
-            { sel: '.ai-updates-filter select[name="author"]', title: "Автор", text: "Записи одного человека. Поправить его имя — в справочнике AuthorAlias.", pos: "bottom" },
-            { sel: '.ai-updates-filter input[name="date_from"]', title: "Период", text: "С какой даты показывать.", pos: "bottom" },
+            { sel: '.ai-updates-filter input[name="q"]', title: "Поиск", text: "Ищет по описанию и автору коммита. Печатай — список сузится сам, кнопки нет.", pos: "bottom" },
+            { sel: '.ai-updates-filter select[name="author"]', title: "Автор", text: "Записи одного человека; применяется сразу, как только выбрал. Поправить имя автора — в справочнике AuthorAlias.", pos: "bottom" },
+            { sel: '.ai-updates-filter input[name="date_from"]', title: "Период", text: "С какой даты показывать; применяется само, как только выбрал дату.", pos: "bottom" },
             { sel: "#content-main table", title: "История изменений", text: "Дата, автор, что сделано — новые сверху.", pos: "bottom" },
             { sel: 'a[href*="updatelog/"]', title: "Скрытые записи", text: "Коммиты, ещё не показанные пользователям в этом списке.", pos: "bottom" }
         ],
 
         admin_regression: [
-            { sel: "#prt_prompt", title: "Промпт", text: "Какой препромпт проверяем.", pos: "right" },
+            { sel: "#prt_prompt", title: "Промпт", text: "Какой промпт проверяем.", pos: "right" },
             { sel: "#prt_interface_language", title: "Язык страницы", text: "На каком языке отвечают пользователи — тот и проверяем.", pos: "right" },
             { sel: "#prt_models", title: "Модели", text: "Какими моделями прогнать тест.", pos: "right" },
             { sel: "#prt_cases", title: "Тест-кейсы", text: "Контрольные примеры: вопрос и правильный ответ.", pos: "right" },
@@ -274,9 +413,18 @@
             { sel: "#pdLanguage", title: "Язык", text: "Для какого языка программирования задаём привязку.", pos: "right" },
             { sel: "#pdTopic", title: "Тема", text: "Подтема курса; станет активной, когда выбран язык.", pos: "right" },
             { sel: "#pdMode", title: "Вид ARM", text: "Где подставлять: на «Реши задачу» или «В чём ошибка».", pos: "right" },
-            { sel: "#pdPrompt", title: "Препромпт", text: "Он подставится по умолчанию у всех пользователей.", pos: "right" },
+            { sel: "#pdPrompt", title: "Промпт", text: "Он подставится по умолчанию у всех пользователей.", pos: "right" },
             { sel: "#pdSaveBtn", title: "Сохранить", text: "Жми — привязка появится в списке ниже.", pos: "right" },
             { sel: "#content-main table", title: "Существующие привязки", text: "Всё, что задано: «Изменить» — поправить, «Удалить» — убрать.", pos: "top" }
+        ],
+
+        // Генератор тестовых записей журнала (только суперюзер): страница
+        // одна-экранная — 4 шага.
+        admin_test_data: [
+            { sel: ".test-data-page h2", title: "Генератор тестовых записей", text: "Страница-помощник: она создаёт фальшивые записи в «Журнале запросов», чтобы было что смотреть и фильтровать. Настоящих запросов студентов она не трогает и ничего не ломает.", pos: "bottom" },
+            { sel: ".help-test-data", title: "Что появится в журнале", text: "После нажатия кнопки в журнале появится случайная запись: случайный студент (или сам админ), случайный режим — чат, «Реши задачу» или «В чём ошибка» — и случайная модель. Нажимаешь кнопку несколько раз — записей станет несколько.", pos: "bottom" },
+            { sel: "[data-emit-request] .button", title: "Кнопка «Emit Request»", text: "Одно нажатие = одна новая тестовая запись в журнале. Чтобы проверить фильтры журнала, наделай записей пять-десять и иди в «Журнал запросов» — они появятся там наверху.", pos: "bottom" },
+            { sel: "#emit-status", title: "Статус", text: "Здесь коротко напишется, что запись создана (или что пошло не так). Тестовые записи выглядят в журнале как настоящие — если захочешь их убрать, удали в стоковом списке журнала (/ai/admin/ai/airequestlog/) или просто оставь: ничему не мешают.", pos: "bottom" }
         ]
     };
 
@@ -388,7 +536,7 @@
         parts.btnSkip = document.createElement("button");
         parts.btnSkip.type = "button";
         parts.btnSkip.className = BTN_SKIP;
-        parts.btnSkip.textContent = LABEL_SKIP;
+        parts.btnSkip.textContent = currentLabels().skip;
         parts.btnSkip.addEventListener("click", function () {
             stop({ mark: true });
         });
@@ -396,7 +544,7 @@
         parts.btnPrev = document.createElement("button");
         parts.btnPrev.type = "button";
         parts.btnPrev.className = BTN_PREV;
-        parts.btnPrev.textContent = LABEL_PREV;
+        parts.btnPrev.textContent = currentLabels().prev;
         parts.btnPrev.addEventListener("click", function () {
             prev();
         });
@@ -585,6 +733,19 @@
         index = i;
         missedTicks = 0;
         var step = steps[i];
+        // Шаг с skipIfHidden, чья цель ЕСТЬ, но скрыта сейчас (напр. кнопка
+        // Think скрыта, пока не выбрана модель Ollama) — пропускаем мгновенно,
+        // не съедая ограниченное ожидание: это не «цель ещё не доехала»
+        // (тогда не помечали бы skipIfHidden), а контракт «скрыта сейчас =
+        // шаг не для этого состояния». Отсутствие в DOM — обычный путь
+        // waitAndShow → skipForward.
+        if (step.skipIfHidden) {
+            var el0 = querySel(step.sel);
+            if (el0 && !isVisible(el0)) {
+                show(i + 1);
+                return;
+            }
+        }
         // Сначала хук (он может открыть навигацию/меню под целью — их
         // переходы анимированы), затем ограниченное ожидание появления,
         // скролл и замер в следующем кадре.
@@ -624,10 +785,10 @@
     function renderContent(step) {
         parts.title.textContent = step.title || "";
         parts.text.textContent = step.text || "";
-        parts.progress.textContent = (index + 1) + " из " + steps.length;
+        parts.progress.textContent = (index + 1) + currentLabels().progress + steps.length;
         parts.btnPrev.disabled = index === 0;
         var last = index === steps.length - 1;
-        parts.btnNext.textContent = last ? LABEL_DONE : LABEL_NEXT;
+        parts.btnNext.textContent = last ? currentLabels().done : currentLabels().next;
         parts.btnNext.className = last ? BTN_DONE : BTN_NEXT;
         // Вхождение — заново на каждом шаге (subtle).
         popover.classList.remove(POP_ENTER);
@@ -641,7 +802,7 @@
     // Подсветка — пересечение цели с вьюпортом. Раньше здесь были два
     // само-ограничения, гасившие пятно у реальных целей: MIN_SPOT=24
     // («мелкая цель не заслуживает пятна»: приветствие админки 14–21px,
-    // селект препромпта 19px) и SPOT_INSET=8, отъедавший цели, прижатые
+    // селект промпта 19px) и SPOT_INSET=8, отъедавший цели, прижатые
     // к краям окна (стрелочка чата: right:0 → пересечение 16px). Для всех
     // таких шагов пятна не было, поповер уезжал «в центр» без якоря и
     // стрелки — в глазах пользователя «шаг не отображается». Теперь пятно
@@ -967,8 +1128,17 @@
         );
         if (!resolved.length) return; // нечего показывать — тихо выходим
 
+        try {
+            // Юзер-туры локализуются на старте (правило триязычной
+            // клиентской части): заменяем title/text без копирования
+            // русской истины в таблицу.
+            resolved = localizeUserSteps(scopeName, resolved);
+        } catch (e) { /* ошибка локализации не валит тур */ }
+
         steps = resolved;
         cfg = {
+            lang: ["chat", "solve", "find_error"].indexOf(scopeName) !== -1
+                ? uiSuffix(wizardUiLanguage()) : "ru",
             scope: scopeName,
             version: conf.version,
             role: conf.role ? String(conf.role) : "",

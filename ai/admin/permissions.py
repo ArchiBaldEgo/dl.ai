@@ -64,6 +64,19 @@ def can_access_prompt_admin(request):
     return is_prompt_developer_user(request.user)
 
 
+def can_access_prompt_defaults(request):
+    """Доступ к «Промптам по умолчанию»: суперюзер ИЛИ prompt_developer.
+
+    NB: внешняя аутентификация зачисляет в prompt_developer КАЖДОГО
+    провижиненного DL-пользователя (external_account.py) — де-факто
+    страница открыта всей аудитории админки. Ограничить круг можно
+    в одном этом хелпере.
+    """
+    if not request.user.is_authenticated:
+        return False
+    return is_superuser_user(request.user) or is_prompt_developer_user(request.user)
+
+
 def can_access_prompt_regression(request):
     """Регрессионные тесты промптов: только суперпользователь."""
     if not request.user.is_authenticated:

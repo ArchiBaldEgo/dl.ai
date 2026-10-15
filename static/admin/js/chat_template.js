@@ -24,7 +24,8 @@ function simulateSend() {
         type: '1',
         message: input.value,
         value: value,
-        language: language
+        language: language,
+        think: aiThinkEnabled()
     }));
     setRequestLock(true);
     notEnter = true;
@@ -35,21 +36,22 @@ function simulateSend() {
 
 function sendMessage(event) {
     event.preventDefault();
-    if (!ws) { alert("Соединение не установлено. Пожалуйста, подождите..."); return; }
-    if (ws.readyState !== WebSocket.OPEN) { alert("Соединение не установлено. Пожалуйста, подождите..."); return; }
-    if (requestInFlight) { alert("Дождитесь ответа модели перед новым запросом."); return; }
+    if (!ws) { alert(getUiString('notConnected', "Соединение не установлено. Пожалуйста, подождите...")); return; }
+    if (ws.readyState !== WebSocket.OPEN) { alert(getUiString('notConnected', "Соединение не установлено. Пожалуйста, подождите...")); return; }
+    if (requestInFlight) { alert(getUiString('waitResponse', "Дождитесь ответа модели перед новым запросом.")); return; }
 
     var value = document.querySelector("#select").value;
     var language = document.querySelector("#selectLang").value;
     var input = document.getElementById("messageText");
-    if (!value) { alert("Сегодня нет доступных моделей. Повторите позже."); return; }
-    if (!input.value.trim()) { alert("Пожалуйста, введите сообщение"); return; }
+    if (!value) { alert(getUiString('noModelsToday', "Сегодня нет доступных моделей. Повторите позже.")); return; }
+    if (!input.value.trim()) { alert(getUiString('enterMessage', "Пожалуйста, введите сообщение")); return; }
 
     ws.send(JSON.stringify({
         type: '1',
         message: input.value,
         value: value,
-        language: language
+        language: language,
+        think: aiThinkEnabled()
     }));
     setRequestLock(true);
     notEnter = true;

@@ -10,7 +10,7 @@ gpt-oss:20b-cloud, gpt-oss:120b-cloud) требуют bearer-токен ``OLLAMA
 Архитектура: generic ``_ask_ollama()`` + декларативная таблица ``OLLAMA_MODELS``;
 внешние функции-обёртки генерируются автоматически через ``_make_handler`` (по
 образцу openrouter.py). Обычный чат БЕЗ tool-calling и БЕЗ истории диалога —
-препромпт подставляется на каждое сообщение (как у Groq).
+промпт подставляется на каждое сообщение (как у Groq).
 
 Контракт handler'а (см. ai/services/model_caller.py:75):
 ``async def handler(msg: str, client_id: str) -> Tuple[str, int, bool]``.
@@ -143,17 +143,39 @@ OLLAMA_MODELS: dict[str, dict] = {
 }
 
 
+def _default_num_predict() -> int:
+    """Потолок генерации (num_predict) Ollama-моделей.
+
+    История обрезов: дефолт 4096 обрезал большие ответы; его подняли до 8192,
+    но chain-of-thought flash-моделей (рассуждения идут в content) сжигает
+    и этот бюджет — снова обрыв на полуслове и «Функция main() не определена».
+    Дефолт поднимали до 16384, затем до 32768 — think-рассуждения думающих
+    моделей съедали ещё не половину, а ВЕСЬ бюджет до начала кода. Обрез
+    всё равно возможен — ARM ловит его по факту (tokens >= потолка, см.
+    model_clients.is_output_truncated) и разово переспрашивает той же моделью
+    с think=false (think-рассуждения глушатся — на код остаётся почти весь
+    бюджет). Переопределяется через OLLAMA_NUM_PREDICT в .env. Читается
+    лениво (как прочие env-лимиты модуля) — тесты переопределяют через
+    patch.dict.
+    """
+    return max(1024, int(os.getenv("OLLAMA_NUM_PREDICT", "32768")))
+
+
 def _get_client() -> Client:
     """Создаёт Ollama Client с явным host/headers из config (не полагаемся на env SDK)."""
     headers = {"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else None
     return Client(host=OLLAMA_HOST, timeout=_OLLAMA_TIMEOUT, headers=headers)
 
 
-def _stream_once(model: str, msg: str, temperature: float, num_predict: int) -> Tuple[str, int, str]:
+def _stream_once(
+    model: str, msg: str, temperature: float, num_predict: int,
+    think: bool | None = None,
+) -> Tuple[str, int, str, str]:
     """Синхронный streaming-вызов ollama.chat (запускается через asyncio.to_thread).
 
-    Возвращает ``(content, eval_count, thinking)``. Стриминг обязателен: без
-    него длинные генерации ARM-solve (промпт ~5k символов + num_predict=4096)
+    Возвращает ``(content, eval_count, thinking, done_reason)``. Стриминг
+    обязателен: без
+    него длинные генерации ARM-solve (промпт ~5k символов + большой num_predict)
     идут минутами без единого байта в ответ, и шлюз api.ollama.com закрывает
     соединение, не дождавшись готового ответа — httpx поднимает
     ServerDisconnectedError («Server disconnected without sending a response»).
@@ -164,16 +186,29 @@ def _stream_once(model: str, msg: str, temperature: float, num_predict: int) -> 
     ``thinking`` — накопленное содержимое одноимённого поля (gpt-oss:cloud
     стримит рассуждение отдельным полем, не think-тегами в content);
     обычно отбрасывается, но спасает ответ, когда content пуст.
+
+    ``think`` — управление рассуждениями модели по докам Ollama
+    (docs.ollama.com/capabilities/thinking): ``false`` — «request no thinking
+    output»; None — поведение модели по умолчанию (поле в запрос не
+    подставляется вовсе — совместимость со старыми SDK без think-поля).
+
+    ``done_reason`` — причина остановки финального чанка: "stop" — нормальное
+    окончание, "length" — генерация обрезана лимитом (нашего num_predict ИЛИ
+    скрытым потолком шлюза: были кейсы «done на ~2000 токенах среди фразы»).
+    Честный сигнал обреза — главный источник для флага truncated в раннере.
     """
     client = _get_client()
     parts: list[str] = []
     thinking_parts: list[str] = []
     tokens = 0
+    done_reason = ""
+    extra_kwargs: dict = {"think": think} if think is not None else {}
     for chunk in client.chat(
         model=model,
         messages=[{"role": "user", "content": msg}],
         options={"temperature": temperature, "num_predict": num_predict},
         stream=True,
+        **extra_kwargs,
     ):
         message = getattr(chunk, "message", None)
         content = getattr(message, "content", "") or ""
@@ -182,12 +217,17 @@ def _stream_once(model: str, msg: str, temperature: float, num_predict: int) -> 
         thinking = getattr(message, "thinking", "") or ""
         if thinking:
             thinking_parts.append(thinking)
+        if getattr(chunk, "done_reason", None):
+            done_reason = str(chunk.done_reason)
         if getattr(chunk, "eval_count", 0):
             tokens = int(chunk.eval_count)
-    return "".join(parts), tokens, "".join(thinking_parts)
+    return "".join(parts), tokens, "".join(thinking_parts), done_reason
 
 
-def _chat_sync(model: str, msg: str, temperature: float, num_predict: int) -> Tuple[str, int, str]:
+def _chat_sync(
+    model: str, msg: str, temperature: float, num_predict: int,
+    think: bool | None = None,
+) -> Tuple[str, int, str]:
     """Запускает ``_stream_once`` под per-process семафором конкурентности.
 
     Блокирующий acquire — ВНУТРИ worker-потока (asyncio.to_thread), не в корутине:
@@ -206,17 +246,18 @@ def _chat_sync(model: str, msg: str, temperature: float, num_predict: int) -> Tu
                 waited, _SEM_SIZE, model,
             )
     try:
-        return _stream_once(model, msg, temperature, num_predict)
+        return _stream_once(model, msg, temperature, num_predict, think)
     finally:
         sem.release()
 
 
-def _handle_ollama_error(exc: Exception, model_id: str) -> Tuple[str, int, bool]:
-    """Преобразует исключение вызова модели в (текст_ошибки, 0, True).
+def _handle_ollama_error(exc: Exception, model_id: str) -> Tuple[str, int, bool, bool]:
+    """Преобразует исключение вызова модели в (текст_ошибки, 0, True, False).
 
     Поведение прежнее (таймаут/disconnected/generic), кроме ResponseError 429,
     дошедшего сюда после исчерпания ретраев, — для него friendly-сообщение из
-    map_http_error вместо сырого «... (status code: 429)».
+    map_http_error вместо сырого «... (status code: 429)». 4-й элемент —
+    флаг обреза длины: у ошибок всегда False.
     """
     # Импорт здесь, чтобы не падать при отсутствии SDK на старых окружениях.
     try:
@@ -226,12 +267,12 @@ def _handle_ollama_error(exc: Exception, model_id: str) -> Tuple[str, int, bool]
     if ResponseError and isinstance(exc, ResponseError):
         if getattr(exc, "status_code", None) == 429:
             logger.error("Ollama 429 for %s после всех ретраев", model_id)
-            return map_http_error(429, "ollama"), 0, True
+            return map_http_error(429, "ollama"), 0, True, False
         logger.warning("Ollama API error for %s: %s", model_id, exc)
-        return f"Ошибка Ollama API: {exc}", 0, True
+        return f"Ошибка Ollama API: {exc}", 0, True, False
     text = str(exc).lower()
     if "timeout" in text or "timed out" in text:
-        return "Таймаут при подключении к Ollama. Попробуйте позже.", 0, True
+        return "Таймаут при подключении к Ollama. Попробуйте позже.", 0, True, False
     if "disconnected" in text:
         logger.warning("Ollama server disconnected for %s (long generation?): %s", model_id, exc)
         return (
@@ -239,9 +280,10 @@ def _handle_ollama_error(exc: Exception, model_id: str) -> Tuple[str, int, bool]
             "Попробуйте позже или выберите другую модель.",
             0,
             True,
+            False,
         )
     logger.exception("Ollama request failed for %s: %s", model_id, exc)
-    return f"Ошибка Ollama: {exc}", 0, True
+    return f"Ошибка Ollama: {exc}", 0, True, False
 
 
 async def _ask_ollama(
@@ -250,23 +292,33 @@ async def _ask_ollama(
     model_id: str,
     *,
     temperature: float = 0.7,
-    num_predict: int = 4096,
-) -> Tuple[str, int, bool]:
+    num_predict: int | None = None,
+    think: bool | None = None,
+) -> Tuple[str, int, bool, bool]:
     """Общий обработчик для всех моделей Ollama. Обычный чат без инструментов.
 
     Ретраит ollama.ResponseError 429 (rate limit тарифа) с эскалирующим backoff;
     конкурентность входящих вызова ограничена per-process семафором в _chat_sync.
+    Возвращает ``(текст, токенов, is_error, длина_обрезана)`` — 4-й элемент True,
+    когда провайдер остановил генерацию лимитом (done_reason == "length": наш
+    num_predict ИЛИ скрытый потолок шлюза) — честный сигнал для флага truncated
+    в ARM-раннере. Нет done_reason в чанке (старый SDK) — False: обрез по токенам
+    подхватывает model_clients.is_output_truncated.
     """
     # Cloud-эндпоинт (ollama.com/api/*) требует bearer-токен.
     if "ollama.com" in OLLAMA_HOST and not OLLAMA_API_KEY:
-        return "Ollama API ключ не настроен. Добавьте OLLAMA_API_KEY в .env", 0, True
+        return "Ollama API ключ не настроен. Добавьте OLLAMA_API_KEY в .env", 0, True, False
 
     attempts = max(1, int(os.getenv("OLLAMA_MAX_RETRIES", "3")) + 1)
-    result: Tuple[str, int, str] | None = None
+    # None → берём env-потолок (_default_num_predict): прежний жёсткий
+    # 4096 обрезал большие ответы моделей.
+    if num_predict is None:
+        num_predict = _default_num_predict()
+    result: Tuple[str, int, str, str] | None = None
     for attempt in range(1, attempts + 1):
         try:
             result = await asyncio.to_thread(
-                _chat_sync, model_id, msg, temperature, num_predict,
+                _chat_sync, model_id, msg, temperature, num_predict, think,
             )
             break
         except Exception as exc:  # ollama.ResponseError / httpx исключения / прочее
@@ -280,7 +332,7 @@ async def _ask_ollama(
                 continue
             return _handle_ollama_error(exc, model_id)
 
-    content, tokens, thinking = result
+    content, tokens, thinking, done_reason = result
 
     if not content.strip():
         # Reasoning-модели (gpt-oss:cloud) иногда кладут
@@ -288,14 +340,17 @@ async def _ask_ollama(
         # пользователю вместо ошибки «пустой ответ». Если это рассуждения без
         # кода, они вырезаются think-фильтром в arm_runner (не попадают в код).
         if thinking.strip():
+            # Стрим оборвался ДО финального ответа по лимиту шлюза/длины
+            # (done_reason != "stop") — это именно «обрезано», а не «молчит»:
+            # ARM-раннер пометит пару truncated и разово переспросит.
             logger.warning(
                 "Ollama model %s returned empty content, falling back to thinking (%d chars)",
                 model_id, len(thinking),
             )
-            return thinking, int(tokens), False
+            return thinking, int(tokens), False, done_reason == "length"
         logger.warning("Ollama model %s returned empty content", model_id)
-        return f"Модель Ollama ({model_id}) вернула пустой ответ. Попробуйте позже.", 0, True
-    return content, int(tokens), False
+        return f"Модель Ollama ({model_id}) вернула пустой ответ. Попробуйте позже.", 0, True, False
+    return content, int(tokens), False, done_reason == "length"
 
 
 # --- Автогенерация функций для каждой модели (через _base.make_table_handlers) ---
@@ -304,8 +359,26 @@ async def _ask_ollama(
 def _ollama_handler_factory(model_key: str, cfg: dict):
     model_id = cfg["model"]
 
+    # ``think`` — клиентский переключатель рассуждений (кнопка Think в чате):
+    # None — поле в запрос не подставляется вовсе (поведение модели по умолчанию,
+    # совместимость с вызовами без аргумента — ModelCaller передаёт kwarg только
+    # при think is not None и провайдере ollama, см. model_clients.supports_think).
+    async def handler(msg: str, user_id: int, *, think: bool | None = None) -> Tuple[str, int, bool]:
+        return await _ask_ollama(msg, user_id, model_id, think=think)
+
+    return handler
+
+
+def _nothink_handler_factory(model_key: str, cfg: dict):
+    """Фабрика РЕТРАЕВ «без think» (см. ai.model_clients.get_no_think_handler):
+    тот же generic-вызов, но с полем ``think: false`` в запросе (доки
+    docs.ollama.com/capabilities/thinking — «request no thinking output»):
+    протекшее рассуждение залило ответ → повторяем задачу у той же модели в
+    режиме «только ответ»."""
+    model_id = cfg["model"]
+
     async def handler(msg: str, user_id: int) -> Tuple[str, int, bool]:
-        return await _ask_ollama(msg, user_id, model_id)
+        return await _ask_ollama(msg, user_id, model_id, think=False)
 
     return handler
 
@@ -317,3 +390,17 @@ globals().update(
         doc_fn=lambda key, cfg: cfg["description"],
     )
 )
+
+# Отдельный dict (не в globals: registry берёт основные имена) с ТЕМИ ЖЕ
+# ключами «ask_{key}_async» — пары «обычный → no-think» ищутся по __name__.
+_NOTHINK_HANDLERS = make_table_handlers(
+    OLLAMA_MODELS,
+    _nothink_handler_factory,
+    doc_fn=lambda key, cfg: f"{cfg['description']} — ретрай без think (Ollama think=False)",
+)
+
+
+def nothink_handler(original):
+    """Хендлер «без think» для исходного ollama-handler'а (по ``__name__``);
+    None — хендлер не оllama-овый (или неизвестный): ретрай пойдёт обычным."""
+    return _NOTHINK_HANDLERS.get(getattr(original, "__name__", "")) or None

@@ -34,7 +34,7 @@ def prompt(obj, ui_language=""):
         "topic_id": obj.topic_id,
         "topic__programming_language": obj.topic.programming_language_id if obj.topic else None,
         # Собственный язык промпта (FK, миграция 0048): без темы — промпт
-        # действует на весь язык; фронт-фильтр препромптов учитывает его.
+        # действует на весь язык; фронт-фильтр промптов учитывает его.
         "programming_language_id": obj.programming_language_id,
         "prompt_name": obj.prompt_name_ru,
         "name": get_localized_name(obj, ui_language, "prompt_name"),
@@ -71,12 +71,12 @@ def shared_prompt_with_dates(obj, ui_language=""):
 
 
 def arm_prompt_binding(obj):
-    """Сериализует ArmPromptBinding для авто-подстановки препромпта на ARM-страницах.
+    """Сериализует ArmPromptBinding для авто-подстановки промпта на ARM-страницах.
 
     Компактный формат: фронт ищет запись по (language_id, topic_id, mode) и
-    подставляет prompt_id в селект препромпта. ``prompt_name`` — для подписи
-    «Препромпт по умолчанию: …» без загрузки списка промптов (ручной выбор
-    препромпта на ARM-страницах убран).
+    подставляет prompt_id в селект промпта. ``prompt_name`` — для подписи
+    «Промпт по умолчанию: …» без загрузки списка промптов (ручной выбор
+    промпта на ARM-страницах убран).
     """
     return {
         "id": obj.id,

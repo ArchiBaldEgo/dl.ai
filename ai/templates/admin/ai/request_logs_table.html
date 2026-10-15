@@ -1,0 +1,224 @@
+{% comment %}
+Тело таблицы журнала запросов — партиал для ленивого AJAX-обновления:
+«Обновить таблицу» запрашивает ту же страницу с фильтрами и заменяет обёртку
+#logs-table-wrapper целиком (статический admin/ai/request_logs/index.js).
+Содержимое — фикс «время + общее кол-во задач» (human_duration, счётчик
+нерешённых из total, снимки промптов прогона, нейтральный статус «пауза») +
+ленивый блок «Показать все задачи». Loads не наследуются от include —
+грузим здесь: tz для МСК, ai_duration для таймеров.
+Колонки (11): Кто отправлял, Отправлен, Получен, Режим, Язык, Тема,
+Промпт, Модель, Статус, с, ★ — ID и Источник вынесены в detail-строку.
+ID записи и источник не пропадают: они в развёрнутых деталях запроса.
+{% endcomment %}
+{% load tz ai_duration %}
+<div id="logs-table-wrapper">
+
+  <div id="ai-logs-table-container">
+  {% if page_obj.object_list %}
+    <div class="ai-scroll">
+    <table class="ai-logs-table">
+      <thead>
+        <tr>
+          <th>Кто отправлял</th>
+          <th>Отправлен</th>
+          <th>Получен</th>
+          <th>Режим</th>
+          <th>Язык</th>
+          <th>Тема</th>
+          <th>Промпт</th>
+          <th>Модель</th>
+          <th>Статус</th>
+          <th>с</th>
+          <th title="Закрепить завершённый пакетный прогон">★</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% timezone moscow_tz %}
+        {% for log, batch in rows %}
+          {# === Основная строка (кликабельная — раскрывает детали) === #}
+          {# batch — не-None только для записей batch-solve (/arm/solve/) #}
+          <tr class="ai-log-row" data-log-id="{{ log.id }}">
+            <td>
+              {% if log.external_user_id %}
+                <a href="https://dl.gsu.by/report.asp?id={{ log.external_user_id }}" target="_blank" rel="noopener">{{ log.user_full_name|default:log.username|default:log.external_user_id }}</a>
+              {% else %}
+                {{ log.user_full_name|default:log.username|default:"—" }}
+              {% endif %}
+            </td>
+            <td>{{ log.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
+            <td>{{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
+            <td>
+              {{ log.get_mode_display|default:"—" }}
+            </td>
+            <td>{{ log.programming_language_name|default:"—" }}</td>
+            <td>{{ log.topic_name|default:"—" }}</td>
+            <td>
+              {% if log.prompt_id %}
+                <a href="/ai/admin/ai/prompt/{{ log.prompt_id }}/change/" target="_blank" rel="noopener">{{ log.prompt_name|default:"—" }}</a>
+              {% else %}
+                {{ log.prompt_name|default:"—" }}
+              {% endif %}
+            </td>
+            <td>
+              {{ log.model_names|join:", "|default:"—" }}
+            </td>
+            <td class="{% if batch %}{% if batch.run_status == 'completed' %}ai-logs-status-success{% elif batch.run_status == 'running' or batch.run_status == 'paused' %}ai-logs-status-neutral{% else %}ai-logs-status-error{% endif %}{% else %}{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}{% endif %}">
+              {% if batch %}{{ batch.run_status_display }}{% else %}{{ log.get_status_display }}{% endif %}
+            </td>
+            <td>{{ log.duration_seconds|human_duration|default:"—" }}</td>
+            <td class="ai-log-pin-cell">
+              {% if batch %}
+                <button type="button"
+                        class="ai-log-pin-btn{% if batch.pinned %} ai-log-pin-btn-active{% endif %}"
+                        data-pin-url="{{ batch.pin_url }}" data-log-id="{{ log.id }}"
+                        {% if batch.run_status == 'running' %}disabled title="Прогон ещё выполняется — закрепить можно только завершённые"{% else %}title="{% if batch.pinned %}Убрать из «Закреплённых»{% else %}Закрепить в «Закреплённых пакетных решениях»{% endif %}"{% endif %}>{{ batch.pinned|yesno:"★,☆" }}</button>
+              {% endif %}
+            </td>
+          </tr>
+
+          {# === Скрытая строка с деталями (аккордеон) === #}
+          <tr class="ai-log-detail-row">
+            <td class="ai-log-detail-cell" colspan="11">
+              <div class="ai-log-detail-content">
+
+                {# Левая колонка: метаданные (+ задачи прогона для batch) #}
+                <div class="ai-log-detail-section">
+                  <h4>Параметры запроса</h4>
+                  <div class="ai-log-detail-meta">
+                    <div><strong>ID:</strong> {{ log.id }}</div>
+                    <div><strong>Источник:</strong> {{ log.get_source_display|default:"—" }}</div>
+                    <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
+                    <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
+                    <div><strong>Статус:</strong> {% if batch %}{{ batch.run_status_display|default:log.get_status_display }}{% else %}{{ log.get_status_display }}{% endif %}</div>
+                    <div><strong>Время ответа:</strong> {% if log.duration_seconds %}{{ log.duration_seconds|human_duration }}{% else %}—{% endif %}{% if batch %} (общее){% endif %}</div>
+                    {% if not batch %}<div><strong>Токенов:</strong> {{ log.tokens|default:"—" }}</div>{% endif %}
+                    <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y:H:i:s" }}</div>
+                    <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</div>
+                    <div><strong>Кто:</strong>
+                      {% if log.external_user_id %}
+                        <a href="https://dl.gsu.by/report.asp?id={{ log.external_user_id }}" target="_blank" rel="noopener">{{ log.user_full_name|default:log.username }} [{{ log.external_user_id }}]</a>
+                      {% else %}
+                        {{ log.user_full_name|default:log.username|default:"—" }}
+                      {% endif %}
+                    </div>
+                    <div><strong>Язык:</strong> {{ log.programming_language_name|default:"—" }}</div>
+                    <div><strong>Тема:</strong> {{ log.topic_name|default:"—" }}</div>
+                    {% if batch %}
+                      <div><strong>ID дерева:</strong> {{ batch.course_id|default:"—" }}</div>
+                      <div><strong>Задачи:</strong>
+                        {# Держим счётчики решено/нерешено; полный перечень (решённые #}
+                        {# и нерешённые с пометками моделей) грузится лениво по кнопке. #}
+                        нерешено {{ batch.tasks_unsolved_count }} из {{ batch.tasks_total }}
+                      </div>
+                    {% else %}
+                      <div><strong>Задача:</strong>
+                        {% if log.task_node_id %}
+                          <button type="button" class="ai-log-task-link" data-task-node="{{ log.task_node_id }}" title="Показать условие задачи">{{ log.task_name|default:log.task_node_id }}</button>
+                        {% else %}
+                          {{ log.task_name|default:"—" }}
+                        {% endif %}
+                      </div>
+                    {% endif %}
+                    <div><strong>Промпт:</strong>
+                      {% if batch %}
+                        {# Снимки фактически использованных промптов (по привязке #}
+                        {# у каждой задачи свой): один или несколько, пусто — «—». #}
+                        {% for p in batch.prompts %}
+                          <a href="/ai/admin/ai/prompt/{{ p.id }}/change/" target="_blank" rel="noopener">{{ p.name }}</a>{% if not forloop.last %}, {% endif %}
+                        {% empty %}
+                          —
+                        {% endfor %}
+                      {% elif log.prompt_id %}
+                        <a href="/ai/admin/ai/prompt/{{ log.prompt_id }}/change/" target="_blank" rel="noopener">{{ log.prompt_name|default:"—" }}</a>
+                      {% else %}
+                        {{ log.prompt_name|default:"—" }}
+                      {% endif %}
+                    </div>
+                  </div>
+                </div>
+
+                {% if batch %}
+                  {# Для batch-строк текст запроса и ответ модели не отображаем (ТЗ); #}
+                  {# подробные результаты — в деталях записи (/request_logs/<id>/). #}
+                  <div class="ai-log-detail-section">
+                    <h4>Прогон</h4>
+                    <div class="ai-log-detail-meta">
+                      <div><strong>Название прогона:</strong> {{ batch.run_name|default:"—" }}</div>
+                      <div><strong>Статус прогона:</strong> {{ batch.run_status_display|default:"—" }}</div>
+                      <div><strong>Окончание:</strong> {{ batch.run_finished_at|default:"—" }}</div>
+                      <div><strong>Общее время:</strong> {{ batch.run_duration_display|default:"—" }}</div>
+                      <div><strong>Расширение:</strong> {{ batch.file_extension|default:"—" }}</div>
+                      <div><strong>Детали:</strong> <a href="{% url 'ai_request_log_detail' log.id %}">результаты прогона →</a></div>
+                    </div>
+                    <div class="ai-log-tasks-block">
+                      <button type="button" class="ai-log-all-tasks-btn" data-log-id="{{ log.id }}" data-snapshot-url="{% url 'ai_request_log_batch_snapshot' log.id %}">Показать все задачи</button>
+                      <div class="ai-log-all-tasks-list" hidden></div>
+                    </div>
+                  </div>
+                {% else %}
+                  <div class="ai-log-detail-section">
+                    <h4>Текст запроса</h4>
+                    <pre>{{ log.message|default:"(пусто)" }}</pre>
+                  </div>
+
+                  {% comment %}Правая колонка: ответ модели. Сам текст (мог быть
+                     мегабайтным) в таблицу не вшиваем — AJAX-обновление
+                     должно оставаться почти мгновенным; по первому раскрытию
+                     строки JS (request_logs/index.js) подтягивает его через
+                     detail-json.{% endcomment %}
+                  <div class="ai-log-detail-section">
+                    <h4>Ответ модели</h4>
+                    <div class="ai-log-response-body" data-response-url="{% url 'ai_request_log_detail_json' log.id %}">
+                      <pre class="ai-log-response-loading">Загрузка…</pre>
+                    </div>
+                  </div>
+                {% endif %}
+
+                {% if log.error_message %}
+                <div class="ai-log-detail-section">
+                  <h4>Ошибка</h4>
+                  <pre class="ai-log-error-text">{{ log.error_message }}</pre>
+                </div>
+                {% endif %}
+
+                {# Действия === #}
+                <div class="ai-log-detail-actions">
+                  {% if batch %}
+                    <a class="resend-btn" href="{% url 'ai_request_log_xlsx' log.id %}">Скачать XLSX</a>
+                    <form method="post" class="ai-batch-rerun-form" action="{% url 'ai_request_log_rerun_arm' log.id %}">
+                      {% csrf_token %}
+                      <button type="submit" class="resend-btn">↻ Повторить запрос</button>
+                      <span class="ai-batch-rerun-status"></span>
+                    </form>
+                  {% else %}
+                    <form method="post" action="{% url 'ai_request_log_resend' log.id %}">
+                      {% csrf_token %}
+                      <button type="submit" class="resend-btn">↻ Повторить запрос</button>
+                    </form>
+                  {% endif %}
+                </div>
+
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+        {% endtimezone %}
+      </tbody>
+    </table>
+
+    </div>
+
+    <div class="ai-logs-paginator">
+      {% if page_obj.has_previous %}
+      <a class="button" href="?{{ filters_query }}page={{ page_obj.previous_page_number }}">← Назад</a>
+      {% endif %}
+      <span>Страница {{ page_obj.number }} из {{ page_obj.paginator.num_pages }}</span>
+      {% if page_obj.has_next %}
+      <a class="button" href="?{{ filters_query }}page={{ page_obj.next_page_number }}">Вперёд →</a>
+      {% endif %}
+    </div>
+    {% else %}
+    <div class="ai-logs-empty">Логи не найдены.</div>
+    {% endif %}
+  </div>
+</div>

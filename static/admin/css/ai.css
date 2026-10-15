@@ -494,6 +494,325 @@ hr {
     margin-right: 8px;
 }
 
+<<<<<<< HEAD
+=======
+/* При масштабе 80% */
+@media (min-resolution: 95dpi) and (max-resolution: 105dpi) {
+    .line-panel {
+        display: flex;
+        grid-row: 1;
+        align-items: center;
+        background-color: #d8d8d8;
+        padding-left: 10px;
+        height: 120px;
+    }
+
+    .voice-mode-btn {
+        margin: 0px 5px;
+        width: 160px;
+        height: 50px;
+        font-size: 14px;
+        margin-top: 21px;
+    }
+
+    .voice-btn {
+        margin: 15px 5px;
+        margin-top: 17px;
+        display: flex;
+        align-items: center;
+        text-align: center;
+        padding: 8px 15px;
+        font-size: 14px;
+        height: 50px;
+    }
+}
+
+
+/* При масштабе 90% */
+@media (min-resolution: 106dpi) and (max-resolution: 118dpi) {
+    .line-panel {
+        display: flex;
+        grid-row: 1;
+        align-items: center;
+        background-color: #d8d8d8;
+        padding-left: 10px;
+        height: 100px;
+    }
+}
+
+/* При масштабе 110%*/
+@media (min-resolution: 131dpi) and (max-resolution: 143dpi) {
+    .line-panel {
+        display: flex;
+        grid-row: 1;
+        align-items: center;
+        background-color: #d8d8d8;
+        padding-left: 10px;
+        height: 80px;
+    }
+
+    .voice-mode-btn {
+        margin: 0px 5px;
+        width: 140px;
+        height: 45px;
+        font-size: 14px;
+        margin-top: 21px;
+    }
+
+    .voice-btn {
+        margin: 15px 5px;
+        margin-top: 17px;
+        display: flex;
+        align-items: center;
+        text-align: center;
+        padding: 8px 15px;
+        font-size: 14px;
+        height: 45px;
+    }
+}
+
+/* При масштабе 125% */
+@media (min-resolution: 144dpi) and (max-resolution: 150dpi) {
+    .line-panel {
+        display: flex;
+        grid-row: 1;
+        align-items: center;
+        background-color: #d8d8d8;
+        padding-left: 10px;
+        height: 80px;
+    }
+
+    button {
+        padding: 10px 20px;
+        margin: 5px;
+        font-size: 16px;
+        color: white;
+        background-color: #007BFF;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        transition: background-color 0.3s ease;
+        height: 40px;
+    }
+
+    .voice-mode-btn {
+        margin: 0px 5px;
+        margin-left: -5px;
+        width: 120px;
+        height: 40px;
+        font-size: 12px;
+        margin-top: 21px;
+    }
+
+    #messages {
+        height: 79vh;
+        width: 100vw;
+        margin-left: 10px;
+        margin-right: 10px;
+        padding: 20px 0;
+        padding: 10px;
+        border: 2px solid #ccc;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        overflow-y: auto;
+        font-family: 'Roboto', sans-serif;
+        background-color: #fff;
+    }
+
+    #messageText {
+        width: 100%;
+        font-size: 18px;
+        border: 2px solid #ccc;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        resize: none;
+        height: 79vh;
+        margin-top: 2vh;
+    }
+
+}
+
+/* При масштабе 150% */
+@media (min-resolution: 151dpi) and (max-resolution: 180dpi) {
+    .line-panel {
+        display: flex;
+        grid-row: 1;
+        align-items: center;
+        background-color: #d8d8d8;
+        padding-left: 10px;
+        height: 80px;
+    }
+
+    button {
+        padding: 10px 20px;
+        margin: 5px;
+        font-size: 16px;
+        color: white;
+        background-color: #007BFF;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        transition: background-color 0.3s ease;
+        height: 43px;
+    }
+
+    #messageText {
+        width: 100%;
+        font-size: 18px;
+        border: 2px solid #ccc;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        resize: none;
+        height: 73vh;
+        margin-top: 2vh;
+    }
+
+    .voice-btn {
+        margin: -5px 5px;
+        margin-top: 17px;
+        display: flex;
+        align-items: center;
+        text-align: center;
+        padding: 8px 15px;
+        font-size: 12px;
+    }
+
+    .voice-mode-btn {
+        margin: 0px 5px;
+        margin-left: -5px;
+        width: fit-content;
+        height: 40px;
+        font-size: 12px;
+        margin-top: 13px;
+    }
+
+    #messages {
+        height: 75vh;
+        width: 100vw;
+        margin-left: 10px;
+        margin-right: 10px;
+        padding: 20px 0;
+        padding: 10px;
+        border: 2px solid #ccc;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        overflow-y: auto;
+        font-family: 'Roboto', sans-serif;
+        background-color: #fff;
+    }
+
+    .resize-button {
+        left: 2;
+        position: absolute;
+        height: 80vh;
+        margin-top: 2vh;
+        width: 30px;
+        background-color: #d8d8d8;
+        cursor: ew-resize;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
+        transition: background-color 0.3s ease;
+        font-size: 32px;
+        color: black;
+    }
+}
+
+/* При масштабе 150% */
+@media (min-resolution: 181dpi) {
+    .line-panel {
+        display: flex;
+        grid-row: 1;
+        align-items: center;
+        background-color: #d8d8d8;
+        padding-left: 10px;
+        height: 70px;
+    }
+
+    button {
+        padding: 10px 20px;
+        margin: 5px;
+        font-size: 16px;
+        color: white;
+        background-color: #007BFF;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        transition: background-color 0.3s ease;
+        height: 43px;
+    }
+
+    #messageText {
+        width: 100%;
+        font-size: 18px;
+        border: 2px solid #ccc;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        resize: none;
+        height: 70vh;
+        margin-top: 2vh;
+    }
+
+    .voice-btn {
+        margin: -5px 5px;
+        margin-top: 17px;
+        display: flex;
+        align-items: center;
+        text-align: center;
+        padding: 8px 15px;
+        font-size: 10px;
+    }
+
+    .voice-mode-btn {
+        margin: 0px 5px;
+        margin-left: -5px;
+        width: fit-content;
+        height: 40px;
+        font-size: 10px;
+        margin-top: 13px;
+    }
+
+    #messages {
+        height: 71vh;
+        width: 100vw;
+        margin-left: 10px;
+        margin-right: 10px;
+        padding: 20px 0;
+        padding: 10px;
+        border: 2px solid #ccc;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+        overflow-y: auto;
+        font-family: 'Roboto', sans-serif;
+        background-color: #fff;
+    }
+
+    .resize-button {
+        left: 2;
+        position: absolute;
+        height: 80vh;
+        margin-top: 2vh;
+        width: 30px;
+        background-color: #d8d8d8;
+        cursor: ew-resize;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
+        transition: background-color 0.3s ease;
+        font-size: 32px;
+        color: black;
+    }
+}
+
+/* Общие промпты */
+>>>>>>> origin/main
 .shared-prompt-section {
     display: flex;
     flex-direction: column;

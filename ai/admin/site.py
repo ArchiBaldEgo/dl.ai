@@ -21,6 +21,7 @@ from .permissions import (
     can_access_logs,
     can_access_model_status,
     can_access_prompt_admin,
+    can_access_prompt_defaults,
     can_access_prompt_regression,
     can_access_test_console,
     is_prompt_developer_user,
@@ -311,6 +312,8 @@ class AIAdminSite(admin.AdminSite):
     def each_context(self, request):
         from .guest_mode import is_viewing_as_guest
         from .my_prompt import get_my_prompt_admin_url
+        from .test_data import ( get_test_data_url, can_access_test_data )
+
         context = super().each_context(request)
         is_pd = is_prompt_developer_user(request.user)
         is_staff = is_staff_or_superuser(request.user)
@@ -359,7 +362,7 @@ class AIAdminSite(admin.AdminSite):
         my_prompt_url = "/ai/admin/prompts/my/"
         context["my_prompt_url"] = my_prompt_url
         context["my_prompt_change_url"] = get_my_prompt_admin_url(request)
-        ai_logs_url = "/ai/admin/ai/airequestlog/"
+        ai_logs_url = "/ai/admin/ai/request_logs/"
         context["ai_logs_url"] = ai_logs_url
         show_updates = is_staff and not guest
         context["show_updates_link"] = show_updates
@@ -368,6 +371,12 @@ class AIAdminSite(admin.AdminSite):
         aiappsettings_url = self._aiappsettings_url()
         docs_url = "/ai/admin/docs/"
         pinned_runs_url = "/ai/admin/pinned-runs/"
+
+        test_data_url = get_test_data_url()
+        # «Тестовые данные» остаются только пунктом меню «Диагностика»
+        # (генератор записей журнала); флаг show_test_data_link удалён вместе
+        # с кнопкой «Добавить запись» на странице журнала.
+        show_test_data = can_access_test_data(request) and is_super and not guest
 
         # --- AI tools in the left navigation sidebar (#nav-sidebar) ---
         # The left nav renders `available_apps` (separate from the dashboard's
@@ -389,19 +398,24 @@ class AIAdminSite(admin.AdminSite):
                 # пакетные прогоны (★ в журнале и на «Настройке ИИ-приложения»).
                 # В гостевом режиме скрыта, как и вся группа настройки.
                 ("Закреплено", "Закреплённые пакетные решения", "AiPinnedBatchRuns", pinned_runs_url, show_logs and not guest, "★", "Закреплённые завершённые пакетные прогоны"),
-                # NB: остальные дубликаты реальных ModelAdmin-строк («Препромпты»)
+                # NB: остальные дубликаты реальных ModelAdmin-строк («Промпты»)
                 # сюда НЕ добавляем — они и так есть в группе «Раздел ИИ» ниже.
                 # Здесь — только кастомные инструменты.
-                ("Промпты", "Мой препромпт", "AiMyPrompt", my_prompt_url, is_pd, "✎", "Свои и закреплённые препромпты"),
-                ("Промпты", "Препромпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", is_super and not guest, "⚙", "Авто-подстановка по языку/теме ARM"),
+                ("Промпты", "Мой промпт", "AiMyPrompt", my_prompt_url, is_pd, "✎", "Свои и закреплённые промпты"),
+                ("Промпты", "Промпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", can_access_prompt_defaults(request) and not guest, "⚙", "Авто-подстановка по языку/теме ARM"),
                 ("Документация", "Разработчик промптов", "AiDocsPromptDeveloper", docs_url + "prompt-developer/", True, "✎", "Инструкция для разработчика промптов"),
                 ("Документация", "Разработчик", "AiDocsDeveloper", docs_url + "developer/", is_staff and not guest, "⚙", "Документация для разработчика"),
                 ("Документация", "Суперюзер", "AiDocsSuperuser", docs_url + "superuser/", is_super and not guest, "⚙", "Инструкция для суперадмина"),
                 ("ARM", "Пакетное решение", "AiArmSolve", arm_solve_url, show_arm, "▤", "Пакетный прогон моделей по задачам DL"),
                 ("ARM", "Состояние моделей", "AiModelStatus", arm_model_status_url, show_model_status, "◉", "Доступность AI-моделей сегодня"),
                 ("Диагностика", "Журнал запросов", "AiRequestLogs", ai_logs_url, show_logs, "≣", "Все запросы к моделям, с поиском"),
-                ("Диагностика", "Регрессионные тесты", "AiPromptRegression", prompt_regression_url, show_prompt_regression, "✓", "Проверка препромптов на тест-кейсах"),
+                ("Диагностика", "Регрессионные тесты", "AiPromptRegression", prompt_regression_url, show_prompt_regression, "✓", "Проверка промптов на тест-кейсах"),
                 ("Диагностика", "Тестовая консоль", "AiTestConsole", test_console_url, show_test_console, "⌘", "Запуск набора тестов приложения"),
+                ("Диагностика",
+                 "Тестовые данные",
+                 "AiTestData",
+                 test_data_url,
+                 show_test_data, "⚙", "Создание и редактирование тестовых данных"),
                 ("Система", "Обновления", "AiUpdates", updates_url, show_updates, "↻", "История изменений проекта"),
             ],
         )

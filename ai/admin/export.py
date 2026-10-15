@@ -2,7 +2,7 @@
 
 Единый серверный генератор для журнала запросов (запись batch-лога) и для
 страницы /arm/solve/ (живой/завершённый прогон по run_id) — раньше формат
-существовал в двух зеркалах (серверный CSV в logs.py и клиентский
+существовал в двух зеркалах (серверный CSV в request_logs.py и клиентский
 downloadResultsCsv в _ai_batch_results.html).
 
 Лист 1 «Сводка»: матрица задача×модель с сокращёнными названиями моделей
@@ -126,9 +126,13 @@ def _model_legend_rows(results, title_map=None):
     )
 
 
-def build_arm_results_xlsx(results) -> bytes:
+def build_arm_results_xlsx(results, note=None) -> bytes:
     """Собрать .xlsx: лист «Сводка» (матрица + сводка по моделям) и лист
-    «Расшифровка моделей» (сокращение → полное название)."""
+    «Расшифровка моделей» (сокращение → полное название).
+
+    ``note`` — необязательная строка в шапке листа «Сводка»: например, для
+    прогона, который ещё выполняется, честная пометка «завершено N пар из T»
+    (все цифры в файле — по завершённым к моменту скачивания парам)."""
     title_map = short_model_titles(
         [r.get("model_title") or r.get("model_key") or ""
          for r in results if (r.get("model_title") or r.get("model_key"))]
@@ -140,6 +144,9 @@ def build_arm_results_xlsx(results) -> bytes:
     ws = wb.active
     ws.title = "Сводка"
     matrix_header, matrix_rows = _arm_results_matrix(results, title_map)
+    if note:
+        ws.append([note])
+        ws.append([])
     for row in [matrix_header] + matrix_rows:
         ws.append(row)
     summary_header, summary_rows = _per_model_summary_rows(results, title_map)

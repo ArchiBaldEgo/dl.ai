@@ -12,12 +12,12 @@
 {% block error_selected %}selected{% endblock %}
 
 {% block form_content %}
-    <h3 class="task">Задача:</h3>
-    <textarea type="text" id="taskText" class="messageText" placeholder="Вставьте сюда условие задачи"
+    <h3 class="task">{{ t.task }}</h3>
+    <textarea type="text" id="taskText" class="messageText" placeholder="{{ t.taskplace }}"
         autocomplete="off"></textarea>
-    <h3 class="codetx">Код программы:</h3>
+    <h3 class="codetx">{{ t.codetx }}</h3>
     <textarea type="text" id="codeText" class="messageText"
-        placeholder="Вставьте сюда ваш код решения задачи, для красивого форматирования оберните код в ```(буква Ё на клавиатуре)"
+        placeholder="{{ t.codePlaceholder }}"
         autocomplete="off"></textarea>
 {% endblock %}
 
@@ -27,7 +27,7 @@
     <select id="selectTheme">
     </select>
     <div class="top-preprompt">
-        <div class="preprompt">Препромпт:</div>
+        <div class="preprompt">{{ t.preprompt }}:</div>
         <select id="selectPrompt">
         </select>
     </div>

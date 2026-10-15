@@ -234,15 +234,15 @@ SHARED_PROMPT_MODE_CHOICES = (
 )
 
 
-# Общий (shared) препромпт - не привязан к конкретному языку программирования или теме.
+# Общий (shared) промпт - не привязан к конкретному языку программирования или теме.
 # Текст может содержать placeholder {language}/{язык}, который заменяется на имя языка,
 # и {topic}/{тема}, который заменяется на название темы при использовании.
 class SharedPrompt(models.Model):
-    """Общий (shared) препромпт — не привязан к конкретному языку программирования или теме.
+    """Общий (shared) промпт — не привязан к конкретному языку программирования или теме.
 
     Текст может содержать плейсхолдеры {language}/{язык} и {topic}/{тема},
     которые заменяются на имя языка и название темы при использовании.
-    Если указан mode (chat/solve/find_error), препромпт используется как
+    Если указан mode (chat/solve/find_error), промпт используется как
     системный шаблон по умолчанию для соответствующего режима.
     """
     prompt_name_ru = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (RU)")
@@ -256,19 +256,19 @@ class SharedPrompt(models.Model):
     )
     prompt_text_en = models.TextField(blank=True, default="", verbose_name="Текст (EN)")
     prompt_text_fr = models.TextField(blank=True, default="", verbose_name="Текст (FR)")
-    # Языки, для которых этот общий препромпт доступен (blank = для всех)
+    # Языки, для которых этот общий промпт доступен (blank = для всех)
     programming_languages = models.ManyToManyField(
         ProgrammingLanguage, blank=True, related_name="shared_prompts",
         verbose_name="Языки программирования",
     )
-    # Системный режим: если указан, препромпт используется как default-шаблон для режима.
+    # Системный режим: если указан, промпт используется как default-шаблон для режима.
     mode = models.CharField(
         max_length=16,
         blank=True,
         choices=SHARED_PROMPT_MODE_CHOICES,
         null=True,
         verbose_name="Системный режим",
-        help_text="Если указан, препромпт используется как системный шаблон для соответствующего режима.",
+        help_text="Если указан, промпт используется как системный шаблон для соответствующего режима.",
     )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
@@ -299,8 +299,8 @@ class SharedPrompt(models.Model):
 
     class Meta:
         db_table = 'ai_sharedprompt'
-        verbose_name = 'Общий препромпт'
-        verbose_name_plural = 'Общие препромпты'
+        verbose_name = 'Общий промпт'
+        verbose_name_plural = 'Общие промпты'
         constraints = [
             models.UniqueConstraint(
                 fields=["mode"],
@@ -313,8 +313,8 @@ class Prompt(models.Model):
     """Промпт, привязанный к конкретной теме.
 
     Может ссылаться на SharedPrompt (shared_prompt) — в этом случае итоговый текст
-    берётся из общего препромпта с подстановкой языка и темы. Если задан
-    prompt_text_override, он переопределяет текст общего препромпта.
+    берётся из общего промпта с подстановкой языка и темы. Если задан
+    prompt_text_override, он переопределяет текст общего промпта.
     Поддерживает мультиязычные названия и тексты (ru/en/fr).
 
     mode — режим чата, в котором промпт предлагается пользователю
@@ -338,7 +338,7 @@ class Prompt(models.Model):
         Topic, on_delete=models.CASCADE, null=True, blank=True,
         verbose_name="Тема",
     )
-    # Собственный язык препромпта. Раньше язык выводился только из темы, из-за
+    # Собственный язык промпта. Раньше язык выводился только из темы, из-за
     # чего у «общих» промптов (без темы, напр. «ASM i86 - общий») язык нельзя
     # было задать: селект в форме был виртуальным и не сохранялся. Теперь
     # промпт может быть привязан к языку целиком (тема пустая) — как
@@ -348,7 +348,7 @@ class Prompt(models.Model):
         ProgrammingLanguage, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="prompts",
         verbose_name="Язык программирования",
-        help_text="Без темы — препромпт действует на весь язык.",
+        help_text="Без темы — промпт действует на весь язык.",
     )
     prompt_text_ru = models.TextField(blank=True, default="", verbose_name="Текст (RU)")
     prompt_text_en = models.TextField(blank=True, default="", verbose_name="Текст (EN)")
@@ -356,11 +356,11 @@ class Prompt(models.Model):
     prompt_name_ru = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (RU)")
     prompt_name_en = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (EN)")
     prompt_name_fr = models.CharField(max_length=255, blank=True, default="", verbose_name="Название (FR)")
-    # Ссылка на общий препромпт (если есть - текст берётся из него с подстановкой языка и темы)
+    # Ссылка на общий промпт (если есть - текст берётся из него с подстановкой языка и темы)
     shared_prompt = models.ForeignKey(
         SharedPrompt, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="language_prompts",
-        verbose_name="Общий препромпт",
+        verbose_name="Общий промпт",
     )
     # Переопределение текста для конкретного языка (если null - используется shared_prompt.prompt_text)
     prompt_text_override = models.TextField(null=True, blank=True, verbose_name="Переопределение текста")
@@ -380,7 +380,7 @@ class Prompt(models.Model):
     )
 
     def get_effective_text(self, ui_language: str = "", programming_language_name: str = "", topic_name: str = "", message: str = "", code: str = ""):
-        """Возвращает итоговый текст препромпта с учётом UI-языка, языка программирования и темы."""
+        """Возвращает итоговый текст промпта с учётом UI-языка, языка программирования и темы."""
         if self.prompt_text_override:
             base = self.prompt_text_override
         elif self.shared_prompt:
@@ -401,16 +401,16 @@ class Prompt(models.Model):
 
 
 class ArmPromptBinding(models.Model):
-    """Привязка «препромпт по умолчанию» для ARM: (язык, тема, вид ARM) → промпт.
+    """Привязка «промпт по умолчанию» для ARM: (язык, тема, вид ARM) → промпт.
 
-    Суперюзерский инструмент «Препромпты по умолчанию»: на /arm/solve/ и
-    /arm/find-error/ после выбора темы препромпт подтягивается автоматически,
-    чтобы пользователю не приходилось выбирать один и тот же препромпт каждый
+    Суперюзерский инструмент «Промпты по умолчанию»: на /arm/solve/ и
+    /arm/find-error/ после выбора темы промпт подтягивается автоматически,
+    чтобы пользователю не приходилось выбирать один и тот же промпт каждый
     раз. Промпт редактируется по обычным правилам (владелец/редактор/
     суперюзер) — привязка тянет актуальный текст по FK, ничего не копируем.
 
     ``topic`` может быть NULL — привязка «на весь язык» (ЯП = формат: язык
-    эквивалентен своему расширению, препромпт по умолчанию на весь Python
+    эквивалентен своему расширению, промпт по умолчанию на весь Python
     покрывает все .py-задачи). Нужно там, где у языка нет тем (Python, C++),
     и как fallback, когда точная привязка (язык+тема) не задана.
     """
@@ -435,15 +435,15 @@ class ArmPromptBinding(models.Model):
     prompt = models.ForeignKey(
         Prompt, on_delete=models.CASCADE,
         related_name="arm_bindings",
-        verbose_name="Препромпт",
+        verbose_name="Промпт",
     )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создана")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлена")
 
     class Meta:
         db_table = "ai_arm_prompt_binding"
-        verbose_name = "Привязка препромпта ARM"
-        verbose_name_plural = "Привязки препромптов ARM"
+        verbose_name = "Привязка промпта ARM"
+        verbose_name_plural = "Привязки промптов ARM"
         constraints = [
             models.UniqueConstraint(
                 fields=["programming_language", "topic", "mode"],
@@ -463,7 +463,7 @@ class ArmPromptBinding(models.Model):
         """Привязка для прогона: точная (язык+тема) → иначе «на весь язык».
 
         Возвращает ArmPromptBinding (select_related("prompt")) или None —
-        нет ни одной → прогон без препромпта.
+        нет ни одной → прогон без промпта.
         """
         base = cls.objects.filter(
             mode=mode, programming_language_id=programming_language_id,
@@ -524,8 +524,8 @@ class TaskSolution(models.Model):
     # Контекст последней генерации решения (как в AIRequestLog — id + имя).
     topic_id = models.IntegerField(null=True, blank=True, verbose_name="ID темы")
     topic_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Тема")
-    prompt_id = models.IntegerField(null=True, blank=True, verbose_name="ID препромпта")
-    prompt_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Препромпт")
+    prompt_id = models.IntegerField(null=True, blank=True, verbose_name="ID промпта")
+    prompt_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Промпт")
     queue_id = models.PositiveIntegerField(null=True, blank=True, db_index=True, verbose_name="Queue ID DL")
     test_log = models.ForeignKey(
         "AIRequestLog", on_delete=models.SET_NULL, null=True, blank=True,
@@ -823,19 +823,23 @@ class AIModelTestRun(models.Model):
     model_keys, file_extension, prompt_id, dl_test, ui_language, course_id;
     single: model_keys, interface_language, programming_language, topic, prompt,
     task_text, code_text) — для восстановления состояния формы при возврате
-    на страницу прогона (``?run_id=``).
+    на страницу прогона (``?run_id=``). ``paused`` — кооперативная пауза
+    batch-прогона (вступает на границе пар); осиротевший paused-прогон
+    (нет живого job) помечается «Процесс потерян», как и running.
     """
 
     STATUS_RUNNING = "running"
     STATUS_COMPLETED = "completed"
     STATUS_FAILED = "failed"
     STATUS_CANCELLED = "cancelled"
+    STATUS_PAUSED = "paused"
 
     STATUS_CHOICES = (
         (STATUS_RUNNING, "Running"),
         (STATUS_COMPLETED, "Completed"),
         (STATUS_FAILED, "Failed"),
         (STATUS_CANCELLED, "Cancelled"),
+        (STATUS_PAUSED, "Paused"),
     )
 
     RUN_TYPE_SINGLE = "single"
@@ -962,6 +966,16 @@ class AIModelTestResult(models.Model):
     topic_id_snapshot = models.IntegerField(null=True, blank=True, verbose_name="ID темы (снимок)")
     topic_name_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Тема (снимок)")
     prog_lang_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Язык программирования (снимок)")
+    # Снимок фактически использованного промпта пары (при старте «по
+    # привязке» у задачи свой промпт; легаси-строки и прогоны без привязок —
+    # NULL/пусто, отображается «—»).
+    prompt_id = models.IntegerField(null=True, blank=True, verbose_name="ID промпта (снимок)")
+    prompt_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Промпт (снимок)")
+    # Ответ модели оборван потолком генерации провайдера (Ollama num_predict /
+    # SambaNova max_tokens — стрим остановлен ровно на лимите;
+    # is_output_truncated). Ретрай с припиской «сразу код» уже сделан во время
+    # прогона; пара помечается чинно, потому что часть ответа реально потеряна.
+    truncated = models.BooleanField(default=False, verbose_name="Ответ обрезан")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
 
     class Meta:
@@ -990,21 +1004,34 @@ class AIModelTestResult(models.Model):
 
 
 class AIModelStats(models.Model):
-    """Глобальная накопленная статистика модели по прогонам /arm/solve/.
+    """Накопленная статистика (model_key, язык, тема) по прогонам /arm/solve/.
 
     Обновляется только по завершении пакетного прогона, запущенного с
     включённым чекбоксом «заносить результаты в БД» (доступен суперюзерам).
     Semantics совпадают с ``arm_runner._per_bucket``: в ``total_count``
     идут только решённые/проваленные пары, длительности — только не-skipped.
-    Эти числа показываются в селекторе моделей чата (среднее время и % решённых).
+
+    Скоупы (2026-10): строка (модель, язык, тема) — пары этой темы; строка
+    (модель, язык, NULL) — языковая строка («выбран только язык»); пара
+    инкрементирует ОБЕ строки (без темы — только языковую). Строки с
+    (NULL, NULL) — легаси-глобальный скоуп по model_key, новые приращения
+    в него не пишутся, UI его не читает (оператор чистит reset_model_stats).
     """
 
-    model_key = models.CharField(max_length=128, unique=True, db_index=True, verbose_name="Ключ модели")
+    model_key = models.CharField(max_length=128, db_index=True, verbose_name="Ключ модели")
     model_title = models.CharField(max_length=255, blank=True, default="", verbose_name="Название модели")
     solved_count = models.PositiveIntegerField(default=0, verbose_name="Решено задач")
     total_count = models.PositiveIntegerField(default=0, verbose_name="Всего задач (решено+провалено)")
     duration_count = models.PositiveIntegerField(default=0, verbose_name="Измерений времени")
     duration_sum = models.FloatField(default=0.0, verbose_name="Сумма времени, сек")
+    programming_language = models.ForeignKey(
+        ProgrammingLanguage, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="model_stats", verbose_name="Язык программирования",
+    )
+    topic = models.ForeignKey(
+        Topic, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="model_stats", verbose_name="Тема",
+    )
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлено")
 
     class Meta:
@@ -1012,6 +1039,16 @@ class AIModelStats(models.Model):
         verbose_name = "Статистика модели"
         verbose_name_plural = "Статистика моделей"
         ordering = ("-solved_count",)
+        indexes = [
+            # Скоуп-ключ чтения (model_key, язык, тема). Уникальность НЕ
+            # навязана бд-констрейнтом: prod-PG 14 не умеет NULLS NOT DISTINCT
+            # (нужен PG15+), а «двойная строка язык-скоупа» невозможна в
+            # одиночном воркере финализации — честный upsert в model_stats.
+            models.Index(
+                fields=["model_key", "programming_language", "topic"],
+                name="ai_model_stats_scope_idx",
+            ),
+        ]
 
     def __str__(self):
         return self.model_key
@@ -1239,6 +1276,53 @@ class AuthorAlias(models.Model):
     def display_map(cls):
         """{nick: display_label} — один запрос, единственный источник для рендера."""
         return {alias.nick: alias.display_label for alias in cls.objects.all()}
+
+
+class DLEducationName(models.Model):
+    """Справочник DL «id → человекочитаемое название» (вуз/школа, группа/класс).
+
+    REST get-user-info отдаёт только коды: schoolId (строка), schoolKind,
+    schoolNo и groupMaskId — настоящих названий вузов/школ и групп там нет.
+    Ведётся вручную суперюзером (по образцу AuthorAlias); отображение
+    (дневной отчёт журнала) резолвится при рендере — правка записи
+    ретроактивно чинит прошлые строки. Читатель — единственный:
+    ai/services/education_directory.py.
+    """
+    KIND_SCHOOL = "school"
+    KIND_GROUP = "group"
+    KIND_CHOICES = (
+        (KIND_SCHOOL, "Школа/вуз (schoolId)"),
+        (KIND_GROUP, "Группа/класс (groupMaskId)"),
+    )
+    kind = models.CharField(
+        max_length=10, choices=KIND_CHOICES, verbose_name="Тип записи",
+    )
+    key = models.CharField(max_length=100, verbose_name="ID в DL")
+    title = models.CharField(max_length=255, verbose_name="Название")
+    # Вуз/школа, к которой относится группа/класс: key соответствующей
+    # school-строки этого же справочника (groupMaskId — строка без структуры,
+    # DL не сообщает заведение группы). Заполняется ТОЛЬКО у kind="group";
+    # читатель — education_directory (groups_school), фолбэк в дневном отчёте
+    # показывает школу студента от привязки его группы.
+    school = models.CharField(
+        max_length=100, blank=True, default="",
+        verbose_name="Вуз/школа (key из schoolId)",
+    )
+
+    class Meta:
+        db_table = "ai_dl_education_name"
+        verbose_name = "Учебное название DL (id → название)"
+        verbose_name_plural = "Учебные названия DL (вуз/школа, группа)"
+        ordering = ("kind", "title")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("kind", "key"),
+                name="ai_dl_education_name_kind_key_uniq",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.title} [{self.key}]"
 
 
 class UpdateLog(models.Model):

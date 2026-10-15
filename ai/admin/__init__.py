@@ -9,6 +9,7 @@ from .site import ai_admin_site
 from ..models import (
     AIAppSettings,
     AuthorAlias,
+    DLEducationName,
     ExternalDLAccount,
     ProgrammingLanguage,
     Prompt,
@@ -24,6 +25,7 @@ from ..models import (
 from .models import (
     AIAppSettingsAdmin,
     AuthorAliasAdmin,
+    DLEducationNameAdmin,
     ExternalDLAccountAdmin,
     ProgrammingLanguageAdmin,
     TopicAdmin,
@@ -38,7 +40,7 @@ from .models import (
     UpdateLogAdmin,
 )
 from .forms import PromptForm, SharedPromptForm
-from .logs import AIRequestLogAdmin, admin_request_log_detail_view, admin_request_logs_view, resend_request_view
+from .request_logs import AIRequestLogAdmin, admin_request_log_detail_view, admin_request_logs_view, resend_request_view
 from ..models import AIRequestLog
 from .arm import (
     admin_arm_solve_view,
@@ -55,6 +57,10 @@ from .prompt_regression import (
     admin_prompt_regression_view,
     admin_prompt_regression_start_view,
     admin_prompt_regression_status_view,
+)
+from .test_data import (
+    test_data_view,
+    test_data_emit_request_view
 )
 
 __all__ = [
@@ -86,11 +92,15 @@ __all__ = [
     "admin_prompt_regression_status_view",
     "admin_request_logs_view",
     "resend_request_view",
+
+    "test_data_view",
+    "test_data_emit_request_view"
 ]
 
 # Register AI models on the custom admin site so they appear in /ai/admin/.
 ai_admin_site.register(AIAppSettings, AIAppSettingsAdmin)
 ai_admin_site.register(AuthorAlias, AuthorAliasAdmin)
+ai_admin_site.register(DLEducationName, DLEducationNameAdmin)
 ai_admin_site.register(ProgrammingLanguage, ProgrammingLanguageAdmin)
 ai_admin_site.register(Task, TaskAdmin)
 ai_admin_site.register(Topic, TopicAdmin)
@@ -108,7 +118,7 @@ ai_admin_site.register(AIWizardSeen, AIWizardSeenAdmin)
 # page links to /ai/admin/ai/updatelog/ (Скрытые записи).
 ai_admin_site.register(UpdateLog, UpdateLogAdmin)
 # NOTE: AIRequestLog is intentionally NOT registered as a ModelAdmin. Its
-# changelist URL (/ai/admin/ai/airequestlog/) is served by the custom
+# changelist URL (/ai/admin/ai/request_logs/) is served by the custom
 # admin_request_logs_view (ai/admin/urls.py), which renders the richer
 # request_logs.html UI. Registering it too shadowed that view and left the
 # ModelAdmin's add/change/delete orphaned. The "Логи запросов" nav row points

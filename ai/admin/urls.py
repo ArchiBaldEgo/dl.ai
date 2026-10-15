@@ -15,6 +15,8 @@ from .arm import (
     admin_arm_solve_status_view,
     admin_arm_solve_load_tree_view,
     admin_arm_solve_cancel_view,
+    admin_arm_solve_pause_view,
+    admin_arm_solve_resume_view,
     admin_arm_solve_rerun_pairs_view,
     admin_arm_solve_report_xlsx_view,
     admin_arm_solve_result_download_view,
@@ -27,7 +29,7 @@ from .docs import (
     admin_docs_view,
 )
 from .guest_mode import admin_toggle_guest_view
-from .logs import (
+from .request_logs import (
     admin_batch_snapshot_view,
     admin_daily_report_view,
     admin_request_log_detail_view,
@@ -43,7 +45,7 @@ from .model_status import (
     admin_model_status_state_view,
 )
 from .my_prompt import admin_my_prompt_view
-from .logs import admin_request_log_detail_json_view
+from .request_logs import admin_request_log_detail_json_view
 from .onboarding import admin_wizard_seen_view
 from .pinned import admin_pinned_run_toggle_view, admin_pinned_runs_view
 from .prompt_defaults import admin_prompt_defaults_view
@@ -59,6 +61,10 @@ from .test_console import (
     admin_test_console_view,
     admin_test_console_start_view,
     admin_test_console_status_view,
+)
+from .test_data import (
+    test_data_emit_request_view,
+    test_data_view
 )
 from .updates import admin_updates_view
 
@@ -80,6 +86,8 @@ def get_ai_admin_urls():
         path("arm/solve/status/", ai_admin_site.admin_view(admin_arm_solve_status_view), name="ai_arm_solve_status"),
         path("arm/solve/load-tree/", ai_admin_site.admin_view(admin_arm_solve_load_tree_view), name="ai_arm_solve_load_tree"),
         path("arm/solve/cancel/", ai_admin_site.admin_view(admin_arm_solve_cancel_view), name="ai_arm_solve_cancel"),
+        path("arm/solve/pause/", ai_admin_site.admin_view(admin_arm_solve_pause_view), name="ai_arm_solve_pause"),
+        path("arm/solve/resume/", ai_admin_site.admin_view(admin_arm_solve_resume_view), name="ai_arm_solve_resume"),
         path("arm/solve/rerun-pairs/", ai_admin_site.admin_view(admin_arm_solve_rerun_pairs_view), name="ai_arm_solve_rerun_pairs"),
         path("arm/solve/result/<int:result_id>/download/", ai_admin_site.admin_view(admin_arm_solve_result_download_view), name="ai_arm_solve_result_download"),
         path("arm/solve/result/<int:result_id>/body/", ai_admin_site.admin_view(admin_arm_solve_result_body_view), name="ai_arm_solve_result_body"),
@@ -100,19 +108,22 @@ def get_ai_admin_urls():
         path("pinned-runs/", ai_admin_site.admin_view(admin_pinned_runs_view), name="ai_pinned_runs"),
         path("prompt-defaults/", ai_admin_site.admin_view(admin_prompt_defaults_view), name="ai_prompt_defaults"),
         path("updates/", ai_admin_site.admin_view(admin_updates_view), name="ai_updates"),
-        # Онбординг-wizard: отметка «тур закрыт» (ai-wizard.js шлёт POST при
-        # закрытии тура; решение показывать — ai/admin/onboarding.py).
         path("wizard/seen/", ai_admin_site.admin_view(admin_wizard_seen_view), name="ai_wizard_seen"),
-        path("ai/airequestlog/task-text/", ai_admin_site.admin_view(admin_request_log_task_text_view), name="ai_request_log_task_text"),
-        path("ai/airequestlog/<int:log_id>/xlsx/", ai_admin_site.admin_view(admin_request_log_xlsx_view), name="ai_request_log_xlsx"),
-        path("ai/airequestlog/daily-report/", ai_admin_site.admin_view(admin_daily_report_view), name="ai_request_log_daily_report"),
-        path("ai/airequestlog/<int:log_id>/batch-snapshot/", ai_admin_site.admin_view(admin_batch_snapshot_view), name="ai_request_log_batch_snapshot"),
-        path("ai/airequestlog/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
-        path("ai/airequestlog/<int:log_id>/resend/", ai_admin_site.admin_view(resend_request_view), name="ai_request_log_resend"),
-        path("ai/airequestlog/<int:log_id>/pin/", ai_admin_site.admin_view(admin_pinned_run_toggle_view), name="ai_request_log_pin"),
-        path("ai/airequestlog/<int:log_id>/detail-json/", ai_admin_site.admin_view(admin_request_log_detail_json_view), name="ai_request_log_detail_json"),
-        path("ai/airequestlog/<int:log_id>/rerun-arm/", ai_admin_site.admin_view(rerun_arm_batch_view), name="ai_request_log_rerun_arm"),
-        path("ai/airequestlog/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),
+        path("ai/request_logs/task-text/", ai_admin_site.admin_view(admin_request_log_task_text_view), name="ai_request_log_task_text"),
+        path("ai/request_logs/<int:log_id>/xlsx/", ai_admin_site.admin_view(admin_request_log_xlsx_view), name="ai_request_log_xlsx"),
+        path("ai/request_logs/daily-report/", ai_admin_site.admin_view(admin_daily_report_view), name="ai_request_log_daily_report"),
+        path("ai/request_logs/<int:log_id>/batch-snapshot/", ai_admin_site.admin_view(admin_batch_snapshot_view), name="ai_request_log_batch_snapshot"),
+        path("ai/request_logs/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
+        path("ai/request_logs/<int:log_id>/resend/", ai_admin_site.admin_view(resend_request_view), name="ai_request_log_resend"),
+        path("ai/request_logs/<int:log_id>/pin/", ai_admin_site.admin_view(admin_pinned_run_toggle_view), name="ai_request_log_pin"),
+        path("ai/request_logs/<int:log_id>/detail-json/", ai_admin_site.admin_view(admin_request_log_detail_json_view), name="ai_request_log_detail_json"),
+        path("ai/request_logs/<int:log_id>/rerun-arm/", ai_admin_site.admin_view(rerun_arm_batch_view), name="ai_request_log_rerun_arm"),
+        path("ai/request_logs/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),
+
+        path("test_data/emit_request/",
+             ai_admin_site.admin_view(test_data_emit_request_view),name="ai_test_data_emit_request"),
+        path("test_data/",
+             ai_admin_site.admin_view(test_data_view), name="ai_test_data")
     ]
     return [
         *custom_urls,

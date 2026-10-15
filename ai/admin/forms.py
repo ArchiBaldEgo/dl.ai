@@ -2,7 +2,7 @@
 
 PromptForm: форма для редактирования промпта с каскадным выбором
 язык программирования → тема (через prompt_language_topic.js).
-SharedPromptForm: форма для общих препромптов.
+SharedPromptForm: форма для общих промптов.
 """
 
 from django import forms
@@ -100,7 +100,7 @@ class PromptForm(forms.ModelForm):
 
         if self.instance.pk and self.instance.topic_id:
             return self.instance.topic.programming_language_id
-        # Темы нет — берём собственный язык промпта (препромпт «на весь язык»).
+        # Темы нет — берём собственный язык промпта (промпт «на весь язык»).
         return self.instance.programming_language_id
 
     def clean(self):
@@ -127,7 +127,7 @@ class PromptForm(forms.ModelForm):
 
 
 class SharedPromptForm(forms.ModelForm):
-    """Форма для общих (shared) препромптов."""
+    """Форма для общих (shared) промптов."""
     class Media:
         js = ("admin/js/prompt_translate_tabs.js",)
 

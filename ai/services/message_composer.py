@@ -26,7 +26,7 @@ class ChatModeBuilder(ModeMessageBuilder):
         if preprompt:
             prompt_text = await resolver.resolve_text(preprompt, language, "", topic_name)
             if prompt_text:
-                prefix = "Preprompt" if language not in ("Русский", "Russian") else "Препромпт"
+                prefix = "Preprompt" if language not in ("Русский", "Russian") else "Промпт"
                 return f"{message}\n\n{prefix}: {prompt_text}"
         return message
 
@@ -53,7 +53,7 @@ class SolveModeBuilder(ModeMessageBuilder):
             allowed_mode="solve",
         )
         if prompt_text:
-            prefix = "Preprompt" if language not in ("Русский", "Russian") else "Препромпт"
+            prefix = "Preprompt" if language not in ("Русский", "Russian") else "Промпт"
             base += f"\n\n{prefix}: {prompt_text}"
         return base
 
@@ -106,7 +106,7 @@ class FindErrorModeBuilder(ModeMessageBuilder):
             allowed_mode="find_error",
         )
         if prompt_text:
-            prefix = "Preprompt" if language not in ("Русский", "Russian") else "Препромпт"
+            prefix = "Preprompt" if language not in ("Русский", "Russian") else "Промпт"
             base += f"\n\n{prefix}: {prompt_text}"
         return base
 

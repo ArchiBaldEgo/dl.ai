@@ -1,9 +1,9 @@
 {% extends "admin/base_site.html" %}
-{% load i18n %}
+{% load i18n static %}
 {% comment %}Дневной отчёт журнала запросов (кнопка «Дневной отчёт» в журнале
    и на странице «Настройки ИИ-приложения»): студенты × сегодняшний день
    (00:00–23:59 МСК). Строка — фамилия / время последней отправки (без
-   даты) / последняя тема и препромпт / последний режим / всего запросов
+   даты) / последняя тема и промпт / последний режим / всего запросов
    за сегодня. Клик по колонке «Запросов» разворачивает свёрнутый список
    всех его записей дня (данные уже в HTML, второго запроса не нужно).
    Таблица живёт в .ai-scroll-контейнере — при увеличении интерфейса
@@ -76,13 +76,27 @@
   .ai-daily-empty {
     padding: 20px; text-align: center; color: var(--body-quiet-color);
   }
+  {# Фильтры над таблицей: группа / вуз-школа (= отображаемое название; #}
+  {# варианты сервер считает из сегодняшних строк). #}
+  .ai-daily-filters {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+    margin: 0 0 12px;
+  }
+  .ai-daily-filters label {
+    display: flex; gap: 6px; align-items: center;
+    font-weight: 600; font-size: 12px;
+  }
+  .ai-daily-filters select {
+    padding: 5px 8px; border: 1px solid var(--border-color);
+    border-radius: 4px; background: var(--body-bg); color: var(--body-fg);
+  }
 </style>
 
 {% include "admin/ai/_ai_back_nav.html" %}
 <div class="ai-daily-wrap">
   <div class="ai-daily-header">
     <h2>{% trans "Дневной отчёт" %} — {{ date_label }} (МСК)</h2>
-    <a class="button" href="/ai/admin/ai/airequestlog/">{% trans "← Весь журнал" %}</a>
+    <a class="button" href="/ai/admin/ai/request_logs/">{% trans "← Весь журнал" %}</a>
   </div>
   <p class="ai-daily-note">
     Сегодняшний день по МСК: {{ date_label }} 00:00–23:59.
@@ -90,18 +104,49 @@
     Нажмите на число в колонке «Запросов», чтобы развернуть все запросы студента за день.
   </p>
 
+  {# Фильтры: поиск по ФИО (первым, как в журнале) + группа и вуз/школа #}
+  {# точным совпадением с ОТОБРАЖАЕМЫМ названием; названия резолвит #}
+  {# справочник DLEducationName (нет записи — сырой ключ из DL). Любое #}
+  {# изменение применяется СРАЗУ (ai_auto_filters.js: текст с паузой, #}
+  {# селекты мгновенно) — кнопки не нужны. #}
+  <form method="get" class="ai-daily-filters">
+    <label for="daily-filter-student">ФИО
+      <input id="daily-filter-student" type="text" name="student"
+             value="{{ filters_student }}" placeholder="Фамилия или часть ФИО">
+    </label>
+    <label for="daily-filter-group">Группа
+      <select id="daily-filter-group" name="group">
+        <option value="">Все</option>
+        {% for g in group_choices %}
+          <option value="{{ g }}" {% if filters_group == g %}selected{% endif %}>{{ g }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label for="daily-filter-school">Вуз/Школа
+      <select id="daily-filter-school" name="school">
+        <option value="">Все</option>
+        {% for s in school_choices %}
+          <option value="{{ s }}" {% if filters_school == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+
   <div class="ai-scroll">
     <table class="ai-daily-table">
       <colgroup>
-        <col style="width: 24%"><col style="width: 10%"><col style="width: 22%">
-        <col style="width: 22%"><col style="width: 12%"><col style="width: 10%">
+        <col style="width: 20%"><col style="width: 10%"><col style="width: 14%">
+        <col style="width: 9%"><col style="width: 16%"><col style="width: 16%">
+        <col style="width: 9%"><col style="width: 6%">
       </colgroup>
       <thead>
         <tr>
           <th>Фамилия студента</th>
+          <th>Группа</th>
+          <th>Вуз/Школа</th>
           <th>Последняя отправка</th>
           <th>Последняя тема</th>
-          <th>Последний препромпт</th>
+          <th>Последний промпт</th>
           <th>Чат</th>
           <th>Запросов</th>
         </tr>
@@ -117,6 +162,8 @@
                 {{ row.display_name }}
               {% endif %}
             </td>
+            <td>{{ row.group_title }}</td>
+            <td>{{ row.school_title }}</td>
             <td class="nowrap">{{ row.last_sent }}</td>
             <td>{{ row.last_topic }}</td>
             <td>{{ row.last_prompt }}</td>
@@ -124,7 +171,7 @@
             <td class="ai-daily-count" title="Показать все запросы за сегодня">{{ row.count }}<span class="ai-daily-caret">▾</span></td>
           </tr>
           <tr class="ai-daily-detail" hidden>
-            <td colspan="6">
+            <td colspan="8">
               <div class="ai-daily-requests">
                 <table class="ai-daily-req-table">
                   <colgroup>
@@ -136,7 +183,7 @@
                       <th>Время</th>
                       <th>Режим</th>
                       <th>Тема</th>
-                      <th>Препромпт</th>
+                      <th>Промпт</th>
                       <th>Модель</th>
                       <th>Статус</th>
                     </tr>
@@ -158,15 +205,19 @@
             </td>
           </tr>
         {% empty %}
-          <tr><td colspan="6" class="ai-daily-empty">За сегодня записей нет.</td></tr>
+          <tr><td colspan="8" class="ai-daily-empty">За сегодня записей нет.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
 </div>
 
+{# Динамические фильтры (сам применяет, без кнопки) — общий хелпер админки. #}
+<script src="{% static 'admin/js/ai_auto_filters.js' %}"></script>
 <script>
   (function () {
+    // Фильтры применяются сами (без кнопок): общий хелпер админки.
+    initAiAutoFilters(document.querySelector('.ai-daily-filters'));
     // Клик по колонке «Запросов» → развёртка всех запросов студента за
     // сегодня (свёрнутый блок уже в HTML — без запроса к серверу).
     document.querySelectorAll('.ai-daily-count').forEach(function (cell) {
@@ -199,7 +250,7 @@
         ['Кто', who],
         ['Язык', log.programming_language_name],
         ['Тема', log.topic_name],
-        ['Препромпт', log.prompt_name],
+        ['Промпт', log.prompt_name],
         ['Задача', log.task_name || log.task_node_id],
         ['Отправлен', log.sent_at],
         ['Получен', log.received_at],
@@ -211,8 +262,8 @@
         var label = document.createElement('strong');
         label.textContent = pair[0] + ': ';
         item.appendChild(label);
-        // Препромпт — кликабелен, как в журнале запросов (открыть промпт).
-        if (pair[0] === 'Препромпт' && log.prompt_id) {
+        // Промпт — кликабелен, как в журнале запросов (открыть промпт).
+        if (pair[0] === 'Промпт' && log.prompt_id) {
           var a = document.createElement('a');
           a.href = '/ai/admin/ai/prompt/' + log.prompt_id + '/change/';
           a.target = '_blank';
@@ -286,7 +337,7 @@
         cell.textContent = 'Загрузка…';
         detail.appendChild(cell);
         row.parentNode.insertBefore(detail, row.nextSibling);
-        fetch('/ai/admin/ai/airequestlog/' + row.dataset.logId + '/detail-json/')
+        fetch('/ai/admin/ai/request_logs/' + row.dataset.logId + '/detail-json/')
           .then(parseJsonResponse)
           .then(function (data) { renderLogInfo(cell, data.log); })
           .catch(function (err) {

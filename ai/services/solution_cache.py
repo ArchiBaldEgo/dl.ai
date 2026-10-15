@@ -32,7 +32,7 @@ def record_batch_solution(*, node_id, programming_language_id=None, file_extensi
     """Сохранить решение из batch-solve ARM в кэш «Решённых задач».
 
     Те же правила, что в пользовательском флоу (record_submission +
-    record_result): вердикт passed, код модели, модель/препромпт/тема из
+    record_result): вердикт passed, код модели, модель/промпт/тема из
     прогона, курс и путь в дереве — для пользовательской ссылки. Отличия:
     вердикт уже известен (DL-тест сделан в worker'е), поэтому пишем сразу
     passed без queue_id; связанный AIRequestLog (test_log) — лог всего
@@ -119,7 +119,7 @@ def record_submission(node_id, code, *, programming_language_id=None, file_exten
             "submitted_at": timezone.now(),
             "test_log": test_log,
         }
-        # Тема/препромпт — из журнала последней генерации решения; когда
+        # Тема/промпт — из журнала последней генерации решения; когда
         # контекста нет (пустые), существующие значения не затираем.
         log = last_solve_log(node_id)
         if log is not None:
@@ -211,6 +211,10 @@ def record_result(queue_id, comment, *, finished=True):
         "model_title": solution.model_title,
         "verdict": DL_VERDICT_SOLVED if dl_verdict == DL_VERDICT_SOLVED else DL_VERDICT_FAILED,
         "duration": duration,
+        # Скоуп статистики — из кэша (язык тестирования + тема из
+        # последней генерации); без языка пара не пишется.
+        "programming_language_id": solution.programming_language_id,
+        "topic_id": solution.topic_id,
     }])
 
     return solution, dl_verdict, dl_verdict == DL_VERDICT_SOLVED

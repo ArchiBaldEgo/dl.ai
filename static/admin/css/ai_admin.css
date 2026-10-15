@@ -289,6 +289,15 @@
   white-space: nowrap;
 }
 
+/* Название ручного прогона (run_name) — строка под типом процесса. */
+.ai-processes-item-name {
+  color: var(--body-fg);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ai-processes-progress {
   height: 5px;
   border-radius: 3px;
@@ -327,6 +336,7 @@
 .ai-processes-status.completed { color: #1a7d1a; background: rgba(26, 125, 26, 0.12); }
 .ai-processes-status.failed { color: #c93b3b; background: rgba(201, 59, 59, 0.12); }
 .ai-processes-status.cancelled { color: var(--body-quiet-color); background: var(--darkened-bg); }
+.ai-processes-status.paused { color: #b45309; background: rgba(180, 83, 9, 0.12); }
 
 .ai-processes-link {
   align-self: flex-start;
@@ -589,7 +599,7 @@ a.ai-docs-chapter:hover {
   font-size: 12px;
 }
 
-/* ───────────── Языковые табы RU/EN/FR в форме препромпта ───────────── */
+/* ───────────── Языковые табы RU/EN/FR в форме промпта ───────────── */
 
 /* Вместо 3 полей названия + 3 textarea — 1 название + 1 textarea с табами
    языков (prompt_translate_tabs.js); пустой язык авто-переводится AJAX-ом

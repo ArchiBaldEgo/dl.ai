@@ -1,0 +1,14 @@
+.test-data-page h2 { margin: 0 0 12px; font-size: 16px; }
+
+.help-test-data {
+  color: var(--body-quiet-color);
+  font-size: 13px;
+  max-width: 640px;
+  margin: 0 0 14px;
+}
+
+.test-data-page form { display: flex; align-items: center; gap: 12px; }
+
+.emit-status { color: var(--body-quiet-color); font-size: 13px; }
+.emit-status.ok { color: #067647; font-weight: 600; }
+.emit-status.error { color: #b42318; font-weight: 600; }
