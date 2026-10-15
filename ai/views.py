@@ -691,11 +691,12 @@ def get_model_stats_view(request):
     """Накопленная статистика моделей по скоупу (язык[, тема]) — суффиксы
     селектора моделей «Реши задачу»/«В чём ошибка».
 
-    GET /ai/api/model-stats/?progLng=<id>&topic=<id>. Язык обязателен: без
-    него скоуп не выбран и клиенту нечего показывать (пустой ``stats``);
-    тема уточняет скоуп до точной темы-строки, без неё читается языковая
-    строка (тема NULL). Нет строк скоупа → пустой ``stats`` («ничего», без
-    фолбэка на глобальное — см. get_model_stats_map).
+    GET /ai/api/model-stats/?progLng=<id>&topic=<id>. Тема уточняет скоуп до
+    точной темы-строки; только язык → языковая строка (тема NULL) — общие
+    данные по всем темам языка; без обоих → ОБЩИЕ данные по всем темам и
+    языкам (агрегат scoped-строк модели — see get_model_stats_map). Нет
+    строк выбранного скоупа → для таких моделей ключа в ``stats`` не будет
+    («ничего»), фолбэков между скоупами нет.
     """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
@@ -703,7 +704,7 @@ def get_model_stats_view(request):
     try:
         language_id = int(request.GET.get("progLng") or "")
     except ValueError:
-        return JsonResponse({"success": True, "stats": {}})
+        language_id = None  # нет/битый progLng — общий скоуп (агрегат)
     try:
         topic_id = int(request.GET.get("topic") or "")
     except ValueError:

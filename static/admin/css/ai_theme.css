@@ -233,32 +233,47 @@ option {
 [data-theme="dark"] .theme-toggle .icon-moon { display: none; }
 
 /* --- Кнопка Think (переключатель рассуждений для Ollama-моделей,
-   initThinkToggle в ai-common.js): базовый вид как у .theme-toggle, но
-   текстовая (ширина по контенту) и с явным включённым состоянием. Видима
-   только при модели Ollama_* — видимость решает атрибут hidden. --- */
+   initThinkToggle в ai-common.js): спокойный контурный chip в духе
+   .theme-toggle — та же высота/радиус, лёгкая рамка; «включено» не заливка,
+   а акцент цветом (фон --bg-think, рамка/текст --accent-blue), состояние
+   видно без перегруза шапки. Видима только при Ollama_* — видимость решает
+   атрибут hidden. --- */
 .think-toggle {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 38px;
+    height: 36px;
     padding: 0 12px;
     margin: 0 0 0 4px;
     flex-shrink: 0;
-    background-color: var(--bg-toggle);
+    background-color: transparent;
     color: var(--text-primary);
     border: 1px solid var(--border);
     border-radius: 8px;
     box-shadow: none;
     cursor: pointer;
-    font-size: 14px;
-    font-weight: 600;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
     white-space: nowrap;
-    transition: background-color 0.2s ease, color 0.2s ease;
+    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
     vertical-align: middle;
 }
 
 .think-toggle:hover {
-    background-color: var(--bg-toggle-hover);
+    background-color: var(--bg-toggle);
+}
+
+/* Включённые рассуждения — мягкий акцент вместо плотной заливки. */
+.think-toggle.ai-think-on {
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
+    background-color: var(--bg-think);
+}
+
+.think-toggle.ai-think-on:hover {
+    background-color: var(--accent-blue);
+    color: #ffffff;
 }
 
 /* display выше перебивает UA-стиль [hidden]{display:none} — без этого guard'а
@@ -267,16 +282,6 @@ option {
     display: none;
 }
 
-/* Включённые рассуждения — акцент: состояние видно издалека. */
-.think-toggle.ai-think-on {
-    background-color: var(--accent-blue);
-    border-color: var(--accent-blue);
-    color: #ffffff;
-}
-
-.think-toggle.ai-think-on:hover {
-    filter: brightness(1.08);
-}
 /* --- Кнопка «?» — инструкция пользователя (модалка initUserDocs) --- */
 /* Размер наследуем от .theme-toggle; отличаем только текстом вместо иконки. */
 .doc-toggle {

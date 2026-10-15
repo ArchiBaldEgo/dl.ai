@@ -890,9 +890,9 @@ def get_available_model_options():
     # см. ai-common.js). Обогащаем ДО cache.set: Redis-копии из кеша мутировать
     # нельзя (cache.get возвращает десериализованную копию).
     if result:
-        from .services.model_stats import get_model_stats_map
+        from .services.model_stats import get_legacy_stats_map
 
-        stats = get_model_stats_map([opt["key"] for opt in result])
+        stats = get_legacy_stats_map([opt["key"] for opt in result])
         for opt in result:
             opt.update(stats.get(opt["key"], {}))
         cache.set(cache_key, result, 30)  # 30 c

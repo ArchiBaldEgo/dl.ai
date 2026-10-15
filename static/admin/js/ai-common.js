@@ -167,8 +167,12 @@ function updateThinkToggleLabel() {
     var btn = document.getElementById('thinkToggleBtn');
     if (!btn) return;
     var on = getThinkOn();
-    btn.textContent = getUiString(on ? 'thinkOn' : 'thinkOff',
-        on ? 'Think: вкл' : 'Think: выкл');
+    btn.textContent = getUiString('thinkLabel', 'Think');
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    // Состояние читаем из всплывающей подсказки: chip держим коротким.
+    btn.title = getUiString(on ? 'thinkOnTitle' : 'thinkOffTitle',
+        on ? 'Включить рассуждения модели (think=true)'
+           : 'Выключить рассуждения модели (think=false)');
 }
 
 function initThinkToggle() {
@@ -245,9 +249,10 @@ function modelOptionStats(opt) {
 // Цифры суффикса «% · сек» на «Реши задачу»/«В чём ошибка» берутся из ответа
 // /ai/api/model-stats/?progLng=&topic= — статистика по ВЫБРАННОМУ языку и
 // теме (map по model_key), а НЕ из data-атрибутов опций (те заморожены и
-// остались только сортировке #selectModelSort). Нет данных по скоупу →
-// суффикса нет («ничего», без фолбэка на глобальное). Гонка ответов:
-// применяется только ответ последнего запрошенного скоупа.
+// остались только сортировке #selectModelSort). Скоуп не выбран (язык пуст)
+// → общие данные по ВСЕМ темам и языкам (API отдаёт агрегат scoped-строк);
+// нет данных по скоупу → суффикса нет («ничего», без фолбэка на глобальное).
+// Гонка ответов: применяется только ответ последнего запрошенного скоупа.
 var scopedStatsMap = null;
 var scopedStatsScope = null;
 // Хук перезамера ширины селекта моделей (ставится в initModelSortSelector):
@@ -269,15 +274,12 @@ function updateScopedModelStats() {
     var theme = document.getElementById('selectTheme');
     var topicId = theme ? theme.value : '';
     scopedStatsScope = languageId + '|' + topicId;
-    if (!languageId) {
-        // Язык не выбран → ничего: цифр нет и запрос не делается.
-        scopedStatsMap = null;
-        stripModelOptionSuffixes();
-        return;
-    }
+    // Язык не выбран → общий скоуп: запрос без progLng, API вернёт агрегат
+    // по всем темам и языкам (пустой languageId не шлём — битый/отсутствующий
+    // progLng сервер считает отсутствующим).
     var scope = scopedStatsScope;
     var url = new URL('/ai/api/model-stats/', window.location.origin);
-    url.searchParams.set('progLng', languageId);
+    if (languageId) url.searchParams.set('progLng', languageId);
     if (topicId) url.searchParams.set('topic', topicId);
     fetch(url.toString())
         .then(function (response) {
@@ -1394,8 +1396,9 @@ var localization = {
         voiceOutput: "Озвучить ответ",
         speakThinkLabel: "Озвучивать дополнительную информацию",
         themeToggle: "Сменить тему",
-        thinkOn: "Think: вкл",
-        thinkOff: "Think: выкл",
+        thinkLabel: "Think",
+        thinkOnTitle: "Включить рассуждения модели (think=true)",
+        thinkOffTitle: "Выключить рассуждения модели (think=false) — ответ сразу, без think-блока",
         lastUpdate: "Последнее обновление",
         // Кнопка «?» — инструкция пользователя (модалка, initUserDocs).
         userDocs: "Инструкция пользователя",
@@ -1506,8 +1509,9 @@ var localization = {
         voiceOutput: "Speak answer",
         speakThinkLabel: "Voice extra information",
         themeToggle: "Toggle theme",
-        thinkOn: "Think: on",
-        thinkOff: "Think: off",
+        thinkLabel: "Think",
+        thinkOnTitle: "Enable model reasoning (think=true)",
+        thinkOffTitle: "Disable model reasoning (think=false) — answer right away, no think block",
         lastUpdate: "Last updated",
         // «?» button — user docs modal (initUserDocs).
         userDocs: "User guide",
@@ -1617,8 +1621,9 @@ var localization = {
         voiceOutput: "Lire la réponse",
         speakThinkLabel: "Informations supplémentaires vocales",
         themeToggle: "Changer le thème",
-        thinkOn: "Think : activé",
-        thinkOff: "Think : désactivé",
+        thinkLabel: "Think",
+        thinkOnTitle: "Activer le raisonnement du modèle (think=true)",
+        thinkOffTitle: "Désactiver le raisonnement du modèle (think=false) — réponse directe, sans bloc think",
         lastUpdate: "Dernière mise à jour",
         // Bouton « ? » — modale du guide utilisateur (initUserDocs).
         userDocs: "Guide de l'utilisateur",

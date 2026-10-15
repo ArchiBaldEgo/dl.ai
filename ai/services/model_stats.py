@@ -11,14 +11,17 @@ Semantics агрегации совпадают с ``arm_runner._per_bucket``: �
 (model_key, язык, тема) и ВСЕГДА языковую (model_key, язык, тема NULL); темы
 нет → только языковая; языка нет → пара не пишется (не пачкает скоупы).
 Строки (NULL, NULL) — легаси-глобальный скоуп: новые приращения в него не
-пишутся, UI его не читает.
+пишутся, его читает только model_health.get_available_model_options (сортировка
+селектора моделей для старых кук); API при неуказанном языке вместо него
+отдаёт АГРЕГАТ по всем scoped-строкам модели (общие данные по всем темам
+и языкам).
 
 Потребители — ``model_health.get_available_model_options`` (легаси-строки
 только для сортировки селектора моделей) и API ``/ai/api/model-stats/``
 (скоуп язык/тема для «Реши задачу»/«В чём ошибка»).
 """
 
-from django.db.models import F
+from django.db.models import F, Sum
 
 from ..models import AIModelStats, Topic
 
@@ -112,39 +115,88 @@ def record_batch_solve_stats(results):
             )
 
 
-def get_model_stats_map(model_keys, language_id=None, topic_id=None):
-    """``{model_key: {"avg_seconds": float|None, "percent_solved": float|None}}``.
+def _stats(duration_sum, duration_count, solved_count, total_count):
+    """Счётчики строки/агрегата в форму суффиксов. None — счётчик пуст
+    (показываем «ничего», а не ноль)."""
+    return {
+        "avg_seconds": round(duration_sum / duration_count, 1) if duration_count else None,
+        "percent_solved": (
+            round(solved_count * 100.0 / total_count, 1) if total_count else None
+        ),
+    }
 
-    Читается РОВНО один скоуп — строки разных скоупов нельзя смешивать в ключе
-    ``model_key``: язык без темы → языковые строки (тема NULL, «выбран только
-    язык»); язык+тема → точная тема-строка; оба None → легаси-глобальные
-    строки (только они использовались до введения скоупов). Модели без
-    накопленной статистики в словаре отсутствуют.
+
+def get_legacy_stats_map(model_keys):
+    """Данные легаси-глобального скоупа (NULL, NULL). Читает ТОЛЬКО
+    model_health.get_available_model_options — сортировка селектора моделей
+    чата: скоуп заморожен (новые приращения пишутся в язык/тему), а данные
+    нужны сортировке как историческая база. Клиентский API этот скоуп не
+    читает — общие данные без скоупа это агрегат scoped-строк
+    (get_model_stats_map с language_id=None).
     """
     keys = [k for k in model_keys if k]
     if not keys:
         return {}
-    qs = AIModelStats.objects.filter(model_key__in=keys)
-    if language_id is not None:
-        qs = qs.filter(programming_language_id=language_id)
-        if topic_id is not None:
-            qs = qs.filter(topic_id=topic_id)
-        else:
-            qs = qs.filter(topic__isnull=True)
+    stats_map = {}
+    qs = AIModelStats.objects.filter(
+        model_key__in=keys, programming_language__isnull=True, topic__isnull=True,
+    )
+    for row in qs:
+        stats_map[row.model_key] = _stats(
+            row.duration_sum, row.duration_count, row.solved_count, row.total_count,
+        )
+    return stats_map
+
+
+def get_model_stats_map(model_keys, language_id=None, topic_id=None):
+    """``{model_key: {"avg_seconds": float|None, "percent_solved": float|None}}``.
+
+    Читается РОВНО один скоуп — строки разных скоупов нельзя смешивать в ключе
+    ``model_key``: язык+тема → точная тема-строка; язык без темы → языковые
+    строки (тема NULL, «общие данные по всем темам данного языка»); оба None
+    → ОБЩИЕ данные по всем темам и всем языкам — scoped-строки модели
+    СУММИРУЮТСЯ (взвешенно по счётчикам: время по duration_sum/счёту,
+    точность по solved/total). Легаси-глобальные строки (NULL, NULL) при
+    агрегации не участвуют. Модели без накопленной статистики в словаре
+    отсутствуют.
+    """
+    keys = [k for k in model_keys if k]
+    if not keys:
+        return {}
+
+    if language_id is None:
+        # Оба None → общие данные по ВСЕМ темам и языкам: суммируем
+        # scoped-строки модели (SQL-агрегат; легаси-строки (NULL, NULL)
+        # отфильтрованы — их приращения уже давно не пишутся).
+        grouped = (
+            AIModelStats.objects
+            .filter(model_key__in=keys, programming_language__isnull=False)
+            .values("model_key")
+            .annotate(
+                d_sum=Sum("duration_sum"),
+                d_cnt=Sum("duration_count"),
+                s_cnt=Sum("solved_count"),
+                t_cnt=Sum("total_count"),
+            )
+        )
+        return {
+            row["model_key"]: _stats(
+                row["d_sum"] or 0, row["d_cnt"] or 0, row["s_cnt"] or 0, row["t_cnt"] or 0,
+            )
+            for row in grouped
+        }
+
+    qs = AIModelStats.objects.filter(
+        model_key__in=keys, programming_language_id=language_id,
+    )
+    if topic_id is not None:
+        qs = qs.filter(topic_id=topic_id)
     else:
-        # Легаси-глобальный скоуп: строки (NULL, NULL).
-        qs = qs.filter(programming_language__isnull=True, topic__isnull=True)
+        qs = qs.filter(topic__isnull=True)
 
     stats_map = {}
     for row in qs:
-        avg_seconds = None
-        if row.duration_count:
-            avg_seconds = round(row.duration_sum / row.duration_count, 1)
-        percent_solved = None
-        if row.total_count:
-            percent_solved = round(row.solved_count * 100.0 / row.total_count, 1)
-        stats_map[row.model_key] = {
-            "avg_seconds": avg_seconds,
-            "percent_solved": percent_solved,
-        }
+        stats_map[row.model_key] = _stats(
+            row.duration_sum, row.duration_count, row.solved_count, row.total_count,
+        )
     return stats_map

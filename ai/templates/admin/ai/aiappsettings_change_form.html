@@ -1,8 +1,18 @@
 {% extends "admin/change_form.html" %}
 
 {% load static %}
+
+{% comment %}
+CSS и JS СТРАНИЦЫ — только ВНУТРИ блоков: содержимое расширяющего шаблона
+вне {% block %} Django НЕ РЕНДЕРИТ вовсе — теги верхнего уровня после разреза
+(index.{css,js}) просто пропадали, и развёртки по клику не работали.
+JS — в конце after_field_sets: строки таблиц уже в DOM.
+{% endcomment %}
+
+{% block extrastyle %}
+{{ block.super }}
 <link rel="stylesheet" href="{% static 'admin/ai/app_settings/index.css' %}">
-<script src="{% static 'admin/ai/app_settings/index.js' %}"></script>
+{% endblock %}
 
 {% load i18n tz %}
 
@@ -196,4 +206,5 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
   </div>
 </fieldset>
 
+<script src="{% static 'admin/ai/app_settings/index.js' %}"></script>
 {% endblock %}

@@ -45,6 +45,7 @@
     {# Кнопки ПОД фильтрами (динамический фильтр применяет всё сам); сброс — #}
     {# ?reset=1: очистить сохранённые фильтры и показать таблицу целиком. #}
     <div class="ai-logs-actions">
+      <button type="button" class="button" id="ai-logs-refresh" title="Перезагрузить таблицу по текущим фильтрам — свежие записи с момента загрузки страницы">Обновить</button>
       <a class="button" href="{{ request.path }}daily-report/" title="Студенты × запросы за сегодня (00:00–23:59 МСК)">Дневной отчёт →</a>
       <a class="button" href="{{ request.path }}?reset=1">Сбросить</a>
     </div>

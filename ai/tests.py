@@ -2982,13 +2982,14 @@ class ExtractCodeFromResponseTests(SimpleTestCase):
 
 
 class OllamaNumPredictTests(SimpleTestCase):
-    """Потолок генерации Ollama: env OLLAMA_NUM_PREDICT, дефолт 16384
-    (4096 и 8192 обрезали большие ответы: chain-of-thought flash-моделей
-    сжигает бюджет ДО кода — «выкусывание ответа»)."""
+    """Потолок генерации Ollama: env OLLAMA_NUM_PREDICT, дефолт 32768
+    (4096 → 8192 → 16384 → 32768: think-рассуждения думающих моделей сжигают
+    бюджет ДО кода — «выкусывание ответа»), env-переопределение и нижняя
+    граница."""
 
-    def test_default_16384_and_env_override(self):
+    def test_default_32768_and_env_override(self):
         from ai.model_clients import ollama
-        self.assertEqual(ollama._default_num_predict(), 16384)
+        self.assertEqual(ollama._default_num_predict(), 32768)
         with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "2048"}):
             self.assertEqual(ollama._default_num_predict(), 2048)
         with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "16"}):
@@ -3122,9 +3123,10 @@ class IsOutputTruncatedTests(SimpleTestCase):
 
     def test_ollama_cut_at_num_predict(self):
         from ai.model_clients import is_output_truncated
-        self.assertFalse(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 0))
-        self.assertFalse(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 16383))
-        self.assertTrue(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 16384))
+        with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "16384"}):
+            self.assertFalse(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 0))
+            self.assertFalse(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 16383))
+            self.assertTrue(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 16384))
         with patch.dict(os.environ, {"OLLAMA_NUM_PREDICT": "2048"}):
             self.assertFalse(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 2047))
             self.assertTrue(is_output_truncated("Ollama_DeepSeek_V4_1_Flash_Cloud", 2048))
@@ -8488,8 +8490,9 @@ class AIModelStatsTests(TestCase):
     всегда языковую (тема NULL); темы нет — только языковая; языка нет —
     пару не пишем. Семантика _per_bucket (total = solved+failed, skipped не
     считается; durations только не-skipped) и race-safe upsert. Читатель
-    get_model_stats_map берёт РОВНО один скоуп и легаси-строки (NULL/NULL)
-    не смешивает с скоуп-данными."""
+    get_model_stats_map берёт РОВНО один скоуп; без языка/темы — ОБЩИЕ данные
+    по всем темам и языкам (SQL-агрегат scoped-строк), легаси-строки (NULL/NULL)
+    в агрегат не попадают."""
 
     def setUp(self):
         from ai.models import ProgrammingLanguage, Topic
@@ -8606,9 +8609,11 @@ class AIModelStatsTests(TestCase):
         self.assertNotIn("K2", topic_stats)
         lang_stats = get_model_stats_map(["K1"], language_id=self.lang.pk)
         self.assertEqual(lang_stats["K1"], {"avg_seconds": 1.0, "percent_solved": 100.0})
+        # Без скоупа — общие данные по ВСЕМ темам и языкам: сумма scoped-строк
+        # K1 (8с/1 замер + 2с/2 замера → 10/3 = 3.3; 3 решено из 6 = 50%).
         legacy = get_model_stats_map(["K1", "K2"])
-        self.assertNotIn("K1", legacy)  # скоуп-строки не видны легаси-чтению
-        self.assertEqual(legacy["K2"], {"avg_seconds": 2.0, "percent_solved": 100.0})
+        self.assertEqual(legacy["K1"], {"avg_seconds": 3.3, "percent_solved": 50.0})
+        self.assertNotIn("K2", legacy)  # легаси-строка (NULL, NULL) в агрегат не попадает
 
     def test_available_model_options_enriched_with_stats(self):
         """get_available_model_options читает только легаси-скоуп (NULL/NULL) —
@@ -14322,8 +14327,9 @@ class TestDataGenerateTests(TestCase):
 
 class ModelStatsApiTests(TestCase):
     """GET /ai/api/model-stats/?progLng=&topic= — скоуп-отдача для суффиксов
-    задачных страниц: без progLng — пустой stats (клиент и не запрашивает),
-    битый progLng — тоже пусто; доступ — как у /ai/api/problem-data/."""
+    задачных страниц: тема+язык — точные числа темы, только язык — общие
+    данные по темам языка, без обоих — общие по ВСЕМ темам и языкам (агрегат);
+    битый progLng/topic = отсутствие параметра; доступ — как у /ai/api/problem-data/."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -14366,11 +14372,49 @@ class ModelStatsApiTests(TestCase):
         data = json.loads(self._request({"progLng": str(self.lang.pk)}).content)
         self.assertEqual(data["stats"][self.model_key]["percent_solved"], 0.0)
 
-    def test_empty_scope_when_not_requested(self):
+    def test_global_aggregate_when_requested_without_scope(self):
+        """Без языка/темы — ОБЩИЕ данные по всем темам и языкам: взвешенная
+        сумма scoped-строк модели; легаси-строки (NULL, NULL) в агрегат не
+        попадают; битый progLng по-прежнему пусто."""
         self._record("solved", 2.0, None)
-        self.assertEqual(json.loads(self._request({}).content)["stats"], {})
+        stats = json.loads(self._request({}).content)["stats"]
         self.assertEqual(
-            json.loads(self._request({"progLng": "abc"}).content)["stats"], {})
+            stats[self.model_key], {"avg_seconds": 2.0, "percent_solved": 100.0})
+        # Легаси-строка не влияет на агрегат:
+        from ai.models import AIModelStats as AMS
+        AMS.objects.create(
+            model_key=self.model_key, solved_count=5, total_count=5,
+            duration_count=1, duration_sum=9.0)
+        stats = json.loads(self._request({}).content)["stats"]
+        self.assertEqual(
+            stats[self.model_key], {"avg_seconds": 2.0, "percent_solved": 100.0})
+        # Вторая запись суммируется взвешенно: (2+4)/2 = 3.0; 1 из 2 = 50%.
+        self._record("failed", 4.0, None)
+        stats = json.loads(self._request({}).content)["stats"]
+        self.assertEqual(
+            stats[self.model_key], {"avg_seconds": 3.0, "percent_solved": 50.0})
+        # Битый progLng = отсутствие параметра → тот же общий скоуп.
+        self.assertEqual(
+            json.loads(self._request({"progLng": "abc"}).content)["stats"],
+            json.loads(self._request({}).content)["stats"],
+        )
+
+    def test_global_aggregate_spans_languages_and_topics(self):
+        """Общий скоуп суммирует ВСЕ языки и темы модели (взвешенно), а не
+        только последний записанный язык."""
+        other_lang = ProgrammingLanguage.objects.create(language_name="Python")
+        self._record("solved", 2.0, None)                       # Pascal-языковая
+        self._record("failed", 4.0, None)                       # Pascal-языковая
+        from ai.services.model_stats import record_batch_solve_stats
+        record_batch_solve_stats([{
+            "model_key": self.model_key, "model_title": "M", "verdict": "solved",
+            "duration": 1.0, "programming_language_id": other_lang.pk,
+            "topic_id": None,
+        }])
+        # (2+4+1)/3 = 2.3; решено 2 из 3 = 66.7.
+        stats = json.loads(self._request({}).content)["stats"]
+        self.assertEqual(
+            stats[self.model_key], {"avg_seconds": 2.3, "percent_solved": 66.7})
 
     def test_no_rows_for_scope(self):
         self._record("solved", 2.0, self.topic.pk)
@@ -14686,9 +14730,11 @@ class ChatThinkToggleStaticTests(TestCase):
         self.assertIn("initThinkToggle();", js)
         # Подпись на смене языка UI (applySharedUiLanguageTexts).
         self.assertIn("updateThinkToggleLabel();", js)
-        # Триязычные ключи подписи.
-        self.assertEqual(js.count("thinkOn:"), 3)
-        self.assertEqual(js.count("thinkOff:"), 3)
+        # Chip короткий («Think»), состояние — в aria-pressed/title; локализация
+        # подсказки триязычная.
+        self.assertIn("aria-pressed", js)
+        for key in ("thinkLabel:", "thinkOnTitle:", "thinkOffTitle:"):
+            self.assertEqual(js.count(key), 3)
 
     def test_envelopes_send_think(self):
         """Конверты трёх страниц идут с think: aiThinkEnabled() — у chat type=1,
@@ -14707,3 +14753,38 @@ class ChatThinkToggleStaticTests(TestCase):
         # author-display перебивает UA-стиль [hidden] — guard обязателен,
         # иначе кнопка светится и на не-Ollama моделях.
         self.assertIn(".think-toggle[hidden] {", css)
+
+
+class AdminPagesStaticFixesTests(TestCase):
+    """Регрессии расрезки CSS/JS admin-шаблонов: содержимое расширяющего
+    шаблона вне {% block %} Django НЕ рендерит — теги верхнего уровня
+    (скрипт/стили) молча пропадали (на «Настройке ИИ» из-за этого не
+    раскрывались детали прогонов/запросов); и кнопка «Обновить» журнала."""
+
+    def _read(self, *parts):
+        from django.conf import settings
+        with open(os.path.join(settings.BASE_DIR, *parts), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_settings_script_and_css_inside_blocks(self):
+        """«Настройка ИИ»: index.css — внутри {% block extrastyle %}, index.js —
+        в конце {% block after_field_sets %} (после таблиц — строки уже в DOM);
+        верхний уровень (до первого {% block %}) без тегов вовсе."""
+        src = self._read("ai", "templates", "admin", "ai", "aiappsettings_change_form.html")
+        first_block = src.index("{% block ")
+        self.assertNotIn("<link", src[:first_block])
+        self.assertNotIn("<script", src[:first_block])
+        self.assertIn("{% block extrastyle %}", src)
+        self.assertGreater(src.index('app_settings/index.css'), src.index("{% block extrastyle %}"))
+        self.assertGreater(src.index('app_settings/index.js'), src.index("{% block after_field_sets %}"))
+        self.assertLess(src.index('app_settings/index.js'), src.index("{% endblock %}", src.index('app_settings/index.js')))
+
+    def test_journal_refresh_button(self):
+        """Журнал: кнопка «Обновить» в .ai-logs-actions (type=button, чтобы не
+        сабмитить форму) и проводка на refreshTable в index.js."""
+        src = self._read("ai", "templates", "admin", "ai", "request_logs.html")
+        actions = src.index('<div class="ai-logs-actions">')
+        self.assertGreater(src.index('<button type="button" class="button" id="ai-logs-refresh"'), actions)
+        js = self._read("static", "admin", "ai", "request_logs", "index.js")
+        self.assertIn("ai-logs-refresh", js)
+        self.assertIn("refreshBtn.addEventListener('click', () => refreshTable())", js)

@@ -149,6 +149,13 @@ document.addEventListener('DOMContentLoaded', function () {
       e.preventDefault();
       refreshTable();
     });
+
+    // «Обновить» — ручная перезагрузка таблицы по текущим фильтрам (кнопка
+    // в .ai-logs-actions). Фильтры сами применяются по мере набора, кнопка
+    // нужна, когда свежие записи появились ПОСЛЕ загрузки страницы
+    // (например, другой админ запустил прогон или пошёл чат-запрос).
+    const refreshBtn = document.getElementById('ai-logs-refresh');
+    if (refreshBtn) refreshBtn.addEventListener('click', () => refreshTable());
   }
 
   // -----------------------------------------------------------
