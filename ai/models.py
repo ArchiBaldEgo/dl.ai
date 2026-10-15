@@ -1299,6 +1299,15 @@ class DLEducationName(models.Model):
     )
     key = models.CharField(max_length=100, verbose_name="ID в DL")
     title = models.CharField(max_length=255, verbose_name="Название")
+    # Вуз/школа, к которой относится группа/класс: key соответствующей
+    # school-строки этого же справочника (groupMaskId — строка без структуры,
+    # DL не сообщает заведение группы). Заполняется ТОЛЬКО у kind="group";
+    # читатель — education_directory (groups_school), фолбэк в дневном отчёте
+    # показывает школу студента от привязки его группы.
+    school = models.CharField(
+        max_length=100, blank=True, default="",
+        verbose_name="Вуз/школа (key из schoolId)",
+    )
 
     class Meta:
         db_table = "ai_dl_education_name"

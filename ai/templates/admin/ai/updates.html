@@ -1,5 +1,5 @@
 {% extends "admin/base_site.html" %}
-{% load i18n %}
+{% load i18n static %}
 
 {% block title %}{% trans "Обновления" %}{% endblock %}
 
@@ -29,7 +29,8 @@
     </select>
     <input type="date" name="date_from" value="{{ date_from }}" placeholder="{% trans 'С' %}" style="padding: 4px 8px;">
     <input type="date" name="date_to" value="{{ date_to }}" placeholder="{% trans 'По' %}" style="padding: 4px 8px;">
-    <button type="submit" class="default" style="padding: 4px 16px;">{% trans 'Фильтровать' %}</button>
+    {# Кнопки отправки нет: любой фильтр применяется сам (ai_auto_filters.js: #}
+    {# текст с паузой, селекты и даты мгновенно). #}
     <a href="{% url 'ai_updates' %}" class="button" style="padding: 4px 16px;">{% trans 'Сбросить' %}</a>
     <a href="/ai/admin/ai/updatelog/?hidden__exact=1" class="button" style="padding: 4px 16px;">{% trans 'Скрытые записи' %}</a>
   </form>
@@ -73,4 +74,10 @@
   </div>
   {% endif %}
 </div>
+
+{# Динамические фильтры (сам применяет, без кнопки) — общий хелпер админки. #}
+<script src="{% static 'admin/js/ai_auto_filters.js' %}"></script>
+<script>
+  initAiAutoFilters(document.querySelector('.ai-updates-filter'));
+</script>
 {% endblock %}

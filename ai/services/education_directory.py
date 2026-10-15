@@ -13,17 +13,22 @@ _PLACEHOLDER = "—"
 
 
 def education_title_maps():
-    """``(schools, groups)`` — словари ``{key: title}`` (один запрос к БД).
+    """``(schools, groups, groups_school)`` — словари ``{key: title}`` и
+    «группа → заведение» (один запрос к БД).
 
     Справочник — десятки строк, читаем целиком на запрос без кеша.
+    ``groups_school`` — привязка группы к вузу/школе (key school-строки,
+    заполнена у group-строк справочника, см. ``DLEducationName.school``).
     """
-    schools, groups = {}, {}
+    schools, groups, groups_school = {}, {}, {}
     for row in DLEducationName.objects.all():
         if row.kind == DLEducationName.KIND_SCHOOL:
             schools[row.key] = row.title
         elif row.kind == DLEducationName.KIND_GROUP:
             groups[row.key] = row.title
-    return schools, groups
+            if row.school:
+                groups_school[row.key] = row.school
+    return schools, groups, groups_school
 
 
 def school_display(schools, account):
@@ -62,3 +67,23 @@ def group_display(groups, account):
     if not mask:
         return _PLACEHOLDER
     return groups.get(mask, mask)
+
+
+def school_title_for(schools, groups_school, account):
+    """Школа/вуз студента для рендера: ``school_display`` + фолбэк «школа
+    от группы».
+
+    Если у студента школа не заполнена вовсе (``school_display`` вернул «—»),
+    но его группа разрешима и привязана к заведению в справочнике
+    (``groups_school``: groupMaskId → schoolId), показываем школу ОТ ГРУППЫ —
+    группа знает своё заведение (``DLEducationName.school``). Сырой школьный
+    id и «kind №N» не перекрываются: он честнее привязки группы.
+    """
+    title = school_display(schools, account)
+    if title != _PLACEHOLDER or account is None:
+        return title
+    mask = (account.education_group_mask_id or "").strip()
+    if not mask:
+        return _PLACEHOLDER
+    school_key = groups_school.get(mask)
+    return schools.get(school_key, _PLACEHOLDER) if school_key else _PLACEHOLDER

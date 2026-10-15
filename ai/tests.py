@@ -10917,6 +10917,55 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         by_school = self._report(self.su, data={"school": "ГГУ"}).context_data
         self.assertEqual([r["display_name"] for r in by_school["rows"]], [ivanov])
 
+    def test_daily_report_student_filter_and_school_from_group(self):
+        """Фильтр student — регистронезависимая подстрока ФИО, выбирается до
+        фильтрации (суженные строки не урезают варианты селектов); школа ОТ
+        ГРУППЫ: школьные поля студента пусты (school_display вернул «—»),
+        но его группа привязана к заведению в справочнике — показываем
+        заведение группы."""
+        from ai.models import DLEducationName, ExternalDLAccount
+
+        ivanov = "Иванов Иван"
+        petrov = "Петров Пётр"
+        sidorov = "Сидоров Сидор"
+        for uid, username in (("101", "sfilt1"), ("200", "sfilt2"), ("300", "sfilt3")):
+            user = self.user_model.objects.create_user(username=username, password="***")
+            ExternalDLAccount.objects.create(
+                user=user, external_user_id=uid, external_login=username,
+                # Сидоров (300): только группа — школьных полей нет вообще.
+                education_school_id="S-1" if uid == "101" else ("S-9" if uid == "200" else ""),
+                education_group_mask_id={"101": "G-1", "200": "", "300": "G-2"}[uid],
+            )
+        DLEducationName.objects.create(kind="school", key="S-1", title="ГГУ")
+        DLEducationName.objects.create(kind="group", key="G-1", title="ИТП-31", school="S-1")
+        DLEducationName.objects.create(kind="group", key="G-2", title="КЛ-9А", school="S-1")
+
+        self._log(user=self.su, external_user_id="101", full_name=ivanov, sent_at=self._msk_at(9, 15))
+        self._log(user=self.su, external_user_id="200", full_name=petrov, sent_at=self._msk_at(10, 0))
+        self._log(user=self.su, external_user_id="300", full_name=sidorov, sent_at=self._msk_at(11, 0))
+
+        # Фолбэк «школа от группы»: школа студента пуста → заведение группы.
+        no_filter = self._report(self.su).context_data
+        rows = no_filter["rows"]
+        self.assertEqual(rows[2]["display_name"], sidorov)  # Сидоров — позже всех
+        self.assertEqual(rows[2]["school_title"], "ГГУ")
+        self.assertEqual(rows[2]["group_title"], "КЛ-9А")
+
+        # Подстрока ФИО без учёта регистра («ИВАНОВ» и «иванов» равнозначны).
+        by_student = self._report(self.su, data={"student": "ИВАНОВ"}).context_data
+        self.assertEqual([r["display_name"] for r in by_student["rows"]], [ivanov])
+        self.assertEqual(by_student["filters_student"], "ИВАНОВ")
+        # Часть ФИО тоже находит.
+        by_part = self._report(self.su, data={"student": "тров"}).context_data
+        self.assertEqual([r["display_name"] for r in by_part["rows"]], [petrov])
+        # Варианты селектов считались ДО фильтрации — не сужаются («—»
+        # безгруппового Петрова тоже в списке: U+2014 после кириллицы).
+        self.assertEqual(by_part["group_choices"], ["ИТП-31", "КЛ-9А", "—"])
+        self.assertEqual(by_part["school_choices"], ["S-9", "ГГУ"])
+        # Не находит — пусто.
+        empty = self._report(self.su, data={"student": "кургузов"}).context_data
+        self.assertEqual(empty["rows"], [])
+
     def test_daily_report_template_filters_and_columns(self):
         """Шаблон отчёта: два GET-фильтра над таблицей, колонки «Группа» и
         «Вуз/Школа» после «Фамилия студента», развёртка colspan=8."""
@@ -11958,6 +12007,7 @@ class OnboardingServiceTests(TestCase):
             "admin_my_prompt", "admin_prompt_defaults", "admin_logs",
             "admin_pinned_runs", "admin_aiappsettings", "admin_updates",
             "admin_regression", "admin_test_console", "admin_tasksolution",
+            "admin_test_data",
         ):
             self.assertTrue(scope_name_valid(page_scope))
         self.assertFalse(scope_name_valid("admin"))
@@ -12380,6 +12430,13 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
         user = self.user_model.objects.create_user(username="wz-ctx-super", password="x", is_superuser=True)
         self.assertEqual(self._context(user, path="/ai/admin/arm/solve/")["scope"], "admin_arm_solve")
         self.assertEqual(self._context(user, path="/ai/admin/arm/models/")["scope"], "admin_model_status")
+
+    def test_test_data_scope(self):
+        """У генератора тестовых записей свой тур (контент страницы)."""
+        user = self.user_model.objects.create_user(username="wz-ctx-td", password="x", is_superuser=True)
+        ctx = self._context(user, path="/ai/admin/test_data/")
+        self.assertEqual(ctx["scope"], "admin_test_data")
+        self.assertTrue(ctx["show"])
 
     def test_pd_role_and_staff_role(self):
         pd_user = self.user_model.objects.create_user(username="wz-ctx-pd2", password="x")
@@ -13359,6 +13416,8 @@ class RequestLogFiltersUiTests(TestCase):
             self.assertNotIn(removed, src)
         # Подпись фильтра пользователя.
         self.assertIn('label for="id_user">ФИО<', src)
+        # ФИО — ПЕРВЫЙ фильтр (просьба владельца): раньше любого другого поля.
+        self.assertLess(src.index('id="id_user"'), src.index('id="id_mode"'))
 
     def test_buttons_under_filters(self):
         """Ровно две кнопки под фильтрами: «Дневной отчёт» ПЕРЕД «Сбросить»;
@@ -13768,10 +13827,14 @@ class EducationDirectoryTests(TestCase):
         from ai.models import DLEducationName
         from ai.services.education_directory import education_title_maps
         DLEducationName.objects.create(kind="school", key="S-1", title="ГГУ")
-        DLEducationName.objects.create(kind="group", key="G-1", title="ИТП-31")
-        schools, groups = education_title_maps()
+        DLEducationName.objects.create(kind="group", key="G-1", title="ИТП-31", school="S-1")
+        DLEducationName.objects.create(kind="group", key="G-2", title="КЛ-9А")
+        schools, groups, groups_school = education_title_maps()
         self.assertEqual(schools, {"S-1": "ГГУ"})
-        self.assertEqual(groups, {"G-1": "ИТП-31"})
+        self.assertEqual(groups, {"G-1": "ИТП-31", "G-2": "КЛ-9А"})
+        # Привязка группы → заведение: только у group-строк с заполненным
+        # school (КЛ-9А без привязки в словарь не попадает).
+        self.assertEqual(groups_school, {"G-1": "S-1"})
 
     def test_school_display_fallbacks(self):
         """Цепочка: справочник → сырой id → «kind №no» → «—» (и группа)."""
@@ -13804,6 +13867,78 @@ class EducationDirectoryTests(TestCase):
         self.assertEqual(school_display(schools, acc_empty), "—")
         self.assertEqual(group_display(groups, acc_empty), "—")
 
+    def test_school_from_group_fallback(self):
+        """school_title_for: школьные поля студента пусты (school_display → «—»)
+        → берём заведение его группы из groups_school; сырой школьный id и
+        «kind №no» честнее привязки группы и НЕ перекрываются."""
+        from ai.services.education_directory import school_title_for
+        schools = {"S-1": "ГГУ"}
+        groups_school = {"G-1": "S-1"}
+        acc = SimpleNamespace(
+            education_school_id="", education_school_kind="", education_school_no="",
+            education_group_mask_id="G-1",
+        )
+        self.assertEqual(school_title_for(schools, groups_school, acc), "ГГУ")
+        # Сырой школьный id не перекрывается привязкой группы.
+        acc_raw = SimpleNamespace(
+            education_school_id="S-9", education_school_kind="", education_school_no="",
+            education_group_mask_id="G-1",
+        )
+        self.assertEqual(school_title_for(schools, groups_school, acc_raw), "S-9")
+        # «kind №no» тоже честный — не перекрывается.
+        acc_kind = SimpleNamespace(
+            education_school_id="", education_school_kind="ФГБОУ", education_school_no="5",
+            education_group_mask_id="G-1",
+        )
+        self.assertEqual(school_title_for(schools, groups_school, acc_kind), "ФГБОУ №5")
+        # Группа без привязки → «—»; аккаунта нет → «—».
+        acc_nolink = SimpleNamespace(
+            education_school_id="", education_school_kind="", education_school_no="",
+            education_group_mask_id="G-7",
+        )
+        self.assertEqual(school_title_for(schools, groups_school, acc_nolink), "—")
+        self.assertEqual(school_title_for(schools, groups_school, None), "—")
+
+    def test_admin_school_field_and_column(self):
+        """Форма справочника: поле school — select с вариантами school-строк
+        («key — title», пустой вариант) и валидацией choices; колонка
+        school_title — название привязки у group-строк, «—» у school-строк
+        и без привязки."""
+        from ai.admin.models import DLEducationNameAdmin, DLEducationNameAdminForm
+        from ai.models import DLEducationName
+        DLEducationName.objects.create(kind="school", key="S-1", title="ГГУ")
+        DLEducationName.objects.create(kind="school", key="S-2", title="СГУ")
+        group_row = DLEducationName.objects.create(
+            kind="group", key="G-1", title="ИТП-31", school="S-1")
+        plain_group = DLEducationName.objects.create(kind="group", key="G-2", title="КЛ-9А")
+
+        form = DLEducationNameAdminForm(instance=group_row)
+        self.assertEqual(
+            list(form.fields["school"].choices),
+            [("", "— не выбрано —"), ("S-1", "S-1 — ГГУ"), ("S-2", "S-2 — СГУ")],
+        )
+        # school="S-2" — валидно; school не из списка school-строк — ошибка.
+        form = DLEducationNameAdminForm(
+            data={"kind": "group", "key": "G-1", "title": "ИТП-31", "school": "S-2"},
+            instance=group_row,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        form.save()
+        self.assertEqual(group_row.school, "S-2")
+        bad = DLEducationNameAdminForm(
+            data={"kind": "group", "key": "G-1", "title": "ИТП-31", "school": "G-1"})
+        self.assertFalse(bad.is_valid())
+        self.assertIn("school", bad.errors)
+
+        # Колонка school_title: резолв через справочник, «—» у остальных.
+        # Справочник крошечный и чанглист пагинирован — построчный запрос в
+        # методе ок (комментарий в админке повторяет это).
+        column = DLEducationNameAdmin(DLEducationName, None).school_title
+        self.assertEqual(column(group_row), "СГУ")
+        self.assertEqual(column(plain_group), "—")
+        school_row = DLEducationName.objects.get(kind="school", key="S-1")
+        self.assertEqual(column(school_row), "—")
+
     def test_registered_in_admin_site(self):
         from django.contrib import admin as django_admin
 
@@ -13812,7 +13947,8 @@ class EducationDirectoryTests(TestCase):
         from ai.models import DLEducationName
         model_admin = ai_admin_site._registry[DLEducationName]
         self.assertIs(type(model_admin), DLEducationNameAdmin)
-        self.assertEqual(model_admin.list_display, ("kind", "key", "title"))
+        self.assertEqual(
+            model_admin.list_display, ("kind", "key", "title", "school_title"))
         # Скорость чанглистов: facets «Show counts» никогда (CLAUDE.md).
         self.assertEqual(model_admin.show_facets, django_admin.ShowFacets.NEVER)
 
@@ -14116,7 +14252,7 @@ class ClientStatsGatingTests(SimpleTestCase):
         from ai.constants import WIZARD_VERSION
         from ai.services import onboarding as onboarding_service
         self.assertEqual(onboarding_service.WIZARD_VERSION, WIZARD_VERSION)
-        self.assertGreaterEqual(WIZARD_VERSION, 7)
+        self.assertGreaterEqual(WIZARD_VERSION, 8)
 
 
 class SettingsPagesAlignmentTests(TestCase):
@@ -14192,3 +14328,69 @@ class SettingsPagesAlignmentTests(TestCase):
         request.session = {}
         rows = build_batch_rows_for_logs(request, [log])
         self.assertEqual(rows[0]["run_duration_display"], "45 с")
+
+
+class AutoFiltersStaticTests(TestCase):
+    """Динамические фильтры «сам применяет, без кнопки»: общий хелпер
+    ai_auto_filters.js (текст с паузой, селекты/даты мгновенно, Enter — сразу,
+    submit-перехват против двойной отправки) + страницы без кнопки
+    «Фильтровать». Журнал и changelists не трогаем — у каждого своя механика
+    (AJAX-партиал / select[data-ai-filter] в change_list.html)."""
+
+    def _read(self, *parts):
+        from django.conf import settings
+        with open(os.path.join(settings.BASE_DIR, *parts), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_helper_mechanics(self):
+        js = self._read("static", "admin", "js", "ai_auto_filters.js")
+        self.assertIn("initAiAutoFilters", js)
+        # Текстовые поля — с паузой (debounce), селекты и даты — мгновенно.
+        self.assertIn("setTimeout", js)
+        self.assertIn("'change'", js)
+        # Enter — сразу (и preventDefault, чтобы не было второй отправки).
+        self.assertIn("Enter", js)
+        self.assertIn("preventDefault", js)
+        # Полная GET-отправка формы (у страниц-потребителей нет партиала).
+        self.assertIn("formEl.submit()", js)
+
+    def test_daily_report_template(self):
+        """Дневной отчёт: ФИО-фильтр ПЕРВЫМ (до «Группа»), inline onchange
+        снят с селектов, хелпер подключён и инициализируется."""
+        src = self._read("ai", "templates", "admin", "ai", "daily_report.html")
+        student = src.index('id="daily-filter-student"')
+        self.assertLess(student, src.index('id="daily-filter-group"'))
+        self.assertIn('name="student"', src)
+        self.assertNotIn("onchange=", src)
+        self.assertIn("ai_auto_filters.js", src)
+        self.assertIn("initAiAutoFilters(document.querySelector('.ai-daily-filters'))", src)
+
+    def test_updates_template_no_filter_button(self):
+        """«Обновления»: кнопки «Фильтровать» больше нет, «Сбросить» и
+        «Скрытые записи» на месте, хелпер подключён по .ai-updates-filter."""
+        src = self._read("ai", "templates", "admin", "ai", "updates.html")
+        self.assertNotIn("Фильтровать", src)
+        self.assertIn("Сбросить", src)
+        self.assertIn('href="/ai/admin/ai/updatelog/?hidden__exact=1"', src)
+        self.assertIn("ai_auto_filters.js", src)
+        self.assertIn("initAiAutoFilters(document.querySelector('.ai-updates-filter'))", src)
+        self.assertIn("{% load i18n static %}", src)
+
+    def test_wizard_registry_updated(self):
+        """Туры: у «Тестовых данных» свой scope с 4 шагами; в туре журнала —
+        шаг ФИО-фильтра дневного отчёта ПЕРЕД шагами селектов; тексты шагов
+        селектов «Обновлений» обещают мгновенное применение."""
+        js = self._read("static", "admin", "js", "ai-wizard.js")
+        entry = js.index("admin_test_data: [")
+        block = js[js.index("admin_test_data: ["): js.index("];", entry)]
+        for sel in (".test-data-page h2", ".help-test-data",
+                    "[data-emit-request] .button", "#emit-status"):
+            self.assertIn(f'sel: "{sel}"', block)
+        self.assertEqual(block.count("sel:"), 4)
+        # ФИО-фильтр дневного отчёта: ПЕРЕД шагом «Группа».
+        self.assertLess(
+            js.index("#daily-filter-student"), js.index("#daily-filter-group"))
+        # admin_updates: «применится само» — в текстах шагов фильтров.
+        updates = js[js.index("admin_updates: ["): js.index("admin_regression: [")]
+        self.assertIn("сузится сам", updates)
+        self.assertIn("применяется само", updates)

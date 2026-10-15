@@ -9,6 +9,12 @@
   {% include "admin/ai/_ai_back_nav.html" %}
 
   <form method="get" class="ai-logs-filters">
+    {% if not own_logs_only %}
+    <div class="filter-field">
+      <label for="id_user">ФИО</label>
+      <input id="id_user" type="text" name="user" value="{{ filters.user }}" placeholder="Фамилия И.О., ID или логин">
+    </div>
+    {% endif %}
     <div class="filter-field">
       <label for="id_mode">Режим</label>
       <select id="id_mode" name="mode">
@@ -27,12 +33,6 @@
         {% endfor %}
       </select>
     </div>
-    {% if not own_logs_only %}
-    <div class="filter-field">
-      <label for="id_user">ФИО</label>
-      <input id="id_user" type="text" name="user" value="{{ filters.user }}" placeholder="Фамилия И.О., ID или логин">
-    </div>
-    {% endif %}
     <div class="filter-field">
       <label for="id_date_from">С</label>
       <input id="id_date_from" type="date" name="date_from" value="{{ filters.date_from }}">

@@ -34,6 +34,7 @@ _ADMIN_SCOPES_BY_PATH = (
     ("/ai/admin/prompt-regression/", "admin_regression"),
     ("/ai/admin/test-console/", "admin_test_console"),
     ("/ai/admin/prompts/my/", "admin_my_prompt"),
+    ("/ai/admin/test_data/", "admin_test_data"),
 )
 
 # Тур ГЛАВНОГО ЭКРАНА админки («весь бар» + каждый раздел меню) — свой для

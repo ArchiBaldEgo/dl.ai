@@ -11,12 +11,14 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
+from django import forms
 from django.http import HttpResponse
 from django.urls import path
 from django.utils import timezone
 
 from ..models import (
     AIAppSettings,
+    DLEducationName,
     ExternalDLAccount,
     ProgrammingLanguage,
     Prompt,
@@ -597,18 +599,59 @@ class AuthorAliasAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     search_fields = ("nick", "full_name", "group")
 
 
+class DLEducationNameAdminForm(forms.ModelForm):
+    """Форма справочника: «Вуз/школа» — ВЫБОР из заведений справочника, а не
+    свободный ввод ключа. Заполняется только у записей «Группа/класс» и
+    хранит key school-строки (``DLEducationName.school``)."""
+
+    school = forms.ChoiceField(
+        label="Вуз/школа (key из schoolId)",
+        required=False,
+        help_text="Только для записей «Группа/класс»: заведение, к которому относится группа.",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        choices = [
+            (row.key, f"{row.key} — {row.title}")
+            for row in DLEducationName.objects.filter(kind=DLEducationName.KIND_SCHOOL).order_by("title")
+        ]
+        self.fields["school"].choices = [("", "— не выбрано —")] + choices
+
+    class Meta:
+        model = DLEducationName
+        fields = "__all__"
+
+
 class DLEducationNameAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     """Справочник DL «id → название» (schoolId/groupMaskId), ведётся вручную.
 
     REST настоящих названий групп/вузов не отдаёт; дневной отчёт журнала
     (и далее — другие страницы) резолвит названия при рендере через
     education_title_maps — правка записи ретроактивно чинит прошлые строки.
+    Группы привязаны к заведениям (school key), фолбэк дневного отчёта
+    показывает школу студента от привязки его группы.
     """
-    list_display = ("kind", "key", "title")
+    form = DLEducationNameAdminForm
+    list_display = ("kind", "key", "title", "school_title")
     list_filter = ("kind",)
     # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
     show_facets = admin.ShowFacets.NEVER
     search_fields = ("key", "title")
+
+    @admin.display(description="Вуз/школа группы")
+    def school_title(self, obj):
+        """Название привязанного заведения (только для group-строк).
+
+        Справочник — десятки строк, lookup по (kind, key) на строку таблицы
+        дёшев; map на запрос здесь не нужен (таблица пагинирована).
+        """
+        if obj.kind != DLEducationName.KIND_GROUP or not obj.school:
+            return "—"
+        title = DLEducationName.objects.filter(
+            kind=DLEducationName.KIND_SCHOOL, key=obj.school,
+        ).values_list("title", flat=True).first()
+        return title or obj.school
 
 
 class PromptEditorshipInline(admin.TabularInline):

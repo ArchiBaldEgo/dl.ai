@@ -1,5 +1,5 @@
 {% extends "admin/base_site.html" %}
-{% load i18n %}
+{% load i18n static %}
 {% comment %}Дневной отчёт журнала запросов (кнопка «Дневной отчёт» в журнале
    и на странице «Настройки ИИ-приложения»): студенты × сегодняшний день
    (00:00–23:59 МСК). Строка — фамилия / время последней отправки (без
@@ -104,12 +104,18 @@
     Нажмите на число в колонке «Запросов», чтобы развернуть все запросы студента за день.
   </p>
 
-  {# Фильтры по группе и вузу/школе: точным совпадением с ОТОБРАЖАЕМЫМ #}
-  {# названием; названия резолвит справочник DLEducationName (нет записи — #}
-  {# сырой ключ из DL). Изменение селекта сразу отправляет форму. #}
+  {# Фильтры: поиск по ФИО (первым, как в журнале) + группа и вуз/школа #}
+  {# точным совпадением с ОТОБРАЖАЕМЫМ названием; названия резолвит #}
+  {# справочник DLEducationName (нет записи — сырой ключ из DL). Любое #}
+  {# изменение применяется СРАЗУ (ai_auto_filters.js: текст с паузой, #}
+  {# селекты мгновенно) — кнопки не нужны. #}
   <form method="get" class="ai-daily-filters">
+    <label for="daily-filter-student">ФИО
+      <input id="daily-filter-student" type="text" name="student"
+             value="{{ filters_student }}" placeholder="Фамилия или часть ФИО">
+    </label>
     <label for="daily-filter-group">Группа
-      <select id="daily-filter-group" name="group" onchange="this.form.submit()">
+      <select id="daily-filter-group" name="group">
         <option value="">Все</option>
         {% for g in group_choices %}
           <option value="{{ g }}" {% if filters_group == g %}selected{% endif %}>{{ g }}</option>
@@ -117,7 +123,7 @@
       </select>
     </label>
     <label for="daily-filter-school">Вуз/Школа
-      <select id="daily-filter-school" name="school" onchange="this.form.submit()">
+      <select id="daily-filter-school" name="school">
         <option value="">Все</option>
         {% for s in school_choices %}
           <option value="{{ s }}" {% if filters_school == s %}selected{% endif %}>{{ s }}</option>
@@ -206,8 +212,12 @@
   </div>
 </div>
 
+{# Динамические фильтры (сам применяет, без кнопки) — общий хелпер админки. #}
+<script src="{% static 'admin/js/ai_auto_filters.js' %}"></script>
 <script>
   (function () {
+    // Фильтры применяются сами (без кнопок): общий хелпер админки.
+    initAiAutoFilters(document.querySelector('.ai-daily-filters'));
     // Клик по колонке «Запросов» → развёртка всех запросов студента за
     // сегодня (свёрнутый блок уже в HTML — без запроса к серверу).
     document.querySelectorAll('.ai-daily-count').forEach(function (cell) {

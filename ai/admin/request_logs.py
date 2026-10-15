@@ -39,7 +39,7 @@ from ..models import (
 )
 from ..templatetags.ai_duration import format_human_duration
 from ..model_health import get_runtime_model_handlers
-from ..services.education_directory import education_title_maps, group_display, school_display
+from ..services.education_directory import education_title_maps, group_display, school_title_for
 from ..services.task_registry import dl_task_url  # DRY: единственное определение — в task_registry
 from .permissions import can_access_arm, can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
 
@@ -642,7 +642,7 @@ def admin_daily_report_view(request):
     # Названия резолвятся при рендере из вручную-ведомого справочника
     # DLEducationName (education_directory — единственный читатель модели);
     # привязка студента → ExternalDLAccount: один запрос по внешним id дня.
-    schools, groups = education_title_maps()
+    schools, groups, groups_school = education_title_maps()
     external_ids = [r["external_user_id"] for r in rows if r["external_user_id"]]
     accounts = {
         acc.external_user_id: acc
@@ -654,17 +654,24 @@ def admin_daily_report_view(request):
     } if external_ids else {}
     for row in rows:
         account = accounts.get(row["external_user_id"])
-        row["school_title"] = school_display(schools, account)
+        # Школа — school_display c фолбэком «школа от группы» (группа знает
+        # своё заведение, у студента поле может быть пустым); группа — map.
+        row["school_title"] = school_title_for(schools, groups_school, account)
         row["group_title"] = group_display(groups, account)
 
-    # GET-фильтры — точным совпадением с ОТОБРАЖАЕМЫМ названием; варианты
-    # селектов — отсортированное множество среди СЕГОДНЯШНИХ строк ДО
-    # фильтрации (иначе активный фильтр убирал бы чужие опции). Фильтр
-    # применяется к уже отсортированным строкам — порядок сохраняется.
+    # GET-фильтры — точным совпадением с ОТОБРАЖАЕМЫМ названием (ФИО —
+    # регистронезависимой подстрокой); варианты селектов — отсортированное
+    # множество среди СЕГОДНЯШНИХ строк ДО фильтрации (иначе активный
+    # фильтр убирал бы чужие опции). Фильтр применяется к уже
+    # отсортированным строкам — порядок сохраняется.
+    student_filter = (request.GET.get("student") or "").strip()
     group_filter = (request.GET.get("group") or "").strip()
     school_filter = (request.GET.get("school") or "").strip()
     group_choices = sorted({r["group_title"] for r in rows})
     school_choices = sorted({r["school_title"] for r in rows})
+    if student_filter:
+        needle = student_filter.casefold()
+        rows = [r for r in rows if needle in r["display_name"].casefold()]
     if group_filter:
         rows = [r for r in rows if r["group_title"] == group_filter]
     if school_filter:
@@ -678,6 +685,7 @@ def admin_daily_report_view(request):
         "total_count": len(logs),
         "group_choices": group_choices,
         "school_choices": school_choices,
+        "filters_student": student_filter,
         "filters_group": group_filter,
         "filters_school": school_filter,
     }
