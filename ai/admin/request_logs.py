@@ -724,7 +724,12 @@ def admin_request_logs_view(request):
     if date_to:
         qs = qs.filter(sent_at__date__lte=date_to)
 
-    qs = qs.order_by("-sent_at")
+    # response_text в таблицу не вшивается (ленивая подгрузка detail-json по
+    # раскрытию строки, см. request_logs_table.html) — с страницы его не читаем,
+    # так что не таскаем из БД: он был самой тяжёлой частью AJAX-обновления
+    # (десятки МБ на страницу и почти мгновенная динамика не получалась).
+    # message НЕ defer: _is_batch_solve_log парсит «Batch solve run <hex>».
+    qs = qs.order_by("-sent_at").defer("response_text")
 
     paginator = Paginator(qs, 50)
     page_number = request.GET.get("page")
@@ -757,39 +762,45 @@ def admin_request_logs_view(request):
     if filters_query_str:
         filters_query_str += "&"
 
-    # Build model choices from runtime handlers (all registered models).
-    _handlers = get_runtime_model_handlers()
-    model_choices = [
-        {"key": key, "title": info["title"]}
-        for key, info in _handlers.items()
-    ]
+    # Контекст. XHR-замена таблицы (динамические фильтры) рендерит ТОЛЬКО
+    # партиал request_logs_table.html — ему нужны page_obj/rows/filters_query/
+    # moscow_tz; each_context + choices + filters он не читает (статика JS
+    # переживает replaceWith), а собирать их на каждый keystroke дорого.
+    is_xhr = request.headers.get("X-Requested-With") == "XMLHttpRequest"
 
     context = {
-        **ai_admin_site.each_context(request),
-        "title": "DL.AI: Логи запросов",
         "page_obj": page_obj,
         "rows": rows,
-        # Кнопки паузы/перезапуска в развёртке строк — тем же правам, что /arm/solve/.
-        "arm_actions": can_access_arm(request),
-        "mode_choices": AIRequestLog.MODE_CHOICES,
-        "model_choices": model_choices,
         "filters_query": filters_query_str,
-        "own_logs_only": logs_scope_is_own_user(request.user),
         "moscow_tz": MOSCOW_TZ,
-        "filters": {
-            "mode": mode,
-            "model": model,
-            "user": user_q,
-            "date_from": date_from,
-            "date_to": date_to,
-        },
     }
 
-    template = (
-        "admin/ai/request_logs_table.html"
-        if request.headers.get("X-Requested-With") == "XMLHttpRequest"
-        else "admin/ai/request_logs.html"
-    )
+    if is_xhr:
+        template = "admin/ai/request_logs_table.html"
+    else:
+        # Build model choices from runtime handlers (all registered models).
+        _handlers = get_runtime_model_handlers()
+        model_choices = [
+            {"key": key, "title": info["title"]}
+            for key, info in _handlers.items()
+        ]
+        context.update({
+            **ai_admin_site.each_context(request),
+            "title": "DL.AI: Логи запросов",
+            # Кнопки паузы/перезапуска в развёртке строк — тем же правам, что /arm/solve/.
+            "arm_actions": can_access_arm(request),
+            "mode_choices": AIRequestLog.MODE_CHOICES,
+            "model_choices": model_choices,
+            "own_logs_only": logs_scope_is_own_user(request.user),
+            "filters": {
+                "mode": mode,
+                "model": model,
+                "user": user_q,
+                "date_from": date_from,
+                "date_to": date_to,
+            },
+        })
+        template = "admin/ai/request_logs.html"
 
     return TemplateResponse(request, template, context)
 

@@ -9294,6 +9294,43 @@ class RequestLogSearchTests(TestCase):
         })
         self.assertEqual(rows, [self.log_a, self.log_b])
 
+    def _view(self, params=None, xhr=False):
+        from ai.admin.request_logs import admin_request_logs_view
+        extra = {"HTTP_X_REQUESTED_WITH": "XMLHttpRequest"} if xhr else {}
+        request = self.factory.get("/ai/admin/ai/request_logs/", params or {}, **extra)
+        request.user = self.superuser
+        request.session = {}
+        return admin_request_logs_view(request)
+
+    def test_xhr_returns_table_template_and_slim_context(self):
+        """AJAX-замена таблицы рендерит ТОЛЬКО партиал, и тот читает из
+        контекста page_obj/rows/filters_query/moscow_tz — heavy-переменные
+        (each_context, choices, filters) на каждый keystroke не собираются."""
+        response = self._view({"mode": "chat"}, xhr=True)
+        self.assertEqual(response.template_name, "admin/ai/request_logs_table.html")
+        for key in ("page_obj", "rows", "filters_query", "moscow_tz"):
+            self.assertIn(key, response.context_data)
+        for gone in ("filters", "model_choices", "mode_choices",
+                     "arm_actions", "own_logs_only", "title"):
+            self.assertNotIn(gone, response.context_data)
+
+    def test_full_page_keeps_heavy_context(self):
+        """Полная страница (не-XHR) не изменилась: heavy-контекст собирается."""
+        response = self._view()
+        self.assertEqual(response.template_name, "admin/ai/request_logs.html")
+        for key in ("page_obj", "rows", "filters_query", "moscow_tz",
+                    "filters", "model_choices", "mode_choices"):
+            self.assertIn(key, response.context_data)
+
+    def test_list_rows_defer_response_text(self):
+        """response_text — самая тяжёлая колонка (были AJAX-ответы по МБ), в
+        таблицу он больше не вшивается (ленивый detail-json) — его не таскаем
+        из БД. message НЕ defer: по нему парсится run-id batch-записей."""
+        response = self._view()
+        rows = list(response.context_data["page_obj"].object_list)
+        self.assertTrue(rows)
+        self.assertTrue(all(row.get_deferred_fields() == {"response_text"} for row in rows))
+
     def test_filters_echoed_in_context(self):
         from ai.admin.request_logs import admin_request_logs_view
         request = self.factory.get(
@@ -13098,6 +13135,24 @@ class MpaMultiWindowExtractionTests(SimpleTestCase):
         )
         self.assertEqual(self._c(wall, ext=".mpc"), small)
 
+    def test_pseudo_c_port_declarations_are_anchors(self):
+        """Псевдо-C диалект портов («unsigned char __in __bits(8) N1;» — тип
+        В НАЧАЛЕ строки) тоже является якорем-объявлением: регулярка матчила
+        только старый DL-каркас «int N1 __in __bits(8);», окно снимали по main
+        и порты выпадали — «Undefined variable N1» на DL (лог queue 15211904).
+        Обычный `unsigned char n;` (без __in/__out/__bits) якорем НЕ станет."""
+        prog = (
+            "unsigned char __in __bits(8) N1;\n"
+            "unsigned char __out __bits(8) R;\n"
+            "void main() {\n"
+            "  unsigned char n;\n"
+            "  n = N1;\n"
+            "  R = n;\n"
+            "}"
+        )
+        wall = "Here is the solution program:\n" + prog + "\nHope this helps."
+        self.assertEqual(self._c(wall, ext=".mpc"), prog)
+
     def test_window_closes_at_first_balanced_main(self):
         """Окно закрывается на ПЕРВОМ балансе скобок: два main подряд дают
         отдельных кандидатов («от анкера до конца файла» больше не существует)."""
@@ -13711,6 +13766,26 @@ class RequestLogFiltersUiTests(TestCase):
         self.assertIn("addEventListener('input'", js)
         self.assertIn("addEventListener('change'", js)
         self.assertNotIn("ai-logs-table-update-button", js)
+
+    def test_response_text_lazy_in_table(self):
+        """Ответ модели не вшивается в таблицу (он делал AJAX-обновление
+        мегабайтным): партиал ставит .ai-log-response-body с data-response-url
+        → detail-json, а index.js подтягивает текст по первому раскрытию
+        строки (loadLazyResponse)."""
+        from django.template.loader import get_template
+        from django.conf import settings
+        src = get_template("admin/ai/request_logs_table.html").template.source
+        self.assertNotIn("{{ log.response_text", src)
+        self.assertIn('class="ai-log-response-body"', src)
+        self.assertIn("ai_request_log_detail_json", src)
+        path = os.path.join(
+            settings.BASE_DIR, "static", "admin", "ai", "request_logs", "index.js",
+        )
+        with open(path, encoding="utf-8") as fh:
+            js = fh.read()
+        self.assertIn("function loadLazyResponse", js)
+        self.assertIn("data-response-url", js)
+        self.assertIn("loadLazyResponse(detailRow);", js)
 
     def test_table_columns_order(self):
         """Ровно 11 колонок в порядке ТЗ: Кто отправлял, Отправлен, Получен,
@@ -14697,6 +14772,18 @@ class AutoFiltersStaticTests(TestCase):
         js = self._read("static", "admin", "js", "ai-wizard.js")
         self.assertIn("airequestlog", js)
 
+    def test_wizard_admin_tours_test_data_step(self):
+        """Ролевые туры (admin_pd/staff/super): шаг «Тестовые данные» идёт
+        СРАЗУ ПОСЛЕ «Тестовой консоли» в общем списке страниц меню (по
+        требованию владельца). Ссылка супер-админская — pd/staff её не видят,
+        и шаг вырезается отсутствием в DOM (v1-принцип, без ветвлений)."""
+        js = self._read("static", "admin", "js", "ai-wizard.js")
+        console = js.index('a[href^="/ai/admin/test-console/"]')
+        testdata = js.index('a[href^="/ai/admin/test_data/"]')
+        solved = js.index('a[href^="/ai/admin/ai/tasksolution/"]')
+        self.assertLess(console, testdata)
+        self.assertLess(testdata, solved)
+
 
 class ChatThinkToggleStaticTests(TestCase):
     """Кнопка Think (переключатель рассуждений для Ollama-моделей):
@@ -14753,6 +14840,26 @@ class ChatThinkToggleStaticTests(TestCase):
         # author-display перебивает UA-стиль [hidden] — guard обязателен,
         # иначе кнопка светится и на не-Ollama моделях.
         self.assertIn(".think-toggle[hidden] {", css)
+
+    def test_wizard_chat_tour_think_step(self):
+        """Чат-тур: шаг кнопки Think — ПОСЛЕ выбора модели и ДО сортировки
+        (по требованию владельца), с skipIfHidden: кнопка скрыта на
+        не-Ollama моделях, шаг пропускается мгновенно (контракт «скрыта
+        сейчас = шаг не для этого состояния»), а не ждать и падать.
+        en/fr-переводы шага на месте (триязычный клиент)."""
+        js = self._read("static", "admin", "js", "ai-wizard.js")
+        chat = js[js.index("        chat: ["): js.index("        solve: [")]
+        self.assertIn('sel: "#thinkToggleBtn"', chat)
+        self.assertLess(
+            chat.index('sel: "#select", rank: 11'), chat.index('sel: "#thinkToggleBtn"'))
+        self.assertLess(
+            chat.index('sel: "#thinkToggleBtn"'), chat.index('sel: "#selectModelSort"'))
+        step_at = js.index('sel: "#thinkToggleBtn", rank: 12')
+        self.assertIn("skipIfHidden: true", js[step_at: step_at + 300])
+        # Движок: мгновенный пропуск скрытой цели по флагу шага.
+        self.assertIn("step.skipIfHidden", js)
+        self.assertIn('"#thinkToggleBtn": { title: "The Think button"', js)
+        self.assertIn('"#thinkToggleBtn": { title: "Le bouton Think"', js)
 
 
 class AdminPagesStaticFixesTests(TestCase):

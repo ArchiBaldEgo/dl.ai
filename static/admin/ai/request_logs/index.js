@@ -205,6 +205,47 @@ document.addEventListener('DOMContentLoaded', function () {
     if (modal) modal.classList.remove('open');
   }
 
+  // Ленивый ответ модели: текст запросов/ответов мог быть мегабайтным и делал
+  // AJAX-обновление таблицы долгим, поэтому в партиал он не вшивается — по
+  // первому раскрытию строки подтягиваем его detail-json'ом (data-response-url
+  // ставит шаблон). textContent экранирует сам (без innerHTML — чужой текст).
+  function loadLazyResponse(detailRow) {
+    const body = detailRow.querySelector('.ai-log-response-body');
+    if (!body || body.dataset.rendered || body.dataset.loading) return;
+    const url = body.getAttribute('data-response-url');
+    if (!url) return;
+    body.dataset.loading = '1';
+    fetch(url, {
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    })
+      .then(function (response) {
+        return response.text().then(function (text) {
+          let data = null;
+          try { data = JSON.parse(text); } catch (e) { /* HTML страницы логина */ }
+          if (!response.ok || !data || data.ok !== true) {
+            throw new Error(
+              !text.trim() || /^\s*</.test(text)
+                ? 'Сессия истекла — перезагрузите страницу'
+                : ((data && data.error) || ('HTTP ' + response.status))
+            );
+          }
+          return data;
+        });
+      })
+      .then(function (data) {
+        const pre = body.querySelector('pre');
+        if (pre) pre.textContent = (data.log.response_text || '').trim() || '(пусто)';
+        body.dataset.rendered = '1';
+        delete body.dataset.loading;
+      })
+      .catch(function (err) {
+        delete body.dataset.loading;
+        const pre = body.querySelector('pre');
+        if (pre) pre.textContent = err.message || 'Не удалось загрузить ответ';
+      });
+  }
+
   // Делегирование: работает и после replaceWith таблицы.
   document.addEventListener('click', function (event) {
     // Модалка условия задачи.
@@ -232,7 +273,10 @@ document.addEventListener('DOMContentLoaded', function () {
     document.querySelectorAll('.ai-log-detail-row.open').forEach(function (r) {
       r.classList.remove('open');
     });
-    if (!isOpen) detailRow.classList.add('open');
+    if (!isOpen) {
+      detailRow.classList.add('open');
+      loadLazyResponse(detailRow);
+    }
   });
 
   document.addEventListener('keydown', function (event) {

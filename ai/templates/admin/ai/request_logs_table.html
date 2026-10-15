@@ -161,10 +161,16 @@ ID записи и источник не пропадают: они в разв�
                     <pre>{{ log.message|default:"(пусто)" }}</pre>
                   </div>
 
-                  {# Правая колонка: ответ модели + ошибки #}
+                  {% comment %}Правая колонка: ответ модели. Сам текст (мог быть
+                     мегабайтным) в таблицу не вшиваем — AJAX-обновление
+                     должно оставаться почти мгновенным; по первому раскрытию
+                     строки JS (request_logs/index.js) подтягивает его через
+                     detail-json.{% endcomment %}
                   <div class="ai-log-detail-section">
                     <h4>Ответ модели</h4>
-                    <pre>{{ log.response_text|default:"(пусто)" }}</pre>
+                    <div class="ai-log-response-body" data-response-url="{% url 'ai_request_log_detail_json' log.id %}">
+                      <pre class="ai-log-response-loading">Загрузка…</pre>
+                    </div>
                   </div>
                 {% endif %}
 

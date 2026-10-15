@@ -216,8 +216,16 @@ _ASM_END_RE = _re.compile(r"^\s*(ends\s*:|jmp\s+ends\b|end\s+\w+\b)", _re.IGNORE
 _DL_END_MARKER_RE = _re.compile(r";\$E\b", _re.IGNORECASE)
 
 # --- С-МПА (псевдо-C) ---
+# Якорь-объявление С-МПА: ДВА диалекта порядка слов —
+#   старый DL-каркас:        «int N1 __in __bits(8);»
+#   псевдо-C от моделей:     «unsigned char __in __bits(8) N1;»
+# — тип в начале (в т.ч. с префиксом unsigned), флаг __in/__out/__bits( дальше
+# в любом месте. Второй порядок долгое время не матчится: декларации-порты не
+# становились якорем, окно снимали по main, порты выпадали — «Undefined
+# variable N1» на DL (лог задачи, queue 15211904).
 _MPA_DECL_RE = _re.compile(
-    r"^\s*(?:int|void|char)\s+[A-Za-z_][\w\s]*\b(?:__in|__out|__bits\s*\()",
+    r"^\s*(?:unsigned\s+)?(?:int|void|char|short|long)\b"
+    r".*(?:\b__in\b|\b__out\b|__bits\s*\()",
     _re.IGNORECASE,
 )
 _MPA_MAIN_RE = _re.compile(r"^\s*(?:int|void)\s+main\b", _re.IGNORECASE)

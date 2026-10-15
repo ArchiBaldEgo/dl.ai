@@ -93,6 +93,7 @@
             chat: {
                 "#selectLang": { title: "Page language", text: "This changes the language of the interface: Russian, English, French." },
                 "#select": { title: "Model selection", text: "These are different AI helper models. Click and pick who will answer you." },
+                "#thinkToggleBtn": { title: "The Think button", text: "Visible only for Ollama models. Off — the model answers right away; on — you can first look at its reasoning (the “Thinking” block above the answer)." },
                 "#selectModelSort": { title: "Model sorting", text: "You can show faster or more precise models first." },
                 "#selectType": { title: "Mode", text: "Modes: chat, “Solve the task”, “What's the error?”. Switch through the list." },
                 "#themeToggleBtn": { title: "Light or dark", text: "Click — the page turns dark. Click again — light." },
@@ -124,6 +125,7 @@
             chat: {
                 "#selectLang": { title: "Langue de la page", text: "C’est ici que change la langue des textes : Russe, English, Français." },
                 "#select": { title: "Choix du modèle", text: "Voici différents modèles-assistants. Clique et choisis celui qui te répondra." },
+                "#thinkToggleBtn": { title: "Le bouton Think", text: "Visible seulement pour les modèles Ollama. Désactivé — le modèle répond tout de suite ; activé — tu peux d’abord voir son raisonnement (le bloc « Réflexions » au-dessus de la réponse)." },
                 "#selectModelSort": { title: "Tri des modèles", text: "Tu peux afficher en premier les modèles plus rapides ou plus précis." },
                 "#selectType": { title: "Mode", text: "Modes : chat, « Résoudre la tâche », « Quelle est l’erreur ? ». On change via la liste." },
                 "#themeToggleBtn": { title: "Clair ou sombre", text: "Clique — la page devient sombre. Clique encore — claire à nouveau." },
@@ -243,6 +245,7 @@
         { sel: '#nav-sidebar a[href^="/ai/admin/arm/models/"]', title: "Состояние моделей", text: "Какие модели доступны и почему нет.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/request_logs/"]', title: "Журнал запросов", text: "Все запросы к моделям: кто, что и чем закончилось.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/test-console/"]', title: "Тестовая консоль", text: "Запуск тестов приложения и логи прошлых запусков.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href^="/ai/admin/test_data/"]', title: "Тестовые данные", text: "Генератор образцов: создаёт тестовые записи журнала и дневного отчёта — можно проверить, как выглядят страницы, не дожидаясь реальных запросов.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/tasksolution/"]', title: "Решённые задачи", text: "Кэш: задания, прошедшие тест в DL, достаются без модели.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/updates/"]', title: "Обновления", text: "Что нового появилось в проекте.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/prompt/"]', title: "Промпты", text: "Таблица всех промптов; правка — по клику на название.", pos: "right", onShow: "openNav" }
@@ -253,22 +256,24 @@
 
         chat: [
             // Строгий порядок чата (ранг: явный rank сильнее геометрии):
-            // язык → модель → сортировка → режим → тема → «?» → голосовой →
-            // боковое меню (супер/штаб) → история → ввод → отправить → очистить.
+            // язык → модель → think → сортировка → режим → тема → «?» →
+            // голосовой → боковое меню (супер/штаб) → история → ввод →
+            // отправить → очистить.
             // Шагов с common в чате НЕТ: basics_seen не режет чат — тур всегда
             // полный и строгий (ранги).
             { sel: "#selectLang", rank: 10, title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français. Сам текст вопросов и ответов — всегда на том языке, на котором ты пишешь.", pos: "bottom" },
             { sel: "#select", rank: 11, title: "Выбор модели", text: "Это разные помощники-модели: нажми и выбери, кто будет отвечать. Не знаешь, кого взять — оставь как есть: наверху стоит обычно та, что выбиралась чаще всего.", pos: "bottom" },
-            { sel: "#selectModelSort", rank: 12, title: "Сортировка моделей", text: "Здесь можно переложить список: сначала более быстрые модели или сначала более точные. Вернуть как было — режим «по алфавиту».", pos: "bottom" },
-            { sel: "#selectType", rank: 13, title: "Режим", text: "Режимы: чат, «Реши задачу», «В чём ошибка». Через этот список переключаешься между страницами — всё твоё (модель, тема) запомнится.", pos: "bottom" },
-            { sel: "#themeToggleBtn", rank: 14, title: "Светлое или тёмное", text: "Нажми — страница станет тёмной. Ещё раз — снова светлой. Как тебе удобнее читать.", pos: "bottom" },
-            { sel: "#userDocsBtn", rank: 15, title: "Кнопка «?»", text: "Это полная инструкция — нажми, если что-то непонятно. Она есть на русском, английском и французском (язык как у страницы); если перевод не подгрузился — покажется русская версия. Там же можно снова показать эти подсказки.", pos: "bottom" },
-            { sel: "#voiceModeBtn", rank: 16, title: "Голосовой ввод", text: "Хочешь говорить, а не печатать? Нажми — можно говорить голосом.", pos: "bottom" },
-            { sel: "#content .toggle-button", rank: 17, title: "Боковое меню", text: "Стрелочка справа открывает меню, там ссылка на админ-панель.", pos: "left", roles: ["super", "staff"] },
-            { sel: "#messages", rank: 18, title: "История", text: "История: всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
-            { sel: "#messageText", rank: 19, title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
-            { sel: '.buttons-block button[type="submit"]', rank: 20, title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
-            { sel: '[onclick="clearContext()"]', rank: 21, title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top" }
+            { sel: "#thinkToggleBtn", rank: 12, skipIfHidden: true, title: "Кнопка Think", text: "Видна только у моделей Ollama. Выключено — модель отвечает сразу; включено — сначала можно посмотреть её рассуждения (блок «Размышления» над ответом).", pos: "bottom" },
+            { sel: "#selectModelSort", rank: 13, title: "Сортировка моделей", text: "Здесь можно переложить список: сначала более быстрые модели или сначала более точные. Вернуть как было — режим «по алфавиту».", pos: "bottom" },
+            { sel: "#selectType", rank: 14, title: "Режим", text: "Режимы: чат, «Реши задачу», «В чём ошибка». Через этот список переключаешься между страницами — всё твоё (модель, тема) запомнится.", pos: "bottom" },
+            { sel: "#themeToggleBtn", rank: 15, title: "Светлое или тёмное", text: "Нажми — страница станет тёмной. Ещё раз — снова светлой. Как тебе удобнее читать.", pos: "bottom" },
+            { sel: "#userDocsBtn", rank: 16, title: "Кнопка «?»", text: "Это полная инструкция — нажми, если что-то непонятно. Она есть на русском, английском и французском (язык как у страницы); если перевод не подгрузился — покажется русская версия. Там же можно снова показать эти подсказки.", pos: "bottom" },
+            { sel: "#voiceModeBtn", rank: 17, title: "Голосовой ввод", text: "Хочешь говорить, а не печатать? Нажми — можно говорить голосом.", pos: "bottom" },
+            { sel: "#content .toggle-button", rank: 18, title: "Боковое меню", text: "Стрелочка справа открывает меню, там ссылка на админ-панель.", pos: "left", roles: ["super", "staff"] },
+            { sel: "#messages", rank: 19, title: "История", text: "История: всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
+            { sel: "#messageText", rank: 20, title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
+            { sel: '.buttons-block button[type="submit"]', rank: 21, title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
+            { sel: '[onclick="clearContext()"]', rank: 22, title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top" }
         ],
 
         // Эталон пользователя (v4): «Реши задачу — Язык программирования, тема,
@@ -728,6 +733,19 @@
         index = i;
         missedTicks = 0;
         var step = steps[i];
+        // Шаг с skipIfHidden, чья цель ЕСТЬ, но скрыта сейчас (напр. кнопка
+        // Think скрыта, пока не выбрана модель Ollama) — пропускаем мгновенно,
+        // не съедая ограниченное ожидание: это не «цель ещё не доехала»
+        // (тогда не помечали бы skipIfHidden), а контракт «скрыта сейчас =
+        // шаг не для этого состояния». Отсутствие в DOM — обычный путь
+        // waitAndShow → skipForward.
+        if (step.skipIfHidden) {
+            var el0 = querySel(step.sel);
+            if (el0 && !isVisible(el0)) {
+                show(i + 1);
+                return;
+            }
+        }
         // Сначала хук (он может открыть навигацию/меню под целью — их
         // переходы анимированы), затем ограниченное ожидание появления,
         // скролл и замер в следующем кадре.
