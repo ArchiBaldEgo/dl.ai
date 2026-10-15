@@ -1,712 +1,21 @@
 @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
 
-        body {
-            font-family: 'Roboto', sans-serif;
-            margin: 0;
-            height: 100%;
-            width: 100%;
-            overflow: auto;
-        }
+html, body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+}
 
-        #content {
-            height: 100%;
-            width: 100%;
-        }
-
-        .think {
-            background-color: #f0f8ff;
-            border-left: 5px solid #4caf50;
-            padding: 15px 20px;
-            margin: 10px 0;
-            font-family: 'Arial', sans-serif;
-            font-size: 16px;
-            line-height: 1.5;
-            color: #333;
-            border-radius: 8px;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-            transition: all 0.3s ease;
-        }
-
-        h1,
-        h2 {
-            font-family: 'Roboto', sans-serif;
-        }
-
-        h1 {
-            font-size: 2.5em;
-            color: #333;
-            margin-bottom: 20px;
-        }
-
-        h2 {
-            font-size: 2em;
-            color: #555;
-            margin-bottom: 15px;
-        }
-
-        #messageText {
-            width: 100%;
-            font-size: 18px;
-            border: 2px solid #ccc;
-            border-radius: 10px;
-            box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-            resize: none;
-            height: 80vh;
-            margin-top: 2vh;
-        }
-
-        button {
-            padding: 10px 20px;
-            margin: 5px;
-            font-size: 16px;
-            color: white;
-            background-color: #007BFF;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-            transition: background-color 0.3s ease;
-        }
-
-        button:hover {
-            background-color: #0056b3;
-        }
-
-        #messages {
-            height: 80vh;
-            width: 100vw;
-            margin-left: 10px;
-            margin-right: 10px;
-            padding: 20px 0;
-            padding: 10px;
-            border: 2px solid #ccc;
-            border-radius: 10px;
-            box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-            overflow-y: auto;
-            font-family: 'Roboto', sans-serif;
-            background-color: #fff;
-        }
-
-        #messages li {
-            font-size: 18px;
-        }
-
-        .msg-user {
-            background-color: #e6f0ff;
-            border-left: 5px solid #3399ff;
-        }
-
-        .msg-assistant {
-            background-color: #eaffea;
-            border-left: 5px solid #4caf50;
-        }
-
-        /* Результат тестирования в DL (кнопка «Тестирование», страница
-           «Реши задачу») — жёлтая, подпись DL. */
-        .msg-dl {
-            background-color: #fff8e1;
-            border-left: 5px solid #ffb300;
-        }
-
-        .accordion {
-            background-color: #eee;
-            color: #444;
-            cursor: pointer;
-            padding: 10px;
-            width: 100%;
-            border: none;
-            text-align: left;
-            outline: none;
-            font-size: 18px;
-            transition: background-color 0.2s ease;
-            border-radius: 5px;
-            margin: 3px;
-        }
-
-        .accordion-user {
-            background-color: #3399ff;
-            color: #fff;
-        }
-
-        .accordion-user.active, .accordion-user:hover {
-            background-color: #1976d2;
-        }
-
-        .accordion-assistant {
-            background-color: #4caf50;
-            color: #fff;
-        }
-
-        .accordion-assistant.active, .accordion-assistant:hover {
-            background-color: #357a38;
-        }
-
-        .accordion-dl {
-            background-color: #ffb300;
-            color: #fff;
-        }
-
-        .accordion-dl.active, .accordion-dl:hover {
-            background-color: #c98a10;
-        }
-
-        .panel {
-            padding: 0 10px;
-            display: none;
-            background-color: white;
-            overflow: hidden;
-            border-radius: 0 0 5px 5px;
-        }
-
-        .panel.open {
-            display: block;
-        }
-
-        form {
-            display: flex;
-            flex-direction: column;
-            margin-right: 1vw;
-            padding-left: 40px;
-            width: 35vw;
-            max-width: 90vw;
-            max-height: 95%;
-        }
-
-        #select,
-        #selectType,
-        #selectModelSort {
-            font-size: 18px;
-            max-width: 77%;
-        }
-        #selectLang {
-            font-size: 18px;
-            width: auto;
-            min-width: 80px;
-        }
-
-        .blo {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-        }
-
-        .line-panel {
-            display: flex;
-            grid-row: 1;
-            align-items: center;
-            background-color: #d8d8d8;
-            padding-left: 10px;
-            height: 80px;
-        }
-
-        hr {
-            margin: 0;
-            color:#ccc;
-        }
-
-        .resize-button {
-            left: 2;
-            position: absolute;
-            height: 83vh;
-            margin-top: 2vh;
-            width: 30px;
-            background-color: #d8d8d8;
-            cursor: ew-resize;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
-            transition: background-color 0.3s ease;
-            font-size: 32px;
-            color: black;
-        }
-
-        .check {
-            font-family: 'Roboto', sans-serif;
-            font-size: small;
-            font-weight: 400;
-            display: flex;
-            align-items: center;
-        }
-
-        .dv {
-            display: grid;
-            justify-content: flex-start;
-        }
-
-        .dv button {
-            width: 150px;
-            padding: 5px 30px;
-        }
-
-        .buttons-block {
-            display: flex;
-            flex-direction: row;
-            justify-content: flex-start;
-            height: 60px;
-        }
-
-        .toggle-button {
-            margin: 0;
-            padding: 0;
-            position: absolute;
-            top: 10px;
-            right: 0;
-            border: none;
-            background-color: transparent;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            z-index: 1001;
-            height: 50px;
-            background-color: rgb(207, 205, 205);
-            border-radius: 30px 0 0 30px;
-        }
-
-        .toggle-button::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: -30px;
-            width: 30px;
-            height: 100%;
-            transition: all 0.3s ease;
-            z-index: -1;
-        }
-
-        .toggle-button:hover {
-            background-color: rgb(119, 119, 119);
-        }
-
-        .sidebar {
-            position: fixed;
-            top: 0;
-            right: -300px;
-            width: 300px;
-            height: 100%;
-            background-color: white;
-            box-shadow: -2px 0 5px rgba(0, 0, 0, 0.2);
-            transition: transform 0.3s ease-in-out;
-            display: flex;
-            flex-direction: column;
-            border-left: 1px solid rgba(0, 0, 0, 0.1);
-            z-index: 1000;
-        }
-
-        .sidebar-header {
-            padding: 15px;
-            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
-        }
-
-        .sidebar-content {
-            padding: 15px;
-            flex: 1;
-        }
-
-        .sidebar.open {
-            transform: translateX(-300px);
-        }
-
-        .sidebar.open+.toggle-button {
-            transform: translateX(-300px);
-        }
-
-        .toggle-button svg {
-            transition: transform 0.3s ease;
-            transform: rotate(180deg);
-        }
-
-        .sidebar.open+.toggle-button svg {
-            transform: rotate(0deg);
-        }
-
-        .voice-controls {
-            display: none;
-            margin: 0px 0px;
-            flex-wrap: wrap;
-        }
-
-        .voice-controls.active {
-            display: flex;
-        }
-
-        .voice-btn {
-            display: flex;
-            align-items: center;
-            padding: 8px 15px;
-            font-size: 14px;
-            height: 45px;
-        }
-
-        .voice-btn.recording {
-            background-color: #ff4444;
-            animation: pulse 1.5s infinite;
-        }
-
-        .voice-btn.speaking {
-            background-color: #4caf50;
-        }
-
-        .voice-status {
-            font-size: 14px;
-            color: #666;
-            margin: 0px;
-            min-height: 20px;
-        }
-
-        @keyframes pulse {
-            0% { background-color: #ff4444; }
-            50% { background-color: #ff6666; }
-            100% { background-color: #ff4444; }
-        }
-
-        .voice-input-indicator {
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            background-color: #ff4444;
-            border-radius: 50%;
-            margin-right: 5px;
-            opacity: 0;
-        }
-
-        .voice-input-indicator.active {
-            animation: voicePulse 0.8s infinite;
-        }
-
-        @keyframes voicePulse {
-            0% { opacity: 0.3; transform: scale(0.8); }
-            50% { opacity: 1; transform: scale(1.2); }
-            100% { opacity: 0.3; transform: scale(0.8); }
-        }
-
-        .voice-mod-div {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            margin-left: 10px;
-        }
-
-        .voice-mode-btn {
-            margin: 0px 5px;
-            width: fit-content;
-            height: 45px;
-            margin-top: 19px;
-        }
-
-        .think-checkbox {
-            display: flex;
-            align-items: center;
-            margin: 5px 10px;
-            font-size: 14px;
-        }
-
-        .think-checkbox input {
-            margin-right: 8px;
-        }
-        /* При масштабе 80% */
-        @media (min-resolution: 95dpi) and (max-resolution: 105dpi) {
-            .line-panel {
-                display: flex;
-                grid-row: 1;
-                align-items: center;
-                background-color: #d8d8d8;
-                padding-left: 10px;
-                height: 120px;
-            }
-            .voice-mode-btn {
-                margin: 0px 5px;
-                width: 160px;
-                height: 50px;
-                font-size: 14px;
-                margin-top: 21px;
-            }
-            .voice-btn {
-                margin: 15px 5px;
-                margin-top: 17px;
-                display: flex;
-                align-items: center;
-                text-align: center;
-                padding: 8px 15px;
-                font-size: 14px;
-                height: 50px;
-            }
-        }
-        
-        
-        /* При масштабе 90% */
-        @media (min-resolution: 106dpi) and (max-resolution: 118dpi) {
-            .line-panel {
-                display: flex;
-                grid-row: 1;
-                align-items: center;
-                background-color: #d8d8d8;
-                padding-left: 10px;
-                height: 100px;
-            }
-        }
-        
-        /* При масштабе 110%*/
-        @media (min-resolution: 131dpi) and (max-resolution: 143dpi) {
-            .line-panel {
-                display: flex;
-                grid-row: 1;
-                align-items: center;
-                background-color: #d8d8d8;
-                padding-left: 10px;
-                height: 80px;
-            }
-            .voice-mode-btn {
-                margin: 0px 5px;
-                width: 140px;
-                height: 45px;
-                font-size: 14px;
-                margin-top: 21px;
-            }
-            .voice-btn {
-                margin: 15px 5px;
-                margin-top: 17px;
-                display: flex;
-                align-items: center;
-                text-align: center;
-                padding: 8px 15px;
-                font-size: 14px;
-                height: 45px;
-            }
-        }
-        /* При масштабе 125% */
-        @media (min-resolution: 144dpi) and (max-resolution: 150dpi) {
-            .line-panel {
-                display: flex;
-                grid-row: 1;
-                align-items: center;
-                background-color: #d8d8d8;
-                padding-left: 10px;
-                height: 80px;
-            }
-            button {
-                padding: 10px 20px;
-                margin: 5px;
-                font-size: 16px;
-                color: white;
-                background-color: #007BFF;
-                border: none;
-                border-radius: 5px;
-                cursor: pointer;
-                box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-                transition: background-color 0.3s ease;
-                height: 40px;
-            }
-            .voice-mode-btn {
-                margin: 0px 5px;
-                margin-left: -5px;
-                width: 120px;
-                height: 40px;
-                font-size: 12px;
-                margin-top: 21px;
-            }
-            #messages {
-                height: 79vh;
-                width: 100vw;
-                margin-left: 10px;
-                margin-right: 10px;
-                padding: 20px 0;
-                padding: 10px;
-                border: 2px solid #ccc;
-                border-radius: 10px;
-                box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-                overflow-y: auto;
-                font-family: 'Roboto', sans-serif;
-                background-color: #fff;
-            }
-            #messageText {
-                width: 100%;
-                font-size: 18px;
-                border: 2px solid #ccc;
-                border-radius: 10px;
-                box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-                resize: none;
-                height: 79vh;
-                margin-top: 2vh;
-            }
-            
-        }
-        /* При масштабе 150% */
-        @media (min-resolution: 151dpi) and (max-resolution: 180dpi) {
-            .line-panel {
-                display: flex;
-                grid-row: 1;
-                align-items: center;
-                background-color:  #d8d8d8;
-                padding-left: 10px;
-                height: 80px;
-            }
-            button {
-                padding: 10px 20px;
-                margin: 5px;
-                font-size: 16px;
-                color: white;
-                background-color: #007BFF;
-                border: none;
-                border-radius: 5px;
-                cursor: pointer;
-                box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-                transition: background-color 0.3s ease;
-                height: 43px;
-            }
-            #messageText {
-                width: 100%;
-                font-size: 18px;
-                border: 2px solid #ccc;
-                border-radius: 10px;
-                box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-                resize: none;
-                height: 73vh;
-                margin-top: 2vh;
-            }
-            .voice-btn {
-                margin: -5px 5px;
-                margin-top: 17px;
-                display: flex;
-                align-items: center;
-                text-align: center;
-                padding: 8px 15px;
-                font-size: 12px;
-            }
-            .voice-mode-btn {
-                margin: 0px 5px;
-                margin-left: -5px;
-                width: fit-content;
-                height: 40px;
-                font-size: 12px;
-                margin-top: 13px;
-            }
-            #messages {
-                height: 75vh;
-                width: 100vw;
-                margin-left: 10px;
-                margin-right: 10px;
-                padding: 20px 0;
-                padding: 10px;
-                border: 2px solid #ccc;
-                border-radius: 10px;
-                box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-                overflow-y: auto;
-                font-family: 'Roboto', sans-serif;
-                background-color: #fff;
-            }
-            .resize-button {
-                left: 2;
-                position: absolute;
-                height: 80vh;
-                margin-top: 2vh;
-                width: 30px;
-                background-color: #d8d8d8;
-                cursor: ew-resize;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                color: white;
-                box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
-                transition: background-color 0.3s ease;
-                font-size: 32px;
-                color: black;
-            }
-        }   
-
-        /* При масштабе 150% */
-        @media (min-resolution: 181dpi){
-            .line-panel {
-                display: flex;
-                grid-row: 1;
-                align-items: center;
-                background-color: #d8d8d8;
-                padding-left: 10px;
-                height: 70px;
-            }
-            button {
-                padding: 10px 20px;
-                margin: 5px;
-                font-size: 16px;
-                color: white;
-                background-color: #007BFF;
-                border: none;
-                border-radius: 5px;
-                cursor: pointer;
-                box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-                transition: background-color 0.3s ease;
-                height: 43px;
-            }
-            #messageText {
-                width: 100%;
-                font-size: 18px;
-                border: 2px solid #ccc;
-                border-radius: 10px;
-                box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-                resize: none;
-                height: 70vh;
-                margin-top: 2vh;
-            }
-            .voice-btn {
-                margin: -5px 5px;
-                margin-top: 17px;
-                display: flex;
-                align-items: center;
-                text-align: center;
-                padding: 8px 15px;
-                font-size: 10px;
-            }
-            .voice-mode-btn {
-                margin: 0px 5px;
-                margin-left: -5px;
-                width: fit-content;
-                height: 40px;
-                font-size: 10px;
-                margin-top: 13px;
-            }
-            #messages {
-                height: 71vh;
-                width: 100vw;
-                margin-left: 10px;
-                margin-right: 10px;
-                padding: 20px 0;
-                padding: 10px;
-                border: 2px solid #ccc;
-                border-radius: 10px;
-                box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-                overflow-y: auto;
-                font-family: 'Roboto', sans-serif;
-                background-color: #fff;
-            }
-            .resize-button {
-                left: 2;
-                position: absolute;
-                height: 80vh;
-                margin-top: 2vh;
-                width: 30px;
-                background-color: #d8d8d8;
-                cursor: ew-resize;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                color: white;
-                box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
-                transition: background-color 0.3s ease;
-                font-size: 32px;
-                color: black;
-            }
-        }
 body {
     font-family: 'Roboto', sans-serif;
-    margin: 0;
-    height: 100%;
-    width: 100%;
     overflow: hidden;
 }
 
 #content {
     height: 100%;
     width: 100%;
+    box-sizing: border-box;
+    padding-bottom: 28px;
 }
 
 .think {
@@ -747,8 +56,11 @@ h2 {
     border-radius: 10px;
     box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
     resize: none;
-    height: 80vh;
+    height: 78vh;
+    max-height: calc(100vh - 220px);
     margin-top: 2vh;
+    box-sizing: border-box;
+    display: block;
 }
 
 button {
@@ -769,11 +81,11 @@ button:hover {
 }
 
 #messages {
-    height: 80vh;
-    width: 100vw;
+    height: 78vh;
+    max-height: calc(100vh - 220px);
+    width: 100%;
     margin-left: 10px;
     margin-right: 10px;
-    padding: 20px 0;
     padding: 10px;
     border: 2px solid #ccc;
     border-radius: 10px;
@@ -781,6 +93,7 @@ button:hover {
     overflow-y: auto;
     font-family: 'Roboto', sans-serif;
     background-color: #fff;
+    box-sizing: border-box;
 }
 
 #messages li {
@@ -797,8 +110,6 @@ button:hover {
     border-left: 5px solid #4caf50;
 }
 
-/* Результат тестирования в DL (кнопка «Тестирование», страница
-   «Реши задачу») — жёлтая, подпись DL. */
 .msg-dl {
     background-color: #fff8e1;
     border-left: 5px solid #ffb300;
@@ -869,14 +180,23 @@ form {
     width: 35vw;
     max-width: 90vw;
     max-height: 95%;
+    box-sizing: border-box;
 }
 
 #select,
 #selectType,
-#selectLang,
 #selectModelSort {
     font-size: 18px;
-    max-width: 77%;
+    flex: 0 1 auto;
+    min-width: 90px;
+    max-width: 300px;
+}
+
+#selectLang {
+    font-size: 18px;
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 80px;
 }
 
 .blo {
@@ -887,61 +207,70 @@ form {
 
 .line-panel {
     display: flex;
-    grid-row: 1;
+    flex-wrap: wrap;
     align-items: center;
+    gap: 8px 12px;
     background-color: #d8d8d8;
-    padding-left: 10px;
-    height: 80px;
+    padding: 10px;
+    min-height: 80px;
     position: relative;
+    box-sizing: border-box;
+}
+
+.line-panel > div:first-child {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 0 1 auto;
 }
 
 .panel-date {
-    position: absolute;
-    right: 20px;
-    bottom: 8px;
     font-size: 12px;
     color: #333;
     opacity: 0.8;
     font-weight: bold;
     pointer-events: none;
+    margin-left: auto;
+    align-self: flex-end;
+    white-space: nowrap;
+    flex: 0 0 auto;
 }
 
-.panel-tokens {
-    position: absolute;
-    right: 20px;
-    bottom: 26px;
+#modelLimitsWidget {
+    display: none;
     font-size: 12px;
     color: #6a6a6a;
     font-weight: bold;
     pointer-events: none;
+    margin-left: auto;
+    align-self: flex-end;
+    white-space: nowrap;
+    flex: 0 0 auto;
+    text-align: right;
+}
+
+.panel-tokens {
+    font-size: 12px;
+    color: #6a6a6a;
+    font-weight: bold;
+    pointer-events: none;
+    margin-left: auto;
+    align-self: flex-end;
+    white-space: nowrap;
+    flex: 0 0 auto;
 }
 
 .token-usage {
-    position: absolute;
-    right: 20px;
-    bottom: 26px;
     font-size: 12px;
     color: #6a6a6a;
     opacity: 0.7;
     pointer-events: auto;
-}
-
-/* Виджет лимитов модели («Осталось: X/Y токенов … запросов»).
-   Прямой потомок .line-panel, стоит над .panel-date (bottom:26px vs 8px).
-   position:absolute убирает его из потока — селекторы языка/модели/режима
-   остаются в одну строку. display:none по умолчанию; updateModelLimitsWidget()
-   в ai-common.js выставляет style.display='block' для Groq/OR-моделей. */
-#modelLimitsWidget {
-    display: none;
-    position: absolute;
-    right: 20px;
-    bottom: 26px;
-    font-size: 12px;
-    color: #6a6a6a;
-    font-weight: bold;
-    pointer-events: none;
-    max-width: 55%;
-    text-align: right;
+    margin-left: auto;
+    align-self: flex-end;
+    white-space: nowrap;
+    flex: 0 0 auto;
 }
 
 hr {
@@ -950,17 +279,17 @@ hr {
 }
 
 .resize-button {
-    left: 2;
+    left: 2px;
+    top: 2vh;
     position: absolute;
-    height: 83vh;
-    margin-top: 2vh;
+    height: 78vh;
+    max-height: calc(100vh - 220px);
     width: 30px;
     background-color: #d8d8d8;
     cursor: ew-resize;
     display: flex;
     align-items: center;
     justify-content: center;
-    color: white;
     box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
     transition: background-color 0.3s ease;
     font-size: 32px;
@@ -976,8 +305,8 @@ hr {
 }
 
 .dv {
-    display: grid;
-    justify-content: flex-start;
+    display: block;
+    position: relative;
 }
 
 .dv button {
@@ -999,12 +328,11 @@ hr {
     top: 10px;
     right: 0;
     border: none;
-    background-color: transparent;
+    background-color: rgb(207, 205, 205);
     cursor: pointer;
     transition: all 0.3s ease;
     z-index: 1001;
     height: 50px;
-    background-color: rgb(207, 205, 205);
     border-radius: 30px 0 0 30px;
 }
 
@@ -1052,7 +380,7 @@ hr {
     transform: translateX(-300px);
 }
 
-.sidebar.open+.toggle-button {
+.sidebar.open + .toggle-button {
     transform: translateX(-300px);
 }
 
@@ -1061,14 +389,24 @@ hr {
     transform: rotate(180deg);
 }
 
-.sidebar.open+.toggle-button svg {
+.sidebar.open + .toggle-button svg {
     transform: rotate(0deg);
+}
+
+.voice-group {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
 }
 
 .voice-controls {
     display: none;
-    margin: 0px 0px;
-    flex-wrap: wrap;
+    margin: 0;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 6px;
 }
 
 .voice-controls.active {
@@ -1081,6 +419,9 @@ hr {
     padding: 8px 15px;
     font-size: 14px;
     height: 45px;
+    margin: 0;
+    white-space: nowrap;
+    flex: 0 0 auto;
 }
 
 .voice-btn.recording {
@@ -1095,22 +436,14 @@ hr {
 .voice-status {
     font-size: 14px;
     color: #666;
-    margin: 0px;
+    margin: 0;
     min-height: 20px;
 }
 
 @keyframes pulse {
-    0% {
-        background-color: #ff4444;
-    }
-
-    50% {
-        background-color: #ff6666;
-    }
-
-    100% {
-        background-color: #ff4444;
-    }
+    0% { background-color: #ff4444; }
+    50% { background-color: #ff6666; }
+    100% { background-color: #ff4444; }
 }
 
 .voice-input-indicator {
@@ -1128,20 +461,9 @@ hr {
 }
 
 @keyframes voicePulse {
-    0% {
-        opacity: 0.3;
-        transform: scale(0.8);
-    }
-
-    50% {
-        opacity: 1;
-        transform: scale(1.2);
-    }
-
-    100% {
-        opacity: 0.3;
-        transform: scale(0.8);
-    }
+    0% { opacity: 0.3; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1.2); }
+    100% { opacity: 0.3; transform: scale(0.8); }
 }
 
 .voice-mod-div {
@@ -1149,13 +471,14 @@ hr {
     flex-direction: column;
     align-items: center;
     margin-left: 10px;
+    flex: 0 0 auto;
 }
 
 .voice-mode-btn {
-    margin: 0px 5px;
+    margin: 0;
     width: fit-content;
     height: 45px;
-    margin-top: 19px;
+    white-space: nowrap;
 }
 
 .think-checkbox {
@@ -1163,328 +486,14 @@ hr {
     align-items: center;
     margin: 5px 10px;
     font-size: 14px;
+    white-space: nowrap;
+    flex: 0 0 auto;
 }
 
 .think-checkbox input {
     margin-right: 8px;
 }
 
-/* При масштабе 80% */
-@media (min-resolution: 95dpi) and (max-resolution: 105dpi) {
-    .line-panel {
-        display: flex;
-        grid-row: 1;
-        align-items: center;
-        background-color: #d8d8d8;
-        padding-left: 10px;
-        height: 120px;
-    }
-
-    .voice-mode-btn {
-        margin: 0px 5px;
-        width: 160px;
-        height: 50px;
-        font-size: 14px;
-        margin-top: 21px;
-    }
-
-    .voice-btn {
-        margin: 15px 5px;
-        margin-top: 17px;
-        display: flex;
-        align-items: center;
-        text-align: center;
-        padding: 8px 15px;
-        font-size: 14px;
-        height: 50px;
-    }
-}
-
-
-/* При масштабе 90% */
-@media (min-resolution: 106dpi) and (max-resolution: 118dpi) {
-    .line-panel {
-        display: flex;
-        grid-row: 1;
-        align-items: center;
-        background-color: #d8d8d8;
-        padding-left: 10px;
-        height: 100px;
-    }
-}
-
-/* При масштабе 110%*/
-@media (min-resolution: 131dpi) and (max-resolution: 143dpi) {
-    .line-panel {
-        display: flex;
-        grid-row: 1;
-        align-items: center;
-        background-color: #d8d8d8;
-        padding-left: 10px;
-        height: 80px;
-    }
-
-    .voice-mode-btn {
-        margin: 0px 5px;
-        width: 140px;
-        height: 45px;
-        font-size: 14px;
-        margin-top: 21px;
-    }
-
-    .voice-btn {
-        margin: 15px 5px;
-        margin-top: 17px;
-        display: flex;
-        align-items: center;
-        text-align: center;
-        padding: 8px 15px;
-        font-size: 14px;
-        height: 45px;
-    }
-}
-
-/* При масштабе 125% */
-@media (min-resolution: 144dpi) and (max-resolution: 150dpi) {
-    .line-panel {
-        display: flex;
-        grid-row: 1;
-        align-items: center;
-        background-color: #d8d8d8;
-        padding-left: 10px;
-        height: 80px;
-    }
-
-    button {
-        padding: 10px 20px;
-        margin: 5px;
-        font-size: 16px;
-        color: white;
-        background-color: #007BFF;
-        border: none;
-        border-radius: 5px;
-        cursor: pointer;
-        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-        transition: background-color 0.3s ease;
-        height: 40px;
-    }
-
-    .voice-mode-btn {
-        margin: 0px 5px;
-        margin-left: -5px;
-        width: 120px;
-        height: 40px;
-        font-size: 12px;
-        margin-top: 21px;
-    }
-
-    #messages {
-        height: 79vh;
-        width: 100vw;
-        margin-left: 10px;
-        margin-right: 10px;
-        padding: 20px 0;
-        padding: 10px;
-        border: 2px solid #ccc;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-        overflow-y: auto;
-        font-family: 'Roboto', sans-serif;
-        background-color: #fff;
-    }
-
-    #messageText {
-        width: 100%;
-        font-size: 18px;
-        border: 2px solid #ccc;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-        resize: none;
-        height: 79vh;
-        margin-top: 2vh;
-    }
-
-}
-
-/* При масштабе 150% */
-@media (min-resolution: 151dpi) and (max-resolution: 180dpi) {
-    .line-panel {
-        display: flex;
-        grid-row: 1;
-        align-items: center;
-        background-color: #d8d8d8;
-        padding-left: 10px;
-        height: 80px;
-    }
-
-    button {
-        padding: 10px 20px;
-        margin: 5px;
-        font-size: 16px;
-        color: white;
-        background-color: #007BFF;
-        border: none;
-        border-radius: 5px;
-        cursor: pointer;
-        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-        transition: background-color 0.3s ease;
-        height: 43px;
-    }
-
-    #messageText {
-        width: 100%;
-        font-size: 18px;
-        border: 2px solid #ccc;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-        resize: none;
-        height: 73vh;
-        margin-top: 2vh;
-    }
-
-    .voice-btn {
-        margin: -5px 5px;
-        margin-top: 17px;
-        display: flex;
-        align-items: center;
-        text-align: center;
-        padding: 8px 15px;
-        font-size: 12px;
-    }
-
-    .voice-mode-btn {
-        margin: 0px 5px;
-        margin-left: -5px;
-        width: fit-content;
-        height: 40px;
-        font-size: 12px;
-        margin-top: 13px;
-    }
-
-    #messages {
-        height: 75vh;
-        width: 100vw;
-        margin-left: 10px;
-        margin-right: 10px;
-        padding: 20px 0;
-        padding: 10px;
-        border: 2px solid #ccc;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-        overflow-y: auto;
-        font-family: 'Roboto', sans-serif;
-        background-color: #fff;
-    }
-
-    .resize-button {
-        left: 2;
-        position: absolute;
-        height: 80vh;
-        margin-top: 2vh;
-        width: 30px;
-        background-color: #d8d8d8;
-        cursor: ew-resize;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: white;
-        box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
-        transition: background-color 0.3s ease;
-        font-size: 32px;
-        color: black;
-    }
-}
-
-/* При масштабе 150% */
-@media (min-resolution: 181dpi) {
-    .line-panel {
-        display: flex;
-        grid-row: 1;
-        align-items: center;
-        background-color: #d8d8d8;
-        padding-left: 10px;
-        height: 70px;
-    }
-
-    button {
-        padding: 10px 20px;
-        margin: 5px;
-        font-size: 16px;
-        color: white;
-        background-color: #007BFF;
-        border: none;
-        border-radius: 5px;
-        cursor: pointer;
-        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-        transition: background-color 0.3s ease;
-        height: 43px;
-    }
-
-    #messageText {
-        width: 100%;
-        font-size: 18px;
-        border: 2px solid #ccc;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-        resize: none;
-        height: 70vh;
-        margin-top: 2vh;
-    }
-
-    .voice-btn {
-        margin: -5px 5px;
-        margin-top: 17px;
-        display: flex;
-        align-items: center;
-        text-align: center;
-        padding: 8px 15px;
-        font-size: 10px;
-    }
-
-    .voice-mode-btn {
-        margin: 0px 5px;
-        margin-left: -5px;
-        width: fit-content;
-        height: 40px;
-        font-size: 10px;
-        margin-top: 13px;
-    }
-
-    #messages {
-        height: 71vh;
-        width: 100vw;
-        margin-left: 10px;
-        margin-right: 10px;
-        padding: 20px 0;
-        padding: 10px;
-        border: 2px solid #ccc;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
-        overflow-y: auto;
-        font-family: 'Roboto', sans-serif;
-        background-color: #fff;
-    }
-
-    .resize-button {
-        left: 2;
-        position: absolute;
-        height: 80vh;
-        margin-top: 2vh;
-        width: 30px;
-        background-color: #d8d8d8;
-        cursor: ew-resize;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: white;
-        box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
-        transition: background-color 0.3s ease;
-        font-size: 32px;
-        color: black;
-    }
-}
-
-/* Общие препромпты */
 .shared-prompt-section {
     display: flex;
     flex-direction: column;
@@ -1497,16 +506,137 @@ hr {
     font-weight: bold;
 }
 
-/* ============================================
-   MOBILE RESPONSIVE STYLES
-   Added for phone/tablet adaptation
-   ============================================ */
+.load-time-footer {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 4px 8px;
+    text-align: center;
+    font-size: 12px;
+    line-height: 1.3;
+    color: #444;
+    background: rgba(255, 255, 255, 0.82);
+    -webkit-backdrop-filter: blur(2px);
+    backdrop-filter: blur(2px);
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+    pointer-events: none;
+    user-select: none;
+    z-index: 1000;
+    font-variant-numeric: tabular-nums;
+}
 
-/* --- Tablets and small screens --- */
+@media (max-width: 1500px) {
+    .line-panel {
+        padding: 8px 10px;
+    }
 
-/* ============================================
-   MOBILE RESPONSIVE
-   ============================================ */
+    #select,
+    #selectType,
+    #selectModelSort {
+        font-size: 16px;
+        min-width: 80px;
+        max-width: 260px;
+    }
+
+    #selectLang {
+        font-size: 16px;
+    }
+}
+
+@media (max-width: 1200px) {
+    #select,
+    #selectType,
+    #selectModelSort {
+        font-size: 15px;
+        min-width: 70px;
+        max-width: 220px;
+    }
+
+    #selectLang {
+        font-size: 15px;
+        min-width: 60px;
+    }
+
+    .voice-btn {
+        font-size: 13px;
+        padding: 6px 12px;
+    }
+
+    .voice-mode-btn {
+        font-size: 14px;
+    }
+
+    form {
+        width: 40vw;
+        padding-left: 30px;
+    }
+}
+
+@media (max-width: 1000px) {
+    .line-panel {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+    }
+
+    .line-panel > div:first-child {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 4px;
+        width: 100%;
+    }
+
+    #select,
+    #selectType,
+    #selectModelSort {
+        font-size: 15px;
+        max-width: 100%;
+        width: 100%;
+        padding: 6px 8px;
+    }
+
+    #selectLang {
+        font-size: 15px;
+        min-width: 80px;
+        width: 100%;
+        padding: 6px 8px;
+    }
+
+    .voice-group {
+        flex-direction: row;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        flex-wrap: wrap;
+    }
+
+    .voice-mod-div {
+        flex-direction: row;
+        align-items: center;
+        gap: 8px;
+        margin-left: 0;
+    }
+
+    .voice-controls {
+        flex-wrap: wrap;
+    }
+
+    .panel-date,
+    .panel-tokens,
+    .token-usage,
+    #modelLimitsWidget {
+        text-align: left;
+        margin-left: 0;
+        align-self: flex-start;
+    }
+
+    form {
+        width: 50vw;
+        padding-left: 20px;
+    }
+}
+
 @media (max-width: 768px) {
     body {
         overflow: auto;
@@ -1517,6 +647,7 @@ hr {
         flex-direction: column;
         min-height: 100vh;
         height: auto;
+        padding-bottom: 40px;
     }
 
     .line-panel {
@@ -1528,8 +659,8 @@ hr {
     }
 
     .line-panel > div:first-child {
-        display: flex;
         flex-direction: column;
+        align-items: stretch;
         gap: 4px;
     }
 
@@ -1541,39 +672,41 @@ hr {
         width: 100%;
         padding: 6px 8px;
     }
+
     #selectLang {
         font-size: 14px;
-        width: auto;
         min-width: 80px;
+        width: 100%;
         padding: 6px 8px;
     }
 
     #modelLimitsWidget {
         font-size: 10px !important;
-        position: static;
-        max-width: 100%;
-        text-align: left;
+    }
+
+    .voice-group {
+        flex-direction: column;
+        align-items: stretch;
+        width: 100%;
     }
 
     .voice-mod-div {
         flex-direction: row;
         align-items: center;
-        margin-left: 0;
         gap: 8px;
-    }
-
-    .voice-mode-btn {
-        margin-top: 0;
-        width: auto;
-        font-size: 13px;
-        padding: 6px 12px;
-        height: 38px;
+        margin-left: 0;
     }
 
     .voice-controls {
-        flex-direction: row;
         flex-wrap: wrap;
         gap: 6px;
+        width: 100%;
+    }
+
+    .voice-mode-btn {
+        font-size: 13px;
+        padding: 6px 12px;
+        height: 38px;
     }
 
     .voice-btn {
@@ -1587,19 +720,6 @@ hr {
         margin: 4px 0;
     }
 
-    .panel-date {
-        position: static;
-        font-size: 11px;
-        opacity: 0.8;
-    }
-
-    .token-usage {
-        position: static;
-        font-size: 11px;
-        opacity: 0.6;
-        margin-bottom: 2px;
-    }
-
     .blo {
         flex-direction: column;
         width: 100%;
@@ -1608,12 +728,12 @@ hr {
 
     #messages {
         width: 100%;
-        height: calc(100vh - 340px);
+        height: auto;
+        max-height: calc(100vh - 340px);
         min-height: 200px;
         margin: 0;
         font-size: 15px;
         padding: 8px;
-        box-sizing: border-box;
     }
 
     #messages li {
@@ -1635,9 +755,16 @@ hr {
     #messageText {
         width: 100%;
         height: 100px;
+        max-height: none;
         font-size: 15px;
         margin-top: 4px;
-        box-sizing: border-box;
+    }
+
+    form {
+        width: 100%;
+        padding-left: 8px;
+        margin-right: 0;
+        max-height: none;
     }
 
     .buttons-block {
@@ -1651,11 +778,6 @@ hr {
         padding: 8px 10px;
         font-size: 14px;
         margin: 0 4px;
-    }
-
-    .dv button {
-        width: auto;
-        padding: 8px 10px;
     }
 
     .sidebar {
@@ -1673,27 +795,6 @@ hr {
         height: 40px;
         width: 40px;
     }
-
-    .top-dv {
-        flex-direction: column;
-        gap: 6px;
-        margin-top: 6px;
-    }
-
-    .top-dv select {
-        width: 100% !important;
-    }
-
-    .top-preprompt {
-        width: 100%;
-        flex-direction: column;
-        align-items: stretch;
-        gap: 4px;
-    }
-
-    .top-preprompt select {
-        width: 100%;
-    }
 }
 
 @media (max-width: 480px) {
@@ -1703,15 +804,15 @@ hr {
         font-size: 13px;
         padding: 5px 6px;
     }
+
     #selectLang {
         font-size: 13px;
-        width: auto;
         min-width: 80px;
         padding: 5px 6px;
     }
 
     #messages {
-        height: calc(100vh - 360px);
+        max-height: calc(100vh - 360px);
         font-size: 14px;
         padding: 6px;
     }
@@ -1739,32 +840,4 @@ hr {
     .toggle-button {
         transform: scale(0.85);
     }
-
-    .top-dv select,
-    #selectProgLng,
-    #selectTheme,
-    #selectPrompt {
-        font-size: 13px;
-    }
-}
-
-/* Индикатор времени загрузки страницы — по центру в самом низу, более видимый */
-.load-time-footer {
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    padding: 4px 8px;
-    text-align: center;
-    font-size: 12px;
-    line-height: 1.3;
-    color: #444;
-    background: rgba(255, 255, 255, 0.82);
-    -webkit-backdrop-filter: blur(2px);
-    backdrop-filter: blur(2px);
-    border-top: 1px solid rgba(0, 0, 0, 0.08);
-    pointer-events: none;
-    user-select: none;
-    z-index: 1000;
-    font-variant-numeric: tabular-nums;
 }

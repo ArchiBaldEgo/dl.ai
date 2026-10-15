@@ -114,6 +114,7 @@
                 <button type="button" class="theme-toggle doc-toggle" id="userDocsBtn"
                     aria-label="Инструкция пользователя" title="Инструкция пользователя">?</button>
             </div>
+            <div class="voice-group">
             <div class="voice-mod-div">
                 <button type="button" class="voice-mode-btn" id="voiceModeBtn" onclick="toggleVoiceControls()">
                     Голосовой режим
@@ -135,6 +136,7 @@
                     <input type="checkbox" id="speakThinkContent" checked>
                     <label for="speakThinkContent" id="speakThinkLabel">Озвучивать think-блоки</label>
                 </div>
+            </div>
             </div>
             <div id="modelLimitsWidget"></div>
             <div class="panel-date"><span class="ai-last-update-label">Последнее обновление</span>: {{ last_update_date|date:"d.m.Y" }}</div>
