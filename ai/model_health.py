@@ -51,6 +51,14 @@ from .model_clients.web_kimi import restart_kimi_bot_pool
 WEB_DEEPSEEK_KEYS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
 # Web Kimi models served by the WebKimi/ pool — candidates for auto-recovery.
 WEB_KIMI_KEYS = ("Web_Kimi",)
+# Модель → её BotPoolClient (клиент умеет спросить /health пула о готовых ботах).
+from .model_clients.web_deepseek import _client as _web_deepseek_pool_client  # noqa: E501
+from .model_clients.web_kimi import _client as _kimi_pool_client
+
+_WEB_POOL_CLIENTS = {
+    **{key: _web_deepseek_pool_client for key in WEB_DEEPSEEK_KEYS},
+    **{key: _kimi_pool_client for key in WEB_KIMI_KEYS},
+}
 _AUTORECOVERY_BACKOFF_SECONDS = 8
 
 # Health checks only exercise the models defined in the registry below.
@@ -292,6 +300,33 @@ def _check_one_model(key, title, handler_info, window_date):
         }
 
     handler = handler_info["handler"]
+
+    # Web_* модели: мёртвый бот-пул (0 готовых/занятых/запускающихся ботов)
+    # диагностируется напрямую через /health пула — ask-пинг против пустого пула
+    # лишь потянет 3 ретрая 429/503 с backoff'ом. Пул не отвечает или запускается
+    # (пул не отвечает или запускается, pool_state ≠ «empty») — проверяем
+    # ask-пингом как прежде.
+    pool_client = _WEB_POOL_CLIENTS.get(key)
+    if pool_client is not None and pool_client.pool_state() == "empty":
+        message = pool_client.empty_pool_message()
+        _save_availability(
+            window_date=window_date,
+            key=key,
+            title=title,
+            is_available=False,
+            response_time_ms=None,
+            last_message=message,
+            last_http_code=429,
+        )
+        return {
+            "key": key,
+            "title": title,
+            "is_available": False,
+            "last_http_code": 429,
+            "last_message": message,
+            "response_time_ms": None,
+        }
+
     response_text, elapsed_ms, exc = _invoke_healthcheck(handler, window_date, key)
     is_available = exc is None and _is_healthy_response(response_text)
 

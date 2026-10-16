@@ -2340,6 +2340,146 @@ class HealthCheckRetryTests(TestCase):
         self.assertEqual(state["n"], 1)
 
 
+class PoolEmptyHealthCheckTests(TestCase):
+    """Пустой бот-пул (0 готовых ботов) диагностируется напрямую по /health пула,
+    без ask-пинга: против пустого пула любой запрос 429, и 3 ретрая с backoff'ом
+    лишь тянут время. Ложится как unavailable с честным сообщением."""
+
+    def _patch_pools(self, ds_state="", kimi_state=""):
+        from ai import model_health
+        ds, kimi = MagicMock(), MagicMock()
+        ds.pool_state.return_value = ds_state
+        kimi.pool_state.return_value = kimi_state
+        ds.empty_pool_message.return_value = (
+            "Бот-пул Web DeepSeek пуст: нет ни одного готового бота (Chromium не установлен или бот не залогинен)."
+        )
+        kimi.empty_pool_message.return_value = (
+            "Бот-пул Kimi пуст: нет ни одного готового бота (Chromium не установлен или бот не залогинен)."
+        )
+        patcher = patch.object(
+            model_health, "_WEB_POOL_CLIENTS",
+            {"Web_DeepSeek": ds, "Web_DeepSeek_Thinking": ds, "Web_Kimi": kimi},
+        )
+        return patcher, ds, kimi
+
+    def test_empty_pool_short_circuits_without_model_call(self):
+        from ai.model_health import _check_one_model
+
+        async def handler(prompt, conv_id):
+            raise AssertionError("ask-пинг не должен вызываться при пустом пуле")
+
+        handler_info = {"handler": handler, "title": "Web DeepSeek"}
+        patcher, ds, _kimi = self._patch_pools(ds_state="empty", kimi_state="live")
+        with patcher, patch("ai.model_health.time.sleep"):
+            result = _check_one_model("Web_DeepSeek", "Web DeepSeek", handler_info, self._window_date())
+        self.assertFalse(result["is_available"])
+        self.assertEqual(result["last_http_code"], 429)
+        self.assertIn("пуст", result["last_message"])
+        self.assertIn("Web DeepSeek", result["last_message"])
+
+    def test_healthy_pool_still_uses_ask_ping(self):
+        from ai.model_health import _check_one_model
+
+        async def handler(prompt, conv_id):
+            return ("2", 1)
+
+        handler_info = {"handler": handler, "title": "Web DeepSeek"}
+        patcher, ds, _kimi = self._patch_pools(ds_state="live", kimi_state="")
+        with patcher, patch("ai.model_health.time.sleep"):
+            result = _check_one_model("Web_DeepSeek", "Web DeepSeek", handler_info, self._window_date())
+        self.assertTrue(result["is_available"])
+        ds.pool_state.assert_called_once()
+
+    def test_pool_starting_still_uses_ask_ping(self):
+        # Бот запускается («starting » 0) — пул считается живым: старт может
+        # доехать, ask-пинг сохраняет прежний ретрай-протокол.
+        from ai.model_health import _check_one_model
+
+        async def handler(prompt, conv_id):
+            return ("2", 1)
+
+        handler_info = {"handler": handler, "title": "Web Kimi"}
+        patcher, _ds, kimi = self._patch_pools(ds_state="live", kimi_state="live")
+        with patcher, patch("ai.model_health.time.sleep"):
+            result = _check_one_model("Web_Kimi", "Web Kimi", handler_info, self._window_date())
+        self.assertTrue(result["is_available"])
+        kimi.pool_state.assert_called_once()
+
+    def _window_date(self):
+        from ai.model_health import get_health_window_date
+        return get_health_window_date()
+
+
+class BotPoolEmptyReplyTests(SimpleTestCase):
+    """ask() против мёртвого пула: после исчерпания ретраев 429/503 превращаются
+    в честное «пул пуст» вместо лживых «ограничил частоту запросов» / «бот
+    инициализируется». Живой пул (боты есть или запускаются) сохраняет старые
+    тексты — они там честны."""
+
+    def _client(self):
+        from ai.model_clients._base import BotPoolClient
+        return BotPoolClient(
+            base_url="http://127.0.0.1:9999",
+            model="deepseek",
+            label="Web DeepSeek",
+            provider="web_deepseek",
+            site_label="DeepSeek",
+            selector_doc="WebDeepseek/worker/data.json",
+        )
+
+    def _post(self, status_code, retry_after="1"):
+        import requests
+        response = requests.Response()
+        response.status_code = status_code
+        response.headers["Retry-After"] = retry_after
+        response._content = b'{"error":"all bots busy"}'
+        return response
+
+    def test_empty_pool_429_becomes_honest_message(self):
+        client = self._client()
+        with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(429)), \
+             patch.object(client, "pool_state", return_value="empty"), \
+             patch("ai.model_clients._base.asyncio.sleep"):
+            text, tokens, is_error = self._run_ask(client)
+        self.assertTrue(is_error)
+        self.assertEqual(tokens, 0)
+        self.assertIn("пуст", text)
+        self.assertIn("нет ни одного готового бота", text)
+
+    def test_empty_pool_503_becomes_honest_message(self):
+        # Пул спавнил бота «вечно» и тот не поднимается: к концу ретраев /health
+        # не показывает ни ready/busy/starting — честное «пул пуст» вместо
+        # «Бот инициализируется слишком долго».
+        client = self._client()
+        with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(503)), \
+             patch.object(client, "pool_state", return_value="empty"), \
+             patch("ai.model_clients._base.asyncio.sleep"):
+            text, _, is_error = self._run_ask(client)
+        self.assertTrue(is_error)
+        self.assertIn("пуст", text)
+
+    def test_busy_pool_429_keeps_rate_limit_text(self):
+        from ai.model_clients.exceptions import map_http_error
+        client = self._client()
+        with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(429)), \
+             patch.object(client, "pool_state", return_value="live"), \
+             patch("ai.model_clients._base.asyncio.sleep"):
+            text, _, _ = self._run_ask(client)
+        self.assertEqual(text, map_http_error(429, "web_deepseek"))
+
+    def test_starting_pool_503_keeps_bot_init_text(self):
+        client = self._client()
+        with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(503)), \
+             patch.object(client, "pool_state", return_value="live"), \
+             patch("ai.model_clients._base.asyncio.sleep"):
+            text, _, _ = self._run_ask(client)
+        self.assertIn("инициализируется", text)
+
+    def _run_ask(self, client):
+        import asyncio
+        return asyncio.run(client.ask("ping", user_id=1, thinking=False))
+
+
 class ChatViewSelfHealTests(SimpleTestCase):
     """When no model is available for the current window, the chat page kicks a
     non-blocking forced sweep so a freshly-fixed key/balance recovers without

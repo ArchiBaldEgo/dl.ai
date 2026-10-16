@@ -157,6 +157,36 @@ class BotPoolClient:
         finally:
             session.close()
 
+    POOL_EMPTY_MESSAGE = (
+        "Бот-пул {site} пуст: нет ни одного готового бота "
+        "(Chromium не установлен или бот не залогинен)."
+    )
+
+    def pool_state(self) -> str:
+        """Состояние пула по GET /health: «live» | «empty» | «» (не отвечает).
+
+        «live» — есть хотя бы один готовый/занятый/запускающийся бот (запросу
+        это ещё может кончиться успехом); «empty» — мёртвый пул: Chromium не
+        установлен (локальная сборка без прокси) или бот не залогинен/упал —
+        дальше ретраить бессмысленно.
+        """
+        session = proxy_bypass_session()
+        try:
+            response = session.get(f"{self.base_url}/health", timeout=10)
+            obj = response.json()
+            if not obj.get("ok"):
+                return ""
+            live = any(int(obj.get(f"{name}_count") or 0) > 0
+                       for name in ("ready", "busy", "starting"))
+            return "live" if live else "empty"
+        except Exception:
+            return ""
+        finally:
+            session.close()
+
+    def empty_pool_message(self) -> str:
+        return self.POOL_EMPTY_MESSAGE.format(site=self.site_label)
+
     def restart(self, timeout_seconds: int = 30) -> bool:
         """Ask the bot pool to restart its workers (автоподъём).
 
@@ -248,5 +278,14 @@ class BotPoolClient:
                     logger.warning("%s bot pool returned %s, retrying in %ss (attempt %s/%s)", self.label, response.status_code, wait, attempt, max_attempts)
                     await asyncio.sleep(wait)
                     continue
+
+            # Мёртвый пул (ни одного готового/занятого/запускающегося бота) — это
+            # не «ограничение частоты» и не «инициализация»: Chromium не установлен
+            # (локальная сборка без прокси) или бот не залогинен. Текст map_http_error
+            # (429 «заняты» / 503 «инициализируется») об этом лжёт — отвечаем прямо.
+            # Живой пул с запускающимся ботом (503 bot_starting) сохраняет прежние
+            # формулировки — старт может доехать.
+            if response.status_code in (429, 500, 502, 503, 504) and self.pool_state() == "empty":
+                return self.empty_pool_message(), 0, True
 
             return map_http_error(response.status_code, self.provider), 0, True

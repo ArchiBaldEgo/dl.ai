@@ -35,6 +35,11 @@ The project follows these rules; keep it that way and extend along them:
     `ai/model_clients/_base.py` (`bearer_headers`, `proxy_bypass_session`,
     `make_table_handlers`, `BotPoolClient`); `web_deepseek.py` / `web_kimi.py`
     are thin config wrappers over `BotPoolClient` — new web pools add a config, not a copy;
+    мёртвый пул (0 готовых/занятых/запускающихся ботов, локальная сборка не качает
+    Chromium) диагностируется по `/health` пула — `BotPoolClient.pool_state()` («empty»)
+    роняет health-check честным сообщением вместо ask-пинга (`ai/model_health.py::_check_one_model`)
+    и заменяет лживые 429/503-тексты (« Все боты заняты» / «Бот инициализируется») на
+    «Бот-пул … пуст: нет ни одного готового бота» в ответах ask;
   - identity for `AIRequestLog` → `ai/services/auth.py::get_user_identity_for_log`;
   - DL verdict from comment → `ai/dl_api_client.py::dl_verdict_from_comment`
     (failure markers take priority over success markers; unrecognized → failed)
