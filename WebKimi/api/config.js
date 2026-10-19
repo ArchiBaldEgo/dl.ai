@@ -16,6 +16,9 @@ module.exports = {
     maxBotCount: toInt(process.env.KIMI_MAX_BOT_COUNT, 3),
     retryAfterSec: toInt(process.env.KIMI_RETRY_AFTER_SEC, 3),
     requestTimeoutMs: toInt(process.env.KIMI_REQUEST_TIMEOUT_MS, 300_000),
+    // Очередь вместо мгновенного 429; должно быть ЗАВЕДОМО меньше HTTP-таймаута
+    // Django-клиента (300s) — иначе клиент оборвёт соединение раньше ответа.
+    queueWaitMs: toInt(process.env.KIMI_POOL_QUEUE_WAIT_MS, 60_000),
     // worker defaults
     serviceModel: process.env.KIMI_SERVICE_MODEL || 'kimi',
     headless: toBool(process.env.KIMI_HEADLESS, false),

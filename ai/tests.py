@@ -12166,9 +12166,11 @@ class PinnedBatchRunsTests(TestCase):
         # Суперюзер: скупа «только свои» нет — чужой прогон раскрывается.
         self.assertTrue(foreign["snapshot_url"])
 
-    def test_page_for_prompt_developer_hides_foreign_snapshot(self):
-        """Общий список виден и разработчику промтов, но раскрывать чужие
-        прогоны он не может — snapshot_url вычищен (строка не разворачивается)."""
+    def test_page_for_prompt_developer_keeps_foreign_snapshot(self):
+        """Общий список виден и разработчику промтов, и смотреть результаты
+        ЧУЖИХ закреплённых прогонов он может (ТЗ 2026-10-19: закреплённые
+        решения — общая витрина): snapshot_url остаётся; открепить чужое
+        он всё равно не может (is_own=false; toggle — только свои записи)."""
         from django.contrib.auth.models import Group
         Group.objects.get_or_create(name="prompt_developer")
         pd_user = get_user_model().objects.create_user(
@@ -12186,7 +12188,77 @@ class PinnedBatchRunsTests(TestCase):
         self.assertEqual(len(rows), 1)
         self.assertFalse(rows[0]["is_own"])
         self.assertIn("pin_admin", rows[0]["pin_authors"])
-        self.assertEqual(rows[0]["snapshot_url"], "")
+        self.assertEqual(
+            rows[0]["snapshot_url"],
+            f"/ai/admin/ai/request_logs/{self.log.id}/batch-snapshot/",
+        )
+
+    def test_snapshot_serves_foreign_pinned_log_to_prompt_dev(self):
+        """Снапшот-эндпоинт: чужой ЗАКРЕПЛЁННЫЙ прогон промпт-разработчику
+        отдаётся (200 + results), незакреплённый чужой — 404 (скуп «только
+        свои» журнала на него больше не распространяется только при закреплении)."""
+        from django.contrib.auth.models import Group
+        from ai.admin.request_logs import admin_batch_snapshot_view
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        run2 = "b" * 32
+        log2 = AIRequestLog.objects.create(
+            user=self.operator, source="arm", mode="batch_solve",
+            message=f"Batch solve run {run2}",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        AIModelTestRun.objects.create(
+            run_id=run2, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED, course_id=1451,
+        )
+        AIModelTestResult.objects.create(
+            run=AIModelTestRun.objects.get(run_id=run2),
+            model_key="FakeModel", model_title="FakeModel",
+            status=AIModelTestResult.STATUS_OK, verdict="solved",
+            raw_response="jmp begin", code="jmp begin",
+        )
+
+        Group.objects.get_or_create(name="prompt_developer")
+        pd_user = get_user_model().objects.create_user(
+            username="snap_pd", password="x",
+        )
+        pd_user.groups.add(Group.objects.get(name="prompt_developer"))
+
+        # Не закреплённый чужой прогон — скуп прячет → 404.
+        request = RequestFactory().get(f"/ai/admin/ai/request_logs/{log2.id}/batch-snapshot/")
+        request.user = pd_user
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = admin_batch_snapshot_view(request, log_id=log2.id)
+        self.assertEqual(resp.status_code, 404)
+
+        # Закрепили (оператор) — теперь витрина: 200 с полным снапшотом.
+        self.toggle_view(self._post(f"/x/{log2.id}/pin/", self.operator), log2.id)
+        request = RequestFactory().get(f"/ai/admin/ai/request_logs/{log2.id}/batch-snapshot/")
+        request.user = pd_user
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = admin_batch_snapshot_view(request, log_id=log2.id)
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        self.assertEqual(data["run_id"], run2)
+        self.assertEqual(len(data["results"]), 1)
+
+    def test_snapshot_404_for_pinned_non_batch_log(self):
+        """Закрепление гарантирует только видимость снапшота чужому промпт-
+        разработчику; не-батч запись журнала (чат) — 404 даже закреплённой."""
+        from ai.admin.request_logs import admin_batch_snapshot_view
+        from django.contrib.auth.models import Group
+
+        AIPinnedBatchRun.objects.create(user=self.operator, log=self.plain_log)
+        Group.objects.get_or_create(name="prompt_developer")
+        pd_user = get_user_model().objects.create_user(
+            username="snap_pd2", password="x",
+        )
+        pd_user.groups.add(Group.objects.get(name="prompt_developer"))
+        request = RequestFactory().get(f"/ai/admin/ai/request_logs/{self.plain_log.id}/batch-snapshot/")
+        request.user = pd_user
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = admin_batch_snapshot_view(request, log_id=self.plain_log.id)
+        self.assertEqual(resp.status_code, 404)
 
     def test_page_requires_logs_access(self):
         outsider = get_user_model().objects.create_user(username="pin_nobody", password="x")
@@ -12766,6 +12838,42 @@ class WizardUserPageContextTests(TestCase):
         record_wizard_seen(plain2, "admin_pd")
         html = self._render(chat_view, "/ai/chat/", user=plain2)
         self.assertIn('"basics_seen": false', html)
+
+    def test_task_prefill_node_id_on_all_three_pages(self):
+        """Префилл условия задачи со страницы DL: ?nid=… прокидывается в шаблон
+        на всех трёх страницах (data-node-id + bootstrap AI_TASK_NODE_ID).
+
+        Раньше «Реши задачу» держало nid, а «Чат с DLAI» и «В чём ошибка?»
+        игнорировали его вовсе — текст задачи никогда не подставлялся.
+        """
+        from ai.views import decide_task_view, find_error_view
+
+        for view, url in (
+            (chat_view, "/ai/chat/"),
+            (decide_task_view, "/ai/solve-problem/"),
+            (find_error_view, "/ai/find-error/"),
+        ):
+            with self.subTest(url=url):
+                html = self._render(view, f"{url}?nid=2607154")
+                self.assertIn('data-node-id="2607154"', html)
+                self.assertIn("window.AI_TASK_NODE_ID", html)
+        # Без nid — пустое значение, страница живёт как раньше.
+        html = self._render(chat_view, "/ai/chat/")
+        self.assertIn('data-node-id=""', html)
+
+    def test_task_prefill_static_loader_markers(self):
+        """Общий лоадер условия в ai-common и его вызов на find-error/chat:
+        маркеры кода для регресс-безопасности (версии статики в шаблонах
+        иногда откатываются мержами — маркеры ловят откат)."""
+        import ai
+        from pathlib import Path
+        base = Path(ai.__file__).parent.parent / "static/admin/js"
+        common = (base / "ai-common.js").read_text(encoding="utf-8")
+        self.assertIn("async function aiLoadTaskFromUrl", common)
+        fe = (base / "find_error.js").read_text(encoding="utf-8")
+        self.assertIn("aiLoadTaskFromUrl(document.getElementById('taskText')", fe)
+        ct = (base / "chat_template.js").read_text(encoding="utf-8")
+        self.assertIn("aiLoadTaskFromUrl(document.getElementById('messageText')", ct)
 
 
 class AIWizardSeenAdminPermissionTests(_AdminViewRequestMixin, TestCase):

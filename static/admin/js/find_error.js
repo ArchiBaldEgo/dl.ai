@@ -305,6 +305,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
 
     restoreSharedText();
+
+    // Автозагрузка условия задачи из DL-ссылки (?nid=…): кнопка «В чём ошибка?»
+    // на странице задачи ведёт сюда. Раньше nid игнорировался и поле всегда
+    // оставалось пустым. Загрузка идёт ПОСЛЕ restoreSharedText и перезаписывает
+    // восстановленное (в приход с задачи пользователь хочет УСЛОВИЕ этой задачи).
+    if (window.AI_TASK_NODE_ID) {
+        await aiLoadTaskFromUrl(document.getElementById('taskText'), { force: true });
+    }
 });
 
 // === window.onload: init для find_error ===

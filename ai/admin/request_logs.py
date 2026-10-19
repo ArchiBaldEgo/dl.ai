@@ -538,15 +538,25 @@ def build_recent_batch_rows(request, limit=5):
 def admin_batch_snapshot_view(request, log_id):
     """AJAX-снапшот результатов пакетного прогона по записи журнала.
 
-    Ленивая загрузка для страницы «Настройки ИИ-приложения»: полные
-    результаты (results + report) не встраиваются в HTML страницы, а
-    подтягиваются по клику на строку. Права — как у журнала
-    (can_access_logs + скоуп «только свои»); формат — тот же
-    ``_build_batch_log_snapshot``, что потребляет window.ArmBatchResults.
+    Ленивая загрузка для страницы «Настройки ИИ-приложения» и «Закреплённых
+    пакетных решений»: полные результаты (results + report) не встраиваются
+    в HTML страницы, а подтягиваются по клику на строку. Права — как у журнала
+    (can_access_logs + скоуп «только свои»), ОДНО исключение (ТЗ 2026-10-19):
+    ЗАКРЕПЛЁННЫЕ чужие записи журнала отдаются и промпт-разработчику —
+    закреплённые решения суть общая витрина (страница /ai/admin/pinned-runs/).
+    Не закреплённую чужую запись скуп journals по-прежнему прячет (404).
+    Формат — тот же ``_build_batch_log_snapshot``, что потребляет
+    window.ArmBatchResults на /arm/solve/.
     """
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
     log = _scope_logs_qs(AIRequestLog.objects.filter(pk=int(log_id)), request.user).first()
+    if log is None:
+        # Скуп «только свои» (prompt_developer) чужую запись прячет; но если на
+        # неё есть хоть одно закрепление — это общая витрина: отдаём снапшот.
+        if not AIPinnedBatchRun.objects.filter(log_id=int(log_id)).exists():
+            return JsonResponse({"error": "not-found"}, status=404)
+        log = AIRequestLog.objects.filter(pk=int(log_id)).first()
     if log is None or not _is_batch_solve_log(log):
         return JsonResponse({"error": "not-found"}, status=404)
     snapshot = _build_batch_log_snapshot(log)

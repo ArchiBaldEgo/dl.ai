@@ -96,6 +96,13 @@ class Bot {
         this._closed = false;
         this._isLoggedIn = false;
         this._disconnected = false;
+        // Флаг краша рендерера ('Page crashed!'): страница-объект puppeteer при
+        // этом НЕ закрывается (page.isClosed() === false — #closed ставится только
+        // при target-destroy), поэтому isAlive() возвращал бы true и пул держал
+        // бы зомби-бота, а все запросы падали с 429/500. По флагу бот считается
+        // мёртвым (reap) и/или страница пересоздаётся в _ensurePage() прямо
+        // внутри текущего запроса.
+        this._pageCrashed = false;
     }
 
     static NotAuthorizedError = class NotAuthorizedError extends Error {
@@ -223,6 +230,9 @@ class Bot {
         // Проверка жив ли бот: браузер подключён, страница не закрыта.
         // Если puppeteer получил disconnect — бот мёртв.
         if (this._disconnected) return false;
+        // Краш рендерера делает страницу нерабочей, формально «открытой»:
+        // считаем такой бот мёртвым (пул заберёт его reap'ом и заспавнит нового).
+        if (this._pageCrashed) return false;
         const b = this.browser;
         if (!b) return false;
 
@@ -247,11 +257,23 @@ class Bot {
 
     _attachPageEvents(p) {
         p.on('pageerror', (err) => error(`[bot#${this.id}] pageerror: ${err?.stack || err}`));
-        p.on('error', (err) => error(`[bot#${this.id}] page error: ${err?.stack || err}`));
+        p.on('error', (err) => {
+            error(`[bot#${this.id}] page error: ${err?.stack || err}`);
+            // 'error' у Page = краш таргета (renderer OOM и т.п.). Страница при
+            // этом «не закрыта» для puppeteer: помечаем краш и роняем ссылку,
+            // чтобы isAlive() стал false (reap) либо _ensurePage() собрал новую
+            // страницу прямо в текущем запросе.
+            const msg = String(err?.message || err || '');
+            if (/Page crashed|Target closed|Session closed|Target.{0,20}detached/i.test(msg)) {
+                this._pageCrashed = true;
+                this.page = null;
+            }
+        });
         p.on('close', () => {
             error(`[bot#${this.id}] page closed`);
             if (!this._closed) {
                 this._disconnected = true;
+                this._pageCrashed = true;
                 void this.close().catch(() => {});
             }
         });
@@ -259,24 +281,33 @@ class Bot {
 
     async _ensurePage() {
         // If page was closed/crashed, create a fresh one and re-login.
-        if (!this.page || (typeof this.page.isClosed === 'function' && this.page.isClosed())) {
-            log(`[bot#${this.id}] page lost, creating new page and re-login`);
-            const pages = await this.browser.pages().catch(() => []);
-            this.page = pages[0] ?? (await this.browser.newPage());
+        if (!this.browser) return;
+        if (this._pageCrashed || !this.page || (typeof this.page.isClosed === 'function' && this.page.isClosed())) {
+            log(`[bot#${this.id}] page lost/crashed, creating fresh page and re-login`);
+            // ВСЕГДА новая вкладка: browser.pages()[0] после краша может вернуть
+            // сам крашнутый таргет (он ещё числится живым) — переиспользовать его нельзя.
+            const oldPage = this.page;
+            this.page = null;
+            try { await oldPage?.close().catch(() => {}); } catch { /* ignore */ }
+            this.page = await this.browser.newPage();
             await this.page.setViewport(getViewport()).catch(() => {});
             this._attachPageEvents(this.page);
+            this._pageCrashed = false;
             this._isLoggedIn = false;
             await this._ensureAuthorized();
         }
     }
 
     async sendMessage(payload) {
-        // Отправка сообщения через UI сайта DeepSeek.
+        // Отправка сообщения через UI сайта Kimi.
         // Авто-восстановление: если страница закрыта/упала — создаётся новая и выполняется повторный логин.
-        if (!this.page) throw new Error('bot page is not initialized');
+        if (!this.browser) throw new Error('bot browser is not initialized');
 
         // Auto-recovery: if page was closed/crashed, recreate and re-login.
+        // (после краша this.page === null — _ensurePage соберёт новую вкладку и
+        // отлогинится по сохранённой сессии профиля, запрос при этом НЕ падает)
         await this._ensurePage();
+        if (!this.page) throw new Error('bot page is not initialized');
 
         // Safety: if session expired or init didn't finish properly, enforce login before messaging.
         if (!this._isLoggedIn) {

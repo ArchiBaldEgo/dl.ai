@@ -559,8 +559,18 @@ def set_password_view(request):
 
 
 def chat_view(request):
-    """Страница чата с AI-моделью."""
-    return _render_ai_page(request, 'ai/chat.html', wizard_scope="chat")
+    """Страница чата с AI-моделью.
+
+    Принимает nid из DL-ссылки (кнопка «Чат с DLAI» на странице задачи:
+    /ai/chat/?uid=…&nid=…) — тогда текст задачи подставляется в поле ввода
+    (как на «Реши задачу»).
+    """
+    return _render_ai_page(
+        request,
+        'ai/chat.html',
+        extra_context={"node_id": request.GET.get("nid", "")},
+        wizard_scope="chat",
+    )
 
 
 def decide_task_view(request):
@@ -576,8 +586,18 @@ def decide_task_view(request):
 
 
 def find_error_view(request):
-    """Страница поиска ошибок в коде с помощью AI."""
-    return _render_ai_page(request, 'ai/find-error.html', wizard_scope="find_error")
+    """Страница поиска ошибок в коде с помощью AI.
+
+    Принимает nid из DL-ссылки (кнопка «В чём ошибка?» на странице задачи:
+    /ai/find-error/?uid=…&nid=…) — раньше параметр игнорировался вовсе и
+    условие задачи никогда не подставлялось в поле.
+    """
+    return _render_ai_page(
+        request,
+        'ai/find-error.html',
+        extra_context={"node_id": request.GET.get("nid", "")},
+        wizard_scope="find_error",
+    )
 
 
 @require_http_methods(["POST"])

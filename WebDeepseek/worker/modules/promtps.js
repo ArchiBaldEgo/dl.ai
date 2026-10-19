@@ -169,6 +169,39 @@ function deepseekHtmlToApiMarkdown(html) {
   return s;
 }
 
+// === Анти-обрыв: распознавание «пузырь юзера/эхо промпта» и «снимок снят
+// посреди code-блока». Общие хелперы send-пайплайна (см. also Kimi-воркер).
+
+// Нормализация пробелов: текст из DOM пузыря (innerText/outerHTML) приходит с
+// переводами строк/отступами, не совпадающими с исходным промптом.
+function normalizeWs(s) {
+  return String(s || '').replace(/\s+/g, ' ').trim();
+}
+
+// Ответ, ПОЛНОСТЬЮ содержащийся в тексте запроса юзера и длинный (≥60 симв.)
+// — это не решение: селектор поймал пузырь юзера (робастный fallback берёт
+// «последний пузырь с текстом», которым до появления ответа остаётся запрос)
+// или эхо промпта моделью (наблюдение прогона 142 от 17.10: raw = хвост
+// условия задачи, «Не удалось извлечь код»). Короткие ответы («2», «да»)
+// не эхо — порог 60 символов.
+function isEchoOfUserMessage(innerText, messageText) {
+  const a = normalizeWs(innerText);
+  const b = normalizeWs(messageText);
+  if (!a || !b || a.length < 60) return false;
+  return b.indexOf(a) !== -1;
+}
+
+// Незакрытый <pre> в сыром outerHTML = снимок сделан посреди код-блока:
+// генерация ещё шла, код оборван посреди слова ('...m', '...byt' в прогоне
+// 142). Конвертер всегда закрывает ```-оградки, поэтому проверять надо ДО
+// конвертации, в сыром HTML.
+function looksCutMidCode(rawHtml) {
+  const html = String(rawHtml || '');
+  const opens = (html.match(/<pre\b/gi) || []).length;
+  const closes = (html.match(/<\/pre>/gi) || []).length;
+  return opens > closes;
+}
+
 async function getLastOuterHtmlByXPath(page, xpath) {
   return page.evaluate((xp) => {
     const result = document.evaluate(
@@ -634,14 +667,36 @@ async function sendMessage(ctx, payload = {}) {
         let inner = '';
         for (const xp of answerXPaths) {
             try {
-                answer = await waitLastOuterHtmlStable(page, xp, {
-                    timeoutMs: 300000,
-                    pollMs: 2000,
-                    stableTicks: 6,
-                    minContentLength: 50,
-                    checkStopButton: true,
-                    confirmMs: 5000,
-                });
+                // DeepThink рассуждает ДО появления первого ds-markdown (ответа):
+                // 20s appear-таймаут «фейлил» живой селектор, а робастный fallback
+                // в это время ловил пузырь юзера (лог 17.10: шесть подряд
+                // «Waiting failed: 20000ms exceeded» → «Robust fallback
+                // succeeded (236 chars)» = хвост промпта). Первому (выверенному)
+                // селектору при thinking даём 2 минуты на появление ответа.
+                const isPrimary = xp === data.xpaths.chat.answer[currentService];
+                const appearTimeoutMs = isPrimary && isUsetThinking ? 120000 : 20000;
+                // Снимок посреди код-блока (незакрытый <pre>) — ждать продолжения:
+                // до 3 докруток; если обрыв не ушёл (лимит вывода DeepSeek) —
+                // отдаём как есть, чтобы пара получила честный DL-вердикт.
+                const cutBudget = 3;
+                for (let cutTry = 0; cutTry <= cutBudget; cutTry++) {
+                    answer = await waitLastOuterHtmlStable(page, xp, {
+                        timeoutMs: 240000,
+                        appearTimeoutMs,
+                        pollMs: 2000,
+                        stableTicks: 6,
+                        minContentLength: 50,
+                        checkStopButton: true,
+                        confirmMs: 8000,
+                    });
+                    inner = deepseekHtmlToApiMarkdown(answer);
+                    if (!looksCutMidCode(answer)) break;
+                    if (cutTry < cutBudget) {
+                        log('Snapshot looks cut mid-<pre> (streaming), re-waiting (' + (cutTry + 1) + '/' + cutBudget + ')...');
+                    } else {
+                        log('Snapshot still looks cut mid-<pre> after ' + cutBudget + ' re-waits — accepting as is');
+                    }
+                }
                 // НЕ принимаем структурно-набитый, но текстово-пустой контейнер:
                 // minContentLength проверяет длину outerHTML, а не текста, поэтому
                 // пустой «скелет» ds-markdown (≥50 символов HTML-обёртки, ~1 символ
@@ -650,15 +705,17 @@ async function sendMessage(ctx, payload = {}) {
                 // конвертируем и провéряем, что есть настоящий текст, иначе идём
                 // к следующему XPath (это и есть источник «Empty/short response
                 // detected (1 chars)» в логах).
-                inner = deepseekHtmlToApiMarkdown(answer);
                 // Короткие ответы («2», «да», «Four», «42») — легитимны, НЕ
                 // отбраковываем: порог 1 символ, а не 5. Скелет-плейсхолдер
                 // даёт 0 текста, реальный ответ — ≥1. (Аналогично Kimi.)
-                if (inner && inner.trim().length >= 1) {
+                // Текст, ПОЛНОСТЬЮ содержащийся в промпте — пузырь юзера/эхо:
+                // отбраковываем и идём к следующему селектору.
+                const echoHit = isEchoOfUserMessage(inner, messageText);
+                if (inner && inner.trim().length >= 1 && !echoHit) {
                     answerXpUsed = xp;
                     break;
                 }
-                log('XPath ' + xp + ' matched an empty skeleton (' + inner.trim().length + ' chars text), trying next selector');
+                log('XPath ' + xp + (echoHit ? ' matched an echo of the user message' : ' matched an empty skeleton (' + inner.trim().length + ' chars text)') + ', trying next selector');
                 answer = null;
                 inner = '';
             } catch (e) {
@@ -683,10 +740,15 @@ async function sendMessage(ctx, payload = {}) {
                 });
                 if (robustHtml) {
                     inner = deepseekHtmlToApiMarkdown(robustHtml);
-                    if (inner && inner.trim().length >= 1) {
+                    const robustEcho = isEchoOfUserMessage(inner, messageText);
+                    if (inner && inner.trim().length >= 1 && !robustEcho) {
                         answer = robustHtml;
                         answerXpUsed = 'robust-fallback';
                         log('Robust fallback succeeded: extracted answer from generic assistant bubble (' + inner.trim().length + ' chars text)');
+                    } else if (robustEcho) {
+                        // «Последний пузырь с текстом» до появления ответа — это
+                        // промпт юзера; раньше возвращался как «ответ модели».
+                        log('Robust fallback matched a bubble whose text is a fragment of the user message — rejected as echo');
                     } else {
                         log('Robust fallback matched a bubble but converter yielded empty text');
                     }
@@ -724,7 +786,7 @@ async function sendMessage(ctx, payload = {}) {
                         confirmMs: 5000,
                     });
                     const retryInner = deepseekHtmlToApiMarkdown(retryAnswer);
-                    if (retryInner && retryInner.trim().length >= 1 && retryInner.trim().length > inner.trim().length) {
+                    if (retryInner && retryInner.trim().length >= 1 && retryInner.trim().length > inner.trim().length && !isEchoOfUserMessage(retryInner, messageText)) {
                         inner = retryInner;
                         answer = retryAnswer;
                         answerXpUsed = xp;

@@ -2120,6 +2120,28 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     return None
 
 
+def _close_stale_connections_if_safe():
+    """Чистка протухших коннектов воркера без разрыва TestCase-транзакции.
+
+    close_old_connections() при CONN_MAX_AGE=0 считает ЗАКРЫТЫМ любой
+    коннект (close_at≈сейчас), поэтому вызов в начале/в конце model-цикла
+    умирал для тестового потока: TestCase держит atomic на этом же
+    коннекте — закрытие внутри atomic оставляет оборванный коннект, и все
+    последующие запросы пары/финализации падали
+    «InterfaceError: connection already closed» (33 теста arm/batch-пакета
+    не запускались ни изолированно, ни в полном сьюте на чистой базе).
+    Прод-воркер работает в autocommit — там чистка легитимна и нужна.
+    Вызываем close_old_connections() только когда atomic нет."""
+    from django.db import connection
+    try:
+        if connection.get_autocommit():
+            close_old_connections()
+    except Exception:
+        # Спорные состояния не должны ронять прогон — в крайнем случае
+        # чистку пропускаем (это hygiene, не функциональность).
+        pass
+
+
 def _run_batch_model_loop(ctx, model, model_index, dl_lock):
     """Цикл ОДНОЙ модели по её задачам — таргет model-потока (или inline при N=1).
 
@@ -2130,7 +2152,7 @@ def _run_batch_model_loop(ctx, model, model_index, dl_lock):
     исключением не задевает остальные и не валит прогон в FAILED
     (финализация добавит примечание в batch_error_message).
     """
-    close_old_connections()
+    _close_stale_connections_if_safe()
     run_id = ctx["run_id"]
     try:
         for task_ctx in ctx["task_ctxs"]:
@@ -2158,7 +2180,7 @@ def _run_batch_model_loop(ctx, model, model_index, dl_lock):
         _mark_batch_model_failed(run_id, model_index)
     finally:
         _mark_batch_model_finished(run_id, model_index)
-        close_old_connections()
+        _close_stale_connections_if_safe()
 
 def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
     """Финализация batch-прогона: ОДИН раз, после join всех model-потоков.

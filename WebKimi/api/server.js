@@ -61,6 +61,30 @@ function getConversationId(req, body) {
 }
 
 /**
+ * Поиск готового бота с ограниченным ожиданием очереди.
+ *
+ * Раньше отсутствие ready-бота сразу давало 429 «All bots are busy»: при
+ * конкуренции (batch-прогон занимает единственного бота на минусы) пара падала
+ * после 3 ретраев Django. Теперь, пока в пуле ЕСТЬ живой бот (busy/starting),
+ * запрос ждёт освобождения до queueWaitMs (0 — старое поведение мгновенного
+ * 429) и лишь потом уходит в старую ветку 429/503. Ожидание ЗАВЕДОМО меньше
+ * HTTP-таймаута Django-клиента (300s), чтобы клиент не оборвал соединение.
+ */
+async function acquireBotWithWait(botManager, queueWaitMs) {
+  let bot = botManager.acquireReadyBot();
+  if (bot || !queueWaitMs || queueWaitMs <= 0) return bot;
+  const deadline = Date.now() + queueWaitMs;
+  while (!bot && Date.now() < deadline) {
+    // Если живых ботов нет вовсе (краш/рестарт) — подкачиваем спавн прямо
+    // во время ожидания: бот поднимется по сохранённой сессии и запрос успеет.
+    botManager.ensureSpawnIfNeeded();
+    await new Promise((r) => setTimeout(r, 1500));
+    bot = botManager.acquireReadyBot();
+  }
+  return bot;
+}
+
+/**
  * Создаёт Express-приложение с API бот-пула.
  * @param {object} params - { botManager, config, logger }
  * @returns {Express} app — Express-приложение
@@ -105,7 +129,7 @@ function createServer({ botManager, config, logger }) {
       );
     }
 
-    let bot = botManager.acquireReadyBot();
+    let bot = await acquireBotWithWait(botManager, config.queueWaitMs);
     if (!bot) {
       if (botManager.hasNotAutorized()) {
         return res.status(401).json(
@@ -186,7 +210,7 @@ function createServer({ botManager, config, logger }) {
       return res.status(400).json({ ok: false, reason: 'message and model are required' });
     }
 
-    let bot = botManager.acquireReadyBot();
+    let bot = await acquireBotWithWait(botManager, config.queueWaitMs);
     if (!bot) {
       if (botManager.hasNotAutorized()) {
         return res.status(401).json({

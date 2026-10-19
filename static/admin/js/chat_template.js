@@ -129,4 +129,13 @@ window.onload = function() {
 
     var messageText = document.getElementById('messageText');
     if (messageText) messageText.addEventListener('input', saveSharedText);
+
+    // Автозагрузка условия задачи из DL-ссылки (?nid=…): кнопка «Чат с DLAI»
+    // на странице задачи ведёт сюда. Раньше nid игнорировался; теперь, если
+    // со стороны dl.gsu.by он передан — подставляем условие в поле сообщения
+    // (после restoreSharedText и только при пустом/восстановленном поле,
+    // см. ai-common.js::aiLoadTaskFromUrl).
+    if (window.AI_TASK_NODE_ID) {
+        aiLoadTaskFromUrl(document.getElementById('messageText'), { force: true });
+    }
 };

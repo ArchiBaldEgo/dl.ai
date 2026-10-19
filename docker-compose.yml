@@ -13,8 +13,13 @@ services:
         NPM_HTTPS_PROXY: "${RUNTIME_HTTPS_PROXY:-}"
     container_name: dl_ai_web
     restart: unless-stopped
-    mem_limit: 2g
-    memswap_limit: 2g
+    # Chrome-боты Kimi k3-эры: idle-рендерер kimi.com ~0.7-1.0ГБ, на генерации +0.4-0.6ГБ
+    # (жёсткое доказательство: 2g-LIMit ронял рендерер cgroup-OOM'ом на КАЖДОЙ отправке —
+    # «Page crashed!» в worker/logs/application.log). 3.5g хватает на одновременные
+    # генерации web Kimi + web DeepSeek; хост имеет 6.4ГБ (4.4ГБ доступно).
+    shm_size: 512m
+    mem_limit: 3.5g
+    memswap_limit: 3.5g
     oom_kill_disable: false
     volumes:
       - .:/app

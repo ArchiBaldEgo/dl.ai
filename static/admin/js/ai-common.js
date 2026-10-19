@@ -1798,6 +1798,69 @@ function restoreSharedText() {
     } catch (e) {}
 }
 
+// === Автозагрузка условия задачи по nodeId (найден в DL-ссылке: ?nid=…) ===
+//
+// Со страницы задачи dl.gsu.by кнопки ведут на /ai/chat/ / /ai/find-error/
+// / /ai/solve-problem/ с параметрами ?uid=…&nid=…&compiler_b64=….
+// Раньше «В чём ошибка?» и «Чат с DLAI» nid игнорировали вовсе (на странице
+// задач он не задан) — текст задачи никогда не подставлялся в поле.
+// Эта функция — простой лоадер, общий для find_error.js и chat_template.js
+// (decide_task.js использует собственную расширенную версию с per-node
+// localStorage и гонкой последовательности — там префилл с давних пор есть).
+//
+// DL-сессия юзера могла протухнуть: task-info отвечает 302 на dl.gsu.by,
+// fetch падает с «Failed to fetch» — поле остаётся как было, показываем
+// статус честно. Одн повтор на транзиентный сбой.
+var _aiTaskLoadSeq = 0;
+
+function _aiTaskCurrentUiLanguage() {
+    var selectLangEl = document.getElementById('selectLang');
+    if (selectLangEl && selectLangEl.selectedIndex >= 0) {
+        return selectLangEl.options[selectLangEl.selectedIndex].getAttribute('language') || 'Russian';
+    }
+    return 'Russian';
+}
+
+async function aiLoadTaskFromUrl(targetTextarea, opts) {
+    var force = !!(opts && opts.force);
+    var nodeId = String(
+        window.AI_TASK_NODE_ID ||
+        (targetTextarea && targetTextarea.dataset && targetTextarea.dataset.nodeId) || ''
+    ).trim();
+    if (!nodeId) return false;
+    if (!force && targetTextarea && targetTextarea.value.trim()) return true; // в поле есть рукописный текст
+    var seq = ++_aiTaskLoadSeq;
+    var lastError = null;
+    for (var attempt = 0; attempt < 2; attempt++) {
+        try {
+            var url = new URL('/ai/api/task-info/', window.location.origin);
+            url.searchParams.set('nodeId', nodeId);
+            url.searchParams.set('removeHtmlTags', 'true');
+            url.searchParams.set('ui_language', _aiTaskCurrentUiLanguage());
+            var response = await fetch(url.toString());
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            var data = await response.json();
+            var statement = data.statement || data.currentStatement || '';
+            if (!String(statement).trim()) throw new Error('Пустое условие задачи');
+            if (seq !== _aiTaskLoadSeq) return true; // уже начал более свежую загрузку
+            if (targetTextarea) {
+                targetTextarea.value = statement;
+                if (typeof saveSharedText === 'function') saveSharedText();
+            }
+            return true;
+        } catch (error) {
+            lastError = error;
+            if (attempt === 0) {
+                await new Promise(function (resolve) { setTimeout(resolve, 700); });
+                if (seq !== _aiTaskLoadSeq) return false;
+            }
+        }
+    }
+    console.error('aiLoadTaskFromUrl failed:', lastError);
+    updateVoiceStatus(getUiString('taskLoadError', 'Не удалось загрузить условие задачи'));
+    return false;
+}
+
 // === Accordion ===
 
 // Роль сообщения для accordion. Приоритет: явная метка li.dataset.role

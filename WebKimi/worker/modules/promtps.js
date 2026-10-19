@@ -164,6 +164,39 @@ function kimiHtmlToApiMarkdown(html) {
   return s;
 }
 
+// === Анти-обрыв: распознавание «пузырь юзера/эхо промпта» и «снимок снят
+// посреди code-блока». Общие хелперы send-пайплайна (см. also DeepSeek-воркер).
+
+// Нормализация пробелов: текст из DOM пузыря (innerText/outerHTML) приходит с
+// переводами строк/отступами, не совпадающими с исходным промптом.
+function normalizeWs(s) {
+  return String(s || '').replace(/\s+/g, ' ').trim();
+}
+
+// Ответ, ПОЛНОСТЬЮ содержащийся в тексте запроса юзера и длинный (≥60 симв.)
+// — это не решение: селектор поймал пузырь юзера (робастный fallback берёт
+// «последний пузырь с текстом», которым до появления ответа остаётся запрос)
+// или эхо промпта моделью. Короткие ответы («2», «да») не эхо — порог 60
+// символов. Логичное расширение гвардов «экзакт-равенства» ниже: частичный
+// фрагмент промпта (253/615 симв. в прогоне 142 у DeepSeek) равенством не
+// ловился.
+function isEchoOfUserMessage(innerText, messageText) {
+  const a = normalizeWs(innerText);
+  const b = normalizeWs(messageText);
+  if (!a || !b || a.length < 60) return false;
+  return b.indexOf(a) !== -1;
+}
+
+// Незакрытый <pre> в сыром outerHTML = снимок сделан посреди код-блока:
+// генерация ещё шла, код оборван посреди слова. Конвертер всегда закрывает
+// ```-оградки, поэтому проверять надо ДО конвертации, в сыром HTML.
+function looksCutMidCode(rawHtml) {
+  const html = String(rawHtml || '');
+  const opens = (html.match(/<pre\b/gi) || []).length;
+  const closes = (html.match(/<\/pre>/gi) || []).length;
+  return opens > closes;
+}
+
 async function getLastOuterHtmlByXPath(page, xpath) {
   return page.evaluate((xp) => {
     const result = document.evaluate(
@@ -720,23 +753,38 @@ async function sendMessage(ctx, payload = {}) {
         let inner = '';
         for (const xp of answerXPaths) {
             try {
-                answer = await waitLastOuterHtmlStable(page, xp, {
-                    timeoutMs: 300000,
-                    pollMs: 1500,
-                    stableTicks: 4,
-                    minContentLength: 50,
-                    checkStopButton: true,
-                    confirmMs: 3000,
-                });
+                // Снимок посреди код-блока (незакрытый <pre>) — ждать продолжения:
+                // до 3 докруток; если обрыв не ушёл — отдаём как есть (честный
+                // фрагмент вместо молчаливо обрезанного кода).
+                const cutBudget = 3;
+                for (let cutTry = 0; cutTry <= cutBudget; cutTry++) {
+                    answer = await waitLastOuterHtmlStable(page, xp, {
+                        timeoutMs: 240000,
+                        pollMs: 1500,
+                        stableTicks: 4,
+                        minContentLength: 50,
+                        checkStopButton: true,
+                        confirmMs: 3000,
+                    });
+                    inner = kimiHtmlToApiMarkdown(answer);
+                    if (!looksCutMidCode(answer)) break;
+                    if (cutTry < cutBudget) {
+                        log('Snapshot looks cut mid-<pre> (streaming), re-waiting (' + (cutTry + 1) + '/' + cutBudget + ')...');
+                    } else {
+                        log('Snapshot still looks cut mid-<pre> after ' + cutBudget + ' re-waits — accepting as is');
+                    }
+                }
                 // НЕ принимаем структурно-набитый, но текстово-ПУСТОЙ контейнер (0/whitespace).
                 // Короткие ответы («2», «да», «42») — легитимны, НЕ отбраковываем: порог 1 символ,
                 // а не 5. Скелет-плейсхолдер даёт 0 текста, реальный ответ — ≥1.
-                inner = kimiHtmlToApiMarkdown(answer);
-                if (inner && inner.trim().length >= 1) {
+                // ФРАГМЕНТ промпта юзера в качестве «ответа» — отбраковываем:
+                // пузырь юзера до появления ответа (см. isEchoOfUserMessage).
+                const echoHit = isEchoOfUserMessage(inner, messageText);
+                if (inner && inner.trim().length >= 1 && !echoHit) {
                     answerXpUsed = xp;
                     break;
                 }
-                log('XPath ' + xp + ' matched an empty skeleton (' + inner.trim().length + ' chars text), trying next selector');
+                log('XPath ' + xp + (echoHit ? ' matched an echo of the user message' : ' matched an empty skeleton (' + inner.trim().length + ' chars text)') + ', trying next selector');
                 answer = null;
                 inner = '';
             } catch (e) {
@@ -761,10 +809,14 @@ async function sendMessage(ctx, payload = {}) {
                 });
                 if (robustHtml) {
                     inner = kimiHtmlToApiMarkdown(robustHtml);
-                    if (inner && inner.trim().length >= 1) {
+                    const robustEcho = isEchoOfUserMessage(inner, messageText);
+                    if (inner && inner.trim().length >= 1 && !robustEcho) {
                         answer = robustHtml;
                         answerXpUsed = 'robust-fallback';
                         log('Robust fallback succeeded: extracted answer from generic assistant bubble (' + inner.trim().length + ' chars text)');
+                    } else if (robustEcho) {
+                        // До появления ответа «последний пузырь с текстом» — промпт юзера.
+                        log('Robust fallback matched a bubble whose text is a fragment of the user message — rejected as echo');
                     } else {
                         log('Robust fallback matched a bubble but converter yielded empty text');
                     }
@@ -801,7 +853,7 @@ async function sendMessage(ctx, payload = {}) {
                         confirmMs: 3000,
                     });
                     const retryInner = kimiHtmlToApiMarkdown(retryAnswer);
-                    if (retryInner && retryInner.trim().length >= 1 && retryInner.trim().length > inner.trim().length) {
+                    if (retryInner && retryInner.trim().length >= 1 && retryInner.trim().length > inner.trim().length && !isEchoOfUserMessage(retryInner, messageText)) {
                         inner = retryInner;
                         answer = retryAnswer;
                         answerXpUsed = xp;
@@ -840,8 +892,9 @@ async function sendMessage(ctx, payload = {}) {
                 }
             };
         }
-        if (msgTrimmed && innerTrimmed === msgTrimmed) {
-            log("STALE ANSWER guard: extraction picked the user's own message bubble instead of the answer");
+        // Частичный фрагмент промпта (равенством не ловился — см. isEchoOfUserMessage)
+        if (msgTrimmed && isEchoOfUserMessage(innerTrimmed, msgTrimmed)) {
+            log("STALE ANSWER guard: extraction picked the user's own message (fragment) instead of the answer");
             return {
                 ok: false,
                 reason: "can't send message",
