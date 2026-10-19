@@ -40,7 +40,7 @@ WebDeepseek/chromium*
 # Chrome profiles (session cookies) — bind-mounted at runtime via .:/app,
 # not needed in the image; their files are permission-restricted and break
 # the build-context sender (open ... permission denied).
-**/worker/.chrome-profiles/
+**/worker/.chrome-profiles*/
 WebKimi/node_modules/
 WebKimi/.cache/
 WebKimi/.puppeteer-cache/
