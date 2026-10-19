@@ -12193,8 +12193,8 @@ class PinnedBatchRunsTests(TestCase):
 class AIDevTaskBoardTests(TestCase):
     """Доска «Таски» (/ai/admin/tasks/, ai/admin/tasks.py).
 
-    Матрица (новая система групп, миграция 0060): доска видна с
-    «Разработчика» (page.tasks) — «Разработчик промптов» её НЕ имеет;
+    Матрица (система групп, сид 0060 + миграция 0063): доска видна с
+    «Разработчика» и у «Разработчика промптов» (page.tasks выдан группой);
     взять может любой с доступом к доске; создать/закрыть — суперюзер
     (action-ключи никто не имеет из коробки); переставить строки фронта —
     суперюзер/action.task_reorder (выдан «Разработчику»). Номер приоритета
@@ -12247,9 +12247,9 @@ class AIDevTaskBoardTests(TestCase):
         self.assertEqual(resp.status_code, 403)
 
     def test_page_allows_prompt_developer_via_baseline(self):
-        """page.tasks — baseline (ТЗ 2026-10-19): доска видна любому,
-        кто допущен в админку (у «Разработчика промптов» есть page.admin
-        группой) — брать таск тоже можно."""
+        """Доска видна «Разработчику промптов» — у группы есть page.tasks
+        (сид 0060 его не содержал; миграция 0063 выдала, когда ключ вышел
+        из базового набора) — брать таск тоже можно."""
         resp = self.page_view(self._request(self.pd, path=self.tasks_url))
         self.assertEqual(resp.status_code, 200)
         task = AIDevTask.objects.create(title="Т-baseline", created_by=self.superuser)
@@ -12732,8 +12732,11 @@ class AIAccessGroupsAdminTests(TestCase):
         self.assertTrue(dev.is_builtin)
         self.assertEqual(
             {p.key for p in pd.permissions.all()},
+            # миграция 0063: Таски и Состояние моделей выведены из
+            # baseline — выдаются сидом самой группе.
             {"page.admin", "page.arm_solve", "page.prompt_admin",
-             "page.prompt_defaults", "page.logs_own"},
+             "page.prompt_defaults", "page.logs_own",
+             "page.model_status", "page.tasks"},
         )
         self.assertEqual(
             {p.key for p in dev.permissions.all()},
@@ -12751,7 +12754,10 @@ class AIAccessGroupsAdminTests(TestCase):
         # весь «Раздел ИИ» приходит baseline'ом, не сидами:
         # (с 2026-10-19 в baseline и «Видеть все промпты»)
         self.assertIn("page.prompt_admin_all", BASELINE_ACCESS_KEYS)
-        self.assertEqual(set(BASELINE_ACCESS_KEYS) & {"page.tasks"}, {"page.tasks"})
+        # (2026-10-20: Таски и Состояние моделей из базы выведены —
+        # PD получает их сидом встроенной группы, миграция 0063.)
+        self.assertEqual(set(BASELINE_ACCESS_KEYS) & {"page.tasks"}, set())
+        self.assertEqual(set(BASELINE_ACCESS_KEYS) & {"page.model_status"}, set())
         self.assertTrue(user_has_key(pd_user, "page.tasks"))
         self.assertTrue(user_has_key(pd_user, "page.model_status"))
         self.assertTrue(user_has_key(pd_user, "page.logs"))
@@ -16154,8 +16160,89 @@ class BaselineMarkerTests(_AdminViewRequestMixin, TestCase):
         response = admin_access_groups_view(request)
         response.render()
         html = response.content.decode()
-        for key in ("page.tasks", "page.model_status", "page.logs",
-                    "page.prompt_admin_all"):
+        for key in ("page.logs", "page.prompt_admin_all"):
             self.assertIn(f'value="{key}"', html)
         self.assertIn('disabled class="ai-perm-baseline"', html)
         self.assertIn(">база</em>", html)
+
+    def test_page_admin_is_first_in_pages_section(self):
+        # «Вход в админку ИИ» — гейт входа: самый верх списка «Страницы»,
+        # все остальные страницы — после него.
+        from ai.admin.access_groups import admin_access_groups_view
+        superuser = self.user_model.objects.create_superuser(
+            username="gc-order", password="x", email="a@t.com",
+        )
+        request = self._admin_request(superuser, path="/ai/admin/ai-groups/")
+        response = admin_access_groups_view(request)
+        response.render()
+        html = response.content.decode()
+        self.assertLess(
+            html.index('value="page.admin"'),
+            min(
+                html.index(f'value="{key}"')
+                for key in ("page.arm_solve", "page.model_status", "page.tasks")
+            ),
+        )
+
+
+class WizardSeenNavTests(_AdminViewRequestMixin, TestCase):
+    """Ключ page.mgmt_wizard_seen открывает листинг «Пройденные онбординги»
+    в левом наве («Раздел ИИ»), как и любой другой mgmt-ключ."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def _context(self, user):
+        from unittest.mock import patch
+        from ai.admin.site import ai_admin_site
+        request = self._admin_request(user, path="/ai/admin/")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return ai_admin_site.each_context(request)
+
+    def _grant(self, username, keys):
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+        user = self.user_model.objects.create_user(username=username, password="x")
+        group = AIAccessGroup.objects.create(name=f"Ключи-{username}")
+        for key in keys:
+            section = "action" if key.startswith("action.") else "page"
+            perm, _ = AIAdminGroupPermission.objects.get_or_create(
+                key=key, defaults={"label": key, "section": section},
+            )
+            group.permissions.add(perm)
+        group.users.add(user)
+        return user
+
+    def test_wizard_seen_visible_with_key(self):
+        user = self._grant(
+            "nav-wizard", ["page.admin", "page.mgmt_wizard_seen"],
+        )
+        context = self._context(user)
+        names = {
+            model["object_name"]
+            for app in context["available_apps"]
+            for model in app.get("models", [])
+        }
+        self.assertIn("AIWizardSeen", names)
+
+    def test_wizard_seen_hidden_without_key(self):
+        user = self.user_model.objects.create_user(username="nav-nokey", password="x")
+        context = self._context(user)
+        names = {
+            model["object_name"]
+            for app in context["available_apps"]
+            for model in app.get("models", [])
+        }
+        self.assertNotIn("AIWizardSeen", names)
+
+    def test_wizard_seen_superuser_sees(self):
+        user = self.user_model.objects.create_user(
+            username="nav-super", password="x", is_superuser=True, is_staff=True,
+        )
+        context = self._context(user)
+        names = {
+            model["object_name"]
+            for app in context["available_apps"]
+            for model in app.get("models", [])
+        }
+        self.assertIn("AIWizardSeen", names)

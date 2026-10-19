@@ -259,11 +259,15 @@ def _section_items(permissions, section, dynamic):
             ],
         })
     if section == AIAdminGroupPermission.SECTION_PAGE:
-        items += [
+        # «Вход в админку ИИ» — гейт входа, самый верх списка (ТЗ: ключ
+        # без него бессмыслен, он должен быть виден первым) — затем
+        # страницы по порядку нава и стоковые таблицы.
+        gate_items = [
             {"key": p.key, "label": p.label, "children": []}
             for p in permissions
             if p.key in _ALWAYS_PAGE_KEYS
         ]
+        return gate_items + items
     return items
 
 
