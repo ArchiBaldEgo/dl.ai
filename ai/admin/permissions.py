@@ -14,6 +14,22 @@ from ..constants import BUILTIN_GROUP_PROMPT_DEV
 from ..models import AIAccessGroup, AIAdminGroupPermission
 
 
+#: Базовые права ЛЮБОГО, кто допущен в админку (ТЗ 2026-10-19): весь
+#: «Раздел ИИ» (ARM + состояние моделей + таски + промпты), «Мой промпт»
+#: (= page.prompt_admin), «Журнал запросов» (свои записи; супер/staff — все).
+#: Модель ДОБАВЛЯЮЩАЯ: группы поверх baseline выдают действия страниц
+#: (создать/закрыть/переставить), «перезаписывать чужое», «читать все
+#: записи» журнала, главы документации и т.д. Отнять базовое нельзя.
+BASELINE_ACCESS_KEYS = frozenset({
+    "page.arm_solve",
+    "page.model_status",
+    "page.tasks",
+    "page.prompt_admin",
+    "page.prompt_defaults",
+    "page.logs",
+})
+
+
 def is_prompt_developer_user(user):
     """Членство во встроенной группе «Разработчик промптов».
 
@@ -72,6 +88,10 @@ def user_access_keys(user):
     миграция 0060). Superuser'у ключи не нужны — все проверки и так дают ему
     полный доступ через is_superuser_user; здесь все ключи возвращаются для
     удобства (шапка/навычисления). Неактивные/неаутентифицированные — пусто.
+
+    К ключам ГРУПП поверх добавляются базовые права (BASELINE_ACCESS_KEYS):
+    у любого, кто вообще допущен в админку (staff/super либо page.admin
+    группой) — весь «Раздел ИИ» + журнал-свои.
     """
     if not user or not getattr(user, "is_authenticated", False):
         return set()
@@ -79,10 +99,13 @@ def user_access_keys(user):
         return set()
     if user.is_superuser:
         return set(AIAdminGroupPermission.objects.values_list("key", flat=True))
-    return set(
+    group_keys = set(
         AIAccessGroup.objects.filter(users=user)
         .values_list("permissions__key", flat=True)
     )
+    if is_staff_or_superuser(user) or "page.admin" in group_keys:
+        group_keys |= BASELINE_ACCESS_KEYS
+    return group_keys
 
 
 def user_has_key(user, key):
@@ -137,12 +160,12 @@ def can_access_prompt_defaults(request):
 
 
 def can_access_tasks(request):
-    """Доступ к доске «Таски»: суперюзер ИЛИ ключ page.tasks.
+    """Доступ к доске «Таски»: суперюзер ИЛИ ключ page.tasks (baseline).
 
-    «Видна начиная с разработчика»: ключ выдан встроенной «Разработчик»,
-    а «Разработчик промптов» его не имеет. Создать/закрыть/переставить
-    — отдельные action-ключи (action.task_create/close/reorder), сами view
-    проверяют их не здесь.
+    Доска по умолчанию видна любому, кто допущен в админку (page.tasks —
+    baseline). Создать/закрыть/переставить — отдельные action-ключи
+    (action.task_create/close/reorder, аккордеон страницы в «Группах
+    доступа»), сами view проверяют их не здесь.
     """
     if not request.user.is_authenticated:
         return False
@@ -173,24 +196,26 @@ def can_access_updates(request):
 
 
 def can_access_logs(request):
-    """Доступ к логам запросов: staff/superuser или ключ page.logs_own/logs_all.
+    """Доступ к логам запросов: staff/superuser или ключ-страница журнала.
 
-    Разработчикам без staff-прав журнал открыт со строгим ограничением —
-    только собственные запросы (см. ``logs_scope_is_own_user``).
+    Родительский ключ — page.logs («читать свои», baseline); page.logs_own —
+    легаси-синоним; page.logs_all — «читать все записи» (вложенное действие
+    страницы журнала). Разработчикам без staff-прав журнал открыт со строгим
+    ограничением — только собственные запросы (см. ``logs_scope_is_own_user``).
     """
     if not request.user.is_authenticated:
         return False
     if is_staff_or_superuser(request.user):
         return True
     keys = user_access_keys(request.user)
-    return bool({"page.logs_own", "page.logs_all"} & keys)
+    return bool({"page.logs", "page.logs_own", "page.logs_all"} & keys)
 
 
 def logs_scope_is_own_user(user):
     """Строгий фильтр журнала запросов: только свои записи.
 
-    True для не-staff юзера с page.logs_own (но без page.logs_all) —
-    queryset жёстко ограничивается ``user=<себя>`` и чужие записи
+    True для не-staff юзера без page.logs_all (кто вообще может читать
+    журнал) — queryset жёстко ограничивается ``user=<себя>`` и чужие записи
     недоступны даже по прямой ссылке (detail/xlsx/resend дают 403).
     """
     if not user or not getattr(user, "is_authenticated", False):
@@ -200,7 +225,7 @@ def logs_scope_is_own_user(user):
     keys = user_access_keys(user)
     if "page.logs_all" in keys:
         return False
-    return "page.logs_own" in keys
+    return bool({"page.logs", "page.logs_own"} & keys)
 
 
 def filter_app_list_for_user(app_list, request):

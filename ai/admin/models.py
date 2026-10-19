@@ -32,7 +32,14 @@ from ..models import (
 )
 from ..querysets import prompt_queryset_for_user
 from .forms import PromptForm, SharedPromptForm, TopicForm
-from .permissions import can_access_logs, is_prompt_developer_user, is_staff_or_superuser, is_superuser_user
+from .permissions import (
+    can_access_logs,
+    can_access_prompt_admin,
+    is_prompt_developer_user,
+    is_staff_or_superuser,
+    is_superuser_user,
+    user_has_key,
+)
 from ..dl_api_client import (
     DLApiError,
     fetch_task_info,
@@ -210,9 +217,13 @@ class PromptAdmin(admin.ModelAdmin):
         return super().lookup_allowed(lookup, value)
 
     def _can_edit_prompt(self, request, obj):
-        if not (is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)):
+        if not (is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user) or can_access_prompt_admin(request)):
             return False
         if request.user.is_superuser:
+            return True
+        # «Перезаписывать чужие промпты» — действие страницы «Мой промпт»
+        # (аккордеон в «Группах доступа»).
+        if user_has_key(request.user, "page.prompt_admin.edit_others"):
             return True
         if obj is None:
             return True
@@ -223,16 +234,24 @@ class PromptAdmin(admin.ModelAdmin):
     def has_module_permission(self, request):
         if is_staff_or_superuser(request.user):
             return True
-        return is_prompt_developer_user(request.user)
+        return is_prompt_developer_user(request.user) or can_access_prompt_admin(request)
 
     def has_view_permission(self, request, obj=None):
-        return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+        return (
+            is_staff_or_superuser(request.user)
+            or is_prompt_developer_user(request.user)
+            or can_access_prompt_admin(request)
+        )
 
     def has_change_permission(self, request, obj=None):
         return self._can_edit_prompt(request, obj)
 
     def has_add_permission(self, request):
-        return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+        return (
+            is_staff_or_superuser(request.user)
+            or is_prompt_developer_user(request.user)
+            or can_access_prompt_admin(request)
+        )
 
     def has_delete_permission(self, request, obj=None):
         if request.user.is_superuser:
@@ -468,22 +487,39 @@ class SharedPromptAdmin(admin.ModelAdmin):
         )
 
 
-class AIAppSettingsAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+class AIAppSettingsAdmin(admin.ModelAdmin):
     list_display = ("is_enabled", "updated_at")
     # favorites_epoch на форме не нужен (меняется только командой
     # reset_favorites_epoch); updated_at — авторасчётное, тоже не редактируем.
     exclude = ("favorites_epoch", "updated_at")
     change_form_template = "admin/ai/aiappsettings_change_form.html"
 
+    # Страница выдаваемая группам (ТЗ 2026-10-19): staff/super ИЛИ ключ
+    # page.app_settings (аккордеон «Страниц» в «Группах доступа»). Не входит
+    # в baseline («Закреплено»/настройка всего ИИ, не «Раздел ИИ»).
+    def _app_settings_access(self, request):
+        return is_staff_or_superuser(request.user) or user_has_key(
+            request.user, "page.app_settings"
+        )
+
+    def has_module_permission(self, request):
+        return self._app_settings_access(request)
+
+    def has_view_permission(self, request, obj=None):
+        return self._app_settings_access(request)
+
+    def has_change_permission(self, request, obj=None):
+        return self._app_settings_access(request)
+
     def has_add_permission(self, request):
-        if not is_staff_or_superuser(request.user):
+        if not self._app_settings_access(request):
             return False
         if AIAppSettings.objects.exists():
             return False
         return super().has_add_permission(request)
 
     def has_delete_permission(self, request, obj=None):
-        if not is_staff_or_superuser(request.user):
+        if not self._app_settings_access(request):
             return False
         return False
 

@@ -61,6 +61,18 @@
 .ai-groups-perm code {
   color: var(--body-quiet-color); font-size: 11px; margin-left: 6px;
 }
+/* Вложенные действия страницы (аккордеон прав): блок = строка страницы +
+   кнопка «Действия» + скрытый список; вложенные чекбоксы с отступом. */
+.ai-groups-perm-block { break-inside: avoid; }
+.ai-groups-perm-block .ai-perm-toggle {
+  margin-left: 18px; padding: 2px 8px; font-size: 11px;
+}
+.ai-perm-toggle-open { font-weight: 600; }
+.ai-perm-children {
+  margin: 2px 0 6px 22px; padding-left: 10px;
+  border-left: 2px solid var(--hairline-color);
+}
+.ai-groups-perm-child { padding: 1px 0; font-size: 12px; }
 
 .ai-groups-actions { display: flex; gap: 8px; align-items: center; }
 .ai-groups-delete { color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color)); }

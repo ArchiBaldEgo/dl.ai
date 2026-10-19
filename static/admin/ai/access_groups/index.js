@@ -87,6 +87,22 @@
         if (head) head.setAttribute('aria-expanded', open ? 'true' : 'false');
     }
 
+    // --- Вложенные действия страницы (аккордеон прав внутри карточки). ---
+    document.addEventListener('click', function (event) {
+        var btn = event.target.closest('[data-ai-perm-toggle]');
+        if (!btn) return;
+        var list = btn.closest('.ai-groups-perm-block').querySelector('.ai-perm-children');
+        if (!list) return;
+        var open = list.hasAttribute('hidden');
+        if (open) {
+            list.removeAttribute('hidden');
+        } else {
+            list.setAttribute('hidden', '');
+        }
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        btn.classList.toggle('ai-perm-toggle-open', open);
+    });
+
     document.addEventListener('click', function (event) {
         var head = event.target.closest('.ai-group-head');
         if (!head || event.target.closest('[data-toggle-url], [data-delete-url], .ai-groups-compose')) return;

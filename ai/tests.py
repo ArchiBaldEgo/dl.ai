@@ -8384,12 +8384,15 @@ class ArmPromptBindingTests(TestCase):
         self.assertEqual(ArmPromptBinding.objects.count(), 2)
 
     def test_page_requires_superuser(self):
+        """page.prompt_defaults — baseline (ТЗ 2026-10-19): staff с допуском
+        в админку теперь тоже видит «Промпты по умолчанию»; остаётся 403
+        у юзера без допуска вовсе (не staff, без page.admin)."""
         from ai.admin.prompt_defaults import admin_prompt_defaults_view
         request = self.factory.get("/ai/admin/prompt-defaults/")
         request.user = self.staff
         request.session = {}
         response = admin_prompt_defaults_view(request)
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
 
         request = self.factory.get("/ai/admin/prompt-defaults/")
         request.user = self.superuser
@@ -12420,21 +12423,21 @@ class AIDevTaskBoardTests(TestCase):
     # --- Доступ --- -------------------------------------------------------
 
     def test_page_denies_plain_user(self):
+        """Без допуска в админку (page.admin) baseline не выдаётся — 403."""
         resp = self.page_view(self._request(self.outsider, path=self.tasks_url))
         self.assertEqual(resp.status_code, 403)
 
-    def test_page_denies_prompt_developer(self):
-        """«Видна начиная с разработчика»: у «Разработчика промптов» ключа
-        page.tasks нет — 403."""
+    def test_page_allows_prompt_developer_via_baseline(self):
+        """page.tasks — baseline (ТЗ 2026-10-19): доска видна любому,
+        кто допущен в админку (у «Разработчика промптов» есть page.admin
+        группой) — брать таск тоже можно."""
         resp = self.page_view(self._request(self.pd, path=self.tasks_url))
-        self.assertEqual(resp.status_code, 403)
-
-    def test_claim_denies_prompt_developer(self):
-        task = AIDevTask.objects.create(title="Т-недоступен", created_by=self.superuser)
+        self.assertEqual(resp.status_code, 200)
+        task = AIDevTask.objects.create(title="Т-baseline", created_by=self.superuser)
         resp = self.claim_view(self._request(self.pd, "post", f"/x/{task.id}/claim/"), task.id)
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 200)
         task.refresh_from_db()
-        self.assertIsNone(task.taken_by)
+        self.assertEqual(task.taken_by, self.pd)
 
     def test_page_allows_developer_and_superuser(self):
         resp = self.page_view(self._request(self.dev, path=self.tasks_url))
@@ -12621,17 +12624,11 @@ class AIDevTaskBoardTests(TestCase):
         resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=bogus"))
         self.assertEqual(resp.context_data["active_kind"], "front")
 
-    def test_mine_tab_shows_only_own_active_tasks(self):
-        """«Мои таски» (kind=mine) — псевдо-вкладка-фильтр: взятые
-        пользователем + созданные им (пока их не взял кто-то ещё); чужие не
-        видны, закрытый (=удалённый) таск исчезает. Хотелка попадает тоже —
+    def test_mine_tab_shows_only_own_taken_tasks(self):
+        """«Мои таски» (kind=mine) — только таски, ВЗЯТЫЕ пользователем
+        (созданные им, но не взятые никем, не показываются; чужие не видны);
+        закрытый (=удалённый с доски) таск исчезает. Хотелка попадает тоже —
         фильтр не по kind; порядок по номеру фронта, NULL-номера в конец."""
-        created_front = AIDevTask.objects.create(
-            title="Мой созданный", kind="front", priority_no=1, created_by=self.dev,
-        )
-        AIDevTask.objects.create(
-            title="Моя хотелка", kind="wish", created_by=self.dev,
-        )
         claimed = AIDevTask.objects.create(
             title="Мой взятый", kind="front", priority_no=2, created_by=self.superuser,
         )
@@ -12639,31 +12636,25 @@ class AIDevTaskBoardTests(TestCase):
         self.claim_view(
             self._request(self.dev, "post", f"/x/{claimed.id}/claim/"), claimed.id
         )
+        claimed_wish = AIDevTask.objects.create(
+            title="Моя взятая хоталка", kind="wish", created_by=self.superuser,
+        )
+        self.claim_view(
+            self._request(self.dev, "post", f"/x/{claimed_wish.id}/claim/"), claimed_wish.id
+        )
+        # созданный мной, никем не взятый — в mine НЕ попадает
+        AIDevTask.objects.create(
+            title="Мой созданный", kind="front", priority_no=1, created_by=self.dev,
+        )
         AIDevTask.objects.create(
             title="Чужой взятый", kind="front", priority_no=3,
             created_by=self.superuser, taken_by=self.superuser,
-        )
-        AIDevTask.objects.create(
-            title="Чужой созданный", kind="front", priority_no=4, created_by=self.superuser,
         )
 
         resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=mine"))
         self.assertEqual(resp.context_data["active_kind"], "mine")
         titles = [r["title"] for r in resp.context_data["rows"]]
-        self.assertEqual(titles, ["Мой созданный", "Мой взятый", "Моя хотелка"])
-
-        # Чужой таск, взятый МНОЙ, появляется в mine; при этом взятый кем-то
-        # другом (superuser) «Чужой взятый» — нет (exact-список выше).
-
-        # Взял кто-то другой мой созданный → он выпадает из mine.
-        self.claim_view(
-            self._request(self.other_dev, "post", f"/x/{created_front.id}/claim/"),
-            created_front.id,
-        )
-        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=mine"))
-        titles = [r["title"] for r in resp.context_data["rows"]]
-        self.assertNotIn("Мой созданный", titles)
-        self.assertIn("Мой взятый", titles)
+        self.assertEqual(titles, ["Мой взятый", "Моя взятая хоталка"])
 
         # Закрытый таск — удалён с доски → из mine исчезает.
         self.close_view(
@@ -12671,7 +12662,7 @@ class AIDevTaskBoardTests(TestCase):
         )
         resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=mine"))
         titles = [r["title"] for r in resp.context_data["rows"]]
-        self.assertNotIn("Мой взятый", titles)
+        self.assertEqual(titles, ["Моя взятая хоталка"])
 
     # --- Перестановка фронта (reorder) -------------------------------------
 
@@ -12932,13 +12923,19 @@ class AIAccessGroupsAdminTests(TestCase):
              "page.tasks", "page.logs_own", "page.updates",
              "docs.developer", "action.task_reorder"},
         )
-        # «Видна начиная с разработчика»: page.tasks у промпт-девелопера НЕТ,
-        # у разработчика ЕСТЬ — решается ключами, не отдельной веткой.
-        from ai.admin.permissions import user_has_key
-        self.assertFalse(user_has_key(self.plain, "page.tasks"))
+        # Базовые права (BASELINE_ACCESS_KEYS): seeds групп могли и не менять
+        # — baseline выдаётся В КОДЕ любому с page.admin, а не сидами.
+        from ai.admin.permissions import user_has_key, BASELINE_ACCESS_KEYS
+        self.assertFalse(user_has_key(self.plain, "page.tasks"))  # нет page.admin — нет и baseline
         make_prompt_developer(pd_user := self.plain)
         self.assertTrue(user_has_key(pd_user, "page.admin"))
-        self.assertFalse(user_has_key(pd_user, "page.tasks"))
+        # весь «Раздел ИИ» приходит baseline'ом, не сидами:
+        self.assertEqual(set(BASELINE_ACCESS_KEYS) & {"page.tasks"}, {"page.tasks"})
+        self.assertTrue(user_has_key(pd_user, "page.tasks"))
+        self.assertTrue(user_has_key(pd_user, "page.model_status"))
+        self.assertTrue(user_has_key(pd_user, "page.logs"))
+        # действия по-прежнему НЕ baseline:
+        self.assertFalse(user_has_key(pd_user, "action.task_create"))
         make_developer(dev_user := get_user_model().objects.create_user(
             username="groups_dev", password="x",
         ))
@@ -12959,6 +12956,56 @@ class AIAccessGroupsAdminTests(TestCase):
         make_prompt_developer(pd_user)
         from ai.admin.permissions import can_access_prompt_defaults
         self.assertTrue(can_access_prompt_defaults(type("R", (), {"user": pd_user})()))
+
+    def test_edit_others_key_opens_foreign_prompts(self):
+        """page.prompt_admin.edit_others — «Перезаписывать чужие промпты»
+        (вложенное действие «Моего промпта», ТЗ 2026-10-19): не-staff'у видны
+        все промпты (queryset) и чужая запись открывается на правку; без
+        ключа — только свои/редактируемые."""
+        from ai.admin.models import PromptAdmin
+        from ai.admin.permissions import user_has_key
+        from ai.admin.site import ai_admin_site
+        from ai.models import AIAccessGroup, Prompt
+        from ai.querysets import prompt_queryset_for_user
+
+        resp = self._save(self.superuser, 0, {
+            "name": "Редакторы чужого",
+            "permissions": [
+                "page.admin", "page.prompt_admin", "page.prompt_admin.edit_others",
+            ],
+        })
+        self.assertEqual(resp.status_code, 200)
+        group = AIAccessGroup.objects.get(name="Редакторы чужого")
+        member = get_user_model().objects.create_user(
+            username="prompt_editor", password="x",
+        )
+        group.users.add(member)
+        self.assertTrue(user_has_key(member, "page.prompt_admin.edit_others"))
+
+        foreign = Prompt.objects.create(
+            prompt_name_ru="Чужой промпт",
+            prompt_text_ru="Текст чужого промпта",
+            owner=self.superuser,
+        )
+        # Ключ открывает ЛЮБЫЕ промпты и на просмотр, и на правку.
+        self.assertIn(
+            foreign,
+            prompt_queryset_for_user(Prompt.objects.all(), member),
+        )
+        request = RequestFactory().get("/")
+        request.user = member
+        admin = ai_admin_site._registry[Prompt]
+        self.assertTrue(admin.has_change_permission(request, obj=foreign))
+
+        # Без ключа (у «Разработчика промптов» только baseline) — чужое закрыто.
+        pd_user = get_user_model().objects.create_user(
+            username="prompt_editor2", password="x",
+        )
+        make_prompt_developer(pd_user)
+        self.assertFalse(user_has_key(pd_user, "page.prompt_admin.edit_others"))
+        self.assertNotIn(
+            foreign, prompt_queryset_for_user(Prompt.objects.all(), pd_user),
+        )
 
     # --- CRUD -----------------------------------------------------------
 
@@ -12984,7 +13031,10 @@ class AIAccessGroupsAdminTests(TestCase):
         member = get_user_model().objects.create_user(username="arm_op", password="x")
         group.users.add(member)
         self.assertTrue(user_has_key(member, "page.arm_solve"))
-        self.assertFalse(user_has_key(member, "page.prompt_defaults"))
+        # baseline даёт page.prompt_defaults любому с page.admin (он в выдаче),
+        # поэтому «нет доступа» проверяем на не-baseline ключе:
+        self.assertFalse(user_has_key(member, "page.test_console"))
+        self.assertTrue(user_has_key(member, "page.prompt_defaults"))
 
     def test_create_requires_name(self):
         resp = self._save(self.superuser, 0, {"name": "", "permissions": []})
@@ -13092,7 +13142,8 @@ class AIAccessGroupsAdminTests(TestCase):
     def test_pages_section_follows_nav_registry(self):
         """«Страницы» — динамически из _ai_tool_defs: строка ключа, потерянная
         в БД, восстанавливается при рендере; page.admin (без URL) остаётся;
-        устаревшая БД-строка не показывается."""
+        устаревшая БД-строка не показывается. Вложенные действия страниц —
+        аккордеоном; «Регрессионные тесты» из списка исключены (ТЗ)."""
         from ai.models import AIAdminGroupPermission
 
         AIAdminGroupPermission.objects.filter(key="page.arm_solve").delete()
@@ -13112,10 +13163,15 @@ class AIAccessGroupsAdminTests(TestCase):
         self.assertIn("Документация для разработчика", html)
         # page.admin — гейт входа, страницы не имеет: остаётся.
         self.assertIn("page.admin", html)
-        # Действия — чисто БД-список.
-        self.assertIn("action.task_create", html)
-        # Устаревший ключ (нет ни в наве, ни в urls) не рисуется.
+        # Вложенные действия «Тасок» и «Моего промпта» — аккордеоном
+        # (value-чекбоксы есть, страницы без действий кнопку не рисуют).
+        self.assertIn('value="action.task_create"', html)
+        self.assertIn('value="page.prompt_admin.edit_others"', html)
+        self.assertIn('value="page.logs_all"', html)
+        self.assertIn("Перезаписывать чужие промпты", html)
+        # Ключи-страницы без ключа в коде или супер-инструменты в списке нет.
         self.assertNotIn("page.ghost", html)
+        self.assertNotIn("page.prompt_regression", html)
 
     def test_member_search_endpoint(self):
         from ai.admin.access_groups import admin_access_group_member_search_view
@@ -13420,18 +13476,30 @@ class AssetViewETagTests(TestCase):
         return response
 
     def test_200_carries_etag_and_no_cache(self):
+        """Кавыченный md5 (content + соль старта процесса): соль не даёт
+        «отравленному» кэшу прошлого деплоя (пустое тело при живом old-ETag)
+        навсегда отвечать 304 — новый процесс гарантированно перекачивает
+        свежие байты; сам честный cached-байт продолжает ловить 304."""
         import hashlib
+        from ai.views import _ASSET_BOOT_SALT
         response = self._get()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Cache-Control"], "no-cache")
         self.assertIn("ETag", response)
         etag = response["ETag"]
-        # Кавыченный md5.
         self.assertTrue(etag.startswith('"') and etag.endswith('"'))
         from django.contrib.staticfiles import finders
         path = finders.find("admin/css/ai.css")
         with open(path, "rb") as fh:
-            self.assertEqual(etag.strip('"'), hashlib.md5(fh.read()).hexdigest())
+            self.assertEqual(
+                etag.strip('"'),
+                hashlib.md5(_ASSET_BOOT_SALT + fh.read()).hexdigest(),
+            )
+        # Соль реально участвует: голый md5 контента больше НЕ валидатор.
+        self.assertNotEqual(
+            etag.strip('"'),
+            hashlib.md5(open(path, "rb").read()).hexdigest(),
+        )
 
     def test_matching_etag_gives_304_with_etag_and_cache_control(self):
         first = self._get()
@@ -15048,8 +15116,9 @@ class RequestLogFiltersUiTests(TestCase):
 # ===================================================================
 
 class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
-    """«Промпты по умолчанию» (/ai/admin/prompt-defaults/) открыты
-    суперюзеру и члену группы prompt_developer; staff вне группы — 403;
+    """«Промпты по умолчанию» (/ai/admin/prompt-defaults/) открыты супер-
+    юзеру и любому допущенному в админку (page.prompt_defaults — baseline,
+    ТЗ 2026-10-19); юзер без допуска (не staff, без page.admin) — 403;
     в гостевом режиме пункт навигации скрыт."""
 
     def setUp(self):
@@ -15079,10 +15148,18 @@ class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(response.status_code, 200)
 
     def test_plain_staff_forbidden(self):
+        """Staff с допуском в админку — 200 (baseline); юзер вовсе без
+        допуска (не staff, нет page.admin) — 403."""
         staff = self.user_model.objects.create_user(
             username="pd-staff", password="x", is_staff=True,
         )
         response = self._get(staff)
+        self.assertEqual(response.status_code, 200)
+
+        outsider = self.user_model.objects.create_user(
+            username="pd-outsider", password="x",
+        )
+        response = self._get(outsider)
         self.assertEqual(response.status_code, 403)
 
     def _nav_tools(self, user, guest=False):

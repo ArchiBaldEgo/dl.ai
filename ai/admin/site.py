@@ -431,8 +431,13 @@ class AIAdminSite(admin.AdminSite):
         выдачу только по access_key — новая страница, добавленная сюда со
         своим page.*/docs.*-ключом, появляется в «Группах доступа» сама).
         Формат кортежа: (group, label, object_name, url, visible, icon,
-        hint, access_key); access_key — ключ-страница/дока (page.*|docs.*)
-        или None (доступ гейтится иными правами: staff/группой/суперюзером).
+        hint, access_key, actions); access_key — ключ-страница/дока
+        (page.*|docs.*) или None (доступ гейтится иными правами: staff/
+        группой/суперюзером); actions — КОРТЕЖ вложенных (key, label)
+        постраничных действий для их аккордеона в «Группах доступа»
+        ([] у страниц без отдельных действий). Ключи действий могут быть
+        легаси-section ACTION (action.task_create) — строки БД переезжают
+        только зрительно, проверяющий код не меняется.
         """
         from .guest_mode import is_viewing_as_guest
         from .my_prompt import get_my_prompt_admin_url
@@ -462,38 +467,54 @@ class AIAdminSite(admin.AdminSite):
             # навигации (группа «ai-pinned» рендерится без заголовка, см.
             # admin/app_list.html). Раньше это была строка группы «Раздел
             # ИИ» — из real_apps ниже она убирается, чтобы не дублировалась.
-            ("Закреплено", "Настройка ИИ-приложения", "AiAppSettings", aiappsettings_url, is_staff and not guest, "⚙", "Вкл/выкл доступ к ИИ, последние запросы и пакетные прогоны", None),
+            ("Закреплено", "Настройка ИИ-приложения", "AiAppSettings", aiappsettings_url, (is_staff or user_has_key(request.user, "page.app_settings")) and not guest, "⚙", "Вкл/выкл доступ к ИИ, последние запросы и пакетные прогоны", "page.app_settings", ()),
             # «Закреплённые пакетные решения» — сразу под «Настройкой ИИ-приложения»
             # (та же беззаголовочная группа «ai-pinned»): закреплённые завершённые
             # пакетные прогоны (★ в журнале и на «Настройке ИИ-приложения»).
-            # В гостевом режиме скрыта, как и вся группа настройки.
-            ("Закреплено", "Закреплённые пакетные решения", "AiPinnedBatchRuns", "/ai/admin/pinned-runs/", show_logs and not guest, "★", "Закреплённые завершённые пакетные прогоны", None),
+            # В гостевом режиме скрыта, как и вся группа настройки. Права —
+            # как у журнала (page.logs_own/logs_all), отдельного ключа нет.
+            ("Закреплено", "Закреплённые пакетные решения", "AiPinnedBatchRuns", "/ai/admin/pinned-runs/", show_logs and not guest, "★", "Закреплённые завершённые пакетные прогоны", None, ()),
             # Доска «Таски» — прямо под закреплёнными пакетными решениями
-            # (ТЗ 2026-10-19): суперюзер создаёт/закрывает, «Разработчик»
-            # берёт; вкладки «Фронт работы» (числовой приоритет,
-            # перетаскивание) и «Хотелки».
-            ("Закреплено", "Таски", "AiDevTask", tasks_url, show_tasks, "▦", "Доска задач: фронт работы + хотелки", "page.tasks"),
+            # (ТЗ 2026-10-19): суперюзер создаёт/закрывает, остальные берут;
+            # вкладки «Фронт работы» (числовой приоритет, перетаскивание)
+            # и «Хотелки». Действия доски — отдельные ключи (аккордеон
+            # страницы в «Группах доступа»): создать/закрыть/переставить.
+            ("Закреплено", "Таски", "AiDevTask", tasks_url, show_tasks, "▦", "Доска задач: фронт работы + хотелки", "page.tasks", (
+                ("action.task_create", "Создавать таски"),
+                ("action.task_close", "Закрывать таски"),
+                ("action.task_reorder", "Менять порядок фронта"),
+            )),
             # NB: остальные дубликаты реальных ModelAdmin-строк («Промпты»)
             # сюда НЕ добавляем — они и так есть в группе «Раздел ИИ» ниже.
-            # Здесь — только кастомные инструменты.
-            ("Промпты", "Мой промпт", "AiMyPrompt", my_prompt_url, is_pd, "✎", "Свои и закреплённые промпты", None),
-            ("Промпты", "Промпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", can_access_prompt_defaults(request) and not guest, "⚙", "Авто-подстановка по языку/теме ARM", "page.prompt_defaults"),
-            ("Документация", "Разработчик промптов", "AiDocsPromptDeveloper", docs_url + "prompt-developer/", True, "✎", "Инструкция для разработчика промптов", None),
-            ("Документация", "Разработчик", "AiDocsDeveloper", docs_url + "developer/", (is_staff or user_has_key(request.user, "docs.developer")) and not guest, "⚙", "Документация для разработчика", "docs.developer"),
-            ("Документация", "Суперюзер", "AiDocsSuperuser", docs_url + "superuser/", user_has_key(request.user, "docs.superuser") and not guest, "⚙", "Инструкция для суперадмина", "docs.superuser"),
-            ("ARM", "Пакетное решение", "AiArmSolve", "/ai/admin/arm/solve/", show_arm, "▤", "Пакетный прогон моделей по задачам DL", "page.arm_solve"),
-            ("ARM", "Состояние моделей", "AiModelStatus", "/ai/admin/arm/models/", show_model_status, "◉", "Доступность AI-моделей сегодня", "page.model_status"),
-            ("Диагностика", "Журнал запросов", "AiRequestLogs", "/ai/admin/ai/request_logs/", show_logs, "≣", "Все запросы к моделям, с поиском", None),
-            ("Диагностика", "Регрессионные тесты", "AiPromptRegression", "/ai/admin/prompt-regression/", show_prompt_regression, "✓", "Проверка промптов на тест-кейсах", "page.prompt_regression"),
-            ("Диагностика", "Тестовая консоль", "AiTestConsole", "/ai/admin/test-console/", show_test_console, "⌘", "Запуск набора тестов приложения", "page.test_console"),
+            # Здесь — только кастомные инструменты. «Мой промпт» гейтится
+            # ключом page.prompt_admin (тот же, что у ModelAdmin-промптов:
+            # пишущий доступ — свои; «чужое» — вложенный ключ
+            # page.prompt_admin.edit_others, см. querysets.prompt_queryset_for_user).
+            ("Промпты", "Мой промпт", "AiMyPrompt", my_prompt_url, (is_pd or user_has_key(request.user, "page.prompt_admin")) and not guest, "✎", "Свои и закреплённые промпты", "page.prompt_admin", (
+                ("page.prompt_admin.edit_others", "Перезаписывать чужие промпты"),
+            )),
+            ("Промпты", "Промпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", can_access_prompt_defaults(request) and not guest, "⚙", "Авто-подстановка по языку/теме ARM", "page.prompt_defaults", ()),
+            ("Документация", "Разработчик промптов", "AiDocsPromptDeveloper", docs_url + "prompt-developer/", True, "✎", "Инструкция для разработчика промптов", None, ()),
+            ("Документация", "Разработчик", "AiDocsDeveloper", docs_url + "developer/", (is_staff or user_has_key(request.user, "docs.developer")) and not guest, "⚙", "Документация для разработчика", "docs.developer", ()),
+            ("Документация", "Суперюзер", "AiDocsSuperuser", docs_url + "superuser/", user_has_key(request.user, "docs.superuser") and not guest, "⚙", "Инструкция для суперадмина", "docs.superuser", ()),
+            ("ARM", "Пакетное решение", "AiArmSolve", "/ai/admin/arm/solve/", show_arm, "▤", "Пакетный прогон моделей по задачам DL", "page.arm_solve", ()),
+            ("ARM", "Состояние моделей", "AiModelStatus", "/ai/admin/arm/models/", show_model_status, "◉", "Доступность AI-моделей сегодня", "page.model_status", ()),
+            # Журнал — родительский ключ page.logs («читать свои»), «читать
+            # все» — вложенный page.logs_all (легаси-ключи page.logs_own —
+            # синоним родителя, проверки их признают).
+            ("Диагностика", "Журнал запросов", "AiRequestLogs", "/ai/admin/ai/request_logs/", show_logs, "≣", "Все запросы к моделям, с поиском", "page.logs", (
+                ("page.logs_all", "Читать все записи"),
+            )),
+            ("Диагностика", "Регрессионные тесты", "AiPromptRegression", "/ai/admin/prompt-regression/", show_prompt_regression, "✓", "Проверка промптов на тест-кейсах", "page.prompt_regression", ()),
+            ("Диагностика", "Тестовая консоль", "AiTestConsole", "/ai/admin/test-console/", show_test_console, "⌘", "Запуск набора тестов приложения", "page.test_console", ()),
             ("Диагностика",
              "Тестовые данные",
              "AiTestData",
              test_data_url,
-             show_test_data, "⚙", "Создание и редактирование тестовых данных", None),
-            ("Система", "Обновления", "AiUpdates", "/ai/admin/updates/", show_updates, "↻", "История изменений проекта", "page.updates"),
+             show_test_data, "⚙", "Создание и редактирование тестовых данных", None, ()),
+            ("Система", "Обновления", "AiUpdates", "/ai/admin/updates/", show_updates, "↻", "История изменений проекта", "page.updates", ()),
             # «Группы доступа» — только суперюзеру (права и состав групп).
-            ("Система", "Группы доступа", "AiAccessGroups", "/ai/admin/ai-groups/", is_super and not guest, "⛭", "Группы доступа: права страниц, действия, состав", None),
+            ("Система", "Группы доступа", "AiAccessGroups", "/ai/admin/ai-groups/", is_super and not guest, "⛭", "Группы доступа: права страниц, действия, состав", None, ()),
         ]
 
     @staticmethod

@@ -748,16 +748,28 @@ def get_model_stats_view(request):
     return JsonResponse({"success": True, "stats": stats})
 
 
+#: Соль валидатора asset_view: одна на жизнь процесса (рестарт контейнера =
+#: новый деплой). Несколько worker-процессов давали бы разные соли и ломали бы
+#: 304-экономию между запросами; у нас Daphne ровно в один процесс.
+_ASSET_BOOT_SALT = os.urandom(16)
+
+
 def asset_view(request, asset_path):
     """Отдаёт статический файл из Django staticfiles по пути (для AI-страниц).
 
     Ассеты ревалидируются браузером (Cache-Control: no-cache + Last-Modified + 304),
     поэтому после деплоя браузер подхватывает обновлённый JS/CSS даже без ?v=-бампа.
-    Условный запрос решается по ETag (md5 КОНТЕНТА, а не mtime): mtime при деплое
-    мог не сдвинуться (таймстампы/WSL-копирование), и 304 отдавал СТАРЫЙ файл —
-    «стили падали». Ревалидация по If-Modified-Since остаётся fallback'ом для
-    кэшей без ETag. 304 всегда несёт ETag + Cache-Control — иначе браузер без
-    закэшированного тела рисует пустой ресурс.
+    Условный запрос решается по ETag (md5 КОНТЕНТА + соль старта процесса, а
+    не mtime): mtime при деплое мог не сдвинуться (таймстампы/WSL-копирование),
+    и 304 отдавал СТАРЫЙ файл — «стили падали». Соль (сгенерирована при старте
+    процесса) нужна против «отравленного» кэша браузера: если когда-то в кэш
+    попало ПУСТОЕ тело с живым md5-валидатором, ревалидация честно отвечала
+    304 и браузер навсегда рисовал без стилей (сам не лечился). Новый процесс
+    = новая соль = валидатор не совпадёт = свежие байты гарантированно
+    перекачаются; живой кэш продолжает работать (304 по-прежнему честные 304).
+    Ревалидация по If-Modified-Since остаётся fallback'ом для кэшей без ETag.
+    304 всегда несёт ETag + Cache-Control — иначе браузер без закэшированного
+    тела рисует пустой ресурс.
     """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
@@ -767,7 +779,7 @@ def asset_view(request, asset_path):
 
     with open(asset_full_path, "rb") as fh:
         data = fh.read()
-    etag = f'"{hashlib.md5(data).hexdigest()}"'
+    etag = f'"{hashlib.md5(_ASSET_BOOT_SALT + data).hexdigest()}"'
 
     if_none_match = request.META.get("HTTP_IF_NONE_MATCH", "")
     if if_none_match:

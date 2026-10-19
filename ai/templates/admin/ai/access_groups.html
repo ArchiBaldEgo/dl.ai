@@ -14,12 +14,17 @@
 <div class="ai-groups-wrap">
   <p class="help">
     Группа даёт право на вкладки админки (Страницы), главы документации и
-    действия. Суперюзер видит всё по умолчанию. Карточка раскрывается
-    кликом: внутри — настройка прав и редактор состава (поиск участников
-    строкой). Страницы и главы документации подтягиваются динамически из
-    левого нава. У созданных групп меняется название; удалить можно любую,
-    но встроенная при следующем добавлении участника пересоздастся ПУСТОЙ
-    (права придётся выдать заново). Изменение прав/состава действует сразу.
+    действия. Суперюзер видит всё по умолчанию, а базовые права — весь
+    «Раздел ИИ», «Мой промпт» и «Журнал запросов» (свои записи) — включены
+    у всех, кто вошёл в админку; группы только добавляют остальное
+    (создать/закрыть, перезаписывать чужое, читать все записи журнала и
+    т.п.). Карточка раскрывается кликом: внутри — настройка прав и редактор
+    состава (поиск участников строкой); у страницы с действиями кнопка
+    «Действия» раскрывает вложенные чекбоксы. Страницы и главы
+    документации подтягиваются динамически из левого нава. У созданных
+    групп меняется название; удалить можно любую, но встроенная при
+    следующем добавлении участника пересоздастся ПУСТОЙ (права придётся
+    выдать заново). Изменение прав/состава действует сразу.
   </p>
 
   <form class="ai-groups-create" data-save-url="{{ create_url }}">
@@ -55,17 +60,37 @@
         <textarea name="description" rows="2" placeholder="Описание">{{ group.description }}</textarea>
         <div class="ai-groups-perms">
           {% for section in sections %}
-            <fieldset>
-              <legend>{{ section.title }}</legend>
-              {% for perm in section.items %}
-                <label class="ai-groups-perm">
-                  <input type="checkbox" name="permissions" value="{{ perm.key }}"
-                         {% if perm.key in group.permission_keys %}checked{% endif %}>
-                  {{ perm.label }}
-                  <code>{{ perm.key }}</code>
-                </label>
-              {% endfor %}
-            </fieldset>
+            {% if section.items %}
+              <fieldset>
+                <legend>{{ section.title }}</legend>
+                {% for perm in section.items %}
+                  <div class="ai-groups-perm-block">
+                    <label class="ai-groups-perm">
+                      <input type="checkbox" name="permissions" value="{{ perm.key }}"
+                             {% if perm.key in group.permission_keys %}checked{% endif %}>
+                      {{ perm.label }}
+                      <code>{{ perm.key }}</code>
+                    </label>
+                    {% if perm.children %}
+                      <button type="button" class="button ai-perm-toggle"
+                              data-ai-perm-toggle aria-expanded="false">
+                        Действия ({{ perm.children|length }})
+                      </button>
+                      <div class="ai-perm-children" hidden>
+                        {% for child in perm.children %}
+                          <label class="ai-groups-perm ai-groups-perm-child">
+                            <input type="checkbox" name="permissions" value="{{ child.key }}"
+                                   {% if child.key in group.permission_keys %}checked{% endif %}>
+                            {{ child.label }}
+                            <code>{{ child.key }}</code>
+                          </label>
+                        {% endfor %}
+                      </div>
+                    {% endif %}
+                  </div>
+                {% endfor %}
+              </fieldset>
+            {% endif %}
           {% endfor %}
         </div>
         <div class="ai-groups-actions">

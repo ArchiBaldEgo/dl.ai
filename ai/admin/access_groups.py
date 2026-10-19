@@ -18,7 +18,15 @@ ai/admin/permissions.py) резолвят ключи из этих групп, �
 URL реально зарегистрирован в urls'ах админки (resolve проходит). Новая
 страница, добавленная в _ai_tool_defs со своим page.*/docs.*-ключом,
 появляется здесь сама; «Документация» — так же по главам.
-action.*-ключи остаются ручным списком БД (их не вывести из URL).
+
+Каждая страница раскрывается в ДЕЙСТВИЯ (9-й элемент кортежа инструмента:
+вложенные (key, label)) — компактный аккордеон вместо плоского списка;
+«читать» = сам чекбокс страницы, вложенные чекбоксы — создать/закрыть/
+переписывать чужое и т.п. action-ключи показываются ПОД СВОЕЙ страницей
+(в БД остаются прежними action.*-строками — проверяющий код не менялся).
+Страницы без собственного ключа (права наследуются: закреплённые прогоны —
+как журнал; группы доступа и тестовые данные — только суперюзер) в списке
+не выдаются. «Регрессионные тесты» из списка исключены (super-инструмент).
 """
 
 from django.db import IntegrityError, transaction
@@ -36,6 +44,11 @@ from .site import ai_admin_site
 GROUPS_URL = "/ai/admin/ai-groups/"
 # Потолок выдачи поиска юзеров (пагинации нет — поиск по подстроке).
 _SEARCH_LIMIT = 100
+
+# Ключи-страницы, НЕ выдающиеся группам (ТЗ 2026-10-19): «Регрессионные
+# тесты» остаются супер-инструментом — строки их старых выдач признаются
+# проверками, но в списке «Страницы» не показываются и новые не создаются.
+_LIST_EXCLUDED_PAGE_KEYS = frozenset({"page.prompt_regression"})
 
 _SECTION_TITLES = {
     AIAdminGroupPermission.SECTION_PAGE: "Страницы",
@@ -56,38 +69,49 @@ def _dynamic_page_doc_permissions(request):
     ссылка есть в urls.py И она в левом нав'е — второе верно по построению,
     _ai_tool_defs и есть нав). Строки БД подгоняются под реестр
     (get_or_create + освежение подписи) — миграции для новых страниц не
-    нужны. Возврат: {key: label}; ключи БД, не попавшие в реестр
-    (устаревшие), НЕ показываются — выдача была бы бессмысленна.
+    нужны; вложенные действия страниц (9-й элемент кортежа) синхронизируются
+    той же петлёй. Возврат: {key: {"label": str, "children": [(key, label)]}}.
+    Ключи БД, не попавшие в реестр (устаревшие страницы/доки), НЕ
+    показываются — выдача была бы бессмысленна.
     """
     available = {}
     for tool in ai_admin_site._ai_tool_defs(request):
-        # (group, label, object_name, url, visible, icon, hint, access_key)
+        # (group, label, object_name, url, visible, icon, hint,
+        #  access_key, actions)
         if len(tool) < 8 or not tool[7]:
             continue
         key, url = tool[7], tool[3]
-        if not key.startswith(("page.", "docs.")):
+        if (
+            not key.startswith(("page.", "docs."))
+            or key in _LIST_EXCLUDED_PAGE_KEYS
+        ):
             continue
         try:
             resolve(url)
         except Resolver404:
             continue  # маршрута в urls.py нет — ключ не выдаётся
-        available[key] = tool[1]
+        available[key] = {"label": tool[1], "children": list(tool[8] or ())}
 
     if available:
+        rows_to_sync = {}
+        for key, entry in available.items():
+            rows_to_sync[key] = (entry["label"], key)
+            for child_key, child_label in entry["children"]:
+                rows_to_sync.setdefault(child_key, (child_label, child_key))
         existing = {
             p.key: p
-            for p in AIAdminGroupPermission.objects.filter(key__in=available)
+            for p in AIAdminGroupPermission.objects.filter(key__in=rows_to_sync)
         }
-        for key, label in available.items():
-            row = existing.get(key)
+        for row_key, (label, key_for_section) in rows_to_sync.items():
+            section_prefix = key_for_section.split(".")[0]
+            section = {
+                "docs": AIAdminGroupPermission.SECTION_DOCS,
+                "action": AIAdminGroupPermission.SECTION_ACTION,
+            }.get(section_prefix, AIAdminGroupPermission.SECTION_PAGE)
+            row = existing.get(row_key)
             if row is None:
-                section = (
-                    AIAdminGroupPermission.SECTION_DOCS
-                    if key.startswith("docs.")
-                    else AIAdminGroupPermission.SECTION_PAGE
-                )
                 AIAdminGroupPermission.objects.create(
-                    key=key, label=label, section=section
+                    key=row_key, label=label, section=section
                 )
             elif row.label != label:
                 row.label = label
@@ -190,21 +214,49 @@ def admin_access_groups_view(request):
 
 
 def _section_items(permissions, section, dynamic):
-    """Элементы секции чекбоксов.
+    """Элементы секции чекбоксов: {"key", "label", "children"}-словари.
 
     «Страницы»/«Документация» — ДИНАМИЧЕСКИ (порядок = порядок нава);
-    ключи БД вне реестра (устаревшие страницы/доки) не показываются.
-    «Действия» — чисто БД-список (из URL не выводятся). page.admin —
-    гейт входа в админку, страницы не имеет: живёт в БД и идёт последним.
+    у страницы, у которой есть вложенные действия, поле children несёт
+    строки ключей — шаблон рисует их аккордеоном под страницей.
+    «Действия» — только БД-ключи НЕ из реестра страниц (все action.*,
+    привязанные к страницам, показываются вложенно, плоского списка нет).
+    page.admin — гейт входа в админку, страницы не имеет: живёт в БД и
+    идёт последним.
     """
-    items = [p for p in permissions if p.section == section]
     if section == AIAdminGroupPermission.SECTION_ACTION:
-        return items
-    by_key = {p.key: p for p in items}
-    ordered = [by_key[k] for k in dynamic if k in by_key]
+        nested = {
+            child_key
+            for entry in dynamic.values()
+            for child_key, _ in entry["children"]
+        }
+        return [
+            {"key": p.key, "label": p.label, "children": []}
+            for p in permissions
+            if p.section == section and p.key not in nested
+        ]
+    by_key = {p.key: p for p in permissions}
+    items = []
+    for key, entry in dynamic.items():
+        row = by_key.get(key)
+        if row is None or row.section != section:
+            continue
+        items.append({
+            "key": row.key,
+            "label": row.label,
+            "children": [
+                {"key": by_key[c_key].key, "label": by_key[c_key].label}
+                for c_key, _ in entry["children"]
+                if c_key in by_key
+            ],
+        })
     if section == AIAdminGroupPermission.SECTION_PAGE:
-        ordered += [p for p in items if p.key in _ALWAYS_PAGE_KEYS]
-    return ordered
+        items += [
+            {"key": p.key, "label": p.label, "children": []}
+            for p in permissions
+            if p.key in _ALWAYS_PAGE_KEYS
+        ]
+    return items
 
 
 @require_POST
@@ -212,9 +264,15 @@ def admin_access_group_save_view(request, group_id):
     """Создать/обновить группу: имя, описание, набор прав (чекбоксы ключей).
 
     Builtin: имя не меняется (проверки ищут группу по имени через константы).
+
+    Синхронизация реестра (_dynamic_page_doc_permissions) вызывается и здесь:
+    иначе «Группы доступа», ни разу не открытые после добавления новой
+    страницы, вернули бы 400 «Неизвестные права» на только что появившийся
+    ключ (чекбокс-то рендерится динамикой, а БД ещё пуста).
     """
     if not _require_superuser(request):
         return _forbid()
+    _dynamic_page_doc_permissions(request)
     try:
         keys_requested = set(request.POST.getlist("permissions"))
     except Exception:
