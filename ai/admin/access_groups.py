@@ -1,4 +1,4 @@
-"""Страница «Группы доступа» (/ai/admin/ai-groups/) — только суперюзер.
+"""Страница «Группы доступа» (/ai/admin/ai-groups/) — суперюзер или ключ page.groups.
 
 Управление AIAccessGroup: создать группу, выдать ей права (ключи
 AIAdminGroupPermission: вкладки-страницы, главы документации, действия) и
@@ -17,16 +17,16 @@ ai/admin/permissions.py) резолвят ключи из этих групп, �
 инструментов левого нава (ai_admin_site._ai_tool_defs), критерий выдачи —
 URL реально зарегистрирован в urls'ах админки (resolve проходит). Новая
 страница, добавленная в _ai_tool_defs со своим page.*/docs.*-ключом,
-появляется здесь сама; «Документация» — так же по главам.
+появляется здесь сама; «Документация» — так же по главам. В Списке
+представлены ВСЕ страницы админки: и инструменты, и стоковые таблицы
+(ModelAdmin'ы) — у каждой есть ключ (см. permissions/models).
 
 Каждая страница раскрывается в ДЕЙСТВИЯ (9-й элемент кортежа инструмента:
 вложенные (key, label)) — компактный аккордеон вместо плоского списка;
 «читать» = сам чекбокс страницы, вложенные чекбоксы — создать/закрыть/
-переписывать чужое и т.п. action-ключи показываются ПОД СВОЕЙ страницей
-(в БД остаются прежними action.*-строками — проверяющий код не менялся).
-Страницы без собственного ключа (права наследуются: закреплённые прогоны —
-как журнал; группы доступа и тестовые данные — только суперюзер) в списке
-не выдаются. «Регрессионные тесты» из списка исключены (super-инструмент).
+переписывать чужое/запускать прогоны и т.п. action-ключи показываются
+ПОД СВОЕЙ страницей (в БД остаются прежними action.*-строками —
+проверяющий код не менялся).
 """
 
 from django.db import IntegrityError, transaction
@@ -38,17 +38,12 @@ from django.views.decorators.http import require_GET, require_POST
 
 from ..models import AIAccessGroup, AIAdminGroupPermission
 from .guest_mode import is_viewing_as_guest
-from .permissions import is_superuser_user
+from .permissions import can_access_access_groups
 from .site import ai_admin_site
 
 GROUPS_URL = "/ai/admin/ai-groups/"
 # Потолок выдачи поиска юзеров (пагинации нет — поиск по подстроке).
 _SEARCH_LIMIT = 100
-
-# Ключи-страницы, НЕ выдающиеся группам (ТЗ 2026-10-19): «Регрессионные
-# тесты» остаются супер-инструментом — строки их старых выдач признаются
-# проверками, но в списке «Страницы» не показываются и новые не создаются.
-_LIST_EXCLUDED_PAGE_KEYS = frozenset({"page.prompt_regression"})
 
 _SECTION_TITLES = {
     AIAdminGroupPermission.SECTION_PAGE: "Страницы",
@@ -81,16 +76,24 @@ def _dynamic_page_doc_permissions(request):
         if len(tool) < 8 or not tool[7]:
             continue
         key, url = tool[7], tool[3]
-        if (
-            not key.startswith(("page.", "docs."))
-            or key in _LIST_EXCLUDED_PAGE_KEYS
-        ):
+        if not key.startswith(("page.", "docs.")):
             continue
         try:
             resolve(url)
         except Resolver404:
             continue  # маршрута в urls.py нет — ключ не выдаётся
         available[key] = {"label": tool[1], "children": list(tool[8] or ())}
+
+    # Стоковые таблицы ModelAdmin'ов: ключ ACCESS_KEY на классе
+    # (ai/admin/models.py::_StaffOnlyAdminMixin) — своей страницы в наве
+    # у них нет, выдаются после нав-инструментов.
+    for model, admin_obj in ai_admin_site._registry.items():
+        key = getattr(admin_obj, "ACCESS_KEY", None)
+        if key and key.startswith("page.") and key not in available:
+            available[key] = {
+                "label": str(model._meta.verbose_name_plural),
+                "children": [],
+            }
 
     if available:
         rows_to_sync = {}
@@ -120,7 +123,8 @@ def _dynamic_page_doc_permissions(request):
 
 
 def _require_superuser(request):
-    return is_superuser_user(request.user) and not is_viewing_as_guest(request)
+    """Суперюзер ИЛИ держатель ключа page.groups; гостевой режим — нет."""
+    return can_access_access_groups(request) and not is_viewing_as_guest(request)
 
 
 def _search_users(group, q):

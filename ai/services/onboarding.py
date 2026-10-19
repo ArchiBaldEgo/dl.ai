@@ -43,7 +43,6 @@ SCOPES = (
     "admin_pinned_runs",
     "admin_aiappsettings",
     "admin_updates",
-    "admin_regression",
     "admin_test_console",
     "admin_tasksolution",
     "admin_test_data",

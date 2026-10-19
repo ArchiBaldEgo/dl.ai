@@ -988,19 +988,12 @@ class PromptAdminAccessTests(TestCase):
             owner=superuser,
         )
         request = self._build_request(superuser, query_params={"mine": "1"})
-        # The "mine" filter is intended for prompt developers; superusers bypass
-        # it and continue to see all prompts.
+        # «Мои» — намерение юзера, не ACL (2026-10-19: с baseline
+        # «Видеть все промпты» фильтр mine должен работать у РОЛИ ЛЮБОГО
+        # уровня, включая суперпользователя).
         prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
 
-        self.assertEqual(
-            prompt_ids,
-            {
-                self.editable_prompt.id,
-                self.readonly_prompt.id,
-                self.legacy_assigned_prompt.id,
-                own_prompt.id,
-            },
-        )
+        self.assertEqual(prompt_ids, {own_prompt.id})
 
 
 class PromptFormTests(TestCase):
@@ -4977,172 +4970,6 @@ class TaskRegistryTests(TestCase):
         self.assertIsNone(result)  # registration must never break the chat
 
 
-class PromptGradingTests(SimpleTestCase):
-    """Prompt-regression comparators in ai/grading.py::compare_response."""
-
-    def test_ratio_identical_is_match(self):
-        from ai.grading import compare_response
-        verdict, hint, missing = compare_response(
-            "program a; begin writeln(1); end.",
-            "program a; begin writeln(1); end.",
-            comparator="ratio",
-        )
-        self.assertEqual(verdict, "match")
-        self.assertEqual(missing, [])
-
-    def test_ratio_different_is_mismatch(self):
-        from ai.grading import compare_response
-        verdict, hint, missing = compare_response(
-            "print('hello world')", "int main(){return 0;}", comparator="ratio",
-        )
-        self.assertEqual(verdict, "mismatch")
-        self.assertIn("ratio", hint)
-
-    def test_ratio_threshold_respected(self):
-        from ai.grading import compare_response
-        # Very close text: ratio is high but below 0.999.
-        verdict, _hint, _missing = compare_response(
-            "program a; begin writeln(1); end.",
-            "program a; begin writeln(2); end.",
-            comparator="ratio",
-            threshold=0.99,
-        )
-        self.assertEqual(verdict, "mismatch")
-
-    def test_contains_all_match(self):
-        from ai.grading import compare_response
-        expected = "В строке 5 нет точки с запятой\nпеременная x не объявлена"
-        actual = "В коде в строке 5 нет точки с запятой. Также переменная x не объявлена."
-        verdict, hint, missing = compare_response(actual, expected, comparator="contains_all")
-        self.assertEqual(verdict, "match")
-        self.assertEqual(missing, [])
-
-    def test_contains_all_mismatch_lists_missing(self):
-        from ai.grading import compare_response
-        expected = "ошибка деления на ноль\nнет точки с запятой"
-        actual = "В коде ошибка деления на ноль."
-        verdict, hint, missing = compare_response(actual, expected, comparator="contains_all")
-        self.assertEqual(verdict, "mismatch")
-        self.assertIn("нет точки с запятой", missing)
-        self.assertIn("отсутствуют", hint)
-
-    def test_exact_match_and_mismatch(self):
-        from ai.grading import compare_response
-        self.assertEqual(
-            compare_response("Program A;\nBegin\n  Writeln(1);\nEnd.",
-                             "program a; begin writeln(1); end.", comparator="exact")[0],
-            "match",
-        )
-        self.assertEqual(
-            compare_response("return 0", "return 1", comparator="exact")[0],
-            "mismatch",
-        )
-
-    def test_set_match_and_mismatch(self):
-        from ai.grading import compare_response
-        self.assertEqual(
-            compare_response("a\nb\nc", "c\nb\na", comparator="set")[0], "match",
-        )
-        verdict, hint, missing = compare_response("a\nb", "a\nb\nc", comparator="set")
-        self.assertEqual(verdict, "mismatch")
-        self.assertIn("c", missing)
-
-    def test_empty_expected_is_skipped(self):
-        from ai.grading import compare_response
-        self.assertEqual(compare_response("anything", "", comparator="ratio")[0], "skipped")
-
-    def test_empty_actual_is_mismatch(self):
-        from ai.grading import compare_response
-        verdict, hint, _missing = compare_response("", "int main(){return 0;}", comparator="ratio")
-        self.assertEqual(verdict, "mismatch")
-        self.assertIn("пустой", hint)
-
-
-class PromptRegressionRunnerTests(TestCase):
-    """ai/prompt_test_runner.py: per-case verdicts + DB fallback snapshot."""
-
-    def setUp(self):
-        from ai.models import PromptTestCase
-        self.user = get_user_model().objects.create_user(username="prompt-tester", password="x")
-        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
-        self.case_match = PromptTestCase.objects.create(
-            name="Solve match", mode="solve",
-            input_text="Сложите a и b",
-            expected_text="program a; begin writeln(1); end.",
-            comparator="ratio",
-            programming_language=self.lang, topic=self.topic,
-        )
-        self.case_mismatch = PromptTestCase.objects.create(
-            name="Solve mismatch", mode="solve",
-            input_text="Выведите n",
-            expected_text="int main(){return 0;}",
-            comparator="ratio",
-            programming_language=self.lang, topic=self.topic,
-        )
-
-    def _run_worker(self, run_id, cases, handler_response):
-        import time as _t
-        from ai import prompt_test_runner
-
-        async def fake_handler(messages, conv_id):
-            return handler_response, 12
-
-        model = {"key": "FakeModel", "title": "FakeModel", "handler": fake_handler}
-        now_ts = _t.time()
-        prompt_test_runner._jobs[run_id] = {
-            "run_id": run_id, "status": "running", "error_message": "",
-            "total_cases": len(cases), "completed_cases": 0, "current_case_name": cases[0].name if cases else "",
-            "results": [], "report": None,
-            "created_at_ts": now_ts, "updated_at_ts": now_ts,
-        }
-        try:
-            prompt_test_runner._run_job_worker(
-                run_id, cases, model, self.user.id,
-                prompt_id=None, ui_language="Русский",
-            )
-        finally:
-            prompt_test_runner._jobs.pop(run_id, None)
-
-    def test_run_records_match_and_mismatch_verdicts(self):
-        from ai.models import PromptTestResult, PromptTestRun
-        run_id = "test-prompt-run-1"
-        # Handler returns the golden solution: matches case_match, mismatches case_mismatch.
-        self._run_worker(run_id, [self.case_match, self.case_mismatch],
-                         "program a; begin writeln(1); end.")
-
-        run = PromptTestRun.objects.get(run_id=run_id)
-        self.assertEqual(run.status, PromptTestRun.STATUS_COMPLETED)
-
-        results = {r.test_case_id: r for r in PromptTestResult.objects.filter(run=run)}
-        self.assertEqual(results[self.case_match.id].verdict, PromptTestResult.VERDICT_MATCH)
-        self.assertEqual(results[self.case_mismatch.id].verdict, PromptTestResult.VERDICT_MISMATCH)
-
-        # DB-fallback snapshot rebuilds the report from persisted rows.
-        from ai import prompt_test_runner
-        snapshot = prompt_test_runner.get_prompt_test_run_snapshot(run_id)
-        self.assertEqual(snapshot["status"], "completed")
-        self.assertEqual(snapshot["report"]["total"], 2)
-        self.assertEqual(snapshot["report"]["matched"], 1)
-        self.assertEqual(snapshot["report"]["mismatched"], 1)
-        self.assertEqual(len(snapshot["report"]["mismatches"]), 1)
-        self.assertEqual(snapshot["report"]["mismatches"][0]["case_name"], "Solve mismatch")
-
-    def test_skipped_when_expected_empty(self):
-        from ai.models import PromptTestCase, PromptTestResult, PromptTestRun
-        case = PromptTestCase.objects.create(
-            name="No oracle", mode="solve", input_text="stmt", expected_text="",
-            comparator="ratio", programming_language=self.lang, topic=self.topic,
-        )
-        run_id = "test-prompt-run-2"
-        self._run_worker(run_id, [case], "program a; begin writeln(1); end.")
-        run = PromptTestRun.objects.get(run_id=run_id)
-        result = PromptTestResult.objects.get(run=run, test_case=case)
-        self.assertEqual(result.verdict, PromptTestResult.VERDICT_SKIPPED)
-
-
-# ===================================================================
-# Tests for model sorting (top-2 user models + alphabetical rest)
 # ===================================================================
 
 class ModelSortingTests(SimpleTestCase):
@@ -7677,7 +7504,7 @@ class ActiveRunsEndpointTests(TestCase):
 
     def test_user_sees_only_own_runs(self):
         """Свои прогоны всех 4 типов видны, чужие — нет (включая superuser)."""
-        from ai import arm_runner, model_health, prompt_test_runner, test_console_runner
+        from ai import arm_runner, model_health, test_console_runner
         from ai.admin.active_runs import admin_active_runs_view
         now_ts = time.time()
         mine = {
@@ -7692,12 +7519,6 @@ class ActiveRunsEndpointTests(TestCase):
                 "run_type": "single", "status": "running",
                 "completed_models": 0, "total_models": 2,
                 "current_model_title": "FakeModel",
-                "created_at_ts": now_ts, "updated_at_ts": now_ts,
-            }),
-            "badge-reg": (prompt_test_runner._jobs, {
-                "run_id": "badge-reg", "user_id": self.superuser.id,
-                "status": "running",
-                "completed_cases": 1, "total_cases": 4, "current_case_name": "case1",
                 "created_at_ts": now_ts, "updated_at_ts": now_ts,
             }),
             "badge-console": (test_console_runner._jobs, {
@@ -7728,20 +7549,19 @@ class ActiveRunsEndpointTests(TestCase):
             by_type = {r["run_type"]: r for r in data["runs"]}
             self.assertEqual(
                 set(by_type),
-                {"batch", "single", "prompt_regression", "test_console"},
+                {"batch", "single", "test_console"},
             )
             self.assertEqual(by_type["batch"]["page_url"], "/ai/admin/arm/solve/")
             # У single-прогонов нет своей страницы (старый ARM-скрипт
             # «В чём ошибка» удалён) — ссылка пустая.
             self.assertEqual(by_type["single"]["page_url"], "")
-            self.assertEqual(by_type["prompt_regression"]["page_url"], "/ai/admin/prompt-regression/")
             self.assertEqual(by_type["test_console"]["page_url"], "/ai/admin/test-console/")
             self.assertEqual(by_type["batch"]["completed"], 1)
             self.assertEqual(by_type["batch"]["total"], 3)
             self.assertEqual(by_type["batch"]["current"], "A")
             self.assertEqual(by_type["batch"]["status"], "running")
             # Чужой batch-прогон не «перекрывает» свой: ровно один каждого типа.
-            self.assertEqual(len(data["runs"]), 4)
+            self.assertEqual(len(data["runs"]), 3)
             self.assertTrue(all(r["status"] == "running" for r in data["runs"]))
         finally:
             for run_id, (jobs_dict, _job) in injected.items():
@@ -10331,7 +10151,6 @@ class GuestModeContextTests(_AdminViewRequestMixin, TestCase):
         self.assertTrue(context["is_viewing_as_guest"])
         self.assertIn("гость", context["user_role_label"])
         self.assertFalse(context["show_model_status_link"])
-        self.assertFalse(context["show_prompt_regression_link"])
         self.assertFalse(context["show_test_console_link"])
         self.assertFalse(context["show_updates_link"])
         # «Настройка ИИ-приложения» и «Закреплённые пакетные решения» гостю
@@ -12919,7 +12738,7 @@ class AIAccessGroupsAdminTests(TestCase):
         self.assertEqual(
             {p.key for p in dev.permissions.all()},
             {"page.admin", "page.arm_solve", "page.model_status",
-             "page.prompt_admin", "page.prompt_regression", "page.test_console",
+             "page.prompt_admin", "page.test_console",
              "page.tasks", "page.logs_own", "page.updates",
              "docs.developer", "action.task_reorder"},
         )
@@ -12930,6 +12749,8 @@ class AIAccessGroupsAdminTests(TestCase):
         make_prompt_developer(pd_user := self.plain)
         self.assertTrue(user_has_key(pd_user, "page.admin"))
         # весь «Раздел ИИ» приходит baseline'ом, не сидами:
+        # (с 2026-10-19 в baseline и «Видеть все промпты»)
+        self.assertIn("page.prompt_admin_all", BASELINE_ACCESS_KEYS)
         self.assertEqual(set(BASELINE_ACCESS_KEYS) & {"page.tasks"}, {"page.tasks"})
         self.assertTrue(user_has_key(pd_user, "page.tasks"))
         self.assertTrue(user_has_key(pd_user, "page.model_status"))
@@ -12966,7 +12787,6 @@ class AIAccessGroupsAdminTests(TestCase):
         from ai.admin.permissions import user_has_key
         from ai.admin.site import ai_admin_site
         from ai.models import AIAccessGroup, Prompt
-        from ai.querysets import prompt_queryset_for_user
 
         resp = self._save(self.superuser, 0, {
             "name": "Редакторы чужого",
@@ -12988,10 +12808,8 @@ class AIAccessGroupsAdminTests(TestCase):
             owner=self.superuser,
         )
         # Ключ открывает ЛЮБЫЕ промпты и на просмотр, и на правку.
-        self.assertIn(
-            foreign,
-            prompt_queryset_for_user(Prompt.objects.all(), member),
-        )
+        # (Просмотр чужого в ModelAdmin-листинге открыт и БЕЗ ключа —
+        # «Видеть все промпты» в baseline 2026-10-19.)
         request = RequestFactory().get("/")
         request.user = member
         admin = ai_admin_site._registry[Prompt]
@@ -13003,9 +12821,10 @@ class AIAccessGroupsAdminTests(TestCase):
         )
         make_prompt_developer(pd_user)
         self.assertFalse(user_has_key(pd_user, "page.prompt_admin.edit_others"))
-        self.assertNotIn(
-            foreign, prompt_queryset_for_user(Prompt.objects.all(), pd_user),
-        )
+        # читает чужое (baseline «Видеть все промпты»), но править не может
+        self.assertTrue(admin.has_view_permission(request, obj=foreign))
+        request.user = pd_user
+        self.assertFalse(admin.has_change_permission(request, obj=foreign))
 
     # --- CRUD -----------------------------------------------------------
 
@@ -13143,7 +12962,7 @@ class AIAccessGroupsAdminTests(TestCase):
         """«Страницы» — динамически из _ai_tool_defs: строка ключа, потерянная
         в БД, восстанавливается при рендере; page.admin (без URL) остаётся;
         устаревшая БД-строка не показывается. Вложенные действия страниц —
-        аккордеоном; «Регрессионные тесты» из списка исключены (ТЗ)."""
+        аккордеоном."""
         from ai.models import AIAdminGroupPermission
 
         AIAdminGroupPermission.objects.filter(key="page.arm_solve").delete()
@@ -13169,9 +12988,20 @@ class AIAccessGroupsAdminTests(TestCase):
         self.assertIn('value="page.prompt_admin.edit_others"', html)
         self.assertIn('value="page.logs_all"', html)
         self.assertIn("Перезаписывать чужие промпты", html)
-        # Ключи-страницы без ключа в коде или супер-инструменты в списке нет.
+        # Ключи-страницы без ключа в коде (гейты без URL) в списке нет.
         self.assertNotIn("page.ghost", html)
-        self.assertNotIn("page.prompt_regression", html)
+        # Новые ключи-страницы и действия доступны в UI групп.
+        self.assertIn('value="page.pinned_runs"', html)
+        self.assertIn('value="page.test_data"', html)
+        self.assertIn('value="page.groups"', html)
+        self.assertIn('value="docs.prompt_developer"', html)
+        self.assertIn('value="page.prompt_admin_all"', html)
+        self.assertIn('value="action.test_console_run"', html)
+        self.assertIn('value="action.updates_publish"', html)
+        self.assertIn('value="page.mgmt_users"', html)
+        self.assertIn('value="page.mgmt_shared_prompt"', html)
+        self.assertIn("Видеть все промпты", html)
+        self.assertIn("Запускать прогоны", html)
 
     def test_member_search_endpoint(self):
         from ai.admin.access_groups import admin_access_group_member_search_view
@@ -13553,7 +13383,7 @@ class OnboardingServiceTests(TestCase):
         for page_scope in (
             "admin_my_prompt", "admin_prompt_defaults", "admin_logs",
             "admin_pinned_runs", "admin_aiappsettings", "admin_updates",
-            "admin_regression", "admin_test_console", "admin_tasksolution",
+            "admin_test_console", "admin_tasksolution",
             "admin_test_data",
         ):
             self.assertTrue(scope_name_valid(page_scope))
@@ -14084,7 +13914,6 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
             ("/ai/admin/ai/aiappsettings/1/change/", "admin_aiappsettings"),
             ("/ai/admin/updates/", "admin_updates"),
             ("/ai/admin/prompt-defaults/", "admin_prompt_defaults"),
-            ("/ai/admin/prompt-regression/", "admin_regression"),
             ("/ai/admin/test-console/", "admin_test_console"),
             ("/ai/admin/prompts/my/", "admin_my_prompt"),
         )
@@ -15434,7 +15263,7 @@ class ArmDlUrlAndInterimReportTests(TestCase):
 
 class EducationDirectoryTests(TestCase):
     """Справочник DLEducationName (id→название, ручное ведение) и единственный
-    читатель — education_directory (DRY, как prompt_queryset_for_user)."""
+    читатель — education_directory (DRY)."""
 
     def test_unique_kind_key(self):
         from django.db import IntegrityError
@@ -16051,7 +15880,7 @@ class AutoFiltersStaticTests(TestCase):
         self.assertLess(
             js.index("#daily-filter-student"), js.index("#daily-filter-group"))
         # admin_updates: «применится само» — в текстах шагов фильтров.
-        updates = js[js.index("admin_updates: ["): js.index("admin_regression: [")]
+        updates = js[js.index("admin_updates: ["): js.index("admin_test_console: [")]
         self.assertIn("сузится сам", updates)
         self.assertIn("применяется само", updates)
 
@@ -16184,3 +16013,124 @@ class AdminPagesStaticFixesTests(TestCase):
         js = self._read("static", "admin", "ai", "request_logs", "index.js")
         self.assertIn("ai-logs-refresh", js)
         self.assertIn("refreshBtn.addEventListener('click', () => refreshTable())", js)
+
+
+class KeyedPageAccessTests(_AdminViewRequestMixin, TestCase):
+    """Ключи-«непоседы» (ТЗ 2026-10-19): «Тестовые данные», «Группы доступа»,
+    док «Разработчик промптов» для не-pd, действия запуска/публикации —
+    всё выдаётся через «Группы доступа», не только ролью."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def _permission(self, key):
+        from ai.models import AIAdminGroupPermission
+        section = ("action" if key.startswith("action.") else
+                   "docs" if key.startswith("docs.") else "page")
+        row, _ = AIAdminGroupPermission.objects.get_or_create(
+            key=key, defaults={"label": key, "section": section},
+        )
+        return row
+
+    def _grant(self, username, keys):
+        from django.contrib.auth import get_user_model
+        from ai.models import AIAccessGroup
+        rows = {k: self._permission(k) for k in keys}
+        group = AIAccessGroup.objects.create(name=f"Ключи-{username}")
+        group.permissions.add(*rows.values())
+        user = get_user_model().objects.create_user(username=username, password="x")
+        group.users.add(user)
+        return user
+
+    def _docs_view(self, user, slug):
+        from unittest.mock import patch
+        from ai.admin.docs import admin_docs_view
+        request = self._admin_request(user, path=f"/ai/admin/docs/{slug}/")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return admin_docs_view(request, slug=slug)
+
+    def test_test_data_page_by_key_only(self):
+        """page.test_data: не-staff держатель ключа видит страницу; без ключа — 403."""
+        from ai.admin.test_data import test_data_view
+        user = self._grant("testdata-key", ["page.admin", "page.test_data"])
+        request = self._admin_request(user, path="/ai/admin/test_data/")
+        self.assertEqual(test_data_view(request).status_code, 200)
+
+        user2 = self._grant("testdata-plain", ["page.admin"])
+        request = self._admin_request(user2, path="/ai/admin/test_data/")
+        self.assertEqual(test_data_view(request).status_code, 403)
+
+    def test_access_groups_page_by_key_only(self):
+        """page.groups: держатель видит страницу и сохраняет группу."""
+        from ai.admin.access_groups import admin_access_groups_view, admin_access_group_save_view
+        user = self._grant("groups-key", ["page.admin", "page.groups"])
+        request = self._admin_request(user, path="/ai/admin/ai-groups/")
+        self.assertEqual(admin_access_groups_view(request).status_code, 200)
+
+        save = self._admin_request(
+            user, method="post", path="/ai/admin/ai-groups/save/", data={
+                "name": "Наблюдатели", "permissions": ["page.model_status"],
+            })
+        self.assertEqual(admin_access_group_save_view(save, 0).status_code, 200)
+        from ai.models import AIAccessGroup
+        self.assertTrue(
+            AIAccessGroup.objects.filter(name="Наблюдатели").exists())
+
+    def test_prompt_developer_doc_by_key_for_non_pd(self):
+        """docs.prompt_developer: обычный вошедший (не pd) с ключом читает главу."""
+        user = self._grant("docstester-key", ["page.admin", "docs.prompt_developer"])
+        self.assertEqual(self._docs_view(user, "prompt-developer").status_code, 200)
+
+        user2 = self._grant("docstester-plain", ["page.admin"])
+        self.assertEqual(self._docs_view(user2, "prompt-developer").status_code, 403)
+
+    def test_test_console_start_requires_run_action(self):
+        """Просмотр консоли — по ключу страницы; запуск — только с
+        action.test_console_run (суперюзер всегда может)."""
+        from unittest.mock import patch
+        from ai.admin.test_console import admin_test_console_view, admin_test_console_start_view
+        user = self._grant("console-viewer", ["page.admin", "page.test_console"])
+        request = self._admin_request(user, path="/ai/admin/test-console/")
+        self.assertEqual(admin_test_console_view(request).status_code, 200)
+
+        post = self._admin_request(
+            user, method="post", path="/ai/admin/test-console/start/")
+        self.assertEqual(admin_test_console_start_view(post).status_code, 403)
+
+        runner = self._grant(
+            "console-runner",
+            ["page.admin", "page.test_console", "action.test_console_run"],
+        )
+        post = self._admin_request(
+            runner, method="post", path="/ai/admin/test-console/start/",
+            content_type=None,
+        )
+        with patch("ai.admin.test_console.start_test_run",
+                   return_value=("mock-run-id", None)):
+            response = admin_test_console_start_view(post)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content)["run_id"], "mock-run-id")
+
+    def test_updates_publish_action_allows_non_super_save(self):
+        """action.updates_publish: не-супер с ModelAdmin-ключом + действием
+        правит запись UpdateLog; без действия — только просмотр."""
+        from ai.admin.models import UpdateLogAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import UpdateLog
+
+        updater = self._grant(
+            "updates-editor",
+            ["page.admin", "page.mgmt_update_log", "page.updates"],
+        )
+        request = self._admin_request(updater, path="/x/")
+        admin = UpdateLogAdmin(UpdateLog, ai_admin_site)
+        self.assertFalse(admin.has_change_permission(request, obj=None))
+
+        updater2 = self._grant(
+            "updates-publisher",
+            ["page.admin", "page.mgmt_update_log", "page.updates",
+             "action.updates_publish"],
+        )
+        request = self._admin_request(updater2, path="/x/")
+        self.assertTrue(admin.has_change_permission(request, obj=None))

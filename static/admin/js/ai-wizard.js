@@ -231,7 +231,7 @@
         { sel: '#nav-sidebar a[href="/ai/admin/updates/"]', title: "Обновления", text: "Что нового появилось в проекте.", pos: "right", onShow: "openNav" }
     ];
 
-    // Дополнительно суперадминам: дефолтные промпты, регрессия, тесты,
+    // Дополнительно суперадминам: дефолтные промпты, тесты,
     // режим «посмотреть как другой», роль в шапке.
      var ADMIN_NAV_PAGES = [
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/aiappsettings/"]', title: "Настройка ИИ-приложения", text: "Главные настройки: доступ к ИИ, сводка за сутки, последние прогоны. Свой тур — на самой странице.", pos: "right", onShow: "openNav" },
@@ -382,16 +382,6 @@
             { sel: '.ai-updates-filter input[name="date_from"]', title: "Период", text: "С какой даты показывать; применяется само, как только выбрал дату.", pos: "bottom" },
             { sel: "#content-main table", title: "История изменений", text: "Дата, автор, что сделано — новые сверху.", pos: "bottom" },
             { sel: 'a[href*="updatelog/"]', title: "Скрытые записи", text: "Коммиты, ещё не показанные пользователям в этом списке.", pos: "bottom" }
-        ],
-
-        admin_regression: [
-            { sel: "#prt_prompt", title: "Промпт", text: "Какой промпт проверяем.", pos: "right" },
-            { sel: "#prt_interface_language", title: "Язык страницы", text: "На каком языке отвечают пользователи — тот и проверяем.", pos: "right" },
-            { sel: "#prt_models", title: "Модели", text: "Какими моделями прогнать тест.", pos: "right" },
-            { sel: "#prt_cases", title: "Тест-кейсы", text: "Контрольные примеры: вопрос и правильный ответ.", pos: "right" },
-            { sel: "#prtRunSubmitBtn", title: "Запустить", text: "Старт проверки; ход будет виден под формой.", pos: "right" },
-            { sel: "#prtReportCard", title: "Сводка", text: "Сколько совпало и сколько промахов.", pos: "top" },
-            { sel: "#prtResultsCard", title: "Подробности", text: "Разбор случаев, где ответ разошёлся с эталоном.", pos: "top" }
         ],
 
         admin_test_console: [

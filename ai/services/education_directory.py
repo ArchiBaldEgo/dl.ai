@@ -4,7 +4,7 @@ REST get-user-info отдаёт только коды: schoolId (строка), 
 и groupMaskId — настоящих названий там нет. Названия ведутся вручную в
 ``DLEducationName`` (/ai/admin/); рендер-резиденты (дневной отчёт журнала и
 далее другие страницы) зовут helpers отсюда, а не читают модель напрямую
-(DRY — единственный читатель модели, как у prompt_queryset_for_user).
+(DRY — единственный читатель модели).
 """
 
 from ..models import DLEducationName

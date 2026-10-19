@@ -1,7 +1,7 @@
 """URL-маршруты кастомного AI admin site.
 
 Содержит кастомные пути для ARM (solve), статуса моделей,
-регрессионных тестов промптов, логов запросов и личных промптов.
+логов запросов и личных промптов.
 Стандартные admin URL подключаются через ai_admin_site.get_urls().
 """
 
@@ -56,11 +56,6 @@ from .request_logs import admin_request_log_detail_json_view
 from .onboarding import admin_wizard_seen_view
 from .pinned import admin_pinned_run_toggle_view, admin_pinned_runs_view
 from .prompt_defaults import admin_prompt_defaults_view
-from .prompt_regression import (
-    admin_prompt_regression_view,
-    admin_prompt_regression_start_view,
-    admin_prompt_regression_status_view,
-)
 from .site import ai_admin_site
 from .tasks import (
     admin_task_claim_view,
@@ -110,9 +105,6 @@ def get_ai_admin_urls():
         path("arm/models/refresh/", ai_admin_site.admin_view(admin_model_status_refresh_view), name="ai_arm_model_status_refresh"),
         path("arm/models/state/", ai_admin_site.admin_view(admin_model_status_state_view), name="ai_arm_model_status_state"),
         path("arm/models/", ai_admin_site.admin_view(admin_model_status_view), name="ai_arm_model_status"),
-        path("prompt-regression/start/", ai_admin_site.admin_view(admin_prompt_regression_start_view), name="ai_prompt_regression_start"),
-        path("prompt-regression/status/", ai_admin_site.admin_view(admin_prompt_regression_status_view), name="ai_prompt_regression_status"),
-        path("prompt-regression/", ai_admin_site.admin_view(admin_prompt_regression_view), name="ai_prompt_regression"),
         path("test-console/start/", ai_admin_site.admin_view(admin_test_console_start_view), name="ai_test_console_start"),
         path("test-console/status/", ai_admin_site.admin_view(admin_test_console_status_view), name="ai_test_console_status"),
         path("test-console/logs/view/", ai_admin_site.admin_view(admin_test_console_log_view), name="ai_test_console_log_view"),

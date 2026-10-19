@@ -1,7 +1,7 @@
 """ModelAdmin классы для моделей AI-приложения.
 
 Содержит админ-конфигурацию для Prompt, SharedPrompt, Topic, ProgrammingLanguage,
-Task, AIRequestLog, AIModelTestRun, PromptTestCase, PromptTestRun и др.
+Task, AIRequestLog, AIModelTestRun и др.
 Включает кастомные actions (экспорт CSV, refresh DL-задач) и ACL-проверки.
 """
 
@@ -23,14 +23,11 @@ from ..models import (
     ExternalDLAccount,
     ProgrammingLanguage,
     Prompt,
-    PromptTestCase,
-    PromptTestRun,
     SharedPrompt,
     Task,
     TaskSolution,
     Topic,
 )
-from ..querysets import prompt_queryset_for_user
 from .forms import PromptForm, SharedPromptForm, TopicForm
 from .permissions import (
     can_access_logs,
@@ -60,31 +57,51 @@ class TopicInline(admin.TabularInline):
 
 
 class _StaffOnlyAdminMixin:
-    """Mixin that restricts all admin access to staff/superuser only."""
+    """staff/super, либо держатель ключа ``ACCESS_KEY`` (класса-наследника).
+
+    Раньше миксин жёстко резал модули до staff; ТЗ 2026-10-19 «полностью все
+    страницы»: у каждого ModelAdmin есть ключ групп доступа
+    (page.mgmt_*), и держатель ключа (обычно не staff) получает доступ
+    наравне со staff. ACCESS_KEY не задан → поведение прежнее (staff-only).
+    """
+
+    ACCESS_KEY = None
+
+    def _has_access(self, request):
+        allowed = is_staff_or_superuser(request.user)
+        if self.ACCESS_KEY and not allowed:
+            allowed = user_has_key(request.user, self.ACCESS_KEY)
+        return allowed
 
     def has_module_permission(self, request):
-        return is_staff_or_superuser(request.user)
+        return self._has_access(request)
 
     def has_view_permission(self, request, obj=None):
-        return is_staff_or_superuser(request.user)
+        return self._has_access(request)
 
     def has_add_permission(self, request):
-        return is_staff_or_superuser(request.user)
+        return self._has_access(request)
 
     def has_change_permission(self, request, obj=None):
-        return is_staff_or_superuser(request.user)
+        return self._has_access(request)
 
     def has_delete_permission(self, request, obj=None):
-        return is_staff_or_superuser(request.user)
+        return self._has_access(request)
 
 
 class ProgrammingLanguageAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_language"
+
     inlines = [TopicInline]
     list_display = ('language_name',)
     search_fields = ('language_name',)
 
 
 class TopicAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_topic"
+
     form = TopicForm
     list_display = ('topic_name_ru', 'programming_language')
     list_filter = ('programming_language',)
@@ -204,7 +221,10 @@ class PromptAdmin(admin.ModelAdmin):
         )
         from .my_prompt import is_mine_only_request
         if is_mine_only_request(request):
-            return prompt_queryset_for_user(queryset, request.user)
+            # «Мои» — намерение юзера, не ACL: только владелец/редактор.
+            return queryset.filter(
+                Q(owner=request.user) | Q(editors=request.user),
+            ).distinct()
         return queryset
 
     @admin.display(description="Режим", ordering="mode")
@@ -241,6 +261,9 @@ class PromptAdmin(admin.ModelAdmin):
             is_staff_or_superuser(request.user)
             or is_prompt_developer_user(request.user)
             or can_access_prompt_admin(request)
+            # «Видеть все промпты» — ключ-действие (baseline 2026-10-19),
+            # открывающий и ModelAdmin-листинг чужих промптов на чтение.
+            or user_has_key(request.user, "page.prompt_admin_all")
         )
 
     def has_change_permission(self, request, obj=None):
@@ -420,7 +443,10 @@ class PromptAdmin(admin.ModelAdmin):
     short_prompt_text.short_description = "Текст промпта"
 
 
-class SharedPromptAdmin(admin.ModelAdmin):
+class SharedPromptAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    # Шаблоны промптов (shared): staff, либо ключ page.mgmt_shared_prompt.
+    ACCESS_KEY = "page.mgmt_shared_prompt"
+
     form = SharedPromptForm
     list_display = ('prompt_name_ru', 'mode', 'language_list', 'updated_at', 'owner_username')
     list_display_links = ('prompt_name_ru',)
@@ -461,19 +487,19 @@ class SharedPromptAdmin(admin.ModelAdmin):
         self.message_user(request, msg, level=("success" if not failed else "warning"))
 
     def has_module_permission(self, request):
-        return is_staff_or_superuser(request.user)
+        return self._has_access(request)
 
     def has_view_permission(self, request, obj=None):
-        return is_staff_or_superuser(request.user)
+        return self._has_access(request)
 
     def has_add_permission(self, request):
-        return is_staff_or_superuser(request.user)
+        return self._has_access(request)
 
     def has_change_permission(self, request, obj=None):
-        return is_staff_or_superuser(request.user)
+        return self._has_access(request)
 
     def has_delete_permission(self, request, obj=None):
-        return is_staff_or_superuser(request.user)
+        return self._has_access(request)
 
     def get_fieldsets(self, request, obj=None):
         return (
@@ -542,6 +568,9 @@ class AIAppSettingsAdmin(admin.ModelAdmin):
 
 
 class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_accounts"
+
     """Admin for viewing external DL accounts (dl.gsu.by user info)."""
     list_display = ("external_user_id", "external_login", "external_first_name",
                     "external_last_name", "dl_email", "education_summary",
@@ -590,6 +619,9 @@ class UpdateLogAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     выбранные») или скрыть любой другой коммит. Из навигации спрятан
     (_HIDDEN_NAV_OBJECT_NAMES) — на «Обновления» ведёт ссылка «Скрытые записи».
     """
+
+    # Ключ «Групп доступа», открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_update_log"
     list_display = ("commit_date", "author", "short_description", "hidden", "commit_hash")
     list_display_links = ("commit_date",)
     list_filter = ("hidden", "commit_date")
@@ -598,19 +630,25 @@ class UpdateLogAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     search_fields = ("description", "author")
 
     def has_module_permission(self, request):
-        return is_superuser_user(request.user)
+        return is_superuser_user(request.user) or self._has_access(request)
 
     def has_view_permission(self, request, obj=None):
-        return is_superuser_user(request.user)
+        return is_superuser_user(request.user) or self._has_access(request)
 
     def has_add_permission(self, request):
         return is_superuser_user(request.user)
 
     def has_change_permission(self, request, obj=None):
-        return is_superuser_user(request.user)
+        # Публикация/скрытие — суперюзер ИЛИ действие action.updates_publish
+        # (аккордеон страницы «Обновления» в «Группах доступа»).
+        return is_superuser_user(request.user) or user_has_key(
+            request.user, "action.updates_publish"
+        )
 
     def has_delete_permission(self, request, obj=None):
-        return is_superuser_user(request.user)
+        return is_superuser_user(request.user) or user_has_key(
+            request.user, "action.updates_publish"
+        )
 
     def short_description(self, obj):
         text = obj.description or ""
@@ -631,6 +669,9 @@ class UpdateLogAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 
 
 class AuthorAliasAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_author_alias"
+
     """Справочник ников git → ФИО + группа для страницы «Обновления».
 
     Ведётся вручную (нет автопривязки к ExternalDLAccount: git-ник не обязан
@@ -666,6 +707,9 @@ class DLEducationNameAdminForm(forms.ModelForm):
 
 
 class DLEducationNameAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_education_names"
+
     """Справочник DL «id → название» (schoolId/groupMaskId), ведётся вручную.
 
     REST настоящих названий групп/вузов не отдаёт; дневной отчёт журнала
@@ -715,6 +759,9 @@ class PromptEditorshipInline(admin.TabularInline):
 
 
 class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_users"
+
     """User management restricted to staff/superuser in the AI admin site."""
 
     list_display = ("last_name", "first_name", "dl_id", "email", "is_staff_badge")
@@ -752,6 +799,9 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
 
 
 class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_dl_tasks"
+
     """Admin for the local Task table used by batch-solve ARM.
 
     The operator enters the DL ``node_id`` and assigns a topic / programming
@@ -817,6 +867,9 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 
 
 class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_task_solution"
+
     """Кэш решённых задач «Реши задачу» (узел DL + язык → проверенный код).
 
     Записи создаются автоматически (send-solution + успешное тестирование со
@@ -905,84 +958,21 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         return is_superuser_user(request.user)
 
 
-class PromptTestCaseAdmin(admin.ModelAdmin):
-    """Admin for prompt regression test fixtures (input + golden + comparator).
-
-    Доступ только суперпользователю (тест-кейсы промптов — по решению владельца
-    закрыты от staff/prompt_developer).
-    """
-
-    def has_module_permission(self, request):
-        return is_superuser_user(request.user)
-
-    def has_view_permission(self, request, obj=None):
-        return is_superuser_user(request.user)
-
-    def has_add_permission(self, request):
-        return is_staff_or_superuser(request.user)
-
-    def has_change_permission(self, request, obj=None):
-        return is_staff_or_superuser(request.user)
-
-    def has_delete_permission(self, request, obj=None):
-        return is_staff_or_superuser(request.user)
-
-    list_display = ("name", "mode", "topic", "programming_language", "comparator", "active", "updated_at")
-    list_display_links = ("name",)
-    list_filter = ("mode", "active", "topic", "comparator")
-    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
-    show_facets = admin.ShowFacets.NEVER
-    list_editable = ("active",)
-    search_fields = ("name", "input_text", "expected_text")
-    autocomplete_fields = ("topic", "programming_language")
-    readonly_fields = ("created_at", "updated_at")
-
-    fieldsets = (
-        (None, {"fields": ("name", "mode", "active")}),
-        ("Ввод и эталон", {"fields": ("input_text", "expected_text", "comparator", "match_threshold")}),
-        ("Привязка", {"fields": ("topic", "programming_language", "ui_language", "owner")}),
-        ("Метаданные", {"fields": ("created_at", "updated_at")}),
-    )
-
-
-class PromptTestRunAdmin(admin.ModelAdmin):
-    """Read-only admin for prompt regression runs (the rich UI is the custom page).
-
-    Доступ только суперпользователю (прогоны регрессионных тестов — по решению
-    владельца закрыты от staff/prompt_developer).
-    """
-
-    def has_module_permission(self, request):
-        return is_superuser_user(request.user)
-
-    def has_view_permission(self, request, obj=None):
-        return is_superuser_user(request.user)
-
-    list_display = ("run_id", "model_title", "prompt_name", "status", "total_cases", "started_at", "finished_at")
-    list_filter = ("status", "model_key")
-    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
-    show_facets = admin.ShowFacets.NEVER
-    search_fields = ("run_id", "model_title", "prompt_name", "error_message")
-    readonly_fields = (
-        "run_id", "status", "model_key", "model_title", "prompt_id", "prompt_name",
-        "ui_language", "user", "started_at", "finished_at", "error_message", "report", "total_cases",
-    )
-
-    def has_add_permission(self, request):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False
-
-
 class AIWizardSeenAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     """Кто какой онбординг-wizard уже видел и в какой версии.
 
     Главная роль листинга — «отследить, получил ли пользователь тур» и сброс
     отметки: удалить строку → тур этой страницы покажется заново при
-    следующем заходе. Только суперюзеру.
+    следующем заходе.
     """
 
+    # Ключ «Групп доступа», открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_wizard_seen"
+
+    def _has_access(self, request):
+        # Листинг исторически супер-инструмент: staff-фолбэк НЕ добавляем —
+        # суперюзер либо держатель ключа.
+        return user_has_key(request.user, self.ACCESS_KEY)
     list_display = ("user", "scope", "version", "created_at")
     list_filter = ("scope",)
     # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
@@ -990,10 +980,10 @@ class AIWizardSeenAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     search_fields = ("user__username", "user__first_name", "user__last_name")
 
     def has_module_permission(self, request):
-        return is_superuser_user(request.user)
+        return is_superuser_user(request.user) or self._has_access(request)
 
     def has_view_permission(self, request, obj=None):
-        return is_superuser_user(request.user)
+        return is_superuser_user(request.user) or self._has_access(request)
 
     def has_add_permission(self, request):
         return is_superuser_user(request.user)
@@ -1001,5 +991,6 @@ class AIWizardSeenAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     def has_change_permission(self, request, obj=None):
         return is_superuser_user(request.user)
 
+    # Удаление строки = сброс флага тура этого юзера → ключ открывает и его.
     def has_delete_permission(self, request, obj=None):
-        return is_superuser_user(request.user)
+        return is_superuser_user(request.user) or self._has_access(request)

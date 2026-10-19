@@ -13,7 +13,12 @@ import random
 import uuid
 from datetime import timedelta
 
-from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.http import (
+    HttpRequest,
+    HttpResponse,
+    HttpResponseForbidden,
+    JsonResponse,
+)
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import reverse
@@ -25,7 +30,7 @@ from ..model_clients import registry
 from ..models import AIRequestLog, ProgrammingLanguage, Prompt, Task, Topic
 from ..services.auth import get_user_identity_for_log
 from ..services.log_writer import LogWriter
-from .permissions import is_superuser_user
+from .permissions import can_access_test_data
 from .site import ai_admin_site
 
 
@@ -34,17 +39,12 @@ from .site import ai_admin_site
 def get_test_data_url():
     return "/ai/admin/test_data/"
 
-def can_access_test_data(request):
-    """Генератор тестовых данных: только суперпользователь/разработчик."""
-    if not request.user.is_authenticated:
-        return False
-    return is_superuser_user(request.user)
-
 #endregion
 
 
 def test_data_view(request: HttpRequest) -> TemplateResponse:
-
+    if not can_access_test_data(request):
+        return HttpResponseForbidden("Access denied")
     context = {
         **ai_admin_site.each_context(request),
         "title": "DL.AI: Тестовые данные",
@@ -109,8 +109,8 @@ def pick_mode() -> str:
 # Генерирует лог о запуске промпте модели
 @require_POST
 def test_data_emit_request_view(request: HttpRequest) -> HttpResponse:
-    if not request.user.is_superuser:
-        return JsonResponse({"error": "Только суперюзер"}, status=403)
+    if not can_access_test_data(request):
+        return JsonResponse({"error": "Только суперюзер или ключ page.test_data"}, status=403)
 
     now = timezone.now()
     duration = round(random.uniform(0.5, 30.0), 2)

@@ -5,7 +5,7 @@
 «Группы доступа» /ai/admin/ai-groups/). Участники групп — не staff: правки
 чужих промптов/тем/языков/препромтов и студентов им недоступны не из-за
 ключей, а потому что соответствующие ModelAdmin'ы за _StaffOnlyAdminMixin,
-а свои промпты режет prompt_queryset_for_user. Жёстких Django-Group больше
+правку чужого промпта открывает вложенный ключ page.prompt_admin.edit_others. Жёстких Django-Group больше
 нет: legacy-группа prompt_developer перенесена во встроенную AIAccessGroup
 «Разработчик промптов» миграцией и из проверок удалена.
 """
@@ -25,6 +25,7 @@ BASELINE_ACCESS_KEYS = frozenset({
     "page.model_status",
     "page.tasks",
     "page.prompt_admin",
+    "page.prompt_admin_all",
     "page.prompt_defaults",
     "page.logs",
 })
@@ -70,7 +71,7 @@ def is_superuser_user(user):
     """Проверяет, является ли пользователь суперпользователем.
 
     Отдельный от ``is_staff_or_superuser`` помощник: некоторые инструменты
-    (регрессионные тесты, тестовая консоль, тест-кейсы промптов) по решению
+    (тестовая консоль и другие супер-инструменты) по решению
     владельца доступны ТОЛЬКО суперпользователю — даже staff без флага
     ``is_superuser`` их не видит (если ключ не выдан через группы).
     """
@@ -172,18 +173,60 @@ def can_access_tasks(request):
     return user_has_key(request.user, "page.tasks")
 
 
-def can_access_prompt_regression(request):
-    """Регрессионные тесты промптов: суперюзер ИЛИ ключ page.prompt_regression."""
-    if not request.user.is_authenticated:
-        return False
-    return user_has_key(request.user, "page.prompt_regression")
-
-
 def can_access_test_console(request):
     """Тестовая консоль: суперюзер ИЛИ ключ page.test_console."""
     if not request.user.is_authenticated:
         return False
     return user_has_key(request.user, "page.test_console")
+
+
+def can_access_pinned_runs(request):
+    """«Закреплённые пакетные решения»: те же права, что у журнала, ИЛИ ключ.
+
+    Раньше права зашивались на журнал (пин живёт в журнале), поэтому ключ
+    page.logs/page.logs_own/page.logs_all признаётся наравне с новым
+    page.pinned_runs — старые группы не теряют доступ.
+    """
+    if can_access_logs(request):
+        return True
+    return user_has_key(request.user, "page.pinned_runs")
+
+
+def can_access_prompt_developer_docs(user):
+    """Док «Разработчик промптов»: role-аудитория (pd/staff/super) ИЛИ ключ.
+
+    Раньше глава была безусловно видна pd/staff/super (rank-логика
+    docs.py), ключ docs.prompt_developer добавляет остальных.
+    """
+    if is_staff_or_superuser(user) or is_prompt_developer_user(user):
+        return True
+    return user_has_key(user, "docs.prompt_developer")
+
+
+def can_access_test_data(request):
+    """«Тестовые данные»: суперюзер ИЛИ ключ page.test_data (гость — нет).
+
+    Раньше только суперюзер (генератор фейковых записей журнала); ключ
+    доверяет не-staff управление журналом — выдаётся осознанно.
+    """
+    if not request.user.is_authenticated:
+        return False
+    return is_superuser_user(request.user) or user_has_key(
+        request.user, "page.test_data"
+    )
+
+
+def can_access_access_groups(request):
+    """«Группы доступа»: суперюзер ИЛИ ключ page.groups (гость — нет).
+
+    Держатель ключа управляет правами групп, включая собственную; выдаётся
+    осознанно (он может раздать любой из существующих ключей).
+    """
+    if not request.user.is_authenticated:
+        return False
+    return is_superuser_user(request.user) or user_has_key(
+        request.user, "page.groups"
+    )
 
 
 def can_access_updates(request):

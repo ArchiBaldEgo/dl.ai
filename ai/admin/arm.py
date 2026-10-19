@@ -229,7 +229,7 @@ def admin_arm_solve_view(request):
 
     # Список промптов режима «Реши задачу» для ручного выбора на странице.
     # Промпты — студенческий контент: тот же контракт, что у chat-facing
-    # get_prompts (см. querysets.prompt_queryset_for_user — здесь ACL не режем).
+    # get_prompts — здесь выбор не режется никаким ACL.
     # language_name — для промптов «на весь язык» (без темы).
     prompt_options = [
         {

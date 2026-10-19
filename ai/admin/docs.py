@@ -21,7 +21,12 @@ from ..services.docs import (
     render_chapter_html,
     visible_chapter_slugs,
 )
-from .permissions import is_staff_or_superuser, is_superuser_user, user_has_key
+from .permissions import (
+    can_access_prompt_developer_docs,
+    is_staff_or_superuser,
+    is_superuser_user,
+    user_has_key,
+)
 from .site import ai_admin_site
 
 # Глава doc-ранга → ключ группы доступа, открывающий её не-staff юзеру
@@ -39,11 +44,17 @@ def _chapter_visible_for_user(chapter, request) -> bool:
     """
     from .guest_mode import is_viewing_as_guest
 
-    if is_viewing_as_guest(request):
-        # Гостевой режим = уровень разработчика промптов: только главы "any".
-        return chapter.min_role == "any"
+    guest = is_viewing_as_guest(request)
     if chapter.min_role == "any":
         return True
+    if chapter.min_role == "prompt_developer":
+        # Гостевой режим = глаза разработчика промптов: глава остаётся видна.
+        if guest:
+            return True
+        return can_access_prompt_developer_docs(request.user)
+    if guest:
+        # Гостевой режим = уровень разработчика промптов: главы staff/super скрыты.
+        return False
     if is_superuser_user(request.user):
         return True
     if chapter.min_role == "staff":

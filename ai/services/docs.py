@@ -23,7 +23,7 @@ from django.utils.html import escape
 
 # Ранг роли: чем больше, тем шире доступ. Фильтрация глав идёт сравнением
 # рангов, без ветвлений по конкретным главам.
-_ROLE_RANKS = {"any": 0, "staff": 1, "superuser": 2}
+_ROLE_RANKS = {"any": 0, "prompt_developer": 0, "staff": 1, "superuser": 2}
 
 # Разделитель глав DOCX.md — только строки «## Инструкция для …». Внутри
 # приложений тестера/сисадмина встречаются одиночные «# …» и нумерованные
@@ -42,7 +42,8 @@ class DocChapter:
     # ("docx", heading) — глава DOCX.md по H2-заголовку;
     # ("file", relative_path) — отдельный файл от BASE_DIR.
     source: tuple[str, str]
-    # "any" — всем в админке; "staff" — is_staff_or_superuser;
+    # "any" — всем в админке; "prompt_developer" — pd/staff/super или ключ
+    # docs.prompt_developer; "staff" — is_staff_or_superuser;
     # "superuser" — только суперюзер. Глава "user" видна только в чате.
     min_role: str = "any"
     in_admin_nav: bool = True
@@ -65,6 +66,7 @@ _CHAPTERS = {
         slug="prompt-developer",
         title="Инструкция для разработчика промптов",
         source=("docx", "Инструкция для разработчика промптов"),
+        min_role="prompt_developer",
     ),
     "developer": DocChapter(
         slug="developer",

@@ -31,7 +31,6 @@ _ADMIN_SCOPES_BY_PATH = (
     ("/ai/admin/ai/aiappsettings/", "admin_aiappsettings"),
     ("/ai/admin/updates/", "admin_updates"),
     ("/ai/admin/prompt-defaults/", "admin_prompt_defaults"),
-    ("/ai/admin/prompt-regression/", "admin_regression"),
     ("/ai/admin/test-console/", "admin_test_console"),
     ("/ai/admin/prompts/my/", "admin_my_prompt"),
     ("/ai/admin/test_data/", "admin_test_data"),
