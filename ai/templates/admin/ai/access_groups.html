@@ -1,8 +1,10 @@
 {% extends "admin/base_site.html" %}
 {% load static %}
 {# Страница «Группы доступа» (ai/admin/access_groups.py) — только суперюзер. #}
-{# Группы (права-ключи + состав), builtin нельзя удалить/переименовать.  #}
-{# Состав: построчный toggle по юзеру (immune к гонке частичной выдачи). #}
+{# Карточки-аккордеоны: свёрнуто = название + описание, раскрыто = форма  #}
+{# (имя/описание/права) + редактор состава (поиск AJAX'ом). builtin нельзя#}
+{# переименовать (проверки по имени), но можно удалить. Страницы/доки —   #}
+{# ДИНАМИЧЕСКИ из левого нава (site.py::_ai_tool_defs).                   #}
 
 {% block extrastyle %}
   <link rel="stylesheet" href="{% static 'admin/ai/access_groups/index.css' %}">
@@ -12,9 +14,12 @@
 <div class="ai-groups-wrap">
   <p class="help">
     Группа даёт право на вкладки админки (Страницы), главы документации и
-    действия. Суперюзер видит всё по умолчанию. Встроенные группы нельзя
-    удалить и переименовать — проверки находят их по имени; права правятся
-    как у обычных. Изменение прав/состава действует сразу.
+    действия. Суперюзер видит всё по умолчанию. Карточка раскрывается
+    кликом: внутри — настройка прав и редактор состава (поиск участников
+    строкой). Страницы и главы документации подтягиваются динамически из
+    левого нава. У созданных групп меняется название; удалить можно любую,
+    но встроенная при следующем добавлении участника пересоздастся ПУСТОЙ
+    (права придётся выдать заново). Изменение прав/состава действует сразу.
   </p>
 
   <form class="ai-groups-create" data-save-url="{{ create_url }}">
@@ -26,75 +31,64 @@
   </form>
 
   {% for group in rows %}
-  <div class="ai-group-card{% if group.is_builtin %} ai-group-builtin{% endif %}{% if group.selected %} ai-group-selected{% endif %}">
-    <div class="ai-group-head">
+  <div class="ai-group-card{% if group.is_builtin %} ai-group-builtin{% endif %}{% if group.open %} ai-group-open{% endif %}"
+       data-group-card="{{ group.id }}">
+    <div class="ai-group-head" role="button" tabindex="0"
+         aria-expanded="{% if group.open %}true{% else %}false{% endif %}">
+      <span class="ai-group-caret">▸</span>
       <h3>{{ group.name }}
         {% if group.is_builtin %}<span class="ai-group-badge">встроенная</span>{% endif %}
         <span class="ai-group-count">{{ group.member_count }} участн.</span>
       </h3>
-      {% if group.selected %}
-        <a href="{{ groups_url }}" class="ai-groups-back">← все группы</a>
-      {% else %}
-        <a href="{{ group.members_link }}" class="button">Состав</a>
-      {% endif %}
+      <span class="ai-group-desc-preview">{{ group.description|default:"&mdash;" }}</span>
+      {% if group.id %}<button type="button" class="button ai-groups-compose">Состав</button>{% endif %}
     </div>
-    <p class="ai-group-desc">{{ group.description|default:"—" }}</p>
 
-    <form class="ai-groups-form" data-save-url="{{ group.save_url }}">
-      {% csrf_token %}
-      {% if group.is_builtin %}
-        <input type="hidden" name="name" value="{{ group.name }}">
-        <p class="ai-groups-name-static">{{ group.name }}</p>
-      {% else %}
-        <input type="text" name="name" value="{{ group.name }}" maxlength="100">
-      {% endif %}
-      <textarea name="description" rows="2" placeholder="Описание">{{ group.description }}</textarea>
-      <div class="ai-groups-perms">
-        {% for section in sections %}
-          <fieldset>
-            <legend>{{ section.title }}</legend>
-            {% for perm in section.items %}
-              <label class="ai-groups-perm">
-                <input type="checkbox" name="permissions" value="{{ perm.key }}"
-                       {% if perm.key in group.permission_keys %}checked{% endif %}>
-                {{ perm.label }}
-                <code>{{ perm.key }}</code>
-              </label>
-            {% endfor %}
-          </fieldset>
-        {% endfor %}
-      </div>
-      <div class="ai-groups-actions">
-        <button type="submit" class="button default">Сохранить</button>
-        {% if not group.is_builtin and group.id %}
-          <button type="button" class="button ai-groups-delete" data-delete-url="{{ group.delete_url }}">Удалить группу</button>
+    <div class="ai-group-body">
+      <form class="ai-groups-form" data-save-url="{{ group.save_url }}">
+        {% csrf_token %}
+        {% if group.is_builtin %}
+          <input type="hidden" name="name" value="{{ group.name }}">
+        {% else %}
+          <input type="text" name="name" value="{{ group.name }}" maxlength="100" placeholder="Название">
         {% endif %}
-      </div>
-    </form>
+        <textarea name="description" rows="2" placeholder="Описание">{{ group.description }}</textarea>
+        <div class="ai-groups-perms">
+          {% for section in sections %}
+            <fieldset>
+              <legend>{{ section.title }}</legend>
+              {% for perm in section.items %}
+                <label class="ai-groups-perm">
+                  <input type="checkbox" name="permissions" value="{{ perm.key }}"
+                         {% if perm.key in group.permission_keys %}checked{% endif %}>
+                  {{ perm.label }}
+                  <code>{{ perm.key }}</code>
+                </label>
+              {% endfor %}
+            </fieldset>
+          {% endfor %}
+        </div>
+        <div class="ai-groups-actions">
+          <button type="submit" class="button default">Сохранить</button>
+          {% if group.id %}
+            <button type="button" class="button ai-groups-delete" data-delete-url="{{ group.delete_url }}"
+                    data-name="{{ group.name }}">Удалить группу</button>
+          {% endif %}
+        </div>
+      </form>
 
-    {% if group.selected %}
+      {% if group.id %}
       <div class="ai-groups-members">
         <h4>Состав</h4>
-        <form class="ai-groups-search" method="get" action="{{ groups_url }}">
-          <input type="hidden" name="group" value="{{ group.id }}">
-          <input type="text" name="q" value="{{ q }}" placeholder="Поиск: логин / ФИО">
-          <button type="submit" class="button">Найти</button>
-        </form>
-        {% if q %}
-          <div class="ai-groups-search-results">
+        <div class="ai-groups-search"
+             data-search-url="{{ group.search_url }}"
+             data-toggle-url="{{ group.toggle_url }}">
+          <input type="text" placeholder="Поиск: логин / ФИО">
+          <div class="ai-groups-search-results" hidden>
             <h5>Найденные (не в группе)</h5>
-            {% for user in found_users %}
-              <div class="ai-groups-user">
-                <span>{{ user.name }}</span>
-                <button type="button" class="button ai-group-add"
-                        data-toggle-url="{{ user.toggle_url }}"
-                        data-user-id="{{ user.id }}" data-action="add">Добавить</button>
-              </div>
-            {% empty %}
-              <p class="ai-groups-empty">Никого не найдено.</p>
-            {% endfor %}
+            <div class="ai-groups-search-list"></div>
           </div>
-        {% endif %}
+        </div>
         <div class="ai-groups-current">
           <h5>Текущие участники ({{ group.member_count }})</h5>
           {% for user in group.members %}
@@ -102,14 +96,17 @@
               <span>{{ user.name }}</span>
               <button type="button" class="button ai-group-remove"
                       data-toggle-url="{{ group.toggle_url }}"
-                      data-user-id="{{ user.id }}" data-action="remove">Убрать</button>
+                      data-user-id="{{ user.id }}"
+                      data-search-url="{{ group.search_url }}"
+                      data-action="remove">Убрать</button>
             </div>
           {% empty %}
             <p class="ai-groups-empty">В группе пока никого нет.</p>
           {% endfor %}
         </div>
       </div>
-    {% endif %}
+      {% endif %}
+    </div>
   </div>
   {% empty %}
     <p class="ai-groups-empty">Групп пока нет — создайте первую формой выше.</p>

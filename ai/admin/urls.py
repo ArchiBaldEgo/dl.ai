@@ -10,6 +10,7 @@ from django.urls import include, path
 from ..views import set_password_view
 from .access_groups import (
     admin_access_group_delete_view,
+    admin_access_group_member_search_view,
     admin_access_group_member_toggle_view,
     admin_access_group_save_view,
     admin_access_groups_view,
@@ -127,6 +128,7 @@ def get_ai_admin_urls():
         path("prompt-defaults/", ai_admin_site.admin_view(admin_prompt_defaults_view), name="ai_prompt_defaults"),
         path("ai-groups/<int:group_id>/save/", ai_admin_site.admin_view(admin_access_group_save_view), name="ai_access_group_save"),
         path("ai-groups/<int:group_id>/delete/", ai_admin_site.admin_view(admin_access_group_delete_view), name="ai_access_group_delete"),
+        path("ai-groups/<int:group_id>/members/search/", ai_admin_site.admin_view(admin_access_group_member_search_view), name="ai_access_group_member_search"),
         path("ai-groups/<int:group_id>/members/toggle/", ai_admin_site.admin_view(admin_access_group_member_toggle_view), name="ai_access_group_member_toggle"),
         path("ai-groups/", ai_admin_site.admin_view(admin_access_groups_view), name="ai_access_groups"),
         path("updates/", ai_admin_site.admin_view(admin_updates_view), name="ai_updates"),

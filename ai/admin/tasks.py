@@ -3,19 +3,21 @@
 Два типа тасков-вкладок: «Фронт работы» (front) — приоритетный поток с
 ЧИСЛОВЫМ уникальным номером (меньше = важнее, выдаётся сервером: max+1;
 порядок меняют перетаскиванием строк → tasks/reorder/ перенумеровывает
-1..N) и «Хотелки» (wish) — без нумерации. Создать/закрыть — суперюзер либо
-ключи action.task_create/task_close (см. «Группы доступа»); переставить —
-superuser/action.task_reorder. Взять может любой с доступом к доске
-(page.tasks — «видна начиная с разработчика»): taken_by/taken_at пишутся
-атомарно (условный UPDATE — «первый успел»). ModelAdmin не регистрируется —
-страница целиком кастомная, по тому же образцу, что «Закреплённые пакетные
-решения» (pinned.py).
+1..N) и «Хотелки» (wish) — без нумерации. Псевдо-вкладка-фильтр «Мои таски»
+(mine) показывает взятые пользователем + созданные им (пока не взятые
+кем-то ещё) — активные: закрытый таск удалён с доски. Создать/закрыть —
+суперюзер либо ключи action.task_create/task_close (см. «Группы доступа»);
+переставить — superuser/action.task_reorder. Взять может любой с доступом
+к доске (page.tasks — «видна начиная с разработчика»): taken_by/taken_at
+пишутся атомарно (условный UPDATE — «первый успел»). ModelAdmin не
+регистрируется — страница целиком кастомная, по тому же образцу, что
+«Закреплённые пакетные решения» (pinned.py).
 """
 
 import json
 
 from django.db import IntegrityError, transaction
-from django.db.models import Max
+from django.db.models import F, Max, Q
 from django.http import HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
 from django.utils import timezone
@@ -72,28 +74,44 @@ def _forbid(message="Access denied", status=403):
 
 
 def admin_tasks_view(request):
-    """Страница «Таски»: вкладки (front/wish), таблица, форма создания.
+    """Страница «Таски»: вкладки (front/wish/mine), таблица, форма создания.
 
     Вкладки — серверные (?kind=), URL шарится; wanted-строки без номера в
-    колонке «№» — «—». Перетаскивание включается атрибутом
-    data-reorder="1" только у тех, кому можно, и только на вкладке front.
+    колонке «№» — «—». «Мои таски» (kind=mine) — ПСЕВДО-вкладка-фильтр:
+    взятые пользователем + созданные им (пока их не взял кто-то ещё);
+    «закрытый» таск удалён с доски, поэтому всё оставшееся — активное.
+    Перетаскивание включается draggable + data-reorder="1" только у тех,
+    кому можно (право), и только на вкладке front.
     """
     if not can_access_tasks(request):
         return HttpResponseForbidden("Access denied")
     guest = is_viewing_as_guest(request)
     superuser = is_superuser_user(request.user)
 
+    VIEW_MINE = "mine"
     kind = request.GET.get("kind") or AIDevTask.Kind.FRONT
-    if kind not in dict(AIDevTask.Kind.choices):
+    if kind not in dict(AIDevTask.Kind.choices) and kind != VIEW_MINE:
         kind = AIDevTask.Kind.FRONT
 
-    rows_qs = AIDevTask.objects.select_related(
-        "taken_by", "taken_by__external_dl_account"
-    ).filter(kind=kind)
-    if kind == AIDevTask.Kind.FRONT:
-        rows_qs = rows_qs.order_by("priority_no", "-created_at", "-id")
+    if kind == VIEW_MINE:
+        # Псевдо-вкладка «Мои таски»: взятые пользователем + созданные им
+        # (пока не взял кто-то ещё). Таск может быть и хоталкой — порядок по
+        # номеру фронта, NULL-номера (хотелки) ВСЕГДА в конец: nulls_last
+        # явно, иначе sqlite (NULLs first) и Postgres (NULLs last) расходятся.
+        rows_qs = AIDevTask.objects.select_related(
+            "taken_by", "taken_by__external_dl_account"
+        ).filter(
+            Q(taken_by=request.user)
+            | Q(created_by=request.user, taken_by__isnull=True)
+        ).order_by(F("priority_no").asc(nulls_last=True), "-created_at", "-id")
     else:
-        rows_qs = rows_qs.order_by("-created_at", "-id")
+        rows_qs = AIDevTask.objects.select_related(
+            "taken_by", "taken_by__external_dl_account"
+        ).filter(kind=kind)
+        if kind == AIDevTask.Kind.FRONT:
+            rows_qs = rows_qs.order_by("priority_no", "-created_at", "-id")
+        else:
+            rows_qs = rows_qs.order_by("-created_at", "-id")
 
     edu_maps = education_title_maps()
     rows = []
@@ -116,6 +134,7 @@ def admin_tasks_view(request):
     can_reorder = (
         (superuser or user_has_key(request.user, "action.task_reorder"))
         and not guest
+        and kind == AIDevTask.Kind.FRONT
     )
     context = {
         **ai_admin_site.each_context(request),
@@ -124,6 +143,10 @@ def admin_tasks_view(request):
         "active_kind": kind,
         "tabs": [
             {"kind": value, "label": label, "url": f"{TASKS_URL}?kind={value}"}
+            for value, label in AIDevTask.Kind.choices
+        ] + [{"kind": VIEW_MINE, "label": "Мои таски", "url": f"{TASKS_URL}?kind={VIEW_MINE}"}],
+        "create_kinds": [
+            {"kind": value, "label": label, "selected": value == (kind if kind in dict(AIDevTask.Kind.choices) else AIDevTask.Kind.FRONT)}
             for value, label in AIDevTask.Kind.choices
         ],
         "can_reorder": can_reorder,

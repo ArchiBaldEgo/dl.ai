@@ -12,14 +12,30 @@
 .ai-group-card {
   border: 1px solid var(--hairline-color);
   border-radius: 6px;
-  padding: 12px 14px 14px;
-  margin: 0 0 16px;
+  padding: 10px 14px;
+  margin: 0 0 12px;
 }
-.ai-group-selected { border-color: var(--button-bg); }
-.ai-group-head { display: flex; align-items: center; gap: 12px; }
-.ai-group-head h3 { margin: 0; display: flex; align-items: center; gap: 8px; }
-.ai-group-head .button { margin-left: auto; }
-.ai-groups-back { color: var(--link-color); }
+.ai-group-open { border-color: var(--button-bg); }
+/* Аккордеон: свёрнуто — шапка (название + описание + «Состав»); тело скрыто. */
+.ai-group-head {
+  display: flex; align-items: center; gap: 12px;
+  cursor: pointer; user-select: none; padding: 2px 0;
+}
+.ai-group-head:focus-visible { outline: 2px solid var(--button-bg); }
+.ai-group-head h3 { margin: 0; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.ai-group-desc-preview {
+  color: var(--body-quiet-color); flex: 1 1 auto;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ai-group-caret {
+  display: inline-block; width: 14px; text-align: center;
+  color: var(--body-quiet-color);
+  transition: transform 0.15s ease;
+}
+.ai-group-open .ai-group-caret { transform: rotate(90deg); }
+.ai-group-body { display: none; padding: 10px 2px 2px; }
+.ai-group-open .ai-group-body { display: block; }
+.ai-groups-compose { flex: 0 0 auto; margin-left: 8px; }
 
 .ai-group-badge {
   display: inline-block; padding: 1px 8px; border-radius: 10px;
@@ -51,8 +67,8 @@
 
 .ai-groups-members h4 { margin: 10px 0 6px; }
 .ai-groups-members h5 { margin: 10px 0 4px; color: var(--body-quiet-color); }
-.ai-groups-search { display: flex; gap: 8px; margin: 0 0 8px; }
-.ai-groups-search input[type="text"] { flex: 0 1 320px; }
+.ai-groups-search { margin: 0 0 8px; }
+.ai-groups-search input[type="text"] { width: 320px; }
 
 .ai-groups-user {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -62,4 +78,4 @@
 .ai-groups-user .button { padding: 2px 10px; }
 .ai-groups-empty { color: var(--body-quiet-color); }
 
-.ai-groups-busy button { pointer-events: none; opacity: 0.6; }
+.busy { pointer-events: none; opacity: 0.6; }

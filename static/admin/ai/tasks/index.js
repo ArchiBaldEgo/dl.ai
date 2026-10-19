@@ -16,12 +16,22 @@
     // AJAX админки всегда ждёт JSON: при протухшей сессии admin_view
     // редиректит fetch на страницу логина (HTML) — честный текст вместо
     // ошибки парсинга (та же конвенция, что в arm_solve/test_console).
+    // Не-JSON с другим статусом (CSRF 403, 500) показывается со статусом
+    // и началом тела — маскировать всё под «сессию» нельзя.
     function parseJsonResponse(response) {
         return response.text().then(function (text) {
             try {
                 return JSON.parse(text);
             } catch (e) {
-                throw new Error('Сессия истекла — обновите страницу и войдите заново');
+                var head = text.replace(/\s+/g, ' ').slice(0, 120);
+                if (response.status === 403) {
+                    throw new Error('CSRF-проверка не прошла (HTTP 403): ' + head +
+                        ' — обновите страницу (Ctrl+F5) и повторите');
+                }
+                throw new Error('Сервер вернул не JSON, HTTP ' + response.status +
+                    ': ' + head + (head.indexOf('<!DOCTYPE') === 0 || head.indexOf('<html') === 0
+                        ? ' — сессия истекла, войдите заново'
+                        : ''));
             }
         });
     }

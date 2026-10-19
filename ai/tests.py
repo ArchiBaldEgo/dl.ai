@@ -12449,6 +12449,29 @@ class AIDevTaskBoardTests(TestCase):
         self.assertTrue(resp.context_data["can_close"])
         self.assertTrue(resp.context_data["can_reorder"])
 
+    def test_front_rows_are_draggable_for_reorder_users(self):
+        """Перетаскивание: HTML5 DnD требует draggable на строках (регрессия
+        2026-10 — атрибут потеряли, dragstart не стартовал вовсе). Ставится
+        только при праве can_reorder на вкладке front; на wish/в гостевом нет."""
+        AIDevTask.objects.create(title="Т-фронт", kind="front", priority_no=1)
+
+        resp = self.page_view(self._request(self.superuser, path=f"{self.tasks_url}?kind=front"))
+        resp.render()
+        self.assertIn('draggable="true"', resp.content.decode())
+
+        resp = self.page_view(self._request(self.superuser, path=f"{self.tasks_url}?kind=wish"))
+        resp.render()
+        self.assertNotIn('draggable="true"', resp.content.decode())
+
+        # Гостевой режим: can_reorder False → draggable не ставится.
+        from ai.admin.guest_mode import SESSION_KEY
+        req = self._request(self.superuser, path=f"{self.tasks_url}?kind=front")
+        req.session[SESSION_KEY] = True
+        resp = self.page_view(req)
+        self.assertFalse(resp.context_data["can_reorder"])
+        resp.render()
+        self.assertNotIn('draggable="true"', resp.content.decode())
+
     # --- Создание (superuser; номер выдаёт сервер) -------------------------
 
     def test_create_requires_superuser(self):
@@ -12597,6 +12620,58 @@ class AIDevTaskBoardTests(TestCase):
         AIDevTask.objects.create(title="фронт", kind="front", priority_no=4)
         resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=bogus"))
         self.assertEqual(resp.context_data["active_kind"], "front")
+
+    def test_mine_tab_shows_only_own_active_tasks(self):
+        """«Мои таски» (kind=mine) — псевдо-вкладка-фильтр: взятые
+        пользователем + созданные им (пока их не взял кто-то ещё); чужие не
+        видны, закрытый (=удалённый) таск исчезает. Хотелка попадает тоже —
+        фильтр не по kind; порядок по номеру фронта, NULL-номера в конец."""
+        created_front = AIDevTask.objects.create(
+            title="Мой созданный", kind="front", priority_no=1, created_by=self.dev,
+        )
+        AIDevTask.objects.create(
+            title="Моя хотелка", kind="wish", created_by=self.dev,
+        )
+        claimed = AIDevTask.objects.create(
+            title="Мой взятый", kind="front", priority_no=2, created_by=self.superuser,
+        )
+        # taken_by ставится только claim'ом (никогда не вручную) — берём как UI.
+        self.claim_view(
+            self._request(self.dev, "post", f"/x/{claimed.id}/claim/"), claimed.id
+        )
+        AIDevTask.objects.create(
+            title="Чужой взятый", kind="front", priority_no=3,
+            created_by=self.superuser, taken_by=self.superuser,
+        )
+        AIDevTask.objects.create(
+            title="Чужой созданный", kind="front", priority_no=4, created_by=self.superuser,
+        )
+
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=mine"))
+        self.assertEqual(resp.context_data["active_kind"], "mine")
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertEqual(titles, ["Мой созданный", "Мой взятый", "Моя хотелка"])
+
+        # Чужой таск, взятый МНОЙ, появляется в mine; при этом взятый кем-то
+        # другом (superuser) «Чужой взятый» — нет (exact-список выше).
+
+        # Взял кто-то другой мой созданный → он выпадает из mine.
+        self.claim_view(
+            self._request(self.other_dev, "post", f"/x/{created_front.id}/claim/"),
+            created_front.id,
+        )
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=mine"))
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertNotIn("Мой созданный", titles)
+        self.assertIn("Мой взятый", titles)
+
+        # Закрытый таск — удалён с доски → из mine исчезает.
+        self.close_view(
+            self._request(self.superuser, "post", f"/x/{claimed.id}/close/"), claimed.id
+        )
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=mine"))
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertNotIn("Мой взятый", titles)
 
     # --- Перестановка фронта (reorder) -------------------------------------
 
@@ -12956,13 +13031,25 @@ class AIAccessGroupsAdminTests(TestCase):
         group.refresh_from_db()
         self.assertEqual(group.name, BUILTIN_GROUP_DEVELOPER)
 
-    def test_builtin_cannot_be_deleted(self):
+    def test_builtin_can_be_deleted_and_recreates_empty(self):
+        """Удаление встроенной разрешено (2026-10, решение владельца): права
+        теряются, а при следующем добавлении участника get_or_create по имени
+        пересоздаёт группу ПУСТОЙ."""
         from ai.constants import BUILTIN_GROUP_PROMPT_DEV
         from ai.models import AIAccessGroup
+
         group = AIAccessGroup.objects.get(name=BUILTIN_GROUP_PROMPT_DEV)
         resp = self._delete(self.superuser, group.id)
-        self.assertEqual(resp.status_code, 403)
-        self.assertTrue(AIAccessGroup.objects.filter(pk=group.pk).exists())
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(AIAccessGroup.objects.filter(pk=group.pk).exists())
+
+        # Пересоздание пустой: у нового юзера ключей не прибавится.
+        from ai.admin.permissions import add_user_to_builtin_ai_group, user_has_key
+        recreated = add_user_to_builtin_ai_group(self.plain)
+        self.assertEqual(recreated.name, BUILTIN_GROUP_PROMPT_DEV)
+        self.assertTrue(recreated.is_builtin)
+        self.assertEqual(recreated.permissions.count(), 0)
+        self.assertFalse(user_has_key(self.plain, "page.arm_solve"))
 
     def test_regular_group_delete(self):
         from ai.models import AIAccessGroup
@@ -12970,6 +13057,92 @@ class AIAccessGroupsAdminTests(TestCase):
         resp = self._delete(self.superuser, group.id)
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(AIAccessGroup.objects.filter(pk=group.pk).exists())
+
+    def test_regular_group_rename_persists(self):
+        """У созданной группы меняется имя (2026-10: раньше имя обновлялось
+        только при создании — ренейм был мёртвым кодом); права сохраняются."""
+        from ai.models import AIAccessGroup
+
+        group = AIAccessGroup.objects.create(name="Старое имя")
+        from ai.models import AIAdminGroupPermission
+        group.permissions.add(
+            *AIAdminGroupPermission.objects.filter(key="page.arm_solve")
+        )
+        resp = self._save(self.superuser, group.id, {
+            "name": "Новое имя", "description": "переименована",
+            "permissions": ["page.arm_solve"],
+        })
+        self.assertEqual(resp.status_code, 200)
+        group.refresh_from_db()
+        self.assertEqual(group.name, "Новое имя")
+        self.assertEqual(group.description, "переименована")
+        self.assertEqual([p.key for p in group.permissions.all()], ["page.arm_solve"])
+
+    def test_regular_group_rename_to_duplicate_is_400(self):
+        from ai.models import AIAccessGroup
+        AIAccessGroup.objects.create(name="А", description="")
+        target = AIAccessGroup.objects.create(name="Б", description="")
+        resp = self._save(self.superuser, target.id, {"name": "А"})
+        self.assertEqual(resp.status_code, 400)
+        target.refresh_from_db()
+        self.assertEqual(target.name, "Б")
+
+    # --- Динамические секции (страницы/доки из нава) ---------------------
+
+    def test_pages_section_follows_nav_registry(self):
+        """«Страницы» — динамически из _ai_tool_defs: строка ключа, потерянная
+        в БД, восстанавливается при рендере; page.admin (без URL) остаётся;
+        устаревшая БД-строка не показывается."""
+        from ai.models import AIAdminGroupPermission
+
+        AIAdminGroupPermission.objects.filter(key="page.arm_solve").delete()
+        AIAdminGroupPermission.objects.create(
+            key="page.ghost", label="Призрак",
+            section=AIAdminGroupPermission.SECTION_PAGE,
+        )
+        resp = self._view(self._request(self.superuser))
+        resp.render()
+        html = resp.content.decode()
+        # Потерянная страница восстановлена из нава и видна (подпись нава).
+        self.assertTrue(
+            AIAdminGroupPermission.objects.filter(key="page.arm_solve").exists()
+        )
+        self.assertIn("Пакетное решение", html)
+        # docs — тоже из нава (свежая подпись нава перетирает миграционную).
+        self.assertIn("Документация для разработчика", html)
+        # page.admin — гейт входа, страницы не имеет: остаётся.
+        self.assertIn("page.admin", html)
+        # Действия — чисто БД-список.
+        self.assertIn("action.task_create", html)
+        # Устаревший ключ (нет ни в наве, ни в urls) не рисуется.
+        self.assertNotIn("page.ghost", html)
+
+    def test_member_search_endpoint(self):
+        from ai.admin.access_groups import admin_access_group_member_search_view
+        from ai.models import AIAccessGroup
+
+        group = AIAccessGroup.objects.get(name="Разработчик")
+        request = self._request(
+            self.superuser, "get", f"/x/{group.id}/members/search/", data={"q": "plain"}
+        )
+        resp = admin_access_group_member_search_view(request, group.id)
+        self.assertEqual(resp.status_code, 200)
+        names = [u["name"] for u in json.loads(resp.content)["users"]]
+        self.assertIn("groups_plain", names)
+
+        # Пустой q → пустой список; чужой доступ → 403; не группа → 404.
+        request = self._request(
+            self.superuser, "get", f"/x/{group.id}/members/search/", data={"q": ""}
+        )
+        self.assertEqual(admin_access_group_member_search_view(request, group.id).status_code, 200)
+        request = self._request(
+            self.plain, "get", f"/x/{group.id}/members/search/", data={"q": "x"}
+        )
+        self.assertEqual(admin_access_group_member_search_view(request, group.id).status_code, 403)
+        request = self._request(
+            self.superuser, "get", "/x/999999/members/search/", data={"q": "x"}
+        )
+        self.assertEqual(admin_access_group_member_search_view(request, 999999).status_code, 404)
 
     def test_delete_unknown_group_is_404(self):
         resp = self._delete(self.superuser, 999999)
