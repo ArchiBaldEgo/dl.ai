@@ -25,10 +25,13 @@ from .permissions import (
     can_access_prompt_regression,
     can_access_tasks,
     can_access_test_console,
+    can_access_updates,
     is_prompt_developer_user,
     is_staff_or_superuser,
+    user_has_key,
 )
 from ..auth_backends import get_external_user_id_from_request
+from ..constants import BUILTIN_GROUP_DEVELOPER
 
 logger = logging.getLogger(__name__)
 
@@ -365,16 +368,16 @@ class AIAdminSite(admin.AdminSite):
         context["my_prompt_change_url"] = get_my_prompt_admin_url(request)
         ai_logs_url = "/ai/admin/ai/request_logs/"
         context["ai_logs_url"] = ai_logs_url
-        show_updates = is_staff and not guest
+        show_updates = can_access_updates(request) and not guest
         context["show_updates_link"] = show_updates
         updates_url = "/ai/admin/updates/"
         context["updates_url"] = updates_url
         aiappsettings_url = self._aiappsettings_url()
         docs_url = "/ai/admin/docs/"
         pinned_runs_url = "/ai/admin/pinned-runs/"
-        # Доска «Таски»: суперюзеры (создать/закрыть) + разработчики промптов
-        # (взять). В гостевом режиме пункт остаётся, форма/кнопки прячет
-        # шаблон по can_create/can_close.
+        # Доска «Таски»: суперюзеры/«Разработчик» (страница + брать), мутации —
+        # по action-ключам. В гостевом режиме пункт остаётся, форма/кнопки
+        # прячет шаблон по can_create/can_close.
         tasks_url = "/ai/admin/tasks/"
         context["tasks_url"] = tasks_url
         context["show_tasks_link"] = can_access_tasks(request)
@@ -405,18 +408,19 @@ class AIAdminSite(admin.AdminSite):
                 # пакетные прогоны (★ в журнале и на «Настройке ИИ-приложения»).
                 # В гостевом режиме скрыта, как и вся группа настройки.
                 ("Закреплено", "Закреплённые пакетные решения", "AiPinnedBatchRuns", pinned_runs_url, show_logs and not guest, "★", "Закреплённые завершённые пакетные прогоны"),
+                # Доска «Таски» — прямо под закреплёнными пакетными решениями
+                # (ТЗ 2026-10-19): суперюзер создаёт/закрывает, «Разработчик»
+                # берёт; вкладки «Фронт работы» (числовой приоритет,
+                # перетаскивание) и «Хотелки».
+                ("Закреплено", "Таски", "AiDevTask", tasks_url, context["show_tasks_link"], "▦", "Доска задач: фронт работы + хотелки"),
                 # NB: остальные дубликаты реальных ModelAdmin-строк («Промпты»)
                 # сюда НЕ добавляем — они и так есть в группе «Раздел ИИ» ниже.
                 # Здесь — только кастомные инструменты.
                 ("Промпты", "Мой промпт", "AiMyPrompt", my_prompt_url, is_pd, "✎", "Свои и закреплённые промпты"),
-                # Доска «Таски» — для суперюзеров и разработчиков промптов
-                # (ТЗ 2026-10-19): суперюзер создаёт/закрывает, разработчик
-                # берёт; важное вверху, у взятого — ФИО + группа + дата.
-                ("Промпты", "Таски", "AiDevTask", tasks_url, context["show_tasks_link"], "▦", "Доска задач: создать/взять/закрыть"),
                 ("Промпты", "Промпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", can_access_prompt_defaults(request) and not guest, "⚙", "Авто-подстановка по языку/теме ARM"),
                 ("Документация", "Разработчик промптов", "AiDocsPromptDeveloper", docs_url + "prompt-developer/", True, "✎", "Инструкция для разработчика промптов"),
-                ("Документация", "Разработчик", "AiDocsDeveloper", docs_url + "developer/", is_staff and not guest, "⚙", "Документация для разработчика"),
-                ("Документация", "Суперюзер", "AiDocsSuperuser", docs_url + "superuser/", is_super and not guest, "⚙", "Инструкция для суперадмина"),
+                ("Документация", "Разработчик", "AiDocsDeveloper", docs_url + "developer/", (is_staff or user_has_key(request.user, "docs.developer")) and not guest, "⚙", "Документация для разработчика"),
+                ("Документация", "Суперюзер", "AiDocsSuperuser", docs_url + "superuser/", user_has_key(request.user, "docs.superuser") and not guest, "⚙", "Инструкция для суперадмина"),
                 ("ARM", "Пакетное решение", "AiArmSolve", arm_solve_url, show_arm, "▤", "Пакетный прогон моделей по задачам DL"),
                 ("ARM", "Состояние моделей", "AiModelStatus", arm_model_status_url, show_model_status, "◉", "Доступность AI-моделей сегодня"),
                 ("Диагностика", "Журнал запросов", "AiRequestLogs", ai_logs_url, show_logs, "≣", "Все запросы к моделям, с поиском"),
@@ -428,6 +432,8 @@ class AIAdminSite(admin.AdminSite):
                  test_data_url,
                  show_test_data, "⚙", "Создание и редактирование тестовых данных"),
                 ("Система", "Обновления", "AiUpdates", updates_url, show_updates, "↻", "История изменений проекта"),
+                # «Группы доступа» — только суперюзеру (права и состав групп).
+                ("Система", "Группы доступа", "AiAccessGroups", "/ai/admin/ai-groups/", is_super and not guest, "⛭", "Группы доступа: права страниц, действия, состав"),
             ],
         )
         # Change/tool pages AND the dashboard: the left nav renders
@@ -476,11 +482,19 @@ class AIAdminSite(admin.AdminSite):
 
     @staticmethod
     def _user_role_label(user, is_super, is_staff, is_pd):
-        """Короткая русская метка роли для шапки админки."""
+        """Короткая русская метка роли для шапки админки.
+
+        «Разработчик» (встроенная AIAccessGroup) — senior-метка над
+        «Разработчиком промптов»: member обеих групп видит высшую.
+        """
         if is_super:
             return "Суперпользователь"
         if is_staff:
             return "Администратор"
+        if user is not None and getattr(user, "is_authenticated", False) and user.ai_access_groups.filter(
+            name=BUILTIN_GROUP_DEVELOPER
+        ).exists():
+            return "Разработчик"
         if is_pd:
             return "Разработчик промптов"
         return "Пользователь"

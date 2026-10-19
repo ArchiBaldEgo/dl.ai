@@ -7,7 +7,6 @@ from django.contrib.admin.sites import AdminSite
 from django.contrib.messages.storage.cookie import CookieStorage
 from django.contrib.auth import SESSION_KEY, get_user_model
 from django.contrib.auth.models import AnonymousUser
-from django.contrib.auth.models import Group
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import SimpleTestCase, RequestFactory, TestCase, TransactionTestCase, override_settings
 from pathlib import Path
@@ -64,6 +63,32 @@ from ai.services import (
 from ai.throttling import RateLimiter, get_request_user_id, rate_limited
 from ai.views import chat_view, get_problem_data, get_prompts, set_password_view
 from ai.dl_api_client import _decode_response_json
+
+
+def make_prompt_developer(user):
+    """Зачисляет юзера во встроенную группу доступа «Разработчик промптов».
+
+    Прежний способ — Django-Group `prompt_developer` — удалён: все проверки
+    прав резолвят ключи AIAccessGroup (см. ai/admin/permissions.py).
+    """
+    from ai.admin.permissions import add_user_to_builtin_ai_group
+    from ai.constants import BUILTIN_GROUP_PROMPT_DEV
+    return add_user_to_builtin_ai_group(user, BUILTIN_GROUP_PROMPT_DEV)
+
+
+def make_developer(user):
+    """Зачисляет юзера во встроенную группу «Разработчик» (page.tasks и пр.)."""
+    from ai.admin.permissions import add_user_to_builtin_ai_group
+    from ai.constants import BUILTIN_GROUP_DEVELOPER
+    return add_user_to_builtin_ai_group(user, BUILTIN_GROUP_DEVELOPER)
+
+
+def make_ai_group_member(user, group_name):
+    """Зачисляет юзера в произвольную группу доступа (обычно создана тестом)."""
+    from ai.models import AIAccessGroup
+    group, _ = AIAccessGroup.objects.get_or_create(name=group_name)
+    user.ai_access_groups.add(group)
+    return group
 
 
 class ChatViewTests(SimpleTestCase):
@@ -167,7 +192,6 @@ class ExternalAuthMiddlewareTests(TestCase):
         # but the current DLSID authenticates user 42. Middleware must
         # rebind the session so the local user matches the external one.
         from django.contrib.auth.models import User
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         from ai.models import ExternalDLAccount
 
         stale = User.objects.create_user(
@@ -180,9 +204,8 @@ class ExternalAuthMiddlewareTests(TestCase):
         self._add_session(request)
         request.user = stale
         request.COOKIES["DLSID"] = "session-123"
-        # Seed the prompt_developer group and a fresh user so the real
-        # provisioning path (not a mock) can run end-to-end.
-        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        # Fresh user so the real provisioning path (not a mock) runs
+        # end-to-end; базовую группу создаст сам провижининг.
         fresh = User.objects.create_user(username="alice", password="x")
         ExternalDLAccount.objects.create(user=fresh, external_user_id="42")
 
@@ -199,11 +222,8 @@ class ExternalAuthMiddlewareTests(TestCase):
         self.assertEqual(request.user.username, "alice")
 
     def test_cached_user_info_skips_external_call(self):
-        # Even for admin paths the middleware now provisions a local
-        # user, so seed the prompt_developer group and the user.
-        from ai.constants import PROMPT_DEVELOPER_GROUP
+        # Even for admin paths the middleware now provisions a local user.
         from ai.models import ExternalDLAccount
-        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         u = self.user_model.objects.create_user(username="user_42", password="x")
         ExternalDLAccount.objects.create(user=u, external_user_id="42")
 
@@ -224,9 +244,7 @@ class ExternalAuthMiddlewareTests(TestCase):
 
     def test_stale_cached_user_info_revalidates_dlsid(self):
         # Кэш старше TTL → middleware заново проверяет DLSID через внешний API.
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         from ai.models import ExternalDLAccount
-        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         u = self.user_model.objects.create_user(username="user_42b", password="x")
         ExternalDLAccount.objects.create(user=u, external_user_id="42")
 
@@ -252,10 +270,8 @@ class ExternalAuthMiddlewareTests(TestCase):
     def test_unavailable_external_api_falls_back_to_stale_cache(self):
         # dl.gsu.by недоступен, но есть свежий кэш → graceful degradation,
         # доступ сохраняется (не 503).
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         from ai.models import ExternalDLAccount
         from ai.external_auth import ExternalAuthUnavailable
-        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         u = self.user_model.objects.create_user(username="user_42c", password="x")
         ExternalDLAccount.objects.create(user=u, external_user_id="42")
 
@@ -303,8 +319,6 @@ class DevAuthBypassTests(TestCase):
     """
 
     def setUp(self):
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         self.factory = RequestFactory()
         self.middleware = ExternalAuthMiddleware(lambda req: HttpResponse("ok"))
         self.user_model = get_user_model()
@@ -512,9 +526,6 @@ class AdminExternalAuthTests(TestCase):
         # exactly the cross-account bug: a stale superuser session
         # must NOT grant access on someone else's DLSID.
         from ai.admin.site import ai_admin_site
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        from django.contrib.auth.models import Group
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         stale = self.user_model.objects.create_user(
             username="99",
             password="initial-pass",
@@ -522,22 +533,19 @@ class AdminExternalAuthTests(TestCase):
             is_staff=True,
         )
         legit = self.user_model.objects.create_user(username="12345", password="initial-pass")
-        legit.groups.add(group)
+        make_prompt_developer(legit)
         request = self._request(user_id="12345")
         request.user = stale
         self.assertFalse(ai_admin_site.has_permission(request))
 
     def test_has_permission_accepts_matching_prompt_developer(self):
         from ai.admin.site import ai_admin_site
-        from django.contrib.auth.models import Group
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         from ai.models import ExternalDLAccount
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         user = self.user_model.objects.create_user(
             username="12345",
             password="initial-pass",
         )
-        user.groups.add(group)
+        make_prompt_developer(user)
         ExternalDLAccount.objects.create(user=user, external_user_id="12345")
         request = self._request(user_id="12345")
         request.user = user
@@ -593,9 +601,14 @@ class AdminExternalAuthTests(TestCase):
 
         set_password_view(request)
 
-        group = Group.objects.get(name="prompt_developer")
+        # Зачисление при первой установке пароля — во встроенную группу
+        # доступа «Разработчик промптов» (Django-Group больше не используется).
+        from ai.constants import BUILTIN_GROUP_PROMPT_DEV
+        from ai.models import AIAccessGroup
+
+        group = AIAccessGroup.objects.get(name=BUILTIN_GROUP_PROMPT_DEV)
         user = self.user_model.objects.get(username="24680")
-        self.assertTrue(user.groups.filter(pk=group.pk).exists())
+        self.assertTrue(user.ai_access_groups.filter(pk=group.pk).exists())
 
     def test_mapped_external_user_without_password_sets_password_on_existing_user(self):
         user = self.user_model.objects.create_user(username="external-login")
@@ -729,15 +742,12 @@ class AdminPermissionsTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
-        from django.contrib.auth.models import Group
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     def test_prompt_developer_cannot_view_shared_prompt_module(self):
         from ai.admin.models import SharedPromptAdmin
         from django.contrib.admin.sites import AdminSite
         user = self.user_model.objects.create_user(username="alice", password="x")
-        user.groups.add(self.pd_group)
+        make_prompt_developer(user)
         request = self.factory.get("/ai/admin/ai/sharedprompt/")
         request.user = user
         admin = SharedPromptAdmin(SharedPrompt, AdminSite())
@@ -761,7 +771,7 @@ class AdminPermissionsTests(TestCase):
         from django.contrib.auth import get_user_model as get_user
         User = get_user()
         user = self.user_model.objects.create_user(username="carol", password="x")
-        user.groups.add(self.pd_group)
+        make_prompt_developer(user)
         request = self.factory.get("/ai/admin/")
         request.user = user
         request._ai_admin_registry = ai_admin_site._registry
@@ -825,10 +835,9 @@ class PromptAdminAccessTests(TestCase):
             password="test-pass",
         )
 
-        prompt_developer_group, _ = Group.objects.get_or_create(name="prompt_developer")
-        self.prompt_developer.groups.add(prompt_developer_group)
-        self.second_prompt_developer.groups.add(prompt_developer_group)
-        self.other_prompt_developer.groups.add(prompt_developer_group)
+        make_prompt_developer(self.prompt_developer)
+        make_prompt_developer(self.second_prompt_developer)
+        make_prompt_developer(self.other_prompt_developer)
 
         self.editable_prompt = Prompt.objects.create(
             prompt_name_ru="Editable prompt",
@@ -5699,10 +5708,8 @@ class UpdateLogAdminTests(UpdateLogAdminViewMixin, TestCase):
         self.normal_user = get_user_model().objects.create_user(
             username="upd_normal", password="***",
         )
-        # Add to prompt_developer group (non-superuser staff-like)
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-        self.normal_user.groups.add(group)
+        # Baseline non-superuser audience (page.prompt_defaults и пр.).
+        make_prompt_developer(self.normal_user)
 
         # Create some test data
         self.u1 = UpdateLog.objects.create(
@@ -5801,6 +5808,47 @@ class UpdateLogAdminTests(UpdateLogAdminViewMixin, TestCase):
         self.assertContains(response, "записей: 3")
         # И автора скрытой записи нет в дропдауне.
         self.assertNotContains(response, 'value="whmi2"')
+
+
+class UpdateLogDateDedupeTests(UpdateLogAdminViewMixin, TestCase):
+    """Дедупликация дат на «Обновлениях» (ТЗ 2026-10-19): несколько коммитов
+    за один день — дата в колонке печатается ОДИН раз ({% ifchanged %} по
+    commit_date; сортировка держит одинаковые даты подряд)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        UpdateLog.objects.all().delete()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="dedupe_admin", password="***", email="admin@test.com",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-07-27", description="Нововведение: первый за день",
+            author="whmi1", commit_hash="a1",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-07-27", description="Исправление: второй за день",
+            author="whmi1", commit_hash="a2",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-07-27", description="правка: третий за день",
+            author="Archi", commit_hash="a3",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-06-22", description="fix build v2",
+            author="ArchiBaldEgo", commit_hash="b1",
+        )
+
+    def test_same_day_date_rendered_once(self):
+        response = self._call_view(self._make_request(self.superuser))
+        self.assertEqual(response.status_code, 200)
+        # Три записи дня 27.07 — дата в таблице только в первой из них.
+        self.assertContains(response, "27.07.2026", count=1)
+        self.assertContains(response, "22.06.2026", count=1)
+        # Сами записи при этом все на месте (дата ≠ строка записи).
+        self.assertContains(response, "первый за день")
+        self.assertContains(response, "второй за день")
+        self.assertContains(response, "третий за день")
+        self.assertContains(response, "записей: 4")
 
 
 class UpdateLogAdminActionTests(TestCase):
@@ -7620,8 +7668,7 @@ class ActiveRunsEndpointTests(TestCase):
         )
         self.normal_user = get_user_model().objects.create_user(username="badge_user", password="x")
         self.pd_user = get_user_model().objects.create_user(username="badge_pd", password="x")
-        pd_group, _ = Group.objects.get_or_create(name="prompt_developer")
-        self.pd_user.groups.add(pd_group)
+        make_prompt_developer(self.pd_user)
 
     def _make_request(self, user):
         request = self.factory.get("/ai/admin/active-runs/")
@@ -9080,11 +9127,10 @@ class LogsDeveloperAccessTests(TestCase):
 
     def setUp(self):
         self.factory = RequestFactory()
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         self.developer = get_user_model().objects.create_user(
             username="log_dev", password="x",
         )
-        self.developer.groups.add(Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)[0])
+        make_prompt_developer(self.developer)
         self.superuser = get_user_model().objects.create_superuser(
             username="log_admin", password="x", email="l@t.com",
         )
@@ -9299,10 +9345,7 @@ class RecentLogRowsTests(TestCase):
         self.developer = get_user_model().objects.create_user(
             username="recent_dev", password="x",
         )
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        self.developer.groups.add(
-            Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)[0]
-        )
+        make_prompt_developer(self.developer)
         base = timezone.now()
         self.logs = [
             AIRequestLog.objects.create(
@@ -10117,9 +10160,6 @@ class DocsAdminAccessTests(_AdminViewRequestMixin, TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        from django.contrib.auth.models import Group
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     def _view(self, user, slug, view_name="admin_docs_view"):
         from unittest.mock import patch
@@ -10137,7 +10177,7 @@ class DocsAdminAccessTests(_AdminViewRequestMixin, TestCase):
 
     def _pd_user(self):
         user = self.user_model.objects.create_user(username="pd-docs", password="x")
-        user.groups.add(self.pd_group)
+        make_prompt_developer(user)
         return user
 
     def test_prompt_developer_sees_only_own_chapter(self):
@@ -10291,19 +10331,23 @@ class GuestModeContextTests(_AdminViewRequestMixin, TestCase):
         self.assertFalse(context["show_prompt_regression_link"])
         self.assertFalse(context["show_test_console_link"])
         self.assertFalse(context["show_updates_link"])
-        # «Настройка ИИ-приложения» (ai-pinned) скрыта целиком.
-        self.assertNotIn(
-            "ai-pinned",
-            [app["app_label"] for app in context["available_apps"]],
+        # «Настройка ИИ-приложения» и «Закреплённые пакетные решения» гостю
+        # скрыты, но группа ai-pinned остаётся: «Таски» в гостевом режиме видны
+        # только для просмотра (форму/кнопки прячет шаблон по can_create/…).
+        pinned_app = next(
+            app
+            for app in context["available_apps"]
+            if app["app_label"] == "ai-pinned"
+        )
+        self.assertEqual(
+            [model["name"] for model in pinned_app["models"]],
+            ["Таски"],
         )
         self.assertEqual(self._doc_tool_names(context), ["Разработчик промптов"])
 
     def test_prompt_developer_context_unchanged(self):
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        from django.contrib.auth.models import Group
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         user = self.user_model.objects.create_user(username="ctx-pd", password="x")
-        user.groups.add(group)
+        make_prompt_developer(user)
         context = self._context(user, guest=False)
         self.assertFalse(context["is_viewing_as_guest"])
         self.assertEqual(
@@ -11192,14 +11236,11 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
     prompt_developer видит только свои записи."""
 
     def setUp(self):
-        from django.contrib.auth.models import Group
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         self.factory = RequestFactory()
         self.user_model = get_user_model()
         self.su = self.user_model.objects.create_user(
             username="daily-su", password="***", is_superuser=True, is_staff=True,
         )
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     @staticmethod
     def _msk_at(hour, minute=0, second=0, *, day_offset=0):
@@ -11305,7 +11346,7 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         pd = self.user_model.objects.create_user(
             username="daily-pd", password="***",
         )
-        pd.groups.add(self.pd_group)
+        make_prompt_developer(pd)
         self._log(user=pd, external_user_id="400", full_name="Разработчик Промптов",
                   sent_at=self._msk_at(8, 0), prompt="Мой промпт")
         rows = self._report(pd).context_data["rows"]
@@ -11656,11 +11697,8 @@ class DocsContentEndpointTests(_AdminViewRequestMixin, TestCase):
         self.assertIn("<h", data["html"])
 
     def test_forbidden_for_other_role(self):
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        from django.contrib.auth.models import Group
         user = self.user_model.objects.create_user(username="cnt-pd", password="x")
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-        user.groups.add(group)
+        make_prompt_developer(user)
         self.assertEqual(self._request(user).status_code, 403)
 
 
@@ -12178,12 +12216,10 @@ class PinnedBatchRunsTests(TestCase):
         ЧУЖИХ закреплённых прогонов он может (ТЗ 2026-10-19: закреплённые
         решения — общая витрина): snapshot_url остаётся; открепить чужое
         он всё равно не может (is_own=false; toggle — только свои записи)."""
-        from django.contrib.auth.models import Group
-        Group.objects.get_or_create(name="prompt_developer")
         pd_user = get_user_model().objects.create_user(
             username="pin_pd", password="x",
         )
-        pd_user.groups.add(Group.objects.get(name="prompt_developer"))
+        make_prompt_developer(pd_user)
         self.toggle_view(self._post(f"/x/{self.log.id}/pin/", self.operator), self.log.id)
 
         request = RequestFactory().get(self.pin_url_prefix)
@@ -12204,7 +12240,6 @@ class PinnedBatchRunsTests(TestCase):
         """Снапшот-эндпоинт: чужой ЗАКРЕПЛЁННЫЙ прогон промпт-разработчику
         отдаётся (200 + results), незакреплённый чужой — 404 (скуп «только
         свои» журнала на него больше не распространяется только при закреплении)."""
-        from django.contrib.auth.models import Group
         from ai.admin.request_logs import admin_batch_snapshot_view
         from ai.models import AIModelTestResult, AIModelTestRun
 
@@ -12225,11 +12260,10 @@ class PinnedBatchRunsTests(TestCase):
             raw_response="jmp begin", code="jmp begin",
         )
 
-        Group.objects.get_or_create(name="prompt_developer")
         pd_user = get_user_model().objects.create_user(
             username="snap_pd", password="x",
         )
-        pd_user.groups.add(Group.objects.get(name="prompt_developer"))
+        make_prompt_developer(pd_user)
 
         # Не закреплённый чужой прогон — скуп прячет → 404.
         request = RequestFactory().get(f"/ai/admin/ai/request_logs/{log2.id}/batch-snapshot/")
@@ -12253,14 +12287,12 @@ class PinnedBatchRunsTests(TestCase):
         """Закрепление гарантирует только видимость снапшота чужому промпт-
         разработчику; не-батч запись журнала (чат) — 404 даже закреплённой."""
         from ai.admin.request_logs import admin_batch_snapshot_view
-        from django.contrib.auth.models import Group
 
         AIPinnedBatchRun.objects.create(user=self.operator, log=self.plain_log)
-        Group.objects.get_or_create(name="prompt_developer")
         pd_user = get_user_model().objects.create_user(
             username="snap_pd2", password="x",
         )
-        pd_user.groups.add(Group.objects.get(name="prompt_developer"))
+        make_prompt_developer(pd_user)
         request = RequestFactory().get(f"/ai/admin/ai/request_logs/{self.plain_log.id}/batch-snapshot/")
         request.user = pd_user
         SessionMiddleware(lambda req: None).process_request(request)
@@ -12292,11 +12324,9 @@ class PinnedBatchRunsTests(TestCase):
             admin_request_log_detail_view,
             admin_request_log_xlsx_view,
         )
-        from django.contrib.auth.models import Group
 
-        Group.objects.get_or_create(name="prompt_developer")
         pd_user = get_user_model().objects.create_user(username="det_pd", password="x")
-        pd_user.groups.add(Group.objects.get(name="prompt_developer"))
+        make_prompt_developer(pd_user)
 
         def _get(view, log_id):
             request = RequestFactory().get(f"/x/{log_id}/")
@@ -12320,11 +12350,9 @@ class PinnedBatchRunsTests(TestCase):
         (мутация, перезапуск модели) на чужой закреплённый лог — 403,
         как и раньше (allow_pinned=False в resend/rerun)."""
         from ai.admin.request_logs import resend_request_view, rerun_arm_batch_view
-        from django.contrib.auth.models import Group
 
-        Group.objects.get_or_create(name="prompt_developer")
         pd_user = get_user_model().objects.create_user(username="pd_mute", password="x")
-        pd_user.groups.add(Group.objects.get(name="prompt_developer"))
+        make_prompt_developer(pd_user)
         self.toggle_view(self._post(f"/x/{self.log.id}/pin/", self.operator), self.log.id)
 
         request = RequestFactory().post(f"/x/{self.log.id}/resend/")
@@ -12341,53 +12369,92 @@ class PinnedBatchRunsTests(TestCase):
 
 
 class AIDevTaskBoardTests(TestCase):
-    """Доска «Таски» (/ai/admin/tasks/, ai/admin/tasks.py): суперюзер
-    создаёт/закрывает, разработчик промптов берёт; важное вверху, у взятого
-    — ФИО+группа+дата; гость-суперюзер видит доску, но не мутирует."""
+    """Доска «Таски» (/ai/admin/tasks/, ai/admin/tasks.py).
+
+    Матрица (новая система групп, миграция 0060): доска видна с
+    «Разработчика» (page.tasks) — «Разработчик промптов» её НЕ имеет;
+    взять может любой с доступом к доске; создать/закрыть — суперюзер
+    (action-ключи никто не имеет из коробки); переставить строки фронта —
+    суперюзер/action.task_reorder (выдан «Разработчику»). Номер приоритета
+    выдаёт СЕРВЕР (max+1), хотелки без номеров; гость-суперюзер видит доску,
+    но не мутирует."""
 
     def setUp(self):
         from ai.admin.tasks import (
             admin_task_claim_view,
             admin_task_close_view,
             admin_task_create_view,
+            admin_task_reorder_view,
             admin_tasks_view,
             TASKS_URL,
         )
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         self.page_view = admin_tasks_view
         self.create_view = admin_task_create_view
+        self.reorder_view = admin_task_reorder_view
         self.claim_view = admin_task_claim_view
         self.close_view = admin_task_close_view
         self.tasks_url = TASKS_URL
         self.superuser = get_user_model().objects.create_superuser(
             username="task_admin", password="x", email="t@a.com",
         )
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-        self.dev = get_user_model().objects.create_user(username="task_pd", password="x")
-        self.dev.groups.add(self.pd_group)
-        self.other_dev = get_user_model().objects.create_user(username="task_pd2", password="x")
-        self.other_dev.groups.add(self.pd_group)
+        self.dev = get_user_model().objects.create_user(username="task_dev", password="x")
+        make_developer(self.dev)
+        self.other_dev = get_user_model().objects.create_user(username="task_dev2", password="x")
+        make_developer(self.other_dev)
+        self.pd = get_user_model().objects.create_user(username="task_pd", password="x")
+        make_prompt_developer(self.pd)
         self.outsider = get_user_model().objects.create_user(username="task_nobody", password="x")
 
-    def _request(self, user, method="get", path="/x/", data=None):
-        request = getattr(RequestFactory(), method)(path, data=data or {})
+    def _request(self, user, method="get", path="/x/", data=None, body=None):
+        if body is not None:
+            request = RequestFactory().post(
+                path, data=body, content_type="application/json"
+            )
+        else:
+            request = getattr(RequestFactory(), method)(path, data=data or {})
         request.user = user
         # each_context → guest_mode читает request.session.
         SessionMiddleware(lambda req: None).process_request(request)
         return request
 
+    # --- Доступ --- -------------------------------------------------------
+
     def test_page_denies_plain_user(self):
         resp = self.page_view(self._request(self.outsider, path=self.tasks_url))
         self.assertEqual(resp.status_code, 403)
 
-    def test_page_allows_prompt_developer_and_superuser(self):
-        self.assertEqual(self.page_view(self._request(self.dev, path=self.tasks_url)).status_code, 200)
+    def test_page_denies_prompt_developer(self):
+        """«Видна начиная с разработчика»: у «Разработчика промптов» ключа
+        page.tasks нет — 403."""
+        resp = self.page_view(self._request(self.pd, path=self.tasks_url))
+        self.assertEqual(resp.status_code, 403)
+
+    def test_claim_denies_prompt_developer(self):
+        task = AIDevTask.objects.create(title="Т-недоступен", created_by=self.superuser)
+        resp = self.claim_view(self._request(self.pd, "post", f"/x/{task.id}/claim/"), task.id)
+        self.assertEqual(resp.status_code, 403)
+        task.refresh_from_db()
+        self.assertIsNone(task.taken_by)
+
+    def test_page_allows_developer_and_superuser(self):
+        resp = self.page_view(self._request(self.dev, path=self.tasks_url))
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.context_data["can_create"])
+        self.assertFalse(resp.context_data["can_close"])
+        self.assertTrue(resp.context_data["can_reorder"])
+
         resp = self.page_view(self._request(self.superuser, path=self.tasks_url))
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.context_data["can_create"])
+        self.assertTrue(resp.context_data["can_close"])
+        self.assertTrue(resp.context_data["can_reorder"])
+
+    # --- Создание (superuser; номер выдаёт сервер) -------------------------
 
     def test_create_requires_superuser(self):
-        resp = self.create_view(self._request(self.dev, "post", path="/x/tasks/create/"))
+        resp = self.create_view(self._request(self.dev, "post", path="/x/tasks/create/", data={
+            "title": "Мой таск", "kind": "front",
+        }))
         self.assertEqual(resp.status_code, 403)
         self.assertFalse(AIDevTask.objects.exists())
 
@@ -12395,23 +12462,50 @@ class AIDevTaskBoardTests(TestCase):
             "title": "Поправить промпт №3",
             "description": "См. тему …",
             "estimate": "До 4 дней",
-            "priority": "high",
+            "kind": "front",
         }))
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(json.loads(resp.content)["ok"])
         task = AIDevTask.objects.get()
         self.assertEqual(task.title, "Поправить промпт №3")
         self.assertEqual(task.estimate, "До 4 дней")
-        self.assertEqual(task.priority, "high")
+        self.assertEqual(task.kind, "front")
+        # Номер сервер выдан сам (max+1 → первый таск — №1).
+        self.assertEqual(task.priority_no, 1)
         self.assertEqual(task.created_by, self.superuser)
 
-    def test_create_validates_title_and_priority(self):
+    def test_create_front_numbers_are_max_plus_one(self):
+        AIDevTask.objects.create(title="Уже есть", kind="front", priority_no=7)
+        wish = AIDevTask.objects.create(title="Хотелка", kind="wish")
+        self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "Новый фронт", "kind": "front",
+        }))
+        new_task = AIDevTask.objects.exclude(pk=wish.pk).get(title="Новый фронт")
+        from django.db.models import Max
+        self.assertEqual(new_task.priority_no, AIDevTask.objects.aggregate(
+            no=Max("priority_no")
+        )["no"])
+        self.assertEqual(new_task.priority_no, 8)
+
+    def test_create_wish_has_no_number_at_all(self):
+        AIDevTask.objects.create(title="Фронт с номером", kind="front", priority_no=3)
+        resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "Хочу фильтры", "kind": "wish",
+        }))
+        self.assertEqual(resp.status_code, 200)
+        wish = AIDevTask.objects.get(title="Хочу фильтры")
+        self.assertEqual(wish.kind, "wish")
+        self.assertIsNone(wish.priority_no)
+
+    def test_create_validates_title_and_kind(self):
         resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={}))
         self.assertEqual(resp.status_code, 400)
         resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
-            "title": "x", "priority": "ultra",
+            "title": "x", "kind": "ultra",
         }))
         self.assertEqual(resp.status_code, 400)
+
+    # --- Взять таск (любой с доступом к доске) -----------------------------
 
     def test_claim_sets_taken_fields_and_visible_on_page(self):
         task = AIDevTask.objects.create(
@@ -12426,7 +12520,14 @@ class AIDevTaskBoardTests(TestCase):
         resp = self.page_view(self._request(self.superuser, path=self.tasks_url))
         row = resp.context_data["rows"][0]
         self.assertTrue(row["taken"])
-        self.assertIn("task_pd", row["claimant"])
+        self.assertIn("task_dev", row["claimant"])
+
+    def test_claim_wish_task_also_works(self):
+        task = AIDevTask.objects.create(title="Хотелка-Т", kind="wish", created_by=self.superuser)
+        resp = self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.dev)
 
     def test_claim_unknown_task_is_404(self):
         resp = self.claim_view(self._request(self.dev, "post", "/x/99999/claim/"), 99999)
@@ -12450,6 +12551,8 @@ class AIDevTaskBoardTests(TestCase):
         resp = self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
         self.assertEqual(resp.status_code, 409)
 
+    # --- Закрытие (superuser) ----------------------------------------------
+
     def test_close_requires_superuser(self):
         task = AIDevTask.objects.create(title="Т3", created_by=self.superuser)
         resp = self.close_view(self._request(self.dev, "post", f"/x/{task.id}/close/"), task.id)
@@ -12462,22 +12565,155 @@ class AIDevTaskBoardTests(TestCase):
         )
         self.assertFalse(AIDevTask.objects.filter(pk=task.pk).exists())
 
-    def test_rows_sorted_high_to_low_and_filtered(self):
-        AIDevTask.objects.create(title="низк", priority="low")
-        AIDevTask.objects.create(title="выс", priority="high")
-        AIDevTask.objects.create(title="сред")
+    def test_close_unknown_task_is_404(self):
+        resp = self.close_view(self._request(self.superuser, "post", "/x/99999/close/"), 99999)
+        self.assertEqual(resp.status_code, 404)
+
+    # --- Вкладки и сортировка ----------------------------------------------
+
+    def test_rows_sorted_by_priority_no_within_front_tab(self):
+        """Меньший номер ВЫШЕ: сортировка front — по priority_no ASC."""
+        AIDevTask.objects.create(title="выс", kind="front", priority_no=1)
+        AIDevTask.objects.create(title="сред", kind="front", priority_no=2)
+        AIDevTask.objects.create(title="низ", kind="front", priority_no=3)
+        AIDevTask.objects.create(title="хотелка", kind="wish")
         resp = self.page_view(self._request(self.dev, path=self.tasks_url))
         titles = [r["title"] for r in resp.context_data["rows"]]
-        self.assertEqual(titles, ["выс", "сред", "низк"])
-        resp = self.page_view(self._request(self.dev, path="/x/?priority=high"))
+        self.assertEqual(titles, ["выс", "сред", "низ"])
+        self.assertEqual(resp.context_data["active_kind"], "front")
+
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=wish"))
         titles = [r["title"] for r in resp.context_data["rows"]]
-        self.assertEqual(titles, ["выс"])
+        self.assertEqual(titles, ["хотелка"])
+        self.assertEqual(resp.context_data["active_kind"], "wish")
+
+    def test_wish_tab_has_sequential_numbering_off(self):
+        """Вкладки share the URL (?kind=front|wish); wish — без номеров, поэтому
+        №-колонка «—» (truthiness шаблона: None → «—»)."""
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=wish"))
+        self.assertEqual(resp.context_data["rows"], [])
+
+    def test_unknown_kind_falls_back_to_front(self):
+        AIDevTask.objects.create(title="фронт", kind="front", priority_no=4)
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=bogus"))
+        self.assertEqual(resp.context_data["active_kind"], "front")
+
+    # --- Перестановка фронта (reorder) -------------------------------------
+
+    def _reorder_body(self, tasks):
+        return json.dumps({"ids": [t.id if isinstance(t, AIDevTask) else t for t in tasks]})
+
+    def test_reorder_persists_new_order_and_renumbers_from_one(self):
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
+        third = AIDevTask.objects.create(title="В", kind="front", priority_no=3, created_by=self.superuser)
+
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/", body=self._reorder_body([second, third, first])),
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            [t.priority_no for t in AIDevTask.objects.filter(kind="front").order_by("priority_no")],
+            [1, 2, 3],
+        )
+        self.assertEqual(AIDevTask.objects.get(pk=second.id).title, "Б")
+        self.assertEqual(AIDevTask.objects.get(pk=first.id).priority_no, 3)
+        # Хотелки не тронуты (нет номера и нет среди expected_ids).
+        wish = AIDevTask.objects.create(title="Х", kind="wish")
+        self.assertIsNone(AIDevTask.objects.get(pk=wish.id).priority_no)
+
+    def test_reorder_allows_developer_with_reorder_key(self):
+        """action.task_reorder выдан «Разработчику» — порядок менять может,
+        superuser-ключ не нужен."""
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
+        resp = self.reorder_view(
+            self._request(self.dev, "post", "/x/tasks/reorder/", body=self._reorder_body([second, first])),
+        )
+        self.assertEqual(resp.status_code, 200)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.priority_no, 2)
+        self.assertEqual(second.priority_no, 1)
+
+    def test_reorder_denies_plain_prompt_developer_and_guest(self):
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
+        body = self._reorder_body([second, first])
+
+        resp = self.reorder_view(
+            self._request(self.pd, "post", "/x/tasks/reorder/", body=body),
+        )
+        self.assertEqual(resp.status_code, 403)
+
+        from ai.admin.guest_mode import SESSION_KEY
+        request = self._request(self.superuser, "post", "/x/tasks/reorder/", body=body)
+        request.session[SESSION_KEY] = True
+        self.assertEqual(self.reorder_view(request).status_code, 403)
+
+    def test_reorder_rejects_inexact_id_set(self):
+        """Множество id должно ТОЧНО совпасть с текущим фронтом: лишний/не
+        переданный/чужой id → 409, доска на сервере не трогалась."""
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
+        wish = AIDevTask.objects.create(title="Х", kind="wish")
+
+        # Забыли один фронт-таск.
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/", body=self._reorder_body([second])),
+        )
+        self.assertEqual(resp.status_code, 409)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.priority_no, 1)
+        self.assertEqual(second.priority_no, 2)
+
+        # Лишний id (несуществующий).
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/",
+                          body=self._reorder_body([first, second, 999999])),
+        )
+        self.assertEqual(resp.status_code, 409)
+
+        # Хотелку в порядок включить нельзя.
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/",
+                          body=self._reorder_body([first, second, wish])),
+        )
+        self.assertEqual(resp.status_code, 409)
+
+        # Тело не JSON / не список int'ов.
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/", body="not json"),
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_reorder_renumbers_gaps_from_closed_tasks(self):
+        """Заодно уплотняются дырки после закрытий: 1..N непрерывно."""
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=5)
+        third = AIDevTask.objects.create(title="В", kind="front", priority_no=9)
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/", body=self._reorder_body([third, first, second])),
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            [t.priority_no for t in AIDevTask.objects.filter(kind="front").order_by("priority_no")],
+            [1, 2, 3],
+        )
+        self.assertEqual(AIDevTask.objects.get(pk=third.id).title, "В")
+
+    # --- Отображение взявшего ----------------------------------------------
 
     def test_claimant_display_uses_role_fallback(self):
         """Без DL-аккаунта/справочника у взятого таска — ролевой фолбэк
-        «ФИО (Разработчик промптов)», формат как у «Обновлений»."""
+        «ФИО (Разработчик промптов)» у pd-юзера, формат как у «Обновлений».
+
+        NB: член «Разработчика» (не pd/staff/super) сейчас показывается как
+        «(Пользователь)» — _user_role_label не знает про новую роль; правка
+        в ai/admin/site.py добавит отдельную ветку."""
         from ai.admin.tasks import _claimant_display
-        label = _claimant_display(self.dev)
+        label = _claimant_display(self.pd)
         self.assertIn("(Разработчик промптов)", label)
 
     def test_claimant_display_shows_dl_group(self):
@@ -12496,6 +12732,8 @@ class AIDevTaskBoardTests(TestCase):
                                        title="ФК-101")
         self.assertIn("Иван Петров (ФК-101)", _claimant_display(dev))
 
+    # --- Гостевой режим ----------------------------------------------------
+
     def test_guest_superuser_sees_page_but_cannot_mutate(self):
         from ai.admin.guest_mode import SESSION_KEY
         task = AIDevTask.objects.create(title="Т5", created_by=self.superuser)
@@ -12505,6 +12743,7 @@ class AIDevTaskBoardTests(TestCase):
         resp = self.page_view(request)
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.context_data["can_create"])
+        self.assertFalse(resp.context_data["can_reorder"])
 
         request = self._request(self.superuser, "post", path="/x/tasks/create/")
         request.session[SESSION_KEY] = True
@@ -12515,7 +12754,261 @@ class AIDevTaskBoardTests(TestCase):
         request = self._request(self.superuser, "post", f"/x/{task.id}/claim/")
         request.session[SESSION_KEY] = True
         self.assertEqual(self.claim_view(request, task.id).status_code, 403)
+        request = self._request(self.superuser, "post", "/x/tasks/reorder/",
+                                body=self._reorder_body([task]))
+        request.session[SESSION_KEY] = True
+        self.assertEqual(self.reorder_view(request).status_code, 403)
         self.assertTrue(AIDevTask.objects.filter(pk=task.pk).exists())
+
+
+class AIAccessGroupsAdminTests(TestCase):
+    """Страница «Группы доступа» (/ai/admin/ai-groups/): только суперюзер
+    (гость-суперюзер тоже 403); CRUD групп, права чекбоксами (валидация ключей
+    против БД), встроенные группы без переименования/удаления, построчный
+    toggle состава. Сиды миграции 0060: ровно две встроенные группы с
+    ЭТАЛОННЫМ набором ключей (set-равенство — состав правит суперюзер)."""
+
+    def setUp(self):
+        from django.contrib.sessions.middleware import SessionMiddleware
+
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="groups_admin", password="x", email="t@a.com",
+        )
+        self.plain = get_user_model().objects.create_user(username="groups_plain", password="x")
+        self.staff = get_user_model().objects.create_user(
+            username="groups_staff", password="x", is_staff=True,
+        )
+        self._middleware = SessionMiddleware(lambda req: None)
+
+    def _request(self, user, method="get", path="/x/", data=None):
+        request = getattr(self.factory, method)(path, data=data or {})
+        request.user = user
+        self._middleware.process_request(request)
+        return request
+
+    def _view(self, request):
+        from ai.admin.access_groups import admin_access_groups_view
+        return admin_access_groups_view(request)
+
+    def _save(self, user, group_id, data):
+        from ai.admin.access_groups import admin_access_group_save_view
+        request = self._request(user, "post", f"/x/{group_id}/save/", data=data)
+        return admin_access_group_save_view(request, group_id)
+
+    def _delete(self, user, group_id):
+        from ai.admin.access_groups import admin_access_group_delete_view
+        request = self._request(user, "post", f"/x/{group_id}/delete/")
+        return admin_access_group_delete_view(request, group_id)
+
+    def _toggle(self, user, group_id, target_user, action="add"):
+        from ai.admin.access_groups import admin_access_group_member_toggle_view
+        request = self._request(user, "post", f"/x/{group_id}/members/toggle/", data={
+            "user_id": target_user.pk, "action": action,
+        })
+        return admin_access_group_member_toggle_view(request, group_id)
+
+    # --- Доступ --------------------------------------------------------
+
+    def test_page_requires_superuser(self):
+        self.assertEqual(self._view(self._request(self.plain)).status_code, 403)
+        self.assertEqual(self._view(self._request(self.staff)).status_code, 403)
+
+        request = self._request(self.superuser)
+        from ai.admin.guest_mode import SESSION_KEY
+        request.session[SESSION_KEY] = True
+        self.assertEqual(self._view(request).status_code, 403)
+
+        resp = self._view(self._request(self.superuser))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Группы доступа")
+
+    def test_save_delete_toggle_require_superuser(self):
+        from ai.models import AIAccessGroup
+
+        group = AIAccessGroup.objects.get(name="Разработчик")
+        resp = self._save(self.plain, group.id, {"name": "Разработчик"})
+        self.assertEqual(resp.status_code, 403)
+        resp = self._delete(self.staff, group.id)
+        self.assertEqual(resp.status_code, 403)
+        resp = self._toggle(self.plain, group.id, self.plain)
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(AIAccessGroup.objects.filter(pk=group.pk).exists())
+
+    # --- Сиды builtin-групп (миграция 0060) -----------------------------
+
+    def test_builtin_groups_seeded_with_exact_key_sets(self):
+        from ai.constants import BUILTIN_GROUP_DEVELOPER, BUILTIN_GROUP_PROMPT_DEV
+        from ai.models import AIAccessGroup
+
+        pd = AIAccessGroup.objects.get(name=BUILTIN_GROUP_PROMPT_DEV)
+        dev = AIAccessGroup.objects.get(name=BUILTIN_GROUP_DEVELOPER)
+        self.assertTrue(pd.is_builtin)
+        self.assertTrue(dev.is_builtin)
+        self.assertEqual(
+            {p.key for p in pd.permissions.all()},
+            {"page.admin", "page.arm_solve", "page.prompt_admin",
+             "page.prompt_defaults", "page.logs_own"},
+        )
+        self.assertEqual(
+            {p.key for p in dev.permissions.all()},
+            {"page.admin", "page.arm_solve", "page.model_status",
+             "page.prompt_admin", "page.prompt_regression", "page.test_console",
+             "page.tasks", "page.logs_own", "page.updates",
+             "docs.developer", "action.task_reorder"},
+        )
+        # «Видна начиная с разработчика»: page.tasks у промпт-девелопера НЕТ,
+        # у разработчика ЕСТЬ — решается ключами, не отдельной веткой.
+        from ai.admin.permissions import user_has_key
+        self.assertFalse(user_has_key(self.plain, "page.tasks"))
+        make_prompt_developer(pd_user := self.plain)
+        self.assertTrue(user_has_key(pd_user, "page.admin"))
+        self.assertFalse(user_has_key(pd_user, "page.tasks"))
+        make_developer(dev_user := get_user_model().objects.create_user(
+            username="groups_dev", password="x",
+        ))
+        self.assertTrue(user_has_key(dev_user, "page.tasks"))
+        self.assertTrue(user_has_key(dev_user, "action.task_reorder"))
+        self.assertFalse(user_has_key(dev_user, "action.task_create"))
+        self.assertFalse(user_has_key(dev_user, "action.task_close"))
+
+    def test_builtin_key_seed_powers_page_and_model_status(self):
+        """Ключи действительно открывают can_access_*: «Разработчику» виден
+        статус моделей, промпт-девелоперу — «Промпты по умолчанию»."""
+        user = get_user_model().objects.create_user(username="keys_dev", password="x")
+        make_developer(user)
+        from ai.admin.permissions import user_has_key
+        self.assertTrue(user_has_key(user, "page.model_status"))
+
+        pd_user = get_user_model().objects.create_user(username="keys_pd", password="x")
+        make_prompt_developer(pd_user)
+        from ai.admin.permissions import can_access_prompt_defaults
+        self.assertTrue(can_access_prompt_defaults(type("R", (), {"user": pd_user})()))
+
+    # --- CRUD -----------------------------------------------------------
+
+    def test_create_group_and_assign_permissions(self):
+        resp = self._save(self.superuser, 0, {
+            "name": "Операторы ARM",
+            "description": "Только пакеты",
+            "permissions": ["page.arm_solve", "page.model_status", "page.admin"],
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(json.loads(resp.content)["ok"])
+
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name="Операторы ARM")
+        self.assertEqual(group.description, "Только пакеты")
+        self.assertFalse(group.is_builtin)
+        self.assertEqual(
+            {p.key for p in group.permissions.all()},
+            {"page.arm_solve", "page.model_status", "page.admin"},
+        )
+        from ai.admin.permissions import user_has_key
+        # Ключ реально открывает доступ: кастомная группа — рабочий механизм.
+        member = get_user_model().objects.create_user(username="arm_op", password="x")
+        group.users.add(member)
+        self.assertTrue(user_has_key(member, "page.arm_solve"))
+        self.assertFalse(user_has_key(member, "page.prompt_defaults"))
+
+    def test_create_requires_name(self):
+        resp = self._save(self.superuser, 0, {"name": "", "permissions": []})
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(json.loads(resp.content)["ok"])
+
+    def test_create_duplicate_name_rejected(self):
+        resp = self._save(self.superuser, 0, {"name": "Разработчик", "permissions": []})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_save_validates_permission_keys_against_db(self):
+        resp = self._save(self.superuser, 0, {
+            "name": "Кривые ключи", "permissions": ["page.admin", "nope.nope"],
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("nope.nope", json.loads(resp.content)["message"])
+
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name="Кривые ключи")
+        self.assertEqual(group.permissions.count(), 0)
+
+    def test_save_group_replaces_permissions(self):
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name="Разработчик")
+        # Встроенной можно менять ПРАВА (не имя) — сузили до одной страницы.
+        resp = self._save(self.superuser, group.id, {
+            "name": "Разработчик", "description": "",
+            "permissions": ["page.admin"],
+        })
+        self.assertEqual(resp.status_code, 200)
+        group.refresh_from_db()
+        self.assertEqual([p.key for p in group.permissions.all()], ["page.admin"])
+
+    # --- Builtin-защита --------------------------------------------------
+
+    def test_builtin_cannot_be_renamed(self):
+        from ai.constants import BUILTIN_GROUP_DEVELOPER
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name=BUILTIN_GROUP_DEVELOPER)
+        resp = self._save(self.superuser, group.id, {
+            "name": "Разрабы", "description": "", "permissions": ["page.admin"],
+        })
+        self.assertEqual(resp.status_code, 403)
+        group.refresh_from_db()
+        self.assertEqual(group.name, BUILTIN_GROUP_DEVELOPER)
+
+    def test_builtin_cannot_be_deleted(self):
+        from ai.constants import BUILTIN_GROUP_PROMPT_DEV
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name=BUILTIN_GROUP_PROMPT_DEV)
+        resp = self._delete(self.superuser, group.id)
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(AIAccessGroup.objects.filter(pk=group.pk).exists())
+
+    def test_regular_group_delete(self):
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.create(name="Одноразовая")
+        resp = self._delete(self.superuser, group.id)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(AIAccessGroup.objects.filter(pk=group.pk).exists())
+
+    def test_delete_unknown_group_is_404(self):
+        resp = self._delete(self.superuser, 999999)
+        self.assertEqual(resp.status_code, 404)
+
+    # --- Состав (member toggle) ------------------------------------------
+
+    def test_member_toggle_add_then_remove(self):
+        from ai.constants import BUILTIN_GROUP_DEVELOPER
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name=BUILTIN_GROUP_DEVELOPER)
+
+        resp = self._toggle(self.superuser, group.id, self.plain, action="add")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(group.users.filter(pk=self.plain.pk).exists())
+        from ai.admin.permissions import user_has_key
+        # И ключ пришел сразу: выдача действует без перелогина.
+        self.assertTrue(user_has_key(self.plain, "page.tasks"))
+
+        resp = self._toggle(self.superuser, group.id, self.plain, action="remove")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(group.users.filter(pk=self.plain.pk).exists())
+        self.assertFalse(user_has_key(self.plain, "page.tasks"))
+
+    def test_member_toggle_unknown_user_or_group_is_404(self):
+        from ai.admin.access_groups import admin_access_group_member_toggle_view
+        from ai.models import AIAccessGroup
+
+        group = AIAccessGroup.objects.get(name="Разработчик промптов")
+        # Несуществующая группа.
+        resp = self._toggle(self.superuser, 999999, self.plain)
+        self.assertEqual(resp.status_code, 404)
+
+        # Несуществующий юзер (в POST идёт сырой user_id).
+        request = self._request(self.superuser, "post", f"/x/{group.id}/members/toggle/", data={
+            "user_id": 999999, "action": "add",
+        })
+        resp = admin_access_group_member_toggle_view(request, group.id)
+        self.assertEqual(resp.status_code, 404)
 
 
 class ArmCourseTreeDbCacheTests(TestCase):
@@ -12614,10 +13107,7 @@ class RequestLogDetailJsonTests(TestCase):
             username="log_admin", password="***", email="l@t.com",
         )
         self.pd = get_user_model().objects.create_user(username="log_pd", password="***")
-        from django.contrib.auth.models import Group
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-        self.pd.groups.add(group)
+        make_prompt_developer(self.pd)
         self.log = AIRequestLog.objects.create(
             user=self.admin, source="websocket", mode="solve",
             message="текст запроса", response_text="ответ модели",
@@ -12731,6 +13221,75 @@ class AssetViewAccessTests(TestCase):
         user = get_user_model().objects.create_user(username="dev", password="x")
         with patch.dict(os.environ, {"AI_DEV_AUTH_BYPASS": "1"}):
             response = self._get(user=user)
+        self.assertEqual(response.status_code, 200)
+
+
+class AssetViewETagTests(TestCase):
+    """Условные запросы asset_view: ETag = md5 КОНТЕНТА (mtime при деплое мог
+    не сдвинуться → 304 отдавал старый файл, «стили падали»). If-None-Match
+    (строгий/слабый/списком) → 304 с ETag + Cache-Control; непрошедший ETag →
+    200 с полным телом; If-Modified-Since — fallback, если ETag не прислали.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(username="etag_user", password="x")
+
+    def _get(self, headers=None):
+        from ai.views import asset_view
+
+        request = self.factory.get("/ai/assets/admin/css/ai.css")
+        request.COOKIES = {"userId": self.user.username}
+        request.user = self.user
+        for key, value in (headers or {}).items():
+            request.META[key] = value
+        response = asset_view(request, "admin/css/ai.css")
+        return response
+
+    def test_200_carries_etag_and_no_cache(self):
+        import hashlib
+        response = self._get()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Cache-Control"], "no-cache")
+        self.assertIn("ETag", response)
+        etag = response["ETag"]
+        # Кавыченный md5.
+        self.assertTrue(etag.startswith('"') and etag.endswith('"'))
+        from django.contrib.staticfiles import finders
+        path = finders.find("admin/css/ai.css")
+        with open(path, "rb") as fh:
+            self.assertEqual(etag.strip('"'), hashlib.md5(fh.read()).hexdigest())
+
+    def test_matching_etag_gives_304_with_etag_and_cache_control(self):
+        first = self._get()
+        self.assertEqual(first.status_code, 200)
+        not_modified = self._get({"HTTP_IF_NONE_MATCH": first["ETag"]})
+        self.assertEqual(not_modified.status_code, 304)
+        self.assertEqual(not_modified["ETag"], first["ETag"])
+        self.assertEqual(not_modified["Cache-Control"], "no-cache")
+
+    def test_weak_and_listed_etags_match(self):
+        first = self._get()
+        bare = first["ETag"].strip('"')
+        for header in (f'W/{first["ETag"]}', f'"opaque-etag", {first["ETag"]}'):
+            response = self._get({"HTTP_IF_NONE_MATCH": header})
+            self.assertEqual(response.status_code, 304, header)
+            self.assertEqual(response["ETag"].strip('"'), bare)
+
+    def test_mismatched_etag_serves_full_body(self):
+        first = self._get()
+        response = self._get({"HTTP_IF_NONE_MATCH": '"no-such-etag"'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(b"".join(response.streaming_content), b"".join(first.streaming_content))
+
+    def test_if_modified_since_fallback_when_no_etag(self):
+        # Кэш без ETag: дата «в будущем» → не модифицирован → 304.
+        response = self._get({"HTTP_IF_MODIFIED_SINCE": "Mon, 01 Jan 2399 00:00:00 GMT"})
+        self.assertEqual(response.status_code, 304)
+        self.assertEqual(response["Cache-Control"], "no-cache")
+        self.assertIn("ETag", response)
+        # Дата в прошлом → модифицирован → 200 с телом.
+        response = self._get({"HTTP_IF_MODIFIED_SINCE": "Thu, 01 Jan 1990 00:00:00 GMT"})
         self.assertEqual(response.status_code, 200)
 
 
@@ -12921,12 +13480,10 @@ class WizardSeenAdminEndpointTests(_AdminViewRequestMixin, TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     def _pd_user(self):
         user = self.user_model.objects.create_user(username="wz-pd", password="x")
-        user.groups.add(self.pd_group)
+        make_prompt_developer(user)
         return user
 
     def _post(self, user, body, method="post", path="/ai/admin/wizard/seen/"):
@@ -13124,8 +13681,6 @@ class AIWizardSeenAdminPermissionTests(_AdminViewRequestMixin, TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     def _admin_instance(self):
         from ai.admin.models import AIWizardSeenAdmin
@@ -13149,7 +13704,7 @@ class AIWizardSeenAdminPermissionTests(_AdminViewRequestMixin, TestCase):
 
     def test_prompt_developer_permissions_denied(self):
         pd_user = self.user_model.objects.create_user(username="wz-list-pd", password="x")
-        pd_user.groups.add(self.pd_group)
+        make_prompt_developer(pd_user)
         request = self._admin_request(pd_user)
         model_admin = self._admin_instance()
         self.assertFalse(model_admin.has_module_permission(request))
@@ -13171,8 +13726,6 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     def _context(self, user, path="/ai/admin/", guest=False):
         from ai.admin.site import ai_admin_site
@@ -13202,7 +13755,7 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
         self.assertTrue(ctx["show"])
 
         pd_user = self.user_model.objects.create_user(username="wz-ctx-pd", password="x")
-        pd_user.groups.add(self.pd_group)
+        make_prompt_developer(pd_user)
         ctx = self._context(pd_user)
         self.assertEqual(ctx["scope"], "admin_pd")
         self.assertEqual(ctx["role"], "pd")
@@ -13223,7 +13776,7 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
 
     def test_pd_role_and_staff_role(self):
         pd_user = self.user_model.objects.create_user(username="wz-ctx-pd2", password="x")
-        pd_user.groups.add(self.pd_group)
+        make_prompt_developer(pd_user)
         staff_user = self.user_model.objects.create_user(
             username="wz-ctx-staff2", password="x", is_staff=True,
         )
@@ -14329,9 +14882,6 @@ class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
-        from django.contrib.auth.models import Group
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     def _get(self, user):
         from unittest.mock import patch
@@ -14351,7 +14901,7 @@ class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
 
     def test_prompt_developer_allowed(self):
         dev = self.user_model.objects.create_user(username="pd-dev", password="x")
-        dev.groups.add(self.pd_group)
+        make_prompt_developer(dev)
         response = self._get(dev)
         self.assertEqual(response.status_code, 200)
 
@@ -14382,7 +14932,7 @@ class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
 
     def test_prompt_defaults_nav_for_developer(self):
         dev = self.user_model.objects.create_user(username="pd-nav", password="x")
-        dev.groups.add(self.pd_group)
+        make_prompt_developer(dev)
         self.assertIn("AiArmPromptDefaults", self._nav_tools(dev))
 
     def test_prompt_defaults_nav_hidden_in_guest(self):

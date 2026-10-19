@@ -1,6 +1,20 @@
-/* Страница «Таски» (доска задач, ai/admin/tasks.py). */
+/* Страница «Таски» (доска задач, ai/admin/tasks.py). Вкладки front/wish,
+   числовой №, перетаскивание строк (data-reorder="1", только front). */
 
 .ai-tasks-wrap { max-width: 100%; }
+
+.ai-task-tabs { display: flex; gap: 6px; margin: 0 0 12px; }
+.ai-task-tab {
+  display: inline-block; padding: 4px 14px;
+  border: 1px solid var(--hairline-color); border-radius: 6px 6px 0 0;
+  color: var(--body-quiet-color);
+}
+.ai-task-tab:hover { color: var(--body-fg); }
+.ai-task-tab-active {
+  color: var(--body-fg); font-weight: 600;
+  background: var(--body-bg);
+  border-bottom-color: var(--body-bg);
+}
 
 .ai-tasks-create {
   border: 1px solid var(--hairline-color);
@@ -16,11 +30,7 @@
 .ai-tasks-create textarea { width: 100%; resize: vertical; }
 .ai-tasks-create button { justify-self: start; }
 
-.ai-tasks-filter {
-  display: flex; align-items: center; gap: 8px;
-  margin: 0 0 10px;
-}
-.ai-tasks-filter-label { color: var(--body-quiet-color); }
+.ai-tasks-hint { color: var(--body-quiet-color); font-size: 12px; }
 
 .ai-tasks-scroll { overflow-x: auto; }
 .ai-tasks-table {
@@ -33,23 +43,20 @@
   font-size: 13px;
 }
 .ai-tasks-table th { background: var(--darkened-bg); font-weight: 600; }
+.ai-task-col-no { width: 44px; text-align: center; font-weight: 600; }
 .ai-task-title { font-weight: 600; }
 .ai-task-description { max-width: 420px; white-space: pre-wrap; }
 .ai-task-actions { white-space: nowrap; }
 .ai-task-free { color: var(--body-quiet-color); }
 
-.ai-task-badge {
-  display: inline-block; padding: 2px 8px; border-radius: 10px;
-  font-size: 12px; font-weight: 600; line-height: 1.4;
+/* Перетаскивание: только строки front-доски (data-reorder на таблице). */
+table[data-reorder="1"] tbody tr[data-task-id] { cursor: grab; }
+.ai-tasks-table tr.ai-task-dragging { opacity: 0.45; }
+.ai-tasks-table tr.ai-task-drop-above {
+  box-shadow: inset 0 3px 0 0 var(--button-bg);
 }
-.ai-task-priority-high {
-  color: #b42318; background: color-mix(in srgb, #b42318 12%, var(--body-bg));
-}
-.ai-task-priority-normal {
-  color: #b45309; background: color-mix(in srgb, #b45309 14%, var(--body-bg));
-}
-.ai-task-priority-low {
-  color: var(--body-quiet-color); background: var(--darkened-bg);
+.ai-tasks-table tr.ai-task-drop-below {
+  box-shadow: inset 0 -3px 0 0 var(--button-bg);
 }
 
 .ai-task-btn-claim { padding: 3px 12px; }

@@ -1,15 +1,44 @@
-"""Хелперы проверки прав доступа для AI admin views и ModelAdmin."""
+"""Хелперы проверки прав доступа для AI admin views и ModelAdmin.
 
-from ..constants import PROMPT_DEVELOPER_GROUP
+Все can_access_* резолвятся единообразно: superuser видит всё по умолчанию,
+остальным доступ определяется ключами их групп (AIAccessGroup, страница
+«Группы доступа» /ai/admin/ai-groups/). Участники групп — не staff: правки
+чужих промптов/тем/языков/препромтов и студентов им недоступны не из-за
+ключей, а потому что соответствующие ModelAdmin'ы за _StaffOnlyAdminMixin,
+а свои промпты режет prompt_queryset_for_user. Жёстких Django-Group больше
+нет: legacy-группа prompt_developer перенесена во встроенную AIAccessGroup
+«Разработчик промптов» миграцией и из проверок удалена.
+"""
+
+from ..constants import BUILTIN_GROUP_PROMPT_DEV
+from ..models import AIAccessGroup, AIAdminGroupPermission
 
 
 def is_prompt_developer_user(user):
-    """Проверяет, входит ли пользователь в группу prompt_developer."""
+    """Членство во встроенной группе «Разработчик промптов».
+
+    Табличное право (AIAccessGroup), а не Django-Group: выдаётся
+    автоматически при провиженинге нового DL-пользователя и правится
+    суперюзером на «Группах доступа» (отзыв теперь «липкий»).
+    """
     if not user or not getattr(user, "is_authenticated", False):
         return False
     if getattr(user, "is_active", True) is False:
         return False
-    return user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists()
+    return user.ai_access_groups.filter(name=BUILTIN_GROUP_PROMPT_DEV).exists()
+
+
+def add_user_to_builtin_ai_group(user, name=BUILTIN_GROUP_PROMPT_DEV):
+    """Зачисляет пользователя во встроенную группу доступа по имени.
+
+    Используется провиженингом внешних DL-аккаунтов (baseline-доступ новой
+    аудитории) и тестами; группу создаёт, если миграционный сид потерян.
+    """
+    group, _ = AIAccessGroup.objects.get_or_create(
+        name=name, defaults={"is_builtin": True}
+    )
+    user.ai_access_groups.add(group)
+    return group
 
 
 def is_staff_or_superuser(user):
@@ -27,7 +56,7 @@ def is_superuser_user(user):
     Отдельный от ``is_staff_or_superuser`` помощник: некоторые инструменты
     (регрессионные тесты, тестовая консоль, тест-кейсы промптов) по решению
     владельца доступны ТОЛЬКО суперпользователю — даже staff без флага
-    ``is_superuser`` их не видит.
+    ``is_superuser`` их не видит (если ключ не выдан через группы).
     """
     if not user:
         return False
@@ -36,96 +65,142 @@ def is_superuser_user(user):
     return bool(getattr(user, "is_superuser", False))
 
 
+def user_access_keys(user):
+    """Множество ключей доступа пользователя (superuser → все существующие).
+
+    Ключи лежат в AIAccessGroup.permissions (AIAdminGroupPermission, сидирует
+    миграция 0060). Superuser'у ключи не нужны — все проверки и так дают ему
+    полный доступ через is_superuser_user; здесь все ключи возвращаются для
+    удобства (шапка/навычисления). Неактивные/неаутентифицированные — пусто.
+    """
+    if not user or not getattr(user, "is_authenticated", False):
+        return set()
+    if getattr(user, "is_active", True) is False:
+        return set()
+    if user.is_superuser:
+        return set(AIAdminGroupPermission.objects.values_list("key", flat=True))
+    return set(
+        AIAccessGroup.objects.filter(users=user)
+        .values_list("permissions__key", flat=True)
+    )
+
+
+def user_has_key(user, key):
+    """Точечная проверка ключа: superuser всегда True, иначе — по группам."""
+    if is_superuser_user(user):
+        return True
+    return key in user_access_keys(user)
+
+
 def can_access_admin(user):
-    """Доступ к админке: staff/superuser ИЛИ prompt_developer."""
-    return is_staff_or_superuser(user) or is_prompt_developer_user(user)
+    """Доступ к админке ИИ: staff/superuser ИЛИ ключ page.admin."""
+    return is_staff_or_superuser(user) or user_has_key(user, "page.admin")
 
 
 def can_access_arm(request):
-    """Доступ к ARM: staff/superuser ИЛИ prompt_developer."""
+    """Доступ к ARM: staff/superuser ИЛИ ключ page.arm_solve."""
     if not request.user.is_authenticated:
         return False
-    return is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
+    return is_staff_or_superuser(request.user) or user_has_key(
+        request.user, "page.arm_solve"
+    )
 
 
 def can_access_model_status(request):
-    """Доступ к статусу моделей: только staff/superuser."""
+    """Доступ к статусу моделей: staff/superuser ИЛИ ключ page.model_status."""
     if not request.user.is_authenticated:
         return False
-    return request.user.is_superuser or request.user.is_staff
+    return is_staff_or_superuser(request.user) or user_has_key(
+        request.user, "page.model_status"
+    )
 
 
 def can_access_prompt_admin(request):
-    """Доступ к управлению промптами: staff/superuser ИЛИ prompt_developer."""
+    """Доступ к управлению промптами: staff/superuser ИЛИ ключ page.prompt_admin."""
+    if not request.user.is_authenticated:
+        return False
+    return is_staff_or_superuser(request.user) or user_has_key(
+        request.user, "page.prompt_admin"
+    )
+
+
+def can_access_prompt_defaults(request):
+    """Доступ к «Промптам по умолчанию»: суперюзер ИЛИ ключ page.prompt_defaults.
+
+    NB: staff БЕЗ superuser и без ключа — нет (как раньше); ключ выдан
+    встроенной «Разработчик промптов», поэтому страница доступна всей
+    базовой аудитории админки.
+    """
+    if not request.user.is_authenticated:
+        return False
+    return user_has_key(request.user, "page.prompt_defaults")
+
+
+def can_access_tasks(request):
+    """Доступ к доске «Таски»: суперюзер ИЛИ ключ page.tasks.
+
+    «Видна начиная с разработчика»: ключ выдан встроенной «Разработчик»,
+    а «Разработчик промптов» его не имеет. Создать/закрыть/переставить
+    — отдельные action-ключи (action.task_create/close/reorder), сами view
+    проверяют их не здесь.
+    """
+    if not request.user.is_authenticated:
+        return False
+    return user_has_key(request.user, "page.tasks")
+
+
+def can_access_prompt_regression(request):
+    """Регрессионные тесты промптов: суперюзер ИЛИ ключ page.prompt_regression."""
+    if not request.user.is_authenticated:
+        return False
+    return user_has_key(request.user, "page.prompt_regression")
+
+
+def can_access_test_console(request):
+    """Тестовая консоль: суперюзер ИЛИ ключ page.test_console."""
+    if not request.user.is_authenticated:
+        return False
+    return user_has_key(request.user, "page.test_console")
+
+
+def can_access_updates(request):
+    """«Обновления»: staff/superuser ИЛИ ключ page.updates."""
+    if not request.user.is_authenticated:
+        return False
+    return is_staff_or_superuser(request.user) or user_has_key(
+        request.user, "page.updates"
+    )
+
+
+def can_access_logs(request):
+    """Доступ к логам запросов: staff/superuser или ключ page.logs_own/logs_all.
+
+    Разработчикам без staff-прав журнал открыт со строгим ограничением —
+    только собственные запросы (см. ``logs_scope_is_own_user``).
+    """
     if not request.user.is_authenticated:
         return False
     if is_staff_or_superuser(request.user):
         return True
-    return is_prompt_developer_user(request.user)
-
-
-def can_access_prompt_defaults(request):
-    """Доступ к «Промптам по умолчанию»: суперюзер ИЛИ prompt_developer.
-
-    NB: внешняя аутентификация зачисляет в prompt_developer КАЖДОГО
-    провижиненного DL-пользователя (external_account.py) — де-факто
-    страница открыта всей аудитории админки. Ограничить круг можно
-    в одном этом хелпере.
-    """
-    if not request.user.is_authenticated:
-        return False
-    return is_superuser_user(request.user) or is_prompt_developer_user(request.user)
-
-
-def can_access_tasks(request):
-    """Доступ к доске «Таски»: суперюзер ИЛИ prompt_developer.
-
-    Разработчик может брать таски, но создавать и закрывать — только
-    суперюзер (мутации проверяются в самих view, не здесь).
-    NB: staff без superuser доску не видит — как и «Промпты по умолчанию».
-    """
-    if not request.user.is_authenticated:
-        return False
-    return is_superuser_user(request.user) or is_prompt_developer_user(request.user)
-
-
-def can_access_prompt_regression(request):
-    """Регрессионные тесты промптов: только суперпользователь."""
-    if not request.user.is_authenticated:
-        return False
-    return is_superuser_user(request.user)
-
-
-def can_access_test_console(request):
-    """Тестовая консоль: только суперпользователь."""
-    if not request.user.is_authenticated:
-        return False
-    return is_superuser_user(request.user)
-
-
-def can_access_logs(request):
-    """Доступ к логам запросов: staff/superuser или prompt_developer.
-
-    Разработчикам препромтов журнал открыт со строгим ограничением —
-    только собственные запросы (см. ``logs_scope_is_own_user``).
-    """
-    return request.user.is_authenticated and (
-        is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)
-    )
+    keys = user_access_keys(request.user)
+    return bool({"page.logs_own", "page.logs_all"} & keys)
 
 
 def logs_scope_is_own_user(user):
     """Строгий фильтр журнала запросов: только свои записи.
 
-    True для prompt_developer без staff/superuser-прав — им журнал доступен,
-    но queryset жёстко ограничивается ``user=<себя>`` и чужие записи
+    True для не-staff юзера с page.logs_own (но без page.logs_all) —
+    queryset жёстко ограничивается ``user=<себя>`` и чужие записи
     недоступны даже по прямой ссылке (detail/xlsx/resend дают 403).
     """
     if not user or not getattr(user, "is_authenticated", False):
         return False
     if is_staff_or_superuser(user):
         return False
-    return is_prompt_developer_user(user)
+    keys = user_access_keys(user)
+    if "page.logs_all" in keys:
+        return False
+    return "page.logs_own" in keys
 
 
 def filter_app_list_for_user(app_list, request):
@@ -138,8 +213,9 @@ def filter_app_list_for_user(app_list, request):
     if not app_list:
         return app_list
 
-    is_pd = is_prompt_developer_user(getattr(request, "user", None))
-    is_staff = is_staff_or_superuser(getattr(request, "user", None))
+    user = getattr(request, "user", None)
+    is_pd = is_prompt_developer_user(user)
+    is_staff = is_staff_or_superuser(user)
     has_any_custom_link = bool(
         getattr(request, "_show_arm_link_cached", None)
         or is_pd

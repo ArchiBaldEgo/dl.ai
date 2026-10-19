@@ -3,12 +3,12 @@
 Связывает Django User с внешним аккаунтом dl.gsu.by через ExternalDLAccount.
 При первом входе автоматически создаёт пользователя с непаролем (unusable password),
 генерирует уникальный username на основе логина dl.gsu.by,
-добавляет в группу prompt_developer и обогащает first/last name из API.
+зачисляет во встроенную группу доступа «Разработчик промптов» (AIAccessGroup)
+на СОЗДАНИИ юзера и обогащает first/last name из API.
 """
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from .models import ExternalDLAccount
-from .constants import PROMPT_DEVELOPER_GROUP
 import logging
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,9 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
     5. Обновляет username/first_name/last_name при изменении; email и блок
        education (учебные данные студента, REST API.md) обновляются при
        каждом входе, если API отдал непустое значение.
-    6. Добавляет пользователя в группу prompt_developer.
+    6. Зачисляет НОВОГО пользователя во встроенную группу доступа
+       «Разработчик промптов» (AIAccessGroup; действующим состав правит
+       суперюзер на «Группах доступа»).
 
     Возвращает (user, created), где created=True если пользователь создан.
     """
@@ -242,13 +244,16 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
                 setattr(user, key, value)
             user.save(update_fields=list(user_updates.keys()))
 
-    # Ensure user is in prompt_developer group
+    # Baseline-доступ новой аудитории: зачисляем в встроенную группу
+    # «Разработчик промптов» (AIAccessGroup) ТОЛЬКО у вновь созданного юзера
+    # — иначе отзыв членства суперюзером откатывался бы каждым логином.
+    # У действующих юзеров состав правит суперюзер на «Группах доступа».
     try:
-        from django.contrib.auth.models import Group
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-        user.groups.add(group)
+        from .admin.permissions import add_user_to_builtin_ai_group
+        if created:
+            add_user_to_builtin_ai_group(user)
     except Exception as e:
-        logger.error(f"Failed to add user {user.username} to prompt_developer group: {e}")
+        logger.error(f"Failed to enroll user {user.username} into «Разработчик промптов»: {e}")
         raise
     
     return user, created

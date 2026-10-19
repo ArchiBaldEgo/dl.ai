@@ -1,15 +1,21 @@
-"""Доска задач «Таски» (ТЗ 2026-10-19).
+"""Доска задач «Таски» (ТЗ 2026-10-19, правки того же числа).
 
-Суперюзер создаёт таски (название, описание, срок — текстом) и выставляет
-приоритет (Высокий/Средний/Низкий — важное вверху, фильтр поверх); закрыть
-(удалить с доски) может только суперюзер. Разработчик промптов берёт таск:
-taken_by/taken_at пишутся атомарно (условный UPDATE — «первый успел»),
-у взятого таска в таблице сразу ФИО + группа + дата взятия, повторно взять
-нельзя. ModelAdmin не регистрируется — страница целиком кастомная,
-по тому же образцу, что «Закреплённые пакетные решения» (pinned.py).
+Два типа тасков-вкладок: «Фронт работы» (front) — приоритетный поток с
+ЧИСЛОВЫМ уникальным номером (меньше = важнее, выдаётся сервером: max+1;
+порядок меняют перетаскиванием строк → tasks/reorder/ перенумеровывает
+1..N) и «Хотелки» (wish) — без нумерации. Создать/закрыть — суперюзер либо
+ключи action.task_create/task_close (см. «Группы доступа»); переставить —
+superuser/action.task_reorder. Взять может любой с доступом к доске
+(page.tasks — «видна начиная с разработчика»): taken_by/taken_at пишутся
+атомарно (условный UPDATE — «первый успел»). ModelAdmin не регистрируется —
+страница целиком кастомная, по тому же образцу, что «Закреплённые пакетные
+решения» (pinned.py).
 """
 
-from django.db.models import Case, When
+import json
+
+from django.db import IntegrityError, transaction
+from django.db.models import Max
 from django.http import HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
 from django.utils import timezone
@@ -24,18 +30,11 @@ from .permissions import (
     is_prompt_developer_user,
     is_staff_or_superuser,
     is_superuser_user,
+    user_has_key,
 )
 from .site import ai_admin_site
 
 TASKS_URL = "/ai/admin/tasks/"
-
-# Приоритет на доске: Высокий → Средний → Низкий (аннотация pr_rank),
-# внутри одного приоритета — свежие сверху.
-_PRIORITY_RANK = Case(
-    When(priority=AIDevTask.Priority.HIGH, then=0),
-    When(priority=AIDevTask.Priority.NORMAL, then=1),
-    default=2,
-)
 
 
 def _claimant_display(user, edu_maps=None):
@@ -73,29 +72,36 @@ def _forbid(message="Access denied", status=403):
 
 
 def admin_tasks_view(request):
-    """Страница «Таски»: таблица доски, форма создания (суперюзер), фильтр."""
+    """Страница «Таски»: вкладки (front/wish), таблица, форма создания.
+
+    Вкладки — серверные (?kind=), URL шарится; wanted-строки без номера в
+    колонке «№» — «—». Перетаскивание включается атрибутом
+    data-reorder="1" только у тех, кому можно, и только на вкладке front.
+    """
     if not can_access_tasks(request):
         return HttpResponseForbidden("Access denied")
     guest = is_viewing_as_guest(request)
     superuser = is_superuser_user(request.user)
 
-    selected = (request.GET.get("priority") or "").strip()
+    kind = request.GET.get("kind") or AIDevTask.Kind.FRONT
+    if kind not in dict(AIDevTask.Kind.choices):
+        kind = AIDevTask.Kind.FRONT
+
     rows_qs = AIDevTask.objects.select_related(
         "taken_by", "taken_by__external_dl_account"
-    )
-    if selected in dict(AIDevTask.Priority.choices):
-        rows_qs = rows_qs.filter(priority=selected)
-    tasks = list(
-        rows_qs.annotate(pr_rank=_PRIORITY_RANK)
-        .order_by("pr_rank", "-created_at", "-id")
-    )
+    ).filter(kind=kind)
+    if kind == AIDevTask.Kind.FRONT:
+        rows_qs = rows_qs.order_by("priority_no", "-created_at", "-id")
+    else:
+        rows_qs = rows_qs.order_by("-created_at", "-id")
+
     edu_maps = education_title_maps()
     rows = []
-    for task in tasks:
+    for task in rows_qs:
         rows.append({
             "id": task.pk,
-            "priority": task.priority,
-            "priority_display": task.get_priority_display(),
+            "kind": task.kind,
+            "priority_no": task.priority_no,
             "title": task.title,
             "description": task.description,
             "estimate": task.estimate,
@@ -107,14 +113,28 @@ def admin_tasks_view(request):
             "close_url": f"{TASKS_URL}{task.pk}/close/",
         })
 
+    can_reorder = (
+        (superuser or user_has_key(request.user, "action.task_reorder"))
+        and not guest
+    )
     context = {
         **ai_admin_site.each_context(request),
         "title": "Таски",
         "rows": rows,
-        "priorities": AIDevTask.Priority.choices,
-        "selected_priority": selected,
-        "can_create": superuser and not guest,
-        "can_close": superuser and not guest,
+        "active_kind": kind,
+        "tabs": [
+            {"kind": value, "label": label, "url": f"{TASKS_URL}?kind={value}"}
+            for value, label in AIDevTask.Kind.choices
+        ],
+        "can_reorder": can_reorder,
+        "can_create": (
+            (superuser or user_has_key(request.user, "action.task_create"))
+            and not guest
+        ),
+        "can_close": (
+            (superuser or user_has_key(request.user, "action.task_close"))
+            and not guest
+        ),
         "moscow_tz": MOSCOW_TZ,
     }
     return TemplateResponse(request, "admin/ai/tasks.html", context)
@@ -122,39 +142,120 @@ def admin_tasks_view(request):
 
 @require_POST
 def admin_task_create_view(request):
-    """Создание таска (только суперюзер, не в гостевом режиме)."""
-    if not is_superuser_user(request.user) or is_viewing_as_guest(request):
+    """Создание таска: суперюзер или action.task_create; не в гостевом.
+
+    Номер приоритета присваивает СЕРВЕР (max+1 по фронту, атомарно) — клиент
+    его прислать не может; у «Хотелок» номера нет вообще.
+    """
+    if not request.user.is_authenticated:
+        return _forbid()
+    if is_viewing_as_guest(request):
+        return _forbid("В гостевом режиме доска только для просмотра")
+    if not (is_superuser_user(request.user) or user_has_key(request.user, "action.task_create")):
         return _forbid("Создавать таски может только суперпользователь")
     title = (request.POST.get("title") or "").strip()
     if not title:
         return JsonResponse(
             {"ok": False, "message": "Название таска обязательно"}, status=400
         )
-    priority = (request.POST.get("priority") or AIDevTask.Priority.NORMAL).strip()
-    if priority not in dict(AIDevTask.Priority.choices):
+    kind = (request.POST.get("kind") or AIDevTask.Kind.FRONT).strip()
+    if kind not in dict(AIDevTask.Kind.choices):
+        return JsonResponse({"ok": False, "message": "Неизвестный тип таска"}, status=400)
+
+    kwargs = {
+        "title": title,
+        "description": (request.POST.get("description") or "").strip(),
+        "estimate": (request.POST.get("estimate") or "").strip(),
+        "kind": kind,
+        "created_by": request.user,
+    }
+    try:
+        with transaction.atomic():
+            if kind == AIDevTask.Kind.FRONT:
+                kwargs["priority_no"] = (
+                    AIDevTask.objects.aggregate(
+                        max_no=Max("priority_no")
+                    )["max_no"] or 0
+                ) + 1
+            task = AIDevTask.objects.create(**kwargs)
+    except IntegrityError:
+        # Гонка двух одновременных созданий на один max+1 — честный 409.
         return JsonResponse(
-            {"ok": False, "message": "Неизвестный приоритет"}, status=400
+            {"ok": False, "message": "Доска менялась — повторите создание"},
+            status=409,
         )
-    task = AIDevTask.objects.create(
-        title=title,
-        description=(request.POST.get("description") or "").strip(),
-        estimate=(request.POST.get("estimate") or "").strip(),
-        priority=priority,
-        created_by=request.user,
-    )
     return JsonResponse({"ok": True, "id": task.pk})
 
 
 @require_POST
+def admin_task_reorder_view(request):
+    """Перенумеровать фронт по присланному порядку (перетаскивание строк).
+
+    Тело: JSON {"ids": [...]} — порядок front-тасков после дропа. Права:
+    суперюзер или action.task_reorder, не гостевой режим. Множество id должно
+    ТОЧНО совпасть с текущим множеством front-pk (гонка create/close → 409,
+    доска на сервере не трогается). В transaction.atomic() строки получают
+    номера 1..N — заодно уплотняются дырки от закрытых тасков (select_for_update
+    не нужен: sqlite-тесты его не знают, конфликт уникальности в атомарном
+    блоке даёт IntegrityError → 409).
+    """
+    if not request.user.is_authenticated:
+        return _forbid()
+    if is_viewing_as_guest(request):
+        return _forbid("В гостевом режиме доска только для просмотра")
+    if not (is_superuser_user(request.user) or user_has_key(request.user, "action.task_reorder")):
+        return _forbid("Порядок меняет только суперпользователь")
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return _forbid("Некорректный запрос", status=400)
+    ids = payload.get("ids")
+    if not isinstance(ids, list) or not all(
+        isinstance(value, int) for value in ids
+    ):
+        return _forbid("Некорректный порядок", status=400)
+
+    expected_ids = list(
+        AIDevTask.objects.filter(kind=AIDevTask.Kind.FRONT)
+        .values_list("pk", flat=True)
+    )
+    if set(ids) != set(expected_ids) or len(ids) != len(expected_ids):
+        return JsonResponse(
+            {"ok": False, "message": "Доска изменилась — обновите страницу"},
+            status=409,
+        )
+    try:
+        with transaction.atomic():
+            # Двухпроходная перенумерация: частичный уникальный констрейнт на
+            # priority_no запрещает промежуточные коллизии (прямой присвоения
+            # 1..N хватило на IntegrityError при перестановке соседей). Сначала
+            # ВСЕ номера фронта сбрасываются в NULL (NULL не сравнивается
+            # констрейнтом), затем присваиваются 1..N.
+            AIDevTask.objects.filter(
+                kind=AIDevTask.Kind.FRONT
+            ).update(priority_no=None)
+            for number, task_id in enumerate(ids, start=1):
+                AIDevTask.objects.filter(
+                    pk=task_id, kind=AIDevTask.Kind.FRONT
+                ).update(priority_no=number)
+    except IntegrityError:
+        return JsonResponse(
+            {"ok": False, "message": "Доска изменилась — обновите страницу"},
+            status=409,
+        )
+    return JsonResponse({"ok": True})
+
+
+@require_POST
 def admin_task_claim_view(request, task_id):
-    """Взять таск (суперюзер ИЛИ prompt_developer; гостю нельзя).
+    """Взять таск (любой с доступом к доске; гостю нельзя).
 
     Атомарный условный UPDATE: строка обновляется только если таск ещё
     свободен — второй конкурент получает 0 строк и 409 (sqlite-тесты
     не знают select_for_update(skip_locked=True), поэтому не он).
     """
     if not can_access_tasks(request):
-        return _forbid("Access denied")
+        return _forbid()
     if is_viewing_as_guest(request):
         return _forbid("В гостевом режиме доска только для просмотра")
     task = AIDevTask.objects.filter(pk=task_id).only("pk").first()
@@ -174,8 +275,12 @@ def admin_task_claim_view(request, task_id):
 
 @require_POST
 def admin_task_close_view(request, task_id):
-    """Закрыть таск — удаление с доски (только суперюзер, не в гостевом)."""
-    if not is_superuser_user(request.user) or is_viewing_as_guest(request):
+    """Закрыть таск — удаление с доски (суперюзер/action.task_close; не гостевой)."""
+    if not request.user.is_authenticated:
+        return _forbid()
+    if is_viewing_as_guest(request):
+        return _forbid("В гостевом режиме доска только для просмотра")
+    if not (is_superuser_user(request.user) or user_has_key(request.user, "action.task_close")):
         return _forbid("Закрывать таски может только суперпользователь")
     task = AIDevTask.objects.filter(pk=task_id).only("pk").first()
     if task is None:

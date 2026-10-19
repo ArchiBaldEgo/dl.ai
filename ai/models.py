@@ -784,22 +784,24 @@ class AIPinnedBatchRun(models.Model):
 
 
 class AIDevTask(models.Model):
-    """Таск на доске задач для разработчиков промптов (страница /ai/admin/tasks/).
+    """Таск на доске задач для разработчиков (страница /ai/admin/tasks/).
 
-    Создаётся суперюзером (название, описание, срок — ТЕКСТОМ, как просили:
-    «До 2 недель», «До 4 дней» — никаких расчётных дат), приоритет Высокий/
-    Средний/Низкий выставляет суперюзер; на доске важное вверху. Разработчик
-    забирает таск («Взять»): taken_by/taken_at пишутся атомарно (условный
-    UPDATE, «первый успел»), у взятого таска в таблице — ФИО + группа +
-    дата взятия, повторно взять нельзя. Закрыть (удалить с доски) может
-    только суперюзер. ModelAdmin не регистрируется — доска целиком
-    кастомная страница (ai/admin/tasks.py), как и «Закреплённые прогоны».
+    Два типа (kind): FRONT «Фронт работы» — приоритетный поток; WISH
+    «Хотелки» — без номеров. Номер приоритета (priority_no) уникален по всей
+    доске, МЕНЬШЕ = ВАЖНЕЕ; выдаётся сервером при создании (max+1), менять
+    порядок можно перетаскиванием строк (superuser/action.task_reorder →
+    /tasks/reorder/ перенумеровывает 1..N). Создаётся (название, описание,
+    срок — ТЕКСТОМ: «До 2 недель» — никаких расчётных дат) тем, у кого есть
+    action.task_create; закрыть (удалить с доски) — action.task_close.
+    Разработчик забирает таск («Взять»): taken_by/taken_at пишутся атомарно
+    (условный UPDATE, «первый успел»), у взятого таска в таблице — ФИО +
+    группа + дата взятия, повторно взять нельзя. ModelAdmin не
+    регистрируется — доска целиком кастомная страница (ai/admin/tasks.py).
     """
 
-    class Priority(models.TextChoices):
-        HIGH = "high", "Высокий"
-        NORMAL = "normal", "Средний"
-        LOW = "low", "Низкий"
+    class Kind(models.TextChoices):
+        FRONT = "front", "Фронт работы"
+        WISH = "wish", "Хотелки"
 
     title = models.CharField(max_length=200, verbose_name="Название")
     description = models.TextField(
@@ -809,9 +811,14 @@ class AIDevTask(models.Model):
         max_length=100, blank=True, default="", verbose_name="Срок",
         help_text="Текстом: «До 2 недель», «До 4 дней»",
     )
-    priority = models.CharField(
-        max_length=10, choices=Priority.choices, default=Priority.NORMAL,
-        verbose_name="Приоритет",
+    kind = models.CharField(
+        max_length=10, choices=Kind.choices, default=Kind.FRONT,
+        verbose_name="Тип",
+    )
+    # У wants NULL: «хотелки без нумерации». Уникальность (по всей доске)
+    # держит частичный UniqueConstraint из Meta.constraints.
+    priority_no = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name="Номер приоритета",
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True,
@@ -829,11 +836,91 @@ class AIDevTask(models.Model):
     class Meta:
         verbose_name = "Таск (доска задач)"
         verbose_name_plural = "Таски (доска задач)"
-        ordering = ("-created_at", "-id")
+        ordering = ("kind", "priority_no", "-created_at", "-id")
+        constraints = [
+            # «Цифры повторяться не могут» — уникальный номер на доске.
+            models.UniqueConstraint(
+                fields=["priority_no"],
+                condition=models.Q(priority_no__isnull=False),
+                name="ai_dev_task_priority_no_uniq",
+            ),
+        ]
 
     def __str__(self):
+        if self.kind == self.Kind.WISH:
+            number = "Хотелки"
+        elif self.priority_no is not None:
+            number = f"№{self.priority_no}"
+        else:
+            number = f"{self.Kind.FRONT.label} без номера"
         suffix = f" (взял {self.taken_by_id})" if self.taken_by_id else ""
-        return f"[{self.get_priority_display()}] {self.title}{suffix}"
+        return f"[{number}] {self.title}{suffix}"
+
+
+class AIAdminGroupPermission(models.Model):
+    """Один ключ доступа, выдающийся группам «Групп доступа» (AIAccessGroup).
+
+    Ключи сидируются миграцией (см. ai/constants.py). Разделы секций — для
+    группировки чекбоксов на странице «Группы доступа»: page — вкладки
+    админки, docs — главы документации, action — действия на страницах.
+    """
+
+    SECTION_PAGE = "page"
+    SECTION_DOCS = "docs"
+    SECTION_ACTION = "action"
+
+    key = models.SlugField(max_length=50, unique=True, verbose_name="Ключ")
+    label = models.CharField(max_length=200, verbose_name="Название")
+    section = models.CharField(
+        max_length=20, default=SECTION_PAGE,
+        choices=[
+            (SECTION_PAGE, "Страницы"),
+            (SECTION_DOCS, "Документация"),
+            (SECTION_ACTION, "Действия"),
+        ],
+        verbose_name="Раздел",
+    )
+
+    class Meta:
+        verbose_name = "Право доступа (группы)"
+        verbose_name_plural = "Права доступа (группы)"
+        ordering = ("section", "key")
+
+    def __str__(self):
+        return self.key
+
+
+class AIAccessGroup(models.Model):
+    """Группа доступа: членам выдаются права ключами (AIAdminGroupPermission).
+
+    Заменяет жёсткие проверки is_prompt_developer_user/Django-Group
+    prompt_developer: все can_access_* резолвят ключи из групп юзера
+    (ai/admin/permissions.py::user_access_keys); состав и права каждой
+    группы редактируются суперюзером на странице «Группы доступа»
+    (/ai/admin/ai-groups/, ai/admin/access_groups.py). Встроенные группы
+    («Разработчик промптов», «Разработчик») сидируются миграцией; их нельзя
+    удалить и переименовать, но права правятся на той же странице.
+    """
+
+    name = models.CharField(max_length=100, unique=True, verbose_name="Название")
+    description = models.TextField(blank=True, default="", verbose_name="Описание")
+    is_builtin = models.BooleanField(default=False, verbose_name="Встроенная")
+    permissions = models.ManyToManyField(
+        AIAdminGroupPermission, blank=True, related_name="access_groups",
+        verbose_name="Права",
+    )
+    users = models.ManyToManyField(
+        settings.AUTH_USER_MODEL, blank=True, related_name="ai_access_groups",
+        verbose_name="Участники",
+    )
+
+    class Meta:
+        verbose_name = "Группа доступа"
+        verbose_name_plural = "Группы доступа"
+        ordering = ("name",)
+
+    def __str__(self):
+        return self.name
 
 
 class AICourseTreeCache(models.Model):

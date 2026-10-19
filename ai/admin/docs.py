@@ -21,8 +21,12 @@ from ..services.docs import (
     render_chapter_html,
     visible_chapter_slugs,
 )
-from .permissions import is_staff_or_superuser, is_superuser_user
+from .permissions import is_staff_or_superuser, is_superuser_user, user_has_key
 from .site import ai_admin_site
+
+# Глава doc-ранга → ключ группы доступа, открывающий её не-staff юзеру
+# (выдаётся суперюзером на «Группах доступа»).
+_DOCS_ROLE_KEYS = {"staff": "docs.developer", "superuser": "docs.superuser"}
 
 
 def _chapter_visible_for_user(chapter, request) -> bool:
@@ -30,6 +34,8 @@ def _chapter_visible_for_user(chapter, request) -> bool:
 
     Гостевой режим визуально понижает суперюзера до разработчика промптов
     (см. guest_mode.is_viewing_as_guest) — придерживаемся того же правила.
+    Ключи docs.developer/docs.superuser открывают соответствующие главы
+    группам доступа.
     """
     from .guest_mode import is_viewing_as_guest
 
@@ -40,7 +46,13 @@ def _chapter_visible_for_user(chapter, request) -> bool:
         return True
     if is_superuser_user(request.user):
         return True
-    return chapter.min_role == "staff" and is_staff_or_superuser(request.user)
+    if chapter.min_role == "staff":
+        return is_staff_or_superuser(request.user) or user_has_key(
+            request.user, _DOCS_ROLE_KEYS["staff"]
+        )
+    if chapter.min_role == "superuser":
+        return user_has_key(request.user, _DOCS_ROLE_KEYS["superuser"])
+    return False
 
 
 def _visible_chapters(request):

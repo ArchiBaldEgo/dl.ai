@@ -11,6 +11,9 @@
 
 import json
 import os
+import hashlib
+import io
+import mimetypes
 import logging
 import threading
 import time
@@ -42,12 +45,11 @@ from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSetti
 from .auth_backends import (
     ADMIN_EXTERNAL_AUTH_BACKEND,
     create_admin_user_with_password,
-    ensure_prompt_developer_group,
     get_admin_user_by_external_id,
     get_external_user_id_from_request,
     normalize_external_user_id,
 )
-from .constants import PROMPT_DEVELOPER_GROUP
+from .admin.permissions import add_user_to_builtin_ai_group, is_prompt_developer_user
 from .middleware import _dev_bypass_enabled
 from .services.auth import get_user_identity_for_log
 from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
@@ -224,13 +226,13 @@ def get_groq_limits_view(request):
 
 
 def prompt_developer_access_required(view_func):
-    """Декоратор: разрешает доступ только суперпользователям и членам группы prompt_developer."""
+    """Декоратор: суперпользователь ИЛИ member встроенной группы «Разработчик промптов»."""
     @wraps(view_func)
     def _wrapped(request, *args, **kwargs):
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated:
             return HttpResponseForbidden("Prompt developer access required")
-        if user.is_superuser or user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists():
+        if user.is_superuser or is_prompt_developer_user(user):
             return view_func(request, *args, **kwargs)
         return HttpResponseForbidden("Prompt developer access required")
 
@@ -494,7 +496,9 @@ def set_password_view(request):
         new_password_confirm = request.POST.get("new_password_confirm") or ""
 
         if is_admin_registration and target_user and target_user.has_usable_password():
-            ensure_prompt_developer_group(target_user)
+            # Вход по уже установленному паролю: группы НЕ перевыдаём —
+            # состав правит суперюзер на «Группах доступа» (иначе отзыв
+            # членства откатывался бы каждым логином).
             login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
             csrf.rotate_token(request)
             request.session["admin_fresh_auth"] = True
@@ -514,9 +518,12 @@ def set_password_view(request):
             if target_user:
                 target_user.set_password(new_password)
                 target_user.save(update_fields=["password"])
-                ensure_prompt_developer_group(target_user)
+                # Первичная установка пароля = зачисление в baseline-группу
+                # «Разработчик промптов» (однократно, потом «липко»).
+                add_user_to_builtin_ai_group(target_user)
             else:
                 target_user = create_admin_user_with_password(external_user_id, new_password)
+                add_user_to_builtin_ai_group(target_user)
             login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
             csrf.rotate_token(request)
             request.session["admin_fresh_auth"] = True
@@ -537,7 +544,8 @@ def set_password_view(request):
         return response
 
     if is_admin_registration and target_user and target_user.has_usable_password():
-        ensure_prompt_developer_group(target_user)
+        # Вход по уже установленному паролю: группы НЕ перевыдаём —
+        # отзыв членства суперюзером не должен откатываться логином.
         login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
         csrf.rotate_token(request)
         request.session["admin_fresh_auth"] = True
@@ -745,6 +753,11 @@ def asset_view(request, asset_path):
 
     Ассеты ревалидируются браузером (Cache-Control: no-cache + Last-Modified + 304),
     поэтому после деплоя браузер подхватывает обновлённый JS/CSS даже без ?v=-бампа.
+    Условный запрос решается по ETag (md5 КОНТЕНТА, а не mtime): mtime при деплое
+    мог не сдвинуться (таймстампы/WSL-копирование), и 304 отдавал СТАРЫЙ файл —
+    «стили падали». Ревалидация по If-Modified-Since остаётся fallback'ом для
+    кэшей без ETag. 304 всегда несёт ETag + Cache-Control — иначе браузер без
+    закэшированного тела рисует пустой ресурс.
     """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
@@ -752,14 +765,37 @@ def asset_view(request, asset_path):
     if not asset_full_path or not os.path.isfile(asset_full_path):
         raise Http404("Asset not found")
 
-    statobj = os.stat(asset_full_path)
-    mtime = statobj.st_mtime
-    if not was_modified_since(request.META.get("HTTP_IF_MODIFIED_SINCE"), mtime):
-        return HttpResponseNotModified()
+    with open(asset_full_path, "rb") as fh:
+        data = fh.read()
+    etag = f'"{hashlib.md5(data).hexdigest()}"'
 
-    response = FileResponse(open(asset_full_path, "rb"))
+    if_none_match = request.META.get("HTTP_IF_NONE_MATCH", "")
+    if if_none_match:
+        # Срезаем W/ и кавычки: клиент может прислать слабый валидатор/список.
+        candidates = {
+            tag.strip().removeprefix('W/').strip('"')
+            for tag in if_none_match.split(",")
+        }
+        if etag.strip('"') in candidates:
+            not_modified = HttpResponseNotModified()
+            not_modified["ETag"] = etag
+            not_modified["Cache-Control"] = "no-cache"
+            return not_modified
+    else:
+        statobj = os.stat(asset_full_path)
+        if not was_modified_since(
+            request.META.get("HTTP_IF_MODIFIED_SINCE"), statobj.st_mtime
+        ):
+            not_modified = HttpResponseNotModified()
+            not_modified["ETag"] = etag
+            not_modified["Cache-Control"] = "no-cache"
+            return not_modified
+
+    content_type, _ = mimetypes.guess_type(asset_path)
+    response = FileResponse(io.BytesIO(data), content_type=content_type)
     response["Cache-Control"] = "no-cache"
-    response["Last-Modified"] = http_date(mtime)
+    response["ETag"] = etag
+    response["Last-Modified"] = http_date(os.stat(asset_full_path).st_mtime)
     return response
 
 @require_http_methods(["GET"])

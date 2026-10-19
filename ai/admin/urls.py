@@ -8,6 +8,12 @@
 from django.urls import include, path
 
 from ..views import set_password_view
+from .access_groups import (
+    admin_access_group_delete_view,
+    admin_access_group_member_toggle_view,
+    admin_access_group_save_view,
+    admin_access_groups_view,
+)
 from .active_runs import admin_active_runs_view
 from .arm import (
     admin_arm_solve_view,
@@ -59,6 +65,7 @@ from .tasks import (
     admin_task_claim_view,
     admin_task_close_view,
     admin_task_create_view,
+    admin_task_reorder_view,
     admin_tasks_view,
 )
 from .test_console import (
@@ -113,10 +120,15 @@ def get_ai_admin_urls():
         path("prompts/my/", ai_admin_site.admin_view(admin_my_prompt_view), name="ai_my_prompt"),
         path("pinned-runs/", ai_admin_site.admin_view(admin_pinned_runs_view), name="ai_pinned_runs"),
         path("tasks/create/", ai_admin_site.admin_view(admin_task_create_view), name="ai_task_create"),
+        path("tasks/reorder/", ai_admin_site.admin_view(admin_task_reorder_view), name="ai_task_reorder"),
         path("tasks/<int:task_id>/claim/", ai_admin_site.admin_view(admin_task_claim_view), name="ai_task_claim"),
         path("tasks/<int:task_id>/close/", ai_admin_site.admin_view(admin_task_close_view), name="ai_task_close"),
         path("tasks/", ai_admin_site.admin_view(admin_tasks_view), name="ai_tasks"),
         path("prompt-defaults/", ai_admin_site.admin_view(admin_prompt_defaults_view), name="ai_prompt_defaults"),
+        path("ai-groups/<int:group_id>/save/", ai_admin_site.admin_view(admin_access_group_save_view), name="ai_access_group_save"),
+        path("ai-groups/<int:group_id>/delete/", ai_admin_site.admin_view(admin_access_group_delete_view), name="ai_access_group_delete"),
+        path("ai-groups/<int:group_id>/members/toggle/", ai_admin_site.admin_view(admin_access_group_member_toggle_view), name="ai_access_group_member_toggle"),
+        path("ai-groups/", ai_admin_site.admin_view(admin_access_groups_view), name="ai_access_groups"),
         path("updates/", ai_admin_site.admin_view(admin_updates_view), name="ai_updates"),
         path("wizard/seen/", ai_admin_site.admin_view(admin_wizard_seen_view), name="ai_wizard_seen"),
         path("ai/request_logs/task-text/", ai_admin_site.admin_view(admin_request_log_task_text_view), name="ai_request_log_task_text"),
