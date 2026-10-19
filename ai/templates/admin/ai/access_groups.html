@@ -7,6 +7,7 @@
 {# ДИНАМИЧЕСКИ из левого нава (site.py::_ai_tool_defs).                   #}
 
 {% block extrastyle %}
+  {{ block.super }}
   <link rel="stylesheet" href="{% static 'admin/ai/access_groups/index.css' %}">
 {% endblock %}
 

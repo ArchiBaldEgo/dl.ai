@@ -7,7 +7,8 @@
 {# action-ключи: форма создания + «Закрыть». CSS/JS — static/admin/ai/tasks/. #}
 
 {% block extrastyle %}
-  <link rel="stylesheet" href="{% static 'admin/ai/tasks/index.css?v=2' %}">
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/tasks/index.css' %}">
 {% endblock %}
 
 {% block content %}
@@ -101,5 +102,5 @@
   {% endif %}
 </div>
 
-<script src="{% static 'admin/ai/tasks/index.js?v=2' %}"></script>
+<script src="{% static 'admin/ai/tasks/index.js' %}"></script>
 {% endblock %}
