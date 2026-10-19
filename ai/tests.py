@@ -39,6 +39,7 @@ from ai.i18n import get_localized_name, get_ui_language_suffix
 from ai.external_account import get_or_create_user_from_external
 from ai.models import (
     AuthorAlias,
+    AIDevTask,
     AIRequestLog,
     AIPinnedBatchRun,
     AIWizardSeen,
@@ -1868,6 +1869,11 @@ class AutorecoveryTests(TestCase):
         row.refresh_from_db()
         self.assertEqual(row.last_message, "down")
 
+    # override_settings, а не env-зависимость: локальный режим (ai/env_mode.py)
+    # ставит AI_WEB_DEEPSEEK_AUTORECOVERY=0, когда прокси нет, — без оверрайда
+    # тест краснеет на чистой локальной базе (это и есть «Автоподъём... not
+    # found in 'down'»: gate рано выходит и аннотации не пишет).
+    @override_settings(AI_WEB_DEEPSEEK_AUTORECOVERY=True)
     def test_restart_failure_annotates_pool_unavailable(self):
         from ai.model_health import _maybe_autorecover_web_deepseek, get_health_window_date
 
@@ -1878,6 +1884,7 @@ class AutorecoveryTests(TestCase):
         row.refresh_from_db()
         self.assertIn("Автоподъём не удался", row.last_message)
 
+    @override_settings(AI_WEB_DEEPSEEK_AUTORECOVERY=True)
     def test_restart_success_annotates_ok(self):
         from ai.model_health import _maybe_autorecover_web_deepseek, get_health_window_date
 
@@ -12275,6 +12282,240 @@ class PinnedBatchRunsTests(TestCase):
         self.assertTrue(contexts[self.log.pk]["pinned"])
         contexts = _batch_log_row_contexts([self.log], user=self.other)
         self.assertFalse(contexts[self.log.pk]["pinned"])
+
+    def test_pinned_foreign_log_detail_and_xlsx_open_to_prompt_dev(self):
+        """Закреплённый чужой лог — общая витрина не только снапшотом:
+        «Детали →» (детальная страница) и XLSX по log_id отдаются
+        промпт-разработчику, а не 403 «Доступны только собственные запросы»
+        (ТЗ 2026-10-19). Незакреплённый чужой лог по-прежнему 403."""
+        from ai.admin.request_logs import (
+            admin_request_log_detail_view,
+            admin_request_log_xlsx_view,
+        )
+        from django.contrib.auth.models import Group
+
+        Group.objects.get_or_create(name="prompt_developer")
+        pd_user = get_user_model().objects.create_user(username="det_pd", password="x")
+        pd_user.groups.add(Group.objects.get(name="prompt_developer"))
+
+        def _get(view, log_id):
+            request = RequestFactory().get(f"/x/{log_id}/")
+            request.user = pd_user
+            SessionMiddleware(lambda req: None).process_request(request)
+            return view(request, log_id=log_id)
+
+        # Чужой незакреплённый лог — по-прежнему 403.
+        self.assertEqual(_get(admin_request_log_detail_view, self.log.id).status_code, 403)
+
+        self.toggle_view(self._post(f"/x/{self.log.id}/pin/", self.operator), self.log.id)
+        self.assertEqual(_get(admin_request_log_detail_view, self.log.id).status_code, 200)
+        # XLSX: у setUp-прогона нет пар — 404 «В прогоне нет результатов»;
+        # важно, что это НЕ 403 «Доступны только собственные запросы».
+        resp = _get(admin_request_log_xlsx_view, self.log.id)
+        self.assertNotEqual(resp.status_code, 403)
+        self.assertNotIn("только собственные", resp.content.decode(errors="ignore"))
+
+    def test_pinned_foreign_log_not_resendable_by_prompt_dev(self):
+        """Закрепление открывает только ЧТЕНИЕ чужого прогона: resend
+        (мутация, перезапуск модели) на чужой закреплённый лог — 403,
+        как и раньше (allow_pinned=False в resend/rerun)."""
+        from ai.admin.request_logs import resend_request_view, rerun_arm_batch_view
+        from django.contrib.auth.models import Group
+
+        Group.objects.get_or_create(name="prompt_developer")
+        pd_user = get_user_model().objects.create_user(username="pd_mute", password="x")
+        pd_user.groups.add(Group.objects.get(name="prompt_developer"))
+        self.toggle_view(self._post(f"/x/{self.log.id}/pin/", self.operator), self.log.id)
+
+        request = RequestFactory().post(f"/x/{self.log.id}/resend/")
+        request.user = pd_user
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = resend_request_view(request, log_id=self.log.id)
+        self.assertEqual(resp.status_code, 403)
+
+        request = RequestFactory().post(f"/x/{self.log.id}/rerun-arm/")
+        request.user = pd_user
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = rerun_arm_batch_view(request, log_id=self.log.id)
+        self.assertEqual(resp.status_code, 403)
+
+
+class AIDevTaskBoardTests(TestCase):
+    """Доска «Таски» (/ai/admin/tasks/, ai/admin/tasks.py): суперюзер
+    создаёт/закрывает, разработчик промптов берёт; важное вверху, у взятого
+    — ФИО+группа+дата; гость-суперюзер видит доску, но не мутирует."""
+
+    def setUp(self):
+        from ai.admin.tasks import (
+            admin_task_claim_view,
+            admin_task_close_view,
+            admin_task_create_view,
+            admin_tasks_view,
+            TASKS_URL,
+        )
+        from ai.constants import PROMPT_DEVELOPER_GROUP
+        self.page_view = admin_tasks_view
+        self.create_view = admin_task_create_view
+        self.claim_view = admin_task_claim_view
+        self.close_view = admin_task_close_view
+        self.tasks_url = TASKS_URL
+        self.superuser = get_user_model().objects.create_superuser(
+            username="task_admin", password="x", email="t@a.com",
+        )
+        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        self.dev = get_user_model().objects.create_user(username="task_pd", password="x")
+        self.dev.groups.add(self.pd_group)
+        self.other_dev = get_user_model().objects.create_user(username="task_pd2", password="x")
+        self.other_dev.groups.add(self.pd_group)
+        self.outsider = get_user_model().objects.create_user(username="task_nobody", password="x")
+
+    def _request(self, user, method="get", path="/x/", data=None):
+        request = getattr(RequestFactory(), method)(path, data=data or {})
+        request.user = user
+        # each_context → guest_mode читает request.session.
+        SessionMiddleware(lambda req: None).process_request(request)
+        return request
+
+    def test_page_denies_plain_user(self):
+        resp = self.page_view(self._request(self.outsider, path=self.tasks_url))
+        self.assertEqual(resp.status_code, 403)
+
+    def test_page_allows_prompt_developer_and_superuser(self):
+        self.assertEqual(self.page_view(self._request(self.dev, path=self.tasks_url)).status_code, 200)
+        resp = self.page_view(self._request(self.superuser, path=self.tasks_url))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context_data["can_create"])
+
+    def test_create_requires_superuser(self):
+        resp = self.create_view(self._request(self.dev, "post", path="/x/tasks/create/"))
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(AIDevTask.objects.exists())
+
+        resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "Поправить промпт №3",
+            "description": "См. тему …",
+            "estimate": "До 4 дней",
+            "priority": "high",
+        }))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(json.loads(resp.content)["ok"])
+        task = AIDevTask.objects.get()
+        self.assertEqual(task.title, "Поправить промпт №3")
+        self.assertEqual(task.estimate, "До 4 дней")
+        self.assertEqual(task.priority, "high")
+        self.assertEqual(task.created_by, self.superuser)
+
+    def test_create_validates_title_and_priority(self):
+        resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={}))
+        self.assertEqual(resp.status_code, 400)
+        resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "x", "priority": "ultra",
+        }))
+        self.assertEqual(resp.status_code, 400)
+
+    def test_claim_sets_taken_fields_and_visible_on_page(self):
+        task = AIDevTask.objects.create(
+            title="Т1", estimate="До 2 недель", created_by=self.superuser,
+        )
+        resp = self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.dev)
+        self.assertIsNotNone(task.taken_at)
+
+        resp = self.page_view(self._request(self.superuser, path=self.tasks_url))
+        row = resp.context_data["rows"][0]
+        self.assertTrue(row["taken"])
+        self.assertIn("task_pd", row["claimant"])
+
+    def test_claim_unknown_task_is_404(self):
+        resp = self.claim_view(self._request(self.dev, "post", "/x/99999/claim/"), 99999)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_claim_second_getter_gets_409(self):
+        """Атомарность: взятый таск не перезатаривается — условный UPDATE
+        возвращает 0 строк и 409, taken_by остаётся у первого."""
+        task = AIDevTask.objects.create(title="Т2", created_by=self.superuser)
+        self.assertEqual(
+            self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id).status_code,
+            200,
+        )
+        resp = self.claim_view(
+            self._request(self.other_dev, "post", f"/x/{task.id}/claim/"), task.id
+        )
+        self.assertEqual(resp.status_code, 409)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.dev)
+        # Повторный claim тем же — тоже нельзя.
+        resp = self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
+        self.assertEqual(resp.status_code, 409)
+
+    def test_close_requires_superuser(self):
+        task = AIDevTask.objects.create(title="Т3", created_by=self.superuser)
+        resp = self.close_view(self._request(self.dev, "post", f"/x/{task.id}/close/"), task.id)
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(AIDevTask.objects.filter(pk=task.pk).exists())
+
+        self.assertEqual(
+            self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id).status_code,
+            200,
+        )
+        self.assertFalse(AIDevTask.objects.filter(pk=task.pk).exists())
+
+    def test_rows_sorted_high_to_low_and_filtered(self):
+        AIDevTask.objects.create(title="низк", priority="low")
+        AIDevTask.objects.create(title="выс", priority="high")
+        AIDevTask.objects.create(title="сред")
+        resp = self.page_view(self._request(self.dev, path=self.tasks_url))
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertEqual(titles, ["выс", "сред", "низк"])
+        resp = self.page_view(self._request(self.dev, path="/x/?priority=high"))
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertEqual(titles, ["выс"])
+
+    def test_claimant_display_uses_role_fallback(self):
+        """Без DL-аккаунта/справочника у взятого таска — ролевой фолбэк
+        «ФИО (Разработчик промптов)», формат как у «Обновлений»."""
+        from ai.admin.tasks import _claimant_display
+        label = _claimant_display(self.dev)
+        self.assertIn("(Разработчик промптов)", label)
+
+    def test_claimant_display_shows_dl_group(self):
+        """DL-разработчик: «ФИО (учебная группа)» — группа из справочника
+        по education_group_mask_id его ExternalDLAccount."""
+        from ai.admin.tasks import _claimant_display
+        from ai.models import DLEducationName
+        dev = get_user_model().objects.create_user(
+            username="user_4242", password="x", first_name="Иван", last_name="Петров",
+        )
+        ExternalDLAccount.objects.create(
+            user=dev, external_user_id="4242", external_login="dev_dl",
+            education_group_mask_id="M-01",
+        )
+        DLEducationName.objects.create(kind=DLEducationName.KIND_GROUP, key="M-01",
+                                       title="ФК-101")
+        self.assertIn("Иван Петров (ФК-101)", _claimant_display(dev))
+
+    def test_guest_superuser_sees_page_but_cannot_mutate(self):
+        from ai.admin.guest_mode import SESSION_KEY
+        task = AIDevTask.objects.create(title="Т5", created_by=self.superuser)
+
+        request = self._request(self.superuser, path=self.tasks_url)
+        request.session[SESSION_KEY] = True
+        resp = self.page_view(request)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.context_data["can_create"])
+
+        request = self._request(self.superuser, "post", path="/x/tasks/create/")
+        request.session[SESSION_KEY] = True
+        self.assertEqual(self.create_view(request).status_code, 403)
+        request = self._request(self.superuser, "post", f"/x/{task.id}/close/")
+        request.session[SESSION_KEY] = True
+        self.assertEqual(self.close_view(request, task.id).status_code, 403)
+        request = self._request(self.superuser, "post", f"/x/{task.id}/claim/")
+        request.session[SESSION_KEY] = True
+        self.assertEqual(self.claim_view(request, task.id).status_code, 403)
+        self.assertTrue(AIDevTask.objects.filter(pk=task.pk).exists())
 
 
 class ArmCourseTreeDbCacheTests(TestCase):

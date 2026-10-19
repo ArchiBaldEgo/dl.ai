@@ -23,6 +23,7 @@ from .permissions import (
     can_access_prompt_admin,
     can_access_prompt_defaults,
     can_access_prompt_regression,
+    can_access_tasks,
     can_access_test_console,
     is_prompt_developer_user,
     is_staff_or_superuser,
@@ -371,6 +372,12 @@ class AIAdminSite(admin.AdminSite):
         aiappsettings_url = self._aiappsettings_url()
         docs_url = "/ai/admin/docs/"
         pinned_runs_url = "/ai/admin/pinned-runs/"
+        # Доска «Таски»: суперюзеры (создать/закрыть) + разработчики промптов
+        # (взять). В гостевом режиме пункт остаётся, форма/кнопки прячет
+        # шаблон по can_create/can_close.
+        tasks_url = "/ai/admin/tasks/"
+        context["tasks_url"] = tasks_url
+        context["show_tasks_link"] = can_access_tasks(request)
 
         test_data_url = get_test_data_url()
         # «Тестовые данные» остаются только пунктом меню «Диагностика»
@@ -402,6 +409,10 @@ class AIAdminSite(admin.AdminSite):
                 # сюда НЕ добавляем — они и так есть в группе «Раздел ИИ» ниже.
                 # Здесь — только кастомные инструменты.
                 ("Промпты", "Мой промпт", "AiMyPrompt", my_prompt_url, is_pd, "✎", "Свои и закреплённые промпты"),
+                # Доска «Таски» — для суперюзеров и разработчиков промптов
+                # (ТЗ 2026-10-19): суперюзер создаёт/закрывает, разработчик
+                # берёт; важное вверху, у взятого — ФИО + группа + дата.
+                ("Промпты", "Таски", "AiDevTask", tasks_url, context["show_tasks_link"], "▦", "Доска задач: создать/взять/закрыть"),
                 ("Промпты", "Промпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", can_access_prompt_defaults(request) and not guest, "⚙", "Авто-подстановка по языку/теме ARM"),
                 ("Документация", "Разработчик промптов", "AiDocsPromptDeveloper", docs_url + "prompt-developer/", True, "✎", "Инструкция для разработчика промптов"),
                 ("Документация", "Разработчик", "AiDocsDeveloper", docs_url + "developer/", is_staff and not guest, "⚙", "Документация для разработчика"),

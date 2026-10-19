@@ -1,0 +1,62 @@
+/* Страница «Таски» (доска задач, ai/admin/tasks.py). */
+
+.ai-tasks-wrap { max-width: 100%; }
+
+.ai-tasks-create {
+  border: 1px solid var(--hairline-color);
+  border-radius: 6px;
+  padding: 10px 14px 14px;
+  margin: 10px 0 18px;
+  display: grid;
+  gap: 8px;
+}
+.ai-tasks-create h3 { margin: 4px 0 0; }
+.ai-tasks-create-row { display: flex; gap: 8px; }
+.ai-tasks-create-row input[type="text"] { flex: 1 1 auto; }
+.ai-tasks-create textarea { width: 100%; resize: vertical; }
+.ai-tasks-create button { justify-self: start; }
+
+.ai-tasks-filter {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 10px;
+}
+.ai-tasks-filter-label { color: var(--body-quiet-color); }
+
+.ai-tasks-scroll { overflow-x: auto; }
+.ai-tasks-table {
+  width: 100%; border-collapse: collapse; margin: 8px 0;
+}
+.ai-tasks-table th,
+.ai-tasks-table td {
+  border: 1px solid var(--hairline-color);
+  padding: 6px 9px; text-align: left; vertical-align: top;
+  font-size: 13px;
+}
+.ai-tasks-table th { background: var(--darkened-bg); font-weight: 600; }
+.ai-task-title { font-weight: 600; }
+.ai-task-description { max-width: 420px; white-space: pre-wrap; }
+.ai-task-actions { white-space: nowrap; }
+.ai-task-free { color: var(--body-quiet-color); }
+
+.ai-task-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  font-size: 12px; font-weight: 600; line-height: 1.4;
+}
+.ai-task-priority-high {
+  color: #b42318; background: color-mix(in srgb, #b42318 12%, var(--body-bg));
+}
+.ai-task-priority-normal {
+  color: #b45309; background: color-mix(in srgb, #b45309 14%, var(--body-bg));
+}
+.ai-task-priority-low {
+  color: var(--body-quiet-color); background: var(--darkened-bg);
+}
+
+.ai-task-btn-claim { padding: 3px 12px; }
+.ai-task-btn-close {
+  padding: 3px 12px;
+  color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color));
+}
+.ai-task-btn-close:hover { color: #912018; }
+
+.ai-tasks-empty { color: var(--body-quiet-color); padding: 12px 0; }

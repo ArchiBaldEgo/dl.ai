@@ -783,6 +783,59 @@ class AIPinnedBatchRun(models.Model):
         return f"{self.user_id} → log {self.log_id}"
 
 
+class AIDevTask(models.Model):
+    """Таск на доске задач для разработчиков промптов (страница /ai/admin/tasks/).
+
+    Создаётся суперюзером (название, описание, срок — ТЕКСТОМ, как просили:
+    «До 2 недель», «До 4 дней» — никаких расчётных дат), приоритет Высокий/
+    Средний/Низкий выставляет суперюзер; на доске важное вверху. Разработчик
+    забирает таск («Взять»): taken_by/taken_at пишутся атомарно (условный
+    UPDATE, «первый успел»), у взятого таска в таблице — ФИО + группа +
+    дата взятия, повторно взять нельзя. Закрыть (удалить с доски) может
+    только суперюзер. ModelAdmin не регистрируется — доска целиком
+    кастомная страница (ai/admin/tasks.py), как и «Закреплённые прогоны».
+    """
+
+    class Priority(models.TextChoices):
+        HIGH = "high", "Высокий"
+        NORMAL = "normal", "Средний"
+        LOW = "low", "Низкий"
+
+    title = models.CharField(max_length=200, verbose_name="Название")
+    description = models.TextField(
+        blank=True, default="", verbose_name="Описание"
+    )
+    estimate = models.CharField(
+        max_length=100, blank=True, default="", verbose_name="Срок",
+        help_text="Текстом: «До 2 недель», «До 4 дней»",
+    )
+    priority = models.CharField(
+        max_length=10, choices=Priority.choices, default=Priority.NORMAL,
+        verbose_name="Приоритет",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="created_dev_tasks",
+        verbose_name="Кто создал",
+    )
+    taken_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="claimed_dev_tasks",
+        verbose_name="Кто взял",
+    )
+    taken_at = models.DateTimeField(null=True, blank=True, verbose_name="Взят")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
+
+    class Meta:
+        verbose_name = "Таск (доска задач)"
+        verbose_name_plural = "Таски (доска задач)"
+        ordering = ("-created_at", "-id")
+
+    def __str__(self):
+        suffix = f" (взял {self.taken_by_id})" if self.taken_by_id else ""
+        return f"[{self.get_priority_display()}] {self.title}{suffix}"
+
+
 class AICourseTreeCache(models.Model):
     """Сохранённое дерево курса dl.gsu.by (последняя успешная загрузка).
 

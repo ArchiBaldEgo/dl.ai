@@ -55,6 +55,12 @@ from .prompt_regression import (
     admin_prompt_regression_status_view,
 )
 from .site import ai_admin_site
+from .tasks import (
+    admin_task_claim_view,
+    admin_task_close_view,
+    admin_task_create_view,
+    admin_tasks_view,
+)
 from .test_console import (
     admin_test_console_log_view,
     admin_test_console_logs_view,
@@ -106,6 +112,10 @@ def get_ai_admin_urls():
         path("test-console/", ai_admin_site.admin_view(admin_test_console_view), name="ai_test_console"),
         path("prompts/my/", ai_admin_site.admin_view(admin_my_prompt_view), name="ai_my_prompt"),
         path("pinned-runs/", ai_admin_site.admin_view(admin_pinned_runs_view), name="ai_pinned_runs"),
+        path("tasks/create/", ai_admin_site.admin_view(admin_task_create_view), name="ai_task_create"),
+        path("tasks/<int:task_id>/claim/", ai_admin_site.admin_view(admin_task_claim_view), name="ai_task_claim"),
+        path("tasks/<int:task_id>/close/", ai_admin_site.admin_view(admin_task_close_view), name="ai_task_close"),
+        path("tasks/", ai_admin_site.admin_view(admin_tasks_view), name="ai_tasks"),
         path("prompt-defaults/", ai_admin_site.admin_view(admin_prompt_defaults_view), name="ai_prompt_defaults"),
         path("updates/", ai_admin_site.admin_view(admin_updates_view), name="ai_updates"),
         path("wizard/seen/", ai_admin_site.admin_view(admin_wizard_seen_view), name="ai_wizard_seen"),

@@ -77,6 +77,18 @@ def can_access_prompt_defaults(request):
     return is_superuser_user(request.user) or is_prompt_developer_user(request.user)
 
 
+def can_access_tasks(request):
+    """Доступ к доске «Таски»: суперюзер ИЛИ prompt_developer.
+
+    Разработчик может брать таски, но создавать и закрывать — только
+    суперюзер (мутации проверяются в самих view, не здесь).
+    NB: staff без superuser доску не видит — как и «Промпты по умолчанию».
+    """
+    if not request.user.is_authenticated:
+        return False
+    return is_superuser_user(request.user) or is_prompt_developer_user(request.user)
+
+
 def can_access_prompt_regression(request):
     """Регрессионные тесты промптов: только суперпользователь."""
     if not request.user.is_authenticated:

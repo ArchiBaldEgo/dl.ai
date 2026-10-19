@@ -13,7 +13,8 @@ from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
 from django import forms
 from django.http import HttpResponse
-from django.urls import path
+from django.utils.html import format_html
+from django.urls import path, reverse
 from django.utils import timezone
 
 from ..models import (
@@ -525,9 +526,14 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     raw_id_fields = ("user",)
 
     def user_link(self, obj):
-        if obj.user:
-            return obj.user.username
-        return "-"
+        if not obj.user:
+            return "-"
+        # «Переход на пользователя»: полноценная страница юзера (is_staff,
+        # is_superuser, группы) — выдача прав происходит там (ТЗ 2026-10-19).
+        return format_html(
+            '<a href="{}">{}</a>', reverse("admin:auth_user_change", args=[obj.user_id]),
+            obj.user.username,
+        )
     user_link.short_description = "Локальный пользователь"
     user_link.admin_order_field = "user__username"
 

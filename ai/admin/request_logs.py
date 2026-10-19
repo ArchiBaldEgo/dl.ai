@@ -130,11 +130,27 @@ def _scope_logs_qs(qs, user):
     return qs
 
 
-def _get_scoped_log(request, log_id, json_errors=True):
+def _log_is_publicly_pinned(log_id):
+    """Чужой лог доступен разработчику промптов, если он ЗАКРЕПЛЁН кем-либо.
+
+    Закреплённые пакетные решения — общая витрина (страница
+    /ai/admin/pinned-runs/): закрепление делает запись журнала публично
+    открываемой — не только снапшот-развёрткой, но и детальной страницей,
+    JSON-деталями и XLSX (ТЗ 2026-10-19). Не закреплённую чужую запись
+    скуп «только свои» по-прежнему прячет.
+    """
+    return AIPinnedBatchRun.objects.filter(log_id=log_id).exists()
+
+
+def _get_scoped_log(request, log_id, json_errors=True, allow_pinned=True):
     """Запись журнала с учётом «только свои» (prompt_developer).
 
     Возвращает ``(log, error_response)``: ровно одно из двух не ``None``.
     404 — записи нет; 403 — разработчику чужую запись смотреть нельзя.
+    ИСКЛЮЧЕНИЕ: закреплённая кем-либо запись — общая витрина, отдаётся для
+    ЧИТАЮЩИХ эндпоинтов (детальная страница, детали JSON, XLSX); мутирующие
+    (resend/rerun) зовут с ``allow_pinned=False`` — чужое не перезапускает
+    модель (см. ``_log_is_publicly_pinned``).
     ``json_errors=True`` — JsonResponse (AJAX-эндпоинты), иначе
     HttpResponseForbidden (HTML-страница деталей).
     """
@@ -143,9 +159,10 @@ def _get_scoped_log(request, log_id, json_errors=True):
         error = JsonResponse({"error": "Запись журнала не найдена"}, status=404)
         return None, error if json_errors else HttpResponseForbidden("Запись журнала не найдена")
     if logs_scope_is_own_user(request.user) and log.user_id != request.user.pk:
-        message = "Доступны только собственные запросы"
-        error = JsonResponse({"error": message}, status=403)
-        return None, error if json_errors else HttpResponseForbidden(message)
+        if not (allow_pinned and _log_is_publicly_pinned(log_id)):
+            message = "Доступны только собственные запросы"
+            error = JsonResponse({"error": message}, status=403)
+            return None, error if json_errors else HttpResponseForbidden(message)
     return log, None
 
 
@@ -554,7 +571,7 @@ def admin_batch_snapshot_view(request, log_id):
     if log is None:
         # Скуп «только свои» (prompt_developer) чужую запись прячет; но если на
         # неё есть хоть одно закрепление — это общая витрина: отдаём снапшот.
-        if not AIPinnedBatchRun.objects.filter(log_id=int(log_id)).exists():
+        if not _log_is_publicly_pinned(int(log_id)):
             return JsonResponse({"error": "not-found"}, status=404)
         log = AIRequestLog.objects.filter(pk=int(log_id)).first()
     if log is None or not _is_batch_solve_log(log):
@@ -1162,7 +1179,8 @@ def resend_request_view(request, log_id):
     if not can_access_logs(request):
         return JsonResponse({"error": "Access denied"}, status=403)
 
-    log, error = _get_scoped_log(request, log_id)
+    # Мутация: чужой (даже закреплённый) лог resend'ить нельзя.
+    log, error = _get_scoped_log(request, log_id, allow_pinned=False)
     if error is not None:
         return error
 
@@ -1488,7 +1506,8 @@ def rerun_arm_batch_view(request, log_id):
     """Public entry point for rerun-arm URL — loads the log and delegates."""
     if not can_access_logs(request):
         return JsonResponse({"error": "Access denied"}, status=403)
-    log, error = _get_scoped_log(request, log_id)
+    # Мутация: чужой (даже закреплённый) прогон не перезапускаем.
+    log, error = _get_scoped_log(request, log_id, allow_pinned=False)
     if error is not None:
         return error
     return _rerun_arm_batch(request, log)
