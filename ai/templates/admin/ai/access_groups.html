@@ -22,10 +22,13 @@
     т.п.). Карточка раскрывается кликом: внутри — настройка прав и редактор
     состава (поиск участников строкой); у страницы с действиями кнопка
     «Действия» раскрывает вложенные чекбоксы. Страницы и главы
-    документации подтягиваются динамически из левого нава. У созданных
-    групп меняется название; удалить можно любую, но встроенная при
-    следующем добавлении участника пересоздастся ПУСТОЙ (права придётся
-    выдать заново). Изменение прав/состава действует сразу.
+    документации подтягиваются динамически из левого нава. Базовые права
+    помечены «база» — галочка включена и заблокирована: они есть у любого
+    вошедшего в админку независимо от группы, снять нельзя (и в галочках
+    группы их фактическое наличие не отражено). У созданных групп меняется
+    название; удалить можно любую, но встроенная при следующем добавлении
+    участника пересоздастся ПУСТОЙ (права придётся выдать заново). Изменение
+    прав/состава действует сразу.
   </p>
 
   <form class="ai-groups-create" data-save-url="{{ create_url }}">
@@ -68,8 +71,9 @@
                   <div class="ai-groups-perm-block">
                     <label class="ai-groups-perm">
                       <input type="checkbox" name="permissions" value="{{ perm.key }}"
-                             {% if perm.key in group.permission_keys %}checked{% endif %}>
+                             {% if perm.key in baseline_keys %}checked disabled class="ai-perm-baseline"{% elif perm.key in group.permission_keys %}checked{% endif %}>
                       {{ perm.label }}
+                      {% if perm.key in baseline_keys %}<em class="ai-perm-baseline-note" title="Базовый доступ: есть у любого вошедшего в админку, снять нельзя">база</em>{% endif %}
                       <code>{{ perm.key }}</code>
                     </label>
                     {% if perm.children %}
@@ -81,8 +85,9 @@
                         {% for child in perm.children %}
                           <label class="ai-groups-perm ai-groups-perm-child">
                             <input type="checkbox" name="permissions" value="{{ child.key }}"
-                                   {% if child.key in group.permission_keys %}checked{% endif %}>
+                                   {% if child.key in baseline_keys %}checked disabled class="ai-perm-baseline"{% elif child.key in group.permission_keys %}checked{% endif %}>
                             {{ child.label }}
+                            {% if child.key in baseline_keys %}<em class="ai-perm-baseline-note" title="Базовый доступ: есть у любого вошедшего в админку, снять нельзя">база</em>{% endif %}
                             <code>{{ child.key }}</code>
                           </label>
                         {% endfor %}

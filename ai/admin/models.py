@@ -568,10 +568,10 @@ class AIAppSettingsAdmin(admin.ModelAdmin):
 
 
 class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Admin for viewing external DL accounts (dl.gsu.by user info)."""
+
     # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
     ACCESS_KEY = "page.mgmt_accounts"
-
-    """Admin for viewing external DL accounts (dl.gsu.by user info)."""
     list_display = ("external_user_id", "external_login", "external_first_name",
                     "external_last_name", "dl_email", "education_summary",
                     "user_link", "created_at", "updated_at")
@@ -669,15 +669,15 @@ class UpdateLogAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 
 
 class AuthorAliasAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
-    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
-    ACCESS_KEY = "page.mgmt_author_alias"
-
     """Справочник ников git → ФИО + группа для страницы «Обновления».
 
     Ведётся вручную (нет автопривязки к ExternalDLAccount: git-ник не обязан
     совпадать с DL-логином); отображение на /ai/admin/updates/ резолвится при
     рендере — правка записи ретроактивно чинит прошлые строки.
     """
+
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_author_alias"
     list_display = ("nick", "full_name", "group")
     search_fields = ("nick", "full_name", "group")
 
@@ -707,9 +707,6 @@ class DLEducationNameAdminForm(forms.ModelForm):
 
 
 class DLEducationNameAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
-    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
-    ACCESS_KEY = "page.mgmt_education_names"
-
     """Справочник DL «id → название» (schoolId/groupMaskId), ведётся вручную.
 
     REST настоящих названий групп/вузов не отдаёт; дневной отчёт журнала
@@ -718,6 +715,9 @@ class DLEducationNameAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     Группы привязаны к заведениям (school key), фолбэк дневного отчёта
     показывает школу студента от привязки его группы.
     """
+
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_education_names"
     form = DLEducationNameAdminForm
     list_display = ("kind", "key", "title", "school_title")
     list_filter = ("kind",)
@@ -799,15 +799,15 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
 
 
 class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
-    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
-    ACCESS_KEY = "page.mgmt_dl_tasks"
-
     """Admin for the local Task table used by batch-solve ARM.
 
     The operator enters the DL ``node_id`` and assigns a topic / programming
     language / ``file_extension`` locally. ``name``/``statement``/``task_id``
     are DL-owned (fetched via ``refresh_from_dl``) and shown read-only.
     """
+
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_dl_tasks"
 
     list_display = ("node_id", "name", "topic", "programming_language", "file_extension", "active", "updated_at")
     list_display_links = ("node_id", "name")
@@ -867,9 +867,6 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 
 
 class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
-    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
-    ACCESS_KEY = "page.mgmt_task_solution"
-
     """Кэш решённых задач «Реши задачу» (узел DL + язык → проверенный код).
 
     Записи создаются автоматически (send-solution + успешное тестирование со
@@ -881,6 +878,9 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     задач DL, TaskSolution.tree_path), имя языка, тему и промпт; клик по
     строке (кроме ссылки на задачу) раскрывает сохранённый код.
     """
+
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_task_solution"
 
     change_list_template = "admin/ai/tasksolution_changelist.html"
 

@@ -38,7 +38,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from ..models import AIAccessGroup, AIAdminGroupPermission
 from .guest_mode import is_viewing_as_guest
-from .permissions import can_access_access_groups
+from .permissions import BASELINE_ACCESS_KEYS, can_access_access_groups
 from .site import ai_admin_site
 
 GROUPS_URL = "/ai/admin/ai-groups/"
@@ -213,6 +213,10 @@ def admin_access_groups_view(request):
         "sections": sections,
         "create_url": f"{GROUPS_URL}0/save/",
         "groups_url": GROUPS_URL,
+        # Базовые права помечаются в карточках «база» (включены и заблокированы):
+        # набор галочек группы — это ТОЛЬКО явные ключи; baseline выдаётся
+        # в КОДЕ любому с page.admin и в группу не пишется.
+        "baseline_keys": BASELINE_ACCESS_KEYS,
     }
     return TemplateResponse(request, "admin/ai/access_groups.html", context)
 

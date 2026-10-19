@@ -16134,3 +16134,28 @@ class KeyedPageAccessTests(_AdminViewRequestMixin, TestCase):
         )
         request = self._admin_request(updater2, path="/x/")
         self.assertTrue(admin.has_change_permission(request, obj=None))
+
+
+class BaselineMarkerTests(_AdminViewRequestMixin, TestCase):
+    """Базовые права (BASELINE_ACCESS_KEYS) в карточках «Групп доступа»:
+    чекбокс включён и заблокирован + пометка «база» — фактический доступ
+    шире галочек группы, и это видно прямо в карточке."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def test_baseline_keys_rendered_checked_disabled(self):
+        from ai.admin.access_groups import admin_access_groups_view
+        superuser = self.user_model.objects.create_superuser(
+            username="gc-super", password="x", email="a@t.com",
+        )
+        request = self._admin_request(superuser, path="/ai/admin/ai-groups/")
+        response = admin_access_groups_view(request)
+        response.render()
+        html = response.content.decode()
+        for key in ("page.tasks", "page.model_status", "page.logs",
+                    "page.prompt_admin_all"):
+            self.assertIn(f'value="{key}"', html)
+        self.assertIn('disabled class="ai-perm-baseline"', html)
+        self.assertIn(">база</em>", html)

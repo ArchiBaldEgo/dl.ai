@@ -91,3 +91,11 @@
 .ai-groups-empty { color: var(--body-quiet-color); }
 
 .busy { pointer-events: none; opacity: 0.6; }
+/* Базовые права (baseline): галочка включена и заблокирована —
+   они выдаются в КОДЕ любому вошедшему в админку, группой не отзываются. */
+.ai-perm-baseline-note {
+  font-size: 11px; font-style: normal;
+  padding: 0 5px; border-radius: 3px;
+  background: var(--darkened-bg); color: var(--body-quiet-color);
+}
+.ai-groups-perm:has(.ai-perm-baseline) code { color: var(--body-quiet-color); }

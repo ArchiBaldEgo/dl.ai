@@ -233,5 +233,5 @@ Non-obvious management commands (see `--help` for flags):
 - No `verify=False` for HTTPS in production — `SKIP_SSL_VERIFICATION` is local-dev only.
 - Admin set-password flow must accept `external_user_id` only after `ExternalAuthMiddleware` validation and `_session_matches_external_id` match.
 - Do not expose the `WebDeepseek/` (:3000) and `WebKimi/` (:3001) pools to public networks — keep them on `127.0.0.1`/internal Docker network.
-- Admin/ARM prompt listings must go through `prompt_queryset_for_user`; the chat-facing APIs (`get_problem_data`, `get_prompts`) intentionally show all prompts to authenticated users (prepompts are student content, not private data).
+- Admin/ARM prompt listings show all prompts read-only to any admin entrant (baseline `page.prompt_admin_all`); overwriting someone else's prompt is gated by `page.prompt_admin.edit_others` (`PromptAdmin._can_edit_prompt`). The chat-facing APIs (`get_problem_data`, `get_prompts`) intentionally show all prompts to authenticated users (prepompts are student content, not private data).
 
