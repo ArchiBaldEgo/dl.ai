@@ -1,4 +1,5 @@
 // Страница «Группы доступа» (ai/admin/access_groups.py): карточки-аккордеоны,
+// права в ДВЕ колонки (слева страницы/доки, справа действия активных страниц),
 // сохранение прав / удаление группы / AJAX-поиск участников / построчный
 // add-remove состава. JS на делегировании (выживает после replaceWith).
 (function () {
@@ -87,20 +88,22 @@
         if (head) head.setAttribute('aria-expanded', open ? 'true' : 'false');
     }
 
-    // --- Вложенные действия страницы (аккордеон прав внутри карточки). ---
-    document.addEventListener('click', function (event) {
-        var btn = event.target.closest('[data-ai-perm-toggle]');
-        if (!btn) return;
-        var list = btn.closest('.ai-groups-perm-block').querySelector('.ai-perm-children');
-        if (!list) return;
-        var open = list.hasAttribute('hidden');
-        if (open) {
-            list.removeAttribute('hidden');
-        } else {
-            list.setAttribute('hidden', '');
-        }
-        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-        btn.classList.toggle('ai-perm-toggle-open', open);
+    // --- Колонка «Действия»: активные страницы + их вложенные действия. ---
+    // Блок страницы скрыт, пока её галочка слева не включена (в базе или в
+    // галочках группы); включение/снятие галочки показывает/прячет его сразу.
+    function syncActionColumn(form) {
+        form.querySelectorAll('[data-ai-actions-for]').forEach(function (block) {
+            var key = block.getAttribute('data-ai-actions-for');
+            var page = form.querySelector('input[name="permissions"][value="' + key + '"]');
+            block.hidden = !(page && page.checked);
+        });
+    }
+
+    document.addEventListener('change', function (event) {
+        var page = event.target.closest('input[name="permissions"]');
+        if (!page) return;
+        var form = page.closest('form.ai-groups-form');
+        if (form && page.closest('.ai-groups-col-left')) syncActionColumn(form);
     });
 
     document.addEventListener('click', function (event) {

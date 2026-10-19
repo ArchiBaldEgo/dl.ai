@@ -26,7 +26,7 @@ from django.views.decorators.http import require_POST
 from ..constants import MOSCOW_TZ
 from ..models import AIDevTask, ExternalDLAccount
 from ..services.education_directory import education_title_maps, group_display
-from .guest_mode import is_viewing_as_guest
+
 from .permissions import (
     can_access_tasks,
     is_prompt_developer_user,
@@ -85,7 +85,6 @@ def admin_tasks_view(request):
     """
     if not can_access_tasks(request):
         return HttpResponseForbidden("Access denied")
-    guest = is_viewing_as_guest(request)
     superuser = is_superuser_user(request.user)
 
     VIEW_MINE = "mine"
@@ -132,7 +131,6 @@ def admin_tasks_view(request):
 
     can_reorder = (
         (superuser or user_has_key(request.user, "action.task_reorder"))
-        and not guest
         and kind == AIDevTask.Kind.FRONT
     )
     context = {
@@ -151,11 +149,9 @@ def admin_tasks_view(request):
         "can_reorder": can_reorder,
         "can_create": (
             (superuser or user_has_key(request.user, "action.task_create"))
-            and not guest
         ),
         "can_close": (
             (superuser or user_has_key(request.user, "action.task_close"))
-            and not guest
         ),
         "moscow_tz": MOSCOW_TZ,
     }
@@ -164,15 +160,13 @@ def admin_tasks_view(request):
 
 @require_POST
 def admin_task_create_view(request):
-    """Создание таска: суперюзер или action.task_create; не в гостевом.
+    """Создание таска: суперюзер или action.task_create.
 
     Номер приоритета присваивает СЕРВЕР (max+1 по фронту, атомарно) — клиент
     его прислать не может; у «Хотелок» номера нет вообще.
     """
     if not request.user.is_authenticated:
         return _forbid()
-    if is_viewing_as_guest(request):
-        return _forbid("В гостевом режиме доска только для просмотра")
     if not (is_superuser_user(request.user) or user_has_key(request.user, "action.task_create")):
         return _forbid("Создавать таски может только суперпользователь")
     title = (request.POST.get("title") or "").strip()
@@ -214,7 +208,7 @@ def admin_task_reorder_view(request):
     """Перенумеровать фронт по присланному порядку (перетаскивание строк).
 
     Тело: JSON {"ids": [...]} — порядок front-тасков после дропа. Права:
-    суперюзер или action.task_reorder, не гостевой режим. Множество id должно
+    суперюзер или action.task_reorder. Множество id должно
     ТОЧНО совпасть с текущим множеством front-pk (гонка create/close → 409,
     доска на сервере не трогается). В transaction.atomic() строки получают
     номера 1..N — заодно уплотняются дырки от закрытых тасков (select_for_update
@@ -223,8 +217,6 @@ def admin_task_reorder_view(request):
     """
     if not request.user.is_authenticated:
         return _forbid()
-    if is_viewing_as_guest(request):
-        return _forbid("В гостевом режиме доска только для просмотра")
     if not (is_superuser_user(request.user) or user_has_key(request.user, "action.task_reorder")):
         return _forbid("Порядок меняет только суперпользователь")
     try:
@@ -270,7 +262,7 @@ def admin_task_reorder_view(request):
 
 @require_POST
 def admin_task_claim_view(request, task_id):
-    """Взять таск (любой с доступом к доске; гостю нельзя).
+    """Взять таск: любой с доступом к доске.
 
     Атомарный условный UPDATE: строка обновляется только если таск ещё
     свободен — второй конкурент получает 0 строк и 409 (sqlite-тесты
@@ -278,8 +270,6 @@ def admin_task_claim_view(request, task_id):
     """
     if not can_access_tasks(request):
         return _forbid()
-    if is_viewing_as_guest(request):
-        return _forbid("В гостевом режиме доска только для просмотра")
     task = AIDevTask.objects.filter(pk=task_id).only("pk").first()
     if task is None:
         return JsonResponse({"ok": False, "message": "Таск не найден"}, status=404)
@@ -297,11 +287,9 @@ def admin_task_claim_view(request, task_id):
 
 @require_POST
 def admin_task_close_view(request, task_id):
-    """Закрыть таск — удаление с доски (суперюзер/action.task_close; не гостевой)."""
+    """Закрыть таск — удаление с доски (суперюзер/action.task_close)."""
     if not request.user.is_authenticated:
         return _forbid()
-    if is_viewing_as_guest(request):
-        return _forbid("В гостевом режиме доска только для просмотра")
     if not (is_superuser_user(request.user) or user_has_key(request.user, "action.task_close")):
         return _forbid("Закрывать таски может только суперпользователь")
     task = AIDevTask.objects.filter(pk=task_id).only("pk").first()

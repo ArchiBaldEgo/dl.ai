@@ -2,10 +2,11 @@
 
 Три главы документации (см. ai/services/docs.py) открываются как страница
 с HTML-рендером markdown и скачиваются как .md. Доступ по роли главы:
-"any" — всем в админке, "staff" — staff/суперюзер, "superuser" — суперюзер.
-В гостевом режиме суперюзер видит только главу для разработчика промптов
-(доки "staff"/"superuser" скрываются вместе с остальными суперюзерскими
-инструментами навигации).
+"any" — всем в админке, "staff" — staff/суперюзер, "superuser" — суперюзер;
+соответствующие главы открываются не-staff юзеру ключами docs.developer /
+docs.superuser (глава «Разработчик промптов» — docs.prompt_developer;
+документация НЕ идёт с ролью — решение владельца 2026-10-20). В режиме
+«Посмотреть как…» главы честно считаются по ключам группы.
 """
 
 from urllib.parse import quote
@@ -37,24 +38,15 @@ _DOCS_ROLE_KEYS = {"staff": "docs.developer", "superuser": "docs.superuser"}
 def _chapter_visible_for_user(chapter, request) -> bool:
     """Глава доступна, если ранг роли главы не выше ранга пользователя.
 
-    Гостевой режим визуально понижает суперюзера до разработчика промптов
-    (см. guest_mode.is_viewing_as_guest) — придерживаемся того же правила.
-    Ключи docs.developer/docs.superuser открывают соответствующие главы
-    группам доступа.
+    Ключи docs.developer/docs.superuser/docs.prompt_developer открывают
+    соответствующие главы группам доступа; эмуляция «Посмотреть как…»
+    считается внутри тех же проверок (permissions) — отдельный гость-ветки
+    больше нет.
     """
-    from .guest_mode import is_viewing_as_guest
-
-    guest = is_viewing_as_guest(request)
     if chapter.min_role == "any":
         return True
     if chapter.min_role == "prompt_developer":
-        # Гостевой режим = глаза разработчика промптов: глава остаётся видна.
-        if guest:
-            return True
         return can_access_prompt_developer_docs(request.user)
-    if guest:
-        # Гостевой режим = уровень разработчика промптов: главы staff/super скрыты.
-        return False
     if is_superuser_user(request.user):
         return True
     if chapter.min_role == "staff":

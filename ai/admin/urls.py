@@ -35,7 +35,7 @@ from .docs import (
     admin_docs_index_view,
     admin_docs_view,
 )
-from .guest_mode import admin_toggle_guest_view
+from .guest_mode import admin_view_as_groups_view, admin_view_as_select_view
 from .request_logs import (
     admin_batch_snapshot_view,
     admin_daily_report_view,
@@ -85,7 +85,8 @@ def get_ai_admin_urls():
     """
     custom_urls = [
         path("set-password/", set_password_view, name="set_password_view"),
-        path("view-as-guest/", ai_admin_site.admin_view(admin_toggle_guest_view), name="ai_view_as_guest"),
+        path("view-as/groups/", ai_admin_site.admin_view(admin_view_as_groups_view), name="ai_view_as_groups"),
+        path("view-as/select/", ai_admin_site.admin_view(admin_view_as_select_view), name="ai_view_as_select"),
         path("docs/", ai_admin_site.admin_view(admin_docs_index_view), name="ai_docs"),
         path("docs/<slug:slug>/", ai_admin_site.admin_view(admin_docs_view), name="ai_docs_detail"),
         path("docs/<slug:slug>/content/", ai_admin_site.admin_view(admin_docs_content_view), name="ai_docs_content"),

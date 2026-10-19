@@ -9976,6 +9976,33 @@ class _AdminViewRequestMixin:
         request._dont_enforce_csrf_checks = True
         return request
 
+    def _view_as_group(self, name, keys):
+        """Группа доступа с набором ключей (для честной эмуляции «Посмотреть как…»)."""
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+        group = AIAccessGroup.objects.create(name=name)
+        for key in keys:
+            perm, _ = AIAdminGroupPermission.objects.get_or_create(
+                key=key,
+                defaults={"label": key, "section": key.split(".")[0]},
+            )
+            group.permissions.add(perm)
+        return group
+
+    def _enter_view_as(self, request, group):
+        """Включить честную эмуляцию: сессия + stash на request.user
+        (admin_view проставляет stash в проде — в тесте зовём вручную)."""
+        from ai.admin.guest_mode import SESSION_KEY, apply_view_as_user
+        request.session[SESSION_KEY] = group.pk
+        apply_view_as_user(request)
+
+    def _leave_view_as(self, user):
+        """Снять stash с ИНСТАНСА юзера: в тестах юзер переиспользуется между
+        запросами (в проде Django пересоздаёт request.user на каждый запрос),
+        и эмуляция иначе «прилипла» бы к следующим проверкам того же объекта."""
+        from ai.admin.guest_mode import VIEW_AS_ATTR
+        if hasattr(user, VIEW_AS_ATTR):
+            delattr(user, VIEW_AS_ATTR)
+
 
 class DocsAdminAccessTests(_AdminViewRequestMixin, TestCase):
     """Роль-гейты страниц «Документация» + скачивание .md."""
@@ -9998,16 +10025,33 @@ class DocsAdminAccessTests(_AdminViewRequestMixin, TestCase):
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
             return view(request, slug=slug)
 
-    def _pd_user(self):
-        user = self.user_model.objects.create_user(username="pd-docs", password="x")
+    def _pd_user(self, grant_docs=False):
+        import uuid
+        user = self.user_model.objects.create_user(
+            username=f"pd-docs-{uuid.uuid4().hex[:8]}", password="x",
+        )
         make_prompt_developer(user)
+        if grant_docs:
+            from ai.models import AIAccessGroup, AIAdminGroupPermission
+            perm, _ = AIAdminGroupPermission.objects.get_or_create(
+                key="docs.prompt_developer",
+                defaults={"label": "Док «Разработчик промптов»", "section": "docs"},
+            )
+            group = AIAccessGroup.objects.create(name="Ключи-docs")
+            group.permissions.add(perm)
+            user.ai_access_groups.add(group)
         return user
 
-    def test_prompt_developer_sees_only_own_chapter(self):
+    def test_prompt_developer_no_chapter_without_key(self):
+        # Решение владельца 2026-10-20: документация НЕ идёт с ролью pd —
+        # глава выдаётся ключом docs.prompt_developer в «Группах доступа».
         user = self._pd_user()
-        self.assertEqual(self._view(user, "prompt-developer").status_code, 200)
+        self.assertEqual(self._view(user, "prompt-developer").status_code, 403)
         self.assertEqual(self._view(user, "developer").status_code, 403)
         self.assertEqual(self._view(user, "superuser").status_code, 403)
+        pd_with_key = self._pd_user(grant_docs=True)
+        self.assertEqual(self._view(pd_with_key, "prompt-developer").status_code, 200,
+                         "ключ docs.prompt_developer открывает главу pd-юзеру")
 
     def test_staff_sees_developer_chapter(self):
         user = self.user_model.objects.create_user(username="staff-docs", password="x", is_staff=True)
@@ -10021,19 +10065,31 @@ class DocsAdminAccessTests(_AdminViewRequestMixin, TestCase):
         for slug in ("prompt-developer", "developer", "superuser"):
             self.assertEqual(self._view(user, slug).status_code, 200)
 
-    def test_guest_superuser_sees_only_prompt_developer(self):
-        from ai.admin.guest_mode import SESSION_KEY
-        user = self.user_model.objects.create_user(
-            username="guest-docs", password="x", is_superuser=True, is_staff=True,
-        )
-        request_path = "/ai/admin/docs/developer/"
+    def test_view_as_group_honest_chapter_access(self):
+        """Эмуляция честная: главы docs.* РЕШАЮТСЯ ключами эмулируемой
+        группы (документация не идёт с ролью), супер-обход отключён."""
         from ai.admin.docs import admin_docs_view
         from unittest.mock import patch
-        request = self._admin_request(user, path=request_path)
-        request.session[SESSION_KEY] = True
+        user = self.user_model.objects.create_user(
+            username="viewas-docs", password="x", is_superuser=True, is_staff=True,
+        )
+        pd_group = self._view_as_group("Эмуля-PD", ["page.admin", "docs.prompt_developer"])
+        staff_group = self._view_as_group("Эмуля-Doc", ["page.admin", "docs.developer"])
+        request = self._admin_request(user, path="/ai/admin/docs/developer/")
+        self._enter_view_as(request, pd_group)
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
             response = admin_docs_view(request, slug="developer")
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 403,
+                         "staff-глава закрыта: ключа docs.developer у группы нет")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = admin_docs_view(request, slug="prompt-developer")
+        self.assertEqual(response.status_code, 200,
+                         "docs.prompt_developer у группы — глава открыта")
+        request = self._admin_request(user, path="/ai/admin/docs/developer/")
+        self._enter_view_as(request, staff_group)
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = admin_docs_view(request, slug="developer")
+        self.assertEqual(response.status_code, 200)
 
     def test_download_returns_markdown_attachment(self):
         user = self.user_model.objects.create_user(username="dl-docs", password="x", is_staff=True)
@@ -10048,80 +10104,192 @@ class DocsAdminAccessTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(response.status_code, 403)
 
 
-class GuestModeViewTests(_AdminViewRequestMixin, TestCase):
-    """POST-переключатель «Зайти как гость» (ai/admin/guest_mode.py)."""
+class ViewAsViewTests(_AdminViewRequestMixin, TestCase):
+    """Окно выбора группы «Посмотреть как…» (ai/admin/guest_mode.py):
+    GET-список (только группы с page.admin) и POST-переключатель."""
 
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
 
-    def _superuser(self):
+    def _superuser(self, username="viewas-super"):
         return self.user_model.objects.create_user(
-            username="toggle-super", password="x", is_superuser=True, is_staff=True,
+            username=username, password="x", is_superuser=True, is_staff=True,
         )
 
-    def _post(self, user):
+    def _select(self, user, group_id):
+        """POST-переключатель; возвращает (response, request) — сессия живёт
+        на запросе (в проде гоняется кукой)."""
         from unittest.mock import patch
-        from ai.admin.guest_mode import admin_toggle_guest_view
-        request = self._admin_request(user, method="post", path="/ai/admin/view-as-guest/")
+        from ai.admin.guest_mode import admin_view_as_select_view
+        request = self._admin_request(
+            user, method="post", path="/ai/admin/view-as/select/",
+            data={"group_id": str(group_id)},
+        )
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
-            return admin_toggle_guest_view(request)
+            response = admin_view_as_select_view(request)
+        return response, request
 
-    def test_post_enables_guest_mode(self):
-        from ai.admin.guest_mode import SESSION_KEY, admin_toggle_guest_view
+    def test_groups_view_lists_only_admin_groups(self):
         from unittest.mock import patch
-        user = self._superuser()
-        request = self._admin_request(user, method="post", path="/ai/admin/view-as-guest/")
+        from ai.admin.guest_mode import (
+            SESSION_KEY,
+            admin_view_as_groups_view,
+            admin_view_as_select_view,
+        )
+        superuser = self._superuser()
+        admin_group = self._view_as_group("Эмуля-вход", ["page.admin"])
+        no_admin_group = self._view_as_group("Эмуля-безвыхода", ["page.model_status"])
+        request = self._admin_request(superuser, path="/ai/admin/view-as/groups/")
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
-            response = admin_toggle_guest_view(request)
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(response["Location"], "/ai/admin/")
-        self.assertIn(SESSION_KEY, request.session)
+            response = admin_view_as_groups_view(request)
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        names = {g["name"]: g for g in data["groups"]}
+        self.assertIn(admin_group.name, names)
+        self.assertNotIn(no_admin_group.name, names,
+                         "группа без page.admin не входит в админку — смотреть нечего")
+        self.assertFalse(names[admin_group.name]["current"])
 
-    def test_post_removes_flag_when_active(self):
+        # Выбор группы: сессия живёт на запросе; следующий запрос в проде
+        # находит её по кукам — в тесте подсунули то же хранилище.
+        select_request = self._admin_request(
+            superuser, method="post", path="/ai/admin/view-as/select/",
+            data={"group_id": str(admin_group.id)},
+        )
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = admin_view_as_select_view(select_request)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(SESSION_KEY, select_request.session)
+        # Прямой вызов view (вне admin_view) НЕТ url_name-исключения —
+        # select проставил stash на юзера; снимаем, чтобы групп-листинг
+        # видел реального супера.
+        self._leave_view_as(superuser)
+        list_request = self._admin_request(superuser, path="/ai/admin/view-as/groups/")
+        list_request.session = select_request.session
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = admin_view_as_groups_view(list_request)
+        data = json.loads(response.content)
+        self.assertTrue(next(g for g in data["groups"] if g["id"] == admin_group.id)["current"])
+
+    def test_select_enables_and_disable(self):
         from ai.admin.guest_mode import SESSION_KEY
-        user = self._superuser()
-        request = self._admin_request(user, method="post", path="/ai/admin/view-as-guest/")
-        request.session[SESSION_KEY] = True
-        from unittest.mock import patch
-        from ai.admin.guest_mode import admin_toggle_guest_view
-        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
-            admin_toggle_guest_view(request)
+        superuser = self._superuser()
+        group = self._view_as_group("Эмуля-два", ["page.admin", "page.model_status"])
+        response, request = self._select(superuser, group.id)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(SESSION_KEY, request.session)
+        self.assertEqual(request.session[SESSION_KEY], group.pk)
+        response, request = self._select(superuser, 0)
+        self.assertEqual(response.status_code, 200)
         self.assertNotIn(SESSION_KEY, request.session)
+
+    def test_select_unknown_group_404(self):
+        response, _ = self._select(self._superuser(username="viewas-404"), 999999)
+        self.assertEqual(response.status_code, 404)
 
     def test_get_method_forbidden(self):
         from unittest.mock import patch
-        from ai.admin.guest_mode import admin_toggle_guest_view
-        request = self._admin_request(self._superuser(), method="get", path="/ai/admin/view-as-guest/")
+        from ai.admin.guest_mode import admin_view_as_select_view
+        request = self._admin_request(
+            self._superuser(), method="get", path="/ai/admin/view-as/select/",
+        )
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
-            response = admin_toggle_guest_view(request)
-        self.assertEqual(response.status_code, 403)
+            response = admin_view_as_select_view(request)
+        self.assertEqual(response.status_code, 405)
 
     def test_non_superuser_forbidden(self):
         from unittest.mock import patch
-        from ai.admin.guest_mode import admin_toggle_guest_view
-        user = self.user_model.objects.create_user(username="toggle-staff", password="x", is_staff=True)
-        request = self._admin_request(user, method="post", path="/ai/admin/view-as-guest/")
+        from ai.admin.guest_mode import admin_view_as_select_view
+        user = self.user_model.objects.create_user(
+            username="viewas-staff", password="x", is_staff=True,
+        )
+        request = self._admin_request(
+            user, method="post", path="/ai/admin/view-as/select/",
+            data={"group_id": "0"},
+        )
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
-            response = admin_toggle_guest_view(request)
+            response = admin_view_as_select_view(request)
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.content.decode(), "Только для суперпользователя")
+
+    def test_honest_checks_fail_for_viewed_group_user(self):
+        """Изнутри эмуляции is_superuser_user/is_staff_or_superuser → False."""
+        from ai.admin.permissions import is_staff_or_superuser, is_superuser_user
+        superuser = self._superuser()
+        group = self._view_as_group("Эмуля-три", ["page.admin"])
+        request = self._admin_request(superuser, path="/ai/admin/")
+        self._enter_view_as(request, group)
+        self.assertFalse(is_staff_or_superuser(request.user))
+        self.assertFalse(is_superuser_user(request.user))
+        # Ключи честные: только группа (+baseline при page.admin).
+        from ai.admin.permissions import user_access_keys
+        self.assertIn("page.admin", user_access_keys(request.user))
+        self.assertIn("page.arm_solve", user_access_keys(request.user),
+                      "baseline выдаётся в эмуляции тоже")
+        self.assertNotIn("page.model_status", user_access_keys(request.user))
+        superuser2 = self._superuser(username="viewas-super-two")
+        request = self._admin_request(superuser2, path="/ai/admin/")
+        from ai.admin.permissions import user_access_keys as _uak
+        # superuser2 БЕЗ эмуляции: полный набор ключей супер-ветки —
+        # это не противоречит честности, stash здесь уже снят.
+
+    def test_role_membership_resolved_from_stash_group(self):
+        """Ролевые проверки в эмуляции смотрят ВЫБРАННУЮ группу, а не
+        реальныеmembership'ы юзера: супер в группе «PD-Эмуля» — не pd;
+        кто угодно в эмуляции «Разработчик промптов» — pd."""
+        from ai.admin.permissions import is_prompt_developer_user
+        from ai.models import AIAccessGroup
+        user = self.user_model.objects.create_user(
+            username="viewas-role", password="x", is_superuser=True, is_staff=True,
+        )
+        make_prompt_developer(user)
+        other = self._view_as_group("Эмуля-role-другая", ["page.admin"])
+        request = self._admin_request(user, path="/ai/admin/")
+        self._enter_view_as(request, other)
+        self.assertFalse(is_prompt_developer_user(request.user),
+                         "реальное членство в эмуляции игнорируется")
+        builtin_pd = AIAccessGroup.objects.get_or_create(
+            name="Разработчик промптов", defaults={"is_builtin": True},
+        )[0]
+        request = self._admin_request(user, path="/ai/admin/")
+        self._enter_view_as(request, builtin_pd)
+        self.assertTrue(is_prompt_developer_user(request.user),
+                        "в эмуляции роль = выбранная группа, своё членство неважно")
+
+    def test_view_as_group_name_flag_hides_superuser_tools(self):
+        """Реальные группы юзера игнорируются: супер с ключом page.updates
+        из личной группы в эмуляции «Разработчик промптов» Обновлений не видит."""
+        from ai.admin.permissions import can_access_updates
+        group = self._view_as_group("Эмуля-PD-два", ["page.admin"])
+        superuser2 = self.user_model.objects.create_user(
+            username="viewas-mixed", password="x", is_superuser=True, is_staff=True,
+        )
+        personal = self._view_as_group("Личная-архив", ["page.updates"])
+        superuser2.ai_access_groups.add(personal)
+        before = list(superuser2.ai_access_groups.all())
+        request = self._admin_request(superuser2, path="/ai/admin/")
+        self._enter_view_as(request, group)
+        self.assertFalse(can_access_updates(request),
+                         "в эмуляции ключи только группы — личная page.updates не в счёт")
+        self.assertEqual(before, list(superuser2.ai_access_groups.all()),
+                         "реальные группы не тронуты")
 
 
-class GuestModeContextTests(_AdminViewRequestMixin, TestCase):
-    """each_context в гостевом режиме: суперюзерские инструменты скрыты."""
+class ViewAsContextTests(_AdminViewRequestMixin, TestCase):
+    """each_context в честной эмуляции «Посмотреть как…»: доступ РОВНО
+    по ключам эмулируемой группы (+baseline при page.admin), супер-обход
+    отключён; тур онбординга при этом не показывается."""
 
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
 
-    def _context(self, user, guest=False):
+    def _context(self, user, group=None):
         from unittest.mock import patch
         from ai.admin.site import ai_admin_site
         request = self._admin_request(user, path="/ai/admin/")
-        if guest:
-            from ai.admin.guest_mode import SESSION_KEY
-            request.session[SESSION_KEY] = True
+        if group is not None:
+            self._enter_view_as(request, group)
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
             return ai_admin_site.each_context(request)
 
@@ -10132,13 +10300,16 @@ class GuestModeContextTests(_AdminViewRequestMixin, TestCase):
 
     def _doc_tool_names(self, context):
         doc_app = next(
-            app for app in context["available_apps"] if app["app_label"] == "ai-docs"
+            (app for app in context["available_apps"] if app["app_label"] == "ai-docs"),
+            None,
         )
-        return [m["name"] for m in doc_app["models"]]
+        return [m["name"] for m in doc_app["models"]] if doc_app else []
 
     def test_normal_superuser_context(self):
-        context = self._context(self._superuser(), guest=False)
+        context = self._context(self._superuser())
         self.assertFalse(context["is_viewing_as_guest"])
+        self.assertTrue(context["real_super_user"])
+        self.assertFalse(context["view_as_group_name"])
         self.assertTrue(context["show_model_status_link"])
         self.assertTrue(context["show_test_console_link"])
         self.assertEqual(
@@ -10146,35 +10317,51 @@ class GuestModeContextTests(_AdminViewRequestMixin, TestCase):
             ["Разработчик промптов", "Разработчик", "Суперюзер"],
         )
 
-    def test_guest_context_downgrades_tools(self):
-        context = self._context(self._superuser(), guest=True)
+    def test_view_as_group_shows_only_group_pages(self):
+        """Группа с page.admin + модельным статусом: только её страницы и
+        baseline; остальное (консоль/обновления) скрыто честно."""
+        from ai.admin.guest_mode import SESSION_KEY
+        group = self._view_as_group(
+            "Эмуля-наблюдатель", ["page.admin", "page.model_status"],
+        )
+        user = self.user_model.objects.create_user(
+            username="ctx-viewas", password="x", is_superuser=True, is_staff=True,
+        )
+        context = self._context(user, group=group)
         self.assertTrue(context["is_viewing_as_guest"])
-        self.assertIn("гость", context["user_role_label"])
-        self.assertFalse(context["show_model_status_link"])
+        self.assertIn("Эмуля-наблюдатель", context["view_as_group_name"])
+        self.assertIn("как группу", context["user_role_label"])
+        self.assertTrue(context["show_model_status_link"],
+                        "у группы ключ есть — пункт виден ЧЕСТНО")
         self.assertFalse(context["show_test_console_link"])
         self.assertFalse(context["show_updates_link"])
-        # «Настройка ИИ-приложения» и «Закреплённые пакетные решения» гостю
-        # скрыты, но группа ai-pinned остаётся: «Таски» в гостевом режиме видны
-        # только для просмотра (форму/кнопки прячет шаблон по can_create/…).
-        pinned_app = next(
-            app
-            for app in context["available_apps"]
-            if app["app_label"] == "ai-pinned"
-        )
-        self.assertEqual(
-            [model["name"] for model in pinned_app["models"]],
-            ["Таски"],
-        )
-        self.assertEqual(self._doc_tool_names(context), ["Разработчик промптов"])
+        # baseline НЕ отменяется у группы с page.admin: пакетное решение видно.
+        self.assertTrue(context["show_arm_link"])
+        wizard = context["ai_wizard"]
+        self.assertFalse(wizard["show"],
+                         "в эмуляции тур не показывается (не двигает состояние реального юзера)")
 
-    def test_prompt_developer_context_unchanged(self):
+    def test_view_as_group_baseline_only(self):
+        """Группа только с page.admin: видны baseline-страницы, но не ключи."""
+        group = self._view_as_group("Эмуля-минимум", ["page.admin"])
+        user = self.user_model.objects.create_user(
+            username="ctx-viewas2", password="x", is_superuser=True, is_staff=True,
+        )
+        context = self._context(user, group=group)
+        self.assertTrue(context["show_arm_link"])
+        self.assertTrue(context["show_prompt_link"])
+        self.assertTrue(context["show_logs_link"])
+        self.assertFalse(context["show_model_status_link"])
+        self.assertFalse(self._doc_tool_names(context))
+
+    def test_prompt_developer_no_docs_without_key(self):
+        # Решение владельца 2026-10-20: документация НЕ идёт с ролью —
+        # выдаётся ключом docs.prompt_developer в «Группах доступа».
         user = self.user_model.objects.create_user(username="ctx-pd", password="x")
         make_prompt_developer(user)
-        context = self._context(user, guest=False)
+        context = self._context(user)
         self.assertFalse(context["is_viewing_as_guest"])
-        self.assertEqual(
-            self._doc_tool_names(context), ["Разработчик промптов"],
-        )
+        self.assertFalse(self._doc_tool_names(context))
 
 
 class RestrictedUserEditorsInlineTests(TestCase):
@@ -12190,16 +12377,16 @@ class PinnedBatchRunsTests(TestCase):
         self.assertEqual(resp.status_code, 403)
 
 
-class AIDevTaskBoardTests(TestCase):
+class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
     """Доска «Таски» (/ai/admin/tasks/, ai/admin/tasks.py).
 
     Матрица (система групп, сид 0060 + миграция 0063): доска видна с
     «Разработчика» и у «Разработчика промптов» (page.tasks выдан группой);
     взять может любой с доступом к доске; создать/закрыть — суперюзер
-    (action-ключи никто не имеет из коробки); переставить строки фронта —
+    (action-ключи выдаются группами); переставить строки фронта —
     суперюзер/action.task_reorder (выдан «Разработчику»). Номер приоритета
-    выдаёт СЕРВЕР (max+1), хотелки без номеров; гость-суперюзер видит доску,
-    но не мутирует."""
+    выдаёт СЕРВЕР (max+1), хотелки без номеров; в эмуляции «Посмотреть как…»
+    права честные по ключам группы."""
 
     def setUp(self):
         from ai.admin.tasks import (
@@ -12285,10 +12472,10 @@ class AIDevTaskBoardTests(TestCase):
         resp.render()
         self.assertNotIn('draggable="true"', resp.content.decode())
 
-        # Гостевой режим: can_reorder False → draggable не ставится.
-        from ai.admin.guest_mode import SESSION_KEY
+        # Эмуляция «Посмотреть как…» без action.task_reorder у группы:
+        # can_reorder False → draggable не ставится.
         req = self._request(self.superuser, path=f"{self.tasks_url}?kind=front")
-        req.session[SESSION_KEY] = True
+        self._enter_view_as(req, self._view_as_group("Эмуля-drag", ["page.admin", "page.tasks"]))
         resp = self.page_view(req)
         self.assertFalse(resp.context_data["can_reorder"])
         resp.render()
@@ -12521,7 +12708,7 @@ class AIDevTaskBoardTests(TestCase):
         self.assertEqual(first.priority_no, 2)
         self.assertEqual(second.priority_no, 1)
 
-    def test_reorder_denies_plain_prompt_developer_and_guest(self):
+    def test_reorder_denies_plain_prompt_developer(self):
         first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
         second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
         body = self._reorder_body([second, first])
@@ -12531,10 +12718,22 @@ class AIDevTaskBoardTests(TestCase):
         )
         self.assertEqual(resp.status_code, 403)
 
-        from ai.admin.guest_mode import SESSION_KEY
+    def test_reorder_honest_in_view_as(self):
+        """Эмуляция честная: без action.task_reorder у группы — 403,
+        с ключом — 200 (супер-обход отключён)."""
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
+        body = self._reorder_body([second, first])
+
+        no_key_group = self._view_as_group("Эмуля-безрорядка", ["page.admin"])
         request = self._request(self.superuser, "post", "/x/tasks/reorder/", body=body)
-        request.session[SESSION_KEY] = True
+        self._enter_view_as(request, no_key_group)
         self.assertEqual(self.reorder_view(request).status_code, 403)
+
+        key_group = self._view_as_group("Эмуля-порядок", ["action.task_reorder"])
+        request = self._request(self.superuser, "post", "/x/tasks/reorder/", body=body)
+        self._enter_view_as(request, key_group)
+        self.assertEqual(self.reorder_view(request).status_code, 200)
 
     def test_reorder_rejects_inexact_id_set(self):
         """Множество id должно ТОЧНО совпасть с текущим фронтом: лишний/не
@@ -12617,38 +12816,66 @@ class AIDevTaskBoardTests(TestCase):
                                        title="ФК-101")
         self.assertIn("Иван Петров (ФК-101)", _claimant_display(dev))
 
-    # --- Гостевой режим ----------------------------------------------------
+    # --- Эмуляция «Посмотреть как…» ----------------------------------------
 
-    def test_guest_superuser_sees_page_but_cannot_mutate(self):
-        from ai.admin.guest_mode import SESSION_KEY
+    def test_view_as_group_honest_page_and_mutations(self):
+        """Эмуляция честная: доступ по ключам группы. Без action-ключей —
+        только просмотр (can_* False, мутации 403); с ключами — можно."""
         task = AIDevTask.objects.create(title="Т5", created_by=self.superuser)
 
+        group = self._view_as_group(
+            "Эмуля-доска", ["page.admin", "page.tasks"],
+        )
         request = self._request(self.superuser, path=self.tasks_url)
-        request.session[SESSION_KEY] = True
+        self._enter_view_as(request, group)
         resp = self.page_view(request)
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.context_data["can_create"])
         self.assertFalse(resp.context_data["can_reorder"])
+        self.assertFalse(resp.context_data["can_close"])
 
         request = self._request(self.superuser, "post", path="/x/tasks/create/")
-        request.session[SESSION_KEY] = True
+        self._enter_view_as(
+            request, self._view_as_group("Эмуля-доска2", ["page.admin"]),
+        )
         self.assertEqual(self.create_view(request).status_code, 403)
         request = self._request(self.superuser, "post", f"/x/{task.id}/close/")
-        request.session[SESSION_KEY] = True
+        self._enter_view_as(request, group)
         self.assertEqual(self.close_view(request, task.id).status_code, 403)
         request = self._request(self.superuser, "post", f"/x/{task.id}/claim/")
-        request.session[SESSION_KEY] = True
-        self.assertEqual(self.claim_view(request, task.id).status_code, 403)
+        self._enter_view_as(request, group)
+        # Взять таск может любой с доступом к доске (page.tasks у группы):
+        # в честной эмуляции это 200, unlike гостя «только просмотр».
+        self.assertEqual(self.claim_view(request, task.id).status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.superuser)
         request = self._request(self.superuser, "post", "/x/tasks/reorder/",
                                 body=self._reorder_body([task]))
-        request.session[SESSION_KEY] = True
+        self._enter_view_as(request, group)
         self.assertEqual(self.reorder_view(request).status_code, 403)
-        self.assertTrue(AIDevTask.objects.filter(pk=task.pk).exists())
+        self.assertTrue(AIDevTask.objects.filter(pk=task.pk).exists(),
+                        "таск закрыть не дали — доска не тронута")
+
+        action_group = self._view_as_group(
+            "Эмуля-действия",
+            ["page.admin", "page.tasks", "action.task_create",
+             "action.task_close", "action.task_reorder"],
+        )
+        request = self._request(self.superuser, path=self.tasks_url)
+        self._enter_view_as(request, action_group)
+        resp = self.page_view(request)
+        self.assertTrue(resp.context_data["can_create"])
+        self.assertTrue(resp.context_data["can_reorder"])
+        request = self._request(self.superuser, "post", path="/x/tasks/create/",
+                                data={"title": "Т6-view-as", "kind": "front"})
+        self._enter_view_as(request, action_group)
+        self.assertEqual(self.create_view(request).status_code, 200)
+        self.assertTrue(AIDevTask.objects.filter(title="Т6-view-as").exists())
 
 
-class AIAccessGroupsAdminTests(TestCase):
+class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
     """Страница «Группы доступа» (/ai/admin/ai-groups/): только суперюзер
-    (гость-суперюзер тоже 403); CRUD групп, права чекбоксами (валидация ключей
+    (в эмуляции «Посмотреть как…» — тоже 403); CRUD групп, права чекбоксами (валидация ключей
     против БД), встроенные группы без переименования/удаления, построчный
     toggle состава. Сиды миграции 0060: ровно две встроенные группы с
     ЭТАЛОННЫМ набором ключей (set-равенство — состав правит суперюзер)."""
@@ -12700,13 +12927,36 @@ class AIAccessGroupsAdminTests(TestCase):
         self.assertEqual(self._view(self._request(self.staff)).status_code, 403)
 
         request = self._request(self.superuser)
-        from ai.admin.guest_mode import SESSION_KEY
-        request.session[SESSION_KEY] = True
+        self._enter_view_as(
+            request, self._view_as_group("Эмуля-безгрупп", ["page.admin"]),
+        )
         self.assertEqual(self._view(request).status_code, 403)
+        self._leave_view_as(self.superuser)
 
         resp = self._view(self._request(self.superuser))
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "Группы доступа")
+
+    def test_two_column_actions_card(self):
+        """Две колонки прав (ТЗ 2026-10-20): слева — страницы без
+        аккордеонов; справа — «Действия» АКТИВНЫХ страниц группы (в базе
+        или в галочках), их вложенные чекбоксы сразу; неактивные страницы
+        в правой колонке скрыты."""
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name="Разработчик промптов")
+        request = self._request(self.superuser, path="/x/?group=%d" % group.id)
+        resp = self._view(request)
+        self.assertEqual(resp.status_code, 200)
+        html = resp.render().content.decode()
+
+        # В левой колонке нет аккордеона-кнопки «Действия (n)».
+        self.assertNotIn("data-ai-perm-toggle", html)
+        # Правая колонка: заголовок секции и блоки активных страниц.
+        self.assertIn("data-ai-actions-for", html)
+        for key in ("page.prompt_admin", "page.logs", "page.tasks"):
+            self.assertIn(f'data-ai-actions-for="{key}"', html)
+        # Страница Журнал/Промпт — база (checked disabled), тоже с блоками.
+        self.assertIn("ai-perm-baseline", html)
 
     def test_save_delete_toggle_require_superuser(self):
         from ai.models import AIAccessGroup
@@ -13604,8 +13854,7 @@ class WizardSeenAdminEndpointTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(AIWizardSeen.objects.count(), 0)
 
-    def test_guest_mode_post_is_ok_but_not_recorded(self):
-        from ai.admin.guest_mode import SESSION_KEY
+    def test_view_as_mode_post_is_ok_but_not_recorded(self):
         from ai.admin.onboarding import admin_wizard_seen_view
 
         superuser = self.user_model.objects.create_user(
@@ -13615,7 +13864,9 @@ class WizardSeenAdminEndpointTests(_AdminViewRequestMixin, TestCase):
             superuser, method="post", path="/ai/admin/wizard/seen/",
             data='{"scope": "admin_super"}', content_type="application/json",
         )
-        request.session[SESSION_KEY] = True
+        self._enter_view_as(
+            request, self._view_as_group("Эмуля-wz", ["page.admin"]),
+        )
         response = admin_wizard_seen_view(request)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.content), {"ok": True})
@@ -13804,13 +14055,12 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
 
-    def _context(self, user, path="/ai/admin/", guest=False):
+    def _context(self, user, path="/ai/admin/", view_as_group=None):
         from ai.admin.site import ai_admin_site
 
         request = self._admin_request(user, path=path)
-        if guest:
-            from ai.admin.guest_mode import SESSION_KEY
-            request.session[SESSION_KEY] = True
+        if view_as_group is not None:
+            self._enter_view_as(request, view_as_group)
         return ai_admin_site.each_context(request)["ai_wizard"]
 
     def test_dashboard_scope_by_role(self):
@@ -13864,7 +14114,11 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
         superuser = self.user_model.objects.create_user(
             username="wz-ctx-guest", password="x", is_superuser=True,
         )
-        ctx = self._context(superuser, guest=True)
+        viewas = self._view_as_group("Эмуля-wzctx", ["page.admin"])
+        superuser2 = self.user_model.objects.create_user(
+            username="wz-ctx-viewas", password="x", is_superuser=True, is_staff=True,
+        )
+        ctx = self._context(superuser2, view_as_group=viewas)
         self.assertFalse(ctx["show"])
 
     def test_seen_scope_is_suppressed(self):
@@ -14997,13 +15251,12 @@ class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
         response = self._get(outsider)
         self.assertEqual(response.status_code, 403)
 
-    def _nav_tools(self, user, guest=False):
+    def _nav_tools(self, user, view_as_group=None):
         from unittest.mock import patch
         from ai.admin.site import ai_admin_site
         request = self._admin_request(user, path="/ai/admin/")
-        if guest:
-            from ai.admin.guest_mode import SESSION_KEY
-            request.session[SESSION_KEY] = True
+        if view_as_group is not None:
+            self._enter_view_as(request, view_as_group)
         with patch(
             "ai.admin.site.get_external_user_id_from_request", return_value="12345",
         ):
@@ -15020,12 +15273,24 @@ class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
         make_prompt_developer(dev)
         self.assertIn("AiArmPromptDefaults", self._nav_tools(dev))
 
-    def test_prompt_defaults_nav_hidden_in_guest(self):
+    def test_prompt_defaults_nav_honest_in_view_as(self):
+        """baseline: у группы с page.admin «Промпты по умолчанию» остаются
+        видны; без page.admin честные ключи пусты — пункт скрыт."""
         su = self.user_model.objects.create_user(
-            username="pd-nav-guest", password="x", is_superuser=True, is_staff=True,
+            username="pd-nav-viewas", password="x", is_superuser=True, is_staff=True,
         )
-        self.assertIn("AiArmPromptDefaults", self._nav_tools(su, guest=False))
-        self.assertNotIn("AiArmPromptDefaults", self._nav_tools(su, guest=True))
+        self.assertIn("AiArmPromptDefaults", self._nav_tools(su))
+        with_admin = self._view_as_group("Эмуля-with-admin", ["page.admin"])
+        self.assertIn(
+            "AiArmPromptDefaults",
+            self._nav_tools(su, view_as_group=with_admin),
+            "page.prompt_defaults — baseline, page.admin сохраняет его в эмуляции",
+        )
+        bare = self._view_as_group("Эмуля-bare-nav", [])
+        self.assertNotIn(
+            "AiArmPromptDefaults",
+            self._nav_tools(su, view_as_group=bare),
+        )
 
     def test_test_data_nav_stays_without_context_flag(self):
         """Генератор тестовых записей живёт ТОЛЬКО в меню «Тестовые данные»;
@@ -15043,7 +15308,8 @@ class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
             ctx = ai_admin_site.each_context(request)
         self.assertNotIn("show_test_data_link", ctx)
         self.assertIn("AiTestData", self._nav_tools(su))
-        self.assertNotIn("AiTestData", self._nav_tools(su, guest=True))
+        bare = self._view_as_group("Эмуля-bare-td", [])
+        self.assertNotIn("AiTestData", self._nav_tools(su, view_as_group=bare))
 
 
 # ===================================================================

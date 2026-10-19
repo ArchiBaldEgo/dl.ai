@@ -78,9 +78,8 @@ def _admin_role_label(user):
 def wizard_context_for_request(request):
     """Конфиг тура для each_context: решение о показе принимает сервис.
 
-    Гостевой режим («зайти как гость») тур не показывает и не отмечает —
-    это предпросмотр глазами разработчика промптов, состояние суперюзера
-    двигать нельзя.
+    Режим «Посмотреть как…» тур не показывает и не отмечает: это предпросмотр
+    глазами участника группы, состояние тур'а РЕАЛЬНОГО юзера двигать нельзя.
     """
     user = request.user
     role = _admin_role_label(user)
@@ -113,7 +112,7 @@ def admin_wizard_seen_view(request):
     scope = scope_from_request_body(request.body)
     if scope is None:
         return JsonResponse({"ok": False, "error": "bad_scope"}, status=400)
-    # Гостевой режим: собственное состояние суперюзера не двигаем.
+    # Режим «Посмотреть как…»: собственное состояние суперюзера не двигаем.
     if is_viewing_as_guest(request):
         return JsonResponse({"ok": True})
     if not can_access_admin(request.user):

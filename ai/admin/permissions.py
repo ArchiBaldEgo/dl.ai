@@ -10,8 +10,18 @@
 «Разработчик промптов» миграцией и из проверок удалена.
 """
 
-from ..constants import BUILTIN_GROUP_PROMPT_DEV
+from ..constants import BUILTIN_GROUP_DEVELOPER, BUILTIN_GROUP_PROMPT_DEV
 from ..models import AIAccessGroup, AIAdminGroupPermission
+
+#: pk группы-эмуляции режима «Посмотреть как…» (ai/admin/guest_mode.py), на
+#: время запроса проставляется атрибутом на request.user. Центральные
+#: проверки здесь и в ModelAdmin'ах честно вычисляют права участника
+#: выбранной группы: супер/staff-обход отключён, членство = группа.
+_VIEW_AS_ATTR = "_ai_view_as_group_pk"
+
+
+def _view_as_group_pk(user):
+    return getattr(user, _VIEW_AS_ATTR, None)
 
 
 #: Базовые права ЛЮБОГО, кто допущен в админку (ТЗ 2026-10-19): Пакетное
@@ -39,12 +49,41 @@ def is_prompt_developer_user(user):
     Табличное право (AIAccessGroup), а не Django-Group: выдаётся
     автоматически при провиженинге нового DL-пользователя и правится
     суперюзером на «Группах доступа» (отзыв теперь «липкий»).
+    В режиме «Посмотреть как…» — только выбранная группа.
     """
     if not user or not getattr(user, "is_authenticated", False):
         return False
     if getattr(user, "is_active", True) is False:
         return False
+    if _view_as_group_pk(user):
+        return user_has_group_name(user, BUILTIN_GROUP_PROMPT_DEV)
     return user.ai_access_groups.filter(name=BUILTIN_GROUP_PROMPT_DEV).exists()
+
+
+def is_developer_user(user):
+    """Членство во встроенной группе «Разработчик» (близко к staff).
+
+    Табличное право, как у «Разработчика промптов»; в режиме
+    «Посмотреть как…» — только выбранная группа.
+    """
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_active", True) is False:
+        return False
+    if _view_as_group_pk(user):
+        return user_has_group_name(user, BUILTIN_GROUP_DEVELOPER)
+    return user.ai_access_groups.filter(name=BUILTIN_GROUP_DEVELOPER).exists()
+
+
+def user_has_group_name(user, name):
+    """Участие юзера в группе доступа ПО ИМЕНИ (честная эмуляция смотрит в неё же)."""
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    group_pk = _view_as_group_pk(user)
+    if group_pk:
+        group = AIAccessGroup.objects.filter(pk=group_pk).first()
+        return bool(group and group.name == name)
+    return user.ai_access_groups.filter(name=name).exists()
 
 
 def add_user_to_builtin_ai_group(user, name=BUILTIN_GROUP_PROMPT_DEV):
@@ -61,10 +100,16 @@ def add_user_to_builtin_ai_group(user, name=BUILTIN_GROUP_PROMPT_DEV):
 
 
 def is_staff_or_superuser(user):
-    """Проверяет, является ли пользователь staff или суперпользователем."""
+    """Проверяет, является ли пользователь staff или суперпользователем.
+
+    В режиме «Посмотреть как…» — всегда False: эмуляция честная
+    (супер-обход отключён, доступ = ключи группы).
+    """
     if not user:
         return False
     if getattr(user, "is_active", True) is False:
+        return False
+    if _view_as_group_pk(user):
         return False
     return bool(user.is_superuser or user.is_staff)
 
@@ -76,10 +121,13 @@ def is_superuser_user(user):
     (тестовая консоль и другие супер-инструменты) по решению
     владельца доступны ТОЛЬКО суперпользователю — даже staff без флага
     ``is_superuser`` их не видит (если ключ не выдан через группы).
+    В режиме «Посмотреть как…» — всегда False (честная эмуляция).
     """
     if not user:
         return False
     if getattr(user, "is_active", True) is False:
+        return False
+    if _view_as_group_pk(user):
         return False
     return bool(getattr(user, "is_superuser", False))
 
@@ -95,11 +143,21 @@ def user_access_keys(user):
     К ключам ГРУПП поверх добавляются базовые права (BASELINE_ACCESS_KEYS):
     у любого, кто вообще допущен в админку (staff/super либо page.admin
     группой) — весь «Раздел ИИ» + журнал-свои.
+    Режим «Посмотреть как…»: ключи РОВНО выбранной группы (+baseline при
+    page.admin) — реальные группы юзера игнорируются.
     """
     if not user or not getattr(user, "is_authenticated", False):
         return set()
     if getattr(user, "is_active", True) is False:
         return set()
+    if _view_as_group_pk(user):
+        group_keys = set(
+            AIAccessGroup.objects.filter(pk=_view_as_group_pk(user))
+            .values_list("permissions__key", flat=True)
+        )
+        if "page.admin" in group_keys:
+            group_keys |= BASELINE_ACCESS_KEYS
+        return group_keys
     if user.is_superuser:
         return set(AIAdminGroupPermission.objects.values_list("key", flat=True))
     group_keys = set(
@@ -195,12 +253,14 @@ def can_access_pinned_runs(request):
 
 
 def can_access_prompt_developer_docs(user):
-    """Док «Разработчик промптов»: role-аудитория (pd/staff/super) ИЛИ ключ.
+    """Док «Разработчик промптов»: staff/super ИЛИ ключ docs.prompt_developer.
 
-    Раньше глава была безусловно видна pd/staff/super (rank-логика
-    docs.py), ключ docs.prompt_developer добавляет остальных.
+    Решение владельца 2026-10-20: членство во встроенной группе
+    «Разработчик промптов» главу больше НЕ открывает — вся документация
+    выдается ключами в «Группах доступа», как и страницы. (Роль_pd оставляет
+    доступ к «Моему промпту» и т.п., но не к докам.)
     """
-    if is_staff_or_superuser(user) or is_prompt_developer_user(user):
+    if is_staff_or_superuser(user):
         return True
     return user_has_key(user, "docs.prompt_developer")
 
@@ -211,7 +271,7 @@ def can_access_test_data(request):
     Раньше только суперюзер (генератор фейковых записей журнала); ключ
     доверяет не-staff управление журналом — выдаётся осознанно. Гостевой
     режим здесь не проверяется: он прячет строку нава (site.py), прямой
-    URL по контракту гостя не режем.
+    URL в режиме «Посмотреть как…» честно считается по ключам группы.
     """
     if not request.user.is_authenticated:
         return False
@@ -226,7 +286,7 @@ def can_access_access_groups(request):
     Держатель ключа управляет правами групп, включая собственную; выдаётся
     осознанно (он может раздать любой из существующих ключей). Гость
     отсекается в access_groups.py::_require_superuser (единственная
-    страница, у которой прямой URL для гостя закрыт).
+    страница, у которой прямой URL закрыт в эмуляции).
     """
     if not request.user.is_authenticated:
         return False

@@ -10,8 +10,8 @@ ai/admin/permissions.py) резолвят ключи из этих групп, �
 Встроенные группы (is_builtin): нельзя ПЕРЕИМЕНОВАТЬ (проверки находят их
 по имени), права правятся как у обычных; удалить можно и встроенную —
 права при этом теряются, группа пересоздастся ПУСТОЙ при следующем
-добавлении участника (get_or_create по имени). Гостевой режим не проходит
-нигде (403).
+добавлении участника (get_or_create по имени). Режим «Посмотреть как…» не
+проходит нигде (403).
 
 Секция «Страницы» ДИНАМИЧЕСКАЯ (ТЗ 2026-10-19): источник — список
 инструментов левого нава (ai_admin_site._ai_tool_defs), критерий выдачи —
@@ -123,7 +123,7 @@ def _dynamic_page_doc_permissions(request):
 
 
 def _require_superuser(request):
-    """Суперюзер ИЛИ держатель ключа page.groups; гостевой режим — нет."""
+    """Суперюзер ИЛИ держатель ключа page.groups; режим «Посмотреть как…» — нет."""
     return can_access_access_groups(request) and not is_viewing_as_guest(request)
 
 
@@ -183,6 +183,17 @@ def admin_access_groups_view(request):
         {"key": key, "title": title, "items": _section_items(permissions, key, dynamic)}
         for key, title in _SECTION_TITLES.items()
     ]
+    # Правая колонка рисуется только когда есть что показывать: вложенные
+    # действия страниц и/или действия-ключи без собственной страницы.
+    has_actions_section = any(
+        section["items"] for section in sections
+        if section["key"] == AIAdminGroupPermission.SECTION_ACTION
+    ) or any(
+        item["children"]
+        for section in sections
+        if section["key"] == AIAdminGroupPermission.SECTION_PAGE
+        for item in section["items"]
+    )
 
     rows = []
     for group in groups:
@@ -217,6 +228,7 @@ def admin_access_groups_view(request):
         # набор галочек группы — это ТОЛЬКО явные ключи; baseline выдаётся
         # в КОДЕ любому с page.admin и в группу не пишется.
         "baseline_keys": BASELINE_ACCESS_KEYS,
+        "has_actions_section": has_actions_section,
     }
     return TemplateResponse(request, "admin/ai/access_groups.html", context)
 

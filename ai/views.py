@@ -49,7 +49,11 @@ from .auth_backends import (
     get_external_user_id_from_request,
     normalize_external_user_id,
 )
-from .admin.permissions import add_user_to_builtin_ai_group, is_prompt_developer_user
+from .admin.permissions import (
+    add_user_to_builtin_ai_group,
+    is_prompt_developer_user,
+    is_superuser_user,
+)
 from .middleware import _dev_bypass_enabled
 from .services.auth import get_user_identity_for_log
 from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
@@ -232,7 +236,7 @@ def prompt_developer_access_required(view_func):
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated:
             return HttpResponseForbidden("Prompt developer access required")
-        if user.is_superuser or is_prompt_developer_user(user):
+        if is_superuser_user(user) or is_prompt_developer_user(user):
             return view_func(request, *args, **kwargs)
         return HttpResponseForbidden("Prompt developer access required")
 

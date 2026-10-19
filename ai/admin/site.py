@@ -30,11 +30,12 @@ from .permissions import (
     can_access_test_data,
     can_access_updates,
     is_prompt_developer_user,
+    is_developer_user,
     is_staff_or_superuser,
+    is_superuser_user,
     user_has_key,
 )
 from ..auth_backends import get_external_user_id_from_request
-from ..constants import BUILTIN_GROUP_DEVELOPER
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,19 @@ class AIAdminSite(admin.AdminSite):
         wrapped_view = super().admin_view(view, cacheable)
 
         def inner(request, *args, **kwargs):
+            # Честная эмуляция «Посмотреть как группа» (ai/admin/guest_mode.py):
+            # до ЛЮБЫХ проверок проставляем на request.user контекст выбранной
+            # группы — все can_access_*/has_*/ключи честно считаются как у
+            # участника. Эндпоинты самого переключателя получают реальный
+            # суперюзер (иначе выйти из режима нельзя).
+            from .guest_mode import apply_view_as_user
+            url_name = getattr(getattr(request, "resolver_match", None), "url_name", None)
+            # /view-as/ — и надёжный путь-фолбэк (RequestFactory-запросы без
+            # resolver_match), чтобы переключатель всегда видел реального супер.
+            if url_name not in {"ai_view_as_select", "ai_view_as_groups"} \
+                    and "/view-as/" not in request.path:
+                apply_view_as_user(request)
+
             # Bounce the user back to dl.gsu.by if the DLSID chain is
             # broken on this request. The login / set-password pages
             # are exempt: login is the entry, set-password is what we
@@ -321,15 +335,25 @@ class AIAdminSite(admin.AdminSite):
         context = super().each_context(request)
         is_pd = is_prompt_developer_user(request.user)
         is_staff = is_staff_or_superuser(request.user)
-        is_super = bool(getattr(request.user, "is_superuser", False))
+        # Честная эмуляция «Посмотреть как…»: супер-флаги считаются по
+        # эффективному пользователю (см. permissions).
+        is_super = is_superuser_user(request.user)
         context["is_prompt_developer"] = is_pd
         context["is_staff_or_superuser"] = is_staff
         # Суперпользователь: отсутствие предупреждения «не покидайте страницу»
         # в тестовой консоли. Личное меню «мои процессы» в шапке (ai_processes.js
         # + active_runs) видно всем админам и показывает только свои прогоны.
         context["is_super_user"] = is_super
-        # Гостевой режим («Зайти как гость»): суперюзер смотрит админку глазами
-        # разработчика промптов — только ВИД, права не режем (см. guest_mode.py).
+        # Кнопка «Посмотреть как…» видна по РЕАЛЬному суперюзерству (иначе из
+        # режима нельзя выйти); честные проверки (is_super_user и пр.)
+        # эмулируют участника группы.
+        context["real_super_user"] = bool(getattr(request.user, "is_superuser", False))
+        from .guest_mode import view_as_group as _view_as_group
+        _view_as = _view_as_group(request)
+        context["view_as_group_name"] = getattr(_view_as, "name", "")
+        # Режим «Посмотреть как…»: честная эмуляция участника группы
+        # (см. guest_mode.py) — доступ уже вычислен по ключам группы
+        # (guest-флаг оставлен только туру/wizard'у онбординга).
         guest = is_viewing_as_guest(request)
         context["is_viewing_as_guest"] = guest
         context["user_display_name"] = self._user_display_name(request.user)
@@ -338,16 +362,17 @@ class AIAdminSite(admin.AdminSite):
             request.user, is_super, is_staff, is_pd,
         )
         if guest:
-            context["user_role_label"] += " (гость)"
+            context["user_role_label"] += " (смотрите как группу)"
         show_arm = can_access_arm(request)
         context["show_arm_link"] = show_arm
-        # Суперюзерские инструменты в гостевом режиме визуально скрыты.
-        show_model_status = can_access_model_status(request) and not guest
+        # Суперюзерские инструменты честно считаются по ключам группы
+        # (в эмуляции is_staff_or_superuser=False и ключи — группы).
+        show_model_status = can_access_model_status(request)
         context["show_model_status_link"] = show_model_status
         context["show_prompt_link"] = can_access_prompt_admin(request)
         show_logs = can_access_logs(request)
         context["show_logs_link"] = show_logs
-        show_test_console = can_access_test_console(request) and not guest
+        show_test_console = can_access_test_console(request)
         context["show_test_console_link"] = show_test_console
         arm_solve_url = "/ai/admin/arm/solve/"
         arm_model_status_url = "/ai/admin/arm/models/"
@@ -364,7 +389,7 @@ class AIAdminSite(admin.AdminSite):
         context["my_prompt_change_url"] = get_my_prompt_admin_url(request)
         ai_logs_url = "/ai/admin/ai/request_logs/"
         context["ai_logs_url"] = ai_logs_url
-        show_updates = can_access_updates(request) and not guest
+        show_updates = can_access_updates(request)
         context["show_updates_link"] = show_updates
         updates_url = "/ai/admin/updates/"
         context["updates_url"] = updates_url
@@ -372,8 +397,7 @@ class AIAdminSite(admin.AdminSite):
         docs_url = "/ai/admin/docs/"
         pinned_runs_url = "/ai/admin/pinned-runs/"
         # Доска «Таски»: суперюзеры/«Разработчик» (страница + брать), мутации —
-        # по action-ключам. В гостевом режиме пункт остаётся, форма/кнопки
-        # прячет шаблон по can_create/can_close.
+        # по action-ключам.
         tasks_url = "/ai/admin/tasks/"
         context["tasks_url"] = tasks_url
         context["show_tasks_link"] = can_access_tasks(request)
@@ -383,7 +407,7 @@ class AIAdminSite(admin.AdminSite):
         # (генератор записей журнала); флаг show_test_data_link удалён вместе
         # с кнопкой «Добавить запись» на странице журнала. Права: супер ИЛИ
         # ключ page.test_data.
-        show_test_data = can_access_test_data(request) and not guest
+        show_test_data = can_access_test_data(request)
 
         # --- AI tools in the left navigation sidebar (#nav-sidebar) ---
         # The left nav renders `available_apps` (separate from the dashboard's
@@ -413,7 +437,8 @@ class AIAdminSite(admin.AdminSite):
             ]
         context["available_apps"] = tools_apps + real_apps
         # Онбординг-wizard: конфиг для json_script в base_site.html
-        # (читает static/admin/js/ai-wizard.js). В гостевом режиме show=False.
+        # (читает static/admin/js/ai-wizard.js). В режиме «Посмотреть как…»
+        # тур не показывается и не отмечается (см. onboarding.py).
         from .onboarding import wizard_context_for_request
         context["ai_wizard"] = wizard_context_for_request(request)
         return context
@@ -436,7 +461,6 @@ class AIAdminSite(admin.AdminSite):
         легаси-section ACTION (action.task_create) — строки БД переезжают
         только зрительно, проверяющий код не меняется.
         """
-        from .guest_mode import is_viewing_as_guest
         from .my_prompt import get_my_prompt_admin_url
         from .test_data import get_test_data_url, can_access_test_data
 
@@ -444,15 +468,14 @@ class AIAdminSite(admin.AdminSite):
         is_pd = is_prompt_developer_user(user)
         is_staff = is_staff_or_superuser(user)
         is_super = bool(getattr(user, "is_superuser", False))
-        guest = is_viewing_as_guest(request)
         show_arm = can_access_arm(request)
-        show_model_status = can_access_model_status(request) and not guest
+        show_model_status = can_access_model_status(request)
         show_logs = can_access_logs(request)
         show_pinned = can_access_pinned_runs(request)
-        show_test_console = can_access_test_console(request) and not guest
-        show_updates = can_access_updates(request) and not guest
+        show_test_console = can_access_test_console(request)
+        show_updates = can_access_updates(request)
         show_tasks = can_access_tasks(request)
-        show_test_data = can_access_test_data(request) and not guest
+        show_test_data = can_access_test_data(request)
         show_groups = can_access_access_groups(request)
 
         docs_url = "/ai/admin/docs/"
@@ -465,19 +488,13 @@ class AIAdminSite(admin.AdminSite):
             # навигации (группа «ai-pinned» рендерится без заголовка, см.
             # admin/app_list.html). Раньше это была строка группы «Раздел
             # ИИ» — из real_apps ниже она убирается, чтобы не дублировалась.
-            ("Закреплено", "Настройка ИИ-приложения", "AiAppSettings", aiappsettings_url, (is_staff or user_has_key(request.user, "page.app_settings")) and not guest, "⚙", "Вкл/выкл доступ к ИИ, последние запросы и пакетные прогоны", "page.app_settings", ()),
+            ("Закреплено", "Настройка ИИ-приложения", "AiAppSettings", aiappsettings_url, (is_staff or user_has_key(request.user, "page.app_settings")), "⚙", "Вкл/выкл доступ к ИИ, последние запросы и пакетные прогоны", "page.app_settings", ()),
             # «Закреплённые пакетные решения» — сразу под «Настройкой ИИ-приложения»
             # (та же беззаголовочная группа «ai-pinned»): закреплённые завершённые
-            # пакетные прогоны (★ в журнале и на «Настройке ИИ-приложения»).
-            # В гостевом режиме скрыта, как и вся группа настройки. Права —
-            # как у журнала (page.logs_own/logs_all), отдельного ключа нет.
-            # «Закреплённые пакетные решения» — сразу под «Настройкой ИИ-приложения»
-            # (та же беззаголовочная группа «ai-pinned»): закреплённые завершённые
-            # пакетные прогоны (★ в журнале и на «Настройке ИИ-приложения»).
-            # В гостевом режиме скрыта, как и вся группа настройки. Права —
-            # те же, что у журнала (page.logs_own/logs_all), плюс собственный
-            # ключ page.pinned_runs (группы выдают и без журнала).
-            ("Закреплено", "Закреплённые пакетные решения", "AiPinnedBatchRuns", "/ai/admin/pinned-runs/", show_pinned and not guest, "★", "Закреплённые завершённые пакетные прогоны", "page.pinned_runs", ()),
+            # пакетные прогоны (★ в журнале и на «Настройке ИИ-приложения»). Права —
+            # Права — те же, что у журнала (page.logs_own/logs_all), плюс
+            # собственный ключ page.pinned_runs (группы выдают и без журнала).
+            ("Закреплено", "Закреплённые пакетные решения", "AiPinnedBatchRuns", "/ai/admin/pinned-runs/", show_pinned, "★", "Закреплённые завершённые пакетные прогоны", "page.pinned_runs", ()),
             # Доска «Таски» — прямо под закреплёнными пакетными решениями
             # (ТЗ 2026-10-19): суперюзер создаёт/закрывает, остальные берут;
             # вкладки «Фронт работы» (числовой приоритет, перетаскивание)
@@ -494,14 +511,14 @@ class AIAdminSite(admin.AdminSite):
             # ключом page.prompt_admin (тот же, что у ModelAdmin-промптов:
             # пишущий доступ — свои; «чужое» — вложенный ключ
             # page.prompt_admin.edit_others в «Группах доступа»).
-            ("Промпты", "Мой промпт", "AiMyPrompt", my_prompt_url, (is_pd or user_has_key(request.user, "page.prompt_admin")) and not guest, "✎", "Свои и закреплённые промпты", "page.prompt_admin", (
+            ("Промпты", "Мой промпт", "AiMyPrompt", my_prompt_url, (is_pd or user_has_key(request.user, "page.prompt_admin")), "✎", "Свои и закреплённые промпты", "page.prompt_admin", (
                 ("page.prompt_admin_all", "Видеть все промпты (читать чужие)"),
                 ("page.prompt_admin.edit_others", "Перезаписывать чужие промпты"),
             )),
-            ("Промпты", "Промпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", can_access_prompt_defaults(request) and not guest, "⚙", "Авто-подстановка по языку/теме ARM", "page.prompt_defaults", ()),
+            ("Промпты", "Промпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", can_access_prompt_defaults(request), "⚙", "Авто-подстановка по языку/теме ARM", "page.prompt_defaults", ()),
             ("Документация", "Разработчик промптов", "AiDocsPromptDeveloper", docs_url + "prompt-developer/", can_access_prompt_developer_docs(user), "✎", "Инструкция для разработчика промптов", "docs.prompt_developer", ()),
-            ("Документация", "Разработчик", "AiDocsDeveloper", docs_url + "developer/", (is_staff or user_has_key(request.user, "docs.developer")) and not guest, "⚙", "Документация для разработчика", "docs.developer", ()),
-            ("Документация", "Суперюзер", "AiDocsSuperuser", docs_url + "superuser/", user_has_key(request.user, "docs.superuser") and not guest, "⚙", "Инструкция для суперадмина", "docs.superuser", ()),
+            ("Документация", "Разработчик", "AiDocsDeveloper", docs_url + "developer/", (is_staff or user_has_key(request.user, "docs.developer")), "⚙", "Документация для разработчика", "docs.developer", ()),
+            ("Документация", "Суперюзер", "AiDocsSuperuser", docs_url + "superuser/", user_has_key(request.user, "docs.superuser"), "⚙", "Инструкция для суперадмина", "docs.superuser", ()),
             ("ARM", "Пакетное решение", "AiArmSolve", "/ai/admin/arm/solve/", show_arm, "▤", "Пакетный прогон моделей по задачам DL", "page.arm_solve", ()),
             ("ARM", "Состояние моделей", "AiModelStatus", "/ai/admin/arm/models/", show_model_status, "◉", "Доступность AI-моделей сегодня", "page.model_status", ()),
             # Журнал — родительский ключ page.logs («читать свои»), «читать
@@ -523,7 +540,7 @@ class AIAdminSite(admin.AdminSite):
             )),
             # «Группы доступа» — суперюзеру, либо держателю ключа page.groups
             # (он управляет правами групп, включая собственную).
-            ("Система", "Группы доступа", "AiAccessGroups", "/ai/admin/ai-groups/", show_groups and not guest, "⛭", "Группы доступа: права страниц, действия, состав", "page.groups", ()),
+            ("Система", "Группы доступа", "AiAccessGroups", "/ai/admin/ai-groups/", show_groups, "⛭", "Группы доступа: права страниц, действия, состав", "page.groups", ()),
         ]
 
     @staticmethod
@@ -558,9 +575,7 @@ class AIAdminSite(admin.AdminSite):
             return "Суперпользователь"
         if is_staff:
             return "Администратор"
-        if user is not None and getattr(user, "is_authenticated", False) and user.ai_access_groups.filter(
-            name=BUILTIN_GROUP_DEVELOPER
-        ).exists():
+        if is_developer_user(user):
             return "Разработчик"
         if is_pd:
             return "Разработчик промптов"

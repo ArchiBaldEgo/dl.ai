@@ -61,16 +61,29 @@
 .ai-groups-perm code {
   color: var(--body-quiet-color); font-size: 11px; margin-left: 6px;
 }
-/* Вложенные действия страницы (аккордеон прав): блок = строка страницы +
-   кнопка «Действия» + скрытый список; вложенные чекбоксы с отступом. */
-.ai-groups-perm-block { break-inside: avoid; }
-.ai-groups-perm-block .ai-perm-toggle {
-  margin-left: 18px; padding: 2px 8px; font-size: 11px;
+/* Две колонки прав (ТЗ 2026-10-20): слева Страницы/Документация, справа
+   «Действия» — активные страницы с их вложенными чекбоксами сразу. */
+.ai-groups-grid {
+  display: grid; grid-template-columns: minmax(300px, 1fr) minmax(300px, 1fr);
+  gap: 8px 16px; align-items: start;
 }
-.ai-perm-toggle-open { font-weight: 600; }
-.ai-perm-children {
-  margin: 2px 0 6px 22px; padding-left: 10px;
+.ai-groups-col-left,
+.ai-groups-col-actions {
+  display: flex; flex-direction: column; gap: 8px;
+}
+@media (max-width: 980px) {
+  .ai-groups-grid { grid-template-columns: 1fr; }
+}
+/* Вложенные действия страницы: заголовок = имя страницы, чекбоксы с отступом. */
+.ai-groups-action-block {
+  margin: 2px 0 8px; padding: 2px 0 4px 12px;
   border-left: 2px solid var(--hairline-color);
+}
+.ai-groups-action-block h4 {
+  margin: 0 0 2px; font-size: 12px; text-transform: none;
+}
+.ai-groups-action-flat {
+  border-left-color: var(--button-bg);
 }
 .ai-groups-perm-child { padding: 1px 0; font-size: 12px; }
 

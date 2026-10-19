@@ -14,20 +14,21 @@
 {% block content %}
 <div class="ai-groups-wrap">
   <p class="help">
-    Группа даёт право на вкладки админки (Страницы), главы документации и
-    действия. Суперюзер видит всё по умолчанию, а базовые права — весь
-    «Раздел ИИ», «Мой промпт» и «Журнал запросов» (свои записи) — включены
-    у всех, кто вошёл в админку; группы только добавляют остальное
-    (создать/закрыть, перезаписывать чужое, читать все записи журнала и
-    т.п.). Карточка раскрывается кликом: внутри — настройка прав и редактор
-    состава (поиск участников строкой); у страницы с действиями кнопка
-    «Действия» раскрывает вложенные чекбоксы. Страницы и главы
-    документации подтягиваются динамически из левого нава. Базовые права
-    помечены «база» — галочка включена и заблокирована: они есть у любого
-    вошедшего в админку независимо от группы, снять нельзя (и в галочках
-    группы их фактическое наличие не отражено). У созданных групп меняется
-    название; удалить можно любую, но встроенная при следующем добавлении
-    участника пересоздастся ПУСТОЙ (права придётся выдать заново). Изменение
+    Группа даёт право на вкладки админки, главы документации и действия
+    страниц. Суперюзер видит всё по умолчанию, а базовые права — весь
+    «Раздел ИИ», «Мой промпт», «Видеть все промпты» и «Журнал запросов»
+    (свои записи) — включены у всех, кто вошёл в админку; группы только
+    добавляют остальное. Права настроены в двух колонках: слева — страницы
+    и документация (галочка = страницаактивна), справа — «Действия»:
+    активные страницы со своими вложенными действиями (создать/закрыть,
+    перезаписывать чужое, читать все записи журнала и т.п.). Страницы и
+    главы документации подтягиваются динамически из левого нава. Базовые
+    права помечены «база» — галочка включена и заблокирована: они есть у
+    любого вошедшего в админку независимо от группы, снять нельзя (и в
+    галочках группы их фактическое наличие не отражено). Изменить состав
+    группы можно кнопкой «Состав». У созданных групп меняется название;
+    удалить можно любую, но встроенная при следующем добавлении участника
+    пересоздастся ПУСТОЙ (права придётся выдать заново). Изменение
     прав/состава действует сразу.
   </p>
 
@@ -62,13 +63,20 @@
           <input type="text" name="name" value="{{ group.name }}" maxlength="100" placeholder="Название">
         {% endif %}
         <textarea name="description" rows="2" placeholder="Описание">{{ group.description }}</textarea>
-        <div class="ai-groups-perms">
-          {% for section in sections %}
-            {% if section.items %}
-              <fieldset>
-                <legend>{{ section.title }}</legend>
-                {% for perm in section.items %}
-                  <div class="ai-groups-perm-block">
+        {% comment %}Две колонки прав (ТЗ 2026-10-20): слева Страницы и
+        Документация — просто чекбоксы без вложенных аккордеонов; справа
+        «Действия»: активные страницы (в базе или среди галочек группы), под
+        каждой сразу её вложенные чекбоксы; ниже — действия-ключи, у которых
+        нет своей страницы. Блок неактивной страницы скрыт (index.js
+        показывает/прячет его тут же при включении/снятии галочки слева;
+        после сохранения с перезагрузкой блок виден и без JS).{% endcomment %}
+        <div class="ai-groups-perms ai-groups-grid">
+          <div class="ai-groups-col ai-groups-col-left">
+            {% for section in sections %}
+              {% if section.items and section.key != "action" %}
+                <fieldset>
+                  <legend>{{ section.title }}</legend>
+                  {% for perm in section.items %}
                     <label class="ai-groups-perm">
                       <input type="checkbox" name="permissions" value="{{ perm.key }}"
                              {% if perm.key in baseline_keys %}checked disabled class="ai-perm-baseline"{% elif perm.key in group.permission_keys %}checked{% endif %}>
@@ -76,12 +84,24 @@
                       {% if perm.key in baseline_keys %}<em class="ai-perm-baseline-note" title="Базовый доступ: есть у любого вошедшего в админку, снять нельзя">база</em>{% endif %}
                       <code>{{ perm.key }}</code>
                     </label>
+                  {% endfor %}
+                </fieldset>
+              {% endif %}
+            {% endfor %}
+          </div>
+          {% if has_actions_section %}
+          <div class="ai-groups-col ai-groups-col-actions">
+            <fieldset>
+              <legend>Действия</legend>
+              {% for section in sections %}
+                {% if section.key == "page" %}
+                  {% for perm in section.items %}
                     {% if perm.children %}
-                      <button type="button" class="button ai-perm-toggle"
-                              data-ai-perm-toggle aria-expanded="false">
-                        Действия ({{ perm.children|length }})
-                      </button>
-                      <div class="ai-perm-children" hidden>
+                      <div class="ai-groups-action-block" data-ai-actions-for="{{ perm.key }}"
+                           {% if perm.key not in baseline_keys and perm.key not in group.permission_keys %}hidden{% endif %}>
+                        <h4>{{ perm.label }}
+                          {% if perm.key in baseline_keys %}<em class="ai-perm-baseline-note" title="Базовый доступ: есть у любого вошедшего в админку, снять нельзя">база</em>{% endif %}
+                        </h4>
                         {% for child in perm.children %}
                           <label class="ai-groups-perm ai-groups-perm-child">
                             <input type="checkbox" name="permissions" value="{{ child.key }}"
@@ -93,11 +113,27 @@
                         {% endfor %}
                       </div>
                     {% endif %}
+                  {% endfor %}
+                {% endif %}
+              {% endfor %}
+              {% for section in sections %}
+                {% if section.key == "action" and section.items %}
+                  <div class="ai-groups-action-block ai-groups-action-flat">
+                    <h4>Другое</h4>
+                    {% for perm in section.items %}
+                      <label class="ai-groups-perm">
+                        <input type="checkbox" name="permissions" value="{{ perm.key }}"
+                               {% if perm.key in group.permission_keys %}checked{% endif %}>
+                        {{ perm.label }}
+                        <code>{{ perm.key }}</code>
+                      </label>
+                    {% endfor %}
                   </div>
-                {% endfor %}
-              </fieldset>
-            {% endif %}
-          {% endfor %}
+                {% endif %}
+              {% endfor %}
+            </fieldset>
+          </div>
+          {% endif %}
         </div>
         <div class="ai-groups-actions">
           <button type="submit" class="button default">Сохранить</button>

@@ -136,7 +136,9 @@ class PromptUserIdFilter(admin.SimpleListFilter):
     parameter_name = "user_id"
 
     def lookups(self, request, model_admin):
-        if not request.user.is_superuser:
+        # is_superuser_user: честный режим «Посмотреть как…» тоже считает
+        # супер-обход отключённым.
+        if not is_superuser_user(request.user):
             return ()
 
         users = (
@@ -239,7 +241,7 @@ class PromptAdmin(admin.ModelAdmin):
     def _can_edit_prompt(self, request, obj):
         if not (is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user) or can_access_prompt_admin(request)):
             return False
-        if request.user.is_superuser:
+        if is_superuser_user(request.user):
             return True
         # «Перезаписывать чужие промпты» — действие страницы «Мой промпт»
         # (аккордеон в «Группах доступа»).
@@ -277,7 +279,7 @@ class PromptAdmin(admin.ModelAdmin):
         )
 
     def has_delete_permission(self, request, obj=None):
-        if request.user.is_superuser:
+        if is_superuser_user(request.user):
             return True
         if not (is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)):
             return False
@@ -299,7 +301,7 @@ class PromptAdmin(admin.ModelAdmin):
             "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
         )
         advanced_fields = ("prompt_text_override",)
-        if request.user.is_superuser:
+        if is_superuser_user(request.user):
             return (
                 (None, {"fields": main_fields}),
                 ("Переопределение текста", {"fields": advanced_fields, "classes": ("collapse",)}),
@@ -365,7 +367,7 @@ class PromptAdmin(admin.ModelAdmin):
         if not change and not obj.owner_id:
             obj.owner = request.user
         super().save_model(request, obj, form, change)
-        if not request.user.is_superuser:
+        if not is_superuser_user(request.user):
             obj.editors.add(request.user)
 
     def export_prompts_csv(self, request, queryset):
