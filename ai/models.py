@@ -785,11 +785,12 @@ class AIPinnedBatchRun(models.Model):
 class AIDevTask(models.Model):
     """Таск на доске задач для разработчиков (страница /ai/admin/tasks/).
 
-    Два типа (kind): FRONT «Фронт работы» — приоритетный поток; WISH
-    «Хотелки» — без номеров. Номер приоритета (priority_no) уникален по всей
-    доске, МЕНЬШЕ = ВАЖНЕЕ; выдаётся сервером при создании (max+1), менять
-    порядок можно перетаскиванием строк (superuser/action.task_reorder →
-    /tasks/reorder/ перенумеровывает 1..N). Создаётся (название, описание,
+    Два типа (kind): FRONT «Фронт работы» и WISH «Хотелки» — у каждого СВОЯ
+    сквозная нумерация (priority_no) с №1, уникальная внутри вида
+    (констрейнт по (kind, priority_no)); МЕНЬШЕ = ВАЖНЕЕ; выдаётся сервером
+    при создании (max+1 внутри вида), менять порядок можно
+    перетаскиванием строк (superuser/action.task_reorder → /tasks/reorder/
+    перенумеровывает 1..N в пределах вида). Создаётся (название, описание,
     срок — ТЕКСТОМ: «До 2 недель» — никаких расчётных дат) тем, у кого есть
     action.task_create; закрыть (удалить с доски) — action.task_close.
     Разработчик забирает таск («Взять»): taken_by/taken_at пишутся атомарно
@@ -814,8 +815,9 @@ class AIDevTask(models.Model):
         max_length=10, choices=Kind.choices, default=Kind.FRONT,
         verbose_name="Тип",
     )
-    # У wants NULL: «хотелки без нумерации». Уникальность (по всей доске)
-    # держит частичный UniqueConstraint из Meta.constraints.
+    # Номер присваивается всем видам (max+1 внутри вида, миграция 0064);
+    # NULL остаётся легаси-запасом. Уникальность — по (kind, priority_no),
+    # частичный UniqueConstraint из Meta.constraints.
     priority_no = models.PositiveIntegerField(
         null=True, blank=True, verbose_name="Номер приоритета",
     )
@@ -837,21 +839,20 @@ class AIDevTask(models.Model):
         verbose_name_plural = "Таски (доска задач)"
         ordering = ("kind", "priority_no", "-created_at", "-id")
         constraints = [
-            # «Цифры повторяться не могут» — уникальный номер на доске.
+            # «Цифры повторяться не могут» — уникальный номер ВНУТРИ вида
+            # (фронт и хотелки нумеруются независимо, оба с №1).
             models.UniqueConstraint(
-                fields=["priority_no"],
+                fields=["kind", "priority_no"],
                 condition=models.Q(priority_no__isnull=False),
                 name="ai_dev_task_priority_no_uniq",
             ),
         ]
 
     def __str__(self):
-        if self.kind == self.Kind.WISH:
-            number = "Хотелки"
-        elif self.priority_no is not None:
+        if self.priority_no is not None:
             number = f"№{self.priority_no}"
         else:
-            number = f"{self.Kind.FRONT.label} без номера"
+            number = f"{self.kind} без номера"
         suffix = f" (взял {self.taken_by_id})" if self.taken_by_id else ""
         return f"[{number}] {self.title}{suffix}"
 

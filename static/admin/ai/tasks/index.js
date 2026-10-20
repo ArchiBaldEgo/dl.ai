@@ -1,6 +1,7 @@
 // Доска «Таски» (ai/admin/tasks.py): создать/взять/закрыть таск — POST fetch,
-// переставить строки фронта — HTML5 drag & drop + POST /tasks/reorder/ (ids
-// в новом порядке; сервер перенумеровывает 1..N). JS на делегировании, IIFE.
+// переставить строки фронта/хотелок — HTML5 drag & drop + POST /tasks/reorder/
+// ({kind, ids}; сервер перенумеровывает 1..N в пределах вида). Фильтр «Кто
+// взял» на «Поиске» сабмитится по change селекта. JS на делегировании, IIFE.
 (function () {
     'use strict';
 
@@ -88,7 +89,13 @@
         });
     }
 
-    // --- Перетаскивание строк фронта (только table[data-reorder="1]) ---
+    // Фильтр «Кто взял» на «Поиске»: смена селекта — GET этой же страницы.
+    document.addEventListener('change', function (event) {
+        var select = event.target.closest('[data-autosubmit="1"]');
+        if (select && select.form) select.form.submit();
+    });
+
+    // --- Перетаскивание строк фронта/хотелок (только table[data-reorder="1"]) ---
     var table = document.querySelector('table[data-reorder="1"]');
     if (table) {
         var body = table.tBodies[0];
@@ -160,7 +167,10 @@
                 rows[i].classList.remove('ai-task-dragging');
                 ids.push(parseInt(rows[i].getAttribute('data-task-id'), 10));
             }
-            post('/ai/admin/tasks/reorder/', JSON.stringify({ ids: ids }))
+            post('/ai/admin/tasks/reorder/', JSON.stringify({
+                kind: table.getAttribute('data-kind') || 'front',
+                ids: ids,
+            }))
                 .then(function () {
                     for (var i = 0; i < rows.length; i++) {
                         var cell = rows[i].querySelector('.ai-task-col-no');

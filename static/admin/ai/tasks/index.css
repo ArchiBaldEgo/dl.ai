@@ -1,7 +1,16 @@
-/* Страница «Таски» (доска задач, ai/admin/tasks.py). Вкладки front/wish,
-   числовой №, перетаскивание строк (data-reorder="1", только front). */
+/* Страница «Таски» (доска задач, ai/admin/tasks.py). Вкладки front/wish
+   (свои нумерации с №1), перетаскивание строк (data-reorder="1"), фильтры
+   «Не взятые»/«Поиск»/«Мои таски». */
 
 .ai-tasks-wrap { max-width: 100%; }
+
+.ai-tasks-filter {
+  margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ai-tasks-filter label { display: flex; align-items: center; gap: 6px; }
 
 .ai-task-tabs { display: flex; gap: 6px; margin: 0 0 12px; }
 .ai-task-tab {
@@ -49,7 +58,7 @@
 .ai-task-actions { white-space: nowrap; }
 .ai-task-free { color: var(--body-quiet-color); }
 
-/* Перетаскивание: только строки front-доски (data-reorder на таблице). */
+/* Перетаскивание: строки front/wish-доски (data-reorder на таблице). */
 table[data-reorder="1"] tbody tr[data-task-id] { cursor: grab; }
 .ai-tasks-table tr.ai-task-dragging { opacity: 0.45; }
 .ai-tasks-table tr.ai-task-drop-above {

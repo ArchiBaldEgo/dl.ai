@@ -1,10 +1,10 @@
 {% extends "admin/base_site.html" %}
 {% load static tz %}
 {# Страница «Таски» — доска задач (ai/admin/tasks.py). Вкладки «Фронт работы» #}
-{# / «Хотелки» / «Мои таски» (фильтр своих активных, ?kind=mine). Фронт —     #}
-{# числовой уникальный № (меньше = важнее), порядок меняется перетаскиванием  #}
-{# строк (draggable + data-reorder="1""); хотелки без номера. Суперюзер/      #}
-{# action-ключи: форма создания + «Закрыть». CSS/JS — static/admin/ai/tasks/. #}
+{# / «Хотелки» (у обоих СВОЯ нумерация с №1, порядок перетаскиванием) и      #}
+{# фильтры «Не взятые» (?kind=unclaimed), «Поиск» (все таски + фильтр «Кто   #}
+{# взял», ?taken=) и «Мои таски» (?kind=mine). Суперюзер/action-ключи: форма #}
+{# создания + «Закрыть». CSS/JS — static/admin/ai/tasks/.                    #}
 
 {% block extrastyle %}
   {{ block.super }}
@@ -15,12 +15,13 @@
 <div class="ai-tasks-wrap">
   <p class="help">
     Доска задач для разработчиков. Создают и закрывают таски суперюзеры;
-    взять таск может любой с доступом. Вкладка «Фронт работы» — приоритетный
-    поток: номер уникален по всей доске, чем меньше — тем важнее; порядок
+    взять таск может любой с доступом. «Фронт работы» и «Хотелки» — свои
+    нумерации с №1, чем меньше — тем важнее; порядок
     {% if can_reorder %}меняется перетаскиванием строк{% else %}задан суперюзерами{% endif %}.
-    «Хотелки» — без нумерации. «Мои таски» — таски, которые вы взяли; у
-    взятого таска показываются ФИО и группа взявшего и дата взятия; взять
-    уже взятый таск нельзя.
+    «Не взятые» — весь свободный фронт, взять можно прямо отсюда; «Поиск» —
+    все таски (фронт, затем хотелки) с фильтром «Кто взял»; «Мои таски» —
+    таски, которые вы взяли. У взятого таска показываются ФИО и группа
+    взявшего и дата взятия; взять уже взятый таск нельзя.
   </p>
 
   <div class="ai-task-tabs">
@@ -44,14 +45,30 @@
       <input type="text" name="estimate" maxlength="100" placeholder="Срок (до 2 недель, до 4 дней…)">
     </div>
     <textarea name="description" rows="3" placeholder="Описание"></textarea>
-    <span class="ai-tasks-hint">Номер приоритета присвоится автоматически (следующий за максимальным).</span>
+    <span class="ai-tasks-hint">Номер приоритета присвоится автоматически (следующий за максимальным в этой вкладке).</span>
     <button type="submit" class="button default">Создать таск</button>
+  </form>
+  {% endif %}
+
+  {% if active_kind == 'search' %}
+  <form class="ai-tasks-filter" method="get" action="">
+    <input type="hidden" name="kind" value="search">
+    <label>
+      Кто взял:
+      <select name="taken" data-autosubmit="1">
+        <option value="">— все —</option>
+        {% for t in taken_options %}
+          <option value="{{ t.id }}"{% if t.id|stringformat:"s" == active_taken %} selected{% endif %}>{{ t.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <noscript><button type="submit" class="button">Показать</button></noscript>
   </form>
   {% endif %}
 
   {% if rows %}
   <div class="ai-tasks-scroll">
-    <table class="ai-tasks-table"{% if can_reorder and active_kind == 'front' %} data-reorder="1"{% endif %}>
+    <table class="ai-tasks-table"{% if can_reorder %} data-reorder="1" data-kind="{{ active_kind }}"{% endif %}>
       <thead>
         <tr>
           <th class="ai-task-col-no">№</th>
@@ -68,7 +85,7 @@
         {% timezone moscow_tz %}
         {% for row in rows %}
           <tr class="{% if row.taken %}ai-tasks-taken{% endif %}" data-task-id="{{ row.id }}"
-              {% if can_reorder and active_kind == 'front' %} draggable="true"{% endif %}>
+              {% if can_reorder %} draggable="true"{% endif %}>
             <td class="ai-task-col-no">{% if row.priority_no %}{{ row.priority_no }}{% else %}—{% endif %}</td>
             <td class="ai-task-title">{{ row.title }}</td>
             <td class="ai-task-description">{{ row.description|default:"—" }}</td>
@@ -91,13 +108,13 @@
         {% endtimezone %}
       </tbody>
     </table>
-    {% if can_reorder and active_kind == 'front' %}
+    {% if can_reorder %}
       <p class="ai-tasks-hint">Строки можно перетаскивать: отпустите сверху/снизу нужного ряда — номера пересчитаются.</p>
     {% endif %}
   </div>
   {% else %}
     <p class="ai-tasks-empty">
-      {% if active_kind == 'wish' %}Хотелок пока нет.{% elif active_kind == 'mine' %}Вы пока не взяли ни одного таска — возьмите его со «Фронта работы» или из «Хотелок».{% else %}Пока тасков нет.{% endif %}{% if can_create %} Создайте первый таск формой выше.{% endif %}
+      {% if active_kind == 'wish' %}Хотелок пока нет.{% elif active_kind == 'mine' %}Вы пока не взяли ни одного таска — возьмите его со «Фронта работы» или из «Хотелок».{% elif active_kind == 'unclaimed' %}Свободных тасков на фронте нет — всё либо взято, либо закрыто.{% elif active_kind == 'search' %}Ничего не найдено.{% else %}Пока тасков нет.{% endif %}{% if can_create and active_kind != 'search' %} Создайте первый таск формой выше.{% endif %}
     </p>
   {% endif %}
 </div>

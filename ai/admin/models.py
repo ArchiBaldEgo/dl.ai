@@ -6,8 +6,11 @@ Task, AIRequestLog, AIModelTestRun и др.
 """
 
 import csv
+import copy
 
 from django.contrib import admin
+from django.contrib.admin.utils import flatten_fieldsets
+from django.contrib.admin.widgets import FilteredSelectMultiple
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
@@ -19,6 +22,7 @@ from django.utils import timezone
 
 from ..models import (
     AIAppSettings,
+    AIAccessGroup,
     DLEducationName,
     ExternalDLAccount,
     ProgrammingLanguage,
@@ -28,10 +32,11 @@ from ..models import (
     TaskSolution,
     Topic,
 )
-from .forms import PromptForm, SharedPromptForm, TopicForm
+from .forms import ExternalDLAccountAdminForm, PromptForm, SharedPromptForm, TopicForm
 from .permissions import (
     can_access_logs,
     can_access_prompt_admin,
+    can_edit_access_groups,
     is_prompt_developer_user,
     is_staff_or_superuser,
     is_superuser_user,
@@ -570,10 +575,19 @@ class AIAppSettingsAdmin(admin.ModelAdmin):
 
 
 class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
-    """Admin for viewing external DL accounts (dl.gsu.by user info)."""
+    """Admin for viewing external DL accounts (dl.gsu.by user info).
+
+    Карточка — основное место выдачи «Групп доступа» конкретному человеку
+    (ТЗ 2026-10-20): поле user_ai_access_groups правит состав групп ЕЁ
+    локального пользователя. Редактируют суперюзер/держатель page.groups
+    (can_edit_access_groups); прочие держатели page.mgmt_accounts блока не
+    видят вовсе (гейтинг в get_form — _StaffOnlyAdminMixin уже дал им
+    полный change, has_*_permission не годится). Персистит save_model.
+    """
 
     # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
     ACCESS_KEY = "page.mgmt_accounts"
+    form = ExternalDLAccountAdminForm
     list_display = ("external_user_id", "external_login", "external_first_name",
                     "external_last_name", "dl_email", "education_summary",
                     "user_link", "created_at", "updated_at")
@@ -591,6 +605,27 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                        "education_group_mask_id", "education_form_letter",
                        "created_at", "updated_at")
     raw_id_fields = ("user",)
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        # Поле остаётся только у редакторов групп; у аккаунта БЕЗ связанного
+        # юзера его нет (менять нечего). На add-странице (obj=None) поле у
+        # редактора живёт: после сохранения account.user известен, save_model
+        # выдаст группы. Не-редакторам поля нет — подделать POST нельзя
+        # (save_model смотрит на cleaned_data, которого без поля не будет).
+        if not can_edit_access_groups(request) or (
+            obj is not None and obj.user_id is None
+        ):
+            form.base_fields.pop("user_ai_access_groups", None)
+        return form
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        # M2M живёт на account.user, ModelForm.save() его не пишет; поле в
+        # cleaned_data есть только когда есть право (и юзер выбран).
+        groups = form.cleaned_data.get("user_ai_access_groups")
+        if groups is not None and obj.user_id:
+            obj.user.ai_access_groups.set(groups)
 
     def user_link(self, obj):
         if not obj.user:
@@ -764,7 +799,18 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
     # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
     ACCESS_KEY = "page.mgmt_users"
 
-    """User management restricted to staff/superuser in the AI admin site."""
+    """User management restricted to staff/superuser in the AI admin site.
+
+    Права админки резолвятся ТОЛЬКО из «Групп доступа» (AIAccessGroup, M2M
+    ai_access_groups) — стоковые Django-группы («Группы») на права не
+    влияют вовсе и из формы убраны всегда (они вводили в заблуждение:
+    выдача там ничего не меняла). Поле «Группы доступа» редактируют
+    суперюзер / держатель page.groups (can_edit_access_groups), держателю
+    page.mgmt_users без page.groups оно показывается read-only. Gating —
+    в get_form/get_fieldsets/save_model: _StaffOnlyAdminMixin уже даёт
+    держателю ключа полный change, гвоздить право в has_*_permission
+    бесполезно.
+    """
 
     list_display = ("last_name", "first_name", "dl_id", "email", "is_staff_badge")
     list_display_links = ("dl_id",)
@@ -773,6 +819,78 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
     show_facets = admin.ShowFacets.NEVER
     search_fields = ("username", "first_name", "last_name", "email")
     ordering = ("last_name", "first_name")
+
+    def get_form(self, request, obj=None, **kwargs):
+        # UserAdmin.get_form скармливает modelform_factory поля ИЗ ФИЛДСЕТОВ
+        # (flatten_fieldsets) — фабрика не знает ни имени-виртуалки
+        # ai_access_groups_display (это readonly-строка), ни, тем более,
+        # обратного M2M: вырезаем все три имени до фабрики и добавляем
+        # поле вручную после.
+        if "fields" not in kwargs:
+            fields = flatten_fieldsets(self.get_fieldsets(request, obj))
+            kwargs["fields"] = tuple(
+                f for f in fields
+                if f not in ("groups", "ai_access_groups",
+                             "ai_access_groups_display")
+            )
+        form = super().get_form(request, obj, **kwargs)
+        # Стоковые «Группы» Django: система прав их не читает — убрать
+        # всегда (иначе держатель ключа снова «выдаст права», которые ни
+        # на что не влияют).
+        form.base_fields.pop("groups", None)
+        if can_edit_access_groups(request):
+            form.base_fields["ai_access_groups"] = forms.ModelMultipleChoiceField(
+                queryset=AIAccessGroup.objects.all(),
+                required=False,
+                widget=FilteredSelectMultiple("Группы доступа", is_stacked=False),
+                label="Группы доступа",
+                help_text="Права админки выдаются только этими группами "
+                          "(не стоковыми «Группами» Django).",
+            )
+            if obj is not None:
+                form.base_fields["ai_access_groups"].initial = (
+                    obj.ai_access_groups.all()
+                )
+        return form
+
+    def get_fieldsets(self, request, obj=None):
+        # UserAdmin.fieldsets — классовый атрибут: правим глубокую копию,
+        # иначе замена «groups» протекла бы в декларацию навсегда.
+        fieldsets = copy.deepcopy(super().get_fieldsets(request, obj))
+        editor = can_edit_access_groups(request)
+        for _, opts in fieldsets:
+            fields = opts.get("fields")
+            if not fields or "groups" not in fields:
+                continue
+            new_fields = list(fields)
+            # Редактор правит группы здесь; не-редактор — только смотрит
+            # (readonly через get_readonly_fields); на add-странице fieldsets
+            # групп не содержат вовсе (stock add_fieldsets).
+            new_fields[new_fields.index("groups")] = (
+                "ai_access_groups" if editor else "ai_access_groups_display"
+            )
+            opts["fields"] = tuple(new_fields)
+        return fieldsets
+
+    def get_readonly_fields(self, request, obj=None):
+        base = super().get_readonly_fields(request, obj)
+        if obj is not None and not can_edit_access_groups(request):
+            return tuple(base) + ("ai_access_groups_display",)
+        return base
+
+    def ai_access_groups_display(self, obj):
+        """Read-only строка «Группы доступа» для не-редакторов (mgmt_users)."""
+        names = [group.name for group in obj.ai_access_groups.all()]
+        return ", ".join(names) if names else "—"
+    ai_access_groups_display.short_description = "Группы доступа"
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        # Декларативное M2M-поле ModelForm.save() не персистит — пишем
+        # вручную; в cleaned_data оно попадает только если поле было в
+        # форме (у не-редакторов его нет — подделать POST нельзя).
+        if "ai_access_groups" in form.cleaned_data:
+            obj.ai_access_groups.set(form.cleaned_data["ai_access_groups"])
 
     def get_inlines(self, request, obj=None):
         # Выдача прав на чужие промпты — только суперюзеру (зеркало правила

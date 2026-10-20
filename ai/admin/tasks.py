@@ -1,21 +1,24 @@
-"""Доска задач «Таски» (ТЗ 2026-10-19, правки того же числа).
+"""Доска задач «Таски» (ТЗ 2026-10-19, правки 2026-10-20).
 
-Два типа тасков-вкладок: «Фронт работы» (front) — приоритетный поток с
-ЧИСЛОВЫМ уникальным номером (меньше = важнее, выдаётся сервером: max+1;
-порядок меняют перетаскиванием строк → tasks/reorder/ перенумеровывает
-1..N) и «Хотелки» (wish) — без нумерации. Псевдо-вкладка-фильтр «Мои таски»
-(mine) показывает только взятые пользователем таски; закрытый таск удалён
-с доски, значит всё показанное — работающее. Создать/закрыть — суперюзер
-либо ключи action.task_create/task_close (см. «Группы доступа»);
-переставить — superuser/action.task_reorder. Взять может любой, кто
-допущен в админку (page.tasks — baseline, ТЗ 2026-10-19): taken_by/taken_at
-пишутся атомарно (условный UPDATE — «первый успел»). ModelAdmin не
-регистрируется — страница целиком кастомная, по тому же образцу, что
-«Закреплённые пакетные решения» (pinned.py).
+Два типа тасков-вкладок: «Фронт работы» (front) и «Хотелки» (wish) — у
+каждого СВОЙ числовой уникальный номер с №1 (меньше = важнее, выдаётся
+сервером: max+1 внутри вида; порядок меняют перетаскиванием строк →
+tasks/reorder/ перенумеровывает 1..N в пределах присланного вида).
+Псевдо-вкладки-фильтры: «Не взятые» (unclaimed) — весь свободный фронт,
+«Поиск» (search) — ВСЕ таски (фронт первым) с фильтром «Кто взял»,
+«Мои таски» (mine) — взятые пользователем. Закрытый таск удалён с доски,
+значит всё показанное — работающее. Создать/закрыть — суперюзер либо
+ключи action.task_create/task_close (см. «Группы доступа»); переставить —
+superuser/action.task_reorder. Взять может любой, кто допущен в админку
+(page.tasks — baseline, ТЗ 2026-10-19): taken_by/taken_at пишутся атомарно
+(условный UPDATE — «первый успел»). ModelAdmin не регистрируется —
+страница целиком кастомная, по тому же образцу, что «Закреплённые
+пакетные решения» (pinned.py).
 """
 
 import json
 
+from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import F, Max, Q
 from django.http import HttpResponseForbidden, JsonResponse
@@ -74,42 +77,63 @@ def _forbid(message="Access denied", status=403):
 
 
 def admin_tasks_view(request):
-    """Страница «Таски»: вкладки (front/wish/mine), таблица, форма создания.
+    """Страница «Таски»: вкладки, таблица, форма создания.
 
-    Вкладки — серверные (?kind=), URL шарится; wanted-строки без номера в
-    колонке «№» — «—». «Мои таски» (kind=mine) — ПСЕВДО-вкладка-фильтр:
-    только таски, взятые пользователем (закрытый таск удалён с доски,
-    поэтому всё показанное — активное).
+    Вкладки — серверные (?kind=), URL шарится. Реальные виды — front/wish
+    (у обоих свои номера с №1); ПСЕВДО-вкладки-фильтры: unclaimed («Не
+    взятые» — весь свободный фронт), search («Поиск» — все таски, фронт
+    первым, фильтр ?taken=<user_id> по взявшему), mine («Мои таски» —
+    взятые пользователем; закрытый таск удалён с доски, поэтому всё
+    показанное — активное).
     Перетаскивание включается draggable + data-reorder="1" только у тех,
-    кому можно (право), и только на вкладке front.
+    кому можно (право), и только на вкладках реальных видов (front/wish).
     """
     if not can_access_tasks(request):
         return HttpResponseForbidden("Access denied")
     superuser = is_superuser_user(request.user)
+    active_taken = ""  # выбранный «Кто взял» на «Поиске» (id строкой)
 
     VIEW_MINE = "mine"
+    VIEW_UNCLAIMED = "unclaimed"
+    VIEW_SEARCH = "search"
     kind = request.GET.get("kind") or AIDevTask.Kind.FRONT
-    if kind not in dict(AIDevTask.Kind.choices) and kind != VIEW_MINE:
+    if kind not in dict(AIDevTask.Kind.choices) and kind not in (
+        VIEW_MINE, VIEW_UNCLAIMED, VIEW_SEARCH
+    ):
         kind = AIDevTask.Kind.FRONT
 
+    rows_qs = AIDevTask.objects.select_related(
+        "taken_by", "taken_by__external_dl_account"
+    )
     if kind == VIEW_MINE:
-        # Псевдо-вкладка «Мои таски»: ТОЛЬКО взятые пользователем. Таск может
-        # быть и хоталкой — порядок по номеру фронта, NULL-номера (хотелки)
-        # ВСЕГДА в конец: nulls_last явно, иначе sqlite (NULLs first) и
-        # Postgres (NULLs last) расходятся.
-        rows_qs = AIDevTask.objects.select_related(
-            "taken_by", "taken_by__external_dl_account"
-        ).filter(
+        # Псевдо-вкладка «Мои таски»: ТОЛЬКО взятые пользователем. NULL-номера
+        # легаси ВСЕГДА в конец: nulls_last явно, иначе sqlite (NULLs first)
+        # и Postgres (NULLs last) расходятся.
+        rows_qs = rows_qs.filter(
             taken_by=request.user
         ).order_by(F("priority_no").asc(nulls_last=True), "-created_at", "-id")
+    elif kind == VIEW_UNCLAIMED:
+        # По ТЗ: «Не взятые» — весь ВОЛЬНЫЙ фронт; взять можно прямо отсюда.
+        rows_qs = rows_qs.filter(
+            kind=AIDevTask.Kind.FRONT, taken_by__isnull=True
+        ).order_by("priority_no", "-created_at", "-id")
+    elif kind == VIEW_SEARCH:
+        # «Поиск»: ВСЕ таски, фронт первым («front» < «wish» строково).
+        # NULL-номера легаси — в конец (nulls_last, см. выше).
+        rows_qs = rows_qs.order_by(
+            "kind", F("priority_no").asc(nulls_last=True), "-created_at", "-id"
+        )
+        taker_param = (request.GET.get("taken") or "").strip()
+        if taker_param:
+            try:
+                rows_qs = rows_qs.filter(taken_by_id=int(taker_param))
+            except ValueError:
+                pass  # мусорное значение — просто показываем все
+        active_taken = taker_param if taker_param.isdigit() else ""
     else:
-        rows_qs = AIDevTask.objects.select_related(
-            "taken_by", "taken_by__external_dl_account"
-        ).filter(kind=kind)
-        if kind == AIDevTask.Kind.FRONT:
-            rows_qs = rows_qs.order_by("priority_no", "-created_at", "-id")
-        else:
-            rows_qs = rows_qs.order_by("-created_at", "-id")
+        rows_qs = rows_qs.filter(kind=kind).order_by(
+            "priority_no", "-created_at", "-id"
+        )
 
     edu_maps = education_title_maps()
     rows = []
@@ -129,10 +153,25 @@ def admin_tasks_view(request):
             "close_url": f"{TASKS_URL}{task.pk}/close/",
         })
 
+    can_reorder_kind = kind in (AIDevTask.Kind.FRONT, AIDevTask.Kind.WISH)
     can_reorder = (
         (superuser or user_has_key(request.user, "action.task_reorder"))
-        and kind == AIDevTask.Kind.FRONT
+        and can_reorder_kind
     )
+    # Фильтр «Кто взял» на «Поиске»: только те, кто хоть что-то взял.
+    taken_options = []
+    if kind == VIEW_SEARCH:
+        taker_ids = (
+            AIDevTask.objects.exclude(taken_by=None)
+            .values_list("taken_by_id", flat=True)
+            .distinct()
+        )
+        for user in get_user_model().objects.filter(
+            pk__in=set(tid for tid in taker_ids if tid)
+        ).order_by("username"):
+            taken_options.append(
+                {"id": user.pk, "name": _claimant_display(user, edu_maps)}
+            )
     context = {
         **ai_admin_site.each_context(request),
         "title": "Таски",
@@ -141,12 +180,18 @@ def admin_tasks_view(request):
         "tabs": [
             {"kind": value, "label": label, "url": f"{TASKS_URL}?kind={value}"}
             for value, label in AIDevTask.Kind.choices
-        ] + [{"kind": VIEW_MINE, "label": "Мои таски", "url": f"{TASKS_URL}?kind={VIEW_MINE}"}],
+        ] + [
+            {"kind": VIEW_UNCLAIMED, "label": "Не взятые", "url": f"{TASKS_URL}?kind={VIEW_UNCLAIMED}"},
+            {"kind": VIEW_SEARCH, "label": "Поиск", "url": f"{TASKS_URL}?kind={VIEW_SEARCH}"},
+            {"kind": VIEW_MINE, "label": "Мои таски", "url": f"{TASKS_URL}?kind={VIEW_MINE}"},
+        ],
         "create_kinds": [
             {"kind": value, "label": label, "selected": value == (kind if kind in dict(AIDevTask.Kind.choices) else AIDevTask.Kind.FRONT)}
             for value, label in AIDevTask.Kind.choices
         ],
         "can_reorder": can_reorder,
+        "taken_options": taken_options,
+        "active_taken": active_taken,
         "can_create": (
             (superuser or user_has_key(request.user, "action.task_create"))
         ),
@@ -162,8 +207,9 @@ def admin_tasks_view(request):
 def admin_task_create_view(request):
     """Создание таска: суперюзер или action.task_create.
 
-    Номер приоритета присваивает СЕРВЕР (max+1 по фронту, атомарно) — клиент
-    его прислать не может; у «Хотелок» номера нет вообще.
+    Номер приоритета присваивает СЕРВЕР (max+1 ВНУТРИ вида таска, атомарно)
+    — клиент его прислать не может; у фронта и хотелок нумерация раздельная
+    (оба с №1, констрейнт по (kind, priority_no)).
     """
     if not request.user.is_authenticated:
         return _forbid()
@@ -187,12 +233,11 @@ def admin_task_create_view(request):
     }
     try:
         with transaction.atomic():
-            if kind == AIDevTask.Kind.FRONT:
-                kwargs["priority_no"] = (
-                    AIDevTask.objects.aggregate(
-                        max_no=Max("priority_no")
-                    )["max_no"] or 0
-                ) + 1
+            kwargs["priority_no"] = (
+                AIDevTask.objects.filter(kind=kind).aggregate(
+                    max_no=Max("priority_no")
+                )["max_no"] or 0
+            ) + 1
             task = AIDevTask.objects.create(**kwargs)
     except IntegrityError:
         # Гонка двух одновременных созданий на один max+1 — честный 409.
@@ -205,15 +250,18 @@ def admin_task_create_view(request):
 
 @require_POST
 def admin_task_reorder_view(request):
-    """Перенумеровать фронт по присланному порядку (перетаскивание строк).
+    """Перенумеровать таски одного вида по присланному порядку (drag&drop).
 
-    Тело: JSON {"ids": [...]} — порядок front-тасков после дропа. Права:
-    суперюзер или action.task_reorder. Множество id должно
-    ТОЧНО совпасть с текущим множеством front-pk (гонка create/close → 409,
-    доска на сервере не трогается). В transaction.atomic() строки получают
-    номера 1..N — заодно уплотняются дырки от закрытых тасков (select_for_update
-    не нужен: sqlite-тесты его не знают, конфликт уникальности в атомарном
-    блоке даёт IntegrityError → 409).
+    Тело: JSON {"kind": "front"|"wish", "ids": [...]} — порядок тасков вида
+    после дропа (kind опционален, дефолт front — назадсовместимо с прежним
+    телом {"ids": [...]}). Права: суперюзер или action.task_reorder.
+    Множество id должно ТОЧНО совпасть с текущим множеством pk этого вида
+    (гонка create/close и вид-мисматч → 409, доска на сервере не трогается).
+    В transaction.atomic() строки получают номера 1..N — заодно уплотняются
+    дырки от закрытых тасков (select_for_update не нужен: sqlite-тесты его
+    не знают, конфликт уникальности в атомарном блоке даёт IntegrityError →
+    409; констрейнт по (kind, priority_no) — сброс номеров СВОЕГО вида не
+    задевает номера другого).
     """
     if not request.user.is_authenticated:
         return _forbid()
@@ -228,10 +276,12 @@ def admin_task_reorder_view(request):
         isinstance(value, int) for value in ids
     ):
         return _forbid("Некорректный порядок", status=400)
+    kind = payload.get("kind") or AIDevTask.Kind.FRONT
+    if kind not in dict(AIDevTask.Kind.choices):
+        return JsonResponse({"ok": False, "message": "Неизвестный тип таска"}, status=400)
 
     expected_ids = list(
-        AIDevTask.objects.filter(kind=AIDevTask.Kind.FRONT)
-        .values_list("pk", flat=True)
+        AIDevTask.objects.filter(kind=kind).values_list("pk", flat=True)
     )
     if set(ids) != set(expected_ids) or len(ids) != len(expected_ids):
         return JsonResponse(
@@ -240,18 +290,16 @@ def admin_task_reorder_view(request):
         )
     try:
         with transaction.atomic():
-            # Двухпроходная перенумерация: частичный уникальный констрейнт на
-            # priority_no запрещает промежуточные коллизии (прямой присвоения
-            # 1..N хватило на IntegrityError при перестановке соседей). Сначала
-            # ВСЕ номера фронта сбрасываются в NULL (NULL не сравнивается
-            # констрейнтом), затем присваиваются 1..N.
-            AIDevTask.objects.filter(
-                kind=AIDevTask.Kind.FRONT
-            ).update(priority_no=None)
+            # Двухпроходная перенумерация: частичный уникальный констрейнт
+            # (kind, priority_no) запрещает промежуточные коллизии (прямое
+            # присвоение 1..N давало IntegrityError на перестановке соседей).
+            # Сначала ВСЕ номера этого вида сбрасываются в NULL (NULL не
+            # сравнивается констрейнтом), затем присваиваются 1..N.
+            AIDevTask.objects.filter(kind=kind).update(priority_no=None)
             for number, task_id in enumerate(ids, start=1):
-                AIDevTask.objects.filter(
-                    pk=task_id, kind=AIDevTask.Kind.FRONT
-                ).update(priority_no=number)
+                AIDevTask.objects.filter(pk=task_id, kind=kind).update(
+                    priority_no=number
+                )
     except IntegrityError:
         return JsonResponse(
             {"ok": False, "message": "Доска изменилась — обновите страницу"},

@@ -295,6 +295,21 @@ def can_access_access_groups(request):
     )
 
 
+def can_edit_access_groups(request):
+    """Право РАЗДАВАТЬ группы доступа: менять состав AIAccessGroup.
+
+    Держатель page.groups (или суперюзер) может выдавать группы не только
+    из «Групп доступа», но и на странице пользователя / DL-аккаунта. Отличие
+    от can_access_access_groups — режим «Посмотреть как…»: там состав групп
+    менять нельзя нигде (эмуляция честная, 403 как на самих «Группах»).
+    """
+    if not can_access_access_groups(request):
+        return False
+    from .guest_mode import is_viewing_as_guest  # ленивый: guest_mode импортирует permissions
+
+    return not is_viewing_as_guest(request)
+
+
 def can_access_updates(request):
     """«Обновления»: staff/superuser ИЛИ ключ page.updates."""
     if not request.user.is_authenticated:

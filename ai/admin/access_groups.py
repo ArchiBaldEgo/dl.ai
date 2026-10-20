@@ -37,8 +37,7 @@ from django.urls.exceptions import Resolver404
 from django.views.decorators.http import require_GET, require_POST
 
 from ..models import AIAccessGroup, AIAdminGroupPermission
-from .guest_mode import is_viewing_as_guest
-from .permissions import BASELINE_ACCESS_KEYS, can_access_access_groups
+from .permissions import BASELINE_ACCESS_KEYS, can_edit_access_groups
 from .site import ai_admin_site
 
 GROUPS_URL = "/ai/admin/ai-groups/"
@@ -124,7 +123,7 @@ def _dynamic_page_doc_permissions(request):
 
 def _require_superuser(request):
     """Суперюзер ИЛИ держатель ключа page.groups; режим «Посмотреть как…» — нет."""
-    return can_access_access_groups(request) and not is_viewing_as_guest(request)
+    return can_edit_access_groups(request)
 
 
 def _search_users(group, q):

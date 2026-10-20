@@ -12383,9 +12383,11 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
     Матрица (система групп, сид 0060 + миграция 0063): доска видна с
     «Разработчика» и у «Разработчика промптов» (page.tasks выдан группой);
     взять может любой с доступом к доске; создать/закрыть — суперюзер
-    (action-ключи выдаются группами); переставить строки фронта —
+    (action-ключи выдаются группами); переставить строки фронта и хотелов —
     суперюзер/action.task_reorder (выдан «Разработчику»). Номер приоритета
-    выдаёт СЕРВЕР (max+1), хотелки без номеров; в эмуляции «Посмотреть как…»
+    выдаёт СЕРВЕР (max+1 внутри вида; у фронта и хотелов нумерации
+    раздельны, оба с №1); вкладки-фильтры «Не взятые» (свободный фронт) и
+    «Поиск» (все таски + фильтр «Кто взял»); в эмуляции «Посмотреть как…»
     права честные по ключам группы."""
 
     def setUp(self):
@@ -12458,19 +12460,26 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.assertTrue(resp.context_data["can_close"])
         self.assertTrue(resp.context_data["can_reorder"])
 
-    def test_front_rows_are_draggable_for_reorder_users(self):
+    def test_rows_are_draggable_on_front_and_wish_tabs(self):
         """Перетаскивание: HTML5 DnD требует draggable на строках (регрессия
         2026-10 — атрибут потеряли, dragstart не стартовал вовсе). Ставится
-        только при праве can_reorder на вкладке front; на wish/в гостевом нет."""
+        при праве can_reorder на вкладках реальных видов (front + wish,
+        паритет хотелов 2026-10-20); на фильтрах unclaimed/search/mine нет."""
         AIDevTask.objects.create(title="Т-фронт", kind="front", priority_no=1)
+        AIDevTask.objects.create(title="Т-хотелка", kind="wish", priority_no=1)
 
-        resp = self.page_view(self._request(self.superuser, path=f"{self.tasks_url}?kind=front"))
-        resp.render()
-        self.assertIn('draggable="true"', resp.content.decode())
+        for kind in ("front", "wish"):
+            resp = self.page_view(self._request(self.superuser, path=f"{self.tasks_url}?kind={kind}"))
+            self.assertTrue(resp.context_data["can_reorder"], kind)
+            resp.render()
+            content = resp.content.decode()
+            self.assertIn('draggable="true"', content)
+            self.assertIn(f'data-kind="{kind}"', content)
 
-        resp = self.page_view(self._request(self.superuser, path=f"{self.tasks_url}?kind=wish"))
-        resp.render()
-        self.assertNotIn('draggable="true"', resp.content.decode())
+        # На вкладках-фильтрах перетаскивания нет (смешанные/усечённые наборы).
+        for kind in ("unclaimed", "search", "mine"):
+            resp = self.page_view(self._request(self.superuser, path=f"{self.tasks_url}?kind={kind}"))
+            self.assertFalse(resp.context_data["can_reorder"], kind)
 
         # Эмуляция «Посмотреть как…» без action.task_reorder у группы:
         # can_reorder False → draggable не ставится.
@@ -12519,7 +12528,9 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         )["no"])
         self.assertEqual(new_task.priority_no, 8)
 
-    def test_create_wish_has_no_number_at_all(self):
+    def test_create_wish_numbering_is_per_kind_max_plus_one(self):
+        """Хотелки нумеруются СВОЕЙ последовательностью с №1: номер — max+1
+        внутри вида, независимо от максимума фронта (паритет 2026-10-20)."""
         AIDevTask.objects.create(title="Фронт с номером", kind="front", priority_no=3)
         resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
             "title": "Хочу фильтры", "kind": "wish",
@@ -12527,7 +12538,22 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(resp.status_code, 200)
         wish = AIDevTask.objects.get(title="Хочу фильтры")
         self.assertEqual(wish.kind, "wish")
-        self.assertIsNone(wish.priority_no)
+        self.assertEqual(wish.priority_no, 1)
+
+        # Вторая хотелка продолжает хотелочную последовательность, а не общую.
+        self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "Хочу фильтры 2", "kind": "wish",
+        }))
+        self.assertEqual(
+            AIDevTask.objects.get(title="Хочу фильтры 2").priority_no, 2
+        )
+        # Новый таск фронта — по фронту (№4), хотелочные не мешают.
+        self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "Новый фронт", "kind": "front",
+        }))
+        self.assertEqual(
+            AIDevTask.objects.get(title="Новый фронт").priority_no, 4
+        )
 
     def test_create_validates_title_and_kind(self):
         resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={}))
@@ -12619,16 +12645,92 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(titles, ["хотелка"])
         self.assertEqual(resp.context_data["active_kind"], "wish")
 
-    def test_wish_tab_has_sequential_numbering_off(self):
-        """Вкладки share the URL (?kind=front|wish); wish — без номеров, поэтому
-        №-колонка «—» (truthiness шаблона: None → «—»)."""
+    def test_wish_tab_shows_numbers_starting_at_one(self):
+        """Вкладки share the URL (?kind=front|wish); у хотелов СВОЯ
+        последовательность с №1 — №-колонка не «—» уже после первой хотолки."""
+        AIDevTask.objects.create(title="Х-первая", kind="wish", priority_no=1)
+        AIDevTask.objects.create(title="Х-вторая", kind="wish", priority_no=2)
         resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=wish"))
-        self.assertEqual(resp.context_data["rows"], [])
+        rows = resp.context_data["rows"]
+        self.assertEqual([r["title"] for r in rows], ["Х-первая", "Х-вторая"])
+        self.assertEqual([r["priority_no"] for r in rows], [1, 2])
 
     def test_unknown_kind_falls_back_to_front(self):
         AIDevTask.objects.create(title="фронт", kind="front", priority_no=4)
         resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=bogus"))
         self.assertEqual(resp.context_data["active_kind"], "front")
+
+    # --- Вкладка «Не взятые» (свободный фронт) ------------------------------
+
+    def test_unclaimed_tab_shows_free_front_tasks_only(self):
+        """«Не взятые»: ТОЛЬКО незанятый фронт (взятое и хотелки не видны),
+        «Взять» работает прямо оттуда (claim-вью один на все вкладки)."""
+        free = AIDevTask.objects.create(title="Свободный", kind="front", priority_no=1)
+        AIDevTask.objects.create(
+            title="Занятый", kind="front", priority_no=2, taken_by=self.superuser,
+        )
+        AIDevTask.objects.create(title="Хотелка свободная", kind="wish", priority_no=1)
+
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=unclaimed"))
+        self.assertEqual(resp.context_data["active_kind"], "unclaimed")
+        rows = resp.context_data["rows"]
+        self.assertEqual([r["title"] for r in rows], ["Свободный"])
+        self.assertFalse(rows[0]["taken"])
+
+        # Взять прямо со вкладки.
+        resp = self.claim_view(self._request(self.dev, "post", f"/x/{free.id}/claim/"), free.id)
+        self.assertEqual(resp.status_code, 200)
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=unclaimed"))
+        self.assertEqual(resp.context_data["rows"], [])
+
+    # --- Вкладка «Поиск» (все таски + фильтр «Кто взял») --------------------
+
+    def test_search_tab_shows_all_front_then_wish_rows(self):
+        """«Поиск»: ВСЕ таски, сначала фронт (по номеру), затем хотелки;
+        фильтр пуст — список полный."""
+        AIDevTask.objects.create(title="ф-2", kind="front", priority_no=2)
+        AIDevTask.objects.create(title="ф-1", kind="front", priority_no=1)
+        AIDevTask.objects.create(title="х-1", kind="wish", priority_no=1)
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=search"))
+        self.assertEqual(resp.context_data["active_kind"], "search")
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertEqual(titles, ["ф-1", "ф-2", "х-1"])
+        self.assertEqual(resp.context_data["taken_options"], [])
+        # Шаблон фильтра «Кто взял» реально рисуется на вкладке.
+        resp.render()
+        html = resp.content.decode()
+        self.assertIn('name="taken"', html)
+        self.assertIn("Кто взял", html)
+
+    def test_search_tab_taker_filter(self):
+        """Фильтр «Кто взял»: выбран человек — только его взятые таски;
+        пустое значение — все (GET ?kind=search&taken=)."""
+        his = AIDevTask.objects.create(title="его таск", created_by=self.superuser)
+        AIDevTask.objects.create(
+            title="чужой таск", created_by=self.superuser, taken_by=self.superuser,
+        )
+        self.claim_view(self._request(self.dev, "post", f"/x/{his.id}/claim/"), his.id)
+
+        resp = self.page_view(self._request(
+            self.dev, path=f"{self.tasks_url}?kind=search&taken={self.dev.pk}",
+        ))
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertEqual(titles, ["его таск"])
+        self.assertEqual(resp.context_data["active_taken"], str(self.dev.pk))
+        # Опции — все, кто хоть что-то взял (dev и superuser).
+        option_ids = {o["id"] for o in resp.context_data["taken_options"]}
+        self.assertEqual(option_ids, {self.dev.pk, self.superuser.pk})
+
+    def test_search_tab_taker_filter_bad_value_shows_all(self):
+        """Мусорное значение фильтра — просто все; числовой, но несуществующий
+        pk — честно пустой список."""
+        AIDevTask.objects.create(title="ф", created_by=self.superuser)
+        base = f"{self.tasks_url}?kind=search"
+        resp = self.page_view(self._request(self.dev, path=f"{base}&taken=abc"))
+        self.assertEqual(len(resp.context_data["rows"]), 1)
+        self.assertEqual(resp.context_data["active_taken"], "")
+        resp = self.page_view(self._request(self.dev, path=f"{base}&taken=999999"))
+        self.assertEqual(resp.context_data["rows"], [])
 
     def test_mine_tab_shows_only_own_taken_tasks(self):
         """«Мои таски» (kind=mine) — только таски, ВЗЯТЫЕ пользователем
@@ -12672,8 +12774,11 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
 
     # --- Перестановка фронта (reorder) -------------------------------------
 
-    def _reorder_body(self, tasks):
-        return json.dumps({"ids": [t.id if isinstance(t, AIDevTask) else t for t in tasks]})
+    def _reorder_body(self, tasks, kind="front"):
+        return json.dumps({
+            "kind": kind,
+            "ids": [t.id if isinstance(t, AIDevTask) else t for t in tasks],
+        })
 
     def test_reorder_persists_new_order_and_renumbers_from_one(self):
         first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
@@ -12690,9 +12795,42 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         )
         self.assertEqual(AIDevTask.objects.get(pk=second.id).title, "Б")
         self.assertEqual(AIDevTask.objects.get(pk=first.id).priority_no, 3)
-        # Хотелки не тронуты (нет номера и нет среди expected_ids).
-        wish = AIDevTask.objects.create(title="Х", kind="wish")
-        self.assertIsNone(AIDevTask.objects.get(pk=wish.id).priority_no)
+        # Хотелки фронт-тело не трогает: их СВОЯ нумерация сохраняется.
+        wish = AIDevTask.objects.create(title="Х", kind="wish", priority_no=1)
+        self.assertEqual(AIDevTask.objects.get(pk=wish.id).priority_no, 1)
+
+    def test_reorder_wish_persists_new_order_and_renumbers_from_one(self):
+        """Хотелки переезжают тем же механизмом (kind=wish): 1..N в пределах
+        вида; фронту и его номера не трогаются."""
+        first = AIDevTask.objects.create(title="Х-А", kind="wish", priority_no=1)
+        second = AIDevTask.objects.create(title="Х-Б", kind="wish", priority_no=2)
+        front = AIDevTask.objects.create(title="Ф", kind="front", priority_no=1)
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/",
+                          body=self._reorder_body([second, first], kind="wish")),
+        )
+        self.assertEqual(resp.status_code, 200)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(second.priority_no, 1)
+        self.assertEqual(first.priority_no, 2)
+        front.refresh_from_db()
+        self.assertEqual(front.priority_no, 1)
+        # Фронт в тело wish не попадает → 409, ничего не перепутано.
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/",
+                          body=self._reorder_body([first, second, front], kind="wish")),
+        )
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(AIDevTask.objects.get(pk=first.id).priority_no, 2)
+
+    def test_reorder_unknown_kind_is_400(self):
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/",
+                          body=json.dumps({"kind": "ultra", "ids": []})),
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(AIDevTask.objects.exists())
 
     def test_reorder_allows_developer_with_reorder_key(self):
         """action.task_reorder выдан «Разработчику» — порядок менять может,
@@ -12871,6 +13009,208 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self._enter_view_as(request, action_group)
         self.assertEqual(self.create_view(request).status_code, 200)
         self.assertTrue(AIDevTask.objects.filter(title="Т6-view-as").exists())
+
+
+class AIUserAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
+    """Выдача «Групп доступа» со страницы пользователя и DL-аккаунта
+    (ТЗ 2026-10-20): поле ai_access_groups у RestrictedUserAdmin и
+    user_ai_access_groups у ExternalDLAccountAdmin.
+
+    Гейтинг — только get_form/get_fieldsets/save_model: держатель ключа
+    page.mgmt_users/page.mgmt_accounts уже имеет полный change (миксин),
+    поэтому редактировать группы там может СТРОГО суперюзер либо держатель
+    page.groups (can_edit_access_groups); «Посмотреть как…» — readOnly.
+    Стоковые Django-«Группы» из формы убраны всегда: система прав их не
+    читает. Тесты зовут get_form/get_fieldsets напрямую (как в проде —
+    ровно те же хуки)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.superuser = self.user_model.objects.create_user(
+            username="ag-super", password="x", is_superuser=True, is_staff=True,
+        )
+        self.target = self.user_model.objects.create_user(
+            username="ag-target", password="x",
+        )
+        self.account = ExternalDLAccount.objects.create(
+            user=self.target, external_user_id="4242", external_login="target_dl",
+        )
+
+    # --- Хелперы ------------------------------------------------------------
+
+    def _admin(self, model):
+        from ai.admin import models as admin_models
+        from django.contrib.admin.sites import AdminSite
+        admin_cls = (
+            admin_models.RestrictedUserAdmin if model is self.user_model
+            else admin_models.ExternalDLAccountAdmin
+        )
+        return admin_cls(model, AdminSite())
+
+    def _grant(self, user, keys):
+        group = self._view_as_group(f"Г-{user.username}-{len(keys)}", keys)
+        group.users.add(user)
+        return group
+
+    def _get_form(self, model, user, obj=None):
+        request = self._admin_request(user, method="get")
+        return self._admin(model).get_form(request, obj=obj)()
+
+    def _fieldsets_field_names(self, model, user, obj=None):
+        request = self._admin_request(user, method="get")
+        return {
+            field
+            for _, opts in self._admin(model).get_fieldsets(request, obj=obj)
+            for field in (opts.get("fields") or ())
+        }
+
+    # --- Страница пользователя ----------------------------------------------
+
+    def test_superuser_sees_ai_groups_and_no_stock_groups(self):
+        form = self._get_form(self.user_model, self.superuser, obj=self.target)
+        self.assertIn("ai_access_groups", form.fields)
+        self.assertNotIn("groups", form.fields)
+        names = self._fieldsets_field_names(self.user_model, self.superuser, obj=self.target)
+        self.assertIn("ai_access_groups", names)
+        self.assertNotIn("groups", names)
+
+    def test_page_groups_holder_can_edit(self):
+        holder = self.user_model.objects.create_user(
+            username="ag-holder", password="x", is_staff=True,
+        )
+        self._grant(holder, ["page.admin", "page.groups"])
+        form = self._get_form(self.user_model, holder, obj=self.target)
+        self.assertIn("ai_access_groups", form.fields)
+
+    def test_mgmt_users_holder_readonly_display(self):
+        """Держатель page.mgmt_users (без page.groups) править группы НЕ
+        может: поля нет, а в филдсетах — readonly-строка состава; стоковых
+        «Групп» нет и у него."""
+        holder = self.user_model.objects.create_user(username="ag-mgmt", password="x")
+        self._grant(holder, ["page.admin", "page.mgmt_users"])
+        form = self._get_form(self.user_model, holder, obj=self.target)
+        self.assertNotIn("ai_access_groups", form.fields)
+        self.assertNotIn("groups", form.fields)
+        names = self._fieldsets_field_names(self.user_model, holder, obj=self.target)
+        self.assertIn("ai_access_groups_display", names)
+        self.assertNotIn("ai_access_groups", names)
+
+    def test_view_as_is_readonly(self):
+        """Эмуляция честная: супер-обход отключён, page.groups у группы
+        эмуляции НЕ даёт правки (can_edit False, как на самой странице
+        «Группы доступа»). Включать эмуляцию может только суперюзер —
+        иначе is_viewing_as_guest всегда False."""
+        group = self._view_as_group("Эмуля-группы", ["page.admin", "page.groups"])
+        request = self._admin_request(self.superuser, method="get")
+        self._enter_view_as(request, group)
+        form = self._admin(self.user_model).get_form(request, obj=self.target)()
+        self.assertNotIn("ai_access_groups", form.fields)
+        names = {
+            field
+            for _, opts in self._admin(self.user_model).get_fieldsets(request, obj=self.target)
+            for field in (opts.get("fields") or ())
+        }
+        self.assertIn("ai_access_groups_display", names)
+
+    def test_change_post_sets_groups_and_keys_apply_at_once(self):
+        """POST со страницы юзера: состав AIAccessGroup меняется, права
+        (user_has_key) действуют сразу — без повторного входа."""
+        grant = self._view_as_group("Г-выдача", ["page.tasks"])
+        from ai.admin.models import RestrictedUserAdmin
+        from django.contrib.admin.sites import AdminSite
+        model_admin = RestrictedUserAdmin(self.user_model, AdminSite())
+        request = self._admin_request(self.superuser, method="post", path="/x/", data={
+            "username": self.target.username,
+            "is_active": "on",
+            "date_joined_0": "2026-10-20",
+            "date_joined_1": "12:30",
+            "ai_access_groups": [grant.pk],
+        })
+        form = model_admin.get_form(request, obj=self.target)(
+            data=request.POST, instance=self.target,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        model_admin.save_model(request, self.target, form, change=True)
+        self.assertIn(self.target, grant.users.all())
+        from ai.admin.permissions import user_has_key
+        self.assertTrue(user_has_key(self.target, "page.tasks"))
+
+    def test_save_model_sets_groups_but_not_for_hidden_field(self):
+        """Защита от подделки POST: держателю page.mgmt_users поля нет —
+        прошенный в body ai_access_groups игнорируется, состав живой."""
+        holder = self.user_model.objects.create_user(username="ag-mgmt2", password="x")
+        self._grant(holder, ["page.admin", "page.mgmt_users"])
+        grant = self._view_as_group("Г-подделка", ["page.tasks"])
+        from ai.admin.models import RestrictedUserAdmin
+        from django.contrib.admin.sites import AdminSite
+        model_admin = RestrictedUserAdmin(self.user_model, AdminSite())
+        request = self._admin_request(holder, method="post", path="/x/", data={
+            "username": self.target.username,
+            "is_active": "on",
+            "date_joined_0": "2026-10-20",
+            "date_joined_1": "12:30",
+            "ai_access_groups": [grant.pk],
+        })
+        form = model_admin.get_form(request, obj=self.target)(
+            data=request.POST, instance=self.target,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertNotIn("ai_access_groups", form.fields)
+        model_admin.save_model(request, self.target, form, change=True)
+        self.assertNotIn(self.target, grant.users.all())
+
+    # --- Страница DL-аккаунта ------------------------------------------------
+
+    def test_account_superuser_sees_and_sets_groups(self):
+        form = self._get_form(ExternalDLAccount, self.superuser, obj=self.account)
+        self.assertIn("user_ai_access_groups", form.fields)
+
+        grant = self._view_as_group("Г-аккаунт", ["page.tasks"])
+        from ai.admin.models import ExternalDLAccountAdmin
+        from django.contrib.admin.sites import AdminSite
+        model_admin = ExternalDLAccountAdmin(ExternalDLAccount, AdminSite())
+        request = self._admin_request(self.superuser, method="post", path="/x/", data={
+            "user": self.target.pk,
+            "external_user_id": self.account.external_user_id,
+            "external_login": self.account.external_login,
+            "user_ai_access_groups": [grant.pk],
+        })
+        form = model_admin.get_form(request, obj=self.account)(
+            data=request.POST, instance=self.account,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        model_admin.save_model(request, self.account, form, change=True)
+        self.assertIn(self.target, grant.users.all())
+        from ai.admin.permissions import user_has_key
+        self.assertTrue(user_has_key(self.target, "page.tasks"))
+
+    def test_account_mgmt_holder_sees_no_field(self):
+        """page.mgmt_accounts без page.groups: блока групп нет вовсе."""
+        holder = self.user_model.objects.create_user(
+            username="ag-acct", password="x", is_staff=True,
+        )
+        self._grant(holder, ["page.admin", "page.mgmt_accounts"])
+        form = self._get_form(ExternalDLAccount, holder, obj=self.account)
+        self.assertNotIn("user_ai_access_groups", form.fields)
+
+    def test_account_add_page_keeps_field_for_editor(self):
+        """На add-странице (obj=None) у редактора поле есть: raw_id юзера
+        заполняется при создании, save_model выдаст группы уже после
+        save (в БД аккаунт без user невозможен — OneToOne NOT NULL)."""
+        form = self._get_form(ExternalDLAccount, self.superuser)
+        self.assertIn("user_ai_access_groups", form.fields)
+
+    def test_account_form_initial_reflects_current_groups(self):
+        grant = self._view_as_group("Г-initial", ["page.tasks"])
+        grant.users.add(self.target)
+        request = self._admin_request(self.superuser, method="get")
+        form_cls = self._admin(ExternalDLAccount).get_form(request, obj=self.account)
+        # initial ставится в __init__ по instance.user — инстанцируем с ним.
+        form = form_cls(instance=self.account)
+        self.assertEqual(
+            list(form.fields["user_ai_access_groups"].initial), [grant]
+        )
 
 
 class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
