@@ -177,6 +177,10 @@
     <div id="armSolvePerModelWrap"></div>
     <div id="armSolvePerTopicWrap" style="margin-top:16px;"></div>
     <div id="armSolveErrorsWrap" style="margin-top:16px;"></div>
+    {# Секция «Сбои по причинам» (таксономия сбоев) — тот же разбор, что на #}
+    {# журнале и на «Настройке ИИ-приложения»: контейнер обязателен,       #}
+    {# иначе renderFailureReasons молча ничего не рисует.                  #}
+    <div id="armSolveReasonsWrap" style="margin-top:16px;"></div>
   </section>
 
   <section id="armSolveResultsCard" class="arm-card"{% if not results %} style="display:none;"{% endif %}>

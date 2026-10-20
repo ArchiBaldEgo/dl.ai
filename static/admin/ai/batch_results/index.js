@@ -754,7 +754,16 @@ window.ArmBatchResults = (function () {
         .then(function (snapshot) {
           inFlight = false;
           errors = 0;
-          if (!snapshot || snapshot.error) { schedule(); return; }
+          if (!snapshot) { schedule(); return; }
+          // Сервер ответил ошибкой (прогон стёрт из БД, нет доступа и т.п.).
+          // Крутить поллинг вечно бессмысленно — считаем это как сетевую
+          // ошибку и останавливаемся после maxErrors попыток.
+          if (snapshot.error) {
+            errors += 1;
+            if (errors >= maxErrors) { stop(); return; }
+            schedule();
+            return;
+          }
           // Прогон завершён (или стёрт) — финальный рендер и стоп.
           var status = snapshot.run_status || '';
           if (opts.onStatus) { opts.onStatus(status, snapshot); }

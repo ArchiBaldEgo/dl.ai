@@ -14,6 +14,7 @@ import json
 from datetime import datetime, timedelta
 import re
 import tempfile
+import threading
 import time
 import uuid
 
@@ -18044,3 +18045,464 @@ class DLApiRequestsTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(self.pending.status, "done")
         self.assertIsNotNone(self.pending.resolved_at)
         self.assertEqual(self.pending.resolved_by_id, self.user.pk)
+
+
+class TokenUsageDateFilterTests(TestCase):
+    """Фильтр по датам на «Контроле токенов» — регрессия.
+
+    Раньше границы считались как ``date.astimezone(timezone.utc)``:
+    * ``django.utils.timezone.utc`` удалён в Django 5.0 → AttributeError → 500
+      на ЛЮБОМ фильтре по датам;
+    * ``date_to`` превращался в полночь выбранного дня → записи ПОСЛЕ
+      00:00 МСК отсекались (потеря целого дня).
+    Теперь границы — через ``msk_day_bounds`` (единый владелец).
+    """
+
+    def setUp(self):
+        self.now = timezone.now()
+
+    def _log(self, *, sent_at, tokens=10, tokens_prompt=5, names=None):
+        return AIRequestLog.objects.create(
+            sent_at=sent_at,
+            mode=AIRequestLog.MODE_CHAT,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=names or ["Ollama Gemma"],
+            tokens=tokens,
+            tokens_prompt=tokens_prompt,
+            user_full_name="Иванов Иван",
+        )
+
+    def test_date_filters_do_not_raise(self):
+        from ai.services.msk_time import parse_date
+        from ai.services.token_usage import collect_log_slices
+        # Регрессия: раньше AttributeError («datetime.date» object has no
+        # attribute «astimezone») — страница отдавала 500.
+        report = collect_log_slices(
+            AIRequestLog.objects.all(),
+            date_from=parse_date("2026-10-01"),
+            date_to=parse_date("2026-10-20"),
+        )
+        self.assertIn("total", report)
+
+    def test_date_to_covers_whole_msk_day(self):
+        from ai.services.msk_time import parse_date
+        from ai.services.token_usage import collect_log_slices
+        from ai.constants import MOSCOW_TZ
+        # Запись в 23:30 МСК выбранного дня — попадает в диапазон.
+        late = datetime(2026, 10, 20, 23, 30, tzinfo=MOSCOW_TZ)
+        self._log(sent_at=late, tokens=100, tokens_prompt=40)
+        report = collect_log_slices(
+            AIRequestLog.objects.all(),
+            date_from=parse_date("2026-10-20"),
+            date_to=parse_date("2026-10-20"),
+        )
+        self.assertEqual(report["total"]["total_tokens"], 140)
+
+    def test_date_range_excludes_outside_rows(self):
+        from ai.services.msk_time import parse_date
+        from ai.services.token_usage import collect_log_slices
+        from ai.constants import MOSCOW_TZ
+        inside = datetime(2026, 10, 20, 12, 0, tzinfo=MOSCOW_TZ)
+        before = datetime(2026, 10, 19, 23, 59, tzinfo=MOSCOW_TZ)
+        after = datetime(2026, 10, 21, 0, 1, tzinfo=MOSCOW_TZ)
+        self._log(sent_at=inside, tokens=10, tokens_prompt=5)
+        self._log(sent_at=before, tokens=1000, tokens_prompt=1000)
+        self._log(sent_at=after, tokens=2000, tokens_prompt=2000)
+        report = collect_log_slices(
+            AIRequestLog.objects.all(),
+            date_from=parse_date("2026-10-20"),
+            date_to=parse_date("2026-10-20"),
+        )
+        self.assertEqual(report["total"]["total_tokens"], 15)
+
+    def test_batch_pairs_respect_date_range(self):
+        from ai.models import AIModelTestResult, AIModelTestRun
+        from ai.services.msk_time import parse_date
+        from ai.services.token_usage import collect_batch_slices
+        from ai.constants import MOSCOW_TZ
+        inside = datetime(2026, 10, 20, 12, 0, tzinfo=MOSCOW_TZ)
+        outside = datetime(2026, 9, 1, 12, 0, tzinfo=MOSCOW_TZ)
+        for started in (inside, outside):
+            run = AIModelTestRun.objects.create(
+                run_id=uuid.uuid4().hex,
+                run_type=AIModelTestRun.RUN_TYPE_BATCH,
+                started_at=started,
+            )
+            AIModelTestResult.objects.create(
+                run=run,
+                model_key="M1",
+                model_title="Ollama Gemma",
+                status=AIModelTestResult.STATUS_OK,
+                verdict=AIModelTestResult.VERDICT_SOLVED,
+                tokens=50,
+                tokens_prompt=20,
+            )
+        report = collect_batch_slices(
+            AIModelTestRun.objects.all(),
+            date_from=parse_date("2026-10-20"),
+            date_to=parse_date("2026-10-20"),
+        )
+        self.assertEqual(report["total"]["total_tokens"], 70)
+        self.assertEqual(report["pairs"], 1)
+
+
+class TokenUsageMultiModelTests(TestCase):
+    """Сводная запись прогона (несколько моделей) — регрессия.
+
+    Токены такой записи — СУММА по всем моделям прогона. Раньше сумма
+    прибавлялась к срезу «по моделям» ПО ОДНОМУ РАЗУ НА КАЖДОЕ ИМЯ —
+    расход завышался в N раз, и каждой модели приписывался весь расход
+    прогона.
+    """
+
+    def setUp(self):
+        self.now = timezone.now()
+        AIRequestLog.objects.create(
+            sent_at=self.now,
+            mode=AIRequestLog.MODE_BATCH_SOLVE,
+            source=AIRequestLog.SOURCE_ARM,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Ollama Gemma", "OpenRouter Qwen", "Groq Llama"],
+            tokens=300,
+            tokens_prompt=100,
+            user_full_name="Иванов Иван",
+        )
+
+    def test_total_is_not_inflated(self):
+        from ai.services.token_usage import collect_log_slices
+        report = collect_log_slices(AIRequestLog.objects.all())
+        # 300 + 100, а НЕ 3 × (300 + 100).
+        self.assertEqual(report["total"]["total_tokens"], 400)
+        self.assertEqual(report["total"]["requests"], 1)
+
+    def test_model_slice_sums_to_total(self):
+        from ai.services.token_usage import collect_log_slices
+        report = collect_log_slices(AIRequestLog.objects.all())
+        by_model_sum = sum(row["total_tokens"] for row in report["by_model"])
+        self.assertEqual(by_model_sum, report["total"]["total_tokens"])
+        # Ни одна ОТДЕЛЬНАЯ модель не должна получить весь расход прогона:
+        # строка среза — это набор моделей прогона, а не одна модель.
+        for row in report["by_model"]:
+            self.assertNotIn(row["label"], ("Ollama Gemma", "OpenRouter Qwen", "Groq Llama"))
+        # Модели прогона перечислены в строке.
+        labels = " ".join(row["label"] for row in report["by_model"])
+        self.assertIn("Groq Llama", labels)
+        self.assertIn("Ollama Gemma", labels)
+
+    def test_model_filter_does_not_credit_one_model(self):
+        from ai.services.token_usage import (
+            MULTI_MODEL_LABEL,
+            collect_log_slices,
+        )
+        report = collect_log_slices(AIRequestLog.objects.all(), model="Groq")
+        # Запись проходит фильтр (в прогоне есть Groq), но её расход не
+        # приписывается Groq — иначе счётчик модели завышен в N раз.
+        self.assertEqual(report["total"]["total_tokens"], 400)
+        labels = [row["label"] for row in report["by_model"]]
+        self.assertNotIn("Groq Llama", labels)
+        # Расход прогона попадает в отдельную «корзину», а не в счётчик
+        # одной из его моделей.
+        self.assertIn(MULTI_MODEL_LABEL, labels)
+
+    def test_user_and_day_slices_keep_full_sum(self):
+        from ai.services.token_usage import collect_log_slices
+        report = collect_log_slices(AIRequestLog.objects.all())
+        self.assertEqual(report["by_user"][0]["total_tokens"], 400)
+        self.assertEqual(report["by_day"][0]["total_tokens"], 400)
+        self.assertEqual(report["by_mode"][0]["total_tokens"], 400)
+
+
+class TokenUsageViewTests(_AdminViewRequestMixin, TestCase):
+    """Страница «Контроль токенов»: рендер, фильтры, права."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(
+            username="tokens-admin", password="x", is_staff=True,
+        )
+        AIRequestLog.objects.create(
+            sent_at=timezone.now(),
+            mode=AIRequestLog.MODE_CHAT,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Ollama Gemma"],
+            tokens=100,
+            tokens_prompt=40,
+            user_full_name="Иванов Иван",
+        )
+
+    def _get(self, query="", user=None):
+        from ai.admin.tokens import admin_token_usage_view
+        path = "/ai/admin/ai/tokens/" + query
+        request = self._admin_request(user or self.user, path=path)
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return admin_token_usage_view(request)
+
+    def test_page_renders(self):
+        response = self._get("")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Контроль токенов", response.content.decode("utf-8"))
+
+    def test_date_filter_does_not_break_page(self):
+        # Регрессия: фильтр по датам ронял страницу в 500.
+        response = self._get("?date_from=2026-10-01&date_to=2026-10-20")
+        self.assertEqual(response.status_code, 200)
+
+    def test_bad_date_is_ignored(self):
+        response = self._get("?date_from=мусор")
+        self.assertEqual(response.status_code, 200)
+
+    def test_non_staff_without_key_is_forbidden(self):
+        # Обычный юзер (не staff) без ключа page.tokens — 403.
+        from ai.admin.permissions import can_access_token_usage
+        plain = self.user_model.objects.create_user(username="plain-user", password="x")
+        request = self._admin_request(plain, path="/ai/admin/ai/tokens/")
+        self.assertFalse(can_access_token_usage(request))
+
+    def test_staff_has_access(self):
+        from ai.admin.permissions import can_access_token_usage
+        request = self._admin_request(self.user, path="/ai/admin/ai/tokens/")
+        self.assertTrue(can_access_token_usage(request))
+
+    def test_key_holder_has_access(self):
+        from ai.admin.permissions import can_access_token_usage
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+        plain = self.user_model.objects.create_user(username="key-user", password="x")
+        perm, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.tokens", defaults={"label": "page.tokens", "section": "page"},
+        )
+        group = AIAccessGroup.objects.create(name="Контроль токенов")
+        group.permissions.add(perm)
+        group.users.add(plain)
+        request = self._admin_request(plain, path="/ai/admin/ai/tokens/")
+        self.assertTrue(can_access_token_usage(request))
+
+
+class FailureReasonEdgeCaseTests(SimpleTestCase):
+    """Граничные случаи классификатора причин сбоя (регрессия)."""
+
+    def test_successful_compile_is_not_compile_error(self):
+        from ai.dl_api_client import dl_failure_reason_from_comment
+        # Регрессия: «Компиляция успешна, все тесты пройдены» — это УСПЕХ,
+        # а не «ошибка компиляции» (маркер «компиляц» срабатывал и на успехе).
+        self.assertEqual(
+            dl_failure_reason_from_comment("Компиляция успешна, все тесты пройдены"),
+            "",
+        )
+
+    def test_successful_build_with_wrong_answer(self):
+        from ai.dl_api_client import dl_failure_reason_from_comment
+        # Сборка прошла, ответ неверный — это «неправильный ответ», а не
+        # «ошибка компиляции».
+        self.assertEqual(
+            dl_failure_reason_from_comment("Сборка прошла успешно, но ответ неверный"),
+            "wrong_answer",
+        )
+        self.assertEqual(
+            dl_failure_reason_from_comment(
+                "Компиляция прошла, ответ не совпадает с ожидаемым"
+            ),
+            "wrong_answer",
+        )
+
+    def test_real_compile_error_still_detected(self):
+        from ai.dl_api_client import dl_failure_reason_from_comment
+        self.assertEqual(
+            dl_failure_reason_from_comment("Ошибка компиляции в строке 5"),
+            "compile_error",
+        )
+        self.assertEqual(
+            dl_failure_reason_from_comment("syntax error at line 3"),
+            "compile_error",
+        )
+        self.assertEqual(
+            dl_failure_reason_from_comment("Программа не компилируется"),
+            "compile_error",
+        )
+
+
+class FailureReasonBackfillNoCodeTests(TestCase):
+    """Бэкфилл причин: «не выкушен код» должен восстанавливаться."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun
+        self.run = AIModelTestRun.objects.create(
+            run_id=uuid.uuid4().hex,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            started_at=timezone.now(),
+        )
+        self.single_run = AIModelTestRun.objects.create(
+            run_id=uuid.uuid4().hex,
+            run_type=AIModelTestRun.RUN_TYPE_SINGLE,
+            started_at=timezone.now(),
+        )
+
+    def _result(self, **kwargs):
+        from ai.models import AIModelTestResult
+        defaults = {
+            "run": self.run,
+            "model_key": "M1",
+            "model_title": "Model 1",
+            "status": AIModelTestResult.STATUS_ERROR,
+            "verdict": AIModelTestResult.VERDICT_FAILED,
+        }
+        defaults.update(kwargs)
+        return AIModelTestResult.objects.create(**defaults)
+
+    def test_no_code_service_comment_restored(self):
+        from io import StringIO
+        from django.core.management import call_command
+        row = self._result(
+            dl_comment="Модель не успела вывести код — ответ оборван лимитом генерации",
+            code="",
+        )
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out)
+        row.refresh_from_db()
+        # Регрессия: по служебному комментарию раннера общий классификатор
+        # давал «причина не распознана» — целая категория терялась.
+        self.assertEqual(row.failure_reason, "no_code")
+
+    def test_junk_code_comment_restored(self):
+        from io import StringIO
+        from django.core.management import call_command
+        row = self._result(
+            dl_comment=(
+                "Извлечённый текст не похож на программу языка курса "
+                "(нет структурных маркеров) — DL не тестировал"
+            ),
+            code="",
+        )
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out)
+        row.refresh_from_db()
+        self.assertEqual(row.failure_reason, "no_code")
+
+    def test_single_run_is_not_touched(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from ai.models import AIModelTestResult
+        row = AIModelTestResult.objects.create(
+            run=self.single_run,
+            model_key="M1",
+            model_title="Model 1",
+            status=AIModelTestResult.STATUS_ERROR,
+            verdict=None,
+            code="",
+            dl_comment="",
+        )
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out)
+        row.refresh_from_db()
+        # У одиночных прогонов вердикта нет by design — пара не тестировалась
+        # на DL, «сбой ответа модели» был бы неверным основанием.
+        self.assertEqual(row.failure_reason, "")
+
+
+class ArmSolveFailureReasonsRenderTests(TestCase):
+    """Секция «Сбои по причинам» должна рендериться на /arm/solve/.
+
+    Регрессия: на странице пакетного решения не было контейнера
+    reasonsWrap, и renderFailureReasons молча ничего не рисовала —
+    таксономия сбоев была видна только в журнале и настройках.
+    """
+
+    def test_arm_solve_template_has_reasons_container(self):
+        from pathlib import Path
+        template = Path("ai/templates/admin/ai/arm_solve.html").read_text(encoding="utf-8")
+        self.assertIn("armSolveReasonsWrap", template)
+
+    def test_arm_solve_js_passes_reasons_element(self):
+        from pathlib import Path
+        js = Path("static/admin/ai/arm_solve/index.js").read_text(encoding="utf-8")
+        self.assertIn("armSolveReasonsWrap", js)
+        self.assertIn("reasons: reasonsWrap", js)
+
+    def test_batch_results_js_has_failure_reasons_render(self):
+        from pathlib import Path
+        js = Path("static/admin/ai/batch_results/index.js").read_text(encoding="utf-8")
+        self.assertIn("renderFailureReasons", js)
+        self.assertIn("failure_reasons", js)
+
+    def test_reason_badge_has_css_class(self):
+        from pathlib import Path
+        css = Path("static/admin/ai/batch_results/index.css").read_text(encoding="utf-8")
+        self.assertIn(".arm-reason", css)
+
+
+class ArmBatchFailureReasonRetryTests(TransactionTestCase):
+    """Ветка «ретрай упал с ошибкой модели» → причина «сбой ответа модели».
+
+    Регрессия: пара, упавшая с 500/429 на ретрае, классифицировалась как
+    «не выкушен код» — таксономия врала (код не получен из-за СБОЯ модели).
+    """
+
+    def setUp(self):
+        from ai.models import Task
+        self.user = get_user_model().objects.create_user(username="retry-reason", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Ретраи", programming_language=self.lang,
+        )
+        self.task = Task.objects.create(
+            node_id=9301, task_id=9401, name="A", statement="Сложите a и b",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+    def _seed_job(self, run_id, total_pairs):
+        from ai import arm_runner
+        now_ts = time.time()
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 1, "total_pairs": total_pairs,
+            "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "", "current_model_title": "",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+
+    def _run(self, handler):
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+        run_id = "rr-" + uuid.uuid4().hex[:8]
+        self._seed_job(run_id, 1)
+        models = [{"key": "M1", "title": "Model 1", "handler": handler}]
+        try:
+            arm_runner._run_batch_job_worker(
+                run_id, [self.task.node_id], models, self.user.id, "DLSID-1",
+                ui_language="Русский", dl_test=True,
+            )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        return AIModelTestResult.objects.get(run=run, model_key="M1")
+
+    def test_retry_model_error_gives_model_error(self):
+        calls = {"n": 0}
+
+        async def handler(messages, conv_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Первый ответ — пустой/обрезанный: кода не извлечётся → ретрай.
+                return ("", 0, False, True, 0)
+            # Ретрай — ошибка провайдера (429/500).
+            return ("Ошибка 429: превышен лимит запросов", 0, True, False, 0)
+
+        row = self._run(handler)
+        self.assertEqual(row.failure_reason, "model_error")
+
+    def test_retry_without_code_gives_no_code(self):
+        calls = {"n": 0}
+
+        async def handler(messages, conv_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ("частичный ответ без кода", 5000, False, True, 100)
+            # Ретрай — модель ответила, но кода всё равно нет.
+            return ("всё равно без кода", 10, False, False, 10)
+
+        row = self._run(handler)
+        self.assertEqual(row.failure_reason, "no_code")

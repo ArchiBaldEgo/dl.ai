@@ -9,10 +9,16 @@
 * строки с НЕПУСТЫМ dl_comment — по каноническому классификатору
   ai/dl_api_client.py::dl_failure_reason_from_comment (ошибка компиляции
   vs неправильный ответ — по тексту комментария);
+* «служебные» комментарии раннера про невыкушенный код («Модель не успела
+  вывести код…», «Извлечённый текст не похож на программу…») — это
+  ``no_code``; по общему классификатору они давали «причина не
+  распознана», и целая категория таксономии при бэкфилле терялась;
 * строки с пустым dl_comment и вердиктом failed — «сбой ответа модели»,
   если провайдерская ошибка была (status=error и нет кода), иначе
   «причина не распознана»;
-* решённые пары (verdict=solved) остаются с пустой причиной.
+* решённые пары (verdict=solved) и ОДИНОЧНЫЕ прогоны (run_type=single) не
+  трогаются: у single-прогонов вердикта нет by design (пара не
+  тестировалась на DL) — приписывать им «сбой ответа модели» неверно.
 
 Запуск:
     python manage.py backfill_arm_failure_reasons             # dry-run
@@ -22,11 +28,23 @@
 from django.core.management.base import BaseCommand
 
 from ai.dl_api_client import dl_failure_reason_from_comment
-from ai.models import AIModelTestResult
+from ai.models import AIModelTestResult, AIModelTestRun
 
 # Причины, которые НЕ восстанавливаются из текста (значения из моделей).
 _REASON_MODEL_ERROR = "model_error"
+_REASON_NO_CODE = "no_code"
 _REASON_UNDEFINED = "undefined"
+
+# Служебные комментарии раннера про невыкушенный код (arm_runner::_process_batch_pair).
+# Их пишет сам раннер, а не DL: общий классификатор по ним даёт
+# «причина не распознана», хотя причина известна точно — код не извлечён.
+_NO_CODE_COMMENT_MARKERS = (
+    "не успела вывести код",
+    "ответ оборван лимитом генерации",
+    "не удалось извлечь код из ответа",
+    "не похож на программу языка",
+    "dl не тестировал",
+)
 
 
 def _reason_for(row) -> str:
@@ -36,6 +54,9 @@ def _reason_for(row) -> str:
         return ""
     comment = (row.get("dl_comment") or "").strip()
     if comment:
+        lowered = comment.lower()
+        if any(marker in lowered for marker in _NO_CODE_COMMENT_MARKERS):
+            return _REASON_NO_CODE
         return dl_failure_reason_from_comment(comment) or _REASON_UNDEFINED
     # Комментария нет — провалилась сама модель (нет кода) или запись легаси.
     if not (row.get("code") or "").strip():
@@ -58,10 +79,16 @@ class Command(BaseCommand):
             qs = qs.filter(run_id__in=opts["run_ids"])
         # Пустая причина = строки, которые ещё не бэкфиллены.
         qs = qs.filter(failure_reason__in=["", None]).exclude(verdict="solved")
+        # Одиночные прогоны (run_type=single) — не результат DL-теста: у них
+        # нет вердикта by design. Приписывать им «сбой ответа модели» —
+        # неверно (пара просто не тестировалась) → оставляем как есть.
+        qs = qs.filter(run__run_type=AIModelTestRun.RUN_TYPE_BATCH)
 
         rows = list(
-            qs.only("id", "run_id", "model_key", "verdict", "status", "dl_comment", "code")
-            .order_by("id")
+            qs.only(
+                "id", "run_id", "model_key", "verdict", "status",
+                "dl_comment", "code",
+            ).order_by("id")
         )
         to_write = []
         counts = {}

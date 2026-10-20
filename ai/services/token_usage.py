@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from django.db.models import Q, Sum
+from django.db.models import Q
 from django.utils import timezone
 
 from ..constants import MOSCOW_TZ
@@ -41,6 +41,11 @@ MODE_LABELS = {
     "batch_solve": "Пакетное решение",
     "testing": "Тестирование",
 }
+
+# Ключ среза «по моделям» для сводной записи прогона, когда включён фильтр
+# по модели: расход прогона относится к нескольким моделям сразу, отнести
+# его к одной — значит завысить её счётчик. Считаем отдельной «корзиной».
+MULTI_MODEL_LABEL = "несколько моделей (прогон)"
 
 
 def is_web_pool_model(name: str) -> bool:
@@ -94,15 +99,35 @@ def _sort_slices(slices: Iterable[TokenSlice]) -> list[dict]:
     return rows
 
 
+def _collect_models(slice_: TokenSlice, names: Iterable[str]) -> None:
+    """Отметить модели среза (без токенов) — состав слага прогона.
+
+    Токены сводной записи НЕ раскладываются по моделям (см.
+    ``collect_log_slices``), но какие модели входили в прогон — знать
+    полезно: в таблице видно, чей расход стоит в этой строке.
+    """
+    for name in names:
+        text = str(name)
+        slice_.models.add(text)
+        if is_web_pool_model(text):
+            slice_.incomplete = True
+
+
 def _filter_logs(qs, *, date_from, date_to, mode: str, model: str, user: str, source: str):
-    """Фильтры журнала запросов (диапазон дат — по МСК, индекс-хостильно)."""
-    if date_from or date_to:
-        start = date_from.astimezone(timezone.utc) if date_from else None
-        end = date_to.astimezone(timezone.utc) if date_to else None
-        if start:
-            qs = qs.filter(sent_at__gte=start)
-        if end:
-            qs = qs.filter(sent_at__lte=end)
+    """Фильтры журнала запросов (диапазон дат — по МСК, индекс-хостильно).
+
+    Границы — через ``msk_day_bounds`` (единый владелец, ai/services/msk_time.py):
+    сутки МСК целиком (00:00 → 23:59:59.999), конвертированные в UTC.
+    Раньше здесь стояло ``date_to.astimezone(timezone.utc)`` — это полночь
+    выбранного дня, из-за чего записи ПОСЛЕ 00:00 МСК отсекались; к тому же
+    ``django.utils.timezone.utc`` удалён в Django 5.0 (AttributeError → 500).
+    """
+    if date_from:
+        day_start, _ = msk_day_bounds(date_from)
+        qs = qs.filter(sent_at__gte=day_start)
+    if date_to:
+        _, day_end = msk_day_bounds(date_to)
+        qs = qs.filter(sent_at__lte=day_end)
     if mode:
         qs = qs.filter(mode=mode)
     if source:
@@ -154,10 +179,15 @@ def collect_log_slices(
             names = [names]
         if not names:
             names = ["—"]
+        # Признак сводной записи считаем ДО фильтра по модели: фильтр
+        # сужает список, но расход прогона всё равно общий.
+        multi_model = len(names) > 1
+        all_names = list(names)
         if model:
-            names = [n for n in names if model.lower() in str(n).lower()] or []
-            if not names:
+            matched = [n for n in names if model.lower() in str(n).lower()]
+            if not matched:
                 continue
+            names = matched
         completion = int(row["tokens"] or 0)
         prompt = int(row["tokens_prompt"] or 0)
         who = (row["user_full_name"] or row["username"] or row["external_user_id"] or "—")
@@ -167,19 +197,58 @@ def collect_log_slices(
             day_key = timezone.localtime(sent_at, MOSCOW_TZ).strftime("%Y-%m-%d")
         else:
             day_key = "—"
-        for name in names:
-            name = str(name)
-            _add(total, completion, prompt, name)
-            m = by_model.setdefault(name, TokenSlice(key=name, label=name))
-            _add(m, completion, prompt, name)
+
+        # Сколько моделей в записи журнала:
+        #   1 — обычный запрос чата/«реши задачу»/«найти ошибку»: токены
+        #       относятся к этой одной модели;
+        #   >1 — СВОДНАЯ запись прогона (batch-решение или ARM-прогон с
+        #       несколькими моделями): токены — СУММА по всем моделям
+        #       прогона (arm_runner пишет их в журнал одной записью).
+        # Раскладывать такую сумму на каждое имя нельзя: расход завышался
+        # в N раз, и каждой модели приписывался весь расход прогона.
+        # Поэтому сводная запись идёт в срез «по моделям» ОДНИМ ключом:
+        #   без фильтра по модели — набор моделей прогона («A, B, C»);
+        #   с фильтром — общая корзина MULTI_MODEL_LABEL (расход прогона
+        #     нельзя отнести к одной модели — а приписать его ей значит
+        #     завысить её счётчик в N раз).
+        # Разбивка по моделям для прогонов есть в источнике 2 — парах
+        # (AIModelTestResult, токены на уровне пары): раздел «Пакетные
+        # пары: по моделям» даёт честную картину по моделям.
+        if multi_model:
+            _add(total, completion, prompt, "")
+            _collect_models(total, all_names)
             u = by_user.setdefault(who, TokenSlice(key=who, label=who))
-            _add(u, completion, prompt, name)
+            _add(u, completion, prompt, "")
+            _collect_models(u, all_names)
             md = by_mode.setdefault(mode_key, TokenSlice(key=mode_key, label=MODE_LABELS.get(mode_key, mode_key or "—")))
-            _add(md, completion, prompt, name)
+            _add(md, completion, prompt, "")
+            _collect_models(md, all_names)
             d = by_day.setdefault(day_key, TokenSlice(key=day_key, label=day_key))
-            _add(d, completion, prompt, name)
-            if is_web_pool_model(name):
+            _add(d, completion, prompt, "")
+            _collect_models(d, all_names)
+            if model:
+                model_key = MULTI_MODEL_LABEL
+            else:
+                model_key = ", ".join(str(n) for n in all_names)
+            m = by_model.setdefault(model_key, TokenSlice(key=model_key, label=model_key))
+            _add(m, completion, prompt, "")
+            _collect_models(m, all_names)
+            if any(is_web_pool_model(str(n)) for n in all_names):
                 incomplete = True
+            continue
+
+        name = str(names[0])
+        _add(total, completion, prompt, name)
+        m = by_model.setdefault(name, TokenSlice(key=name, label=name))
+        _add(m, completion, prompt, name)
+        u = by_user.setdefault(who, TokenSlice(key=who, label=who))
+        _add(u, completion, prompt, name)
+        md = by_mode.setdefault(mode_key, TokenSlice(key=mode_key, label=MODE_LABELS.get(mode_key, mode_key or "—")))
+        _add(md, completion, prompt, name)
+        d = by_day.setdefault(day_key, TokenSlice(key=day_key, label=day_key))
+        _add(d, completion, prompt, name)
+        if is_web_pool_model(name):
+            incomplete = True
 
     return {
         "total": total.as_dict(),
@@ -199,13 +268,12 @@ def collect_batch_slices(test_runs, *, date_from=None, date_to=None, model: str 
     """
     from ..models import AIModelTestResult
 
-    if date_from or date_to:
-        start = date_from.astimezone(timezone.utc) if date_from else None
-        end = date_to.astimezone(timezone.utc) if date_to else None
-        if start:
-            test_runs = test_runs.filter(started_at__gte=start)
-        if end:
-            test_runs = test_runs.filter(started_at__lte=end)
+    if date_from:
+        day_start, _ = msk_day_bounds(date_from)
+        test_runs = test_runs.filter(started_at__gte=day_start)
+    if date_to:
+        _, day_end = msk_day_bounds(date_to)
+        test_runs = test_runs.filter(started_at__lte=day_end)
 
     rows = AIModelTestResult.objects.filter(run__in=test_runs).values(
         "model_title", "model_key", "tokens", "tokens_prompt", "verdict",
@@ -254,8 +322,8 @@ def token_usage_report(
 ) -> dict:
     """Сводный отчёт по токенам: журнал + пакетные пары.
 
-    Единая точка входа для страницы «Контроль токенов» (view + XLSX) —
-    обе поверхности показывают одни и те же цифры.
+    Единая точка входа для страницы «Контроль токенов» (view) — цифры
+    считаются здесь, view только собирает фильтры и рендерит.
     """
     from ..models import AIRequestLog, AIModelTestRun
 

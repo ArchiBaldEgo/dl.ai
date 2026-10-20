@@ -954,13 +954,19 @@ def _build_batch_log_snapshot(log):
     report = _build_batch_report(results)
     # Карточка «Прогон» (время) — та же, что на /arm/solve/.
     from ..arm_runner import _attach_run_meta
+    # Прогон на паузе ТОЖЕ не завершён — цифры промежуточные (живой поллинг
+    # на фронте стартует и для paused). Раньше пауза считалась «финалом»:
+    # плашки «цифры промежуточные» не было, хотя прогон не закончился.
+    run_in_progress = test_run.status in (
+        AIModelTestRun.STATUS_RUNNING, AIModelTestRun.STATUS_PAUSED,
+    )
     _attach_run_meta(
         report,
         test_run.started_at.timestamp() if test_run.started_at else None,
         test_run.finished_at.timestamp() if test_run.finished_at else None,
-        now_ts=time.time() if test_run.status == AIModelTestRun.STATUS_RUNNING else None,
+        now_ts=time.time() if run_in_progress else None,
     )
-    if test_run.status == AIModelTestRun.STATUS_RUNNING and report is not None:
+    if run_in_progress and report is not None:
         # Отчёт построен по текущим строкам БД прогона — цифры промежуточные:
         # та же плашка честности, что у живого снапшота (arm_runner.
         # _interim_live_report); финал придёт без флага.
@@ -1221,7 +1227,9 @@ def admin_request_log_xlsx_view(request, log_id):
     # Прогон ещё идёт — в файле только завершённые к этому моменту пары
     # (та же честная пометка, что у прямого скачивания с /arm/solve/).
     note = None
-    if snapshot["run_status"] == AIModelTestRun.STATUS_RUNNING:
+    if snapshot["run_status"] in (
+        AIModelTestRun.STATUS_RUNNING, AIModelTestRun.STATUS_PAUSED,
+    ):
         note = (
             "ВНИМАНИЕ: работа ещё выполняется — в файле пары, завершённые"
             f" на момент скачивания ({snapshot['run_completed_pairs']})."

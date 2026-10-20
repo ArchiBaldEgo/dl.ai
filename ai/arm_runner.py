@@ -922,6 +922,7 @@ def _run_job_worker(
                     f"admin-{user_id}-{model['key']}-{run_id}",
                 )
                 response_text, tokens = _extract_model_response(response)
+                prompt_tokens = _extract_prompt_tokens(response)
                 # Флаг обреза по факту (tokens упёрся в потолок провайдера).
                 # У ошибочного вызова флага нет — это другой вид сбоя.
                 single_truncated = (
@@ -946,6 +947,7 @@ def _run_job_worker(
                     "model_title": model["title"],
                     "duration": duration,
                     "tokens": tokens,
+                    "tokens_prompt": prompt_tokens,
                     "short_response": short_response,
                     "status": status,
                     "raw_response": detailed_text,
@@ -961,6 +963,7 @@ def _run_job_worker(
                     "model_title": model["title"],
                     "duration": duration,
                     "tokens": 0,
+                    "tokens_prompt": 0,
                     "short_response": friendly_text or f"Ошибка вызова модели: {exc_text}",
                     "status": status,
                     "raw_response": detailed_text,
@@ -1080,6 +1083,11 @@ def _run_job_worker(
             duration_seconds=(end_time - start_time).total_seconds(),
             response_text=response_summary[:5000],
             status=AIRequestLog.STATUS_SUCCESS if any(r.get("status") == "ok" for r in results) else AIRequestLog.STATUS_ERROR,
+            # Расход одиночного ARM-прогона — в журнал (иначе он не виден
+            # на странице «Контроль токенов»: batch-записи токены пишут,
+            # одиночные — нет). Сумма по парам прогона.
+            tokens=sum(_to_int(r.get("tokens")) for r in results),
+            tokens_prompt=sum(_to_int(r.get("tokens_prompt")) for r in results),
         )
         AIModelTestRun.objects.filter(pk=test_run.pk).update(
             status=AIModelTestRun.STATUS_COMPLETED,
@@ -2130,12 +2138,25 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 )
             elif not code_only:
                 verdict = _VERDICT_FAILED
-                failure_reason = _REASON_NO_CODE
-                dl_test_comment = (
-                    "Модель не успела вывести код — ответ оборван лимитом генерации"
-                    if truncated
-                    else "Не удалось извлечь код из ответа модели"
+                # Ретрай тоже может упасть с ошибкой провайдера (429/500/
+                # таймаут) — тогда кода нет НЕ из-за ответа модели, а из-за
+                # СБОЯ модели: причина «не выкушен код» была бы враньём.
+                # Раннер знает об этом по флагу is_model_err (его выставляет
+                # ретрай-ветка выше).
+                failure_reason = (
+                    _REASON_MODEL_ERROR if is_model_err else _REASON_NO_CODE
                 )
+                if is_model_err:
+                    dl_test_comment = (
+                        "Сбой ответа модели при повторной попытке — "
+                        "код не получен"
+                    )
+                else:
+                    dl_test_comment = (
+                        "Модель не успела вывести код — ответ оборван лимитом генерации"
+                        if truncated
+                        else "Не удалось извлечь код из ответа модели"
+                    )
             elif can_run_dl:
                 if not _acquire_dl_run_lock(dl_lock, ctx["run_id"]):
                     return None

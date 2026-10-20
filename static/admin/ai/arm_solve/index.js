@@ -25,6 +25,10 @@
     const perModelWrap = document.getElementById('armSolvePerModelWrap');
     const perTopicWrap = document.getElementById('armSolvePerTopicWrap');
     const errorsWrap = document.getElementById('armSolveErrorsWrap');
+    // Контейнер секции «Сбои по причинам» (таксономия сбоев). Без него
+    // renderFailureReasons молча ничего не рисует — на этой странице
+    // раздел «Сводка» должен показывать то же, что журнал и настройки.
+    const reasonsWrap = document.getElementById('armSolveReasonsWrap');
     const resultsCard = document.getElementById('armSolveResultsCard');
     const resultsEl = document.getElementById('armSolveResults');
     // Адреса эндпоинтов приходят из шаблона через json_script-блоки
@@ -92,7 +96,7 @@
     // «Пакетное решение». Локальные обёртки пробрасывают closure-элементы;
     // filterHost — куда partial ставит переключатель «Все / Не пройденные».
     function renderReport(report) {
-      ArmBatchResults.renderReport(report, { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap, errors: errorsWrap });
+      ArmBatchResults.renderReport(report, { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap, errors: errorsWrap, reasons: reasonsWrap });
     }
     function renderResults(results) {
       ArmBatchResults.renderResults(results, resultsEl, resultsCard, filterHost);
