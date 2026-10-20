@@ -24,9 +24,11 @@ services:
     volumes:
       - .:/app
       - static_volume:/app/staticfiles
-      - WebDeepseek_node_modules:/app/WebDeepseek/node_modules
-      - WebKimi_node_modules:/app/WebKimi/node_modules
-#      - WebDeepseek_puppeteer_cache:/app/WebDeepseek/.puppeteer-cache
+      # Один общий node_modules (в корне репозитория) на оба бот-пула и на
+      # WebKimi/seed.js — раньше были два (WebDeepseek/ + WebKimi/) с
+      # идентичным набором зависимостей.
+      - WebPools_node_modules:/app/node_modules
+#      - WebPools_puppeteer_cache:/app/.puppeteer-cache
     ports:
       - "8000:8000"
     env_file:
@@ -37,7 +39,7 @@ services:
     # `environment:` overrides `env_file:`, so an explicit mapping with an empty
     # fallback ("${PUPPETEER_PROXY_SERVER:-}") wipes BOT_PROXY* from .env,
     # leaving the browser with NO proxy -> login can't reach chat.deepseek.com
-    # -> 401 not_autorized. WebDeepseek/worker/bot.js resolveProxy() already
+    # -> 401 not_autorized. WebPools/worker/bot.js resolveProxy() already
     # falls back to PUPPETEER_PROXY_* when BOT_PROXY is empty, so both naming
     # schemes work without any mapping here.
     # Пулы без сидирования (Kimi требует ручного seed-логина) держат контейнер
@@ -108,9 +110,8 @@ volumes:
   redis_data:
     name: "${REDIS_VOLUME_NAME:-dlai_redis_data}"
   static_volume:
-  WebDeepseek_node_modules:
-  WebDeepseek_puppeteer_cache:
-  WebKimi_node_modules:
+  WebPools_node_modules:
+  WebPools_puppeteer_cache:
 
 networks:
   shared-network:

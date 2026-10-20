@@ -671,6 +671,31 @@ _DL_SUCCESS_MARKERS_RE = re.compile(
 DL_VERDICT_SOLVED = "solved"
 DL_VERDICT_FAILED = "failed"
 
+# Маркеры ОШИБКИ КОМПИЛЯЦИИ. Проверяются ПЕРВЫМИ: комментарий «Ошибка
+# компиляции в строке 5» — это про компиляцию, а не про неверный ответ,
+# хотя содержит общий маркер «ошибк».
+DL_COMPILE_MARKERS = (
+    "ошибк компиляц", "компиляц", "compile error", "compilation error",
+    "syntax error", "не компилир", "не компилируется", "ошибка синтаксис",
+    "синтаксическ", "не собирает", "сборк", "build failed",
+)
+# Маркеры НЕПРАВИЛЬНОГО ОТВЕТА (программа собралась, но результат не тот).
+# Основы — «стебли» без окончаний: «неправильн» покрывает «неправильный/
+# неправильно», «неверн» — «неверный/неверно». Иначе комментарий
+# «Неправильный ответ на тесте 2» не распознавался (в «неправильн ответ»
+# между основой и словом «ответ» стоит «ый»).
+DL_WRONG_ANSWER_MARKERS = (
+    "неправильн", "неверн", "wrong answer", "не совп", "не прош",
+    "не все тесты", "не все проверки", "rejected", "не зачт", "не принят",
+    "отклон",
+)
+
+# Причины сбоя (ортогональны вердикту: вердикт — «прошёл ли DL», причина —
+# «почему нет»). Значения совпадают с AIModelTestResult.FAILURE_REASON_CHOICES.
+DL_REASON_COMPILE_ERROR = "compile_error"
+DL_REASON_WRONG_ANSWER = "wrong_answer"
+DL_REASON_UNDEFINED = "undefined"
+
 
 def dl_verdict_from_comment(comment: str) -> str:
     """Вердикт по завершённому DL-комментарию: solved / failed.
@@ -688,6 +713,38 @@ def dl_verdict_from_comment(comment: str) -> str:
     if _DL_SUCCESS_MARKERS_RE.search(comment_lower):
         return DL_VERDICT_SOLVED
     return DL_VERDICT_FAILED
+
+
+def dl_failure_reason_from_comment(comment: str) -> str:
+    """Причина провала по тексту DL-комментария.
+
+    Канонический классификатор (рядом с ``dl_verdict_from_comment``): разбирает
+    ТОТ ЖЕ комментарий, что и вердикт, но отвечает на вопрос «почему пара не
+    решена». Порядок проверки:
+
+    1. маркеры компиляции → ``compile_error``;
+    2. маркеры неверного ответа → ``wrong_answer``;
+    3. иначе, если комментарий содержит любой провальный маркер →
+       ``undefined`` (провал DL, причина не распознана);
+    4. иначе (успех) → ``""`` (пустая строка — причина нет).
+
+    Провал НИКОГДА не переименовывается в успех: нераспознанный провал =
+    ``undefined``, а не пустая строка.
+    """
+    comment_lower = (comment or "").lower().strip()
+    if not comment_lower:
+        return DL_REASON_UNDEFINED
+    if any(m in comment_lower for m in DL_COMPILE_MARKERS):
+        return DL_REASON_COMPILE_ERROR
+    if any(m in comment_lower for m in DL_WRONG_ANSWER_MARKERS):
+        return DL_REASON_WRONG_ANSWER
+    if any(m in comment_lower for m in DL_FAILURE_MARKERS):
+        return DL_REASON_UNDEFINED
+    # Успех (или пустой комментарий при отсутствии провальных маркеров) —
+    # причина сбоя отсутствует.
+    if _DL_SUCCESS_MARKERS_RE.search(comment_lower):
+        return ""
+    return DL_REASON_UNDEFINED
 
 
 def get_solutions_from_dl(

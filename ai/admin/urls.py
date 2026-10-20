@@ -29,6 +29,10 @@ from .arm import (
     admin_arm_solve_result_download_view,
     admin_arm_solve_result_body_view,
 )
+from .dl_api_requests import (
+    admin_dl_api_request_update_view,
+    admin_dl_api_requests_view,
+)
 from .docs import (
     admin_docs_content_view,
     admin_docs_download_view,
@@ -61,6 +65,7 @@ from .tasks import (
     admin_task_claim_view,
     admin_task_close_view,
     admin_task_create_view,
+    admin_task_edit_view,
     admin_task_reopen_view,
     admin_task_reorder_view,
     admin_tasks_view,
@@ -76,7 +81,13 @@ from .test_data import (
     test_data_emit_request_view,
     test_data_view
 )
+from .tokens import admin_token_usage_view
 from .updates import admin_updates_view
+from .user_models import (
+    admin_user_model_create_view,
+    admin_user_model_delete_view,
+    admin_user_models_view,
+)
 
 
 def get_ai_admin_urls():
@@ -115,6 +126,7 @@ def get_ai_admin_urls():
         path("prompts/my/", ai_admin_site.admin_view(admin_my_prompt_view), name="ai_my_prompt"),
         path("pinned-runs/", ai_admin_site.admin_view(admin_pinned_runs_view), name="ai_pinned_runs"),
         path("tasks/create/", ai_admin_site.admin_view(admin_task_create_view), name="ai_task_create"),
+        path("tasks/<int:task_id>/edit/", ai_admin_site.admin_view(admin_task_edit_view), name="ai_task_edit"),
         path("tasks/reorder/", ai_admin_site.admin_view(admin_task_reorder_view), name="ai_task_reorder"),
         path("tasks/<int:task_id>/claim/", ai_admin_site.admin_view(admin_task_claim_view), name="ai_task_claim"),
         path("tasks/<int:task_id>/close/", ai_admin_site.admin_view(admin_task_close_view), name="ai_task_close"),
@@ -138,6 +150,15 @@ def get_ai_admin_urls():
         path("ai/request_logs/<int:log_id>/detail-json/", ai_admin_site.admin_view(admin_request_log_detail_json_view), name="ai_request_log_detail_json"),
         path("ai/request_logs/<int:log_id>/rerun-arm/", ai_admin_site.admin_view(rerun_arm_batch_view), name="ai_request_log_rerun_arm"),
         path("ai/request_logs/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),
+        # «Контроль токенов» — расход токенов по моделям/пользователям/режимам.
+        path("ai/tokens/", ai_admin_site.admin_view(admin_token_usage_view), name="ai_token_usage"),
+        # «Мои AI-модели» — личные модели пользователя (только владелец).
+        path("user-models/", ai_admin_site.admin_view(admin_user_models_view), name="ai_user_models"),
+        path("user-models/create/", ai_admin_site.admin_view(admin_user_model_create_view), name="ai_user_model_create"),
+        path("user-models/delete/", ai_admin_site.admin_view(admin_user_model_delete_view), name="ai_user_model_delete"),
+        # «Запросы по DL API» — заявки на создание API к dl.gsu.by.
+        path("dl-api-requests/", ai_admin_site.admin_view(admin_dl_api_requests_view), name="ai_dl_api_requests"),
+        path("dl-api-requests/update/", ai_admin_site.admin_view(admin_dl_api_request_update_view), name="ai_dl_api_request_update"),
 
         path("test_data/emit_request/",
              ai_admin_site.admin_view(test_data_emit_request_view),name="ai_test_data_emit_request"),

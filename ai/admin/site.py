@@ -19,6 +19,7 @@ from .permissions import (
     can_access_access_groups,
     can_access_admin,
     can_access_arm,
+    can_access_dl_api_requests,
     can_access_logs,
     can_access_model_status,
     can_access_pinned_runs,
@@ -28,7 +29,9 @@ from .permissions import (
     can_access_tasks,
     can_access_test_console,
     can_access_test_data,
+    can_access_token_usage,
     can_access_updates,
+    can_access_user_models,
     is_prompt_developer_user,
     is_developer_user,
     is_staff_or_superuser,
@@ -535,6 +538,16 @@ class AIAdminSite(admin.AdminSite):
              "AiTestData",
              test_data_url,
              show_test_data, "⚙", "Создание и редактирование тестовых данных", "page.test_data", ()),
+            # «Контроль токенов» — расход токенов (промпт + ответ) по моделям,
+            # пользователям и режимам. Ключ page.tokens НЕ в baseline: страница
+            # показывает расход ВСЕХ пользователей — выдаётся группами.
+            ("Диагностика", "Контроль токенов", "AiTokenUsage", "/ai/admin/ai/tokens/", can_access_token_usage(request), "◔", "Сколько токенов потрачено: модели, кто, режим", "page.tokens", ()),
+            # «Мои AI-модели» — личные модели пользователя (провайдер + модель +
+            # свой ключ). Видны и правятся ТОЛЬКО владельцем.
+            ("Система", "Мои AI-модели", "AiUserModels", "/ai/admin/user-models/", can_access_user_models(request), "☁", "Свои AI-модели: провайдер, модель, ключ", "page.user_models", ()),
+            # «Запросы по DL API» — заявки пользователей на создание API к
+            # dl.gsu.by: «актуальные» (API ещё не создан) и «неактуальные».
+            ("Система", "Запросы по DL API", "AiDLApiRequests", "/ai/admin/dl-api-requests/", can_access_dl_api_requests(request), "☏", "Заявки на создание API к dl.gsu.by", "page.dl_api_requests", ()),
             ("Система", "Обновления", "AiUpdates", "/ai/admin/updates/", show_updates, "↻", "История изменений проекта", "page.updates", (
                 ("action.updates_publish", "Публиковать/скрывать записи"),
             )),

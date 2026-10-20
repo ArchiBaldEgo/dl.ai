@@ -1,9 +1,0 @@
-.env
-node_modules
-chrome*
-chromium*
-.cache
-**/.cache/**
-**/.puppeteer/**
-pptr-cache
-*.zip

@@ -6,9 +6,13 @@
 downloadResultsCsv в _ai_batch_results.html).
 
 Лист 1 «Сводка»: матрица задача×модель с сокращёнными названиями моделей
-(short_model_titles) + сводная таблица по моделям (% решено, среднее время).
+(short_model_titles) + сводная таблица по моделям (% решено, среднее время)
++ сводка «Сбои по причинам» (таксономия сбоев прогона).
 Лист 2 «Расшифровка моделей»: сокращение → полное название — читаемость
 любого кода гарантирована даже при агрессивном сокращении.
+Лист 3 «Сбои по парам»: построчная расшифровка — задача, модель, вердикт и
+ПРИЧИНА сбоя («сбой ответа модели» / «не выкушен код» / «ошибка
+компиляции» / «неправильный ответ»).
 """
 
 from io import BytesIO
@@ -16,7 +20,7 @@ from io import BytesIO
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
-from ..arm_runner import _per_bucket
+from ..arm_runner import _build_failure_reasons, _per_bucket
 from ..model_clients.registry import short_model_titles
 
 # Границы автоширины (в символах Excel): короткие колонки не схлопываются,
@@ -126,9 +130,51 @@ def _model_legend_rows(results, title_map=None):
     )
 
 
+def _failure_reason_summary_rows(results):
+    """Сводка «Сбои по причинам»: (header, rows).
+
+    Таксономия — та же, что в UI (arm_runner::_build_failure_reasons):
+    «сбой ответа модели» / «не выкушен код» / «ошибка компиляции» /
+    «неправильный ответ» (+ честные «причина не распознана» / «пропущено»).
+    """
+    header = ["Причина", "Пар", "% от всех пар"]
+    rows = [
+        [row["label"], row["count"], row["percent"]]
+        for row in _build_failure_reasons(results)
+    ]
+    return header, rows
+
+
+def _failure_reason_detail_rows(results, title_map=None):
+    """Построчная расшифровка сбоев: (header, rows).
+
+    Только пары с ПРИЧИНОЙ сбоя (у решённых пар причины нет) — иначе файл
+    раздувается пустыми строками.
+    """
+    header = ["Node ID", "Задача", "Модель", "Вердикт", "Причина"]
+    rows = []
+    for r in results:
+        reason = (r.get("failure_reason") or "").strip()
+        if not reason:
+            continue
+        node = str(r.get("task_node_id") or "")
+        rows.append([
+            int(node) if node.isdigit() else node,
+            r.get("task_name") or "",
+            (title_map or {}).get(
+                r.get("model_title") or r.get("model_key") or "",
+                r.get("model_title") or r.get("model_key") or "",
+            ),
+            r.get("verdict") or "",
+            r.get("failure_reason_label") or reason,
+        ])
+    return header, rows
+
+
 def build_arm_results_xlsx(results, note=None) -> bytes:
-    """Собрать .xlsx: лист «Сводка» (матрица + сводка по моделям) и лист
-    «Расшифровка моделей» (сокращение → полное название).
+    """Собрать .xlsx: лист «Сводка» (матрица + сводка по моделям + сводка
+    сбоев), лист «Расшифровка моделей» (сокращение → полное название) и
+    лист «Сбои по парам» (построчная причина сбоя).
 
     ``note`` — необязательная строка в шапке листа «Сводка»: например, для
     прогона, который ещё выполняется, честная пометка «завершено N пар из T»
@@ -154,6 +200,12 @@ def build_arm_results_xlsx(results, note=None) -> bytes:
     ws.append(summary_header)
     for row in summary_rows:
         ws.append(row)
+    reasons_header, reasons_rows = _failure_reason_summary_rows(results)
+    if reasons_rows:
+        ws.append([])
+        ws.append(reasons_header)
+        for row in reasons_rows:
+            ws.append(row)
     _autofit_columns(ws, matrix_header, matrix_rows)
 
     # Лист 2 — расшифровка сокращений.
@@ -162,6 +214,13 @@ def build_arm_results_xlsx(results, note=None) -> bytes:
     for row in [legend_header] + legend_rows:
         ws_legend.append(row)
     _autofit_columns(ws_legend, legend_header, legend_rows)
+
+    # Лист 3 — сбои по парам (причина сбоя построчно).
+    ws_fail = wb.create_sheet("Сбои по парам")
+    fail_header, fail_rows = _failure_reason_detail_rows(results, title_map)
+    for row in [fail_header] + fail_rows:
+        ws_fail.append(row)
+    _autofit_columns(ws_fail, fail_header, fail_rows)
 
     bio = BytesIO()
     wb.save(bio)

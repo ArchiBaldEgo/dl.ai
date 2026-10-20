@@ -34,6 +34,9 @@ _ADMIN_SCOPES_BY_PATH = (
     ("/ai/admin/test-console/", "admin_test_console"),
     ("/ai/admin/prompts/my/", "admin_my_prompt"),
     ("/ai/admin/test_data/", "admin_test_data"),
+    ("/ai/admin/ai/tokens/", "admin_tokens"),
+    ("/ai/admin/user-models/", "admin_user_models"),
+    ("/ai/admin/dl-api-requests/", "admin_dl_api_requests"),
 )
 
 # Тур ГЛАВНОГО ЭКРАНА админки («весь бар» + каждый раздел меню) — свой для

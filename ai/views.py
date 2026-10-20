@@ -41,7 +41,10 @@ from .throttling import rate_limited
 from .model_health import get_available_model_options, trigger_model_health_refresh_async
 from .model_clients import registry
 from .model_clients.registry import DEFAULT_MODEL_KEY, EXPERIMENTAL_MODEL_PREFIXES
-from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
+from .models import (
+    AIUserModel, AIAppSettings, ExternalDLAccount, ProgrammingLanguage,
+    Prompt, SharedPrompt, Topic,
+)
 from .auth_backends import (
     ADMIN_EXTERNAL_AUTH_BACKEND,
     create_admin_user_with_password,
@@ -57,6 +60,13 @@ from .admin.permissions import (
 from .middleware import _dev_bypass_enabled
 from .services.auth import get_user_identity_for_log
 from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
+from .services.user_models import (
+    PROVIDER_BASE_URLS,
+    delete_user_model,
+    save_user_model,
+    user_model_options,
+    user_model_rows,
+)
 from .services.onboarding import (
     MARK_URL_USER,
     record_wizard_seen,
@@ -81,6 +91,8 @@ from .i18n import (
     get_localized_name,
     get_localized_text,
     get_ui_language_suffix,
+    user_models_strings,
+    user_models_strings_all,
 )
 from .serializers import (
     programming_language as serialize_programming_language,
@@ -402,6 +414,10 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         default_model_key = ""
     saved_state = _read_ai_state(request)
     external_session_id = request.session.get('external_session_id')
+    # Личные модели пользователя («Мои модели»): отдельная optgroup В САМОМ
+    # НИЗУ селектора. Видны ТОЛЬКО владельцу (ai/services/user_models.py) —
+    # чужие модели чужие.
+    user_models = user_model_options(request.user)
     # Клиентские строки трёхъязычного UI (ai/i18n.client_strings): язык — тот
     # же, что у #selectLang (ai_state cookie, «Русский» по умолчанию). JS
     # перелокализует DOM при каждой смене языка сам; серверный словарь нужен
@@ -411,6 +427,7 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         'favorite_models': favorite_models,
         'other_models': other_models,
         'experimental_models': experimental_models,
+        'user_models': user_models,
         'default_model_key': default_model_key,
         'external_session_id': external_session_id,
         'last_update_date': _get_last_update_date(),
@@ -610,6 +627,75 @@ def find_error_view(request):
         extra_context={"node_id": request.GET.get("nid", "")},
         wizard_scope="find_error",
     )
+
+
+# === «Мои AI-модели» — клиентская страница (/ai/my-models/) ================
+#
+# Личные модели пользователя (провайдер + модель + свой ключ) нужны не
+# только сотрудникам админки: модель должна быть доступна ВСЕМ, кто
+# пользуется чатом. Поэтому страница есть с двух сторон:
+# * /ai/my-models/ — клиентская (обычный аутентифицированный пользователь,
+#   гейт как у страниц чата: _has_page_access);
+# * /ai/admin/user-models/ — админская (персонал, ai/admin/user_models.py).
+# Логика операций — одна, в СЕРВИСЕ (ai/services/user_models.py): вьюхи
+# только гейтят доступ и отдают шаблон (DRY).
+
+
+@require_http_methods(["GET"])
+def my_models_view(request):
+    """Клиентская страница «Мои AI-модели»: список + форма добавления."""
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+    if not _is_ai_app_enabled():
+        return HttpResponseNotFound("AI app is disabled")
+    ui_lang = _read_ai_state(request).get("lang") or ""
+    return render(
+        request,
+        "ai/my_models.html",
+        {
+            "user_models": user_model_rows(request.user),
+            "provider_choices": AIUserModel.PROVIDER_CHOICES,
+            "provider_base_urls": PROVIDER_BASE_URLS,
+            "t": user_models_strings(ui_lang),
+            # Все языки панели — для переключения языка на клиенте
+            # (JS-апплаер перерисовывает подписи при смене #selectLang).
+            "um_i18n": user_models_strings_all(),
+        },
+    )
+
+
+@require_http_methods(["POST"])
+def my_model_save_view(request):
+    """Создать/обновить СВОЮ личную модель (клиентская страница)."""
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"ok": False, "message": "Некорректный запрос"}, status=400)
+    if not isinstance(payload, dict):
+        return JsonResponse({"ok": False, "message": "Некорректный запрос"}, status=400)
+    ok, message, model_pk = save_user_model(request.user, payload)
+    if not ok:
+        status = 404 if message == "Модель не найдена" else 400
+        return JsonResponse({"ok": False, "message": message}, status=status)
+    return JsonResponse({"ok": True, "id": model_pk})
+
+
+@require_http_methods(["POST"])
+def my_model_delete_view(request):
+    """Удалить СВОЮ личную модель (клиентская страница)."""
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"ok": False, "message": "Некорректный запрос"}, status=400)
+    ok, message = delete_user_model(request.user, payload.get("id"))
+    if not ok:
+        status = 404 if message == "Модель не найдена" else 400
+        return JsonResponse({"ok": False, "message": message}, status=status)
+    return JsonResponse({"ok": True})
 
 
 @require_http_methods(["POST"])

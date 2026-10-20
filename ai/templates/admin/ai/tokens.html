@@ -1,0 +1,110 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+{# Страница «Контроль токенов» (ai/admin/tokens.py) — сколько токенов      #}
+{# потрачено: какие модели, кто, в каком режиме. Данные — из журнала       #}
+{# запросов и пар пакетного решения (ai/services/token_usage.py).           #}
+{# CSS/JS — static/admin/ai/tokens/.                                        #}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/tokens/index.css' %}">
+{% endblock %}
+
+{% block content %}
+<div class="ai-tokens-wrap">
+  <p class="help">
+    Сколько токенов потрачено. Считается <strong>промпт + ответ</strong>:
+    «ответ» — токены, которые сгенерировала модель, «промпт» — входные
+    токены запроса. Источники: журнал запросов (чат, «Реши задачу»,
+    «Найти ошибку», пакетное решение) и подробные пары пакетных прогонов
+    (задача × модель) — это два разреза одного расхода, поэтому суммы
+    разделов между собой <em>не складываются</em>.
+    {% if incomplete %}
+      <span class="ai-tokens-warn">Учёт неполный: web-модели (Web DeepSeek / Web Kimi) токены не отдают — их строки учитываются как 0.</span>
+    {% endif %}
+  </p>
+
+  <form class="ai-tokens-filters" method="get" action="">
+    <label>С даты <input type="date" name="date_from" value="{{ filters_date_from }}"></label>
+    <label>По дату <input type="date" name="date_to" value="{{ filters_date_to }}"></label>
+    <label>Режим
+      <select name="mode">
+        <option value="">все</option>
+        {% for key, label in mode_choices %}
+          <option value="{{ key }}"{% if filters_mode == key %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Модель
+      <input type="text" name="model" value="{{ filters_model }}" list="ai-tokens-model-list" placeholder="название модели">
+      <datalist id="ai-tokens-model-list">
+        {% for title in model_choices %}
+          <option value="{{ title }}"></option>
+        {% endfor %}
+      </datalist>
+    </label>
+    <label>Кто <input type="text" name="user" value="{{ filters_user }}" placeholder="ФИО / логин"></label>
+    <label>Источник
+      <select name="source">
+        <option value="">все</option>
+        {% for key, label in source_choices %}
+          <option value="{{ key }}"{% if filters_source == key %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="button default">Показать</button>
+    <a class="button" href="?">Сбросить</a>
+  </form>
+
+  <div class="ai-tokens-cards">
+    <div class="ai-tokens-card">
+      <div class="ai-tokens-card-title">Журнал запросов — всего</div>
+      <div class="ai-tokens-card-value">{{ logs.total.total_tokens }}</div>
+      <div class="ai-tokens-card-sub">
+        ответ: {{ logs.total.completion_tokens }} · промпт: {{ logs.total.prompt_tokens }} ·
+        запросов: {{ logs.total.requests }}
+      </div>
+    </div>
+    <div class="ai-tokens-card">
+      <div class="ai-tokens-card-title">Пакетные пары — всего</div>
+      <div class="ai-tokens-card-value">{{ batch.total.total_tokens }}</div>
+      <div class="ai-tokens-card-sub">
+        ответ: {{ batch.total.completion_tokens }} · промпт: {{ batch.total.prompt_tokens }} ·
+        пар: {{ batch.pairs }}
+      </div>
+    </div>
+  </div>
+
+  <div class="ai-tokens-grid">
+    <section class="ai-tokens-panel">
+      <h3>Журнал: по моделям</h3>
+      {% include "admin/ai/_tokens_table.html" with rows=logs.by_model %}
+    </section>
+    <section class="ai-tokens-panel">
+      <h3>Журнал: по пользователям</h3>
+      {% include "admin/ai/_tokens_table.html" with rows=logs.by_user %}
+    </section>
+    <section class="ai-tokens-panel">
+      <h3>Журнал: по режимам</h3>
+      {% include "admin/ai/_tokens_table.html" with rows=logs.by_mode %}
+    </section>
+    <section class="ai-tokens-panel">
+      <h3>Журнал: по дням</h3>
+      {% include "admin/ai/_tokens_table.html" with rows=logs.by_day %}
+    </section>
+    <section class="ai-tokens-panel">
+      <h3>Пакетные пары: по моделям</h3>
+      {% include "admin/ai/_tokens_table.html" with rows=batch.by_model %}
+    </section>
+    <section class="ai-tokens-panel">
+      <h3>Пакетные пары: по темам</h3>
+      {% include "admin/ai/_tokens_table.html" with rows=batch.by_topic %}
+    </section>
+  </div>
+</div>
+{% endblock %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script src="{% static 'admin/ai/tokens/index.js' %}" defer></script>
+{% endblock %}

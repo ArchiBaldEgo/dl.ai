@@ -226,6 +226,10 @@ def admin_tasks_view(request):
             "claim_url": f"{TASKS_URL}{task.pk}/claim/",
             "close_url": f"{TASKS_URL}{task.pk}/close/",
             "reopen_url": f"{TASKS_URL}{task.pk}/reopen/",
+            # Правка — только автору (ТЗ владельца) и только на рабочих
+            # видах (фронт/хотелки); в архиве кнопки правки нет.
+            "can_edit": _can_edit_task(request, task) and task.closed_at is None,
+            "edit_url": f"{TASKS_URL}{task.pk}/edit/",
         })
 
     can_reorder_kind = kind in (AIDevTask.Kind.FRONT, AIDevTask.Kind.WISH)
@@ -343,6 +347,74 @@ def admin_task_create_view(request):
             status=409,
         )
     return JsonResponse({"ok": True, "id": task.pk})
+
+
+#: Виды тасков, в которых редактирование разрешено: «Фронт работы» и
+#: «Хотелки». Архив «Закрытые» — не редактируется (таск уже отработан),
+#: псевдо-вкладки-фильтры («Не взятые», «Поиск», «Мои таски») — показывают
+#: те же строки фронта/хотелок, поэтому правка там доступна тоже.
+EDITABLE_KINDS = (AIDevTask.Kind.FRONT, AIDevTask.Kind.WISH)
+
+
+def _can_edit_task(request, task) -> bool:
+    """Может ли текущий пользователь править ЭТОТ таск.
+
+    По ТЗ владельца: редактировать может ТОЛЬКО тот, кто создал таск.
+    Права на доску (page.tasks) — только вход; сама правка — по авторству.
+    Superuser-override НЕТ: правило владельца буквальное («ТОЛЬКО тому,
+    что создал»), иначе суперюзер правил бы чужие таски мимо воли авторов.
+    """
+    if not request.user.is_authenticated:
+        return False
+    if task is None or task.created_by_id != request.user.pk:
+        return False
+    # Вид таска должен быть редактируемым (фронт/хотелки). Архив — нет.
+    return task.kind in EDITABLE_KINDS
+
+
+@require_POST
+def admin_task_edit_view(request, task_id):
+    """Редактирование таска: название, описание, срок.
+
+    Править может ТОЛЬКО автор таска (создатель) — по ТЗ владельца. Вид
+    таска (фронт/хотелки) и его номер НЕ меняются: это ломало бы нумерацию
+    вида (сквозная, с №1) и констрейнт (kind, priority_no).
+
+    Тело — JSON ``{"title", "description", "estimate"}`` (тот же формат, что
+    у create, только без kind). Пустое название — 400. Чужой таск — 403
+    (не 404: существование чужого таска и так видно на доске).
+    """
+    if not request.user.is_authenticated:
+        return _forbid()
+    raw = request.body or b""
+    if not raw.strip():
+        payload = {}
+    else:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return _forbid("Некорректный запрос", status=400)
+    task = AIDevTask.objects.filter(pk=task_id).only(
+        "pk", "kind", "created_by_id", "closed_at",
+    ).first()
+    if task is None:
+        return JsonResponse({"ok": False, "message": "Таск не найден"}, status=404)
+    if not _can_edit_task(request, task):
+        return _forbid("Редактировать таск может только его автор")
+    if task.closed_at is not None:
+        return JsonResponse(
+            {"ok": False, "message": "Закрытый таск не редактируется"}, status=409
+        )
+    title = (payload.get("title") or "").strip()
+    if not title:
+        return JsonResponse(
+            {"ok": False, "message": "Название таска обязательно"}, status=400
+        )
+    task.title = title[:200]
+    task.description = (payload.get("description") or "").strip()
+    task.estimate = (payload.get("estimate") or "").strip()[:100]
+    task.save(update_fields=["title", "description", "estimate"])
+    return JsonResponse({"ok": True})
 
 
 @require_POST

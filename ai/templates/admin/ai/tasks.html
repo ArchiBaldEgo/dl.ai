@@ -39,7 +39,7 @@
     {% endfor %}
   </div>
 
-  {% if can_create and active_kind != 'closed' %}
+  {% if can_create and active_kind != 'search' and active_kind != 'closed' %}
   <form class="ai-tasks-create" data-create-url="/ai/admin/tasks/create/">
     {% csrf_token %}
     <h3>Новый таск</h3>
@@ -187,6 +187,11 @@
             <td>{% if row.taken %}{{ row.claimant|default:"—" }}{% else %}<span class="ai-task-free">—</span>{% endif %}</td>
             <td>{% if row.taken %}{{ row.taken_at|date:"d.m.Y H:i" }}{% else %}—{% endif %}</td>
             <td class="ai-task-actions">
+              {% if row.can_edit %}
+                {# Правка — только автору таска (проверка на сервере тоже). #}
+                <button type="button" class="button ai-task-btn-edit"
+                        data-edit-toggle="1">Изменить</button>
+              {% endif %}
               {% if not row.taken %}
                 <button type="button" class="button ai-task-btn-claim"
                         data-claim-url="{{ row.claim_url }}">Взять</button>
@@ -197,6 +202,27 @@
               {% endif %}
             </td>
           </tr>
+          {% if row.can_edit %}
+          {# Форма правки раскрывается кнопкой «Изменить» (в своей строке). #}
+          <tr class="ai-task-edit-row" data-edit-row="{{ row.id }}" hidden>
+            <td colspan="8">
+              <form class="ai-task-edit-form" data-edit-url="{{ row.edit_url }}">
+                <div class="ai-tasks-create-row">
+                  <input type="text" name="title" maxlength="200" required
+                         value="{{ row.title }}" placeholder="Название *">
+                  <input type="text" name="estimate" maxlength="100"
+                         value="{{ row.estimate }}" placeholder="Срок (до 2 недель, до 4 дней…)">
+                </div>
+                <textarea name="description" rows="3"
+                          placeholder="Описание">{{ row.description }}</textarea>
+                <div class="ai-task-edit-actions">
+                  <button type="submit" class="button default">Сохранить</button>
+                  <button type="button" class="button ai-task-btn-edit-cancel">Отмена</button>
+                </div>
+              </form>
+            </td>
+          </tr>
+          {% endif %}
         {% endfor %}
         {% endtimezone %}
       </tbody>

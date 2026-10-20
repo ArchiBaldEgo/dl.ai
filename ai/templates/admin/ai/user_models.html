@@ -1,0 +1,21 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+{# Страница «Мои AI-модели» (ai/admin/user_models.py) — личные модели        #}
+{# пользователя: провайдер + ID модели + свой ключ (+ базовый URL для      #}
+{# совместимых провайдеров). Видны ТОЛЬКО владельцу. Разметка — общий       #}
+{# partial ai/_user_models_panel.html (он же на клиентской странице).        #}
+{# CSS/JS — static/admin/ai/user_models/.                                     #}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/user_models/index.css' %}">
+{% endblock %}
+
+{% block content %}
+  {% include "ai/_user_models_panel.html" with create_url="/ai/admin/user-models/create/" delete_url="/ai/admin/user-models/delete/" %}
+{% endblock %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script src="{% static 'admin/ai/user_models/index.js' %}" defer></script>
+{% endblock %}

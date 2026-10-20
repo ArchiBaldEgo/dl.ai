@@ -19,6 +19,7 @@ from datetime import time as dtime, timedelta
 from time import perf_counter
 from asgiref.sync import async_to_sync
 from django.db import close_old_connections, transaction
+from django.db.models import Max, Q
 from django.utils import timezone
 
 from django.conf import settings
@@ -47,9 +48,9 @@ from .model_clients import registry
 from .model_clients.web_deepseek import restart_bot_pool
 from .model_clients.web_kimi import restart_kimi_bot_pool
 
-# Web DeepSeek models served by the WebDeepseek/ pool — candidates for auto-recovery.
+# Web DeepSeek models served by the WebPools/ pool (site deepseek) — candidates for auto-recovery.
 WEB_DEEPSEEK_KEYS = ("Web_DeepSeek", "Web_DeepSeek_Thinking")
-# Web Kimi models served by the WebKimi/ pool — candidates for auto-recovery.
+# Web Kimi models served by the WebPools/ pool (site kimi) — candidates for auto-recovery.
 WEB_KIMI_KEYS = ("Web_Kimi",)
 # Модель → её BotPoolClient (клиент умеет спросить /health пула о готовых ботах).
 from .model_clients.web_deepseek import _client as _web_deepseek_pool_client  # noqa: E501
@@ -450,7 +451,7 @@ def _maybe_autorecover_web_deepseek(handlers, window_date):
 def _maybe_autorecover_kimi(handlers, window_date):
     """Restart the Kimi bot pool and re-check Web Kimi if it is down.
 
-    Зеркало ``_maybe_autorecover_web_deepseek`` для WebKimi/ пула. Gate
+    Зеркало ``_maybe_autorecover_web_deepseek`` для Kimi-пула. Gate
     ``AI_WEB_KIMI_AUTORECOVERY`` (default True). Only acts when the Web Kimi
     model is unavailable; restarts the pool once, waits briefly, re-checks the
     down model, and annotates ``last_message`` with the auto-recovery outcome.
@@ -825,10 +826,23 @@ def get_model_status_rows():
     missing_keys = [key for key in ordered_keys if key not in current_rows]
     latest_rows = {}
     if missing_keys:
-        for row in AIModelAvailability.objects.filter(model_key__in=missing_keys).order_by(
-            "model_key", "-window_date"
-        ):
-            if row.model_key not in latest_rows:
+        # Только последнее окно по каждой отсутствующей модели: раньше тянулась
+        # ВСЯ история доступности (строка на модель на окно) и в словарь попадала
+        # первая — на долгоживущей БД это десятки тысяч строк ради нескольких
+        # моделей. Два запроса вместо одного (агрегат + точечная выборка) —
+        # переносимо на sqlite (тесты) и Postgres.
+        max_dates = dict(
+            AIModelAvailability.objects
+            .filter(model_key__in=missing_keys)
+            .values("model_key")
+            .annotate(latest=Max("window_date"))
+            .values_list("model_key", "latest")
+        )
+        if max_dates:
+            cond = Q()
+            for key, win_date in max_dates.items():
+                cond |= Q(model_key=key, window_date=win_date)
+            for row in AIModelAvailability.objects.filter(cond):
                 latest_rows[row.model_key] = row
 
     result = []

@@ -66,7 +66,7 @@ document.getElementById("selectLang").addEventListener("change", function() {
     var submitBtn = document.querySelector("button[type='submit']");
     if (submitBtn) submitBtn.textContent = localization[selectedLang].send;
 
-    var clearBtn = document.querySelector("button[onclick='clearContext()']");
+    var clearBtn = document.querySelector("#clearContextBtn");
     if (clearBtn) clearBtn.textContent = localization[selectedLang].clear;
 
     var messageText = document.getElementById("messageText");

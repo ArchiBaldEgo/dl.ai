@@ -92,10 +92,11 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   в `static/admin/js/`: `chat_template.js` (только чат), `decide_task.js`/`find_error.js`
   self-contained, `ai_processes.js` (меню «Процессы» через `admin/base_site.html`),
   `test_console.js`.
-- Root-level: `WebDeepseek/` (:3000), `WebKimi/` (:3001, отдельный `KIMI_*` env; login через
-  `seed.js`), `REST API.md`, `DOCX.md`, `test_arm_solve.py`, `mail_bridge.py` /
-  `backup_runner.sh` / `health_check.sh` (email→ops bridge). `bot/` — LEGACY, не
-  референсится кодом.
+- Root-level: `WebPools/` (общий код обоих пулов: `sites/deepseek.js` :3000, `sites/kimi.js`
+  :3001 с отдельным `KIMI_*` env; Kimi login сажается вручную в persistent Chrome profile —
+  `WebKimi/seed.js`, НЕ ТРОГАТЬ), `REST API.md`, `DOCX.md`, `test_arm_solve.py`,
+  `mail_bridge.py` / `backup_runner.sh` / `health_check.sh` (email→ops bridge). `bot/` —
+  LEGACY, не референсится кодом.
 
 ## Critical gotchas (daily)
 
@@ -142,10 +143,13 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
 
 ## Web bot-pools (ops)
 
-- Оба пула в одном контейнере (стартует Dockerfile CMD): `WebDeepseek/` :3000, `WebKimi/` :3001
-  (Kimi login сажается вручную в persistent Chrome profile — `WebKimi/seed.js`). Держать на
-  127.0.0.1/internal; Docker healthcheck опрашивает :8000/health И оба пула
-  (`ready_count > 0`).
+- Оба пула в одном контейнере (стартует Dockerfile CMD): `WebPools/api/index.js --site=deepseek`
+  :3000 и `--site=kimi` :3001 — ОТДЕЛЬНЫМИ процессами (краш одного сайта не роняет другой).
+  Один общий код + один корневой `node_modules` (Node резолвит его вверх по дереву, поэтому
+  `WebKimi/seed.js` работает без своих копий). Kimi login сажается вручную в persistent
+  Chrome profile (`WebKimi/seed.js`) — профили DeepSeek и Kimi РАЗДЕЛЬНЫЕ
+  (`site.profileRoot`), смешивать нельзя. Держать на 127.0.0.1/internal; Docker healthcheck
+  опрашивает :8000/health И оба пула (`ready_count > 0`).
 - Правки пулов/воркеров живут ТОЛЬКО после рестарта контейнера. Краш рендерера — зомби-бот
   (`page.isClosed()` остаётся false!) — `_pageCrashed` + reap; конкуренция за бота ждёт до
   `queueWaitMs` (30с, env `BOT_POOL_QUEUE_WAIT_MS`/`KIMI_POOL_QUEUE_WAIT_MS`) — держать
@@ -180,6 +184,6 @@ Management-команды (см. `--help`):
 - No `verify=False` for HTTPS in production — `SKIP_SSL_VERIFICATION` local-dev only.
 - Admin set-password flow принимает `external_user_id` только после
   `ExternalAuthMiddleware` + `_session_matches_external_id`.
-- Не экспортировать `WebDeepseek/` (:3000) / `WebKimi/` (:3001) в публичные сети.
+- Не экспортировать пулы `WebPools/` (:3000 DeepSeek / :3001 Kimi) в публичные сети.
 - Промпт-листинги админки/чата: all prompts read-only всем допущенным (student content);
   правка чужого — только ключ `page.prompt_admin.edit_others`.

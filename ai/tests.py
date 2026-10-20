@@ -2433,7 +2433,7 @@ class BotPoolEmptyReplyTests(SimpleTestCase):
             label="Web DeepSeek",
             provider="web_deepseek",
             site_label="DeepSeek",
-            selector_doc="WebDeepseek/worker/data.json",
+            selector_doc="WebPools/sites/deepseek.js",
         )
 
     def _post(self, status_code, retry_after="1"):
@@ -2449,7 +2449,7 @@ class BotPoolEmptyReplyTests(SimpleTestCase):
         with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(429)), \
              patch.object(client, "pool_state", return_value="empty"), \
              patch("ai.model_clients._base.asyncio.sleep"):
-            text, tokens, is_error = self._run_ask(client)
+            text, tokens, is_error, _cut, _prompt = self._run_ask(client)
         self.assertTrue(is_error)
         self.assertEqual(tokens, 0)
         self.assertIn("пуст", text)
@@ -2463,7 +2463,7 @@ class BotPoolEmptyReplyTests(SimpleTestCase):
         with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(503)), \
              patch.object(client, "pool_state", return_value="empty"), \
              patch("ai.model_clients._base.asyncio.sleep"):
-            text, _, is_error = self._run_ask(client)
+            text, _, is_error, _cut, _prompt = self._run_ask(client)
         self.assertTrue(is_error)
         self.assertIn("пуст", text)
 
@@ -2473,7 +2473,7 @@ class BotPoolEmptyReplyTests(SimpleTestCase):
         with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(429)), \
              patch.object(client, "pool_state", return_value="live"), \
              patch("ai.model_clients._base.asyncio.sleep"):
-            text, _, _ = self._run_ask(client)
+            text, _, _, _cut, _prompt = self._run_ask(client)
         self.assertEqual(text, map_http_error(429, "web_deepseek"))
 
     def test_starting_pool_503_keeps_bot_init_text(self):
@@ -2481,7 +2481,7 @@ class BotPoolEmptyReplyTests(SimpleTestCase):
         with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(503)), \
              patch.object(client, "pool_state", return_value="live"), \
              patch("ai.model_clients._base.asyncio.sleep"):
-            text, _, _ = self._run_ask(client)
+            text, _, _, _cut, _prompt = self._run_ask(client)
         self.assertIn("инициализируется", text)
 
     def _run_ask(self, client):
@@ -2727,10 +2727,12 @@ class HealthCheckOutputTests(SimpleTestCase):
 class BatchReportTests(SimpleTestCase):
     """Batch-solve ARM report: per-model / per-topic aggregation + ordering."""
 
-    def _item(self, model, topic, verdict, duration, tokens=0):
+    def _item(self, model, topic, verdict, duration, tokens=0, topic_id=None):
+        # topic_id — ключ группировки по темам (названия тем совпадают у
+        # разных языков, поэтому группируем по ID, см. _topic_bucket_key).
         return {
             "model_key": model, "model_title": model,
-            "topic_name": topic, "verdict": verdict,
+            "topic_id": topic_id, "topic_name": topic, "verdict": verdict,
             "duration": duration, "tokens": tokens,
         }
 
@@ -2738,11 +2740,11 @@ class BatchReportTests(SimpleTestCase):
         from ai.arm_runner import _build_batch_report
 
         results = [
-            self._item("A", "Линейные", "solved", 2.0, 10),
-            self._item("A", "Циклы", "failed", 4.0, 10),
-            self._item("A", "Линейные", "skipped", 1.0, 2),
-            self._item("B", "Линейные", "solved", 5.0, 20),
-            self._item("B", "Циклы", "solved", 3.0, 20),
+            self._item("A", "Линейные", "solved", 2.0, 10, topic_id=1),
+            self._item("A", "Циклы", "failed", 4.0, 10, topic_id=2),
+            self._item("A", "Линейные", "skipped", 1.0, 2, topic_id=1),
+            self._item("B", "Линейные", "solved", 5.0, 20, topic_id=1),
+            self._item("B", "Циклы", "solved", 3.0, 20, topic_id=2),
         ]
         report = _build_batch_report(results)
         # Top-level counts: 3 solved, 1 failed, 1 skipped, 5 total.
@@ -3153,6 +3155,10 @@ class AskOllamaCutFlagTests(SimpleTestCase):
 
     @staticmethod
     def _run_with_chat_sync(result):
+        """result — кортеж _chat_sync: (content, tokens, thinking, done_reason).
+
+        Возвращает кортеж _ask_ollama: (текст, токены_ответа, is_error,
+        обрезан, токены_промпта) — 5 элементов (контракт провайдеров)."""
         from asyncio import run as _run
         from unittest.mock import patch
         from ai.model_clients import ollama
@@ -3160,23 +3166,23 @@ class AskOllamaCutFlagTests(SimpleTestCase):
             return _run(ollama._ask_ollama("msg", 1, "test:model"))
 
     def test_done_reason_stop_not_truncated(self):
-        text, tokens, is_err, cut = self._run_with_chat_sync(("ok", 5, "", "stop"))
+        text, tokens, is_err, cut, _prompt = self._run_with_chat_sync(("ok", 5, "", "stop", 3))
         self.assertEqual((text, tokens, is_err, cut), ("ok", 5, False, False))
 
     def test_done_reason_length_truncated(self):
-        text, tokens, is_err, cut = self._run_with_chat_sync(("partial code block", 16384, "", "length"))
+        text, tokens, is_err, cut, _prompt = self._run_with_chat_sync(("partial code block", 16384, "", "length", 3))
         self.assertEqual((text, tokens, is_err, cut), ("partial code block", 16384, False, True))
 
     def test_thinking_fallback_cut_flag(self):
         # content пуст, thinking есть — обрезанное рассуждение → флаг True
-        text, tokens, is_err, cut = self._run_with_chat_sync(("", 1998, "We need to think...", "length"))
+        text, tokens, is_err, cut, _prompt = self._run_with_chat_sync(("", 1998, "We need to think...", "length", 3))
         self.assertEqual((text, tokens, is_err, cut), ("We need to think...", 1998, False, True))
         # рассуждение дошло до конца, но контента не родил — не «обрез»
-        text, tokens, is_err, cut = self._run_with_chat_sync(("", 50, "all thinking done", "stop"))
+        text, tokens, is_err, cut, _prompt = self._run_with_chat_sync(("", 50, "all thinking done", "stop", 3))
         self.assertEqual((text, tokens, is_err, cut), ("all thinking done", 50, False, False))
 
     def test_empty_content_is_error(self):
-        text, tokens, is_err, cut = self._run_with_chat_sync(("", 0, "", "stop"))
+        text, tokens, is_err, cut, _prompt = self._run_with_chat_sync(("", 0, "", "stop", 3))
         self.assertTrue(is_err)
         self.assertFalse(cut)
         self.assertIn("пустой ответ", text)
@@ -3209,7 +3215,7 @@ class OllamaNoThinkTests(SimpleTestCase):
         from ai.model_clients import ollama
         seen = {}
         with patch.object(ollama, "_get_client", lambda: self._fake_client(seen)):
-            content, tokens, thinking, done = ollama._stream_once("m", "msg", 0.7, 100, think=False)
+            content, tokens, thinking, done, _prompt = ollama._stream_once("m", "msg", 0.7, 100, think=False)
         self.assertEqual(content, "x")
         self.assertEqual(seen.get("think"), False)
         # Дефолт — поле в запрос вообще не идёт (старые SDK без think-поля).
@@ -3224,11 +3230,11 @@ class OllamaNoThinkTests(SimpleTestCase):
         seen = {"think": "not-called"}
         def fake_chat_sync(model, msg, temperature, num_predict, think=None):
             seen["think"] = think
-            return ("program p;", 5, "", "stop")
+            return ("program p;", 5, "", "stop", 3)
         handler = ollama.nothink_handler(ollama.ask_Ollama_Gemma_4_Cloud_async)
         self.assertIsNotNone(handler)  # все Ollama-модели получили no-think пару
         with patch.object(ollama, "_chat_sync", fake_chat_sync):
-            text, tokens, is_err, cut = _run(handler("м", 1))  # 4-кортеж, как у основных
+            text, tokens, is_err, cut, _prompt = _run(handler("м", 1))  # 5-кортеж, как у основных
         self.assertEqual((text, tokens, is_err), ("program p;", 5, False))
         self.assertFalse(seen["think"])
 
@@ -3259,9 +3265,9 @@ class OllamaNoThinkTests(SimpleTestCase):
         seen = {"think": "not-called"}
         def fake_chat_sync(model, msg, temperature, num_predict, think=None):
             seen["think"] = think
-            return ("код", 9, "", "stop")
+            return ("код", 9, "", "stop", 3)
         with patch.object(ollama, "_chat_sync", fake_chat_sync):
-            text, tokens, is_err, cut = _run(
+            text, tokens, is_err, cut, _prompt = _run(
                 ollama.ask_Ollama_Gemma_4_Cloud_async("м", 1, think=True))
         self.assertTrue(seen["think"])
 
@@ -3757,7 +3763,14 @@ class RerunLogJournalTests(TestCase):
         html = response.render().content.decode()
         # Таблица результатов (общий partial), как у обычного batch-лога.
         self.assertTrue(response.context_data["is_batch_log"])
-        self.assertIn("ArmBatchResults.init", html)
+        # Скрипт развёртки вынесен в static — маркер ищем в файле.
+        from pathlib import Path
+        js = (
+            Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
+            / "request_logs_detail" / "index.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("ArmBatchResults.init", js)
+        self.assertIn('id="batch-results-card"', html)
 
     def test_recent_batch_rows_include_rerun_log(self):
         from ai.admin.request_logs import build_recent_batch_rows
@@ -6079,12 +6092,15 @@ class OllamaRegistryTests(SimpleTestCase):
         "Ollama_Kimi_K2_6_Cloud",
         "Ollama_Gpt_Oss_20B_Cloud",
         "Ollama_Gpt_Oss_120B_Cloud",
+        "Ollama_MiniMax_M3_1_Flash_Cloud",
     ]
 
-    # gpt-oss:cloud (harmony) стримит отдельное поле thinking → reasoning-модели.
+    # gpt-oss:cloud (harmony) и minimax-m3.1-flash:cloud стримят отдельное поле
+    # thinking → reasoning-модели.
     REASONING_KEYS = {
         "Ollama_Gpt_Oss_20B_Cloud",
         "Ollama_Gpt_Oss_120B_Cloud",
+        "Ollama_MiniMax_M3_1_Flash_Cloud",
     }
 
     def _expected_caps(self, key):
@@ -6165,7 +6181,7 @@ class OllamaHandlerTests(SimpleTestCase):
             # чтобы линтер не ругался на отсутствующий атрибут.
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
             result = await glm_5_2("1+1=?", "client")
-            self.assertEqual(result, ("print(1)", 5, False, False))
+            self.assertEqual(result, ("print(1)", 5, False, False, 0))
             mock_client.chat.assert_called_once()
             # Без tools= (обычный чат), но СТРИМОМ (stream=True) — иначе
             # ollama.com рвёт соединение на длинных генерациях.
@@ -6184,7 +6200,7 @@ class OllamaHandlerTests(SimpleTestCase):
 
             deepseek_flash = getattr(ollama, "ask_Ollama_DeepSeek_V4_1_Flash_Cloud_async")
             result = await deepseek_flash("hi", "client")
-            self.assertEqual(result, ("ok", 1, False, False))
+            self.assertEqual(result, ("ok", 1, False, False, 0))
             _, kwargs = mock_client.chat.call_args
             self.assertEqual(kwargs.get("model"), "deepseek-v4.1-flash:cloud")
 
@@ -6204,7 +6220,7 @@ class OllamaHandlerTests(SimpleTestCase):
 
                     handler = getattr(ollama, f"ask_{key}_async")
                     result = await handler("hi", "client")
-                    self.assertEqual(result, ("ok", 1, False, False))
+                    self.assertEqual(result, ("ok", 1, False, False, 0))
                     _, kwargs = mock_client.chat.call_args
                     self.assertEqual(kwargs.get("model"), model_id)
 
@@ -6245,7 +6261,7 @@ class OllamaHandlerTests(SimpleTestCase):
             gpt_oss = getattr(ollama, "ask_Ollama_Gpt_Oss_20B_Cloud_async")
             result = await gpt_oss("hi", "client")
             # thinking-фолбэк: done_reason нет в чанках → не «length» → не обрез
-            self.assertEqual(result, ("Рассуждаю и отвечаю", 7, False, False))
+            self.assertEqual(result, ("Рассуждаю и отвечаю", 7, False, False, 0))
 
     async def test_empty_content_and_thinking_returns_error(self):
         """Пустые и content, и thinking → прежняя ошибка «пустой ответ»."""
@@ -6257,7 +6273,7 @@ class OllamaHandlerTests(SimpleTestCase):
             mock_client.chat.return_value = self._stream("", eval_count=0)
 
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
-            content, tokens, is_error, cut = await glm_5_2("hi", "client")
+            content, tokens, is_error, cut, _prompt = await glm_5_2("hi", "client")
             self.assertTrue(is_error)
             self.assertEqual(tokens, 0)
             self.assertFalse(cut)
@@ -6312,7 +6328,7 @@ class OllamaRateLimitTests(SimpleTestCase):
             ]
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
             result = await glm_5_2("hi", "client")
-            self.assertEqual(result, ("ok", 3, False, False))
+            self.assertEqual(result, ("ok", 3, False, False, 0))
             self.assertEqual(mock_client.chat.call_count, 2)
             self.assertEqual(mock_sleep.await_count, 1)
             delay = mock_sleep.await_args.args[0]
@@ -6332,7 +6348,7 @@ class OllamaRateLimitTests(SimpleTestCase):
             mock_client = mock_client_cls.return_value
             mock_client.chat.side_effect = self._429()
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
-            content, tokens, is_error, cut = await glm_5_2("hi", "client")
+            content, tokens, is_error, cut, _prompt = await glm_5_2("hi", "client")
             # 1 первая попытка + 3 ретрая
             self.assertEqual(mock_client.chat.call_count, 4)
             self.assertTrue(is_error)
@@ -6359,7 +6375,7 @@ class OllamaRateLimitTests(SimpleTestCase):
             mock_client = mock_client_cls.return_value
             mock_client.chat.side_effect = ResponseError("boom", status_code=500)
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
-            content, tokens, is_error, cut = await glm_5_2("hi", "client")
+            content, tokens, is_error, cut, _prompt = await glm_5_2("hi", "client")
             self.assertEqual(mock_client.chat.call_count, 1)
             self.assertTrue(is_error)
             self.assertFalse(cut)
@@ -6391,7 +6407,7 @@ class OllamaRateLimitTests(SimpleTestCase):
             )
             self.assertEqual(active["max"], 1)
             self.assertEqual(len(results), 4)
-            self.assertTrue(all(r == ("ok", 1, False, False) for r in results))
+            self.assertTrue(all(r == ("ok", 1, False, False, 0) for r in results))
 
 
 class ArmBatchResultsPartialTests(SimpleTestCase):
@@ -6405,8 +6421,18 @@ class ArmBatchResultsPartialTests(SimpleTestCase):
         html = render_to_string("admin/ai/_ai_batch_results.html")
         self.assertNotIn("{#", html)
         self.assertNotIn("Общий CSS", html)
-        # Содержимое частички (CSS) рендерится как обычно.
-        self.assertIn(".arm-card", html)
+        # Комментарий partial'а не должен попасть на страницу как видимый текст.
+        self.assertNotIn("Общий partial", html)
+
+    def test_batch_results_css_moved_to_static_file(self):
+        """CSS карточки вынесен в static/admin/ai/batch_results/index.css."""
+        from pathlib import Path
+        path = (
+            Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
+            / "batch_results" / "index.css"
+        )
+        src = path.read_text(encoding="utf-8")
+        self.assertIn(".arm-card", src)
 
 
 class SendSolutionCourseIdTests(SimpleTestCase):
@@ -6527,7 +6553,7 @@ class EmptyResponseDetectionTests(SimpleTestCase):
             mock_req.post.return_value = FakeResponse()
             mock_req.exceptions = __import__("requests").exceptions
             result = sambanova._ask_sambanova_model_async("hi", 0, "Model", max_tokens=8)
-            content, tokens, is_error = async_to_sync_runner(result)
+            content, tokens, is_error, _cut, _prompt = async_to_sync_runner(result)
         self.assertTrue(is_error)
         self.assertEqual(tokens, 0)
         self.assertIn("пустой ответ", content.lower())
@@ -6544,7 +6570,7 @@ class EmptyResponseDetectionTests(SimpleTestCase):
             mock_req.post.return_value = FakeResponse()
             mock_req.exceptions = __import__("requests").exceptions
             result = sambanova._ask_sambanova_model_async("hi", 0, "Model", max_tokens=8)
-            content, tokens = async_to_sync_runner(result)
+            content, tokens, _is_error, _cut, _prompt = async_to_sync_runner(result)
         self.assertEqual(content, "42")
         self.assertEqual(tokens, 3)
 
@@ -6571,7 +6597,7 @@ class EmptyResponseDetectionTests(SimpleTestCase):
             mock_client.__aexit__ = AsyncMock(return_value=None)
             mock_cls.return_value = mock_client
             result = groq._ask_groq("groq-model", "hi", 0, model_key="Groq_Test")
-            content, tokens, is_error = async_to_sync_runner(result)
+            content, tokens, is_error, _cut, _prompt = async_to_sync_runner(result)
         self.assertTrue(is_error)
         self.assertEqual(tokens, 0)
         self.assertIn("пустой ответ", content.lower())
@@ -7064,9 +7090,10 @@ class RequestLogXlsxTests(TestCase):
         )
 
     def test_xlsx_matrix_and_auto_width(self):
-        """Два листа: «Сводка» (матрица задача×модель с сокращёнными
-        названиями + сводка по моделям) и «Расшифровка моделей»
-        (сокращение → полное название). Автоширина — по содержимому."""
+        """Три листа: «Сводка» (матрица задача×модель с сокращёнными
+        названиями + сводка по моделям), «Расшифровка моделей»
+        (сокращение → полное название) и «Сбои по парам» (построчная
+        причина сбоя — таксономия сбоев). Автоширина — по содержимому."""
         from io import BytesIO
 
         from openpyxl import load_workbook
@@ -7082,7 +7109,7 @@ class RequestLogXlsxTests(TestCase):
         ]
         payload = build_arm_results_xlsx(results)
         wb = load_workbook(BytesIO(payload))
-        self.assertEqual(wb.sheetnames, ["Сводка", "Расшифровка моделей"])
+        self.assertEqual(wb.sheetnames, ["Сводка", "Расшифровка моделей", "Сбои по парам"])
 
         ws = wb["Сводка"]
         rows = [[c.value for c in row] for row in ws.iter_rows()]
@@ -9449,9 +9476,19 @@ class BatchLogDetailTemplateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         return response.render().content.decode()
 
+    def _batch_detail_js(self):
+        """JS детальной страницы журнала — вынесен в static."""
+        from pathlib import Path
+        return (
+            Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
+            / "request_logs_detail" / "index.js"
+        ).read_text(encoding="utf-8")
+
     def test_batch_detail_shows_only_results_table(self):
         html = self._detail(self.batch_log)
-        self.assertIn("ArmBatchResults.init", html)
+        # Скрипт развёртки вынесен в static (шаблон — только контейнер),
+        # поэтому маркер ищем в файле, а не в отрендеренном HTML.
+        self.assertIn("ArmBatchResults.init", self._batch_detail_js())
         self.assertIn("результаты прогона", html)
         # Метаданные и тексты запроса/ответа НЕ показываем.
         self.assertNotIn("Кто отправлял", html)
@@ -9463,11 +9500,18 @@ class BatchLogDetailTemplateTests(TestCase):
         «Скачать результаты (XLSX)» (тот же стиль .arm-button), «Назад к
         логам» — отдельной строкой ссылок, не в стиле .default."""
         html = self._detail(self.batch_log)
+        js = self._batch_detail_js()
         self.assertIn('id="resend-btn" class="arm-button"', html)
-        self.assertIn("group.className = 'arm-head-actions'", html)
-        self.assertIn("group.appendChild(built.downloadBtn)", html)
-        # Обе кнопки группы нормализованы до одного размера (button vs a).
-        self.assertIn(".arm-head-actions .arm-button {", html)
+        self.assertIn("group.className = 'arm-head-actions'", js)
+        self.assertIn("group.appendChild(built.downloadBtn)", js)
+        # Обе кнопки группы нормализованы до одного размера (button vs a) —
+        # правило живёт в вынесенном CSS карточки.
+        from pathlib import Path
+        css = (
+            Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
+            / "batch_results" / "index.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn(".arm-head-actions .arm-button {", css)
         self.assertNotIn('id="resend-btn" class="default"', html)
         self.assertIn("← Назад к логам", html)
 
@@ -9514,8 +9558,12 @@ class ArmSolveTopicsKeyTests(TestCase):
         self.assertNotIn("programming_language_id", topics[0])
 
     def test_js_filltopics_matches_serializer_key(self):
-        from django.template.loader import get_template
-        src = get_template("admin/ai/arm_solve.html").template.source
+        from pathlib import Path
+        # JS страницы вынесен в static (шаблон — только разметка).
+        src = (
+            Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
+            / "arm_solve" / "index.js"
+        ).read_text(encoding="utf-8")
         # Темы фильтруются по ключу сериализатора через Set (объединение
         # тем всех выбранных языков).
         self.assertIn(
@@ -9541,14 +9589,21 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         from django.template.loader import get_template
         return get_template(name).template.source
 
+    @staticmethod
+    def _static_source(*parts):
+        """Источник вынесенного статического файла (CSS/JS админки)."""
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent.joinpath("static", *parts)
+        return path.read_text(encoding="utf-8")
+
     def test_rerun_pairs_post_sends_csrf_token(self):
-        src = self._source("admin/ai/arm_solve.html")
+        src = self._static_source("admin", "ai", "arm_solve", "index.js")
         i = src.find("await fetch(rerunPairsUrl")
         self.assertNotEqual(i, -1, "блок POST rerun-pairs не найден")
         self.assertIn("'X-CSRFToken': getCsrfToken()", src[i:i + 400])
 
     def test_arm_solve_has_friendly_expired_session_parser(self):
-        src = self._source("admin/ai/arm_solve.html")
+        src = self._static_source("admin", "ai", "arm_solve", "index.js")
         self.assertIn("function parseJsonResponse", src)
         self.assertIn("Сессия истекла", src)
 
@@ -9556,7 +9611,7 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         """Ленивое тело результата (partial используется на /arm/solve/ и в
         деталях журнала): не-JSON ответ (страница логина) → внятная ошибка.
         Чанковая загрузка raw_response и агрегатор состояния — на месте."""
-        src = self._source("admin/ai/_ai_batch_results.html")
+        src = self._static_source("admin", "ai", "batch_results", "index.js")
         self.assertIn("function parseJsonResponse", src)
         self.assertIn("Сессия истекла", src)
         i = src.find("function fetchResultChunk")
@@ -9565,7 +9620,7 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         self.assertIn("function loadResultBodyState", src)
 
     def test_log_detail_resend_session_label_and_rerun_route(self):
-        src = self._source("admin/ai/request_logs_detail.html")
+        src = self._static_source("admin", "ai", "request_logs_detail", "index.js")
         # Протухшая сессия — внятное сообщение вместо JSON.parse-мусора.
         self.assertIn("Сессия истекла", src)
         # Подпись кнопки восстанавливается из отрендеренной, а не литералом.
@@ -9754,8 +9809,14 @@ class FormActionShadowingTests(SimpleTestCase):
     ``form.getAttribute('action')`` — атрибут затенением не страдает."""
 
     def test_prompt_defaults_post_url_uses_get_attribute(self):
-        from django.template.loader import get_template
-        src = get_template("admin/ai/prompt_defaults.html").template.source
+        from django.conf import settings
+        import os
+        # JS страницы вынесен в static (шаблон — только разметка).
+        js_path = os.path.join(
+            settings.BASE_DIR, "static", "admin", "ai", "prompt_defaults", "index.js",
+        )
+        with open(js_path, encoding="utf-8") as fh:
+            src = fh.read()
         self.assertIn("form.getAttribute('action')", src)
         self.assertNotIn("fetch(form.action", src)
 
@@ -12516,6 +12577,7 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
             admin_task_claim_view,
             admin_task_close_view,
             admin_task_create_view,
+            admin_task_edit_view,
             admin_task_reopen_view,
             admin_task_reorder_view,
             admin_tasks_view,
@@ -12527,6 +12589,7 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.claim_view = admin_task_claim_view
         self.close_view = admin_task_close_view
         self.reopen_view = admin_task_reopen_view
+        self.edit_view = admin_task_edit_view
         self.tasks_url = TASKS_URL
         self.superuser = get_user_model().objects.create_superuser(
             username="task_admin", password="x", email="t@a.com",
@@ -13314,6 +13377,172 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
                                        title="ФК-101")
         self.assertIn("Иван Петров (ФК-101)", _claimant_display(dev))
 
+    # --- Правка таска (ТЗ 2026-10-20) ---------------------------------------
+
+    def _edit_body(self, **kwargs):
+        return json.dumps(kwargs)
+
+    def test_edit_allowed_only_for_author(self):
+        """Править таск может ТОЛЬКО тот, кто его создал (ТЗ владельца)."""
+        task = AIDevTask.objects.create(
+            title="Мой таск", description="Описание", estimate="До 2 недель",
+            kind="front", priority_no=1, created_by=self.dev,
+        )
+        # Автор — правит.
+        resp = self.edit_view(
+            self._request(self.dev, "post", f"/x/{task.id}/edit/",
+                          body=self._edit_body(title="Правленый", description="Новое",
+                                               estimate="До 4 дней")),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(json.loads(resp.content)["ok"])
+        task.refresh_from_db()
+        self.assertEqual(task.title, "Правленый")
+        self.assertEqual(task.description, "Новое")
+        self.assertEqual(task.estimate, "До 4 дней")
+
+        # Чужой (в т.ч. суперюзер) — 403, таск не тронут.
+        for other in (self.other_dev, self.superuser, self.pd):
+            resp = self.edit_view(
+                self._request(other, "post", f"/x/{task.id}/edit/",
+                              body=self._edit_body(title="Взломано")),
+                task.id,
+            )
+            self.assertEqual(resp.status_code, 403, other.username)
+        task.refresh_from_db()
+        self.assertEqual(task.title, "Правленый")
+
+    def test_edit_keeps_kind_and_priority_no(self):
+        """Вид таска и его номер — не меняются: нумерация вида сквозная."""
+        task = AIDevTask.objects.create(
+            title="Хотелка", kind="wish", priority_no=3, created_by=self.dev,
+        )
+        resp = self.edit_view(
+            self._request(self.dev, "post", f"/x/{task.id}/edit/",
+                          body=self._edit_body(title="Хотелка-2", kind="front",
+                                               priority_no=99)),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.kind, "wish")
+        self.assertEqual(task.priority_no, 3)
+
+    def test_edit_rejects_empty_title_and_unknown_task(self):
+        task = AIDevTask.objects.create(
+            title="Т", kind="front", created_by=self.dev,
+        )
+        resp = self.edit_view(
+            self._request(self.dev, "post", f"/x/{task.id}/edit/",
+                          body=self._edit_body(title="   ")),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 400)
+        task.refresh_from_db()
+        self.assertEqual(task.title, "Т")
+
+        resp = self.edit_view(
+            self._request(self.dev, "post", "/x/999999/edit/",
+                          body=self._edit_body(title="Х")),
+            999999,
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_edit_rejects_non_json_body(self):
+        task = AIDevTask.objects.create(
+            title="Т", kind="front", created_by=self.dev,
+        )
+        resp = self.edit_view(
+            self._request(self.dev, "post", f"/x/{task.id}/edit/", body="не json"),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_edit_closed_task_is_409(self):
+        """Закрытый (архивный) таск не редактируется."""
+        task = AIDevTask.objects.create(
+            title="Т", kind="front", created_by=self.dev,
+            closed_at=timezone.now(),
+        )
+        resp = self.edit_view(
+            self._request(self.dev, "post", f"/x/{task.id}/edit/",
+                          body=self._edit_body(title="Правка")),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 409)
+        task.refresh_from_db()
+        self.assertEqual(task.title, "Т")
+
+    def test_edit_button_shown_only_to_author_on_front_and_wish(self):
+        """Кнопка «Изменить» — только у автора и только на рабочих видах
+        (фронт/хотелки); в архиве «Закрытые» её нет."""
+        mine = AIDevTask.objects.create(
+            title="Мой", kind="front", priority_no=1, created_by=self.dev,
+        )
+        theirs = AIDevTask.objects.create(
+            title="Чужой", kind="front", priority_no=2, created_by=self.other_dev,
+        )
+        wish = AIDevTask.objects.create(
+            title="Моя хотелка", kind="wish", priority_no=1, created_by=self.dev,
+        )
+
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=front"))
+        rows = {r["id"]: r for r in resp.context_data["rows"]}
+        self.assertTrue(rows[mine.id]["can_edit"])
+        self.assertFalse(rows[theirs.id]["can_edit"])
+        resp.render()
+        content = resp.content.decode()
+        self.assertIn("ai-task-btn-edit", content)
+        self.assertIn(f'data-edit-url="{self.tasks_url}{mine.id}/edit/"', content)
+
+        # Хотелки — тоже можно править (своя нумерация, но правило то же).
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=wish"))
+        rows = {r["id"]: r for r in resp.context_data["rows"]}
+        self.assertTrue(rows[wish.id]["can_edit"])
+
+        # Архив «Закрытые» — кнопки правки нет.
+        closed = AIDevTask.objects.create(
+            title="Закрытый", kind="front", created_by=self.dev,
+            closed_at=timezone.now(),
+        )
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=closed"))
+        rows = {r["id"]: r for r in resp.context_data["rows"]}
+        self.assertFalse(rows[closed.id]["can_edit"])
+        resp.render()
+        self.assertNotIn(f'data-edit-url="{self.tasks_url}{closed.id}/edit/"',
+                         resp.content.decode())
+
+    def test_edit_works_on_pseudo_tabs_of_front(self):
+        """Псевдо-вкладки («Не взятые», «Поиск», «Мои таски») показывают те же
+        строки фронта/хотелок — правка там доступна автору."""
+        task = AIDevTask.objects.create(
+            title="Мой", kind="front", priority_no=1, created_by=self.dev,
+        )
+        for kind in ("unclaimed", "search", "mine"):
+            resp = self.page_view(
+                self._request(self.dev, path=f"{self.tasks_url}?kind={kind}")
+            )
+            rows = {r["id"]: r for r in resp.context_data["rows"]}
+            if task.id in rows:
+                self.assertTrue(rows[task.id]["can_edit"], kind)
+
+    def test_edit_honest_in_view_as(self):
+        """Эмуляция «Посмотреть как…»: авторство проверяется по РЕАЛЬНОМу
+        пользователю сессии — в эмуляции правки нет ни у кого (superuser-
+        обхода нет)."""
+        task = AIDevTask.objects.create(
+            title="Т", kind="front", created_by=self.dev,
+        )
+        request = self._request(self.superuser, "post", f"/x/{task.id}/edit/",
+                                body=self._edit_body(title="Правка"))
+        self._enter_view_as(
+            request, self._view_as_group("Эмуля-правка", ["page.admin", "page.tasks"])
+        )
+        self.assertEqual(self.edit_view(request, task.id).status_code, 403)
+        task.refresh_from_db()
+        self.assertEqual(task.title, "Т")
+
     # --- Эмуляция «Посмотреть как…» ----------------------------------------
 
     def test_view_as_group_honest_page_and_mutations(self):
@@ -13684,15 +13913,20 @@ class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
             {p.key for p in pd.permissions.all()},
             # миграция 0063: Таски и Состояние моделей выведены из
             # baseline — выдаются сидом самой группе.
+            # 0067: «Мои AI-модели» — страница про СВОИ модели, доступна
+            # всей базовой аудитории админки (как «Мой промпт»).
             {"page.admin", "page.arm_solve", "page.prompt_admin",
              "page.prompt_defaults", "page.logs_own",
-             "page.model_status", "page.tasks"},
+             "page.model_status", "page.tasks", "page.user_models"},
         )
         self.assertEqual(
             {p.key for p in dev.permissions.all()},
+            # 0067: «Разработчик» дополнительно получает «Мои AI-модели»,
+            # «Контроль токенов» и «Запросы по DL API».
             {"page.admin", "page.arm_solve", "page.model_status",
              "page.prompt_admin", "page.test_console",
              "page.tasks", "page.logs_own", "page.updates",
+             "page.user_models", "page.tokens", "page.dl_api_requests",
              "docs.developer", "action.task_reorder"},
         )
         # Базовые права (BASELINE_ACCESS_KEYS): seeds групп могли и не менять
@@ -14667,10 +14901,15 @@ class WizardUserPageContextTests(TestCase):
 
     def test_task_prefill_node_id_on_all_three_pages(self):
         """Префилл условия задачи со страницы DL: ?nid=… прокидывается в шаблон
-        на всех трёх страницах (data-node-id + bootstrap AI_TASK_NODE_ID).
+        на всех трёх страницах (data-node-id), а window.AI_TASK_NODE_ID ставит
+        общий загрузчик в ai-common.js (initAiTaskNodeId).
 
         Раньше «Реши задачу» держало nid, а «Чат с DLAI» и «В чём ошибка?»
         игнорировали его вовсе — текст задачи никогда не подставлялся.
+
+        Инлайн-скрипт с window.AI_TASK_NODE_ID в шаблонах больше НЕ живёт
+        (правило «JS — в файлах»): значение приходит из data-node-id поля
+        страницы, которое заполняет initAiTaskNodeId на DOMContentLoaded.
         """
         from ai.views import decide_task_view, find_error_view
 
@@ -14682,7 +14921,8 @@ class WizardUserPageContextTests(TestCase):
             with self.subTest(url=url):
                 html = self._render(view, f"{url}?nid=2607154")
                 self.assertIn('data-node-id="2607154"', html)
-                self.assertIn("window.AI_TASK_NODE_ID", html)
+                # Страница подключает общий ai-common.js — там и ставится nid.
+                self.assertIn("/ai/assets/admin/js/ai-common.js", html)
         # Без nid — пустое значение, страница живёт как раньше.
         html = self._render(chat_view, "/ai/chat/")
         self.assertIn('data-node-id=""', html)
@@ -16038,11 +16278,15 @@ class PromptTranslateTabsArityTests(SimpleTestCase):
 
     def test_batch_results_template_renders_dl_link_and_interim_note(self):
         """Карточка результата: r.dl_url → ссылка в DL (escapeHtml НЕ нужен —
-        link.textContent); в renderReport есть ветка плашки interim."""
+        link.textContent); в renderReport есть ветка плашки interim.
+
+        Логика карточки вынесена в отдельный JS-файл
+        (static/admin/ai/batch_results/index.js), а шаблон — чистый
+        контейнер (общий partial у четырёх страниц)."""
         from pathlib import Path
         path = (
-            Path(__file__).resolve().parent / "templates" / "admin" / "ai"
-            / "_ai_batch_results.html"
+            Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
+            / "batch_results" / "index.js"
         )
         src = path.read_text(encoding="utf-8")
         self.assertIn("r.dl_url", src)
@@ -16824,7 +17068,9 @@ class AutoFiltersStaticTests(TestCase):
         self.assertIn('name="student"', src)
         self.assertNotIn("onchange=", src)
         self.assertIn("ai_auto_filters.js", src)
-        self.assertIn("initAiAutoFilters(document.querySelector('.ai-daily-filters'))", src)
+        # Инициализация хелпера — в вынесенном JS страницы.
+        js = self._read("static", "admin", "ai", "daily_report", "index.js")
+        self.assertIn("initAiAutoFilters(document.querySelector('.ai-daily-filters'))", js)
 
     def test_updates_template_no_filter_button(self):
         """«Обновления»: кнопки «Фильтровать» больше нет, «Сбросить» и
@@ -16834,7 +17080,8 @@ class AutoFiltersStaticTests(TestCase):
         self.assertIn("Сбросить", src)
         self.assertIn('href="/ai/admin/ai/updatelog/?hidden__exact=1"', src)
         self.assertIn("ai_auto_filters.js", src)
-        self.assertIn("initAiAutoFilters(document.querySelector('.ai-updates-filter'))", src)
+        js = self._read("static", "admin", "ai", "updates", "index.js")
+        self.assertIn("initAiAutoFilters(document.querySelector('.ai-updates-filter'))", js)
         self.assertIn("{% load i18n static %}", src)
 
     def test_wizard_registry_updated(self):
@@ -16843,7 +17090,9 @@ class AutoFiltersStaticTests(TestCase):
         селектов «Обновлений» обещают мгновенное применение."""
         js = self._read("static", "admin", "js", "ai-wizard.js")
         entry = js.index("admin_test_data: [")
-        block = js[js.index("admin_test_data: ["): js.index("];", entry)]
+        # Конец массива scope'а — закрывающая скобка на своей строке (не
+        # "];": registry может продолжиться следующими scope'ами).
+        block = js[entry: js.index("\n        ],", entry)]
         for sel in (".test-data-page h2", ".help-test-data",
                     "[data-emit-request] .button", "#emit-status"):
             self.assertIn(f'sel: "{sel}"', block)
@@ -17212,3 +17461,586 @@ class WizardSeenNavTests(_AdminViewRequestMixin, TestCase):
             for model in app.get("models", [])
         }
         self.assertIn("AIWizardSeen", names)
+
+
+class FailureReasonClassifierTests(SimpleTestCase):
+    """Классификатор причин сбоя по тексту DL-комментария.
+
+    Канонический владелец — ai/dl_api_client.py::dl_failure_reason_from_comment
+    (рядом с dl_verdict_from_comment). Причина ОРТОГОНАЛЬНА вердикту:
+    «прошёл ли DL» и «почему нет» — разные вопросы.
+    """
+
+    def _reason(self, comment):
+        from ai.dl_api_client import dl_failure_reason_from_comment
+        return dl_failure_reason_from_comment(comment)
+
+    def test_compile_error_markers(self):
+        for comment in (
+            "Ошибка компиляции в строке 5: expected ';'",
+            "compile error",
+            "syntax error",
+            "Не компилируется",
+            "Ошибка синтаксиса",
+        ):
+            self.assertEqual(self._reason(comment), "compile_error", comment)
+
+    def test_wrong_answer_markers(self):
+        for comment in (
+            "Неправильный ответ на тесте 2",
+            "Неверный вывод программы",
+            "Вывод не совпадает с ожидаемым",
+            "Не все тесты пройдены",
+            "wrong answer on test 3",
+            "Solution rejected",
+        ):
+            self.assertEqual(self._reason(comment), "wrong_answer", comment)
+
+    def test_unrecognized_failure_is_undefined_not_success(self):
+        # Провал НИКОГДА не переименовывается в успех: нераспознанный провал
+        # = undefined, а не пустая строка.
+        self.assertEqual(self._reason("Какая-то ошибка 500"), "undefined")
+        self.assertEqual(self._reason(""), "undefined")
+        self.assertEqual(self._reason(None), "undefined")
+
+    def test_success_has_no_reason(self):
+        self.assertEqual(self._reason("Все тесты пройдены успешно"), "")
+        self.assertEqual(self._reason("ОК"), "")
+
+    def test_compile_markers_win_over_generic_failure(self):
+        # «ошибк» — общий провальный маркер, но про компиляцию: причина
+        # компиляции, а не «не распознано».
+        self.assertEqual(
+            self._reason("Ошибка компиляции в строке 5"),
+            "compile_error",
+        )
+
+
+class FailureReasonBatchReportTests(SimpleTestCase):
+    """Раздел «Сбои по причинам» в отчёте прогона (arm_runner)."""
+
+    def _reasons(self, results):
+        from ai.arm_runner import _build_failure_reasons
+        return {row["key"]: row for row in _build_failure_reasons(results)}
+
+    def test_solved_pairs_are_not_counted(self):
+        results = [
+            {"verdict": "solved", "failure_reason": ""},
+            {"verdict": "failed", "failure_reason": "compile_error"},
+        ]
+        reasons = self._reasons(results)
+        self.assertNotIn("solved", reasons)
+        self.assertEqual(reasons["compile_error"]["count"], 1)
+
+    def test_counts_and_percent(self):
+        results = [
+            {"verdict": "failed", "failure_reason": "compile_error"},
+            {"verdict": "failed", "failure_reason": "compile_error"},
+            {"verdict": "failed", "failure_reason": "wrong_answer"},
+            {"verdict": "solved", "failure_reason": ""},
+        ]
+        reasons = self._reasons(results)
+        self.assertEqual(reasons["compile_error"]["count"], 2)
+        self.assertEqual(reasons["wrong_answer"]["count"], 1)
+        # Процент — от всех пар прогона (4), а не от проваленных.
+        self.assertEqual(reasons["compile_error"]["percent"], 50)
+
+    def test_labels_are_human_readable(self):
+        results = [{"verdict": "failed", "failure_reason": "no_code"}]
+        reasons = self._reasons(results)
+        self.assertEqual(reasons["no_code"]["label"], "Не выкушен код")
+
+
+class FailureReasonBackfillTests(TestCase):
+    """Бэкфилл причин сбоя для старых прогонов (management-команда)."""
+
+    def _make_result(self, **kwargs):
+        from ai.models import AIModelTestResult, AIModelTestRun
+        run = AIModelTestRun.objects.create(
+            run_id=uuid.uuid4().hex,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+        )
+        defaults = {
+            "run": run,
+            "model_key": "M1",
+            "model_title": "Model 1",
+            "status": AIModelTestResult.STATUS_OK,
+            "verdict": AIModelTestResult.VERDICT_FAILED,
+        }
+        defaults.update(kwargs)
+        return AIModelTestResult.objects.create(**defaults)
+
+    def test_dry_run_writes_nothing(self):
+        from io import StringIO
+        from django.core.management import call_command
+        row = self._make_result(dl_comment="Ошибка компиляции в строке 5")
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", stdout=out)
+        row.refresh_from_db()
+        self.assertEqual(row.failure_reason, "")
+
+    def test_commit_sets_reason(self):
+        from io import StringIO
+        from django.core.management import call_command
+        row = self._make_result(dl_comment="Неправильный ответ на тесте 1")
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out)
+        row.refresh_from_db()
+        self.assertEqual(row.failure_reason, "wrong_answer")
+
+    def test_solved_rows_are_skipped(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from ai.models import AIModelTestResult
+        row = self._make_result(
+            dl_comment="Ошибка компиляции",
+            verdict=AIModelTestResult.VERDICT_SOLVED,
+        )
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out)
+        row.refresh_from_db()
+        self.assertEqual(row.failure_reason, "")
+
+    def test_rerun_is_idempotent(self):
+        from io import StringIO
+        from django.core.management import call_command
+        self._make_result(dl_comment="Неверный вывод программы")
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out)
+        out2 = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out2)
+        self.assertIn("Проверено строк без причины: 0", out2.getvalue())
+
+
+class TokenUsageAggregationTests(TestCase):
+    """Агрегация токенов (журнал + пакетные пары) — единственный владелец
+    ai/services/token_usage.py."""
+
+    def setUp(self):
+        from ai.models import AIRequestLog
+        self.now = timezone.now()
+        self.log = AIRequestLog.objects.create(
+            sent_at=self.now,
+            mode=AIRequestLog.MODE_CHAT,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Ollama Gemma"],
+            tokens=100,
+            tokens_prompt=40,
+            user_full_name="Иванов Иван",
+            external_user_id="dl-1",
+        )
+
+    def test_prompt_plus_completion_is_total(self):
+        from ai.services.token_usage import collect_log_slices
+        report = collect_log_slices(
+            __import__("ai.models", fromlist=["AIRequestLog"]).AIRequestLog.objects.all()
+        )
+        self.assertEqual(report["total"]["total_tokens"], 140)
+        self.assertEqual(report["total"]["completion_tokens"], 100)
+        self.assertEqual(report["total"]["prompt_tokens"], 40)
+
+    def test_slices_by_model_user_mode(self):
+        from ai.models import AIRequestLog
+        from ai.services.token_usage import collect_log_slices
+        report = collect_log_slices(AIRequestLog.objects.all())
+        self.assertEqual(report["by_model"][0]["label"], "Ollama Gemma")
+        self.assertEqual(report["by_user"][0]["label"], "Иванов Иван")
+        self.assertEqual(report["by_mode"][0]["key"], "chat")
+
+    def test_web_pool_marks_incomplete(self):
+        from ai.models import AIRequestLog
+        from ai.services.token_usage import collect_log_slices
+        AIRequestLog.objects.create(
+            sent_at=self.now,
+            mode=AIRequestLog.MODE_CHAT,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Web_DeepSeek"],
+            tokens=0,
+            tokens_prompt=0,
+        )
+        report = collect_log_slices(AIRequestLog.objects.all())
+        self.assertTrue(report["incomplete"])
+
+    def test_mode_filter(self):
+        from ai.models import AIRequestLog
+        from ai.services.token_usage import collect_log_slices
+        AIRequestLog.objects.create(
+            sent_at=self.now,
+            mode=AIRequestLog.MODE_SOLVE,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Ollama Gemma"],
+            tokens=10,
+            tokens_prompt=5,
+        )
+        report = collect_log_slices(AIRequestLog.objects.all(), mode="chat")
+        self.assertEqual(report["total"]["total_tokens"], 140)
+        report = collect_log_slices(AIRequestLog.objects.all(), mode="solve")
+        self.assertEqual(report["total"]["total_tokens"], 15)
+
+    def test_batch_pairs_slice(self):
+        from ai.models import AIModelTestResult, AIModelTestRun
+        run = AIModelTestRun.objects.create(
+            run_id=uuid.uuid4().hex,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            started_at=self.now,
+        )
+        AIModelTestResult.objects.create(
+            run=run,
+            model_key="M1",
+            model_title="Ollama Gemma",
+            status=AIModelTestResult.STATUS_OK,
+            verdict=AIModelTestResult.VERDICT_SOLVED,
+            tokens=50,
+            tokens_prompt=20,
+        )
+        from ai.services.token_usage import collect_batch_slices
+        report = collect_batch_slices(AIModelTestRun.objects.all())
+        self.assertEqual(report["total"]["total_tokens"], 70)
+        self.assertEqual(report["pairs"], 1)
+
+
+class MskDateRangeTests(SimpleTestCase):
+    """Границы периодов по МСК (единый хелпер ai/services/msk_time.py)."""
+
+    def test_parse_date_formats(self):
+        from ai.services.msk_time import parse_date
+        self.assertIsNotNone(parse_date("2026-10-20"))
+        self.assertIsNotNone(parse_date("20.10.2026"))
+        self.assertIsNone(parse_date("мусор"))
+        self.assertIsNone(parse_date(""))
+
+    def test_day_bounds_are_msk_midnights_in_utc(self):
+        from datetime import datetime, timezone as dt_timezone
+        from ai.constants import MOSCOW_TZ
+        from ai.services.msk_time import msk_day_bounds
+        start, end = msk_day_bounds(datetime(2026, 10, 20, 15, 30, tzinfo=MOSCOW_TZ))
+        # Границы отдаются в UTC (sent_at в БД хранится в UTC), но это
+        # ПОЛНОЧИ МСК: 00:00 MSK = 21:00 UTC предыдущего дня.
+        self.assertEqual(start.tzinfo, dt_timezone.utc)
+        self.assertEqual(end.tzinfo, dt_timezone.utc)
+        self.assertEqual(start.hour, 21)
+        self.assertEqual(start.minute, 0)
+        self.assertEqual(end.hour, 20)
+        self.assertEqual(end.minute, 59)
+        # Обратно в МСК — ровно полночь/конец суток.
+        self.assertEqual(start.astimezone(MOSCOW_TZ).hour, 0)
+        self.assertEqual(end.astimezone(MOSCOW_TZ).hour, 23)
+
+
+class UserModelSecurityTests(SimpleTestCase):
+    """SSRF-защита поля «адрес модели» (владелец просил защиту от атак)."""
+
+    def test_http_is_rejected(self):
+        from ai.services.user_models import ERR_NOT_HTTPS, validate_base_url
+        _, error = validate_base_url("http://api.example.com/v1")
+        self.assertEqual(error, ERR_NOT_HTTPS)
+
+    def test_localhost_is_rejected(self):
+        from ai.services.user_models import ERR_PRIVATE_HOST, validate_base_url
+        _, error = validate_base_url("https://localhost/v1")
+        self.assertEqual(error, ERR_PRIVATE_HOST)
+
+    def test_private_ip_literal_is_rejected(self):
+        from ai.services.user_models import ERR_PRIVATE_HOST, validate_base_url
+        for url in ("https://127.0.0.1/v1", "https://10.0.0.5/v1",
+                    "https://192.168.1.1/v1", "https://169.254.169.254/latest"):
+            _, error = validate_base_url(url)
+            self.assertEqual(error, ERR_PRIVATE_HOST, url)
+
+    def test_credentials_in_url_are_rejected(self):
+        from ai.services.user_models import ERR_CREDENTIALS_IN_URL, validate_base_url
+        _, error = validate_base_url("https://user:pass@api.example.com/v1")
+        self.assertEqual(error, ERR_CREDENTIALS_IN_URL)
+
+    def test_non_standard_port_is_rejected(self):
+        from ai.services.user_models import ERR_BAD_PORT, validate_base_url
+        _, error = validate_base_url("https://api.example.com:8080/v1")
+        self.assertEqual(error, ERR_BAD_PORT)
+
+    def test_https_public_url_passes(self):
+        from ai.services.user_models import validate_base_url
+        url, error = validate_base_url("https://api.openai.com/v1")
+        self.assertEqual(error, "")
+        self.assertEqual(url, "https://api.openai.com/v1")
+
+    def test_dns_rebinding_to_localhost_is_rejected(self):
+        # Домен резолвится в приватный адрес — такой endpoint запрещён
+        # (иначе «свой» домен → 127.0.0.1 обходит фильтр по литералу).
+        from ai.services.user_models import ERR_PRIVATE_HOST, validate_base_url
+        from unittest.mock import patch
+        import socket
+        fake = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+        with patch("ai.services.user_models.socket.getaddrinfo", return_value=fake):
+            _, error = validate_base_url("https://my-own-domain.example/v1")
+        self.assertEqual(error, ERR_PRIVATE_HOST)
+
+    def test_default_base_urls_are_https(self):
+        from ai.services.user_models import PROVIDER_BASE_URLS
+        for provider, url in PROVIDER_BASE_URLS.items():
+            self.assertTrue(url.startswith("https://"), provider)
+
+
+class UserModelIsolationTests(TestCase):
+    """Личные модели видны ТОЛЬКО владельцу."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        self.user_model = get_user_model()
+        self.owner = self.user_model.objects.create_user(username="um-owner", password="x")
+        self.other = self.user_model.objects.create_user(username="um-other", password="x")
+        self.model = AIUserModel.objects.create(
+            user=self.owner,
+            title="Моя модель",
+            provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="gpt-4o-mini",
+            base_url="https://api.openai.com/v1",
+        )
+
+    def test_options_only_for_owner(self):
+        from ai.services.user_models import user_model_options
+        self.assertEqual(len(user_model_options(self.owner)), 1)
+        self.assertEqual(user_model_options(self.other), [])
+
+    def test_find_user_model_is_owner_scoped(self):
+        from ai.services.user_models import find_user_model
+        key = f"User_{self.model.pk}"
+        self.assertIsNotNone(find_user_model(self.owner, key))
+        # Чужой пользователь ключ НЕ находит — вызов чужой модели невозможен.
+        self.assertIsNone(find_user_model(self.other, key))
+
+
+
+class UserModelCallerIsolationTests(TransactionTestCase):
+    """ModelCaller не даёт вызвать ЧУЖУЮ личную модель.
+
+    Отдельный TransactionTestCase: поиск модели идёт из другого потока
+    (sync_to_async), а sqlite в TestCase держит транзакцию — таблица
+    заблокирована для чужого соединения.
+    """
+
+    def test_foreign_key_is_rejected(self):
+        import asyncio
+        from ai.models import AIUserModel
+        from ai.services.model_caller import ModelCaller
+        user_model = get_user_model()
+        owner = user_model.objects.create_user(username="mc-owner", password="x")
+        other = user_model.objects.create_user(username="mc-other", password="x")
+        model = AIUserModel.objects.create(
+            user=owner, title="Моя", provider=AIUserModel.PROVIDER_OPENAI, model_id="m",
+        )
+        key = f"User_{model.pk}"
+        result = asyncio.run(
+            ModelCaller().call("привет", "client-1", key, language="ru", user=other)
+        )
+        self.assertTrue(result.is_error)
+        self.assertIn(key, result.response_text)
+
+
+class UserModelsAdminViewTests(_AdminViewRequestMixin, TestCase):
+    """Страница «Мои AI-модели»: создание/удаление только своих записей."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(username="um-admin", password="x")
+        # Право на страницу «Мои AI-модели» (page.user_models) выдаём
+        # группой доступа — ровно так, как это делает прод-миграция 0067.
+        group = self._view_as_group("UM-группа", ["page.user_models"])
+        group.users.add(self.user)
+        from ai.models import AIUserModel
+        self.foreign = AIUserModel.objects.create(
+            user=self.user_model.objects.create_user(username="um-foreign", password="x"),
+            title="Чужая",
+            provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m",
+        )
+
+    def _post(self, path, payload):
+        """POST на create/delete — вьюхи вызываются напрямую.
+
+        ai.admin.urls отдаёт get_ai_admin_urls() (без module-level
+        urlpatterns), поэтому маршрут резолвим по имени view-функции.
+        """
+        request = self._admin_request(
+            self.user, method="post", path=path,
+            data=json.dumps(payload), content_type="application/json",
+        )
+        if path.endswith("/create/"):
+            from ai.admin.user_models import admin_user_model_create_view
+            return admin_user_model_create_view(request)
+        from ai.admin.user_models import admin_user_model_delete_view
+        return admin_user_model_delete_view(request)
+
+    def test_list_shows_only_own_models(self):
+        from ai.models import AIUserModel
+        mine = AIUserModel.objects.create(
+            user=self.user, title="Своя", provider=AIUserModel.PROVIDER_OPENAI, model_id="m",
+        )
+        request = self._admin_request(self.user, path="/ai/admin/user-models/")
+        from ai.admin.user_models import admin_user_models_view
+        response = admin_user_models_view(request)
+        ids = [row["id"] for row in response.context_data["user_models"]]
+        self.assertIn(mine.pk, ids)
+        self.assertNotIn(self.foreign.pk, ids)
+
+    def test_cannot_update_foreign_model(self):
+        response = self._post("/ai/admin/user-models/create/", {
+            "id": self.foreign.pk,
+            "title": "Взлом",
+            "provider": "openai",
+            "model_id": "x",
+        })
+        self.assertEqual(response.status_code, 404)
+
+    def test_cannot_delete_foreign_model(self):
+        response = self._post("/ai/admin/user-models/delete/", {"id": self.foreign.pk})
+        self.assertEqual(response.status_code, 404)
+        from ai.models import AIUserModel
+        self.assertTrue(AIUserModel.objects.filter(pk=self.foreign.pk).exists())
+
+    def test_create_rejects_private_base_url(self):
+        response = self._post("/ai/admin/user-models/create/", {
+            "title": "Локальная",
+            "provider": "custom",
+            "model_id": "m",
+            "base_url": "https://127.0.0.1/v1",
+        })
+        self.assertEqual(response.status_code, 400)
+
+
+class MyModelsClientViewTests(TestCase):
+    """Клиентская страница «Мои AI-модели» (/ai/my-models/).
+
+    Обычный пользователь (не сотрудник админки) должен иметь доступ к
+    своим моделям: страница клиентская (/ai/my-models/), гейт — как у
+    страниц чата (_has_page_access), а не админский.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(username="mm-user", password="x")
+
+    def _client_request(self, user, method="get", path="/ai/my-models/", body=None):
+        """Запрос клиентской страницы: тело — сырой JSON (content_type)."""
+        if body is None:
+            request = getattr(self.factory, method)(path)
+        else:
+            request = getattr(self.factory, method)(
+                path, data=body, content_type="application/json",
+            )
+        request.user = user
+        request.session = {}
+        request.COOKIES = {}
+        return request
+
+    def test_page_renders_for_ordinary_user(self):
+        from ai.views import my_models_view
+        request = self._client_request(self.user)
+        with patch("ai.views.get_external_user_id_from_request", return_value="777"):
+            response = my_models_view(request)
+        self.assertEqual(response.status_code, 200)
+
+    def test_page_forbidden_without_external_id(self):
+        from ai.views import my_models_view
+        request = self._client_request(self.user)
+        with patch("ai.views.get_external_user_id_from_request", return_value=""):
+            response = my_models_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_save_creates_own_model(self):
+        from ai.views import my_model_save_view
+        request = self._client_request(
+            self.user, method="post", path="/ai/my-models/create/",
+            body=json.dumps({
+                "title": "Моя модель",
+                "provider": "openai",
+                "model_id": "gpt-4o-mini",
+            }),
+        )
+        with patch("ai.views.get_external_user_id_from_request", return_value="777"):
+            response = my_model_save_view(request)
+        self.assertEqual(response.status_code, 200)
+        from ai.models import AIUserModel
+        self.assertTrue(
+            AIUserModel.objects.filter(user=self.user, model_id="gpt-4o-mini").exists()
+        )
+
+    def test_cannot_touch_foreign_model(self):
+        from ai.models import AIUserModel
+        from ai.views import my_model_delete_view
+        foreign = AIUserModel.objects.create(
+            user=self.user_model.objects.create_user(username="mm-other", password="x"),
+            title="Чужая", provider=AIUserModel.PROVIDER_OPENAI, model_id="m",
+        )
+        request = self._client_request(
+            self.user, method="post", path="/ai/my-models/delete/",
+            body=json.dumps({"id": foreign.pk}),
+        )
+        with patch("ai.views.get_external_user_id_from_request", return_value="777"):
+            response = my_model_delete_view(request)
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(AIUserModel.objects.filter(pk=foreign.pk).exists())
+
+
+class DLApiRequestsTests(_AdminViewRequestMixin, TestCase):
+    """Страница «Запросы по DL API»: вкладки «актуально/неактуально»."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(
+            username="dl-api-admin", password="x", is_staff=True,
+        )
+        from ai.models import AIDLApiRequest
+        self.pending = AIDLApiRequest.objects.create(
+            description="Нужен API к задачам",
+            user=self.user,
+            user_full_name="Петров Пётр",
+            username="dl-api-admin",
+        )
+        self.done = AIDLApiRequest.objects.create(
+            description="Уже сделано",
+            user=self.user,
+            status=AIDLApiRequest.STATUS_DONE,
+        )
+
+    def _get(self, path):
+        from ai.admin.dl_api_requests import admin_dl_api_requests_view
+        request = self._admin_request(self.user, path=path)
+        return admin_dl_api_requests_view(request)
+
+    def test_tabs_split_pending_and_done(self):
+        from ai.models import AIDLApiRequest
+        pending = self._get("/ai/admin/dl-api-requests/?tab=pending")
+        done = self._get("/ai/admin/dl-api-requests/?tab=done")
+        pending_ids = [row["id"] for row in pending.context_data["rows"]]
+        done_ids = [row["id"] for row in done.context_data["rows"]]
+        self.assertIn(self.pending.pk, pending_ids)
+        self.assertNotIn(self.done.pk, pending_ids)
+        self.assertIn(self.done.pk, done_ids)
+
+    def test_row_has_description_who_and_when(self):
+        response = self._get("/ai/admin/dl-api-requests/?tab=pending")
+        row = response.context_data["rows"][0]
+        self.assertEqual(row["description"], "Нужен API к задачам")
+        self.assertEqual(row["who"], "Петров Пётр")
+        self.assertTrue(row["created_label"])
+
+    def test_mark_done_moves_row_between_tabs(self):
+        import json as _json
+        from ai.admin.dl_api_requests import admin_dl_api_request_update_view
+        request = self._admin_request(
+            self.user, method="post", path="/ai/admin/dl-api-requests/update/",
+            data=_json.dumps({"id": self.pending.pk, "status": "done", "comment": "создано"}),
+            content_type="application/json",
+        )
+        response = admin_dl_api_request_update_view(request, self.pending.pk) if False else admin_dl_api_request_update_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.pending.refresh_from_db()
+        self.assertEqual(self.pending.status, "done")
+        self.assertIsNotNone(self.pending.resolved_at)
+        self.assertEqual(self.pending.resolved_by_id, self.user.pk)

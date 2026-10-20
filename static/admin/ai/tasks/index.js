@@ -85,6 +85,24 @@
         if (main) main.hidden = false;
     }
 
+    // Правка таска: форма живёт ОТДЕЛЬНОЙ строкой таблицы (data-edit-row
+    // с тем же id), кнопка «Изменить» — в строке самого таска. Показ/скрыв
+    // по кнопке; в форме — отправка JSON на tasks/<id>/edit/.
+    function toggleEditForm(el, show) {
+        var row = el.closest('tr[data-task-id]');
+        if (!row) return;
+        var taskId = row.getAttribute('data-task-id');
+        var editRow = document.querySelector('tr[data-edit-row="' + taskId + '"]');
+        if (!editRow) return;
+        editRow.hidden = !show;
+        var btn = row.querySelector('[data-edit-toggle]');
+        if (btn) btn.hidden = show;
+        if (show) {
+            var input = editRow.querySelector('input[name="title"]');
+            if (input) { input.focus(); input.select(); }
+        }
+    }
+
     // Взять/закрыть/вернуть — успех перезагружает страницу: статусы строк
     // пересчитывает сервер (на фронте после reorder reload не нужен).
     // «Вернуть» — двухшажный: первый клик спрашивает, оставить ли
@@ -96,6 +114,12 @@
         if (ask) { expandReopenChoice(ask); return; }
         var cancel = event.target.closest('.ai-task-btn-reopen-cancel');
         if (cancel) { collapseReopenChoice(cancel); return; }
+        // Правка таска (только автору): «Изменить» раскрывает форму правки
+        // в строке под таском, «Отмена» прячет её обратно.
+        var editToggle = event.target.closest('[data-edit-toggle]');
+        if (editToggle) { toggleEditForm(editToggle, true); return; }
+        var editCancel = event.target.closest('.ai-task-btn-edit-cancel');
+        if (editCancel) { toggleEditForm(editCancel, false); return; }
         var freeBtn = event.target.closest('[data-reopen-free]');
         if (freeBtn) {
             var freeUrl = freeBtn.getAttribute('data-reopen-url');
@@ -138,6 +162,30 @@
     document.addEventListener('change', function (event) {
         var select = event.target.closest('[data-autosubmit="1"]');
         if (select && select.form) select.form.submit();
+    });
+
+    // Правка таска: сабмит формы правки — POST JSON {title, description,
+    // estimate} на tasks/<id>/edit/. Делегирование (форма может быть
+    // добавлена в DOM сервером при каждой перерисовке строк).
+    document.addEventListener('submit', function (event) {
+        var form = event.target.closest('.ai-task-edit-form');
+        if (!form) return;
+        event.preventDefault();
+        var url = form.getAttribute('data-edit-url');
+        if (!url) return;
+        var btn = form.querySelector('[type="submit"]');
+        if (btn) btn.classList.add('busy');
+        var payload = {
+            title: (form.querySelector('input[name="title"]') || {}).value || '',
+            description: (form.querySelector('textarea[name="description"]') || {}).value || '',
+            estimate: (form.querySelector('input[name="estimate"]') || {}).value || '',
+        };
+        post(url, JSON.stringify(payload))
+            .then(function () { window.location.reload(); })
+            .catch(function (err) {
+                if (btn) btn.classList.remove('busy');
+                alert(err.message);
+            });
     });
 
     // --- Перетаскивание строк фронта/хотелок (только table[data-reorder="1"]) ---

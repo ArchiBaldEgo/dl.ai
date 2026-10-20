@@ -25,11 +25,28 @@
                     })
                     .then(function (snapshot) {
                         body.innerHTML = '';
-                        window.ArmBatchResults.init(
+                        var built = window.ArmBatchResults.init(
                             body, snapshot, snapshot.run_id || row.getAttribute('data-run-id') || ''
                         );
                         body.dataset.rendered = '1';
                         delete body.dataset.loading;
+                        // Живая развёртка: пока прогон идёт, цифры и раздел
+                        // «Сбои по причинам» обновляются сами (раз в 2 с).
+                        // Перерисовка идёт по ТЕМ ЖЕ карточкам — раскрытые
+                        // модели не схлопываются (init не зовём заново).
+                        var status = snapshot.run_status || '';
+                        if (built && built.reportEls && (status === 'running' || status === 'paused')) {
+                            window.ArmBatchResults.startLiveUpdates(
+                                {
+                                    report: built.reportEls,
+                                    resultsEl: built.resultsEl,
+                                    resultsCard: built.resultsCard,
+                                    filterHost: built.filterHost,
+                                },
+                                url,
+                                { intervalMs: 2000 }
+                            );
+                        }
                     })
                     .catch(function () {
                         body.innerHTML = '<p class="ai-recent-logs-empty">Не удалось загрузить результаты прогона — попробуйте ещё раз.</p>';

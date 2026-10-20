@@ -252,6 +252,47 @@ def can_access_pinned_runs(request):
     return user_has_key(request.user, "page.pinned_runs")
 
 
+def can_access_token_usage(request):
+    """«Контроль токенов»: staff/superuser ИЛИ ключ page.tokens.
+
+    Ключ НЕ входит в BASELINE_ACCESS_KEYS: страница показывает расход
+    ВСЕХ пользователей — выдаётся группами осознанно (через «Группы
+    доступа»), как «Состояние моделей» и «Таски».
+    """
+    if not request.user.is_authenticated:
+        return False
+    return is_staff_or_superuser(request.user) or user_has_key(
+        request.user, "page.tokens"
+    )
+
+
+def can_access_dl_api_requests(request):
+    """«Запросы по DL API»: staff/superuser ИЛИ ключ page.dl_api_requests.
+
+    Заявки на создание API к dl.gsu.by видят те, кому их доверили: ключ
+    выдаётся группами, в baseline не входит.
+    """
+    if not request.user.is_authenticated:
+        return False
+    return is_staff_or_superuser(request.user) or user_has_key(
+        request.user, "page.dl_api_requests"
+    )
+
+
+def can_access_user_models(request):
+    """«Мои AI-модели»: сотрудник админки ИЛИ владелец своих моделей.
+
+    Страницу видит любой сотрудник админки (она — про СВОИ модели), но
+    чужие модели чужие: доступ к записям — только владельцу
+    (проверка в ai/services/user_models.py).
+    """
+    if not request.user.is_authenticated:
+        return False
+    return is_staff_or_superuser(request.user) or user_has_key(
+        request.user, "page.user_models"
+    )
+
+
 def can_access_prompt_developer_docs(user):
     """Док «Разработчик промптов»: staff/super ИЛИ ключ docs.prompt_developer.
 

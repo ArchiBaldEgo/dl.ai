@@ -80,8 +80,8 @@
 </div>
 
 {# Динамические фильтры (сам применяет, без кнопки) — общий хелпер админки. #}
+{# Хелпер грузится ПЕРВЫМ, потом index.js инициализирует его на форме.    #}
 <script src="{% static 'admin/js/ai_auto_filters.js' %}"></script>
-<script>
-  initAiAutoFilters(document.querySelector('.ai-updates-filter'));
-</script>
+<script src="{% static 'admin/ai/updates/index.js' %}"></script>
+
 {% endblock %}

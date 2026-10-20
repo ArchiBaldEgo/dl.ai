@@ -89,12 +89,29 @@ def _to_float(value, default=0.0):
 
 
 def _extract_model_response(response):
+    """Текст ответа и токены ОТВЕТА из кортежа хендлера.
+
+    Контракт хендлера: ``(content, completion_tokens, is_error, cut_flag,
+    prompt_tokens)`` — 5-й элемент (prompt_tokens) добавлен для учёта
+    токенов (prompt + completion) и НЕ сдвигает прежние позиции.
+    """
     if isinstance(response, tuple):
         response_text = response[0] if len(response) > 0 else ""
         tokens = _to_int(response[1] if len(response) > 1 else 0)
         return str(response_text or ""), tokens
 
     return str(response or ""), 0
+
+
+def _extract_prompt_tokens(response) -> int:
+    """Токены ПРОМПТА из кортежа хендлера (5-й элемент).
+
+    Провайдеры, не отдающие usage (web-пулы), дают 0 — на странице «Контроль
+    токенов» такие строки честно помечаются «учёт недоступен».
+    """
+    if isinstance(response, tuple) and len(response) > 4:
+        return _to_int(response[4])
+    return 0
 
 
 def _is_model_error(response):
@@ -137,12 +154,23 @@ from .grading import (
 # Вердикты DL живут в dl_api_client (dl_verdict_from_comment) — единственный
 # источник (DRY); здесь только алиасы под исторические локальные имена.
 from .dl_api_client import (  # noqa: E402
+    DL_REASON_COMPILE_ERROR as _REASON_COMPILE_ERROR,
+    DL_REASON_UNDEFINED as _REASON_UNDEFINED,
+    DL_REASON_WRONG_ANSWER as _REASON_WRONG_ANSWER,
     DL_VERDICT_FAILED as _VERDICT_FAILED,
     DL_VERDICT_SOLVED as _VERDICT_SOLVED,
+    dl_failure_reason_from_comment as _failure_reason_from_dl_comment,
     dl_verdict_from_comment as _verdict_from_dl_comment,
 )
 
 _VERDICT_SKIPPED = "skipped"
+
+# Причины сбоя пары (ортогональны вердикту). Значения совпадают с
+# AIModelTestResult.FAILURE_REASON_CHOICES — источник истины там, здесь
+# алиасы для кода прогона (как вердикты выше).
+_REASON_MODEL_ERROR = "model_error"
+_REASON_NO_CODE = "no_code"
+_REASON_SKIPPED = "skipped"
 
 # Лимит позиций в строке «Ошибки по темам» (остальное — «+ ещё N»):
 # отчёт не должен разбухать на больших прогонах.
@@ -364,6 +392,97 @@ def _per_bucket(results, key_fn, label_fn):
     return rows
 
 
+def _topic_bucket_key(item):
+    """Ключ группировки по теме: ID темы (не название).
+
+    Названия тем повторяются между языками (курс «[Ассемблер i8086, C-MPA]»
+    держит по одной теме с одинаковым названием на язык) — группировка по
+    названию сливала бы разные темы в одну строку отчёта. Без ID (тема не
+    определена) ключ — пустая строка: такие пары попадают в отдельную
+    строку с честной подписью (см. ``_topic_bucket_label``).
+    """
+    topic_id = item.get("topic_id")
+    if topic_id is None:
+        return ""
+    return str(topic_id)
+
+
+def _topic_bucket_label(item):
+    """Подпись строки «по темам»: название темы, иначе — по-человечески.
+
+    Владелец отдельно просил убрать «Без темы» из отчёта: в прогоне должны
+    быть видны ВСЕ задействованные темы. Тема без названия — это не
+    «отсутствующая тема», а конкретная задача вне темы DL-дерева; подпись
+    строится по языку/имени задачи, чтобы строка читалась.
+    """
+    name = (item.get("topic_name") or "").strip()
+    if name:
+        return name
+    lang = (item.get("prog_lang_name") or "").strip()
+    task_name = (item.get("task_name") or "").strip()
+    if lang and task_name:
+        return f"{task_name} ({lang})"
+    if task_name:
+        return task_name
+    if lang:
+        return f"Задачи без темы ({lang})"
+    return "Задачи без темы"
+
+
+def _topics_used(results):
+    """Список всех тем, задействованных в прогоне (для отчёта и проверок).
+
+    Возвращает ``[{"topic_id", "topic_name", "pairs", "solved"}]`` — по
+    возрастанию числа пар (топ-частая тема первой). Темы без названия
+    подписываются так же, как в строках отчёта.
+    """
+    buckets: dict = {}
+    for item in results:
+        key = _topic_bucket_key(item)
+        bucket = buckets.setdefault(
+            key,
+            {
+                "topic_id": item.get("topic_id"),
+                "topic_name": _topic_bucket_label(item),
+                "pairs": 0,
+                "solved": 0,
+            },
+        )
+        bucket["pairs"] += 1
+        if item.get("verdict") == _VERDICT_SOLVED:
+            bucket["solved"] += 1
+    return sorted(buckets.values(), key=lambda b: (-b["pairs"], b["topic_name"]))
+
+
+def _build_failure_reasons(results):
+    """Секция «Сбои по причинам» отчёта пакетного прогона.
+
+    Таксономия — из ``AIModelTestResult.FAILURE_REASON_CHOICES`` (единый
+    источник): «сбой ответа модели», «не выкушен код», «ошибка компиляции»,
+    «неправильный ответ» (+ честные «причина не распознана» / «пропущено»).
+    Учитываются только пары с непустой причиной (у решённых пар причины
+    нет). Проценты — от числа ВСЕХ пар прогона.
+    """
+    total = len(results)
+    counts: dict = {}
+    for item in results:
+        reason = (item.get("failure_reason") or "").strip()
+        if not reason:
+            continue
+        counts[reason] = counts.get(reason, 0) + 1
+    rows = []
+    for reason, count in counts.items():
+        label = AIModelTestResult.FAILURE_REASON_LABELS.get(reason, reason)
+        rows.append({
+            "key": reason,
+            "label": label,
+            "count": count,
+            "percent": round(count / total * 100, 1) if total else 0.0,
+        })
+    rows.sort(key=lambda row: (-row["count"], row["label"]))
+    return rows
+
+
 def _build_batch_report(results):
     """Batch-solve report: per-model + per-topic tables + overall counters.
 
@@ -371,6 +490,14 @@ def _build_batch_report(results):
     результатов) и errors_by_topic — нерешённые пары (failed/skipped),
     сгруппированные по темам с ограничением на количество позиций в строке
     (компактность отчёта на больших прогонах).
+
+    Добавлено (2026-10): секция ``failure_reasons`` — таксономия сбоев
+    («сбой ответа модели» / «не выкушен код» / «ошибка компиляции» /
+    «неправильный ответ»), см. AIModelTestResult.FAILURE_REASON_CHOICES.
+    Темы группируются ПО ID темы (topic_id), а не по названию: названия
+    совпадают у разных языков (i8086 / C-MPA), и без ID отчёт сливал бы их
+    в одну строку. Тема без названия подписывается по-человечески, а не
+    «Без темы»: в прогоне всегда видно, какие темы задействованы.
     """
     if not results:
         return None
@@ -390,8 +517,8 @@ def _build_batch_report(results):
     )
     per_topic = _per_bucket(
         results,
-        key_fn=lambda r: r.get("topic_name") or "Без темы",
-        label_fn=lambda r: r.get("topic_name") or "Без темы",
+        key_fn=_topic_bucket_key,
+        label_fn=_topic_bucket_label,
     )
 
     # Объём прогона: уникальные модели и задачи из результатов.
@@ -406,7 +533,7 @@ def _build_batch_report(results):
         verdict = r.get("verdict")
         if verdict in (_VERDICT_SOLVED, None):
             continue
-        topic = r.get("topic_name") or "Без темы"
+        topic = _topic_bucket_label(r)
         bucket = errors_map.setdefault(topic, {"count": 0, "items": []})
         bucket["count"] += 1
         task_label = str(r.get("task_name") or ("#" + str(r.get("task_node_id") or "")))
@@ -425,6 +552,8 @@ def _build_batch_report(results):
         )
     ]
 
+    failure_reasons = _build_failure_reasons(results)
+
     return {
         "total_pairs": len(results),
         "solved": solved,
@@ -437,6 +566,8 @@ def _build_batch_report(results):
         "models_count": models_count,
         "tasks_count": tasks_count,
         "errors_by_topic": errors_by_topic,
+        "failure_reasons": failure_reasons,
+        "topics_used": _topics_used(results),
     }
 
 
@@ -1462,6 +1593,10 @@ def _prepare_batch_run(
         sent_at=start_time,
         model_names=models_titles,
         message=f"Batch solve rerun {run_id}" if rerun else f"Batch solve run {run_id}",
+        # Индексированный признак batch-записи: заменяет парсинг
+        # «Batch solve run <hex>» из текста message (полный scan по журналу
+        # на каждой загрузке «Настройки ИИ-приложения»).
+        batch_run_id=run_id,
         programming_language_id=programming_language_id,
         programming_language_name=programming_language_name or "",
         topic_id=topic_id,
@@ -1481,6 +1616,10 @@ def _prepare_batch_run(
         task = ensure_task(
             node_id, session_id=session_id, course_id=course_id,
             programming_language_id=programming_language_id,
+            # Тема прогона (выбрана оператором на форме) — запасной вариант,
+            # если тему задачи не удалось определить из ветки DL: без неё в
+            # отчёте появлялись строки «Без темы» вместо задействованных тем.
+            fallback_topic_id=topic_id,
         )
         if task is None:
             continue
@@ -1561,6 +1700,7 @@ def _prepare_batch_run(
             "effective_ext": effective_ext,
             "prog_lang_name": prog_lang_name,
             "topic_name": topic_name,
+            "topic_id": task.topic_id,
             "prompt_id": task_prompt_id,
         })
 
@@ -1826,11 +1966,16 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     raw_response = ""
     cleaned_text = ""
     tokens = 0
+    prompt_tokens = 0
     truncated = False
     code_only = ""
     dl_test_comment = ""
     dl_submit_error = ""
     dl_queue_id = 0
+    # Причина провала (таксономия сбоев). Пустая строка = причина нет
+    # (пара решена). Заполняется в каждой ветке ниже; последняя присваивание
+    # — в ветке DL-классификации по тексту комментария.
+    failure_reason = _REASON_UNDEFINED
 
     held_dl_lock = False
     try:
@@ -1848,6 +1993,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         if _is_cancel_requested(ctx["run_id"]):
             return None
         response_text, tokens = _extract_model_response(response)
+        prompt_tokens = _extract_prompt_tokens(response)
         cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
         if not cleaned_text:
             cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
@@ -1871,6 +2017,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         if is_model_err:
             verdict = _VERDICT_FAILED
             status = "error"
+            failure_reason = _REASON_MODEL_ERROR
             dl_submit_error = (friendly or cleaned_text)[:2000]
             short_response = (friendly or cleaned_text)[:300] + (
                 "..." if len(friendly or cleaned_text) > 300 else ""
@@ -1934,6 +2081,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                     if _is_cancel_requested(ctx["run_id"]):
                         return None
                     response_text, tokens = _extract_model_response(retry_response)
+                    prompt_tokens = _extract_prompt_tokens(retry_response)
                     cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
                     if not cleaned_text:
                         cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
@@ -1975,12 +2123,14 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             )
             if not code_only and junk_code:
                 verdict = _VERDICT_FAILED
+                failure_reason = _REASON_NO_CODE
                 dl_test_comment = (
                     "Извлечённый текст не похож на программу языка "
                     "курса (нет структурных маркеров) — DL не тестировал"
                 )
             elif not code_only:
                 verdict = _VERDICT_FAILED
+                failure_reason = _REASON_NO_CODE
                 dl_test_comment = (
                     "Модель не успела вывести код — ответ оборван лимитом генерации"
                     if truncated
@@ -2008,8 +2158,18 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 dl_queue_id = dl_result.get("queue_id", 0) or 0
                 # solved — только если DL явно подтвердил; иное → failed.
                 verdict = dl_verdict if dl_verdict is not None else _VERDICT_FAILED
+                # Таксономия сбоев: компиляция vs неправильный ответ vs
+                # «не распознано» — по ТЕКСТУ комментария DL (канонический
+                # классификатор dl_failure_reason_from_comment).
+                if verdict == _VERDICT_SOLVED:
+                    failure_reason = ""
+                else:
+                    failure_reason = _failure_reason_from_dl_comment(dl_test_comment)
+                    if not failure_reason:
+                        failure_reason = _REASON_UNDEFINED
             else:
                 verdict = _VERDICT_FAILED
+                failure_reason = _REASON_UNDEFINED
                 dl_test_comment = (
                     "Не задано расширение файла для тестирования на DL "
                     "(выберите язык/расширение в форме запуска)"
@@ -2024,6 +2184,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         friendly, detailed = humanize_model_error(exc_text, include_detail=True)
         verdict = _VERDICT_FAILED
         status = "error"
+        failure_reason = _REASON_MODEL_ERROR
         short_response = friendly or f"Ошибка вызова модели: {exc_text}"
         raw_response = detailed or cleaned_text
         dl_submit_error = exc_text[:2000]
@@ -2053,8 +2214,10 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 "model_title": model["title"],
                 "status": status,
                 "verdict": verdict,
+                "failure_reason": failure_reason or "",
                 "duration_seconds": duration,
                 "tokens": tokens,
+                "tokens_prompt": prompt_tokens,
                 "short_response": short_response,
                 "raw_response": raw_response or "",
                 "code": code_only or "",
@@ -2081,9 +2244,14 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "model_title": model["title"],
             "duration": duration,
             "tokens": tokens,
+            "tokens_prompt": prompt_tokens,
             "short_response": short_response,
             "status": status,
             "verdict": verdict,
+            "failure_reason": failure_reason or "",
+            "failure_reason_label": AIModelTestResult.FAILURE_REASON_LABELS.get(
+                failure_reason or "", ""
+            ),
             "raw_response": raw_response,
             "code": code_only,
             "dl_comment": dl_test_comment,
@@ -2329,12 +2497,19 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
         )[:2000]
     if cancelled:
         batch_error_message = (batch_error_message + " Прервано пользователем.")[:2000]
+    # Токены прогона в записи журнала: сумма по всем парам (ответ + промпт).
+    # Раньше batch-записи оставались с tokens=0 — из-за этого ARM-прогоны
+    # были не видны в учёте токенов (страница «Контроль токенов»).
+    batch_tokens = sum(_to_int(r.get("tokens")) for r in batch_results)
+    batch_prompt_tokens = sum(_to_int(r.get("tokens_prompt")) for r in batch_results)
     AIRequestLog.objects.filter(pk=log.pk).update(
         received_at=end_time,
         duration_seconds=(end_time - start_time).total_seconds(),
         status=AIRequestLog.STATUS_SUCCESS if all_solved_batch else AIRequestLog.STATUS_ERROR,
         response_text=batch_response_text,
         error_message=batch_error_message,
+        tokens=batch_tokens,
+        tokens_prompt=batch_prompt_tokens,
     )
     if cancelled:
         # Прогон уже переведён в STATUS_CANCELLED методом cancel_arm_run
@@ -2404,9 +2579,10 @@ def _batch_results_from_db(test_run, light=False):
         results = []
         rows = test_run.results.values(
             "pk", "model_key", "model_title", "duration_seconds", "tokens",
-            "status", "verdict", "dl_queue_id", "file_extension_snapshot",
-            "topic_name_snapshot", "prog_lang_snapshot", "truncated",
-            "prompt_id", "prompt_name",
+            "tokens_prompt", "status", "verdict", "failure_reason",
+            "dl_queue_id", "file_extension_snapshot",
+            "topic_name_snapshot", "topic_id_snapshot", "prog_lang_snapshot",
+            "truncated", "prompt_id", "prompt_name",
             "task__node_id", "task__name", "task__file_extension",
         ).order_by("model_title")
         for r in rows:
@@ -2419,12 +2595,18 @@ def _batch_results_from_db(test_run, light=False):
                 "model_title": r["model_title"],
                 "duration": r["duration_seconds"] or 0.0,
                 "tokens": r["tokens"] or 0,
+                "tokens_prompt": r["tokens_prompt"] or 0,
                 "status": r["status"],
                 "verdict": r["verdict"] or _VERDICT_FAILED,
+                "failure_reason": r["failure_reason"] or "",
+                "failure_reason_label": AIModelTestResult.FAILURE_REASON_LABELS.get(
+                    r["failure_reason"] or "", ""
+                ),
                 "truncated": bool(r["truncated"]),
                 "dl_queue_id": r["dl_queue_id"] or 0,
                 "file_extension": r["file_extension_snapshot"] or (r["task__file_extension"] or ""),
                 "topic_name": r["topic_name_snapshot"],
+                "topic_id": r["topic_id_snapshot"],
                 "prog_lang_name": r["prog_lang_snapshot"],
                 "prompt_id": r["prompt_id"],
                 "prompt_name": r["prompt_name"] or "",
@@ -2444,9 +2626,14 @@ def _batch_results_from_db(test_run, light=False):
             "model_title": r.model_title,
             "duration": r.duration_seconds or 0.0,
             "tokens": r.tokens or 0,
+            "tokens_prompt": r.tokens_prompt or 0,
             "short_response": r.short_response,
             "status": r.status,
             "verdict": r.verdict or _VERDICT_FAILED,
+            "failure_reason": r.failure_reason or "",
+            "failure_reason_label": AIModelTestResult.FAILURE_REASON_LABELS.get(
+                r.failure_reason or "", ""
+            ),
             "truncated": bool(r.truncated),
             "raw_response": r.raw_response,
             "code": r.code or "",
@@ -2455,6 +2642,7 @@ def _batch_results_from_db(test_run, light=False):
             "dl_queue_id": r.dl_queue_id or 0,
             "file_extension": r.file_extension_snapshot or (r.task.file_extension if r.task else ""),
             "topic_name": r.topic_name_snapshot,
+            "topic_id": r.topic_id_snapshot,
             "prog_lang_name": r.prog_lang_snapshot,
             "prompt_id": r.prompt_id,
             "prompt_name": r.prompt_name or "",

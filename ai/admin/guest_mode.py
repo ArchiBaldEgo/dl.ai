@@ -19,6 +19,7 @@ AIAdminSite.admin_view и только для ВИДА: он не сохраня
 is_superuser_user(request.user) был бы False, и выйти из режима нельзя.
 """
 
+from django.db.models import Count
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET, require_POST
 
@@ -83,9 +84,15 @@ def admin_view_as_groups_view(request):
         return JsonResponse({"ok": False}, status=403)
     current = view_as_group(request)
     rows = []
-    for group in AIAccessGroup.objects.prefetch_related(
-        "permissions", "users"
-    ).order_by("is_builtin", "name"):
+    # members — через annotate(Count), а не group.users.count() на каждую
+    # группу (был N+1: по запросу на группу).
+    groups_qs = (
+        AIAccessGroup.objects
+        .prefetch_related("permissions")
+        .annotate(members_count=Count("users"))
+        .order_by("is_builtin", "name")
+    )
+    for group in groups_qs:
         keys = {p.key for p in group.permissions.all()}
         if "page.admin" not in keys:
             continue  # члены такой группы в админку не входят — показывать нечего
@@ -93,7 +100,7 @@ def admin_view_as_groups_view(request):
             "id": group.pk,
             "name": group.name,
             "builtin": group.is_builtin,
-            "members": group.users.count(),
+            "members": group.members_count,
             "current": bool(current and current.pk == group.pk),
             "keys": sorted(keys),
         })

@@ -78,13 +78,13 @@ def _get_proxy():
     return None
 
 
-async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = "") -> Tuple[str, int, bool]:
+async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = "") -> Tuple[str, int, bool, bool, int]:
     """Общий обработчик для всех моделей Groq.
 
     Отправляет chat completion запрос через OpenAI-совместимый API Groq.
     """
     if not GROQ_TOKEN:
-        return "Groq API токен не настроен. Добавьте GROQ_TOKEN в .env", 0, True
+        return "Groq API токен не настроен. Добавьте GROQ_TOKEN в .env", 0, True, False, 0
 
     # max_tokens берётся из GROQ_MODELS; по умолчанию 4096 для обратной совместимости
     max_tokens = 4096
@@ -120,25 +120,30 @@ async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = ""
             # возвращались без warning — сохраняем это поведение).
             if response.status_code not in (401, 413, 429):
                 logger.warning("Groq API error: status=%s body=%s", response.status_code, response.text[:500])
-            return map_http_error(response.status_code, "groq"), 0, True
+            return map_http_error(response.status_code, "groq"), 0, True, False, 0
 
         data = response.json()
         choice = data.get("choices", [{}])[0]
         content = choice.get("message", {}).get("content", "")
         if not (content or "").strip():
             logger.warning("Groq model %s returned empty content", model_name)
-            return f"Модель Groq ({model_name}) вернула пустой ответ. Попробуйте позже.", 0, True
-        usage = data.get("usage", {})
-        total_tokens = usage.get("total_tokens", 0)
+            return f"Модель Groq ({model_name}) вернула пустой ответ. Попробуйте позже.", 0, True, False, 0
+        usage = data.get("usage", {}) or {}
+        # ВАЖНО: completion_tokens, а НЕ total_tokens. total_tokens включает
+        # промпт, а is_output_truncated сравнивает токены с потолком
+        # генерации — с total_tokens ответ ложно помечался «обрезанным».
+        completion_tokens = usage.get("completion_tokens", 0) or 0
+        prompt_tokens = usage.get("prompt_tokens", 0) or 0
         # 4-й элемент — обрез генерации (finish_reason == "length"), как в
         # ollama/openrouter: честный сигнал для флага truncated в раннере.
-        return content, total_tokens, False, choice.get("finish_reason") == "length"
+        # 5-й — токены промпта (учёт токенов: prompt + completion).
+        return content, int(completion_tokens), False, choice.get("finish_reason") == "length", int(prompt_tokens)
 
     except httpx.TimeoutException:
-        return "Таймаут при подключении к Groq API. Попробуйте позже.", 0, True
+        return "Таймаут при подключении к Groq API. Попробуйте позже.", 0, True, False, 0
     except Exception as exc:
         logger.exception("Groq API request failed: %s", exc)
-        return f"Ошибка Groq API: {exc}", 0, True
+        return f"Ошибка Groq API: {exc}", 0, True, False, 0
 
 
 # --- Автогенерация функций для каждой модели (через _base.make_table_handlers) ---
@@ -148,7 +153,7 @@ def _groq_handler_factory(model_key: str, cfg: tuple):
     """Создаёт async-функцию-обработчик для Groq модели по ключу."""
     groq_model, _max_tokens = cfg
 
-    async def handler(msg: str, user_id: int) -> Tuple[str, int, bool]:
+    async def handler(msg: str, user_id: int) -> Tuple[str, int, bool, bool, int]:
         return await _ask_groq(groq_model, msg, user_id, model_key)
 
     return handler

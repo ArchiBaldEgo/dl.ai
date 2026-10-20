@@ -15,10 +15,4 @@
         autocomplete="off"></textarea>
 {% endblock %}
 
-{% block extra_body_script %}
-<script>
-    // nid из DL-ссылки («Чат с DLAI» на странице задачи): текст задачи
-    // подставляется в поле сообщения (chat_template.js по AI_TASK_NODE_ID).
-    window.AI_TASK_NODE_ID = document.getElementById('messageText')?.dataset.nodeId || '';
-</script>
-{% endblock %}
+{% block extra_body_script %}{% endblock %}

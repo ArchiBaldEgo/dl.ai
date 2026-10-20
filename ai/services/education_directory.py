@@ -7,19 +7,34 @@ REST get-user-info отдаёт только коды: schoolId (строка), 
 (DRY — единственный читатель модели).
 """
 
+from django.core.cache import cache
+
+from ..constants import AI_CACHE_KEY_PREFIX
 from ..models import DLEducationName
 
 _PLACEHOLDER = "—"
 
+# Ключ кеша справочника. Инвалидация — по post_save/post_delete
+# DLEducationName (ai/signals.py), поэтому TTL — только страховка.
+_EDU_MAPS_CACHE_KEY = f"{AI_CACHE_KEY_PREFIX}:education_title_maps"
+_EDU_MAPS_CACHE_TTL = 300
+
 
 def education_title_maps():
     """``(schools, groups, groups_school)`` — словари ``{key: title}`` и
-    «группа → заведение» (один запрос к БД).
+    «группа → заведение» (один запрос к БД, дальше — кеш).
 
-    Справочник — десятки строк, читаем целиком на запрос без кеша.
+    Справочник — десятки строк; он читался целиком на КАЖДЫЙ рендер (дневной
+    отчёт журнала, «Таски») без кеша. Теперь результат кешируется в
+    django-cache; правка справочника сбрасывает кеш через сигнал
+    (ai/signals.py), так что изменения видны сразу.
+
     ``groups_school`` — привязка группы к вузу/школе (key school-строки,
     заполнена у group-строк справочника, см. ``DLEducationName.school``).
     """
+    cached = cache.get(_EDU_MAPS_CACHE_KEY)
+    if cached is not None:
+        return cached
     schools, groups, groups_school = {}, {}, {}
     for row in DLEducationName.objects.all():
         if row.kind == DLEducationName.KIND_SCHOOL:
@@ -28,6 +43,7 @@ def education_title_maps():
             groups[row.key] = row.title
             if row.school:
                 groups_school[row.key] = row.school
+    cache.set(_EDU_MAPS_CACHE_KEY, (schools, groups, groups_school), _EDU_MAPS_CACHE_TTL)
     return schools, groups, groups_school
 
 

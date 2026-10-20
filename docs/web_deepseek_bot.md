@@ -56,31 +56,52 @@
 
 ## Структура проекта
 
+Оба бот-пула (DeepSeek `:3000` и Kimi `:3001`) живут в **одном общем пакете
+`WebPools/`**. Различия сайтов (селекторы вёрстки, логин, env-имена) вынесены в
+`sites/<id>.js`; общий код о сайте ничего не знает.
+
 ```
-WebDeepseek/
+WebPools/
 ├── api/
-│   ├── index.js         # entrypoint, поднимает Express
+│   ├── index.js         # entrypoint: --site=deepseek | --site=kimi (без флага — оба сайта)
 │   ├── server.js        # роуты /v1/chat/completions, /api/send, /health
 │   ├── botManager.js    # пул ботов, состояния, реап мёртвых
-│   ├── config.js        # парсинг env
+│   ├── config.js        # парсинг env (по site.envNames)
 │   └── openaiFormat.js  # форматирование ответов в стиле OpenAI
+├── sites/
+│   ├── index.js         # реестр сайтов
+│   ├── deepseek.js      # дескриптор DeepSeek: env-имена, URL'ы/XPath'ы, Google-OAuth, профиль
+│   └── kimi.js          # дескриптор Kimi: KIMI_* env, contenteditable-ввод, ручной логин, профиль
 ├── worker/
 │   ├── index.js         # экспортит createBot()
 │   ├── bot.js           # класс Bot, lifecycle (init/sendMessage/close)
-│   ├── hist.js          # in-memory история диалогов (общая для всех ботов)
-│   ├── data.json        # URL'ы и XPath'ы для chat.deepseek.com
+│   ├── hist.js          # in-memory история диалогов (ключ: <site>:<user_id>)
 │   ├── modules/
-│   │   ├── auth.js      # вход на DeepSeek через «Войти с помощью Google» + проверка сохранённой сессии
 │   │   └── promtps.js   # отправка сообщения + парсинг HTML-ответа в Markdown
+│   │                    # (общий движок; site-специфика — через хуки sites/<id>.js)
 │   ├── core/
 │   │   └── page-utils.js   # helpers для puppeteer (waitAndTypeX и т.п.)
 │   └── utils/
-│       ├── logger.js    # запись в worker/logs/application.log
+│       ├── logger.js    # запись в лог-файл сайта (WebDeepseek/worker/logs или WebKimi/worker/logs)
+│       ├── env.js       # toInt/toBool/cleanEnvStr
 │       └── helpers.js   # sleep и т.п.
-├── Dockerfile
-├── docker-compose.linux.yml
-└── package.json
+├── WebKimi/seed.js      # (в корне репозитория) одноразовый ручной логин Kimi — НЕ ТРОГАТЬ
+├── WebDeepseek/worker/  # runtime: .chrome-profiles/ (сессия Google) + logs/
+├── WebKimi/worker/      # runtime: .chrome-profiles/ (сессия Kimi) + logs/
+├── package.json         # один node_modules на весь репозиторий (в корне!)
+└── Dockerfile
 ```
+
+> **Один `node_modules` в корне репозитория.** Раньше было два
+> (`WebDeepseek/node_modules` + `WebKimi/node_modules`) с идентичным набором
+> зависимостей. Теперь `npm ci` ставится один раз в корне; `WebKimi/seed.js`
+> находит `puppeteer`/`proxy-chain` сам (Node резолвит `node_modules` вверх по
+> дереву) — сам скрипт не менялся.
+>
+> **Chrome-профили остались РАЗДЕЛЬНЫМИ** (`WebDeepseek/worker/.chrome-profiles`
+> и `WebKimi/worker/.chrome-profiles`): сессия Google и сессия Kimi нельзя
+> смешивать в одном `user-data-dir`. Пути задаёт `site.profileRoot` и
+> переопределяются `BOT_PROFILE_DIR` / `KIMI_BOT_PROFILE_DIR`.
 
 > Переменные окружения для bot pool больше не живут в `WebDeepseek/.env` — они консолидированы в корневом `.env` репозитория (см. раздел `Bot pool (Web DeepSeek) worker` в `.env.example`). Локальный `WebDeepseek/.env` больше не читается.
 
@@ -194,14 +215,25 @@ docker compose --env-file ../.env down
 Нужен Node.js 20+ и Chromium, который скачает puppeteer.
 
 ```bash
-npm install
-node api/index.js
+# из корня репозитория — один общий node_modules
+npm ci
+node WebPools/api/index.js --site=deepseek
 ```
 
 В консоли должно быть:
 ```
-[api] listening on :3000
-[api] MAX_BOT_COUNT=3
+[api:deepseek] listening on 127.0.0.1:3000
+[api:deepseek] MAX_BOT_COUNT=3
+```
+
+Без флага `--site` поднимаются оба пула в одном процессе (DeepSeek `:3000` +
+Kimi `:3001`). В Docker они стартуют отдельными процессами (см. CMD в
+`Dockerfile`), чтобы падение одного сайта не роняло другой.
+
+Ручной логин Kimi (один раз, нужна графическая сессия):
+```bash
+npm run seed        # слот 1 (bot-1)
+npm run seed:2      # слот 2 (bot-2)
 ```
 
 Первый бот стартанёт лениво — при первом запросе к `/api/send` или `/v1/chat/completions`.

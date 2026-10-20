@@ -4,11 +4,11 @@
 import logging
 import re
 import time
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime
 
 from django.contrib import admin
 from django.core.paginator import Paginator
-from django.db.models import Count, Q
+from django.db.models import Count, Min, Q
 from .site import ai_admin_site
 from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
@@ -40,6 +40,7 @@ from ..models import (
 from ..templatetags.ai_duration import format_human_duration
 from ..model_health import get_runtime_model_handlers
 from ..services.education_directory import education_title_maps, group_display, school_title_for
+from ..services.msk_time import msk_day_bounds, parse_date
 from ..services.task_registry import dl_task_url  # DRY: единственное определение — в task_registry
 from .permissions import can_access_arm, can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
 
@@ -53,7 +54,15 @@ _BATCH_RUN_ID_RE = re.compile(r"Batch solve (?:rerun|run) ([0-9a-f]{32})")
 
 
 def _batch_run_id_from_log(log):
-    """Run id batch-прогона из записи журнала или None."""
+    """Run id batch-прогона из записи журнала или None.
+
+    Сначала — индексированная колонка ``AIRequestLog.batch_run_id`` (её пишет
+    arm_runner при старте прогона). Для ЛЕГАСИ-записей (созданных до
+    миграции) — фолбэк на разбор текста message.
+    """
+    stored = (getattr(log, "batch_run_id", "") or "").strip()
+    if stored:
+        return stored
     m = _BATCH_RUN_ID_RE.search(log.message or "")
     return m.group(1) if m else None
 
@@ -121,6 +130,32 @@ def _parse_date(value: str) -> str:
     except ValueError:
         return ""
     return value
+
+
+def _apply_date_range(qs, date_from: str, date_to: str):
+    """Фильтр журнала по периоду «от и до» (МСК) — ДИАПАЗОН по ``sent_at``.
+
+    Раньше здесь стоял ``sent_at__date__gte/lte``: такой lookup вычисляет
+    выражение по каждой строке и НЕ использует индекс (в Postgres). Теперь
+    границы — полуночи МСК в UTC, и фильтр индекс-хостильный (см. индексы
+    ``ai_request_log_*_sent_idx`` в ai/models.py).
+
+    Пустая/мусорная граница = «нет ограничения» (её раньше отсекал
+    ``_parse_date``, поэтому 500 на мусоре не возвращается).
+    """
+    from ..services.msk_time import parse_date, msk_day_bounds
+
+    if date_from:
+        start = parse_date(date_from)
+        if start is not None:
+            day_start, _ = msk_day_bounds(start)
+            qs = qs.filter(sent_at__gte=day_start)
+    if date_to:
+        end = parse_date(date_to)
+        if end is not None:
+            _, day_end = msk_day_bounds(end)
+            qs = qs.filter(sent_at__lte=day_end)
+    return qs
 
 
 def _scope_logs_qs(qs, user):
@@ -397,14 +432,25 @@ def build_batch_rows_for_logs(request, logs):
             counters[row["run__run_id"]] = row
         # file_extension строки — первый непустой снимок результата прогона
         # (тот же приоритет, что в _build_batch_log_snapshot).
+        # Раньше тянулись ВСЕ непустые снимки прогона, а в словарь попадал
+        # первый — на прогоне с сотней пар это сотня строк впустую. Теперь:
+        # Min(pk) по прогону → точечная выборка нужных строк.
+        ext_first_pks = {}
         for row in (
             AIModelTestResult.objects
             .filter(run__run_id__in=set(run_ids.values()))
             .exclude(file_extension_snapshot="")
-            .order_by("pk")
-            .values("run__run_id", "file_extension_snapshot")
+            .values("run__run_id")
+            .annotate(first_pk=Min("pk"))
         ):
-            first_ext.setdefault(row["run__run_id"], row["file_extension_snapshot"])
+            ext_first_pks[row["run__run_id"]] = row["first_pk"]
+        if ext_first_pks:
+            for row in (
+                AIModelTestResult.objects
+                .filter(pk__in=list(ext_first_pks.values()))
+                .values("run__run_id", "file_extension_snapshot")
+            ):
+                first_ext.setdefault(row["run__run_id"], row["file_extension_snapshot"])
     rows = []
     for log in logs:
         run_hex = run_ids.get(log.pk)
@@ -538,12 +584,32 @@ def build_recent_batch_rows(request, limit=5):
         qs = (
             _scope_logs_qs(AIRequestLog.objects.all(), request.user)
             .filter(source="arm", mode__in=("batch_solve", "solve"))
-            # "Batch solve run <hex>" И "Batch solve rerun <hex>" (перезапуск
-            # нерешённых пар вливается в тот же прогон — лог той же формы).
-            .filter(message__icontains="Batch solve ")
+            # Batch-запись отмечается ИНДЕКСИРОВАННОЙ колонкой
+            # batch_run_id (её пишет arm_runner). Раньше признаком был
+            # message__icontains="Batch solve " — полный scan по всему журналу
+            # на КАЖДУЮ загрузку «Настройки ИИ-приложения».
+            .exclude(batch_run_id="")
             .order_by("-sent_at")
         )
         logs = list(qs[: max(0, int(limit))])
+        # ЛЕГАСИ-записи (до миграции): у них batch_run_id пуст, признак — в
+        # тексте message. Достраиваем выборку по тексту только если новых
+        # записей не хватило (иначе — лишний scan на каждой загрузке).
+        if len(logs) < max(0, int(limit)):
+            legacy_qs = (
+                _scope_logs_qs(AIRequestLog.objects.all(), request.user)
+                .filter(source="arm", mode__in=("batch_solve", "solve"))
+                .filter(batch_run_id="")
+                .filter(message__icontains="Batch solve ")
+                .order_by("-sent_at")
+            )
+            seen = {log.pk for log in logs}
+            for log in legacy_qs:
+                if len(logs) >= max(0, int(limit)):
+                    break
+                if log.pk in seen:
+                    continue
+                logs.append(log)
         rows = build_batch_rows_for_logs(request, logs)
     return {
         "recent_batch_runs": rows,
@@ -600,16 +666,32 @@ def admin_daily_report_view(request):
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
 
+    # Период «от и до» (МСК). Пустые границы = сегодняшний день (по умолчанию).
+    # Границы — полуночи МСК в UTC (единый хелпер ai/services/msk_time.py):
+    # sent_at в БД хранится в UTC, а __date__-фильтр по sent_at ломает индекс
+    # (индекс-хостильный отказ).
+    date_from = _parse_date(request.GET.get("date_from", ""))
+    date_to = _parse_date(request.GET.get("date_to", ""))
+    start_utc, end_utc = msk_day_bounds()
+    if date_from:
+        parsed_from = parse_date(date_from)
+        if parsed_from is not None:
+            start_utc, _ = msk_day_bounds(parsed_from)
+    if date_to:
+        parsed_to = parse_date(date_to)
+        if parsed_to is not None:
+            _, end_utc = msk_day_bounds(parsed_to)
+    # Подписи периода — по МСК (границы храним в UTC).
     now_msk = timezone.localtime(timezone.now(), MOSCOW_TZ)
-    day_start = now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = now_msk.replace(hour=23, minute=59, second=59, microsecond=999_000)
+    start_msk = timezone.localtime(start_utc, MOSCOW_TZ)
+    end_msk = timezone.localtime(end_utc, MOSCOW_TZ)
     # .only() — без message/response_text: тексты тяжёлые, отчёту не нужны.
     logs = list(
         _scope_logs_qs(AIRequestLog.objects.all(), request.user)
         .exclude(source=AIRequestLog.SOURCE_ARM)
         .filter(
-            sent_at__gte=day_start.astimezone(dt_timezone.utc),
-            sent_at__lte=day_end.astimezone(dt_timezone.utc),
+            sent_at__gte=start_utc,
+            sent_at__lte=end_utc,
         )
         .only(
             "id", "sent_at", "external_user_id", "username", "user_full_name",
@@ -707,7 +789,11 @@ def admin_daily_report_view(request):
     context = {
         **ai_admin_site.each_context(request),
         "title": "DL.AI: Дневной отчёт",
-        "date_label": now_msk.strftime("%d.%m.%Y"),
+        "date_label": (
+            now_msk.strftime("%d.%m.%Y")
+            if not (date_from or date_to)
+            else f"{start_msk.strftime('%d.%m.%Y')} — {end_msk.strftime('%d.%m.%Y')}"
+        ),
         "rows": rows,
         "total_count": len(logs),
         "group_choices": group_choices,
@@ -715,6 +801,8 @@ def admin_daily_report_view(request):
         "filters_student": student_filter,
         "filters_group": group_filter,
         "filters_school": school_filter,
+        "filters_date_from": date_from,
+        "filters_date_to": date_to,
     }
     return TemplateResponse(request, "admin/ai/daily_report.html", context)
 
@@ -746,10 +834,8 @@ def admin_request_logs_view(request):
             | Q(username__icontains=user_q)
             | Q(external_user_id__icontains=user_q)
         )
-    if date_from:
-        qs = qs.filter(sent_at__date__gte=date_from)
-    if date_to:
-        qs = qs.filter(sent_at__date__lte=date_to)
+    # Период «от и до» (МСК) — диапазон по sent_at (индекс-хостильно).
+    qs = _apply_date_range(qs, date_from, date_to)
 
     # response_text в таблицу не вшивается (ленивая подгрузка detail-json по
     # раскрытию строки, см. request_logs_table.html) — с страницы его не читаем,
@@ -993,6 +1079,7 @@ def _batch_log_row_contexts(logs, user=None):
     # собираем снимки промптов (distinct по prompt_id — сколько использовано,
     # столько и показываем; легаси-пустые снимки не попадают).
     tasks_by_run = {}
+    seen_nodes_by_run = {}
     solved_nodes_by_run = {}
     models_by_run = {}
     prompts_by_run = {}
@@ -1014,7 +1101,11 @@ def _batch_log_row_contexts(logs, user=None):
             if is_solved:
                 solved_nodes_by_run.setdefault(run_key, set()).add(node_id)
             bucket = tasks_by_run.setdefault(run_key, [])
-            if not any(t["node_id"] == node_id for t in bucket):
+            # Множество node_id по прогону — вместо any() по списку (был O(n²)
+            # на числе пар прогона).
+            seen_nodes = seen_nodes_by_run.setdefault(run_key, set())
+            if node_id not in seen_nodes:
+                seen_nodes.add(node_id)
                 bucket.append({
                     "node_id": node_id,
                     "name": r.task.name if r.task else "",
@@ -1255,9 +1346,12 @@ def resend_request_view(request, log_id):
         if isinstance(response, tuple):
             response_text = str(response[0] or "") if len(response) > 0 else ""
             tokens = response[1] if len(response) > 1 else 0
+            # 5-й элемент кортежа — токены промпта (учёт prompt+completion).
+            prompt_tokens = response[4] if len(response) > 4 else 0
         else:
             response_text = str(response or "")
             tokens = 0
+            prompt_tokens = 0
 
         response_text = response_text[:5000]
 
@@ -1266,6 +1360,7 @@ def resend_request_view(request, log_id):
             new_log.duration_seconds = (end_time - start_time).total_seconds()
             new_log.response_text = response_text
             new_log.tokens = tokens or 0
+            new_log.tokens_prompt = prompt_tokens or 0
             new_log.status = AIRequestLog.STATUS_ERROR
             new_log.error_message = "Модель вернула пустой ответ"
             new_log.save()
@@ -1279,6 +1374,7 @@ def resend_request_view(request, log_id):
         new_log.duration_seconds = (end_time - start_time).total_seconds()
         new_log.response_text = response_text
         new_log.tokens = tokens or 0
+        new_log.tokens_prompt = prompt_tokens or 0
         new_log.status = AIRequestLog.STATUS_SUCCESS
         new_log.save()
 

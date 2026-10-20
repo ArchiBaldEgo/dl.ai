@@ -76,6 +76,15 @@ table[data-reorder="1"] tbody tr[data-task-id] { cursor: grab; }
   color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color));
 }
 .ai-task-btn-close:hover { color: #912018; }
+
+/* Правка таска (только автору): форма — отдельной строкой под таском. */
+.ai-task-btn-edit { padding: 3px 12px; }
+.ai-task-edit-row[hidden] { display: none; }
+.ai-task-edit-row > td { background: var(--body-bg); }
+.ai-task-edit-form { display: grid; gap: 8px; }
+.ai-task-edit-form .ai-tasks-create-row input[type="text"] { flex: 1 1 auto; }
+.ai-task-edit-form textarea { width: 100%; resize: vertical; }
+.ai-task-edit-actions { display: flex; gap: 8px; }
 .ai-task-btn-reopen { padding: 3px 12px; }
 /* Выбор исполнителя при возврате: «Освободить» заметно отличается. */
 .ai-task-reopen-choice { display: inline-flex; gap: 6px; }

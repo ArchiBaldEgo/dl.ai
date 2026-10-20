@@ -32,16 +32,21 @@ ENV/
 *.log
 
 # Bot build artifacts
-WebDeepseek/node_modules/
-WebDeepseek/.cache/
-WebDeepseek/.puppeteer-cache/
-WebDeepseek/chrome*
-WebDeepseek/chromium*
+node_modules/
+WebPools/.cache/
+WebPools/.puppeteer-cache/
+WebPools/chrome*
+WebPools/chromium*
 # Chrome profiles (session cookies) — bind-mounted at runtime via .:/app,
 # not needed in the image; their files are permission-restricted and break
 # the build-context sender (open ... permission denied).
 **/worker/.chrome-profiles*/
-WebKimi/node_modules/
+# Каталоги пулов: JS-код в WebPools/, здесь остались только runtime-каталоги
+# (Chrome-профили и логи) — их в образ класть не нужно.
+WebDeepseek/.cache/
+WebDeepseek/.puppeteer-cache/
+WebDeepseek/chrome*
+WebDeepseek/chromium*
 WebKimi/.cache/
 WebKimi/.puppeteer-cache/
 WebKimi/chrome*

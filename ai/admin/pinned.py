@@ -64,11 +64,16 @@ def admin_pinned_runs_view(request):
     # любой строке, а снапшот-эндпоинт сам допускает закреплённые чужие записи
     # для промпт-разработчика (см. admin_batch_snapshot_view).
     ordered_rows = []
+    # Пины по логу — один проход (был O(n²): список пинов перебирался для
+    # КАЖДОГО пина — на странице десятков закреплений это квадрат).
+    pins_by_log = {}
+    for pin in pins:
+        pins_by_log.setdefault(pin.log_id, []).append(pin)
     for pin in pins:
         row = rows_by_log_id.pop(pin.log_id, None)
         if row is None:
             continue
-        row_pins = [p for p in pins if p.log_id == pin.log_id]
+        row_pins = pins_by_log.get(pin.log_id, [])
         row["is_own"] = any(p.user_id == request.user.pk for p in row_pins)
         row["pin_authors"] = ", ".join(_pin_author_display(p.user) for p in row_pins)
         ordered_rows.append(row)

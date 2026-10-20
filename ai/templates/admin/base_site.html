@@ -20,10 +20,19 @@ file AND admin/app_list.html are not shadowed by the stock admin templates
   {{ block.super }}
   <link rel="stylesheet" href="{% static 'admin/css/ai_admin.css' %}">
   <link rel="stylesheet" href="{% static 'admin/css/ai-wizard.css' %}">
+  {% comment %}Общая таблица результатов batch-solve (ARM): CSS подключаем
+  ГЛОБАЛЬНО — partial _ai_batch_results.html включают четыре страницы
+  (настройки приложения, /arm/solve/, «Закреплённые», деталь записи
+  журнала), и в каждой дублировать тег было бы копипастой.{% endcomment %}
+  <link rel="stylesheet" href="{% static 'admin/ai/batch_results/index.css' %}">
 {% endblock %}
 
 {% block extrahead %}
   {{ block.super }}
+  {% comment %}window.ArmBatchResults (общий рендер таблицы результатов) должен
+  быть определён ДО вызывающих скриптов страниц — поэтому подключаем его
+  ПЕРВЫМ, синхронно (без defer), а не defer'ом.{% endcomment %}
+  <script src="{% static 'admin/ai/batch_results/index.js' %}"></script>
   <script src="{% static 'admin/js/ai_processes.js' %}" defer></script>
   <script src="{% static 'admin/js/ai_admin_state.js' %}" defer></script>
   <script src="{% static 'admin/js/ai_nav_filter.js' %}" defer></script>

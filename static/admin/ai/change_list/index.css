@@ -1,0 +1,6 @@
+/* Стили переопределения админского changelist (Django 5.1.4).
+   Вынесены из ai/templates/admin/change_list.html.
+   ВНИМАНИЕ: файл — копия стокового admin/change_list.html Django 5.1.4 с
+   одним отличием (панель фильтров вынесена наверх). При обновлении Django
+   сверять со стоковым шаблоном версии. */
+#changelist table thead th:first-child {width: inherit}

@@ -718,6 +718,13 @@ class AIRequestLog(models.Model):
     message = models.TextField(blank=True, verbose_name="Запрос")
     response_text = models.TextField(blank=True, verbose_name="Ответ модели")
     tokens = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов")
+    # Токены ПРОМПТА (вход). «tokens» — completion (ответ модели). Итог =
+    # tokens + tokens_prompt (см. ai/services/token_usage.py). Null = провайдер
+    # не отдал счётчик (тогда честно 0, а не выдуманное число).
+    tokens_prompt = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов (промпт)")
+    # ID batch-прогона для записей пакетного решения (индексированная замена
+    # парсинга «Batch solve run <id>» из текста сообщения).
+    batch_run_id = models.CharField(max_length=64, blank=True, default="", db_index=True, verbose_name="ID пакетного прогона")
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ERROR, verbose_name="Статус")
     error_message = models.TextField(blank=True, verbose_name="Текст ошибки")
 
@@ -738,6 +745,17 @@ class AIRequestLog(models.Model):
         verbose_name = "Журнал запросов к ИИ"
         verbose_name_plural = "Журнал запросов к ИИ"
         ordering = ("-sent_at",)
+        indexes = [
+            # Журнал растёт быстро, а читается всегда «по времени» (Meta.ordering
+            # = -sent_at) и с фильтрами. Без индексов каждая загрузка журнала/
+            # дневного отчёта/контроля токенов делала сортировку по всей
+            # таблице. Составные индексы покрывают типовые фильтры
+            # (режим / источник / статус) + срез по дате.
+            models.Index(fields=["sent_at"], name="ai_request_log_sent_idx"),
+            models.Index(fields=["mode", "sent_at"], name="ai_request_log_mode_sent_idx"),
+            models.Index(fields=["source", "sent_at"], name="ai_request_log_source_sent_idx"),
+            models.Index(fields=["status", "sent_at"], name="ai_request_log_status_sent_idx"),
+        ]
 
     def __str__(self):
         return f"{self.sent_at} — {self.user_full_name or self.username or self.external_user_id}"
@@ -1042,6 +1060,12 @@ class AIModelTestRun(models.Model):
         verbose_name = "Прогон тестирования модели"
         verbose_name_plural = "Прогоны тестирования модели"
         ordering = ("-started_at",)
+        indexes = [
+            # Список прогонов всегда сортируется по -started_at; фильтр по
+            # статусу («идущие/завершённые») — частый.
+            models.Index(fields=["started_at"], name="ai_model_test_run_started_idx"),
+            models.Index(fields=["status", "started_at"], name="ai_model_test_run_status_idx"),
+        ]
 
     def __str__(self):
         return f"{self.run_id} ({self.status})"
@@ -1077,6 +1101,28 @@ class AIModelTestResult(models.Model):
         (VERDICT_SKIPPED, "Пропущено"),
     )
 
+    # Ортогональная ось «почему пара не решена» (orthogonal to ``verdict``:
+    # verdict отвечает «прошёл ли DL», failure_reason — «почему нет»).
+    # solved ⇒ пустая строка; skipped ⇒ "skipped"; нераспознанный провал DL ⇒
+    # "undefined" (честно: причина не опознана, а не «успех»).
+    FR_MODEL_ERROR = "model_error"
+    FR_NO_CODE = "no_code"
+    FR_COMPILE_ERROR = "compile_error"
+    FR_WRONG_ANSWER = "wrong_answer"
+    FR_UNDEFINED = "undefined"
+    FR_SKIPPED = "skipped"
+
+    FAILURE_REASON_CHOICES = (
+        (FR_MODEL_ERROR, "Сбой ответа модели"),
+        (FR_NO_CODE, "Не выкушен код"),
+        (FR_COMPILE_ERROR, "Ошибка компиляции"),
+        (FR_WRONG_ANSWER, "Неправильный ответ"),
+        (FR_UNDEFINED, "Причина не распознана"),
+        (FR_SKIPPED, "Пропущено"),
+    )
+
+    FAILURE_REASON_LABELS = dict(FAILURE_REASON_CHOICES)
+
     run = models.ForeignKey(
         AIModelTestRun,
         on_delete=models.CASCADE,
@@ -1097,8 +1143,15 @@ class AIModelTestResult(models.Model):
         max_length=8, choices=VERDICT_CHOICES, null=True, blank=True, db_index=True,
         verbose_name="Вердикт",
     )
+    # Причина провала (см. FAILURE_REASON_CHOICES). Пустая строка = solved.
+    failure_reason = models.CharField(
+        max_length=16, choices=FAILURE_REASON_CHOICES, null=True, blank=True,
+        db_index=True, default="", verbose_name="Причина сбоя",
+    )
     duration_seconds = models.FloatField(null=True, blank=True, verbose_name="Время ответа, с")
     tokens = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов")
+    # Токены промпта (вход) — «tokens» остаётся completion.
+    tokens_prompt = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов (промпт)")
     short_response = models.TextField(blank=True, default="", verbose_name="Краткий ответ")
     raw_response = models.TextField(blank=True, default="", verbose_name="Полный ответ")
     # Извлечённый чистый код модели (содержимое файла программы) для batch-solve.
@@ -1132,6 +1185,13 @@ class AIModelTestResult(models.Model):
         verbose_name = "Результат тестирования модели"
         verbose_name_plural = "Результаты тестирования модели"
         ordering = ("model_title",)
+        indexes = [
+            # Сортировка результатов по названию модели (Meta.ordering) и
+            # выборка «результаты одного прогона» — обе без индекса
+            # сортировали весь результат прогона на каждой загрузке.
+            models.Index(fields=["model_title"], name="ai_model_test_result_title_idx"),
+            models.Index(fields=["run", "model_title"], name="ai_mtr_run_title_idx"),
+        ]
         constraints = [
             # One row per (run, model, task) for batch runs.
             models.UniqueConstraint(
@@ -1196,6 +1256,11 @@ class AIModelStats(models.Model):
             models.Index(
                 fields=["model_key", "programming_language", "topic"],
                 name="ai_model_stats_scope_idx",
+            ),
+            # Список статистики сортируется по -solved_count (Meta.ordering).
+            models.Index(
+                fields=["solved_count"],
+                name="ai_model_stats_solved_idx",
             ),
         ]
 
@@ -1342,3 +1407,130 @@ class AIWizardSeen(models.Model):
 
     def __str__(self):
         return f"{self.user_id} / {self.scope} v{self.version}"
+
+
+class AIUserModel(models.Model):
+    """Личная AI-модель пользователя (провайдер + модель + свои ключи).
+
+    Пользователь сам приносит провайдера и модель (OpenAI-совместимый
+    endpoint). Модель доступна ТОЛЬКО ему: чужие пользователи её не видят
+    (селектор моделей), не могут вызвать (проверка владельца в
+    ai/services/user_models.py) и не могут отредактировать.
+
+    Безопасность:
+    - ``base_url`` — только https, без приватных/локальных адресов (SSRF-защита
+      проверяется в ai/services/user_models.py::validate_base_url);
+    - ``api_key`` хранится шифром (Fernet, ключ — ``AI_USER_MODEL_SECRET_KEY``
+      в .env); в открытом виде не выводится никогда;
+    - URL-путь и host валидируются, редиректы не следуются.
+
+    Поля model_key НЕ попадают в глобальный реестр моделей
+    (ai/model_clients/registry.py) — поэтому такие модели не участвуют в
+    health-check, ARM-прогонах и общей статистике.
+    """
+
+    PROVIDER_OPENAI = "openai"
+    PROVIDER_ANTHROPIC = "anthropic"
+    PROVIDER_OLLAMA = "ollama"
+    PROVIDER_GROQ = "groq"
+    PROVIDER_OPENROUTER = "openrouter"
+    PROVIDER_SAMBANOVA = "sambanova"
+    PROVIDER_CUSTOM = "custom"
+
+    PROVIDER_CHOICES = (
+        (PROVIDER_OPENAI, "OpenAI"),
+        (PROVIDER_ANTHROPIC, "Anthropic"),
+        (PROVIDER_OLLAMA, "Ollama"),
+        (PROVIDER_GROQ, "Groq"),
+        (PROVIDER_OPENROUTER, "OpenRouter"),
+        (PROVIDER_SAMBANOVA, "SambaNova"),
+        (PROVIDER_CUSTOM, "Другой (OpenAI-совместимый)"),
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="ai_user_models",
+        verbose_name="Владелец",
+    )
+    title = models.CharField(max_length=255, verbose_name="Название модели")
+    provider = models.CharField(
+        max_length=32, choices=PROVIDER_CHOICES, default=PROVIDER_OPENAI,
+        verbose_name="Провайдер",
+    )
+    model_id = models.CharField(max_length=255, verbose_name="ID модели у провайдера")
+    base_url = models.CharField(
+        max_length=500, blank=True, default="",
+        verbose_name="Базовый URL (для совместимых провайдеров)",
+    )
+    # Шифротекст ключа (Fernet). Пусто = без ключа (локальный endpoint).
+    api_key_encrypted = models.TextField(blank=True, default="", verbose_name="Ключ (зашифрован)")
+    max_tokens = models.PositiveIntegerField(default=8000, verbose_name="Потолок ответа")
+    supports_vision = models.BooleanField(default=False, verbose_name="Умеет картинки")
+    supports_think = models.BooleanField(default=False, verbose_name="Умеет think")
+    is_active = models.BooleanField(default=True, verbose_name="Активна")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Добавлена")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменена")
+
+    class Meta:
+        db_table = "ai_ai_user_model"
+        verbose_name = "Личная AI-модель"
+        verbose_name_plural = "Личные AI-модели"
+        ordering = ("title",)
+
+    def __str__(self) -> str:
+        return f"{self.title} ({self.model_id}) — {self.user_id}"
+
+
+class AIDLApiRequest(models.Model):
+    """Запрос пользователя на создание API к DL (dl.gsu.by).
+
+    Страница «Запросы по DL API»: две вкладки — «актуальные» (STATUS_PENDING,
+    API ещё не создан) и «неактуальные» (API сделано — STATUS_DONE).
+    Актуальный запрос провисает, когда API создан: админ жмёт «API создано»,
+    и строка переезжает в «неактуальные».
+    """
+
+    STATUS_PENDING = "pending"
+    STATUS_DONE = "done"
+
+    STATUS_CHOICES = (
+        (STATUS_PENDING, "Актуальный"),
+        (STATUS_DONE, "Неактуальный"),
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ai_dl_api_requests",
+        verbose_name="Кто попросил",
+    )
+    external_user_id = models.CharField(max_length=255, blank=True, db_index=True, verbose_name="ID на dl.gsu.by")
+    user_full_name = models.CharField(max_length=500, blank=True, default="", verbose_name="ФИО")
+    username = models.CharField(max_length=255, blank=True, default="", verbose_name="Логин")
+    description = models.TextField(blank=True, default="", verbose_name="Описание")
+    status = models.CharField(
+        max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True,
+        verbose_name="Статус",
+    )
+    created_at = models.DateTimeField(default=timezone.now, db_index=True, verbose_name="Когда попросил")
+    resolved_at = models.DateTimeField(null=True, blank=True, verbose_name="Когда сделано")
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ai_dl_api_requests_resolved",
+        verbose_name="Кто сделал",
+    )
+    comment = models.TextField(blank=True, default="", verbose_name="Комментарий")
+
+    class Meta:
+        db_table = "ai_ai_dl_api_request"
+        verbose_name = "Запрос API к DL"
+        verbose_name_plural = "Запросы API к DL"
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:
+        who = self.user_full_name or self.username or self.external_user_id or "—"
+        return f"{who}: {self.description[:60]}"

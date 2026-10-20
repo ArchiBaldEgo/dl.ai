@@ -103,7 +103,7 @@
                 "#messages": { title: "History", text: "History: everything you write and the model answers appears here." },
                 "#messageText": { title: "Type your question here", text: "Just type your question into this field." },
                 '.buttons-block button[type="submit"]': { title: "The “Send” button", text: "When the question is written, click this button." },
-                '[onclick="clearContext()"]': { title: "Erase everything", text: "This button clears the conversation and starts over." }
+                '#clearContextBtn': { title: "Erase everything", text: "This button clears the conversation and starts over." }
             },
             solve: {
                 "#selectType": { title: "Where you are", text: "You are on the “Solve the task” page. Use this list to return to “Chat”." },
@@ -135,7 +135,7 @@
                 "#messages": { title: "Historique", text: "Historique : tout ce que tu écris et que le modèle répond s’affiche ici." },
                 "#messageText": { title: "Tu écris ta question ici", text: "Écris simplement ta question dans ce champ." },
                 '.buttons-block button[type="submit"]': { title: "Le bouton « Envoyer »", text: "Quand la question est écrite, clique sur ce bouton." },
-                '[onclick="clearContext()"]': { title: "Tout effacer", text: "Ce bouton efface la conversation et recommence." }
+                '#clearContextBtn': { title: "Tout effacer", text: "Ce bouton efface la conversation et recommence." }
             },
             solve: {
                 "#selectType": { title: "Où tu es", text: "Tu es sur la page « Résoudre la tâche ». Par cette liste, tu reviens au « Chat »." },
@@ -248,7 +248,10 @@
         { sel: '#nav-sidebar a[href^="/ai/admin/test_data/"]', title: "Тестовые данные", text: "Генератор образцов: создаёт тестовые записи журнала и дневного отчёта — можно проверить, как выглядят страницы, не дожидаясь реальных запросов.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/ai/tasksolution/"]', title: "Решённые задачи", text: "Кэш: задания, прошедшие тест в DL, достаются без модели.", pos: "right", onShow: "openNav" },
         { sel: '#nav-sidebar a[href^="/ai/admin/updates/"]', title: "Обновления", text: "Что нового появилось в проекте.", pos: "right", onShow: "openNav" },
-        { sel: '#nav-sidebar a[href^="/ai/admin/ai/prompt/"]', title: "Промпты", text: "Таблица всех промптов; правка — по клику на название.", pos: "right", onShow: "openNav" }
+        { sel: '#nav-sidebar a[href^="/ai/admin/ai/prompt/"]', title: "Промпты", text: "Таблица всех промптов; правка — по клику на название.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href^="/ai/admin/ai/tokens/"]', title: "Контроль токенов", text: "Сколько токенов потрачено: какие модели, кто, в каком режиме.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href^="/ai/admin/user-models/"]', title: "Мои AI-модели", text: "Свои модели: провайдер, ID модели, ключ. Видны только вам.", pos: "right", onShow: "openNav" },
+        { sel: '#nav-sidebar a[href^="/ai/admin/dl-api-requests/"]', title: "Запросы по DL API", text: "Заявки на создание API к dl.gsu.by: актуальные и неактуальные.", pos: "right", onShow: "openNav" }
     ];
 
 
@@ -273,7 +276,7 @@
             { sel: "#messages", rank: 19, title: "История", text: "История: всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
             { sel: "#messageText", rank: 20, title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
             { sel: '.buttons-block button[type="submit"]', rank: 21, title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
-            { sel: '[onclick="clearContext()"]', rank: 22, title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top" }
+            { sel: '#clearContextBtn', rank: 22, title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top" }
         ],
 
         // Эталон пользователя (v4): «Реши задачу — Язык программирования, тема,
@@ -415,6 +418,26 @@
             { sel: ".help-test-data", title: "Что появится в журнале", text: "После нажатия кнопки в журнале появится случайная запись: случайный студент (или сам админ), случайный режим — чат, «Реши задачу» или «В чём ошибка» — и случайная модель. Нажимаешь кнопку несколько раз — записей станет несколько.", pos: "bottom" },
             { sel: "[data-emit-request] .button", title: "Кнопка «Emit Request»", text: "Одно нажатие = одна новая тестовая запись в журнале. Чтобы проверить фильтры журнала, наделай записей пять-десять и иди в «Журнал запросов» — они появятся там наверху.", pos: "bottom" },
             { sel: "#emit-status", title: "Статус", text: "Здесь коротко напишется, что запись создана (или что пошло не так). Тестовые записи выглядят в журнале как настоящие — если захочешь их убрать, удали в стоковом списке журнала (/ai/admin/ai/airequestlog/) или просто оставь: ничему не мешают.", pos: "bottom" }
+        ],
+
+        // Контроль токенов: сколько потрачено, какие модели, кто, в каком режиме.
+        admin_tokens: [
+            { sel: ".ai-tokens-filters", title: "Фильтры", text: "Период (с даты и по дату), режим, модель, кто и источник. Набери и нажми «Показать» — цифры пересчитаются за выбранный срез.", pos: "bottom" },
+            { sel: ".ai-tokens-cards", title: "Итог", text: "Две сводки: по журналу запросов и по парам пакетного решения. Считается промпт + ответ. Это два разреза одного расхода, складывать их между собой не надо.", pos: "bottom" },
+            { sel: ".ai-tokens-panel", title: "Разрезы", text: "Отдельно по моделям, пользователям, режимам и дням. У web-моделей (Web DeepSeek, Web Kimi) токены не считаются — они помечены «учёт недоступен».", pos: "top" }
+        ],
+
+        // Мои AI-модели: личная модель пользователя (провайдер + модель + ключ).
+        admin_user_models: [
+            { sel: ".ai-um-form", title: "Форма модели", text: "Название, провайдер, ID модели у провайдера, базовый адрес (для совместимых) и ключ. Модель должна работать без VPN — адрес провайдера должен быть доступен из сети университета.", pos: "bottom" },
+            { sel: ".ai-um-form input[name=api_key]", title: "Ключ API", text: "Ключ хранится зашифрованным и в открытом виде нигде не показывается. Оставь поле пустым, чтобы не менять ключ.", pos: "bottom" },
+            { sel: ".ai-um-table", title: "Список", text: "Твои модели. «Править» — изменить, «Удалить» — убрать. Другие пользователи их не видят.", pos: "top" }
+        ],
+
+        // Запросы по DL API: заявки пользователей на создание API к dl.gsu.by.
+        admin_dl_api_requests: [
+            { sel: ".ai-dlapi-tabs", title: "Две вкладки", text: "«Актуальные» — заявки, по которым API ещё не создан. «Неактуальные» — уже сделанные.", pos: "bottom" },
+            { sel: ".ai-dlapi-table", title: "Заявки", text: "Описание, кто попросил и когда. Кнопка «API создано» переносит заявку в «Неактуальные» и запоминает, кто и когда сделал.", pos: "top" }
         ]
     };
 
