@@ -4,7 +4,8 @@
 {# / «Хотелки» (у обоих СВОЯ нумерация с №1, порядок перетаскиванием) и      #}
 {# фильтры «Не взятые» (?kind=unclaimed), «Поиск» (активные таски + фильтр   #}
 {# «Кто взял», ?taken=), «Мои таски» (?kind=mine) и архив «Закрытые»         #}
-{# (?kind=closed + диапазон дат ?closed_from/?closed_to; «Вернуть» спрашивает,#}
+{# (?kind=closed + ?closed_from/?closed_to + ?task_kind= + ?done_by=;        #}
+{# «Вернуть» спрашивает,                                                     #}
 {# оставить исполнителя (по умолчанию) или освободить таск). Суперюзер/      #}
 {# action-ключи: форма создания, «Закрыть», «Вернуть». CSS/JS —              #}
 {# static/admin/ai/tasks/.                                                   #}
@@ -26,9 +27,9 @@
     «Мои таски» — таски, которые вы взяли. У взятого таска показываются
     ФИО и группа взявшего и дата взятия; взять уже взятый таск нельзя.
     Закрытый таск уходит с доски в архив «Закрытые» (кто дал, кто выполнил,
-    даты, разграничение по датам закрытия); случайно закрытый или сделанный
-    не так, как нужно, таск суперюзер может вернуть на доску кнопкой
-    «Вернуть».
+    даты, фильтры по датам закрытия, типу и исполнителю); случайно закрытый
+    или сделанный не так, как нужно, таск суперюзер может вернуть на доску
+    кнопкой «Вернуть».
   </p>
 
   <div class="ai-task-tabs">
@@ -74,9 +75,27 @@
   {% endif %}
 
   {% if active_kind == 'closed' %}
-  {# Архив: разграничение по датам закрытия (обе границы включительно; «по» = весь день). #}
+  {# Архив: даты закрытия (обе границы включительно; «по» = весь день), тип таска и исполнитель. #}
   <form class="ai-tasks-filter" method="get" action="">
     <input type="hidden" name="kind" value="closed">
+    <label>
+      Тип:
+      <select name="task_kind" data-autosubmit="1">
+        <option value="">— все —</option>
+        {% for k in create_kinds %}
+          <option value="{{ k.kind }}"{% if k.kind == closed_kind %} selected{% endif %}>{{ k.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Кто выполнил:
+      <select name="done_by" data-autosubmit="1">
+        <option value="">— все —</option>
+        {% for t in closed_done_options %}
+          <option value="{{ t.id }}"{% if t.id|stringformat:"s" == closed_done_by %} selected{% endif %}>{{ t.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
     <label>
       Закрыт с:
       <input type="date" name="closed_from" value="{{ closed_from }}">
@@ -189,7 +208,7 @@
   {% endif %}
   {% else %}
     <p class="ai-tasks-empty">
-      {% if active_kind == 'wish' %}Хотелок пока нет.{% elif active_kind == 'mine' %}Вы пока не взяли ни одного таска — возьмите его со «Фронта работы» или из «Хотелок».{% elif active_kind == 'unclaimed' %}Свободных тасков на фронте нет — всё либо взято, либо закрыто.{% elif active_kind == 'search' %}Ничего не найдено.{% elif active_kind == 'closed' %}Закрытых тасков за этот период нет{% if closed_from or closed_to %} — измените фильтр дат или сбросьте его{% endif %}.{% else %}Пока тасков нет.{% endif %}{% if can_create and active_kind != 'search' and active_kind != 'closed' %} Создайте первый таск формой выше.{% endif %}
+      {% if active_kind == 'wish' %}Хотелок пока нет.{% elif active_kind == 'mine' %}Вы пока не взяли ни одного таска — возьмите его со «Фронта работы» или из «Хотелок».{% elif active_kind == 'unclaimed' %}Свободных тасков на фронте нет — всё либо взято, либо закрыто.{% elif active_kind == 'search' %}Ничего не найдено.{% elif active_kind == 'closed' %}Закрытых тасков по этим фильтрам нет{% if closed_from or closed_to or closed_kind or closed_done_by %} — измените фильтры или сбросьте их{% endif %}.{% else %}Пока тасков нет.{% endif %}{% if can_create and active_kind != 'search' and active_kind != 'closed' %} Создайте первый таск формой выше.{% endif %}
     </p>
   {% endif %}
 </div>

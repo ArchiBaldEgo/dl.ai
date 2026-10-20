@@ -10,8 +10,9 @@ tasks/reorder/ перенумеровывает 1..N в пределах при�
 выполненных. Закрытие НЕ удаляет таск: closed_at/closed_by ставятся,
 priority_no сбрасывается (номерное пространство свободно), взятый
 (closed) таск пропадает из всех рабочих видов и попадает в «Закрытые»
-(разграничение по датам закрытия + «кто дал»/«кто выполнил»/«когда»),
-откуда суперюзер/action.task_close может ВЕРНУТЬ его на доску
+(разграничение по датам закрытия, типу и исполнителю + «кто дал»/«кто
+выполнил»/«когда»), откуда суперюзер/action.task_close может ВЕРНУТЬ его
+на доску
 (tasks/reopen/: closed-поля в NULL, новый номер max+1 внутри вида; фронт
 спрашивает — оставить исполнителя (taken_by сохраняется) или освободить
 (тело {"free_executor": true} → в «Не взятые»)). Создать/закрыть/вернуть —
@@ -114,7 +115,8 @@ def admin_tasks_view(request):
     взятые» — весь свободный фронт), search («Поиск» — все активные таски,
     фронт первым, фильтр ?taken=<user_id> по взявшему), mine («Мои таски» —
     взятые пользователем), closed («Закрытые» — архив: разграничение по
-    датам закрытия ?closed_from/?closed_to (вкл., МСК), «кто дал»/«кто
+    датам закрытия ?closed_from/?closed_to (вкл., МСК), типу ?task_kind= и
+    исполнителю ?done_by=<user_id>, «кто дал»/«кто
     выполнил»/«когда закрыт», возврат на доску).
     Перетаскивание включается draggable + data-reorder="1" только у тех,
     кому можно (право), и только на вкладках реальных видов (front/wish).
@@ -125,6 +127,8 @@ def admin_tasks_view(request):
     active_taken = ""  # выбранный «Кто взял» на «Поиске» (id строкой)
     closed_from = None  # границы фильтра «Закрыт …—…» на вкладке «Закрытые»
     closed_to = None
+    closed_kind = ""  # выбранный тип («Фронт работы»/«Хотелки») в архиве
+    closed_done_by = ""  # выбранный «Кто выполнил» в архиве (id строкой)
 
     VIEW_MINE = "mine"
     VIEW_UNCLAIMED = "unclaimed"
@@ -172,7 +176,9 @@ def admin_tasks_view(request):
         active_taken = taker_param if taker_param.isdigit() else ""
     elif kind == VIEW_CLOSED:
         # Архив «Закрытые»: свежие закрытия первыми; диапазон дат закрытия —
-        # обе границы включительно («по» = до конца дня, МСК).
+        # обе границы включительно («по» = до конца дня, МСК); тип и
+        # исполнитель — как «Кто взял» на «Поиске» (мусорное значение —
+        # фильтр молча не применяется).
         rows_qs = rows_qs.order_by("-closed_at", "-id")
         closed_from = _parse_date_param(request.GET.get("closed_from"))
         closed_to = _parse_date_param(request.GET.get("closed_to"))
@@ -182,6 +188,16 @@ def admin_tasks_view(request):
             rows_qs = rows_qs.filter(
                 closed_at__lt=_msk_day_start(closed_to) + timedelta(days=1)
             )
+        closed_kind = (request.GET.get("task_kind") or "").strip()
+        if closed_kind and closed_kind not in dict(AIDevTask.Kind.choices):
+            closed_kind = ""
+        if closed_kind:
+            rows_qs = rows_qs.filter(kind=closed_kind)
+        closed_done_by = (request.GET.get("done_by") or "").strip()
+        if closed_done_by and closed_done_by.isdigit():
+            rows_qs = rows_qs.filter(taken_by_id=int(closed_done_by))
+        else:
+            closed_done_by = ""
     else:
         rows_qs = rows_qs.filter(kind=kind).order_by(
             "priority_no", "-created_at", "-id"
@@ -217,21 +233,36 @@ def admin_tasks_view(request):
         (superuser or user_has_key(request.user, "action.task_reorder"))
         and can_reorder_kind
     )
+    def _taker_options(user_ids):
+        """Селект-варианты «Кто взял/выполнил»: «ФИО (группа)» по списку pk
+        (DRY для «Поиска» и архива; порядок — по username, у обоих фильтров)."""
+        options = []
+        for user in get_user_model().objects.filter(
+            pk__in=set(uid for uid in user_ids if uid)
+        ).order_by("username"):
+            options.append(
+                {"id": user.pk, "name": _claimant_display(user, edu_maps)}
+            )
+        return options
+
     # Фильтр «Кто взял» на «Поиске»: только те, кто хоть что-то взял.
     taken_options = []
     if kind == VIEW_SEARCH:
-        taker_ids = (
+        taken_options = _taker_options(
             AIDevTask.objects.exclude(taken_by=None)
             .filter(closed_at__isnull=True)
             .values_list("taken_by_id", flat=True)
             .distinct()
         )
-        for user in get_user_model().objects.filter(
-            pk__in=set(tid for tid in taker_ids if tid)
-        ).order_by("username"):
-            taken_options.append(
-                {"id": user.pk, "name": _claimant_display(user, edu_maps)}
-            )
+    # «Кто выполнил» в архиве: те, по чьим закрытым таскам есть исполнитель.
+    closed_done_options = []
+    if is_closed_tab:
+        closed_done_options = _taker_options(
+            AIDevTask.objects.exclude(taken_by=None)
+            .filter(closed_at__isnull=False)
+            .values_list("taken_by_id", flat=True)
+            .distinct()
+        )
     context = {
         **ai_admin_site.each_context(request),
         "title": "Таски",
@@ -255,6 +286,9 @@ def admin_tasks_view(request):
         "active_taken": active_taken,
         "closed_from": closed_from.isoformat() if closed_from else "",
         "closed_to": closed_to.isoformat() if closed_to else "",
+        "closed_done_options": closed_done_options,
+        "closed_done_by": closed_done_by,
+        "closed_kind": closed_kind,
         "can_create": (
             (superuser or user_has_key(request.user, "action.task_create"))
         ),

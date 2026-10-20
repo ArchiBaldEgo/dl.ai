@@ -12840,6 +12840,48 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         # Мусорные даты игнорируются (фильтр не применяется, страница жива).
         self.assertEqual(titles("closed&closed_from=бак&closed_to=zz"), ["Ноя", "Окт"])
 
+        self.assertEqual(titles("closed"), ["Ноя", "Окт"])  # без фильтра — все
+        # Мусорные даты игнорируются (фильтр не применяется, страница жива).
+        self.assertEqual(titles("closed&closed_from=бак&closed_to=zz"), ["Ноя", "Окт"])
+
+    def test_closed_tab_kind_and_executor_filters(self):
+        """Архив «Закрытые»: фильтры по типу таска (?task_kind=) и по
+        исполнителю (?done_by= — «кто выполнил»); мусорные значения и
+        неизвестный тип молча не применяются. Селект «Кто выполнил» перечисляет
+        исполнителей ЗАКРЫТЫХ тасков (не активных)."""
+        front = AIDevTask.objects.create(title="Фр", kind="front", created_by=self.superuser)
+        wish = AIDevTask.objects.create(title="Хо", kind="wish", created_by=self.superuser)
+        self.claim_view(self._request(self.dev, "post", f"/x/{front.id}/claim/"), front.id)
+        self.claim_view(self._request(self.other_dev, "post", f"/x/{wish.id}/claim/"), wish.id)
+        self.close_view(self._request(self.superuser, "post", f"/x/{front.id}/close/"), front.id)
+        self.close_view(self._request(self.superuser, "post", f"/x/{wish.id}/close/"), wish.id)
+
+        def titles(query):
+            resp = self.page_view(
+                self._request(self.dev, path=f"{self.tasks_url}?kind={query}")
+            )
+            return [r["title"] for r in resp.context_data["rows"]]
+
+        self.assertEqual(titles("closed"), ["Хо", "Фр"])  # свежие закрытия первыми
+        self.assertEqual(titles("closed&task_kind=front"), ["Фр"])
+        self.assertEqual(titles("closed&task_kind=wish"), ["Хо"])
+        self.assertEqual(titles("closed&task_kind=garbage"), ["Хо", "Фр"])
+        self.assertEqual(titles(f"closed&done_by={self.dev.id}"), ["Фр"])
+        self.assertEqual(titles(f"closed&done_by={self.other_dev.id}"), ["Хо"])
+        self.assertEqual(titles("closed&done_by=abc"), ["Хо", "Фр"])
+
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=closed"))
+        options = resp.context_data["closed_done_options"]
+        self.assertEqual(
+            {opt["id"] for opt in options}, {self.dev.id, self.other_dev.id}
+        )
+        # Селекты фильтров рисуются (autosubmit-движок тот же, что у «Поиска»).
+        resp.render()
+        html = resp.content.decode()
+        self.assertIn('name="task_kind"', html)
+        self.assertIn('name="done_by"', html)
+        self.assertIn("data-autosubmit", html)
+
     def test_reopen_returns_task_to_board(self):
         """«Вернуть»: закрытые поля в NULL, новый номер max+1 внутри вида,
         taken_by сохраняется (переделывать тому, кто взял); право — как у

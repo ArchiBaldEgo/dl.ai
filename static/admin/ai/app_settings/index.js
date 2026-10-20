@@ -158,4 +158,21 @@
                 .finally(function () { btn.classList.remove('busy'); });
         });
     });
+
+    // Кнопка «Сохранить» — сразу под вкл/выкл AI-приложения: единственный
+    // редактируемый филд формы — переключатель is_enabled (первый fieldset),
+    // а штатный submit-row рендерится В САМОМ НИЗУ — после блоков последних
+    // прогонов/запросов. Переносим submit-row прямо под переключатель.
+    // DOMContentLoaded: скрипт грузится из after_field_sets, т.е. ДО того,
+    // как Django отрендерит submit_buttons_bottom (submit-row ещё не в DOM).
+    document.addEventListener('DOMContentLoaded', function () {
+        var toggle = document.querySelector('input[name="is_enabled"]');
+        var submitRow = document.querySelector('.submit-row');
+        if (!toggle || !submitRow) return;
+        var fieldset = toggle.closest('fieldset');
+        // Переносим только «свой» submit-row этой формы (guard от чужих блоков).
+        if (fieldset && submitRow.closest('form') === fieldset.closest('form')) {
+            fieldset.insertAdjacentElement('afterend', submitRow);
+        }
+    });
 })();
