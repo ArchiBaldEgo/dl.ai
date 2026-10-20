@@ -2,9 +2,12 @@
 {% load static tz %}
 {# Страница «Таски» — доска задач (ai/admin/tasks.py). Вкладки «Фронт работы» #}
 {# / «Хотелки» (у обоих СВОЯ нумерация с №1, порядок перетаскиванием) и      #}
-{# фильтры «Не взятые» (?kind=unclaimed), «Поиск» (все таски + фильтр «Кто   #}
-{# взял», ?taken=) и «Мои таски» (?kind=mine). Суперюзер/action-ключи: форма #}
-{# создания + «Закрыть». CSS/JS — static/admin/ai/tasks/.                    #}
+{# фильтры «Не взятые» (?kind=unclaimed), «Поиск» (активные таски + фильтр   #}
+{# «Кто взял», ?taken=), «Мои таски» (?kind=mine) и архив «Закрытые»         #}
+{# (?kind=closed + диапазон дат ?closed_from/?closed_to; «Вернуть» спрашивает,#}
+{# оставить исполнителя (по умолчанию) или освободить таск). Суперюзер/      #}
+{# action-ключи: форма создания, «Закрыть», «Вернуть». CSS/JS —              #}
+{# static/admin/ai/tasks/.                                                   #}
 
 {% block extrastyle %}
   {{ block.super }}
@@ -19,9 +22,13 @@
     нумерации с №1, чем меньше — тем важнее; порядок
     {% if can_reorder %}меняется перетаскиванием строк{% else %}задан суперюзерами{% endif %}.
     «Не взятые» — весь свободный фронт, взять можно прямо отсюда; «Поиск» —
-    все таски (фронт, затем хотелки) с фильтром «Кто взял»; «Мои таски» —
-    таски, которые вы взяли. У взятого таска показываются ФИО и группа
-    взявшего и дата взятия; взять уже взятый таск нельзя.
+    все активные таски (фронт, затем хотелки) с фильтром «Кто взял»;
+    «Мои таски» — таски, которые вы взяли. У взятого таска показываются
+    ФИО и группа взявшего и дата взятия; взять уже взятый таск нельзя.
+    Закрытый таск уходит с доски в архив «Закрытые» (кто дал, кто выполнил,
+    даты, разграничение по датам закрытия); случайно закрытый или сделанный
+    не так, как нужно, таск суперюзер может вернуть на доску кнопкой
+    «Вернуть».
   </p>
 
   <div class="ai-task-tabs">
@@ -31,7 +38,7 @@
     {% endfor %}
   </div>
 
-  {% if can_create %}
+  {% if can_create and active_kind != 'closed' %}
   <form class="ai-tasks-create" data-create-url="/ai/admin/tasks/create/">
     {% csrf_token %}
     <h3>Новый таск</h3>
@@ -66,7 +73,74 @@
   </form>
   {% endif %}
 
+  {% if active_kind == 'closed' %}
+  {# Архив: разграничение по датам закрытия (обе границы включительно; «по» = весь день). #}
+  <form class="ai-tasks-filter" method="get" action="">
+    <input type="hidden" name="kind" value="closed">
+    <label>
+      Закрыт с:
+      <input type="date" name="closed_from" value="{{ closed_from }}">
+    </label>
+    <label>
+      по:
+      <input type="date" name="closed_to" value="{{ closed_to }}">
+    </label>
+    <button type="submit" class="button">Показать</button>
+    <a href="?kind=closed">Сбросить</a>
+  </form>
+  {% endif %}
+
   {% if rows %}
+  {% if active_kind == 'closed' %}
+  {# Архив «Закрытые»: тип таска, кто дал (создал), кто выполнил (взял), даты; возврат на доску. #}
+  <div class="ai-tasks-scroll">
+    <table class="ai-tasks-table ai-tasks-table-closed">
+      <thead>
+        <tr>
+          <th>Тип</th>
+          <th>Название</th>
+          <th>Описание</th>
+          <th>Кто дал</th>
+          <th>Создан</th>
+          <th>Кто выполнил</th>
+          <th>Взят</th>
+          <th>Закрыт</th>
+          {% if can_close %}<th></th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% timezone moscow_tz %}
+        {% for row in rows %}
+          <tr class="ai-tasks-closed-row" data-task-id="{{ row.id }}">
+            <td><span class="ai-task-kind ai-task-kind-{{ row.kind }}">{{ row.kind_label }}</span></td>
+            <td class="ai-task-title">{{ row.title }}</td>
+            <td class="ai-task-description">{{ row.description|default:"—" }}</td>
+            <td>{{ row.creator|default:"—" }}</td>
+            <td>{{ row.created_at|date:"d.m.Y H:i" }}</td>
+            <td>{{ row.claimant|default:"—" }}</td>
+            <td>{% if row.taken %}{{ row.taken_at|date:"d.m.Y H:i" }}{% else %}—{% endif %}</td>
+            <td>{{ row.closed_at|date:"d.m.Y H:i" }}</td>
+            {% if can_close %}
+            <td class="ai-task-actions">
+              <button type="button" class="button ai-task-btn-reopen"
+                      data-reopen-ask="1">Вернуть</button>
+              {# Выбор исполнителя при возврате: оставить за взявшим или освободить. #}
+              <span class="ai-task-reopen-choice" hidden>
+                <button type="button" class="button ai-task-btn-reopen"
+                        data-reopen-url="{{ row.reopen_url }}">С исполнителем</button>
+                <button type="button" class="button ai-task-btn-reopen"
+                        data-reopen-free="1" data-reopen-url="{{ row.reopen_url }}">Освободить</button>
+                <button type="button" class="button ai-task-btn-reopen-cancel">Отмена</button>
+              </span>
+            </td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+        {% endtimezone %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
   <div class="ai-tasks-scroll">
     <table class="ai-tasks-table"{% if can_reorder %} data-reorder="1" data-kind="{{ active_kind }}"{% endif %}>
       <thead>
@@ -112,9 +186,10 @@
       <p class="ai-tasks-hint">Строки можно перетаскивать: отпустите сверху/снизу нужного ряда — номера пересчитаются.</p>
     {% endif %}
   </div>
+  {% endif %}
   {% else %}
     <p class="ai-tasks-empty">
-      {% if active_kind == 'wish' %}Хотелок пока нет.{% elif active_kind == 'mine' %}Вы пока не взяли ни одного таска — возьмите его со «Фронта работы» или из «Хотелок».{% elif active_kind == 'unclaimed' %}Свободных тасков на фронте нет — всё либо взято, либо закрыто.{% elif active_kind == 'search' %}Ничего не найдено.{% else %}Пока тасков нет.{% endif %}{% if can_create and active_kind != 'search' %} Создайте первый таск формой выше.{% endif %}
+      {% if active_kind == 'wish' %}Хотелок пока нет.{% elif active_kind == 'mine' %}Вы пока не взяли ни одного таска — возьмите его со «Фронта работы» или из «Хотелок».{% elif active_kind == 'unclaimed' %}Свободных тасков на фронте нет — всё либо взято, либо закрыто.{% elif active_kind == 'search' %}Ничего не найдено.{% elif active_kind == 'closed' %}Закрытых тасков за этот период нет{% if closed_from or closed_to %} — измените фильтр дат или сбросьте его{% endif %}.{% else %}Пока тасков нет.{% endif %}{% if can_create and active_kind != 'search' and active_kind != 'closed' %} Создайте первый таск формой выше.{% endif %}
     </p>
   {% endif %}
 </div>

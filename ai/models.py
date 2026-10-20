@@ -792,8 +792,11 @@ class AIDevTask(models.Model):
     перетаскиванием строк (superuser/action.task_reorder → /tasks/reorder/
     перенумеровывает 1..N в пределах вида). Создаётся (название, описание,
     срок — ТЕКСТОМ: «До 2 недель» — никаких расчётных дат) тем, у кого есть
-    action.task_create; закрыть (удалить с доски) — action.task_close.
-    Разработчик забирает таск («Взять»): taken_by/taken_at пишутся атомарно
+    action.task_create; закрыть — увод с доски (closed_at/closed_by,
+    priority_no сбрасывается): таск ОСТАЁТСЯ в БД и попадает в архив
+    (вкладка «Закрытые»), откуда суперюзер/action.task_close может
+    вернуть его на доску (reopen). Разработчик забирает таск («Взять»):
+    taken_by/taken_at пишутся атомарно
     (условный UPDATE, «первый успел»), у взятого таска в таблице — ФИО +
     группа + дата взятия, повторно взять нельзя. ModelAdmin не
     регистрируется — доска целиком кастомная страница (ai/admin/tasks.py).
@@ -832,6 +835,12 @@ class AIDevTask(models.Model):
         verbose_name="Кто взял",
     )
     taken_at = models.DateTimeField(null=True, blank=True, verbose_name="Взят")
+    closed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="closed_dev_tasks",
+        verbose_name="Кто закрыл",
+    )
+    closed_at = models.DateTimeField(null=True, blank=True, verbose_name="Закрыт")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
 
     class Meta:

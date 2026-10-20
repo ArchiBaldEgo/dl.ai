@@ -1,6 +1,7 @@
 /* Страница «Таски» (доска задач, ai/admin/tasks.py). Вкладки front/wish
    (свои нумерации с №1), перетаскивание строк (data-reorder="1"), фильтры
-   «Не взятые»/«Поиск»/«Мои таски». */
+   «Не взятые»/«Поиск»/«Мои таски» и архив «Закрытые» (диапазон дат,
+   возврат таска на доску). */
 
 .ai-tasks-wrap { max-width: 100%; }
 
@@ -74,5 +75,21 @@ table[data-reorder="1"] tbody tr[data-task-id] { cursor: grab; }
   color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color));
 }
 .ai-task-btn-close:hover { color: #912018; }
+.ai-task-btn-reopen { padding: 3px 12px; }
+/* Выбор исполнителя при возврате: «Освободить» заметно отличается. */
+.ai-task-reopen-choice { display: inline-flex; gap: 6px; }
+.ai-task-reopen-choice[hidden] { display: none; }
+.ai-task-btn-reopen[data-reopen-free] {
+  color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color));
+}
+.ai-task-btn-reopen[data-reopen-free]:hover { color: #912018; }
+
+/* Архив «Закрытые»: чип типа таска, строки чуть притушены. */
+.ai-task-kind {
+  display: inline-block; padding: 1px 8px; font-size: 12px;
+  border-radius: 8px; border: 1px solid var(--hairline-color);
+  color: var(--body-quiet-color); white-space: nowrap;
+}
+.ai-task-kind-front { color: var(--body-fg); }
 
 .ai-tasks-empty { color: var(--body-quiet-color); padding: 12px 0; }

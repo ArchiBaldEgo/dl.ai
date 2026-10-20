@@ -1,7 +1,10 @@
-// Доска «Таски» (ai/admin/tasks.py): создать/взять/закрыть таск — POST fetch,
-// переставить строки фронта/хотелок — HTML5 drag & drop + POST /tasks/reorder/
-// ({kind, ids}; сервер перенумеровывает 1..N в пределах вида). Фильтр «Кто
-// взял» на «Поиске» сабмитится по change селекта. JS на делегировании, IIFE.
+// Доска «Таски» (ai/admin/tasks.py): создать/взять/закрыть таск, вернуть
+// закрытый («Закрытые»; двухшажно — спросить, оставить ли исполнителя,
+// «Освободить» шлёт free_executor) — POST fetch; переставить строки
+// фронта/хотелок — HTML5 drag & drop + POST /tasks/reorder/ ({kind, ids};
+// сервер перенумеровывает 1..N в пределах вида). Фильтры «Кто взял»
+// (селект-автосабмит) и дат закрытия архива — обычные GET-формы.
+// JS на делегировании, IIFE.
 (function () {
     'use strict';
 
@@ -63,12 +66,54 @@
         });
     }
 
-    // Взять/закрыть — успех перезагружает страницу: статусы строк
+    // «Вернуть» раскрывает выбор исполнителя в своей ячейке (см. шаблон):
+    // main-кнопка data-reopen-ask прячется, показывается ai-task-reopen-choice.
+    function expandReopenChoice(btn) {
+        var cell = btn.closest('.ai-task-actions');
+        if (!cell) return;
+        btn.hidden = true;
+        var choice = cell.querySelector('.ai-task-reopen-choice');
+        if (choice) choice.hidden = false;
+    }
+
+    function collapseReopenChoice(el) {
+        var cell = el.closest('.ai-task-actions');
+        if (!cell) return;
+        var choice = cell.querySelector('.ai-task-reopen-choice');
+        if (choice) choice.hidden = true;
+        var main = cell.querySelector('[data-reopen-ask]');
+        if (main) main.hidden = false;
+    }
+
+    // Взять/закрыть/вернуть — успех перезагружает страницу: статусы строк
     // пересчитывает сервер (на фронте после reorder reload не нужен).
+    // «Вернуть» — двухшажный: первый клик спрашивает, оставить ли
+    // исполнителя; «С исполнителем» шлёт POST без тела, «Освободить»
+    // — {"free_executor": true} (исполнитель сбрасывается, таск в
+    // «Не взятые»).
     document.addEventListener('click', function (event) {
-        var btn = event.target.closest('[data-claim-url], [data-close-url]');
+        var ask = event.target.closest('[data-reopen-ask]');
+        if (ask) { expandReopenChoice(ask); return; }
+        var cancel = event.target.closest('.ai-task-btn-reopen-cancel');
+        if (cancel) { collapseReopenChoice(cancel); return; }
+        var freeBtn = event.target.closest('[data-reopen-free]');
+        if (freeBtn) {
+            var freeUrl = freeBtn.getAttribute('data-reopen-url');
+            if (freeUrl) {
+                guard(freeBtn, function () {
+                    return post(freeUrl, JSON.stringify({ free_executor: true }))
+                        .then(function () { window.location.reload(); });
+                });
+                return;
+            }
+        }
+        var btn = event.target.closest(
+            '[data-claim-url], [data-close-url], [data-reopen-url]'
+        );
         if (!btn) return;
-        var url = btn.getAttribute('data-claim-url') || btn.getAttribute('data-close-url');
+        var url = btn.getAttribute('data-claim-url')
+            || btn.getAttribute('data-close-url')
+            || btn.getAttribute('data-reopen-url');
         if (!url) return;
         guard(btn, function () { return post(url).then(function () { window.location.reload(); }); });
     });

@@ -502,7 +502,7 @@ class AIAdminSite(admin.AdminSite):
             # страницы в «Группах доступа»): создать/закрыть/переставить.
             ("Закреплено", "Таски", "AiDevTask", tasks_url, show_tasks, "▦", "Доска задач: фронт работы + хотелки", "page.tasks", (
                 ("action.task_create", "Создавать таски"),
-                ("action.task_close", "Закрывать таски"),
+                ("action.task_close", "Закрывать таски / возвращать на доску"),
                 ("action.task_reorder", "Менять порядок фронта"),
             )),
             # NB: остальные дубликаты реальных ModelAdmin-строк («Промпты»)

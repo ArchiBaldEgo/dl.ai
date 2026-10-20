@@ -157,6 +157,19 @@ The project follows these rules; keep it that way and extend along them:
       на КАЖДОМ `/ai/admin/auth/user/<id>/change/`). «Логин dl.gsu.by»
       (`external_login` на ExternalDLAccountAdmin) — readonly: приходит из
       внешнего payload, руками не редактируется.
+    - Доска «Таски» (`ai/admin/tasks.py`, custom страница): закрытие — АРХИВ, не
+      удаление (миграция 0065): closed_at/closed_by ставятся, priority_no
+      сбрасывается (закрытые номер не занимают → max+1 активных остаётся плотным,
+      reorder'ы 409-гейт по множеству АКТИВНЫХ id), taken_by остаётся («кто
+      выполнил»); закрытое пропадает из всех рабочих вкладок и попадает в
+      псевдо-вкладку «Закрытые» (?kind=closed: тип/«кто дал»/«кто выполнил»/
+      «когда закрыт», диапазон дат закрытия ?closed_from/?closed_to — границы
+      МСК-полночь, НЕ UTC/`__date`). Возврат — POST `tasks/<id>/reopen/`
+      (суперюзер/action.task_close; новый номер max+1 вида; кнопка «Вернуть»
+      ДВУХШАЖНАЯ — JS раскрывает выбор «С исполнителем» (по умолчанию:
+      taken_by сохраняется — «выполнил не так» переделывает) / «Освободить»
+      (тело {"free_executor": true} → taken_by сброшен, таск в «Не взятые») /
+      «Отмена»).
 - `test_console_runner.py` — runner for the admin test console (subprocess `manage.py test ai --settings=DjangoTest.test_settings`; full raw output of each run is duplicated under `BASE_DIR/logs/test_console/`). Gotchas: `setup_test_environment` patches globals — unsafe in a live Daphne thread, hence the isolated subprocess; log filenames are validated by `_LOG_FILENAME_RE` (path-traversal barrier).
 - `model_clients/` — `registry.py` (model id → handler + title + capabilities; default-active: ollama, openrouter, web_deepseek, web_kimi; Groq/SambaNova gated by `AI_ENABLE_GROQ`/`AI_ENABLE_SAMBANOVA`), `_base.py` (shared helpers incl. `BotPoolClient` — the whole Puppeteer-pool protocol), `web_deepseek.py`/`web_kimi.py` (thin `BotPoolClient` configs: `ask_*_async`, `restart_bot_pool`/`restart_kimi_bot_pool`), `config.py` (centralized .env tokens/proxy), `exceptions.py` (`humanize_model_error`, `map_http_error`, `safe_parse_response`), `history.py` (`ConversationHistory`, Redis/Django-cache shared history), plus provider modules `groq.py`/`openrouter.py`/`sambanova.py`/`ollama.py`. Gotcha: `OR_Nemotron_Nano_12B_VL` is the first `vision:true` entry; add capabilities in `registry.py`, not the DB. Gotcha: Ollama cloud-модели `…:cloud` живут на `https://ollama.com/api/*` (bearer `OLLAMA_API_KEY`; `OLLAMA_HOST` пустой → дефолт `http://localhost:11434` — если локально не задать переменные, модель вешает соединение «устанавливается соединение», а модель не в селекторе — health-ping недоступен; client — ollama SDK на httpx, он НЕ видит `PROXY` из config.py, но httpx читает HTTP(S)_PROXY из env, `trust_env` не отключается). Gotcha: рассуждения переключаются полем `think` только у
 Ollama (docs.ollama.com/capabilities/thinking) — провайдер определяется по хвосту

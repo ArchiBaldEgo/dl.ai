@@ -11,7 +11,7 @@ from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import SimpleTestCase, RequestFactory, TestCase, TransactionTestCase, override_settings
 from pathlib import Path
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 import re
 import tempfile
 import time
@@ -12507,14 +12507,16 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
     суперюзер/action.task_reorder (выдан «Разработчику»). Номер приоритета
     выдаёт СЕРВЕР (max+1 внутри вида; у фронта и хотелов нумерации
     раздельны, оба с №1); вкладки-фильтры «Не взятые» (свободный фронт) и
-    «Поиск» (все таски + фильтр «Кто взял»); в эмуляции «Посмотреть как…»
-    права честные по ключам группы."""
+    «Поиск» (все таски + фильтр «Кто взял»); закрытие — архив вместо
+    удаления (вкладка «Закрытые», возврат reopen'ом); в эмуляции
+    «Посмотреть как…» права честные по ключам группы."""
 
     def setUp(self):
         from ai.admin.tasks import (
             admin_task_claim_view,
             admin_task_close_view,
             admin_task_create_view,
+            admin_task_reopen_view,
             admin_task_reorder_view,
             admin_tasks_view,
             TASKS_URL,
@@ -12524,6 +12526,7 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.reorder_view = admin_task_reorder_view
         self.claim_view = admin_task_claim_view
         self.close_view = admin_task_close_view
+        self.reopen_view = admin_task_reopen_view
         self.tasks_url = TASKS_URL
         self.superuser = get_user_model().objects.create_superuser(
             username="task_admin", password="x", email="t@a.com",
@@ -12732,20 +12735,215 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
     # --- Закрытие (superuser) ----------------------------------------------
 
     def test_close_requires_superuser(self):
-        task = AIDevTask.objects.create(title="Т3", created_by=self.superuser)
+        """Закрытие уводит таск с доски, но НЕ удаляет строку: closed_at/
+        closed_by ставятся, приоритетный номер сбрасывается, taken-поля
+        остаются (в архиве видно «кто выполнил»); второй close — 409."""
+        task = AIDevTask.objects.create(
+            title="Т3", created_by=self.superuser, taken_by=self.dev,
+            priority_no=5,
+        )
         resp = self.close_view(self._request(self.dev, "post", f"/x/{task.id}/close/"), task.id)
         self.assertEqual(resp.status_code, 403)
-        self.assertTrue(AIDevTask.objects.filter(pk=task.pk).exists())
+        task.refresh_from_db()
+        self.assertIsNone(task.closed_at)
 
         self.assertEqual(
             self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id).status_code,
             200,
         )
-        self.assertFalse(AIDevTask.objects.filter(pk=task.pk).exists())
+        task.refresh_from_db()
+        # Строка жива: архив, а не удаление.
+        self.assertIsNotNone(task.closed_at)
+        self.assertEqual(task.closed_by, self.superuser)
+        self.assertIsNone(task.priority_no)
+        self.assertEqual(task.taken_by, self.dev)
+
+        # Повторное закрытие закрытого — 409.
+        resp = self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+        self.assertEqual(resp.status_code, 409)
 
     def test_close_unknown_task_is_404(self):
         resp = self.close_view(self._request(self.superuser, "post", "/x/99999/close/"), 99999)
         self.assertEqual(resp.status_code, 404)
+
+    # --- Архив «Закрытые» и возврат (reopen) --------------------------------
+
+    def test_closed_tab_details_and_visibility(self):
+        """Архив «Закрытые»: тип, «кто дал», «кто выполнил», даты; закрытое
+        пропадает из рабочих вкладок (front/unclaimed/search/mine)."""
+        task = AIDevTask.objects.create(
+            title="Готовый", kind="wish", priority_no=2, created_by=self.superuser,
+        )
+        self.claim_view(
+            self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id
+        )
+        self.close_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id
+        )
+
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=closed"))
+        self.assertEqual(resp.context_data["active_kind"], "closed")
+        rows = resp.context_data["rows"]
+        self.assertEqual([r["title"] for r in rows], ["Готовый"])
+        self.assertEqual(rows[0]["kind_label"], "Хотелки")
+        self.assertIn("task_admin", rows[0]["creator"])  # «кто дал»
+        self.assertIn("task_dev", rows[0]["claimant"])  # «кто выполнил»
+        self.assertIsNotNone(rows[0]["closed_at"])
+        # Шаблон архива рисуется (колонки + двухшажный «Вернуть»: спрашивает
+        # оставить исполнителя или освободить; у разработчика без действия
+        # кнопок нет).
+        resp = self.page_view(self._request(self.superuser, path=f"{self.tasks_url}?kind=closed"))
+        resp.render()
+        html = resp.content.decode()
+        self.assertIn("Кто выполнил", html)
+        self.assertIn("data-reopen-ask", html)
+        self.assertIn("data-reopen-url", html)
+        self.assertIn("С исполнителем", html)
+        self.assertIn("Освободить", html)
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=closed"))
+        resp.render()
+        self.assertNotIn("data-reopen-url", resp.content.decode())
+
+        # Рабочие вкладки закрытое больше не показывают.
+        for kind_tab in ("front", "unclaimed", "search"):
+            resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind={kind_tab}"))
+            self.assertEqual([r["title"] for r in resp.context_data["rows"]], [], kind_tab)
+        resp = self.page_view(self._request(self.dev, path=self.tasks_url))
+        self.assertEqual(resp.context_data["rows"], [])
+        # Фильтр «Кто взял» на «Поиске» тоже только по активным.
+        self.assertNotEqual(resp.context_data["active_kind"], "closed")
+
+    def test_closed_tab_date_filter(self):
+        """Разграничение по датам закрытия: обе границы включительно («по»
+        захватывает весь день; границы — московские, не UTC)."""
+        self.dev  # dev допущен к доске (baseline)
+        first = AIDevTask.objects.create(title="Окт", created_by=self.superuser)
+        second = AIDevTask.objects.create(title="Ноя", created_by=self.superuser)
+        # Закрытие в 23:50 по МСК (+3): UTC-границы отсекли бы его соседним днём.
+        AIDevTask.objects.filter(pk=first.pk).update(closed_at=timezone.make_aware(
+            datetime(2026, 10, 5, 23, 50), timezone.get_fixed_timezone(180)
+        ))
+        AIDevTask.objects.filter(pk=second.pk).update(closed_at=timezone.make_aware(
+            datetime(2026, 11, 10, 23, 50), timezone.get_fixed_timezone(180)
+        ))
+
+        def titles(query):
+            resp = self.page_view(
+                self._request(self.dev, path=f"{self.tasks_url}?kind={query}")
+            )
+            return [r["title"] for r in resp.context_data["rows"]]
+
+        self.assertEqual(titles("closed&closed_from=2026-10-05&closed_to=2026-10-05"), ["Окт"])
+        self.assertEqual(titles("closed&closed_from=2026-11-01"), ["Ноя"])
+        self.assertEqual(titles("closed&closed_to=2026-10-31"), ["Окт"])
+        self.assertEqual(titles("closed"), ["Ноя", "Окт"])  # без фильтра — все
+        # Мусорные даты игнорируются (фильтр не применяется, страница жива).
+        self.assertEqual(titles("closed&closed_from=бак&closed_to=zz"), ["Ноя", "Окт"])
+
+    def test_reopen_returns_task_to_board(self):
+        """«Вернуть»: закрытые поля в NULL, новый номер max+1 внутри вида,
+        taken_by сохраняется (переделывать тому, кто взял); право — как у
+        закрытия; повторный reopen/закрыто-открытое — 409, чужой id — 404."""
+        task = AIDevTask.objects.create(
+            title="Верну", kind="front", priority_no=1, created_by=self.superuser,
+        )
+        self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
+        self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+        AIDevTask.objects.create(title="Ещё", kind="front", priority_no=2)
+
+        # Брать таски можно всем, а возвращать — как закрывать.
+        resp = self.reopen_view(self._request(self.dev, "post", f"/x/{task.id}/reopen/"), task.id)
+        self.assertEqual(resp.status_code, 403)
+        resp = self.reopen_view(
+            self._request(self.superuser, "post", "/x/99999/reopen/", body={}), 99999
+        )
+        self.assertEqual(resp.status_code, 404)
+
+        self.assertEqual(
+            self.reopen_view(
+                self._request(self.superuser, "post", f"/x/{task.id}/reopen/", body={}), task.id
+            ).status_code,
+            200,
+        )
+        task.refresh_from_db()
+        self.assertIsNone(task.closed_at)
+        self.assertEqual(task.priority_no, 3)  # новый номер max+1, старый не восстановлен
+        self.assertEqual(task.taken_by, self.dev)
+        resp = self.page_view(self._request(self.dev, path=self.tasks_url))
+        self.assertEqual([r["title"] for r in resp.context_data["rows"]], ["Ещё", "Верну"])
+
+        # Открытый повторно reopen'ится нельзя.
+        resp = self.reopen_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/reopen/", body={}), task.id
+        )
+        self.assertEqual(resp.status_code, 409)
+
+        # Непарсящийся непустой JSON — 400. Пустое тело (реальный POST UI
+        # «С исполнителем» шлёт fetch без body) валидно и трактуется как
+        # отсутствие флага — проверяется кодовой веткой с raw.strip().
+        resp = self.reopen_view(
+            self._request(self.superuser, "post", "/x/99999/reopen/", body=b"not json"), 99999
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_reopen_with_free_executor_releases_task(self):
+        """«Освободить» ({"free_executor": true}): taken_by/taken_at
+        сбрасываются — таск возвращается в «Не взятые», его можно взять
+        заново; без флага исполнитель сохраняется (см. предыдущий тест)."""
+        task = AIDevTask.objects.create(
+            title="Освобожду", kind="front", priority_no=1, created_by=self.superuser,
+        )
+        self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
+        self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+        resp = self.reopen_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/reopen/", body={
+                "free_executor": True,
+            }),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertIsNone(task.closed_at)
+        self.assertIsNone(task.taken_by)
+        self.assertIsNone(task.taken_at)
+        self.assertEqual(task.priority_no, 1)  # был единственным активным
+        # Таск в «Не взятые» и его можно взять заново.
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=unclaimed"))
+        self.assertEqual([r["title"] for r in resp.context_data["rows"]], ["Освобожду"])
+        self.assertEqual(
+            self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id).status_code,
+            200,
+        )
+
+    def test_create_after_close_reuses_numbers_and_reorder_skips_closed(self):
+        """Закрытый таск номер не держит: max+1 считается по активным
+        (после закрытия №2 новый таск снова №2 — нумерация остаётся
+        плотной); reorder считает закрытые отсутствующими — присланное
+        множество только активных не даёт 409, закрытые номера не трогает."""
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
+        self.close_view(self._request(self.superuser, "post", f"/x/{second.id}/close/"), second.id)
+
+        resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "Новый", "kind": "front",
+        }))
+        self.assertEqual(json.loads(resp.content)["ok"], True)
+        new_task = AIDevTask.objects.get(title="Новый")
+        self.assertEqual(new_task.priority_no, 2)
+
+        # В тело перестановки входят только АКТИВНЫЕ строки вида;
+        # закрытый second не нужен (иначе был бы 409).
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/",
+                          body=self._reorder_body([new_task, first])),
+        )
+        self.assertEqual(resp.status_code, 200)
+        first.refresh_from_db()
+        new_task.refresh_from_db()
+        self.assertEqual(new_task.priority_no, 1)
+        self.assertEqual(first.priority_no, 2)
+        second.refresh_from_db()
+        self.assertIsNone(second.priority_no)
 
     # --- Вкладки и сортировка ----------------------------------------------
 
@@ -12884,7 +13082,7 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         titles = [r["title"] for r in resp.context_data["rows"]]
         self.assertEqual(titles, ["Мой взятый", "Моя взятая хоталка"])
 
-        # Закрытый таск — удалён с доски → из mine исчезает.
+        # Закрытый таск уходит с доски в архив → из mine исчезает.
         self.close_view(
             self._request(self.superuser, "post", f"/x/{claimed.id}/close/"), claimed.id
         )

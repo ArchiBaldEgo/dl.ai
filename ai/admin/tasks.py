@@ -1,14 +1,22 @@
-"""Доска задач «Таски» (ТЗ 2026-10-19, правки 2026-10-20).
+"""Доска задач «Таски» (ТЗ 2026-10-19, правки 2026-10-20; архив 2026-10-20).
 
 Два типа тасков-вкладок: «Фронт работы» (front) и «Хотелки» (wish) — у
 каждого СВОЙ числовой уникальный номер с №1 (меньше = важнее, выдаётся
 сервером: max+1 внутри вида; порядок меняют перетаскиванием строк →
 tasks/reorder/ перенумеровывает 1..N в пределах присланного вида).
 Псевдо-вкладки-фильтры: «Не взятые» (unclaimed) — весь свободный фронт,
-«Поиск» (search) — ВСЕ таски (фронт первым) с фильтром «Кто взял»,
-«Мои таски» (mine) — взятые пользователем. Закрытый таск удалён с доски,
-значит всё показанное — работающее. Создать/закрыть — суперюзер либо
-ключи action.task_create/task_close (см. «Группы доступа»); переставить —
+«Поиск» (search) — ВСЕ активные таски (фронт первым) с фильтром «Кто взял»,
+«Мои таски» (mine) — взятые пользователем, «Закрытые» (closed) — архив
+выполненных. Закрытие НЕ удаляет таск: closed_at/closed_by ставятся,
+priority_no сбрасывается (номерное пространство свободно), взятый
+(closed) таск пропадает из всех рабочих видов и попадает в «Закрытые»
+(разграничение по датам закрытия + «кто дал»/«кто выполнил»/«когда»),
+откуда суперюзер/action.task_close может ВЕРНУТЬ его на доску
+(tasks/reopen/: closed-поля в NULL, новый номер max+1 внутри вида; фронт
+спрашивает — оставить исполнителя (taken_by сохраняется) или освободить
+(тело {"free_executor": true} → в «Не взятые»)). Создать/закрыть/вернуть —
+суперюзер либо ключи
+action.task_create/task_close (см. «Группы доступа»); переставить —
 superuser/action.task_reorder. Взять может любой, кто допущен в админку
 (page.tasks — baseline, ТЗ 2026-10-19): taken_by/taken_at пишутся атомарно
 (условный UPDATE — «первый успел»). ModelAdmin не регистрируется —
@@ -17,6 +25,7 @@ superuser/action.task_reorder. Взять может любой, кто допу
 """
 
 import json
+from datetime import date, datetime, timedelta
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
@@ -76,15 +85,37 @@ def _forbid(message="Access denied", status=403):
     return JsonResponse({"ok": False, "message": message}, status=status)
 
 
+def _parse_date_param(value):
+    """GET-дату «YYYY-MM-DD» (инпут type=date) → date; мусор/пусто → None
+    (фильтр молча не применяется, как мусорный ?taken= на «Поиске»)."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _msk_day_start(day):
+    """Полночь дня в Московском часовом поясе (aware) — граница фильтра по
+    closed_at. UTC-полночь (TIME_ZONE=UTC) резала бы вечерние закрытия в
+    соседний день относительно показанных в {% timezone moscow_tz %} дат."""
+    return timezone.make_aware(
+        datetime.combine(day, datetime.min.time()), MOSCOW_TZ
+    )
+
+
 def admin_tasks_view(request):
     """Страница «Таски»: вкладки, таблица, форма создания.
 
     Вкладки — серверные (?kind=), URL шарится. Реальные виды — front/wish
     (у обоих свои номера с №1); ПСЕВДО-вкладки-фильтры: unclaimed («Не
-    взятые» — весь свободный фронт), search («Поиск» — все таски, фронт
-    первым, фильтр ?taken=<user_id> по взявшему), mine («Мои таски» —
-    взятые пользователем; закрытый таск удалён с доски, поэтому всё
-    показанное — активное).
+    взятые» — весь свободный фронт), search («Поиск» — все активные таски,
+    фронт первым, фильтр ?taken=<user_id> по взявшему), mine («Мои таски» —
+    взятые пользователем), closed («Закрытые» — архив: разграничение по
+    датам закрытия ?closed_from/?closed_to (вкл., МСК), «кто дал»/«кто
+    выполнил»/«когда закрыт», возврат на доску).
     Перетаскивание включается draggable + data-reorder="1" только у тех,
     кому можно (право), и только на вкладках реальных видов (front/wish).
     """
@@ -92,18 +123,27 @@ def admin_tasks_view(request):
         return HttpResponseForbidden("Access denied")
     superuser = is_superuser_user(request.user)
     active_taken = ""  # выбранный «Кто взял» на «Поиске» (id строкой)
+    closed_from = None  # границы фильтра «Закрыт …—…» на вкладке «Закрытые»
+    closed_to = None
 
     VIEW_MINE = "mine"
     VIEW_UNCLAIMED = "unclaimed"
     VIEW_SEARCH = "search"
+    VIEW_CLOSED = "closed"
     kind = request.GET.get("kind") or AIDevTask.Kind.FRONT
     if kind not in dict(AIDevTask.Kind.choices) and kind not in (
-        VIEW_MINE, VIEW_UNCLAIMED, VIEW_SEARCH
+        VIEW_MINE, VIEW_UNCLAIMED, VIEW_SEARCH, VIEW_CLOSED
     ):
         kind = AIDevTask.Kind.FRONT
 
     rows_qs = AIDevTask.objects.select_related(
-        "taken_by", "taken_by__external_dl_account"
+        "taken_by", "taken_by__external_dl_account", "created_by"
+    )
+    is_closed_tab = kind == VIEW_CLOSED
+    # Рабочие виды показывают ТОЛЬКО незакрытое (closed_at IS NULL), архив —
+    # только закрытое: isnull = not is_closed_tab.
+    rows_qs = rows_qs.filter(
+        closed_at__isnull=not is_closed_tab
     )
     if kind == VIEW_MINE:
         # Псевдо-вкладка «Мои таски»: ТОЛЬКО взятые пользователем. NULL-номера
@@ -118,8 +158,8 @@ def admin_tasks_view(request):
             kind=AIDevTask.Kind.FRONT, taken_by__isnull=True
         ).order_by("priority_no", "-created_at", "-id")
     elif kind == VIEW_SEARCH:
-        # «Поиск»: ВСЕ таски, фронт первым («front» < «wish» строково).
-        # NULL-номера легаси — в конец (nulls_last, см. выше).
+        # «Поиск»: ВСЕ активные таски, фронт первым («front» < «wish»
+        # строково). NULL-номера легаси — в конец (nulls_last, см. выше).
         rows_qs = rows_qs.order_by(
             "kind", F("priority_no").asc(nulls_last=True), "-created_at", "-id"
         )
@@ -130,27 +170,46 @@ def admin_tasks_view(request):
             except ValueError:
                 pass  # мусорное значение — просто показываем все
         active_taken = taker_param if taker_param.isdigit() else ""
+    elif kind == VIEW_CLOSED:
+        # Архив «Закрытые»: свежие закрытия первыми; диапазон дат закрытия —
+        # обе границы включительно («по» = до конца дня, МСК).
+        rows_qs = rows_qs.order_by("-closed_at", "-id")
+        closed_from = _parse_date_param(request.GET.get("closed_from"))
+        closed_to = _parse_date_param(request.GET.get("closed_to"))
+        if closed_from:
+            rows_qs = rows_qs.filter(closed_at__gte=_msk_day_start(closed_from))
+        if closed_to:
+            rows_qs = rows_qs.filter(
+                closed_at__lt=_msk_day_start(closed_to) + timedelta(days=1)
+            )
     else:
         rows_qs = rows_qs.filter(kind=kind).order_by(
             "priority_no", "-created_at", "-id"
         )
 
     edu_maps = education_title_maps()
+    kind_labels = dict(AIDevTask.Kind.choices)
     rows = []
     for task in rows_qs:
         rows.append({
             "id": task.pk,
             "kind": task.kind,
+            # Метка типа нужна только на архивной вкладке (там нет колонок
+            # видов), но строится одинаково для всех строк.
+            "kind_label": kind_labels.get(task.kind, task.kind),
             "priority_no": task.priority_no,
             "title": task.title,
             "description": task.description,
             "estimate": task.estimate,
+            "creator": _claimant_display(task.created_by, edu_maps),
             "created_at": task.created_at,
             "taken": task.taken_by_id is not None,
             "claimant": _claimant_display(task.taken_by, edu_maps),
             "taken_at": task.taken_at,
+            "closed_at": task.closed_at,
             "claim_url": f"{TASKS_URL}{task.pk}/claim/",
             "close_url": f"{TASKS_URL}{task.pk}/close/",
+            "reopen_url": f"{TASKS_URL}{task.pk}/reopen/",
         })
 
     can_reorder_kind = kind in (AIDevTask.Kind.FRONT, AIDevTask.Kind.WISH)
@@ -163,6 +222,7 @@ def admin_tasks_view(request):
     if kind == VIEW_SEARCH:
         taker_ids = (
             AIDevTask.objects.exclude(taken_by=None)
+            .filter(closed_at__isnull=True)
             .values_list("taken_by_id", flat=True)
             .distinct()
         )
@@ -184,6 +244,7 @@ def admin_tasks_view(request):
             {"kind": VIEW_UNCLAIMED, "label": "Не взятые", "url": f"{TASKS_URL}?kind={VIEW_UNCLAIMED}"},
             {"kind": VIEW_SEARCH, "label": "Поиск", "url": f"{TASKS_URL}?kind={VIEW_SEARCH}"},
             {"kind": VIEW_MINE, "label": "Мои таски", "url": f"{TASKS_URL}?kind={VIEW_MINE}"},
+            {"kind": VIEW_CLOSED, "label": "Закрытые", "url": f"{TASKS_URL}?kind={VIEW_CLOSED}"},
         ],
         "create_kinds": [
             {"kind": value, "label": label, "selected": value == (kind if kind in dict(AIDevTask.Kind.choices) else AIDevTask.Kind.FRONT)}
@@ -192,6 +253,8 @@ def admin_tasks_view(request):
         "can_reorder": can_reorder,
         "taken_options": taken_options,
         "active_taken": active_taken,
+        "closed_from": closed_from.isoformat() if closed_from else "",
+        "closed_to": closed_to.isoformat() if closed_to else "",
         "can_create": (
             (superuser or user_has_key(request.user, "action.task_create"))
         ),
@@ -256,7 +319,8 @@ def admin_task_reorder_view(request):
     после дропа (kind опционален, дефолт front — назадсовместимо с прежним
     телом {"ids": [...]}). Права: суперюзер или action.task_reorder.
     Множество id должно ТОЧНО совпасть с текущим множеством pk этого вида
-    (гонка create/close и вид-мисматч → 409, доска на сервере не трогается).
+    БЕЗ закрытых (гонка create/close/reopen и вид-мисматч → 409, доска на
+    сервере не трогается).
     В transaction.atomic() строки получают номера 1..N — заодно уплотняются
     дырки от закрытых тасков (select_for_update не нужен: sqlite-тесты его
     не знают, конфликт уникальности в атомарном блоке даёт IntegrityError →
@@ -281,7 +345,8 @@ def admin_task_reorder_view(request):
         return JsonResponse({"ok": False, "message": "Неизвестный тип таска"}, status=400)
 
     expected_ids = list(
-        AIDevTask.objects.filter(kind=kind).values_list("pk", flat=True)
+        AIDevTask.objects.filter(kind=kind, closed_at__isnull=True)
+        .values_list("pk", flat=True)
     )
     if set(ids) != set(expected_ids) or len(ids) != len(expected_ids):
         return JsonResponse(
@@ -293,9 +358,12 @@ def admin_task_reorder_view(request):
             # Двухпроходная перенумерация: частичный уникальный констрейнт
             # (kind, priority_no) запрещает промежуточные коллизии (прямое
             # присвоение 1..N давало IntegrityError на перестановке соседей).
-            # Сначала ВСЕ номера этого вида сбрасываются в NULL (NULL не
-            # сравнивается констрейнтом), затем присваиваются 1..N.
-            AIDevTask.objects.filter(kind=kind).update(priority_no=None)
+            # Сначала ВСЕ номера АКТИВНЫХ строк вида сбрасываются в NULL
+            # (NULL не сравнивается констрейнтом; закрытые уже NULL),
+            # затем присваиваются 1..N.
+            AIDevTask.objects.filter(
+                kind=kind, closed_at__isnull=True
+            ).update(priority_no=None)
             for number, task_id in enumerate(ids, start=1):
                 AIDevTask.objects.filter(pk=task_id, kind=kind).update(
                     priority_no=number
@@ -313,16 +381,26 @@ def admin_task_claim_view(request, task_id):
     """Взять таск: любой с доступом к доске.
 
     Атомарный условный UPDATE: строка обновляется только если таск ещё
-    свободен — второй конкурент получает 0 строк и 409 (sqlite-тесты
+    свободен И не закрыт (закрытое в архиве нельзя «перевзять») — второй
+    конкурент получает 0 строк и 409 (sqlite-тесты
     не знают select_for_update(skip_locked=True), поэтому не он).
     """
     if not can_access_tasks(request):
         return _forbid()
-    task = AIDevTask.objects.filter(pk=task_id).only("pk").first()
+    task = AIDevTask.objects.filter(pk=task_id).only(
+        "pk", "closed_at"
+    ).first()
     if task is None:
         return JsonResponse({"ok": False, "message": "Таск не найден"}, status=404)
+    if task.closed_at is not None:
+        return JsonResponse(
+            {"ok": False, "message": "Таск закрыт — верните его на доску прежде чем взять"},
+            status=409,
+        )
     claimed = (
-        AIDevTask.objects.filter(pk=task_id, taken_by__isnull=True)
+        AIDevTask.objects.filter(
+            pk=task_id, taken_by__isnull=True, closed_at__isnull=True
+        )
         .update(taken_by=request.user, taken_at=timezone.now())
     )
     if not claimed:
@@ -335,13 +413,89 @@ def admin_task_claim_view(request, task_id):
 
 @require_POST
 def admin_task_close_view(request, task_id):
-    """Закрыть таск — удаление с доски (суперюзер/action.task_close)."""
+    """Закрыть таск — увод с доски в архив «Закрытые», НЕ удаление
+    (суперюзер/action.task_close).
+
+    Строка остаётся: closed_at/closed_by ставятся, priority_no сбрасывается
+    (номерное пространство вида освобождается целиком — закрытые никогда не
+    конфликтуют с нумерацией и перенумерацией активных строк); taken_by/
+    taken_at НЕ трогаются — в архиве видно «кто выполнил». Условный UPDATE:
+    второй закрывающий получает 0 строк и 409 (гонка, как у claim).
+    Вернуть на доску — admin_task_reopen_view.
+    """
     if not request.user.is_authenticated:
         return _forbid()
     if not (is_superuser_user(request.user) or user_has_key(request.user, "action.task_close")):
         return _forbid("Закрывать таски может только суперпользователь")
-    task = AIDevTask.objects.filter(pk=task_id).only("pk").first()
+    closed = AIDevTask.objects.filter(
+        pk=task_id, closed_at__isnull=True
+    ).update(
+        closed_at=timezone.now(), closed_by=request.user, priority_no=None,
+    )
+    if not closed:
+        if not AIDevTask.objects.filter(pk=task_id).exists():
+            return JsonResponse({"ok": False, "message": "Таск не найден"}, status=404)
+        return JsonResponse({"ok": False, "message": "Таск уже закрыт"}, status=409)
+    return JsonResponse({"ok": True})
+
+
+@require_POST
+def admin_task_reopen_view(request, task_id):
+    """Вернуть закрытый таск на доску (суперюзер/action.task_close).
+
+    Инверсия close (разработчик случайно закрыл таск или выполнил его не
+    так, как нужно). Тело опционально JSON {"free_executor": true} —
+    выбор спрашивает фронт («Вернуть» раскрывает «С исполнителем» /
+    «Освободить»): исполнитель СОХРАНЯЕТСЯ (таск возвращается тому, кто
+    его взял, — пусть переделает) или СБРАСЫВАЕТСЯ (taken_by/taken_at в
+    NULL → таск попадёт в «Не взятые»). closed_at/closed_by сбрасываются
+    всегда; номер присваивается заново (max+1 внутри вида — закрытые
+    номер не занимают, таск идёт в конец доски; гонка с созданием/
+    возвратом на один max+1 → IntegrityError → честный 409).
+    """
+    if not request.user.is_authenticated:
+        return _forbid()
+    if not (is_superuser_user(request.user) or user_has_key(request.user, "action.task_close")):
+        return _forbid("Возвращать таски может только суперпользователь")
+    # Тело опционально: «С исполнителем» шлёт POST вообще без тела (b"") —
+    # это НЕ ошибка, просто пустой payload; непарсящийся НЕпустой — 400.
+    raw = request.body or b""
+    if raw.strip():
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return _forbid("Некорректный запрос", status=400)
+    else:
+        payload = {}
+    task = AIDevTask.objects.filter(pk=task_id).only("kind", "closed_at").first()
     if task is None:
         return JsonResponse({"ok": False, "message": "Таск не найден"}, status=404)
-    task.delete()
+    if task.closed_at is None:
+        return JsonResponse({"ok": False, "message": "Таск уже на доске"}, status=409)
+    reopen_kwargs = {"closed_at": None, "closed_by": None, "priority_no": None}
+    # «Освободить»: taken_by/taken_at не трогаем по умолчанию — только при
+    # явном флаге (клиент выбирает между «переделает тот же» и «в Не взятые»).
+    if payload.get("free_executor"):
+        reopen_kwargs["taken_by"] = None
+        reopen_kwargs["taken_at"] = None
+    try:
+        with transaction.atomic():
+            next_no = (
+                AIDevTask.objects.filter(kind=task.kind).aggregate(
+                    max_no=Max("priority_no")
+                )["max_no"] or 0
+            ) + 1
+            reopen_kwargs["priority_no"] = next_no
+            reopened = AIDevTask.objects.filter(
+                pk=task_id, closed_at__isnull=False
+            ).update(**reopen_kwargs)
+    except IntegrityError:
+        return JsonResponse(
+            {"ok": False, "message": "Доска изменилась — обновите страницу"},
+            status=409,
+        )
+    if not reopened:
+        # close/reopen успел кто-то другой между чтением строки и UPDATE —
+        # вернуться на «уже на доске» нельзя, честный отказ.
+        return JsonResponse({"ok": False, "message": "Таск уже закрыт"}, status=409)
     return JsonResponse({"ok": True})

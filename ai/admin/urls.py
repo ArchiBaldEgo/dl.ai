@@ -61,6 +61,7 @@ from .tasks import (
     admin_task_claim_view,
     admin_task_close_view,
     admin_task_create_view,
+    admin_task_reopen_view,
     admin_task_reorder_view,
     admin_tasks_view,
 )
@@ -117,6 +118,7 @@ def get_ai_admin_urls():
         path("tasks/reorder/", ai_admin_site.admin_view(admin_task_reorder_view), name="ai_task_reorder"),
         path("tasks/<int:task_id>/claim/", ai_admin_site.admin_view(admin_task_claim_view), name="ai_task_claim"),
         path("tasks/<int:task_id>/close/", ai_admin_site.admin_view(admin_task_close_view), name="ai_task_close"),
+        path("tasks/<int:task_id>/reopen/", ai_admin_site.admin_view(admin_task_reopen_view), name="ai_task_reopen"),
         path("tasks/", ai_admin_site.admin_view(admin_tasks_view), name="ai_tasks"),
         path("prompt-defaults/", ai_admin_site.admin_view(admin_prompt_defaults_view), name="ai_prompt_defaults"),
         path("ai-groups/<int:group_id>/save/", ai_admin_site.admin_view(admin_access_group_save_view), name="ai_access_group_save"),
