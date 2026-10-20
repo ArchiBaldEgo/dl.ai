@@ -3283,8 +3283,36 @@ class IsOutputTruncatedTests(SimpleTestCase):
     def test_unknown_provider_is_never_truncated(self):
         from ai.model_clients import is_output_truncated
         self.assertFalse(is_output_truncated("Web_DeepSeek", 99999))
-        self.assertFalse(is_output_truncated("Groq_Gpt_Oss_120B", 99999))
+        self.assertFalse(is_output_truncated("Web_Kimi", 99999))
         self.assertFalse(is_output_truncated("", 16384))
+
+    def _fake_registry(self, module_name):
+        from ai.model_clients import registry
+
+        class _FakeHandler:
+            __module__ = module_name
+
+        return {"handler": _FakeHandler()}
+
+    def test_openrouter_ceiling_from_table(self):
+        """Выкусывание для ВСЕХ моделей, а не только Ollama/SambaNova:
+        потолок OpenRouter = max_tokens его таблицы моделей."""
+        from ai.model_clients import is_output_truncated, registry
+        with patch.object(
+            registry, "get",
+            lambda key: self._fake_registry("ai.model_clients.openrouter"),
+        ):
+            self.assertTrue(is_output_truncated("OR_GPT_OSS_20B", 8000))
+            self.assertFalse(is_output_truncated("OR_GPT_OSS_20B", 7999))
+
+    def test_groq_ceiling_from_table(self):
+        from ai.model_clients import is_output_truncated, registry
+        with patch.object(
+            registry, "get",
+            lambda key: self._fake_registry("ai.model_clients.groq"),
+        ):
+            self.assertTrue(is_output_truncated("Groq_Gpt_Oss_120B", 4096))
+            self.assertFalse(is_output_truncated("Groq_Gpt_Oss_120B", 4095))
 
     def test_sambanova_ceiling_from_table(self):
         # Провайдер определяется по __module__ обработчика из реестра (ключи
@@ -10847,6 +10875,98 @@ class StructuralCarverTests(SimpleTestCase):
         got = self._c(code, ext=".i86")
         self.assertIn("x dw 2", got)
         self.assertIn("Входные данные", got)
+
+    def test_asm_data_section_inline_comment_with_period_not_cut(self):
+        """Выкусывание: реальная строка кода с хвостовым комментарием,
+        кончающимся точкой («x dw 2 ; число икс.»), не срезается как
+        прозя-предложение (судим по кодовой части строки)."""
+        code = ("jmp begin\n\nx dw 2 ; число икс.\ny dw -1\n"
+                "RES dw 0\n\nbegin:\nmov al, x\ncbw\nmov a_16, ax\n"
+                "Ends:\njmp Ends ;$E")
+        got = self._c(code, ext=".i86")
+        self.assertIn("x dw 2 ; число икс.", got)
+        self.assertIn("mov a_16, ax", got)
+
+    def test_mpc_inline_comment_with_period_not_cut(self):
+        """То же для С-МПА: «y = a + b; // сумма двух операндов.» — код."""
+        code = ("int __in __bits(8) a;\nint __out __bits(8) y;\nvoid main()\n{\n"
+                "y = a + b; // сумма двух операндов тут.\n}")
+        got = self._c(code, ext=".mpc")
+        self.assertIn("y = a + b; // сумма двух операндов тут.", got)
+        self.assertIn("int __in __bits(8) a;", got)
+
+    def test_asm_masm_skeleton_extracted(self):
+        """MASM-скелет без «jmp begin» (.model/.stack/.data/.code/…/end start)
+        тоже извлекается целиком — включая дату-секцию (прежде: анкер один —
+        «jmp begin», программа проваливалась в карвинг и без оградки теряла
+        данные; директивный анкер теперь даёт кандидата от первой директивы)."""
+        masm = (".model small\n.stack 100h\n.data\nx dw 2\ny dw -1\n"
+                ".code\nstart:\nmov ax, x\nadd ax, y\nend start")
+        got = self._c("Решение на MASM:\n" + masm + "\nУдачи!", ext=".i86")
+        self.assertIn(".model small", got)
+        self.assertIn("x dw 2", got)
+        self.assertIn("mov ax, x", got)
+        self.assertIn("end start", got)
+        self.assertNotIn("Удачи", got)
+
+    def test_asm_skewed_skeleton_label_extracted(self):
+        """Скошенный каркас «jmp start / start: …» (модели иного диалекта):
+        генерализованные якоря не теряют дату-секцию, лейблы циклов
+        (jmp loop_start) анкерами НЕ становятся."""
+        code = ("jmp start\nx dw 2\ny dw -1\nRES dw 0\n\n"
+                "start:\nmov ax, x\ncbw\nadd ax, y\nmov RES, ax\nend start")
+        got = self._c("Сначала объясню: решение простое.\n" + code, ext=".i86")
+        self.assertIn("jmp start", got)
+        self.assertIn("x dw 2", got)
+        self.assertIn("end start", got)
+        self.assertNotIn("решение простое", got)
+
+    def test_alt_cut_requires_code_right_after_heading(self):
+        """Ранний заголовок «Альтернатива:» в CoT НЕ должен срезать
+        ФИНАЛЬНУЮ программу, записанную ниже: между заголовком и кодом
+        прозя-строка — среза нет (res: «Финальная программа:» терялась)."""
+        early = ("Сначала покажу как не надо:\n"
+                 "jmp begin\nn dw 5\n\nbegin:\nmov ax, n\n"
+                 "Альтернатива: нужно иначе.\nФинальная программа:\n"
+                 "jmp begin\nn dw 4\nplace dw 1\n\nbegin:\nmov z, 0\n"
+                 "loop_start:\nmov ax, n\ncmp ax, 0\n\nje done\n\ndone:\njmp Ends ;$E")
+        got = self._c(early, ext=".i86")
+        self.assertIn("place dw 1", got)
+        self.assertIn("je done", got)
+
+    def test_mpc_glued_decl_window_salvaged(self):
+        """Склейка «декларации + прозя + повтор main» в окне от
+        якоря-декларации больше не бракуется целиком: декларации спасаются
+        (иначе DL падал «Undefined variable»), кодовая вставка между
+        main-ами выкусывается."""
+        text = (
+            "int __in __bits(8) a;\nint __out __bits(8) y;\n"
+            "void main() {\ny = a +\n"
+            "Now I reconsider. The correct one:\n"
+            "void main() {\ny = a + 1;\ny = a + 2;\n}\n"
+        )
+        got = self._c(text, ext=".mpc")
+        self.assertIn("int __in __bits(8) a;", got)
+        self.assertIn("y = a + 2;", got)
+        self.assertNotIn("Now I reconsider", got)
+
+    def test_language_code_incomplete(self):
+        """Гейт обрыва: код без концевика каркаса (.i86) / без main или
+        несбалансированные скобки (.mpc) — неполный."""
+        from ai.services.code_carver import language_code_incomplete
+        self.assertTrue(language_code_incomplete(
+            "jmp begin\nbegin:\nmov ax, 1", ".i86"))
+        self.assertFalse(language_code_incomplete(
+            "jmp begin\nbegin:\nmov ax, 1\nEnds:\njmp Ends ;$E", ".i86"))
+        self.assertFalse(language_code_incomplete(
+            ".model small\n.code\nmov ax, 1\nend start", ".i86"))
+        self.assertTrue(language_code_incomplete(
+            "int __in __bits(8) a;\nvoid main() {\ny = a;", ".mpc"))
+        self.assertTrue(language_code_incomplete(
+            "int __in __bits(8) a;", ".mpc"))
+        self.assertFalse(language_code_incomplete(
+            "int __in __bits(8) a;\nvoid main() {\ny = a; }", ".mpc"))
+        self.assertFalse(language_code_incomplete("whatever", ""))
 
     # --- С-МПА .mpc ---
 

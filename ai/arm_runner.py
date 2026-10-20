@@ -39,6 +39,7 @@ from .services.code_carver import (  # noqa: E402
     _strip_think_blocks,
     _trim_prose_tail,
     has_language_marker,
+    language_code_incomplete,
 )
 from django.utils.html import strip_tags
 
@@ -1102,19 +1103,26 @@ def _extract_code_from_response(text, file_extension=""):
     ни одного структурного маркера (window.HYDRATION-JSON, «[ВСТАВЬТЕ ВАШ
     КОД]», протекшие рассуждения) возвращает "" — в DL такой текст не ходит
     и в code не пишется (реальные кейсы res#194/206/180).
+
+    Конвейер вызывается ДВАЖДЫ: сначала на срезе «Альтернатива:/Вариант 2:»
+    (второе решение не должно затирать основное), а при полностью пустом
+    результате — на СЫРОМ тексте: раннее упоминание «Альтернатива:» в CoT
+    не должно срезать ФИНАЛЬНУЮ программу, записанную ниже.
     """
     from .services.code_carver import has_language_marker
-    code = _extract_code_pipeline(text, file_extension)
+    code = _extract_code_pipeline(text, file_extension, apply_alt_cut=True)
+    if not code and text:
+        code = _extract_code_pipeline(text, file_extension, apply_alt_cut=False)
     if code and not has_language_marker(code, file_extension or ""):
         return ""
     return code
 
 
-def _extract_code_pipeline(text, file_extension):
+def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
     """Extract pure code from an AI response.
 
     Структурные экстракторы С-МПА (services/code_carver.py) идут ПЕРВЫМИ,
-    когда известно расширение: сначала по всему текст (мульти-анкер +
+    когда известно расширение: сначала по всему тексту (мульти-анкер +
     валидация кандидатов внутри), затем по закрытым код-фенсам. Без
     расширения структурники пробуются только как последняя надежда
     (маркеры видны в сыром ответе). Структурники бракуют склейки
@@ -1125,6 +1133,11 @@ def _extract_code_pipeline(text, file_extension):
     прози посреди), незакрытая оградка, карвинг прогона код-строк; каждый
     кандидат проверяется тем же «мид-контролем». Prose-In-Fence (res#5170)
     отбрасывается; утечка оградок срезается strip_code_fence_lines().
+    По фенс-блокам в структурных экстракторах идём С КОНЦА — последний
+    валидный фенс обычно финальный ответ модели (res#4160).
+
+    apply_alt_cut=False отключает срез «Альтернатива:/Вариант 2:»
+    (спасательный прогон _extract_code_from_response).
 
     Если кода в ответе нет вовсе, возвращается пустая строка (воркер
     засчитает «код не извлечён»), а не простыня рассуждений.
@@ -1138,7 +1151,8 @@ def _extract_code_pipeline(text, file_extension):
     from .services import code_carver
     # «Альтернатива:/Вариант 2:…» с кодом второго решения срезаются ДО всех
     # экстракторов (структурники, фенсы и карвинг работают по одному тексту).
-    cleaned = code_carver.cut_after_alternative_heading(cleaned)
+    if apply_alt_cut:
+        cleaned = code_carver.cut_after_alternative_heading(cleaned)
     structural = None
     if ext in (".i86", ".asm"):
         structural = code_carver.extract_asm_i86
@@ -1154,8 +1168,9 @@ def _extract_code_pipeline(text, file_extension):
         if found:
             return found
         # По фенс-блокам: внутри ограды кандидата границы естественны;
-        # последний валидный фенс обычно финальный ответ модели.
-        for block in _CODE_FENCE_RE.findall(cleaned):
+        # последний валидный фенс обычно финальный ответ модели — обходим
+        # С КОНЦА (res#4160).
+        for block in reversed(_CODE_FENCE_RE.findall(cleaned)):
             block = block.strip()
             if not block or _looks_like_prose(block):
                 continue
@@ -1201,7 +1216,7 @@ def _extract_code_pipeline(text, file_extension):
         found = structural(cleaned, relaxed=True)
         if found:
             return code_carver.strip_code_fence_lines(found)
-        for block in _CODE_FENCE_RE.findall(cleaned):
+        for block in reversed(_CODE_FENCE_RE.findall(cleaned)):
             found = structural(block.strip(), relaxed=True)
             if found:
                 return code_carver.strip_code_fence_lines(found)
@@ -1878,6 +1893,14 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             if junk_code:
                 code_only = ""
 
+            # Обрезанный ответ с ЧАСТИЧНЫМ кодом: неполная программа (.i86
+            # без концевика каркаса, .mpc с несбалансированными скобками или
+            # без main) не компилируется — в DL не ходим, код считается
+            # «не извлечён» → ниже сработает авто-ретрай «сразу код». Для НЕ
+            # обрезанных (complete) ответов гейт не применяется.
+            if code_only and truncated and language_code_incomplete(code_only, effective_ext):
+                code_only = ""
+
             # Кода НЕ извлекли (при любом исходе, не только обрезе) — один
             # авто-ретрай к ТОЙ ЖЕ модели, БЕЗ think-механики. Думающие модели
             # подводят протекшим reasoning'ом; по докам Ollama
@@ -1933,6 +1956,9 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                             cleaned_text, file_extension=effective_ext or ""
                         )
                         if code_only and effective_ext in (".i86", ".asm", ".mpc") and not has_language_marker(code_only, effective_ext):
+                            code_only = ""
+                        # Ретрай тоже мог обрезаться по пути к концевику.
+                        if code_only and truncated and language_code_incomplete(code_only, effective_ext):
                             code_only = ""
                 except Exception as retry_exc:  # noqa: BLE001
                     gen_seconds += round(perf_counter() - retry_started, 2)

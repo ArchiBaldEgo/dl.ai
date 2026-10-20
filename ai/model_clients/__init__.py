@@ -26,10 +26,11 @@ def _provider_module(handler) -> str:
 def _output_ceiling(model_key: str) -> int:
     """Потолок генерации (токенов ответа) для ключа модели; 0 — неизвестен.
 
-    ollama → num_predict (env OLLAMA_NUM_PREDICT, дефолт 16384);
-    sambanova → cfg["max_tokens"] из SAMBANOVA_MODELS (ключ = ключ реестра);
-    остальные провайдеры → 0 (семантика tokens неоднородная — ложный
-    «обрезан» хуже пропущенного).
+    ollama → num_predict (env OLLAMA_NUM_PREDICT);
+    sambanova/openrouter → cfg["max_tokens"] из таблицы моделей
+    (ключ = ключ реестра); groq → GROQ_MODELS[key][1]; остальные
+    провайдеры → 0 (семантика tokens неоднородная — ложный «обрезан»
+    хуже пропущенного).
     """
     key = model_key or ""
     provider = ""
@@ -51,6 +52,16 @@ def _output_ceiling(model_key: str) -> int:
             cfg = _sambanova.SAMBANOVA_MODELS.get(key)
             if isinstance(cfg, dict):
                 return int(cfg.get("max_tokens") or 0)
+        if provider == "openrouter":
+            from . import openrouter as _openrouter
+            cfg = _openrouter.OPENROUTER_FREE_MODELS.get(key)
+            if isinstance(cfg, dict):
+                return int(cfg.get("max_tokens") or 0)
+        if provider == "groq":
+            from . import groq as _groq
+            cfg = _groq.GROQ_MODELS.get(key)
+            if isinstance(cfg, (tuple, list)) and len(cfg) > 1:
+                return int(cfg[1] or 0)
     except (TypeError, ValueError, ImportError, AttributeError):
         return 0
     return 0

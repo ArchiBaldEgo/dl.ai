@@ -123,13 +123,16 @@ async def _ask_groq(model_name: str, msg: str, user_id: int, model_key: str = ""
             return map_http_error(response.status_code, "groq"), 0, True
 
         data = response.json()
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        choice = data.get("choices", [{}])[0]
+        content = choice.get("message", {}).get("content", "")
         if not (content or "").strip():
             logger.warning("Groq model %s returned empty content", model_name)
             return f"Модель Groq ({model_name}) вернула пустой ответ. Попробуйте позже.", 0, True
         usage = data.get("usage", {})
         total_tokens = usage.get("total_tokens", 0)
-        return content, total_tokens, False
+        # 4-й элемент — обрез генерации (finish_reason == "length"), как в
+        # ollama/openrouter: честный сигнал для флага truncated в раннере.
+        return content, total_tokens, False, choice.get("finish_reason") == "length"
 
     except httpx.TimeoutException:
         return "Таймаут при подключении к Groq API. Попробуйте позже.", 0, True

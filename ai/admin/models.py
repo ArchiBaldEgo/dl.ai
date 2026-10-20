@@ -599,11 +599,13 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                      "external_first_name", "external_last_name",
                      "dl_email", "education_school_no", "user__username")
     # Учебные данные приходят из dl.gsu.by при входе пользователя (REST API.md
-    # get-user-info) — руками их не правим, только смотрим.
-    readonly_fields = ("dl_email", "education_form", "education_school_id",
-                       "education_school_kind", "education_school_no",
-                       "education_group_mask_id", "education_form_letter",
-                       "created_at", "updated_at")
+    # get-user-info) — руками их не правим, только смотрим. external_login
+    # («Логин dl.gsu.by») тоже приходит извне — из формы убран полностью,
+    # не обязательное поле (правится только самим dl.gsu.by).
+    readonly_fields = ("dl_email", "external_login", "education_form",
+                       "education_school_id", "education_school_kind",
+                       "education_school_no", "education_group_mask_id",
+                       "education_form_letter", "created_at", "updated_at")
     raw_id_fields = ("user",)
 
     def get_form(self, request, obj=None, **kwargs):
@@ -825,11 +827,16 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
         # (flatten_fieldsets) — фабрика не знает ни имени-виртуалки
         # ai_access_groups_display (это readonly-строка), ни, тем более,
         # обратного M2M: вырезаем все три имени до фабрики и добавляем
-        # поле вручную после.
+        # поле вручную после. ВАЖНО: _changeform_view ВСЕГДА передаёт
+        # fields=flatten_fieldsets(fieldsets) в get_form — фильтр обязан
+        # применяться и в этом случае (ветка «fields not in kwargs» не
+        # срабатывала никогда → FieldError «Unknown field(s)
+        # (ai_access_groups) specified for User» на странице пользователя).
         if "fields" not in kwargs:
-            fields = flatten_fieldsets(self.get_fieldsets(request, obj))
+            kwargs["fields"] = flatten_fieldsets(self.get_fieldsets(request, obj))
+        if kwargs["fields"]:
             kwargs["fields"] = tuple(
-                f for f in fields
+                f for f in kwargs["fields"]
                 if f not in ("groups", "ai_access_groups",
                              "ai_access_groups_display")
             )
