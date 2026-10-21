@@ -40,7 +40,6 @@ from ..models import (
 from ..templatetags.ai_duration import format_human_duration
 from ..model_health import get_runtime_model_handlers
 from ..services.education_directory import (
-    education_suggestions,
     education_title_maps,
     group_info,
     school_info,
@@ -816,7 +815,9 @@ def admin_daily_report_view(request):
     rows.sort(key=lambda r: (r["display_name"].casefold(), r["last_sent"]))
 
     # === «Буквенная информация» + фильтры по группе и вузу/школе ===
-    # Названия резолвятся при рендере из вручную-ведомого справочника
+    # Названия берутся из данных DL: ExternalDLAccount.education_*_name
+    # (DL сам отдаёт schoolName/groupName — dl-rest-api.json 1.4.2), а если
+    # названия у конкретного студента нет — из ручного справочника
     # DLEducationName (education_directory — единственный читатель модели);
     # привязка студента → ExternalDLAccount: один запрос по внешним id дня.
     schools, groups, groups_school = education_title_maps()
@@ -827,6 +828,7 @@ def admin_daily_report_view(request):
         .only(
             "external_user_id", "education_school_id", "education_school_kind",
             "education_school_no", "education_group_mask_id",
+            "education_school_name", "education_group_name",
         )
     } if external_ids else {}
     for row in rows:
@@ -847,13 +849,10 @@ def admin_daily_report_view(request):
 
     # GET-фильтры — СВОБОДНЫЙ ввод: подстрока отображаемого названия ИЛИ
     # сырого ID из DL (регистронезависимо). ФИО — тоже подстрока.
-    # Подсказки (datalist) — из справочника DLEducationName, они не
-    # ограничивают ввод. Фильтр применяется к уже отсортированным строкам —
-    # порядок сохраняется.
+    # Фильтр применяется к уже отсортированным строкам — порядок сохраняется.
     student_filter = (request.GET.get("student") or "").strip()
     group_filter = (request.GET.get("group") or "").strip()
     school_filter = (request.GET.get("school") or "").strip()
-    group_suggestions, school_suggestions = education_suggestions(groups, schools)
     if student_filter:
         needle = student_filter.casefold()
         rows = [r for r in rows if needle in r["display_name"].casefold()]
@@ -880,8 +879,6 @@ def admin_daily_report_view(request):
         ),
         "rows": rows,
         "total_count": len(logs),
-        "group_suggestions": group_suggestions,
-        "school_suggestions": school_suggestions,
         "filters_student": student_filter,
         "filters_group": group_filter,
         "filters_school": school_filter,

@@ -1377,6 +1377,8 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
             "comment": str,        # DL comment (test result details)
             "submit_error": str,   # error message if send-solution failed
             "queue_id": int,       # DL queue id (0 if submit failed)
+            "delta_id": int,       # id тестирующей машины (Дельты), 0 — не назначена
+            "delta_name": str,     # имя тестирующей машины ("" — не назначена)
             "code_sent": str,      # the code that was sent to DL
             "cancelled": bool,     # True if aborted by cancel request
         }
@@ -1398,6 +1400,8 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
         "comment": "",
         "submit_error": "",
         "queue_id": 0,
+        "delta_id": 0,
+        "delta_name": "",
         "code_sent": code[:5000],
         "cancelled": False,
     }
@@ -1477,6 +1481,13 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
 
         is_finished = poll_resp.get("isFinished")
         comment = poll_resp.get("comment", "") or ""
+        # Машина (Дельта), на которой идёт/шла проверка: deltaId/deltaName
+        # (dl-rest-api.json, GetResultResponse). 0/"" — машина ещё не назначена.
+        try:
+            result["delta_id"] = int(poll_resp.get("deltaId") or 0)
+        except (TypeError, ValueError):
+            result["delta_id"] = 0
+        result["delta_name"] = str(poll_resp.get("deltaName") or "")
 
         if is_finished:
             result["comment"] = comment
@@ -1980,6 +1991,9 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     dl_test_comment = ""
     dl_submit_error = ""
     dl_queue_id = 0
+    # Машина (Дельта), на которой DL проверял решение (deltaId/deltaName).
+    dl_delta_id = 0
+    dl_delta_name = ""
     # Причина провала (таксономия сбоев). Пустая строка = причина нет
     # (пара решена). Заполняется в каждой ветке ниже; последняя присваивание
     # — в ветке DL-классификации по тексту комментария.
@@ -2177,6 +2191,8 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 dl_submit_error = dl_result.get("submit_error", "") or ""
                 dl_verdict = dl_result.get("verdict")
                 dl_queue_id = dl_result.get("queue_id", 0) or 0
+                dl_delta_id = dl_result.get("delta_id", 0) or 0
+                dl_delta_name = dl_result.get("delta_name", "") or ""
                 # solved — только если DL явно подтвердил; иное → failed.
                 verdict = dl_verdict if dl_verdict is not None else _VERDICT_FAILED
                 # Таксономия сбоев: компиляция vs неправильный ответ vs
@@ -2245,6 +2261,8 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 "dl_comment": dl_test_comment or "",
                 "dl_error": dl_submit_error or "",
                 "dl_queue_id": dl_queue_id or 0,
+                "delta_id": dl_delta_id or 0,
+                "delta_name": dl_delta_name or "",
                 "file_extension_snapshot": effective_ext or "",
                 "topic_id_snapshot": task.topic_id,
                 "topic_name_snapshot": topic_name,
@@ -2278,6 +2296,8 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "dl_comment": dl_test_comment,
             "dl_error": dl_submit_error,
             "dl_queue_id": dl_queue_id,
+            "delta_id": dl_delta_id or 0,
+            "delta_name": dl_delta_name or "",
             "file_extension": effective_ext or "",
             "topic_name": topic_name,
             # Скоуп статистики: язык прогона (в batch-прогоне язык один —
@@ -2601,7 +2621,7 @@ def _batch_results_from_db(test_run, light=False):
         rows = test_run.results.values(
             "pk", "model_key", "model_title", "duration_seconds", "tokens",
             "tokens_prompt", "status", "verdict", "failure_reason",
-            "dl_queue_id", "file_extension_snapshot",
+            "dl_queue_id", "file_extension_snapshot", "delta_id", "delta_name",
             "topic_name_snapshot", "topic_id_snapshot", "prog_lang_snapshot",
             "truncated", "prompt_id", "prompt_name",
             "task__node_id", "task__name", "task__file_extension",
@@ -2625,6 +2645,8 @@ def _batch_results_from_db(test_run, light=False):
                 ),
                 "truncated": bool(r["truncated"]),
                 "dl_queue_id": r["dl_queue_id"] or 0,
+                "delta_id": r["delta_id"] or 0,
+                "delta_name": r["delta_name"] or "",
                 "file_extension": r["file_extension_snapshot"] or (r["task__file_extension"] or ""),
                 "topic_name": r["topic_name_snapshot"],
                 "topic_id": r["topic_id_snapshot"],
@@ -2661,6 +2683,8 @@ def _batch_results_from_db(test_run, light=False):
             "dl_comment": r.dl_comment or "",
             "dl_error": r.dl_error or "",
             "dl_queue_id": r.dl_queue_id or 0,
+            "delta_id": r.delta_id or 0,
+            "delta_name": r.delta_name or "",
             "file_extension": r.file_extension_snapshot or (r.task.file_extension if r.task else ""),
             "topic_name": r.topic_name_snapshot,
             "topic_id": r.topic_id_snapshot,

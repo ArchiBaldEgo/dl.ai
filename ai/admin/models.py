@@ -598,7 +598,7 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     search_fields = ("external_user_id", "external_login",
                      "external_first_name", "external_last_name",
                      "dl_email", "education_school_no", "user__username")
-    # Учебные данные приходят из dl.gsu.by при входе пользователя (REST API.md
+    # Учебные данные приходят из dl.gsu.by при входе пользователя (dl-rest-api.json
     # get-user-info) — руками их не правим, только смотрим. external_login
     # («Логин dl.gsu.by») тоже приходит извне — из формы убран полностью,
     # не обязательное поле (правится только самим dl.gsu.by).

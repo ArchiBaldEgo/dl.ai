@@ -50,16 +50,21 @@ _STUDENT_INFO_FIELDS = (
     "education_school_no",
     "education_group_mask_id",
     "education_form_letter",
+    "education_school_name",
+    "education_form_name",
+    "education_group_name",
 )
 
 
 def _extract_student_info(user_info: dict) -> dict[str, str]:
     """Извлекает email и учебный блок education из ответа post/get-user-info.
 
-    Формат ответа описан в REST API.md: top-level ``email`` и вложенный
-    ``education`` (form, schoolId, schoolKind, schoolNo, groupMaskId,
-    formLetter). Отсутствующие ключи дают пустую строку (поля модели blank).
-    Небезопасные значения приводятся к строке и обрезаются.
+    Формат ответа описан в dl-rest-api.json (dl-rest-api.json): top-level
+    ``email`` и вложенный ``education`` (form, schoolId, schoolKind,
+    schoolNo, groupMaskId, formLetter) + названия (schoolName, formName,
+    groupName) — их DL отдаёт с версии 1.4.2 API. Отсутствующие ключи дают
+    пустую строку (поля модели blank). Небезопасные значения приводятся к
+    строке и обрезаются.
     """
     education = user_info.get("education") or {}
     if not isinstance(education, dict):
@@ -76,6 +81,9 @@ def _extract_student_info(user_info: dict) -> dict[str, str]:
         "education_school_no": _pick("schoolNo"),
         "education_group_mask_id": _pick("groupMaskId"),
         "education_form_letter": _pick("formLetter"),
+        "education_school_name": _pick("schoolName"),
+        "education_form_name": _pick("formName"),
+        "education_group_name": _pick("groupName"),
     }
 
 
@@ -133,7 +141,7 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
     3. Ищет существующего пользователя по ExternalDLAccount.external_user_id.
     4. Если не найден — создаёт User + ExternalDLAccount.
     5. Обновляет username/first_name/last_name при изменении; email и блок
-       education (учебные данные студента, REST API.md) обновляются при
+       education (учебные данные студента, dl-rest-api.json) обновляются при
        каждом входе, если API отдал непустое значение.
     6. Зачисляет НОВОГО пользователя во встроенную группу доступа
        «Разработчик промптов» (AIAccessGroup; действующим состав правит
@@ -157,6 +165,35 @@ def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
                 external_last_name = names["last_name"]
         except Exception as exc:
             logger.warning("fetch_user_names failed for userId=%s: %s", external_user_id, exc)
+
+    # Названия вуза/школы и группы: get-user-info отдаёт их начиная с
+    # версии 1.4.2 API (EducationInfo.schoolName/groupName). Если блок
+    # education в ответе пуст (старый DL или кеш), дозабираем через
+    # get-id-user-info — sessionId там не нужен.
+    if external_user_id and external_user_id != "None" and not (
+        student_info.get("education_school_name") or student_info.get("education_group_name")
+    ):
+        try:
+            from .dl_api_client import fetch_user_education
+            education = fetch_user_education(external_user_id)
+            for dl_key, model_field in (
+                ("form", "education_form"),
+                ("schoolId", "education_school_id"),
+                ("schoolKind", "education_school_kind"),
+                ("schoolNo", "education_school_no"),
+                ("groupMaskId", "education_group_mask_id"),
+                ("formLetter", "education_form_letter"),
+                ("schoolName", "education_school_name"),
+                ("formName", "education_form_name"),
+                ("groupName", "education_group_name"),
+            ):
+                value = (education.get(dl_key) or "").strip()
+                if value and not student_info.get(model_field):
+                    student_info[model_field] = value
+        except Exception as exc:
+            logger.warning(
+                "fetch_user_education failed for userId=%s: %s", external_user_id, exc
+            )
     
     if not external_user_id or external_user_id == "None":
         logger.error(f"Invalid user_info: userId={external_user_id}")

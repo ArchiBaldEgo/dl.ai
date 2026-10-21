@@ -89,6 +89,10 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'channels',
+    # postgres — нужен ради OpClass/GinIndex: его ready() регистрирует
+    # обёртки выражений в индексах (expression index на UPPER(col) с
+    # gin_trgm_ops — ускорение фильтра журнала по фамилии).
+    'django.contrib.postgres',
 ]
 
 MIDDLEWARE = [

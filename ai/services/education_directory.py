@@ -1,10 +1,20 @@
-"""Справочник DL «id → название» для учебных полей (вуз/школа, группа/класс).
+"""Названия вуза/школы и группы/класса — из данных DL.
 
-REST get-user-info отдаёт только коды: schoolId (строка), schoolKind, schoolNo
-и groupMaskId — настоящих названий там нет. Названия ведутся вручную в
-``DLEducationName`` (/ai/admin/); рендер-резиденты (дневной отчёт журнала и
-далее другие страницы) зовут helpers отсюда, а не читают модель напрямую
-(DRY — единственный читатель модели).
+Начиная с версии 1.4.2 REST API (dl-rest-api.json, EducationInfo) DL сам
+отдаёт человекочитаемые названия учебного заведения и группы:
+``schoolName``/``formName``/``groupName`` — рядом с ID (``schoolId``/
+``groupMaskId``). Они сохраняются в ``ExternalDLAccount`` при входе
+пользователя и дозабираются массово через ``GET /restapi/get-id-user-info``
+(этот endpoint не требует sessionId — в отличие от ``get-user-info``).
+
+Раньше названий в API не было, поэтому их вели вручную в справочнике
+``DLEducationName``. Справочник остался в базе (его данные полезны как
+историческая привязка «группа → заведение» и как запасной источник, если
+название у конкретного студента не пришло), но рендер больше НЕ зависит от
+его актуальности: сначала берётся название из DL, потом — из справочника,
+и только потом — сырой ID.
+
+Читатель — единственный: этот модуль.
 """
 
 from django.core.cache import cache
@@ -30,7 +40,7 @@ def education_title_maps():
     (ai/signals.py), так что изменения видны сразу.
 
     ``groups_school`` — привязка группы к вузу/школе (key school-строки,
-    заполнена у group-строк справочника, см. ``DLEducationName.school``).
+    заполняена у group-строк справочника, см. ``DLEducationName.school``).
     """
     cached = cache.get(_EDU_MAPS_CACHE_KEY)
     if cached is not None:
@@ -47,16 +57,36 @@ def education_title_maps():
     return schools, groups, groups_school
 
 
+def _dl_school_name(account) -> str:
+    """Название учебного заведения, присланное DL (``education.schoolName``)."""
+    if account is None:
+        return ""
+    return (getattr(account, "education_school_name", "") or "").strip()
+
+
+def _dl_group_name(account) -> str:
+    """Название группы/класса, присланное DL (``education.groupName``)."""
+    if account is None:
+        return ""
+    return (getattr(account, "education_group_name", "") or "").strip()
+
+
 def _school_base(schools, account):
     """Школьные поля студента: ``(display, key, has_title)``.
 
     ``display`` — что показываем, ``key`` — ID вуза/школы в DL (пусто, если
     его у студента нет), ``has_title`` — есть ли человекочитаемое название
-    в справочнике (False → в UI честная пометка «нет названия»).
+    (False → в UI честная пометка «нет названия»).
+
+    Цепочка: название из DL (``schoolName``) → справочник (по
+    ``education_school_id``) → сырой schoolId → «kind №no» → «—».
     """
     if account is None:
         return _PLACEHOLDER, "", False
+    dl_name = _dl_school_name(account)
     school_id = (account.education_school_id or "").strip()
+    if dl_name:
+        return dl_name, school_id, True
     if school_id:
         title = schools.get(school_id)
         if title:
@@ -77,9 +107,9 @@ def _school_base(schools, account):
 def school_display(schools, account):
     """Название вуза/школы студента для рендера.
 
-    Цепочка: справочник (по education_school_id) → сырой schoolId →
-    «kind №no» из schoolKind/schoolNo → «—». ``account`` — ExternalDLAccount
-    или None (у записи нет внешнего аккаунта).
+    Цепочка: название из DL → справочник (по education_school_id) → сырой
+    schoolId → «kind №no» → «—». ``account`` — ExternalDLAccount или None
+    (у записи нет внешнего аккаунта).
     """
     return _school_base(schools, account)[0]
 
@@ -109,7 +139,8 @@ def school_info(schools, groups_school, account):
 def group_display(groups, account):
     """Название группы/класса студента для рендера.
 
-    Цепочка: справочник (по education_group_mask_id) → сырой groupMaskId → «—».
+    Цепочка: название из DL (``groupName``) → справочник (по
+    ``education_group_mask_id``) → сырой groupMaskId → «—».
     """
     return group_info(groups, account)[0]
 
@@ -117,12 +148,15 @@ def group_display(groups, account):
 def group_info(groups, account):
     """Группа/класс студента с её ключом: ``(display, key, has_title)``.
 
-    ``has_title`` — False, если названия группы нет в справочнике (тогда
-    ``display`` — сырой groupMaskId, и UI честно пишет «нет названия»).
+    ``has_title`` — False, если названия группы нет ни в DL, ни в справочнике
+    (тогда ``display`` — сырой groupMaskId, и UI честно пишет «нет названия»).
     """
     if account is None:
         return _PLACEHOLDER, "", False
+    dl_name = _dl_group_name(account)
     mask = (account.education_group_mask_id or "").strip()
+    if dl_name:
+        return dl_name, mask, True
     if not mask:
         return _PLACEHOLDER, "", False
     title = groups.get(mask)
@@ -137,16 +171,3 @@ def school_title_for(schools, groups_school, account):
     «названия нет»).
     """
     return school_info(schools, groups_school, account)[0]
-
-
-def education_suggestions(groups, schools):
-    """Подсказки для СВОБОДНОГО ввода группы и вуза/школы (список ``datalist``).
-
-    Возвращает ``(group_titles, school_titles)`` — отсортированные названия из
-    справочника ``DLEducationName``. Пользователь может вписать что угодно
-    (в т.ч. сырой ID), справочник — только подсказка.
-    """
-    return (
-        sorted({title for title in groups.values() if title}),
-        sorted({title for title in schools.values() if title}),
-    )

@@ -1,5 +1,7 @@
 from django.conf import settings
+from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db import models
+from django.db.models.functions import Upper
 from django.utils import timezone
 
 from .i18n import get_localized_name, get_localized_text
@@ -72,7 +74,7 @@ class ExternalDLAccount(models.Model):
         help_text="Фамилия из dl.gsu.by",
         verbose_name="Фамилия",
     )
-    # Учебные данные студента из post/get-user-info (REST API.md): top-level
+    # Учебные данные студента из post/get-user-info (dl-rest-api.json): top-level
     # email + вложенный блок education. Обновляются при каждом входе
     # пользователя; массовый бэкфилл невозможен — endpoint требует sessionId
     # самого пользователя.
@@ -124,6 +126,31 @@ class ExternalDLAccount(models.Model):
         default="",
         help_text="Класс/буква (education.formLetter)",
         verbose_name="Класс (буква)",
+    )
+    # Названия учебного заведения и группы присылает сам DL
+    # (dl-rest-api.json, EducationInfo.schoolName/formName/groupName) —
+    # с версии 1.4.2 REST API отдаёт их вместе с ID. Раньше названий в API
+    # не было, поэтому их вели вручную в справочнике DLEducationName.
+    education_school_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Название учебного заведения (education.schoolName)",
+        verbose_name="Школа/вуз: название",
+    )
+    education_form_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Название класса/курса (education.formName)",
+        verbose_name="Класс/курс: название",
+    )
+    education_group_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Название группы (education.groupName)",
+        verbose_name="Группа: название",
     )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
@@ -755,6 +782,23 @@ class AIRequestLog(models.Model):
             models.Index(fields=["mode", "sent_at"], name="ai_request_log_mode_sent_idx"),
             models.Index(fields=["source", "sent_at"], name="ai_request_log_source_sent_idx"),
             models.Index(fields=["status", "sent_at"], name="ai_request_log_status_sent_idx"),
+            # Поиск по фамилии/логину/id — expression-индексы на UPPER(col)
+            # с триграммами: Django генерирует для icontains предикат
+            # UPPER(col::text) LIKE UPPER(%p%), и обычный индекс по колонке
+            # его НЕ обслуживает. Postgres-специфичные (gin_trgm_ops) —
+            # в БД создаёт миграция 0069 (на SQLite индексы не создаются).
+            GinIndex(
+                OpClass(Upper("user_full_name"), "gin_trgm_ops"),
+                name="ai_log_uname_trgm_idx",
+            ),
+            GinIndex(
+                OpClass(Upper("username"), "gin_trgm_ops"),
+                name="ai_log_login_trgm_idx",
+            ),
+            GinIndex(
+                OpClass(Upper("external_user_id"), "gin_trgm_ops"),
+                name="ai_log_extid_trgm_idx",
+            ),
         ]
 
     def __str__(self):
@@ -1162,6 +1206,11 @@ class AIModelTestResult(models.Model):
     dl_error = models.TextField(blank=True, default="", verbose_name="DL: ошибка")
     # DL queue id из send-solution (0 — отправка не удалась).
     dl_queue_id = models.IntegerField(null=True, blank=True, verbose_name="DL: queueId")
+    # Машина (Дельта), на которой DL проверял решение: id и имя из
+    # get-solution-result (deltaId/deltaName). Пусто — машина не назначена
+    # или проверка не дошла до DL.
+    delta_id = models.IntegerField(null=True, blank=True, verbose_name="DL: машина (id)")
+    delta_name = models.CharField(max_length=255, blank=True, default="", verbose_name="DL: машина")
     # Снимок расширения файла задачи (для имени файла скачивания).
     file_extension_snapshot = models.CharField(max_length=16, blank=True, default="", verbose_name="Расширение (снимок)")
     # Snapshot of the task's topic / programming language at run time (batch runs).
@@ -1191,6 +1240,14 @@ class AIModelTestResult(models.Model):
             # сортировали весь результат прогона на каждой загрузке.
             models.Index(fields=["model_title"], name="ai_model_test_result_title_idx"),
             models.Index(fields=["run", "model_title"], name="ai_mtr_run_title_idx"),
+            # Поиск пар по названию модели (icontains) — expression-индекс
+            # на UPPER(model_title) с триграммами (см. AIRequestLog: предикат
+            # UPPER(col::text) LIKE UPPER(%p%) не обслуживается обычным
+            # индексом по колонке). Создаёт миграция 0069 (только Postgres).
+            GinIndex(
+                OpClass(Upper("model_title"), "gin_trgm_ops"),
+                name="ai_mtr_model_title_trgm_idx",
+            ),
         ]
         constraints = [
             # One row per (run, model, task) for batch runs.

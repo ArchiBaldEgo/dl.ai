@@ -22,7 +22,7 @@ from django.http import HttpResponse
 from django.http.response import Http404
 from django.db import ProgrammingError
 from django.utils import timezone
-from asgiref.sync import sync_to_async
+from asgiref.sync import async_to_sync, sync_to_async
 from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
 import os
@@ -641,7 +641,7 @@ class AdminExternalAuthTests(TestCase):
 
 
 class ExternalAccountStudentInfoTests(TestCase):
-    """Email и блок education из get-user-info (REST API.md) сохраняются
+    """Email и блок education из get-user-info (dl-rest-api.json) сохраняются
     в ExternalDLAccount: при создании и при повторном входе."""
 
     def setUp(self):
@@ -11550,12 +11550,12 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(rows[0]["count"], 1)
 
     def test_daily_report_group_school_titles_and_filters(self):
-        """«Буквенная информация»: группа/вуз-школа из справочника
-        DLEducationName (unmapped → сырой ключ + пометка «нет названия»,
-        без аккаунта → «—»); группа и вуз/школа — СВОБОДНЫЙ ввод: фильтр
-        по подстроке названия ИЛИ по сырому ID из DL (регистронезависимо);
-        подсказки (datalist) — все названия справочника."""
-        from ai.models import DLEducationName, ExternalDLAccount
+        """«Буквенная информация»: группа/вуз-школа приходят из DL
+        (education.groupName/schoolName — DL отдаёт их с версии 1.4.2 API);
+        если названия нет — сырой ключ + честная пометка «нет названия»
+        (без аккаунта → «—»); группа и вуз/школа — СВОБОДНЫЙ ввод: фильтр
+        по подстроке названия ИЛИ по сырому ID из DL (регистронезависимо)."""
+        from ai.models import ExternalDLAccount
 
         ivanov = "Иванов Иван"
         petrov = "Петров Пётр"
@@ -11563,14 +11563,13 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         ExternalDLAccount.objects.create(
             user=student, external_user_id="101", external_login="gstudent",
             education_school_id="S-1", education_group_mask_id="G-1",
+            education_school_name="ГГУ", education_group_name="ИТП-31",
         )
         petrov_user = self.user_model.objects.create_user(username="gstudent2", password="***")
         ExternalDLAccount.objects.create(
             user=petrov_user, external_user_id="200", external_login="gstudent2",
-            education_school_id="S-9",  # вне справочника, группы нет
+            education_school_id="S-9",  # названия от DL нет, группы нет
         )
-        DLEducationName.objects.create(kind="school", key="S-1", title="ГГУ")
-        DLEducationName.objects.create(kind="group", key="G-1", title="ИТП-31")
 
         self._log(user=self.su, external_user_id="101", full_name=ivanov,
                   sent_at=self._msk_at(9, 15))
@@ -11584,16 +11583,13 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(rows[0]["school_title"], "ГГУ")
         self.assertTrue(rows[0]["group_has_title"])
         self.assertTrue(rows[0]["school_has_title"])
-        # unmapped → сырой id; группы нет вообще → «—».
+        # Названия от DL нет → сырой id; группы нет вообще → «—».
         self.assertEqual(rows[1]["school_title"], "S-9")
         self.assertEqual(rows[1]["group_title"], "—")
-        # Названия нет в справочнике — честный признак (в UI «нет названия»).
+        # Названия нет — честный признак (в UI «нет названия»).
         self.assertFalse(rows[1]["school_has_title"])
         self.assertEqual(rows[1]["school_key"], "S-9")
         self.assertFalse(rows[1]["group_has_title"])
-        # Подсказки — ВСЕ названия справочника (не только сегодняшние).
-        self.assertEqual(report.context_data["group_suggestions"], ["ИТП-31"])
-        self.assertEqual(report.context_data["school_suggestions"], ["ГГУ"])
 
         by_group = self._report(self.su, data={"group": "ИТП-31"}).context_data
         self.assertEqual([r["display_name"] for r in by_group["rows"]], [ivanov])
@@ -11611,6 +11607,28 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual([r["display_name"] for r in school_key["rows"]], [petrov])
         # Не находит — пусто.
         self.assertEqual(self._report(self.su, data={"group": "нет такой"}).context_data["rows"], [])
+
+    def test_daily_report_group_school_titles_from_manual_directory_fallback(self):
+        """Фолбэк: названия от DL не пришли — берём из ручного справочника
+        DLEducationName (он остаётся запасным источником)."""
+        from ai.models import DLEducationName, ExternalDLAccount
+
+        student = self.user_model.objects.create_user(username="gstudent", password="***")
+        ExternalDLAccount.objects.create(
+            user=student, external_user_id="101", external_login="gstudent",
+            education_school_id="S-1", education_group_mask_id="G-1",
+        )
+        DLEducationName.objects.create(kind="school", key="S-1", title="ГГУ")
+        DLEducationName.objects.create(kind="group", key="G-1", title="ИТП-31")
+
+        self._log(user=self.su, external_user_id="101", full_name="Иванов Иван",
+                  sent_at=self._msk_at(9, 15))
+
+        rows = self._report(self.su).context_data["rows"]
+        self.assertEqual(rows[0]["group_title"], "ИТП-31")
+        self.assertEqual(rows[0]["school_title"], "ГГУ")
+        self.assertTrue(rows[0]["group_has_title"])
+        self.assertTrue(rows[0]["school_has_title"])
 
     def test_daily_report_student_filter_and_school_from_group(self):
         """Фильтр student — регистронезависимая подстрока ФИО, выбирается до
@@ -11653,10 +11671,6 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         # Часть ФИО тоже находит.
         by_part = self._report(self.su, data={"student": "тров"}).context_data
         self.assertEqual([r["display_name"] for r in by_part["rows"]], [petrov])
-        # Варианты селектов считались ДО фильтрации — не сужаются («—»
-        # безгруппового Петрова тоже в списке: U+2014 после кириллицы).
-        self.assertEqual(by_part["group_suggestions"], ["ИТП-31", "КЛ-9А"])
-        self.assertEqual(by_part["school_suggestions"], ["ГГУ"])
         # Не находит — пусто.
         empty = self._report(self.su, data={"student": "кургузов"}).context_data
         self.assertEqual(empty["rows"], [])
@@ -11664,20 +11678,19 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
     def test_daily_report_template_filters_and_columns(self):
         """Шаблон отчёта: два GET-фильтра над таблицей, колонки «Группа» и
         «Вуз/Школа» после «Фамилия студента», развёртка colspan=8.
-        Группа и вуз/школа — СВОБОДНЫЙ ввод (input+list), подсказки —
-        datalist из справочника."""
+        Группа и вуз/школа — СВОБОДНЫЙ ввод (input[type=text]), без
+        select-списков и datalist-подсказок (названия приходят из DL)."""
         from django.template.loader import get_template
         src = get_template("admin/ai/daily_report.html").template.source
         self.assertIn('id="daily-filter-group"', src)
         self.assertIn('id="daily-filter-school"', src)
-        # Свободный ввод, а не select: у полей есть list=… (datalist).
-        self.assertIn('name="group" list="daily-group-options"', src)
-        self.assertIn('name="school" list="daily-school-options"', src)
-        self.assertIn('<datalist id="daily-group-options">', src)
-        self.assertIn('<datalist id="daily-school-options">', src)
-        # Подсказки берутся из справочника, а не из сегодняшних строк.
-        self.assertIn("{% for g in group_suggestions %}", src)
-        self.assertIn("{% for s in school_suggestions %}", src)
+        # Свободный ввод, а не select: текстовые поля без list=…/datalist.
+        self.assertIn('name="group"', src)
+        self.assertIn('name="school"', src)
+        self.assertNotIn("daily-group-options", src)
+        self.assertNotIn("daily-school-options", src)
+        self.assertNotIn("group_suggestions", src)
+        self.assertNotIn("school_suggestions", src)
         self.assertNotIn("<select", src)
         # Честная пометка «нет названия» для ключей без названия.
         self.assertIn("ai-daily-no-title", src)
@@ -16634,16 +16647,28 @@ class EducationDirectoryTests(TestCase):
         self.assertEqual(group_info(groups, None), ("—", "", False))
         self.assertEqual(school_info(schools, groups_school, None), ("—", "", False))
 
-    def test_education_suggestions(self):
-        """Подсказки для свободного ввода — отсортированные названия
-        справочника (без дублей и пустых)."""
-        from ai.services.education_directory import education_suggestions
-        groups = {"G-1": "ИТП-31", "G-2": "КЛ-9А", "G-3": "ИТП-31"}
-        schools = {"S-1": "ГГУ", "S-2": "СГУ"}
-        self.assertEqual(
-            education_suggestions(groups, schools),
-            (["ИТП-31", "КЛ-9А"], ["ГГУ", "СГУ"]),
+    def test_dl_names_take_precedence_over_directory(self):
+        """Название от DL (education.schoolName/groupName) ВАЖНЕЕ ручного
+        справочника: DL — источник истины, справочник — лишь фолбэк."""
+        from ai.services.education_directory import group_info, school_info
+        schools = {"S-1": "Старое название школы"}
+        groups = {"G-1": "Старая группа"}
+        groups_school = {"G-1": "S-1"}
+        acc = SimpleNamespace(
+            education_school_id="S-1", education_school_kind="", education_school_no="",
+            education_group_mask_id="G-1",
+            education_school_name="ГГУ", education_group_name="ИТП-31",
         )
+        self.assertEqual(group_info(groups, acc), ("ИТП-31", "G-1", True))
+        self.assertEqual(school_info(schools, groups_school, acc), ("ГГУ", "S-1", True))
+        # Название есть, а ID нет — название всё равно показываем (ключ пуст).
+        acc_no_id = SimpleNamespace(
+            education_school_id="", education_school_kind="", education_school_no="",
+            education_group_mask_id="",
+            education_school_name="ГГУ", education_group_name="ИТП-31",
+        )
+        self.assertEqual(group_info(groups, acc_no_id), ("ИТП-31", "", True))
+        self.assertEqual(school_info(schools, groups_school, acc_no_id), ("ГГУ", "", True))
 
     def test_admin_school_field_and_column(self):
         """Форма справочника: поле school — select с вариантами school-строк
@@ -18753,3 +18778,347 @@ class ArmBatchFailureReasonRetryTests(TransactionTestCase):
 
         row = self._run(handler)
         self.assertEqual(row.failure_reason, "no_code")
+
+
+# ===================================================================
+# 2026-10-21: гейт DL «canUseAi» (WS7) + машина проверки delta (WS6)
+# ===================================================================
+
+class CanUseAiGateTests(TestCase):
+    """Флаг DL ``canUseAi`` (dl-rest-api.json, UserInfo.canUseAi).
+
+    Правило: флага нет — разрешено («неизвестно» ≠ «запрещено»); явный
+    ``False`` — запрещено. Серверный гейт — 403 на страницах чата и закрытие
+    WS с кодом 4404 (не молчаливый 4403 «не аутентифицирован»).
+    """
+
+    def test_can_use_ai_semantics(self):
+        from ai.services.auth import can_use_ai
+        # Флага нет / пустой payload / None — разрешено.
+        self.assertTrue(can_use_ai(None))
+        self.assertTrue(can_use_ai({}))
+        self.assertTrue(can_use_ai({"canUseAi": None}))
+        self.assertTrue(can_use_ai({"userId": 1}))
+        # Явные значения.
+        self.assertFalse(can_use_ai({"canUseAi": False}))
+        self.assertTrue(can_use_ai({"canUseAi": True}))
+        # Строковые формы (в кеше сессии значение может сохраниться строкой).
+        self.assertFalse(can_use_ai({"canUseAi": "false"}))
+        self.assertFalse(can_use_ai({"canUseAi": "0"}))
+        self.assertFalse(can_use_ai({"canUseAi": "no"}))
+        self.assertTrue(can_use_ai({"canUseAi": "true"}))
+
+    def test_chat_page_returns_403_with_reason(self):
+        """Страница чата при canUseAi=false → 403 с ТЕКСТОМ (не пустая)."""
+        from ai.views import chat_view
+
+        factory = RequestFactory()
+        request = factory.get("/ai/chat/")
+        request.user = get_user_model().objects.create_user(
+            username="student-canuseai", password="***")
+        request.session = {}
+        request.user_info = {"userId": "student", "canUseAi": False}
+        request.COOKIES = {"userId": "student"}
+        with patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)), \
+             patch("ai.views.get_available_model_options", return_value=[]), \
+             patch("ai.views.trigger_model_health_refresh_async"):
+            response = chat_view(request)
+        self.assertEqual(response.status_code, 403)
+        body = response.content.decode()
+        self.assertIn("запрещено", body)
+
+    def test_chat_page_allowed_without_flag(self):
+        """Без флага страница открывается (гейт не блокирует)."""
+        from ai.views import chat_view
+
+        factory = RequestFactory()
+        request = factory.get("/ai/chat/")
+        request.user = get_user_model().objects.create_user(
+            username="student-noflag", password="***")
+        request.session = {}
+        request.user_info = {"userId": "student"}
+        request.COOKIES = {"userId": "student"}
+        with patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)), \
+             patch("ai.views.get_available_model_options", return_value=[]), \
+             patch("ai.views.trigger_model_health_refresh_async"), \
+             patch("ai.views.render", return_value=HttpResponse("ok")):
+            response = chat_view(request)
+        self.assertEqual(response.status_code, 200)
+
+    def test_consumer_closes_with_ai_disabled_code(self):
+        """WS: canUseAi=false → закрытие с кодом 4404 (отдельным от 4403)."""
+        from ai.consumers import AI_DISABLED_CLOSE_CODE, MyConsumer
+
+        self.assertEqual(AI_DISABLED_CLOSE_CODE, 4404)
+
+        consumer = MyConsumer()
+        closed = {}
+
+        async def fake_close(code=None, reason=None):
+            closed["code"] = code
+            closed["reason"] = reason
+
+        consumer.close = fake_close
+        consumer.user_info = {"userId": "1", "canUseAi": False}
+        consumer.scope = {"session": {}}
+
+        async def fake_authenticate(_consumer):
+            return SimpleNamespace(pk=1), {"userId": "1", "canUseAi": False}
+
+        consumer.auth_service.authenticate = fake_authenticate
+
+        async def run():
+            await consumer.connect()
+
+        async_to_sync(run)()
+        self.assertEqual(closed.get("code"), AI_DISABLED_CLOSE_CODE)
+        self.assertIn("запрещён", closed.get("reason", ""))
+
+    def test_consumer_allows_when_flag_absent(self):
+        """Без флага WS подключается (accept вызывается)."""
+        from ai.consumers import MyConsumer
+
+        consumer = MyConsumer()
+        accepted = {"value": False}
+
+        async def fake_accept():
+            accepted["value"] = True
+
+        async def fake_close(code=None, reason=None):
+            raise AssertionError(f"соединение закрыто: {code} {reason}")
+
+        consumer.accept = fake_accept
+        consumer.close = fake_close
+        consumer.user_info = {"userId": "1"}
+        consumer.scope = {"session": {}, "url_route": {"kwargs": {"client_id": "c1"}}}
+
+        async def fake_authenticate(_consumer):
+            return SimpleNamespace(pk=1), {"userId": "1"}
+
+        consumer.auth_service.authenticate = fake_authenticate
+
+        async def fake_resolve_account(_user):
+            return None
+
+        import ai.consumers as consumers_module
+        with patch.object(consumers_module, "resolve_external_account", fake_resolve_account):
+            async def run():
+                await consumer.connect()
+
+            async_to_sync(run)()
+        self.assertTrue(accepted["value"])
+
+
+class CanUseAiClientTests(SimpleTestCase):
+    """Клиентская часть гейта: WS-код 4404 → внятное ТРЁХЯЗЫЧНОЕ сообщение."""
+
+    def _js(self):
+        from pathlib import Path
+
+        base = Path(__file__).resolve().parent.parent / "static" / "admin" / "js"
+        return {
+            name: (base / name).read_text(encoding="utf-8")
+            for name in ("ai-common.js", "find_error.js", "decide_task.js")
+        }
+
+    def test_localization_has_ai_disabled_in_three_languages(self):
+        sources = self._js()
+        common = sources["ai-common.js"]
+        self.assertIn("aiDisabled:", common)
+        # Три языка: RU/EN/FR — по одному ключу в каждой секции.
+        self.assertEqual(common.count("aiDisabled:"), 3)
+        for marker in ("В этом курсе использование ИИ запрещено",
+                       "Using AI is not allowed in this course",
+                       "L'utilisation de l'IA n'est pas autorisée"):
+            self.assertIn(marker, common)
+
+    def test_close_handlers_show_disabled_message(self):
+        sources = self._js()
+        for name, src in sources.items():
+            self.assertIn("isAiDisabledClose(event)", src, name)
+            self.assertIn("showAiDisabledMessage()", src, name)
+
+    def test_disabled_close_code_matches_server(self):
+        from ai.consumers import AI_DISABLED_CLOSE_CODE
+
+        common = self._js()["ai-common.js"]
+        self.assertIn(f"var AI_DISABLED_CLOSE_CODE = {AI_DISABLED_CLOSE_CODE};", common)
+
+
+class BatchDeltaColumnsTests(TestCase):
+    """Машина проверки (Дельта) в паре прогона: deltaId/deltaName из
+    get-solution-result сохраняются в БД и отдаются в UI."""
+
+    def _run_and_result(self):
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun, Task
+
+        run = AIModelTestRun.objects.create(run_id="delta-run", course_id=1)
+        task = Task.objects.create(node_id=555, name="Задача", file_extension=".cpp")
+        row = AIModelTestResult.objects.create(
+            run=run, model_key="M1", model_title="Модель 1", task=task,
+            status="done", verdict="solved", delta_id=5,
+            delta_name="DelTA4 at NIT1 Win10 x64",
+        )
+        return run, row
+
+    def test_delta_fields_are_persisted(self):
+        from ai.models import AIModelTestResult
+
+        _run, row = self._run_and_result()
+        row.refresh_from_db()
+        self.assertEqual(row.delta_id, 5)
+        self.assertEqual(row.delta_name, "DelTA4 at NIT1 Win10 x64")
+
+    def test_batch_results_from_db_exposes_delta(self):
+        from ai import arm_runner
+
+        run, _row = self._run_and_result()
+        for light in (True, False):
+            items = arm_runner._batch_results_from_db(run, light=light)
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["delta_id"], 5)
+            self.assertEqual(items[0]["delta_name"], "DelTA4 at NIT1 Win10 x64")
+
+    def test_result_body_endpoint_exposes_delta(self):
+        from ai.admin.arm import admin_arm_solve_result_body_view
+        from ai.models import AIModelTestResult
+
+        _run, row = self._run_and_result()
+        factory = RequestFactory()
+        request = factory.get(f"/ai/admin/arm/solve/result/{row.pk}/body/")
+        request.user = get_user_model().objects.create_user(
+            username="delta-admin", password="***", is_staff=True, is_superuser=True)
+        response = admin_arm_solve_result_body_view(request, row.pk)
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content.decode())["result"]
+        self.assertEqual(body["delta_id"], 5)
+        self.assertEqual(body["delta_name"], "DelTA4 at NIT1 Win10 x64")
+
+    def test_poll_reads_delta_from_dl_answer(self):
+        """Поллинг get-solution-result отдаёт deltaId/deltaName — они
+        попадают в результат пары."""
+        from ai import arm_runner
+
+        def fake_send(session_id, node_id, code, file_extension, course_id=0, **kw):
+            return {"queueId": 42, "message": "ok"}
+
+        def fake_poll(session_id, queue_id):
+            return {
+                "isFinished": True,
+                "comment": "Все тесты успешно пройдены",
+                "deltaId": 5,
+                "deltaName": "DelTA4 at NIT1 Win10 x64",
+            }
+
+        with patch("ai.dl_api_client.send_solution_to_dl", fake_send), \
+                patch("ai.dl_api_client.get_solution_result_from_dl", fake_poll):
+            res = arm_runner._test_solution_on_dl(
+                "SID", 2606747, "code...", ".mpc", max_polls=1, poll_interval=0,
+            )
+        self.assertEqual(res["delta_id"], 5)
+        self.assertEqual(res["delta_name"], "DelTA4 at NIT1 Win10 x64")
+
+
+class EducationNamesFromDLTests(TestCase):
+    """Названия вуза/школы и группы приходят из DL (EducationInfo 1.4.2):
+    get-user-info отдаёт их сразу, get-id-user-info дозабирает без sessionId."""
+
+    def test_student_info_extraction_includes_names(self):
+        from ai.external_account import _extract_student_info
+
+        info = _extract_student_info({
+            "email": "s@gsu.by",
+            "education": {
+                "form": "F-1", "schoolId": "S-1", "schoolKind": "Гимназия",
+                "schoolNo": "5", "groupMaskId": "G-1", "formLetter": "А",
+                "schoolName": "Гимназия №5", "formName": "10 класс",
+                "groupName": "ИТП-31",
+            },
+        })
+        self.assertEqual(info["education_school_name"], "Гимназия №5")
+        self.assertEqual(info["education_form_name"], "10 класс")
+        self.assertEqual(info["education_group_name"], "ИТП-31")
+        self.assertEqual(info["education_school_id"], "S-1")
+        # Без education — пустые строки (поля blank), без исключений.
+        empty = _extract_student_info({})
+        self.assertEqual(empty["education_school_name"], "")
+        self.assertEqual(empty["education_group_name"], "")
+
+    def test_fetch_user_education_reads_dl_answer(self):
+        from ai import dl_api_client
+
+        class _Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {
+                    "firstName": "Иван",
+                    "education": {
+                        "schoolId": "S-1", "groupMaskId": "G-1",
+                        "schoolName": "ГГУ", "groupName": "ИТП-31",
+                    },
+                }
+
+        with patch("ai.dl_api_client._dl_request", return_value=_Response()):
+            education = dl_api_client.fetch_user_education("42")
+        self.assertEqual(education["schoolName"], "ГГУ")
+        self.assertEqual(education["groupName"], "ИТП-31")
+        self.assertEqual(education["schoolId"], "S-1")
+
+    def test_fetch_user_education_survives_dl_failure(self):
+        from ai import dl_api_client
+
+        with patch("ai.dl_api_client._dl_request", side_effect=dl_api_client.DLApiUnavailable("down")):
+            education = dl_api_client.fetch_user_education("42")
+        self.assertEqual(education["schoolName"], "")
+        self.assertEqual(education["groupName"], "")
+
+    def test_backfill_command_saves_names(self):
+        """Команда backfill_education_names дозабирает названия из DL."""
+        from io import StringIO
+
+        from ai.management.commands.backfill_education_names import Command
+        from ai.models import ExternalDLAccount
+
+        user = get_user_model().objects.create_user(username="bf-user", password="***")
+        account = ExternalDLAccount.objects.create(
+            user=user, external_user_id="77", external_login="bf",
+            education_school_id="S-1", education_group_mask_id="G-1",
+        )
+        education = {
+            "form": "", "schoolId": "S-1", "schoolKind": "", "schoolNo": "",
+            "groupMaskId": "G-1", "formLetter": "",
+            "schoolName": "ГГУ", "formName": "", "groupName": "ИТП-31",
+        }
+        out = StringIO()
+        with patch("ai.management.commands.backfill_education_names.fetch_user_education",
+                   return_value=education):
+            Command().handle(stdout=out)
+        account.refresh_from_db()
+        self.assertEqual(account.education_school_name, "ГГУ")
+        self.assertEqual(account.education_group_name, "ИТП-31")
+
+    def test_backfill_command_keeps_old_values_on_empty_answer(self):
+        """Пустой ответ DL не затирает уже сохранённое название."""
+        from io import StringIO
+
+        from ai.management.commands.backfill_education_names import Command
+        from ai.models import ExternalDLAccount
+
+        user = get_user_model().objects.create_user(username="bf-user2", password="***")
+        account = ExternalDLAccount.objects.create(
+            user=user, external_user_id="78", external_login="bf2",
+            education_school_name="ГГУ", education_group_name="ИТП-31",
+        )
+        empty = {key: "" for key in (
+            "form", "schoolId", "schoolKind", "schoolNo", "groupMaskId",
+            "formLetter", "schoolName", "formName", "groupName")}
+        out = StringIO()
+        with patch("ai.management.commands.backfill_education_names.fetch_user_education",
+                   return_value=empty):
+            Command().handle(stdout=out)
+        account.refresh_from_db()
+        self.assertEqual(account.education_school_name, "ГГУ")
+        self.assertEqual(account.education_group_name, "ИТП-31")

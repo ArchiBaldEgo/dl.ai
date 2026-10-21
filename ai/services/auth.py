@@ -13,6 +13,40 @@ from ..external_auth import (
 )
 
 
+def can_use_ai(user_info: dict | None) -> bool:
+    """Разрешено ли пользователю использовать AI в текущем курсе.
+
+    Флаг ``canUseAi`` приходит из DL ``get-user-info`` (dl-rest-api.json,
+    UserInfo.canUseAi) и означает «AI в текущем курсе разрешён». Раньше
+    приложение его НЕ читало — запрет DL молча игнорировался.
+
+    Правила:
+    * флага нет (старый DL, dev-bypass, кеш без поля) — разрешено:
+      «неизвестно» ≠ «запрещено»;
+    * флаг ``True`` — разрешено;
+    * флаг ``False`` — запрещено (единственный случай отказа).
+
+    Значение читается как булево: DL шлёт JSON-``true/false``, но в кеше
+    сессии значение может сохраниться строкой — ``"false"``/``"0"``/``"no"``
+    трактуются как запрет.
+    """
+    if not user_info:
+        return True
+    if "canUseAi" not in user_info:
+        return True
+    value = user_info.get("canUseAi")
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return True
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("false", "0", "no", "off", "нет"):
+        return False
+    return True
+
+
 class WebSocketAuthService:
     """Аутентификация WebSocket через DLSID (тот же поток, что и HTTP).
 

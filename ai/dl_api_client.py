@@ -414,7 +414,8 @@ def _decode_response_json(response: requests.Response) -> dict[str, Any]:
 def fetch_user_names(user_id: int | str, timeout: int = 10) -> dict[str, str]:
     """Fetch firstName / lastName by userId from the DL REST API.
 
-    GET /restapi/get-id-user-info?userId=<id> → {"firstName": "...", "lastName": "..."}
+    GET /restapi/get-id-user-info?userId=<id> →
+        {"firstName": "...", "lastName": "...", "education": {...}}
 
     Returns a dict with "first_name" and "last_name" keys (empty strings on
     failure). Never raises — callers use this as a best-effort enrichment step
@@ -444,6 +445,59 @@ def fetch_user_names(user_id: int | str, timeout: int = 10) -> dict[str, str]:
     return {
         "first_name": (data.get("firstName") or "").strip(),
         "last_name": (data.get("lastName") or "").strip(),
+    }
+
+
+def fetch_user_education(user_id: int | str, timeout: int = 10) -> dict[str, str]:
+    """Fetch the ``education`` block by userId from the DL REST API.
+
+    GET /restapi/get-id-user-info?userId=<id> → ``{"education": {...}}``.
+    The block has the same shape as in ``get-user-info``
+    (dl-rest-api.json, EducationInfo): ``form``/``schoolId``/``schoolKind``/
+    ``schoolNo``/``groupMaskId``/``formLetter`` plus the human-readable
+    ``schoolName``/``formName``/``groupName``.
+
+    Unlike ``get-user-info`` this endpoint needs NO sessionId, so the
+    education data can be back-filled for every known student — that is how
+    the group/school names got into the database without the manual
+    ``DLEducationName`` directory.
+
+    Returns a dict with the DL key names as keys (empty strings on failure).
+    Never raises — best-effort enrichment.
+    """
+    empty = {
+        "form": "", "schoolId": "", "schoolKind": "", "schoolNo": "",
+        "groupMaskId": "", "formLetter": "",
+        "schoolName": "", "formName": "", "groupName": "",
+    }
+    if not user_id:
+        return dict(empty)
+
+    try:
+        response = _dl_request(
+            "GET",
+            "/restapi/get-id-user-info",
+            params={"userId": str(user_id)},
+            timeout=timeout,
+        )
+    except DLApiUnavailable:
+        return dict(empty)
+
+    if response.status_code != 200:
+        return dict(empty)
+
+    try:
+        data = response.json()
+    except ValueError:
+        return dict(empty)
+
+    education = data.get("education") or {}
+    if not isinstance(education, dict):
+        return dict(empty)
+
+    return {
+        key: str(education.get(key) or "").strip()
+        for key in empty
     }
 
 

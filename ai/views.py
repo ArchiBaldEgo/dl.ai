@@ -58,7 +58,7 @@ from .admin.permissions import (
     is_superuser_user,
 )
 from .middleware import _dev_bypass_enabled
-from .services.auth import get_user_identity_for_log
+from .services.auth import can_use_ai, get_user_identity_for_log
 from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
 from .services.user_models import (
     PROVIDER_BASE_URLS,
@@ -334,6 +334,31 @@ def _read_ai_state(request):
         return {}
 
 
+def _ai_disabled_reason(request):
+    """Причина, по которой AI пользователю недоступен (или ``None``).
+
+    DL отдаёт флаг ``canUseAi`` (dl-rest-api.json, UserInfo.canUseAi) — «разрешено
+    ли использование AI в текущем курсе». При ``False`` отдаём честную
+    страницу-отказ с ТЕКСТОМ, а не молчаливую пустую страницу (раньше флаг
+    вообще не читался — запрет DL просто игнорировался).
+
+    Данные — тот же user_info, что кладёт ExternalAuthMiddleware (кеш в
+    сессии под ключом ``external_user_info``).
+    """
+    user_info = getattr(request, "user_info", None)
+    if not user_info:
+        session = getattr(request, "session", None)
+        if session is not None:
+            user_info = session.get("external_user_info") or {}
+    if can_use_ai(user_info):
+        return None
+    return (
+        "В этом курсе использование ИИ запрещено (dl.gsu.by не разрешил "
+        "доступ для вашей учётной записи). Обратитесь к преподавателю или "
+        "в техническую поддержку."
+    )
+
+
 def _render_ai_page(request, template_name, extra_context=None, wizard_scope=None):
     """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
 
@@ -351,6 +376,11 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         return HttpResponseForbidden("Authentication required")
     if not _is_ai_app_enabled():
         return HttpResponseNotFound("AI app is disabled")
+    # Гейт DL «canUseAi»: AI в текущем курсе запрещён → честная страница
+    # с объяснением (не молчаливая пустая страница).
+    disabled_reason = _ai_disabled_reason(request)
+    if disabled_reason:
+        return HttpResponseForbidden(disabled_reason)
     available_models = get_available_model_options()
     # Self-heal: an empty list means the current 04:00 MSK window was scanned
     # while the upstream key/balance was broken and every model got marked

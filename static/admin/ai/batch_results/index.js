@@ -76,6 +76,8 @@ window.ArmBatchResults = (function () {
         dl_comment: b.dl_comment || '',
         dl_error: b.dl_error || '',
         dl_queue_id: b.dl_queue_id || 0,
+        delta_id: b.delta_id || 0,
+        delta_name: b.delta_name || '',
         truncated: !!b.truncated,
       };
       bodyCache[resultId] = state;
@@ -102,6 +104,14 @@ window.ArmBatchResults = (function () {
   // часть текста (и возможно кода) потеряна (см. model_clients.is_output_truncated).
   function truncatedBadge() {
     return '<span class="arm-badge truncated" title="Ответ обрезан потолком генерации — модель не успела дописать текст">✂ обрезан</span>';
+  }
+  // Машина (Дельта), на которой DL проверял решение: deltaId/deltaName из
+  // get-solution-result. Пусто — машина не назначена (или проверка не шла).
+  function deltaLabel(deltaId, deltaName) {
+    if (!deltaId && !deltaName) { return ''; }
+    var text = deltaName ? escapeHtml(deltaName) : ('#' + escapeHtml(deltaId));
+    if (deltaId && deltaName) { text += ' (id ' + escapeHtml(deltaId) + ')'; }
+    return ' <span style="color:#6b7280;">· машина: ' + text + '</span>';
   }
 
   function isFailedRow(r) {
@@ -496,6 +506,9 @@ window.ArmBatchResults = (function () {
         var dlComment = r.dl_comment || '';
         var dlError = r.dl_error || '';
         var dlQueueId = r.dl_queue_id || 0;
+        // Машина (Дельта), на которой DL проверял решение: deltaId/deltaName.
+        var deltaId = r.delta_id || 0;
+        var deltaName = r.delta_name || '';
         var code = r.code || '';
         var resultId = r.result_id || '';
 
@@ -544,6 +557,7 @@ window.ArmBatchResults = (function () {
         var dlHtml = '<strong>DL тест:</strong> ';
         if (dlComment) { dlHtml += escapeHtml(dlComment); } else { dlHtml += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
         if (dlQueueId) { dlHtml += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
+        dlHtml += deltaLabel(deltaId, deltaName);
         if (r.saved_solution) { dlHtml += ' <span style="color:#166534;">· ✓ сохранено в «Решённые задачи»</span>'; }
         if (dlError) { dlHtml += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
         dlBlock.innerHTML = dlHtml;
@@ -588,9 +602,12 @@ window.ArmBatchResults = (function () {
             dlComment = st.dl_comment || '';
             dlError = st.dl_error || '';
             dlQueueId = st.dl_queue_id || dlQueueId;
+            deltaId = st.delta_id || deltaId;
+            deltaName = st.delta_name || deltaName;
             var dlHtml2 = '<strong>DL тест:</strong> ';
             if (dlComment) { dlHtml2 += escapeHtml(dlComment); } else { dlHtml2 += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
             if (dlQueueId) { dlHtml2 += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
+            dlHtml2 += deltaLabel(deltaId, deltaName);
             if (r.saved_solution) { dlHtml2 += ' <span style="color:#166534;">· ✓ сохранено в «Решённые задачи»</span>'; }
             if (dlError) { dlHtml2 += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
             dlBlock.innerHTML = dlHtml2;

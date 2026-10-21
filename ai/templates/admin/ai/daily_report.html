@@ -33,9 +33,9 @@
 
   {# Фильтры: поиск по ФИО (первым, как в журнале) + группа и вуз/школа. #}
   {# Группа и вуз/школа — СВОБОДНЫЙ ввод (пишем текстом, а не выбираем #}
-  {# из списка): datalist — только подсказки из справочника DLEducationName, #}
-  {# они ничего не ограничивают — можно вписать и название, и сырой ID #}
-  {# из DL. Совпадение — подстрока (регистронезависимо). Любое изменение #}
+  {# из списка): названия приходят из DL (education.schoolName/groupName), #}
+  {# так что подсказки-списки не нужны — можно вписать и название, и сырой #}
+  {# ID из DL. Совпадение — подстрока (регистронезависимо). Любое изменение #}
   {# применяется СРАЗУ (ai_auto_filters.js: текст с паузой, даты #}
   {# мгновенно) — кнопки не нужны. #}
   <form method="get" class="ai-daily-filters">
@@ -44,18 +44,12 @@
              value="{{ filters_student }}" placeholder="Фамилия или часть ФИО">
     </label>
     <label for="daily-filter-group">Группа
-      <input id="daily-filter-group" type="text" name="group" list="daily-group-options"
+      <input id="daily-filter-group" type="text" name="group"
              value="{{ filters_group }}" placeholder="Название или ID группы">
-      <datalist id="daily-group-options">
-        {% for g in group_suggestions %}<option value="{{ g }}"></option>{% endfor %}
-      </datalist>
     </label>
     <label for="daily-filter-school">Вуз/Школа
-      <input id="daily-filter-school" type="text" name="school" list="daily-school-options"
+      <input id="daily-filter-school" type="text" name="school"
              value="{{ filters_school }}" placeholder="Название или ID вуза/школы">
-      <datalist id="daily-school-options">
-        {% for s in school_suggestions %}<option value="{{ s }}"></option>{% endfor %}
-      </datalist>
     </label>
     <label for="daily-filter-date-from">С
       <input id="daily-filter-date-from" type="date" name="date_from"
@@ -97,8 +91,8 @@
                 {{ row.display_name }}
               {% endif %}
             </td>
-            <td>{{ row.group_title }}{% if not row.group_has_title and row.group_key %} <span class="ai-daily-no-title" title="В справочнике DL нет названия для этой группы — показан её ID">нет названия</span>{% endif %}</td>
-            <td>{{ row.school_title }}{% if not row.school_has_title and row.school_key %} <span class="ai-daily-no-title" title="В справочнике DL нет названия для этого вуза/школы — показан его ID">нет названия</span>{% endif %}</td>
+            <td>{{ row.group_title }}{% if not row.group_has_title and row.group_key %} <span class="ai-daily-no-title" title="DL не вернул название для этой группы — показан её ID">нет названия</span>{% endif %}</td>
+            <td>{{ row.school_title }}{% if not row.school_has_title and row.school_key %} <span class="ai-daily-no-title" title="DL не вернул название для этого вуза/школы — показан его ID">нет названия</span>{% endif %}</td>
             <td class="nowrap">{{ row.last_sent }}</td>
             <td>{{ row.last_topic }}</td>
             <td>{{ row.last_prompt }}</td>

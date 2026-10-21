@@ -767,7 +767,7 @@ def admin_arm_solve_result_download_view(request, result_id):
     ``<модель>_<ID узла задачи><file_extension>`` (расширение из снимка, с
     ведущей точкой): у одной задачи скачивают решения нескольких моделей, пара
     «модель + задача» делает имя однозначным. ID узла — узкая ссылка на задачу
-    по всему журналу (DL REST API.md). У DL API поле имени файла при отправке
+    по всему журналу (DL REST API, dl-rest-api.json). У DL API поле имени файла при отправке
     решения отсутствует — подписываем единственное, что у нас под контролем,
     то есть скачивание. Файлы на диске не хранятся — содержимое берётся
     прямо из БД.
@@ -848,6 +848,9 @@ def admin_arm_solve_result_body_view(request, result_id):
         "code": result.code or "",
         "dl_comment": result.dl_comment or "",
         "dl_error": result.dl_error or "",
+        # Машина (Дельта), на которой DL проверял решение.
+        "delta_id": result.delta_id or 0,
+        "delta_name": result.delta_name or "",
         "truncated": bool(result.truncated),
         "raw_total": len(raw),
     }
