@@ -29,6 +29,52 @@
         var wrap = document.querySelector('.ai-dlapi-wrap');
         if (!wrap) return;
         var updateUrl = wrap.getAttribute('data-update-url') || '';
+        var createUrl = wrap.getAttribute('data-create-url') || '';
+
+        // === Создание заявки (форма в админке) =============================
+        var createForm = document.getElementById('ai-dlapi-create-form');
+        if (createForm && createUrl) {
+            createForm.addEventListener('submit', function (event) {
+                event.preventDefault();
+                var field = document.getElementById('ai-dlapi-description');
+                var status = createForm.querySelector('.ai-dlapi-create-status');
+                var submitBtn = createForm.querySelector('.ai-dlapi-create-submit');
+                var description = field ? field.value.trim() : '';
+                if (!description) {
+                    if (status) { status.textContent = 'Опишите, какой API нужен'; status.className = 'ai-dlapi-create-status ai-dlapi-create-err'; }
+                    if (field) { field.focus(); }
+                    return;
+                }
+                if (submitBtn) { submitBtn.disabled = true; }
+                if (status) { status.textContent = 'Создаём…'; status.className = 'ai-dlapi-create-status'; }
+                fetch(createUrl, {
+                    method: 'POST',
+                    headers: {
+                        'X-CSRFToken': csrftoken(),
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Content-Type': 'application/json',
+                    },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ description: description }),
+                })
+                    .then(function (response) {
+                        return parseJsonResponse(response).then(function (data) {
+                            if (!data.ok) {
+                                throw new Error(data.message || 'Не удалось создать заявку');
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function () {
+                        // Заявка попала во вкладку «Актуальные» — перерисовываем.
+                        window.location.reload();
+                    })
+                    .catch(function (err) {
+                        if (submitBtn) { submitBtn.disabled = false; }
+                        if (status) { status.textContent = err.message || 'Ошибка'; status.className = 'ai-dlapi-create-status ai-dlapi-create-err'; }
+                    });
+            });
+        }
 
         wrap.addEventListener('click', function (event) {
             var target = event.target;

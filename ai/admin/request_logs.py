@@ -39,7 +39,12 @@ from ..models import (
 )
 from ..templatetags.ai_duration import format_human_duration
 from ..model_health import get_runtime_model_handlers
-from ..services.education_directory import education_title_maps, group_display, school_title_for
+from ..services.education_directory import (
+    education_suggestions,
+    education_title_maps,
+    group_info,
+    school_info,
+)
 from ..services.msk_time import msk_day_bounds, parse_date
 from ..services.task_registry import dl_task_url  # DRY: единственное определение — в task_registry
 from .permissions import can_access_arm, can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
@@ -826,28 +831,44 @@ def admin_daily_report_view(request):
     } if external_ids else {}
     for row in rows:
         account = accounts.get(row["external_user_id"])
-        # Школа — school_display c фолбэком «школа от группы» (группа знает
+        # Школа — school_info c фолбэком «школа от группы» (группа знает
         # своё заведение, у студента поле может быть пустым); группа — map.
-        row["school_title"] = school_title_for(schools, groups_school, account)
-        row["group_title"] = group_display(groups, account)
+        # *_key / *_has_title — сырой ID из DL и признак «названия нет»:
+        # по ключу фильтруем (ввод ID работает), по отсутствию названия
+        # честно пишем «нет названия».
+        school_title, school_key, school_has_title = school_info(schools, groups_school, account)
+        group_title, group_key, group_has_title = group_info(groups, account)
+        row["school_title"] = school_title
+        row["school_key"] = school_key
+        row["school_has_title"] = school_has_title
+        row["group_title"] = group_title
+        row["group_key"] = group_key
+        row["group_has_title"] = group_has_title
 
-    # GET-фильтры — точным совпадением с ОТОБРАЖАЕМЫМ названием (ФИО —
-    # регистронезависимой подстрокой); варианты селектов — отсортированное
-    # множество среди СЕГОДНЯШНИХ строк ДО фильтрации (иначе активный
-    # фильтр убирал бы чужие опции). Фильтр применяется к уже
-    # отсортированным строкам — порядок сохраняется.
+    # GET-фильтры — СВОБОДНЫЙ ввод: подстрока отображаемого названия ИЛИ
+    # сырого ID из DL (регистронезависимо). ФИО — тоже подстрока.
+    # Подсказки (datalist) — из справочника DLEducationName, они не
+    # ограничивают ввод. Фильтр применяется к уже отсортированным строкам —
+    # порядок сохраняется.
     student_filter = (request.GET.get("student") or "").strip()
     group_filter = (request.GET.get("group") or "").strip()
     school_filter = (request.GET.get("school") or "").strip()
-    group_choices = sorted({r["group_title"] for r in rows})
-    school_choices = sorted({r["school_title"] for r in rows})
+    group_suggestions, school_suggestions = education_suggestions(groups, schools)
     if student_filter:
         needle = student_filter.casefold()
         rows = [r for r in rows if needle in r["display_name"].casefold()]
     if group_filter:
-        rows = [r for r in rows if r["group_title"] == group_filter]
+        needle = group_filter.casefold()
+        rows = [
+            r for r in rows
+            if needle in r["group_title"].casefold() or needle in r["group_key"].casefold()
+        ]
     if school_filter:
-        rows = [r for r in rows if r["school_title"] == school_filter]
+        needle = school_filter.casefold()
+        rows = [
+            r for r in rows
+            if needle in r["school_title"].casefold() or needle in r["school_key"].casefold()
+        ]
 
     context = {
         **ai_admin_site.each_context(request),
@@ -859,8 +880,8 @@ def admin_daily_report_view(request):
         ),
         "rows": rows,
         "total_count": len(logs),
-        "group_choices": group_choices,
-        "school_choices": school_choices,
+        "group_suggestions": group_suggestions,
+        "school_suggestions": school_suggestions,
         "filters_student": student_filter,
         "filters_group": group_filter,
         "filters_school": school_filter,

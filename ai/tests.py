@@ -11551,9 +11551,10 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
 
     def test_daily_report_group_school_titles_and_filters(self):
         """«Буквенная информация»: группа/вуз-школа из справочника
-        DLEducationName (unmapped → сырой ключ, без аккаунта → «—»);
-        GET-фильтры group/school — точным совпадением с отображаемым
-        названием; варианты селектов — до фильтрации."""
+        DLEducationName (unmapped → сырой ключ + пометка «нет названия»,
+        без аккаунта → «—»); группа и вуз/школа — СВОБОДНЫЙ ввод: фильтр
+        по подстроке названия ИЛИ по сырому ID из DL (регистронезависимо);
+        подсказки (datalist) — все названия справочника."""
         from ai.models import DLEducationName, ExternalDLAccount
 
         ivanov = "Иванов Иван"
@@ -11581,19 +11582,35 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual([r["display_name"] for r in rows], [ivanov, petrov])
         self.assertEqual(rows[0]["group_title"], "ИТП-31")
         self.assertEqual(rows[0]["school_title"], "ГГУ")
+        self.assertTrue(rows[0]["group_has_title"])
+        self.assertTrue(rows[0]["school_has_title"])
         # unmapped → сырой id; группы нет вообще → «—».
         self.assertEqual(rows[1]["school_title"], "S-9")
         self.assertEqual(rows[1]["group_title"], "—")
-        # Выборка селектов — отсортированное множество («—» после названий
-        # по коду символа; «С» < «Г» в Unicode, так что сырой S-9 первым).
-        self.assertEqual(report.context_data["group_choices"], ["ИТП-31", "—"])
-        self.assertEqual(report.context_data["school_choices"], ["S-9", "ГГУ"])
+        # Названия нет в справочнике — честный признак (в UI «нет названия»).
+        self.assertFalse(rows[1]["school_has_title"])
+        self.assertEqual(rows[1]["school_key"], "S-9")
+        self.assertFalse(rows[1]["group_has_title"])
+        # Подсказки — ВСЕ названия справочника (не только сегодняшние).
+        self.assertEqual(report.context_data["group_suggestions"], ["ИТП-31"])
+        self.assertEqual(report.context_data["school_suggestions"], ["ГГУ"])
 
         by_group = self._report(self.su, data={"group": "ИТП-31"}).context_data
         self.assertEqual([r["display_name"] for r in by_group["rows"]], [ivanov])
         self.assertEqual(by_group["filters_group"], "ИТП-31")
         by_school = self._report(self.su, data={"school": "ГГУ"}).context_data
         self.assertEqual([r["display_name"] for r in by_school["rows"]], [ivanov])
+
+        # Свободный ввод: часть названия (регистр не важен).
+        part = self._report(self.su, data={"group": "тп-3"}).context_data
+        self.assertEqual([r["display_name"] for r in part["rows"]], [ivanov])
+        # Сырой ID из DL — тоже находится (названия может не быть вовсе).
+        by_key = self._report(self.su, data={"group": "G-1"}).context_data
+        self.assertEqual([r["display_name"] for r in by_key["rows"]], [ivanov])
+        school_key = self._report(self.su, data={"school": "S-9"}).context_data
+        self.assertEqual([r["display_name"] for r in school_key["rows"]], [petrov])
+        # Не находит — пусто.
+        self.assertEqual(self._report(self.su, data={"group": "нет такой"}).context_data["rows"], [])
 
     def test_daily_report_student_filter_and_school_from_group(self):
         """Фильтр student — регистронезависимая подстрока ФИО, выбирается до
@@ -11638,19 +11655,32 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual([r["display_name"] for r in by_part["rows"]], [petrov])
         # Варианты селектов считались ДО фильтрации — не сужаются («—»
         # безгруппового Петрова тоже в списке: U+2014 после кириллицы).
-        self.assertEqual(by_part["group_choices"], ["ИТП-31", "КЛ-9А", "—"])
-        self.assertEqual(by_part["school_choices"], ["S-9", "ГГУ"])
+        self.assertEqual(by_part["group_suggestions"], ["ИТП-31", "КЛ-9А"])
+        self.assertEqual(by_part["school_suggestions"], ["ГГУ"])
         # Не находит — пусто.
         empty = self._report(self.su, data={"student": "кургузов"}).context_data
         self.assertEqual(empty["rows"], [])
 
     def test_daily_report_template_filters_and_columns(self):
         """Шаблон отчёта: два GET-фильтра над таблицей, колонки «Группа» и
-        «Вуз/Школа» после «Фамилия студента», развёртка colspan=8."""
+        «Вуз/Школа» после «Фамилия студента», развёртка colspan=8.
+        Группа и вуз/школа — СВОБОДНЫЙ ввод (input+list), подсказки —
+        datalist из справочника."""
         from django.template.loader import get_template
         src = get_template("admin/ai/daily_report.html").template.source
         self.assertIn('id="daily-filter-group"', src)
         self.assertIn('id="daily-filter-school"', src)
+        # Свободный ввод, а не select: у полей есть list=… (datalist).
+        self.assertIn('name="group" list="daily-group-options"', src)
+        self.assertIn('name="school" list="daily-school-options"', src)
+        self.assertIn('<datalist id="daily-group-options">', src)
+        self.assertIn('<datalist id="daily-school-options">', src)
+        # Подсказки берутся из справочника, а не из сегодняшних строк.
+        self.assertIn("{% for g in group_suggestions %}", src)
+        self.assertIn("{% for s in school_suggestions %}", src)
+        self.assertNotIn("<select", src)
+        # Честная пометка «нет названия» для ключей без названия.
+        self.assertIn("ai-daily-no-title", src)
         head = src.index("<thead>")
         self.assertLess(head, src.index("<th>Группа</th>"))
         self.assertLess(src.index("<th>Группа</th>"), src.index("<th>Вуз/Школа</th>"))
@@ -16573,6 +16603,48 @@ class EducationDirectoryTests(TestCase):
         self.assertEqual(school_title_for(schools, groups_school, acc_nolink), "—")
         self.assertEqual(school_title_for(schools, groups_school, None), "—")
 
+    def test_group_and_school_info_keys(self):
+        """group_info / school_info отдают (display, key, has_title): сырой ID
+        из DL для фильтра и честный признак «названия нет»."""
+        from ai.services.education_directory import group_info, school_info
+        schools = {"S-1": "ГГУ"}
+        groups = {"G-1": "ИТП-31"}
+        groups_school = {"G-1": "S-1"}
+        named = SimpleNamespace(
+            education_school_id="S-1", education_school_kind="", education_school_no="",
+            education_group_mask_id="G-1",
+        )
+        self.assertEqual(group_info(groups, named), ("ИТП-31", "G-1", True))
+        self.assertEqual(school_info(schools, groups_school, named), ("ГГУ", "S-1", True))
+        # Ключа нет в справочнике → display = сырой ID, has_title = False.
+        raw = SimpleNamespace(
+            education_school_id="S-9", education_school_kind="", education_school_no="",
+            education_group_mask_id="G-7",
+        )
+        self.assertEqual(group_info(groups, raw), ("G-7", "G-7", False))
+        self.assertEqual(school_info(schools, groups_school, raw), ("S-9", "S-9", False))
+        # Пустые поля → «—», без ключа.
+        empty = SimpleNamespace(
+            education_school_id="", education_school_kind="", education_school_no="",
+            education_group_mask_id="",
+        )
+        self.assertEqual(group_info(groups, empty), ("—", "", False))
+        self.assertEqual(school_info(schools, groups_school, empty), ("—", "", False))
+        # Аккаунта нет → «—».
+        self.assertEqual(group_info(groups, None), ("—", "", False))
+        self.assertEqual(school_info(schools, groups_school, None), ("—", "", False))
+
+    def test_education_suggestions(self):
+        """Подсказки для свободного ввода — отсортированные названия
+        справочника (без дублей и пустых)."""
+        from ai.services.education_directory import education_suggestions
+        groups = {"G-1": "ИТП-31", "G-2": "КЛ-9А", "G-3": "ИТП-31"}
+        schools = {"S-1": "ГГУ", "S-2": "СГУ"}
+        self.assertEqual(
+            education_suggestions(groups, schools),
+            (["ИТП-31", "КЛ-9А"], ["ГГУ", "СГУ"]),
+        )
+
     def test_admin_school_field_and_column(self):
         """Форма справочника: поле school — select с вариантами school-строк
         («key — title», пустой вариант) и валидацией choices; колонка
@@ -18114,6 +18186,66 @@ class DLApiRequestsTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(self.pending.status, "done")
         self.assertIsNotNone(self.pending.resolved_at)
         self.assertEqual(self.pending.resolved_by_id, self.user.pk)
+
+
+class DLApiRequestCreateTests(_AdminViewRequestMixin, TestCase):
+    """Создание заявки на API к DL: форма в админке (POST JSON)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(
+            username="dl-api-creator", password="x", is_staff=True,
+        )
+
+    def _post(self, payload, user=None):
+        import json as _json
+        from ai.admin.dl_api_requests import admin_dl_api_request_create_view
+        request = self._admin_request(
+            user or self.user, method="post", path="/ai/admin/dl-api-requests/create/",
+            data=_json.dumps(payload), content_type="application/json",
+        )
+        return admin_dl_api_request_create_view(request)
+
+    def test_create_makes_pending_request(self):
+        import json as _json
+        from ai.models import AIDLApiRequest
+        response = self._post({"description": "Нужен API к списку задач"})
+        self.assertEqual(response.status_code, 200)
+        payload = _json.loads(response.content)
+        self.assertTrue(payload["ok"])
+        item = AIDLApiRequest.objects.get(pk=payload["id"])
+        self.assertEqual(item.description, "Нужен API к списку задач")
+        self.assertEqual(item.status, AIDLApiRequest.STATUS_PENDING)
+        self.assertEqual(item.user_id, self.user.pk)
+        self.assertEqual(item.username, "dl-api-creator")
+
+    def test_create_requires_description(self):
+        import json as _json
+        from ai.models import AIDLApiRequest
+        before = AIDLApiRequest.objects.count()
+        response = self._post({"description": "   "})
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(_json.loads(response.content)["ok"])
+        self.assertEqual(AIDLApiRequest.objects.count(), before)
+
+    def test_create_without_permission_is_forbidden(self):
+        """Без прав на страницу (page.dl_api_requests) — 403, заявка не создана."""
+        from ai.models import AIDLApiRequest
+        before = AIDLApiRequest.objects.count()
+        outsider = self.user_model.objects.create_user(username="outsider", password="x")
+        response = self._post({"description": "Хочу API"}, user=outsider)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(AIDLApiRequest.objects.count(), before)
+
+    def test_create_page_has_form(self):
+        """На странице есть форма создания заявки (описание + кнопка)."""
+        from django.template.loader import get_template
+        src = get_template("admin/ai/dl_api_requests.html").template.source
+        self.assertIn('id="ai-dlapi-create-form"', src)
+        self.assertIn('id="ai-dlapi-description"', src)
+        self.assertIn("ai-dlapi-create-submit", src)
+        self.assertIn('data-create-url="/ai/admin/dl-api-requests/create/"', src)
 
 
 class TokenUsageDateFilterTests(TestCase):

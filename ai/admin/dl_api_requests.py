@@ -20,7 +20,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from ..constants import MOSCOW_TZ
-from ..models import AIDLApiRequest
+from ..models import AIDLApiRequest, ExternalDLAccount
 from .permissions import can_access_dl_api_requests
 from .site import ai_admin_site
 
@@ -99,6 +99,47 @@ def admin_dl_api_requests_view(request):
         "counts": counts,
     }
     return TemplateResponse(request, "admin/ai/dl_api_requests.html", context)
+
+
+@require_POST
+def admin_dl_api_request_create_view(request):
+    """Создать заявку на создание API к DL (форма в админке).
+
+    Тело — JSON: ``{description}``. Права — как у страницы
+    (page.dl_api_requests): без них 403. Описание обязательно.
+    """
+    if not can_access_dl_api_requests(request) or not request.user.is_authenticated:
+        return _forbid()
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return _forbid("Некорректный запрос", status=400)
+    if not isinstance(payload, dict):
+        return _forbid("Некорректный запрос", status=400)
+    description = (payload.get("description") or "").strip()
+    if not description:
+        return _forbid("Описание заявки обязательно", status=400)
+    description = description[:5000]
+
+    user = request.user
+    full_name = (user.get_full_name() or "").strip()
+    external_user_id = ""
+    account = ExternalDLAccount.objects.filter(user=user).first()
+    if account is not None:
+        external_user_id = account.external_user_id or ""
+        full_name = full_name or (
+            (account.external_first_name or "").strip()
+            + " " + (account.external_last_name or "").strip()
+        ).strip()
+    item = AIDLApiRequest.objects.create(
+        description=description,
+        user=user,
+        username=user.username or "",
+        user_full_name=full_name,
+        external_user_id=external_user_id,
+        status=AIDLApiRequest.STATUS_PENDING,
+    )
+    return JsonResponse({"ok": True, "id": item.pk, "status": item.status})
 
 
 @require_POST

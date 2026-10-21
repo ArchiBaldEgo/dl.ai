@@ -64,8 +64,8 @@
 .ai-daily-empty {
   padding: 20px; text-align: center; color: var(--body-quiet-color);
 }
-/* Фильтры над таблицей: группа / вуз-школа (= отображаемое название; */
-/* варианты сервер считает из сегодняшних строк). */
+/* Фильтры над таблицей: группа / вуз-школа — СВОБОДНЫЙ ввод (datalist — */
+/* только подсказки из справочника, ввод ничем не ограничен). */
 .ai-daily-filters {
   display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
   margin: 0 0 12px;
@@ -74,7 +74,13 @@
   display: flex; gap: 6px; align-items: center;
   font-weight: 600; font-size: 12px;
 }
-.ai-daily-filters select {
+.ai-daily-filters select,
+.ai-daily-filters input[type="text"] {
   padding: 5px 8px; border: 1px solid var(--border-color);
   border-radius: 4px; background: var(--body-bg); color: var(--body-fg);
+}
+/* Честная пометка: в справочнике DL нет названия — показан сырой ID. */
+.ai-daily-no-title {
+  color: var(--body-quiet-color); font-size: 11px; font-style: italic;
+  white-space: nowrap;
 }

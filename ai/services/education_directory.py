@@ -47,6 +47,33 @@ def education_title_maps():
     return schools, groups, groups_school
 
 
+def _school_base(schools, account):
+    """Школьные поля студента: ``(display, key, has_title)``.
+
+    ``display`` — что показываем, ``key`` — ID вуза/школы в DL (пусто, если
+    его у студента нет), ``has_title`` — есть ли человекочитаемое название
+    в справочнике (False → в UI честная пометка «нет названия»).
+    """
+    if account is None:
+        return _PLACEHOLDER, "", False
+    school_id = (account.education_school_id or "").strip()
+    if school_id:
+        title = schools.get(school_id)
+        if title:
+            return title, school_id, True
+        # Ключа нет в справочнике — показываем его как есть.
+        return school_id, school_id, False
+    kind = (account.education_school_kind or "").strip()
+    no = (account.education_school_no or "").strip()
+    if kind and no:
+        return f"{kind} №{no}", "", False
+    if no:
+        return f"№{no}", "", False
+    if kind:
+        return kind, "", False
+    return _PLACEHOLDER, "", False
+
+
 def school_display(schools, account):
     """Название вуза/школы студента для рендера.
 
@@ -54,22 +81,29 @@ def school_display(schools, account):
     «kind №no» из schoolKind/schoolNo → «—». ``account`` — ExternalDLAccount
     или None (у записи нет внешнего аккаунта).
     """
-    if account is None:
-        return _PLACEHOLDER
-    school_id = (account.education_school_id or "").strip()
-    if school_id and school_id in schools:
-        return schools[school_id]
-    if school_id:
-        return school_id
-    kind = (account.education_school_kind or "").strip()
-    no = (account.education_school_no or "").strip()
-    if kind and no:
-        return f"{kind} №{no}"
-    if no:
-        return f"№{no}"
-    if kind:
-        return kind
-    return _PLACEHOLDER
+    return _school_base(schools, account)[0]
+
+
+def school_info(schools, groups_school, account):
+    """Вуз/школа студента с её ключом: ``(display, key, has_title)``.
+
+    Школьные поля студента пусты → заведение ОТ ГРУППЫ (группа знает своё
+    заведение, ``DLEducationName.school``). Сырой школьный id и «kind №N» не
+    перекрываются: он честнее привязки группы.
+    """
+    display, key, has_title = _school_base(schools, account)
+    if display != _PLACEHOLDER or account is None:
+        return display, key, has_title
+    mask = (account.education_group_mask_id or "").strip()
+    if not mask:
+        return _PLACEHOLDER, "", False
+    school_key = groups_school.get(mask)
+    if not school_key:
+        return _PLACEHOLDER, "", False
+    title = schools.get(school_key)
+    if title:
+        return title, school_key, True
+    return school_key, school_key, False
 
 
 def group_display(groups, account):
@@ -77,29 +111,42 @@ def group_display(groups, account):
 
     Цепочка: справочник (по education_group_mask_id) → сырой groupMaskId → «—».
     """
+    return group_info(groups, account)[0]
+
+
+def group_info(groups, account):
+    """Группа/класс студента с её ключом: ``(display, key, has_title)``.
+
+    ``has_title`` — False, если названия группы нет в справочнике (тогда
+    ``display`` — сырой groupMaskId, и UI честно пишет «нет названия»).
+    """
     if account is None:
-        return _PLACEHOLDER
+        return _PLACEHOLDER, "", False
     mask = (account.education_group_mask_id or "").strip()
     if not mask:
-        return _PLACEHOLDER
-    return groups.get(mask, mask)
+        return _PLACEHOLDER, "", False
+    title = groups.get(mask)
+    if title:
+        return title, mask, True
+    return mask, mask, False
 
 
 def school_title_for(schools, groups_school, account):
     """Школа/вуз студента для рендера: ``school_display`` + фолбэк «школа
-    от группы».
-
-    Если у студента школа не заполнена вовсе (``school_display`` вернул «—»),
-    но его группа разрешима и привязана к заведению в справочнике
-    (``groups_school``: groupMaskId → schoolId), показываем школу ОТ ГРУППЫ —
-    группа знает своё заведение (``DLEducationName.school``). Сырой школьный
-    id и «kind №N» не перекрываются: он честнее привязки группы.
+    от группы» (см. ``school_info`` — он же отдаёт ключ и признак
+    «названия нет»).
     """
-    title = school_display(schools, account)
-    if title != _PLACEHOLDER or account is None:
-        return title
-    mask = (account.education_group_mask_id or "").strip()
-    if not mask:
-        return _PLACEHOLDER
-    school_key = groups_school.get(mask)
-    return schools.get(school_key, _PLACEHOLDER) if school_key else _PLACEHOLDER
+    return school_info(schools, groups_school, account)[0]
+
+
+def education_suggestions(groups, schools):
+    """Подсказки для СВОБОДНОГО ввода группы и вуза/школы (список ``datalist``).
+
+    Возвращает ``(group_titles, school_titles)`` — отсортированные названия из
+    справочника ``DLEducationName``. Пользователь может вписать что угодно
+    (в т.ч. сырой ID), справочник — только подсказка.
+    """
+    return (
+        sorted({title for title in groups.values() if title}),
+        sorted({title for title in schools.values() if title}),
+    )
