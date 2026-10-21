@@ -69,7 +69,6 @@
             </h3>{% endif %}
           </div>{% endif %}
           {% for spec in cl.filter_specs %}{% admin_list_filter cl spec %}{% endfor %}
-          <script src="{% static 'admin/ai/change_list/index.js' %}"></script>
         </nav>
       {% endif %}
     {% endblock %}
@@ -92,5 +91,7 @@
         </form>
       </div>
     </div>
+    {% comment %}Скрипт в конце блока: к моменту его выполнения таблица результатов уже в DOM (нужен номер страницы для ссылок «правка»).{% endcomment %}
+    <script src="{% static 'admin/ai/change_list/index.js' %}"></script>
   </div>
 {% endblock %}

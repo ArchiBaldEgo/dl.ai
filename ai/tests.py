@@ -13796,6 +13796,25 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         )
         self.assertEqual(resp.status_code, 400)
 
+    def test_edit_returns_saved_values_for_inplace_update(self):
+        """Ответ правки отдаёт сохранённые значения — клиент обновляет
+        карточку НА МЕСТЕ (перезагрузка выкидывала наверх)."""
+        task = AIDevTask.objects.create(
+            title="Т", kind="front", created_by=self.dev,
+        )
+        resp = self.edit_view(
+            self._request(self.dev, "post", f"/x/{task.id}/edit/",
+                          body=self._edit_body(title="Правленый", description="Новое",
+                                               estimate="До 4 дней")),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["title"], "Правленый")
+        self.assertEqual(data["description"], "Новое")
+        self.assertEqual(data["estimate"], "До 4 дней")
+
     def test_edit_closed_task_is_409(self):
         """Закрытый (архивный) таск не редактируется."""
         task = AIDevTask.objects.create(
@@ -19228,6 +19247,48 @@ class ModelErrorAutoRetryTests(TransactionTestCase):
         report = run.report or {}
         self.assertTrue((report.get("log_lines") or []))
         self.assertIn("Сбой ответа модели", report["log_lines"][0]["text"])
+
+
+class TaskAdminChangelistReturnTests(TestCase):
+    """Правка таска в админке: возврат в список — на ту же страницу.
+
+    Django сохраняет только фильтры (``_changelist_filters``) и выбрасывает
+    номер страницы → после правки оператора выкидывало наверх (на 1-ю
+    страницу списка). Номер страницы приходит в querystring формы правки
+    (``p``) — возвращаем весь исходный querystring.
+    """
+
+    def _request(self, user, path, data=None):
+        from django.contrib.messages.middleware import MessageMiddleware
+        from django.contrib.sessions.middleware import SessionMiddleware
+
+        request = RequestFactory().post(path, data=data or {})
+        SessionMiddleware(lambda req: None).process_request(request)
+        MessageMiddleware(lambda req: None).process_request(request)
+        request.user = user
+        request._dont_enforce_csrf_checks = True
+        return request
+
+    def test_response_change_keeps_page_and_filters(self):
+        from ai.admin.models import TaskAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import Task
+
+        su = get_user_model().objects.create_superuser(
+            username="task_changelist_admin", password="x", email="t2@a.com",
+        )
+        task = Task.objects.create(
+            node_id=4242, name="Задача", statement="Условие", file_extension=".pas",
+        )
+        task_admin = TaskAdmin(Task, ai_admin_site)
+        request = self._request(
+            su,
+            f"/ai/admin/ai/task/{task.pk}/change/?p=3&_changelist_filters=abc",
+        )
+        resp = task_admin.response_change(request, task)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("p=3", resp["Location"])
+        self.assertIn("_changelist_filters=abc", resp["Location"])
 
 
 class CanUseAiGateTests(TestCase):

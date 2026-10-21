@@ -54,6 +54,7 @@
                 if (!data.ok) {
                     throw new Error(data.message || 'Не удалось выполнить действие');
                 }
+                return data;
             });
     }
 
@@ -181,12 +182,49 @@
             estimate: (form.querySelector('input[name="estimate"]') || {}).value || '',
         };
         post(url, JSON.stringify(payload))
-            .then(function () { window.location.reload(); })
+            .then(function (data) {
+                // Обновляем карточку НА МЕСТЕ: перезагрузка страницы выкидывала
+                // оператора наверх (он правил таск в середине доски).
+                applyEditInPlace(form, data || payload);
+            })
             .catch(function (err) {
                 if (btn) btn.classList.remove('busy');
                 alert(err.message);
             });
     });
+
+    // Карточка таска после правки: значения в строке обновляются, форма
+    // правки сворачивается, страница НЕ перезагружается (скролл сохраняется).
+    function applyEditInPlace(form, data) {
+        var editRow = form.closest('tr[data-edit-row]');
+        if (!editRow) return;
+        var taskId = editRow.getAttribute('data-edit-row');
+        var taskRow = document.querySelector('tr[data-task-id="' + taskId + '"]');
+        if (taskRow) {
+            var title = taskRow.querySelector('.ai-task-title');
+            if (title) title.textContent = data.title || '';
+            var description = taskRow.querySelector('.ai-task-description');
+            if (description) description.textContent = data.description || '—';
+            var estimate = taskRow.querySelector('.ai-task-estimate');
+            if (estimate) estimate.textContent = data.estimate || '—';
+        }
+        // Значения в самой форме — чтобы повторное «Изменить» показывало
+        // уже сохранённые (а не старые) значения.
+        var titleInput = form.querySelector('input[name="title"]');
+        if (titleInput && data.title) titleInput.value = data.title;
+        var descriptionInput = form.querySelector('textarea[name="description"]');
+        if (descriptionInput && data.description) descriptionInput.value = data.description;
+        var estimateInput = form.querySelector('input[name="estimate"]');
+        if (estimateInput && data.estimate) estimateInput.value = data.estimate;
+        var btn = form.querySelector('[type="submit"]');
+        if (btn) btn.classList.remove('busy');
+        // Сворачиваем форму правки и возвращаем кнопку «Изменить».
+        editRow.hidden = true;
+        if (taskRow) {
+            var editBtn = taskRow.querySelector('[data-edit-toggle]');
+            if (editBtn) editBtn.hidden = false;
+        }
+    }
 
     // --- Перетаскивание строк фронта/хотелок (только table[data-reorder="1"]) ---
     var table = document.querySelector('table[data-reorder="1"]');

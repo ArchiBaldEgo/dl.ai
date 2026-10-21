@@ -15,7 +15,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
 from django import forms
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseRedirect
 from django.utils.html import format_html
 from django.urls import path, reverse
 from django.utils import timezone
@@ -967,6 +967,26 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
             base.append("node_id")
         return base
 
+    def response_change(self, request, obj):
+        """Возврат в список — на ту же страницу, с теми же фильтрами.
+
+        Django сохраняет только фильтры (``_changelist_filters``) и ВЫБРАСЫВАЕТ
+        номер страницы → после правки оператор оказывался на 1-й странице
+        списка («выкидывало наверх»). Номер страницы приходит в querystring
+        формы правки (``p``, его добавляет static/admin/ai/change_list/index.js)
+        — возвращаем весь исходный querystring.
+        """
+        response = super().response_change(request, obj)
+        if "_continue" in request.POST or "_addanother" in request.POST:
+            return response
+        query = request.GET.urlencode()
+        if not query:
+            return response
+        changelist_url = reverse(
+            "admin:ai_task_changelist", current_app=self.admin_site.name,
+        )
+        return HttpResponseRedirect(f"{changelist_url}?{query}")
+
     def refresh_from_dl(self, request, queryset):
         """Fetch name/statement/task_id from DL for the selected tasks.
 
@@ -994,7 +1014,7 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                 )
                 continue
             apply_dl_task_info(task, data)
-            task.save(update_fields=["task_id", "name", "statement"])
+            task.save(update_fields=["task_id", "name", "statement", "tree_path"])
             updated += 1
         self.message_user(request, f"Обновлено из DL: {updated}, ошибок: {failed}.")
     refresh_from_dl.short_description = "Обновить название и условие из DL"

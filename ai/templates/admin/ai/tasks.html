@@ -182,7 +182,7 @@
             <td class="ai-task-col-no">{% if row.priority_no %}{{ row.priority_no }}{% else %}—{% endif %}</td>
             <td class="ai-task-title">{{ row.title }}</td>
             <td class="ai-task-description">{{ row.description|default:"—" }}</td>
-            <td>{{ row.estimate|default:"—" }}</td>
+            <td class="ai-task-estimate">{{ row.estimate|default:"—" }}</td>
             <td>{{ row.created_at|date:"d.m.Y H:i" }}</td>
             <td>{% if row.taken %}{{ row.claimant|default:"—" }}{% else %}<span class="ai-task-free">—</span>{% endif %}</td>
             <td>{% if row.taken %}{{ row.taken_at|date:"d.m.Y H:i" }}{% else %}—{% endif %}</td>

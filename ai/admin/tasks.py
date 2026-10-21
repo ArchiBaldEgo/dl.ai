@@ -414,7 +414,14 @@ def admin_task_edit_view(request, task_id):
     task.description = (payload.get("description") or "").strip()
     task.estimate = (payload.get("estimate") or "").strip()[:100]
     task.save(update_fields=["title", "description", "estimate"])
-    return JsonResponse({"ok": True})
+    # Сохранённые значения — клиент обновляет карточку НА МЕСТЕ (без
+    # перезагрузки страницы: перезагрузка выбрасывала оператора наверх).
+    return JsonResponse({
+        "ok": True,
+        "title": task.title,
+        "description": task.description,
+        "estimate": task.estimate,
+    })
 
 
 @require_POST
