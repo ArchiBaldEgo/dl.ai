@@ -468,6 +468,13 @@ class SharedPromptAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     filter_horizontal = ('programming_languages',)
     actions = ("auto_translate_selected",)
 
+    def get_queryset(self, request):
+        # prefetch_related убирает N+1: language_list дёргал
+        # programming_languages по одному запросу на строку списка.
+        return super().get_queryset(request).prefetch_related(
+            "programming_languages", "owner",
+        )
+
     def language_list(self, obj):
         langs = obj.programming_languages.all()
         return ", ".join([l.language_name for l in langs]) if langs else "Все языки"

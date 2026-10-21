@@ -1654,20 +1654,29 @@ def _rerun_arm_batch(request, log):
         return JsonResponse({"error": "Прогон ARM не найден в БД"}, status=404)
 
     # 2. Collect node_ids and model_keys from AIModelTestResult rows.
-    results_qs = AIModelTestResult.objects.select_related("task").filter(run=test_run)
-    if not results_qs.exists():
+    # ОДИН запрос вместо четырёх (exists + итерация + distinct + first):
+    # тяжёлые поля (raw_response/code) не нужны — только task.node_id,
+    # model_key и снимок расширения.
+    rows = list(
+        AIModelTestResult.objects.filter(run=test_run)
+        .values("task__node_id", "model_key", "file_extension_snapshot")
+    )
+    if not rows:
         return JsonResponse({"error": "В прогоне нет результатов — нечего перезапускать"}, status=400)
 
     node_ids = []
     seen_nodes = set()
-    for r in results_qs:
-        if r.task and r.task.node_id and r.task.node_id not in seen_nodes:
-            seen_nodes.add(r.task.node_id)
-            node_ids.append(r.task.node_id)
-
-    model_keys = list(
-        results_qs.values_list("model_key", flat=True).distinct()
-    )
+    model_keys = []
+    seen_models = set()
+    for r in rows:
+        node_id = r["task__node_id"]
+        if node_id and node_id not in seen_nodes:
+            seen_nodes.add(node_id)
+            node_ids.append(node_id)
+        model_key = r["model_key"]
+        if model_key and model_key not in seen_models:
+            seen_models.add(model_key)
+            model_keys.append(model_key)
 
     if not node_ids:
         return JsonResponse({"error": "Не найдено задач в результатах прогона"}, status=400)
@@ -1675,7 +1684,12 @@ def _rerun_arm_batch(request, log):
         return JsonResponse({"error": "Не найдено моделей в результатах прогона"}, status=400)
 
     # 3. File extension from first result snapshot.
-    file_extension = (results_qs.first().file_extension_snapshot or "").strip()
+    file_extension = ""
+    for r in rows:
+        snapshot = (r["file_extension_snapshot"] or "").strip()
+        if snapshot:
+            file_extension = snapshot
+            break
     if not file_extension:
         return JsonResponse({"error": "Не найдено расширение файла в результатах прогона"}, status=400)
 

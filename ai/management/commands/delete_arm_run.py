@@ -138,8 +138,16 @@ class Command(BaseCommand):
             raise CommandError(f"Прогон «{run_ref}» не найден (см. --list).")
 
         results = list(run.results.all())
-        log_rows = [l for l in AIRequestLog.objects.filter(message__contains=run.run_id)
-                    if _LOG_RUN_RE.search(l.message or "")]
+        # Записи журнала — по ИНДЕКСИРОВАННОМУ полю batch_run_id, а не по
+        # message__contains (полный scan по всей таблице журнала). Старый
+        # путь (текст «Batch solve run <hex>» без поля) оставлен фолбэком —
+        # для записей, сделанных до появления поля.
+        log_rows = list(AIRequestLog.objects.filter(batch_run_id=run.run_id))
+        if not log_rows:
+            log_rows = [
+                l for l in AIRequestLog.objects.filter(message__contains=run.run_id)
+                if _LOG_RUN_RE.search(l.message or "")
+            ]
         solutions = TaskSolution.objects.filter(
             test_log__in=[l.pk for l in log_rows]) if options["drop_solutions"] \
             else TaskSolution.objects.none()

@@ -391,13 +391,17 @@ def _maybe_autorecover_web_deepseek(handlers, window_date):
     if not getattr(settings, "AI_WEB_DEEPSEEK_AUTORECOVERY", True):
         return
 
-    down_keys = []
-    for key in WEB_DEEPSEEK_KEYS:
-        row = AIModelAvailability.objects.filter(
-            window_date=window_date, model_key=key
-        ).first()
-        if not row or not row.is_available:
-            down_keys.append(key)
+    # ОДИН запрос на все ключи вместо запроса на каждый (было N+1 на цикле).
+    available = {
+        row["model_key"]: row["is_available"]
+        for row in AIModelAvailability.objects.filter(
+            window_date=window_date, model_key__in=WEB_DEEPSEEK_KEYS
+        ).values("model_key", "is_available")
+    }
+    down_keys = [
+        key for key in WEB_DEEPSEEK_KEYS
+        if not available.get(key, False)
+    ]
 
     if not down_keys:
         return
@@ -460,13 +464,17 @@ def _maybe_autorecover_kimi(handlers, window_date):
     if not getattr(settings, "AI_WEB_KIMI_AUTORECOVERY", True):
         return
 
-    down_keys = []
-    for key in WEB_KIMI_KEYS:
-        row = AIModelAvailability.objects.filter(
-            window_date=window_date, model_key=key
-        ).first()
-        if not row or not row.is_available:
-            down_keys.append(key)
+    # ОДИН запрос на все ключи вместо запроса на каждый (было N+1 на цикле).
+    available = {
+        row["model_key"]: row["is_available"]
+        for row in AIModelAvailability.objects.filter(
+            window_date=window_date, model_key__in=WEB_KIMI_KEYS
+        ).values("model_key", "is_available")
+    }
+    down_keys = [
+        key for key in WEB_KIMI_KEYS
+        if not available.get(key, False)
+    ]
 
     if not down_keys:
         return

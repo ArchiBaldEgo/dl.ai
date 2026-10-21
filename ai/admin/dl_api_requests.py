@@ -15,6 +15,7 @@
 import json
 
 from django.http import HttpResponseForbidden, JsonResponse
+from django.db.models import Count
 from django.template.response import TemplateResponse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
@@ -82,12 +83,19 @@ def admin_dl_api_requests_view(request):
         qs = qs.filter(status=AIDLApiRequest.STATUS_DONE)
     rows = [_row(item) for item in qs.order_by("-created_at")]
 
-    counts = {
-        "pending": AIDLApiRequest.objects.filter(
-            status=AIDLApiRequest.STATUS_PENDING
-        ).count(),
-        "done": AIDLApiRequest.objects.filter(status=AIDLApiRequest.STATUS_DONE).count(),
-    }
+    # Счётчики вкладок — ОДИН запрос с группировкой по статусу вместо двух
+    # COUNT(*): на странице счётчики нужны оба сразу, а таблица заявок может
+    # быть большой.
+    counts = {"pending": 0, "done": 0}
+    for status, total in (
+        AIDLApiRequest.objects.values("status")
+        .annotate(total=Count("id"))
+        .values_list("status", "total")
+    ):
+        if status == AIDLApiRequest.STATUS_PENDING:
+            counts["pending"] = total
+        elif status == AIDLApiRequest.STATUS_DONE:
+            counts["done"] = total
 
     # each_context — обязателен: без него admin/base.html не рендерит
     # ЛЕВЫЙ БАР (is_nav_sidebar_enabled приходит только отсюда) и шапку.
