@@ -33,6 +33,11 @@ file AND admin/app_list.html are not shadowed by the stock admin templates
   быть определён ДО вызывающих скриптов страниц — поэтому подключаем его
   ПЕРВЫМ, синхронно (без defer), а не defer'ом.{% endcomment %}
   <script src="{% static 'admin/ai/batch_results/index.js' %}"></script>
+  {% comment %}Общая логика строк ПАКЕТНЫХ РЕШЕНИЙ (развёртка результатов
+  прогона по клику + кнопка ★). Раньше продублирована в трёх файлах
+  (app_settings, pinned_runs, request_logs) — теперь одна, на делегировании,
+  и работает и после AJAX-обновления таблицы журнала.{% endcomment %}
+  <script src="{% static 'admin/ai/batch_results/rows.js' %}"></script>
   <script src="{% static 'admin/js/ai_processes.js' %}" defer></script>
   <script src="{% static 'admin/js/ai_admin_state.js' %}" defer></script>
   <script src="{% static 'admin/js/ai_nav_filter.js' %}" defer></script>

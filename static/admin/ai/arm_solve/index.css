@@ -180,16 +180,11 @@
   font-size: 14px;
 }
 
-.arm-badge {
-  border-radius: 999px;
-  padding: 3px 9px;
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-.arm-badge.solved { color: #166534; background: #dcfce7; }
-.arm-badge.failed { color: #991b1b; background: #fee2e2; }
-.arm-badge.skipped { color: #475467; background: #f1f5f9; }
+/* Бейджи результата (.arm-badge и его варианты) — в ГЛОБАЛЬНОМ
+   static/admin/ai/batch_results/index.css (подключён в base_site.html):
+   там же .arm-badge.truncated и .arm-badge.arm-reason, которых здесь не
+   было — из-за этого бейдж причины терял цвет на странице /arm/solve/.
+   Копия правил здесь удалена (DRY). */
 
 .arm-result {
   border: 1px solid var(--hairline-color);

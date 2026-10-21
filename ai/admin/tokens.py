@@ -50,7 +50,10 @@ def admin_token_usage_view(request):
     seen_models |= {row["label"] for row in report["batch"]["by_model"]}
     model_choices = sorted(seen_models | set(registry_models))
 
+    # each_context — обязателен: без него admin/base.html не рендерит
+    # ЛЕВЫЙ БАР (is_nav_sidebar_enabled приходит только отсюда) и шапку.
     context = {
+        **ai_admin_site.each_context(request),
         "title": "Контроль токенов",
         "report": report,
         "logs": report["logs"],

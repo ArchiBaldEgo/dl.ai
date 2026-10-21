@@ -1,0 +1,27 @@
+{% comment %}
+Развёртка строки ПАКЕТНОГО РЕШЕНИЯ — ОДИН вид на всех поверхностях.
+
+Содержимое — результаты прогона (window.ArmBatchResults, лениво по клику) +
+действия прогона (XLSX / повтор / список задач).
+
+Ожидает в контексте: row (строка пакета — build_batch_rows_for_logs),
+log (запись журнала), batch (контекст прогона из _batch_log_row_contexts).
+{% endcomment %}
+<tr class="ai-batch-detail" hidden>
+  <td colspan="15">
+    <div class="ai-batch-detail-body"></div>
+    {% if not row.snapshot_url %}
+      <p class="ai-recent-logs-empty">Прогон не найден в БД — результаты недоступны.</p>
+    {% endif %}
+    <div class="ai-batch-detail-actions">
+      <a class="resend-btn" href="{% url 'ai_request_log_xlsx' log.id %}">Скачать XLSX</a>
+      <form method="post" class="ai-batch-rerun-form" action="{% url 'ai_request_log_rerun_arm' log.id %}">
+        {% csrf_token %}
+        <button type="submit" class="resend-btn">↻ Повторить прогон</button>
+        <span class="ai-batch-rerun-status"></span>
+      </form>
+      <button type="button" class="ai-log-all-tasks-btn" data-log-id="{{ log.id }}" data-snapshot-url="{% url 'ai_request_log_batch_snapshot' log.id %}">Показать все задачи</button>
+      <div class="ai-log-all-tasks-list" hidden></div>
+    </div>
+  </td>
+</tr>

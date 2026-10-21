@@ -75,6 +75,17 @@
 .arm-result summary::-webkit-details-marker { display: none; }
 .arm-result-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .arm-result-title { font-weight: 700; }
+/* Бейджи результата (вердикт + причина + «обрезан») — ОДИН контейнер:
+   иначе каждый бейдж был отдельным flex-элементом .arm-result-top
+   (justify-content: space-between) и строка «прыгала» — вердикт слева,
+   причина справа, «обрезан» ещё дальше. */
+.arm-result-badges {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: none;
+}
 /* Ссылка на задачу в DL (r.dl_url → /task.jsp?nid=…&cid=…) в заголовке
    результата: цвет текста карточки, подчёркивание по наведению. */
 .arm-result-title a { color: inherit; text-decoration: none; }
@@ -101,6 +112,34 @@
 .arm-model-group[open] .arm-model-arrow { transform: rotate(90deg); }
 .arm-model-meta { color: var(--body-quiet-color); font-size: 12px; margin-top: 4px; }
 .arm-model-tasks { padding: 10px 10px 12px; }
+
+/* === Строки пакетного решения (общие для всех страниц) ==================
+   Кликабельная строка прогона + подсветка открытой. Правила были
+   продублированы в app_settings/index.css и pinned_runs/index.css —
+   теперь живут здесь (файл подключён ГЛОБАЛЬНО в base_site.html). */
+.ai-batch-row-clickable { cursor: pointer; }
+.ai-batch-row-clickable:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }
+.ai-batch-row-open td { font-weight: 600; }
+.ai-batch-detail > td { background: var(--darkened-bg); }
+.ai-recent-logs-ok { color: #067647; font-weight: 600; }
+.ai-recent-logs-err { color: #b42318; font-weight: 600; }
+/* Нейтральный статус (прогон идёт / на паузе) — не ошибка, но и не успех. */
+.ai-recent-logs-neutral { color: #b45309; font-weight: 600; }
+.ai-recent-logs-empty { color: var(--body-quiet-color); padding: 8px 0; }
+/* Авторы закрепления (страница «Закреплённые») — мелким шрифтом под ФИО. */
+.ai-log-pin-authors { color: var(--body-quiet-color); font-size: 12px; margin-top: 2px; }
+.ai-scroll { overflow-x: auto; }
+.ai-log-pin-cell { white-space: nowrap; text-align: center; }
+.ai-log-pin-btn {
+  background: none; border: 1px solid var(--hairline-color); border-radius: 4px;
+  cursor: pointer; font-size: 15px; line-height: 1; padding: 3px 7px;
+  color: var(--body-quiet-color);
+}
+.ai-log-pin-btn:hover:not(:disabled) { border-color: var(--link-fg); color: var(--link-fg); }
+.ai-log-pin-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.ai-log-pin-btn-active { color: #d97706; border-color: #d97706; }
+.ai-log-pin-btn.busy { opacity: 0.6; pointer-events: none; }
+.ai-log-pin-static { font-size: 15px; color: var(--body-quiet-color); }
 .arm-result-body pre {
   margin: 0; white-space: pre-wrap; word-wrap: break-word;
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;

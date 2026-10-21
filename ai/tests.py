@@ -9377,7 +9377,8 @@ class RequestLogSearchTests(TestCase):
         (each_context, choices, filters) на каждый keystroke не собираются."""
         response = self._view({"mode": "chat"}, xhr=True)
         self.assertEqual(response.template_name, "admin/ai/request_logs_table.html")
-        for key in ("page_obj", "rows", "filters_query", "moscow_tz"):
+        for key in ("page_obj", "plain_rows", "batch_rows", "filters_query",
+                    "moscow_tz"):
             self.assertIn(key, response.context_data)
         for gone in ("filters", "model_choices", "mode_choices",
                      "arm_actions", "own_logs_only", "title"):
@@ -9387,8 +9388,8 @@ class RequestLogSearchTests(TestCase):
         """Полная страница (не-XHR) не изменилась: heavy-контекст собирается."""
         response = self._view()
         self.assertEqual(response.template_name, "admin/ai/request_logs.html")
-        for key in ("page_obj", "rows", "filters_query", "moscow_tz",
-                    "filters", "model_choices", "mode_choices"):
+        for key in ("page_obj", "plain_rows", "batch_rows", "filters_query",
+                    "moscow_tz", "filters", "model_choices", "mode_choices"):
             self.assertIn(key, response.context_data)
 
     def test_list_rows_defer_response_text(self):
@@ -11287,9 +11288,13 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
         batch_rows = build_recent_batch_rows(request)["recent_batch_runs"]
         self.assertEqual(batch_rows[0]["run_name"], "Неделя 3")
         self.assertEqual(batch_rows[0]["run_status_display"], "Выполнен")
-        log_rows = build_recent_log_rows(request)["recent_logs"]
-        self.assertEqual(log_rows[0]["run_name"], "Неделя 3")
-        self.assertEqual(log_rows[0]["status_display"], "Выполнен")
+        # Пакетные строки журнала живут в ОТДЕЛЬНОМ списке (своя таблица —
+        # вид пакета одинаков на всех поверхностях, см. build_recent_log_rows).
+        log_data = build_recent_log_rows(request)
+        self.assertEqual(log_data["recent_logs"], [])
+        batch_log_rows = log_data["recent_batch_logs"]
+        self.assertEqual(batch_log_rows[0]["run_name"], "Неделя 3")
+        self.assertEqual(batch_log_rows[0]["run_status_display"], "Выполнен")
 
         snapshot = _build_batch_log_snapshot(log)
         self.assertEqual(snapshot["run_name"], "Неделя 3")
@@ -16101,20 +16106,21 @@ class RequestLogFiltersUiTests(TestCase):
         self.assertIn("loadLazyResponse(detailRow);", js)
 
     def test_table_columns_order(self):
-        """Ровно 11 колонок в порядке ТЗ: Кто отправлял, Отправлен, Получен,
-        Режим, Язык, Тема, Промпт, Модель, Статус, с, ★ (ID и Источник
-        вынесены в развёртку)."""
+        """Ровно 10 колонок в порядке ТЗ: Кто отправлял, Отправлен, Получен,
+        Режим, Язык, Тема, Промпт, Модель, Статус, с (ID и Источник
+        вынесены в развёртку). Шапка — в общем партиале
+        admin/ai/_ai_log_head.html (её читают и журнал, и настройки)."""
         from django.template.loader import get_template
-        src = get_template("admin/ai/request_logs_table.html").template.source
-        who = src.index("<th>Кто отправлял</th>")
-        sent = src.index("<th>Отправлен</th>")
-        got = src.index("<th>Получен</th>")
-        mode = src.index("<th>Режим</th>")
-        lang = src.index("<th>Язык</th>")
-        topic = src.index("<th>Тема</th>")
-        prompt = src.index("<th>Промпт</th>")
-        model = src.index("<th>Модель</th>")
-        status = src.index("<th>Статус</th>")
+        head = get_template("admin/ai/_ai_log_head.html").template.source
+        who = head.index("<th>Кто отправлял</th>")
+        sent = head.index("<th>Отправлен</th>")
+        got = head.index("<th>Получен</th>")
+        mode = head.index("<th>Режим</th>")
+        lang = head.index("<th>Язык</th>")
+        topic = head.index("<th>Тема</th>")
+        prompt = head.index("<th>Промпт</th>")
+        model = head.index("<th>Модель</th>")
+        status = head.index("<th>Статус</th>")
         self.assertLess(who, sent)
         self.assertLess(sent, got)
         self.assertLess(got, mode)
@@ -16123,10 +16129,11 @@ class RequestLogFiltersUiTests(TestCase):
         self.assertLess(topic, prompt)
         self.assertLess(prompt, model)
         self.assertLess(model, status)
-        self.assertNotIn("<th>ID</th>", src)
-        self.assertNotIn("<th>Источник</th>", src)
-        self.assertIn('colspan="11"', src)
-        self.assertNotIn('colspan="13"', src)
+        self.assertNotIn("<th>ID</th>", head)
+        self.assertNotIn("<th>Источник</th>", head)
+        # Развёртка строки обычного запроса — на 10 колонок.
+        src = get_template("admin/ai/request_logs_table.html").template.source
+        self.assertIn('colspan="10"', src)
 
     def test_index_js_filter_fields(self):
         from django.conf import settings
@@ -16962,30 +16969,92 @@ class ClientStatsGatingTests(SimpleTestCase):
 
 
 class SettingsPagesAlignmentTests(TestCase):
-    """Страница «Настройка ИИ-приложения»: колонки выровнены (10 th / 10 td,
-    colspan=10), «Последние пакетные решения» получили колонку «Время»
-    (colspan=13); билдеры несут ключи выравнивания."""
+    """Единый вид таблиц журнала и пакетных решений.
+
+    ТЗ: «ЛЮБОЙ лог пакетного решения должен выглядеть одинаково» — как в блоке
+    «Последние пакетные решения». Поэтому:
+
+    * обычные запросы — таблица 10 колонок, шапка и строка в ОБЩИХ партиалах
+      (admin/ai/_ai_log_head.html + _ai_log_row.html);
+    * пакетные решения — таблица 15 колонок, шапка/строка/развёртка в общих
+      партиалах (admin/ai/_ai_batch_head.html + _ai_batch_row.html +
+      _ai_batch_detail.html) — и подключаются на ВСЕХ поверхностях
+      (журнал запросов, настройки, закреплённые).
+    """
 
     def _read(self, *parts):
         from django.conf import settings
         with open(os.path.join(settings.BASE_DIR, *parts), encoding="utf-8") as fh:
             return fh.read()
 
-    def test_template_recent_queries_alignment(self):
+    def test_settings_page_uses_shared_partials(self):
         src = self._read("ai", "templates", "admin", "ai", "aiappsettings_change_form.html")
-        # Убрана лишняя th «★» (пин в запросах не имеет смысла), Промпт — on.
-        self.assertNotIn('<th title="Закрепить завершённый пакетный прогон">★</th>', src)
-        self.assertIn("<th>Промпт</th>", src)
-        self.assertIn('{{ row.user_full_name }}', src)
-        self.assertIn('{{ row.received_at|date:"d.m.Y:H:i:s"|default:"—" }}', src)
-        self.assertIn('colspan="10"', src)
-        self.assertNotIn('colspan="9"', src)
+        for partial in (
+            "admin/ai/_ai_log_head.html",
+            "admin/ai/_ai_log_row.html",
+            "admin/ai/_ai_batch_head.html",
+            "admin/ai/_ai_batch_row.html",
+            "admin/ai/_ai_batch_detail.html",
+        ):
+            self.assertIn(partial, src)
 
-    def test_template_batch_duration_column(self):
-        src = self._read("ai", "templates", "admin", "ai", "aiappsettings_change_form.html")
+    def test_log_head_has_ten_columns(self):
+        src = self._read("ai", "templates", "admin", "ai", "_ai_log_head.html")
+        for title in ("Кто отправлял", "Отправлен", "Получен", "Режим", "Язык",
+                      "Тема", "Промпт", "Модель", "Статус", "с"):
+            self.assertIn("<th>%s</th>" % title, src)
+        # ★ — только у пакетных решений (там закрепление).
+        self.assertNotIn("★", src)
+
+    def test_batch_head_has_all_columns(self):
+        src = self._read("ai", "templates", "admin", "ai", "_ai_batch_head.html")
+        for title in ("Кто отправлял", "Отправлен", "Получен", "Название прогона",
+                      "Курс", "Расширение", "Тема", "Промпт", "Решено",
+                      "Не решено", "Всего пар", "Статус"):
+            self.assertIn("<th>%s</th>" % title, src)
         self.assertIn('<th title="От начала прогона до его окончания">Время</th>', src)
-        self.assertIn('{{ row.run_duration_display|default:"—" }}', src)
-        self.assertIn('colspan="13"', src)
+        self.assertIn("★", src)
+
+    def test_batch_row_partial_shows_run_and_counts(self):
+        src = self._read("ai", "templates", "admin", "ai", "_ai_batch_row.html")
+        self.assertIn("{{ row.run_name|default:\"—\" }}", src)
+        self.assertIn("{{ row.course_id|default:\"—\" }}", src)
+        self.assertIn("{{ row.file_extension|default:\"—\" }}", src)
+        self.assertIn("{{ row.topics_display|default:\"—\" }}", src)
+        self.assertIn("{{ row.solved|default:\"—\" }}", src)
+        self.assertIn("{{ row.failed|default:\"—\" }}", src)
+        self.assertIn("{{ row.total_pairs|default:\"—\" }}", src)
+        self.assertIn("{{ row.run_duration_display|default:\"—\" }}", src)
+        # Промпт(ы) прогона — ссылками на промпт.
+        self.assertIn("/ai/admin/ai/prompt/{{ p.id }}/change/", src)
+
+    def test_batch_detail_colspan_matches_head(self):
+        head = self._read("ai", "templates", "admin", "ai", "_ai_batch_head.html")
+        detail = self._read("ai", "templates", "admin", "ai", "_ai_batch_detail.html")
+        columns = head.count("<th>") + head.count("<th ")
+        self.assertIn('colspan="%d"' % columns, detail)
+
+    def test_log_row_partial_contract(self):
+        src = self._read("ai", "templates", "admin", "ai", "_ai_log_row.html")
+        self.assertIn("{{ row.sender_display }}", src)
+        self.assertIn('{{ row.received_at|date:"d.m.Y:H:i:s"|default:"—" }}', src)
+        self.assertIn("{{ row.topic_display }}", src)
+        self.assertIn("{{ row.prompt_display }}", src)
+        self.assertIn("{{ row.model_display }}", src)
+        self.assertIn("{{ row.duration_display }}", src)
+        self.assertIn("ai-log-row", src)
+
+    def test_every_surface_uses_the_same_batch_partials(self):
+        """Ключевое требование ТЗ: вид пакета ОДИН на всех поверхностях."""
+        for path in (
+            ("ai", "templates", "admin", "ai", "aiappsettings_change_form.html"),
+            ("ai", "templates", "admin", "ai", "request_logs_table.html"),
+            ("ai", "templates", "admin", "ai", "pinned_runs.html"),
+        ):
+            src = self._read(*path)
+            self.assertIn("admin/ai/_ai_batch_head.html", src, path)
+            self.assertIn("admin/ai/_ai_batch_row.html", src, path)
+            self.assertIn("admin/ai/_ai_batch_detail.html", src, path)
 
     def test_recent_log_rows_builder_keys(self):
         factory = RequestFactory()
@@ -18320,6 +18389,52 @@ class FailureReasonEdgeCaseTests(SimpleTestCase):
         self.assertEqual(
             dl_failure_reason_from_comment("Программа не компилируется"),
             "compile_error",
+        )
+
+    def test_wrong_variable_is_compile_error(self):
+        """«Не правильная переменная» — это ОШИБКА КОМПИЛЯЦИИ.
+
+        Регрессия: маркер «неправильн» из DL_WRONG_ANSWER_MARKERS матчился
+        в «Неправильная переменная» → пара уезжала в «неправильный ответ».
+        """
+        from ai.dl_api_client import dl_failure_reason_from_comment
+        self.assertEqual(
+            dl_failure_reason_from_comment("Неправильная переменная 'x' не объявлена"),
+            "compile_error",
+        )
+        self.assertEqual(
+            dl_failure_reason_from_comment("Не правильная переменная"),
+            "compile_error",
+        )
+        self.assertEqual(
+            dl_failure_reason_from_comment("Переменная x не объявлена"),
+            "compile_error",
+        )
+        self.assertEqual(
+            dl_failure_reason_from_comment("Ошибка: неизвестный идентификатор foo"),
+            "compile_error",
+        )
+        self.assertEqual(
+            dl_failure_reason_from_comment("undeclared identifier 'y'"),
+            "compile_error",
+        )
+
+    def test_wrong_answer_with_variable_word_stays_wrong_answer(self):
+        """«Неправильный ответ: значение переменной …» — это НЕ компиляция.
+
+        Регрессия к over-fix: слово «переменная» в комментарии про ответ
+        не должно переводить причину в compile_error.
+        """
+        from ai.dl_api_client import dl_failure_reason_from_comment
+        self.assertEqual(
+            dl_failure_reason_from_comment(
+                "Неправильный ответ: значение переменной не равно ожидаемому"
+            ),
+            "wrong_answer",
+        )
+        self.assertEqual(
+            dl_failure_reason_from_comment("Неверный ответ на тесте 2"),
+            "wrong_answer",
         )
 
 

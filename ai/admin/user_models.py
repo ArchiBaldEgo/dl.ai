@@ -43,6 +43,7 @@ from ..services.user_models import (
     user_model_rows,
 )
 from .permissions import can_access_user_models
+from .site import ai_admin_site
 
 #: URL страницы — из клиентского шаблона тоже (там админский путь).
 USER_MODELS_URL = "/ai/admin/user-models/"
@@ -59,7 +60,10 @@ def admin_user_models_view(request):
     if not request.user.is_authenticated:
         return HttpResponseForbidden("Access denied")
 
+    # each_context — обязателен: без него admin/base.html не рендерит
+    # ЛЕВЫЙ БАР (is_nav_sidebar_enabled приходит только отсюда) и шапку.
     context = {
+        **ai_admin_site.each_context(request),
         "title": "Мои AI-модели",
         "user_models": user_model_rows(request.user),
         "provider_choices": AIUserModel.PROVIDER_CHOICES,

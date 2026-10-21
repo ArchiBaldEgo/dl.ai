@@ -6,79 +6,37 @@
 нерешённых из total, снимки промптов прогона, нейтральный статус «пауза») +
 ленивый блок «Показать все задачи». Loads не наследуются от include —
 грузим здесь: tz для МСК, ai_duration для таймеров.
-Колонки (11): Кто отправлял, Отправлен, Получен, Режим, Язык, Тема,
-Промпт, Модель, Статус, с, ★ — ID и Источник вынесены в detail-строку.
-ID записи и источник не пропадают: они в развёрнутых деталях запроса.
+
+ДВЕ таблицы (ТЗ: «любой лог пакетного решения должен выглядеть одинаково»):
+  1. Обычные запросы — 10 колонок (admin/ai/_ai_log_head.html +
+     _ai_log_row.html). ID и Источник вынесены в detail-строку (не пропадают).
+  2. Пакетные решения — 15 колонок (admin/ai/_ai_batch_head.html +
+     _ai_batch_row.html) — РОВНО как в блоке «Последние пакетные решения»
+     на «Настройке ИИ-приложения» и на странице «Закреплённые».
+
+Контракты строк — ai/admin/request_logs.py::build_log_table_row (обычные) и
+build_batch_rows_for_logs (пакетные).
 {% endcomment %}
 {% load tz ai_duration %}
 <div id="logs-table-wrapper">
 
   <div id="ai-logs-table-container">
-  {% if page_obj.object_list %}
+    {% if plain_rows %}
     <div class="ai-scroll">
     <table class="ai-logs-table">
       <thead>
-        <tr>
-          <th>Кто отправлял</th>
-          <th>Отправлен</th>
-          <th>Получен</th>
-          <th>Режим</th>
-          <th>Язык</th>
-          <th>Тема</th>
-          <th>Промпт</th>
-          <th>Модель</th>
-          <th>Статус</th>
-          <th>с</th>
-          <th title="Закрепить завершённый пакетный прогон">★</th>
-        </tr>
+        {% include "admin/ai/_ai_log_head.html" %}
       </thead>
       <tbody>
         {% timezone moscow_tz %}
-        {% for log, batch in rows %}
+        {% for entry in plain_rows %}
+          {% with log=entry.log batch=entry.batch %}
           {# === Основная строка (кликабельная — раскрывает детали) === #}
-          {# batch — не-None только для записей batch-solve (/arm/solve/) #}
-          <tr class="ai-log-row" data-log-id="{{ log.id }}">
-            <td>
-              {% if log.external_user_id %}
-                <a href="https://dl.gsu.by/report.asp?id={{ log.external_user_id }}" target="_blank" rel="noopener">{{ log.user_full_name|default:log.username|default:log.external_user_id }}</a>
-              {% else %}
-                {{ log.user_full_name|default:log.username|default:"—" }}
-              {% endif %}
-            </td>
-            <td>{{ log.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
-            <td>{{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
-            <td>
-              {{ log.get_mode_display|default:"—" }}
-            </td>
-            <td>{{ log.programming_language_name|default:"—" }}</td>
-            <td>{{ log.topic_name|default:"—" }}</td>
-            <td>
-              {% if log.prompt_id %}
-                <a href="/ai/admin/ai/prompt/{{ log.prompt_id }}/change/" target="_blank" rel="noopener">{{ log.prompt_name|default:"—" }}</a>
-              {% else %}
-                {{ log.prompt_name|default:"—" }}
-              {% endif %}
-            </td>
-            <td>
-              {{ log.model_names|join:", "|default:"—" }}
-            </td>
-            <td class="{% if batch %}{% if batch.run_status == 'completed' %}ai-logs-status-success{% elif batch.run_status == 'running' or batch.run_status == 'paused' %}ai-logs-status-neutral{% else %}ai-logs-status-error{% endif %}{% else %}{% if log.status == "success" %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}{% endif %}">
-              {% if batch %}{{ batch.run_status_display }}{% else %}{{ log.get_status_display }}{% endif %}
-            </td>
-            <td>{{ log.duration_seconds|human_duration|default:"—" }}</td>
-            <td class="ai-log-pin-cell">
-              {% if batch %}
-                <button type="button"
-                        class="ai-log-pin-btn{% if batch.pinned %} ai-log-pin-btn-active{% endif %}"
-                        data-pin-url="{{ batch.pin_url }}" data-log-id="{{ log.id }}"
-                        {% if batch.run_status == 'running' %}disabled title="Прогон ещё выполняется — закрепить можно только завершённые"{% else %}title="{% if batch.pinned %}Убрать из «Закреплённых»{% else %}Закрепить в «Закреплённых пакетных решениях»{% endif %}"{% endif %}>{{ batch.pinned|yesno:"★,☆" }}</button>
-              {% endif %}
-            </td>
-          </tr>
+          {% include "admin/ai/_ai_log_row.html" with row=entry.row %}
 
           {# === Скрытая строка с деталями (аккордеон) === #}
           <tr class="ai-log-detail-row">
-            <td class="ai-log-detail-cell" colspan="11">
+            <td class="ai-log-detail-cell" colspan="10">
               <div class="ai-log-detail-content">
 
                 {# Левая колонка: метаданные (+ задачи прогона для batch) #}
@@ -201,12 +159,40 @@ ID записи и источник не пропадают: они в разв�
               </div>
             </td>
           </tr>
+          {% endwith %}
         {% endfor %}
         {% endtimezone %}
       </tbody>
     </table>
-
     </div>
+    {% endif %}
+
+    {# === Пакетные решения — СВОЯ таблица (15 колонок), РОВНО как в блоке #}
+    {# «Последние пакетные решения» на «Настройке ИИ-приложения». ТЗ:      #}
+    {# «любой лог пакетного решения должен выглядеть одинаково».            #}
+    {% if batch_rows %}
+    <div class="ai-scroll">
+    <table class="ai-logs-table ai-batch-table">
+      <thead>
+        {% include "admin/ai/_ai_batch_head.html" %}
+      </thead>
+      <tbody>
+        {% timezone moscow_tz %}
+        {% for entry in batch_rows %}
+          {% with log=entry.log batch=entry.batch %}
+          {% include "admin/ai/_ai_batch_row.html" with row=entry.row %}
+          {% include "admin/ai/_ai_batch_detail.html" with row=entry.row log=entry.log batch=entry.batch %}
+          {% endwith %}
+        {% endfor %}
+        {% endtimezone %}
+      </tbody>
+    </table>
+    </div>
+    {% endif %}
+
+    {% if not plain_rows and not batch_rows %}
+    <div class="ai-logs-empty">Логи не найдены.</div>
+    {% endif %}
 
     <div class="ai-logs-paginator">
       {% if page_obj.has_previous %}
@@ -217,8 +203,5 @@ ID записи и источник не пропадают: они в разв�
       <a class="button" href="?{{ filters_query }}page={{ page_obj.next_page_number }}">Вперёд →</a>
       {% endif %}
     </div>
-    {% else %}
-    <div class="ai-logs-empty">Логи не найдены.</div>
-    {% endif %}
   </div>
 </div>

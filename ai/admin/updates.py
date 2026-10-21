@@ -85,7 +85,10 @@ def admin_updates_view(request):
         for entry in page_obj.object_list
     ]
 
+    # each_context — обязателен: без него admin/base.html не рендерит
+    # ЛЕВЫЙ БАР (is_nav_sidebar_enabled приходит только отсюда) и шапку.
     context = {
+        **ai_admin_site.each_context(request),
         'title': 'Обновления',
         'page_obj': page_obj,
         'rows': rows,
@@ -95,6 +98,8 @@ def admin_updates_view(request):
         'authors': authors,
         'selected_author': selected_author,
         'opts': UpdateLog._meta,
-        'total_count': queryset.count(),
+        # total_count — из пагинатора (paginator.count): отдельный
+        # queryset.count() был лишним COUNT-запросом на каждый рендер.
+        'total_count': paginator.count,
     }
     return render(request, 'admin/ai/updates.html', context)

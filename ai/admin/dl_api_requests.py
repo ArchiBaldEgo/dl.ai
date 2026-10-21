@@ -89,7 +89,10 @@ def admin_dl_api_requests_view(request):
         "done": AIDLApiRequest.objects.filter(status=AIDLApiRequest.STATUS_DONE).count(),
     }
 
+    # each_context — обязателен: без него admin/base.html не рендерит
+    # ЛЕВЫЙ БАР (is_nav_sidebar_enabled приходит только отсюда) и шапку.
     context = {
+        **ai_admin_site.each_context(request),
         "title": "Запросы по DL API",
         "tab": tab,
         "rows": rows,

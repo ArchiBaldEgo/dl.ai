@@ -519,9 +519,17 @@ window.ArmBatchResults = (function () {
           title.textContent = '#' + (r.task_node_id || '') + ' ' + (r.task_name || '');
         }
         top.appendChild(title);
-        top.insertAdjacentHTML('beforeend', verdictBadge(r.verdict));
-        if (r.failure_reason) { top.insertAdjacentHTML('beforeend', failureReasonBadge(r.failure_reason, r.failure_reason_label)); }
-        if (r.truncated) { top.insertAdjacentHTML('beforeend', truncatedBadge()); }
+        // Бейджи — ОДНИМ контейнером .arm-result-badges. Раньше каждый бейдж
+        // был отдельным flex-элементом .arm-result-top (justify-content:
+        // space-between) → «Не решено» улетало влево, причина — вправо,
+        // «обрезан» — ещё дальше: строка «прыгала». Теперь все бейджи стоят
+        // рядом, в одном столбике у правого края.
+        var badges = document.createElement('span');
+        badges.className = 'arm-result-badges';
+        badges.insertAdjacentHTML('beforeend', verdictBadge(r.verdict));
+        if (r.failure_reason) { badges.insertAdjacentHTML('beforeend', failureReasonBadge(r.failure_reason, r.failure_reason_label)); }
+        if (r.truncated) { badges.insertAdjacentHTML('beforeend', truncatedBadge()); }
+        top.appendChild(badges);
         var meta = document.createElement('div');
         meta.className = 'arm-meta';
         meta.textContent = (r.duration != null ? r.duration : '') + ' сек | ' + (r.tokens != null ? r.tokens : '') + ' ток.';

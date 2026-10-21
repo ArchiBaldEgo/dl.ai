@@ -320,67 +320,40 @@ def build_recent_log_rows(request, limit=5):
     """Контекст-хелпер: последние N записей журнала для встраивания в другую
     страницу (напр. «Настройки ИИ-приложения»).
 
-    Отдаёт те же данные, что и колонки «Журнала запросов» (ID, отправлен,
-    кто, язык, тема, модель, статус, режим, время), но без пагинации и
-    фильтров, + ссылка на поиск по всему журналу. Учитывает ограничение
-    видимости (``logs_scope_is_own_user`` → только свои записи).
+    Возвращает ДВА списка, потому что показывать их надо по-разному
+    (ТЗ: «любой лог пакетного решения должен выглядеть одинаково» — как в
+    блоке «Последние пакетные решения»):
 
-    Возвращает словарь для ``extra_context``: ``recent_logs`` (список строк)
-    и ``logs_search_url`` (полный журнал). Если у пользователя нет доступа к
-    журналу — ``recent_logs`` пуст и ``can_view_logs`` False.
+    * ``recent_logs`` — обычные запросы (контракт ``build_log_table_row``);
+    * ``recent_batch_logs`` — пакетные прогоны (контракт
+      ``build_batch_rows_for_logs`` — ТОТ ЖЕ, что у «Последних пакетных
+      решений», поэтому вид совпадает байт в байт).
+
+    Оба списка — свежие сверху. Если у пользователя нет доступа к журналу —
+    списки пустые и ``can_view_logs`` False.
     """
     can_view = can_access_logs(request)
-    rows = []
+    log_rows = []
+    batch_rows = []
     if can_view:
         qs = _scope_logs_qs(AIRequestLog.objects.all(), request.user).order_by("-sent_at")
         logs = list(qs[: max(0, int(limit))])
-        # Batch-записи: статус показываем по статусу прогона (Выполнен/Прерван),
-        # а не по Success/Error записи журнала. Один запрос по ≤5 run_id.
-        batch_run_by_log = {}
-        batch_run_ids = {
-            log.pk: _batch_run_id_from_log(log)
-            for log in logs
-            if _is_batch_solve_log(log)
+        batch_logs = [log for log in logs if _is_batch_solve_log(log)]
+        batch_by_log = {
+            row["id"]: row
+            for row in (build_batch_rows_for_logs(request, batch_logs) if batch_logs else [])
         }
-        if batch_run_ids:
-            runs_by_hex = {
-                r.run_id: r
-                for r in AIModelTestRun.objects.filter(run_id__in=set(batch_run_ids.values()))
-            }
-            batch_run_by_log = {
-                log_pk: runs_by_hex[run_hex]
-                for log_pk, run_hex in batch_run_ids.items()
-                if run_hex in runs_by_hex
-            }
         for log in logs:
-            run = batch_run_by_log.get(log.pk)
-            status_ok = (run.status == "completed") if run else (log.status == "success")
-            rows.append({
-                "id": log.id,
-                "sent_at": log.sent_at,
-                "user_full_name": log.user_full_name or log.username or "—",
-                "external_user_id": log.external_user_id or "",
-                "programming_language_name": log.programming_language_name or "—",
-                "topic_name": log.topic_name or "—",
-                # Промпт (id + имя) — колонка «Промпт» на «Настройке ИИ»;
-                # ссылка ведёт на редактирование промпта, как в журнале.
-                "prompt_id": log.prompt_id,
-                "prompt_name": log.prompt_name or "—",
-                "model_names": ", ".join(log.model_names or []) or "—",
-                "status": log.status,
-                "status_display": (
-                    batch_run_status_display(run.status) if run else log.get_status_display()
-                ),
-                "status_class": "ok" if status_ok else "err",
-                "run_name": run_name_for(run),
-                "mode_display": log.get_mode_display() or "—",
-                # datetime — шаблон форматирует |date:"d.m.Y:H:i:s|
-                "received_at": log.received_at,
-                "duration_seconds": log.duration_seconds,
-                "detail_url": f"/ai/admin/ai/request_logs/{log.id}/",
-            })
+            batch = batch_by_log.get(log.pk)
+            if batch is not None:
+                # Пакетный прогон — СВОЯ строка (как в «Последних пакетных
+                # решениях»), а не подгонка под колонки обычного запроса.
+                batch_rows.append(batch)
+            else:
+                log_rows.append(build_log_table_row(log))
     return {
-        "recent_logs": rows,
+        "recent_logs": log_rows,
+        "recent_batch_logs": batch_rows,
         "recent_logs_limit": limit,
         "can_view_logs": can_view,
         # Полный журнал: там есть поиск/фильтры по всему журналу. Ссылка ведёт
@@ -389,6 +362,45 @@ def build_recent_log_rows(request, limit=5):
         # Для {% timezone moscow_tz %} в aiappsettings_change_form.html —
         # тот же контракт, что у admin_request_logs_view.
         "moscow_tz": MOSCOW_TZ,
+    }
+
+
+def build_log_table_row(log):
+    """Строка таблицы обычных запросов журнала.
+
+    ОДИН контракт для всех поверхностей, где показываются обычные запросы
+    («Журнал запросов» и «Последние запросы» на «Настройке ИИ-приложения»):
+    разметка строки — admin/ai/_ai_log_row.html.
+
+    Пакетные прогоны сюда НЕ попадают: у них свой вид (контракт
+    ``build_batch_rows_for_logs``) — ТЗ «любой лог пакетного решения должен
+    выглядеть одинаково», т.е. как в блоке «Последние пакетные решения».
+    """
+    models = list(log.model_names or [])
+    return {
+        "id": log.id,
+        "is_batch": False,
+        "external_user_id": log.external_user_id or "",
+        "sender_display": log.user_full_name or log.username or "—",
+        "sent_at": log.sent_at,
+        "received_at": log.received_at,
+        "mode_display": log.get_mode_display() or "—",
+        "programming_language_name": log.programming_language_name or "—",
+        "topic_display": log.topic_name or "—",
+        "prompt_display": log.prompt_name or "—",
+        "prompt_id": log.prompt_id,
+        # Имена-синонимы прежнего контракта (старые шаблоны/тесты читают их).
+        "topic_name": log.topic_name or "—",
+        "prompt_name": log.prompt_name or "—",
+        "model_names": ", ".join(models) or "—",
+        "model_display": ", ".join(models) or "—",
+        "status": log.status,
+        "status_display": log.get_status_display(),
+        "status_class": "ok" if log.status == "success" else "err",
+        "duration_display": (
+            str(round(log.duration_seconds)) if log.duration_seconds is not None else "—"
+        ),
+        "detail_url": f"/ai/admin/ai/request_logs/{log.id}/",
     }
 
 def build_batch_rows_for_logs(request, logs):
@@ -451,12 +463,51 @@ def build_batch_rows_for_logs(request, logs):
                 .values("run__run_id", "file_extension_snapshot")
             ):
                 first_ext.setdefault(row["run__run_id"], row["file_extension_snapshot"])
+    # Темы/промпты/модели прогона — из СНИМКОВ пар (topic_name_snapshot,
+    # prompt_id/prompt_name, model_title): если при запуске тему/промпт не
+    # выбирали, в логе их нет, а фактически задействованные знаем по парам.
+    # distinct() по нужным полям — тянуть тексты ответов не нужно.
+    topics_by_run = {}
+    prompts_by_run = {}
+    models_by_run = {}
+    for row in (
+        AIModelTestResult.objects
+        .filter(run__run_id__in=set(run_ids.values()))
+        .values("run__run_id", "topic_name_snapshot", "prompt_id", "prompt_name", "model_title")
+        .distinct()
+    ):
+        run_key = row["run__run_id"]
+        topic = (row["topic_name_snapshot"] or "").strip()
+        if topic:
+            topics_by_run.setdefault(run_key, [])
+            if topic not in topics_by_run[run_key]:
+                topics_by_run[run_key].append(topic)
+        if row["prompt_id"] and (row["prompt_name"] or "").strip():
+            bucket = prompts_by_run.setdefault(run_key, {})
+            bucket.setdefault(row["prompt_id"], row["prompt_name"].strip())
+        title = (row["model_title"] or "").strip()
+        if title:
+            bucket_models = models_by_run.setdefault(run_key, [])
+            if title not in bucket_models:
+                bucket_models.append(title)
     rows = []
     for log in logs:
         run_hex = run_ids.get(log.pk)
         run = runs.get(run_hex) if run_hex else None
         counter = counters.get(run_hex, {})
         run_status = run.status if run else ""
+        # Тема/промпт прогона: сначала ВЫБРАННОЕ при запуске (тема/промпт
+        # формы), затем — фактически задействованные (снимки пар). Если при
+        # запуске ничего не выбирали, остаются только снимки.
+        run_topics = list(topics_by_run.get(run_hex, []))
+        run_prompts = list((prompts_by_run.get(run_hex) or {}).items())
+        if run is not None:
+            run_topic = (run.topic_name or "").strip()
+            if run_topic and run_topic not in run_topics:
+                run_topics.insert(0, run_topic)
+            run_prompt_name = (run.prompt_name or "").strip()
+            if run.prompt_id and run_prompt_name and run.prompt_id not in dict(run_prompts):
+                run_prompts.insert(0, (run.prompt_id, run_prompt_name))
         rows.append({
             "id": log.id,
             "sent_at": log.sent_at,
@@ -465,6 +516,7 @@ def build_batch_rows_for_logs(request, logs):
                 if log.received_at else "—"
             ),
             "sender_display": log.user_full_name or log.username or "—",
+            "external_user_id": log.external_user_id or "",
             "status": log.status,
             # Статус прогона («Выполнен»/«Прерван»); прогон стёрт из БД →
             # старое отображение по записи журнала.
@@ -479,6 +531,17 @@ def build_batch_rows_for_logs(request, logs):
             "run_id": run_hex or "",
             "course_id": run.course_id if run else None,
             "file_extension": first_ext.get(run_hex, ""),
+            # Тема/промпт/модели прогона (из снимков пар + выбранного при
+            # запуске) — для краткой формы журнала: если при запуске их не
+            # выбирали, показываем реально задействованные (все, через запятую).
+            "topics": run_topics,
+            # Готовая строка для колонки «Тема» (шаблон не склеивает сам).
+            "topics_display": ", ".join(run_topics) if run_topics else "—",
+            "prompts": [
+                {"id": pid, "name": name}
+                for pid, name in run_prompts
+            ],
+            "models": models_by_run.get(run_hex, []),
             "total_pairs": counter.get("total"),
             "solved": counter.get("solved"),
             "failed": counter.get("failed"),
@@ -848,10 +911,41 @@ def admin_request_logs_view(request):
     page_number = request.GET.get("page")
     page_obj = paginator.get_page(page_number)
 
-    # Строки страницы парами (log, batch-контекст) — batch-контекст None для
-    # обычных записей. Так шаблон читает его без dict-lookup по pk.
+    # ДВЕ таблицы на странице (ТЗ: «любой лог пакетного решения должен
+    # выглядеть одинаково» — как в блоке «Последние пакетные решения»):
+    # обычные запросы (контракт build_log_table_row) и пакетные прогоны
+    # (контракт build_batch_rows_for_logs — тот же, что у «Последних
+    # пакетных решений» и «Закреплённых»).
     batch_contexts = _batch_log_row_contexts(page_obj.object_list, user=request.user)
-    rows = [(log, batch_contexts.get(log.pk)) for log in page_obj.object_list]
+    batch_logs = [
+        log for log in page_obj.object_list if batch_contexts.get(log.pk) is not None
+    ]
+    batch_by_log = {
+        row["id"]: row
+        for row in (build_batch_rows_for_logs(request, batch_logs) if batch_logs else [])
+    }
+    # Строка таблицы — словарь: {log, batch, row}. Шаблон берёт «row» для
+    # краткой строки, «log»/«batch» — для развёртки деталей.
+    plain_rows = []
+    batch_rows = []
+    for log in page_obj.object_list:
+        batch = batch_contexts.get(log.pk)
+        if batch is not None:
+            batch_row = batch_by_log.get(log.pk)
+            if batch_row is None:
+                # Прогон стёрт из БД — строки нет; обычную запись не покажем.
+                continue
+            # Счётчики задач прогона (для развёртки) — из контекста журнала.
+            batch_row.setdefault("tasks_total", batch.get("tasks_total", 0))
+            batch_row.setdefault(
+                "tasks_solved_count", batch.get("tasks_solved_count", 0))
+            batch_row.setdefault(
+                "tasks_unsolved_count", batch.get("tasks_unsolved_count", 0))
+            batch_rows.append({"log": log, "batch": batch, "row": batch_row})
+        else:
+            plain_rows.append({
+                "log": log, "batch": None, "row": build_log_table_row(log),
+            })
 
     # Build the query string carried by pagination links. ``urlencode`` over a
     # QueryDict *without* doseq stringifies each value-list (``str(['x'])`` =
@@ -883,7 +977,10 @@ def admin_request_logs_view(request):
 
     context = {
         "page_obj": page_obj,
-        "rows": rows,
+        # Строки обычных запросов (партиал _ai_log_row.html) и строки
+        # пакетных прогонов (партиал _ai_batch_row.html) — разные таблицы.
+        "plain_rows": plain_rows,
+        "batch_rows": batch_rows,
         "filters_query": filters_query_str,
         "moscow_tz": MOSCOW_TZ,
     }

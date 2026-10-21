@@ -59,55 +59,13 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
     <div class="ai-scroll">
       <table class="ai-recent-logs-table ai-batch-table">
         <thead>
-          <tr>
-            <th></th>
-            <th>Кто отправлял</th>
-            <th>Отправлен</th>
-            <th>Получен</th>
-            <th>Название прогона</th>
-            <th>Курс</th>
-            <th>Расширение</th>
-            <th>Решено</th>
-            <th>Не решено</th>
-            <th>Всего пар</th>
-            <th>Статус</th>
-            <th title="От начала прогона до его окончания">Время</th>
-            <th></th>
-          </tr>
+          {% include "admin/ai/_ai_batch_head.html" %}
         </thead>
         <tbody>
           {% timezone moscow_tz %}
           {% for row in recent_batch_runs %}
-          <tr class="ai-batch-row{% if row.snapshot_url %} ai-batch-row-clickable{% endif %}" data-snapshot-url="{{ row.snapshot_url }}" data-run-id="{{ row.run_id }}" data-log-id="{{ row.id }}" {% if row.snapshot_url %} title="Кликните, чтобы развернуть результаты прогона" {% endif %}>
-            <td class="ai-log-pin-cell">
-              <button type="button" class="ai-log-pin-btn{% if row.pinned %} ai-log-pin-btn-active{% endif %}"
-                data-pin-url="{{ row.pin_url }}" {% if row.run_status == 'running' %}disabled
-                title="Прогон ещё выполняется — закрепить можно только завершённые" {% else %}title="{% if row.pinned %}Убрать из «Закреплённых»{% else %}Закрепить в «Закреплённых пакетных решениях»{% endif %}"
-                {% endif %}>{{ row.pinned|yesno:"★,☆" }}</button>
-            </td>
-            <td>{{ row.sender_display }}</td>
-            <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
-            <td>{{ row.received_at|default:"—" }}</td>
-            <td>{{ row.run_name|default:"—" }}</td>
-            <td>{{ row.course_id|default:"—" }}</td>
-            <td>{{ row.file_extension|default:"—" }}</td>
-            <td class="ai-recent-logs-ok">{{ row.solved|default:"—" }}</td>
-            <td class="ai-recent-logs-err">{{ row.failed|default:"—" }}</td>
-            <td>{{ row.total_pairs|default:"—" }}</td>
-            <td
-              class="{% if row.run_status == 'completed' or row.run_status == 'success' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">
-              {{ row.run_status_display }}</td>
-            <td>{{ row.run_duration_display|default:"—" }}</td>
-            <td><a href="{{ row.detail_url }}">Детали →</a></td>
-          </tr>
-          {# Развёртка: сводка + ответы моделей прогона (ленивая загрузка — AJAX по первому клику). #}
-          <tr class="ai-batch-detail" hidden>
-            <td colspan="13">
-              <div class="ai-batch-detail-body"></div>
-              {% if not row.snapshot_url %}<p class="ai-recent-logs-empty">Прогон не найден в БД — результаты
-                недоступны.</p>{% endif %}
-            </td>
-          </tr>
+          {% include "admin/ai/_ai_batch_row.html" with row=row %}
+          {% include "admin/ai/_ai_batch_detail.html" with row=row %}
           {% endfor %}
           {% endtimezone %}
         </tbody>
@@ -133,64 +91,57 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
   <div class="ai-settings-logs-body">
     <p class="help">
       Последние {{ recent_logs_limit|default:5 }} записей из «Журнала запросов».
+      Пакетные решения показаны ТАК ЖЕ, как в «Последних пакетных решениях»
+      выше (клик по строке раскрывает результаты прогона).
       Чтобы найти конкретную запись — откройте полный журнал с поиском.
     </p>
 
     {% if can_view_logs %}
+    {% if recent_logs or recent_batch_logs %}
+    {# Обычные запросы — ТА ЖЕ таблица, что в журнале запросов #}
+    {# (admin/ai/_ai_log_row.html). #}
     {% if recent_logs %}
     <div class="ai-scroll">
-      <table class="ai-recent-logs-table">
+      <table class="ai-recent-logs-table ai-logs-table">
         <thead>
-          <tr>
-            <th>Кто отправил</th>
-            <th>Отправлен</th>
-            <th>Получен</th>
-            <th>Режим</th>
-            <th>Язык</th>
-            <th>Тема</th>
-            <th>Промпт</th>
-            <th>Модель</th>
-            <th>Статус</th>
-            <th>С</th>
-          </tr>
+          {% include "admin/ai/_ai_log_head.html" %}
         </thead>
         <tbody>
           {% timezone moscow_tz %}
-              {% for row in recent_logs %}
-                <tr class="ai-recent-log-row" data-log-id="{{ row.id }}" data-detail-url="/ai/admin/ai/request_logs/{{ row.id }}/detail-json/">
-              <td>
-                {% if row.external_user_id %}
-                  <a href="https://dl.gsu.by/report.asp?id={{ row.external_user_id }}" target="_blank" rel="noopener">{{ row.user_full_name }}</a>
-                {% else %}
-                  {{ row.user_full_name }}
-                {% endif %}
+          {% for row in recent_logs %}
+            {% include "admin/ai/_ai_log_row.html" with row=row %}
+            {# Развёртка: подробная информация по записи (лениво — AJAX по первому клику). #}
+            <tr class="ai-recent-log-detail" hidden>
+              <td colspan="10">
+                <div class="ai-recent-log-detail-body"></div>
               </td>
-                  <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
-                  <td>{{ row.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
-                  <td>{{ row.mode_display }}</td>
-                  <td>{{ row.programming_language_name }}</td>
-                  <td>{{ row.topic_name }}</td>
-                  <td>
-                    {% if row.prompt_id %}
-                      <a href="/ai/admin/ai/prompt/{{ row.prompt_id }}/change/" target="_blank" rel="noopener">{{ row.prompt_name }}</a>
-                    {% else %}{{ row.prompt_name }}{% endif %}
-                  </td>
-                  <td>{{ row.model_names }}</td>
-                  <td class="{% if row.status_class == 'ok' %}ai-recent-logs-ok{% else %}ai-recent-logs-err{% endif %}">{{ row.status_display }}</td>
-                  <td>{{ row.duration_seconds|floatformat:0|default:"—" }}</td>
-                </tr>
-                {# Развёртка: подробная информация по записи (лениво — AJAX по первому клику). #}
-                <tr class="ai-recent-log-detail" hidden>
-                  <td colspan="10">
-                    <div class="ai-recent-log-detail-body"></div>
-                  </td>
-                </tr>
-              {% endfor %}
-              {% endtimezone %}
-          
+            </tr>
+          {% endfor %}
+          {% endtimezone %}
         </tbody>
       </table>
     </div>
+    {% endif %}
+    {# Пакетные решения — ТА ЖЕ таблица, что в блоке «Последние пакетные #}
+    {# решения» выше (ТЗ: «любой лог пакетного решения должен выглядеть #}
+    {# одинаково»). Тот же партиал admin/ai/_ai_batch_row.html. #}
+    {% if recent_batch_logs %}
+    <div class="ai-scroll">
+      <table class="ai-recent-logs-table ai-batch-table">
+        <thead>
+          {% include "admin/ai/_ai_batch_head.html" %}
+        </thead>
+        <tbody>
+          {% timezone moscow_tz %}
+          {% for row in recent_batch_logs %}
+            {% include "admin/ai/_ai_batch_row.html" with row=row %}
+            {% include "admin/ai/_ai_batch_detail.html" with row=row %}
+          {% endfor %}
+          {% endtimezone %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
     {% else %}
     <p class="ai-recent-logs-empty">Записей пока нет.</p>
     {% endif %}
