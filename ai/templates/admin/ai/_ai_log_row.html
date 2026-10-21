@@ -1,15 +1,15 @@
 {% comment %}
 Строка таблицы обычных запросов журнала.
 
+Журнал — ОДНА таблица (admin/ai/_ai_journal_head.html, 18 колонок): обычные
+запросы и пакетные прогоны в одном списке. Колонки пакета (★, название
+прогона, курс, расширение, решено/не решено/всего пар) у обычной строки
+пустые.
+
 ОДИН вид на всех поверхностях, где показываются обычные запросы:
   - «Журнал запросов» (admin/ai/request_logs_table.html);
   - «Последние запросы» на «Настройке ИИ-приложения»
     (admin/ai/aiappsettings_change_form.html).
-
-Пакетные решения сюда НЕ попадают — у них своя таблица
-(admin/ai/_ai_batch_head.html + admin/ai/_ai_batch_row.html): ТЗ «любой лог
-пакетного решения должен выглядеть одинаково» (как в блоке «Последние
-пакетные решения»).
 
 Контракт строки — ai/admin/request_logs.py::build_log_table_row.
 Ожидает в контексте: row (словарь).
@@ -17,6 +17,7 @@
 <tr class="ai-log-row"
     data-log-id="{{ row.id }}"
     data-detail-url="/ai/admin/ai/request_logs/{{ row.id }}/detail-json/">
+  <td class="ai-log-pin-cell"></td>
   <td>
     {% if row.external_user_id %}
       <a href="https://dl.gsu.by/report.asp?id={{ row.external_user_id }}" target="_blank" rel="noopener">{{ row.sender_display }}</a>
@@ -27,6 +28,9 @@
   <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
   <td>{{ row.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
   <td>{{ row.mode_display }}</td>
+  <td>—</td>
+  <td>—</td>
+  <td>—</td>
   <td>{{ row.programming_language_name }}</td>
   <td>{{ row.topic_display }}</td>
   <td>
@@ -37,6 +41,10 @@
     {% endif %}
   </td>
   <td>{{ row.model_display }}</td>
+  <td>—</td>
+  <td>—</td>
+  <td>—</td>
   <td class="{% if row.status_class == 'ok' %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %}">{{ row.status_display }}</td>
-  <td>{{ row.duration_display }}</td>
+  <td>{{ row.time_display }}</td>
+  <td><a href="{{ row.detail_url }}">Детали →</a></td>
 </tr>

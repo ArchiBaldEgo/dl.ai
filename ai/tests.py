@@ -9378,7 +9378,7 @@ class RequestLogSearchTests(TestCase):
         (each_context, choices, filters) на каждый keystroke не собираются."""
         response = self._view({"mode": "chat"}, xhr=True)
         self.assertEqual(response.template_name, "admin/ai/request_logs_table.html")
-        for key in ("page_obj", "plain_rows", "batch_rows", "filters_query",
+        for key in ("page_obj", "rows", "filters_query",
                     "moscow_tz"):
             self.assertIn(key, response.context_data)
         for gone in ("filters", "model_choices", "mode_choices",
@@ -9389,7 +9389,7 @@ class RequestLogSearchTests(TestCase):
         """Полная страница (не-XHR) не изменилась: heavy-контекст собирается."""
         response = self._view()
         self.assertEqual(response.template_name, "admin/ai/request_logs.html")
-        for key in ("page_obj", "plain_rows", "batch_rows", "filters_query",
+        for key in ("page_obj", "rows", "filters_query",
                     "moscow_tz", "filters", "model_choices", "mode_choices"):
             self.assertIn(key, response.context_data)
 
@@ -9825,11 +9825,12 @@ class FormActionShadowingTests(SimpleTestCase):
 
     def test_request_logs_rerun_url_uses_get_attribute(self):
         """Журнал разрезан (2026-10): rerun-форма и её JS живут в партиале
-        request_logs_table.html + статическом index.js — маркер проверяем там."""
+        admin/ai/_ai_batch_detail.html + статическом index.js — маркер
+        проверяем там."""
         from django.template.loader import get_template
         from django.conf import settings
 
-        src = get_template("admin/ai/request_logs_table.html").template.source
+        src = get_template("admin/ai/_ai_batch_detail.html").template.source
         self.assertIn("ai-batch-rerun-form", src)
         self.assertNotIn("fetch(form.action", src)
         js_path = os.path.join(
@@ -11289,13 +11290,13 @@ class BatchRunNameTests(_AdminViewRequestMixin, TestCase):
         batch_rows = build_recent_batch_rows(request)["recent_batch_runs"]
         self.assertEqual(batch_rows[0]["run_name"], "Неделя 3")
         self.assertEqual(batch_rows[0]["run_status_display"], "Выполнен")
-        # Пакетные строки журнала живут в ОТДЕЛЬНОМ списке (своя таблица —
-        # вид пакета одинаков на всех поверхностях, см. build_recent_log_rows).
+        # Пакетная строка журнала — в ОБЩЕМ списке (одна таблица журнала).
         log_data = build_recent_log_rows(request)
-        self.assertEqual(log_data["recent_logs"], [])
-        batch_log_rows = log_data["recent_batch_logs"]
-        self.assertEqual(batch_log_rows[0]["run_name"], "Неделя 3")
-        self.assertEqual(batch_log_rows[0]["run_status_display"], "Выполнен")
+        log_rows = log_data["recent_logs"]
+        self.assertEqual(len(log_rows), 1)
+        self.assertTrue(log_rows[0]["is_batch"])
+        self.assertEqual(log_rows[0]["run_name"], "Неделя 3")
+        self.assertEqual(log_rows[0]["run_status_display"], "Выполнен")
 
         snapshot = _build_batch_log_snapshot(log)
         self.assertEqual(snapshot["run_name"], "Неделя 3")
@@ -16131,15 +16132,19 @@ class RequestLogFiltersUiTests(TestCase):
 
     def test_response_text_lazy_in_table(self):
         """Ответ модели не вшивается в таблицу (он делал AJAX-обновление
-        мегабайтным): партиал ставит .ai-log-response-body с data-response-url
-        → detail-json, а index.js подтягивает текст по первому раскрытию
-        строки (loadLazyResponse)."""
+        мегабайтным): развёртка строки обычного запроса
+        (admin/ai/_ai_log_detail.html) ставит .ai-log-response-body с
+        data-response-url → detail-json, а index.js подтягивает текст по
+        первому раскрытию строки (loadLazyResponse)."""
         from django.template.loader import get_template
         from django.conf import settings
-        src = get_template("admin/ai/request_logs_table.html").template.source
+        src = get_template("admin/ai/_ai_log_detail.html").template.source
         self.assertNotIn("{{ log.response_text", src)
         self.assertIn('class="ai-log-response-body"', src)
         self.assertIn("ai_request_log_detail_json", src)
+        # В таблице журнала самого текста ответа тоже нет.
+        table = get_template("admin/ai/request_logs_table.html").template.source
+        self.assertNotIn("{{ log.response_text", table)
         path = os.path.join(
             settings.BASE_DIR, "static", "admin", "ai", "request_logs", "index.js",
         )
@@ -16150,34 +16155,39 @@ class RequestLogFiltersUiTests(TestCase):
         self.assertIn("loadLazyResponse(detailRow);", js)
 
     def test_table_columns_order(self):
-        """Ровно 10 колонок в порядке ТЗ: Кто отправлял, Отправлен, Получен,
-        Режим, Язык, Тема, Промпт, Модель, Статус, с (ID и Источник
-        вынесены в развёртку). Шапка — в общем партиале
-        admin/ai/_ai_log_head.html (её читают и журнал, и настройки)."""
+        """Одна шапка журнала — 18 колонок (admin/ai/_ai_journal_head.html):
+        ★, Кто отправлял, Отправлен, Получен, Режим, Название прогона, Курс,
+        Расширение, Язык, Тема, Промпт, Модель, Решено, Не решено, Всего пар,
+        Статус, Время, (Детали). ID и Источник вынесены в развёртку."""
         from django.template.loader import get_template
-        head = get_template("admin/ai/_ai_log_head.html").template.source
-        who = head.index("<th>Кто отправлял</th>")
-        sent = head.index("<th>Отправлен</th>")
-        got = head.index("<th>Получен</th>")
-        mode = head.index("<th>Режим</th>")
-        lang = head.index("<th>Язык</th>")
-        topic = head.index("<th>Тема</th>")
-        prompt = head.index("<th>Промпт</th>")
-        model = head.index("<th>Модель</th>")
-        status = head.index("<th>Статус</th>")
-        self.assertLess(who, sent)
-        self.assertLess(sent, got)
-        self.assertLess(got, mode)
-        self.assertLess(mode, lang)
-        self.assertLess(lang, topic)
-        self.assertLess(topic, prompt)
-        self.assertLess(prompt, model)
-        self.assertLess(model, status)
+        head = get_template("admin/ai/_ai_journal_head.html").template.source
+        order = [
+            "<th>Кто отправлял</th>",
+            "<th>Отправлен</th>",
+            "<th>Получен</th>",
+            "<th>Режим</th>",
+            "<th>Название прогона</th>",
+            "<th>Курс</th>",
+            "<th>Расширение</th>",
+            "<th>Язык</th>",
+            "<th>Тема</th>",
+            "<th>Промпт</th>",
+            "<th>Модель</th>",
+            "<th>Решено</th>",
+            "<th>Не решено</th>",
+            "<th>Всего пар</th>",
+            "<th>Статус</th>",
+        ]
+        positions = [head.index(item) for item in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(head.count("<th"), 18)
         self.assertNotIn("<th>ID</th>", head)
         self.assertNotIn("<th>Источник</th>", head)
-        # Развёртка строки обычного запроса — на 10 колонок.
-        src = get_template("admin/ai/request_logs_table.html").template.source
-        self.assertIn('colspan="10"', src)
+        # Развёртка строки обычного запроса — на 18 колонок.
+        src = get_template("admin/ai/_ai_log_detail.html").template.source
+        self.assertIn('colspan="18"', src)
+        detail = get_template("admin/ai/_ai_batch_detail.html").template.source
+        self.assertIn('colspan="18"', detail)
 
     def test_index_js_filter_fields(self):
         from django.conf import settings
@@ -17069,15 +17079,15 @@ class ClientStatsGatingTests(SimpleTestCase):
 class SettingsPagesAlignmentTests(TestCase):
     """Единый вид таблиц журнала и пакетных решений.
 
-    ТЗ: «ЛЮБОЙ лог пакетного решения должен выглядеть одинаково» — как в блоке
-    «Последние пакетные решения». Поэтому:
+    ТЗ: «в журнале запросов ВСЁ должно быть в одной таблице» + «ЛЮБОЙ лог
+    пакетного решения должен выглядеть одинаково». Поэтому:
 
-    * обычные запросы — таблица 10 колонок, шапка и строка в ОБЩИХ партиалах
-      (admin/ai/_ai_log_head.html + _ai_log_row.html);
-    * пакетные решения — таблица 15 колонок, шапка/строка/развёртка в общих
-      партиалах (admin/ai/_ai_batch_head.html + _ai_batch_row.html +
-      _ai_batch_detail.html) — и подключаются на ВСЕХ поверхностях
-      (журнал запросов, настройки, закреплённые).
+    * журнал — ОДНА таблица (шапка admin/ai/_ai_journal_head.html, 18
+      колонок), где обычные запросы (admin/ai/_ai_log_row.html +
+      _ai_log_detail.html) и пакетные прогоны (admin/ai/_ai_batch_row.html +
+      _ai_batch_detail.html) лежат ВМЕСТЕ;
+    * партиалы пакета подключаются на ВСЕХ поверхностях (журнал запросов,
+      настройки, закреплённые) — вид пакета один.
     """
 
     def _read(self, *parts):
@@ -17088,30 +17098,25 @@ class SettingsPagesAlignmentTests(TestCase):
     def test_settings_page_uses_shared_partials(self):
         src = self._read("ai", "templates", "admin", "ai", "aiappsettings_change_form.html")
         for partial in (
-            "admin/ai/_ai_log_head.html",
+            "admin/ai/_ai_journal_head.html",
             "admin/ai/_ai_log_row.html",
-            "admin/ai/_ai_batch_head.html",
             "admin/ai/_ai_batch_row.html",
             "admin/ai/_ai_batch_detail.html",
         ):
             self.assertIn(partial, src)
 
-    def test_log_head_has_ten_columns(self):
-        src = self._read("ai", "templates", "admin", "ai", "_ai_log_head.html")
-        for title in ("Кто отправлял", "Отправлен", "Получен", "Режим", "Язык",
-                      "Тема", "Промпт", "Модель", "Статус", "с"):
-            self.assertIn("<th>%s</th>" % title, src)
-        # ★ — только у пакетных решений (там закрепление).
-        self.assertNotIn("★", src)
-
-    def test_batch_head_has_all_columns(self):
-        src = self._read("ai", "templates", "admin", "ai", "_ai_batch_head.html")
-        for title in ("Кто отправлял", "Отправлен", "Получен", "Название прогона",
-                      "Курс", "Расширение", "Тема", "Промпт", "Решено",
+    def test_journal_head_has_all_columns(self):
+        src = self._read("ai", "templates", "admin", "ai", "_ai_journal_head.html")
+        for title in ("Кто отправлял", "Отправлен", "Получен", "Режим",
+                      "Название прогона", "Курс", "Расширение", "Язык",
+                      "Тема", "Промпт", "Модель", "Решено",
                       "Не решено", "Всего пар", "Статус"):
             self.assertIn("<th>%s</th>" % title, src)
         self.assertIn('<th title="От начала прогона до его окончания">Время</th>', src)
         self.assertIn("★", src)
+        # ★ — закрепление пакета; в обычной строке ячейка пустая.
+        log_row = self._read("ai", "templates", "admin", "ai", "_ai_log_row.html")
+        self.assertIn('<td class="ai-log-pin-cell"></td>', log_row)
 
     def test_batch_row_partial_shows_run_and_counts(self):
         src = self._read("ai", "templates", "admin", "ai", "_ai_batch_row.html")
@@ -17122,12 +17127,12 @@ class SettingsPagesAlignmentTests(TestCase):
         self.assertIn("{{ row.solved|default:\"—\" }}", src)
         self.assertIn("{{ row.failed|default:\"—\" }}", src)
         self.assertIn("{{ row.total_pairs|default:\"—\" }}", src)
-        self.assertIn("{{ row.run_duration_display|default:\"—\" }}", src)
+        self.assertIn("{{ row.time_display|default:\"—\" }}", src)
         # Промпт(ы) прогона — ссылками на промпт.
         self.assertIn("/ai/admin/ai/prompt/{{ p.id }}/change/", src)
 
     def test_batch_detail_colspan_matches_head(self):
-        head = self._read("ai", "templates", "admin", "ai", "_ai_batch_head.html")
+        head = self._read("ai", "templates", "admin", "ai", "_ai_journal_head.html")
         detail = self._read("ai", "templates", "admin", "ai", "_ai_batch_detail.html")
         columns = head.count("<th>") + head.count("<th ")
         self.assertIn('colspan="%d"' % columns, detail)
@@ -17139,8 +17144,18 @@ class SettingsPagesAlignmentTests(TestCase):
         self.assertIn("{{ row.topic_display }}", src)
         self.assertIn("{{ row.prompt_display }}", src)
         self.assertIn("{{ row.model_display }}", src)
-        self.assertIn("{{ row.duration_display }}", src)
+        self.assertIn("{{ row.time_display }}", src)
         self.assertIn("ai-log-row", src)
+
+    def test_journal_page_has_one_table(self):
+        """Журнал — ОДНА таблица: обычные запросы и пакетные прогоны вместе."""
+        src = self._read("ai", "templates", "admin", "ai", "request_logs_table.html")
+        self.assertEqual(src.count("<table"), 1)
+        self.assertIn("admin/ai/_ai_journal_head.html", src)
+        self.assertIn("admin/ai/_ai_log_row.html", src)
+        self.assertIn("admin/ai/_ai_log_detail.html", src)
+        self.assertIn("admin/ai/_ai_batch_row.html", src)
+        self.assertIn("admin/ai/_ai_batch_detail.html", src)
 
     def test_every_surface_uses_the_same_batch_partials(self):
         """Ключевое требование ТЗ: вид пакета ОДИН на всех поверхностях."""
@@ -17150,7 +17165,7 @@ class SettingsPagesAlignmentTests(TestCase):
             ("ai", "templates", "admin", "ai", "pinned_runs.html"),
         ):
             src = self._read(*path)
-            self.assertIn("admin/ai/_ai_batch_head.html", src, path)
+            self.assertIn("admin/ai/_ai_journal_head.html", src, path)
             self.assertIn("admin/ai/_ai_batch_row.html", src, path)
             self.assertIn("admin/ai/_ai_batch_detail.html", src, path)
 

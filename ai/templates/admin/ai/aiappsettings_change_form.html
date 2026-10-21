@@ -59,7 +59,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
     <div class="ai-scroll">
       <table class="ai-recent-logs-table ai-batch-table">
         <thead>
-          {% include "admin/ai/_ai_batch_head.html" %}
+          {% include "admin/ai/_ai_journal_head.html" %}
         </thead>
         <tbody>
           {% timezone moscow_tz %}
@@ -97,51 +97,34 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
     </p>
 
     {% if can_view_logs %}
-    {% if recent_logs or recent_batch_logs %}
-    {# Обычные запросы — ТА ЖЕ таблица, что в журнале запросов #}
-    {# (admin/ai/_ai_log_row.html). #}
     {% if recent_logs %}
+    {# ОДНА таблица журнала: обычные запросы и пакетные прогоны вместе #}
+    {# (те же партиалы и та же шапка, что в «Журнале запросов»). #}
     <div class="ai-scroll">
-      <table class="ai-recent-logs-table ai-logs-table">
+      <table class="ai-recent-logs-table ai-logs-table ai-logs-table--mixed">
         <thead>
-          {% include "admin/ai/_ai_log_head.html" %}
+          {% include "admin/ai/_ai_journal_head.html" %}
         </thead>
         <tbody>
           {% timezone moscow_tz %}
           {% for row in recent_logs %}
-            {% include "admin/ai/_ai_log_row.html" with row=row %}
-            {# Развёртка: подробная информация по записи (лениво — AJAX по первому клику). #}
-            <tr class="ai-recent-log-detail" hidden>
-              <td colspan="10">
-                <div class="ai-recent-log-detail-body"></div>
-              </td>
-            </tr>
+            {% if row.is_batch %}
+              {% include "admin/ai/_ai_batch_row.html" with row=row %}
+              {% include "admin/ai/_ai_batch_detail.html" with row=row %}
+            {% else %}
+              {% include "admin/ai/_ai_log_row.html" with row=row %}
+              {# Развёртка: подробная информация по записи (лениво — AJAX по первому клику). #}
+              <tr class="ai-recent-log-detail" hidden>
+                <td colspan="18">
+                  <div class="ai-recent-log-detail-body"></div>
+                </td>
+              </tr>
+            {% endif %}
           {% endfor %}
           {% endtimezone %}
         </tbody>
       </table>
     </div>
-    {% endif %}
-    {# Пакетные решения — ТА ЖЕ таблица, что в блоке «Последние пакетные #}
-    {# решения» выше (ТЗ: «любой лог пакетного решения должен выглядеть #}
-    {# одинаково»). Тот же партиал admin/ai/_ai_batch_row.html. #}
-    {% if recent_batch_logs %}
-    <div class="ai-scroll">
-      <table class="ai-recent-logs-table ai-batch-table">
-        <thead>
-          {% include "admin/ai/_ai_batch_head.html" %}
-        </thead>
-        <tbody>
-          {% timezone moscow_tz %}
-          {% for row in recent_batch_logs %}
-            {% include "admin/ai/_ai_batch_row.html" with row=row %}
-            {% include "admin/ai/_ai_batch_detail.html" with row=row %}
-          {% endfor %}
-          {% endtimezone %}
-        </tbody>
-      </table>
-    </div>
-    {% endif %}
     {% else %}
     <p class="ai-recent-logs-empty">Записей пока нет.</p>
     {% endif %}

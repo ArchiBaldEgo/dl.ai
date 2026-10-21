@@ -5,16 +5,19 @@
 «Последние пакетные решения» на «Настройке ИИ-приложения». Поэтому строка
 живёт здесь и подключается ОТКУДА УГОДНО:
   - «Последние пакетные решения» (Настройка ИИ-приложения);
-  - «Последние запросы» → таблица пакетных решений (Настройка ИИ-приложения);
-  - «Журнал запросов» → таблица пакетных решений;
+  - «Последние запросы» → общая таблица журнала (Настройка ИИ-приложения);
+  - «Журнал запросов» → общая таблица журнала;
   - «Закреплённые пакетные решения».
+
+Шапка — admin/ai/_ai_journal_head.html (18 колонок, общая для журнала):
+колонки «Режим», «Язык» и «Модель» у пакета заполнены своими данными.
 
 Контракт строки — ai/admin/request_logs.py::build_batch_rows_for_logs.
 Ожидает в контексте: row (словарь), moscow_tz (для {% timezone %}).
 
 Развёртка (результаты прогона) — СЛЕДУЮЩАЯ строка таблицы
 (.ai-batch-detail), её подключает вызывающий шаблон (colspan = числу
-колонок шапки admin/ai/_ai_batch_head.html).
+колонок шапки admin/ai/_ai_journal_head.html).
 {% endcomment %}
 <tr class="ai-batch-row{% if row.snapshot_url %} ai-batch-row-clickable{% endif %}"
     data-snapshot-url="{{ row.snapshot_url }}"
@@ -51,9 +54,11 @@
   </td>
   <td>{{ row.sent_at|date:"d.m.Y:H:i:s"|default:"—" }}</td>
   <td>{{ row.received_at|default:"—" }}</td>
+  <td>{{ row.mode_display|default:"—" }}</td>
   <td>{{ row.run_name|default:"—" }}</td>
   <td>{{ row.course_id|default:"—" }}</td>
   <td>{{ row.file_extension|default:"—" }}</td>
+  <td>{{ row.programming_language_name|default:"—" }}</td>
   <td>{{ row.topics_display|default:"—" }}</td>
   <td>
     {% for p in row.prompts %}
@@ -62,10 +67,11 @@
       —
     {% endfor %}
   </td>
+  <td>{{ row.model_display|default:"—" }}</td>
   <td class="ai-recent-logs-ok">{{ row.solved|default:"—" }}</td>
   <td class="ai-recent-logs-err">{{ row.failed|default:"—" }}</td>
   <td>{{ row.total_pairs|default:"—" }}</td>
   <td class="{% if row.run_status == 'completed' or row.run_status == 'success' %}ai-recent-logs-ok{% elif row.run_status == 'running' or row.run_status == 'paused' %}ai-recent-logs-neutral{% else %}ai-recent-logs-err{% endif %}">{{ row.run_status_display }}</td>
-  <td>{{ row.run_duration_display|default:"—" }}</td>
+  <td>{{ row.time_display|default:"—" }}</td>
   <td><a href="{{ row.detail_url }}">Детали →</a></td>
 </tr>
