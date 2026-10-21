@@ -19122,3 +19122,328 @@ class EducationNamesFromDLTests(TestCase):
         account.refresh_from_db()
         self.assertEqual(account.education_school_name, "ГГУ")
         self.assertEqual(account.education_group_name, "ИТП-31")
+
+
+class AccessKeysCacheTests(TestCase):
+    """Кэш ключей доступа (admin/permissions.py) — инвалидация и экономия.
+
+    Кэш живёт на инстансе request.user (request-scoped) + общий django-cache
+    на весь набор ключей суперюзера. Оба обязаны инвалидироваться при правке
+    прав/состава групп, иначе отзыв права «залипает».
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        self.user = get_user_model().objects.create_user(
+            username="cache-user", password="***")
+        self.superuser = get_user_model().objects.create_superuser(
+            username="cache-super", password="***", email="s@example.com")
+
+    def test_repeated_calls_hit_db_once(self):
+        """Два вызова подряд — одна выборка: кэш на инстансе user."""
+        from ai.admin.permissions import user_access_keys
+
+        with self.assertNumQueries(1):
+            user_access_keys(self.user)
+            user_access_keys(self.user)
+
+    def test_view_as_cache_keyed_by_group(self):
+        """Кэш ключуется (user.pk, view_as_group_pk): эмуляция не ломается."""
+        from ai.admin.permissions import user_access_keys
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+
+        perm_a, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.cache_a", defaults={"label": "А", "section": "page"})
+        perm_b, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.cache_b", defaults={"label": "Б", "section": "page"})
+        group_a = AIAccessGroup.objects.create(name="Кэш-А")
+        group_b = AIAccessGroup.objects.create(name="Кэш-Б")
+        group_a.permissions.add(perm_a)
+        group_b.permissions.add(perm_b)
+        group_a.users.add(self.user)
+        group_b.users.add(self.user)
+
+        setattr(self.user, "_ai_view_as_group_pk", group_a.pk)
+        keys_a = user_access_keys(self.user)
+        setattr(self.user, "_ai_view_as_group_pk", group_b.pk)
+        keys_b = user_access_keys(self.user)
+        self.assertIn("page.cache_a", keys_a)
+        self.assertNotIn("page.cache_b", keys_a)
+        self.assertIn("page.cache_b", keys_b)
+        self.assertNotIn("page.cache_a", keys_b)
+
+    def test_group_membership_change_invalidates_cache(self):
+        """Добавление юзера в группу действует немедленно (без перелогина)."""
+        from ai.admin.permissions import user_has_key
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+
+        group = AIAccessGroup.objects.get(
+            name="Разработчик")
+        perm, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.tokens", defaults={"label": "Токены", "section": "page"})
+        group.permissions.add(perm)
+        self.assertFalse(user_has_key(self.user, "page.tokens"))
+
+        group.users.add(self.user)
+        self.assertTrue(user_has_key(self.user, "page.tokens"))
+
+        group.users.remove(self.user)
+        self.assertFalse(user_has_key(self.user, "page.tokens"))
+
+    def test_superuser_all_keys_refreshed_after_new_permission(self):
+        """Новое право сразу видно суперюзеру (кэш сброшен сигналом)."""
+        from ai.admin.permissions import user_access_keys
+        from ai.models import AIAdminGroupPermission
+
+        key = "page.cache_probe"
+        self.assertNotIn(key, user_access_keys(self.superuser))
+        AIAdminGroupPermission.objects.create(
+            key=key, label="Проба", section=AIAdminGroupPermission.SECTION_PAGE)
+        self.assertIn(key, user_access_keys(self.superuser))
+        AIAdminGroupPermission.objects.filter(key=key).delete()
+        self.assertNotIn(key, user_access_keys(self.superuser))
+
+
+class TokenUsageSqlParityTests(TestCase):
+    """Сверка SQL-агрегации с эталонной Python-версией.
+
+    Срезы «Контроля токенов» переведены в SQL (GROUP BY) — цифры при этом
+    обязаны совпадать с эталоном до конца: иначе страница начала бы врать
+    про расход токенов.
+    """
+
+    def setUp(self):
+        from ai.models import AIRequestLog
+
+        self.now = timezone.now()
+        self.logs = [
+            # обычный запрос одной моделью
+            AIRequestLog.objects.create(
+                sent_at=self.now,
+                mode=AIRequestLog.MODE_CHAT,
+                source=AIRequestLog.SOURCE_WEBSOCKET,
+                status=AIRequestLog.STATUS_SUCCESS,
+                model_names=["Ollama Gemma"],
+                tokens=100, tokens_prompt=40,
+                user_full_name="Иванов Иван", username="ivanov",
+                external_user_id="dl-1",
+            ),
+            # web-пул: usage не отдаёт
+            AIRequestLog.objects.create(
+                sent_at=self.now,
+                mode=AIRequestLog.MODE_SOLVE,
+                source=AIRequestLog.SOURCE_WEBSOCKET,
+                status=AIRequestLog.STATUS_SUCCESS,
+                model_names=["Web_DeepSeek"],
+                tokens=0, tokens_prompt=0,
+                user_full_name="Петров Пётр", username="petrov",
+                external_user_id="dl-2",
+            ),
+            # сводная запись прогона: несколько моделей
+            AIRequestLog.objects.create(
+                sent_at=self.now,
+                mode=AIRequestLog.MODE_BATCH_SOLVE,
+                source=AIRequestLog.SOURCE_ARM,
+                status=AIRequestLog.STATUS_SUCCESS,
+                model_names=["Ollama Gemma", "OpenRouter Qwen", "Groq Llama"],
+                tokens=300, tokens_prompt=100,
+                user_full_name="Иванов Иван", username="ivanov",
+                external_user_id="dl-1",
+            ),
+            # пустое имя пользователя → фолбэк на логин
+            AIRequestLog.objects.create(
+                sent_at=self.now,
+                mode=AIRequestLog.MODE_CHAT,
+                source=AIRequestLog.SOURCE_WEBSOCKET,
+                status=AIRequestLog.STATUS_SUCCESS,
+                model_names=["Ollama Kimi"],
+                tokens=7, tokens_prompt=3,
+                user_full_name="", username="siesta",
+                external_user_id="",
+            ),
+            # без моделей вовсе
+            AIRequestLog.objects.create(
+                sent_at=self.now,
+                mode=AIRequestLog.MODE_FIND_ERROR,
+                source=AIRequestLog.SOURCE_WEBSOCKET,
+                status=AIRequestLog.STATUS_SUCCESS,
+                model_names=[],
+                tokens=5, tokens_prompt=1,
+                user_full_name="Сидоров С", username="sidorov",
+                external_user_id="dl-3",
+            ),
+        ]
+
+    def _compare(self, **kwargs):
+        from ai.models import AIRequestLog
+        from ai.services.token_usage import (
+            _collect_log_slices_legacy,
+            collect_log_slices,
+        )
+
+        sql_report = collect_log_slices(AIRequestLog.objects.all(), **kwargs)
+        py_report = _collect_log_slices_legacy(AIRequestLog.objects.all(), **kwargs)
+        for key in ("total", "by_model", "by_user", "by_mode", "by_day"):
+            self.assertEqual(
+                sql_report[key], py_report[key],
+                msg=f"срез {key} разошёлся при фильтрах {kwargs}",
+            )
+        self.assertEqual(sql_report["incomplete"], py_report["incomplete"])
+
+    def test_parity_without_filters(self):
+        self._compare()
+
+    def test_parity_with_model_filter(self):
+        self._compare(model="Groq")
+
+    def test_parity_with_mode_and_user_filters(self):
+        self._compare(mode="chat")
+        self._compare(user="Иванов")
+
+    def test_by_user_falls_back_to_login(self):
+        from ai.models import AIRequestLog
+        from ai.services.token_usage import collect_log_slices
+
+        report = collect_log_slices(AIRequestLog.objects.all())
+        labels = [row["label"] for row in report["by_user"]]
+        self.assertIn("siesta", labels)
+        self.assertNotIn("", labels)
+
+    def test_web_pool_slice_marked_incomplete(self):
+        from ai.models import AIRequestLog
+        from ai.services.token_usage import collect_log_slices
+
+        report = collect_log_slices(AIRequestLog.objects.all())
+        self.assertTrue(report["incomplete"])
+        by_mode = {row["key"]: row for row in report["by_mode"]}
+        self.assertTrue(by_mode["solve"]["incomplete"])
+        self.assertFalse(by_mode["chat"]["incomplete"])
+
+    def test_batch_slices_parity(self):
+        from ai.models import AIModelTestResult, AIModelTestRun
+        from ai.services.token_usage import (
+            _collect_batch_slices_legacy,
+            collect_batch_slices,
+        )
+
+        run = AIModelTestRun.objects.create(
+            run_id=uuid.uuid4().hex,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            started_at=self.now,
+        )
+        AIModelTestResult.objects.create(
+            run=run, model_key="M1", model_title="Ollama Gemma",
+            status=AIModelTestResult.STATUS_OK,
+            verdict=AIModelTestResult.VERDICT_SOLVED,
+            tokens=50, tokens_prompt=20,
+        )
+        AIModelTestResult.objects.create(
+            run=run, model_key="M2", model_title="Web_Kimi",
+            status=AIModelTestResult.STATUS_OK,
+            verdict=AIModelTestResult.VERDICT_FAILED,
+            tokens=0, tokens_prompt=0,
+            topic_name_snapshot="Массивы",
+        )
+        runs = AIModelTestRun.objects.all()
+        sql_report = collect_batch_slices(runs)
+        py_report = _collect_batch_slices_legacy(runs)
+        for key in ("total", "by_model", "by_topic", "pairs", "incomplete"):
+            self.assertEqual(sql_report[key], py_report[key], msg=f"срез {key}")
+
+
+class TokensAjaxPartialTests(_AdminViewRequestMixin, TestCase):
+    """«Контроль токенов»: AJAX-обновление панелей + вёрстка таблиц.
+
+    Фильтры применяются без перезагрузки страницы: сервер в XHR-режиме
+    отдаёт только панели (карточки + срезы), клиент подменяет их на месте.
+    Таблицы не «плывут» — фиксированная сетка в две колонки.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(
+            username="tokens-ajax", password="x", is_staff=True,
+        )
+        AIRequestLog.objects.create(
+            sent_at=timezone.now(),
+            mode=AIRequestLog.MODE_CHAT,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Ollama Gemma"],
+            tokens=100, tokens_prompt=40,
+            user_full_name="Иванов Иван",
+        )
+
+    def _get(self, xhr=False):
+        from ai.admin.tokens import admin_token_usage_view
+
+        request = self._admin_request(self.user, path="/ai/admin/ai/tokens/")
+        if xhr:
+            request.META["HTTP_X_REQUESTED_WITH"] = "XMLHttpRequest"
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return admin_token_usage_view(request)
+
+    def test_full_page_has_filters_and_panels(self):
+        response = self._get()
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+        self.assertIn("ai-tokens-filters", html)
+        self.assertIn("ai-tokens-grid", html)
+        self.assertIn("ai-tokens-panel", html)
+
+    def test_xhr_returns_panels_only(self):
+        response = self._get(xhr=True)
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+        # Панели — да, форма фильтров — нет (клиент её не перерисовывает).
+        self.assertIn("ai-tokens-grid", html)
+        self.assertNotIn("ai-tokens-filters", html)
+
+    def test_xhr_and_full_page_have_same_numbers(self):
+        full = self._get().content.decode()
+        xhr = self._get(xhr=True).content.decode()
+        for html in (full, xhr):
+            self.assertIn("140", html)  # 100 ответа + 40 промпта
+
+    def test_report_computed_once_per_request(self):
+        from ai.services import token_usage as token_usage_module
+
+        with patch(
+            "ai.admin.tokens.token_usage_report",
+            wraps=token_usage_module.token_usage_report,
+        ) as spy:
+            self._get()
+        self.assertEqual(spy.call_count, 1)
+
+    def test_grid_is_two_fixed_columns(self):
+        css = (
+            Path("static/admin/ai/tokens/index.css")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr))", css)
+        self.assertNotIn("repeat(auto-fit, minmax(430px", css)
+
+    def test_table_layout_fixed_and_label_truncated(self):
+        css = (
+            Path("static/admin/ai/tokens/index.css")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn("table-layout: fixed", css)
+        self.assertIn(".ai-tokens-label", css)
+        template = (
+            Path("ai/templates/admin/ai/_tokens_table.html")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn("ai-tokens-label", template)
+        self.assertIn("title=", template)
+
+    def test_index_js_uses_debounce_and_ajax(self):
+        js = (
+            Path("static/admin/ai/tokens/index.js")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn("setTimeout", js)
+        self.assertIn("X-Requested-With", js)
+        self.assertIn("AbortController", js)
+        self.assertNotIn("form.submit()", js)

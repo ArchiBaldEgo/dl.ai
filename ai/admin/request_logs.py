@@ -1187,9 +1187,18 @@ def _batch_log_row_contexts(logs, user=None):
         )
 
     contexts = {}
+    # Прогоны — точечной выборкой: нужны только поля, которые читаются ниже
+    # (статус, курс, название, время старта/финиша, параметры запуска).
+    # Полная загрузка тянула бы message/error_message (TextField) впустую.
+    # Набор полей совпадает с тем, что читают run_name_for/run_finish_meta.
     runs = {
         r.run_id: r
-        for r in AIModelTestRun.objects.filter(run_id__in=set(run_ids.values()))
+        for r in AIModelTestRun.objects.filter(
+            run_id__in=set(run_ids.values())
+        ).only(
+            "run_id", "course_id", "status", "run_name", "run_params",
+            "started_at", "finished_at",
+        )
     }
 
     # Задачи и расширение — по прогону (run_id уникален), затем раскладываем
@@ -1206,19 +1215,32 @@ def _batch_log_row_contexts(logs, user=None):
     prompts_by_run = {}
     ext_by_run = {}
     for r in (
-        AIModelTestResult.objects.select_related("task", "run")
+        AIModelTestResult.objects
         .filter(run__run_id__in=set(run_ids.values()))
+        .values(
+            "run__run_id",
+            "file_extension_snapshot",
+            "verdict",
+            "model_title",
+            "model_key",
+            "prompt_id",
+            "prompt_name",
+            "task__node_id",
+            "task__name",
+        )
         .order_by("id")
     ):
-        # r.run_id — это pk FK-поля run; строковый идентификатор прогона —
-        # r.run.run_id (тот же, что в AIModelTestRun.run_id).
-        run_key = r.run.run_id
-        ext = r.file_extension_snapshot or ""
+        # r["run__run_id"] — строковый идентификатор прогона (тот же, что
+        # в AIModelTestRun.run_id). Тяжёлые поля (raw_response/code/
+        # dl_comment) НЕ тянутся: списку журнала нужны только перечисленные
+        # колонки — на странице 50 прогонов это десятки мегабайт лишнего.
+        run_key = r["run__run_id"]
+        ext = r["file_extension_snapshot"] or ""
         if ext and run_key not in ext_by_run:
             ext_by_run[run_key] = ext
-        node_id = r.task.node_id if r.task else None
+        node_id = r["task__node_id"]
         if node_id:
-            is_solved = r.verdict == "solved"
+            is_solved = r["verdict"] == "solved"
             if is_solved:
                 solved_nodes_by_run.setdefault(run_key, set()).add(node_id)
             bucket = tasks_by_run.setdefault(run_key, [])
@@ -1229,17 +1251,17 @@ def _batch_log_row_contexts(logs, user=None):
                 seen_nodes.add(node_id)
                 bucket.append({
                     "node_id": node_id,
-                    "name": r.task.name if r.task else "",
+                    "name": r["task__name"] or "",
                 })
             # Пометки по моделям: модель → решено ли, для развёртки списка задач.
             per_node = models_by_run.setdefault(run_key, {}).setdefault(node_id, {})
-            model_title = r.model_title or r.model_key or ""
+            model_title = r["model_title"] or r["model_key"] or ""
             if model_title and model_title not in per_node:
                 per_node[model_title] = is_solved
-        if r.prompt_id and r.prompt_name:
+        if r["prompt_id"] and r["prompt_name"]:
             run_prompts = prompts_by_run.setdefault(run_key, {})
-            if r.prompt_id not in run_prompts:
-                run_prompts[r.prompt_id] = r.prompt_name
+            if r["prompt_id"] not in run_prompts:
+                run_prompts[r["prompt_id"]] = r["prompt_name"]
 
     for log_pk, run_id in run_ids.items():
         run_obj = runs.get(run_id)

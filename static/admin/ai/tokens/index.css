@@ -74,13 +74,28 @@
     color: var(--body-quiet-color, #666);
 }
 
+/* Сетка панелей — РОВНО две колонки. С «auto-fit + minmax(430px, 1fr)» число
+   колонок зависело от ширины окна, и таблицы разной длины «плыли»: колонки
+   соседних панелей не совпадали, длинные названия моделей распирали панель.
+   Фиксированная сетка + обрезка длинных названий внутри панели. */
 .ai-tokens-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 16px;
+    align-items: start;
+}
+
+@media (max-width: 1100px) {
+    .ai-tokens-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
 }
 
 .ai-tokens-panel {
+    /* min-width: 0 — без него содержимое таблицы распирает грид-колонку;
+       overflow: hidden — горизонтальная прокрутка остаётся ВНУТРИ панели. */
+    min-width: 0;
+    overflow: hidden;
     border: 1px solid var(--hairline-color, #e8e8e8);
     border-radius: 6px;
     padding: 10px 14px 14px;
@@ -94,6 +109,9 @@
 
 .ai-tokens-table {
     width: 100%;
+    /* Фиксированная раскладка: ширины колонок не «прыгают» от панели к
+       панели, длинное название обрезается (подсказка — в title). */
+    table-layout: fixed;
     border-collapse: collapse;
 }
 
@@ -103,6 +121,19 @@
     border-bottom: 1px solid var(--hairline-color, #eee);
     text-align: left;
     vertical-align: top;
+}
+
+.ai-tokens-table th:not(:first-child),
+.ai-tokens-table td:not(:first-child) {
+    width: 88px;
+}
+
+/* Название среза — обрезается, полный текст в подсказке (title). */
+.ai-tokens-label {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .ai-tokens-table th {

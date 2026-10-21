@@ -14,7 +14,7 @@
     {% for row in rows %}
       <tr>
         <td>
-          {{ row.label }}
+          <span class="ai-tokens-label" title="{{ row.label }}">{{ row.label }}</span>
           {% if row.incomplete %}
             <span class="ai-tokens-flag" title="Модель не отдаёт usage (web-пул) — учёт по ней неполный">учёт недоступен</span>
           {% endif %}

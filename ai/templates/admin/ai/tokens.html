@@ -56,51 +56,7 @@
     <a class="button" href="?">Сбросить</a>
   </form>
 
-  <div class="ai-tokens-cards">
-    <div class="ai-tokens-card">
-      <div class="ai-tokens-card-title">Журнал запросов — всего</div>
-      <div class="ai-tokens-card-value">{{ logs.total.total_tokens }}</div>
-      <div class="ai-tokens-card-sub">
-        ответ: {{ logs.total.completion_tokens }} · промпт: {{ logs.total.prompt_tokens }} ·
-        запросов: {{ logs.total.requests }}
-      </div>
-    </div>
-    <div class="ai-tokens-card">
-      <div class="ai-tokens-card-title">Пакетные пары — всего</div>
-      <div class="ai-tokens-card-value">{{ batch.total.total_tokens }}</div>
-      <div class="ai-tokens-card-sub">
-        ответ: {{ batch.total.completion_tokens }} · промпт: {{ batch.total.prompt_tokens }} ·
-        пар: {{ batch.pairs }}
-      </div>
-    </div>
-  </div>
-
-  <div class="ai-tokens-grid">
-    <section class="ai-tokens-panel">
-      <h3>Журнал: по моделям</h3>
-      {% include "admin/ai/_tokens_table.html" with rows=logs.by_model %}
-    </section>
-    <section class="ai-tokens-panel">
-      <h3>Журнал: по пользователям</h3>
-      {% include "admin/ai/_tokens_table.html" with rows=logs.by_user %}
-    </section>
-    <section class="ai-tokens-panel">
-      <h3>Журнал: по режимам</h3>
-      {% include "admin/ai/_tokens_table.html" with rows=logs.by_mode %}
-    </section>
-    <section class="ai-tokens-panel">
-      <h3>Журнал: по дням</h3>
-      {% include "admin/ai/_tokens_table.html" with rows=logs.by_day %}
-    </section>
-    <section class="ai-tokens-panel">
-      <h3>Пакетные пары: по моделям</h3>
-      {% include "admin/ai/_tokens_table.html" with rows=batch.by_model %}
-    </section>
-    <section class="ai-tokens-panel">
-      <h3>Пакетные пары: по темам</h3>
-      {% include "admin/ai/_tokens_table.html" with rows=batch.by_topic %}
-    </section>
-  </div>
+  {% include "admin/ai/_tokens_panels.html" %}
 </div>
 {% endblock %}
 

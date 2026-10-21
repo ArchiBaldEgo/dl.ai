@@ -41,6 +41,21 @@ def admin_token_usage_view(request):
         source=source,
     )
 
+    # XHR-ветка: при смене фильтров клиент просит ТОЛЬКО панели (карточки +
+    # срезы) — без формы, шапки и левого бара. Фильтры приезжают в URL, но
+    # наборы моделей/режимов/источников остаются от прошлой загрузки: они
+    # нужны форме, а её при XHR-запросе нет.
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return render(
+            request,
+            "admin/ai/_tokens_panels.html",
+            {
+                "logs": report["logs"],
+                "batch": report["batch"],
+                "incomplete": report["incomplete"],
+            },
+        )
+
     # Модели для селекта — из реестра (плюс фактические названия из отчёта:
     # в журнале модель записывается TITLE'ом, а не ключом).
     registry_models = sorted(
