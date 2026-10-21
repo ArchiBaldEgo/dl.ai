@@ -2794,11 +2794,25 @@ class BatchReportTests(SimpleTestCase):
         errors = report["errors_by_topic"]
         self.assertEqual([e["topic"] for e in errors], ["Циклы", "Строки"])
         self.assertEqual(errors[0]["count"], 2)
-        self.assertEqual(errors[0]["items"], ["Зад1 × A", "Зад2 × A"])
+        # Позиции — структуры: задача, модель, причина и ключ карточки
+        # пары в списке «Ответы моделей» (task_node_id:model_key).
+        self.assertEqual(
+            [(i["task"], i["model"]) for i in errors[0]["items"]],
+            [("Зад1", "A"), ("Зад2", "A")],
+        )
+        self.assertEqual(errors[0]["items"][0]["key"], "1:A")
+        self.assertEqual(errors[0]["items"][0]["node_id"], 1)
+        self.assertEqual(errors[0]["items"][0]["model_key"], "A")
+        self.assertEqual(errors[0]["items"][0]["reason"], "Причина не распознана")
         self.assertEqual(errors[0]["hidden"], 0)
-        self.assertEqual(errors[1]["items"], ["Зад3 × B"])
+        self.assertEqual(errors[1]["items"][0]["task"], "Зад3")
         # Решённые пары в ошибки не попадают.
-        self.assertFalse(any("Зад1 × B" in item for e in errors for item in e["items"]))
+        self.assertFalse(
+            any(
+                i["task"] == "Зад1" and i["model"] == "B"
+                for e in errors for i in e["items"]
+            )
+        )
 
     def test_errors_items_cap_and_hidden(self):
         """Кап позиций на тему (6): остальное — hidden, для компактности."""
@@ -2814,6 +2828,23 @@ class BatchReportTests(SimpleTestCase):
         self.assertEqual(row["count"], 10)
         self.assertEqual(len(row["items"]), _REPORT_ERRORS_ITEM_CAP)
         self.assertEqual(row["hidden"], 4)
+
+    def test_errors_items_carry_failure_reason(self):
+        """Позиция в «Ошибках по темам» несёт причину сбоя пары — клиент
+        рисует мини-ссылку с причиной прямо у задачи + ключ карточки."""
+        from ai.arm_runner import _build_batch_report
+
+        results = [
+            {"model_key": "A", "model_title": "A", "topic_name": "Циклы",
+             "verdict": "failed", "duration": 1.0, "task_node_id": 7,
+             "task_name": "Зад7", "failure_reason": "compile_error"},
+        ]
+        report = _build_batch_report(results)
+        item = report["errors_by_topic"][0]["items"][0]
+        self.assertEqual(item["reason"], "Ошибка компиляции")
+        self.assertEqual(item["key"], "7:A")
+        self.assertEqual(item["node_id"], 7)
+        self.assertEqual(item["model_key"], "A")
 
     def test_attach_run_meta(self):
         """Время прогона: завершён — длительность конец-старт; идёт — elapsed."""
@@ -9907,6 +9938,41 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         self.assertNotEqual(i, -1)
         self.assertIn(".then(parseJsonResponse)", src[i:i + 800])
         self.assertIn("function loadResultBodyState", src)
+
+    def test_batch_results_errors_table_has_reason_per_line_and_links(self):
+        """«Ошибки по темам»: каждая причина — с новой строки, позиции —
+        мини-ссылки на карточку пары (скролл + возврат «наверх»)."""
+        src = self._static_source("admin", "ai", "batch_results", "index.js")
+        self.assertIn("arm-error-reason", src)
+        self.assertIn("arm-error-link", src)
+        self.assertIn("data-arm-result-key", src)
+        self.assertIn("function jumpToResult", src)
+        self.assertIn("arm-backtop", src)
+        # Причины — отдельными строками, а не одной строкой через запятую.
+        i = src.find("function renderErrorsByTopic")
+        self.assertNotEqual(i, -1)
+        block = src[i:i + 3000]
+        self.assertIn("'<div class=\"arm-error-reason\">'", block)
+        self.assertNotIn(".join(', ')", block)
+
+    def test_batch_results_tables_have_fixed_width(self):
+        """Сводные таблицы и журнал — фиксированной ширины: раскрытие сводки
+        не растягивает журнал, таблицу нельзя «ездить» вправо-влево."""
+        css = self._static_source("admin", "ai", "batch_results", "index.css")
+        self.assertIn("table-layout: fixed", css)
+        self.assertIn(".arm-summary-table--errors", css)
+        logs_css = self._static_source("admin", "ai", "request_logs", "index.css")
+        self.assertIn(".ai-logs-table--mixed { table-layout: fixed", logs_css)
+
+    def test_batch_results_list_updated_incrementally(self):
+        """Новая пара (+1 задача) ДОБАВЛЯЕТСЯ в таблицу, а не пересобирает
+        её целиком (иначе страница «прыгает» на каждом тике поллинга)."""
+        src = self._static_source("admin", "ai", "batch_results", "index.js")
+        self.assertIn("function createResultCard", src)
+        self.assertIn("_armUpdate", src)
+        self.assertIn("resultsState", src)
+        # Полной очистки списка при обновлении быть не должно.
+        self.assertNotIn("resultsEl.innerHTML = ''", src)
 
     def test_log_detail_resend_session_label_and_rerun_route(self):
         src = self._static_source("admin", "ai", "request_logs_detail", "index.js")

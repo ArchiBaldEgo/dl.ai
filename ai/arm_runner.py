@@ -591,7 +591,21 @@ def _build_batch_report(results, run_topic_id=None, run_topic_name=None):
         task_label = str(r.get("task_name") or ("#" + str(r.get("task_node_id") or "")))
         model_label = str(r.get("model_title") or r.get("model_key") or "?")
         if len(bucket["items"]) < _REPORT_ERRORS_ITEM_CAP:
-            bucket["items"].append(f"{task_label} × {model_label}")
+            # Позиция — СТРУКТУРА: клиент делает из неё ссылку на карточку
+            # пары в списке «Ответы моделей» (data-key = node_id:model_key)
+            # и печатает причину сбоя прямо рядом с задачей.
+            node_id = r.get("task_node_id")
+            model_key = str(r.get("model_key") or "")
+            bucket["items"].append(
+                {
+                    "task": task_label,
+                    "model": model_label,
+                    "reason": AIModelTestResult.FAILURE_REASON_LABELS.get(reason, reason),
+                    "node_id": node_id,
+                    "model_key": model_key,
+                    "key": f"{node_id if node_id is not None else ''}:{model_key}",
+                }
+            )
     errors_by_topic = [
         {
             "topic": bucket["label"],

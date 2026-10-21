@@ -17,6 +17,32 @@
   border: 1px solid var(--hairline-color); padding: 8px 10px;
   text-align: left; vertical-align: top;
 }
+/* Журнал (18 колонок) — таблица ФИКСИРОВАННОЙ ШИРИНЫ: раскрытие сводки
+   пакетного решения не должно растягивать журнал, и таблицу нельзя
+   «ездить» вправо-влево (в .ai-scroll появлялась горизонтальная прокрутка).
+   Ширины колонок — из шапки (table-layout: fixed берёт их оттуда). */
+.ai-logs-table--mixed { table-layout: fixed; width: 100%; }
+.ai-logs-table--mixed th, .ai-logs-table--mixed td {
+  overflow-wrap: anywhere; word-break: break-word;
+}
+.ai-logs-table--mixed th:nth-child(1) { width: 2%; }
+.ai-logs-table--mixed th:nth-child(2) { width: 10%; }
+.ai-logs-table--mixed th:nth-child(3) { width: 6%; }
+.ai-logs-table--mixed th:nth-child(4) { width: 6%; }
+.ai-logs-table--mixed th:nth-child(5) { width: 5%; }
+.ai-logs-table--mixed th:nth-child(6) { width: 9%; }
+.ai-logs-table--mixed th:nth-child(7) { width: 4%; }
+.ai-logs-table--mixed th:nth-child(8) { width: 4%; }
+.ai-logs-table--mixed th:nth-child(9) { width: 5%; }
+.ai-logs-table--mixed th:nth-child(10) { width: 9%; }
+.ai-logs-table--mixed th:nth-child(11) { width: 9%; }
+.ai-logs-table--mixed th:nth-child(12) { width: 9%; }
+.ai-logs-table--mixed th:nth-child(13) { width: 4%; }
+.ai-logs-table--mixed th:nth-child(14) { width: 4%; }
+.ai-logs-table--mixed th:nth-child(15) { width: 4%; }
+.ai-logs-table--mixed th:nth-child(16) { width: 4%; }
+.ai-logs-table--mixed th:nth-child(17) { width: 4%; }
+.ai-logs-table--mixed th:nth-child(18) { width: 2%; }
 .ai-logs-table th { background: var(--darkened-bg); }
 .ai-logs-status-success { color: #067647; font-weight: 600; }
 .ai-logs-status-error { color: #b42318; font-weight: 600; }
