@@ -4,8 +4,11 @@
 Содержимое — результаты прогона (window.ArmBatchResults, лениво по клику) +
 действия прогона (XLSX / повтор / список задач).
 
-Ожидает в контексте: row (строка пакета — build_batch_rows_for_logs),
-log (запись журнала), batch (контекст прогона из _batch_log_row_contexts).
+Ожидает в контексте: row (строка пакета — build_batch_rows_for_logs).
+Идентификатор лога берём из row.id (pk лога) — партиал самодостаточен:
+log в контексте есть не на всех поверхностях (пустая строка в {% url %}
+давала NoReverseMatch → 500 на «Настройке ИИ-приложения» и «Закреплённых
+пакетных решениях»).
 {% endcomment %}
 <tr class="ai-batch-detail" hidden>
   <td colspan="15">
@@ -14,13 +17,13 @@ log (запись журнала), batch (контекст прогона из _
       <p class="ai-recent-logs-empty">Прогон не найден в БД — результаты недоступны.</p>
     {% endif %}
     <div class="ai-batch-detail-actions">
-      <a class="resend-btn" href="{% url 'ai_request_log_xlsx' log.id %}">Скачать XLSX</a>
-      <form method="post" class="ai-batch-rerun-form" action="{% url 'ai_request_log_rerun_arm' log.id %}">
+      <a class="resend-btn" href="{% url 'ai_request_log_xlsx' row.id %}">Скачать XLSX</a>
+      <form method="post" class="ai-batch-rerun-form" action="{% url 'ai_request_log_rerun_arm' row.id %}">
         {% csrf_token %}
         <button type="submit" class="resend-btn">↻ Повторить прогон</button>
         <span class="ai-batch-rerun-status"></span>
       </form>
-      <button type="button" class="ai-log-all-tasks-btn" data-log-id="{{ log.id }}" data-snapshot-url="{% url 'ai_request_log_batch_snapshot' log.id %}">Показать все задачи</button>
+      <button type="button" class="ai-log-all-tasks-btn" data-log-id="{{ row.id }}" data-snapshot-url="{% url 'ai_request_log_batch_snapshot' row.id %}">Показать все задачи</button>
       <div class="ai-log-all-tasks-list" hidden></div>
     </div>
   </td>
