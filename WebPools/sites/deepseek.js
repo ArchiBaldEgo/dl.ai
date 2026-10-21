@@ -543,10 +543,16 @@ module.exports = {
         answerXPaths: (site, service) => [
             site.data.xpaths.chat.answer[service],
             // Fallback 1: any element with ds-markdown class inside a message
+            // (ограничены контейнером сообщения ds-message).
             "//div[contains(@class,'ds-message')]//div[contains(@class,'ds-markdown')]",
             "//div[contains(@class,'ds-message')]/div[contains(@class,'ds-markdown')" + NOT_THINK + "]",
+            // Fallback 1a: markdown внутри сообщения (ds-message покрывает и
+            // обёртку сообщения — ответ всегда внутри неё).
+            "//div[contains(@class,'ds-message')]//div[contains(@class,'markdown')" + NOT_THINK + "]",
+            // Fallback 2: ГЛОБАЛЬНЫЕ селекторы — крайний случай (сайт сменил
+            // классы сообщений). Ответ всё равно проходит фильтр мусора:
+            // служебные данные страницы (гидрация) до Django не дойдут.
             "//div[contains(@class,'ds-markdown')" + NOT_THINK + "]",
-            // Fallback 2: any element with ds-markdown class (broader)
             "//div[contains(@class,'ds-markdown')]",
             // Fallback 3: any element with markdown class inside a chat message
             "//div[contains(@class,'message')]//div[contains(@class,'markdown')]",

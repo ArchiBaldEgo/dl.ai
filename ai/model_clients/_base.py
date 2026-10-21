@@ -97,6 +97,49 @@ def make_table_handlers(
     return handlers
 
 
+# Маркеры «мусора» — служебных данных сайта (гидрация Next.js/Remix),
+# которые веб-пул иногда отдаёт вместо ответа модели (юзер видел «код
+# регионов» — JSON-куски разметки страницы). Проверка на границе — простой
+# эвристический чек по подстрокам; основная логика отсечения живёт в
+# WebPools/worker/modules/answerSanitizer.js (единый источник правды).
+SITE_GARBAGE_MARKERS = (
+    "window.HYDRATION_INIT_STATE",
+    "window.__INITIAL_STATE__",
+    "window.__APOLLO_STATE__",
+    "window.__NUXT__",
+    "window.__remixContext",
+    "__NEXT_DATA__",
+    "self.__next_f.push",
+    '"dehydratedAt"',
+)
+
+# Маркеры состояния страницы, которые считаются мусором ТОЛЬКО в JSON-контексте
+# (весь ответ похож на JSON-объект) — иначе ловили бы нормальные ответы
+# модели с примером JSON (ключ "queries" и т.п.).
+SITE_GARBAGE_JSON_MARKERS = (
+    '"mutations"',
+    '"queries"',
+    '"pageProps"',
+)
+
+
+def looks_like_site_garbage(content: str) -> bool:
+    """Похож ли ответ веб-пула на служебные данные страницы (гидрацию).
+
+    Страховка на границе: основной санитайзер — в пуле (JS), здесь ловим
+    только явные маркеры, чтобы мусор не дошёл до пользователя как «ответ».
+    """
+    if content is None:
+        return False
+    text = str(content)
+    if any(marker in text for marker in SITE_GARBAGE_MARKERS):
+        return True
+    stripped = text.strip()
+    if len(stripped) >= 40 and stripped.startswith(("{", "[")):
+        return any(marker in text for marker in SITE_GARBAGE_JSON_MARKERS)
+    return False
+
+
 class BotPoolClient:
     """HTTP-клиент Puppeteer-бот-пула (WebPools/, сайты deepseek/kimi).
 
@@ -161,6 +204,13 @@ class BotPoolClient:
         "Бот-пул {site} пуст: нет ни одного готового бота "
         "(Chromium не установлен или бот не залогинен)."
     )
+
+    GARBAGE_ANSWER_MESSAGE = (
+        "Модель вернула вместо ответа служебные данные сайта "
+        "(гидрация страницы) — попробуйте ещё раз."
+    )
+
+    EMPTY_ANSWER_MESSAGE = "Модель вернула пустой ответ — попробуйте ещё раз."
 
     def pool_state(self) -> str:
         """Состояние пула по GET /health: «live» | «empty» | «» (не отвечает).
@@ -251,8 +301,19 @@ class BotPoolClient:
                 obj, error_message = safe_parse_response(response.text)
                 if obj is None:
                     return error_message, 0, True, False, 0
+                content = (obj.get("data") or {}).get("content") or ""
+                # СТРАХОВКА НА ГРАНИЦЕ: пул иногда отдаёт вместо ответа
+                # служебные данные сайта (гидрация страницы: window.
+                # HYDRATION_INIT_STATE={...}, __NEXT_DATA__ и т.п.). Такой
+                # текст — не ответ модели: показываем честную ошибку, а не
+                # мусор (в пуле мусор режется на уровне worker/server.js).
+                if looks_like_site_garbage(content):
+                    logger.warning("%s bot pool returned site garbage instead of an answer", self.label)
+                    return self.GARBAGE_ANSWER_MESSAGE, 0, True, False, 0
+                if not content.strip():
+                    return self.EMPTY_ANSWER_MESSAGE, 0, True, False, 0
                 # Пул не отдаёт usage — токены 0 (честно: «учёт недоступен»).
-                return obj["data"]["content"], 0, False, False, 0
+                return content, 0, False, False, 0
 
             if response.status_code in (429, 500, 502, 503, 504):
                 # 429 — все боты pool заняты (pool шлёт Retry-After, ~3с): транзитная
@@ -271,6 +332,11 @@ class BotPoolClient:
                     if "UI may have changed" in reason or "All answer XPath selectors failed" in reason:
                         return (f"{self.site_label} изменил интерфейс сайта — селекторы bot-пула устарели, "
                                 f"нужно обновить {self.selector_doc}."), 0, True, False, 0
+                    # Пул сам отсёк мусор (гидрация страницы) — ретраить бессмысленно:
+                    # отдаём честную ошибку сразу.
+                    if "GARBAGE_ANSWER" in reason:
+                        logger.warning("%s bot pool rejected the answer as site garbage: %s", self.label, reason[:200])
+                        return self.GARBAGE_ANSWER_MESSAGE, 0, True, False, 0
                 if attempt < max_attempts:
                     # Уважаем Retry-After (429/503 — бот освобождается/стартует),
                     # иначе мягкий backoff; ограничиваем сверху, чтобы не висеть.

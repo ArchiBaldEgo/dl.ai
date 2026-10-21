@@ -2491,6 +2491,91 @@ class BotPoolEmptyReplyTests(SimpleTestCase):
         return asyncio.run(client.ask("ping", user_id=1, thinking=False))
 
 
+class BotPoolGarbageAnswerTests(SimpleTestCase):
+    """Пул ответил мусором (служебные данные сайта — гидрация) вместо ответа
+    модели. Такой текст пользователю отдавать нельзя: клиент возвращает
+    честную ошибку, а не «код регионов»."""
+
+    def _client(self):
+        from ai.model_clients._base import BotPoolClient
+        return BotPoolClient(
+            base_url="http://127.0.0.1:9999",
+            model="deepseek",
+            label="Web DeepSeek",
+            provider="web_deepseek",
+            site_label="DeepSeek",
+            selector_doc="WebPools/sites/deepseek.js",
+        )
+
+    def _post(self, status_code, payload):
+        response = requests.Response()
+        response.status_code = status_code
+        response._content = json.dumps(payload).encode("utf-8")
+        return response
+
+    def _post_ok(self, content):
+        return self._post(200, {"ok": True, "data": {"content": content}})
+
+    def _run_ask(self, client):
+        import asyncio
+        return asyncio.run(client.ask("ping", user_id=1, thinking=False))
+
+    def test_hydration_payload_becomes_honest_error(self):
+        client = self._client()
+        junk = 'window.HYDRATION_INIT_STATE={"mutations":[],"queries":[{"dehydratedAt":1}]}'
+        with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post_ok(junk)):
+            text, tokens, is_error, _cut, _prompt = self._run_ask(client)
+        self.assertTrue(is_error)
+        self.assertEqual(tokens, 0)
+        self.assertIn("служебные данные сайта", text)
+
+    def test_next_data_becomes_honest_error(self):
+        client = self._client()
+        junk = '<script id="__NEXT_DATA__">{"props":{}}</script>'
+        with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post_ok(junk)):
+            text, _, is_error, _cut, _prompt = self._run_ask(client)
+        self.assertTrue(is_error)
+        self.assertIn("гидрация", text)
+
+    def test_empty_answer_becomes_error(self):
+        client = self._client()
+        with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post_ok("   ")):
+            text, _, is_error, _cut, _prompt = self._run_ask(client)
+        self.assertTrue(is_error)
+        self.assertIn("пустой ответ", text)
+
+    def test_normal_answer_passes_through(self):
+        client = self._client()
+        content = "Вот решение:\n\n```asm\n.model small\n.code\nstart:\n  nop\n```"
+        with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post_ok(content)):
+            text, _, is_error, _cut, _prompt = self._run_ask(client)
+        self.assertFalse(is_error)
+        self.assertEqual(text, content)
+
+    def test_prose_with_queries_word_is_not_garbage(self):
+        # JSON-маркеры («queries») — мусор только в JSON-контексте; обычный
+        # ответ модели проходит.
+        client = self._client()
+        content = "Сначала выполните queries, затем соберите результат из таблицы users."
+        with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post_ok(content)):
+            text, _, is_error, _cut, _prompt = self._run_ask(client)
+        self.assertFalse(is_error)
+        self.assertEqual(text, content)
+
+    def test_pool_rejected_garbage_is_not_retried(self):
+        # Пул сам отсёк мусор (reason=GARBAGE_ANSWER) → честная ошибка сразу,
+        # без бесполезных retry-ов по 3×300с.
+        client = self._client()
+        payload = {"ok": False, "reason": "GARBAGE_ANSWER: marker:__NEXT_DATA__"}
+        with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(502, payload)) as to_thread, \
+             patch("ai.model_clients._base.asyncio.sleep") as sleep:
+            text, _, is_error, _cut, _prompt = self._run_ask(client)
+        self.assertTrue(is_error)
+        self.assertIn("служебные данные сайта", text)
+        self.assertEqual(to_thread.call_count, 1)
+        sleep.assert_not_called()
+
+
 class ChatViewSelfHealTests(SimpleTestCase):
     """When no model is available for the current window, the chat page kicks a
     non-blocking forced sweep so a freshly-fixed key/balance recovers without

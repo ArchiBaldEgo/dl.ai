@@ -371,12 +371,18 @@ module.exports = {
             // ВАРИАНТЫ БЕЗ reasoning (прецедент Fallback 2): контейнер размышлений
             // тоже может носить 'markdown' — без исключений ловит простыню размышлений.
             "//div[contains(@class,'chat-content-item-assistant')][last()]//div[contains(@class,'markdown') and not(contains(@class,'think')) and not(contains(@class,'toolcall-content-text'))]",
-            // Fallback 2: answer-markdown без toolcall/thinking-обёртки
-            "//div[contains(@class,'markdown-container') and not(contains(@class,'toolcall-content-text'))]//div[contains(@class,'markdown')]",
-            "//div[contains(@class,'markdown') and not(contains(@class,'toolcall-content-text')) and not(contains(@class,'think'))]",
+            // Fallback 2: answer-markdown без toolcall/thinking-обёртки.
+            // ОГРАНИЧЕНЫ контейнером чата (chat-content-list): глобальные
+            // markdown-блоки ловили служебные блоки страницы (гидрация/лайдинг)
+            // вместо ответа модели. Глобальный вариант оставлен ниже как
+            // последний крайний случай (если класс контейнера сменится).
+            "//div[contains(@class,'chat-content-list')]//div[contains(@class,'markdown-container') and not(contains(@class,'toolcall-content-text'))]//div[contains(@class,'markdown')]",
+            "//div[contains(@class,'chat-content-list')]//div[contains(@class,'markdown') and not(contains(@class,'toolcall-content-text')) and not(contains(@class,'think'))]",
+            "//div[contains(@class,'chat-content-list')]//div[contains(@class,'markdown')]",
             // Fallback 3: весь последний assistant-item (конвертер разберёт markdown-блоки внутри)
             "//div[contains(@class,'chat-content-item-assistant')][last()]",
-            // Fallback 4: любой markdown-блок (broader — крайний случай)
+            // Fallback 4: любой markdown-блок (broader — крайний случай; в ответе
+            // остаётся фильтр мусора — гидрация страницы не пройдёт).
             "//div[contains(@class,'markdown')]",
         ],
         appearTimeoutMs: () => 20000,

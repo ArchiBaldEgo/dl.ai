@@ -30,6 +30,8 @@ const { log } = require('../utils/logger');
 
 const { clickIfExists } = require('../core/page-utils');
 
+const { GARBAGE_MARKERS, GARBAGE_JSON_MARKERS, describeGarbage } = require('./answerSanitizer');
+
 const { sleep } = require('../utils/helpers');
 
 const { hist } = require('../hist');
@@ -54,6 +56,26 @@ function extractCodeFromPreInner(preInnerHtml) {
         .replace(/<br\s*\/?>/gi, '\n')
         .replace(/<\/?[^>]+>/g, ''); // снос всех тегов подсветки
     return decodeHtmlEntities(raw).replace(/\r\n/g, '\n').trim();
+}
+
+/**
+ * Вырезает ТЕГИ вместе с их СОДЕРЖИМЫМ: <script>, <style>, <noscript>,
+ * <template>.
+ *
+ * Зачем: содержимое inline-скриптов страницы (гидрация Next.js/Remix —
+ * `window.HYDRATION_INIT_STATE={...}`, `self.__next_f.push(...)`) НЕ является
+ * ответом модели, но раньше попадало в текст ответа («код регионов» у юзера).
+ *
+ * Порядок важен: функция вызывается ПОСЛЕ извлечения code blocks (они
+ * хранятся в плейсхолдерах), поэтому пример кода с тегом <script> внутри
+ * ответа модели не потеряется.
+ */
+function stripNonContentTags(html) {
+    return String(html || '')
+        // Парные теги — вместе с содержимым.
+        .replace(/<(script|style|noscript|template)\b[\s\S]*?<\/\1>/gi, '')
+        // Незакрытый тег (хвост разметки) — режем до конца строки.
+        .replace(/<(script|style|noscript|template)\b[\s\S]*$/gi, '');
 }
 
 /**
@@ -84,6 +106,12 @@ function htmlToMarkdown(html, { stripOuterDiv, preExtractors = [] }) {
             return token;
         });
     }
+
+    // 1б) Вырезаем служебные блоки разметки (<script>/<style>/<noscript>/
+    //     <template>) ВМЕСТЕ с содержимым — иначе гидрация страницы попадает
+    //     в «ответ» модели. Сделано после извлечения code blocks: пример кода
+    //     с <script> внутри ответа остаётся целым.
+    s = stripNonContentTags(s);
 
     // 2) Ссылки
     // <a href="...">text</a> -> [text](url)
@@ -413,6 +441,10 @@ async function getRobustLastAnswerData(page, {
     const extraLabelsSrc = extraThinkLabels.length
         ? extraThinkLabels.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
         : null;
+    // Маркеры мусора (гидрация страницы) передаются в браузер строкой-массивом:
+    // список живёт в общем модуле answerSanitizer (единый источник правды).
+    const garbageMarkersSrc = GARBAGE_MARKERS;
+    const garbageJsonMarkersSrc = GARBAGE_JSON_MARKERS;
 
     const data = await page.evaluate((opts) => {
         const containerSels = [
@@ -447,24 +479,66 @@ async function getRobustLastAnswerData(page, {
             "[class*='message']",
         ];
 
-        const pickLastWithText = (root) => {
+        // Служебные теги: их содержимое (гидрация, стили) НИКОГДА не является
+        // ответом модели.
+        const SKIP_TAGS = ['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'];
+        const isSkippedNode = (node) =>
+            !!node && SKIP_TAGS.indexOf(String(node.tagName || '').toUpperCase()) !== -1;
+
+        // Похож ли текст на мусор (служебные данные страницы)? RegExp сюда не
+        // передаём — собираем прямо здесь, список маркеров общий.
+        const garbageMarkers = Array.isArray(opts.garbageMarkers) ? opts.garbageMarkers : [];
+        const garbageJsonMarkers = Array.isArray(opts.garbageJsonMarkers) ? opts.garbageJsonMarkers : [];
+        const looksGarbage = (text) => {
+            const s = String(text || '');
+            if (!s.trim()) return true;
+            for (const m of garbageMarkers) {
+                if (s.includes(m)) return true;
+            }
+            // JSON-контекст: маркеры состояния страницы — мусор только если
+            // весь текст похож на JSON-объект (иначе это обычный ответ).
+            const t = s.trim();
+            if (t.length >= 40 && /^[[{]/.test(t)) {
+                for (const m of garbageJsonMarkers) {
+                    if (s.includes(m)) return true;
+                }
+            }
+            return /window\.[A-Z][A-Z0-9_]{2,}\s*=/.test(s);
+        };
+
+        const pickLastWithText = (root, allowChildrenFallback) => {
             if (!root) return null;
             for (const sel of bubbleSels) {
                 const nodes = root.querySelectorAll(sel);
                 for (let i = nodes.length - 1; i >= 0; i--) {
-                    if ((nodes[i].innerText || '').trim().length > 0) return nodes[i];
+                    if (isSkippedNode(nodes[i])) continue;
+                    const text = (nodes[i].innerText || '').trim();
+                    if (text.length === 0) continue;
+                    // Пузырь с гидрацией/мусором — не ответ: пропускаем и берём
+                    // предыдущий (нормальный) пузырь.
+                    if (looksGarbage(text)) continue;
+                    return nodes[i];
                 }
             }
-            // Крайний случай: последний дочерний блок контейнера с substantial текстом
-            // (user-сообщение идёт выше — последний с текстом = текущий ответ ассистента).
+            // Крайний случай (только для найденного контейнера чата): последний
+            // дочерний блок с substantial текстом (user-сообщение идёт выше —
+            // последний с текстом = текущий ответ ассистента). Для document.body
+            // этот фолбэк ЗАПРЕЩЁН: последний child body — это обычно inline
+            // <script> с гидрацией страницы (именно он раньше и становился
+            // «ответом»). Скрипты/стили/шаблоны пропускаем в любом случае.
+            if (!allowChildrenFallback) return null;
             const children = Array.from(root.children || []);
             for (let i = children.length - 1; i >= 0; i--) {
-                if ((children[i].innerText || '').trim().length > 10) return children[i];
+                if (isSkippedNode(children[i])) continue;
+                const text = (children[i].innerText || '').trim();
+                if (text.length <= 10) continue;
+                if (looksGarbage(text)) continue;
+                return children[i];
             }
             return null;
         };
 
-        const bubble = pickLastWithText(container) || pickLastWithText(document.body);
+        const bubble = pickLastWithText(container, true) || pickLastWithText(document.body, false);
         if (!bubble) return { html: '', text: '' };
 
         // Reasoning/«размышления» НЕ должны попадать в content ответа: python-сторона
@@ -498,15 +572,32 @@ async function getRobustLastAnswerData(page, {
             }
         });
 
-        // В пузыре может быть НЕСКОЛЬКО markdown-блоков (размышления + ответ);
-        // ответ = ПОСЛЕДНИЙ БЛОК С ТЕКСТОМ — финал модели всегда последним.
+        // В пузыре может быть НЕСКОЛЬКО markdown-блоков (размышления + ответ).
+        // Брали ПОСЛЕДНИЙ блок с текстом, но финал модели не всегда последний
+        // (сайт доклеивает свои служебные блоки) — и самый полезный текст
+        // терялся. При НЕСКОЛЬКИХ блоках выбираем САМЫЙ СОДЕРЖАТЕЛЬНЫЙ (максимум
+        // непустого текста; при равенстве длин — последний, ближе к финалу
+        // генерации). Блоки-мусор (гидрация) в кандидаты не попадают.
+        // Единственный блок — как раньше, отдаём весь пузырь (clone).
         const blocks = Array.from(clone.querySelectorAll(opts.blockSelector))
-            .filter((n) => (n.innerText || '').trim().length > 0);
-        const picked = blocks.length > 1 ? blocks[blocks.length - 1] : clone;
+            .filter((n) => (n.innerText || '').trim().length > 0)
+            .filter((n) => !looksGarbage(n.innerText || ''));
+        let picked = clone;
+        if (blocks.length > 1) {
+            let best = blocks[0];
+            for (let i = 1; i < blocks.length; i++) {
+                const len = (blocks[i].innerText || '').trim().length;
+                const bestLen = (best.innerText || '').trim().length;
+                if (len >= bestLen) best = blocks[i];
+            }
+            picked = best;
+        }
         return { html: picked.outerHTML || '', text: (picked.innerText || '').trim() };
     }, {
         extraThinkClass: extraThinkSrc,
         extraThinkLabels: extraLabelsSrc,
+        garbageMarkers: garbageMarkersSrc,
+        garbageJsonMarkers: garbageJsonMarkersSrc,
         blockSelector,
     });
     return data || { html: '', text: '' };
@@ -672,6 +763,10 @@ async function sendMessage(ctx, payload = {}, site) {
         let answer = null;
         let answerXpUsed = null;
         let inner = '';
+        // Причина отбраковки кандидата как мусора (гидрация страницы) — нужна
+        // для честной диагностики: Django увидит GARBAGE_ANSWER и не будет
+        // ретраить пул по кругу.
+        let garbageHit = '';
         for (const xp of answerXPaths) {
             try {
                 // Снимок посреди код-блока (незакрытый <pre>) — ждать продолжения:
@@ -700,11 +795,19 @@ async function sendMessage(ctx, payload = {}, site) {
                 // Текст, ПОЛНОСТЬЮ содержащийся в промпте — пузырь юзера/эхо:
                 // отбраковываем и идём к следующему селектору.
                 const echoHit = isEchoOfUserMessage(inner, messageText);
-                if (inner && inner.trim().length >= 1 && !echoHit) {
+                // Мусор (гидрация/служебные данные страницы) — это НЕ ответ:
+                // такой кандидат отбраковываем и идём к следующему селектору.
+                const garbageReason = describeGarbage(inner);
+                if (garbageReason) garbageHit = garbageReason;
+                if (inner && inner.trim().length >= 1 && !echoHit && !garbageReason) {
                     answerXpUsed = xp;
                     break;
                 }
-                log('XPath ' + xp + (echoHit ? ' matched an echo of the user message' : ' matched an empty skeleton (' + inner.trim().length + ' chars text)') + ', trying next selector');
+                log('XPath ' + xp + (echoHit
+                    ? ' matched an echo of the user message'
+                    : (garbageReason
+                        ? ' matched site garbage (' + garbageReason + ')'
+                        : ' matched an empty skeleton (' + inner.trim().length + ' chars text)')) + ', trying next selector');
                 answer = null;
                 inner = '';
             } catch (e) {
@@ -728,7 +831,9 @@ async function sendMessage(ctx, payload = {}, site) {
                 if (robustHtml) {
                     inner = toMarkdown(robustHtml);
                     const robustEcho = isEchoOfUserMessage(inner, messageText);
-                    if (inner && inner.trim().length >= 1 && !robustEcho) {
+                    const robustGarbage = describeGarbage(inner);
+                    if (robustGarbage) garbageHit = robustGarbage;
+                    if (inner && inner.trim().length >= 1 && !robustEcho && !robustGarbage) {
                         answer = robustHtml;
                         answerXpUsed = 'robust-fallback';
                         log('Robust fallback succeeded: extracted answer from generic assistant bubble (' + inner.trim().length + ' chars text)');
@@ -736,6 +841,10 @@ async function sendMessage(ctx, payload = {}, site) {
                         // «Последний пузырь с текстом» до появления ответа — это
                         // промпт юзера; раньше возвращался как «ответ модели».
                         log('Robust fallback matched a bubble whose text is a fragment of the user message — rejected as echo');
+                    } else if (robustGarbage) {
+                        // Пузырь оказался служебными данными страницы (гидрация) —
+                        // ответом это быть не может.
+                        log('Robust fallback matched a bubble with site garbage (' + robustGarbage + ') — rejected');
                     } else {
                         log('Robust fallback matched a bubble but converter yielded empty text');
                     }
@@ -752,7 +861,13 @@ async function sendMessage(ctx, payload = {}, site) {
             return {
                 ok: false,
                 reason: "can't send message",
-                data: { "moreInformation": cfg.labels.selectorsFailed }
+                data: {
+                    "moreInformation": garbageHit
+                        // Кандидат нашёлся, но это были служебные данные страницы
+                        // (гидрация) — честная метка для Django: не ретраить.
+                        ? `GARBAGE_ANSWER: ${garbageHit}`
+                        : cfg.labels.selectorsFailed
+                }
             };
         }
 
@@ -769,7 +884,9 @@ async function sendMessage(ctx, payload = {}, site) {
                         stopXPaths: cfg.stopXPaths,
                     });
                     const retryInner = toMarkdown(retryAnswer);
-                    if (retryInner && retryInner.trim().length >= 1 && retryInner.trim().length > inner.trim().length && !isEchoOfUserMessage(retryInner, messageText)) {
+                    if (retryInner && retryInner.trim().length >= 1 && retryInner.trim().length > inner.trim().length
+                        && !isEchoOfUserMessage(retryInner, messageText)
+                        && !describeGarbage(retryInner)) {
                         inner = retryInner;
                         answer = retryAnswer;
                         answerXpUsed = xp;
@@ -798,6 +915,21 @@ async function sendMessage(ctx, payload = {}, site) {
             if (guard) {
                 return guard;
             }
+        }
+
+        // ФИНАЛЬНЫЙ ГЕЙТ МУСОРА: ответ, который выглядит как служебные данные
+        // страницы (гидрация Next.js/Remix: window.HYDRATION_INIT_STATE=…,
+        // __NEXT_DATA__, self.__next_f.push(…)), пользователю отдавать нельзя —
+        // это не ответ модели. Отдаём честную ошибку (Django покажет её юзеру
+        // и НЕ будет ретраить пул по кругу).
+        const finalGarbage = describeGarbage(inner);
+        if (finalGarbage) {
+            log('Answer rejected as site garbage (' + finalGarbage + ') — not returning it to the client');
+            return {
+                ok: false,
+                reason: "can't send message",
+                data: { "moreInformation": `GARBAGE_ANSWER: ${finalGarbage}` }
+            };
         }
 
         const answerData = {
