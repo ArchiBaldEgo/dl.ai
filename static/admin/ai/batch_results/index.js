@@ -212,7 +212,7 @@ window.ArmBatchResults = (function () {
     return line;
   }
 
-  // els = {card, list, perModel, perTopic, errors, reasons}
+  // els = {card, list, perModel, perTopic, errors, reasons, log}
   function renderReport(report, els) {
     // Скип перерисовки отчёта: во время живого прогона поллинг приносит
     // те же цифры — пересобирать таблицы «Итог по моделям/темам» каждые
@@ -222,6 +222,9 @@ window.ArmBatchResults = (function () {
       report.tokens_total, report.truncated_pairs,
       (report.per_model || []).length, (report.per_topic || []).length,
       (report.errors_by_topic || []).length, (report.failure_reasons || []).length,
+      (report.hints || []).length,
+      (report.run_topic || {}).name || '',
+      (report.log_lines || []).length,
       report.interim ? 1 : 0,
     ].join(':') : 'none';
     if (els._sig === reportSig && els.card && els.card.style.display !== 'none') {
@@ -235,6 +238,7 @@ window.ArmBatchResults = (function () {
       if (els.perTopic) { els.perTopic.innerHTML = ''; }
       if (els.errors) { els.errors.innerHTML = ''; }
       if (els.reasons) { els.reasons.innerHTML = ''; }
+      if (els.log) { els.log.innerHTML = ''; }
       setInterimNote(els.card, false);
       return;
     }
@@ -252,6 +256,13 @@ window.ArmBatchResults = (function () {
       }
       const timeLine = runMetaLine(report);
       if (timeLine) { lines.push('<strong>Прогон:</strong> ' + escapeHtml(timeLine)); }
+      // Тема прогона — запасная тема для задач, у которых свою определить не
+      // удалось (см. ensure_task → fallback_topic_id). Показываем, чтобы
+      // строки отчёта с этой темой не читались как «своя тема задачи».
+      if (report.run_topic && report.run_topic.name) {
+        lines.push('<strong>Тема прогона:</strong> ' + escapeHtml(report.run_topic.name)
+          + ' — пары без собственной темы наследуют её');
+      }
       const volumeLine = runVolumeLine(report);
       if (volumeLine) { lines.push('<strong>Объём:</strong> ' + escapeHtml(volumeLine)); }
       els.list.innerHTML = lines.map(function (line) { return '<li>' + line + '</li>'; }).join('');
@@ -271,6 +282,7 @@ window.ArmBatchResults = (function () {
     }
     renderErrorsByTopic(report.errors_by_topic || [], els.errors);
     renderFailureReasons(report.failure_reasons || [], els.reasons);
+    renderRunLog(report.log_lines || [], els.log);
     if (els.card) { els.card.style.display = 'block'; }
   }
 
@@ -291,6 +303,29 @@ window.ArmBatchResults = (function () {
       + '<table class="arm-summary-table"><thead><tr><th>Причина</th>'
       + '<th class="arm-col-num">Пар</th><th class="arm-col-num">%</th></tr></thead>'
       + '<tbody>' + body.join('') + '</tbody></table>';
+  }
+
+  // «Журнал прогона»: события прогона (сбой ответа модели → повтор).
+  // Сервер присылает готовые строки (arm_runner::_append_run_log) — здесь
+  // только форматируем время.
+  function renderRunLog(lines, wrapEl) {
+    if (!wrapEl) { return; }
+    if (!lines || !lines.length) { wrapEl.innerHTML = ''; return; }
+    const body = lines.map(function (line) {
+      const ts = line && line.ts ? formatLogTime(line.ts) : '';
+      const text = escapeHtml((line && line.text) || '');
+      return '<li>' + (ts ? '<span class="arm-log-time">' + escapeHtml(ts) + '</span> ' : '') + text + '</li>';
+    });
+    wrapEl.innerHTML = '<h3>Журнал прогона</h3>'
+      + '<ul class="arm-run-log">' + body.join('') + '</ul>';
+  }
+
+  // Время строки журнала прогона — московское (как в журнале запросов).
+  function formatLogTime(ts) {
+    const d = new Date((Number(ts) || 0) * 1000);
+    if (isNaN(d.getTime())) { return ''; }
+    const pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
 
   // «Ошибки по темам»: нерешённые пары (failed/skipped), компактно — до 6
@@ -315,13 +350,19 @@ window.ArmBatchResults = (function () {
     const body = rows.map(function (row) {
       const items = (row.items || []).map(function (x) { return escapeHtml(x); }).join(', ')
         + (row.hidden > 0 ? ' <span class="arm-section-note">+ ещё ' + escapeHtml(row.hidden) + '</span>' : '');
+      // Причины сбоя внутри темы (компиляция / неверный ответ / нет кода /
+      // сбой модели) — считает сервер (arm_runner::_build_batch_report).
+      const reasons = (row.reasons || []).map(function (r) {
+        return escapeHtml(r.label) + ' — ' + escapeHtml(r.count);
+      }).join(', ');
       return '<tr><td>' + escapeHtml(row.topic) + '</td>'
         + '<td class="arm-col-num">' + escapeHtml(row.count) + '</td>'
+        + '<td>' + reasons + '</td>'
         + '<td>' + items + '</td></tr>';
     });
     wrapEl.innerHTML = '<h3>Ошибки по темам</h3>'
       + '<table class="arm-summary-table"><thead><tr><th>Тема</th>'
-      + '<th class="arm-col-num">Не решено</th><th>Что не решено</th></tr></thead>'
+      + '<th class="arm-col-num">Не решено</th><th>Причины</th><th>Что не решено</th></tr></thead>'
       + '<tbody>' + body.join('') + '</tbody></table>';
   }
 
@@ -711,6 +752,7 @@ window.ArmBatchResults = (function () {
     var perTopicWrap = document.createElement('div'); perTopicWrap.style.marginTop = '16px'; reportCard.appendChild(perTopicWrap);
     var errorsWrap = document.createElement('div'); errorsWrap.style.marginTop = '16px'; reportCard.appendChild(errorsWrap);
     var reasonsWrap = document.createElement('div'); reasonsWrap.style.marginTop = '16px'; reportCard.appendChild(reasonsWrap);
+    var logWrap = document.createElement('div'); logWrap.style.marginTop = '16px'; reportCard.appendChild(logWrap);
     rootEl.appendChild(reportCard);
 
     var resultsCard = document.createElement('section');
@@ -726,7 +768,7 @@ window.ArmBatchResults = (function () {
     var resultsEl = document.createElement('div'); resultsCard.appendChild(resultsEl);
     rootEl.appendChild(resultsCard);
 
-    var reportEls = { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap, errors: errorsWrap, reasons: reasonsWrap };
+    var reportEls = { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap, errors: errorsWrap, reasons: reasonsWrap, log: logWrap };
     renderReport(snapshot.report || null, reportEls);
     // В шапке карточки — переключатель «Все / Не пройденные».
     renderResults(snapshot.results || [], resultsEl, resultsCard, resultsHead);

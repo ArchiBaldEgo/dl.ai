@@ -239,6 +239,14 @@ class Task(models.Model):
         help_text="Например .pas, .cpp, .py — используется для get-solution.",
     )
     active = models.BooleanField(default=True, db_index=True, verbose_name="Активна")
+    # Путь задачи в дереве задач DL (get-task-info → path; либо дерево
+    # курса, закэшированное на форме /arm/solve/), напр.
+    # «Программирование [Ассемблер i8086, C-MPA]\Одномерные массивы\Сумма цифр числа».
+    # Нужен для честной подписи темы в отчёте пакетного решения: когда
+    # локальная тема не определена, подписью служит папка DL, а не имя задачи.
+    tree_path = models.CharField(
+        max_length=512, blank=True, default="", verbose_name="Путь в дереве задач DL",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
 
@@ -1155,7 +1163,6 @@ class AIModelTestResult(models.Model):
     FR_WRONG_ANSWER = "wrong_answer"
     FR_UNDEFINED = "undefined"
     FR_SKIPPED = "skipped"
-
     FAILURE_REASON_CHOICES = (
         (FR_MODEL_ERROR, "Сбой ответа модели"),
         (FR_NO_CODE, "Не выкушен код"),
@@ -1228,6 +1235,17 @@ class AIModelTestResult(models.Model):
     # прогона; пара помечается чинно, потому что часть ответа реально потеряна.
     truncated = models.BooleanField(default=False, verbose_name="Ответ обрезан")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
+    # Время последнего обновления строки. Повтор пары перезаписывает её через
+    # update_or_create → updated_at меняется, created_at остаётся прежним.
+    # По updated_at результаты сортируются «свежие сверху» (см.
+    # arm_runner._sort_results_fresh_first).
+    #
+    # Пишется ЯВНО (не auto_now): на SQLite добавление auto_now-поля
+    # пересоздаёт таблицу, а у этой модели в Meta.indexes есть
+    # postgres-only GinIndex (gin_trgm_ops) — пересоздание падало бы с
+    # «near "gin_trgm_ops": syntax error». Пишет писатель строки
+    # (arm_runner._write_pair_row).
+    updated_at = models.DateTimeField(null=True, blank=True, verbose_name="Обновлён")
 
     class Meta:
         db_table = "ai_ai_model_test_result"

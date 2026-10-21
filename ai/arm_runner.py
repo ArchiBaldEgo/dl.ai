@@ -45,7 +45,7 @@ from django.utils.html import strip_tags
 
 from .model_clients.exceptions import humanize_model_error
 from .model_clients import is_output_truncated, get_no_think_handler
-from .services.task_registry import dl_task_url
+from .services.task_registry import dl_path_folder, dl_task_url
 from .i18n import get_ui_language_suffix
 from .model_health import get_runtime_model_handlers, is_arm_solve_model
 from .models import AIModelTestResult, AIModelTestRun, AIRequestLog, ArmPromptBinding, ExternalDLAccount, Task
@@ -171,10 +171,15 @@ _VERDICT_SKIPPED = "skipped"
 _REASON_MODEL_ERROR = "model_error"
 _REASON_NO_CODE = "no_code"
 _REASON_SKIPPED = "skipped"
-
 # Лимит позиций в строке «Ошибки по темам» (остальное — «+ ещё N»):
 # отчёт не должен разбухать на больших прогонах.
 _REPORT_ERRORS_ITEM_CAP = 6
+
+# Сколько попыток вызова модели делаем при «Сбое ответа модели»
+# (таймаут/401/429/провайдер упал). ТЗ: «вывести сначала, что сбой, и потом
+# сразу переслать, и так 5 раз» — сбой печатается в журнал прогона, запрос
+# пересылается немедленно, всего до 5 попыток.
+_MODEL_ERROR_MAX_ATTEMPTS = 5
 
 # Тяжёлые поля batch-результата (тело ответа): не встраиваются в снапшот
 # страницы / поллинга (light-режим), подтягиваются по AJAX при раскрытии
@@ -408,16 +413,21 @@ def _topic_bucket_key(item):
 
 
 def _topic_bucket_label(item):
-    """Подпись строки «по темам»: название темы, иначе — по-человечески.
+    """Подпись строки «по темам»: название темы, иначе — папка DL, иначе —
+    по-человечески.
 
     Владелец отдельно просил убрать «Без темы» из отчёта: в прогоне должны
     быть видны ВСЕ задействованные темы. Тема без названия — это не
     «отсутствующая тема», а конкретная задача вне темы DL-дерева; подпись
-    строится по языку/имени задачи, чтобы строка читалась.
+    строится по ПАПКЕ DL (путь задачи в дереве: «Курс\\Папка\\Задача» →
+    «Папка»), а только если пути нет — по языку/имени задачи.
     """
     name = (item.get("topic_name") or "").strip()
     if name:
         return name
+    folder = dl_path_folder(item.get("tree_path") or "")
+    if folder:
+        return folder
     lang = (item.get("prog_lang_name") or "").strip()
     task_name = (item.get("task_name") or "").strip()
     if lang and task_name:
@@ -483,7 +493,27 @@ def _build_failure_reasons(results):
     return rows
 
 
-def _build_batch_report(results):
+def _errors_bucket_key(item):
+    """Ключ группировки строки «Ошибки по темам».
+
+    Как и в «итоге по темам», темы группируются ПО ID (одинаковые названия
+    у разных языков не сливаются). Если ID нет, но название есть — по
+    названию; если нет и его — по ПАПКЕ DL (путь задачи в дереве), а без
+    пути — по самой задаче.
+    """
+    topic_key = _topic_bucket_key(item)
+    if topic_key:
+        return "t:" + topic_key
+    topic_name = (item.get("topic_name") or "").strip()
+    if topic_name:
+        return "n:" + topic_name.lower()
+    folder = dl_path_folder(item.get("tree_path") or "")
+    if folder:
+        return "dl:" + folder.lower()
+    return "task:" + str(item.get("task_node_id") or item.get("task_name") or "?")
+
+
+def _build_batch_report(results, run_topic_id=None, run_topic_name=None):
     """Batch-solve report: per-model + per-topic tables + overall counters.
 
     Добавлено (2026-09): models_count / tasks_count (объём прогона из
@@ -498,6 +528,12 @@ def _build_batch_report(results):
     совпадают у разных языков (i8086 / C-MPA), и без ID отчёт сливал бы их
     в одну строку. Тема без названия подписывается по-человечески, а не
     «Без темы»: в прогоне всегда видно, какие темы задействованы.
+
+    ``run_topic_id``/``run_topic_name`` — тема, выбранная оператором на форме
+    прогона. Пары, у которых собственную тему определить не удалось,
+    наследуют её (ensure_task → fallback_topic_id) — в отчёте это отмечено
+    полем ``run_topic``, чтобы было видно, что часть строк — не «своя» тема
+    задачи, а запасная тема прогона.
     """
     if not results:
         return None
@@ -528,27 +564,45 @@ def _build_batch_report(results):
     # Ошибки по темам: пары с вердиктом «не решено» (failed) и «пропущено»
     # (не протестировано) — они и есть проблемы прогона. Items сокращаются
     # до _REPORT_ERRORS_ITEM_CAP позиций на тему (остальное — «+ ещё N»).
+    # reasons — счётчики причин сбоя ВНУТРИ темы (компиляция / неверный
+    # ответ / нет кода / сбой модели): по одной теме видно, ЧЕМ именно
+    # не решено (владелец просил «посмотреть для каждой темы, какие были
+    # ошибки»).
     errors_map: dict = {}
     for r in results:
         verdict = r.get("verdict")
         if verdict in (_VERDICT_SOLVED, None):
             continue
-        topic = _topic_bucket_label(r)
-        bucket = errors_map.setdefault(topic, {"count": 0, "items": []})
+        key = _errors_bucket_key(r)
+        bucket = errors_map.setdefault(
+            key, {"count": 0, "items": [], "label": _topic_bucket_label(r), "reasons": {}}
+        )
         bucket["count"] += 1
+        reason = (r.get("failure_reason") or "").strip() or "undefined"
+        bucket["reasons"][reason] = bucket["reasons"].get(reason, 0) + 1
         task_label = str(r.get("task_name") or ("#" + str(r.get("task_node_id") or "")))
         model_label = str(r.get("model_title") or r.get("model_key") or "?")
         if len(bucket["items"]) < _REPORT_ERRORS_ITEM_CAP:
             bucket["items"].append(f"{task_label} × {model_label}")
     errors_by_topic = [
         {
-            "topic": topic,
+            "topic": bucket["label"],
             "count": bucket["count"],
             "items": bucket["items"],
             "hidden": bucket["count"] - len(bucket["items"]),
+            "reasons": [
+                {
+                    "key": reason,
+                    "label": AIModelTestResult.FAILURE_REASON_LABELS.get(reason, reason),
+                    "count": count,
+                }
+                for reason, count in sorted(
+                    bucket["reasons"].items(), key=lambda kv: (-kv[1], kv[0])
+                )
+            ],
         }
-        for topic, bucket in sorted(
-            errors_map.items(), key=lambda kv: (-kv[1]["count"], kv[0])
+        for _key, bucket in sorted(
+            errors_map.items(), key=lambda kv: (-kv[1]["count"], kv[1]["label"])
         )
     ]
 
@@ -565,10 +619,27 @@ def _build_batch_report(results):
         "per_topic": per_topic,
         "models_count": models_count,
         "tasks_count": tasks_count,
+        # Тема прогона (запасная тема для задач без своей) — см. докстринг.
+        "run_topic": {
+            "id": run_topic_id,
+            "name": (run_topic_name or "").strip(),
+        } if (run_topic_id or run_topic_name) else None,
         "errors_by_topic": errors_by_topic,
         "failure_reasons": failure_reasons,
         "topics_used": _topics_used(results),
     }
+
+
+def _attach_log_lines(report, log_lines):
+    """Журнал прогона (сбои модели и повторы) — в отчёт.
+
+    Отчёт может быть None (пустые результаты прогона) — тогда журнал
+    некуда класть, но ломать нечего.
+    """
+    if report is None:
+        return None
+    report["log_lines"] = list(log_lines or [])
+    return report
 
 
 def _attach_run_meta(report, started_ts, finished_ts=None, now_ts=None):
@@ -605,12 +676,18 @@ def _interim_live_report(job):
     """
     if job.get("run_type") != "batch":
         return None
-    report = _build_batch_report(job.get("results") or [])
+    report = _build_batch_report(
+        _sort_results_fresh_first(job.get("results") or []),
+        run_topic_id=job.get("topic_id"),
+        run_topic_name=job.get("topic_name"),
+    )
     if report is None:
         return None
     _attach_run_meta(report, job.get("created_at_ts"), None, now_ts=time.time())
     report["interim"] = True
-    return report
+    # Журнал прогона (сбои модели и повторы) — в отчёте, чтобы он был виден
+    # и в живом поллинге, и в сохранённом отчёте.
+    return _attach_log_lines(report, job.get("log_lines"))
 
 
 def _update_job(run_id, **updates):
@@ -982,6 +1059,7 @@ def _run_job_worker(
                     "short_response": result_item["short_response"],
                     "raw_response": (result_item["raw_response"] or "")[:8000],
                     "truncated": bool(result_item.get("truncated")),
+                    "updated_at": timezone.now(),
                 },
             )
 
@@ -1574,7 +1652,11 @@ def _prepare_batch_run(
     писать нечего (guard «нет задач/моделей»: failed-записи сделаны здесь же,
     воркер просто завершается).
     """
-    from .services.task_registry import EXTENSION_TO_LANG, ensure_task
+    from .services.task_registry import (
+        EXTENSION_TO_LANG,
+        dl_tree_path_map,
+        ensure_task,
+    )
 
     user, username, external_id, full_name = _resolve_user(user_id)
     models_titles = [m["title"] for m in ordered_models]
@@ -1641,6 +1723,9 @@ def _prepare_batch_run(
     # фильтром по этому языку — иначе _resolve_batch_prompt резолвит
     # (новый язык, stale-тема старого) и не находит точную привязку.
     tasks = []
+    # Пути в дереве DL — из кэша дерева курса (без запросов к DL): нужны для
+    # честной подписи темы в отчёте (папка DL, а не имя задачи).
+    path_map = dl_tree_path_map(course_id) if course_id else {}
     for node_id in node_ids:
         task = ensure_task(
             node_id, session_id=session_id, course_id=course_id,
@@ -1652,6 +1737,11 @@ def _prepare_batch_run(
         )
         if task is None:
             continue
+        if not task.tree_path:
+            path = path_map.get(str(node_id))
+            if path:
+                task.tree_path = path[:512]
+                task.save(update_fields=["tree_path"])
         tasks.append(task)
 
     # Refetch со select_related: model-потоки читают task.topic.* /
@@ -1731,6 +1821,9 @@ def _prepare_batch_run(
             "topic_name": topic_name,
             "topic_id": task.topic_id,
             "prompt_id": task_prompt_id,
+            # Путь задачи в дереве DL — подпись темы, когда локальная тема
+            # не определена (папка DL вместо имени задачи).
+            "tree_path": task.tree_path or "",
         })
 
     # Кэш имён промптов для записи в «Решённые задачи» (save_solutions):
@@ -1897,6 +1990,85 @@ def _batch_progress_entry(job, model_index):
     return entries[model_index] if model_index < len(entries) else None
 
 
+def _append_run_log(run_id, text):
+    """Дописать строку в журнал прогона (in-memory ``job["log_lines"]``).
+
+    Лок берётся ЗДЕСЬ: ``_jobs_lock`` нереентерабельный — вызывать эту
+    функцию из-под уже взятого лока нельзя (дедлок). Воркер пишет сюда
+    события прогона (например, «Сбой ответа модели → повтор»), они видны
+    в живом снапшоте и сохраняются в отчёте прогона.
+    """
+    if not run_id or not text:
+        return
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        job.setdefault("log_lines", []).append({
+            "ts": time.time(),
+            "text": str(text)[:1000],
+        })
+        job["updated_at_ts"] = time.time()
+
+
+def _call_model_with_retries(ctx, model, message, client_id, task_label):
+    """Вызов модели с автоповтором при «Сбое ответа модели».
+
+    Возвращает ``(response, gen_seconds)`` — ответ хендлера (кортеж провайдера)
+    и суммарное время вызовов модели (в попытках повторов тоже). Логика повторов:
+
+    * сбой (провайдер бросил исключение ИЛИ хендлер вернул is_error=True)
+      печатается в журнал прогона **до** следующего вызова — сначала видно
+      сбой, потом запрос уходит заново (ТЗ пользователя);
+    * всего до ``_MODEL_ERROR_MAX_ATTEMPTS`` попыток;
+    * успех — обычное продолжение пары.
+
+    Если все попытки провалились И последняя упала исключением — оно
+    пробрасывается наружу (общий обработчик пары запишет «Сбой ответа
+    модели»). Если хендлер вернул is_error=True — возвращается последний
+    ответ: вызывающий код сам разберёт его как сбой модели.
+    """
+    attempts = 0
+    last_exc = None
+    gen_seconds = 0.0
+    while True:
+        attempts += 1
+        gen_started = perf_counter()
+        try:
+            response = async_to_sync(model["handler"])(message, client_id)
+            last_exc = None
+        except Exception as call_exc:  # noqa: BLE001 — сбой модели, не прогона
+            response = None
+            last_exc = call_exc
+        gen_seconds += round(perf_counter() - gen_started, 2)
+        if _is_cancel_requested(ctx["run_id"]):
+            return None, gen_seconds
+        if last_exc is None and not _is_model_error(response):
+            return response, gen_seconds
+        if last_exc is not None:
+            fail_text = str(last_exc)[:200]
+        else:
+            fail_raw, _ = _extract_model_response(response)
+            fail_text = strip_tags(_strip_think_blocks(fail_raw)).strip()[:200]
+        if attempts < _MODEL_ERROR_MAX_ATTEMPTS:
+            _append_run_log(
+                ctx["run_id"],
+                f"Сбой ответа модели ({model['title']}), задача «{task_label}»: "
+                f"{fail_text or 'ошибка провайдера'} — повтор "
+                f"{attempts + 1}/{_MODEL_ERROR_MAX_ATTEMPTS}",
+            )
+            continue
+        _append_run_log(
+            ctx["run_id"],
+            f"Сбой ответа модели ({model['title']}), задача «{task_label}»: "
+            f"{fail_text or 'ошибка провайдера'} — попыток {_MODEL_ERROR_MAX_ATTEMPTS}, "
+            "пара помечена «Сбой ответа модели»",
+        )
+        if last_exc is not None:
+            raise last_exc
+        return response, gen_seconds
+
+
 def _mark_batch_pair_started(run_id, model_index, model, task_ctx):
     """Пометить начало пары в прогрессе (под _jobs_lock)."""
     with _jobs_lock:
@@ -1985,6 +2157,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     effective_ext = task_ctx["effective_ext"]
     prog_lang_name = task_ctx["prog_lang_name"]
     topic_name = task_ctx["topic_name"]
+    tree_path = task_ctx.get("tree_path") or ""
     task_prompt_id = task_ctx["prompt_id"]
 
     # «Время обработки» пары меряет ТОЛЬКО вызов модели (генерацию): из
@@ -2018,15 +2191,17 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         message = _build_solve_message(
             task.statement, prog_lang_name, topic_name, ctx["ui_language"], task_prompt_id,
         )
-        gen_started = perf_counter()
-        response = async_to_sync(model["handler"])(
-            message,
-            f"admin-batch-{ctx['user_id']}-{model['key']}-{ctx['run_id']}-{node_id}",
+        # Вызов модели с автоповтором при «Сбое ответа модели»: сбой
+        # печатается в журнал прогона, запрос пересылается СРАЗУ, попыток —
+        # до _MODEL_ERROR_MAX_ATTEMPTS. Исключение провайдера — тоже сбой
+        # модели: после исчерпания попыток пробрасываем его дальше (общий
+        # обработчик пары запишет «Сбой ответа модели»).
+        client_id = f"admin-batch-{ctx['user_id']}-{model['key']}-{ctx['run_id']}-{node_id}"
+        response, gen_seconds = _call_model_with_retries(
+            ctx, model, message, client_id, task.name or node_id,
         )
-        gen_seconds = round(perf_counter() - gen_started, 2)
-        # Отмена могла прийти во время LLM-вызова (его самого не
-        # прервать) — не тратим время на DL-тест и запись пары.
-        if _is_cancel_requested(ctx["run_id"]):
+        # None = отмена прогона пришла во время вызова модели.
+        if response is None:
             return None
         response_text, tokens = _extract_model_response(response)
         prompt_tokens = _extract_prompt_tokens(response)
@@ -2286,6 +2461,9 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 "prompt_id": pair_prompt_id,
                 "prompt_name": pair_prompt_name,
                 "truncated": bool(truncated),
+                # Свежесть строки: повтор пары обновляет её — по этому полю
+                # результаты сортируются «свежие сверху».
+                "updated_at": timezone.now(),
             },
         )
 
@@ -2316,6 +2494,8 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "delta_name": dl_delta_name or "",
             "file_extension": effective_ext or "",
             "topic_name": topic_name,
+            # Путь в дереве DL — подпись темы, когда локальной темы нет.
+            "tree_path": tree_path,
             # Скоуп статистики: язык прогона (в batch-прогоне язык один —
             # CLAUDE.md) + тема задачи, как в topic_id_snapshot.
             "programming_language_id": ctx["programming_language_id"],
@@ -2324,6 +2504,10 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "prompt_id": pair_prompt_id,
             "prompt_name": pair_prompt_name,
             "truncated": bool(truncated),
+            # Свежесть пары (epoch) — сортировка «свежие сверху» (см.
+            # _sort_results_fresh_first). У живых элементов — время записи
+            # строки, у строк из БД — AIModelTestResult.updated_at.
+            "updated_ts": result_obj.updated_at.timestamp() if result_obj.updated_at else time.time(),
         }
 
         if ctx["save_solutions"] and verdict == _VERDICT_SOLVED:
@@ -2463,7 +2647,13 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
             # cancelled, чтобы UI корректно показал «Прервано».
             was_cancelled = job.get("cancelled", False)
             report_source = db_results if rerun else (job.get("results") or [])
-            job["report"] = _build_batch_report(report_source)
+            job["report"] = _build_batch_report(
+                report_source,
+                run_topic_id=test_run.topic_id,
+                run_topic_name=test_run.topic_name,
+            )
+            # Журнал прогона — в отчёт (он и сохраняется в БД ниже).
+            job["report"] = _attach_log_lines(job["report"], job.get("log_lines"))
             # Карточка «Прогон» (время): у перезапуска — исходный started_at,
             # у обычного прогона — job.created_at_ts; финиш — момент
             # финализации (updated_at_ts, ставится ниже).
@@ -2487,7 +2677,13 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
 
     if evicted:
         db_results = _batch_results_from_db(test_run)
-        report = _build_batch_report(db_results)
+        report = _build_batch_report(
+            db_results,
+            run_topic_id=test_run.topic_id,
+            run_topic_name=test_run.topic_name,
+        )
+        # Журнал прогона — из сохранённого отчёта (job уже вытеснен).
+        report = _attach_log_lines(report, (test_run.report or {}).get("log_lines"))
         _attach_run_meta(
             report,
             test_run.started_at.timestamp() if test_run.started_at else None,
@@ -2607,6 +2803,30 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
         record_batch_solve_stats(stats_results)
 
 
+def _sort_results_fresh_first(results):
+    """Свежие пары — сверху: перезапущенная/пересчитанная пара видна первой.
+
+    Ключ свежести — ``updated_ts`` (epoch-секунды): у строк из БД это
+    ``AIModelTestResult.updated_at`` (обновляется при каждом
+    ``update_or_create``, т.е. и при повторе пары), у живых элементов
+    прогресса — время записи пары. При равенстве времени — выше более новый
+    ``result_id`` (pk). Порядок списка результатов влияет на рендер таблицы
+    (клиент группирует по моделям, внутри группы — порядок массива).
+    """
+    def _key(item):
+        try:
+            ts = float(item.get("updated_ts") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        try:
+            rid = int(item.get("result_id") or 0)
+        except (TypeError, ValueError):
+            rid = 0
+        return (-ts, -rid)
+
+    return sorted(results or [], key=_key)
+
+
 def _light_batch_result_item(item):
     """Легковесная копия batch-результата без тяжёлого тела (lazy_body=True).
 
@@ -2640,8 +2860,10 @@ def _batch_results_from_db(test_run, light=False):
             "dl_queue_id", "file_extension_snapshot", "delta_id", "delta_name",
             "topic_name_snapshot", "topic_id_snapshot", "prog_lang_snapshot",
             "truncated", "prompt_id", "prompt_name",
+            "updated_at",
             "task__node_id", "task__name", "task__file_extension",
-        ).order_by("model_title")
+            "task__tree_path",
+        ).order_by("-updated_at", "-pk")
         for r in rows:
             results.append({
                 "result_id": r["pk"],
@@ -2669,11 +2891,13 @@ def _batch_results_from_db(test_run, light=False):
                 "prog_lang_name": r["prog_lang_snapshot"],
                 "prompt_id": r["prompt_id"],
                 "prompt_name": r["prompt_name"] or "",
+                "tree_path": r["task__tree_path"] or "",
+                "updated_ts": r["updated_at"].timestamp() if r["updated_at"] else 0.0,
                 "lazy_body": True,
             })
         return results
     results = []
-    for r in test_run.results.select_related("task").order_by("model_title"):
+    for r in test_run.results.select_related("task").order_by("-updated_at", "-pk"):
         node_id = r.task.node_id if r.task else ""
         task_name = r.task.name if r.task else ""
         results.append({
@@ -2707,6 +2931,8 @@ def _batch_results_from_db(test_run, light=False):
             "prog_lang_name": r.prog_lang_snapshot,
             "prompt_id": r.prompt_id,
             "prompt_name": r.prompt_name or "",
+            "tree_path": (r.task.tree_path if r.task else "") or "",
+            "updated_ts": r.updated_at.timestamp() if r.updated_at else 0.0,
         })
     return results
 
@@ -2793,7 +3019,14 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "model_progress": [],
         "results": [],
         "report": None,
+        # Журнал прогона (события: сбои модели и повторы) — в живом
+        # снапшоте и в отчёте прогона.
+        "log_lines": [],
         "run_name": (run_name or "").strip(),
+        # Тема прогона (запасная тема для задач без своей) — нужна живому
+        # отчёту, чтобы отметить унаследованные темы.
+        "topic_id": topic_id,
+        "topic_name": (topic_name or "").strip(),
         "run_params": run_params,
         "created_at_ts": now_ts,
         "updated_at_ts": now_ts,
@@ -3004,7 +3237,13 @@ def _snapshot_from_test_run(test_run, light_results=False):
 
     if is_batch:
         results = _batch_results_from_db(test_run, light=light_results)
-        report = _build_batch_report(results)
+        report = _build_batch_report(
+            results,
+            run_topic_id=test_run.topic_id,
+            run_topic_name=test_run.topic_name,
+        )
+        # Журнал прогона — из сохранённого отчёта.
+        report = _attach_log_lines(report, (test_run.report or {}).get("log_lines"))
         # Карточка «Прогон» (время): из БД-прогона; для живого прогона
         # finished_at пуст — длительность считается до текущего момента.
         _attach_run_meta(
@@ -3131,7 +3370,7 @@ def _rerun_snapshot(rerun_job, live_items, light_results):
         test_run = AIModelTestRun.objects.get(run_id=rerun_job.get("run_id"))
     except AIModelTestRun.DoesNotExist:
         snapshot = dict(rerun_job)
-        snapshot["results"] = list(live_items)
+        snapshot["results"] = _sort_results_fresh_first(list(live_items))
         return snapshot
     live_index = {
         (r.get("model_key"), r.get("task_node_id")): r for r in live_items
@@ -3140,9 +3379,17 @@ def _rerun_snapshot(rerun_job, live_items, light_results):
         live_index.get((row.get("model_key"), row.get("task_node_id")), row)
         for row in _batch_results_from_db(test_run, light=light_results)
     ]
+    results = _sort_results_fresh_first(results)
     snapshot = dict(rerun_job)
     snapshot["results"] = results
-    snapshot["report"] = _build_batch_report(results)
+    snapshot["report"] = _attach_log_lines(
+        _build_batch_report(
+            results,
+            run_topic_id=test_run.topic_id,
+            run_topic_name=test_run.topic_name,
+        ),
+        (test_run.report or {}).get("log_lines"),
+    )
     _attach_run_meta(
         snapshot["report"],
         test_run.started_at.timestamp() if test_run.started_at else None,
@@ -3190,14 +3437,15 @@ def get_arm_run_snapshot(run_id, light_results=False):
                 # согласованность обеспечена замком, а не обходом десятков
                 # мегабайт текста на каждый поллинг.
                 snapshot = dict(job)
-                snapshot["results"] = [
+                snapshot["results"] = _sort_results_fresh_first([
                     _light_batch_result_item(item)
                     for item in job.get("results") or []
-                ]
+                ])
                 if interim_report is not None and snapshot.get("report") is None:
                     snapshot["report"] = interim_report
                 return snapshot
             snapshot = copy.deepcopy(job)
+            snapshot["results"] = _sort_results_fresh_first(snapshot.get("results") or [])
             if interim_report is not None and snapshot.get("report") is None:
                 snapshot["report"] = interim_report
             return snapshot

@@ -30,6 +30,11 @@ def apply_dl_task_info(task, data):
         task.name = name
     if data.get("statement"):
         task.statement = data["statement"]
+    # Путь в дереве задач DL (get-task-info → path): нужен для честной
+    # подписи темы в отчёте пакетного решения (папка DL вместо имени задачи).
+    path = (data.get("path") or "")[:512]
+    if path:
+        task.tree_path = path
 
 
 _LANG_TO_EXTENSION = {
@@ -204,6 +209,10 @@ def _guess_topic_from_path(path: str, programming_language_id=None):
     3. Fallback — keyword-подстроки из ``_PATH_TOPIC_KEYWORDS`` (исторические
        исключения, которые не ловит нечёткое совпадение).
 
+    Все три прохода смотрят только на ПАПКИ пути: последний сегмент пути DL —
+    имя задачи, а не тема (иначе задача «Сумма цифр числа» давала тему
+    «Цифры числа»).
+
     Темы per-языковые (курс «[Ассемблер i8086, C-MPA]» держит два Topic с
     одинаковым названием — по одному на язык), поэтому при известном языке
     ищем только среди тем этого языка. Совпадений в языке нет → None:
@@ -221,7 +230,11 @@ def _guess_topic_from_path(path: str, programming_language_id=None):
     # Точное совпадение сегмента с topic_name (порядок — от глубоких папок к
     # корню: более конкретная тема приоритетна).
     segments = re.split(r"[\\/|]", path)
-    for segment in reversed(segments):
+    # Последний сегмент пути DL — ИМЯ ЗАДАЧИ, а тема — это ПАПКА дерева.
+    # Без этого имя задачи («Сумма цифр числа») находило тему «Цифры
+    # числа» — отсюда «неправильно взяты темы» в отчёте прогона.
+    folder_segments = segments[:-1] if len(segments) > 1 else segments
+    for segment in reversed(folder_segments):
         name = segment.strip()
         if not name:
             continue
@@ -232,11 +245,11 @@ def _guess_topic_from_path(path: str, programming_language_id=None):
     # Нечёткое совпадение (проход 2): тема, чьё название входит в
     # название папки DL (или наоборот). Длина названия темы — от 4
     # символов, чтобы короткие совпадения («СИ») не давали ложную тему.
-    fuzzy = _fuzzy_topic_from_segments(topics, segments)
+    fuzzy = _fuzzy_topic_from_segments(topics, folder_segments)
     if fuzzy is not None:
         return fuzzy
 
-    low = path.lower()
+    low = "\\".join(folder_segments).lower()
     for keyword, topic_name in _PATH_TOPIC_KEYWORDS:
         if keyword in low:
             topic = topics.filter(topic_name_ru__iexact=topic_name).first()
@@ -274,6 +287,65 @@ def _fuzzy_topic_from_segments(topics, segments):
                 # Возвращаем Topic-объект: угадавший — по id из выборки.
                 return topics.filter(pk=tid).first()
     return None
+
+
+def dl_path_folder(path):
+    """Папка DL задачи по её пути в дереве (``предпоследний`` сегмент).
+
+    Путь DL выглядит как «Программирование [..]\\Одномерные массивы\\Сумма цифр
+    числа» — последний сегмент это ИМЯ ЗАДАЧИ, а папка (реальная «тема»
+    дерева DL) — предпоследний. Пусто, если путь короче двух сегментов.
+    """
+    if not path:
+        return ""
+    segments = [s.strip() for s in re.split(r"[\\/|]", path) if s.strip()]
+    if len(segments) < 2:
+        return ""
+    return segments[-2]
+
+
+def dl_tree_path_map(course_id):
+    """{node_id: "путь\\в\\дереве\\DL"} по закэшированному дереву курса.
+
+    Дерево курса уже кэшируется в Redis при загрузке на форме /arm/solve/
+    (ai/admin/arm.py::admin_arm_solve_load_tree_view) — пути строятся из
+    кэша, БЕЗ дополнительных запросов к DL. Формат пути совпадает с
+    get-task-info («папки\\папка\\имя задачи»).
+
+    Нужен, чтобы у задач прогона была реальная ветка DL (Task.tree_path), а
+    в отчёте пакетного решения — честная подпись темы (папка DL), а не имя
+    задачи. Кэша нет/Redis недоступен → пустая карта (не ломаем прогон).
+    """
+    if not course_id:
+        return {}
+    from django.core.cache import cache
+    from ..constants import AI_CACHE_KEY_PREFIX
+
+    try:
+        data = cache.get(f"{AI_CACHE_KEY_PREFIX}:dl_tree:{course_id}")
+    except Exception:  # pragma: no cover — Redis недоступен
+        logger.warning("dl_tree_path_map: cache unavailable for course %s", course_id)
+        return {}
+    tree = (data or {}).get("tree") or []
+    paths: dict = {}
+
+    def _walk(nodes, prefix):
+        for node in nodes or []:
+            if not isinstance(node, dict):
+                continue
+            name = str(node.get("name") or "").strip()
+            children = node.get("children") or []
+            if node.get("isFolder", False):
+                _walk(children, prefix + ([name] if name else []))
+                continue
+            node_id = node.get("nodeId")
+            if node_id is None:
+                continue
+            parts = prefix + ([name] if name else [])
+            paths[str(node_id)] = "\\".join(parts)
+
+    _walk(tree, [])
+    return paths
 
 
 def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session_id=None, course_id=None, fallback_topic_id=None):
@@ -358,7 +430,12 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
             # Backfill missing topic/extension/statement from DL for pre-existing
             # tasks created before auto-detection was added. topic_stale тоже
             # требует фэтча: перегадать тему можно только из path.
-            if session_id and (not task.topic_id or topic_stale or not task.file_extension or not task.statement):
+            # tree_path НЕ требует фэтча: его заполняет воркер прогона из
+            # кэша дерева курса (dl_tree_path_map) — без обращения к DL.
+            if session_id and (
+                not task.topic_id or topic_stale or not task.file_extension
+                or not task.statement
+            ):
                 try:
                     data = fetch_task_info(node_id, session_id=session_id, remove_html_tags=True, course_id=course_id)
                 except DLApiError:
@@ -389,7 +466,7 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
                 task.topic_id = run_topic_id
                 dirty = True
             if dirty:
-                task.save(update_fields=["programming_language_id", "topic_id", "file_extension", "name", "statement", "task_id"])
+                task.save(update_fields=["programming_language_id", "topic_id", "file_extension", "name", "statement", "task_id", "tree_path"])
             return task
 
         # Created — best-effort fill name/statement/task_id from DL (once).
@@ -413,7 +490,7 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
                     )
                     if guessed_topic:
                         task.topic_id = guessed_topic.id
-                task.save(update_fields=["task_id", "name", "statement", "file_extension", "topic"])
+                task.save(update_fields=["task_id", "name", "statement", "file_extension", "topic", "tree_path"])
         # Созданная задача: тема не нашлась по ветке DL — берём тему прогона.
         if task.topic_id is None and run_topic_id is not None:
             task.topic_id = run_topic_id

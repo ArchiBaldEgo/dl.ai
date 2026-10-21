@@ -1124,7 +1124,11 @@ def _build_batch_log_snapshot(log):
     что потребляет JS мини-таблицы в /arm/solve/. Возвращает None, если
     прогон/результаты не найдены (тогда детал отрисуется как обычный
     текстовый лог)."""
-    from ..arm_runner import _batch_results_from_db, _build_batch_report
+    from ..arm_runner import (
+        _attach_log_lines,
+        _batch_results_from_db,
+        _build_batch_report,
+    )
 
     run_id_hex = _batch_run_id_from_log(log)
     if not run_id_hex:
@@ -1143,6 +1147,8 @@ def _build_batch_log_snapshot(log):
         run_topic_id=test_run.topic_id,
         run_topic_name=test_run.topic_name,
     )
+    # Журнал прогона (сбои модели и повторы) — из сохранённого отчёта.
+    report = _attach_log_lines(report, (test_run.report or {}).get("log_lines"))
     # Карточка «Прогон» (время) — та же, что на /arm/solve/.
     from ..arm_runner import _attach_run_meta
     # Прогон на паузе ТОЖЕ не завершён — цифры промежуточные (живой поллинг

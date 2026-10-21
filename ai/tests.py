@@ -7539,6 +7539,200 @@ class ArmLightSnapshotTests(TestCase):
         self.assertIn("run_meta", snapshot["report"])
 
 
+class BatchResultsFreshFirstTests(TestCase):
+    """Свежие пары — сверху (ТЗ: «в логах пакетного решения свежие задачи
+    добавлять наверх, а не вниз»).
+
+    Свежесть пары — время последнего обновления её строки
+    (``AIModelTestResult.updated_at``): повтор пары перезаписывает строку,
+    и перезапущенная пара поднимается наверх.
+    """
+
+    def setUp(self):
+        from ai.models import AIModelTestRun, AIModelTestResult, Task
+        self.task = Task.objects.create(node_id=6201, name="Задача", statement="x")
+        self.run = AIModelTestRun.objects.create(
+            run_id="e" * 32,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED,
+        )
+        self.old = AIModelTestResult.objects.create(
+            run=self.run, task=self.task, model_key="M1", model_title="M1",
+            status="ok", verdict="solved", updated_at=timezone.now() - timezone.timedelta(hours=2),
+        )
+        self.fresh = AIModelTestResult.objects.create(
+            run=self.run, task=self.task, model_key="M2", model_title="M2",
+            status="ok", verdict="solved", updated_at=timezone.now() - timezone.timedelta(minutes=1),
+        )
+
+    def test_db_results_are_fresh_first(self):
+        """Выборка из БД: свежая пара выше старой (order_by -updated_at)."""
+        from ai.arm_runner import _batch_results_from_db
+        rows = _batch_results_from_db(self.run, light=True)
+        self.assertEqual([r["result_id"] for r in rows], [self.fresh.id, self.old.id])
+        # Свежесть отдаётся и в снапшоте (epoch-секунды).
+        self.assertGreater(rows[0]["updated_ts"], rows[1]["updated_ts"])
+
+    def test_helper_orders_by_freshness_then_id(self):
+        """_sort_results_fresh_first: по времени, при равенстве — по id."""
+        from ai.arm_runner import _sort_results_fresh_first
+        items = [
+            {"result_id": 1, "updated_ts": 100.0},
+            {"result_id": 3, "updated_ts": 200.0},
+            {"result_id": 2, "updated_ts": 200.0},
+            {"result_id": 4},
+        ]
+        ordered = [i["result_id"] for i in _sort_results_fresh_first(items)]
+        self.assertEqual(ordered, [3, 2, 1, 4])
+
+    def test_snapshot_from_db_is_fresh_first(self):
+        from ai.arm_runner import get_arm_run_snapshot
+        snapshot = get_arm_run_snapshot(self.run.run_id, light_results=True)
+        self.assertEqual(
+            [r["result_id"] for r in snapshot["results"]],
+            [self.fresh.id, self.old.id],
+        )
+
+
+class BatchTopicLabelTests(TestCase):
+    """Темы в отчёте пакетного решения — настоящие (ТЗ: «неправильно взяты
+    темы»): локальная тема по ID, иначе ПАПКА DL из пути задачи, а не имя
+    задачи."""
+
+    def test_label_prefers_topic_then_folder(self):
+        from ai.arm_runner import _topic_bucket_label
+        self.assertEqual(
+            _topic_bucket_label({"topic_name": "Циклы", "topic_id": 3}),
+            "Циклы",
+        )
+        # Темы нет — подписью служит папка DL (путь: «Курс\\Папка\\Задача»).
+        self.assertEqual(
+            _topic_bucket_label({
+                "topic_name": "", "topic_id": None,
+                "tree_path": "Программирование [Ассемблер i8086, C-MPA]\\Одномерные массивы\\Сумма цифр числа",
+                "task_name": "Сумма цифр числа",
+            }),
+            "Одномерные массивы",
+        )
+        # Ни темы, ни пути — честная подпись по задаче.
+        self.assertEqual(
+            _topic_bucket_label({"topic_name": "", "topic_id": None, "task_name": "Задача 1"}),
+            "Задача 1",
+        )
+
+    def test_errors_grouped_by_topic_id_then_folder(self):
+        """Ошибки по темам: одинаковые названия у разных языков не сливаются;
+        пары без темы группируются по папке DL."""
+        from ai.arm_runner import _build_batch_report
+        results = [
+            {"model_key": "A", "model_title": "A", "topic_id": 1, "topic_name": "Циклы",
+             "verdict": "failed", "task_node_id": 1, "task_name": "Зад1"},
+            {"model_key": "B", "model_title": "B", "topic_id": 2, "topic_name": "Циклы",
+             "verdict": "failed", "task_node_id": 2, "task_name": "Зад2"},
+            {"model_key": "A", "model_title": "A", "topic_id": None, "topic_name": "",
+             "tree_path": "Курс\\Одномерные массивы\\Зад3",
+             "verdict": "failed", "task_node_id": 3, "task_name": "Зад3"},
+            {"model_key": "A", "model_title": "A", "topic_id": None, "topic_name": "",
+             "tree_path": "Курс\\Одномерные массивы\\Зад4",
+             "verdict": "failed", "task_node_id": 4, "task_name": "Зад4"},
+        ]
+        report = _build_batch_report(results)
+        errors = report["errors_by_topic"]
+        # Три строки: две темы с одинаковым названием (разные ID) + папка DL.
+        self.assertEqual(len(errors), 3)
+        labels = sorted(e["topic"] for e in errors)
+        self.assertEqual(labels, ["Одномерные массивы", "Циклы", "Циклы"])
+        folder_row = [e for e in errors if e["topic"] == "Одномерные массивы"][0]
+        self.assertEqual(folder_row["count"], 2)
+
+    def test_report_carries_run_topic(self):
+        """Тема прогона (запасная для задач без своей) — в отчёте."""
+        from ai.arm_runner import _build_batch_report
+        report = _build_batch_report(
+            [{"model_key": "A", "model_title": "A", "topic_id": 7, "topic_name": "Циклы",
+              "verdict": "solved", "task_node_id": 1, "task_name": "Зад1"}],
+            run_topic_id=7, run_topic_name="Циклы",
+        )
+        self.assertEqual(report["run_topic"]["id"], 7)
+        self.assertEqual(report["run_topic"]["name"], "Циклы")
+
+    def test_errors_by_topic_carry_failure_reasons(self):
+        """Внутри темы видно, ЧЕМ не решено (компиляция / ответ / нет кода)."""
+        from ai.arm_runner import _build_batch_report
+        results = [
+            {"model_key": "A", "model_title": "A", "topic_id": 1, "topic_name": "Циклы",
+             "verdict": "failed", "failure_reason": "compile_error",
+             "task_node_id": 1, "task_name": "Зад1"},
+            {"model_key": "A", "model_title": "A", "topic_id": 1, "topic_name": "Циклы",
+             "verdict": "failed", "failure_reason": "compile_error",
+             "task_node_id": 2, "task_name": "Зад2"},
+            {"model_key": "B", "model_title": "B", "topic_id": 1, "topic_name": "Циклы",
+             "verdict": "failed", "failure_reason": "wrong_answer",
+             "task_node_id": 3, "task_name": "Зад3"},
+            {"model_key": "A", "model_title": "A", "topic_id": 1, "topic_name": "Циклы",
+             "verdict": "failed", "failure_reason": "",
+             "task_node_id": 4, "task_name": "Зад4"},
+            {"model_key": "A", "model_title": "A", "topic_id": 1, "topic_name": "Циклы",
+             "verdict": "solved", "task_node_id": 5, "task_name": "Зад5"},
+        ]
+        report = _build_batch_report(results)
+        row = [e for e in report["errors_by_topic"] if e["topic"] == "Циклы"][0]
+        self.assertEqual(row["count"], 4)
+        reasons = {r["key"]: r["count"] for r in row["reasons"]}
+        self.assertEqual(reasons["compile_error"], 2)
+        self.assertEqual(reasons["wrong_answer"], 1)
+        # Пара без причины — честная «причина не распознана».
+        self.assertEqual(reasons["undefined"], 1)
+        labels = {r["key"]: r["label"] for r in row["reasons"]}
+        self.assertEqual(labels["compile_error"], "Ошибка компиляции")
+
+
+class TaskTreePathTests(TestCase):
+    """Путь задачи в дереве DL (Task.tree_path) — источник честной темы."""
+
+    def test_apply_dl_task_info_fills_tree_path(self):
+        from ai.models import Task
+        from ai.services.task_registry import apply_dl_task_info
+        task = Task.objects.create(node_id=6301, name="Задача")
+        apply_dl_task_info(task, {"path": "Курс\\Папка\\Задача", "name": "Задача"})
+        self.assertEqual(task.tree_path, "Курс\\Папка\\Задача")
+
+    def test_tree_path_map_from_cached_course_tree(self):
+        """Пути строятся из закэшированного дерева курса (без запросов к DL)."""
+        from django.core.cache import cache
+        from ai.services.task_registry import dl_tree_path_map
+        cache.set("ai:dl_tree:1450", {
+            "tree": [{
+                "nodeId": 1, "name": "Курс", "isFolder": True,
+                "children": [
+                    {"nodeId": 2, "name": "Папка", "isFolder": True,
+                     "children": [{"nodeId": 3, "name": "Задача", "isFolder": False}]},
+                ],
+            }],
+            "task_count": 1,
+        })
+        paths = dl_tree_path_map(1450)
+        self.assertEqual(paths.get("3"), "Курс\\Папка\\Задача")
+        self.assertEqual(dl_tree_path_map(999), {})
+
+    def test_topic_guess_ignores_task_name_segment(self):
+        """Имя задачи — не тема: задача «Сумма цифр числа» не должна давать
+        тему «Цифры числа» (темы — это ПАПКИ дерева)."""
+        from ai.models import ProgrammingLanguage, Topic
+        from ai.services.task_registry import _guess_topic_from_path
+        lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        topic = Topic.objects.create(topic_name_ru="Цифры числа", programming_language=lang)
+        # Путь с папкой «Цифры числа» — тема находится.
+        self.assertEqual(
+            _guess_topic_from_path("Курс\\Цифры числа\\Сумма цифр числа", lang.id).id,
+            topic.id,
+        )
+        # Путь, где «Цифры числа» — только имя задачи: темы быть не должно.
+        self.assertIsNone(
+            _guess_topic_from_path("Курс\\Сумма цифр числа", lang.id),
+        )
+
+
 class ActiveRunsEndpointTests(TestCase):
     """/ai/admin/active-runs/: личное меню «мои процессы» в шапке админки.
     Каждый админ видит только СВОИ прогоны (даже суперпользователь); завершённые
@@ -18796,9 +18990,153 @@ class ArmBatchFailureReasonRetryTests(TransactionTestCase):
         self.assertEqual(row.failure_reason, "no_code")
 
 
-# ===================================================================
-# 2026-10-21: гейт DL «canUseAi» (WS7) + машина проверки delta (WS6)
-# ===================================================================
+class ModelErrorAutoRetryTests(TransactionTestCase):
+    """Автоповтор «Сбой ответа модели» ×5.
+
+    ТЗ пользователя: сбой СНАЧАЛА выводится в журнал прогона, потом запрос
+    СРАЗУ пересылается — и так до 5 раз.
+    """
+
+    def setUp(self):
+        from ai import arm_runner
+        self.arm_runner = arm_runner
+        self.run_id = "mretry-" + uuid.uuid4().hex[:8]
+        now_ts = time.time()
+        arm_runner._jobs[self.run_id] = {
+            "run_id": self.run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 1, "total_pairs": 1,
+            "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "", "current_model_title": "",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "log_lines": [],
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+
+    def tearDown(self):
+        self.arm_runner._jobs.pop(self.run_id, None)
+
+    def _ctx(self):
+        return {"run_id": self.run_id, "user_id": 1}
+
+    def _log_lines(self):
+        job = self.arm_runner._jobs.get(self.run_id) or {}
+        return [str(l.get("text") or "") for l in (job.get("log_lines") or [])]
+
+    def _model(self, handler):
+        return {"key": "M1", "title": "Model 1", "handler": handler}
+
+    def test_five_attempts_and_log_lines(self):
+        """Всегда сбой → ровно 5 попыток, 4 строки «повтор» + финальная."""
+        calls = {"n": 0}
+
+        async def handler(messages, conv_id):
+            calls["n"] += 1
+            return ("Ошибка 429: превышен лимит запросов", 0, True, False, 0)
+
+        response, _gen = self.arm_runner._call_model_with_retries(
+            self._ctx(), self._model(handler), "msg", "cid", "Задача А",
+        )
+        self.assertEqual(calls["n"], 5)
+        self.assertTrue(self.arm_runner._is_model_error(response))
+        lines = self._log_lines()
+        self.assertEqual(len(lines), 5)
+        self.assertIn("повтор 2/5", lines[0])
+        self.assertIn("повтор 5/5", lines[3])
+        self.assertIn("попыток 5", lines[4])
+        self.assertIn("Сбой ответа модели (Model 1)", lines[0])
+
+    def test_failure_logged_before_next_call(self):
+        """Сбой печатается ДО следующего вызова модели (порядок ТЗ)."""
+        seen = []
+
+        async def handler(messages, conv_id):
+            seen.append(list(self._log_lines()))
+            return ("Ошибка 500: провайдер упал", 0, True, False, 0)
+
+        self.arm_runner._call_model_with_retries(
+            self._ctx(), self._model(handler), "msg", "cid", "Задача Б",
+        )
+        self.assertEqual(len(seen), 5)
+        self.assertEqual(seen[0], [])
+        self.assertEqual(len(seen[1]), 1)
+        self.assertIn("повтор 2/5", seen[1][0])
+        self.assertEqual(len(seen[4]), 4)
+
+    def test_success_after_first_failure(self):
+        """Сбой → повтор → успех: 2 вызова, одна строка лога."""
+        calls = {"n": 0}
+
+        async def handler(messages, conv_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ("Ошибка 503", 0, True, False, 0)
+            return ("Готово", 5, False, False, 2)
+
+        response, _gen = self.arm_runner._call_model_with_retries(
+            self._ctx(), self._model(handler), "msg", "cid", "Задача В",
+        )
+        self.assertEqual(calls["n"], 2)
+        self.assertFalse(self.arm_runner._is_model_error(response))
+        lines = self._log_lines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("повтор 2/5", lines[0])
+
+    def test_provider_exception_raised_after_attempts(self):
+        """Провайдер бросил исключение → тоже повтор, потом исключение наружу."""
+        calls = {"n": 0}
+
+        async def handler(messages, conv_id):
+            calls["n"] += 1
+            raise RuntimeError("провайдер недоступен")
+
+        with self.assertRaises(RuntimeError):
+            self.arm_runner._call_model_with_retries(
+                self._ctx(), self._model(handler), "msg", "cid", "Задача Г",
+            )
+        self.assertEqual(calls["n"], 5)
+        self.assertEqual(len(self._log_lines()), 5)
+
+    def test_worker_marks_pair_model_error(self):
+        """Интеграция: пара с постоянным сбоем модели → вердикт/причина."""
+        from ai.models import AIModelTestResult, AIModelTestRun, Task
+        calls = {"n": 0}
+
+        async def handler(messages, conv_id):
+            calls["n"] += 1
+            return ("Ошибка 429: превышен лимит запросов", 0, True, False, 0)
+
+        user = get_user_model().objects.create_user(
+            username="mretry-user", password="x",
+        )
+        lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        topic = Topic.objects.create(
+            topic_name_ru="Автоповтор", programming_language=lang,
+        )
+        task = Task.objects.create(
+            node_id=9311, task_id=9411, name="A", statement="Сложите a и b",
+            topic=topic, programming_language=lang, file_extension=".pas",
+        )
+        run_id = "mretry-run-" + uuid.uuid4().hex[:8]
+        self.arm_runner._jobs[run_id] = dict(
+            self.arm_runner._jobs[self.run_id], run_id=run_id, log_lines=[],
+        )
+        try:
+            self.arm_runner._run_batch_job_worker(
+                run_id, [task.node_id], [self._model(handler)], user.id, "DLSID-1",
+                ui_language="Русский", dl_test=True,
+            )
+        finally:
+            self.arm_runner._jobs.pop(run_id, None)
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="M1")
+        self.assertEqual(row.failure_reason, "model_error")
+        self.assertEqual(row.verdict, "failed")
+        self.assertEqual(calls["n"], 5)
+        report = run.report or {}
+        self.assertTrue((report.get("log_lines") or []))
+        self.assertIn("Сбой ответа модели", report["log_lines"][0]["text"])
+
 
 class CanUseAiGateTests(TestCase):
     """Флаг DL ``canUseAi`` (dl-rest-api.json, UserInfo.canUseAi).

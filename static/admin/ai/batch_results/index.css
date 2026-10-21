@@ -95,6 +95,17 @@
   margin: 0 0 10px; padding: 8px 12px; border-radius: 6px; font-weight: 600;
   color: #9a3412; background: #ffedd5; border: 1px solid #fdba74;
 }
+/* Журнал прогона (сбои модели и повторы): список событий под «Сводкой». */
+.arm-run-log {
+  margin: 0; padding: 0; list-style: none;
+  border: 1px solid var(--hairline-color); border-radius: 6px;
+}
+.arm-run-log li {
+  padding: 8px 12px; font-size: 13px;
+  border-bottom: 1px solid var(--hairline-color);
+}
+.arm-run-log li:last-child { border-bottom: none; }
+.arm-log-time { color: var(--body-quiet-color); font-variant-numeric: tabular-nums; }
 .arm-meta { color: var(--body-quiet-color); font-size: 12px; margin-top: 4px; }
 .arm-result-body { border-top: 1px solid var(--hairline-color); padding: 12px 14px 14px; }
 /* Группировка «модель → её задачи»: summary карточки модели — шапка со
