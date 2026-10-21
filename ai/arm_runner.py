@@ -171,6 +171,14 @@ _VERDICT_SKIPPED = "skipped"
 _REASON_MODEL_ERROR = "model_error"
 _REASON_NO_CODE = "no_code"
 _REASON_SKIPPED = "skipped"
+# DL отклонил отправку решения (HTTP 401 — сессия DLSID истекла).
+_REASON_DL_UNAUTHORIZED = "dl_unauthorized"
+
+# Подсказка оператору при 401 от DL: что именно произошло и что делать.
+DL_UNAUTHORIZED_HINT = (
+    "сессия DL истекла — обновите DLSID и перезапустите прогон"
+)
+
 # Лимит позиций в строке «Ошибки по темам» (остальное — «+ ещё N»):
 # отчёт не должен разбухать на больших прогонах.
 _REPORT_ERRORS_ITEM_CAP = 6
@@ -608,6 +616,14 @@ def _build_batch_report(results, run_topic_id=None, run_topic_name=None):
 
     failure_reasons = _build_failure_reasons(results)
 
+    # Подсказки оператору по итогам прогона (сейчас — протухшая сессия DL).
+    hints = []
+    if any((r.get("failure_reason") or "") == _REASON_DL_UNAUTHORIZED for r in results):
+        hints.append(
+            "Ошибка DL: send-solution: Не авторизован — сессия DL истекла, "
+            "обновите DLSID и перезапустите прогон"
+        )
+
     return {
         "total_pairs": len(results),
         "solved": solved,
@@ -626,6 +642,7 @@ def _build_batch_report(results, run_topic_id=None, run_topic_name=None):
         } if (run_topic_id or run_topic_name) else None,
         "errors_by_topic": errors_by_topic,
         "failure_reasons": failure_reasons,
+        "hints": hints,
         "topics_used": _topics_used(results),
     }
 
@@ -1475,7 +1492,10 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
     название (контракт DL v1.4.2). ``file_name`` (опционально) — имя
     временного файла решения (контракт DL v1.4.2, SendSolutionRequest.fileName).
     """
-    from .dl_api_client import send_solution_to_dl, get_solution_result_from_dl, DLServerError, ensure_course_session
+    from .dl_api_client import (
+        send_solution_to_dl, get_solution_result_from_dl,
+        DLServerError, DLUnauthorizedError, ensure_course_session,
+    )
 
     result = {
         "verdict": None,
@@ -1486,6 +1506,10 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
         "delta_name": "",
         "code_sent": code[:5000],
         "cancelled": False,
+        # True — DL отклонил запрос (HTTP 401): сессия DLSID истекла.
+        # Отдельный флаг, чтобы пара получила причину «Ошибка DL: не
+        # авторизован», а не «причина не распознана».
+        "unauthorized": False,
     }
 
     # Activate the course in the DL session before send-solution — DL requires
@@ -1500,6 +1524,13 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
             session_id, node_id, code, file_extension,
             course_id=course_id, file_name=file_name, delta=delta,
         )
+    except DLUnauthorizedError as exc:
+        # DL отклонил: сессия DLSID истекла/невалидна (HTTP 401). Пробу с
+        # taskId вместо nodeId НЕ делаем (отказ авторизации не про id) и
+        # поллинг не запускаем — пара закрывается сразу с понятной причиной.
+        result["submit_error"] = f"send-solution: {exc}"
+        result["unauthorized"] = True
+        return result
     except DLServerError as exc:
         msg = str(exc)
         result["submit_error"] = f"send-solution: {msg}"
@@ -1563,6 +1594,12 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
         time.sleep(poll_interval)
         try:
             poll_resp = get_solution_result_from_dl(session_id, queue_id)
+        except DLUnauthorizedError as exc:
+            # Сессия DL истекла прямо во время опроса — дальше опрашивать
+            # бессмысленно: закрываем пару сразу.
+            result["submit_error"] = f"get-solution-result: {exc}"
+            result["unauthorized"] = True
+            return result
         except Exception as exc:
             result["submit_error"] = f"get-solution-result: {exc}"
             return result
@@ -2391,6 +2428,14 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 # классификатор dl_failure_reason_from_comment).
                 if verdict == _VERDICT_SOLVED:
                     failure_reason = ""
+                elif dl_result.get("unauthorized"):
+                    # DL отклонил запрос (401): сессия DLSID истекла. Отдельная
+                    # причина + понятная подсказка в тексте ошибки.
+                    failure_reason = _REASON_DL_UNAUTHORIZED
+                    dl_submit_error = (
+                        f"{dl_submit_error} — {DL_UNAUTHORIZED_HINT}"
+                        if dl_submit_error else DL_UNAUTHORIZED_HINT
+                    )
                 else:
                     failure_reason = _failure_reason_from_dl_comment(dl_test_comment)
                     if not failure_reason:

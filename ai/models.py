@@ -1163,6 +1163,10 @@ class AIModelTestResult(models.Model):
     FR_WRONG_ANSWER = "wrong_answer"
     FR_UNDEFINED = "undefined"
     FR_SKIPPED = "skipped"
+    # DL отклонил отправку решения: сессия DLSID истекла/невалидна (HTTP 401).
+    # Отдельная причина, а не «не распознана»: лечится обновлением DLSID.
+    FR_DL_UNAUTHORIZED = "dl_unauthorized"
+
     FAILURE_REASON_CHOICES = (
         (FR_MODEL_ERROR, "Сбой ответа модели"),
         (FR_NO_CODE, "Не выкушен код"),
@@ -1170,6 +1174,7 @@ class AIModelTestResult(models.Model):
         (FR_WRONG_ANSWER, "Неправильный ответ"),
         (FR_UNDEFINED, "Причина не распознана"),
         (FR_SKIPPED, "Пропущено"),
+        (FR_DL_UNAUTHORIZED, "Ошибка DL: не авторизован"),
     )
 
     FAILURE_REASON_LABELS = dict(FAILURE_REASON_CHOICES)

@@ -265,6 +265,9 @@ window.ArmBatchResults = (function () {
       }
       const volumeLine = runVolumeLine(report);
       if (volumeLine) { lines.push('<strong>Объём:</strong> ' + escapeHtml(volumeLine)); }
+      (report.hints || []).forEach(function (hint) {
+        lines.push('<strong class="arm-report-hint">' + escapeHtml(hint) + '</strong>');
+      });
       els.list.innerHTML = lines.map(function (line) { return '<li>' + line + '</li>'; }).join('');
     }
     if (els.perModel) {

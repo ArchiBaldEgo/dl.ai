@@ -7687,6 +7687,98 @@ class BatchTopicLabelTests(TestCase):
         self.assertEqual(labels["compile_error"], "Ошибка компиляции")
 
 
+class DLUnauthorizedHandlingTests(TransactionTestCase):
+    """«Ошибка DL: send-solution: Не авторизован» (HTTP 401) — отдельный
+    случай: без пробы taskId, без опроса результата, с понятной причиной."""
+
+    def setUp(self):
+        from ai.models import Task
+        self.user = get_user_model().objects.create_user(
+            username="dl401-user", password="x",
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Тема 401", programming_language=self.lang,
+        )
+        self.task = Task.objects.create(
+            node_id=9321, task_id=9421, name="A", statement="Сложите a и b",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+    def test_send_401_skips_fallback_probe_and_polling(self):
+        from ai import arm_runner
+        from ai.dl_api_client import DLUnauthorizedError
+        sends = []
+
+        def fake_send(session_id, node_id, code, ext, **kw):
+            sends.append(node_id)
+            raise DLUnauthorizedError()
+
+        with patch("ai.dl_api_client.send_solution_to_dl", side_effect=fake_send), \
+                patch("ai.dl_api_client.get_solution_result_from_dl") as poll:
+            result = arm_runner._test_solution_on_dl(
+                "DLSID", 9321, "code", ".pas", task_id=9421,
+            )
+        self.assertTrue(result["unauthorized"])
+        self.assertIn("Не авторизован", result["submit_error"])
+        # Проба taskId вместо nodeId НЕ делается (отказ не про id)...
+        self.assertEqual(len(sends), 1)
+        # ...и опрос результата не запускается.
+        poll.assert_not_called()
+
+    def test_pair_failure_reason_dl_unauthorized(self):
+        """Пара, отклонённая DL по 401 → причина «Ошибка DL: не авторизован»."""
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        async def handler(messages, conv_id):
+            return ("program p; begin writeln(1); end.", 7, False, False, 0)
+
+        dl_result = {
+            "verdict": None, "comment": "", "submit_error": "send-solution: Не авторизован",
+            "queue_id": 0, "delta_id": 0, "delta_name": "", "code_sent": "code",
+            "cancelled": False, "unauthorized": True,
+        }
+        run_id = "dl401-" + uuid.uuid4().hex[:8]
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 1, "total_pairs": 1,
+            "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "", "current_model_title": "",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None, "log_lines": [],
+            "created_at_ts": time.time(), "updated_at_ts": time.time(),
+        }
+        try:
+            with patch.object(arm_runner, "_test_solution_on_dl", return_value=dl_result):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.task.node_id],
+                    [{"key": "M1", "title": "Model 1", "handler": handler}],
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="M1")
+        self.assertEqual(row.failure_reason, "dl_unauthorized")
+        self.assertEqual(row.verdict, "failed")
+        self.assertIn("Не авторизован", row.dl_error)
+        # В тексте ошибки — подсказка, что делать.
+        self.assertIn("DLSID", row.dl_error)
+        # В сводке прогона — подсказка для оператора.
+        report = run.report or {}
+        self.assertTrue(any("Не авторизован" in (h or "") for h in (report.get("hints") or [])))
+
+    def test_dl_path_folder_is_second_to_last_segment(self):
+        from ai.services.task_registry import dl_path_folder
+        self.assertEqual(
+            dl_path_folder("Программирование [Ассемблер i8086, C-MPA]\\Одномерные массивы\\Сумма цифр числа"),
+            "Одномерные массивы",
+        )
+        self.assertEqual(dl_path_folder(""), "")
+        self.assertEqual(dl_path_folder("Одна папка"), "")
+
+
 class TaskTreePathTests(TestCase):
     """Путь задачи в дереве DL (Task.tree_path) — источник честной темы."""
 
