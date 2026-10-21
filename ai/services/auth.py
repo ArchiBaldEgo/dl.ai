@@ -47,6 +47,43 @@ def can_use_ai(user_info: dict | None) -> bool:
     return True
 
 
+def resolve_user_info_for_request(request) -> dict | None:
+    """Достать user_info DL для произвольного запроса (HTTP).
+
+    Единый источник: атрибут ``request.user_info`` (его кладёт
+    ``ExternalAuthMiddleware``) → кеш сессии ``external_user_info`` →
+    ``None``. Используется гейтом ``canUseAi`` (см. ``ai_disabled_reason``).
+    """
+    user_info = getattr(request, "user_info", None)
+    if user_info:
+        return user_info
+    session = getattr(request, "session", None)
+    if session is not None:
+        cached = session.get("external_user_info")
+        if isinstance(cached, dict) and cached:
+            return cached
+    return None
+
+
+def ai_disabled_reason(request) -> str | None:
+    """Причина, по которой AI пользователю недоступен (или ``None``).
+
+    DL отдаёт флаг ``canUseAi`` (dl-rest-api.json, UserInfo.canUseAi) — «разрешено
+    ли использование AI в текущем курсе». Раньше приложение его НЕ читало —
+    запрет DL молча игнорировался.
+
+    Единая формулировка для всех точек отказа (страница, WS, HTTP-эндпоинты
+    отправки решения): правка текста — в одном месте.
+    """
+    if can_use_ai(resolve_user_info_for_request(request)):
+        return None
+    return (
+        "В этом курсе использование ИИ запрещено (dl.gsu.by не разрешил "
+        "доступ для вашей учётной записи). Обратитесь к преподавателю или "
+        "в техническую поддержку."
+    )
+
+
 class WebSocketAuthService:
     """Аутентификация WebSocket через DLSID (тот же поток, что и HTTP).
 

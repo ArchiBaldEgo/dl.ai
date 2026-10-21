@@ -1368,7 +1368,7 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
     return ""
 
 
-def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None, course_id=None):
+def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None, course_id=None, delta="", file_name=""):
     """Send code to DL for real testing and poll for the result.
 
     Returns a dict:
@@ -1392,6 +1392,10 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
     ``course_id`` (опционально) — если передан, перед send-solution вызывается
     ``ensure_course_session`` для активации курса в сессии DL (иначе send-solution
     отдаёт 400 при courseID=0 в сессии).
+
+    ``delta`` (опционально) — тестирующая машина (Дельта): ID или ТОЧНОЕ
+    название (контракт DL v1.4.2). ``file_name`` (опционально) — имя
+    временного файла решения (контракт DL v1.4.2, SendSolutionRequest.fileName).
     """
     from .dl_api_client import send_solution_to_dl, get_solution_result_from_dl, DLServerError, ensure_course_session
 
@@ -1414,7 +1418,10 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
     # Step 1: submit code to DL.
     submit_resp = None
     try:
-        submit_resp = send_solution_to_dl(session_id, node_id, code, file_extension, course_id=course_id)
+        submit_resp = send_solution_to_dl(
+            session_id, node_id, code, file_extension,
+            course_id=course_id, file_name=file_name, delta=delta,
+        )
     except DLServerError as exc:
         msg = str(exc)
         result["submit_error"] = f"send-solution: {msg}"
@@ -1427,7 +1434,10 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
         # nodeId (courseId тот же); если принято — продолжаем поллинг.
         if task_id and task_id != node_id:
             try:
-                alt_resp = send_solution_to_dl(session_id, task_id, code, file_extension, course_id=course_id)
+                alt_resp = send_solution_to_dl(
+                    session_id, task_id, code, file_extension,
+                    course_id=course_id, file_name=file_name, delta=delta,
+                )
                 alt_qid = alt_resp.get("queueId") or 0
                 if alt_qid > 0:
                     # taskId принят — nodeId был не тем идентификатором.
@@ -1551,7 +1561,7 @@ def _prepare_batch_run(
     ui_language, dl_test, prompt_id, course_id, solve_file_extension,
     solve_prog_lang_name, programming_language_id, programming_language_name,
     prompt_name, topic_id, topic_name, run_params, rerun, rerun_pairs,
-    start_time, run_name="", save_solutions=False,
+    start_time, run_name="", save_solutions=False, delta="", file_name="",
 ):
     """Однопоточная подготовка batch-прогона (фаза воркера до model-потоков).
 
@@ -1745,6 +1755,8 @@ def _prepare_batch_run(
         "ui_language": ui_language,
         "dl_test": dl_test,
         "save_solutions": bool(save_solutions),
+        "delta": delta or "",
+        "file_name": file_name or "",
         "programming_language_id": programming_language_id,
         "test_run": test_run,
         "log": log,
@@ -1777,6 +1789,8 @@ def _run_batch_job_worker(
     record_stats=False,
     run_name="",
     save_solutions=False,
+    delta="",
+    file_name="",
     rerun=False,
     rerun_pairs=None,
 ):
@@ -1818,7 +1832,7 @@ def _run_batch_job_worker(
             prompt_name=prompt_name, topic_id=topic_id, topic_name=topic_name,
             run_params=run_params, rerun=rerun, rerun_pairs=rerun_pairs,
             start_time=start_time, run_name=run_name,
-            save_solutions=save_solutions,
+            save_solutions=save_solutions, delta=delta, file_name=file_name,
         )
         if ctx is None:
             return
@@ -2180,6 +2194,8 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                     task_id=task.task_id or 0,
                     run_id=ctx["run_id"],
                     course_id=ctx["course_id"],
+                    delta=ctx.get("delta") or "",
+                    file_name=ctx.get("file_name") or "",
                 )
                 # Отмена пришла во время поллинга DL — прерываем без записи
                 # пары (вердикт не определён). Лок после DL-фазы удерживается
@@ -2695,7 +2711,7 @@ def _batch_results_from_db(test_run, light=False):
     return results
 
 
-def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name="", record_stats=False, run_name="", save_solutions=False):
+def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name="", record_stats=False, run_name="", save_solutions=False, delta="", file_name=""):
     """Запускает batch-solve ARM: задачи из DL дерева × модели в фоновом потоке.
 
     Принимает node_ids — список DL node ID (из дерева задач dl.gsu.by).
@@ -2706,6 +2722,10 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     solve_prog_lang_name — название языка для промпта под выбранным расширением.
     run_name — необязательное ручное название прогона (задаётся только при
         запуске; сохраняется в AIModelTestRun.run_name).
+    delta — тестирующая машина (Дельта): ID или ТОЧНОЕ название (контракт DL
+        v1.4.2, SendSolutionRequest.delta). Пусто — машину назначает DL.
+    file_name — имя временного файла решения (контракт DL v1.4.2,
+        SendSolutionRequest.fileName); пусто — DL назовёт файл сам.
     """
     handlers = get_runtime_model_handlers()
     # В solve допущены только Web_* и Ollama_* (нет жёсткого лимита вывода);
@@ -2743,6 +2763,8 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "record_stats": bool(record_stats),
         "save_solutions": bool(save_solutions),
         "run_name": (run_name or "").strip(),
+        "delta": (delta or "").strip(),
+        "file_name": (file_name or "").strip(),
     }
 
     run_id = uuid.uuid4().hex
@@ -2783,7 +2805,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, node_ids, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params, "record_stats": record_stats, "run_name": (run_name or "").strip(), "save_solutions": bool(save_solutions)},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params, "record_stats": record_stats, "run_name": (run_name or "").strip(), "save_solutions": bool(save_solutions), "delta": (delta or "").strip(), "file_name": (file_name or "").strip()},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )
@@ -2939,6 +2961,10 @@ def start_batch_rerun_pairs(run_id, user_id, session_id):
             "record_stats": bool(form_params.get("record_stats")),
             "run_name": rerun_run_name,
             "save_solutions": bool(form_params.get("save_solutions")),
+            # Машина проверки и имя файла — из снимка запуска: перезапуск
+            # нерешённых пар идёт на той же Дельте, что и исходный прогон.
+            "delta": form_params.get("delta") or "",
+            "file_name": form_params.get("file_name") or "",
             "rerun": True,
             "rerun_pairs": rerun_pairs,
         },

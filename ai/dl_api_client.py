@@ -574,7 +574,7 @@ def fetch_task_solution(session_id: str, task_id: int, file_extension: str) -> d
     return _decode_response_json(response)
 
 
-def _send_solution_payload_context(node_id, code, file_extension, course_id=0) -> str:
+def _send_solution_payload_context(node_id, code, file_extension, course_id=0, file_name="") -> str:
     """Build a diagnostic context string for send-solution failures.
 
     DL returns a bare «Bad Request» (400) without saying WHICH field it rejected,
@@ -588,9 +588,148 @@ def _send_solution_payload_context(node_id, code, file_extension, course_id=0) -
     return (
         f"send-solution(nodeId={node_id}, courseId={course_id}, "
         f"fileExtension={file_extension!r}, "
+        f"fileName={file_name!r}, "
         f"codeLen={len(code or '')}, "
         f"codeHead={code_head!r})"
     )
+
+
+#: Контракт REST API (dl-rest-api.json, SendSolutionRequest.fileName):
+#: ``^[A-Za-z0-9_-]+\.[A-Za-z0-9]+$``, maxLength 200, расширение должно
+#: ТОЧНО совпадать с ``fileExtension`` (включая регистр), зарезервированные
+#: имена Windows запрещены.
+_DL_FILE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9]+$")
+_DL_FILE_NAME_MAX_LEN = 200
+#: Зарезервированные имена Windows (CON, PRN, AUX, NUL, COM1–COM9, LPT1–LPT9) —
+#: DL их не принимает, а проверка на нашей стороне даёт внятную ошибку вместо
+#: 400 от сервера.
+_DL_RESERVED_FILE_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
+
+
+#: Транслитерация кириллицы в латиницу для имени файла. Контракт DL
+#: допускает только ``[A-Za-z0-9_-]`` — без транслитерации русское имя
+#: «Моё решение» превратилось бы в «1» (одна цифра), и файл в DL был бы
+#: безымянным. Транслитерация даёт читаемое латинское имя.
+_DL_TRANSLIT_MAP = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def _dl_transliterate(text: str) -> str:
+    """Кириллица → латиница (для имени файла по контракту DL).
+
+    Только кириллица заменяется; латиница, цифры и дефисы сохраняются
+    как есть (в т.ч. регистр — «Deepseek» не должен стать «deepseek»).
+    """
+    out = []
+    for ch in text:
+        lower = ch.lower()
+        if lower in _DL_TRANSLIT_MAP:
+            mapped = _DL_TRANSLIT_MAP[lower]
+            # Регистр первой буквы слова сохраняем.
+            if ch.isupper() and mapped:
+                mapped = mapped[0].upper() + mapped[1:]
+            out.append(mapped)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def build_dl_file_name(base_name: str, file_extension: str) -> str:
+    """Собрать имя временного файла решения по контракту DL (v1.4.2).
+
+    Контракт ``SendSolutionRequest.fileName``: ``^[A-Za-z0-9_-]+\\.[A-Za-z0-9]+$``,
+    длина ≤ 200, расширение — ТОЧНО как в ``fileExtension`` (с точкой, с тем же
+    регистром), зарезервированные имена Windows запрещены.
+
+    Валидное имя приходит как есть. Невалидное — чинится по правилам DL:
+    кириллица транслитерируется в латиницу, пробелы и прочие
+    недопустимые символы → ``_``, длина режется до лимита с сохранением
+    расширения. Если после чистки имя всё равно невалидно (пустая основа)
+    — возвращается ``None``, и отправка идёт БЕЗ поля ``fileName``
+    (DL сам назовёт файл ``api_solution_<случайное>.<ext>``).
+
+    Расширение подставляется из ``file_extension`` (тот же, что уходит в
+    ``fileExtension``) — иначе DL отвергнет запрос («несовпадение расширения»).
+    """
+    ext = (file_extension or "").strip()
+    if not ext.startswith("."):
+        ext = f".{ext}" if ext else ""
+    ext = ext[1:]  # без точки
+    if not ext or not re.fullmatch(r"[A-Za-z0-9]+", ext):
+        return None
+
+    base = (base_name or "").strip()
+    # Отрезаем расширение, если оператор уже написал «имя.расширение».
+    if "." in base:
+        base = base.rsplit(".", 1)[0]
+    # Кириллица → латиница (иначе имя превратится в «_»/пустую основу).
+    base = _dl_transliterate(base)
+    # Только разрешённые символы: латиница, цифры, дефис, подчёркивание.
+    base = re.sub(r"[^A-Za-z0-9_-]+", "_", base)
+    base = base.strip("_-")
+    if not base:
+        return None
+    if base.upper() in _DL_RESERVED_FILE_NAMES:
+        base = f"{base}_file"
+
+    # Лимит 200 символов на ВСЁ имя (основа + точка + расширение).
+    max_base = _DL_FILE_NAME_MAX_LEN - len(ext) - 1
+    if max_base < 1:
+        return None
+    base = base[:max_base]
+    name = f"{base}.{ext}"
+    if len(name) > _DL_FILE_NAME_MAX_LEN:
+        return None
+    if not _DL_FILE_NAME_RE.match(name):
+        return None
+    return name
+
+
+def fetch_deltas() -> list[dict[str, Any]]:
+    """Список тестирующих машин (Дельт) — ``GET /restapi/get-deltas``.
+
+    Ответ: ``{"deltas": [{"id": N, "name": "...", "displayName": "...",
+    "isWorking": bool}, …]}``. Эндпоинт открытый (sessionId не требуется) —
+    это перечисление всего парка машин DL без авторизации, о чём стоит
+    сказать разработчикам DL.
+
+    Возвращает список словарей. При ошибке — пустой список (выбор машины
+    не обязан ломать страницу: список машин — справочный, необязательный).
+    """
+    try:
+        response = _dl_request("GET", "/restapi/get-deltas", timeout=15)
+        _raise_for_status(response)
+        data = _decode_response_json(response)
+    except DLApiError as exc:
+        logger.warning("Не удалось получить список тестирующих машин DL: %s", exc)
+        return []
+    deltas = data.get("deltas") if isinstance(data, dict) else None
+    if not isinstance(deltas, list):
+        return []
+    result = []
+    for item in deltas:
+        if not isinstance(item, dict):
+            continue
+        try:
+            delta_id = int(item.get("id"))
+        except (TypeError, ValueError):
+            continue
+        result.append({
+            "id": delta_id,
+            "name": str(item.get("name") or ""),
+            "display_name": str(item.get("displayName") or ""),
+            "is_working": bool(item.get("isWorking")),
+        })
+    return result
 
 
 def ensure_course_session(session_id: str, course_id: int, node_id: int) -> bool:
@@ -634,6 +773,8 @@ def send_solution_to_dl(
     code: str,
     file_extension: str,
     course_id: int = 0,
+    file_name: str = "",
+    delta: str = "",
 ) -> dict[str, Any]:
     """Submit code to DL for automated testing.
 
@@ -645,12 +786,15 @@ def send_solution_to_dl(
     страницы (``cid``). По умолчанию 0 — только для обратной совместимости
     сигнатуры, все in-tree вызовы должны передавать реальный course_id.
 
-    NB (2026-10, проверено): имя файла решения (``api_solution_XXXXXXXX``)
-    задаёт сам DL-сервер — контракт ``/restapi/send-solution`` поля имени
-    файла НЕ содержит, его невозможно задать (эксперимент с
-    ``fileName``/``solutionFileName`` убран: прогоны с нестандартными полями
-    тела отдавали 400). Читаемое имя остаётся только в скачках из админки
-    (admin_arm_solve_result_download_view); разработчикам DL — фича-запрос.
+    ``file_name`` (контракт v1.4.2, ``SendSolutionRequest.fileName``) — необязательное
+    имя временного файла решения. Формат жёсткий:
+    ``^[A-Za-z0-9_-]+\\.[A-Za-z0-9]+$``, ≤ 200 символов, расширение ТОЧНО как в
+    ``fileExtension``. Здесь имя нормализуется (``build_dl_file_name``); если
+    привести к контракту нельзя — поле не отправляется, DL назовёт файл сам
+    (``api_solution_<случайное>.<ext>``).
+
+    ``delta`` (контракт v1.4.2) — машина проверки: её ID ("5") или ТОЧНОЕ
+    название ("DelTA4 at NIT1 Win10 x64"). Пусто — машина назначается DL.
 
     Returns the raw JSON response. Raises DLUnauthorizedError (401),
     DLServerError (500), DLApiUnavailable on network failure.
@@ -662,6 +806,16 @@ def send_solution_to_dl(
         "fileExtension": file_extension,
         "courseId": course_id,
     }
+    # Имя файла — по контракту; невалидное/пустое → поле не отправляется
+    # (DL назовёт файл сам — это безопаснее, чем 400 из-за имени).
+    resolved_name = build_dl_file_name(file_name, file_extension) if file_name else ""
+    if resolved_name:
+        payload["fileName"] = resolved_name
+    # Машина проверки: ID или точное название (контракт: "delta").
+    delta_value = str(delta or "").strip()
+    if delta_value:
+        payload["delta"] = delta_value
+
     response = _dl_request(
         "POST",
         "/restapi/send-solution",
@@ -676,7 +830,7 @@ def send_solution_to_dl(
         return _decode_response_json(response)
     except DLServerError as exc:
         raise DLServerError(
-            f"{_send_solution_payload_context(node_id, code, file_extension, course_id)}: {exc}"
+            f"{_send_solution_payload_context(node_id, code, file_extension, course_id, resolved_name)}: {exc}"
         ) from exc
 
 

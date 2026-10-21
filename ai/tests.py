@@ -11,6 +11,7 @@ from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import SimpleTestCase, RequestFactory, TestCase, TransactionTestCase, override_settings
 from pathlib import Path
 import json
+import requests
 from datetime import datetime, timedelta
 import re
 import tempfile
@@ -19447,3 +19448,388 @@ class TokensAjaxPartialTests(_AdminViewRequestMixin, TestCase):
         self.assertIn("X-Requested-With", js)
         self.assertIn("AbortController", js)
         self.assertNotIn("form.submit()", js)
+
+
+class CanUseAiHttpGateTests(TestCase):
+    """Гейт DL «canUseAi» на HTTP-эндпоинтах отправки/опроса решения.
+
+    Флаг запрета AI в курсе (dl-rest-api.json, UserInfo.canUseAi) должен
+    закрывать не только страницу чата и WS, но и отправку решения на
+    проверку: код сгенерировать нельзя, проверять нечего.
+    """
+
+    def _request(self, path, body):
+        factory = RequestFactory()
+        request = factory.post(path, data=json.dumps(body),
+                               content_type="application/json")
+        request.user = get_user_model().objects.create_user(
+            username="dl-gate-user", password="***")
+        request.session = {}
+        request.user_info = {"userId": "student", "canUseAi": False}
+        request.COOKIES = {"userId": "student"}
+        return request
+
+    def test_send_solution_blocked_when_ai_disabled(self):
+        from ai.views import send_solution_view
+
+        request = self._request(
+            "/ai/api/send-solution/",
+            {"nodeId": 9101, "code": "program a;", "fileExtension": ".pas"},
+        )
+        response = send_solution_view(request)
+        self.assertEqual(response.status_code, 403)
+        payload = json.loads(response.content.decode())
+        self.assertIn("запрещено", payload.get("error", ""))
+
+    def test_send_solution_blocked_by_session_cache_flag(self):
+        """Флаг в кеше сессии (external_user_info) — тоже блокирует."""
+        from ai.views import send_solution_view
+
+        factory = RequestFactory()
+        request = factory.post(
+            "/ai/api/send-solution/",
+            data=json.dumps({"nodeId": 9101, "code": "x", "fileExtension": ".pas"}),
+            content_type="application/json",
+        )
+        request.user = get_user_model().objects.create_user(
+            username="dl-gate-user2", password="***")
+        request.session = {"external_user_info": {"userId": "s", "canUseAi": False}}
+        request.COOKIES = {"userId": "student"}
+        response = send_solution_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_get_solution_result_blocked_when_ai_disabled(self):
+        from ai.views import get_solution_result_view
+
+        request = self._request("/ai/api/get-solution-result/", {"queueId": 5})
+        response = get_solution_result_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_allowed_without_flag(self):
+        """Без флага эндпоинты работают как раньше (гейт не блокирует)."""
+        from ai.views import send_solution_view
+
+        factory = RequestFactory()
+        request = factory.post(
+            "/ai/api/send-solution/",
+            data=json.dumps({"nodeId": 9101, "code": "x", "fileExtension": ".pas"}),
+            content_type="application/json",
+        )
+        request.user = get_user_model().objects.create_user(
+            username="dl-gate-ok", password="***")
+        request.session = {}
+        request.user_info = {"userId": "student"}
+        request.session = {"external_session_id": "SID-1"}
+        request.COOKIES = {"userId": "student"}
+        with patch("ai.dl_api_client.send_solution_to_dl",
+                   return_value={"queueId": 7}) as send:
+            response = send_solution_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(send.called)
+
+    def test_ai_disabled_reason_single_source(self):
+        """Текст отказа — один на странице, WS и HTTP (общий хелпер)."""
+        from ai.services.auth import ai_disabled_reason
+
+        factory = RequestFactory()
+        request = factory.get("/ai/chat/")
+        request.session = {}
+        request.user_info = {"userId": "s", "canUseAi": False}
+        reason = ai_disabled_reason(request)
+        self.assertIsNotNone(reason)
+        self.assertIn("запрещено", reason)
+        # Тот же текст отдаёт и views-обёртка.
+        from ai.views import _ai_disabled_reason
+
+        self.assertEqual(_ai_disabled_reason(request), reason)
+
+
+class DlFileNameContractTests(TestCase):
+    """Имя временного файла решения по контракту DL v1.4.2.
+
+    ``SendSolutionRequest.fileName``: ``^[A-Za-z0-9_-]+\\.[A-Za-z0-9]+$``,
+    ≤ 200 символов, расширение ТОЧНО как в ``fileExtension``.
+    """
+
+    def test_valid_name_kept(self):
+        from ai.dl_api_client import build_dl_file_name
+
+        self.assertEqual(
+            build_dl_file_name("Deepseek-4-1-flash_12345", ".mpc"),
+            "Deepseek-4-1-flash_12345.mpc",
+        )
+
+    def test_extension_taken_from_file_extension(self):
+        from ai.dl_api_client import build_dl_file_name
+
+        self.assertEqual(build_dl_file_name("solution", ".pas"), "solution.pas")
+        # Без точки в расширении — добавляем.
+        self.assertEqual(build_dl_file_name("solution", "cpp"), "solution.cpp")
+
+    def test_non_latin_and_spaces_replaced(self):
+        from ai.dl_api_client import build_dl_file_name
+
+        name = build_dl_file_name("Моё решение 1", ".cpp")
+        self.assertIsNotNone(name)
+        self.assertRegex(name, r"^[A-Za-z0-9_-]+\.[A-Za-z0-9]+$")
+        self.assertNotIn(" ", name)
+
+    def test_cyrillic_is_transliterated_readably(self):
+        """Русское имя → читаемое латинское (не «_» и не пустое)."""
+        from ai.dl_api_client import build_dl_file_name
+
+        name = build_dl_file_name("Проверка новых задач", ".pas")
+        self.assertEqual(name, "Proverka_novyh_zadach.pas")
+
+    def test_existing_extension_in_base_is_replaced(self):
+        from ai.dl_api_client import build_dl_file_name
+
+        self.assertEqual(build_dl_file_name("sol.cpp", ".pas"), "sol.pas")
+
+    def test_reserved_windows_name_escaped(self):
+        from ai.dl_api_client import build_dl_file_name
+
+        name = build_dl_file_name("CON", ".txt")
+        self.assertIsNotNone(name)
+        self.assertNotEqual(name.split(".")[0].upper(), "CON")
+
+    def test_empty_base_returns_none(self):
+        from ai.dl_api_client import build_dl_file_name
+
+        self.assertIsNone(build_dl_file_name("", ".cpp"))
+        self.assertIsNone(build_dl_file_name("   ", ".cpp"))
+        self.assertIsNone(build_dl_file_name("///", ".cpp"))
+
+    def test_long_name_truncated_to_limit(self):
+        from ai.dl_api_client import build_dl_file_name
+
+        name = build_dl_file_name("a" * 500, ".cpp")
+        self.assertIsNotNone(name)
+        self.assertLessEqual(len(name), 200)
+        self.assertTrue(name.endswith(".cpp"))
+
+    def test_bad_extension_returns_none(self):
+        from ai.dl_api_client import build_dl_file_name
+
+        self.assertIsNone(build_dl_file_name("sol", ""))
+        self.assertIsNone(build_dl_file_name("sol", ".c++"))
+
+    def test_send_solution_sends_file_name(self):
+        from ai.dl_api_client import send_solution_to_dl
+
+        with patch("ai.dl_api_client._dl_request") as request:
+            request.return_value = _fake_response(200, {"queueId": 3})
+            send_solution_to_dl("SID", 100, "code", ".cpp", course_id=5,
+                                file_name="my_solution")
+        payload = request.call_args.kwargs["json"]
+        self.assertEqual(payload.get("fileName"), "my_solution.cpp")
+        self.assertEqual(payload.get("courseId"), 5)
+
+    def test_send_solution_omits_invalid_file_name(self):
+        """Невалидное имя → поле не отправляется (DL назовёт файл сам)."""
+        from ai.dl_api_client import send_solution_to_dl
+
+        with patch("ai.dl_api_client._dl_request") as request:
+            request.return_value = _fake_response(200, {"queueId": 3})
+            send_solution_to_dl("SID", 100, "code", ".cpp", course_id=5,
+                                file_name="")
+        payload = request.call_args.kwargs["json"]
+        self.assertNotIn("fileName", payload)
+
+    def test_send_solution_sends_delta(self):
+        from ai.dl_api_client import send_solution_to_dl
+
+        with patch("ai.dl_api_client._dl_request") as request:
+            request.return_value = _fake_response(200, {"queueId": 3})
+            send_solution_to_dl("SID", 100, "code", ".cpp", course_id=5,
+                                delta="48")
+        payload = request.call_args.kwargs["json"]
+        self.assertEqual(payload.get("delta"), "48")
+
+    def test_send_solution_omits_empty_delta(self):
+        from ai.dl_api_client import send_solution_to_dl
+
+        with patch("ai.dl_api_client._dl_request") as request:
+            request.return_value = _fake_response(200, {"queueId": 3})
+            send_solution_to_dl("SID", 100, "code", ".cpp", course_id=5)
+        payload = request.call_args.kwargs["json"]
+        self.assertNotIn("delta", payload)
+
+
+class FetchDeltasTests(TestCase):
+    """Список тестирующих машин (Дельт) — GET /restapi/get-deltas."""
+
+    def test_parses_deltas(self):
+        from ai.dl_api_client import fetch_deltas
+
+        payload = {"deltas": [
+            {"id": 16, "name": "DelTA_NONE", "displayName": "DelTA никакая",
+             "isWorking": False},
+            {"id": 48, "name": "DelTA4_NIT0_W10_x64",
+             "displayName": "DelTA4 at NIT0 Win10 x64", "isWorking": True},
+        ]}
+        with patch("ai.dl_api_client._dl_request") as request:
+            request.return_value = _fake_response(200, payload)
+            deltas = fetch_deltas()
+        self.assertEqual(len(deltas), 2)
+        self.assertEqual(deltas[0]["id"], 16)
+        self.assertEqual(deltas[1]["display_name"], "DelTA4 at NIT0 Win10 x64")
+        self.assertTrue(deltas[1]["is_working"])
+
+    def test_network_error_returns_empty_list(self):
+        """Список машин — справочный: его недоступность не ломает страницу."""
+        from ai.dl_api_client import fetch_deltas
+
+        from ai.dl_api_client import DLApiUnavailable
+
+        with patch("ai.dl_api_client._dl_request",
+                   side_effect=DLApiUnavailable("нет сети")):
+            self.assertEqual(fetch_deltas(), [])
+
+    def test_malformed_entries_skipped(self):
+        from ai.dl_api_client import fetch_deltas
+
+        with patch("ai.dl_api_client._dl_request") as request:
+            request.return_value = _fake_response(
+                200, {"deltas": [{"id": "не число"}, "строка", {"id": 5}]})
+            deltas = fetch_deltas()
+        self.assertEqual([d["id"] for d in deltas], [5])
+
+
+def _fake_response(status_code, payload):
+    """Подделка requests.Response для тестов клиента DL."""
+    response = requests.Response()
+    response.status_code = status_code
+    response._content = json.dumps(payload).encode("utf-8")
+    response.headers["Content-Type"] = "application/json"
+    return response
+
+
+class ArmDeltaSelectionTests(TestCase):
+    """Выбор тестирующей машины (Дельты) в форме запуска ARM.
+
+    Контракт DL v1.4.2: машина передаётся как ID ("5") или ТОЧНОЕ название
+    ("DelTA4 at NIT1 Win10 x64"); пусто — машину назначает DL.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="delta_admin", password="x", email="d@t.com",
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+
+    def _post(self, payload, deltas=None):
+        from ai.admin.arm import admin_arm_solve_start_view
+
+        request = self.factory.post(
+            "/ai/admin/arm/solve/start/", data=json.dumps(payload),
+            content_type="application/json",
+        )
+        request.user = self.superuser
+        request.session = {}
+        options = deltas if deltas is not None else [
+            {"id": 48, "name": "DelTA4_NIT0_W10_x64",
+             "display_name": "DelTA4 at NIT0 Win10 x64", "is_working": True},
+        ]
+        with (
+            patch("ai.admin.arm._resolve_session_id", return_value="sess-1"),
+            patch("ai.admin.arm._resolve_active_course_id", return_value=(1450, "")),
+            patch("ai.admin.arm._fetch_delta_options", return_value=options),
+            patch("ai.admin.arm.start_batch_solve_run", return_value=("run-x", None)) as start_mock,
+        ):
+            response = admin_arm_solve_start_view(request)
+        return response, start_mock
+
+    def _payload(self, **extra):
+        payload = {
+            "node_ids": [101], "models": ["FakeModel"],
+            "language_id": self.lang.id, "dl_test": True,
+        }
+        payload.update(extra)
+        return payload
+
+    def test_delta_id_passed_to_run(self):
+        response, start_mock = self._post(self._payload(delta="48"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(start_mock.call_args.kwargs["delta"], "48")
+
+    def test_delta_display_name_accepted(self):
+        response, start_mock = self._post(
+            self._payload(delta="DelTA4 at NIT0 Win10 x64"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            start_mock.call_args.kwargs["delta"], "DelTA4 at NIT0 Win10 x64")
+
+    def test_unknown_delta_rejected(self):
+        response, start_mock = self._post(self._payload(delta="999"))
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(start_mock.called)
+
+    def test_empty_delta_allows_automatic_assignment(self):
+        response, start_mock = self._post(self._payload(delta=""))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(start_mock.call_args.kwargs["delta"], "")
+
+    def test_delta_stored_in_run_params(self):
+        """Машина сохраняется в снимке формы запуска (run_params)."""
+        from ai.arm_runner import start_batch_solve_run
+
+        with (
+            patch("ai.arm_runner.get_runtime_model_handlers",
+                  return_value={"Web_DeepSeek": {"title": "Web DS", "handler": None}}),
+            patch("ai.arm_runner.is_arm_solve_model", return_value=True),
+            patch("ai.arm_runner.threading.Thread") as thread_mock,
+        ):
+            run_id, error = start_batch_solve_run(
+                [101], ["Web_DeepSeek"], 1, "sess-1",
+                delta="48", file_name="my_run",
+            )
+        self.assertEqual(error, "")
+        self.assertTrue(run_id)
+        job = thread_mock.call_args.kwargs.get("kwargs", {})
+        self.assertEqual(job.get("delta"), "48")
+        self.assertEqual(job.get("file_name"), "my_run")
+
+
+class ArmDeltaFormTests(_AdminViewRequestMixin, TestCase):
+    """Селект тестирующей машины на странице ARM."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(
+            username="delta_page", password="x", is_staff=True,
+        )
+
+    def test_page_has_delta_select(self):
+        from ai.admin.arm import admin_arm_solve_view
+
+        request = self._admin_request(self.user, path="/ai/admin/arm/solve/")
+        options = [
+            {"id": 48, "name": "DelTA4_NIT0_W10_x64",
+             "display_name": "DelTA4 at NIT0 Win10 x64", "is_working": True},
+        ]
+        with (
+            patch("ai.admin.arm._resolve_active_course_id", return_value=(1450, "")),
+            patch("ai.admin.arm._fetch_delta_options", return_value=options),
+            patch("ai.admin.arm.get_arm_solve_model_options", return_value=[]),
+        ):
+            response = admin_arm_solve_view(request)
+        html = response.render().content.decode()
+        self.assertIn('id="armDeltaSelect"', html)
+        self.assertIn('name="delta"', html)
+        self.assertIn("DelTA4 at NIT0 Win10 x64", html)
+
+    def test_page_without_delta_list_still_renders(self):
+        """Список машин недоступен — форма работает (машина назначается DL)."""
+        from ai.admin.arm import admin_arm_solve_view
+
+        request = self._admin_request(self.user, path="/ai/admin/arm/solve/")
+        with (
+            patch("ai.admin.arm._resolve_active_course_id", return_value=(1450, "")),
+            patch("ai.admin.arm._fetch_delta_options", return_value=[]),
+            patch("ai.admin.arm.get_arm_solve_model_options", return_value=[]),
+        ):
+            response = admin_arm_solve_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('id="armDeltaSelect"', response.render().content.decode())

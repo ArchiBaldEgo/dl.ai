@@ -587,9 +587,17 @@ async function _pollDlResult(queueId, statusNode) {
             var data = await response.json().catch(function () { return null; });
             if (data && data.isFinished === true) {
                 var comment = String(data.comment || '').trim();
-                _setDlMessageTextPersist(statusNode,
-                    comment ? 'DL: ' + comment
-                            : getUiString('dlEmptyComment', 'DL: тестирование завершено'));
+                var verdictText = comment ? 'DL: ' + comment
+                                         : getUiString('dlEmptyComment', 'DL: тестирование завершено');
+                // Машина (Дельта), на которой шла проверка (deltaName в ответе
+                // get-solution-result). Показываем её, чтобы было видно, ГДЕ
+                // именно проверялось решение.
+                var deltaName = String((data && data.deltaName) || '').trim();
+                if (deltaName) {
+                    var machineTpl = getUiString('dlMachine', 'машина: {0}');
+                    verdictText += ' (' + machineTpl.replace('{0}', deltaName) + ')';
+                }
+                _setDlMessageTextPersist(statusNode, verdictText);
                 _forgetQueue();
                 return;
             }

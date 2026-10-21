@@ -1455,6 +1455,8 @@ var localization = {
         dlTimeout: "DL: тестирование не завершилось за отведённое время",
         dlSendFailed: "DL: не удалось отправить решение на тестирование",
         dlEmptyComment: "DL: тестирование завершено",
+        // Машина (Дельта), на которой DL проверял решение (deltaName).
+        dlMachine: "машина: {0}",
         voiceStatus: {
             listening: "Запись голоса",
             recognized: "Распознано: ",
@@ -1571,6 +1573,8 @@ var localization = {
         dlTimeout: "DL: testing did not finish within the allotted time",
         dlSendFailed: "DL: failed to submit the solution for testing",
         dlEmptyComment: "DL: testing finished",
+        // The machine (Delta) that ran the DL check (deltaName).
+        dlMachine: "machine: {0}",
         voiceStatus: {
             listening: "Voice recording",
             recognized: "Recognized: ",
@@ -1686,6 +1690,8 @@ var localization = {
         dlTimeout: "DL : le test ne s'est pas terminé dans le délai imparti",
         dlSendFailed: "DL : échec de l'envoi de la solution pour le test",
         dlEmptyComment: "DL : test terminé",
+        // La machine (Delta) qui a effectué le test DL (deltaName).
+        dlMachine: "machine : {0}",
         voiceStatus: {
             listening: "Enregistrement vocal",
             recognized: "Reconnu : ",

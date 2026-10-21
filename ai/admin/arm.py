@@ -139,6 +139,25 @@ def _resolve_active_course_id(request):
     return _resolve_active_course_id_for_session(_resolve_session_id(request))
 
 
+def _fetch_delta_options() -> list[dict]:
+    """Список тестирующих машин (Дельт) для селекта в форме запуска ARM.
+
+    Источник — DL (GET /restapi/get-deltas, открытый эндпоинт, авторизация не
+    нужна). Ответ кэшируется в django-cache на 5 минут: список машин меняется
+    редко, а страница ARM открывается часто. Если DL недоступен — пустой
+    список (форма работает как раньше: машину назначает DL сам).
+    """
+    cache_key = f"{AI_CACHE_KEY_PREFIX}:dl_deltas"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    from ..dl_api_client import fetch_deltas
+
+    options = fetch_deltas()
+    cache.set(cache_key, options, 300)
+    return options
+
+
 # ---------------------------------------------------------------------------
 # Batch-solve ARM: load tasks from DL tree, send each model the statement,
 # test the code via DL (send-solution / get-solution-result).
@@ -243,6 +262,11 @@ def admin_arm_solve_view(request):
         ).order_by("topic__topic_name_ru", "prompt_name_ru")
     ]
 
+    # Тестирующие машины (Дельты) — выбор в форме запуска. Список приходит из
+    # DL (GET /restapi/get-deltas, открытый эндпоинт). Если список не пришёл —
+    # форма работает как раньше (машину назначает DL автоматически).
+    delta_options = _fetch_delta_options()
+
     context = {
         **ai_admin_site.each_context(request),
         "title": "ARM: Пакетное решение",
@@ -253,6 +277,7 @@ def admin_arm_solve_view(request):
         "prompt_options": prompt_options,
         "language_options": language_options,
         "topics": topics,
+        "delta_options": delta_options,
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
         "results": results,
         "report": report,
@@ -570,6 +595,24 @@ def admin_arm_solve_start_view(request):
         if course_err:
             return JsonResponse({"ok": False, "message": course_err}, status=400)
 
+    # Тестирующая машина (Дельта) — по выбору оператора. Контракт DL (v1.4.2,
+    # SendSolutionRequest.delta): машина передаётся как ID ("5") или ТОЧНОЕ
+    # название ("DelTA4 at NIT1 Win10 x64"). Пусто — машину назначает DL.
+    # Значение сверяем со списком машин (fetch_deltas): произвольная строка
+    # ушла бы в DL и отбивалась бы 400 без внятного объяснения.
+    delta = str(body.get("delta") or request.POST.get("delta") or "").strip()
+    if delta:
+        known = _fetch_delta_options()
+        if known:
+            known_ids = {str(d["id"]) for d in known}
+            known_names = {d["name"] for d in known if d.get("name")}
+            known_display = {d["display_name"] for d in known if d.get("display_name")}
+            if delta not in known_ids and delta not in known_names and delta not in known_display:
+                return JsonResponse(
+                    {"ok": False, "message": "Выбранная тестирующая машина неизвестна DL."},
+                    status=400,
+                )
+
     session_id = _resolve_session_id(request)
     if not session_id:
         return JsonResponse(
@@ -610,6 +653,7 @@ def admin_arm_solve_start_view(request):
         record_stats=record_stats,
         run_name=run_name,
         save_solutions=save_solutions,
+        delta=delta,
     )
     if not run_id:
         return JsonResponse(

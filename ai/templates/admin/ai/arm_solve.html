@@ -134,6 +134,20 @@
       {% endif %}
 
       <input type="hidden" name="dl_test" value="1" id="armDlTest">
+      {% if delta_options %}
+      <div class="arm-section-head" style="margin-top:18px;">
+        <div>
+          <h2>Тестирующая машина</h2>
+          <p class="arm-section-note">Необязательно. По умолчанию машину назначает dl.gsu.by сам. Если выбрать конкретную — проверка пойдёт именно на ней; в результатах будет видно, какая машина это была.</p>
+        </div>
+      </div>
+      <select name="delta" id="armDeltaSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
+        <option value="">Назначить автоматически</option>
+        {% for d in delta_options %}
+          <option value="{{ d.id }}">{{ d.display_name|default:d.name }}{% if d.name and d.display_name %} ({{ d.name }}){% endif %}</option>
+        {% endfor %}
+      </select>
+      {% endif %}
       {% if not is_super_user %}<div class="arm-warning">Не покидайте страницу, иначе тестирование прервётся.</div>{% endif %}
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
