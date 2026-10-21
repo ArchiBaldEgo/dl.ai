@@ -1921,21 +1921,38 @@ var isResizing = false;
 
 function startResize(event) {
     isResizing = true;
+    document.body.style.cursor = 'ew-resize';
+    document.body.style.userSelect = 'none';
     window.addEventListener('mousemove', resize);
     window.addEventListener('mouseup', stopResize);
 }
 
 function resize(event) {
     if (isResizing) {
-        var container = document.querySelector('form');
-        var newWidth = container.getBoundingClientRect().right - event.clientX;
-        var minWidth = 500;
-        if (newWidth > minWidth) container.style.width = newWidth + 'px';
+        var container = document.querySelector('.blo');
+        var dv = document.querySelector('.dv');
+        if (!container || !dv) return;
+
+        var containerRect = container.getBoundingClientRect();
+        
+        // Считаем ширину от правого края контейнера .blo до курсора
+        var newWidth = containerRect.right - event.clientX - 10; // -10 это padding контейнера
+
+        var minWidth = 300; // Минимальная ширина
+        var maxWidth = containerRect.width - 300; // Оставляем минимум 300px для левого окна
+
+        if (newWidth < minWidth) newWidth = minWidth;
+        if (newWidth > maxWidth) newWidth = maxWidth;
+
+        // Применяем ширину к контейнеру .dv
+        dv.style.flex = '0 0 ' + newWidth + 'px';
     }
 }
 
 function stopResize() {
     isResizing = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
     window.removeEventListener('mousemove', resize);
     window.removeEventListener('mouseup', stopResize);
 }
