@@ -13865,6 +13865,24 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
                                        title="ФК-101")
         self.assertIn("Иван Петров (ФК-101)", _claimant_display(dev))
 
+    def test_page_schedules_education_backfill_for_missing_names(self):
+        """У аккаунтов без названия группы (залогинились до появления
+        EducationInfo в DL API) дозагрузка идёт В ФОНЕ при открытии доски —
+        «ФИО (группа)» появятся при следующем открытии (страница не ждёт DL)."""
+        dev = get_user_model().objects.create_user(username="user_777", password="x")
+        ExternalDLAccount.objects.create(
+            user=dev, external_user_id="777", external_login="dev777",
+            education_group_mask_id="M-77",
+        )
+        AIDevTask.objects.create(
+            title="Т-бэкфилл", created_by=self.superuser, taken_by=dev,
+        )
+        with patch("ai.admin.tasks.schedule_education_backfill") as backfill:
+            resp = self.page_view(self._request(self.superuser, path=self.tasks_url))
+        self.assertEqual(resp.status_code, 200)
+        backfill.assert_called_once()
+        self.assertIn("777", backfill.call_args[0][0])
+
     # --- Правка таска (ТЗ 2026-10-20) ---------------------------------------
 
     def _edit_body(self, **kwargs):

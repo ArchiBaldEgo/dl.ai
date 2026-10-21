@@ -26,6 +26,7 @@ superuser/action.task_reorder. Взять может любой, кто допу
 """
 
 import json
+import logging
 from datetime import date, datetime, timedelta
 
 from django.contrib.auth import get_user_model
@@ -38,6 +39,7 @@ from django.views.decorators.http import require_POST
 
 from ..constants import MOSCOW_TZ
 from ..models import AIDevTask, ExternalDLAccount
+from ..services.education_backfill import schedule_education_backfill
 from ..services.education_directory import education_title_maps, group_display
 
 from .permissions import (
@@ -50,6 +52,8 @@ from .permissions import (
 from .site import ai_admin_site
 
 TASKS_URL = "/ai/admin/tasks/"
+
+logger = logging.getLogger(__name__)
 
 
 def _claimant_display(user, edu_maps=None):
@@ -206,7 +210,14 @@ def admin_tasks_view(request):
     edu_maps = education_title_maps()
     kind_labels = dict(AIDevTask.Kind.choices)
     rows = []
+    # Пользователи, чьё ФИО/группа показываются на доске («кто дал»/«кто взял»
+    # и варианты фильтров) — по ним дозагружаем название группы из DL.
+    participant_ids = set()
     for task in rows_qs:
+        if task.created_by_id:
+            participant_ids.add(task.created_by_id)
+        if task.taken_by_id:
+            participant_ids.add(task.taken_by_id)
         rows.append({
             "id": task.pk,
             "kind": task.kind,
@@ -244,6 +255,7 @@ def admin_tasks_view(request):
         for user in get_user_model().objects.filter(
             pk__in=set(uid for uid in user_ids if uid)
         ).order_by("username"):
+            participant_ids.add(user.pk)
             options.append(
                 {"id": user.pk, "name": _claimant_display(user, edu_maps)}
             )
@@ -267,6 +279,26 @@ def admin_tasks_view(request):
             .values_list("taken_by_id", flat=True)
             .distinct()
         )
+    # Название группы в «ФИО (группа)» берётся из DL (education_group_name);
+    # у тех, кто залогинился до появления EducationInfo в DL API, поля пустые —
+    # дозагружаем их В ФОНЕ (страница не ждёт DL, группы появятся при следующем
+    # открытии доски) — тот же приём, что в дневном отчёте.
+    try:
+        _accounts = ExternalDLAccount.objects.filter(
+            user_id__in=participant_ids
+        ).only(
+            "external_user_id", "education_group_name", "education_school_name"
+        )
+        _missing = [
+            acc.external_user_id for acc in _accounts
+            if not (acc.education_group_name or "").strip()
+            or not (acc.education_school_name or "").strip()
+        ]
+        if _missing:
+            schedule_education_backfill(_missing)
+    except Exception:  # noqa: BLE001 — дозагрузка не должна ломать доску
+        logger.exception("education backfill scheduling failed")
+
     context = {
         **ai_admin_site.each_context(request),
         "title": "Таски",
