@@ -66,7 +66,7 @@ document.getElementById("selectLang").addEventListener("change", function() {
     var submitBtn = document.querySelector("button[type='submit']");
     if (submitBtn) submitBtn.textContent = localization[selectedLang].send;
 
-    var clearBtn = document.querySelector("button[onclick='clearContext()']");
+    var clearBtn = document.querySelector("#clearContextBtn");
     if (clearBtn) clearBtn.textContent = localization[selectedLang].clear;
 
     var messageText = document.getElementById("messageText");
@@ -129,4 +129,13 @@ window.onload = function() {
 
     var messageText = document.getElementById('messageText');
     if (messageText) messageText.addEventListener('input', saveSharedText);
+
+    // Автозагрузка условия задачи из DL-ссылки (?nid=…): кнопка «Чат с DLAI»
+    // на странице задачи ведёт сюда. Раньше nid игнорировался; теперь, если
+    // со стороны dl.gsu.by он передан — подставляем условие в поле сообщения
+    // (после restoreSharedText и только при пустом/восстановленном поле,
+    // см. ai-common.js::aiLoadTaskFromUrl).
+    if (window.AI_TASK_NODE_ID) {
+        aiLoadTaskFromUrl(document.getElementById('messageText'), { force: true });
+    }
 };

@@ -7,14 +7,14 @@ from django.contrib.admin.sites import AdminSite
 from django.contrib.messages.storage.cookie import CookieStorage
 from django.contrib.auth import SESSION_KEY, get_user_model
 from django.contrib.auth.models import AnonymousUser
-from django.contrib.auth.models import Group
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import SimpleTestCase, RequestFactory, TestCase, TransactionTestCase, override_settings
 from pathlib import Path
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 import re
 import tempfile
+import threading
 import time
 import uuid
 
@@ -39,6 +39,7 @@ from ai.i18n import get_localized_name, get_ui_language_suffix
 from ai.external_account import get_or_create_user_from_external
 from ai.models import (
     AuthorAlias,
+    AIDevTask,
     AIRequestLog,
     AIPinnedBatchRun,
     AIWizardSeen,
@@ -63,6 +64,32 @@ from ai.services import (
 from ai.throttling import RateLimiter, get_request_user_id, rate_limited
 from ai.views import chat_view, get_problem_data, get_prompts, set_password_view
 from ai.dl_api_client import _decode_response_json
+
+
+def make_prompt_developer(user):
+    """Зачисляет юзера во встроенную группу доступа «Разработчик промптов».
+
+    Прежний способ — Django-Group `prompt_developer` — удалён: все проверки
+    прав резолвят ключи AIAccessGroup (см. ai/admin/permissions.py).
+    """
+    from ai.admin.permissions import add_user_to_builtin_ai_group
+    from ai.constants import BUILTIN_GROUP_PROMPT_DEV
+    return add_user_to_builtin_ai_group(user, BUILTIN_GROUP_PROMPT_DEV)
+
+
+def make_developer(user):
+    """Зачисляет юзера во встроенную группу «Разработчик» (page.tasks и пр.)."""
+    from ai.admin.permissions import add_user_to_builtin_ai_group
+    from ai.constants import BUILTIN_GROUP_DEVELOPER
+    return add_user_to_builtin_ai_group(user, BUILTIN_GROUP_DEVELOPER)
+
+
+def make_ai_group_member(user, group_name):
+    """Зачисляет юзера в произвольную группу доступа (обычно создана тестом)."""
+    from ai.models import AIAccessGroup
+    group, _ = AIAccessGroup.objects.get_or_create(name=group_name)
+    user.ai_access_groups.add(group)
+    return group
 
 
 class ChatViewTests(SimpleTestCase):
@@ -166,7 +193,6 @@ class ExternalAuthMiddlewareTests(TestCase):
         # but the current DLSID authenticates user 42. Middleware must
         # rebind the session so the local user matches the external one.
         from django.contrib.auth.models import User
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         from ai.models import ExternalDLAccount
 
         stale = User.objects.create_user(
@@ -179,9 +205,8 @@ class ExternalAuthMiddlewareTests(TestCase):
         self._add_session(request)
         request.user = stale
         request.COOKIES["DLSID"] = "session-123"
-        # Seed the prompt_developer group and a fresh user so the real
-        # provisioning path (not a mock) can run end-to-end.
-        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
+        # Fresh user so the real provisioning path (not a mock) runs
+        # end-to-end; базовую группу создаст сам провижининг.
         fresh = User.objects.create_user(username="alice", password="x")
         ExternalDLAccount.objects.create(user=fresh, external_user_id="42")
 
@@ -198,11 +223,8 @@ class ExternalAuthMiddlewareTests(TestCase):
         self.assertEqual(request.user.username, "alice")
 
     def test_cached_user_info_skips_external_call(self):
-        # Even for admin paths the middleware now provisions a local
-        # user, so seed the prompt_developer group and the user.
-        from ai.constants import PROMPT_DEVELOPER_GROUP
+        # Even for admin paths the middleware now provisions a local user.
         from ai.models import ExternalDLAccount
-        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         u = self.user_model.objects.create_user(username="user_42", password="x")
         ExternalDLAccount.objects.create(user=u, external_user_id="42")
 
@@ -223,9 +245,7 @@ class ExternalAuthMiddlewareTests(TestCase):
 
     def test_stale_cached_user_info_revalidates_dlsid(self):
         # Кэш старше TTL → middleware заново проверяет DLSID через внешний API.
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         from ai.models import ExternalDLAccount
-        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         u = self.user_model.objects.create_user(username="user_42b", password="x")
         ExternalDLAccount.objects.create(user=u, external_user_id="42")
 
@@ -251,10 +271,8 @@ class ExternalAuthMiddlewareTests(TestCase):
     def test_unavailable_external_api_falls_back_to_stale_cache(self):
         # dl.gsu.by недоступен, но есть свежий кэш → graceful degradation,
         # доступ сохраняется (не 503).
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         from ai.models import ExternalDLAccount
         from ai.external_auth import ExternalAuthUnavailable
-        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         u = self.user_model.objects.create_user(username="user_42c", password="x")
         ExternalDLAccount.objects.create(user=u, external_user_id="42")
 
@@ -302,8 +320,6 @@ class DevAuthBypassTests(TestCase):
     """
 
     def setUp(self):
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         self.factory = RequestFactory()
         self.middleware = ExternalAuthMiddleware(lambda req: HttpResponse("ok"))
         self.user_model = get_user_model()
@@ -511,9 +527,6 @@ class AdminExternalAuthTests(TestCase):
         # exactly the cross-account bug: a stale superuser session
         # must NOT grant access on someone else's DLSID.
         from ai.admin.site import ai_admin_site
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        from django.contrib.auth.models import Group
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         stale = self.user_model.objects.create_user(
             username="99",
             password="initial-pass",
@@ -521,22 +534,19 @@ class AdminExternalAuthTests(TestCase):
             is_staff=True,
         )
         legit = self.user_model.objects.create_user(username="12345", password="initial-pass")
-        legit.groups.add(group)
+        make_prompt_developer(legit)
         request = self._request(user_id="12345")
         request.user = stale
         self.assertFalse(ai_admin_site.has_permission(request))
 
     def test_has_permission_accepts_matching_prompt_developer(self):
         from ai.admin.site import ai_admin_site
-        from django.contrib.auth.models import Group
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         from ai.models import ExternalDLAccount
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
         user = self.user_model.objects.create_user(
             username="12345",
             password="initial-pass",
         )
-        user.groups.add(group)
+        make_prompt_developer(user)
         ExternalDLAccount.objects.create(user=user, external_user_id="12345")
         request = self._request(user_id="12345")
         request.user = user
@@ -592,9 +602,14 @@ class AdminExternalAuthTests(TestCase):
 
         set_password_view(request)
 
-        group = Group.objects.get(name="prompt_developer")
+        # Зачисление при первой установке пароля — во встроенную группу
+        # доступа «Разработчик промптов» (Django-Group больше не используется).
+        from ai.constants import BUILTIN_GROUP_PROMPT_DEV
+        from ai.models import AIAccessGroup
+
+        group = AIAccessGroup.objects.get(name=BUILTIN_GROUP_PROMPT_DEV)
         user = self.user_model.objects.get(username="24680")
-        self.assertTrue(user.groups.filter(pk=group.pk).exists())
+        self.assertTrue(user.ai_access_groups.filter(pk=group.pk).exists())
 
     def test_mapped_external_user_without_password_sets_password_on_existing_user(self):
         user = self.user_model.objects.create_user(username="external-login")
@@ -728,15 +743,12 @@ class AdminPermissionsTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
-        from django.contrib.auth.models import Group
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     def test_prompt_developer_cannot_view_shared_prompt_module(self):
         from ai.admin.models import SharedPromptAdmin
         from django.contrib.admin.sites import AdminSite
         user = self.user_model.objects.create_user(username="alice", password="x")
-        user.groups.add(self.pd_group)
+        make_prompt_developer(user)
         request = self.factory.get("/ai/admin/ai/sharedprompt/")
         request.user = user
         admin = SharedPromptAdmin(SharedPrompt, AdminSite())
@@ -760,7 +772,7 @@ class AdminPermissionsTests(TestCase):
         from django.contrib.auth import get_user_model as get_user
         User = get_user()
         user = self.user_model.objects.create_user(username="carol", password="x")
-        user.groups.add(self.pd_group)
+        make_prompt_developer(user)
         request = self.factory.get("/ai/admin/")
         request.user = user
         request._ai_admin_registry = ai_admin_site._registry
@@ -824,10 +836,9 @@ class PromptAdminAccessTests(TestCase):
             password="test-pass",
         )
 
-        prompt_developer_group, _ = Group.objects.get_or_create(name="prompt_developer")
-        self.prompt_developer.groups.add(prompt_developer_group)
-        self.second_prompt_developer.groups.add(prompt_developer_group)
-        self.other_prompt_developer.groups.add(prompt_developer_group)
+        make_prompt_developer(self.prompt_developer)
+        make_prompt_developer(self.second_prompt_developer)
+        make_prompt_developer(self.other_prompt_developer)
 
         self.editable_prompt = Prompt.objects.create(
             prompt_name_ru="Editable prompt",
@@ -978,19 +989,12 @@ class PromptAdminAccessTests(TestCase):
             owner=superuser,
         )
         request = self._build_request(superuser, query_params={"mine": "1"})
-        # The "mine" filter is intended for prompt developers; superusers bypass
-        # it and continue to see all prompts.
+        # «Мои» — намерение юзера, не ACL (2026-10-19: с baseline
+        # «Видеть все промпты» фильтр mine должен работать у РОЛИ ЛЮБОГО
+        # уровня, включая суперпользователя).
         prompt_ids = set(self.prompt_admin.get_queryset(request).values_list("id", flat=True))
 
-        self.assertEqual(
-            prompt_ids,
-            {
-                self.editable_prompt.id,
-                self.readonly_prompt.id,
-                self.legacy_assigned_prompt.id,
-                own_prompt.id,
-            },
-        )
+        self.assertEqual(prompt_ids, {own_prompt.id})
 
 
 class PromptFormTests(TestCase):
@@ -1868,6 +1872,11 @@ class AutorecoveryTests(TestCase):
         row.refresh_from_db()
         self.assertEqual(row.last_message, "down")
 
+    # override_settings, а не env-зависимость: локальный режим (ai/env_mode.py)
+    # ставит AI_WEB_DEEPSEEK_AUTORECOVERY=0, когда прокси нет, — без оверрайда
+    # тест краснеет на чистой локальной базе (это и есть «Автоподъём... not
+    # found in 'down'»: gate рано выходит и аннотации не пишет).
+    @override_settings(AI_WEB_DEEPSEEK_AUTORECOVERY=True)
     def test_restart_failure_annotates_pool_unavailable(self):
         from ai.model_health import _maybe_autorecover_web_deepseek, get_health_window_date
 
@@ -1878,6 +1887,7 @@ class AutorecoveryTests(TestCase):
         row.refresh_from_db()
         self.assertIn("Автоподъём не удался", row.last_message)
 
+    @override_settings(AI_WEB_DEEPSEEK_AUTORECOVERY=True)
     def test_restart_success_annotates_ok(self):
         from ai.model_health import _maybe_autorecover_web_deepseek, get_health_window_date
 
@@ -2424,7 +2434,7 @@ class BotPoolEmptyReplyTests(SimpleTestCase):
             label="Web DeepSeek",
             provider="web_deepseek",
             site_label="DeepSeek",
-            selector_doc="WebDeepseek/worker/data.json",
+            selector_doc="WebPools/sites/deepseek.js",
         )
 
     def _post(self, status_code, retry_after="1"):
@@ -2440,7 +2450,7 @@ class BotPoolEmptyReplyTests(SimpleTestCase):
         with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(429)), \
              patch.object(client, "pool_state", return_value="empty"), \
              patch("ai.model_clients._base.asyncio.sleep"):
-            text, tokens, is_error = self._run_ask(client)
+            text, tokens, is_error, _cut, _prompt = self._run_ask(client)
         self.assertTrue(is_error)
         self.assertEqual(tokens, 0)
         self.assertIn("пуст", text)
@@ -2454,7 +2464,7 @@ class BotPoolEmptyReplyTests(SimpleTestCase):
         with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(503)), \
              patch.object(client, "pool_state", return_value="empty"), \
              patch("ai.model_clients._base.asyncio.sleep"):
-            text, _, is_error = self._run_ask(client)
+            text, _, is_error, _cut, _prompt = self._run_ask(client)
         self.assertTrue(is_error)
         self.assertIn("пуст", text)
 
@@ -2464,7 +2474,7 @@ class BotPoolEmptyReplyTests(SimpleTestCase):
         with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(429)), \
              patch.object(client, "pool_state", return_value="live"), \
              patch("ai.model_clients._base.asyncio.sleep"):
-            text, _, _ = self._run_ask(client)
+            text, _, _, _cut, _prompt = self._run_ask(client)
         self.assertEqual(text, map_http_error(429, "web_deepseek"))
 
     def test_starting_pool_503_keeps_bot_init_text(self):
@@ -2472,7 +2482,7 @@ class BotPoolEmptyReplyTests(SimpleTestCase):
         with patch("ai.model_clients._base.asyncio.to_thread", return_value=self._post(503)), \
              patch.object(client, "pool_state", return_value="live"), \
              patch("ai.model_clients._base.asyncio.sleep"):
-            text, _, _ = self._run_ask(client)
+            text, _, _, _cut, _prompt = self._run_ask(client)
         self.assertIn("инициализируется", text)
 
     def _run_ask(self, client):
@@ -2718,10 +2728,12 @@ class HealthCheckOutputTests(SimpleTestCase):
 class BatchReportTests(SimpleTestCase):
     """Batch-solve ARM report: per-model / per-topic aggregation + ordering."""
 
-    def _item(self, model, topic, verdict, duration, tokens=0):
+    def _item(self, model, topic, verdict, duration, tokens=0, topic_id=None):
+        # topic_id — ключ группировки по темам (названия тем совпадают у
+        # разных языков, поэтому группируем по ID, см. _topic_bucket_key).
         return {
             "model_key": model, "model_title": model,
-            "topic_name": topic, "verdict": verdict,
+            "topic_id": topic_id, "topic_name": topic, "verdict": verdict,
             "duration": duration, "tokens": tokens,
         }
 
@@ -2729,11 +2741,11 @@ class BatchReportTests(SimpleTestCase):
         from ai.arm_runner import _build_batch_report
 
         results = [
-            self._item("A", "Линейные", "solved", 2.0, 10),
-            self._item("A", "Циклы", "failed", 4.0, 10),
-            self._item("A", "Линейные", "skipped", 1.0, 2),
-            self._item("B", "Линейные", "solved", 5.0, 20),
-            self._item("B", "Циклы", "solved", 3.0, 20),
+            self._item("A", "Линейные", "solved", 2.0, 10, topic_id=1),
+            self._item("A", "Циклы", "failed", 4.0, 10, topic_id=2),
+            self._item("A", "Линейные", "skipped", 1.0, 2, topic_id=1),
+            self._item("B", "Линейные", "solved", 5.0, 20, topic_id=1),
+            self._item("B", "Циклы", "solved", 3.0, 20, topic_id=2),
         ]
         report = _build_batch_report(results)
         # Top-level counts: 3 solved, 1 failed, 1 skipped, 5 total.
@@ -3144,6 +3156,10 @@ class AskOllamaCutFlagTests(SimpleTestCase):
 
     @staticmethod
     def _run_with_chat_sync(result):
+        """result — кортеж _chat_sync: (content, tokens, thinking, done_reason).
+
+        Возвращает кортеж _ask_ollama: (текст, токены_ответа, is_error,
+        обрезан, токены_промпта) — 5 элементов (контракт провайдеров)."""
         from asyncio import run as _run
         from unittest.mock import patch
         from ai.model_clients import ollama
@@ -3151,23 +3167,23 @@ class AskOllamaCutFlagTests(SimpleTestCase):
             return _run(ollama._ask_ollama("msg", 1, "test:model"))
 
     def test_done_reason_stop_not_truncated(self):
-        text, tokens, is_err, cut = self._run_with_chat_sync(("ok", 5, "", "stop"))
+        text, tokens, is_err, cut, _prompt = self._run_with_chat_sync(("ok", 5, "", "stop", 3))
         self.assertEqual((text, tokens, is_err, cut), ("ok", 5, False, False))
 
     def test_done_reason_length_truncated(self):
-        text, tokens, is_err, cut = self._run_with_chat_sync(("partial code block", 16384, "", "length"))
+        text, tokens, is_err, cut, _prompt = self._run_with_chat_sync(("partial code block", 16384, "", "length", 3))
         self.assertEqual((text, tokens, is_err, cut), ("partial code block", 16384, False, True))
 
     def test_thinking_fallback_cut_flag(self):
         # content пуст, thinking есть — обрезанное рассуждение → флаг True
-        text, tokens, is_err, cut = self._run_with_chat_sync(("", 1998, "We need to think...", "length"))
+        text, tokens, is_err, cut, _prompt = self._run_with_chat_sync(("", 1998, "We need to think...", "length", 3))
         self.assertEqual((text, tokens, is_err, cut), ("We need to think...", 1998, False, True))
         # рассуждение дошло до конца, но контента не родил — не «обрез»
-        text, tokens, is_err, cut = self._run_with_chat_sync(("", 50, "all thinking done", "stop"))
+        text, tokens, is_err, cut, _prompt = self._run_with_chat_sync(("", 50, "all thinking done", "stop", 3))
         self.assertEqual((text, tokens, is_err, cut), ("all thinking done", 50, False, False))
 
     def test_empty_content_is_error(self):
-        text, tokens, is_err, cut = self._run_with_chat_sync(("", 0, "", "stop"))
+        text, tokens, is_err, cut, _prompt = self._run_with_chat_sync(("", 0, "", "stop", 3))
         self.assertTrue(is_err)
         self.assertFalse(cut)
         self.assertIn("пустой ответ", text)
@@ -3200,7 +3216,7 @@ class OllamaNoThinkTests(SimpleTestCase):
         from ai.model_clients import ollama
         seen = {}
         with patch.object(ollama, "_get_client", lambda: self._fake_client(seen)):
-            content, tokens, thinking, done = ollama._stream_once("m", "msg", 0.7, 100, think=False)
+            content, tokens, thinking, done, _prompt = ollama._stream_once("m", "msg", 0.7, 100, think=False)
         self.assertEqual(content, "x")
         self.assertEqual(seen.get("think"), False)
         # Дефолт — поле в запрос вообще не идёт (старые SDK без think-поля).
@@ -3215,11 +3231,11 @@ class OllamaNoThinkTests(SimpleTestCase):
         seen = {"think": "not-called"}
         def fake_chat_sync(model, msg, temperature, num_predict, think=None):
             seen["think"] = think
-            return ("program p;", 5, "", "stop")
+            return ("program p;", 5, "", "stop", 3)
         handler = ollama.nothink_handler(ollama.ask_Ollama_Gemma_4_Cloud_async)
         self.assertIsNotNone(handler)  # все Ollama-модели получили no-think пару
         with patch.object(ollama, "_chat_sync", fake_chat_sync):
-            text, tokens, is_err, cut = _run(handler("м", 1))  # 4-кортеж, как у основных
+            text, tokens, is_err, cut, _prompt = _run(handler("м", 1))  # 5-кортеж, как у основных
         self.assertEqual((text, tokens, is_err), ("program p;", 5, False))
         self.assertFalse(seen["think"])
 
@@ -3250,9 +3266,9 @@ class OllamaNoThinkTests(SimpleTestCase):
         seen = {"think": "not-called"}
         def fake_chat_sync(model, msg, temperature, num_predict, think=None):
             seen["think"] = think
-            return ("код", 9, "", "stop")
+            return ("код", 9, "", "stop", 3)
         with patch.object(ollama, "_chat_sync", fake_chat_sync):
-            text, tokens, is_err, cut = _run(
+            text, tokens, is_err, cut, _prompt = _run(
                 ollama.ask_Ollama_Gemma_4_Cloud_async("м", 1, think=True))
         self.assertTrue(seen["think"])
 
@@ -3274,8 +3290,36 @@ class IsOutputTruncatedTests(SimpleTestCase):
     def test_unknown_provider_is_never_truncated(self):
         from ai.model_clients import is_output_truncated
         self.assertFalse(is_output_truncated("Web_DeepSeek", 99999))
-        self.assertFalse(is_output_truncated("Groq_Gpt_Oss_120B", 99999))
+        self.assertFalse(is_output_truncated("Web_Kimi", 99999))
         self.assertFalse(is_output_truncated("", 16384))
+
+    def _fake_registry(self, module_name):
+        from ai.model_clients import registry
+
+        class _FakeHandler:
+            __module__ = module_name
+
+        return {"handler": _FakeHandler()}
+
+    def test_openrouter_ceiling_from_table(self):
+        """Выкусывание для ВСЕХ моделей, а не только Ollama/SambaNova:
+        потолок OpenRouter = max_tokens его таблицы моделей."""
+        from ai.model_clients import is_output_truncated, registry
+        with patch.object(
+            registry, "get",
+            lambda key: self._fake_registry("ai.model_clients.openrouter"),
+        ):
+            self.assertTrue(is_output_truncated("OR_GPT_OSS_20B", 8000))
+            self.assertFalse(is_output_truncated("OR_GPT_OSS_20B", 7999))
+
+    def test_groq_ceiling_from_table(self):
+        from ai.model_clients import is_output_truncated, registry
+        with patch.object(
+            registry, "get",
+            lambda key: self._fake_registry("ai.model_clients.groq"),
+        ):
+            self.assertTrue(is_output_truncated("Groq_Gpt_Oss_120B", 4096))
+            self.assertFalse(is_output_truncated("Groq_Gpt_Oss_120B", 4095))
 
     def test_sambanova_ceiling_from_table(self):
         # Провайдер определяется по __module__ обработчика из реестра (ключи
@@ -3720,7 +3764,14 @@ class RerunLogJournalTests(TestCase):
         html = response.render().content.decode()
         # Таблица результатов (общий partial), как у обычного batch-лога.
         self.assertTrue(response.context_data["is_batch_log"])
-        self.assertIn("ArmBatchResults.init", html)
+        # Скрипт развёртки вынесен в static — маркер ищем в файле.
+        from pathlib import Path
+        js = (
+            Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
+            / "request_logs_detail" / "index.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("ArmBatchResults.init", js)
+        self.assertIn('id="batch-results-card"', html)
 
     def test_recent_batch_rows_include_rerun_log(self):
         from ai.admin.request_logs import build_recent_batch_rows
@@ -4961,172 +5012,6 @@ class TaskRegistryTests(TestCase):
         self.assertIsNone(result)  # registration must never break the chat
 
 
-class PromptGradingTests(SimpleTestCase):
-    """Prompt-regression comparators in ai/grading.py::compare_response."""
-
-    def test_ratio_identical_is_match(self):
-        from ai.grading import compare_response
-        verdict, hint, missing = compare_response(
-            "program a; begin writeln(1); end.",
-            "program a; begin writeln(1); end.",
-            comparator="ratio",
-        )
-        self.assertEqual(verdict, "match")
-        self.assertEqual(missing, [])
-
-    def test_ratio_different_is_mismatch(self):
-        from ai.grading import compare_response
-        verdict, hint, missing = compare_response(
-            "print('hello world')", "int main(){return 0;}", comparator="ratio",
-        )
-        self.assertEqual(verdict, "mismatch")
-        self.assertIn("ratio", hint)
-
-    def test_ratio_threshold_respected(self):
-        from ai.grading import compare_response
-        # Very close text: ratio is high but below 0.999.
-        verdict, _hint, _missing = compare_response(
-            "program a; begin writeln(1); end.",
-            "program a; begin writeln(2); end.",
-            comparator="ratio",
-            threshold=0.99,
-        )
-        self.assertEqual(verdict, "mismatch")
-
-    def test_contains_all_match(self):
-        from ai.grading import compare_response
-        expected = "В строке 5 нет точки с запятой\nпеременная x не объявлена"
-        actual = "В коде в строке 5 нет точки с запятой. Также переменная x не объявлена."
-        verdict, hint, missing = compare_response(actual, expected, comparator="contains_all")
-        self.assertEqual(verdict, "match")
-        self.assertEqual(missing, [])
-
-    def test_contains_all_mismatch_lists_missing(self):
-        from ai.grading import compare_response
-        expected = "ошибка деления на ноль\nнет точки с запятой"
-        actual = "В коде ошибка деления на ноль."
-        verdict, hint, missing = compare_response(actual, expected, comparator="contains_all")
-        self.assertEqual(verdict, "mismatch")
-        self.assertIn("нет точки с запятой", missing)
-        self.assertIn("отсутствуют", hint)
-
-    def test_exact_match_and_mismatch(self):
-        from ai.grading import compare_response
-        self.assertEqual(
-            compare_response("Program A;\nBegin\n  Writeln(1);\nEnd.",
-                             "program a; begin writeln(1); end.", comparator="exact")[0],
-            "match",
-        )
-        self.assertEqual(
-            compare_response("return 0", "return 1", comparator="exact")[0],
-            "mismatch",
-        )
-
-    def test_set_match_and_mismatch(self):
-        from ai.grading import compare_response
-        self.assertEqual(
-            compare_response("a\nb\nc", "c\nb\na", comparator="set")[0], "match",
-        )
-        verdict, hint, missing = compare_response("a\nb", "a\nb\nc", comparator="set")
-        self.assertEqual(verdict, "mismatch")
-        self.assertIn("c", missing)
-
-    def test_empty_expected_is_skipped(self):
-        from ai.grading import compare_response
-        self.assertEqual(compare_response("anything", "", comparator="ratio")[0], "skipped")
-
-    def test_empty_actual_is_mismatch(self):
-        from ai.grading import compare_response
-        verdict, hint, _missing = compare_response("", "int main(){return 0;}", comparator="ratio")
-        self.assertEqual(verdict, "mismatch")
-        self.assertIn("пустой", hint)
-
-
-class PromptRegressionRunnerTests(TestCase):
-    """ai/prompt_test_runner.py: per-case verdicts + DB fallback snapshot."""
-
-    def setUp(self):
-        from ai.models import PromptTestCase
-        self.user = get_user_model().objects.create_user(username="prompt-tester", password="x")
-        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
-        self.topic = Topic.objects.create(topic_name_ru="Линейные", programming_language=self.lang)
-        self.case_match = PromptTestCase.objects.create(
-            name="Solve match", mode="solve",
-            input_text="Сложите a и b",
-            expected_text="program a; begin writeln(1); end.",
-            comparator="ratio",
-            programming_language=self.lang, topic=self.topic,
-        )
-        self.case_mismatch = PromptTestCase.objects.create(
-            name="Solve mismatch", mode="solve",
-            input_text="Выведите n",
-            expected_text="int main(){return 0;}",
-            comparator="ratio",
-            programming_language=self.lang, topic=self.topic,
-        )
-
-    def _run_worker(self, run_id, cases, handler_response):
-        import time as _t
-        from ai import prompt_test_runner
-
-        async def fake_handler(messages, conv_id):
-            return handler_response, 12
-
-        model = {"key": "FakeModel", "title": "FakeModel", "handler": fake_handler}
-        now_ts = _t.time()
-        prompt_test_runner._jobs[run_id] = {
-            "run_id": run_id, "status": "running", "error_message": "",
-            "total_cases": len(cases), "completed_cases": 0, "current_case_name": cases[0].name if cases else "",
-            "results": [], "report": None,
-            "created_at_ts": now_ts, "updated_at_ts": now_ts,
-        }
-        try:
-            prompt_test_runner._run_job_worker(
-                run_id, cases, model, self.user.id,
-                prompt_id=None, ui_language="Русский",
-            )
-        finally:
-            prompt_test_runner._jobs.pop(run_id, None)
-
-    def test_run_records_match_and_mismatch_verdicts(self):
-        from ai.models import PromptTestResult, PromptTestRun
-        run_id = "test-prompt-run-1"
-        # Handler returns the golden solution: matches case_match, mismatches case_mismatch.
-        self._run_worker(run_id, [self.case_match, self.case_mismatch],
-                         "program a; begin writeln(1); end.")
-
-        run = PromptTestRun.objects.get(run_id=run_id)
-        self.assertEqual(run.status, PromptTestRun.STATUS_COMPLETED)
-
-        results = {r.test_case_id: r for r in PromptTestResult.objects.filter(run=run)}
-        self.assertEqual(results[self.case_match.id].verdict, PromptTestResult.VERDICT_MATCH)
-        self.assertEqual(results[self.case_mismatch.id].verdict, PromptTestResult.VERDICT_MISMATCH)
-
-        # DB-fallback snapshot rebuilds the report from persisted rows.
-        from ai import prompt_test_runner
-        snapshot = prompt_test_runner.get_prompt_test_run_snapshot(run_id)
-        self.assertEqual(snapshot["status"], "completed")
-        self.assertEqual(snapshot["report"]["total"], 2)
-        self.assertEqual(snapshot["report"]["matched"], 1)
-        self.assertEqual(snapshot["report"]["mismatched"], 1)
-        self.assertEqual(len(snapshot["report"]["mismatches"]), 1)
-        self.assertEqual(snapshot["report"]["mismatches"][0]["case_name"], "Solve mismatch")
-
-    def test_skipped_when_expected_empty(self):
-        from ai.models import PromptTestCase, PromptTestResult, PromptTestRun
-        case = PromptTestCase.objects.create(
-            name="No oracle", mode="solve", input_text="stmt", expected_text="",
-            comparator="ratio", programming_language=self.lang, topic=self.topic,
-        )
-        run_id = "test-prompt-run-2"
-        self._run_worker(run_id, [case], "program a; begin writeln(1); end.")
-        run = PromptTestRun.objects.get(run_id=run_id)
-        result = PromptTestResult.objects.get(run=run, test_case=case)
-        self.assertEqual(result.verdict, PromptTestResult.VERDICT_SKIPPED)
-
-
-# ===================================================================
-# Tests for model sorting (top-2 user models + alphabetical rest)
 # ===================================================================
 
 class ModelSortingTests(SimpleTestCase):
@@ -5692,10 +5577,8 @@ class UpdateLogAdminTests(UpdateLogAdminViewMixin, TestCase):
         self.normal_user = get_user_model().objects.create_user(
             username="upd_normal", password="***",
         )
-        # Add to prompt_developer group (non-superuser staff-like)
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-        self.normal_user.groups.add(group)
+        # Baseline non-superuser audience (page.prompt_defaults и пр.).
+        make_prompt_developer(self.normal_user)
 
         # Create some test data
         self.u1 = UpdateLog.objects.create(
@@ -5794,6 +5677,47 @@ class UpdateLogAdminTests(UpdateLogAdminViewMixin, TestCase):
         self.assertContains(response, "записей: 3")
         # И автора скрытой записи нет в дропдауне.
         self.assertNotContains(response, 'value="whmi2"')
+
+
+class UpdateLogDateDedupeTests(UpdateLogAdminViewMixin, TestCase):
+    """Дедупликация дат на «Обновлениях» (ТЗ 2026-10-19): несколько коммитов
+    за один день — дата в колонке печатается ОДИН раз ({% ifchanged %} по
+    commit_date; сортировка держит одинаковые даты подряд)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        UpdateLog.objects.all().delete()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="dedupe_admin", password="***", email="admin@test.com",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-07-27", description="Нововведение: первый за день",
+            author="whmi1", commit_hash="a1",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-07-27", description="Исправление: второй за день",
+            author="whmi1", commit_hash="a2",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-07-27", description="правка: третий за день",
+            author="Archi", commit_hash="a3",
+        )
+        UpdateLog.objects.create(
+            commit_date="2026-06-22", description="fix build v2",
+            author="ArchiBaldEgo", commit_hash="b1",
+        )
+
+    def test_same_day_date_rendered_once(self):
+        response = self._call_view(self._make_request(self.superuser))
+        self.assertEqual(response.status_code, 200)
+        # Три записи дня 27.07 — дата в таблице только в первой из них.
+        self.assertContains(response, "27.07.2026", count=1)
+        self.assertContains(response, "22.06.2026", count=1)
+        # Сами записи при этом все на месте (дата ≠ строка записи).
+        self.assertContains(response, "первый за день")
+        self.assertContains(response, "второй за день")
+        self.assertContains(response, "третий за день")
+        self.assertContains(response, "записей: 4")
 
 
 class UpdateLogAdminActionTests(TestCase):
@@ -6169,12 +6093,15 @@ class OllamaRegistryTests(SimpleTestCase):
         "Ollama_Kimi_K2_6_Cloud",
         "Ollama_Gpt_Oss_20B_Cloud",
         "Ollama_Gpt_Oss_120B_Cloud",
+        "Ollama_MiniMax_M3_1_Flash_Cloud",
     ]
 
-    # gpt-oss:cloud (harmony) стримит отдельное поле thinking → reasoning-модели.
+    # gpt-oss:cloud (harmony) и minimax-m3.1-flash:cloud стримят отдельное поле
+    # thinking → reasoning-модели.
     REASONING_KEYS = {
         "Ollama_Gpt_Oss_20B_Cloud",
         "Ollama_Gpt_Oss_120B_Cloud",
+        "Ollama_MiniMax_M3_1_Flash_Cloud",
     }
 
     def _expected_caps(self, key):
@@ -6255,7 +6182,7 @@ class OllamaHandlerTests(SimpleTestCase):
             # чтобы линтер не ругался на отсутствующий атрибут.
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
             result = await glm_5_2("1+1=?", "client")
-            self.assertEqual(result, ("print(1)", 5, False, False))
+            self.assertEqual(result, ("print(1)", 5, False, False, 0))
             mock_client.chat.assert_called_once()
             # Без tools= (обычный чат), но СТРИМОМ (stream=True) — иначе
             # ollama.com рвёт соединение на длинных генерациях.
@@ -6274,7 +6201,7 @@ class OllamaHandlerTests(SimpleTestCase):
 
             deepseek_flash = getattr(ollama, "ask_Ollama_DeepSeek_V4_1_Flash_Cloud_async")
             result = await deepseek_flash("hi", "client")
-            self.assertEqual(result, ("ok", 1, False, False))
+            self.assertEqual(result, ("ok", 1, False, False, 0))
             _, kwargs = mock_client.chat.call_args
             self.assertEqual(kwargs.get("model"), "deepseek-v4.1-flash:cloud")
 
@@ -6294,7 +6221,7 @@ class OllamaHandlerTests(SimpleTestCase):
 
                     handler = getattr(ollama, f"ask_{key}_async")
                     result = await handler("hi", "client")
-                    self.assertEqual(result, ("ok", 1, False, False))
+                    self.assertEqual(result, ("ok", 1, False, False, 0))
                     _, kwargs = mock_client.chat.call_args
                     self.assertEqual(kwargs.get("model"), model_id)
 
@@ -6335,7 +6262,7 @@ class OllamaHandlerTests(SimpleTestCase):
             gpt_oss = getattr(ollama, "ask_Ollama_Gpt_Oss_20B_Cloud_async")
             result = await gpt_oss("hi", "client")
             # thinking-фолбэк: done_reason нет в чанках → не «length» → не обрез
-            self.assertEqual(result, ("Рассуждаю и отвечаю", 7, False, False))
+            self.assertEqual(result, ("Рассуждаю и отвечаю", 7, False, False, 0))
 
     async def test_empty_content_and_thinking_returns_error(self):
         """Пустые и content, и thinking → прежняя ошибка «пустой ответ»."""
@@ -6347,7 +6274,7 @@ class OllamaHandlerTests(SimpleTestCase):
             mock_client.chat.return_value = self._stream("", eval_count=0)
 
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
-            content, tokens, is_error, cut = await glm_5_2("hi", "client")
+            content, tokens, is_error, cut, _prompt = await glm_5_2("hi", "client")
             self.assertTrue(is_error)
             self.assertEqual(tokens, 0)
             self.assertFalse(cut)
@@ -6402,7 +6329,7 @@ class OllamaRateLimitTests(SimpleTestCase):
             ]
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
             result = await glm_5_2("hi", "client")
-            self.assertEqual(result, ("ok", 3, False, False))
+            self.assertEqual(result, ("ok", 3, False, False, 0))
             self.assertEqual(mock_client.chat.call_count, 2)
             self.assertEqual(mock_sleep.await_count, 1)
             delay = mock_sleep.await_args.args[0]
@@ -6422,7 +6349,7 @@ class OllamaRateLimitTests(SimpleTestCase):
             mock_client = mock_client_cls.return_value
             mock_client.chat.side_effect = self._429()
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
-            content, tokens, is_error, cut = await glm_5_2("hi", "client")
+            content, tokens, is_error, cut, _prompt = await glm_5_2("hi", "client")
             # 1 первая попытка + 3 ретрая
             self.assertEqual(mock_client.chat.call_count, 4)
             self.assertTrue(is_error)
@@ -6449,7 +6376,7 @@ class OllamaRateLimitTests(SimpleTestCase):
             mock_client = mock_client_cls.return_value
             mock_client.chat.side_effect = ResponseError("boom", status_code=500)
             glm_5_2 = getattr(ollama, "ask_Ollama_Glm_5_2_Cloud_async")
-            content, tokens, is_error, cut = await glm_5_2("hi", "client")
+            content, tokens, is_error, cut, _prompt = await glm_5_2("hi", "client")
             self.assertEqual(mock_client.chat.call_count, 1)
             self.assertTrue(is_error)
             self.assertFalse(cut)
@@ -6481,7 +6408,7 @@ class OllamaRateLimitTests(SimpleTestCase):
             )
             self.assertEqual(active["max"], 1)
             self.assertEqual(len(results), 4)
-            self.assertTrue(all(r == ("ok", 1, False, False) for r in results))
+            self.assertTrue(all(r == ("ok", 1, False, False, 0) for r in results))
 
 
 class ArmBatchResultsPartialTests(SimpleTestCase):
@@ -6495,8 +6422,18 @@ class ArmBatchResultsPartialTests(SimpleTestCase):
         html = render_to_string("admin/ai/_ai_batch_results.html")
         self.assertNotIn("{#", html)
         self.assertNotIn("Общий CSS", html)
-        # Содержимое частички (CSS) рендерится как обычно.
-        self.assertIn(".arm-card", html)
+        # Комментарий partial'а не должен попасть на страницу как видимый текст.
+        self.assertNotIn("Общий partial", html)
+
+    def test_batch_results_css_moved_to_static_file(self):
+        """CSS карточки вынесен в static/admin/ai/batch_results/index.css."""
+        from pathlib import Path
+        path = (
+            Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
+            / "batch_results" / "index.css"
+        )
+        src = path.read_text(encoding="utf-8")
+        self.assertIn(".arm-card", src)
 
 
 class SendSolutionCourseIdTests(SimpleTestCase):
@@ -6617,7 +6554,7 @@ class EmptyResponseDetectionTests(SimpleTestCase):
             mock_req.post.return_value = FakeResponse()
             mock_req.exceptions = __import__("requests").exceptions
             result = sambanova._ask_sambanova_model_async("hi", 0, "Model", max_tokens=8)
-            content, tokens, is_error = async_to_sync_runner(result)
+            content, tokens, is_error, _cut, _prompt = async_to_sync_runner(result)
         self.assertTrue(is_error)
         self.assertEqual(tokens, 0)
         self.assertIn("пустой ответ", content.lower())
@@ -6634,7 +6571,7 @@ class EmptyResponseDetectionTests(SimpleTestCase):
             mock_req.post.return_value = FakeResponse()
             mock_req.exceptions = __import__("requests").exceptions
             result = sambanova._ask_sambanova_model_async("hi", 0, "Model", max_tokens=8)
-            content, tokens = async_to_sync_runner(result)
+            content, tokens, _is_error, _cut, _prompt = async_to_sync_runner(result)
         self.assertEqual(content, "42")
         self.assertEqual(tokens, 3)
 
@@ -6661,7 +6598,7 @@ class EmptyResponseDetectionTests(SimpleTestCase):
             mock_client.__aexit__ = AsyncMock(return_value=None)
             mock_cls.return_value = mock_client
             result = groq._ask_groq("groq-model", "hi", 0, model_key="Groq_Test")
-            content, tokens, is_error = async_to_sync_runner(result)
+            content, tokens, is_error, _cut, _prompt = async_to_sync_runner(result)
         self.assertTrue(is_error)
         self.assertEqual(tokens, 0)
         self.assertIn("пустой ответ", content.lower())
@@ -7154,9 +7091,10 @@ class RequestLogXlsxTests(TestCase):
         )
 
     def test_xlsx_matrix_and_auto_width(self):
-        """Два листа: «Сводка» (матрица задача×модель с сокращёнными
-        названиями + сводка по моделям) и «Расшифровка моделей»
-        (сокращение → полное название). Автоширина — по содержимому."""
+        """Три листа: «Сводка» (матрица задача×модель с сокращёнными
+        названиями + сводка по моделям), «Расшифровка моделей»
+        (сокращение → полное название) и «Сбои по парам» (построчная
+        причина сбоя — таксономия сбоев). Автоширина — по содержимому."""
         from io import BytesIO
 
         from openpyxl import load_workbook
@@ -7172,7 +7110,7 @@ class RequestLogXlsxTests(TestCase):
         ]
         payload = build_arm_results_xlsx(results)
         wb = load_workbook(BytesIO(payload))
-        self.assertEqual(wb.sheetnames, ["Сводка", "Расшифровка моделей"])
+        self.assertEqual(wb.sheetnames, ["Сводка", "Расшифровка моделей", "Сбои по парам"])
 
         ws = wb["Сводка"]
         rows = [[c.value for c in row] for row in ws.iter_rows()]
@@ -7613,8 +7551,7 @@ class ActiveRunsEndpointTests(TestCase):
         )
         self.normal_user = get_user_model().objects.create_user(username="badge_user", password="x")
         self.pd_user = get_user_model().objects.create_user(username="badge_pd", password="x")
-        pd_group, _ = Group.objects.get_or_create(name="prompt_developer")
-        self.pd_user.groups.add(pd_group)
+        make_prompt_developer(self.pd_user)
 
     def _make_request(self, user):
         request = self.factory.get("/ai/admin/active-runs/")
@@ -7623,7 +7560,7 @@ class ActiveRunsEndpointTests(TestCase):
 
     def test_user_sees_only_own_runs(self):
         """Свои прогоны всех 4 типов видны, чужие — нет (включая superuser)."""
-        from ai import arm_runner, model_health, prompt_test_runner, test_console_runner
+        from ai import arm_runner, model_health, test_console_runner
         from ai.admin.active_runs import admin_active_runs_view
         now_ts = time.time()
         mine = {
@@ -7638,12 +7575,6 @@ class ActiveRunsEndpointTests(TestCase):
                 "run_type": "single", "status": "running",
                 "completed_models": 0, "total_models": 2,
                 "current_model_title": "FakeModel",
-                "created_at_ts": now_ts, "updated_at_ts": now_ts,
-            }),
-            "badge-reg": (prompt_test_runner._jobs, {
-                "run_id": "badge-reg", "user_id": self.superuser.id,
-                "status": "running",
-                "completed_cases": 1, "total_cases": 4, "current_case_name": "case1",
                 "created_at_ts": now_ts, "updated_at_ts": now_ts,
             }),
             "badge-console": (test_console_runner._jobs, {
@@ -7674,20 +7605,19 @@ class ActiveRunsEndpointTests(TestCase):
             by_type = {r["run_type"]: r for r in data["runs"]}
             self.assertEqual(
                 set(by_type),
-                {"batch", "single", "prompt_regression", "test_console"},
+                {"batch", "single", "test_console"},
             )
             self.assertEqual(by_type["batch"]["page_url"], "/ai/admin/arm/solve/")
             # У single-прогонов нет своей страницы (старый ARM-скрипт
             # «В чём ошибка» удалён) — ссылка пустая.
             self.assertEqual(by_type["single"]["page_url"], "")
-            self.assertEqual(by_type["prompt_regression"]["page_url"], "/ai/admin/prompt-regression/")
             self.assertEqual(by_type["test_console"]["page_url"], "/ai/admin/test-console/")
             self.assertEqual(by_type["batch"]["completed"], 1)
             self.assertEqual(by_type["batch"]["total"], 3)
             self.assertEqual(by_type["batch"]["current"], "A")
             self.assertEqual(by_type["batch"]["status"], "running")
             # Чужой batch-прогон не «перекрывает» свой: ровно один каждого типа.
-            self.assertEqual(len(data["runs"]), 4)
+            self.assertEqual(len(data["runs"]), 3)
             self.assertTrue(all(r["status"] == "running" for r in data["runs"]))
         finally:
             for run_id, (jobs_dict, _job) in injected.items():
@@ -8330,12 +8260,15 @@ class ArmPromptBindingTests(TestCase):
         self.assertEqual(ArmPromptBinding.objects.count(), 2)
 
     def test_page_requires_superuser(self):
+        """page.prompt_defaults — baseline (ТЗ 2026-10-19): staff с допуском
+        в админку теперь тоже видит «Промпты по умолчанию»; остаётся 403
+        у юзера без допуска вовсе (не staff, без page.admin)."""
         from ai.admin.prompt_defaults import admin_prompt_defaults_view
         request = self.factory.get("/ai/admin/prompt-defaults/")
         request.user = self.staff
         request.session = {}
         response = admin_prompt_defaults_view(request)
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
 
         request = self.factory.get("/ai/admin/prompt-defaults/")
         request.user = self.superuser
@@ -9073,11 +9006,10 @@ class LogsDeveloperAccessTests(TestCase):
 
     def setUp(self):
         self.factory = RequestFactory()
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         self.developer = get_user_model().objects.create_user(
             username="log_dev", password="x",
         )
-        self.developer.groups.add(Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)[0])
+        make_prompt_developer(self.developer)
         self.superuser = get_user_model().objects.create_superuser(
             username="log_admin", password="x", email="l@t.com",
         )
@@ -9292,10 +9224,7 @@ class RecentLogRowsTests(TestCase):
         self.developer = get_user_model().objects.create_user(
             username="recent_dev", password="x",
         )
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        self.developer.groups.add(
-            Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)[0]
-        )
+        make_prompt_developer(self.developer)
         base = timezone.now()
         self.logs = [
             AIRequestLog.objects.create(
@@ -9548,9 +9477,19 @@ class BatchLogDetailTemplateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         return response.render().content.decode()
 
+    def _batch_detail_js(self):
+        """JS детальной страницы журнала — вынесен в static."""
+        from pathlib import Path
+        return (
+            Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
+            / "request_logs_detail" / "index.js"
+        ).read_text(encoding="utf-8")
+
     def test_batch_detail_shows_only_results_table(self):
         html = self._detail(self.batch_log)
-        self.assertIn("ArmBatchResults.init", html)
+        # Скрипт развёртки вынесен в static (шаблон — только контейнер),
+        # поэтому маркер ищем в файле, а не в отрендеренном HTML.
+        self.assertIn("ArmBatchResults.init", self._batch_detail_js())
         self.assertIn("результаты прогона", html)
         # Метаданные и тексты запроса/ответа НЕ показываем.
         self.assertNotIn("Кто отправлял", html)
@@ -9562,11 +9501,18 @@ class BatchLogDetailTemplateTests(TestCase):
         «Скачать результаты (XLSX)» (тот же стиль .arm-button), «Назад к
         логам» — отдельной строкой ссылок, не в стиле .default."""
         html = self._detail(self.batch_log)
+        js = self._batch_detail_js()
         self.assertIn('id="resend-btn" class="arm-button"', html)
-        self.assertIn("group.className = 'arm-head-actions'", html)
-        self.assertIn("group.appendChild(built.downloadBtn)", html)
-        # Обе кнопки группы нормализованы до одного размера (button vs a).
-        self.assertIn(".arm-head-actions .arm-button {", html)
+        self.assertIn("group.className = 'arm-head-actions'", js)
+        self.assertIn("group.appendChild(built.downloadBtn)", js)
+        # Обе кнопки группы нормализованы до одного размера (button vs a) —
+        # правило живёт в вынесенном CSS карточки.
+        from pathlib import Path
+        css = (
+            Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
+            / "batch_results" / "index.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn(".arm-head-actions .arm-button {", css)
         self.assertNotIn('id="resend-btn" class="default"', html)
         self.assertIn("← Назад к логам", html)
 
@@ -9613,8 +9559,12 @@ class ArmSolveTopicsKeyTests(TestCase):
         self.assertNotIn("programming_language_id", topics[0])
 
     def test_js_filltopics_matches_serializer_key(self):
-        from django.template.loader import get_template
-        src = get_template("admin/ai/arm_solve.html").template.source
+        from pathlib import Path
+        # JS страницы вынесен в static (шаблон — только разметка).
+        src = (
+            Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
+            / "arm_solve" / "index.js"
+        ).read_text(encoding="utf-8")
         # Темы фильтруются по ключу сериализатора через Set (объединение
         # тем всех выбранных языков).
         self.assertIn(
@@ -9640,14 +9590,21 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         from django.template.loader import get_template
         return get_template(name).template.source
 
+    @staticmethod
+    def _static_source(*parts):
+        """Источник вынесенного статического файла (CSS/JS админки)."""
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent.joinpath("static", *parts)
+        return path.read_text(encoding="utf-8")
+
     def test_rerun_pairs_post_sends_csrf_token(self):
-        src = self._source("admin/ai/arm_solve.html")
+        src = self._static_source("admin", "ai", "arm_solve", "index.js")
         i = src.find("await fetch(rerunPairsUrl")
         self.assertNotEqual(i, -1, "блок POST rerun-pairs не найден")
         self.assertIn("'X-CSRFToken': getCsrfToken()", src[i:i + 400])
 
     def test_arm_solve_has_friendly_expired_session_parser(self):
-        src = self._source("admin/ai/arm_solve.html")
+        src = self._static_source("admin", "ai", "arm_solve", "index.js")
         self.assertIn("function parseJsonResponse", src)
         self.assertIn("Сессия истекла", src)
 
@@ -9655,7 +9612,7 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         """Ленивое тело результата (partial используется на /arm/solve/ и в
         деталях журнала): не-JSON ответ (страница логина) → внятная ошибка.
         Чанковая загрузка raw_response и агрегатор состояния — на месте."""
-        src = self._source("admin/ai/_ai_batch_results.html")
+        src = self._static_source("admin", "ai", "batch_results", "index.js")
         self.assertIn("function parseJsonResponse", src)
         self.assertIn("Сессия истекла", src)
         i = src.find("function fetchResultChunk")
@@ -9664,7 +9621,7 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         self.assertIn("function loadResultBodyState", src)
 
     def test_log_detail_resend_session_label_and_rerun_route(self):
-        src = self._source("admin/ai/request_logs_detail.html")
+        src = self._static_source("admin", "ai", "request_logs_detail", "index.js")
         # Протухшая сессия — внятное сообщение вместо JSON.parse-мусора.
         self.assertIn("Сессия истекла", src)
         # Подпись кнопки восстанавливается из отрендеренной, а не литералом.
@@ -9853,8 +9810,14 @@ class FormActionShadowingTests(SimpleTestCase):
     ``form.getAttribute('action')`` — атрибут затенением не страдает."""
 
     def test_prompt_defaults_post_url_uses_get_attribute(self):
-        from django.template.loader import get_template
-        src = get_template("admin/ai/prompt_defaults.html").template.source
+        from django.conf import settings
+        import os
+        # JS страницы вынесен в static (шаблон — только разметка).
+        js_path = os.path.join(
+            settings.BASE_DIR, "static", "admin", "ai", "prompt_defaults", "index.js",
+        )
+        with open(js_path, encoding="utf-8") as fh:
+            src = fh.read()
         self.assertIn("form.getAttribute('action')", src)
         self.assertNotIn("fetch(form.action", src)
 
@@ -10103,6 +10066,33 @@ class _AdminViewRequestMixin:
         request._dont_enforce_csrf_checks = True
         return request
 
+    def _view_as_group(self, name, keys):
+        """Группа доступа с набором ключей (для честной эмуляции «Посмотреть как…»)."""
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+        group = AIAccessGroup.objects.create(name=name)
+        for key in keys:
+            perm, _ = AIAdminGroupPermission.objects.get_or_create(
+                key=key,
+                defaults={"label": key, "section": key.split(".")[0]},
+            )
+            group.permissions.add(perm)
+        return group
+
+    def _enter_view_as(self, request, group):
+        """Включить честную эмуляцию: сессия + stash на request.user
+        (admin_view проставляет stash в проде — в тесте зовём вручную)."""
+        from ai.admin.guest_mode import SESSION_KEY, apply_view_as_user
+        request.session[SESSION_KEY] = group.pk
+        apply_view_as_user(request)
+
+    def _leave_view_as(self, user):
+        """Снять stash с ИНСТАНСА юзера: в тестах юзер переиспользуется между
+        запросами (в проде Django пересоздаёт request.user на каждый запрос),
+        и эмуляция иначе «прилипла» бы к следующим проверкам того же объекта."""
+        from ai.admin.guest_mode import VIEW_AS_ATTR
+        if hasattr(user, VIEW_AS_ATTR):
+            delattr(user, VIEW_AS_ATTR)
+
 
 class DocsAdminAccessTests(_AdminViewRequestMixin, TestCase):
     """Роль-гейты страниц «Документация» + скачивание .md."""
@@ -10110,9 +10100,6 @@ class DocsAdminAccessTests(_AdminViewRequestMixin, TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        from django.contrib.auth.models import Group
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     def _view(self, user, slug, view_name="admin_docs_view"):
         from unittest.mock import patch
@@ -10128,16 +10115,33 @@ class DocsAdminAccessTests(_AdminViewRequestMixin, TestCase):
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
             return view(request, slug=slug)
 
-    def _pd_user(self):
-        user = self.user_model.objects.create_user(username="pd-docs", password="x")
-        user.groups.add(self.pd_group)
+    def _pd_user(self, grant_docs=False):
+        import uuid
+        user = self.user_model.objects.create_user(
+            username=f"pd-docs-{uuid.uuid4().hex[:8]}", password="x",
+        )
+        make_prompt_developer(user)
+        if grant_docs:
+            from ai.models import AIAccessGroup, AIAdminGroupPermission
+            perm, _ = AIAdminGroupPermission.objects.get_or_create(
+                key="docs.prompt_developer",
+                defaults={"label": "Док «Разработчик промптов»", "section": "docs"},
+            )
+            group = AIAccessGroup.objects.create(name="Ключи-docs")
+            group.permissions.add(perm)
+            user.ai_access_groups.add(group)
         return user
 
-    def test_prompt_developer_sees_only_own_chapter(self):
+    def test_prompt_developer_no_chapter_without_key(self):
+        # Решение владельца 2026-10-20: документация НЕ идёт с ролью pd —
+        # глава выдаётся ключом docs.prompt_developer в «Группах доступа».
         user = self._pd_user()
-        self.assertEqual(self._view(user, "prompt-developer").status_code, 200)
+        self.assertEqual(self._view(user, "prompt-developer").status_code, 403)
         self.assertEqual(self._view(user, "developer").status_code, 403)
         self.assertEqual(self._view(user, "superuser").status_code, 403)
+        pd_with_key = self._pd_user(grant_docs=True)
+        self.assertEqual(self._view(pd_with_key, "prompt-developer").status_code, 200,
+                         "ключ docs.prompt_developer открывает главу pd-юзеру")
 
     def test_staff_sees_developer_chapter(self):
         user = self.user_model.objects.create_user(username="staff-docs", password="x", is_staff=True)
@@ -10151,19 +10155,31 @@ class DocsAdminAccessTests(_AdminViewRequestMixin, TestCase):
         for slug in ("prompt-developer", "developer", "superuser"):
             self.assertEqual(self._view(user, slug).status_code, 200)
 
-    def test_guest_superuser_sees_only_prompt_developer(self):
-        from ai.admin.guest_mode import SESSION_KEY
-        user = self.user_model.objects.create_user(
-            username="guest-docs", password="x", is_superuser=True, is_staff=True,
-        )
-        request_path = "/ai/admin/docs/developer/"
+    def test_view_as_group_honest_chapter_access(self):
+        """Эмуляция честная: главы docs.* РЕШАЮТСЯ ключами эмулируемой
+        группы (документация не идёт с ролью), супер-обход отключён."""
         from ai.admin.docs import admin_docs_view
         from unittest.mock import patch
-        request = self._admin_request(user, path=request_path)
-        request.session[SESSION_KEY] = True
+        user = self.user_model.objects.create_user(
+            username="viewas-docs", password="x", is_superuser=True, is_staff=True,
+        )
+        pd_group = self._view_as_group("Эмуля-PD", ["page.admin", "docs.prompt_developer"])
+        staff_group = self._view_as_group("Эмуля-Doc", ["page.admin", "docs.developer"])
+        request = self._admin_request(user, path="/ai/admin/docs/developer/")
+        self._enter_view_as(request, pd_group)
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
             response = admin_docs_view(request, slug="developer")
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 403,
+                         "staff-глава закрыта: ключа docs.developer у группы нет")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = admin_docs_view(request, slug="prompt-developer")
+        self.assertEqual(response.status_code, 200,
+                         "docs.prompt_developer у группы — глава открыта")
+        request = self._admin_request(user, path="/ai/admin/docs/developer/")
+        self._enter_view_as(request, staff_group)
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = admin_docs_view(request, slug="developer")
+        self.assertEqual(response.status_code, 200)
 
     def test_download_returns_markdown_attachment(self):
         user = self.user_model.objects.create_user(username="dl-docs", password="x", is_staff=True)
@@ -10178,80 +10194,192 @@ class DocsAdminAccessTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(response.status_code, 403)
 
 
-class GuestModeViewTests(_AdminViewRequestMixin, TestCase):
-    """POST-переключатель «Зайти как гость» (ai/admin/guest_mode.py)."""
+class ViewAsViewTests(_AdminViewRequestMixin, TestCase):
+    """Окно выбора группы «Посмотреть как…» (ai/admin/guest_mode.py):
+    GET-список (только группы с page.admin) и POST-переключатель."""
 
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
 
-    def _superuser(self):
+    def _superuser(self, username="viewas-super"):
         return self.user_model.objects.create_user(
-            username="toggle-super", password="x", is_superuser=True, is_staff=True,
+            username=username, password="x", is_superuser=True, is_staff=True,
         )
 
-    def _post(self, user):
+    def _select(self, user, group_id):
+        """POST-переключатель; возвращает (response, request) — сессия живёт
+        на запросе (в проде гоняется кукой)."""
         from unittest.mock import patch
-        from ai.admin.guest_mode import admin_toggle_guest_view
-        request = self._admin_request(user, method="post", path="/ai/admin/view-as-guest/")
+        from ai.admin.guest_mode import admin_view_as_select_view
+        request = self._admin_request(
+            user, method="post", path="/ai/admin/view-as/select/",
+            data={"group_id": str(group_id)},
+        )
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
-            return admin_toggle_guest_view(request)
+            response = admin_view_as_select_view(request)
+        return response, request
 
-    def test_post_enables_guest_mode(self):
-        from ai.admin.guest_mode import SESSION_KEY, admin_toggle_guest_view
+    def test_groups_view_lists_only_admin_groups(self):
         from unittest.mock import patch
-        user = self._superuser()
-        request = self._admin_request(user, method="post", path="/ai/admin/view-as-guest/")
+        from ai.admin.guest_mode import (
+            SESSION_KEY,
+            admin_view_as_groups_view,
+            admin_view_as_select_view,
+        )
+        superuser = self._superuser()
+        admin_group = self._view_as_group("Эмуля-вход", ["page.admin"])
+        no_admin_group = self._view_as_group("Эмуля-безвыхода", ["page.model_status"])
+        request = self._admin_request(superuser, path="/ai/admin/view-as/groups/")
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
-            response = admin_toggle_guest_view(request)
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(response["Location"], "/ai/admin/")
-        self.assertIn(SESSION_KEY, request.session)
+            response = admin_view_as_groups_view(request)
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        names = {g["name"]: g for g in data["groups"]}
+        self.assertIn(admin_group.name, names)
+        self.assertNotIn(no_admin_group.name, names,
+                         "группа без page.admin не входит в админку — смотреть нечего")
+        self.assertFalse(names[admin_group.name]["current"])
 
-    def test_post_removes_flag_when_active(self):
+        # Выбор группы: сессия живёт на запросе; следующий запрос в проде
+        # находит её по кукам — в тесте подсунули то же хранилище.
+        select_request = self._admin_request(
+            superuser, method="post", path="/ai/admin/view-as/select/",
+            data={"group_id": str(admin_group.id)},
+        )
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = admin_view_as_select_view(select_request)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(SESSION_KEY, select_request.session)
+        # Прямой вызов view (вне admin_view) НЕТ url_name-исключения —
+        # select проставил stash на юзера; снимаем, чтобы групп-листинг
+        # видел реального супера.
+        self._leave_view_as(superuser)
+        list_request = self._admin_request(superuser, path="/ai/admin/view-as/groups/")
+        list_request.session = select_request.session
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = admin_view_as_groups_view(list_request)
+        data = json.loads(response.content)
+        self.assertTrue(next(g for g in data["groups"] if g["id"] == admin_group.id)["current"])
+
+    def test_select_enables_and_disable(self):
         from ai.admin.guest_mode import SESSION_KEY
-        user = self._superuser()
-        request = self._admin_request(user, method="post", path="/ai/admin/view-as-guest/")
-        request.session[SESSION_KEY] = True
-        from unittest.mock import patch
-        from ai.admin.guest_mode import admin_toggle_guest_view
-        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
-            admin_toggle_guest_view(request)
+        superuser = self._superuser()
+        group = self._view_as_group("Эмуля-два", ["page.admin", "page.model_status"])
+        response, request = self._select(superuser, group.id)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(SESSION_KEY, request.session)
+        self.assertEqual(request.session[SESSION_KEY], group.pk)
+        response, request = self._select(superuser, 0)
+        self.assertEqual(response.status_code, 200)
         self.assertNotIn(SESSION_KEY, request.session)
+
+    def test_select_unknown_group_404(self):
+        response, _ = self._select(self._superuser(username="viewas-404"), 999999)
+        self.assertEqual(response.status_code, 404)
 
     def test_get_method_forbidden(self):
         from unittest.mock import patch
-        from ai.admin.guest_mode import admin_toggle_guest_view
-        request = self._admin_request(self._superuser(), method="get", path="/ai/admin/view-as-guest/")
+        from ai.admin.guest_mode import admin_view_as_select_view
+        request = self._admin_request(
+            self._superuser(), method="get", path="/ai/admin/view-as/select/",
+        )
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
-            response = admin_toggle_guest_view(request)
-        self.assertEqual(response.status_code, 403)
+            response = admin_view_as_select_view(request)
+        self.assertEqual(response.status_code, 405)
 
     def test_non_superuser_forbidden(self):
         from unittest.mock import patch
-        from ai.admin.guest_mode import admin_toggle_guest_view
-        user = self.user_model.objects.create_user(username="toggle-staff", password="x", is_staff=True)
-        request = self._admin_request(user, method="post", path="/ai/admin/view-as-guest/")
+        from ai.admin.guest_mode import admin_view_as_select_view
+        user = self.user_model.objects.create_user(
+            username="viewas-staff", password="x", is_staff=True,
+        )
+        request = self._admin_request(
+            user, method="post", path="/ai/admin/view-as/select/",
+            data={"group_id": "0"},
+        )
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
-            response = admin_toggle_guest_view(request)
+            response = admin_view_as_select_view(request)
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.content.decode(), "Только для суперпользователя")
+
+    def test_honest_checks_fail_for_viewed_group_user(self):
+        """Изнутри эмуляции is_superuser_user/is_staff_or_superuser → False."""
+        from ai.admin.permissions import is_staff_or_superuser, is_superuser_user
+        superuser = self._superuser()
+        group = self._view_as_group("Эмуля-три", ["page.admin"])
+        request = self._admin_request(superuser, path="/ai/admin/")
+        self._enter_view_as(request, group)
+        self.assertFalse(is_staff_or_superuser(request.user))
+        self.assertFalse(is_superuser_user(request.user))
+        # Ключи честные: только группа (+baseline при page.admin).
+        from ai.admin.permissions import user_access_keys
+        self.assertIn("page.admin", user_access_keys(request.user))
+        self.assertIn("page.arm_solve", user_access_keys(request.user),
+                      "baseline выдаётся в эмуляции тоже")
+        self.assertNotIn("page.model_status", user_access_keys(request.user))
+        superuser2 = self._superuser(username="viewas-super-two")
+        request = self._admin_request(superuser2, path="/ai/admin/")
+        from ai.admin.permissions import user_access_keys as _uak
+        # superuser2 БЕЗ эмуляции: полный набор ключей супер-ветки —
+        # это не противоречит честности, stash здесь уже снят.
+
+    def test_role_membership_resolved_from_stash_group(self):
+        """Ролевые проверки в эмуляции смотрят ВЫБРАННУЮ группу, а не
+        реальныеmembership'ы юзера: супер в группе «PD-Эмуля» — не pd;
+        кто угодно в эмуляции «Разработчик промптов» — pd."""
+        from ai.admin.permissions import is_prompt_developer_user
+        from ai.models import AIAccessGroup
+        user = self.user_model.objects.create_user(
+            username="viewas-role", password="x", is_superuser=True, is_staff=True,
+        )
+        make_prompt_developer(user)
+        other = self._view_as_group("Эмуля-role-другая", ["page.admin"])
+        request = self._admin_request(user, path="/ai/admin/")
+        self._enter_view_as(request, other)
+        self.assertFalse(is_prompt_developer_user(request.user),
+                         "реальное членство в эмуляции игнорируется")
+        builtin_pd = AIAccessGroup.objects.get_or_create(
+            name="Разработчик промптов", defaults={"is_builtin": True},
+        )[0]
+        request = self._admin_request(user, path="/ai/admin/")
+        self._enter_view_as(request, builtin_pd)
+        self.assertTrue(is_prompt_developer_user(request.user),
+                        "в эмуляции роль = выбранная группа, своё членство неважно")
+
+    def test_view_as_group_name_flag_hides_superuser_tools(self):
+        """Реальные группы юзера игнорируются: супер с ключом page.updates
+        из личной группы в эмуляции «Разработчик промптов» Обновлений не видит."""
+        from ai.admin.permissions import can_access_updates
+        group = self._view_as_group("Эмуля-PD-два", ["page.admin"])
+        superuser2 = self.user_model.objects.create_user(
+            username="viewas-mixed", password="x", is_superuser=True, is_staff=True,
+        )
+        personal = self._view_as_group("Личная-архив", ["page.updates"])
+        superuser2.ai_access_groups.add(personal)
+        before = list(superuser2.ai_access_groups.all())
+        request = self._admin_request(superuser2, path="/ai/admin/")
+        self._enter_view_as(request, group)
+        self.assertFalse(can_access_updates(request),
+                         "в эмуляции ключи только группы — личная page.updates не в счёт")
+        self.assertEqual(before, list(superuser2.ai_access_groups.all()),
+                         "реальные группы не тронуты")
 
 
-class GuestModeContextTests(_AdminViewRequestMixin, TestCase):
-    """each_context в гостевом режиме: суперюзерские инструменты скрыты."""
+class ViewAsContextTests(_AdminViewRequestMixin, TestCase):
+    """each_context в честной эмуляции «Посмотреть как…»: доступ РОВНО
+    по ключам эмулируемой группы (+baseline при page.admin), супер-обход
+    отключён; тур онбординга при этом не показывается."""
 
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
 
-    def _context(self, user, guest=False):
+    def _context(self, user, group=None):
         from unittest.mock import patch
         from ai.admin.site import ai_admin_site
         request = self._admin_request(user, path="/ai/admin/")
-        if guest:
-            from ai.admin.guest_mode import SESSION_KEY
-            request.session[SESSION_KEY] = True
+        if group is not None:
+            self._enter_view_as(request, group)
         with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
             return ai_admin_site.each_context(request)
 
@@ -10262,13 +10390,16 @@ class GuestModeContextTests(_AdminViewRequestMixin, TestCase):
 
     def _doc_tool_names(self, context):
         doc_app = next(
-            app for app in context["available_apps"] if app["app_label"] == "ai-docs"
+            (app for app in context["available_apps"] if app["app_label"] == "ai-docs"),
+            None,
         )
-        return [m["name"] for m in doc_app["models"]]
+        return [m["name"] for m in doc_app["models"]] if doc_app else []
 
     def test_normal_superuser_context(self):
-        context = self._context(self._superuser(), guest=False)
+        context = self._context(self._superuser())
         self.assertFalse(context["is_viewing_as_guest"])
+        self.assertTrue(context["real_super_user"])
+        self.assertFalse(context["view_as_group_name"])
         self.assertTrue(context["show_model_status_link"])
         self.assertTrue(context["show_test_console_link"])
         self.assertEqual(
@@ -10276,32 +10407,51 @@ class GuestModeContextTests(_AdminViewRequestMixin, TestCase):
             ["Разработчик промптов", "Разработчик", "Суперюзер"],
         )
 
-    def test_guest_context_downgrades_tools(self):
-        context = self._context(self._superuser(), guest=True)
+    def test_view_as_group_shows_only_group_pages(self):
+        """Группа с page.admin + модельным статусом: только её страницы и
+        baseline; остальное (консоль/обновления) скрыто честно."""
+        from ai.admin.guest_mode import SESSION_KEY
+        group = self._view_as_group(
+            "Эмуля-наблюдатель", ["page.admin", "page.model_status"],
+        )
+        user = self.user_model.objects.create_user(
+            username="ctx-viewas", password="x", is_superuser=True, is_staff=True,
+        )
+        context = self._context(user, group=group)
         self.assertTrue(context["is_viewing_as_guest"])
-        self.assertIn("гость", context["user_role_label"])
-        self.assertFalse(context["show_model_status_link"])
-        self.assertFalse(context["show_prompt_regression_link"])
+        self.assertIn("Эмуля-наблюдатель", context["view_as_group_name"])
+        self.assertIn("как группу", context["user_role_label"])
+        self.assertTrue(context["show_model_status_link"],
+                        "у группы ключ есть — пункт виден ЧЕСТНО")
         self.assertFalse(context["show_test_console_link"])
         self.assertFalse(context["show_updates_link"])
-        # «Настройка ИИ-приложения» (ai-pinned) скрыта целиком.
-        self.assertNotIn(
-            "ai-pinned",
-            [app["app_label"] for app in context["available_apps"]],
-        )
-        self.assertEqual(self._doc_tool_names(context), ["Разработчик промптов"])
+        # baseline НЕ отменяется у группы с page.admin: пакетное решение видно.
+        self.assertTrue(context["show_arm_link"])
+        wizard = context["ai_wizard"]
+        self.assertFalse(wizard["show"],
+                         "в эмуляции тур не показывается (не двигает состояние реального юзера)")
 
-    def test_prompt_developer_context_unchanged(self):
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        from django.contrib.auth.models import Group
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-        user = self.user_model.objects.create_user(username="ctx-pd", password="x")
-        user.groups.add(group)
-        context = self._context(user, guest=False)
-        self.assertFalse(context["is_viewing_as_guest"])
-        self.assertEqual(
-            self._doc_tool_names(context), ["Разработчик промптов"],
+    def test_view_as_group_baseline_only(self):
+        """Группа только с page.admin: видны baseline-страницы, но не ключи."""
+        group = self._view_as_group("Эмуля-минимум", ["page.admin"])
+        user = self.user_model.objects.create_user(
+            username="ctx-viewas2", password="x", is_superuser=True, is_staff=True,
         )
+        context = self._context(user, group=group)
+        self.assertTrue(context["show_arm_link"])
+        self.assertTrue(context["show_prompt_link"])
+        self.assertTrue(context["show_logs_link"])
+        self.assertFalse(context["show_model_status_link"])
+        self.assertFalse(self._doc_tool_names(context))
+
+    def test_prompt_developer_no_docs_without_key(self):
+        # Решение владельца 2026-10-20: документация НЕ идёт с ролью —
+        # выдаётся ключом docs.prompt_developer в «Группах доступа».
+        user = self.user_model.objects.create_user(username="ctx-pd", password="x")
+        make_prompt_developer(user)
+        context = self._context(user)
+        self.assertFalse(context["is_viewing_as_guest"])
+        self.assertFalse(self._doc_tool_names(context))
 
 
 class RestrictedUserEditorsInlineTests(TestCase):
@@ -10788,6 +10938,98 @@ class StructuralCarverTests(SimpleTestCase):
         self.assertIn("x dw 2", got)
         self.assertIn("Входные данные", got)
 
+    def test_asm_data_section_inline_comment_with_period_not_cut(self):
+        """Выкусывание: реальная строка кода с хвостовым комментарием,
+        кончающимся точкой («x dw 2 ; число икс.»), не срезается как
+        прозя-предложение (судим по кодовой части строки)."""
+        code = ("jmp begin\n\nx dw 2 ; число икс.\ny dw -1\n"
+                "RES dw 0\n\nbegin:\nmov al, x\ncbw\nmov a_16, ax\n"
+                "Ends:\njmp Ends ;$E")
+        got = self._c(code, ext=".i86")
+        self.assertIn("x dw 2 ; число икс.", got)
+        self.assertIn("mov a_16, ax", got)
+
+    def test_mpc_inline_comment_with_period_not_cut(self):
+        """То же для С-МПА: «y = a + b; // сумма двух операндов.» — код."""
+        code = ("int __in __bits(8) a;\nint __out __bits(8) y;\nvoid main()\n{\n"
+                "y = a + b; // сумма двух операндов тут.\n}")
+        got = self._c(code, ext=".mpc")
+        self.assertIn("y = a + b; // сумма двух операндов тут.", got)
+        self.assertIn("int __in __bits(8) a;", got)
+
+    def test_asm_masm_skeleton_extracted(self):
+        """MASM-скелет без «jmp begin» (.model/.stack/.data/.code/…/end start)
+        тоже извлекается целиком — включая дату-секцию (прежде: анкер один —
+        «jmp begin», программа проваливалась в карвинг и без оградки теряла
+        данные; директивный анкер теперь даёт кандидата от первой директивы)."""
+        masm = (".model small\n.stack 100h\n.data\nx dw 2\ny dw -1\n"
+                ".code\nstart:\nmov ax, x\nadd ax, y\nend start")
+        got = self._c("Решение на MASM:\n" + masm + "\nУдачи!", ext=".i86")
+        self.assertIn(".model small", got)
+        self.assertIn("x dw 2", got)
+        self.assertIn("mov ax, x", got)
+        self.assertIn("end start", got)
+        self.assertNotIn("Удачи", got)
+
+    def test_asm_skewed_skeleton_label_extracted(self):
+        """Скошенный каркас «jmp start / start: …» (модели иного диалекта):
+        генерализованные якоря не теряют дату-секцию, лейблы циклов
+        (jmp loop_start) анкерами НЕ становятся."""
+        code = ("jmp start\nx dw 2\ny dw -1\nRES dw 0\n\n"
+                "start:\nmov ax, x\ncbw\nadd ax, y\nmov RES, ax\nend start")
+        got = self._c("Сначала объясню: решение простое.\n" + code, ext=".i86")
+        self.assertIn("jmp start", got)
+        self.assertIn("x dw 2", got)
+        self.assertIn("end start", got)
+        self.assertNotIn("решение простое", got)
+
+    def test_alt_cut_requires_code_right_after_heading(self):
+        """Ранний заголовок «Альтернатива:» в CoT НЕ должен срезать
+        ФИНАЛЬНУЮ программу, записанную ниже: между заголовком и кодом
+        прозя-строка — среза нет (res: «Финальная программа:» терялась)."""
+        early = ("Сначала покажу как не надо:\n"
+                 "jmp begin\nn dw 5\n\nbegin:\nmov ax, n\n"
+                 "Альтернатива: нужно иначе.\nФинальная программа:\n"
+                 "jmp begin\nn dw 4\nplace dw 1\n\nbegin:\nmov z, 0\n"
+                 "loop_start:\nmov ax, n\ncmp ax, 0\n\nje done\n\ndone:\njmp Ends ;$E")
+        got = self._c(early, ext=".i86")
+        self.assertIn("place dw 1", got)
+        self.assertIn("je done", got)
+
+    def test_mpc_glued_decl_window_salvaged(self):
+        """Склейка «декларации + прозя + повтор main» в окне от
+        якоря-декларации больше не бракуется целиком: декларации спасаются
+        (иначе DL падал «Undefined variable»), кодовая вставка между
+        main-ами выкусывается."""
+        text = (
+            "int __in __bits(8) a;\nint __out __bits(8) y;\n"
+            "void main() {\ny = a +\n"
+            "Now I reconsider. The correct one:\n"
+            "void main() {\ny = a + 1;\ny = a + 2;\n}\n"
+        )
+        got = self._c(text, ext=".mpc")
+        self.assertIn("int __in __bits(8) a;", got)
+        self.assertIn("y = a + 2;", got)
+        self.assertNotIn("Now I reconsider", got)
+
+    def test_language_code_incomplete(self):
+        """Гейт обрыва: код без концевика каркаса (.i86) / без main или
+        несбалансированные скобки (.mpc) — неполный."""
+        from ai.services.code_carver import language_code_incomplete
+        self.assertTrue(language_code_incomplete(
+            "jmp begin\nbegin:\nmov ax, 1", ".i86"))
+        self.assertFalse(language_code_incomplete(
+            "jmp begin\nbegin:\nmov ax, 1\nEnds:\njmp Ends ;$E", ".i86"))
+        self.assertFalse(language_code_incomplete(
+            ".model small\n.code\nmov ax, 1\nend start", ".i86"))
+        self.assertTrue(language_code_incomplete(
+            "int __in __bits(8) a;\nvoid main() {\ny = a;", ".mpc"))
+        self.assertTrue(language_code_incomplete(
+            "int __in __bits(8) a;", ".mpc"))
+        self.assertFalse(language_code_incomplete(
+            "int __in __bits(8) a;\nvoid main() {\ny = a; }", ".mpc"))
+        self.assertFalse(language_code_incomplete("whatever", ""))
+
     # --- С-МПА .mpc ---
 
     def test_mpc_decls_plus_prose_plus_main(self):
@@ -11185,14 +11427,11 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
     prompt_developer видит только свои записи."""
 
     def setUp(self):
-        from django.contrib.auth.models import Group
-        from ai.constants import PROMPT_DEVELOPER_GROUP
         self.factory = RequestFactory()
         self.user_model = get_user_model()
         self.su = self.user_model.objects.create_user(
             username="daily-su", password="***", is_superuser=True, is_staff=True,
         )
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     @staticmethod
     def _msk_at(hour, minute=0, second=0, *, day_offset=0):
@@ -11298,7 +11537,7 @@ class DailyReportTests(_AdminViewRequestMixin, TestCase):
         pd = self.user_model.objects.create_user(
             username="daily-pd", password="***",
         )
-        pd.groups.add(self.pd_group)
+        make_prompt_developer(pd)
         self._log(user=pd, external_user_id="400", full_name="Разработчик Промптов",
                   sent_at=self._msk_at(8, 0), prompt="Мой промпт")
         rows = self._report(pd).context_data["rows"]
@@ -11649,11 +11888,8 @@ class DocsContentEndpointTests(_AdminViewRequestMixin, TestCase):
         self.assertIn("<h", data["html"])
 
     def test_forbidden_for_other_role(self):
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        from django.contrib.auth.models import Group
         user = self.user_model.objects.create_user(username="cnt-pd", password="x")
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-        user.groups.add(group)
+        make_prompt_developer(user)
         self.assertEqual(self._request(user).status_code, 403)
 
 
@@ -12166,15 +12402,15 @@ class PinnedBatchRunsTests(TestCase):
         # Суперюзер: скупа «только свои» нет — чужой прогон раскрывается.
         self.assertTrue(foreign["snapshot_url"])
 
-    def test_page_for_prompt_developer_hides_foreign_snapshot(self):
-        """Общий список виден и разработчику промтов, но раскрывать чужие
-        прогоны он не может — snapshot_url вычищен (строка не разворачивается)."""
-        from django.contrib.auth.models import Group
-        Group.objects.get_or_create(name="prompt_developer")
+    def test_page_for_prompt_developer_keeps_foreign_snapshot(self):
+        """Общий список виден и разработчику промтов, и смотреть результаты
+        ЧУЖИХ закреплённых прогонов он может (ТЗ 2026-10-19: закреплённые
+        решения — общая витрина): snapshot_url остаётся; открепить чужое
+        он всё равно не может (is_own=false; toggle — только свои записи)."""
         pd_user = get_user_model().objects.create_user(
             username="pin_pd", password="x",
         )
-        pd_user.groups.add(Group.objects.get(name="prompt_developer"))
+        make_prompt_developer(pd_user)
         self.toggle_view(self._post(f"/x/{self.log.id}/pin/", self.operator), self.log.id)
 
         request = RequestFactory().get(self.pin_url_prefix)
@@ -12186,7 +12422,73 @@ class PinnedBatchRunsTests(TestCase):
         self.assertEqual(len(rows), 1)
         self.assertFalse(rows[0]["is_own"])
         self.assertIn("pin_admin", rows[0]["pin_authors"])
-        self.assertEqual(rows[0]["snapshot_url"], "")
+        self.assertEqual(
+            rows[0]["snapshot_url"],
+            f"/ai/admin/ai/request_logs/{self.log.id}/batch-snapshot/",
+        )
+
+    def test_snapshot_serves_foreign_pinned_log_to_prompt_dev(self):
+        """Снапшот-эндпоинт: чужой ЗАКРЕПЛЁННЫЙ прогон промпт-разработчику
+        отдаётся (200 + results), незакреплённый чужой — 404 (скуп «только
+        свои» журнала на него больше не распространяется только при закреплении)."""
+        from ai.admin.request_logs import admin_batch_snapshot_view
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        run2 = "b" * 32
+        log2 = AIRequestLog.objects.create(
+            user=self.operator, source="arm", mode="batch_solve",
+            message=f"Batch solve run {run2}",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        AIModelTestRun.objects.create(
+            run_id=run2, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED, course_id=1451,
+        )
+        AIModelTestResult.objects.create(
+            run=AIModelTestRun.objects.get(run_id=run2),
+            model_key="FakeModel", model_title="FakeModel",
+            status=AIModelTestResult.STATUS_OK, verdict="solved",
+            raw_response="jmp begin", code="jmp begin",
+        )
+
+        pd_user = get_user_model().objects.create_user(
+            username="snap_pd", password="x",
+        )
+        make_prompt_developer(pd_user)
+
+        # Не закреплённый чужой прогон — скуп прячет → 404.
+        request = RequestFactory().get(f"/ai/admin/ai/request_logs/{log2.id}/batch-snapshot/")
+        request.user = pd_user
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = admin_batch_snapshot_view(request, log_id=log2.id)
+        self.assertEqual(resp.status_code, 404)
+
+        # Закрепили (оператор) — теперь витрина: 200 с полным снапшотом.
+        self.toggle_view(self._post(f"/x/{log2.id}/pin/", self.operator), log2.id)
+        request = RequestFactory().get(f"/ai/admin/ai/request_logs/{log2.id}/batch-snapshot/")
+        request.user = pd_user
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = admin_batch_snapshot_view(request, log_id=log2.id)
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        self.assertEqual(data["run_id"], run2)
+        self.assertEqual(len(data["results"]), 1)
+
+    def test_snapshot_404_for_pinned_non_batch_log(self):
+        """Закрепление гарантирует только видимость снапшота чужому промпт-
+        разработчику; не-батч запись журнала (чат) — 404 даже закреплённой."""
+        from ai.admin.request_logs import admin_batch_snapshot_view
+
+        AIPinnedBatchRun.objects.create(user=self.operator, log=self.plain_log)
+        pd_user = get_user_model().objects.create_user(
+            username="snap_pd2", password="x",
+        )
+        make_prompt_developer(pd_user)
+        request = RequestFactory().get(f"/ai/admin/ai/request_logs/{self.plain_log.id}/batch-snapshot/")
+        request.user = pd_user
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = admin_batch_snapshot_view(request, log_id=self.plain_log.id)
+        self.assertEqual(resp.status_code, 404)
 
     def test_page_requires_logs_access(self):
         outsider = get_user_model().objects.create_user(username="pin_nobody", password="x")
@@ -12203,6 +12505,1760 @@ class PinnedBatchRunsTests(TestCase):
         self.assertTrue(contexts[self.log.pk]["pinned"])
         contexts = _batch_log_row_contexts([self.log], user=self.other)
         self.assertFalse(contexts[self.log.pk]["pinned"])
+
+    def test_pinned_foreign_log_detail_and_xlsx_open_to_prompt_dev(self):
+        """Закреплённый чужой лог — общая витрина не только снапшотом:
+        «Детали →» (детальная страница) и XLSX по log_id отдаются
+        промпт-разработчику, а не 403 «Доступны только собственные запросы»
+        (ТЗ 2026-10-19). Незакреплённый чужой лог по-прежнему 403."""
+        from ai.admin.request_logs import (
+            admin_request_log_detail_view,
+            admin_request_log_xlsx_view,
+        )
+
+        pd_user = get_user_model().objects.create_user(username="det_pd", password="x")
+        make_prompt_developer(pd_user)
+
+        def _get(view, log_id):
+            request = RequestFactory().get(f"/x/{log_id}/")
+            request.user = pd_user
+            SessionMiddleware(lambda req: None).process_request(request)
+            return view(request, log_id=log_id)
+
+        # Чужой незакреплённый лог — по-прежнему 403.
+        self.assertEqual(_get(admin_request_log_detail_view, self.log.id).status_code, 403)
+
+        self.toggle_view(self._post(f"/x/{self.log.id}/pin/", self.operator), self.log.id)
+        self.assertEqual(_get(admin_request_log_detail_view, self.log.id).status_code, 200)
+        # XLSX: у setUp-прогона нет пар — 404 «В прогоне нет результатов»;
+        # важно, что это НЕ 403 «Доступны только собственные запросы».
+        resp = _get(admin_request_log_xlsx_view, self.log.id)
+        self.assertNotEqual(resp.status_code, 403)
+        self.assertNotIn("только собственные", resp.content.decode(errors="ignore"))
+
+    def test_pinned_foreign_log_not_resendable_by_prompt_dev(self):
+        """Закрепление открывает только ЧТЕНИЕ чужого прогона: resend
+        (мутация, перезапуск модели) на чужой закреплённый лог — 403,
+        как и раньше (allow_pinned=False в resend/rerun)."""
+        from ai.admin.request_logs import resend_request_view, rerun_arm_batch_view
+
+        pd_user = get_user_model().objects.create_user(username="pd_mute", password="x")
+        make_prompt_developer(pd_user)
+        self.toggle_view(self._post(f"/x/{self.log.id}/pin/", self.operator), self.log.id)
+
+        request = RequestFactory().post(f"/x/{self.log.id}/resend/")
+        request.user = pd_user
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = resend_request_view(request, log_id=self.log.id)
+        self.assertEqual(resp.status_code, 403)
+
+        request = RequestFactory().post(f"/x/{self.log.id}/rerun-arm/")
+        request.user = pd_user
+        SessionMiddleware(lambda req: None).process_request(request)
+        resp = rerun_arm_batch_view(request, log_id=self.log.id)
+        self.assertEqual(resp.status_code, 403)
+
+
+class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
+    """Доска «Таски» (/ai/admin/tasks/, ai/admin/tasks.py).
+
+    Матрица (система групп, сид 0060 + миграция 0063): доска видна с
+    «Разработчика» и у «Разработчика промптов» (page.tasks выдан группой);
+    взять может любой с доступом к доске; создать/закрыть — суперюзер
+    (action-ключи выдаются группами); переставить строки фронта и хотелов —
+    суперюзер/action.task_reorder (выдан «Разработчику»). Номер приоритета
+    выдаёт СЕРВЕР (max+1 внутри вида; у фронта и хотелов нумерации
+    раздельны, оба с №1); вкладки-фильтры «Не взятые» (свободный фронт) и
+    «Поиск» (все таски + фильтр «Кто взял»); закрытие — архив вместо
+    удаления (вкладка «Закрытые», возврат reopen'ом); в эмуляции
+    «Посмотреть как…» права честные по ключам группы."""
+
+    def setUp(self):
+        from ai.admin.tasks import (
+            admin_task_claim_view,
+            admin_task_close_view,
+            admin_task_create_view,
+            admin_task_edit_view,
+            admin_task_reopen_view,
+            admin_task_reorder_view,
+            admin_tasks_view,
+            TASKS_URL,
+        )
+        self.page_view = admin_tasks_view
+        self.create_view = admin_task_create_view
+        self.reorder_view = admin_task_reorder_view
+        self.claim_view = admin_task_claim_view
+        self.close_view = admin_task_close_view
+        self.reopen_view = admin_task_reopen_view
+        self.edit_view = admin_task_edit_view
+        self.tasks_url = TASKS_URL
+        self.superuser = get_user_model().objects.create_superuser(
+            username="task_admin", password="x", email="t@a.com",
+        )
+        self.dev = get_user_model().objects.create_user(username="task_dev", password="x")
+        make_developer(self.dev)
+        self.other_dev = get_user_model().objects.create_user(username="task_dev2", password="x")
+        make_developer(self.other_dev)
+        self.pd = get_user_model().objects.create_user(username="task_pd", password="x")
+        make_prompt_developer(self.pd)
+        self.outsider = get_user_model().objects.create_user(username="task_nobody", password="x")
+
+    def _request(self, user, method="get", path="/x/", data=None, body=None):
+        if body is not None:
+            request = RequestFactory().post(
+                path, data=body, content_type="application/json"
+            )
+        else:
+            request = getattr(RequestFactory(), method)(path, data=data or {})
+        request.user = user
+        # each_context → guest_mode читает request.session.
+        SessionMiddleware(lambda req: None).process_request(request)
+        return request
+
+    # --- Доступ --- -------------------------------------------------------
+
+    def test_page_denies_plain_user(self):
+        """Без допуска в админку (page.admin) baseline не выдаётся — 403."""
+        resp = self.page_view(self._request(self.outsider, path=self.tasks_url))
+        self.assertEqual(resp.status_code, 403)
+
+    def test_page_allows_prompt_developer_via_baseline(self):
+        """Доска видна «Разработчику промптов» — у группы есть page.tasks
+        (сид 0060 его не содержал; миграция 0063 выдала, когда ключ вышел
+        из базового набора) — брать таск тоже можно."""
+        resp = self.page_view(self._request(self.pd, path=self.tasks_url))
+        self.assertEqual(resp.status_code, 200)
+        task = AIDevTask.objects.create(title="Т-baseline", created_by=self.superuser)
+        resp = self.claim_view(self._request(self.pd, "post", f"/x/{task.id}/claim/"), task.id)
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.pd)
+
+    def test_page_allows_developer_and_superuser(self):
+        resp = self.page_view(self._request(self.dev, path=self.tasks_url))
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.context_data["can_create"])
+        self.assertFalse(resp.context_data["can_close"])
+        self.assertTrue(resp.context_data["can_reorder"])
+
+        resp = self.page_view(self._request(self.superuser, path=self.tasks_url))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context_data["can_create"])
+        self.assertTrue(resp.context_data["can_close"])
+        self.assertTrue(resp.context_data["can_reorder"])
+
+    def test_rows_are_draggable_on_front_and_wish_tabs(self):
+        """Перетаскивание: HTML5 DnD требует draggable на строках (регрессия
+        2026-10 — атрибут потеряли, dragstart не стартовал вовсе). Ставится
+        при праве can_reorder на вкладках реальных видов (front + wish,
+        паритет хотелов 2026-10-20); на фильтрах unclaimed/search/mine нет."""
+        AIDevTask.objects.create(title="Т-фронт", kind="front", priority_no=1)
+        AIDevTask.objects.create(title="Т-хотелка", kind="wish", priority_no=1)
+
+        for kind in ("front", "wish"):
+            resp = self.page_view(self._request(self.superuser, path=f"{self.tasks_url}?kind={kind}"))
+            self.assertTrue(resp.context_data["can_reorder"], kind)
+            resp.render()
+            content = resp.content.decode()
+            self.assertIn('draggable="true"', content)
+            self.assertIn(f'data-kind="{kind}"', content)
+
+        # На вкладках-фильтрах перетаскивания нет (смешанные/усечённые наборы).
+        for kind in ("unclaimed", "search", "mine"):
+            resp = self.page_view(self._request(self.superuser, path=f"{self.tasks_url}?kind={kind}"))
+            self.assertFalse(resp.context_data["can_reorder"], kind)
+
+        # Эмуляция «Посмотреть как…» без action.task_reorder у группы:
+        # can_reorder False → draggable не ставится.
+        req = self._request(self.superuser, path=f"{self.tasks_url}?kind=front")
+        self._enter_view_as(req, self._view_as_group("Эмуля-drag", ["page.admin", "page.tasks"]))
+        resp = self.page_view(req)
+        self.assertFalse(resp.context_data["can_reorder"])
+        resp.render()
+        self.assertNotIn('draggable="true"', resp.content.decode())
+
+    # --- Создание (superuser; номер выдаёт сервер) -------------------------
+
+    def test_create_requires_superuser(self):
+        resp = self.create_view(self._request(self.dev, "post", path="/x/tasks/create/", data={
+            "title": "Мой таск", "kind": "front",
+        }))
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(AIDevTask.objects.exists())
+
+        resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "Поправить промпт №3",
+            "description": "См. тему …",
+            "estimate": "До 4 дней",
+            "kind": "front",
+        }))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(json.loads(resp.content)["ok"])
+        task = AIDevTask.objects.get()
+        self.assertEqual(task.title, "Поправить промпт №3")
+        self.assertEqual(task.estimate, "До 4 дней")
+        self.assertEqual(task.kind, "front")
+        # Номер сервер выдан сам (max+1 → первый таск — №1).
+        self.assertEqual(task.priority_no, 1)
+        self.assertEqual(task.created_by, self.superuser)
+
+    def test_create_front_numbers_are_max_plus_one(self):
+        AIDevTask.objects.create(title="Уже есть", kind="front", priority_no=7)
+        wish = AIDevTask.objects.create(title="Хотелка", kind="wish")
+        self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "Новый фронт", "kind": "front",
+        }))
+        new_task = AIDevTask.objects.exclude(pk=wish.pk).get(title="Новый фронт")
+        from django.db.models import Max
+        self.assertEqual(new_task.priority_no, AIDevTask.objects.aggregate(
+            no=Max("priority_no")
+        )["no"])
+        self.assertEqual(new_task.priority_no, 8)
+
+    def test_create_wish_numbering_is_per_kind_max_plus_one(self):
+        """Хотелки нумеруются СВОЕЙ последовательностью с №1: номер — max+1
+        внутри вида, независимо от максимума фронта (паритет 2026-10-20)."""
+        AIDevTask.objects.create(title="Фронт с номером", kind="front", priority_no=3)
+        resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "Хочу фильтры", "kind": "wish",
+        }))
+        self.assertEqual(resp.status_code, 200)
+        wish = AIDevTask.objects.get(title="Хочу фильтры")
+        self.assertEqual(wish.kind, "wish")
+        self.assertEqual(wish.priority_no, 1)
+
+        # Вторая хотелка продолжает хотелочную последовательность, а не общую.
+        self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "Хочу фильтры 2", "kind": "wish",
+        }))
+        self.assertEqual(
+            AIDevTask.objects.get(title="Хочу фильтры 2").priority_no, 2
+        )
+        # Новый таск фронта — по фронту (№4), хотелочные не мешают.
+        self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "Новый фронт", "kind": "front",
+        }))
+        self.assertEqual(
+            AIDevTask.objects.get(title="Новый фронт").priority_no, 4
+        )
+
+    def test_create_validates_title_and_kind(self):
+        resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={}))
+        self.assertEqual(resp.status_code, 400)
+        resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "x", "kind": "ultra",
+        }))
+        self.assertEqual(resp.status_code, 400)
+
+    # --- Взять таск (любой с доступом к доске) -----------------------------
+
+    def test_claim_sets_taken_fields_and_visible_on_page(self):
+        task = AIDevTask.objects.create(
+            title="Т1", estimate="До 2 недель", created_by=self.superuser,
+        )
+        resp = self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.dev)
+        self.assertIsNotNone(task.taken_at)
+
+        resp = self.page_view(self._request(self.superuser, path=self.tasks_url))
+        row = resp.context_data["rows"][0]
+        self.assertTrue(row["taken"])
+        self.assertIn("task_dev", row["claimant"])
+
+    def test_claim_wish_task_also_works(self):
+        task = AIDevTask.objects.create(title="Хотелка-Т", kind="wish", created_by=self.superuser)
+        resp = self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.dev)
+
+    def test_claim_unknown_task_is_404(self):
+        resp = self.claim_view(self._request(self.dev, "post", "/x/99999/claim/"), 99999)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_claim_second_getter_gets_409(self):
+        """Атомарность: взятый таск не перезатаривается — условный UPDATE
+        возвращает 0 строк и 409, taken_by остаётся у первого."""
+        task = AIDevTask.objects.create(title="Т2", created_by=self.superuser)
+        self.assertEqual(
+            self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id).status_code,
+            200,
+        )
+        resp = self.claim_view(
+            self._request(self.other_dev, "post", f"/x/{task.id}/claim/"), task.id
+        )
+        self.assertEqual(resp.status_code, 409)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.dev)
+        # Повторный claim тем же — тоже нельзя.
+        resp = self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
+        self.assertEqual(resp.status_code, 409)
+
+    # --- Закрытие (superuser) ----------------------------------------------
+
+    def test_close_requires_superuser(self):
+        """Закрытие уводит таск с доски, но НЕ удаляет строку: closed_at/
+        closed_by ставятся, приоритетный номер сбрасывается, taken-поля
+        остаются (в архиве видно «кто выполнил»); второй close — 409."""
+        task = AIDevTask.objects.create(
+            title="Т3", created_by=self.superuser, taken_by=self.dev,
+            priority_no=5,
+        )
+        resp = self.close_view(self._request(self.dev, "post", f"/x/{task.id}/close/"), task.id)
+        self.assertEqual(resp.status_code, 403)
+        task.refresh_from_db()
+        self.assertIsNone(task.closed_at)
+
+        self.assertEqual(
+            self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id).status_code,
+            200,
+        )
+        task.refresh_from_db()
+        # Строка жива: архив, а не удаление.
+        self.assertIsNotNone(task.closed_at)
+        self.assertEqual(task.closed_by, self.superuser)
+        self.assertIsNone(task.priority_no)
+        self.assertEqual(task.taken_by, self.dev)
+
+        # Повторное закрытие закрытого — 409.
+        resp = self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+        self.assertEqual(resp.status_code, 409)
+
+    def test_close_unknown_task_is_404(self):
+        resp = self.close_view(self._request(self.superuser, "post", "/x/99999/close/"), 99999)
+        self.assertEqual(resp.status_code, 404)
+
+    # --- Архив «Закрытые» и возврат (reopen) --------------------------------
+
+    def test_closed_tab_details_and_visibility(self):
+        """Архив «Закрытые»: тип, «кто дал», «кто выполнил», даты; закрытое
+        пропадает из рабочих вкладок (front/unclaimed/search/mine)."""
+        task = AIDevTask.objects.create(
+            title="Готовый", kind="wish", priority_no=2, created_by=self.superuser,
+        )
+        self.claim_view(
+            self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id
+        )
+        self.close_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id
+        )
+
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=closed"))
+        self.assertEqual(resp.context_data["active_kind"], "closed")
+        rows = resp.context_data["rows"]
+        self.assertEqual([r["title"] for r in rows], ["Готовый"])
+        self.assertEqual(rows[0]["kind_label"], "Хотелки")
+        self.assertIn("task_admin", rows[0]["creator"])  # «кто дал»
+        self.assertIn("task_dev", rows[0]["claimant"])  # «кто выполнил»
+        self.assertIsNotNone(rows[0]["closed_at"])
+        # Шаблон архива рисуется (колонки + двухшажный «Вернуть»: спрашивает
+        # оставить исполнителя или освободить; у разработчика без действия
+        # кнопок нет).
+        resp = self.page_view(self._request(self.superuser, path=f"{self.tasks_url}?kind=closed"))
+        resp.render()
+        html = resp.content.decode()
+        self.assertIn("Кто выполнил", html)
+        self.assertIn("data-reopen-ask", html)
+        self.assertIn("data-reopen-url", html)
+        self.assertIn("С исполнителем", html)
+        self.assertIn("Освободить", html)
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=closed"))
+        resp.render()
+        self.assertNotIn("data-reopen-url", resp.content.decode())
+
+        # Рабочие вкладки закрытое больше не показывают.
+        for kind_tab in ("front", "unclaimed", "search"):
+            resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind={kind_tab}"))
+            self.assertEqual([r["title"] for r in resp.context_data["rows"]], [], kind_tab)
+        resp = self.page_view(self._request(self.dev, path=self.tasks_url))
+        self.assertEqual(resp.context_data["rows"], [])
+        # Фильтр «Кто взял» на «Поиске» тоже только по активным.
+        self.assertNotEqual(resp.context_data["active_kind"], "closed")
+
+    def test_closed_tab_date_filter(self):
+        """Разграничение по датам закрытия: обе границы включительно («по»
+        захватывает весь день; границы — московские, не UTC)."""
+        self.dev  # dev допущен к доске (baseline)
+        first = AIDevTask.objects.create(title="Окт", created_by=self.superuser)
+        second = AIDevTask.objects.create(title="Ноя", created_by=self.superuser)
+        # Закрытие в 23:50 по МСК (+3): UTC-границы отсекли бы его соседним днём.
+        AIDevTask.objects.filter(pk=first.pk).update(closed_at=timezone.make_aware(
+            datetime(2026, 10, 5, 23, 50), timezone.get_fixed_timezone(180)
+        ))
+        AIDevTask.objects.filter(pk=second.pk).update(closed_at=timezone.make_aware(
+            datetime(2026, 11, 10, 23, 50), timezone.get_fixed_timezone(180)
+        ))
+
+        def titles(query):
+            resp = self.page_view(
+                self._request(self.dev, path=f"{self.tasks_url}?kind={query}")
+            )
+            return [r["title"] for r in resp.context_data["rows"]]
+
+        self.assertEqual(titles("closed&closed_from=2026-10-05&closed_to=2026-10-05"), ["Окт"])
+        self.assertEqual(titles("closed&closed_from=2026-11-01"), ["Ноя"])
+        self.assertEqual(titles("closed&closed_to=2026-10-31"), ["Окт"])
+        self.assertEqual(titles("closed"), ["Ноя", "Окт"])  # без фильтра — все
+        # Мусорные даты игнорируются (фильтр не применяется, страница жива).
+        self.assertEqual(titles("closed&closed_from=бак&closed_to=zz"), ["Ноя", "Окт"])
+
+        self.assertEqual(titles("closed"), ["Ноя", "Окт"])  # без фильтра — все
+        # Мусорные даты игнорируются (фильтр не применяется, страница жива).
+        self.assertEqual(titles("closed&closed_from=бак&closed_to=zz"), ["Ноя", "Окт"])
+
+    def test_closed_tab_kind_and_executor_filters(self):
+        """Архив «Закрытые»: фильтры по типу таска (?task_kind=) и по
+        исполнителю (?done_by= — «кто выполнил»); мусорные значения и
+        неизвестный тип молча не применяются. Селект «Кто выполнил» перечисляет
+        исполнителей ЗАКРЫТЫХ тасков (не активных)."""
+        front = AIDevTask.objects.create(title="Фр", kind="front", created_by=self.superuser)
+        wish = AIDevTask.objects.create(title="Хо", kind="wish", created_by=self.superuser)
+        self.claim_view(self._request(self.dev, "post", f"/x/{front.id}/claim/"), front.id)
+        self.claim_view(self._request(self.other_dev, "post", f"/x/{wish.id}/claim/"), wish.id)
+        self.close_view(self._request(self.superuser, "post", f"/x/{front.id}/close/"), front.id)
+        self.close_view(self._request(self.superuser, "post", f"/x/{wish.id}/close/"), wish.id)
+
+        def titles(query):
+            resp = self.page_view(
+                self._request(self.dev, path=f"{self.tasks_url}?kind={query}")
+            )
+            return [r["title"] for r in resp.context_data["rows"]]
+
+        self.assertEqual(titles("closed"), ["Хо", "Фр"])  # свежие закрытия первыми
+        self.assertEqual(titles("closed&task_kind=front"), ["Фр"])
+        self.assertEqual(titles("closed&task_kind=wish"), ["Хо"])
+        self.assertEqual(titles("closed&task_kind=garbage"), ["Хо", "Фр"])
+        self.assertEqual(titles(f"closed&done_by={self.dev.id}"), ["Фр"])
+        self.assertEqual(titles(f"closed&done_by={self.other_dev.id}"), ["Хо"])
+        self.assertEqual(titles("closed&done_by=abc"), ["Хо", "Фр"])
+
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=closed"))
+        options = resp.context_data["closed_done_options"]
+        self.assertEqual(
+            {opt["id"] for opt in options}, {self.dev.id, self.other_dev.id}
+        )
+        # Селекты фильтров рисуются (autosubmit-движок тот же, что у «Поиска»).
+        resp.render()
+        html = resp.content.decode()
+        self.assertIn('name="task_kind"', html)
+        self.assertIn('name="done_by"', html)
+        self.assertIn("data-autosubmit", html)
+
+    def test_reopen_returns_task_to_board(self):
+        """«Вернуть»: закрытые поля в NULL, новый номер max+1 внутри вида,
+        taken_by сохраняется (переделывать тому, кто взял); право — как у
+        закрытия; повторный reopen/закрыто-открытое — 409, чужой id — 404."""
+        task = AIDevTask.objects.create(
+            title="Верну", kind="front", priority_no=1, created_by=self.superuser,
+        )
+        self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
+        self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+        AIDevTask.objects.create(title="Ещё", kind="front", priority_no=2)
+
+        # Брать таски можно всем, а возвращать — как закрывать.
+        resp = self.reopen_view(self._request(self.dev, "post", f"/x/{task.id}/reopen/"), task.id)
+        self.assertEqual(resp.status_code, 403)
+        resp = self.reopen_view(
+            self._request(self.superuser, "post", "/x/99999/reopen/", body={}), 99999
+        )
+        self.assertEqual(resp.status_code, 404)
+
+        self.assertEqual(
+            self.reopen_view(
+                self._request(self.superuser, "post", f"/x/{task.id}/reopen/", body={}), task.id
+            ).status_code,
+            200,
+        )
+        task.refresh_from_db()
+        self.assertIsNone(task.closed_at)
+        self.assertEqual(task.priority_no, 3)  # новый номер max+1, старый не восстановлен
+        self.assertEqual(task.taken_by, self.dev)
+        resp = self.page_view(self._request(self.dev, path=self.tasks_url))
+        self.assertEqual([r["title"] for r in resp.context_data["rows"]], ["Ещё", "Верну"])
+
+        # Открытый повторно reopen'ится нельзя.
+        resp = self.reopen_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/reopen/", body={}), task.id
+        )
+        self.assertEqual(resp.status_code, 409)
+
+        # Непарсящийся непустой JSON — 400. Пустое тело (реальный POST UI
+        # «С исполнителем» шлёт fetch без body) валидно и трактуется как
+        # отсутствие флага — проверяется кодовой веткой с raw.strip().
+        resp = self.reopen_view(
+            self._request(self.superuser, "post", "/x/99999/reopen/", body=b"not json"), 99999
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_reopen_with_free_executor_releases_task(self):
+        """«Освободить» ({"free_executor": true}): taken_by/taken_at
+        сбрасываются — таск возвращается в «Не взятые», его можно взять
+        заново; без флага исполнитель сохраняется (см. предыдущий тест)."""
+        task = AIDevTask.objects.create(
+            title="Освобожду", kind="front", priority_no=1, created_by=self.superuser,
+        )
+        self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
+        self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+        resp = self.reopen_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/reopen/", body={
+                "free_executor": True,
+            }),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertIsNone(task.closed_at)
+        self.assertIsNone(task.taken_by)
+        self.assertIsNone(task.taken_at)
+        self.assertEqual(task.priority_no, 1)  # был единственным активным
+        # Таск в «Не взятые» и его можно взять заново.
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=unclaimed"))
+        self.assertEqual([r["title"] for r in resp.context_data["rows"]], ["Освобожду"])
+        self.assertEqual(
+            self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id).status_code,
+            200,
+        )
+
+    def test_create_after_close_reuses_numbers_and_reorder_skips_closed(self):
+        """Закрытый таск номер не держит: max+1 считается по активным
+        (после закрытия №2 новый таск снова №2 — нумерация остаётся
+        плотной); reorder считает закрытые отсутствующими — присланное
+        множество только активных не даёт 409, закрытые номера не трогает."""
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
+        self.close_view(self._request(self.superuser, "post", f"/x/{second.id}/close/"), second.id)
+
+        resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "Новый", "kind": "front",
+        }))
+        self.assertEqual(json.loads(resp.content)["ok"], True)
+        new_task = AIDevTask.objects.get(title="Новый")
+        self.assertEqual(new_task.priority_no, 2)
+
+        # В тело перестановки входят только АКТИВНЫЕ строки вида;
+        # закрытый second не нужен (иначе был бы 409).
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/",
+                          body=self._reorder_body([new_task, first])),
+        )
+        self.assertEqual(resp.status_code, 200)
+        first.refresh_from_db()
+        new_task.refresh_from_db()
+        self.assertEqual(new_task.priority_no, 1)
+        self.assertEqual(first.priority_no, 2)
+        second.refresh_from_db()
+        self.assertIsNone(second.priority_no)
+
+    # --- Вкладки и сортировка ----------------------------------------------
+
+    def test_rows_sorted_by_priority_no_within_front_tab(self):
+        """Меньший номер ВЫШЕ: сортировка front — по priority_no ASC."""
+        AIDevTask.objects.create(title="выс", kind="front", priority_no=1)
+        AIDevTask.objects.create(title="сред", kind="front", priority_no=2)
+        AIDevTask.objects.create(title="низ", kind="front", priority_no=3)
+        AIDevTask.objects.create(title="хотелка", kind="wish")
+        resp = self.page_view(self._request(self.dev, path=self.tasks_url))
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertEqual(titles, ["выс", "сред", "низ"])
+        self.assertEqual(resp.context_data["active_kind"], "front")
+
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=wish"))
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertEqual(titles, ["хотелка"])
+        self.assertEqual(resp.context_data["active_kind"], "wish")
+
+    def test_wish_tab_shows_numbers_starting_at_one(self):
+        """Вкладки share the URL (?kind=front|wish); у хотелов СВОЯ
+        последовательность с №1 — №-колонка не «—» уже после первой хотолки."""
+        AIDevTask.objects.create(title="Х-первая", kind="wish", priority_no=1)
+        AIDevTask.objects.create(title="Х-вторая", kind="wish", priority_no=2)
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=wish"))
+        rows = resp.context_data["rows"]
+        self.assertEqual([r["title"] for r in rows], ["Х-первая", "Х-вторая"])
+        self.assertEqual([r["priority_no"] for r in rows], [1, 2])
+
+    def test_unknown_kind_falls_back_to_front(self):
+        AIDevTask.objects.create(title="фронт", kind="front", priority_no=4)
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=bogus"))
+        self.assertEqual(resp.context_data["active_kind"], "front")
+
+    # --- Вкладка «Не взятые» (свободный фронт) ------------------------------
+
+    def test_unclaimed_tab_shows_free_front_tasks_only(self):
+        """«Не взятые»: ТОЛЬКО незанятый фронт (взятое и хотелки не видны),
+        «Взять» работает прямо оттуда (claim-вью один на все вкладки)."""
+        free = AIDevTask.objects.create(title="Свободный", kind="front", priority_no=1)
+        AIDevTask.objects.create(
+            title="Занятый", kind="front", priority_no=2, taken_by=self.superuser,
+        )
+        AIDevTask.objects.create(title="Хотелка свободная", kind="wish", priority_no=1)
+
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=unclaimed"))
+        self.assertEqual(resp.context_data["active_kind"], "unclaimed")
+        rows = resp.context_data["rows"]
+        self.assertEqual([r["title"] for r in rows], ["Свободный"])
+        self.assertFalse(rows[0]["taken"])
+
+        # Взять прямо со вкладки.
+        resp = self.claim_view(self._request(self.dev, "post", f"/x/{free.id}/claim/"), free.id)
+        self.assertEqual(resp.status_code, 200)
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=unclaimed"))
+        self.assertEqual(resp.context_data["rows"], [])
+
+    # --- Вкладка «Поиск» (все таски + фильтр «Кто взял») --------------------
+
+    def test_search_tab_shows_all_front_then_wish_rows(self):
+        """«Поиск»: ВСЕ таски, сначала фронт (по номеру), затем хотелки;
+        фильтр пуст — список полный."""
+        AIDevTask.objects.create(title="ф-2", kind="front", priority_no=2)
+        AIDevTask.objects.create(title="ф-1", kind="front", priority_no=1)
+        AIDevTask.objects.create(title="х-1", kind="wish", priority_no=1)
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=search"))
+        self.assertEqual(resp.context_data["active_kind"], "search")
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertEqual(titles, ["ф-1", "ф-2", "х-1"])
+        self.assertEqual(resp.context_data["taken_options"], [])
+        # Шаблон фильтра «Кто взял» реально рисуется на вкладке.
+        resp.render()
+        html = resp.content.decode()
+        self.assertIn('name="taken"', html)
+        self.assertIn("Кто взял", html)
+
+    def test_search_tab_taker_filter(self):
+        """Фильтр «Кто взял»: выбран человек — только его взятые таски;
+        пустое значение — все (GET ?kind=search&taken=)."""
+        his = AIDevTask.objects.create(title="его таск", created_by=self.superuser)
+        AIDevTask.objects.create(
+            title="чужой таск", created_by=self.superuser, taken_by=self.superuser,
+        )
+        self.claim_view(self._request(self.dev, "post", f"/x/{his.id}/claim/"), his.id)
+
+        resp = self.page_view(self._request(
+            self.dev, path=f"{self.tasks_url}?kind=search&taken={self.dev.pk}",
+        ))
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertEqual(titles, ["его таск"])
+        self.assertEqual(resp.context_data["active_taken"], str(self.dev.pk))
+        # Опции — все, кто хоть что-то взял (dev и superuser).
+        option_ids = {o["id"] for o in resp.context_data["taken_options"]}
+        self.assertEqual(option_ids, {self.dev.pk, self.superuser.pk})
+
+    def test_search_tab_taker_filter_bad_value_shows_all(self):
+        """Мусорное значение фильтра — просто все; числовой, но несуществующий
+        pk — честно пустой список."""
+        AIDevTask.objects.create(title="ф", created_by=self.superuser)
+        base = f"{self.tasks_url}?kind=search"
+        resp = self.page_view(self._request(self.dev, path=f"{base}&taken=abc"))
+        self.assertEqual(len(resp.context_data["rows"]), 1)
+        self.assertEqual(resp.context_data["active_taken"], "")
+        resp = self.page_view(self._request(self.dev, path=f"{base}&taken=999999"))
+        self.assertEqual(resp.context_data["rows"], [])
+
+    def test_mine_tab_shows_only_own_taken_tasks(self):
+        """«Мои таски» (kind=mine) — только таски, ВЗЯТЫЕ пользователем
+        (созданные им, но не взятые никем, не показываются; чужие не видны);
+        закрытый (=удалённый с доски) таск исчезает. Хотелка попадает тоже —
+        фильтр не по kind; порядок по номеру фронта, NULL-номера в конец."""
+        claimed = AIDevTask.objects.create(
+            title="Мой взятый", kind="front", priority_no=2, created_by=self.superuser,
+        )
+        # taken_by ставится только claim'ом (никогда не вручную) — берём как UI.
+        self.claim_view(
+            self._request(self.dev, "post", f"/x/{claimed.id}/claim/"), claimed.id
+        )
+        claimed_wish = AIDevTask.objects.create(
+            title="Моя взятая хоталка", kind="wish", created_by=self.superuser,
+        )
+        self.claim_view(
+            self._request(self.dev, "post", f"/x/{claimed_wish.id}/claim/"), claimed_wish.id
+        )
+        # созданный мной, никем не взятый — в mine НЕ попадает
+        AIDevTask.objects.create(
+            title="Мой созданный", kind="front", priority_no=1, created_by=self.dev,
+        )
+        AIDevTask.objects.create(
+            title="Чужой взятый", kind="front", priority_no=3,
+            created_by=self.superuser, taken_by=self.superuser,
+        )
+
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=mine"))
+        self.assertEqual(resp.context_data["active_kind"], "mine")
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertEqual(titles, ["Мой взятый", "Моя взятая хоталка"])
+
+        # Закрытый таск уходит с доски в архив → из mine исчезает.
+        self.close_view(
+            self._request(self.superuser, "post", f"/x/{claimed.id}/close/"), claimed.id
+        )
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=mine"))
+        titles = [r["title"] for r in resp.context_data["rows"]]
+        self.assertEqual(titles, ["Моя взятая хоталка"])
+
+    # --- Перестановка фронта (reorder) -------------------------------------
+
+    def _reorder_body(self, tasks, kind="front"):
+        return json.dumps({
+            "kind": kind,
+            "ids": [t.id if isinstance(t, AIDevTask) else t for t in tasks],
+        })
+
+    def test_reorder_persists_new_order_and_renumbers_from_one(self):
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
+        third = AIDevTask.objects.create(title="В", kind="front", priority_no=3, created_by=self.superuser)
+
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/", body=self._reorder_body([second, third, first])),
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            [t.priority_no for t in AIDevTask.objects.filter(kind="front").order_by("priority_no")],
+            [1, 2, 3],
+        )
+        self.assertEqual(AIDevTask.objects.get(pk=second.id).title, "Б")
+        self.assertEqual(AIDevTask.objects.get(pk=first.id).priority_no, 3)
+        # Хотелки фронт-тело не трогает: их СВОЯ нумерация сохраняется.
+        wish = AIDevTask.objects.create(title="Х", kind="wish", priority_no=1)
+        self.assertEqual(AIDevTask.objects.get(pk=wish.id).priority_no, 1)
+
+    def test_reorder_wish_persists_new_order_and_renumbers_from_one(self):
+        """Хотелки переезжают тем же механизмом (kind=wish): 1..N в пределах
+        вида; фронту и его номера не трогаются."""
+        first = AIDevTask.objects.create(title="Х-А", kind="wish", priority_no=1)
+        second = AIDevTask.objects.create(title="Х-Б", kind="wish", priority_no=2)
+        front = AIDevTask.objects.create(title="Ф", kind="front", priority_no=1)
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/",
+                          body=self._reorder_body([second, first], kind="wish")),
+        )
+        self.assertEqual(resp.status_code, 200)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(second.priority_no, 1)
+        self.assertEqual(first.priority_no, 2)
+        front.refresh_from_db()
+        self.assertEqual(front.priority_no, 1)
+        # Фронт в тело wish не попадает → 409, ничего не перепутано.
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/",
+                          body=self._reorder_body([first, second, front], kind="wish")),
+        )
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(AIDevTask.objects.get(pk=first.id).priority_no, 2)
+
+    def test_reorder_unknown_kind_is_400(self):
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/",
+                          body=json.dumps({"kind": "ultra", "ids": []})),
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(AIDevTask.objects.exists())
+
+    def test_reorder_allows_developer_with_reorder_key(self):
+        """action.task_reorder выдан «Разработчику» — порядок менять может,
+        superuser-ключ не нужен."""
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
+        resp = self.reorder_view(
+            self._request(self.dev, "post", "/x/tasks/reorder/", body=self._reorder_body([second, first])),
+        )
+        self.assertEqual(resp.status_code, 200)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.priority_no, 2)
+        self.assertEqual(second.priority_no, 1)
+
+    def test_reorder_denies_plain_prompt_developer(self):
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
+        body = self._reorder_body([second, first])
+
+        resp = self.reorder_view(
+            self._request(self.pd, "post", "/x/tasks/reorder/", body=body),
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_reorder_honest_in_view_as(self):
+        """Эмуляция честная: без action.task_reorder у группы — 403,
+        с ключом — 200 (супер-обход отключён)."""
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
+        body = self._reorder_body([second, first])
+
+        no_key_group = self._view_as_group("Эмуля-безрорядка", ["page.admin"])
+        request = self._request(self.superuser, "post", "/x/tasks/reorder/", body=body)
+        self._enter_view_as(request, no_key_group)
+        self.assertEqual(self.reorder_view(request).status_code, 403)
+
+        key_group = self._view_as_group("Эмуля-порядок", ["action.task_reorder"])
+        request = self._request(self.superuser, "post", "/x/tasks/reorder/", body=body)
+        self._enter_view_as(request, key_group)
+        self.assertEqual(self.reorder_view(request).status_code, 200)
+
+    def test_reorder_rejects_inexact_id_set(self):
+        """Множество id должно ТОЧНО совпасть с текущим фронтом: лишний/не
+        переданный/чужой id → 409, доска на сервере не трогалась."""
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
+        wish = AIDevTask.objects.create(title="Х", kind="wish")
+
+        # Забыли один фронт-таск.
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/", body=self._reorder_body([second])),
+        )
+        self.assertEqual(resp.status_code, 409)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.priority_no, 1)
+        self.assertEqual(second.priority_no, 2)
+
+        # Лишний id (несуществующий).
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/",
+                          body=self._reorder_body([first, second, 999999])),
+        )
+        self.assertEqual(resp.status_code, 409)
+
+        # Хотелку в порядок включить нельзя.
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/",
+                          body=self._reorder_body([first, second, wish])),
+        )
+        self.assertEqual(resp.status_code, 409)
+
+        # Тело не JSON / не список int'ов.
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/", body="not json"),
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_reorder_renumbers_gaps_from_closed_tasks(self):
+        """Заодно уплотняются дырки после закрытий: 1..N непрерывно."""
+        first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
+        second = AIDevTask.objects.create(title="Б", kind="front", priority_no=5)
+        third = AIDevTask.objects.create(title="В", kind="front", priority_no=9)
+        resp = self.reorder_view(
+            self._request(self.superuser, "post", "/x/tasks/reorder/", body=self._reorder_body([third, first, second])),
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            [t.priority_no for t in AIDevTask.objects.filter(kind="front").order_by("priority_no")],
+            [1, 2, 3],
+        )
+        self.assertEqual(AIDevTask.objects.get(pk=third.id).title, "В")
+
+    # --- Отображение взявшего ----------------------------------------------
+
+    def test_claimant_display_uses_role_fallback(self):
+        """Без DL-аккаунта/справочника у взятого таска — ролевой фолбэк
+        «ФИО (Разработчик промптов)» у pd-юзера, формат как у «Обновлений».
+
+        NB: член «Разработчика» (не pd/staff/super) сейчас показывается как
+        «(Пользователь)» — _user_role_label не знает про новую роль; правка
+        в ai/admin/site.py добавит отдельную ветку."""
+        from ai.admin.tasks import _claimant_display
+        label = _claimant_display(self.pd)
+        self.assertIn("(Разработчик промптов)", label)
+
+    def test_claimant_display_shows_dl_group(self):
+        """DL-разработчик: «ФИО (учебная группа)» — группа из справочника
+        по education_group_mask_id его ExternalDLAccount."""
+        from ai.admin.tasks import _claimant_display
+        from ai.models import DLEducationName
+        dev = get_user_model().objects.create_user(
+            username="user_4242", password="x", first_name="Иван", last_name="Петров",
+        )
+        ExternalDLAccount.objects.create(
+            user=dev, external_user_id="4242", external_login="dev_dl",
+            education_group_mask_id="M-01",
+        )
+        DLEducationName.objects.create(kind=DLEducationName.KIND_GROUP, key="M-01",
+                                       title="ФК-101")
+        self.assertIn("Иван Петров (ФК-101)", _claimant_display(dev))
+
+    # --- Правка таска (ТЗ 2026-10-20) ---------------------------------------
+
+    def _edit_body(self, **kwargs):
+        return json.dumps(kwargs)
+
+    def test_edit_allowed_only_for_author(self):
+        """Править таск может ТОЛЬКО тот, кто его создал (ТЗ владельца)."""
+        task = AIDevTask.objects.create(
+            title="Мой таск", description="Описание", estimate="До 2 недель",
+            kind="front", priority_no=1, created_by=self.dev,
+        )
+        # Автор — правит.
+        resp = self.edit_view(
+            self._request(self.dev, "post", f"/x/{task.id}/edit/",
+                          body=self._edit_body(title="Правленый", description="Новое",
+                                               estimate="До 4 дней")),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(json.loads(resp.content)["ok"])
+        task.refresh_from_db()
+        self.assertEqual(task.title, "Правленый")
+        self.assertEqual(task.description, "Новое")
+        self.assertEqual(task.estimate, "До 4 дней")
+
+        # Чужой (в т.ч. суперюзер) — 403, таск не тронут.
+        for other in (self.other_dev, self.superuser, self.pd):
+            resp = self.edit_view(
+                self._request(other, "post", f"/x/{task.id}/edit/",
+                              body=self._edit_body(title="Взломано")),
+                task.id,
+            )
+            self.assertEqual(resp.status_code, 403, other.username)
+        task.refresh_from_db()
+        self.assertEqual(task.title, "Правленый")
+
+    def test_edit_keeps_kind_and_priority_no(self):
+        """Вид таска и его номер — не меняются: нумерация вида сквозная."""
+        task = AIDevTask.objects.create(
+            title="Хотелка", kind="wish", priority_no=3, created_by=self.dev,
+        )
+        resp = self.edit_view(
+            self._request(self.dev, "post", f"/x/{task.id}/edit/",
+                          body=self._edit_body(title="Хотелка-2", kind="front",
+                                               priority_no=99)),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.kind, "wish")
+        self.assertEqual(task.priority_no, 3)
+
+    def test_edit_rejects_empty_title_and_unknown_task(self):
+        task = AIDevTask.objects.create(
+            title="Т", kind="front", created_by=self.dev,
+        )
+        resp = self.edit_view(
+            self._request(self.dev, "post", f"/x/{task.id}/edit/",
+                          body=self._edit_body(title="   ")),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 400)
+        task.refresh_from_db()
+        self.assertEqual(task.title, "Т")
+
+        resp = self.edit_view(
+            self._request(self.dev, "post", "/x/999999/edit/",
+                          body=self._edit_body(title="Х")),
+            999999,
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_edit_rejects_non_json_body(self):
+        task = AIDevTask.objects.create(
+            title="Т", kind="front", created_by=self.dev,
+        )
+        resp = self.edit_view(
+            self._request(self.dev, "post", f"/x/{task.id}/edit/", body="не json"),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_edit_closed_task_is_409(self):
+        """Закрытый (архивный) таск не редактируется."""
+        task = AIDevTask.objects.create(
+            title="Т", kind="front", created_by=self.dev,
+            closed_at=timezone.now(),
+        )
+        resp = self.edit_view(
+            self._request(self.dev, "post", f"/x/{task.id}/edit/",
+                          body=self._edit_body(title="Правка")),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 409)
+        task.refresh_from_db()
+        self.assertEqual(task.title, "Т")
+
+    def test_edit_button_shown_only_to_author_on_front_and_wish(self):
+        """Кнопка «Изменить» — только у автора и только на рабочих видах
+        (фронт/хотелки); в архиве «Закрытые» её нет."""
+        mine = AIDevTask.objects.create(
+            title="Мой", kind="front", priority_no=1, created_by=self.dev,
+        )
+        theirs = AIDevTask.objects.create(
+            title="Чужой", kind="front", priority_no=2, created_by=self.other_dev,
+        )
+        wish = AIDevTask.objects.create(
+            title="Моя хотелка", kind="wish", priority_no=1, created_by=self.dev,
+        )
+
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=front"))
+        rows = {r["id"]: r for r in resp.context_data["rows"]}
+        self.assertTrue(rows[mine.id]["can_edit"])
+        self.assertFalse(rows[theirs.id]["can_edit"])
+        resp.render()
+        content = resp.content.decode()
+        self.assertIn("ai-task-btn-edit", content)
+        self.assertIn(f'data-edit-url="{self.tasks_url}{mine.id}/edit/"', content)
+
+        # Хотелки — тоже можно править (своя нумерация, но правило то же).
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=wish"))
+        rows = {r["id"]: r for r in resp.context_data["rows"]}
+        self.assertTrue(rows[wish.id]["can_edit"])
+
+        # Архив «Закрытые» — кнопки правки нет.
+        closed = AIDevTask.objects.create(
+            title="Закрытый", kind="front", created_by=self.dev,
+            closed_at=timezone.now(),
+        )
+        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=closed"))
+        rows = {r["id"]: r for r in resp.context_data["rows"]}
+        self.assertFalse(rows[closed.id]["can_edit"])
+        resp.render()
+        self.assertNotIn(f'data-edit-url="{self.tasks_url}{closed.id}/edit/"',
+                         resp.content.decode())
+
+    def test_edit_works_on_pseudo_tabs_of_front(self):
+        """Псевдо-вкладки («Не взятые», «Поиск», «Мои таски») показывают те же
+        строки фронта/хотелок — правка там доступна автору."""
+        task = AIDevTask.objects.create(
+            title="Мой", kind="front", priority_no=1, created_by=self.dev,
+        )
+        for kind in ("unclaimed", "search", "mine"):
+            resp = self.page_view(
+                self._request(self.dev, path=f"{self.tasks_url}?kind={kind}")
+            )
+            rows = {r["id"]: r for r in resp.context_data["rows"]}
+            if task.id in rows:
+                self.assertTrue(rows[task.id]["can_edit"], kind)
+
+    def test_edit_honest_in_view_as(self):
+        """Эмуляция «Посмотреть как…»: авторство проверяется по РЕАЛЬНОМу
+        пользователю сессии — в эмуляции правки нет ни у кого (superuser-
+        обхода нет)."""
+        task = AIDevTask.objects.create(
+            title="Т", kind="front", created_by=self.dev,
+        )
+        request = self._request(self.superuser, "post", f"/x/{task.id}/edit/",
+                                body=self._edit_body(title="Правка"))
+        self._enter_view_as(
+            request, self._view_as_group("Эмуля-правка", ["page.admin", "page.tasks"])
+        )
+        self.assertEqual(self.edit_view(request, task.id).status_code, 403)
+        task.refresh_from_db()
+        self.assertEqual(task.title, "Т")
+
+    # --- Эмуляция «Посмотреть как…» ----------------------------------------
+
+    def test_view_as_group_honest_page_and_mutations(self):
+        """Эмуляция честная: доступ по ключам группы. Без action-ключей —
+        только просмотр (can_* False, мутации 403); с ключами — можно."""
+        task = AIDevTask.objects.create(title="Т5", created_by=self.superuser)
+
+        group = self._view_as_group(
+            "Эмуля-доска", ["page.admin", "page.tasks"],
+        )
+        request = self._request(self.superuser, path=self.tasks_url)
+        self._enter_view_as(request, group)
+        resp = self.page_view(request)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.context_data["can_create"])
+        self.assertFalse(resp.context_data["can_reorder"])
+        self.assertFalse(resp.context_data["can_close"])
+
+        request = self._request(self.superuser, "post", path="/x/tasks/create/")
+        self._enter_view_as(
+            request, self._view_as_group("Эмуля-доска2", ["page.admin"]),
+        )
+        self.assertEqual(self.create_view(request).status_code, 403)
+        request = self._request(self.superuser, "post", f"/x/{task.id}/close/")
+        self._enter_view_as(request, group)
+        self.assertEqual(self.close_view(request, task.id).status_code, 403)
+        request = self._request(self.superuser, "post", f"/x/{task.id}/claim/")
+        self._enter_view_as(request, group)
+        # Взять таск может любой с доступом к доске (page.tasks у группы):
+        # в честной эмуляции это 200, unlike гостя «только просмотр».
+        self.assertEqual(self.claim_view(request, task.id).status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.superuser)
+        request = self._request(self.superuser, "post", "/x/tasks/reorder/",
+                                body=self._reorder_body([task]))
+        self._enter_view_as(request, group)
+        self.assertEqual(self.reorder_view(request).status_code, 403)
+        self.assertTrue(AIDevTask.objects.filter(pk=task.pk).exists(),
+                        "таск закрыть не дали — доска не тронута")
+
+        action_group = self._view_as_group(
+            "Эмуля-действия",
+            ["page.admin", "page.tasks", "action.task_create",
+             "action.task_close", "action.task_reorder"],
+        )
+        request = self._request(self.superuser, path=self.tasks_url)
+        self._enter_view_as(request, action_group)
+        resp = self.page_view(request)
+        self.assertTrue(resp.context_data["can_create"])
+        self.assertTrue(resp.context_data["can_reorder"])
+        request = self._request(self.superuser, "post", path="/x/tasks/create/",
+                                data={"title": "Т6-view-as", "kind": "front"})
+        self._enter_view_as(request, action_group)
+        self.assertEqual(self.create_view(request).status_code, 200)
+        self.assertTrue(AIDevTask.objects.filter(title="Т6-view-as").exists())
+
+
+class AIUserAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
+    """Выдача «Групп доступа» со страницы пользователя и DL-аккаунта
+    (ТЗ 2026-10-20): поле ai_access_groups у RestrictedUserAdmin и
+    user_ai_access_groups у ExternalDLAccountAdmin.
+
+    Гейтинг — только get_form/get_fieldsets/save_model: держатель ключа
+    page.mgmt_users/page.mgmt_accounts уже имеет полный change (миксин),
+    поэтому редактировать группы там может СТРОГО суперюзер либо держатель
+    page.groups (can_edit_access_groups); «Посмотреть как…» — readOnly.
+    Стоковые Django-«Группы» из формы убраны всегда: система прав их не
+    читает. Тесты зовут get_form/get_fieldsets напрямую (как в проде —
+    ровно те же хуки)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.superuser = self.user_model.objects.create_user(
+            username="ag-super", password="x", is_superuser=True, is_staff=True,
+        )
+        self.target = self.user_model.objects.create_user(
+            username="ag-target", password="x",
+        )
+        self.account = ExternalDLAccount.objects.create(
+            user=self.target, external_user_id="4242", external_login="target_dl",
+        )
+
+    # --- Хелперы ------------------------------------------------------------
+
+    def _admin(self, model):
+        from ai.admin import models as admin_models
+        from django.contrib.admin.sites import AdminSite
+        admin_cls = (
+            admin_models.RestrictedUserAdmin if model is self.user_model
+            else admin_models.ExternalDLAccountAdmin
+        )
+        return admin_cls(model, AdminSite())
+
+    def _grant(self, user, keys):
+        group = self._view_as_group(f"Г-{user.username}-{len(keys)}", keys)
+        group.users.add(user)
+        return group
+
+    def _get_form(self, model, user, obj=None):
+        request = self._admin_request(user, method="get")
+        return self._admin(model).get_form(request, obj=obj)()
+
+    def _fieldsets_field_names(self, model, user, obj=None):
+        request = self._admin_request(user, method="get")
+        return {
+            field
+            for _, opts in self._admin(model).get_fieldsets(request, obj=obj)
+            for field in (opts.get("fields") or ())
+        }
+
+    # --- Страница пользователя ----------------------------------------------
+
+    def test_superuser_sees_ai_groups_and_no_stock_groups(self):
+        form = self._get_form(self.user_model, self.superuser, obj=self.target)
+        self.assertIn("ai_access_groups", form.fields)
+        self.assertNotIn("groups", form.fields)
+        names = self._fieldsets_field_names(self.user_model, self.superuser, obj=self.target)
+        self.assertIn("ai_access_groups", names)
+        self.assertNotIn("groups", names)
+
+    def test_page_groups_holder_can_edit(self):
+        holder = self.user_model.objects.create_user(
+            username="ag-holder", password="x", is_staff=True,
+        )
+        self._grant(holder, ["page.admin", "page.groups"])
+        form = self._get_form(self.user_model, holder, obj=self.target)
+        self.assertIn("ai_access_groups", form.fields)
+
+    def test_mgmt_users_holder_readonly_display(self):
+        """Держатель page.mgmt_users (без page.groups) править группы НЕ
+        может: поля нет, а в филдсетах — readonly-строка состава; стоковых
+        «Групп» нет и у него."""
+        holder = self.user_model.objects.create_user(username="ag-mgmt", password="x")
+        self._grant(holder, ["page.admin", "page.mgmt_users"])
+        form = self._get_form(self.user_model, holder, obj=self.target)
+        self.assertNotIn("ai_access_groups", form.fields)
+        self.assertNotIn("groups", form.fields)
+        names = self._fieldsets_field_names(self.user_model, holder, obj=self.target)
+        self.assertIn("ai_access_groups_display", names)
+        self.assertNotIn("ai_access_groups", names)
+
+    def test_view_as_is_readonly(self):
+        """Эмуляция честная: супер-обход отключён, page.groups у группы
+        эмуляции НЕ даёт правки (can_edit False, как на самой странице
+        «Группы доступа»). Включать эмуляцию может только суперюзер —
+        иначе is_viewing_as_guest всегда False."""
+        group = self._view_as_group("Эмуля-группы", ["page.admin", "page.groups"])
+        request = self._admin_request(self.superuser, method="get")
+        self._enter_view_as(request, group)
+        form = self._admin(self.user_model).get_form(request, obj=self.target)()
+        self.assertNotIn("ai_access_groups", form.fields)
+        names = {
+            field
+            for _, opts in self._admin(self.user_model).get_fieldsets(request, obj=self.target)
+            for field in (opts.get("fields") or ())
+        }
+        self.assertIn("ai_access_groups_display", names)
+
+    def test_change_post_sets_groups_and_keys_apply_at_once(self):
+        """POST со страницы юзера: состав AIAccessGroup меняется, права
+        (user_has_key) действуют сразу — без повторного входа."""
+        grant = self._view_as_group("Г-выдача", ["page.tasks"])
+        from ai.admin.models import RestrictedUserAdmin
+        from django.contrib.admin.sites import AdminSite
+        model_admin = RestrictedUserAdmin(self.user_model, AdminSite())
+        request = self._admin_request(self.superuser, method="post", path="/x/", data={
+            "username": self.target.username,
+            "is_active": "on",
+            "date_joined_0": "2026-10-20",
+            "date_joined_1": "12:30",
+            "ai_access_groups": [grant.pk],
+        })
+        form = model_admin.get_form(request, obj=self.target)(
+            data=request.POST, instance=self.target,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        model_admin.save_model(request, self.target, form, change=True)
+        self.assertIn(self.target, grant.users.all())
+        from ai.admin.permissions import user_has_key
+        self.assertTrue(user_has_key(self.target, "page.tasks"))
+
+    def test_save_model_sets_groups_but_not_for_hidden_field(self):
+        """Защита от подделки POST: держателю page.mgmt_users поля нет —
+        прошенный в body ai_access_groups игнорируется, состав живой."""
+        holder = self.user_model.objects.create_user(username="ag-mgmt2", password="x")
+        self._grant(holder, ["page.admin", "page.mgmt_users"])
+        grant = self._view_as_group("Г-подделка", ["page.tasks"])
+        from ai.admin.models import RestrictedUserAdmin
+        from django.contrib.admin.sites import AdminSite
+        model_admin = RestrictedUserAdmin(self.user_model, AdminSite())
+        request = self._admin_request(holder, method="post", path="/x/", data={
+            "username": self.target.username,
+            "is_active": "on",
+            "date_joined_0": "2026-10-20",
+            "date_joined_1": "12:30",
+            "ai_access_groups": [grant.pk],
+        })
+        form = model_admin.get_form(request, obj=self.target)(
+            data=request.POST, instance=self.target,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertNotIn("ai_access_groups", form.fields)
+        model_admin.save_model(request, self.target, form, change=True)
+        self.assertNotIn(self.target, grant.users.all())
+
+    # --- Страница DL-аккаунта ------------------------------------------------
+
+    def test_account_superuser_sees_and_sets_groups(self):
+        form = self._get_form(ExternalDLAccount, self.superuser, obj=self.account)
+        self.assertIn("user_ai_access_groups", form.fields)
+
+        grant = self._view_as_group("Г-аккаунт", ["page.tasks"])
+        from ai.admin.models import ExternalDLAccountAdmin
+        from django.contrib.admin.sites import AdminSite
+        model_admin = ExternalDLAccountAdmin(ExternalDLAccount, AdminSite())
+        request = self._admin_request(self.superuser, method="post", path="/x/", data={
+            "user": self.target.pk,
+            "external_user_id": self.account.external_user_id,
+            "external_login": self.account.external_login,
+            "user_ai_access_groups": [grant.pk],
+        })
+        form = model_admin.get_form(request, obj=self.account)(
+            data=request.POST, instance=self.account,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        model_admin.save_model(request, self.account, form, change=True)
+        self.assertIn(self.target, grant.users.all())
+        from ai.admin.permissions import user_has_key
+        self.assertTrue(user_has_key(self.target, "page.tasks"))
+
+    def test_account_mgmt_holder_sees_no_field(self):
+        """page.mgmt_accounts без page.groups: блока групп нет вовсе."""
+        holder = self.user_model.objects.create_user(
+            username="ag-acct", password="x", is_staff=True,
+        )
+        self._grant(holder, ["page.admin", "page.mgmt_accounts"])
+        form = self._get_form(ExternalDLAccount, holder, obj=self.account)
+        self.assertNotIn("user_ai_access_groups", form.fields)
+
+    def test_account_add_page_keeps_field_for_editor(self):
+        """На add-странице (obj=None) у редактора поле есть: raw_id юзера
+        заполняется при создании, save_model выдаст группы уже после
+        save (в БД аккаунт без user невозможен — OneToOne NOT NULL)."""
+        form = self._get_form(ExternalDLAccount, self.superuser)
+        self.assertIn("user_ai_access_groups", form.fields)
+
+    def test_account_form_initial_reflects_current_groups(self):
+        grant = self._view_as_group("Г-initial", ["page.tasks"])
+        grant.users.add(self.target)
+        request = self._admin_request(self.superuser, method="get")
+        form_cls = self._admin(ExternalDLAccount).get_form(request, obj=self.account)
+        # initial ставится в __init__ по instance.user — инстанцируем с ним.
+        form = form_cls(instance=self.account)
+        self.assertEqual(
+            list(form.fields["user_ai_access_groups"].initial), [grant]
+        )
+
+
+class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
+    """Страница «Группы доступа» (/ai/admin/ai-groups/): только суперюзер
+    (в эмуляции «Посмотреть как…» — тоже 403); CRUD групп, права чекбоксами (валидация ключей
+    против БД), встроенные группы без переименования/удаления, построчный
+    toggle состава. Сиды миграции 0060: ровно две встроенные группы с
+    ЭТАЛОННЫМ набором ключей (set-равенство — состав правит суперюзер)."""
+
+    def setUp(self):
+        from django.contrib.sessions.middleware import SessionMiddleware
+
+        self.factory = RequestFactory()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="groups_admin", password="x", email="t@a.com",
+        )
+        self.plain = get_user_model().objects.create_user(username="groups_plain", password="x")
+        self.staff = get_user_model().objects.create_user(
+            username="groups_staff", password="x", is_staff=True,
+        )
+        self._middleware = SessionMiddleware(lambda req: None)
+
+    def _request(self, user, method="get", path="/x/", data=None):
+        request = getattr(self.factory, method)(path, data=data or {})
+        request.user = user
+        self._middleware.process_request(request)
+        return request
+
+    def _view(self, request):
+        from ai.admin.access_groups import admin_access_groups_view
+        return admin_access_groups_view(request)
+
+    def _save(self, user, group_id, data):
+        from ai.admin.access_groups import admin_access_group_save_view
+        request = self._request(user, "post", f"/x/{group_id}/save/", data=data)
+        return admin_access_group_save_view(request, group_id)
+
+    def _delete(self, user, group_id):
+        from ai.admin.access_groups import admin_access_group_delete_view
+        request = self._request(user, "post", f"/x/{group_id}/delete/")
+        return admin_access_group_delete_view(request, group_id)
+
+    def _toggle(self, user, group_id, target_user, action="add"):
+        from ai.admin.access_groups import admin_access_group_member_toggle_view
+        request = self._request(user, "post", f"/x/{group_id}/members/toggle/", data={
+            "user_id": target_user.pk, "action": action,
+        })
+        return admin_access_group_member_toggle_view(request, group_id)
+
+    # --- Доступ --------------------------------------------------------
+
+    def test_page_requires_superuser(self):
+        self.assertEqual(self._view(self._request(self.plain)).status_code, 403)
+        self.assertEqual(self._view(self._request(self.staff)).status_code, 403)
+
+        request = self._request(self.superuser)
+        self._enter_view_as(
+            request, self._view_as_group("Эмуля-безгрупп", ["page.admin"]),
+        )
+        self.assertEqual(self._view(request).status_code, 403)
+        self._leave_view_as(self.superuser)
+
+        resp = self._view(self._request(self.superuser))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Группы доступа")
+
+    def test_two_column_actions_card(self):
+        """Две колонки прав (ТЗ 2026-10-20): слева — страницы без
+        аккордеонов; справа — «Действия» АКТИВНЫХ страниц группы (в базе
+        или в галочках), их вложенные чекбоксы сразу; неактивные страницы
+        в правой колонке скрыты."""
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name="Разработчик промптов")
+        request = self._request(self.superuser, path="/x/?group=%d" % group.id)
+        resp = self._view(request)
+        self.assertEqual(resp.status_code, 200)
+        html = resp.render().content.decode()
+
+        # В левой колонке нет аккордеона-кнопки «Действия (n)».
+        self.assertNotIn("data-ai-perm-toggle", html)
+        # Правая колонка: заголовок секции и блоки активных страниц.
+        self.assertIn("data-ai-actions-for", html)
+        for key in ("page.prompt_admin", "page.logs", "page.tasks"):
+            self.assertIn(f'data-ai-actions-for="{key}"', html)
+        # Страница Журнал/Промпт — база (checked disabled), тоже с блоками.
+        self.assertIn("ai-perm-baseline", html)
+
+    def test_save_delete_toggle_require_superuser(self):
+        from ai.models import AIAccessGroup
+
+        group = AIAccessGroup.objects.get(name="Разработчик")
+        resp = self._save(self.plain, group.id, {"name": "Разработчик"})
+        self.assertEqual(resp.status_code, 403)
+        resp = self._delete(self.staff, group.id)
+        self.assertEqual(resp.status_code, 403)
+        resp = self._toggle(self.plain, group.id, self.plain)
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(AIAccessGroup.objects.filter(pk=group.pk).exists())
+
+    # --- Сиды builtin-групп (миграция 0060) -----------------------------
+
+    def test_builtin_groups_seeded_with_exact_key_sets(self):
+        from ai.constants import BUILTIN_GROUP_DEVELOPER, BUILTIN_GROUP_PROMPT_DEV
+        from ai.models import AIAccessGroup
+
+        pd = AIAccessGroup.objects.get(name=BUILTIN_GROUP_PROMPT_DEV)
+        dev = AIAccessGroup.objects.get(name=BUILTIN_GROUP_DEVELOPER)
+        self.assertTrue(pd.is_builtin)
+        self.assertTrue(dev.is_builtin)
+        self.assertEqual(
+            {p.key for p in pd.permissions.all()},
+            # миграция 0063: Таски и Состояние моделей выведены из
+            # baseline — выдаются сидом самой группе.
+            # 0067: «Мои AI-модели» — страница про СВОИ модели, доступна
+            # всей базовой аудитории админки (как «Мой промпт»).
+            {"page.admin", "page.arm_solve", "page.prompt_admin",
+             "page.prompt_defaults", "page.logs_own",
+             "page.model_status", "page.tasks", "page.user_models"},
+        )
+        self.assertEqual(
+            {p.key for p in dev.permissions.all()},
+            # 0067: «Разработчик» дополнительно получает «Мои AI-модели»,
+            # «Контроль токенов» и «Запросы по DL API».
+            {"page.admin", "page.arm_solve", "page.model_status",
+             "page.prompt_admin", "page.test_console",
+             "page.tasks", "page.logs_own", "page.updates",
+             "page.user_models", "page.tokens", "page.dl_api_requests",
+             "docs.developer", "action.task_reorder"},
+        )
+        # Базовые права (BASELINE_ACCESS_KEYS): seeds групп могли и не менять
+        # — baseline выдаётся В КОДЕ любому с page.admin, а не сидами.
+        from ai.admin.permissions import user_has_key, BASELINE_ACCESS_KEYS
+        self.assertFalse(user_has_key(self.plain, "page.tasks"))  # нет page.admin — нет и baseline
+        make_prompt_developer(pd_user := self.plain)
+        self.assertTrue(user_has_key(pd_user, "page.admin"))
+        # весь «Раздел ИИ» приходит baseline'ом, не сидами:
+        # (с 2026-10-19 в baseline и «Видеть все промпты»)
+        self.assertIn("page.prompt_admin_all", BASELINE_ACCESS_KEYS)
+        # (2026-10-20: Таски и Состояние моделей из базы выведены —
+        # PD получает их сидом встроенной группы, миграция 0063.)
+        self.assertEqual(set(BASELINE_ACCESS_KEYS) & {"page.tasks"}, set())
+        self.assertEqual(set(BASELINE_ACCESS_KEYS) & {"page.model_status"}, set())
+        self.assertTrue(user_has_key(pd_user, "page.tasks"))
+        self.assertTrue(user_has_key(pd_user, "page.model_status"))
+        self.assertTrue(user_has_key(pd_user, "page.logs"))
+        # действия по-прежнему НЕ baseline:
+        self.assertFalse(user_has_key(pd_user, "action.task_create"))
+        make_developer(dev_user := get_user_model().objects.create_user(
+            username="groups_dev", password="x",
+        ))
+        self.assertTrue(user_has_key(dev_user, "page.tasks"))
+        self.assertTrue(user_has_key(dev_user, "action.task_reorder"))
+        self.assertFalse(user_has_key(dev_user, "action.task_create"))
+        self.assertFalse(user_has_key(dev_user, "action.task_close"))
+
+    def test_builtin_key_seed_powers_page_and_model_status(self):
+        """Ключи действительно открывают can_access_*: «Разработчику» виден
+        статус моделей, промпт-девелоперу — «Промпты по умолчанию»."""
+        user = get_user_model().objects.create_user(username="keys_dev", password="x")
+        make_developer(user)
+        from ai.admin.permissions import user_has_key
+        self.assertTrue(user_has_key(user, "page.model_status"))
+
+        pd_user = get_user_model().objects.create_user(username="keys_pd", password="x")
+        make_prompt_developer(pd_user)
+        from ai.admin.permissions import can_access_prompt_defaults
+        self.assertTrue(can_access_prompt_defaults(type("R", (), {"user": pd_user})()))
+
+    def test_edit_others_key_opens_foreign_prompts(self):
+        """page.prompt_admin.edit_others — «Перезаписывать чужие промпты»
+        (вложенное действие «Моего промпта», ТЗ 2026-10-19): не-staff'у видны
+        все промпты (queryset) и чужая запись открывается на правку; без
+        ключа — только свои/редактируемые."""
+        from ai.admin.models import PromptAdmin
+        from ai.admin.permissions import user_has_key
+        from ai.admin.site import ai_admin_site
+        from ai.models import AIAccessGroup, Prompt
+
+        resp = self._save(self.superuser, 0, {
+            "name": "Редакторы чужого",
+            "permissions": [
+                "page.admin", "page.prompt_admin", "page.prompt_admin.edit_others",
+            ],
+        })
+        self.assertEqual(resp.status_code, 200)
+        group = AIAccessGroup.objects.get(name="Редакторы чужого")
+        member = get_user_model().objects.create_user(
+            username="prompt_editor", password="x",
+        )
+        group.users.add(member)
+        self.assertTrue(user_has_key(member, "page.prompt_admin.edit_others"))
+
+        foreign = Prompt.objects.create(
+            prompt_name_ru="Чужой промпт",
+            prompt_text_ru="Текст чужого промпта",
+            owner=self.superuser,
+        )
+        # Ключ открывает ЛЮБЫЕ промпты и на просмотр, и на правку.
+        # (Просмотр чужого в ModelAdmin-листинге открыт и БЕЗ ключа —
+        # «Видеть все промпты» в baseline 2026-10-19.)
+        request = RequestFactory().get("/")
+        request.user = member
+        admin = ai_admin_site._registry[Prompt]
+        self.assertTrue(admin.has_change_permission(request, obj=foreign))
+
+        # Без ключа (у «Разработчика промптов» только baseline) — чужое закрыто.
+        pd_user = get_user_model().objects.create_user(
+            username="prompt_editor2", password="x",
+        )
+        make_prompt_developer(pd_user)
+        self.assertFalse(user_has_key(pd_user, "page.prompt_admin.edit_others"))
+        # читает чужое (baseline «Видеть все промпты»), но править не может
+        self.assertTrue(admin.has_view_permission(request, obj=foreign))
+        request.user = pd_user
+        self.assertFalse(admin.has_change_permission(request, obj=foreign))
+
+    # --- CRUD -----------------------------------------------------------
+
+    def test_create_group_and_assign_permissions(self):
+        resp = self._save(self.superuser, 0, {
+            "name": "Операторы ARM",
+            "description": "Только пакеты",
+            "permissions": ["page.arm_solve", "page.model_status", "page.admin"],
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(json.loads(resp.content)["ok"])
+
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name="Операторы ARM")
+        self.assertEqual(group.description, "Только пакеты")
+        self.assertFalse(group.is_builtin)
+        self.assertEqual(
+            {p.key for p in group.permissions.all()},
+            {"page.arm_solve", "page.model_status", "page.admin"},
+        )
+        from ai.admin.permissions import user_has_key
+        # Ключ реально открывает доступ: кастомная группа — рабочий механизм.
+        member = get_user_model().objects.create_user(username="arm_op", password="x")
+        group.users.add(member)
+        self.assertTrue(user_has_key(member, "page.arm_solve"))
+        # baseline даёт page.prompt_defaults любому с page.admin (он в выдаче),
+        # поэтому «нет доступа» проверяем на не-baseline ключе:
+        self.assertFalse(user_has_key(member, "page.test_console"))
+        self.assertTrue(user_has_key(member, "page.prompt_defaults"))
+
+    def test_create_requires_name(self):
+        resp = self._save(self.superuser, 0, {"name": "", "permissions": []})
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(json.loads(resp.content)["ok"])
+
+    def test_create_duplicate_name_rejected(self):
+        resp = self._save(self.superuser, 0, {"name": "Разработчик", "permissions": []})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_save_validates_permission_keys_against_db(self):
+        resp = self._save(self.superuser, 0, {
+            "name": "Кривые ключи", "permissions": ["page.admin", "nope.nope"],
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("nope.nope", json.loads(resp.content)["message"])
+
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name="Кривые ключи")
+        self.assertEqual(group.permissions.count(), 0)
+
+    def test_save_group_replaces_permissions(self):
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name="Разработчик")
+        # Встроенной можно менять ПРАВА (не имя) — сузили до одной страницы.
+        resp = self._save(self.superuser, group.id, {
+            "name": "Разработчик", "description": "",
+            "permissions": ["page.admin"],
+        })
+        self.assertEqual(resp.status_code, 200)
+        group.refresh_from_db()
+        self.assertEqual([p.key for p in group.permissions.all()], ["page.admin"])
+
+    # --- Builtin-защита --------------------------------------------------
+
+    def test_builtin_cannot_be_renamed(self):
+        from ai.constants import BUILTIN_GROUP_DEVELOPER
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name=BUILTIN_GROUP_DEVELOPER)
+        resp = self._save(self.superuser, group.id, {
+            "name": "Разрабы", "description": "", "permissions": ["page.admin"],
+        })
+        self.assertEqual(resp.status_code, 403)
+        group.refresh_from_db()
+        self.assertEqual(group.name, BUILTIN_GROUP_DEVELOPER)
+
+    def test_builtin_can_be_deleted_and_recreates_empty(self):
+        """Удаление встроенной разрешено (2026-10, решение владельца): права
+        теряются, а при следующем добавлении участника get_or_create по имени
+        пересоздаёт группу ПУСТОЙ."""
+        from ai.constants import BUILTIN_GROUP_PROMPT_DEV
+        from ai.models import AIAccessGroup
+
+        group = AIAccessGroup.objects.get(name=BUILTIN_GROUP_PROMPT_DEV)
+        resp = self._delete(self.superuser, group.id)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(AIAccessGroup.objects.filter(pk=group.pk).exists())
+
+        # Пересоздание пустой: у нового юзера ключей не прибавится.
+        from ai.admin.permissions import add_user_to_builtin_ai_group, user_has_key
+        recreated = add_user_to_builtin_ai_group(self.plain)
+        self.assertEqual(recreated.name, BUILTIN_GROUP_PROMPT_DEV)
+        self.assertTrue(recreated.is_builtin)
+        self.assertEqual(recreated.permissions.count(), 0)
+        self.assertFalse(user_has_key(self.plain, "page.arm_solve"))
+
+    def test_regular_group_delete(self):
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.create(name="Одноразовая")
+        resp = self._delete(self.superuser, group.id)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(AIAccessGroup.objects.filter(pk=group.pk).exists())
+
+    def test_regular_group_rename_persists(self):
+        """У созданной группы меняется имя (2026-10: раньше имя обновлялось
+        только при создании — ренейм был мёртвым кодом); права сохраняются."""
+        from ai.models import AIAccessGroup
+
+        group = AIAccessGroup.objects.create(name="Старое имя")
+        from ai.models import AIAdminGroupPermission
+        group.permissions.add(
+            *AIAdminGroupPermission.objects.filter(key="page.arm_solve")
+        )
+        resp = self._save(self.superuser, group.id, {
+            "name": "Новое имя", "description": "переименована",
+            "permissions": ["page.arm_solve"],
+        })
+        self.assertEqual(resp.status_code, 200)
+        group.refresh_from_db()
+        self.assertEqual(group.name, "Новое имя")
+        self.assertEqual(group.description, "переименована")
+        self.assertEqual([p.key for p in group.permissions.all()], ["page.arm_solve"])
+
+    def test_regular_group_rename_to_duplicate_is_400(self):
+        from ai.models import AIAccessGroup
+        AIAccessGroup.objects.create(name="А", description="")
+        target = AIAccessGroup.objects.create(name="Б", description="")
+        resp = self._save(self.superuser, target.id, {"name": "А"})
+        self.assertEqual(resp.status_code, 400)
+        target.refresh_from_db()
+        self.assertEqual(target.name, "Б")
+
+    # --- Динамические секции (страницы/доки из нава) ---------------------
+
+    def test_pages_section_follows_nav_registry(self):
+        """«Страницы» — динамически из _ai_tool_defs: строка ключа, потерянная
+        в БД, восстанавливается при рендере; page.admin (без URL) остаётся;
+        устаревшая БД-строка не показывается. Вложенные действия страниц —
+        аккордеоном."""
+        from ai.models import AIAdminGroupPermission
+
+        AIAdminGroupPermission.objects.filter(key="page.arm_solve").delete()
+        AIAdminGroupPermission.objects.create(
+            key="page.ghost", label="Призрак",
+            section=AIAdminGroupPermission.SECTION_PAGE,
+        )
+        resp = self._view(self._request(self.superuser))
+        resp.render()
+        html = resp.content.decode()
+        # Потерянная страница восстановлена из нава и видна (подпись нава).
+        self.assertTrue(
+            AIAdminGroupPermission.objects.filter(key="page.arm_solve").exists()
+        )
+        self.assertIn("Пакетное решение", html)
+        # docs — тоже из нава (свежая подпись нава перетирает миграционную).
+        self.assertIn("Документация для разработчика", html)
+        # page.admin — гейт входа, страницы не имеет: остаётся.
+        self.assertIn("page.admin", html)
+        # Вложенные действия «Тасок» и «Моего промпта» — аккордеоном
+        # (value-чекбоксы есть, страницы без действий кнопку не рисуют).
+        self.assertIn('value="action.task_create"', html)
+        self.assertIn('value="page.prompt_admin.edit_others"', html)
+        self.assertIn('value="page.logs_all"', html)
+        self.assertIn("Перезаписывать чужие промпты", html)
+        # Ключи-страницы без ключа в коде (гейты без URL) в списке нет.
+        self.assertNotIn("page.ghost", html)
+        # Новые ключи-страницы и действия доступны в UI групп.
+        self.assertIn('value="page.pinned_runs"', html)
+        self.assertIn('value="page.test_data"', html)
+        self.assertIn('value="page.groups"', html)
+        self.assertIn('value="docs.prompt_developer"', html)
+        self.assertIn('value="page.prompt_admin_all"', html)
+        self.assertIn('value="action.test_console_run"', html)
+        self.assertIn('value="action.updates_publish"', html)
+        self.assertIn('value="page.mgmt_users"', html)
+        self.assertIn('value="page.mgmt_shared_prompt"', html)
+        self.assertIn("Видеть все промпты", html)
+        self.assertIn("Запускать прогоны", html)
+
+    def test_member_search_endpoint(self):
+        from ai.admin.access_groups import admin_access_group_member_search_view
+        from ai.models import AIAccessGroup
+
+        group = AIAccessGroup.objects.get(name="Разработчик")
+        request = self._request(
+            self.superuser, "get", f"/x/{group.id}/members/search/", data={"q": "plain"}
+        )
+        resp = admin_access_group_member_search_view(request, group.id)
+        self.assertEqual(resp.status_code, 200)
+        names = [u["name"] for u in json.loads(resp.content)["users"]]
+        self.assertIn("groups_plain", names)
+
+        # Пустой q → пустой список; чужой доступ → 403; не группа → 404.
+        request = self._request(
+            self.superuser, "get", f"/x/{group.id}/members/search/", data={"q": ""}
+        )
+        self.assertEqual(admin_access_group_member_search_view(request, group.id).status_code, 200)
+        request = self._request(
+            self.plain, "get", f"/x/{group.id}/members/search/", data={"q": "x"}
+        )
+        self.assertEqual(admin_access_group_member_search_view(request, group.id).status_code, 403)
+        request = self._request(
+            self.superuser, "get", "/x/999999/members/search/", data={"q": "x"}
+        )
+        self.assertEqual(admin_access_group_member_search_view(request, 999999).status_code, 404)
+
+    def test_delete_unknown_group_is_404(self):
+        resp = self._delete(self.superuser, 999999)
+        self.assertEqual(resp.status_code, 404)
+
+    # --- Состав (member toggle) ------------------------------------------
+
+    def test_member_toggle_add_then_remove(self):
+        from ai.constants import BUILTIN_GROUP_DEVELOPER
+        from ai.models import AIAccessGroup
+        group = AIAccessGroup.objects.get(name=BUILTIN_GROUP_DEVELOPER)
+
+        resp = self._toggle(self.superuser, group.id, self.plain, action="add")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(group.users.filter(pk=self.plain.pk).exists())
+        from ai.admin.permissions import user_has_key
+        # И ключ пришел сразу: выдача действует без перелогина.
+        self.assertTrue(user_has_key(self.plain, "page.tasks"))
+
+        resp = self._toggle(self.superuser, group.id, self.plain, action="remove")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(group.users.filter(pk=self.plain.pk).exists())
+        self.assertFalse(user_has_key(self.plain, "page.tasks"))
+
+    def test_member_toggle_unknown_user_or_group_is_404(self):
+        from ai.admin.access_groups import admin_access_group_member_toggle_view
+        from ai.models import AIAccessGroup
+
+        group = AIAccessGroup.objects.get(name="Разработчик промптов")
+        # Несуществующая группа.
+        resp = self._toggle(self.superuser, 999999, self.plain)
+        self.assertEqual(resp.status_code, 404)
+
+        # Несуществующий юзер (в POST идёт сырой user_id).
+        request = self._request(self.superuser, "post", f"/x/{group.id}/members/toggle/", data={
+            "user_id": 999999, "action": "add",
+        })
+        resp = admin_access_group_member_toggle_view(request, group.id)
+        self.assertEqual(resp.status_code, 404)
 
 
 class ArmCourseTreeDbCacheTests(TestCase):
@@ -12301,10 +14357,7 @@ class RequestLogDetailJsonTests(TestCase):
             username="log_admin", password="***", email="l@t.com",
         )
         self.pd = get_user_model().objects.create_user(username="log_pd", password="***")
-        from django.contrib.auth.models import Group
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-        self.pd.groups.add(group)
+        make_prompt_developer(self.pd)
         self.log = AIRequestLog.objects.create(
             user=self.admin, source="websocket", mode="solve",
             message="текст запроса", response_text="ответ модели",
@@ -12421,6 +14474,87 @@ class AssetViewAccessTests(TestCase):
         self.assertEqual(response.status_code, 200)
 
 
+class AssetViewETagTests(TestCase):
+    """Условные запросы asset_view: ETag = md5 КОНТЕНТА (mtime при деплое мог
+    не сдвинуться → 304 отдавал старый файл, «стили падали»). If-None-Match
+    (строгий/слабый/списком) → 304 с ETag + Cache-Control; непрошедший ETag →
+    200 с полным телом; If-Modified-Since — fallback, если ETag не прислали.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(username="etag_user", password="x")
+
+    def _get(self, headers=None):
+        from ai.views import asset_view
+
+        request = self.factory.get("/ai/assets/admin/css/ai.css")
+        request.COOKIES = {"userId": self.user.username}
+        request.user = self.user
+        for key, value in (headers or {}).items():
+            request.META[key] = value
+        response = asset_view(request, "admin/css/ai.css")
+        return response
+
+    def test_200_carries_etag_and_no_cache(self):
+        """Кавыченный md5 (content + соль старта процесса): соль не даёт
+        «отравленному» кэшу прошлого деплоя (пустое тело при живом old-ETag)
+        навсегда отвечать 304 — новый процесс гарантированно перекачивает
+        свежие байты; сам честный cached-байт продолжает ловить 304."""
+        import hashlib
+        from ai.views import _ASSET_BOOT_SALT
+        response = self._get()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Cache-Control"], "no-cache")
+        self.assertIn("ETag", response)
+        etag = response["ETag"]
+        self.assertTrue(etag.startswith('"') and etag.endswith('"'))
+        from django.contrib.staticfiles import finders
+        path = finders.find("admin/css/ai.css")
+        with open(path, "rb") as fh:
+            self.assertEqual(
+                etag.strip('"'),
+                hashlib.md5(_ASSET_BOOT_SALT + fh.read()).hexdigest(),
+            )
+        # Соль реально участвует: голый md5 контента больше НЕ валидатор.
+        self.assertNotEqual(
+            etag.strip('"'),
+            hashlib.md5(open(path, "rb").read()).hexdigest(),
+        )
+
+    def test_matching_etag_gives_304_with_etag_and_cache_control(self):
+        first = self._get()
+        self.assertEqual(first.status_code, 200)
+        not_modified = self._get({"HTTP_IF_NONE_MATCH": first["ETag"]})
+        self.assertEqual(not_modified.status_code, 304)
+        self.assertEqual(not_modified["ETag"], first["ETag"])
+        self.assertEqual(not_modified["Cache-Control"], "no-cache")
+
+    def test_weak_and_listed_etags_match(self):
+        first = self._get()
+        bare = first["ETag"].strip('"')
+        for header in (f'W/{first["ETag"]}', f'"opaque-etag", {first["ETag"]}'):
+            response = self._get({"HTTP_IF_NONE_MATCH": header})
+            self.assertEqual(response.status_code, 304, header)
+            self.assertEqual(response["ETag"].strip('"'), bare)
+
+    def test_mismatched_etag_serves_full_body(self):
+        first = self._get()
+        response = self._get({"HTTP_IF_NONE_MATCH": '"no-such-etag"'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(b"".join(response.streaming_content), b"".join(first.streaming_content))
+
+    def test_if_modified_since_fallback_when_no_etag(self):
+        # Кэш без ETag: дата «в будущем» → не модифицирован → 304.
+        response = self._get({"HTTP_IF_MODIFIED_SINCE": "Mon, 01 Jan 2399 00:00:00 GMT"})
+        self.assertEqual(response.status_code, 304)
+        self.assertEqual(response["Cache-Control"], "no-cache")
+        self.assertIn("ETag", response)
+        # Дата в прошлом → модифицирован → 200 с телом.
+        response = self._get({"HTTP_IF_MODIFIED_SINCE": "Thu, 01 Jan 1990 00:00:00 GMT"})
+        self.assertEqual(response.status_code, 200)
+
+
 class OnboardingServiceTests(TestCase):
     """ai/services/onboarding.py: контракт флага «wizard просмотрено»."""
 
@@ -12440,7 +14574,7 @@ class OnboardingServiceTests(TestCase):
         for page_scope in (
             "admin_my_prompt", "admin_prompt_defaults", "admin_logs",
             "admin_pinned_runs", "admin_aiappsettings", "admin_updates",
-            "admin_regression", "admin_test_console", "admin_tasksolution",
+            "admin_test_console", "admin_tasksolution",
             "admin_test_data",
         ):
             self.assertTrue(scope_name_valid(page_scope))
@@ -12608,12 +14742,10 @@ class WizardSeenAdminEndpointTests(_AdminViewRequestMixin, TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     def _pd_user(self):
         user = self.user_model.objects.create_user(username="wz-pd", password="x")
-        user.groups.add(self.pd_group)
+        make_prompt_developer(user)
         return user
 
     def _post(self, user, body, method="post", path="/ai/admin/wizard/seen/"):
@@ -12657,8 +14789,7 @@ class WizardSeenAdminEndpointTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(AIWizardSeen.objects.count(), 0)
 
-    def test_guest_mode_post_is_ok_but_not_recorded(self):
-        from ai.admin.guest_mode import SESSION_KEY
+    def test_view_as_mode_post_is_ok_but_not_recorded(self):
         from ai.admin.onboarding import admin_wizard_seen_view
 
         superuser = self.user_model.objects.create_user(
@@ -12668,7 +14799,9 @@ class WizardSeenAdminEndpointTests(_AdminViewRequestMixin, TestCase):
             superuser, method="post", path="/ai/admin/wizard/seen/",
             data='{"scope": "admin_super"}', content_type="application/json",
         )
-        request.session[SESSION_KEY] = True
+        self._enter_view_as(
+            request, self._view_as_group("Эмуля-wz", ["page.admin"]),
+        )
         response = admin_wizard_seen_view(request)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.content), {"ok": True})
@@ -12767,6 +14900,48 @@ class WizardUserPageContextTests(TestCase):
         html = self._render(chat_view, "/ai/chat/", user=plain2)
         self.assertIn('"basics_seen": false', html)
 
+    def test_task_prefill_node_id_on_all_three_pages(self):
+        """Префилл условия задачи со страницы DL: ?nid=… прокидывается в шаблон
+        на всех трёх страницах (data-node-id), а window.AI_TASK_NODE_ID ставит
+        общий загрузчик в ai-common.js (initAiTaskNodeId).
+
+        Раньше «Реши задачу» держало nid, а «Чат с DLAI» и «В чём ошибка?»
+        игнорировали его вовсе — текст задачи никогда не подставлялся.
+
+        Инлайн-скрипт с window.AI_TASK_NODE_ID в шаблонах больше НЕ живёт
+        (правило «JS — в файлах»): значение приходит из data-node-id поля
+        страницы, которое заполняет initAiTaskNodeId на DOMContentLoaded.
+        """
+        from ai.views import decide_task_view, find_error_view
+
+        for view, url in (
+            (chat_view, "/ai/chat/"),
+            (decide_task_view, "/ai/solve-problem/"),
+            (find_error_view, "/ai/find-error/"),
+        ):
+            with self.subTest(url=url):
+                html = self._render(view, f"{url}?nid=2607154")
+                self.assertIn('data-node-id="2607154"', html)
+                # Страница подключает общий ai-common.js — там и ставится nid.
+                self.assertIn("/ai/assets/admin/js/ai-common.js", html)
+        # Без nid — пустое значение, страница живёт как раньше.
+        html = self._render(chat_view, "/ai/chat/")
+        self.assertIn('data-node-id=""', html)
+
+    def test_task_prefill_static_loader_markers(self):
+        """Общий лоадер условия в ai-common и его вызов на find-error/chat:
+        маркеры кода для регресс-безопасности (версии статики в шаблонах
+        иногда откатываются мержами — маркеры ловят откат)."""
+        import ai
+        from pathlib import Path
+        base = Path(ai.__file__).parent.parent / "static/admin/js"
+        common = (base / "ai-common.js").read_text(encoding="utf-8")
+        self.assertIn("async function aiLoadTaskFromUrl", common)
+        fe = (base / "find_error.js").read_text(encoding="utf-8")
+        self.assertIn("aiLoadTaskFromUrl(document.getElementById('taskText')", fe)
+        ct = (base / "chat_template.js").read_text(encoding="utf-8")
+        self.assertIn("aiLoadTaskFromUrl(document.getElementById('messageText')", ct)
+
 
 class AIWizardSeenAdminPermissionTests(_AdminViewRequestMixin, TestCase):
     """Листинг «кто видел wizard» (AIWizardSeenAdmin): просмотр — только
@@ -12775,8 +14950,6 @@ class AIWizardSeenAdminPermissionTests(_AdminViewRequestMixin, TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     def _admin_instance(self):
         from ai.admin.models import AIWizardSeenAdmin
@@ -12800,7 +14973,7 @@ class AIWizardSeenAdminPermissionTests(_AdminViewRequestMixin, TestCase):
 
     def test_prompt_developer_permissions_denied(self):
         pd_user = self.user_model.objects.create_user(username="wz-list-pd", password="x")
-        pd_user.groups.add(self.pd_group)
+        make_prompt_developer(pd_user)
         request = self._admin_request(pd_user)
         model_admin = self._admin_instance()
         self.assertFalse(model_admin.has_module_permission(request))
@@ -12822,16 +14995,13 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
-    def _context(self, user, path="/ai/admin/", guest=False):
+    def _context(self, user, path="/ai/admin/", view_as_group=None):
         from ai.admin.site import ai_admin_site
 
         request = self._admin_request(user, path=path)
-        if guest:
-            from ai.admin.guest_mode import SESSION_KEY
-            request.session[SESSION_KEY] = True
+        if view_as_group is not None:
+            self._enter_view_as(request, view_as_group)
         return ai_admin_site.each_context(request)["ai_wizard"]
 
     def test_dashboard_scope_by_role(self):
@@ -12853,7 +15023,7 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
         self.assertTrue(ctx["show"])
 
         pd_user = self.user_model.objects.create_user(username="wz-ctx-pd", password="x")
-        pd_user.groups.add(self.pd_group)
+        make_prompt_developer(pd_user)
         ctx = self._context(pd_user)
         self.assertEqual(ctx["scope"], "admin_pd")
         self.assertEqual(ctx["role"], "pd")
@@ -12874,7 +15044,7 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
 
     def test_pd_role_and_staff_role(self):
         pd_user = self.user_model.objects.create_user(username="wz-ctx-pd2", password="x")
-        pd_user.groups.add(self.pd_group)
+        make_prompt_developer(pd_user)
         staff_user = self.user_model.objects.create_user(
             username="wz-ctx-staff2", password="x", is_staff=True,
         )
@@ -12885,7 +15055,11 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
         superuser = self.user_model.objects.create_user(
             username="wz-ctx-guest", password="x", is_superuser=True,
         )
-        ctx = self._context(superuser, guest=True)
+        viewas = self._view_as_group("Эмуля-wzctx", ["page.admin"])
+        superuser2 = self.user_model.objects.create_user(
+            username="wz-ctx-viewas", password="x", is_superuser=True, is_staff=True,
+        )
+        ctx = self._context(superuser2, view_as_group=viewas)
         self.assertFalse(ctx["show"])
 
     def test_seen_scope_is_suppressed(self):
@@ -12941,7 +15115,6 @@ class WizardAdminContextTests(_AdminViewRequestMixin, TestCase):
             ("/ai/admin/ai/aiappsettings/1/change/", "admin_aiappsettings"),
             ("/ai/admin/updates/", "admin_updates"),
             ("/ai/admin/prompt-defaults/", "admin_prompt_defaults"),
-            ("/ai/admin/prompt-regression/", "admin_regression"),
             ("/ai/admin/test-console/", "admin_test_console"),
             ("/ai/admin/prompts/my/", "admin_my_prompt"),
         )
@@ -13973,16 +16146,14 @@ class RequestLogFiltersUiTests(TestCase):
 # ===================================================================
 
 class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
-    """«Промпты по умолчанию» (/ai/admin/prompt-defaults/) открыты
-    суперюзеру и члену группы prompt_developer; staff вне группы — 403;
+    """«Промпты по умолчанию» (/ai/admin/prompt-defaults/) открыты супер-
+    юзеру и любому допущенному в админку (page.prompt_defaults — baseline,
+    ТЗ 2026-10-19); юзер без допуска (не staff, без page.admin) — 403;
     в гостевом режиме пункт навигации скрыт."""
 
     def setUp(self):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
-        from django.contrib.auth.models import Group
-        from ai.constants import PROMPT_DEVELOPER_GROUP
-        self.pd_group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
 
     def _get(self, user):
         from unittest.mock import patch
@@ -14002,24 +16173,31 @@ class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
 
     def test_prompt_developer_allowed(self):
         dev = self.user_model.objects.create_user(username="pd-dev", password="x")
-        dev.groups.add(self.pd_group)
+        make_prompt_developer(dev)
         response = self._get(dev)
         self.assertEqual(response.status_code, 200)
 
     def test_plain_staff_forbidden(self):
+        """Staff с допуском в админку — 200 (baseline); юзер вовсе без
+        допуска (не staff, нет page.admin) — 403."""
         staff = self.user_model.objects.create_user(
             username="pd-staff", password="x", is_staff=True,
         )
         response = self._get(staff)
+        self.assertEqual(response.status_code, 200)
+
+        outsider = self.user_model.objects.create_user(
+            username="pd-outsider", password="x",
+        )
+        response = self._get(outsider)
         self.assertEqual(response.status_code, 403)
 
-    def _nav_tools(self, user, guest=False):
+    def _nav_tools(self, user, view_as_group=None):
         from unittest.mock import patch
         from ai.admin.site import ai_admin_site
         request = self._admin_request(user, path="/ai/admin/")
-        if guest:
-            from ai.admin.guest_mode import SESSION_KEY
-            request.session[SESSION_KEY] = True
+        if view_as_group is not None:
+            self._enter_view_as(request, view_as_group)
         with patch(
             "ai.admin.site.get_external_user_id_from_request", return_value="12345",
         ):
@@ -14033,15 +16211,27 @@ class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
 
     def test_prompt_defaults_nav_for_developer(self):
         dev = self.user_model.objects.create_user(username="pd-nav", password="x")
-        dev.groups.add(self.pd_group)
+        make_prompt_developer(dev)
         self.assertIn("AiArmPromptDefaults", self._nav_tools(dev))
 
-    def test_prompt_defaults_nav_hidden_in_guest(self):
+    def test_prompt_defaults_nav_honest_in_view_as(self):
+        """baseline: у группы с page.admin «Промпты по умолчанию» остаются
+        видны; без page.admin честные ключи пусты — пункт скрыт."""
         su = self.user_model.objects.create_user(
-            username="pd-nav-guest", password="x", is_superuser=True, is_staff=True,
+            username="pd-nav-viewas", password="x", is_superuser=True, is_staff=True,
         )
-        self.assertIn("AiArmPromptDefaults", self._nav_tools(su, guest=False))
-        self.assertNotIn("AiArmPromptDefaults", self._nav_tools(su, guest=True))
+        self.assertIn("AiArmPromptDefaults", self._nav_tools(su))
+        with_admin = self._view_as_group("Эмуля-with-admin", ["page.admin"])
+        self.assertIn(
+            "AiArmPromptDefaults",
+            self._nav_tools(su, view_as_group=with_admin),
+            "page.prompt_defaults — baseline, page.admin сохраняет его в эмуляции",
+        )
+        bare = self._view_as_group("Эмуля-bare-nav", [])
+        self.assertNotIn(
+            "AiArmPromptDefaults",
+            self._nav_tools(su, view_as_group=bare),
+        )
 
     def test_test_data_nav_stays_without_context_flag(self):
         """Генератор тестовых записей живёт ТОЛЬКО в меню «Тестовые данные»;
@@ -14059,7 +16249,8 @@ class PromptDefaultsAccessTests(_AdminViewRequestMixin, TestCase):
             ctx = ai_admin_site.each_context(request)
         self.assertNotIn("show_test_data_link", ctx)
         self.assertIn("AiTestData", self._nav_tools(su))
-        self.assertNotIn("AiTestData", self._nav_tools(su, guest=True))
+        bare = self._view_as_group("Эмуля-bare-td", [])
+        self.assertNotIn("AiTestData", self._nav_tools(su, view_as_group=bare))
 
 
 # ===================================================================
@@ -14088,11 +16279,15 @@ class PromptTranslateTabsArityTests(SimpleTestCase):
 
     def test_batch_results_template_renders_dl_link_and_interim_note(self):
         """Карточка результата: r.dl_url → ссылка в DL (escapeHtml НЕ нужен —
-        link.textContent); в renderReport есть ветка плашки interim."""
+        link.textContent); в renderReport есть ветка плашки interim.
+
+        Логика карточки вынесена в отдельный JS-файл
+        (static/admin/ai/batch_results/index.js), а шаблон — чистый
+        контейнер (общий partial у четырёх страниц)."""
         from pathlib import Path
         path = (
-            Path(__file__).resolve().parent / "templates" / "admin" / "ai"
-            / "_ai_batch_results.html"
+            Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
+            / "batch_results" / "index.js"
         )
         src = path.read_text(encoding="utf-8")
         self.assertIn("r.dl_url", src)
@@ -14285,7 +16480,7 @@ class ArmDlUrlAndInterimReportTests(TestCase):
 
 class EducationDirectoryTests(TestCase):
     """Справочник DLEducationName (id→название, ручное ведение) и единственный
-    читатель — education_directory (DRY, как prompt_queryset_for_user)."""
+    читатель — education_directory (DRY)."""
 
     def test_unique_kind_key(self):
         from django.db import IntegrityError
@@ -14874,7 +17069,9 @@ class AutoFiltersStaticTests(TestCase):
         self.assertIn('name="student"', src)
         self.assertNotIn("onchange=", src)
         self.assertIn("ai_auto_filters.js", src)
-        self.assertIn("initAiAutoFilters(document.querySelector('.ai-daily-filters'))", src)
+        # Инициализация хелпера — в вынесенном JS страницы.
+        js = self._read("static", "admin", "ai", "daily_report", "index.js")
+        self.assertIn("initAiAutoFilters(document.querySelector('.ai-daily-filters'))", js)
 
     def test_updates_template_no_filter_button(self):
         """«Обновления»: кнопки «Фильтровать» больше нет, «Сбросить» и
@@ -14884,7 +17081,8 @@ class AutoFiltersStaticTests(TestCase):
         self.assertIn("Сбросить", src)
         self.assertIn('href="/ai/admin/ai/updatelog/?hidden__exact=1"', src)
         self.assertIn("ai_auto_filters.js", src)
-        self.assertIn("initAiAutoFilters(document.querySelector('.ai-updates-filter'))", src)
+        js = self._read("static", "admin", "ai", "updates", "index.js")
+        self.assertIn("initAiAutoFilters(document.querySelector('.ai-updates-filter'))", js)
         self.assertIn("{% load i18n static %}", src)
 
     def test_wizard_registry_updated(self):
@@ -14893,7 +17091,9 @@ class AutoFiltersStaticTests(TestCase):
         селектов «Обновлений» обещают мгновенное применение."""
         js = self._read("static", "admin", "js", "ai-wizard.js")
         entry = js.index("admin_test_data: [")
-        block = js[js.index("admin_test_data: ["): js.index("];", entry)]
+        # Конец массива scope'а — закрывающая скобка на своей строке (не
+        # "];": registry может продолжиться следующими scope'ами).
+        block = js[entry: js.index("\n        ],", entry)]
         for sel in (".test-data-page h2", ".help-test-data",
                     "[data-emit-request] .button", "#emit-status"):
             self.assertIn(f'sel: "{sel}"', block)
@@ -14902,7 +17102,7 @@ class AutoFiltersStaticTests(TestCase):
         self.assertLess(
             js.index("#daily-filter-student"), js.index("#daily-filter-group"))
         # admin_updates: «применится само» — в текстах шагов фильтров.
-        updates = js[js.index("admin_updates: ["): js.index("admin_regression: [")]
+        updates = js[js.index("admin_updates: ["): js.index("admin_test_console: [")]
         self.assertIn("сузится сам", updates)
         self.assertIn("применяется само", updates)
 
@@ -15035,3 +17235,1274 @@ class AdminPagesStaticFixesTests(TestCase):
         js = self._read("static", "admin", "ai", "request_logs", "index.js")
         self.assertIn("ai-logs-refresh", js)
         self.assertIn("refreshBtn.addEventListener('click', () => refreshTable())", js)
+
+
+class KeyedPageAccessTests(_AdminViewRequestMixin, TestCase):
+    """Ключи-«непоседы» (ТЗ 2026-10-19): «Тестовые данные», «Группы доступа»,
+    док «Разработчик промптов» для не-pd, действия запуска/публикации —
+    всё выдаётся через «Группы доступа», не только ролью."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def _permission(self, key):
+        from ai.models import AIAdminGroupPermission
+        section = ("action" if key.startswith("action.") else
+                   "docs" if key.startswith("docs.") else "page")
+        row, _ = AIAdminGroupPermission.objects.get_or_create(
+            key=key, defaults={"label": key, "section": section},
+        )
+        return row
+
+    def _grant(self, username, keys):
+        from django.contrib.auth import get_user_model
+        from ai.models import AIAccessGroup
+        rows = {k: self._permission(k) for k in keys}
+        group = AIAccessGroup.objects.create(name=f"Ключи-{username}")
+        group.permissions.add(*rows.values())
+        user = get_user_model().objects.create_user(username=username, password="x")
+        group.users.add(user)
+        return user
+
+    def _docs_view(self, user, slug):
+        from unittest.mock import patch
+        from ai.admin.docs import admin_docs_view
+        request = self._admin_request(user, path=f"/ai/admin/docs/{slug}/")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return admin_docs_view(request, slug=slug)
+
+    def test_test_data_page_by_key_only(self):
+        """page.test_data: не-staff держатель ключа видит страницу; без ключа — 403."""
+        from ai.admin.test_data import test_data_view
+        user = self._grant("testdata-key", ["page.admin", "page.test_data"])
+        request = self._admin_request(user, path="/ai/admin/test_data/")
+        self.assertEqual(test_data_view(request).status_code, 200)
+
+        user2 = self._grant("testdata-plain", ["page.admin"])
+        request = self._admin_request(user2, path="/ai/admin/test_data/")
+        self.assertEqual(test_data_view(request).status_code, 403)
+
+    def test_access_groups_page_by_key_only(self):
+        """page.groups: держатель видит страницу и сохраняет группу."""
+        from ai.admin.access_groups import admin_access_groups_view, admin_access_group_save_view
+        user = self._grant("groups-key", ["page.admin", "page.groups"])
+        request = self._admin_request(user, path="/ai/admin/ai-groups/")
+        self.assertEqual(admin_access_groups_view(request).status_code, 200)
+
+        save = self._admin_request(
+            user, method="post", path="/ai/admin/ai-groups/save/", data={
+                "name": "Наблюдатели", "permissions": ["page.model_status"],
+            })
+        self.assertEqual(admin_access_group_save_view(save, 0).status_code, 200)
+        from ai.models import AIAccessGroup
+        self.assertTrue(
+            AIAccessGroup.objects.filter(name="Наблюдатели").exists())
+
+    def test_prompt_developer_doc_by_key_for_non_pd(self):
+        """docs.prompt_developer: обычный вошедший (не pd) с ключом читает главу."""
+        user = self._grant("docstester-key", ["page.admin", "docs.prompt_developer"])
+        self.assertEqual(self._docs_view(user, "prompt-developer").status_code, 200)
+
+        user2 = self._grant("docstester-plain", ["page.admin"])
+        self.assertEqual(self._docs_view(user2, "prompt-developer").status_code, 403)
+
+    def test_test_console_start_requires_run_action(self):
+        """Просмотр консоли — по ключу страницы; запуск — только с
+        action.test_console_run (суперюзер всегда может)."""
+        from unittest.mock import patch
+        from ai.admin.test_console import admin_test_console_view, admin_test_console_start_view
+        user = self._grant("console-viewer", ["page.admin", "page.test_console"])
+        request = self._admin_request(user, path="/ai/admin/test-console/")
+        self.assertEqual(admin_test_console_view(request).status_code, 200)
+
+        post = self._admin_request(
+            user, method="post", path="/ai/admin/test-console/start/")
+        self.assertEqual(admin_test_console_start_view(post).status_code, 403)
+
+        runner = self._grant(
+            "console-runner",
+            ["page.admin", "page.test_console", "action.test_console_run"],
+        )
+        post = self._admin_request(
+            runner, method="post", path="/ai/admin/test-console/start/",
+            content_type=None,
+        )
+        with patch("ai.admin.test_console.start_test_run",
+                   return_value=("mock-run-id", None)):
+            response = admin_test_console_start_view(post)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content)["run_id"], "mock-run-id")
+
+    def test_updates_publish_action_allows_non_super_save(self):
+        """action.updates_publish: не-супер с ModelAdmin-ключом + действием
+        правит запись UpdateLog; без действия — только просмотр."""
+        from ai.admin.models import UpdateLogAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import UpdateLog
+
+        updater = self._grant(
+            "updates-editor",
+            ["page.admin", "page.mgmt_update_log", "page.updates"],
+        )
+        request = self._admin_request(updater, path="/x/")
+        admin = UpdateLogAdmin(UpdateLog, ai_admin_site)
+        self.assertFalse(admin.has_change_permission(request, obj=None))
+
+        updater2 = self._grant(
+            "updates-publisher",
+            ["page.admin", "page.mgmt_update_log", "page.updates",
+             "action.updates_publish"],
+        )
+        request = self._admin_request(updater2, path="/x/")
+        self.assertTrue(admin.has_change_permission(request, obj=None))
+
+
+class BaselineMarkerTests(_AdminViewRequestMixin, TestCase):
+    """Базовые права (BASELINE_ACCESS_KEYS) в карточках «Групп доступа»:
+    чекбокс включён и заблокирован + пометка «база» — фактический доступ
+    шире галочек группы, и это видно прямо в карточке."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def test_baseline_keys_rendered_checked_disabled(self):
+        from ai.admin.access_groups import admin_access_groups_view
+        superuser = self.user_model.objects.create_superuser(
+            username="gc-super", password="x", email="a@t.com",
+        )
+        request = self._admin_request(superuser, path="/ai/admin/ai-groups/")
+        response = admin_access_groups_view(request)
+        response.render()
+        html = response.content.decode()
+        for key in ("page.logs", "page.prompt_admin_all"):
+            self.assertIn(f'value="{key}"', html)
+        self.assertIn('disabled class="ai-perm-baseline"', html)
+        self.assertIn(">база</em>", html)
+
+    def test_page_admin_is_first_in_pages_section(self):
+        # «Вход в админку ИИ» — гейт входа: самый верх списка «Страницы»,
+        # все остальные страницы — после него.
+        from ai.admin.access_groups import admin_access_groups_view
+        superuser = self.user_model.objects.create_superuser(
+            username="gc-order", password="x", email="a@t.com",
+        )
+        request = self._admin_request(superuser, path="/ai/admin/ai-groups/")
+        response = admin_access_groups_view(request)
+        response.render()
+        html = response.content.decode()
+        self.assertLess(
+            html.index('value="page.admin"'),
+            min(
+                html.index(f'value="{key}"')
+                for key in ("page.arm_solve", "page.model_status", "page.tasks")
+            ),
+        )
+
+
+class WizardSeenNavTests(_AdminViewRequestMixin, TestCase):
+    """Ключ page.mgmt_wizard_seen открывает листинг «Пройденные онбординги»
+    в левом наве («Раздел ИИ»), как и любой другой mgmt-ключ."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def _context(self, user):
+        from unittest.mock import patch
+        from ai.admin.site import ai_admin_site
+        request = self._admin_request(user, path="/ai/admin/")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return ai_admin_site.each_context(request)
+
+    def _grant(self, username, keys):
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+        user = self.user_model.objects.create_user(username=username, password="x")
+        group = AIAccessGroup.objects.create(name=f"Ключи-{username}")
+        for key in keys:
+            section = "action" if key.startswith("action.") else "page"
+            perm, _ = AIAdminGroupPermission.objects.get_or_create(
+                key=key, defaults={"label": key, "section": section},
+            )
+            group.permissions.add(perm)
+        group.users.add(user)
+        return user
+
+    def test_wizard_seen_visible_with_key(self):
+        user = self._grant(
+            "nav-wizard", ["page.admin", "page.mgmt_wizard_seen"],
+        )
+        context = self._context(user)
+        names = {
+            model["object_name"]
+            for app in context["available_apps"]
+            for model in app.get("models", [])
+        }
+        self.assertIn("AIWizardSeen", names)
+
+    def test_wizard_seen_hidden_without_key(self):
+        user = self.user_model.objects.create_user(username="nav-nokey", password="x")
+        context = self._context(user)
+        names = {
+            model["object_name"]
+            for app in context["available_apps"]
+            for model in app.get("models", [])
+        }
+        self.assertNotIn("AIWizardSeen", names)
+
+    def test_wizard_seen_superuser_sees(self):
+        user = self.user_model.objects.create_user(
+            username="nav-super", password="x", is_superuser=True, is_staff=True,
+        )
+        context = self._context(user)
+        names = {
+            model["object_name"]
+            for app in context["available_apps"]
+            for model in app.get("models", [])
+        }
+        self.assertIn("AIWizardSeen", names)
+
+
+class FailureReasonClassifierTests(SimpleTestCase):
+    """Классификатор причин сбоя по тексту DL-комментария.
+
+    Канонический владелец — ai/dl_api_client.py::dl_failure_reason_from_comment
+    (рядом с dl_verdict_from_comment). Причина ОРТОГОНАЛЬНА вердикту:
+    «прошёл ли DL» и «почему нет» — разные вопросы.
+    """
+
+    def _reason(self, comment):
+        from ai.dl_api_client import dl_failure_reason_from_comment
+        return dl_failure_reason_from_comment(comment)
+
+    def test_compile_error_markers(self):
+        for comment in (
+            "Ошибка компиляции в строке 5: expected ';'",
+            "compile error",
+            "syntax error",
+            "Не компилируется",
+            "Ошибка синтаксиса",
+        ):
+            self.assertEqual(self._reason(comment), "compile_error", comment)
+
+    def test_wrong_answer_markers(self):
+        for comment in (
+            "Неправильный ответ на тесте 2",
+            "Неверный вывод программы",
+            "Вывод не совпадает с ожидаемым",
+            "Не все тесты пройдены",
+            "wrong answer on test 3",
+            "Solution rejected",
+        ):
+            self.assertEqual(self._reason(comment), "wrong_answer", comment)
+
+    def test_unrecognized_failure_is_undefined_not_success(self):
+        # Провал НИКОГДА не переименовывается в успех: нераспознанный провал
+        # = undefined, а не пустая строка.
+        self.assertEqual(self._reason("Какая-то ошибка 500"), "undefined")
+        self.assertEqual(self._reason(""), "undefined")
+        self.assertEqual(self._reason(None), "undefined")
+
+    def test_success_has_no_reason(self):
+        self.assertEqual(self._reason("Все тесты пройдены успешно"), "")
+        self.assertEqual(self._reason("ОК"), "")
+
+    def test_compile_markers_win_over_generic_failure(self):
+        # «ошибк» — общий провальный маркер, но про компиляцию: причина
+        # компиляции, а не «не распознано».
+        self.assertEqual(
+            self._reason("Ошибка компиляции в строке 5"),
+            "compile_error",
+        )
+
+
+class FailureReasonBatchReportTests(SimpleTestCase):
+    """Раздел «Сбои по причинам» в отчёте прогона (arm_runner)."""
+
+    def _reasons(self, results):
+        from ai.arm_runner import _build_failure_reasons
+        return {row["key"]: row for row in _build_failure_reasons(results)}
+
+    def test_solved_pairs_are_not_counted(self):
+        results = [
+            {"verdict": "solved", "failure_reason": ""},
+            {"verdict": "failed", "failure_reason": "compile_error"},
+        ]
+        reasons = self._reasons(results)
+        self.assertNotIn("solved", reasons)
+        self.assertEqual(reasons["compile_error"]["count"], 1)
+
+    def test_counts_and_percent(self):
+        results = [
+            {"verdict": "failed", "failure_reason": "compile_error"},
+            {"verdict": "failed", "failure_reason": "compile_error"},
+            {"verdict": "failed", "failure_reason": "wrong_answer"},
+            {"verdict": "solved", "failure_reason": ""},
+        ]
+        reasons = self._reasons(results)
+        self.assertEqual(reasons["compile_error"]["count"], 2)
+        self.assertEqual(reasons["wrong_answer"]["count"], 1)
+        # Процент — от всех пар прогона (4), а не от проваленных.
+        self.assertEqual(reasons["compile_error"]["percent"], 50)
+
+    def test_labels_are_human_readable(self):
+        results = [{"verdict": "failed", "failure_reason": "no_code"}]
+        reasons = self._reasons(results)
+        self.assertEqual(reasons["no_code"]["label"], "Не выкушен код")
+
+
+class FailureReasonBackfillTests(TestCase):
+    """Бэкфилл причин сбоя для старых прогонов (management-команда)."""
+
+    def _make_result(self, **kwargs):
+        from ai.models import AIModelTestResult, AIModelTestRun
+        run = AIModelTestRun.objects.create(
+            run_id=uuid.uuid4().hex,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+        )
+        defaults = {
+            "run": run,
+            "model_key": "M1",
+            "model_title": "Model 1",
+            "status": AIModelTestResult.STATUS_OK,
+            "verdict": AIModelTestResult.VERDICT_FAILED,
+        }
+        defaults.update(kwargs)
+        return AIModelTestResult.objects.create(**defaults)
+
+    def test_dry_run_writes_nothing(self):
+        from io import StringIO
+        from django.core.management import call_command
+        row = self._make_result(dl_comment="Ошибка компиляции в строке 5")
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", stdout=out)
+        row.refresh_from_db()
+        self.assertEqual(row.failure_reason, "")
+
+    def test_commit_sets_reason(self):
+        from io import StringIO
+        from django.core.management import call_command
+        row = self._make_result(dl_comment="Неправильный ответ на тесте 1")
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out)
+        row.refresh_from_db()
+        self.assertEqual(row.failure_reason, "wrong_answer")
+
+    def test_solved_rows_are_skipped(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from ai.models import AIModelTestResult
+        row = self._make_result(
+            dl_comment="Ошибка компиляции",
+            verdict=AIModelTestResult.VERDICT_SOLVED,
+        )
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out)
+        row.refresh_from_db()
+        self.assertEqual(row.failure_reason, "")
+
+    def test_rerun_is_idempotent(self):
+        from io import StringIO
+        from django.core.management import call_command
+        self._make_result(dl_comment="Неверный вывод программы")
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out)
+        out2 = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out2)
+        self.assertIn("Проверено строк без причины: 0", out2.getvalue())
+
+
+class TokenUsageAggregationTests(TestCase):
+    """Агрегация токенов (журнал + пакетные пары) — единственный владелец
+    ai/services/token_usage.py."""
+
+    def setUp(self):
+        from ai.models import AIRequestLog
+        self.now = timezone.now()
+        self.log = AIRequestLog.objects.create(
+            sent_at=self.now,
+            mode=AIRequestLog.MODE_CHAT,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Ollama Gemma"],
+            tokens=100,
+            tokens_prompt=40,
+            user_full_name="Иванов Иван",
+            external_user_id="dl-1",
+        )
+
+    def test_prompt_plus_completion_is_total(self):
+        from ai.services.token_usage import collect_log_slices
+        report = collect_log_slices(
+            __import__("ai.models", fromlist=["AIRequestLog"]).AIRequestLog.objects.all()
+        )
+        self.assertEqual(report["total"]["total_tokens"], 140)
+        self.assertEqual(report["total"]["completion_tokens"], 100)
+        self.assertEqual(report["total"]["prompt_tokens"], 40)
+
+    def test_slices_by_model_user_mode(self):
+        from ai.models import AIRequestLog
+        from ai.services.token_usage import collect_log_slices
+        report = collect_log_slices(AIRequestLog.objects.all())
+        self.assertEqual(report["by_model"][0]["label"], "Ollama Gemma")
+        self.assertEqual(report["by_user"][0]["label"], "Иванов Иван")
+        self.assertEqual(report["by_mode"][0]["key"], "chat")
+
+    def test_web_pool_marks_incomplete(self):
+        from ai.models import AIRequestLog
+        from ai.services.token_usage import collect_log_slices
+        AIRequestLog.objects.create(
+            sent_at=self.now,
+            mode=AIRequestLog.MODE_CHAT,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Web_DeepSeek"],
+            tokens=0,
+            tokens_prompt=0,
+        )
+        report = collect_log_slices(AIRequestLog.objects.all())
+        self.assertTrue(report["incomplete"])
+
+    def test_mode_filter(self):
+        from ai.models import AIRequestLog
+        from ai.services.token_usage import collect_log_slices
+        AIRequestLog.objects.create(
+            sent_at=self.now,
+            mode=AIRequestLog.MODE_SOLVE,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Ollama Gemma"],
+            tokens=10,
+            tokens_prompt=5,
+        )
+        report = collect_log_slices(AIRequestLog.objects.all(), mode="chat")
+        self.assertEqual(report["total"]["total_tokens"], 140)
+        report = collect_log_slices(AIRequestLog.objects.all(), mode="solve")
+        self.assertEqual(report["total"]["total_tokens"], 15)
+
+    def test_batch_pairs_slice(self):
+        from ai.models import AIModelTestResult, AIModelTestRun
+        run = AIModelTestRun.objects.create(
+            run_id=uuid.uuid4().hex,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            started_at=self.now,
+        )
+        AIModelTestResult.objects.create(
+            run=run,
+            model_key="M1",
+            model_title="Ollama Gemma",
+            status=AIModelTestResult.STATUS_OK,
+            verdict=AIModelTestResult.VERDICT_SOLVED,
+            tokens=50,
+            tokens_prompt=20,
+        )
+        from ai.services.token_usage import collect_batch_slices
+        report = collect_batch_slices(AIModelTestRun.objects.all())
+        self.assertEqual(report["total"]["total_tokens"], 70)
+        self.assertEqual(report["pairs"], 1)
+
+
+class MskDateRangeTests(SimpleTestCase):
+    """Границы периодов по МСК (единый хелпер ai/services/msk_time.py)."""
+
+    def test_parse_date_formats(self):
+        from ai.services.msk_time import parse_date
+        self.assertIsNotNone(parse_date("2026-10-20"))
+        self.assertIsNotNone(parse_date("20.10.2026"))
+        self.assertIsNone(parse_date("мусор"))
+        self.assertIsNone(parse_date(""))
+
+    def test_day_bounds_are_msk_midnights_in_utc(self):
+        from datetime import datetime, timezone as dt_timezone
+        from ai.constants import MOSCOW_TZ
+        from ai.services.msk_time import msk_day_bounds
+        start, end = msk_day_bounds(datetime(2026, 10, 20, 15, 30, tzinfo=MOSCOW_TZ))
+        # Границы отдаются в UTC (sent_at в БД хранится в UTC), но это
+        # ПОЛНОЧИ МСК: 00:00 MSK = 21:00 UTC предыдущего дня.
+        self.assertEqual(start.tzinfo, dt_timezone.utc)
+        self.assertEqual(end.tzinfo, dt_timezone.utc)
+        self.assertEqual(start.hour, 21)
+        self.assertEqual(start.minute, 0)
+        self.assertEqual(end.hour, 20)
+        self.assertEqual(end.minute, 59)
+        # Обратно в МСК — ровно полночь/конец суток.
+        self.assertEqual(start.astimezone(MOSCOW_TZ).hour, 0)
+        self.assertEqual(end.astimezone(MOSCOW_TZ).hour, 23)
+
+
+class UserModelSecurityTests(SimpleTestCase):
+    """SSRF-защита поля «адрес модели» (владелец просил защиту от атак)."""
+
+    def test_http_is_rejected(self):
+        from ai.services.user_models import ERR_NOT_HTTPS, validate_base_url
+        _, error = validate_base_url("http://api.example.com/v1")
+        self.assertEqual(error, ERR_NOT_HTTPS)
+
+    def test_localhost_is_rejected(self):
+        from ai.services.user_models import ERR_PRIVATE_HOST, validate_base_url
+        _, error = validate_base_url("https://localhost/v1")
+        self.assertEqual(error, ERR_PRIVATE_HOST)
+
+    def test_private_ip_literal_is_rejected(self):
+        from ai.services.user_models import ERR_PRIVATE_HOST, validate_base_url
+        for url in ("https://127.0.0.1/v1", "https://10.0.0.5/v1",
+                    "https://192.168.1.1/v1", "https://169.254.169.254/latest"):
+            _, error = validate_base_url(url)
+            self.assertEqual(error, ERR_PRIVATE_HOST, url)
+
+    def test_credentials_in_url_are_rejected(self):
+        from ai.services.user_models import ERR_CREDENTIALS_IN_URL, validate_base_url
+        _, error = validate_base_url("https://user:pass@api.example.com/v1")
+        self.assertEqual(error, ERR_CREDENTIALS_IN_URL)
+
+    def test_non_standard_port_is_rejected(self):
+        from ai.services.user_models import ERR_BAD_PORT, validate_base_url
+        _, error = validate_base_url("https://api.example.com:8080/v1")
+        self.assertEqual(error, ERR_BAD_PORT)
+
+    def test_https_public_url_passes(self):
+        from ai.services.user_models import validate_base_url
+        url, error = validate_base_url("https://api.openai.com/v1")
+        self.assertEqual(error, "")
+        self.assertEqual(url, "https://api.openai.com/v1")
+
+    def test_dns_rebinding_to_localhost_is_rejected(self):
+        # Домен резолвится в приватный адрес — такой endpoint запрещён
+        # (иначе «свой» домен → 127.0.0.1 обходит фильтр по литералу).
+        from ai.services.user_models import ERR_PRIVATE_HOST, validate_base_url
+        from unittest.mock import patch
+        import socket
+        fake = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+        with patch("ai.services.user_models.socket.getaddrinfo", return_value=fake):
+            _, error = validate_base_url("https://my-own-domain.example/v1")
+        self.assertEqual(error, ERR_PRIVATE_HOST)
+
+    def test_default_base_urls_are_https(self):
+        from ai.services.user_models import PROVIDER_BASE_URLS
+        for provider, url in PROVIDER_BASE_URLS.items():
+            self.assertTrue(url.startswith("https://"), provider)
+
+
+class UserModelIsolationTests(TestCase):
+    """Личные модели видны ТОЛЬКО владельцу."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        self.user_model = get_user_model()
+        self.owner = self.user_model.objects.create_user(username="um-owner", password="x")
+        self.other = self.user_model.objects.create_user(username="um-other", password="x")
+        self.model = AIUserModel.objects.create(
+            user=self.owner,
+            title="Моя модель",
+            provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="gpt-4o-mini",
+            base_url="https://api.openai.com/v1",
+        )
+
+    def test_options_only_for_owner(self):
+        from ai.services.user_models import user_model_options
+        self.assertEqual(len(user_model_options(self.owner)), 1)
+        self.assertEqual(user_model_options(self.other), [])
+
+    def test_find_user_model_is_owner_scoped(self):
+        from ai.services.user_models import find_user_model
+        key = f"User_{self.model.pk}"
+        self.assertIsNotNone(find_user_model(self.owner, key))
+        # Чужой пользователь ключ НЕ находит — вызов чужой модели невозможен.
+        self.assertIsNone(find_user_model(self.other, key))
+
+
+
+class UserModelCallerIsolationTests(TransactionTestCase):
+    """ModelCaller не даёт вызвать ЧУЖУЮ личную модель.
+
+    Отдельный TransactionTestCase: поиск модели идёт из другого потока
+    (sync_to_async), а sqlite в TestCase держит транзакцию — таблица
+    заблокирована для чужого соединения.
+    """
+
+    def test_foreign_key_is_rejected(self):
+        import asyncio
+        from ai.models import AIUserModel
+        from ai.services.model_caller import ModelCaller
+        user_model = get_user_model()
+        owner = user_model.objects.create_user(username="mc-owner", password="x")
+        other = user_model.objects.create_user(username="mc-other", password="x")
+        model = AIUserModel.objects.create(
+            user=owner, title="Моя", provider=AIUserModel.PROVIDER_OPENAI, model_id="m",
+        )
+        key = f"User_{model.pk}"
+        result = asyncio.run(
+            ModelCaller().call("привет", "client-1", key, language="ru", user=other)
+        )
+        self.assertTrue(result.is_error)
+        self.assertIn(key, result.response_text)
+
+
+class UserModelsAdminViewTests(_AdminViewRequestMixin, TestCase):
+    """Страница «Мои AI-модели»: создание/удаление только своих записей."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(username="um-admin", password="x")
+        # Право на страницу «Мои AI-модели» (page.user_models) выдаём
+        # группой доступа — ровно так, как это делает прод-миграция 0067.
+        group = self._view_as_group("UM-группа", ["page.user_models"])
+        group.users.add(self.user)
+        from ai.models import AIUserModel
+        self.foreign = AIUserModel.objects.create(
+            user=self.user_model.objects.create_user(username="um-foreign", password="x"),
+            title="Чужая",
+            provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m",
+        )
+
+    def _post(self, path, payload):
+        """POST на create/delete — вьюхи вызываются напрямую.
+
+        ai.admin.urls отдаёт get_ai_admin_urls() (без module-level
+        urlpatterns), поэтому маршрут резолвим по имени view-функции.
+        """
+        request = self._admin_request(
+            self.user, method="post", path=path,
+            data=json.dumps(payload), content_type="application/json",
+        )
+        if path.endswith("/create/"):
+            from ai.admin.user_models import admin_user_model_create_view
+            return admin_user_model_create_view(request)
+        from ai.admin.user_models import admin_user_model_delete_view
+        return admin_user_model_delete_view(request)
+
+    def test_list_shows_only_own_models(self):
+        from ai.models import AIUserModel
+        mine = AIUserModel.objects.create(
+            user=self.user, title="Своя", provider=AIUserModel.PROVIDER_OPENAI, model_id="m",
+        )
+        request = self._admin_request(self.user, path="/ai/admin/user-models/")
+        from ai.admin.user_models import admin_user_models_view
+        response = admin_user_models_view(request)
+        ids = [row["id"] for row in response.context_data["user_models"]]
+        self.assertIn(mine.pk, ids)
+        self.assertNotIn(self.foreign.pk, ids)
+
+    def test_cannot_update_foreign_model(self):
+        response = self._post("/ai/admin/user-models/create/", {
+            "id": self.foreign.pk,
+            "title": "Взлом",
+            "provider": "openai",
+            "model_id": "x",
+        })
+        self.assertEqual(response.status_code, 404)
+
+    def test_cannot_delete_foreign_model(self):
+        response = self._post("/ai/admin/user-models/delete/", {"id": self.foreign.pk})
+        self.assertEqual(response.status_code, 404)
+        from ai.models import AIUserModel
+        self.assertTrue(AIUserModel.objects.filter(pk=self.foreign.pk).exists())
+
+    def test_create_rejects_private_base_url(self):
+        response = self._post("/ai/admin/user-models/create/", {
+            "title": "Локальная",
+            "provider": "custom",
+            "model_id": "m",
+            "base_url": "https://127.0.0.1/v1",
+        })
+        self.assertEqual(response.status_code, 400)
+
+
+class MyModelsClientViewTests(TestCase):
+    """Клиентская страница «Мои AI-модели» (/ai/my-models/).
+
+    Обычный пользователь (не сотрудник админки) должен иметь доступ к
+    своим моделям: страница клиентская (/ai/my-models/), гейт — как у
+    страниц чата (_has_page_access), а не админский.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(username="mm-user", password="x")
+
+    def _client_request(self, user, method="get", path="/ai/my-models/", body=None):
+        """Запрос клиентской страницы: тело — сырой JSON (content_type)."""
+        if body is None:
+            request = getattr(self.factory, method)(path)
+        else:
+            request = getattr(self.factory, method)(
+                path, data=body, content_type="application/json",
+            )
+        request.user = user
+        request.session = {}
+        request.COOKIES = {}
+        return request
+
+    def test_page_renders_for_ordinary_user(self):
+        from ai.views import my_models_view
+        request = self._client_request(self.user)
+        with patch("ai.views.get_external_user_id_from_request", return_value="777"):
+            response = my_models_view(request)
+        self.assertEqual(response.status_code, 200)
+
+    def test_page_forbidden_without_external_id(self):
+        from ai.views import my_models_view
+        request = self._client_request(self.user)
+        with patch("ai.views.get_external_user_id_from_request", return_value=""):
+            response = my_models_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_save_creates_own_model(self):
+        from ai.views import my_model_save_view
+        request = self._client_request(
+            self.user, method="post", path="/ai/my-models/create/",
+            body=json.dumps({
+                "title": "Моя модель",
+                "provider": "openai",
+                "model_id": "gpt-4o-mini",
+            }),
+        )
+        with patch("ai.views.get_external_user_id_from_request", return_value="777"):
+            response = my_model_save_view(request)
+        self.assertEqual(response.status_code, 200)
+        from ai.models import AIUserModel
+        self.assertTrue(
+            AIUserModel.objects.filter(user=self.user, model_id="gpt-4o-mini").exists()
+        )
+
+    def test_cannot_touch_foreign_model(self):
+        from ai.models import AIUserModel
+        from ai.views import my_model_delete_view
+        foreign = AIUserModel.objects.create(
+            user=self.user_model.objects.create_user(username="mm-other", password="x"),
+            title="Чужая", provider=AIUserModel.PROVIDER_OPENAI, model_id="m",
+        )
+        request = self._client_request(
+            self.user, method="post", path="/ai/my-models/delete/",
+            body=json.dumps({"id": foreign.pk}),
+        )
+        with patch("ai.views.get_external_user_id_from_request", return_value="777"):
+            response = my_model_delete_view(request)
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(AIUserModel.objects.filter(pk=foreign.pk).exists())
+
+
+class DLApiRequestsTests(_AdminViewRequestMixin, TestCase):
+    """Страница «Запросы по DL API»: вкладки «актуально/неактуально»."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(
+            username="dl-api-admin", password="x", is_staff=True,
+        )
+        from ai.models import AIDLApiRequest
+        self.pending = AIDLApiRequest.objects.create(
+            description="Нужен API к задачам",
+            user=self.user,
+            user_full_name="Петров Пётр",
+            username="dl-api-admin",
+        )
+        self.done = AIDLApiRequest.objects.create(
+            description="Уже сделано",
+            user=self.user,
+            status=AIDLApiRequest.STATUS_DONE,
+        )
+
+    def _get(self, path):
+        from ai.admin.dl_api_requests import admin_dl_api_requests_view
+        request = self._admin_request(self.user, path=path)
+        return admin_dl_api_requests_view(request)
+
+    def test_tabs_split_pending_and_done(self):
+        from ai.models import AIDLApiRequest
+        pending = self._get("/ai/admin/dl-api-requests/?tab=pending")
+        done = self._get("/ai/admin/dl-api-requests/?tab=done")
+        pending_ids = [row["id"] for row in pending.context_data["rows"]]
+        done_ids = [row["id"] for row in done.context_data["rows"]]
+        self.assertIn(self.pending.pk, pending_ids)
+        self.assertNotIn(self.done.pk, pending_ids)
+        self.assertIn(self.done.pk, done_ids)
+
+    def test_row_has_description_who_and_when(self):
+        response = self._get("/ai/admin/dl-api-requests/?tab=pending")
+        row = response.context_data["rows"][0]
+        self.assertEqual(row["description"], "Нужен API к задачам")
+        self.assertEqual(row["who"], "Петров Пётр")
+        self.assertTrue(row["created_label"])
+
+    def test_mark_done_moves_row_between_tabs(self):
+        import json as _json
+        from ai.admin.dl_api_requests import admin_dl_api_request_update_view
+        request = self._admin_request(
+            self.user, method="post", path="/ai/admin/dl-api-requests/update/",
+            data=_json.dumps({"id": self.pending.pk, "status": "done", "comment": "создано"}),
+            content_type="application/json",
+        )
+        response = admin_dl_api_request_update_view(request, self.pending.pk) if False else admin_dl_api_request_update_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.pending.refresh_from_db()
+        self.assertEqual(self.pending.status, "done")
+        self.assertIsNotNone(self.pending.resolved_at)
+        self.assertEqual(self.pending.resolved_by_id, self.user.pk)
+
+
+class TokenUsageDateFilterTests(TestCase):
+    """Фильтр по датам на «Контроле токенов» — регрессия.
+
+    Раньше границы считались как ``date.astimezone(timezone.utc)``:
+    * ``django.utils.timezone.utc`` удалён в Django 5.0 → AttributeError → 500
+      на ЛЮБОМ фильтре по датам;
+    * ``date_to`` превращался в полночь выбранного дня → записи ПОСЛЕ
+      00:00 МСК отсекались (потеря целого дня).
+    Теперь границы — через ``msk_day_bounds`` (единый владелец).
+    """
+
+    def setUp(self):
+        self.now = timezone.now()
+
+    def _log(self, *, sent_at, tokens=10, tokens_prompt=5, names=None):
+        return AIRequestLog.objects.create(
+            sent_at=sent_at,
+            mode=AIRequestLog.MODE_CHAT,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=names or ["Ollama Gemma"],
+            tokens=tokens,
+            tokens_prompt=tokens_prompt,
+            user_full_name="Иванов Иван",
+        )
+
+    def test_date_filters_do_not_raise(self):
+        from ai.services.msk_time import parse_date
+        from ai.services.token_usage import collect_log_slices
+        # Регрессия: раньше AttributeError («datetime.date» object has no
+        # attribute «astimezone») — страница отдавала 500.
+        report = collect_log_slices(
+            AIRequestLog.objects.all(),
+            date_from=parse_date("2026-10-01"),
+            date_to=parse_date("2026-10-20"),
+        )
+        self.assertIn("total", report)
+
+    def test_date_to_covers_whole_msk_day(self):
+        from ai.services.msk_time import parse_date
+        from ai.services.token_usage import collect_log_slices
+        from ai.constants import MOSCOW_TZ
+        # Запись в 23:30 МСК выбранного дня — попадает в диапазон.
+        late = datetime(2026, 10, 20, 23, 30, tzinfo=MOSCOW_TZ)
+        self._log(sent_at=late, tokens=100, tokens_prompt=40)
+        report = collect_log_slices(
+            AIRequestLog.objects.all(),
+            date_from=parse_date("2026-10-20"),
+            date_to=parse_date("2026-10-20"),
+        )
+        self.assertEqual(report["total"]["total_tokens"], 140)
+
+    def test_date_range_excludes_outside_rows(self):
+        from ai.services.msk_time import parse_date
+        from ai.services.token_usage import collect_log_slices
+        from ai.constants import MOSCOW_TZ
+        inside = datetime(2026, 10, 20, 12, 0, tzinfo=MOSCOW_TZ)
+        before = datetime(2026, 10, 19, 23, 59, tzinfo=MOSCOW_TZ)
+        after = datetime(2026, 10, 21, 0, 1, tzinfo=MOSCOW_TZ)
+        self._log(sent_at=inside, tokens=10, tokens_prompt=5)
+        self._log(sent_at=before, tokens=1000, tokens_prompt=1000)
+        self._log(sent_at=after, tokens=2000, tokens_prompt=2000)
+        report = collect_log_slices(
+            AIRequestLog.objects.all(),
+            date_from=parse_date("2026-10-20"),
+            date_to=parse_date("2026-10-20"),
+        )
+        self.assertEqual(report["total"]["total_tokens"], 15)
+
+    def test_batch_pairs_respect_date_range(self):
+        from ai.models import AIModelTestResult, AIModelTestRun
+        from ai.services.msk_time import parse_date
+        from ai.services.token_usage import collect_batch_slices
+        from ai.constants import MOSCOW_TZ
+        inside = datetime(2026, 10, 20, 12, 0, tzinfo=MOSCOW_TZ)
+        outside = datetime(2026, 9, 1, 12, 0, tzinfo=MOSCOW_TZ)
+        for started in (inside, outside):
+            run = AIModelTestRun.objects.create(
+                run_id=uuid.uuid4().hex,
+                run_type=AIModelTestRun.RUN_TYPE_BATCH,
+                started_at=started,
+            )
+            AIModelTestResult.objects.create(
+                run=run,
+                model_key="M1",
+                model_title="Ollama Gemma",
+                status=AIModelTestResult.STATUS_OK,
+                verdict=AIModelTestResult.VERDICT_SOLVED,
+                tokens=50,
+                tokens_prompt=20,
+            )
+        report = collect_batch_slices(
+            AIModelTestRun.objects.all(),
+            date_from=parse_date("2026-10-20"),
+            date_to=parse_date("2026-10-20"),
+        )
+        self.assertEqual(report["total"]["total_tokens"], 70)
+        self.assertEqual(report["pairs"], 1)
+
+
+class TokenUsageMultiModelTests(TestCase):
+    """Сводная запись прогона (несколько моделей) — регрессия.
+
+    Токены такой записи — СУММА по всем моделям прогона. Раньше сумма
+    прибавлялась к срезу «по моделям» ПО ОДНОМУ РАЗУ НА КАЖДОЕ ИМЯ —
+    расход завышался в N раз, и каждой модели приписывался весь расход
+    прогона.
+    """
+
+    def setUp(self):
+        self.now = timezone.now()
+        AIRequestLog.objects.create(
+            sent_at=self.now,
+            mode=AIRequestLog.MODE_BATCH_SOLVE,
+            source=AIRequestLog.SOURCE_ARM,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Ollama Gemma", "OpenRouter Qwen", "Groq Llama"],
+            tokens=300,
+            tokens_prompt=100,
+            user_full_name="Иванов Иван",
+        )
+
+    def test_total_is_not_inflated(self):
+        from ai.services.token_usage import collect_log_slices
+        report = collect_log_slices(AIRequestLog.objects.all())
+        # 300 + 100, а НЕ 3 × (300 + 100).
+        self.assertEqual(report["total"]["total_tokens"], 400)
+        self.assertEqual(report["total"]["requests"], 1)
+
+    def test_model_slice_sums_to_total(self):
+        from ai.services.token_usage import collect_log_slices
+        report = collect_log_slices(AIRequestLog.objects.all())
+        by_model_sum = sum(row["total_tokens"] for row in report["by_model"])
+        self.assertEqual(by_model_sum, report["total"]["total_tokens"])
+        # Ни одна ОТДЕЛЬНАЯ модель не должна получить весь расход прогона:
+        # строка среза — это набор моделей прогона, а не одна модель.
+        for row in report["by_model"]:
+            self.assertNotIn(row["label"], ("Ollama Gemma", "OpenRouter Qwen", "Groq Llama"))
+        # Модели прогона перечислены в строке.
+        labels = " ".join(row["label"] for row in report["by_model"])
+        self.assertIn("Groq Llama", labels)
+        self.assertIn("Ollama Gemma", labels)
+
+    def test_model_filter_does_not_credit_one_model(self):
+        from ai.services.token_usage import (
+            MULTI_MODEL_LABEL,
+            collect_log_slices,
+        )
+        report = collect_log_slices(AIRequestLog.objects.all(), model="Groq")
+        # Запись проходит фильтр (в прогоне есть Groq), но её расход не
+        # приписывается Groq — иначе счётчик модели завышен в N раз.
+        self.assertEqual(report["total"]["total_tokens"], 400)
+        labels = [row["label"] for row in report["by_model"]]
+        self.assertNotIn("Groq Llama", labels)
+        # Расход прогона попадает в отдельную «корзину», а не в счётчик
+        # одной из его моделей.
+        self.assertIn(MULTI_MODEL_LABEL, labels)
+
+    def test_user_and_day_slices_keep_full_sum(self):
+        from ai.services.token_usage import collect_log_slices
+        report = collect_log_slices(AIRequestLog.objects.all())
+        self.assertEqual(report["by_user"][0]["total_tokens"], 400)
+        self.assertEqual(report["by_day"][0]["total_tokens"], 400)
+        self.assertEqual(report["by_mode"][0]["total_tokens"], 400)
+
+
+class TokenUsageViewTests(_AdminViewRequestMixin, TestCase):
+    """Страница «Контроль токенов»: рендер, фильтры, права."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+        self.user = self.user_model.objects.create_user(
+            username="tokens-admin", password="x", is_staff=True,
+        )
+        AIRequestLog.objects.create(
+            sent_at=timezone.now(),
+            mode=AIRequestLog.MODE_CHAT,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Ollama Gemma"],
+            tokens=100,
+            tokens_prompt=40,
+            user_full_name="Иванов Иван",
+        )
+
+    def _get(self, query="", user=None):
+        from ai.admin.tokens import admin_token_usage_view
+        path = "/ai/admin/ai/tokens/" + query
+        request = self._admin_request(user or self.user, path=path)
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            return admin_token_usage_view(request)
+
+    def test_page_renders(self):
+        response = self._get("")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Контроль токенов", response.content.decode("utf-8"))
+
+    def test_date_filter_does_not_break_page(self):
+        # Регрессия: фильтр по датам ронял страницу в 500.
+        response = self._get("?date_from=2026-10-01&date_to=2026-10-20")
+        self.assertEqual(response.status_code, 200)
+
+    def test_bad_date_is_ignored(self):
+        response = self._get("?date_from=мусор")
+        self.assertEqual(response.status_code, 200)
+
+    def test_non_staff_without_key_is_forbidden(self):
+        # Обычный юзер (не staff) без ключа page.tokens — 403.
+        from ai.admin.permissions import can_access_token_usage
+        plain = self.user_model.objects.create_user(username="plain-user", password="x")
+        request = self._admin_request(plain, path="/ai/admin/ai/tokens/")
+        self.assertFalse(can_access_token_usage(request))
+
+    def test_staff_has_access(self):
+        from ai.admin.permissions import can_access_token_usage
+        request = self._admin_request(self.user, path="/ai/admin/ai/tokens/")
+        self.assertTrue(can_access_token_usage(request))
+
+    def test_key_holder_has_access(self):
+        from ai.admin.permissions import can_access_token_usage
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+        plain = self.user_model.objects.create_user(username="key-user", password="x")
+        perm, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.tokens", defaults={"label": "page.tokens", "section": "page"},
+        )
+        group = AIAccessGroup.objects.create(name="Контроль токенов")
+        group.permissions.add(perm)
+        group.users.add(plain)
+        request = self._admin_request(plain, path="/ai/admin/ai/tokens/")
+        self.assertTrue(can_access_token_usage(request))
+
+
+class FailureReasonEdgeCaseTests(SimpleTestCase):
+    """Граничные случаи классификатора причин сбоя (регрессия)."""
+
+    def test_successful_compile_is_not_compile_error(self):
+        from ai.dl_api_client import dl_failure_reason_from_comment
+        # Регрессия: «Компиляция успешна, все тесты пройдены» — это УСПЕХ,
+        # а не «ошибка компиляции» (маркер «компиляц» срабатывал и на успехе).
+        self.assertEqual(
+            dl_failure_reason_from_comment("Компиляция успешна, все тесты пройдены"),
+            "",
+        )
+
+    def test_successful_build_with_wrong_answer(self):
+        from ai.dl_api_client import dl_failure_reason_from_comment
+        # Сборка прошла, ответ неверный — это «неправильный ответ», а не
+        # «ошибка компиляции».
+        self.assertEqual(
+            dl_failure_reason_from_comment("Сборка прошла успешно, но ответ неверный"),
+            "wrong_answer",
+        )
+        self.assertEqual(
+            dl_failure_reason_from_comment(
+                "Компиляция прошла, ответ не совпадает с ожидаемым"
+            ),
+            "wrong_answer",
+        )
+
+    def test_real_compile_error_still_detected(self):
+        from ai.dl_api_client import dl_failure_reason_from_comment
+        self.assertEqual(
+            dl_failure_reason_from_comment("Ошибка компиляции в строке 5"),
+            "compile_error",
+        )
+        self.assertEqual(
+            dl_failure_reason_from_comment("syntax error at line 3"),
+            "compile_error",
+        )
+        self.assertEqual(
+            dl_failure_reason_from_comment("Программа не компилируется"),
+            "compile_error",
+        )
+
+
+class FailureReasonBackfillNoCodeTests(TestCase):
+    """Бэкфилл причин: «не выкушен код» должен восстанавливаться."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun
+        self.run = AIModelTestRun.objects.create(
+            run_id=uuid.uuid4().hex,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            started_at=timezone.now(),
+        )
+        self.single_run = AIModelTestRun.objects.create(
+            run_id=uuid.uuid4().hex,
+            run_type=AIModelTestRun.RUN_TYPE_SINGLE,
+            started_at=timezone.now(),
+        )
+
+    def _result(self, **kwargs):
+        from ai.models import AIModelTestResult
+        defaults = {
+            "run": self.run,
+            "model_key": "M1",
+            "model_title": "Model 1",
+            "status": AIModelTestResult.STATUS_ERROR,
+            "verdict": AIModelTestResult.VERDICT_FAILED,
+        }
+        defaults.update(kwargs)
+        return AIModelTestResult.objects.create(**defaults)
+
+    def test_no_code_service_comment_restored(self):
+        from io import StringIO
+        from django.core.management import call_command
+        row = self._result(
+            dl_comment="Модель не успела вывести код — ответ оборван лимитом генерации",
+            code="",
+        )
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out)
+        row.refresh_from_db()
+        # Регрессия: по служебному комментарию раннера общий классификатор
+        # давал «причина не распознана» — целая категория терялась.
+        self.assertEqual(row.failure_reason, "no_code")
+
+    def test_junk_code_comment_restored(self):
+        from io import StringIO
+        from django.core.management import call_command
+        row = self._result(
+            dl_comment=(
+                "Извлечённый текст не похож на программу языка курса "
+                "(нет структурных маркеров) — DL не тестировал"
+            ),
+            code="",
+        )
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out)
+        row.refresh_from_db()
+        self.assertEqual(row.failure_reason, "no_code")
+
+    def test_single_run_is_not_touched(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from ai.models import AIModelTestResult
+        row = AIModelTestResult.objects.create(
+            run=self.single_run,
+            model_key="M1",
+            model_title="Model 1",
+            status=AIModelTestResult.STATUS_ERROR,
+            verdict=None,
+            code="",
+            dl_comment="",
+        )
+        out = StringIO()
+        call_command("backfill_arm_failure_reasons", "--commit", stdout=out)
+        row.refresh_from_db()
+        # У одиночных прогонов вердикта нет by design — пара не тестировалась
+        # на DL, «сбой ответа модели» был бы неверным основанием.
+        self.assertEqual(row.failure_reason, "")
+
+
+class ArmSolveFailureReasonsRenderTests(TestCase):
+    """Секция «Сбои по причинам» должна рендериться на /arm/solve/.
+
+    Регрессия: на странице пакетного решения не было контейнера
+    reasonsWrap, и renderFailureReasons молча ничего не рисовала —
+    таксономия сбоев была видна только в журнале и настройках.
+    """
+
+    def test_arm_solve_template_has_reasons_container(self):
+        from pathlib import Path
+        template = Path("ai/templates/admin/ai/arm_solve.html").read_text(encoding="utf-8")
+        self.assertIn("armSolveReasonsWrap", template)
+
+    def test_arm_solve_js_passes_reasons_element(self):
+        from pathlib import Path
+        js = Path("static/admin/ai/arm_solve/index.js").read_text(encoding="utf-8")
+        self.assertIn("armSolveReasonsWrap", js)
+        self.assertIn("reasons: reasonsWrap", js)
+
+    def test_batch_results_js_has_failure_reasons_render(self):
+        from pathlib import Path
+        js = Path("static/admin/ai/batch_results/index.js").read_text(encoding="utf-8")
+        self.assertIn("renderFailureReasons", js)
+        self.assertIn("failure_reasons", js)
+
+    def test_reason_badge_has_css_class(self):
+        from pathlib import Path
+        css = Path("static/admin/ai/batch_results/index.css").read_text(encoding="utf-8")
+        self.assertIn(".arm-reason", css)
+
+
+class ArmBatchFailureReasonRetryTests(TransactionTestCase):
+    """Ветка «ретрай упал с ошибкой модели» → причина «сбой ответа модели».
+
+    Регрессия: пара, упавшая с 500/429 на ретрае, классифицировалась как
+    «не выкушен код» — таксономия врала (код не получен из-за СБОЯ модели).
+    """
+
+    def setUp(self):
+        from ai.models import Task
+        self.user = get_user_model().objects.create_user(username="retry-reason", password="x")
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Ретраи", programming_language=self.lang,
+        )
+        self.task = Task.objects.create(
+            node_id=9301, task_id=9401, name="A", statement="Сложите a и b",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+    def _seed_job(self, run_id, total_pairs):
+        from ai import arm_runner
+        now_ts = time.time()
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 1, "total_pairs": total_pairs,
+            "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "", "current_model_title": "",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+
+    def _run(self, handler):
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+        run_id = "rr-" + uuid.uuid4().hex[:8]
+        self._seed_job(run_id, 1)
+        models = [{"key": "M1", "title": "Model 1", "handler": handler}]
+        try:
+            arm_runner._run_batch_job_worker(
+                run_id, [self.task.node_id], models, self.user.id, "DLSID-1",
+                ui_language="Русский", dl_test=True,
+            )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        return AIModelTestResult.objects.get(run=run, model_key="M1")
+
+    def test_retry_model_error_gives_model_error(self):
+        calls = {"n": 0}
+
+        async def handler(messages, conv_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Первый ответ — пустой/обрезанный: кода не извлечётся → ретрай.
+                return ("", 0, False, True, 0)
+            # Ретрай — ошибка провайдера (429/500).
+            return ("Ошибка 429: превышен лимит запросов", 0, True, False, 0)
+
+        row = self._run(handler)
+        self.assertEqual(row.failure_reason, "model_error")
+
+    def test_retry_without_code_gives_no_code(self):
+        calls = {"n": 0}
+
+        async def handler(messages, conv_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ("частичный ответ без кода", 5000, False, True, 100)
+            # Ретрай — модель ответила, но кода всё равно нет.
+            return ("всё равно без кода", 10, False, False, 10)
+
+        row = self._run(handler)
+        self.assertEqual(row.failure_reason, "no_code")

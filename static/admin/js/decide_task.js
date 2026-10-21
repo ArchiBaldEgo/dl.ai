@@ -255,7 +255,7 @@ document.addEventListener("DOMContentLoaded", function() {
             var submitBtn = document.querySelector("button[type='submit']");
             if (submitBtn) submitBtn.textContent = localization[selectedLang].send;
 
-            var clearBtn = document.querySelector("button[onclick='clearContext()']");
+            var clearBtn = document.querySelector("#clearContextBtn");
             if (clearBtn) clearBtn.textContent = localization[selectedLang].clear;
 
             var testOnDlBtn = document.getElementById("testOnDlBtn");
@@ -319,6 +319,16 @@ document.addEventListener("DOMContentLoaded", function() {
 // + savePageState/restorePageState. Возвращает handle для repopulateOnUiLanguageChange.
 document.addEventListener("DOMContentLoaded", function() {
     problemSelectors = initProblemSelectors('solve');
+});
+
+// === Кнопка «Тестирование» (DL) ===
+// Раньше — инлайновый onclick="testOnDl()" в разметке. Правило проекта:
+// в шаблонах — только разметка, весь JS — в файлах. Делегирование по id.
+document.addEventListener("DOMContentLoaded", function() {
+    var btn = document.getElementById('testOnDlBtn');
+    if (!btn || btn.dataset.dlBound === '1') return;
+    btn.dataset.dlBound = '1';
+    btn.addEventListener('click', function () { testOnDl(); });
 });
 
 // === Автозагрузка условия задачи из DL-ссылки ===

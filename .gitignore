@@ -44,6 +44,20 @@ WebKimi/worker/logs/
 WebKimi/worker/logs/*
 WebKimi/worker/.chrome-profiles/
 WebKimi/worker/.chrome-profiles/*
+WebKimi/worker/.chrome-profiles-seed/
+WebKimi/worker/.chrome-profiles-seed/*
+WebKimi/tools-debug/
+WebKimi/tools-debug/*
+
+# Общий пакет бот-пулов (WebPools/) + корневой node_modules (один на оба
+# пула и на WebKimi/seed.js) — зависимости и логи
+node_modules/
+WebPools/.cache/
+WebPools/.puppeteer-cache/
+WebPools/worker/logs/
+WebPools/worker/logs/*
+WebPools/worker/.chrome-profiles/
+WebPools/worker/.chrome-profiles/*
 
 # Claude
 .claude/

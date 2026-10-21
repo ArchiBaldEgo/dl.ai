@@ -10,6 +10,9 @@
 
 {% block form_content %}
     <textarea type="text" id="messageText"
+        data-node-id="{{ node_id }}"
         placeholder="{{ t.placeholder }}"
         autocomplete="off"></textarea>
 {% endblock %}
+
+{% block extra_body_script %}{% endblock %}

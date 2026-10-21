@@ -13,7 +13,6 @@ from .i18n import get_localized_name, get_localized_text
 - Журнала запросов к AI-моделям (AIRequestLog).
 - Проверки доступности моделей (AIModelHealthRun, AIModelAvailability).
 - Результатов тестирования моделей (AIModelTestRun, AIModelTestResult).
-- Регрессионных тестов промптов (PromptTestCase, PromptTestRun, PromptTestResult).
 - Глобальных настроек приложения (AIAppSettings).
 - Связи пользователей с внешними аккаунтами dl.gsu.by (ExternalDLAccount).
 """
@@ -719,6 +718,13 @@ class AIRequestLog(models.Model):
     message = models.TextField(blank=True, verbose_name="Запрос")
     response_text = models.TextField(blank=True, verbose_name="Ответ модели")
     tokens = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов")
+    # Токены ПРОМПТА (вход). «tokens» — completion (ответ модели). Итог =
+    # tokens + tokens_prompt (см. ai/services/token_usage.py). Null = провайдер
+    # не отдал счётчик (тогда честно 0, а не выдуманное число).
+    tokens_prompt = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов (промпт)")
+    # ID batch-прогона для записей пакетного решения (индексированная замена
+    # парсинга «Batch solve run <id>» из текста сообщения).
+    batch_run_id = models.CharField(max_length=64, blank=True, default="", db_index=True, verbose_name="ID пакетного прогона")
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ERROR, verbose_name="Статус")
     error_message = models.TextField(blank=True, verbose_name="Текст ошибки")
 
@@ -739,6 +745,17 @@ class AIRequestLog(models.Model):
         verbose_name = "Журнал запросов к ИИ"
         verbose_name_plural = "Журнал запросов к ИИ"
         ordering = ("-sent_at",)
+        indexes = [
+            # Журнал растёт быстро, а читается всегда «по времени» (Meta.ordering
+            # = -sent_at) и с фильтрами. Без индексов каждая загрузка журнала/
+            # дневного отчёта/контроля токенов делала сортировку по всей
+            # таблице. Составные индексы покрывают типовые фильтры
+            # (режим / источник / статус) + срез по дате.
+            models.Index(fields=["sent_at"], name="ai_request_log_sent_idx"),
+            models.Index(fields=["mode", "sent_at"], name="ai_request_log_mode_sent_idx"),
+            models.Index(fields=["source", "sent_at"], name="ai_request_log_source_sent_idx"),
+            models.Index(fields=["status", "sent_at"], name="ai_request_log_status_sent_idx"),
+        ]
 
     def __str__(self):
         return f"{self.sent_at} — {self.user_full_name or self.username or self.external_user_id}"
@@ -781,6 +798,156 @@ class AIPinnedBatchRun(models.Model):
 
     def __str__(self):
         return f"{self.user_id} → log {self.log_id}"
+
+
+class AIDevTask(models.Model):
+    """Таск на доске задач для разработчиков (страница /ai/admin/tasks/).
+
+    Два типа (kind): FRONT «Фронт работы» и WISH «Хотелки» — у каждого СВОЯ
+    сквозная нумерация (priority_no) с №1, уникальная внутри вида
+    (констрейнт по (kind, priority_no)); МЕНЬШЕ = ВАЖНЕЕ; выдаётся сервером
+    при создании (max+1 внутри вида), менять порядок можно
+    перетаскиванием строк (superuser/action.task_reorder → /tasks/reorder/
+    перенумеровывает 1..N в пределах вида). Создаётся (название, описание,
+    срок — ТЕКСТОМ: «До 2 недель» — никаких расчётных дат) тем, у кого есть
+    action.task_create; закрыть — увод с доски (closed_at/closed_by,
+    priority_no сбрасывается): таск ОСТАЁТСЯ в БД и попадает в архив
+    (вкладка «Закрытые»), откуда суперюзер/action.task_close может
+    вернуть его на доску (reopen). Разработчик забирает таск («Взять»):
+    taken_by/taken_at пишутся атомарно
+    (условный UPDATE, «первый успел»), у взятого таска в таблице — ФИО +
+    группа + дата взятия, повторно взять нельзя. ModelAdmin не
+    регистрируется — доска целиком кастомная страница (ai/admin/tasks.py).
+    """
+
+    class Kind(models.TextChoices):
+        FRONT = "front", "Фронт работы"
+        WISH = "wish", "Хотелки"
+
+    title = models.CharField(max_length=200, verbose_name="Название")
+    description = models.TextField(
+        blank=True, default="", verbose_name="Описание"
+    )
+    estimate = models.CharField(
+        max_length=100, blank=True, default="", verbose_name="Срок",
+        help_text="Текстом: «До 2 недель», «До 4 дней»",
+    )
+    kind = models.CharField(
+        max_length=10, choices=Kind.choices, default=Kind.FRONT,
+        verbose_name="Тип",
+    )
+    # Номер присваивается всем видам (max+1 внутри вида, миграция 0064);
+    # NULL остаётся легаси-запасом. Уникальность — по (kind, priority_no),
+    # частичный UniqueConstraint из Meta.constraints.
+    priority_no = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name="Номер приоритета",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="created_dev_tasks",
+        verbose_name="Кто создал",
+    )
+    taken_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="claimed_dev_tasks",
+        verbose_name="Кто взял",
+    )
+    taken_at = models.DateTimeField(null=True, blank=True, verbose_name="Взят")
+    closed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="closed_dev_tasks",
+        verbose_name="Кто закрыл",
+    )
+    closed_at = models.DateTimeField(null=True, blank=True, verbose_name="Закрыт")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
+
+    class Meta:
+        verbose_name = "Таск (доска задач)"
+        verbose_name_plural = "Таски (доска задач)"
+        ordering = ("kind", "priority_no", "-created_at", "-id")
+        constraints = [
+            # «Цифры повторяться не могут» — уникальный номер ВНУТРИ вида
+            # (фронт и хотелки нумеруются независимо, оба с №1).
+            models.UniqueConstraint(
+                fields=["kind", "priority_no"],
+                condition=models.Q(priority_no__isnull=False),
+                name="ai_dev_task_priority_no_uniq",
+            ),
+        ]
+
+    def __str__(self):
+        if self.priority_no is not None:
+            number = f"№{self.priority_no}"
+        else:
+            number = f"{self.kind} без номера"
+        suffix = f" (взял {self.taken_by_id})" if self.taken_by_id else ""
+        return f"[{number}] {self.title}{suffix}"
+
+
+class AIAdminGroupPermission(models.Model):
+    """Один ключ доступа, выдающийся группам «Групп доступа» (AIAccessGroup).
+
+    Ключи сидируются миграцией (см. ai/constants.py). Разделы секций — для
+    группировки чекбоксов на странице «Группы доступа»: page — вкладки
+    админки, docs — главы документации, action — действия на страницах.
+    """
+
+    SECTION_PAGE = "page"
+    SECTION_DOCS = "docs"
+    SECTION_ACTION = "action"
+
+    key = models.SlugField(max_length=50, unique=True, verbose_name="Ключ")
+    label = models.CharField(max_length=200, verbose_name="Название")
+    section = models.CharField(
+        max_length=20, default=SECTION_PAGE,
+        choices=[
+            (SECTION_PAGE, "Страницы"),
+            (SECTION_DOCS, "Документация"),
+            (SECTION_ACTION, "Действия"),
+        ],
+        verbose_name="Раздел",
+    )
+
+    class Meta:
+        verbose_name = "Право доступа (группы)"
+        verbose_name_plural = "Права доступа (группы)"
+        ordering = ("section", "key")
+
+    def __str__(self):
+        return self.key
+
+
+class AIAccessGroup(models.Model):
+    """Группа доступа: членам выдаются права ключами (AIAdminGroupPermission).
+
+    Заменяет жёсткие проверки is_prompt_developer_user/Django-Group
+    prompt_developer: все can_access_* резолвят ключи из групп юзера
+    (ai/admin/permissions.py::user_access_keys); состав и права каждой
+    группы редактируются суперюзером на странице «Группы доступа»
+    (/ai/admin/ai-groups/, ai/admin/access_groups.py). Встроенные группы
+    («Разработчик промптов», «Разработчик») сидируются миграцией; их нельзя
+    удалить и переименовать, но права правятся на той же странице.
+    """
+
+    name = models.CharField(max_length=100, unique=True, verbose_name="Название")
+    description = models.TextField(blank=True, default="", verbose_name="Описание")
+    is_builtin = models.BooleanField(default=False, verbose_name="Встроенная")
+    permissions = models.ManyToManyField(
+        AIAdminGroupPermission, blank=True, related_name="access_groups",
+        verbose_name="Права",
+    )
+    users = models.ManyToManyField(
+        settings.AUTH_USER_MODEL, blank=True, related_name="ai_access_groups",
+        verbose_name="Участники",
+    )
+
+    class Meta:
+        verbose_name = "Группа доступа"
+        verbose_name_plural = "Группы доступа"
+        ordering = ("name",)
+
+    def __str__(self):
+        return self.name
 
 
 class AICourseTreeCache(models.Model):
@@ -893,6 +1060,12 @@ class AIModelTestRun(models.Model):
         verbose_name = "Прогон тестирования модели"
         verbose_name_plural = "Прогоны тестирования модели"
         ordering = ("-started_at",)
+        indexes = [
+            # Список прогонов всегда сортируется по -started_at; фильтр по
+            # статусу («идущие/завершённые») — частый.
+            models.Index(fields=["started_at"], name="ai_model_test_run_started_idx"),
+            models.Index(fields=["status", "started_at"], name="ai_model_test_run_status_idx"),
+        ]
 
     def __str__(self):
         return f"{self.run_id} ({self.status})"
@@ -928,6 +1101,28 @@ class AIModelTestResult(models.Model):
         (VERDICT_SKIPPED, "Пропущено"),
     )
 
+    # Ортогональная ось «почему пара не решена» (orthogonal to ``verdict``:
+    # verdict отвечает «прошёл ли DL», failure_reason — «почему нет»).
+    # solved ⇒ пустая строка; skipped ⇒ "skipped"; нераспознанный провал DL ⇒
+    # "undefined" (честно: причина не опознана, а не «успех»).
+    FR_MODEL_ERROR = "model_error"
+    FR_NO_CODE = "no_code"
+    FR_COMPILE_ERROR = "compile_error"
+    FR_WRONG_ANSWER = "wrong_answer"
+    FR_UNDEFINED = "undefined"
+    FR_SKIPPED = "skipped"
+
+    FAILURE_REASON_CHOICES = (
+        (FR_MODEL_ERROR, "Сбой ответа модели"),
+        (FR_NO_CODE, "Не выкушен код"),
+        (FR_COMPILE_ERROR, "Ошибка компиляции"),
+        (FR_WRONG_ANSWER, "Неправильный ответ"),
+        (FR_UNDEFINED, "Причина не распознана"),
+        (FR_SKIPPED, "Пропущено"),
+    )
+
+    FAILURE_REASON_LABELS = dict(FAILURE_REASON_CHOICES)
+
     run = models.ForeignKey(
         AIModelTestRun,
         on_delete=models.CASCADE,
@@ -948,8 +1143,15 @@ class AIModelTestResult(models.Model):
         max_length=8, choices=VERDICT_CHOICES, null=True, blank=True, db_index=True,
         verbose_name="Вердикт",
     )
+    # Причина провала (см. FAILURE_REASON_CHOICES). Пустая строка = solved.
+    failure_reason = models.CharField(
+        max_length=16, choices=FAILURE_REASON_CHOICES, null=True, blank=True,
+        db_index=True, default="", verbose_name="Причина сбоя",
+    )
     duration_seconds = models.FloatField(null=True, blank=True, verbose_name="Время ответа, с")
     tokens = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов")
+    # Токены промпта (вход) — «tokens» остаётся completion.
+    tokens_prompt = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов (промпт)")
     short_response = models.TextField(blank=True, default="", verbose_name="Краткий ответ")
     raw_response = models.TextField(blank=True, default="", verbose_name="Полный ответ")
     # Извлечённый чистый код модели (содержимое файла программы) для batch-solve.
@@ -983,6 +1185,13 @@ class AIModelTestResult(models.Model):
         verbose_name = "Результат тестирования модели"
         verbose_name_plural = "Результаты тестирования модели"
         ordering = ("model_title",)
+        indexes = [
+            # Сортировка результатов по названию модели (Meta.ordering) и
+            # выборка «результаты одного прогона» — обе без индекса
+            # сортировали весь результат прогона на каждой загрузке.
+            models.Index(fields=["model_title"], name="ai_model_test_result_title_idx"),
+            models.Index(fields=["run", "model_title"], name="ai_mtr_run_title_idx"),
+        ]
         constraints = [
             # One row per (run, model, task) for batch runs.
             models.UniqueConstraint(
@@ -1048,204 +1257,15 @@ class AIModelStats(models.Model):
                 fields=["model_key", "programming_language", "topic"],
                 name="ai_model_stats_scope_idx",
             ),
-        ]
-
-    def __str__(self):
-        return self.model_key
-
-
-# ---------------------------------------------------------------------------
-# Prompt regression tests (golden-master suite).
-#
-# A `PromptTestCase` is a fixed fixture: an input (task statement / code /
-# message) plus the expected (golden) model reaction. A `PromptTestRun` is one
-# pass of a single model over a set of cases with a chosen prompt under test;
-# `PromptTestResult` stores the per-case actual response and the deterministic
-# comparison verdict against the golden text. This mirrors the ARM run/result
-# pair but is keyed by (run, test_case) and driven by an editable prompt.
-# ---------------------------------------------------------------------------
-
-PROMPT_TEST_MODE_CHOICES = (
-    ("solve", "Solve"),
-    ("find_error", "Find error"),
-    ("chat", "Chat"),
-)
-
-PROMPT_TEST_COMPARATOR_CHOICES = (
-    ("ratio", "ratio (difflib)"),
-    ("contains_all", "contains_all (все строки эталона)"),
-    ("exact", "exact (нормализованное равенство)"),
-    ("set", "set (равенство множеств строк)"),
-)
-
-
-class PromptTestCase(models.Model):
-    """Один тест-кейс регрессионного набора промпта: ввод + эталон + компаратор.
-
-    ``input_text`` — условие задачи (solve), код с ошибкой (find_error) или
-    сообщение пользователя (chat). ``expected_text`` — образцовая реакция
-    модели: решение / ошибки по одной на строку (contains_all) / ожидаемый
-    ответ. ``comparator`` задаёт способ детерминированного сравнения (см.
-    ``ai/grading.py``). Тема и язык программирования нужны для подстановки
-    плейсхолдеров в тестируемый промпт.
-    """
-
-    name = models.CharField(max_length=255, verbose_name="Название")
-    mode = models.CharField(
-        max_length=16, choices=PROMPT_TEST_MODE_CHOICES, db_index=True,
-        verbose_name="Режим",
-    )
-    programming_language = models.ForeignKey(
-        ProgrammingLanguage, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name="prompt_test_cases", verbose_name="Язык программирования",
-    )
-    topic = models.ForeignKey(
-        Topic, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name="prompt_test_cases", verbose_name="Тема",
-    )
-    input_text = models.TextField(verbose_name="Ввод (условие / код / сообщение)")
-    expected_text = models.TextField(blank=True, default="", verbose_name="Эталон")
-    comparator = models.CharField(
-        max_length=16, choices=PROMPT_TEST_COMPARATOR_CHOICES, default="ratio",
-        verbose_name="Компаратор",
-    )
-    match_threshold = models.FloatField(
-        null=True, blank=True, verbose_name="Порог ratio",
-        help_text="Для компаратора ratio (по умолчанию 0.85).",
-    )
-    ui_language = models.CharField(max_length=16, default="Русский", verbose_name="Язык интерфейса")
-    active = models.BooleanField(default=True, db_index=True, verbose_name="Активен")
-    owner = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name="owned_prompt_test_cases", verbose_name="Владелец",
-    )
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
-    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
-
-    class Meta:
-        db_table = "ai_prompttestcase"
-        verbose_name = "Тест-кейс промпта"
-        verbose_name_plural = "Тест-кейсы промптов"
-        ordering = ("-created_at",)
-
-    def __str__(self):
-        return self.name or f"Тест-кейс #{self.id}"
-
-
-class PromptTestRun(models.Model):
-    """Один прогон регрессионных тестов: одна модель × набор кейсов × промпт.
-
-    Живой прогресс хранится in-memory в ``ai/prompt_test_runner.py``; эта модель
-    — источник правды для завершённых/вытесненных прогонов и основа отчётов.
-    ``run_params`` — снимок параметров формы на момент запуска (``case_ids``,
-    фактически разрешённые id кейсов; пустой список = «все активные») — для
-    восстановления состояния формы при возврате на страницу прогона (``?run_id=``).
-    """
-
-    STATUS_RUNNING = "running"
-    STATUS_COMPLETED = "completed"
-    STATUS_FAILED = "failed"
-
-    STATUS_CHOICES = (
-        (STATUS_RUNNING, "Running"),
-        (STATUS_COMPLETED, "Completed"),
-        (STATUS_FAILED, "Failed"),
-    )
-
-    run_id = models.CharField(max_length=64, unique=True, db_index=True, verbose_name="ID прогона")
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING, db_index=True, verbose_name="Статус")
-    model_key = models.CharField(max_length=128, db_index=True, verbose_name="Ключ модели")
-    model_title = models.CharField(max_length=255, blank=True, default="", verbose_name="Модель")
-    prompt_id = models.IntegerField(null=True, blank=True, db_index=True, verbose_name="ID промпта")
-    prompt_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Промпт")
-    ui_language = models.CharField(max_length=16, default="Русский", verbose_name="Язык интерфейса")
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
-        related_name="prompt_test_runs",
-        verbose_name="Пользователь",
-    )
-    started_at = models.DateTimeField(default=timezone.now, verbose_name="Начат")
-    finished_at = models.DateTimeField(null=True, blank=True, verbose_name="Завершён")
-    error_message = models.TextField(blank=True, default="", verbose_name="Текст ошибки")
-    report = models.JSONField(default=dict, blank=True, verbose_name="Отчёт")
-    total_cases = models.PositiveSmallIntegerField(default=0, verbose_name="Всего кейсов")
-    # Снимок параметров формы на момент запуска — для восстановления состояния
-    # формы при возврате на страницу прогона (?run_id=). См. докстринг модели.
-    run_params = models.JSONField(default=dict, blank=True, verbose_name="Параметры запуска (форма)")
-
-    class Meta:
-        db_table = "ai_prompttest_run"
-        verbose_name = "Прогон регрессионных тестов промпта"
-        verbose_name_plural = "Прогоны регрессионных тестов промптов"
-        ordering = ("-started_at",)
-
-    def __str__(self):
-        return f"{self.run_id} ({self.status})"
-
-
-class PromptTestResult(models.Model):
-    """Строка на (прогон × кейс): фактический ответ и verdict vs эталона."""
-
-    STATUS_OK = "ok"
-    STATUS_ERROR = "error"
-
-    STATUS_CHOICES = (
-        (STATUS_OK, "OK"),
-        (STATUS_ERROR, "Error"),
-    )
-
-    VERDICT_MATCH = "match"
-    VERDICT_MISMATCH = "mismatch"
-    VERDICT_SKIPPED = "skipped"
-
-    VERDICT_CHOICES = (
-        (VERDICT_MATCH, "Совпадает"),
-        (VERDICT_MISMATCH, "Отклонение"),
-        (VERDICT_SKIPPED, "Пропущен"),
-    )
-
-    run = models.ForeignKey(
-        PromptTestRun, on_delete=models.CASCADE, related_name="results",
-        verbose_name="Прогон",
-    )
-    test_case = models.ForeignKey(
-        PromptTestCase, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name="test_results",
-        verbose_name="Тест-кейс",
-    )
-    model_key = models.CharField(max_length=128, db_index=True, verbose_name="Ключ модели")
-    model_title = models.CharField(max_length=255, blank=True, default="", verbose_name="Модель")
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_OK, verbose_name="Статус")
-    verdict = models.CharField(
-        max_length=16, choices=VERDICT_CHOICES, default=VERDICT_MISMATCH, db_index=True,
-        verbose_name="Вердикт",
-    )
-    actual_response = models.TextField(blank=True, default="", verbose_name="Ответ")
-    expected_snapshot = models.TextField(blank=True, default="", verbose_name="Эталон (снимок)")
-    diff_hint = models.CharField(max_length=255, blank=True, default="", verbose_name="Подсказка различий")
-    duration_seconds = models.FloatField(null=True, blank=True, verbose_name="Время ответа, с")
-    tokens = models.PositiveIntegerField(null=True, blank=True, verbose_name="Токенов")
-    # Snapshot of the case at run time (operator may reassign topic/lang later).
-    case_name_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Название кейса (снимок)")
-    mode_snapshot = models.CharField(max_length=16, blank=True, default="", verbose_name="Режим (снимок)")
-    topic_name_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Тема (снимок)")
-    prog_lang_snapshot = models.CharField(max_length=255, blank=True, default="", verbose_name="Язык программирования (снимок)")
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
-
-    class Meta:
-        db_table = "ai_prompt_test_result"
-        verbose_name = "Результат регрессионного теста промпта"
-        verbose_name_plural = "Результаты регрессионных тестов промптов"
-        ordering = ("case_name_snapshot",)
-        constraints = [
-            models.UniqueConstraint(
-                fields=("run", "test_case"),
-                name="ai_prompt_test_result_run_case_uniq",
+            # Список статистики сортируется по -solved_count (Meta.ordering).
+            models.Index(
+                fields=["solved_count"],
+                name="ai_model_stats_solved_idx",
             ),
         ]
 
     def __str__(self):
-        return f"{self.run.run_id} / {self.case_name_snapshot or self.model_title} — {self.verdict}"
+        return self.model_key
 
 
 class AuthorAlias(models.Model):
@@ -1387,3 +1407,130 @@ class AIWizardSeen(models.Model):
 
     def __str__(self):
         return f"{self.user_id} / {self.scope} v{self.version}"
+
+
+class AIUserModel(models.Model):
+    """Личная AI-модель пользователя (провайдер + модель + свои ключи).
+
+    Пользователь сам приносит провайдера и модель (OpenAI-совместимый
+    endpoint). Модель доступна ТОЛЬКО ему: чужие пользователи её не видят
+    (селектор моделей), не могут вызвать (проверка владельца в
+    ai/services/user_models.py) и не могут отредактировать.
+
+    Безопасность:
+    - ``base_url`` — только https, без приватных/локальных адресов (SSRF-защита
+      проверяется в ai/services/user_models.py::validate_base_url);
+    - ``api_key`` хранится шифром (Fernet, ключ — ``AI_USER_MODEL_SECRET_KEY``
+      в .env); в открытом виде не выводится никогда;
+    - URL-путь и host валидируются, редиректы не следуются.
+
+    Поля model_key НЕ попадают в глобальный реестр моделей
+    (ai/model_clients/registry.py) — поэтому такие модели не участвуют в
+    health-check, ARM-прогонах и общей статистике.
+    """
+
+    PROVIDER_OPENAI = "openai"
+    PROVIDER_ANTHROPIC = "anthropic"
+    PROVIDER_OLLAMA = "ollama"
+    PROVIDER_GROQ = "groq"
+    PROVIDER_OPENROUTER = "openrouter"
+    PROVIDER_SAMBANOVA = "sambanova"
+    PROVIDER_CUSTOM = "custom"
+
+    PROVIDER_CHOICES = (
+        (PROVIDER_OPENAI, "OpenAI"),
+        (PROVIDER_ANTHROPIC, "Anthropic"),
+        (PROVIDER_OLLAMA, "Ollama"),
+        (PROVIDER_GROQ, "Groq"),
+        (PROVIDER_OPENROUTER, "OpenRouter"),
+        (PROVIDER_SAMBANOVA, "SambaNova"),
+        (PROVIDER_CUSTOM, "Другой (OpenAI-совместимый)"),
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="ai_user_models",
+        verbose_name="Владелец",
+    )
+    title = models.CharField(max_length=255, verbose_name="Название модели")
+    provider = models.CharField(
+        max_length=32, choices=PROVIDER_CHOICES, default=PROVIDER_OPENAI,
+        verbose_name="Провайдер",
+    )
+    model_id = models.CharField(max_length=255, verbose_name="ID модели у провайдера")
+    base_url = models.CharField(
+        max_length=500, blank=True, default="",
+        verbose_name="Базовый URL (для совместимых провайдеров)",
+    )
+    # Шифротекст ключа (Fernet). Пусто = без ключа (локальный endpoint).
+    api_key_encrypted = models.TextField(blank=True, default="", verbose_name="Ключ (зашифрован)")
+    max_tokens = models.PositiveIntegerField(default=8000, verbose_name="Потолок ответа")
+    supports_vision = models.BooleanField(default=False, verbose_name="Умеет картинки")
+    supports_think = models.BooleanField(default=False, verbose_name="Умеет think")
+    is_active = models.BooleanField(default=True, verbose_name="Активна")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Добавлена")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменена")
+
+    class Meta:
+        db_table = "ai_ai_user_model"
+        verbose_name = "Личная AI-модель"
+        verbose_name_plural = "Личные AI-модели"
+        ordering = ("title",)
+
+    def __str__(self) -> str:
+        return f"{self.title} ({self.model_id}) — {self.user_id}"
+
+
+class AIDLApiRequest(models.Model):
+    """Запрос пользователя на создание API к DL (dl.gsu.by).
+
+    Страница «Запросы по DL API»: две вкладки — «актуальные» (STATUS_PENDING,
+    API ещё не создан) и «неактуальные» (API сделано — STATUS_DONE).
+    Актуальный запрос провисает, когда API создан: админ жмёт «API создано»,
+    и строка переезжает в «неактуальные».
+    """
+
+    STATUS_PENDING = "pending"
+    STATUS_DONE = "done"
+
+    STATUS_CHOICES = (
+        (STATUS_PENDING, "Актуальный"),
+        (STATUS_DONE, "Неактуальный"),
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ai_dl_api_requests",
+        verbose_name="Кто попросил",
+    )
+    external_user_id = models.CharField(max_length=255, blank=True, db_index=True, verbose_name="ID на dl.gsu.by")
+    user_full_name = models.CharField(max_length=500, blank=True, default="", verbose_name="ФИО")
+    username = models.CharField(max_length=255, blank=True, default="", verbose_name="Логин")
+    description = models.TextField(blank=True, default="", verbose_name="Описание")
+    status = models.CharField(
+        max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True,
+        verbose_name="Статус",
+    )
+    created_at = models.DateTimeField(default=timezone.now, db_index=True, verbose_name="Когда попросил")
+    resolved_at = models.DateTimeField(null=True, blank=True, verbose_name="Когда сделано")
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ai_dl_api_requests_resolved",
+        verbose_name="Кто сделал",
+    )
+    comment = models.TextField(blank=True, default="", verbose_name="Комментарий")
+
+    class Meta:
+        db_table = "ai_ai_dl_api_request"
+        verbose_name = "Запрос API к DL"
+        verbose_name_plural = "Запросы API к DL"
+        ordering = ("-created_at",)
+
+    def __str__(self) -> str:
+        who = self.user_full_name or self.username or self.external_user_id or "—"
+        return f"{who}: {self.description[:60]}"

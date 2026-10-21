@@ -1,0 +1,243 @@
+{% extends "admin/base_site.html" %}
+{% load static tz %}
+{# Страница «Таски» — доска задач (ai/admin/tasks.py). Вкладки «Фронт работы» #}
+{# / «Хотелки» (у обоих СВОЯ нумерация с №1, порядок перетаскиванием) и      #}
+{# фильтры «Не взятые» (?kind=unclaimed), «Поиск» (активные таски + фильтр   #}
+{# «Кто взял», ?taken=), «Мои таски» (?kind=mine) и архив «Закрытые»         #}
+{# (?kind=closed + ?closed_from/?closed_to + ?task_kind= + ?done_by=;        #}
+{# «Вернуть» спрашивает,                                                     #}
+{# оставить исполнителя (по умолчанию) или освободить таск). Суперюзер/      #}
+{# action-ключи: форма создания, «Закрыть», «Вернуть». CSS/JS —              #}
+{# static/admin/ai/tasks/.                                                   #}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/tasks/index.css' %}">
+{% endblock %}
+
+{% block content %}
+<div class="ai-tasks-wrap">
+  <p class="help">
+    Доска задач для разработчиков. Создают и закрывают таски суперюзеры;
+    взять таск может любой с доступом. «Фронт работы» и «Хотелки» — свои
+    нумерации с №1, чем меньше — тем важнее; порядок
+    {% if can_reorder %}меняется перетаскиванием строк{% else %}задан суперюзерами{% endif %}.
+    «Не взятые» — весь свободный фронт, взять можно прямо отсюда; «Поиск» —
+    все активные таски (фронт, затем хотелки) с фильтром «Кто взял»;
+    «Мои таски» — таски, которые вы взяли. У взятого таска показываются
+    ФИО и группа взявшего и дата взятия; взять уже взятый таск нельзя.
+    Закрытый таск уходит с доски в архив «Закрытые» (кто дал, кто выполнил,
+    даты, фильтры по датам закрытия, типу и исполнителю); случайно закрытый
+    или сделанный не так, как нужно, таск суперюзер может вернуть на доску
+    кнопкой «Вернуть».
+  </p>
+
+  <div class="ai-task-tabs">
+    {% for tab in tabs %}
+      <a href="{{ tab.url }}"
+         class="ai-task-tab{% if tab.kind == active_kind %} ai-task-tab-active{% endif %}">{{ tab.label }}</a>
+    {% endfor %}
+  </div>
+
+  {% if can_create and active_kind != 'search' and active_kind != 'closed' %}
+  <form class="ai-tasks-create" data-create-url="/ai/admin/tasks/create/">
+    {% csrf_token %}
+    <h3>Новый таск</h3>
+    <div class="ai-tasks-create-row ai-tasks-create-row-top">
+      <input type="text" name="title" maxlength="200" placeholder="Название *" required>
+      <select name="kind">
+        {% for tab in create_kinds %}
+          <option value="{{ tab.kind }}"{% if tab.selected %} selected{% endif %}>{{ tab.label }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" name="estimate" maxlength="100" placeholder="Срок (до 2 недель, до 4 дней…)">
+    </div>
+    <textarea name="description" rows="3" placeholder="Описание"></textarea>
+    <span class="ai-tasks-hint">Номер приоритета присвоится автоматически (следующий за максимальным в этой вкладке).</span>
+    <button type="submit" class="button default">Создать таск</button>
+  </form>
+  {% endif %}
+
+  {% if active_kind == 'search' %}
+  <form class="ai-tasks-filter" method="get" action="">
+    <input type="hidden" name="kind" value="search">
+    <label>
+      Кто взял:
+      <select name="taken" data-autosubmit="1">
+        <option value="">— все —</option>
+        {% for t in taken_options %}
+          <option value="{{ t.id }}"{% if t.id|stringformat:"s" == active_taken %} selected{% endif %}>{{ t.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <noscript><button type="submit" class="button">Показать</button></noscript>
+  </form>
+  {% endif %}
+
+  {% if active_kind == 'closed' %}
+  {# Архив: даты закрытия (обе границы включительно; «по» = весь день), тип таска и исполнитель. #}
+  <form class="ai-tasks-filter" method="get" action="">
+    <input type="hidden" name="kind" value="closed">
+    <label>
+      Тип:
+      <select name="task_kind" data-autosubmit="1">
+        <option value="">— все —</option>
+        {% for k in create_kinds %}
+          <option value="{{ k.kind }}"{% if k.kind == closed_kind %} selected{% endif %}>{{ k.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Кто выполнил:
+      <select name="done_by" data-autosubmit="1">
+        <option value="">— все —</option>
+        {% for t in closed_done_options %}
+          <option value="{{ t.id }}"{% if t.id|stringformat:"s" == closed_done_by %} selected{% endif %}>{{ t.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Закрыт с:
+      <input type="date" name="closed_from" value="{{ closed_from }}">
+    </label>
+    <label>
+      по:
+      <input type="date" name="closed_to" value="{{ closed_to }}">
+    </label>
+    <button type="submit" class="button">Показать</button>
+    <a href="?kind=closed">Сбросить</a>
+  </form>
+  {% endif %}
+
+  {% if rows %}
+  {% if active_kind == 'closed' %}
+  {# Архив «Закрытые»: тип таска, кто дал (создал), кто выполнил (взял), даты; возврат на доску. #}
+  <div class="ai-tasks-scroll">
+    <table class="ai-tasks-table ai-tasks-table-closed">
+      <thead>
+        <tr>
+          <th>Тип</th>
+          <th>Название</th>
+          <th>Описание</th>
+          <th>Кто дал</th>
+          <th>Создан</th>
+          <th>Кто выполнил</th>
+          <th>Взят</th>
+          <th>Закрыт</th>
+          {% if can_close %}<th></th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% timezone moscow_tz %}
+        {% for row in rows %}
+          <tr class="ai-tasks-closed-row" data-task-id="{{ row.id }}">
+            <td><span class="ai-task-kind ai-task-kind-{{ row.kind }}">{{ row.kind_label }}</span></td>
+            <td class="ai-task-title">{{ row.title }}</td>
+            <td class="ai-task-description">{{ row.description|default:"—" }}</td>
+            <td>{{ row.creator|default:"—" }}</td>
+            <td>{{ row.created_at|date:"d.m.Y H:i" }}</td>
+            <td>{{ row.claimant|default:"—" }}</td>
+            <td>{% if row.taken %}{{ row.taken_at|date:"d.m.Y H:i" }}{% else %}—{% endif %}</td>
+            <td>{{ row.closed_at|date:"d.m.Y H:i" }}</td>
+            {% if can_close %}
+            <td class="ai-task-actions">
+              <button type="button" class="button ai-task-btn-reopen"
+                      data-reopen-ask="1">Вернуть</button>
+              {# Выбор исполнителя при возврате: оставить за взявшим или освободить. #}
+              <span class="ai-task-reopen-choice" hidden>
+                <button type="button" class="button ai-task-btn-reopen"
+                        data-reopen-url="{{ row.reopen_url }}">С исполнителем</button>
+                <button type="button" class="button ai-task-btn-reopen"
+                        data-reopen-free="1" data-reopen-url="{{ row.reopen_url }}">Освободить</button>
+                <button type="button" class="button ai-task-btn-reopen-cancel">Отмена</button>
+              </span>
+            </td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+        {% endtimezone %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="ai-tasks-scroll">
+    <table class="ai-tasks-table"{% if can_reorder %} data-reorder="1" data-kind="{{ active_kind }}"{% endif %}>
+      <thead>
+        <tr>
+          <th class="ai-task-col-no">№</th>
+          <th>Название</th>
+          <th>Описание</th>
+          <th>Срок</th>
+          <th>Создан</th>
+          <th>Взял</th>
+          <th>Взят</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% timezone moscow_tz %}
+        {% for row in rows %}
+          <tr class="{% if row.taken %}ai-tasks-taken{% endif %}" data-task-id="{{ row.id }}"
+              {% if can_reorder %} draggable="true"{% endif %}>
+            <td class="ai-task-col-no">{% if row.priority_no %}{{ row.priority_no }}{% else %}—{% endif %}</td>
+            <td class="ai-task-title">{{ row.title }}</td>
+            <td class="ai-task-description">{{ row.description|default:"—" }}</td>
+            <td>{{ row.estimate|default:"—" }}</td>
+            <td>{{ row.created_at|date:"d.m.Y H:i" }}</td>
+            <td>{% if row.taken %}{{ row.claimant|default:"—" }}{% else %}<span class="ai-task-free">—</span>{% endif %}</td>
+            <td>{% if row.taken %}{{ row.taken_at|date:"d.m.Y H:i" }}{% else %}—{% endif %}</td>
+            <td class="ai-task-actions">
+              {% if row.can_edit %}
+                {# Правка — только автору таска (проверка на сервере тоже). #}
+                <button type="button" class="button ai-task-btn-edit"
+                        data-edit-toggle="1">Изменить</button>
+              {% endif %}
+              {% if not row.taken %}
+                <button type="button" class="button ai-task-btn-claim"
+                        data-claim-url="{{ row.claim_url }}">Взять</button>
+              {% endif %}
+              {% if can_close and row.taken %}
+                <button type="button" class="button ai-task-btn-close"
+                        data-close-url="{{ row.close_url }}">Закрыть</button>
+              {% endif %}
+            </td>
+          </tr>
+          {% if row.can_edit %}
+          {# Форма правки раскрывается кнопкой «Изменить» (в своей строке). #}
+          <tr class="ai-task-edit-row" data-edit-row="{{ row.id }}" hidden>
+            <td colspan="8">
+              <form class="ai-task-edit-form" data-edit-url="{{ row.edit_url }}">
+                <div class="ai-tasks-create-row">
+                  <input type="text" name="title" maxlength="200" required
+                         value="{{ row.title }}" placeholder="Название *">
+                  <input type="text" name="estimate" maxlength="100"
+                         value="{{ row.estimate }}" placeholder="Срок (до 2 недель, до 4 дней…)">
+                </div>
+                <textarea name="description" rows="3"
+                          placeholder="Описание">{{ row.description }}</textarea>
+                <div class="ai-task-edit-actions">
+                  <button type="submit" class="button default">Сохранить</button>
+                  <button type="button" class="button ai-task-btn-edit-cancel">Отмена</button>
+                </div>
+              </form>
+            </td>
+          </tr>
+          {% endif %}
+        {% endfor %}
+        {% endtimezone %}
+      </tbody>
+    </table>
+    {% if can_reorder %}
+      <p class="ai-tasks-hint">Строки можно перетаскивать: отпустите сверху/снизу нужного ряда — номера пересчитаются.</p>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% else %}
+    <p class="ai-tasks-empty">
+      {% if active_kind == 'wish' %}Хотелок пока нет.{% elif active_kind == 'mine' %}Вы пока не взяли ни одного таска — возьмите его со «Фронта работы» или из «Хотелок».{% elif active_kind == 'unclaimed' %}Свободных тасков на фронте нет — всё либо взято, либо закрыто.{% elif active_kind == 'search' %}Ничего не найдено.{% elif active_kind == 'closed' %}Закрытых тасков по этим фильтрам нет{% if closed_from or closed_to or closed_kind or closed_done_by %} — измените фильтры или сбросьте их{% endif %}.{% else %}Пока тасков нет.{% endif %}{% if can_create and active_kind != 'search' and active_kind != 'closed' %} Создайте первый таск формой выше.{% endif %}
+    </p>
+  {% endif %}
+</div>
+
+<script src="{% static 'admin/ai/tasks/index.js' %}"></script>
+{% endblock %}

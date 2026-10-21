@@ -13,14 +13,15 @@ from django.http import HttpResponseForbidden
 from django.db.models import Q
 
 from ..models import AuthorAlias, UpdateLog
+from .permissions import can_access_updates
 from .site import ai_admin_site
 
 
 @ai_admin_site.admin_view
 def admin_updates_view(request):
-    """Render the updates/commit history page (superusers only)."""
-    if not request.user.is_superuser:
-        return HttpResponseForbidden("Superuser access required")
+    """Render the updates/commit history page (staff/superuser или page.updates)."""
+    if not can_access_updates(request):
+        return HttpResponseForbidden("Access denied")
 
     author_map = AuthorAlias.display_map()
 

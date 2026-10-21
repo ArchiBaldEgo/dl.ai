@@ -84,9 +84,13 @@ class ModelCallResult:
         model_title: str = "",
         error_message: str = "",
         is_error: bool = False,
+        prompt_tokens: Any = 0,
     ):
         self.response_text = response_text
+        # tokens — токены ОТВЕТА (completion); prompt_tokens — токены ВХОДА.
+        # Итог (prompt + completion) считается на странице «Контроль токенов».
         self.tokens = tokens
+        self.prompt_tokens = prompt_tokens
         self.model_title = model_title
         self.error_message = error_message
         self.is_error = is_error
@@ -99,7 +103,29 @@ class ModelCaller:
         self.registry = registry_instance
 
     async def call(self, message: str, client_id: str, model_key: str,
-                   language: str = "", think: bool | None = None) -> ModelCallResult:
+                   language: str = "", think: bool | None = None,
+                   user=None) -> ModelCallResult:
+        # ЛИЧНАЯ модель пользователя (ai/services/user_models.py). Ключ вида
+        # ``User_<pk>``: резолвится ТОЛЬКО владельцем — чужой ключ не
+        # находится и уходит в общий «model_not_found». Личные модели НЕ
+        # в глобальном реестре: health-check/ARM/статистика их не видят.
+        if user is not None and str(model_key or "").strip().startswith("User_"):
+            from .user_models import call_user_model, find_user_model
+
+            personal = await sync_to_async(find_user_model, thread_sensitive=True)(
+                user, model_key
+            )
+            if personal is None:
+                error_text = ws_text(language, "model_not_found", model_key=model_key)
+                return ModelCallResult(
+                    response_text=error_text,
+                    model_title=model_key,
+                    error_message=error_text,
+                    is_error=True,
+                )
+            response = await call_user_model(personal, message, client_id)
+            return self._build_result(response, personal.title, language)
+
         normalized_key = _resolve_model_key(self.registry, model_key) or _resolve_legacy_alias(model_key)
         handler = self.registry.handler(normalized_key)
         title = self.registry.title(normalized_key)
@@ -132,10 +158,24 @@ class ModelCaller:
                 is_error=True,
             )
 
+        return self._build_result(response, title, language)
+
+    def _build_result(self, response, title: str, language: str = "") -> ModelCallResult:
+        """Разбор ответа хендлера в ``ModelCallResult`` (контракт 5-элементного
+        кортежа: content, completion_tokens, is_error, cut_flag, prompt_tokens).
+
+        Общий разбор для глобальных моделей и личных моделей пользователя —
+        одинаковый контракт, одинаковая обработка пустого ответа.
+        """
         is_error = False
+        prompt_tokens = 0
+        tokens = 0
         if isinstance(response, tuple):
             response_text = response[0] if len(response) > 0 else ""
             tokens = response[1] if len(response) > 1 else 0
+            # 5-й элемент кортежа — токены промпта (учёт prompt+completion).
+            if len(response) > 4:
+                prompt_tokens = response[4] or 0
             # Clients signal a 200-OK-but-error body (rate limit, «все боты
             # заняты», parse failure, …) via a 3rd tuple element = True. This
             # is the structured signal that replaces log_writer's text-marker
@@ -144,7 +184,6 @@ class ModelCaller:
                 is_error = bool(response[2])
         else:
             response_text = response
-            tokens = 0
 
         response_text = str(response_text or "")
 
@@ -159,6 +198,7 @@ class ModelCaller:
         return ModelCallResult(
             response_text=response_text,
             tokens=tokens,
+            prompt_tokens=prompt_tokens,
             model_title=title,
             is_error=is_error,
         )

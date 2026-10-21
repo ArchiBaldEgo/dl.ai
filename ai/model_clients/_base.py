@@ -9,9 +9,9 @@
   ``Authorization: Bearer ...`` + ``Content-Type: application/json``;
 - ``proxy_bypass_session()`` — ``requests.Session`` с ``trust_env=False``
   (для внутренних HTTP-вызовов в обход HTTP_PROXY/HTTPS_PROXY);
-- ``BotPoolClient`` — общий HTTP-клиент Puppeteer-бот-пула (WebDeepseek/,
-  WebKimi/): POST /api/send с ретраями и POST /api/restart; веб-модули
-  задают только конфигурацию (DRY вместо двух копий логики).
+- ``BotPoolClient`` — общий HTTP-клиент Puppeteer-бот-пула (WebPools/,
+  сайты deepseek/kimi): POST /api/send с ретраями и POST /api/restart;
+  веб-модули задают только конфигурацию (DRY вместо двух копий логики).
 """
 
 import asyncio
@@ -98,7 +98,7 @@ def make_table_handlers(
 
 
 class BotPoolClient:
-    """HTTP-клиент Puppeteer-бот-пула (WebDeepseek/, WebKimi/).
+    """HTTP-клиент Puppeteer-бот-пула (WebPools/, сайты deepseek/kimi).
 
     Общий протокол у пулов одинаковый: ``POST /api/send`` (с ретраями,
     Retry-After backoff и распознаванием устаревших селекторов) и
@@ -114,7 +114,7 @@ class BotPoolClient:
         site_label: имя сайта для сообщения об изменённой вёрстке
             ("DeepSeek" / "Kimi").
         selector_doc: путь к файлу селекторов в этом сообщении
-            ("WebDeepseek/worker/data.json" / "WebKimi/worker/data.json").
+            ("WebPools/sites/deepseek.js" / "WebPools/sites/kimi.js").
     """
 
     def __init__(
@@ -213,7 +213,7 @@ class BotPoolClient:
         finally:
             session.close()
 
-    async def ask(self, msg: str, user_id: int, thinking: bool) -> Tuple[str, int, bool]:
+    async def ask(self, msg: str, user_id: int, thinking: bool) -> Tuple[str, int, bool, bool, int]:
         """Отправить сообщение в бот-пул и вернуть (text, tokens, is_error).
 
         До 3 попыток: таймаут/обрыв соединения и 429/5xx — с backoff
@@ -236,22 +236,23 @@ class BotPoolClient:
                     logger.warning("%s bot pool timeout (300s), retrying in %ss (attempt %s/%s)", self.label, wait, attempt, max_attempts)
                     await asyncio.sleep(wait)
                     continue
-                return f"Таймаут при подключении к {self.label} (300с). Попробуйте позже.", 0, True
+                return f"Таймаут при подключении к {self.label} (300с). Попробуйте позже.", 0, True, False, 0
             except requests.ConnectionError as exc:
                 if attempt < max_attempts:
                     wait = min(attempt * 3, 15)
                     logger.warning("%s bot pool connection error: %s, retrying in %ss (attempt %s/%s)", self.label, exc, wait, attempt, max_attempts)
                     await asyncio.sleep(wait)
                     continue
-                return f"Ошибка подключения к {self.label}: {exc}", 0, True
+                return f"Ошибка подключения к {self.label}: {exc}", 0, True, False, 0
 
             logger.debug("%s bot pool response status: %s (attempt %s/%s)", self.label, response.status_code, attempt, max_attempts)
 
             if response.status_code == 200:
                 obj, error_message = safe_parse_response(response.text)
                 if obj is None:
-                    return error_message, 0, True
-                return obj["data"]["content"], 0, False
+                    return error_message, 0, True, False, 0
+                # Пул не отдаёт usage — токены 0 (честно: «учёт недоступен»).
+                return obj["data"]["content"], 0, False, False, 0
 
             if response.status_code in (429, 500, 502, 503, 504):
                 # 429 — все боты pool заняты (pool шлёт Retry-After, ~3с): транзитная
@@ -269,7 +270,7 @@ class BotPoolClient:
                         pass
                     if "UI may have changed" in reason or "All answer XPath selectors failed" in reason:
                         return (f"{self.site_label} изменил интерфейс сайта — селекторы bot-пула устарели, "
-                                f"нужно обновить {self.selector_doc}."), 0, True
+                                f"нужно обновить {self.selector_doc}."), 0, True, False, 0
                 if attempt < max_attempts:
                     # Уважаем Retry-After (429/503 — бот освобождается/стартует),
                     # иначе мягкий backoff; ограничиваем сверху, чтобы не висеть.
@@ -286,6 +287,6 @@ class BotPoolClient:
             # Живой пул с запускающимся ботом (503 bot_starting) сохраняет прежние
             # формулировки — старт может доехать.
             if response.status_code in (429, 500, 502, 503, 504) and self.pool_state() == "empty":
-                return self.empty_pool_message(), 0, True
+                return self.empty_pool_message(), 0, True, False, 0
 
-            return map_http_error(response.status_code, self.provider), 0, True
+            return map_http_error(response.status_code, self.provider), 0, True, False, 0

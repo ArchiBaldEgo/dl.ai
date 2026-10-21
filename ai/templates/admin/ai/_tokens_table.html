@@ -1,0 +1,31 @@
+{# Таблица среза токенов: строки — словари TokenSlice.as_dict (ключи: label, #}
+{# total_tokens, completion_tokens, prompt_tokens, requests, incomplete).      #}
+<table class="ai-tokens-table">
+  <thead>
+    <tr>
+      <th scope="col">Название</th>
+      <th scope="col" class="ai-tokens-num">Всего</th>
+      <th scope="col" class="ai-tokens-num">Ответ</th>
+      <th scope="col" class="ai-tokens-num">Промпт</th>
+      <th scope="col" class="ai-tokens-num">Запросов</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+      <tr>
+        <td>
+          {{ row.label }}
+          {% if row.incomplete %}
+            <span class="ai-tokens-flag" title="Модель не отдаёт usage (web-пул) — учёт по ней неполный">учёт недоступен</span>
+          {% endif %}
+        </td>
+        <td class="ai-tokens-num">{{ row.total_tokens }}</td>
+        <td class="ai-tokens-num">{{ row.completion_tokens }}</td>
+        <td class="ai-tokens-num">{{ row.prompt_tokens }}</td>
+        <td class="ai-tokens-num">{{ row.requests }}</td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="5" class="ai-tokens-empty">Нет данных за выбранный период.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>

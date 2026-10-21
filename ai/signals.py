@@ -5,12 +5,14 @@
 Также инвалидирует кеш get_available_model_options при изменении
 AIModelAvailability, чтобы список доступных моделей обновлялся сразу после
 health-check / автопроверки, не дожидаясь 30-секундного TTL.
+И кеш справочника учебных названий (education_directory.education_title_maps)
+при правке DLEducationName — правка справочника должна быть видна сразу.
 """
 
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 
-from .models import UpdateLog, AIModelAvailability
+from .models import UpdateLog, AIModelAvailability, DLEducationName
 
 
 @receiver(post_save, sender=UpdateLog)
@@ -28,3 +30,12 @@ def _invalidate_available_models_cache(sender, **kwargs):
     from django.core.cache import cache
     from .constants import AI_CACHE_KEY_PREFIX
     cache.delete(f"{AI_CACHE_KEY_PREFIX}:available_models")
+
+
+@receiver(post_save, sender=DLEducationName)
+@receiver(post_delete, sender=DLEducationName)
+def _invalidate_education_title_maps_cache(sender, **kwargs):
+    """Сбрасывает кеш справочника «id → название» при правке DLEducationName."""
+    from django.core.cache import cache
+    from .constants import AI_CACHE_KEY_PREFIX
+    cache.delete(f"{AI_CACHE_KEY_PREFIX}:education_title_maps")

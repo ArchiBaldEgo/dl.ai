@@ -109,19 +109,15 @@ def _resolve_active_course_id_for_session(session_id):
         .first()
     )
     fallback_course_id = DL_DEFAULT_COURSE_ID
-    if last_run and last_run.results.exists():
-        first_result = last_run.results.first()
-        if first_result.task and first_result.task.node_id:
-            # Активируем курс по первой задаче из последнего прогона.
-            # course_id не хранится в БД, но 1450 — единственный курс в DL.
-            pass
 
     # Пытаемся активировать курс 1450 (fallback) через ensure_course_session.
     # Нужен node_id — берём из последнего прогона или дефолт 2606747.
+    # ОДИН запрос на первый результат прогона (было три: exists() + first()
+    # + повтор exists()/first() в том же блоке — одинаково).
     fallback_node_id = 2606747
-    if last_run and last_run.results.exists():
-        first_result = last_run.results.first()
-        if first_result.task and first_result.task.node_id:
+    if last_run:
+        first_result = last_run.results.select_related("task").first()
+        if first_result and first_result.task and first_result.task.node_id:
             fallback_node_id = first_result.task.node_id
 
     ensure_course_session(session_id, fallback_course_id, fallback_node_id)
@@ -229,7 +225,7 @@ def admin_arm_solve_view(request):
 
     # Список промптов режима «Реши задачу» для ручного выбора на странице.
     # Промпты — студенческий контент: тот же контракт, что у chat-facing
-    # get_prompts (см. querysets.prompt_queryset_for_user — здесь ACL не режем).
+    # get_prompts — здесь выбор не режется никаким ACL.
     # language_name — для промптов «на весь язык» (без темы).
     prompt_options = [
         {

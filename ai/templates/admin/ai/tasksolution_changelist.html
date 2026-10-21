@@ -1,5 +1,5 @@
 {% extends "admin/change_list.html" %}
-{% load i18n %}
+{% load i18n static %}
 
 {% comment %}Список «Решённые задачи (кэш кода)»: строка — дата / задача (ссылка в DL) /
    приписка — путь в дереве задач DL / язык / тема / промпт / пользователь /
@@ -75,24 +75,8 @@
         </tbody>
       </table>
     </div>
-    <script>
-      // Клик по строке раскрывает сохранённый код; клик по ссылке на задачу —
-      // нет (она ведёт в DL). Открыта одна деталь за раз (паттерн request_logs).
-      (function () {
-        document.addEventListener('click', function (event) {
-          if (event.target.closest('a')) return;
-          var row = event.target.closest('.ai-sol-row');
-          if (!row || !row.closest('#ai-sol-table')) return;
-          var detailRow = row.nextElementSibling;
-          if (!detailRow || !detailRow.classList.contains('ai-sol-detail-row')) return;
-          var isOpen = detailRow.classList.contains('open');
-          document.querySelectorAll('.ai-sol-detail-row.open').forEach(function (r) {
-            r.classList.remove('open');
-          });
-          if (!isOpen) detailRow.classList.add('open');
-        });
-      })();
-    </script>
+    <script src="{% static 'admin/ai/tasksolution_changelist/index.js' %}"></script>
+
   {% else %}
     <p class="ai-sol-empty">Нет записей.</p>
   {% endif %}

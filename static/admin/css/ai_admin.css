@@ -422,11 +422,11 @@
   font-size: 13px;
 }
 
-/* ───────────── «Зайти как гость» (шапка админки, суперюзер) ───────────── */
+/* ───────────── «Посмотреть как…» (шапка админки, суперюзер) ───────────── */
 
-/* Кнопка-пилюля рядом с «Процессы» — визуальный гостевой режим
-   (ai/admin/guest_mode.py). В активном состоянии подсвечена: суперюзер
-   смотрит админку глазами разработчика промптов. */
+/* Кнопка-пилюля рядом с «Процессы» — окно выбора группы (ai/admin/guest_mode.py,
+   static/admin/js/view_as.js). В активном состоянии подсвечена: суперюзер
+   смотрит админку глазами участника выбранной группы (честная эмуляция). */
 .ai-guest-form {
   display: inline;
   margin-left: 8px;
@@ -456,6 +456,39 @@
   color: #b54708;
   border-color: #b54708;
   background: color-mix(in srgb, #fff7ed 70%, var(--body-bg));
+}
+
+/* Окно выбора группы (<dialog class="ai-view-as-dialog">). */
+.ai-view-as-dialog {
+  border: 1px solid var(--hairline-color);
+  border-radius: 8px;
+  padding: 16px 20px;
+  min-width: 320px;
+  max-width: 90vw;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+}
+
+.ai-view-as-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.ai-view-as-dialog p {
+  margin: 0 0 10px;
+  font-weight: 600;
+}
+
+.ai-view-as-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+
+.ai-view-as-list li {
+  margin: 0 0 6px;
+}
+
+.ai-view-as-dialog .button {
+  margin: 4px 6px 0 0;
 }
 
 /* ───────────── Страница документации (группа «Документация») ───────────── */

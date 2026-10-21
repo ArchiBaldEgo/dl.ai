@@ -7,7 +7,11 @@
     <meta name="viewport"
         content="width=device-width, initial-scale=1">
     <meta http-equiv="X-UA-Compatible" content="ie=edge">
-    <!-- Тема применяется до первой отрисовки (без FOUC): по умолчанию светлая. -->
+    <!-- Тема применяется до первой отрисовки (без FOUC): по умолчанию светлая.
+         ИСКЛЮЧЕНИЕ из правила «JS — в файлах»: скрипт обязан выполниться
+         СИНХРОННО, до отрисовки первого кадра (внешний файл с defer — после
+         неё, и тема мигнёт). Сам он — 10 строк, ради него отдельный файл
+         не заводим. -->
     <script>
     (function () {
         try {
@@ -28,8 +32,8 @@
     <!-- Тема подключается ПОСЛЕ страничных CSS, чтобы переменные перепобивали значения. -->
     <link rel="stylesheet" href="/ai/assets/admin/css/ai_theme.css?v=3"/>
     {% block js %}
-    <script src="/ai/assets/admin/js/ai-common.js?v=16" defer></script>
-    <script src="/ai/assets/admin/js/chat_template.js?v=4" defer></script>
+    <script src="/ai/assets/admin/js/ai-common.js?v=18" defer></script>
+    <script src="/ai/assets/admin/js/chat_template.js?v=6" defer></script>
     {% endblock %}
     {% block extra_js %}
     <!-- Онбординг-wizard: решение «показывать ли» принимает сервер
@@ -37,7 +41,7 @@
          Скрипт после ai-common.js (defer-порядок), сам стартует только при
          show:true. -->
     {% if ai_wizard %}{{ ai_wizard|json_script:"ai-wizard-config" }}{% endif %}
-    <script src="/ai/assets/admin/js/ai-wizard.js?v=5" defer></script>
+    <script src="/ai/assets/admin/js/ai-wizard.js?v=6" defer></script>
     {% endblock %}
     <title>DLAPI</title>
 </head>
@@ -52,7 +56,7 @@
                     <option language="French"{% if saved_lang == 'French' %} selected{% endif %}>Français</option>
                 </select>
                 <select id="select">
-                    {% if available_models %}
+                    {% if available_models or user_models %}
                         {% if favorite_models %}
                             <optgroup data-ai-group="favorites" label="{{ t.favoritesGroup }}">
                                 {% for model in favorite_models %}
@@ -62,6 +66,7 @@
                                 {% endfor %}
                             </optgroup>
                         {% endif %}
+                        {% if available_models %}
                         <optgroup data-ai-group="all" label="{{ t.allModelsGroup }}">
                             {% for model in other_models %}
                                 <option value="{{ model.key }}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}"{% if model.key == default_model_key %} selected{% endif %}>
@@ -69,11 +74,24 @@
                                 </option>
                             {% endfor %}
                         </optgroup>
+                        {% endif %}
                         <!-- Экспериментальные бесплатные модели (OpenRouter) — всегда самый низ селектора -->
                         {% if experimental_models %}
                             <optgroup data-ai-group="experimental" label="{{ t.experimentalModelsGroup }}">
                                 {% for model in experimental_models %}
                                     <option value="{{ model.key }}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}">
+                                        {{ model.title }}
+                                    </option>
+                                {% endfor %}
+                            </optgroup>
+                        {% endif %}
+                        <!-- Личные модели пользователя («Мои модели») — самый низ селектора.
+                             Видны ТОЛЬКО владельцу: чужие модели чужие (проверка владельца —
+                             ai/services/user_models.py::find_user_model, резолв — в ModelCaller). -->
+                        {% if user_models %}
+                            <optgroup data-ai-group="mine" label="{{ t.myModelsGroup }}">
+                                {% for model in user_models %}
+                                    <option value="{{ model.key }}" data-avg-seconds="" data-percent-solved="">
                                         {{ model.title }}
                                     </option>
                                 {% endfor %}
@@ -100,7 +118,7 @@
                     <option value="accuracy">{{ t.sortAccuracy }}</option>
                     <option value="both">{{ t.sortBoth }}</option>
                 </select>
-                <select id="selectType" onchange="goToAiPage(this)">
+                <select id="selectType">
                     <option data-link="/ai/chat/" {% block chat_selected %}{% endblock %}>{{ t.chat }}</option>
                     <option data-link="/ai/solve-problem/" {% block solve_selected %}{% endblock %}>{{ t.decideTask }}</option>
                     <option data-link="/ai/find-error/" {% block error_selected %}{% endblock %}>{{ t.findError }}</option>
@@ -132,18 +150,18 @@
                     aria-label="{{ t.userDocs }}" title="{{ t.userDocs }}">?</button>
             </div>
             <div class="voice-mod-div">
-                <button type="button" class="voice-mode-btn" id="voiceModeBtn" onclick="toggleVoiceControls()">
+                <button type="button" class="voice-mode-btn" id="voiceModeBtn">
                     {{ t.voiceMode }}
                 </button>
                 <div class="voice-status" id="voiceStatus"></div>
             </div>
             <!-- Голосовые контролы (скрыты по умолчанию) -->
             <div class="voice-controls" id="voiceControls">
-                <button type="button" class="voice-btn" id="voiceInputBtn" onclick="toggleVoiceInput()">
+                <button type="button" class="voice-btn" id="voiceInputBtn">
                     <span class="voice-input-indicator" id="voiceIndicator"></span>
                     {{ t.voiceInput }}
                 </button>
-                <button type="button" class="voice-btn" id="voiceOutputBtn" onclick="speakLastResponse()">
+                <button type="button" class="voice-btn" id="voiceOutputBtn">
                     {{ t.voiceOutput }}
                 </button>
 
@@ -158,17 +176,21 @@
         </div>
         <hr/>
 
+        {% comment %}Основная область страницы. Блок вынесен, чтобы страницы со
+        СВОЕЙ формой (например «Мои AI-модели») не вставляли её внутрь общей
+        формы переписки — вложенные form невалидны.{% endcomment %}
+        {% block main_area %}
         <div class="blo">
             <ul id='messages'>
             </ul>
             <div class="dv">
-                <div class="resize-button" onmousedown="startResize(event)">🠔 </div>
-                <form action="" method="post" onsubmit="sendMessage(event)">
+                <div class="resize-button">🠔 </div>
+                <form action="" method="post" id="chatForm">
                     {% csrf_token %}
                     {% block form_content %}{% endblock %}
                     <div class="buttons-block">
                         <button type="submit">{{ t.send }}</button>
-                        <button type="button" onclick="clearContext()">{{ t.clear }}</button>
+                        <button type="button" id="clearContextBtn">{{ t.clear }}</button>
                         {% block extra_buttons %}{% endblock %}
                     </div>
 
@@ -178,11 +200,20 @@
                 </form>
             </div>
         </div>
+        {% endblock %}
 
         <div class="sidebar">
             <a href="/ai/admin/login/?next=/ai/admin/" class="sidebar-admin-link">
                 <div class="sidebar-header" id="adminPanelLink">
                     {{ t.adminPanel }}
+                </div>
+            </a>
+            {# Свои AI-модели (личные провайдер+модель+ключ) — доступны только #}
+            {# владельцу, поэтому ссылка ведёт на клиентскую страницу: там   #}
+            {# права проверяет сам сервер (владелец — текущий пользователь).  #}
+            <a href="/ai/my-models/" class="sidebar-admin-link">
+                <div class="sidebar-header" id="myModelsLink">
+                    {{ t.myModels }}
                 </div>
             </a>
         </div>
@@ -211,18 +242,5 @@
         </div>
     </div>
 </body>
-<script>
-function goToAiPage(selectEl) {
-    const selected = selectEl.querySelector('option:checked');
-    const target = selected && selected.dataset ? selected.dataset.link : '';
-    if (!target) {
-        return;
-    }
-    try { setAiState({ tab: target }); } catch (e) {}
-    const query = window.location.search || '';
-    const destination = query ? `${target}${query}` : target;
-    window.location.href = destination;
-}
-</script>
 {% block extra_body_script %}{% endblock %}
 </html>

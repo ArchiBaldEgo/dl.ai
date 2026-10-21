@@ -320,7 +320,8 @@ class MyConsumer(AsyncWebsocketConsumer):
         raw_think = data.get("think")
         think = bool(raw_think) if isinstance(raw_think, bool) else None
         result = await self.caller.call(
-            message, self.client_id, model_key, language=language, think=think)
+            message, self.client_id, model_key, language=language, think=think,
+            user=self.user)
         end_time = timezone.now()
 
         # Treat empty response as an error, not a success.
@@ -334,7 +335,8 @@ class MyConsumer(AsyncWebsocketConsumer):
             await self.log_writer.update_error(log, result.response_text, result.error_message, end_time)
         else:
             await self.log_writer.update_success(
-                log, result.response_text, result.tokens, result.model_title, end_time
+                log, result.response_text, result.tokens, result.model_title, end_time,
+                prompt_tokens=getattr(result, "prompt_tokens", 0),
             )
 
         end_str = timezone.localtime(end_time, MOSCOW_TZ).strftime("%H:%M:%S")

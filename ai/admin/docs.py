@@ -2,10 +2,11 @@
 
 Три главы документации (см. ai/services/docs.py) открываются как страница
 с HTML-рендером markdown и скачиваются как .md. Доступ по роли главы:
-"any" — всем в админке, "staff" — staff/суперюзер, "superuser" — суперюзер.
-В гостевом режиме суперюзер видит только главу для разработчика промптов
-(доки "staff"/"superuser" скрываются вместе с остальными суперюзерскими
-инструментами навигации).
+"any" — всем в админке, "staff" — staff/суперюзер, "superuser" — суперюзер;
+соответствующие главы открываются не-staff юзеру ключами docs.developer /
+docs.superuser (глава «Разработчик промптов» — docs.prompt_developer;
+документация НЕ идёт с ролью — решение владельца 2026-10-20). В режиме
+«Посмотреть как…» главы честно считаются по ключам группы.
 """
 
 from urllib.parse import quote
@@ -21,26 +22,40 @@ from ..services.docs import (
     render_chapter_html,
     visible_chapter_slugs,
 )
-from .permissions import is_staff_or_superuser, is_superuser_user
+from .permissions import (
+    can_access_prompt_developer_docs,
+    is_staff_or_superuser,
+    is_superuser_user,
+    user_has_key,
+)
 from .site import ai_admin_site
+
+# Глава doc-ранга → ключ группы доступа, открывающий её не-staff юзеру
+# (выдаётся суперюзером на «Группах доступа»).
+_DOCS_ROLE_KEYS = {"staff": "docs.developer", "superuser": "docs.superuser"}
 
 
 def _chapter_visible_for_user(chapter, request) -> bool:
     """Глава доступна, если ранг роли главы не выше ранга пользователя.
 
-    Гостевой режим визуально понижает суперюзера до разработчика промптов
-    (см. guest_mode.is_viewing_as_guest) — придерживаемся того же правила.
+    Ключи docs.developer/docs.superuser/docs.prompt_developer открывают
+    соответствующие главы группам доступа; эмуляция «Посмотреть как…»
+    считается внутри тех же проверок (permissions) — отдельный гость-ветки
+    больше нет.
     """
-    from .guest_mode import is_viewing_as_guest
-
-    if is_viewing_as_guest(request):
-        # Гостевой режим = уровень разработчика промптов: только главы "any".
-        return chapter.min_role == "any"
     if chapter.min_role == "any":
         return True
+    if chapter.min_role == "prompt_developer":
+        return can_access_prompt_developer_docs(request.user)
     if is_superuser_user(request.user):
         return True
-    return chapter.min_role == "staff" and is_staff_or_superuser(request.user)
+    if chapter.min_role == "staff":
+        return is_staff_or_superuser(request.user) or user_has_key(
+            request.user, _DOCS_ROLE_KEYS["staff"]
+        )
+    if chapter.min_role == "superuser":
+        return user_has_key(request.user, _DOCS_ROLE_KEYS["superuser"])
+    return False
 
 
 def _visible_chapters(request):

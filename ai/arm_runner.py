@@ -39,6 +39,7 @@ from .services.code_carver import (  # noqa: E402
     _strip_think_blocks,
     _trim_prose_tail,
     has_language_marker,
+    language_code_incomplete,
 )
 from django.utils.html import strip_tags
 
@@ -88,12 +89,29 @@ def _to_float(value, default=0.0):
 
 
 def _extract_model_response(response):
+    """Текст ответа и токены ОТВЕТА из кортежа хендлера.
+
+    Контракт хендлера: ``(content, completion_tokens, is_error, cut_flag,
+    prompt_tokens)`` — 5-й элемент (prompt_tokens) добавлен для учёта
+    токенов (prompt + completion) и НЕ сдвигает прежние позиции.
+    """
     if isinstance(response, tuple):
         response_text = response[0] if len(response) > 0 else ""
         tokens = _to_int(response[1] if len(response) > 1 else 0)
         return str(response_text or ""), tokens
 
     return str(response or ""), 0
+
+
+def _extract_prompt_tokens(response) -> int:
+    """Токены ПРОМПТА из кортежа хендлера (5-й элемент).
+
+    Провайдеры, не отдающие usage (web-пулы), дают 0 — на странице «Контроль
+    токенов» такие строки честно помечаются «учёт недоступен».
+    """
+    if isinstance(response, tuple) and len(response) > 4:
+        return _to_int(response[4])
+    return 0
 
 
 def _is_model_error(response):
@@ -136,12 +154,23 @@ from .grading import (
 # Вердикты DL живут в dl_api_client (dl_verdict_from_comment) — единственный
 # источник (DRY); здесь только алиасы под исторические локальные имена.
 from .dl_api_client import (  # noqa: E402
+    DL_REASON_COMPILE_ERROR as _REASON_COMPILE_ERROR,
+    DL_REASON_UNDEFINED as _REASON_UNDEFINED,
+    DL_REASON_WRONG_ANSWER as _REASON_WRONG_ANSWER,
     DL_VERDICT_FAILED as _VERDICT_FAILED,
     DL_VERDICT_SOLVED as _VERDICT_SOLVED,
+    dl_failure_reason_from_comment as _failure_reason_from_dl_comment,
     dl_verdict_from_comment as _verdict_from_dl_comment,
 )
 
 _VERDICT_SKIPPED = "skipped"
+
+# Причины сбоя пары (ортогональны вердикту). Значения совпадают с
+# AIModelTestResult.FAILURE_REASON_CHOICES — источник истины там, здесь
+# алиасы для кода прогона (как вердикты выше).
+_REASON_MODEL_ERROR = "model_error"
+_REASON_NO_CODE = "no_code"
+_REASON_SKIPPED = "skipped"
 
 # Лимит позиций в строке «Ошибки по темам» (остальное — «+ ещё N»):
 # отчёт не должен разбухать на больших прогонах.
@@ -363,6 +392,97 @@ def _per_bucket(results, key_fn, label_fn):
     return rows
 
 
+def _topic_bucket_key(item):
+    """Ключ группировки по теме: ID темы (не название).
+
+    Названия тем повторяются между языками (курс «[Ассемблер i8086, C-MPA]»
+    держит по одной теме с одинаковым названием на язык) — группировка по
+    названию сливала бы разные темы в одну строку отчёта. Без ID (тема не
+    определена) ключ — пустая строка: такие пары попадают в отдельную
+    строку с честной подписью (см. ``_topic_bucket_label``).
+    """
+    topic_id = item.get("topic_id")
+    if topic_id is None:
+        return ""
+    return str(topic_id)
+
+
+def _topic_bucket_label(item):
+    """Подпись строки «по темам»: название темы, иначе — по-человечески.
+
+    Владелец отдельно просил убрать «Без темы» из отчёта: в прогоне должны
+    быть видны ВСЕ задействованные темы. Тема без названия — это не
+    «отсутствующая тема», а конкретная задача вне темы DL-дерева; подпись
+    строится по языку/имени задачи, чтобы строка читалась.
+    """
+    name = (item.get("topic_name") or "").strip()
+    if name:
+        return name
+    lang = (item.get("prog_lang_name") or "").strip()
+    task_name = (item.get("task_name") or "").strip()
+    if lang and task_name:
+        return f"{task_name} ({lang})"
+    if task_name:
+        return task_name
+    if lang:
+        return f"Задачи без темы ({lang})"
+    return "Задачи без темы"
+
+
+def _topics_used(results):
+    """Список всех тем, задействованных в прогоне (для отчёта и проверок).
+
+    Возвращает ``[{"topic_id", "topic_name", "pairs", "solved"}]`` — по
+    возрастанию числа пар (топ-частая тема первой). Темы без названия
+    подписываются так же, как в строках отчёта.
+    """
+    buckets: dict = {}
+    for item in results:
+        key = _topic_bucket_key(item)
+        bucket = buckets.setdefault(
+            key,
+            {
+                "topic_id": item.get("topic_id"),
+                "topic_name": _topic_bucket_label(item),
+                "pairs": 0,
+                "solved": 0,
+            },
+        )
+        bucket["pairs"] += 1
+        if item.get("verdict") == _VERDICT_SOLVED:
+            bucket["solved"] += 1
+    return sorted(buckets.values(), key=lambda b: (-b["pairs"], b["topic_name"]))
+
+
+def _build_failure_reasons(results):
+    """Секция «Сбои по причинам» отчёта пакетного прогона.
+
+    Таксономия — из ``AIModelTestResult.FAILURE_REASON_CHOICES`` (единый
+    источник): «сбой ответа модели», «не выкушен код», «ошибка компиляции»,
+    «неправильный ответ» (+ честные «причина не распознана» / «пропущено»).
+    Учитываются только пары с непустой причиной (у решённых пар причины
+    нет). Проценты — от числа ВСЕХ пар прогона.
+    """
+    total = len(results)
+    counts: dict = {}
+    for item in results:
+        reason = (item.get("failure_reason") or "").strip()
+        if not reason:
+            continue
+        counts[reason] = counts.get(reason, 0) + 1
+    rows = []
+    for reason, count in counts.items():
+        label = AIModelTestResult.FAILURE_REASON_LABELS.get(reason, reason)
+        rows.append({
+            "key": reason,
+            "label": label,
+            "count": count,
+            "percent": round(count / total * 100, 1) if total else 0.0,
+        })
+    rows.sort(key=lambda row: (-row["count"], row["label"]))
+    return rows
+
+
 def _build_batch_report(results):
     """Batch-solve report: per-model + per-topic tables + overall counters.
 
@@ -370,6 +490,14 @@ def _build_batch_report(results):
     результатов) и errors_by_topic — нерешённые пары (failed/skipped),
     сгруппированные по темам с ограничением на количество позиций в строке
     (компактность отчёта на больших прогонах).
+
+    Добавлено (2026-10): секция ``failure_reasons`` — таксономия сбоев
+    («сбой ответа модели» / «не выкушен код» / «ошибка компиляции» /
+    «неправильный ответ»), см. AIModelTestResult.FAILURE_REASON_CHOICES.
+    Темы группируются ПО ID темы (topic_id), а не по названию: названия
+    совпадают у разных языков (i8086 / C-MPA), и без ID отчёт сливал бы их
+    в одну строку. Тема без названия подписывается по-человечески, а не
+    «Без темы»: в прогоне всегда видно, какие темы задействованы.
     """
     if not results:
         return None
@@ -389,8 +517,8 @@ def _build_batch_report(results):
     )
     per_topic = _per_bucket(
         results,
-        key_fn=lambda r: r.get("topic_name") or "Без темы",
-        label_fn=lambda r: r.get("topic_name") or "Без темы",
+        key_fn=_topic_bucket_key,
+        label_fn=_topic_bucket_label,
     )
 
     # Объём прогона: уникальные модели и задачи из результатов.
@@ -405,7 +533,7 @@ def _build_batch_report(results):
         verdict = r.get("verdict")
         if verdict in (_VERDICT_SOLVED, None):
             continue
-        topic = r.get("topic_name") or "Без темы"
+        topic = _topic_bucket_label(r)
         bucket = errors_map.setdefault(topic, {"count": 0, "items": []})
         bucket["count"] += 1
         task_label = str(r.get("task_name") or ("#" + str(r.get("task_node_id") or "")))
@@ -424,6 +552,8 @@ def _build_batch_report(results):
         )
     ]
 
+    failure_reasons = _build_failure_reasons(results)
+
     return {
         "total_pairs": len(results),
         "solved": solved,
@@ -436,6 +566,8 @@ def _build_batch_report(results):
         "models_count": models_count,
         "tasks_count": tasks_count,
         "errors_by_topic": errors_by_topic,
+        "failure_reasons": failure_reasons,
+        "topics_used": _topics_used(results),
     }
 
 
@@ -790,6 +922,7 @@ def _run_job_worker(
                     f"admin-{user_id}-{model['key']}-{run_id}",
                 )
                 response_text, tokens = _extract_model_response(response)
+                prompt_tokens = _extract_prompt_tokens(response)
                 # Флаг обреза по факту (tokens упёрся в потолок провайдера).
                 # У ошибочного вызова флага нет — это другой вид сбоя.
                 single_truncated = (
@@ -814,6 +947,7 @@ def _run_job_worker(
                     "model_title": model["title"],
                     "duration": duration,
                     "tokens": tokens,
+                    "tokens_prompt": prompt_tokens,
                     "short_response": short_response,
                     "status": status,
                     "raw_response": detailed_text,
@@ -829,6 +963,7 @@ def _run_job_worker(
                     "model_title": model["title"],
                     "duration": duration,
                     "tokens": 0,
+                    "tokens_prompt": 0,
                     "short_response": friendly_text or f"Ошибка вызова модели: {exc_text}",
                     "status": status,
                     "raw_response": detailed_text,
@@ -948,6 +1083,11 @@ def _run_job_worker(
             duration_seconds=(end_time - start_time).total_seconds(),
             response_text=response_summary[:5000],
             status=AIRequestLog.STATUS_SUCCESS if any(r.get("status") == "ok" for r in results) else AIRequestLog.STATUS_ERROR,
+            # Расход одиночного ARM-прогона — в журнал (иначе он не виден
+            # на странице «Контроль токенов»: batch-записи токены пишут,
+            # одиночные — нет). Сумма по парам прогона.
+            tokens=sum(_to_int(r.get("tokens")) for r in results),
+            tokens_prompt=sum(_to_int(r.get("tokens_prompt")) for r in results),
         )
         AIModelTestRun.objects.filter(pk=test_run.pk).update(
             status=AIModelTestRun.STATUS_COMPLETED,
@@ -1102,19 +1242,26 @@ def _extract_code_from_response(text, file_extension=""):
     ни одного структурного маркера (window.HYDRATION-JSON, «[ВСТАВЬТЕ ВАШ
     КОД]», протекшие рассуждения) возвращает "" — в DL такой текст не ходит
     и в code не пишется (реальные кейсы res#194/206/180).
+
+    Конвейер вызывается ДВАЖДЫ: сначала на срезе «Альтернатива:/Вариант 2:»
+    (второе решение не должно затирать основное), а при полностью пустом
+    результате — на СЫРОМ тексте: раннее упоминание «Альтернатива:» в CoT
+    не должно срезать ФИНАЛЬНУЮ программу, записанную ниже.
     """
     from .services.code_carver import has_language_marker
-    code = _extract_code_pipeline(text, file_extension)
+    code = _extract_code_pipeline(text, file_extension, apply_alt_cut=True)
+    if not code and text:
+        code = _extract_code_pipeline(text, file_extension, apply_alt_cut=False)
     if code and not has_language_marker(code, file_extension or ""):
         return ""
     return code
 
 
-def _extract_code_pipeline(text, file_extension):
+def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
     """Extract pure code from an AI response.
 
     Структурные экстракторы С-МПА (services/code_carver.py) идут ПЕРВЫМИ,
-    когда известно расширение: сначала по всему текст (мульти-анкер +
+    когда известно расширение: сначала по всему тексту (мульти-анкер +
     валидация кандидатов внутри), затем по закрытым код-фенсам. Без
     расширения структурники пробуются только как последняя надежда
     (маркеры видны в сыром ответе). Структурники бракуют склейки
@@ -1125,6 +1272,11 @@ def _extract_code_pipeline(text, file_extension):
     прози посреди), незакрытая оградка, карвинг прогона код-строк; каждый
     кандидат проверяется тем же «мид-контролем». Prose-In-Fence (res#5170)
     отбрасывается; утечка оградок срезается strip_code_fence_lines().
+    По фенс-блокам в структурных экстракторах идём С КОНЦА — последний
+    валидный фенс обычно финальный ответ модели (res#4160).
+
+    apply_alt_cut=False отключает срез «Альтернатива:/Вариант 2:»
+    (спасательный прогон _extract_code_from_response).
 
     Если кода в ответе нет вовсе, возвращается пустая строка (воркер
     засчитает «код не извлечён»), а не простыня рассуждений.
@@ -1138,7 +1290,8 @@ def _extract_code_pipeline(text, file_extension):
     from .services import code_carver
     # «Альтернатива:/Вариант 2:…» с кодом второго решения срезаются ДО всех
     # экстракторов (структурники, фенсы и карвинг работают по одному тексту).
-    cleaned = code_carver.cut_after_alternative_heading(cleaned)
+    if apply_alt_cut:
+        cleaned = code_carver.cut_after_alternative_heading(cleaned)
     structural = None
     if ext in (".i86", ".asm"):
         structural = code_carver.extract_asm_i86
@@ -1154,8 +1307,9 @@ def _extract_code_pipeline(text, file_extension):
         if found:
             return found
         # По фенс-блокам: внутри ограды кандидата границы естественны;
-        # последний валидный фенс обычно финальный ответ модели.
-        for block in _CODE_FENCE_RE.findall(cleaned):
+        # последний валидный фенс обычно финальный ответ модели — обходим
+        # С КОНЦА (res#4160).
+        for block in reversed(_CODE_FENCE_RE.findall(cleaned)):
             block = block.strip()
             if not block or _looks_like_prose(block):
                 continue
@@ -1201,7 +1355,7 @@ def _extract_code_pipeline(text, file_extension):
         found = structural(cleaned, relaxed=True)
         if found:
             return code_carver.strip_code_fence_lines(found)
-        for block in _CODE_FENCE_RE.findall(cleaned):
+        for block in reversed(_CODE_FENCE_RE.findall(cleaned)):
             found = structural(block.strip(), relaxed=True)
             if found:
                 return code_carver.strip_code_fence_lines(found)
@@ -1447,6 +1601,10 @@ def _prepare_batch_run(
         sent_at=start_time,
         model_names=models_titles,
         message=f"Batch solve rerun {run_id}" if rerun else f"Batch solve run {run_id}",
+        # Индексированный признак batch-записи: заменяет парсинг
+        # «Batch solve run <hex>» из текста message (полный scan по журналу
+        # на каждой загрузке «Настройки ИИ-приложения»).
+        batch_run_id=run_id,
         programming_language_id=programming_language_id,
         programming_language_name=programming_language_name or "",
         topic_id=topic_id,
@@ -1466,6 +1624,10 @@ def _prepare_batch_run(
         task = ensure_task(
             node_id, session_id=session_id, course_id=course_id,
             programming_language_id=programming_language_id,
+            # Тема прогона (выбрана оператором на форме) — запасной вариант,
+            # если тему задачи не удалось определить из ветки DL: без неё в
+            # отчёте появлялись строки «Без темы» вместо задействованных тем.
+            fallback_topic_id=topic_id,
         )
         if task is None:
             continue
@@ -1546,6 +1708,7 @@ def _prepare_batch_run(
             "effective_ext": effective_ext,
             "prog_lang_name": prog_lang_name,
             "topic_name": topic_name,
+            "topic_id": task.topic_id,
             "prompt_id": task_prompt_id,
         })
 
@@ -1811,11 +1974,16 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     raw_response = ""
     cleaned_text = ""
     tokens = 0
+    prompt_tokens = 0
     truncated = False
     code_only = ""
     dl_test_comment = ""
     dl_submit_error = ""
     dl_queue_id = 0
+    # Причина провала (таксономия сбоев). Пустая строка = причина нет
+    # (пара решена). Заполняется в каждой ветке ниже; последняя присваивание
+    # — в ветке DL-классификации по тексту комментария.
+    failure_reason = _REASON_UNDEFINED
 
     held_dl_lock = False
     try:
@@ -1833,6 +2001,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         if _is_cancel_requested(ctx["run_id"]):
             return None
         response_text, tokens = _extract_model_response(response)
+        prompt_tokens = _extract_prompt_tokens(response)
         cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
         if not cleaned_text:
             cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
@@ -1856,6 +2025,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         if is_model_err:
             verdict = _VERDICT_FAILED
             status = "error"
+            failure_reason = _REASON_MODEL_ERROR
             dl_submit_error = (friendly or cleaned_text)[:2000]
             short_response = (friendly or cleaned_text)[:300] + (
                 "..." if len(friendly or cleaned_text) > 300 else ""
@@ -1876,6 +2046,14 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 ".i86", ".asm", ".mpc"
             ) and not has_language_marker(code_only, effective_ext)
             if junk_code:
+                code_only = ""
+
+            # Обрезанный ответ с ЧАСТИЧНЫМ кодом: неполная программа (.i86
+            # без концевика каркаса, .mpc с несбалансированными скобками или
+            # без main) не компилируется — в DL не ходим, код считается
+            # «не извлечён» → ниже сработает авто-ретрай «сразу код». Для НЕ
+            # обрезанных (complete) ответов гейт не применяется.
+            if code_only and truncated and language_code_incomplete(code_only, effective_ext):
                 code_only = ""
 
             # Кода НЕ извлекли (при любом исходе, не только обрезе) — один
@@ -1911,6 +2089,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                     if _is_cancel_requested(ctx["run_id"]):
                         return None
                     response_text, tokens = _extract_model_response(retry_response)
+                    prompt_tokens = _extract_prompt_tokens(retry_response)
                     cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
                     if not cleaned_text:
                         cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
@@ -1934,6 +2113,9 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                         )
                         if code_only and effective_ext in (".i86", ".asm", ".mpc") and not has_language_marker(code_only, effective_ext):
                             code_only = ""
+                        # Ретрай тоже мог обрезаться по пути к концевику.
+                        if code_only and truncated and language_code_incomplete(code_only, effective_ext):
+                            code_only = ""
                 except Exception as retry_exc:  # noqa: BLE001
                     gen_seconds += round(perf_counter() - retry_started, 2)
                     # truncated НЕ завышаем: флаг ставился по факту обреза
@@ -1949,17 +2131,32 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             )
             if not code_only and junk_code:
                 verdict = _VERDICT_FAILED
+                failure_reason = _REASON_NO_CODE
                 dl_test_comment = (
                     "Извлечённый текст не похож на программу языка "
                     "курса (нет структурных маркеров) — DL не тестировал"
                 )
             elif not code_only:
                 verdict = _VERDICT_FAILED
-                dl_test_comment = (
-                    "Модель не успела вывести код — ответ оборван лимитом генерации"
-                    if truncated
-                    else "Не удалось извлечь код из ответа модели"
+                # Ретрай тоже может упасть с ошибкой провайдера (429/500/
+                # таймаут) — тогда кода нет НЕ из-за ответа модели, а из-за
+                # СБОЯ модели: причина «не выкушен код» была бы враньём.
+                # Раннер знает об этом по флагу is_model_err (его выставляет
+                # ретрай-ветка выше).
+                failure_reason = (
+                    _REASON_MODEL_ERROR if is_model_err else _REASON_NO_CODE
                 )
+                if is_model_err:
+                    dl_test_comment = (
+                        "Сбой ответа модели при повторной попытке — "
+                        "код не получен"
+                    )
+                else:
+                    dl_test_comment = (
+                        "Модель не успела вывести код — ответ оборван лимитом генерации"
+                        if truncated
+                        else "Не удалось извлечь код из ответа модели"
+                    )
             elif can_run_dl:
                 if not _acquire_dl_run_lock(dl_lock, ctx["run_id"]):
                     return None
@@ -1982,8 +2179,18 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 dl_queue_id = dl_result.get("queue_id", 0) or 0
                 # solved — только если DL явно подтвердил; иное → failed.
                 verdict = dl_verdict if dl_verdict is not None else _VERDICT_FAILED
+                # Таксономия сбоев: компиляция vs неправильный ответ vs
+                # «не распознано» — по ТЕКСТУ комментария DL (канонический
+                # классификатор dl_failure_reason_from_comment).
+                if verdict == _VERDICT_SOLVED:
+                    failure_reason = ""
+                else:
+                    failure_reason = _failure_reason_from_dl_comment(dl_test_comment)
+                    if not failure_reason:
+                        failure_reason = _REASON_UNDEFINED
             else:
                 verdict = _VERDICT_FAILED
+                failure_reason = _REASON_UNDEFINED
                 dl_test_comment = (
                     "Не задано расширение файла для тестирования на DL "
                     "(выберите язык/расширение в форме запуска)"
@@ -1998,6 +2205,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         friendly, detailed = humanize_model_error(exc_text, include_detail=True)
         verdict = _VERDICT_FAILED
         status = "error"
+        failure_reason = _REASON_MODEL_ERROR
         short_response = friendly or f"Ошибка вызова модели: {exc_text}"
         raw_response = detailed or cleaned_text
         dl_submit_error = exc_text[:2000]
@@ -2027,8 +2235,10 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 "model_title": model["title"],
                 "status": status,
                 "verdict": verdict,
+                "failure_reason": failure_reason or "",
                 "duration_seconds": duration,
                 "tokens": tokens,
+                "tokens_prompt": prompt_tokens,
                 "short_response": short_response,
                 "raw_response": raw_response or "",
                 "code": code_only or "",
@@ -2055,9 +2265,14 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "model_title": model["title"],
             "duration": duration,
             "tokens": tokens,
+            "tokens_prompt": prompt_tokens,
             "short_response": short_response,
             "status": status,
             "verdict": verdict,
+            "failure_reason": failure_reason or "",
+            "failure_reason_label": AIModelTestResult.FAILURE_REASON_LABELS.get(
+                failure_reason or "", ""
+            ),
             "raw_response": raw_response,
             "code": code_only,
             "dl_comment": dl_test_comment,
@@ -2120,6 +2335,28 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     return None
 
 
+def _close_stale_connections_if_safe():
+    """Чистка протухших коннектов воркера без разрыва TestCase-транзакции.
+
+    close_old_connections() при CONN_MAX_AGE=0 считает ЗАКРЫТЫМ любой
+    коннект (close_at≈сейчас), поэтому вызов в начале/в конце model-цикла
+    умирал для тестового потока: TestCase держит atomic на этом же
+    коннекте — закрытие внутри atomic оставляет оборванный коннект, и все
+    последующие запросы пары/финализации падали
+    «InterfaceError: connection already closed» (33 теста arm/batch-пакета
+    не запускались ни изолированно, ни в полном сьюте на чистой базе).
+    Прод-воркер работает в autocommit — там чистка легитимна и нужна.
+    Вызываем close_old_connections() только когда atomic нет."""
+    from django.db import connection
+    try:
+        if connection.get_autocommit():
+            close_old_connections()
+    except Exception:
+        # Спорные состояния не должны ронять прогон — в крайнем случае
+        # чистку пропускаем (это hygiene, не функциональность).
+        pass
+
+
 def _run_batch_model_loop(ctx, model, model_index, dl_lock):
     """Цикл ОДНОЙ модели по её задачам — таргет model-потока (или inline при N=1).
 
@@ -2130,7 +2367,7 @@ def _run_batch_model_loop(ctx, model, model_index, dl_lock):
     исключением не задевает остальные и не валит прогон в FAILED
     (финализация добавит примечание в batch_error_message).
     """
-    close_old_connections()
+    _close_stale_connections_if_safe()
     run_id = ctx["run_id"]
     try:
         for task_ctx in ctx["task_ctxs"]:
@@ -2158,7 +2395,7 @@ def _run_batch_model_loop(ctx, model, model_index, dl_lock):
         _mark_batch_model_failed(run_id, model_index)
     finally:
         _mark_batch_model_finished(run_id, model_index)
-        close_old_connections()
+        _close_stale_connections_if_safe()
 
 def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
     """Финализация batch-прогона: ОДИН раз, после join всех model-потоков.
@@ -2281,12 +2518,19 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
         )[:2000]
     if cancelled:
         batch_error_message = (batch_error_message + " Прервано пользователем.")[:2000]
+    # Токены прогона в записи журнала: сумма по всем парам (ответ + промпт).
+    # Раньше batch-записи оставались с tokens=0 — из-за этого ARM-прогоны
+    # были не видны в учёте токенов (страница «Контроль токенов»).
+    batch_tokens = sum(_to_int(r.get("tokens")) for r in batch_results)
+    batch_prompt_tokens = sum(_to_int(r.get("tokens_prompt")) for r in batch_results)
     AIRequestLog.objects.filter(pk=log.pk).update(
         received_at=end_time,
         duration_seconds=(end_time - start_time).total_seconds(),
         status=AIRequestLog.STATUS_SUCCESS if all_solved_batch else AIRequestLog.STATUS_ERROR,
         response_text=batch_response_text,
         error_message=batch_error_message,
+        tokens=batch_tokens,
+        tokens_prompt=batch_prompt_tokens,
     )
     if cancelled:
         # Прогон уже переведён в STATUS_CANCELLED методом cancel_arm_run
@@ -2356,9 +2600,10 @@ def _batch_results_from_db(test_run, light=False):
         results = []
         rows = test_run.results.values(
             "pk", "model_key", "model_title", "duration_seconds", "tokens",
-            "status", "verdict", "dl_queue_id", "file_extension_snapshot",
-            "topic_name_snapshot", "prog_lang_snapshot", "truncated",
-            "prompt_id", "prompt_name",
+            "tokens_prompt", "status", "verdict", "failure_reason",
+            "dl_queue_id", "file_extension_snapshot",
+            "topic_name_snapshot", "topic_id_snapshot", "prog_lang_snapshot",
+            "truncated", "prompt_id", "prompt_name",
             "task__node_id", "task__name", "task__file_extension",
         ).order_by("model_title")
         for r in rows:
@@ -2371,12 +2616,18 @@ def _batch_results_from_db(test_run, light=False):
                 "model_title": r["model_title"],
                 "duration": r["duration_seconds"] or 0.0,
                 "tokens": r["tokens"] or 0,
+                "tokens_prompt": r["tokens_prompt"] or 0,
                 "status": r["status"],
                 "verdict": r["verdict"] or _VERDICT_FAILED,
+                "failure_reason": r["failure_reason"] or "",
+                "failure_reason_label": AIModelTestResult.FAILURE_REASON_LABELS.get(
+                    r["failure_reason"] or "", ""
+                ),
                 "truncated": bool(r["truncated"]),
                 "dl_queue_id": r["dl_queue_id"] or 0,
                 "file_extension": r["file_extension_snapshot"] or (r["task__file_extension"] or ""),
                 "topic_name": r["topic_name_snapshot"],
+                "topic_id": r["topic_id_snapshot"],
                 "prog_lang_name": r["prog_lang_snapshot"],
                 "prompt_id": r["prompt_id"],
                 "prompt_name": r["prompt_name"] or "",
@@ -2396,9 +2647,14 @@ def _batch_results_from_db(test_run, light=False):
             "model_title": r.model_title,
             "duration": r.duration_seconds or 0.0,
             "tokens": r.tokens or 0,
+            "tokens_prompt": r.tokens_prompt or 0,
             "short_response": r.short_response,
             "status": r.status,
             "verdict": r.verdict or _VERDICT_FAILED,
+            "failure_reason": r.failure_reason or "",
+            "failure_reason_label": AIModelTestResult.FAILURE_REASON_LABELS.get(
+                r.failure_reason or "", ""
+            ),
             "truncated": bool(r.truncated),
             "raw_response": r.raw_response,
             "code": r.code or "",
@@ -2407,6 +2663,7 @@ def _batch_results_from_db(test_run, light=False):
             "dl_queue_id": r.dl_queue_id or 0,
             "file_extension": r.file_extension_snapshot or (r.task.file_extension if r.task else ""),
             "topic_name": r.topic_name_snapshot,
+            "topic_id": r.topic_id_snapshot,
             "prog_lang_name": r.prog_lang_snapshot,
             "prompt_id": r.prompt_id,
             "prompt_name": r.prompt_name or "",

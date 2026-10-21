@@ -5,12 +5,17 @@
 пакетные прогоны. Закрепление (★) выполняется из журнала запросов и из
 блока «Последние пакетные решения» на «Настройке ИИ-приложения».
 
-Права — как у журнала (can_access_logs + скоуп «только свои» для
-prompt_developer): закрепить можно только доступную самому пользователю
-запись журнала, поэтому чужие прогоны в закладки не попадают.
+Права — как у журнала плюс ключ page.pinned_runs (can_access_pinned_runs): закрепить можно только доступную
+самому пользователю запись журнала, поэтому чужие прогоны в закладки
+не попадают.
 
 Страница «Закреплённые...» при этом ОБЩАЯ: у всех с доступом один список
 закреплений всех участников (с авторами); открепить можно только своё.
+Смотреть результаты закреплённых чужих прогонов может КАЖДЫЙ с доступом
+(в том числе промпт-разработчик со скупом «только свои» — ТЗ 2026-10-19:
+закреплённые решения — общая витрина): строке всегда проставляется
+snapshot_url, а ``admin_batch_snapshot_view`` отдаёт снапшот закреплённой
+записи даже когда обычный скуп журнала её прячет (и только закреплённую).
 """
 
 from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
@@ -24,7 +29,7 @@ from .request_logs import (
     _is_batch_solve_log,
     build_batch_rows_for_logs,
 )
-from .permissions import can_access_logs, logs_scope_is_own_user
+from .permissions import can_access_pinned_runs
 from .site import ai_admin_site
 
 PINNED_RUNS_URL = "/ai/admin/pinned-runs/"
@@ -37,8 +42,10 @@ def admin_pinned_runs_view(request):
     разработчики промтов — тот же guard, что у журнала), список закреплений
     ОДИН на всех — видны закрепления всех участников с авторами. Открепить
     (★) можно только своё закрепление; чужое показывается меткой «★ автор».
+    Развёрнуть (смотреть результаты) чужой закреплённый прогон может каждый
+    с доступом — закреплённые решения являются общей витриной (ТЗ 2026-10-19).
     """
-    if not can_access_logs(request):
+    if not can_access_pinned_runs(request):
         return HttpResponseForbidden("Access denied")
 
     pins = list(
@@ -52,20 +59,23 @@ def admin_pinned_runs_view(request):
     rows_by_log_id = {row["id"]: row for row in rows}
 
     # Один и тот же лог могут закрепить несколько человек — показываем один раз
-    # со списком авторов. Открепление — только своё; раскрывать чужие результаты
-    # разработчик промтов не может (скуп журнала) — такому ряду не отдаём
-    # snapshot_url, он не разворачивается кликом.
-    scope_own = logs_scope_is_own_user(request.user)
+    # со списком авторов. Открепление — только своё; СМОТРЕТЬ чужие закреплённые
+    # прогоны может каждый с доступом (ТЗ 2026-10-19): snapshot_url ставится
+    # любой строке, а снапшот-эндпоинт сам допускает закреплённые чужие записи
+    # для промпт-разработчика (см. admin_batch_snapshot_view).
     ordered_rows = []
+    # Пины по логу — один проход (был O(n²): список пинов перебирался для
+    # КАЖДОГО пина — на странице десятков закреплений это квадрат).
+    pins_by_log = {}
+    for pin in pins:
+        pins_by_log.setdefault(pin.log_id, []).append(pin)
     for pin in pins:
         row = rows_by_log_id.pop(pin.log_id, None)
         if row is None:
             continue
-        row_pins = [p for p in pins if p.log_id == pin.log_id]
+        row_pins = pins_by_log.get(pin.log_id, [])
         row["is_own"] = any(p.user_id == request.user.pk for p in row_pins)
         row["pin_authors"] = ", ".join(_pin_author_display(p.user) for p in row_pins)
-        if scope_own and pin.log.user_id != request.user.pk:
-            row["snapshot_url"] = ""
         ordered_rows.append(row)
 
     context = {
@@ -93,7 +103,7 @@ def admin_pinned_run_toggle_view(request, log_id):
     """
     if request.method != "POST":
         return JsonResponse({"ok": False, "error": "Метод не поддерживается"}, status=405)
-    if not can_access_logs(request):
+    if not can_access_pinned_runs(request):
         return HttpResponseForbidden("Access denied")
 
     log, error = _get_scoped_log(request, log_id)

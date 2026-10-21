@@ -4,9 +4,14 @@
 - AdminExternalAuthBackend: бэкенд Django для входа в админку по external userId.
 - normalize_external_user_id: нормализация внешнего ID пользователя.
 - get_external_user_id_from_request: извлечение external userId из запроса.
-- ensure_prompt_developer_group: добавление пользователя в группу prompt_developer.
 - get_admin_user_by_external_id: поиск Django-пользователя по external ID.
 - create_admin_user_with_password: создание пользователя с паролем (первичная регистрация).
+
+NB: при входе группы больше НЕ выдаются (ни legacy prompt_developer, ни
+AIAccessGroup) — состав групп управляется суперюзером на «Группах доступа»,
+иначе отзыв членства откатывался бы каждым логином. Baseline-членство
+«Разработчик промптов» назначает провижининг (external_account.py) на
+СОЗДАНИИ пользователя.
 """
 
 import os
@@ -14,9 +19,6 @@ from urllib.parse import unquote
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.backends import BaseBackend
-from django.contrib.auth.models import Group
-
-from .constants import PROMPT_DEVELOPER_GROUP
 
 
 ADMIN_EXTERNAL_AUTH_BACKEND = "ai.auth_backends.AdminExternalAuthBackend"
@@ -71,13 +73,6 @@ def get_external_user_id_from_request(request):
     return ""
 
 
-def ensure_prompt_developer_group(user):
-    """Добавляет пользователя в группу prompt_developer (создаёт группу при необходимости)."""
-    group, _ = Group.objects.get_or_create(name=PROMPT_DEVELOPER_GROUP)
-    user.groups.add(group)
-    return group
-
-
 def get_admin_user_by_external_id(external_user_id):
     """Return the Django user mapped to ``external_user_id``.
 
@@ -105,7 +100,8 @@ def create_admin_user_with_password(external_user_id, password):
     """Создаёт Django-пользователя с заданным паролем для внешнего ID.
 
     Если пользователь уже существует, но не имеет пароля — устанавливает пароль.
-    Добавляет пользователя в группу prompt_developer.
+    Группы не трогает: baseline-доступ назначает провижининг, прочее —
+    суперюзер на «Группах доступа».
     """
     external_user_id = normalize_external_user_id(external_user_id)
     if not external_user_id:
@@ -120,7 +116,6 @@ def create_admin_user_with_password(external_user_id, password):
         user.set_password(password)
         user.save(update_fields=["password"])
 
-    ensure_prompt_developer_group(user)
     return user
 
 
@@ -136,7 +131,6 @@ class AdminExternalAuthBackend(BaseBackend):
         if not user or not user.is_active:
             return None
 
-        ensure_prompt_developer_group(user)
         return user
 
     def get_user(self, user_id):

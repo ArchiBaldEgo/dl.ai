@@ -5,8 +5,8 @@
 {% endblock %}
 
 {% block js %}
-    <script src="/ai/assets/admin/js/ai-common.js?v=16" defer></script>
-    <script src="/ai/assets/admin/js/find_error.js?v=5" defer></script>
+    <script src="/ai/assets/admin/js/ai-common.js?v=18" defer></script>
+    <script src="/ai/assets/admin/js/find_error.js?v=7" defer></script>
 {% endblock %}
 
 {% block error_selected %}selected{% endblock %}
@@ -14,6 +14,7 @@
 {% block form_content %}
     <h3 class="task">{{ t.task }}</h3>
     <textarea type="text" id="taskText" class="messageText" placeholder="{{ t.taskplace }}"
+        data-node-id="{{ node_id }}"
         autocomplete="off"></textarea>
     <h3 class="codetx">{{ t.codetx }}</h3>
     <textarea type="text" id="codeText" class="messageText"
@@ -32,3 +33,5 @@
         </select>
     </div>
 {% endblock %}
+
+{% block extra_body_script %}{% endblock %}

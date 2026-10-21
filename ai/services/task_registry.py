@@ -190,13 +190,19 @@ _PATH_TOPIC_KEYWORDS = [
 def _guess_topic_from_path(path: str, programming_language_id=None):
     """Best-effort: find a local Topic from a DL task path.
 
-    Returns the Topic instance or None. Two passes:
+    Returns the Topic instance or None. Три прохода:
     1. Точное сопоставление каждого сегмента пути (название ветки/папки из
        get-task-info ``path``) с ``Topic.topic_name_ru`` (без учёта регистра) —
        покрывает темы, чьё название совпадает с веткой целиком (напр.
        «Простейшая (Программы с подсказками)»).
-    2. Fallback — keyword-подстроки из ``_PATH_TOPIC_KEYWORDS``: названия
-       папок DL иногда лишь близки к теме («Одномерные числовые массивы»).
+    2. Нечёткое совпадение: сегмент пути СОДЕРЖИТ название темы (или
+       наоборот) — названия папок DL часто лишь БЛИЗКИ к теме
+       («Одномерные числовые массивы» vs «Одномерный массив»). Этот
+       проход не требует хардкод-списка: он работает с ЛЮБОЙ темой, которую
+       оператор завёл в админке, — поэтому «Без темы» в отчётах прогона
+       появляется заметно реже.
+    3. Fallback — keyword-подстроки из ``_PATH_TOPIC_KEYWORDS`` (исторические
+       исключения, которые не ловит нечёткое совпадение).
 
     Темы per-языковые (курс «[Ассемблер i8086, C-MPA]» держит два Topic с
     одинаковым названием — по одному на язык), поэтому при известном языке
@@ -223,6 +229,13 @@ def _guess_topic_from_path(path: str, programming_language_id=None):
         if topic:
             return topic
 
+    # Нечёткое совпадение (проход 2): тема, чьё название входит в
+    # название папки DL (или наоборот). Длина названия темы — от 4
+    # символов, чтобы короткие совпадения («СИ») не давали ложную тему.
+    fuzzy = _fuzzy_topic_from_segments(topics, segments)
+    if fuzzy is not None:
+        return fuzzy
+
     low = path.lower()
     for keyword, topic_name in _PATH_TOPIC_KEYWORDS:
         if keyword in low:
@@ -232,7 +245,38 @@ def _guess_topic_from_path(path: str, programming_language_id=None):
     return None
 
 
-def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session_id=None, course_id=None):
+def _fuzzy_topic_from_segments(topics, segments):
+    """Тема, название которой входит в сегмент пути DL (или наоборот).
+
+    Возвращает Topic или None. Поиск идёт от глубоких сегментов к корню
+    (как и точное совпадение) и среди самых длинных названий (самая
+    специфичная тема приоритетна) — иначе «Одномерный массив» победил бы
+    «Массивы» в папке «Одномерные числовые массивы».
+    """
+    candidates = [
+        (t.id, (t.topic_name_ru or "").strip())
+        for t in topics.only("id", "topic_name_ru")
+    ]
+    # Темы с названием короче 4 символов — слишком шумны для нечёткого
+    # совпадения (иначе «СИ» нашлось бы в любой папке).
+    candidates = [(tid, name) for tid, name in candidates if len(name) >= 4]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-len(item[1]), item[0]))
+    by_id = {tid: name for tid, name in candidates}
+    for segment in reversed(segments):
+        seg = segment.strip().lower()
+        if len(seg) < 4:
+            continue
+        for tid, name in candidates:
+            low_name = name.lower()
+            if low_name in seg or seg in low_name:
+                # Возвращаем Topic-объект: угадавший — по id из выборки.
+                return topics.filter(pk=tid).first()
+    return None
+
+
+def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session_id=None, course_id=None, fallback_topic_id=None):
     """Get-or-create a ``Task`` row for a DL node id; best-effort DL fill on create.
 
     Used by the chat consumer when a user solves a DL task. Never raises —
@@ -247,6 +291,13 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
     different language is re-guessed from the DL path scoped to that language
     (topics are per-language; a stale foreign-language topic would make
     ArmPromptBinding.resolve miss the exact binding).
+
+    ``fallback_topic_id`` — тема прогона (выбранная оператором на форме
+    /arm/solve/). Используется ТОЛЬКО как запасной вариант: если тему
+    задачи не удалось определить из ветки DL, задача наследует тему
+    прогона (того же языка). Без этого в отчёте пакетного решения появлялись
+    строки «Без темы» вместо реально задействованных тем. Явно заданная
+    тема задачи (``topic_id``) всегда важнее.
     """
     try:
         from ..models import Topic
@@ -260,6 +311,18 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
                 file_ext = _guess_extension(pl.language_name)
             except ProgrammingLanguage.DoesNotExist:
                 pass
+
+        # Запасная тема прогона — берём только если она того же языка
+        # (темы per-языковые; чужая тема хуже отсутствующей).
+        run_topic_id = None
+        if fallback_topic_id is not None:
+            run_topic = Topic.objects.filter(pk=fallback_topic_id).first()
+            if run_topic is not None and (
+                programming_language_id is None
+                or run_topic.programming_language_id is None
+                or run_topic.programming_language_id == programming_language_id
+            ):
+                run_topic_id = run_topic.id
 
         task, created = Task.objects.get_or_create(
             node_id=node_id,
@@ -320,6 +383,11 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
                             # сбрасываем, резолв привязки уйдёт «на весь язык».
                             task.topic_id = None
                             dirty = True
+            # Тема так и не определилась — наследуем тему прогона (того же
+            # языка), чтобы в отчёте была реальная тема, а не «Без темы».
+            if task.topic_id is None and run_topic_id is not None:
+                task.topic_id = run_topic_id
+                dirty = True
             if dirty:
                 task.save(update_fields=["programming_language_id", "topic_id", "file_extension", "name", "statement", "task_id"])
             return task
@@ -346,6 +414,10 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
                     if guessed_topic:
                         task.topic_id = guessed_topic.id
                 task.save(update_fields=["task_id", "name", "statement", "file_extension", "topic"])
+        # Созданная задача: тема не нашлась по ветке DL — берём тему прогона.
+        if task.topic_id is None and run_topic_id is not None:
+            task.topic_id = run_topic_id
+            task.save(update_fields=["topic"])
         return task
     except Exception:
         logger.exception("ensure_task failed for node_id=%s", node_id)

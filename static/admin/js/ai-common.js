@@ -1798,6 +1798,162 @@ function restoreSharedText() {
     } catch (e) {}
 }
 
+// === Автозагрузка условия задачи по nodeId (найден в DL-ссылке: ?nid=…) ===
+//
+// Со страницы задачи dl.gsu.by кнопки ведут на /ai/chat/ / /ai/find-error/
+// / /ai/solve-problem/ с параметрами ?uid=…&nid=…&compiler_b64=….
+// Раньше «В чём ошибка?» и «Чат с DLAI» nid игнорировали вовсе (на странице
+// задач он не задан) — текст задачи никогда не подставлялся в поле.
+// Эта функция — простой лоадер, общий для find_error.js и chat_template.js
+// (decide_task.js использует собственную расширенную версию с per-node
+// localStorage и гонкой последовательности — там префилл с давних пор есть).
+//
+// DL-сессия юзера могла протухнуть: task-info отвечает 302 на dl.gsu.by,
+// fetch падает с «Failed to fetch» — поле остаётся как было, показываем
+// статус честно. Одн повтор на транзиентный сбой.
+var _aiTaskLoadSeq = 0;
+
+// === Общие хелперы страниц (были инлайн-скриптами в шаблонах) ========
+//
+// Правило проекта: в шаблонах — только разметка, весь JS — в файлах
+// (static/admin/js/*.js). Раньше в base_chat.html/chat.html/decide-task.html/
+// find-error.html лежали три инлайн-скрипта; здесь им место.
+//
+// 1) initAiTaskNodeId — выставляет window.AI_TASK_NODE_ID из поля страницы
+//    (data-node-id). Раньше — инлайн-скрипт в каждом из трёх шаблонов.
+//    Порядок: DOMContentLoaded (раньше window.onload) — те же страничные
+//    скрипты читают значение в window.onload, значит оно уже готово.
+// 2) initTypeSwitcher — переключатель «Чат / Реши задачу / В чём ошибка?».
+//    Раньше — инлайн-функция goToAiPage + атрибут onchange в шаблоне.
+
+function initAiTaskNodeId() {
+    // Поле с nid: у чата и «Реши задачу» — #messageText, у «В чём ошибка?» —
+    // #taskText. Берём первое найденное с data-node-id.
+    var hosts = ['messageText', 'taskText'];
+    for (var i = 0; i < hosts.length; i++) {
+        var el = document.getElementById(hosts[i]);
+        if (el && el.dataset && el.dataset.nodeId) {
+            window.AI_TASK_NODE_ID = el.dataset.nodeId;
+            return;
+        }
+    }
+    window.AI_TASK_NODE_ID = window.AI_TASK_NODE_ID || '';
+}
+
+function initTypeSwitcher() {
+    var select = document.getElementById('selectType');
+    if (!select) return;
+    // Старый инлайн-обработчик (onchange="goToAiPage(this)") удалён — здесь
+    // слушатель на change, чтобы разметка шаблона оставалась чистой.
+    if (select.dataset.aiSwitchBound === '1') return;
+    select.dataset.aiSwitchBound = '1';
+    select.addEventListener('change', function () {
+        var option = select.options[select.selectedIndex];
+        var target = option && option.dataset ? option.dataset.link : '';
+        if (!target) return;
+        try { setAiState({ tab: target }); } catch (e) {}
+        var query = window.location.search || '';
+        window.location.href = query ? target + query : target;
+    });
+}
+
+// 3) initCommonPageActions — обработчики кнопок, которые раньше были
+//    инлайновыми атрибутами в разметке (onclick="…"/onsubmit="…").
+//    Правило проекта: в шаблонах — только разметка, весь JS — в файлах.
+//    Здесь: голос (режим/ввод/вывод), «Очистить», ресайз формы и отправка.
+//    Страничные скрипты (chat_template.js/decide_task.js/find_error.js)
+//    переопределяют sendMessage — вызываем именно window.sendMessage,
+//    чтобы подхватилась нужная версия.
+function initCommonPageActions() {
+    // Кнопки голоса и «Очистить» — делегирование по id (разметка может
+    // перерисовываться, поэтому ищем элемент на клике, а не в init).
+    document.addEventListener('click', function (event) {
+        var target = event.target;
+        if (!target || !target.closest) return;
+        var btn = target.closest('button');
+        if (!btn) return;
+        if (btn.id === 'voiceModeBtn') {
+            if (typeof toggleVoiceControls === 'function') toggleVoiceControls();
+        } else if (btn.id === 'voiceInputBtn') {
+            if (typeof toggleVoiceInput === 'function') toggleVoiceInput();
+        } else if (btn.id === 'voiceOutputBtn') {
+            if (typeof speakLastResponse === 'function') speakLastResponse();
+        } else if (btn.id === 'clearContextBtn') {
+            if (typeof clearContext === 'function') clearContext();
+        }
+    });
+
+    // Ресайз формы переписки (за ручку 🠔).
+    document.addEventListener('mousedown', function (event) {
+        var handle = event.target.closest ? event.target.closest('.resize-button') : null;
+        if (!handle) return;
+        if (typeof startResize === 'function') startResize(event);
+    });
+
+    // Отправка формы переписки: прежний onsubmit="sendMessage(event)".
+    // Привязка к #chatForm (форма переписки в base_chat.html), а не к любой
+    // форме на странице: у «Моих моделей» своя форма (ai-um-form).
+    document.addEventListener('submit', function (event) {
+        var form = event.target;
+        if (!form || form.id !== 'chatForm') return;
+        // Страничный скрипт (chat_template.js/decide_task.js/find_error.js)
+        // переопределяет sendMessage — зовём именно window.sendMessage.
+        if (typeof window.sendMessage === 'function') {
+            window.sendMessage(event);
+        } else {
+            event.preventDefault();
+        }
+    });
+}
+
+function _aiTaskCurrentUiLanguage() {
+    var selectLangEl = document.getElementById('selectLang');
+    if (selectLangEl && selectLangEl.selectedIndex >= 0) {
+        return selectLangEl.options[selectLangEl.selectedIndex].getAttribute('language') || 'Russian';
+    }
+    return 'Russian';
+}
+
+async function aiLoadTaskFromUrl(targetTextarea, opts) {
+    var force = !!(opts && opts.force);
+    var nodeId = String(
+        window.AI_TASK_NODE_ID ||
+        (targetTextarea && targetTextarea.dataset && targetTextarea.dataset.nodeId) || ''
+    ).trim();
+    if (!nodeId) return false;
+    if (!force && targetTextarea && targetTextarea.value.trim()) return true; // в поле есть рукописный текст
+    var seq = ++_aiTaskLoadSeq;
+    var lastError = null;
+    for (var attempt = 0; attempt < 2; attempt++) {
+        try {
+            var url = new URL('/ai/api/task-info/', window.location.origin);
+            url.searchParams.set('nodeId', nodeId);
+            url.searchParams.set('removeHtmlTags', 'true');
+            url.searchParams.set('ui_language', _aiTaskCurrentUiLanguage());
+            var response = await fetch(url.toString());
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            var data = await response.json();
+            var statement = data.statement || data.currentStatement || '';
+            if (!String(statement).trim()) throw new Error('Пустое условие задачи');
+            if (seq !== _aiTaskLoadSeq) return true; // уже начал более свежую загрузку
+            if (targetTextarea) {
+                targetTextarea.value = statement;
+                if (typeof saveSharedText === 'function') saveSharedText();
+            }
+            return true;
+        } catch (error) {
+            lastError = error;
+            if (attempt === 0) {
+                await new Promise(function (resolve) { setTimeout(resolve, 700); });
+                if (seq !== _aiTaskLoadSeq) return false;
+            }
+        }
+    }
+    console.error('aiLoadTaskFromUrl failed:', lastError);
+    updateVoiceStatus(getUiString('taskLoadError', 'Не удалось загрузить условие задачи'));
+    return false;
+}
+
 // === Accordion ===
 
 // Роль сообщения для accordion. Приоритет: явная метка li.dataset.role
@@ -2208,6 +2364,9 @@ function initUserDocs() {
 
 document.addEventListener('DOMContentLoaded', initThemeToggle);
 document.addEventListener('DOMContentLoaded', initUserDocs);
+document.addEventListener('DOMContentLoaded', initAiTaskNodeId);
+document.addEventListener('DOMContentLoaded', initTypeSwitcher);
+document.addEventListener('DOMContentLoaded', initCommonPageActions);
 
 // === Conversation persistence across reloads (until «Clear Context») ===
 // Каждое пришедшее по WS сообщение диалога (эхо пользователя «Обрабатываю

@@ -13,8 +13,6 @@ from ..models import (
     ExternalDLAccount,
     ProgrammingLanguage,
     Prompt,
-    PromptTestCase,
-    PromptTestRun,
     AIWizardSeen,
     SharedPrompt,
     Task,
@@ -30,8 +28,6 @@ from .models import (
     ProgrammingLanguageAdmin,
     TopicAdmin,
     PromptAdmin,
-    PromptTestCaseAdmin,
-    PromptTestRunAdmin,
     AIWizardSeenAdmin,
     RestrictedUserAdmin,
     SharedPromptAdmin,
@@ -53,11 +49,6 @@ from .model_status import (
     admin_model_status_refresh_view,
 )
 from .my_prompt import admin_my_prompt_view
-from .prompt_regression import (
-    admin_prompt_regression_view,
-    admin_prompt_regression_start_view,
-    admin_prompt_regression_status_view,
-)
 from .test_data import (
     test_data_view,
     test_data_emit_request_view
@@ -70,8 +61,6 @@ __all__ = [
     "ProgrammingLanguageAdmin",
     "TopicAdmin",
     "PromptAdmin",
-    "PromptTestCaseAdmin",
-    "PromptTestRunAdmin",
     "AIWizardSeenAdmin",
     "SharedPromptAdmin",
     "TaskAdmin",
@@ -87,9 +76,6 @@ __all__ = [
     "admin_model_status_state_view",
     "admin_model_status_refresh_view",
     "admin_my_prompt_view",
-    "admin_prompt_regression_view",
-    "admin_prompt_regression_start_view",
-    "admin_prompt_regression_status_view",
     "admin_request_logs_view",
     "resend_request_view",
 
@@ -106,8 +92,6 @@ ai_admin_site.register(Task, TaskAdmin)
 ai_admin_site.register(Topic, TopicAdmin)
 ai_admin_site.register(Prompt, PromptAdmin)
 ai_admin_site.register(SharedPrompt, SharedPromptAdmin)
-ai_admin_site.register(PromptTestCase, PromptTestCaseAdmin)
-ai_admin_site.register(PromptTestRun, PromptTestRunAdmin)
 ai_admin_site.register(ExternalDLAccount, ExternalDLAccountAdmin)
 ai_admin_site.register(TaskSolution, TaskSolutionAdmin)
 # NOTE: AIWizardSeen — листинг «кто видел онбординг-wizard» (только суперюзер);
