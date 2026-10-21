@@ -39,6 +39,7 @@ from ..models import (
 )
 from ..templatetags.ai_duration import format_human_duration
 from ..model_health import get_runtime_model_handlers
+from ..services.education_backfill import schedule_education_backfill
 from ..services.education_directory import (
     education_title_maps,
     group_info,
@@ -931,6 +932,17 @@ def admin_daily_report_view(request):
             "education_school_name", "education_group_name",
         )
     } if external_ids else {}
+    # Названий у части студентов ещё нет (залогинились до появления
+    # EducationInfo в DL API) — дозагружаем их В ФОНЕ: страница не ждёт DL,
+    # названия появятся в следующем открытии отчёта.
+    try:
+        schedule_education_backfill([
+            acc.external_user_id for acc in accounts.values()
+            if not (acc.education_school_name or "").strip()
+            or not (acc.education_group_name or "").strip()
+        ])
+    except Exception:  # noqa: BLE001 — дозагрузка не должна ломать отчёт
+        logger.exception("education backfill scheduling failed")
     for row in rows:
         account = accounts.get(row["external_user_id"])
         # Школа — school_info c фолбэком «школа от группы» (группа знает

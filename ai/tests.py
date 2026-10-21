@@ -19291,6 +19291,49 @@ class TaskAdminChangelistReturnTests(TestCase):
         self.assertIn("_changelist_filters=abc", resp["Location"])
 
 
+class EducationBackfillTests(TestCase):
+    """Дозагрузка названий вуза/школы и группы из DL (для дневного отчёта)."""
+
+    def test_backfill_fills_missing_names(self):
+        from ai.models import ExternalDLAccount
+        from ai.services.education_backfill import backfill_education_names
+
+        user = get_user_model().objects.create_user(username="edu-user", password="x")
+        acc = ExternalDLAccount.objects.create(
+            user=user, external_user_id="777",
+            education_school_id="10", education_group_mask_id="55",
+        )
+        education = {
+            "schoolName": 'ГУП "Гимназия №1"', "groupName": "10-1",
+        }
+        with patch("ai.dl_api_client.fetch_user_education", return_value=education):
+            updated = backfill_education_names(["777"])
+        acc.refresh_from_db()
+        self.assertEqual(updated, 1)
+        self.assertEqual(acc.education_school_name, 'ГУП "Гимназия №1"')
+        self.assertEqual(acc.education_group_name, "10-1")
+
+    def test_backfill_keeps_existing_names(self):
+        """Пустые значения DL не затирают уже сохранённые названия."""
+        from ai.models import ExternalDLAccount
+        from ai.services.education_backfill import backfill_education_names
+
+        user = get_user_model().objects.create_user(username="edu-user2", password="x")
+        acc = ExternalDLAccount.objects.create(
+            user=user, external_user_id="888",
+            education_school_name="Своё название",
+        )
+        with patch("ai.dl_api_client.fetch_user_education", return_value={}):
+            updated = backfill_education_names(["888"])
+        acc.refresh_from_db()
+        self.assertEqual(updated, 0)
+        self.assertEqual(acc.education_school_name, "Своё название")
+
+
+# ===================================================================
+# 2026-10-21: гейт DL «canUseAi» (WS7) + машина проверки delta (WS6)
+# ===================================================================
+
 class CanUseAiGateTests(TestCase):
     """Флаг DL ``canUseAi`` (dl-rest-api.json, UserInfo.canUseAi).
 
