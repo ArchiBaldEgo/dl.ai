@@ -858,6 +858,78 @@ def get_solution_result_from_dl(
     return _decode_response_json(response)
 
 
+def get_failed_tests_from_dl(
+    session_id: str,
+    queue_id: int,
+) -> list[dict[str, Any]]:
+    """Подтверждённые проваленные тесты решения (контракт DL v1.4.2).
+
+    POST /restapi/get-failed-tests {sessionId, queueId} →
+    ``{"isFinished": bool, "tests": [{stepId, testNumber, result, message,
+    canGetData}]}``
+
+    Ошибки DL НЕ поднимаются наружу: данные теста — необязательное
+    дополнение к отчёту (не условие прогона). Типичные отказы — 403
+    (выдача тестов запрещена настройками курса), 404 (решение не найдено),
+    409 (проверка ещё идёт).
+    """
+    try:
+        response = _dl_request(
+            "POST",
+            "/restapi/get-failed-tests",
+            json={"sessionId": session_id, "queueId": int(queue_id)},
+        )
+        _raise_for_status(response)
+        data = _decode_response_json(response)
+    except Exception as exc:  # noqa: BLE001 — данные теста не обязательны
+        logger.info("get-failed-tests не ответил (queueId=%s): %s", queue_id, exc)
+        return []
+    tests = data.get("tests") if isinstance(data, dict) else None
+    if not isinstance(tests, list):
+        return []
+    return [t for t in tests if isinstance(t, dict)]
+
+
+def get_test_data_from_dl(
+    session_id: str,
+    queue_id: int,
+    test_number: int,
+) -> dict[str, str]:
+    """Входные данные и эталонный ответ проваленного теста.
+
+    POST /restapi/get-test-data {sessionId, queueId, testNumber} →
+    ``{"input": "...", "expectedOutput": "..."}``
+
+    ``expectedOutput`` — эталонный ответ, а НЕ вывод проверяемой программы.
+    Ошибки DL не поднимаются наружу (см. get_failed_tests_from_dl) — при
+    отказе возвращается пустой словарь.
+    """
+    try:
+        response = _dl_request(
+            "POST",
+            "/restapi/get-test-data",
+            json={
+                "sessionId": session_id,
+                "queueId": int(queue_id),
+                "testNumber": int(test_number),
+            },
+        )
+        _raise_for_status(response)
+        data = _decode_response_json(response)
+    except Exception as exc:  # noqa: BLE001 — данные теста не обязательны
+        logger.info(
+            "get-test-data не ответил (queueId=%s, test=%s): %s",
+            queue_id, test_number, exc,
+        )
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        "input": str(data.get("input") or ""),
+        "expected_output": str(data.get("expectedOutput") or ""),
+    }
+
+
 # --- Вердикт по завершённому DL-комментарию ---------------------------------
 
 # Маркеры провала в ЗАВЕРШЁННОМ DL-комментарии. Проверяются ПЕРВЫМИ и

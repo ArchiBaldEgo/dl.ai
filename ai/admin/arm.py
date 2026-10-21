@@ -29,6 +29,7 @@ from ..arm_runner import (
     start_batch_rerun_pairs,
     start_batch_solve_run,
 )
+from ..arm_runner import parse_dl_test_data
 from ..model_health import (
     get_arm_solve_model_options,
     get_health_window_date,
@@ -892,6 +893,11 @@ def admin_arm_solve_result_body_view(request, result_id):
         "code": result.code or "",
         "dl_comment": result.dl_comment or "",
         "dl_error": result.dl_error or "",
+        # Имя файла решения, отправленного в DL («<модель>_<задача>.<ext>»).
+        "dl_file_name": result.dl_file_name or "",
+        # Входные данные и эталонный ответ проваленного теста (есть только
+        # у НЕ решённых пар, которым DL разрешил выдачу теста).
+        "dl_test_data": parse_dl_test_data(result.dl_test_data),
         # Машина (Дельта), на которой DL проверял решение.
         "delta_id": result.delta_id or 0,
         "delta_name": result.delta_name or "",

@@ -159,6 +159,7 @@ from .dl_api_client import (  # noqa: E402
     DL_REASON_WRONG_ANSWER as _REASON_WRONG_ANSWER,
     DL_VERDICT_FAILED as _VERDICT_FAILED,
     DL_VERDICT_SOLVED as _VERDICT_SOLVED,
+    build_dl_file_name as _build_dl_file_name,
     dl_failure_reason_from_comment as _failure_reason_from_dl_comment,
     dl_verdict_from_comment as _verdict_from_dl_comment,
 )
@@ -2193,6 +2194,65 @@ def _mark_batch_model_failed(run_id, model_index):
         job["updated_at_ts"] = time.time()
 
 
+# Предел длины входных данных/эталонного ответа, который сохраняется в БД
+# и показывается в карточке пары: файлы тестов в DL бывают до 1 МиБ, а
+# отчёт должен оставаться компактным.
+_TEST_DATA_CHARS_MAX = 8000
+
+
+def _fetch_failed_test_data(session_id, queue_id):
+    """Входные данные и эталонный ответ проваленного теста (компактно).
+
+    DL: ``get-failed-tests`` → список подтверждённых проваленных тестов
+    (флаг ``canGetData`` — можно ли забирать данные), ``get-test-data`` →
+    ``{input, expectedOutput}`` по номеру теста. Берём ПЕРВЫЙ тест с
+    ``canGetData``; длинные данные обрезаем.
+
+    Пустой словарь — данных нет (выдача запрещена настройками курса,
+    проверка не завершена, ошибка DL). Ошибки не поднимаются: данные теста
+    — дополнение к отчёту, а не условие прогона.
+    """
+    from .dl_api_client import get_failed_tests_from_dl, get_test_data_from_dl
+
+    test_number = 0
+    for t in get_failed_tests_from_dl(session_id, queue_id):
+        if not t.get("canGetData"):
+            continue
+        try:
+            test_number = int(t.get("testNumber") or 0)
+        except (TypeError, ValueError):
+            test_number = 0
+        if test_number > 0:
+            break
+    if not test_number:
+        return {}
+    data = get_test_data_from_dl(session_id, queue_id, test_number)
+    if not data:
+        return {}
+    raw_input = data.get("input") or ""
+    raw_expected = data.get("expected_output") or ""
+    return {
+        "test_number": test_number,
+        "input": raw_input[:_TEST_DATA_CHARS_MAX],
+        "input_truncated": len(raw_input) > _TEST_DATA_CHARS_MAX,
+        "expected_output": raw_expected[:_TEST_DATA_CHARS_MAX],
+        "expected_truncated": len(raw_expected) > _TEST_DATA_CHARS_MAX,
+    }
+
+
+def _pair_file_name(model, node_id, file_extension, run_file_name=""):
+    """Имя файла решения, отправляемого в DL (контракт fileName).
+
+    По умолчанию — ПОДПИСАННОЕ: ``<модель>_<задача>.<ext>`` («Gemma4_12345.mcp»):
+    в DL сразу видно, чьё решение и по какой задаче. Имя, заданное оператором
+    на форме прогона, приоритетнее — он назвал файл сам.
+    """
+    if run_file_name:
+        return run_file_name
+    title = (model or {}).get("title") or (model or {}).get("key") or "model"
+    return _build_dl_file_name(f"{title}_{node_id}", file_extension) or ""
+
+
 def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     """Тело одной пары задача×модель. Возвращает result_item; None — отмена.
 
@@ -2232,6 +2292,11 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     # Машина (Дельта), на которой DL проверял решение (deltaId/deltaName).
     dl_delta_id = 0
     dl_delta_name = ""
+    # Имя файла решения, отправленного в DL (подписанное: <модель>_<задача>).
+    pair_file_name = ""
+    # Входные данные и эталонный ответ проваленного теста (только для НЕ
+    # решённых пар, которым DL разрешил выдачу теста).
+    dl_test_data = {}
     # Причина провала (таксономия сбоев). Пустая строка = причина нет
     # (пара решена). Заполняется в каждой ветке ниже; последняя присваивание
     # — в ветке DL-классификации по тексту комментария.
@@ -2415,13 +2480,19 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 if not _acquire_dl_run_lock(dl_lock, ctx["run_id"]):
                     return None
                 held_dl_lock = True
+                # Имя файла решения — ПОДПИСАННОЕ: <модель>_<задача>.<ext>
+                # («Gemma4_12345.mcp»). Имя, заданное оператором на форме
+                # прогона, приоритетнее — он назвал файл сам.
+                pair_file_name = _pair_file_name(
+                    model, node_id, effective_ext, ctx.get("file_name") or "",
+                )
                 dl_result = _test_solution_on_dl(
                     ctx["session_id"], node_id, code_only, effective_ext,
                     task_id=task.task_id or 0,
                     run_id=ctx["run_id"],
                     course_id=ctx["course_id"],
                     delta=ctx.get("delta") or "",
-                    file_name=ctx.get("file_name") or "",
+                    file_name=pair_file_name,
                 )
                 # Отмена пришла во время поллинга DL — прерываем без записи
                 # пары (вердикт не определён). Лок после DL-фазы удерживается
@@ -2454,6 +2525,14 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                     failure_reason = _failure_reason_from_dl_comment(dl_test_comment)
                     if not failure_reason:
                         failure_reason = _REASON_UNDEFINED
+                # НЕ решённая пара: забираем входные данные и эталонный
+                # ответ проваленного теста (DL разрешает выдачу не всегда —
+                # флаг canGetData). Данные компактные: в карточке пары
+                # показываются сразу после извлечённого кода.
+                if verdict != _VERDICT_SOLVED and dl_queue_id:
+                    dl_test_data = _fetch_failed_test_data(
+                        ctx["session_id"], dl_queue_id,
+                    )
             else:
                 verdict = _VERDICT_FAILED
                 failure_reason = _REASON_UNDEFINED
@@ -2511,6 +2590,8 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 "dl_comment": dl_test_comment or "",
                 "dl_error": dl_submit_error or "",
                 "dl_queue_id": dl_queue_id or 0,
+                "dl_file_name": pair_file_name or "",
+                "dl_test_data": json.dumps(dl_test_data, ensure_ascii=False) if dl_test_data else "",
                 "delta_id": dl_delta_id or 0,
                 "delta_name": dl_delta_name or "",
                 "file_extension_snapshot": effective_ext or "",
@@ -2549,6 +2630,10 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "dl_comment": dl_test_comment,
             "dl_error": dl_submit_error,
             "dl_queue_id": dl_queue_id,
+            "dl_file_name": pair_file_name or "",
+            # Входные/выходные данные проваленного теста — только для НЕ
+            # решённых пар (в карточке идут сразу после извлечённого кода).
+            "dl_test_data": dl_test_data or {},
             "delta_id": dl_delta_id or 0,
             "delta_name": dl_delta_name or "",
             "file_extension": effective_ext or "",
@@ -2903,6 +2988,22 @@ def _light_batch_result_item(item):
     return light
 
 
+def parse_dl_test_data(raw):
+    """Разобрать сохранённые данные проваленного теста (JSON-строка → dict).
+
+    Пустая/битая строка — пустой словарь (старые строки БД без поля).
+    """
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _batch_results_from_db(test_run, light=False):
     """Rebuild batch result items from persisted AIModelTestResult rows.
 
@@ -2916,7 +3017,8 @@ def _batch_results_from_db(test_run, light=False):
         rows = test_run.results.values(
             "pk", "model_key", "model_title", "duration_seconds", "tokens",
             "tokens_prompt", "status", "verdict", "failure_reason",
-            "dl_queue_id", "file_extension_snapshot", "delta_id", "delta_name",
+            "dl_queue_id", "dl_file_name", "dl_test_data",
+            "file_extension_snapshot", "delta_id", "delta_name",
             "topic_name_snapshot", "topic_id_snapshot", "prog_lang_snapshot",
             "truncated", "prompt_id", "prompt_name",
             "updated_at",
@@ -2942,6 +3044,9 @@ def _batch_results_from_db(test_run, light=False):
                 ),
                 "truncated": bool(r["truncated"]),
                 "dl_queue_id": r["dl_queue_id"] or 0,
+                "dl_file_name": r["dl_file_name"] or "",
+                # Данные проваленного теста грузятся вместе с телом (body-эндпоинт).
+                "has_test_data": bool(r["dl_test_data"]),
                 "delta_id": r["delta_id"] or 0,
                 "delta_name": r["delta_name"] or "",
                 "file_extension": r["file_extension_snapshot"] or (r["task__file_extension"] or ""),
@@ -2982,6 +3087,8 @@ def _batch_results_from_db(test_run, light=False):
             "dl_comment": r.dl_comment or "",
             "dl_error": r.dl_error or "",
             "dl_queue_id": r.dl_queue_id or 0,
+            "dl_file_name": r.dl_file_name or "",
+            "dl_test_data": parse_dl_test_data(r.dl_test_data),
             "delta_id": r.delta_id or 0,
             "delta_name": r.delta_name or "",
             "file_extension": r.file_extension_snapshot or (r.task.file_extension if r.task else ""),

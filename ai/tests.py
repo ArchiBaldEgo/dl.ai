@@ -20311,6 +20311,156 @@ class FetchDeltasTests(TestCase):
         self.assertEqual([d["id"] for d in deltas], [5])
 
 
+class BatchPairFileNameAndTestDataTests(TransactionTestCase):
+    """Подпись файла решения и данные проваленного теста.
+
+    - файл, отправляемый в DL, подписан: ``<модель>_<задача>.<ext>``
+      («Gemma4_12345.mcp»);
+    - для НЕ решённых пар забираются входные данные и эталонный ответ
+      проваленного теста (DL: get-failed-tests → get-test-data) — компактно.
+    """
+
+    def setUp(self):
+        from ai.models import Task
+        self.user = get_user_model().objects.create_user(
+            username="filenm-user", password="x",
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Тема имени", programming_language=self.lang,
+        )
+        self.task = Task.objects.create(
+            node_id=12345, task_id=12445, name="Задача", statement="Сложите a и b",
+            topic=self.topic, programming_language=self.lang, file_extension=".mcp",
+        )
+
+    def test_pair_file_name_is_signed(self):
+        from ai.arm_runner import _pair_file_name
+
+        self.assertEqual(
+            _pair_file_name({"title": "Gemma4"}, 12345, ".mcp"), "Gemma4_12345.mcp",
+        )
+        # Кириллица/пробелы в названии модели — по контракту DL (латиница).
+        name = _pair_file_name({"title": "Веб Ким"}, 7, ".mcp")
+        self.assertRegex(name, r"^[A-Za-z0-9_-]+\.[A-Za-z0-9]+$")
+        self.assertTrue(name.endswith(".mcp"))
+
+    def test_operator_file_name_wins(self):
+        from ai.arm_runner import _pair_file_name
+
+        self.assertEqual(
+            _pair_file_name({"title": "Gemma4"}, 12345, ".mcp", "my_sol.mpc"),
+            "my_sol.mpc",
+        )
+
+    def test_failed_test_data_is_compact(self):
+        from ai import arm_runner
+
+        long_text = "x" * 20000
+        with patch("ai.dl_api_client.get_failed_tests_from_dl",
+                   return_value=[{"testNumber": 3, "canGetData": True}]), \
+                patch("ai.dl_api_client.get_test_data_from_dl",
+                      return_value={"input": long_text, "expected_output": "42"}):
+            data = arm_runner._fetch_failed_test_data("DLSID", 77)
+        self.assertEqual(data["test_number"], 3)
+        self.assertEqual(data["expected_output"], "42")
+        self.assertTrue(data["input_truncated"])
+        self.assertLessEqual(len(data["input"]), arm_runner._TEST_DATA_CHARS_MAX)
+
+    def test_failed_test_data_absent_without_permission(self):
+        from ai import arm_runner
+
+        with patch("ai.dl_api_client.get_failed_tests_from_dl",
+                   return_value=[{"testNumber": 1, "canGetData": False}]), \
+                patch("ai.dl_api_client.get_test_data_from_dl") as data_call:
+            data = arm_runner._fetch_failed_test_data("DLSID", 77)
+        self.assertEqual(data, {})
+        data_call.assert_not_called()
+
+    def test_dl_client_failed_tests_and_test_data(self):
+        from ai import dl_api_client
+
+        with patch("ai.dl_api_client._dl_request") as request:
+            request.return_value = _fake_response(200, {
+                "isFinished": True,
+                "tests": [{"stepId": 1, "testNumber": 2, "result": "WA",
+                            "message": "неверный ответ", "canGetData": True}],
+            })
+            tests = dl_api_client.get_failed_tests_from_dl("SID", 55)
+        self.assertEqual(request.call_args.kwargs["json"],
+                         {"sessionId": "SID", "queueId": 55})
+        self.assertEqual(tests[0]["testNumber"], 2)
+
+        with patch("ai.dl_api_client._dl_request") as request:
+            request.return_value = _fake_response(200, {
+                "input": "1 2\n", "expectedOutput": "3\n",
+            })
+            data = dl_api_client.get_test_data_from_dl("SID", 55, 2)
+        self.assertEqual(request.call_args.kwargs["json"],
+                         {"sessionId": "SID", "queueId": 55, "testNumber": 2})
+        self.assertEqual(data, {"input": "1 2\n", "expected_output": "3\n"})
+
+    def test_dl_client_errors_give_empty_result(self):
+        from ai import dl_api_client
+
+        with patch("ai.dl_api_client._dl_request") as request:
+            request.return_value = _fake_response(403, {"error": "no"})
+            self.assertEqual(dl_api_client.get_failed_tests_from_dl("SID", 55), [])
+            self.assertEqual(dl_api_client.get_test_data_from_dl("SID", 55, 1), {})
+
+    def test_pair_row_stores_signed_file_name_and_test_data(self):
+        """Прогон пары: в строке БД — подписанное имя файла и (для
+        нерешённой пары) входные/выходные данные проваленного теста."""
+        from ai import arm_runner
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        async def handler(messages, conv_id):
+            return ("program p; begin writeln(1); end.", 7, False, False, 0)
+
+        captured = {}
+
+        def fake_dl_test(session_id, node_id, code, ext, **kw):
+            captured["file_name"] = kw.get("file_name")
+            return {
+                "verdict": "failed", "comment": "не пройден 1-й тест (неверный ответ)",
+                "submit_error": "", "queue_id": 91, "delta_id": 0, "delta_name": "",
+                "code_sent": code, "cancelled": False, "unauthorized": False,
+            }
+
+        run_id = "filenm-" + uuid.uuid4().hex[:8]
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 1, "total_pairs": 1,
+            "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "", "current_model_title": "",
+            "current_task_node_id": "", "current_task_name": "",
+            "model_progress": [], "results": [], "report": None, "log_lines": [],
+            "created_at_ts": time.time(), "updated_at_ts": time.time(),
+        }
+        try:
+            with patch.object(arm_runner, "_test_solution_on_dl", side_effect=fake_dl_test), \
+                    patch("ai.dl_api_client.get_failed_tests_from_dl",
+                          return_value=[{"testNumber": 1, "canGetData": True}]), \
+                    patch("ai.dl_api_client.get_test_data_from_dl",
+                          return_value={"input": "2 3\n", "expected_output": "5\n"}):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.task.node_id],
+                    [{"key": "M1", "title": "Gemma4", "handler": handler}],
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        # Имя файла — подписанное по контракту DL.
+        self.assertEqual(captured.get("file_name"), "Gemma4_12345.mcp")
+        run = AIModelTestRun.objects.get(run_id=run_id)
+        row = AIModelTestResult.objects.get(run=run, model_key="M1")
+        self.assertEqual(row.dl_file_name, "Gemma4_12345.mcp")
+        # Данные проваленного теста — в строке прогона.
+        data = json.loads(row.dl_test_data)
+        self.assertEqual(data["input"], "2 3\n")
+        self.assertEqual(data["expected_output"], "5\n")
+
+
 def _fake_response(status_code, payload):
     """Подделка requests.Response для тестов клиента DL."""
     response = requests.Response()

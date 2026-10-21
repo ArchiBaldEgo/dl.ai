@@ -1218,6 +1218,16 @@ class AIModelTestResult(models.Model):
     dl_error = models.TextField(blank=True, default="", verbose_name="DL: ошибка")
     # DL queue id из send-solution (0 — отправка не удалась).
     dl_queue_id = models.IntegerField(null=True, blank=True, verbose_name="DL: queueId")
+    # Имя файла решения, отправленного в DL (контракт fileName): по умолчанию
+    # подписанное — <модель>_<задача>.<ext> («Gemma4_12345.mcp»).
+    # null=True и БЕЗ default — на SQLite это обычный ALTER TABLE ADD COLUMN:
+    # пересоздание таблицы (default/не-null) падало бы на postgres-only
+    # GinIndex модели (gin_trgm_ops) — см. миграцию 0071.
+    dl_file_name = models.CharField(max_length=200, null=True, blank=True, verbose_name="DL: имя файла")
+    # Входные данные и эталонный ответ проваленного теста (JSON-строка:
+    # {"input": ..., "expected_output": ...}). Заполняется только для НЕ
+    # решённых пар, которым DL разрешил выдачу теста (canGetData).
+    dl_test_data = models.TextField(null=True, blank=True, verbose_name="DL: данные теста")
     # Машина (Дельта), на которой DL проверял решение: id и имя из
     # get-solution-result (deltaId/deltaName). Пусто — машина не назначена
     # или проверка не дошла до DL.
