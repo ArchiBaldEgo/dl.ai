@@ -18453,7 +18453,13 @@ class UserModelSecurityTests(SimpleTestCase):
 
     def test_localhost_is_rejected(self):
         from ai.services.user_models import ERR_PRIVATE_HOST, validate_base_url
-        _, error = validate_base_url("https://localhost/v1")
+        from unittest.mock import patch
+        import socket
+        # localhost резолвится в 127.0.0.1 — подменяем DNS, чтобы тест не
+        # зависел от резолвера хоста.
+        fake = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+        with patch("ai.services.user_models.socket.getaddrinfo", return_value=fake):
+            _, error = validate_base_url("https://localhost/v1")
         self.assertEqual(error, ERR_PRIVATE_HOST)
 
     def test_private_ip_literal_is_rejected(self):
@@ -18475,7 +18481,14 @@ class UserModelSecurityTests(SimpleTestCase):
 
     def test_https_public_url_passes(self):
         from ai.services.user_models import validate_base_url
-        url, error = validate_base_url("https://api.openai.com/v1")
+        from unittest.mock import patch
+        import socket
+        # DNS подменяем: тест проверяет ЛОГИКУ валидации, а не доступ к
+        # внешней сети. Без подмены тест падал («Не удалось разрешить адрес
+        # модели») на любом хосте без внешнего DNS — в т.ч. на проде.
+        fake = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+        with patch("ai.services.user_models.socket.getaddrinfo", return_value=fake):
+            url, error = validate_base_url("https://api.openai.com/v1")
         self.assertEqual(error, "")
         self.assertEqual(url, "https://api.openai.com/v1")
 
