@@ -1,7 +1,12 @@
 {% extends "admin/base_site.html" %}
 
-{% load tz %}
+{% load static tz %}
 {% load ai_duration %}
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/request_logs_detail/index.css' %}">
+{% endblock %}
+
 {% block content %}
 <div class="ai-log-detail">
   {% include "admin/ai/_ai_back_nav.html" %}
@@ -34,28 +39,7 @@
     {# Кнопка рендерится здесь скрытой и подставляется скриптом карточки ВЛЕВО от #}
     {# «Скачать результаты (XLSX)» — тот же стиль .arm-button, тот же размер. #}
     <button type="button" id="resend-btn" class="arm-button" style="display:none;" data-log-id="{{ log.id }}" data-source="{{ log.source }}" data-mode="{{ log.mode }}" data-message="{{ log.message|truncatechars:60 }}">Повторить прогон</button>
-    <script>
-      (function () {
-        var raw = document.getElementById('batch-snapshot-data');
-        var snapshot = raw ? JSON.parse(raw.textContent) : {};
-        var built = window.ArmBatchResults.init(
-          document.getElementById('batch-results-card'),
-          snapshot,
-          snapshot.run_id || ''
-        );
-        var btn = document.getElementById('resend-btn');
-        if (btn && built && built.downloadBtn && built.downloadBtn.parentNode) {
-          btn.style.display = '';
-          // Группа справа: «Повторить прогон» + «Скачать результаты (XLSX)»
-          // рядом (space-between шапки иначе разнёс бы их по краям).
-          var group = document.createElement('span');
-          group.className = 'arm-head-actions';
-          built.downloadBtn.parentNode.insertBefore(group, built.downloadBtn);
-          group.appendChild(btn);
-          group.appendChild(built.downloadBtn);
-        }
-      })();
-    </script>
+
 
     <div class="ai-log-actions">
       {% include "admin/ai/_ai_back_nav.html" %}
@@ -66,8 +50,8 @@
   {% timezone moscow_tz %}
   <div class="ai-log-meta">
     <div><strong>Статус:</strong> {{ log.get_status_display }}</div>
-    <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y:H:i:s" }}</div>
-    <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</div>
+    <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y H:i:s" }}</div>
+    <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y H:i:s"|default:"—" }}</div>
     <div><strong>Кто отправлял:</strong>
       {% if log.external_user_id %}
         <a href="https://dl.gsu.by/report.asp?id={{ log.external_user_id }}" target="_blank" rel="noopener">{{ log.user_full_name|default:log.username|default:log.external_user_id }}</a>
@@ -109,164 +93,9 @@
   {% csrf_token %}
   {% endif %}
 </div>
+<script src="{% static 'admin/ai/request_logs_detail/index.js' %}"></script>
 
-<style>
-  .ai-log-detail {
-    max-width: 1200px;
-  }
-  .ai-batch-run-meta {
-    display: flex; gap: 24px; flex-wrap: wrap;
-    margin: 8px 0 14px; font-size: 14px;
-  }
-  .ai-logs-status-success { color: #067647; font-weight: 600; }
-  .ai-logs-status-error { color: #b42318; font-weight: 600; }
-  .ai-logs-status-neutral { color: #b45309; font-weight: 600; }
-  .ai-log-meta {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 8px 16px;
-    margin-bottom: 20px;
-  }
-  .ai-log-block {
-    background: var(--darkened-bg);
-    border: 1px solid var(--hairline-color);
-    border-radius: 4px;
-    padding: 12px;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    max-height: 500px;
-    overflow: auto;
-    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-    font-size: 13px;
-    line-height: 1.45;
-  }
-  .ai-log-error {
-    color: #b42318;
-  }
-  .ai-log-actions {
-    margin-top: 20px;
-    display: flex;
-    gap: 8px;
-  }
-  .resend-status {
-    margin-top: 12px;
-    padding: 10px 14px;
-    border-radius: 4px;
-    display: none;
-  }
-  .resend-status.success {
-    background: #e6f4ea;
-    color: #067647;
-    display: block;
-  }
-  .resend-status.error {
-    background: #fef2f2;
-    color: #b42318;
-    display: block;
-  }
-</style>
 
-<script>
-  document.addEventListener('DOMContentLoaded', function () {
-    const btn = document.getElementById('resend-btn');
-    if (!btn) return;
-    // Восстановление подписи после клика: на batch-странице кнопка называется
-    // «Повторить прогон», на обычной — «Повторить запрос» — верная подпись —
-    // та, что отрендерил шаблон (литерал в коде раньше затирал прогонный).
-    const originalLabel = btn.textContent.trim() || 'Повторить запрос';
 
-    btn.addEventListener('click', function () {
-      const logId = btn.dataset.logId;
-      const source = btn.dataset.source || '';
-      const mode = btn.dataset.mode || '';
-      const logMessage = btn.dataset.message || '';
-      // Rerun-лог («Batch solve rerun <hex>») — тоже ARM batch: после
-      // попарного перезапуска кнопка должна вести в rerun-arm, а не в resend.
-      const isArmBatch = source === 'arm' && (mode === 'batch_solve' || mode === 'solve') && (logMessage.indexOf('Batch solve run') !== -1 || logMessage.indexOf('Batch solve rerun') !== -1);
-      const endpoint = isArmBatch
-        ? '/ai/admin/ai/request_logs/' + logId + '/rerun-arm/'
-        : '/ai/admin/ai/request_logs/' + logId + '/resend/';
 
-      // Disable button and show loading state.
-      btn.disabled = true;
-      btn.textContent = 'Отправка...';
-
-      // Create status container if it doesn't exist.
-      let statusDiv = document.querySelector('.resend-status');
-      if (!statusDiv) {
-        statusDiv = document.createElement('div');
-        statusDiv.className = 'resend-status';
-        btn.parentElement.insertAdjacentElement('afterend', statusDiv);
-      }
-      statusDiv.className = 'resend-status';
-      statusDiv.textContent = '';
-      statusDiv.style.display = 'none';
-
-      // Get CSRF token from the DOM (rendered by {% csrf_token %}).
-      const csrfInput = document.querySelector('input[name="csrfmiddlewaretoken"]');
-      const csrftoken = csrfInput ? csrfInput.value : '';
-
-      fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'X-CSRFToken': csrftoken,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({}),
-      })
-      .then(function (response) {
-        // При протухшей сессии POST редиректит на страницу логина (HTML) —
-        // показываем внятное сообщение вместо «Unexpected token '<'».
-        return response.text().then(function (text) {
-          try { return JSON.parse(text); }
-          catch (e) {
-            throw new Error('Сессия истекла — обновите страницу и войдите заново.');
-          }
-        });
-      })
-      .then(function (data) {
-        btn.disabled = false;
-        btn.textContent = originalLabel;
-        if (data.success || data.run_id) {
-          statusDiv.className = 'resend-status success';
-          if (isArmBatch && data.run_id) {
-            statusDiv.textContent = 'Перезапуск ARM... ';
-            const link = document.createElement('a');
-            link.href = '/ai/admin/arm/solve/?run_id=' + data.run_id;
-            link.textContent = 'Открыть прогон →';
-            link.style.marginLeft = '8px';
-            statusDiv.appendChild(link);
-            // Auto-redirect to the ARM solve page with the new run_id.
-            window.location.href = '/ai/admin/arm/solve/?run_id=' + data.run_id;
-          } else {
-            statusDiv.textContent = 'Запрос успешно отправлен. ';
-            if (data.new_log_id) {
-              const link = document.createElement('a');
-              link.href = '/ai/admin/ai/request_logs/' + data.new_log_id + '/';
-              link.textContent = 'Открыть новый лог →';
-              link.style.marginLeft = '8px';
-              statusDiv.appendChild(link);
-            }
-          }
-        } else {
-          statusDiv.className = 'resend-status error';
-          statusDiv.textContent = 'Ошибка: ' + (data.error || 'Неизвестная ошибка');
-          if (data.new_log_id) {
-            const link = document.createElement('a');
-            link.href = '/ai/admin/ai/request_logs/' + data.new_log_id + '/';
-            link.textContent = 'Открыть лог ошибки →';
-            link.style.marginLeft = '8px';
-            statusDiv.appendChild(link);
-          }
-        }
-      })
-      .catch(function (err) {
-        btn.disabled = false;
-        btn.textContent = originalLabel;
-        statusDiv.className = 'resend-status error';
-        statusDiv.textContent = 'Сетевая ошибка: ' + err.message;
-      });
-    });
-  });
-</script>
 {% endblock %}

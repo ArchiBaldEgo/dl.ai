@@ -8,89 +8,16 @@
    всех его записей дня (данные уже в HTML, второго запроса не нужно).
    Таблица живёт в .ai-scroll-контейнере — при увеличении интерфейса
    (зум 150–170%) прокручивается внутри себя, не распирая страницу.
-   Контекст готовит ai.admin.logs.admin_daily_report_view.{% endcomment %}
+   Контекст готовит ai.admin.logs.admin_daily_report_view.
+   CSS/JS страницы вынесены в static/admin/ai/daily_report/.{% endcomment %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/daily_report/index.css' %}">
+{% endblock %}
 
 {% block content %}
-<style>
-  .ai-daily-header {
-    display: flex; flex-wrap: wrap; gap: 10px;
-    align-items: baseline; justify-content: space-between;
-    margin: 0 0 8px;
-  }
-  .ai-daily-header h2 { margin: 0; }
-  .ai-daily-note { color: var(--body-quiet-color); font-size: 12px; margin: 0 0 10px; }
-  {# Фиксированные ширины колонок — таблица не «пляшет» от длинных строк. #}
-  .ai-daily-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-  .ai-daily-table .nowrap { white-space: nowrap; }
-  .ai-daily-table th, .ai-daily-table td {
-    border: 1px solid var(--hairline-color); padding: 8px 10px;
-    text-align: left; vertical-align: top; word-wrap: break-word; overflow-wrap: anywhere;
-  }
-  .ai-daily-table th { background: var(--darkened-bg); }
-  .ai-daily-count {
-    cursor: pointer; font-weight: 600; white-space: nowrap;
-    user-select: none; text-align: right;
-  }
-  .ai-daily-count:hover { background: var(--selected-row); }
-  .ai-daily-caret {
-    display: inline-block; margin-left: 4px;
-    transition: transform .12s ease; color: var(--body-quiet-color);
-  }
-  .ai-daily-count.open .ai-daily-caret { transform: rotate(180deg); }
-  .ai-daily-detail > td {
-    background: var(--darkened-bg);
-    border-left: 3px solid var(--hairline-color);
-  }
-  .ai-daily-requests { max-height: 60vh; overflow: auto; }
-  .ai-daily-req-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
-  .ai-daily-req-table th, .ai-daily-req-table td {
-    border: 1px solid var(--hairline-color); padding: 5px 8px;
-    text-align: left; vertical-align: top; word-wrap: break-word; overflow-wrap: anywhere;
-  }
-  .ai-daily-req-table th { background: var(--darkened-bg); font-weight: 600; }
-  {# Клик по строке запроса: разворачивает на месте ровно ту же информацию, #}
-  {# что в журнале запросов (тексты тянутся лениво, по клику). #}
-  .ai-daily-req-row { cursor: pointer; }
-  .ai-daily-req-row:hover { background: var(--selected-row); }
-  .ai-daily-req-detail > td {
-    background: var(--darkened-bg);
-    border-left: 3px solid var(--hairline-color);
-    padding: 10px 12px;
-  }
-  .ai-daily-req-detail-meta {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    gap: 4px 16px; font-size: 12px; margin-bottom: 10px;
-  }
-  .ai-daily-req-detail h4 { margin: 10px 0 4px; font-size: 13px; }
-  .ai-daily-req-block {
-    background: var(--body-bg); border: 1px solid var(--hairline-color);
-    border-radius: 4px; padding: 8px; margin: 0;
-    white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;
-    max-height: 320px; overflow: auto;
-    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-    font-size: 12px; line-height: 1.45;
-  }
-  .ai-daily-req-error { color: #b42318; }
-  .ai-daily-ok { color: #067647; font-weight: 600; }
-  .ai-daily-err { color: #b42318; font-weight: 600; }
-  .ai-daily-empty {
-    padding: 20px; text-align: center; color: var(--body-quiet-color);
-  }
-  {# Фильтры над таблицей: группа / вуз-школа (= отображаемое название; #}
-  {# варианты сервер считает из сегодняшних строк). #}
-  .ai-daily-filters {
-    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
-    margin: 0 0 12px;
-  }
-  .ai-daily-filters label {
-    display: flex; gap: 6px; align-items: center;
-    font-weight: 600; font-size: 12px;
-  }
-  .ai-daily-filters select {
-    padding: 5px 8px; border: 1px solid var(--border-color);
-    border-radius: 4px; background: var(--body-bg); color: var(--body-fg);
-  }
-</style>
+
 
 {% include "admin/ai/_ai_back_nav.html" %}
 <div class="ai-daily-wrap">
@@ -99,36 +26,38 @@
     <a class="button" href="/ai/admin/ai/request_logs/">{% trans "← Весь журнал" %}</a>
   </div>
   <p class="ai-daily-note">
-    Сегодняшний день по МСК: {{ date_label }} 00:00–23:59.
+    Период по МСК: {{ date_label }} 00:00–23:59.
     Студентов: {{ rows|length }}, записей: {{ total_count }}.
     Нажмите на число в колонке «Запросов», чтобы развернуть все запросы студента за день.
   </p>
 
-  {# Фильтры: поиск по ФИО (первым, как в журнале) + группа и вуз/школа #}
-  {# точным совпадением с ОТОБРАЖАЕМЫМ названием; названия резолвит #}
-  {# справочник DLEducationName (нет записи — сырой ключ из DL). Любое #}
-  {# изменение применяется СРАЗУ (ai_auto_filters.js: текст с паузой, #}
-  {# селекты мгновенно) — кнопки не нужны. #}
+  {# Фильтры: поиск по ФИО (первым, как в журнале) + группа и вуз/школа. #}
+  {# Группа и вуз/школа — СВОБОДНЫЙ ввод (пишем текстом, а не выбираем #}
+  {# из списка): названия приходят из DL (education.schoolName/groupName), #}
+  {# так что подсказки-списки не нужны — можно вписать и название, и сырой #}
+  {# ID из DL. Совпадение — подстрока (регистронезависимо). Любое изменение #}
+  {# применяется СРАЗУ (ai_auto_filters.js: текст с паузой, даты #}
+  {# мгновенно) — кнопки не нужны. #}
   <form method="get" class="ai-daily-filters">
     <label for="daily-filter-student">ФИО
       <input id="daily-filter-student" type="text" name="student"
              value="{{ filters_student }}" placeholder="Фамилия или часть ФИО">
     </label>
     <label for="daily-filter-group">Группа
-      <select id="daily-filter-group" name="group">
-        <option value="">Все</option>
-        {% for g in group_choices %}
-          <option value="{{ g }}" {% if filters_group == g %}selected{% endif %}>{{ g }}</option>
-        {% endfor %}
-      </select>
+      <input id="daily-filter-group" type="text" name="group"
+             value="{{ filters_group }}" placeholder="Название или ID группы">
     </label>
     <label for="daily-filter-school">Вуз/Школа
-      <select id="daily-filter-school" name="school">
-        <option value="">Все</option>
-        {% for s in school_choices %}
-          <option value="{{ s }}" {% if filters_school == s %}selected{% endif %}>{{ s }}</option>
-        {% endfor %}
-      </select>
+      <input id="daily-filter-school" type="text" name="school"
+             value="{{ filters_school }}" placeholder="Название или ID вуза/школы">
+    </label>
+    <label for="daily-filter-date-from">С
+      <input id="daily-filter-date-from" type="date" name="date_from"
+             value="{{ filters_date_from }}">
+    </label>
+    <label for="daily-filter-date-to">По
+      <input id="daily-filter-date-to" type="date" name="date_to"
+             value="{{ filters_date_to }}">
     </label>
   </form>
 
@@ -162,8 +91,8 @@
                 {{ row.display_name }}
               {% endif %}
             </td>
-            <td>{{ row.group_title }}</td>
-            <td>{{ row.school_title }}</td>
+            <td>{{ row.group_title }}{% if not row.group_has_title and row.group_key %} <span class="ai-daily-no-title" title="DL не вернул название для этой группы — показан её ID">нет названия</span>{% endif %}</td>
+            <td>{{ row.school_title }}{% if not row.school_has_title and row.school_key %} <span class="ai-daily-no-title" title="DL не вернул название для этого вуза/школы — показан его ID">нет названия</span>{% endif %}</td>
             <td class="nowrap">{{ row.last_sent }}</td>
             <td>{{ row.last_topic }}</td>
             <td>{{ row.last_prompt }}</td>
@@ -213,138 +142,7 @@
 </div>
 
 {# Динамические фильтры (сам применяет, без кнопки) — общий хелпер админки. #}
+{# Хелпер грузится ПЕРВЫМ, потом index.js инициализирует его на форме.    #}
 <script src="{% static 'admin/js/ai_auto_filters.js' %}"></script>
-<script>
-  (function () {
-    // Фильтры применяются сами (без кнопок): общий хелпер админки.
-    initAiAutoFilters(document.querySelector('.ai-daily-filters'));
-    // Клик по колонке «Запросов» → развёртка всех запросов студента за
-    // сегодня (свёрнутый блок уже в HTML — без запроса к серверу).
-    document.querySelectorAll('.ai-daily-count').forEach(function (cell) {
-      cell.addEventListener('click', function () {
-        var row = cell.closest('.ai-daily-row');
-        var detail = row && row.nextElementSibling;
-        if (!detail || !detail.classList.contains('ai-daily-detail')) { return; }
-        var willOpen = detail.hidden;
-        detail.hidden = !willOpen;
-        cell.classList.toggle('open', willOpen);
-      });
-    });
-    // Клик по строке запроса: разворачивает на месте информацию запроса —
-    // ровно ту же, что в журнале запросов. Тексты запроса/ответа в дневном
-    // отчёте не хранятся (страница лёгкая) — подтягиваются один раз по клику
-    // через существующий JSON-эндпоинт детального лога (DIP: его же использует
-    // блок «Последние запросы» на «Настройке ИИ-приложения»).
-    function renderLogInfo(cell, log) {
-      cell.textContent = '';
-      var meta = document.createElement('div');
-      meta.className = 'ai-daily-req-detail-meta';
-      var duration = (log.duration_seconds ? Math.round(log.duration_seconds) + ' с' : '—');
-      var who = log.sender || '—';
-      if (log.external_user_id) { who += ' [' + log.external_user_id + ']'; }
-      var pairs = [
-        ['ID', String(log.id)],
-        ['Статус', log.status_display],
-        ['Режим', log.mode_display],
-        ['Модель', log.model_names],
-        ['Кто', who],
-        ['Язык', log.programming_language_name],
-        ['Тема', log.topic_name],
-        ['Промпт', log.prompt_name],
-        ['Задача', log.task_name || log.task_node_id],
-        ['Отправлен', log.sent_at],
-        ['Получен', log.received_at],
-        ['Время ответа', duration],
-        ['Токенов', log.tokens],
-      ];
-      pairs.forEach(function (pair) {
-        var item = document.createElement('div');
-        var label = document.createElement('strong');
-        label.textContent = pair[0] + ': ';
-        item.appendChild(label);
-        // Промпт — кликабелен, как в журнале запросов (открыть промпт).
-        if (pair[0] === 'Промпт' && log.prompt_id) {
-          var a = document.createElement('a');
-          a.href = '/ai/admin/ai/prompt/' + log.prompt_id + '/change/';
-          a.target = '_blank';
-          a.rel = 'noopener';
-          a.textContent = pair[1] || '—';
-          item.appendChild(a);
-        } else {
-          item.appendChild(document.createTextNode(pair[1] !== null && pair[1] !== undefined ? pair[1] : '—'));
-        }
-        meta.appendChild(item);
-      });
-      cell.appendChild(meta);
-
-      // Batch-записи: тексты не отдаём (могут быть десятки МБ) — как и на
-      // «Настройке ИИ», отправляем в детальную страницу лога.
-      if (log.is_batch) {
-        var h4b = document.createElement('h4'); h4b.textContent = 'Результаты прогона';
-        cell.appendChild(h4b);
-        var ab = document.createElement('a');
-        ab.href = log.detail_url;
-        ab.textContent = 'Открыть детальную страницу лога →';
-        cell.appendChild(ab);
-        return;
-      }
-
-      var h4q = document.createElement('h4'); h4q.textContent = 'Текст запроса';
-      cell.appendChild(h4q);
-      var preQ = document.createElement('pre');
-      preQ.className = 'ai-daily-req-block';
-      preQ.textContent = log.message || '(пусто)';
-      cell.appendChild(preQ);
-
-      var h4a = document.createElement('h4'); h4a.textContent = 'Ответ модели';
-      cell.appendChild(h4a);
-      var preA = document.createElement('pre');
-      preA.className = 'ai-daily-req-block';
-      preA.textContent = log.response_text || '(пусто)';
-      cell.appendChild(preA);
-
-      if (log.error_message) {
-        var h4e = document.createElement('h4'); h4e.textContent = 'Ошибка';
-        cell.appendChild(h4e);
-        var preE = document.createElement('pre');
-        preE.className = 'ai-daily-req-block ai-daily-req-error';
-        preE.textContent = log.error_message;
-        cell.appendChild(preE);
-      }
-    }
-
-    function parseJsonResponse(response) {
-      // При протухшей сессии admin_view редиректит на страницу логина
-      // (HTML) — показываем понятное сообщение, а не ошибку JSON.parse.
-      return response.text().then(function (text) {
-        try { return JSON.parse(text); }
-        catch (e) {
-          throw new Error('Сессия истекла — обновите страницу и войдите заново.');
-        }
-      });
-    }
-
-    document.querySelectorAll('.ai-daily-req-row').forEach(function (row) {
-      row.addEventListener('click', function () {
-        var detail = row.nextElementSibling;
-        if (detail && detail.classList.contains('ai-daily-req-detail')) {
-          detail.hidden = !detail.hidden;  // повторный клик сворачивает
-          return;
-        }
-        detail = document.createElement('tr');
-        detail.className = 'ai-daily-req-detail';
-        var cell = document.createElement('td'); cell.colSpan = 6;
-        cell.textContent = 'Загрузка…';
-        detail.appendChild(cell);
-        row.parentNode.insertBefore(detail, row.nextSibling);
-        fetch('/ai/admin/ai/request_logs/' + row.dataset.logId + '/detail-json/')
-          .then(parseJsonResponse)
-          .then(function (data) { renderLogInfo(cell, data.log); })
-          .catch(function (err) {
-            cell.textContent = 'Ошибка: ' + err.message;
-          });
-      });
-    });
-  })();
-</script>
+<script src="{% static 'admin/ai/daily_report/index.js' %}"></script>
 {% endblock %}

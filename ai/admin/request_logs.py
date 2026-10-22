@@ -4,11 +4,11 @@
 import logging
 import re
 import time
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime
 
 from django.contrib import admin
 from django.core.paginator import Paginator
-from django.db.models import Count, Q
+from django.db.models import Count, Min, Q
 from .site import ai_admin_site
 from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
@@ -39,8 +39,17 @@ from ..models import (
 )
 from ..templatetags.ai_duration import format_human_duration
 from ..model_health import get_runtime_model_handlers
-from ..services.education_directory import education_title_maps, group_display, school_title_for
-from ..services.task_registry import dl_task_url  # DRY: единственное определение — в task_registry
+from ..services.education_backfill import schedule_education_backfill
+from ..services.education_directory import (
+    education_title_maps,
+    group_info,
+    school_info,
+)
+from ..services.msk_time import msk_day_bounds, parse_date
+from ..services.task_registry import (  # DRY: единственное определение — в task_registry
+    EXTENSION_TO_LANG,
+    dl_task_url,
+)
 from .permissions import can_access_arm, can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
 
 logger = logging.getLogger(__name__)
@@ -53,7 +62,15 @@ _BATCH_RUN_ID_RE = re.compile(r"Batch solve (?:rerun|run) ([0-9a-f]{32})")
 
 
 def _batch_run_id_from_log(log):
-    """Run id batch-прогона из записи журнала или None."""
+    """Run id batch-прогона из записи журнала или None.
+
+    Сначала — индексированная колонка ``AIRequestLog.batch_run_id`` (её пишет
+    arm_runner при старте прогона). Для ЛЕГАСИ-записей (созданных до
+    миграции) — фолбэк на разбор текста message.
+    """
+    stored = (getattr(log, "batch_run_id", "") or "").strip()
+    if stored:
+        return stored
     m = _BATCH_RUN_ID_RE.search(log.message or "")
     return m.group(1) if m else None
 
@@ -121,6 +138,32 @@ def _parse_date(value: str) -> str:
     except ValueError:
         return ""
     return value
+
+
+def _apply_date_range(qs, date_from: str, date_to: str):
+    """Фильтр журнала по периоду «от и до» (МСК) — ДИАПАЗОН по ``sent_at``.
+
+    Раньше здесь стоял ``sent_at__date__gte/lte``: такой lookup вычисляет
+    выражение по каждой строке и НЕ использует индекс (в Postgres). Теперь
+    границы — полуночи МСК в UTC, и фильтр индекс-хостильный (см. индексы
+    ``ai_request_log_*_sent_idx`` в ai/models.py).
+
+    Пустая/мусорная граница = «нет ограничения» (её раньше отсекал
+    ``_parse_date``, поэтому 500 на мусоре не возвращается).
+    """
+    from ..services.msk_time import parse_date, msk_day_bounds
+
+    if date_from:
+        start = parse_date(date_from)
+        if start is not None:
+            day_start, _ = msk_day_bounds(start)
+            qs = qs.filter(sent_at__gte=day_start)
+    if date_to:
+        end = parse_date(date_to)
+        if end is not None:
+            _, day_end = msk_day_bounds(end)
+            qs = qs.filter(sent_at__lte=day_end)
+    return qs
 
 
 def _scope_logs_qs(qs, user):
@@ -281,69 +324,78 @@ def _format_moscow_datetime(value):
     return local.strftime("%d.%m.%Y:%H:%M:%S")
 
 
+# ── ЕДИНЫЙ контракт строки журнала ────────────────────────────────────────
+# «Журнал запросов» — ОДНА таблица: обычные запросы и пакетные прогоны в
+# одном списке, одна шапка (admin/ai/_ai_journal_head.html), 11 колонок.
+# Контракт строки — общий набор ключей: то, чего нет у данного вида строки,
+# заполняется пустыми значениями (шаблон покажет «—»).
+
+_JOURNAL_ROW_DEFAULTS = {
+    "id": 0,
+    "is_batch": False,
+    "log": None,
+    "external_user_id": "",
+    "sender_display": "—",
+    "sent_at": None,
+    "received_at": None,
+    "mode_display": "—",
+    "run_name": "",
+    "course_id": None,
+    "file_extension": "",
+    "programming_language_name": "—",
+    "topic_display": "—",
+    "prompt_display": "—",
+    "prompt_id": None,
+    "prompts": [],
+    "model_display": "—",
+    "models": [],
+    "solved": None,
+    "failed": None,
+    "total_pairs": None,
+    "status": "",
+    "status_display": "—",
+    "status_class": "err",
+    "run_status": "",
+    "run_status_display": "—",
+    "duration_display": "—",
+    "run_duration_display": "—",
+    # Колонка «Время»: у обычного запроса — время ответа, у пакета — время
+    # прогона.
+    "time_display": "—",
+    "detail_url": "",
+    "snapshot_url": "",
+    "pinned": False,
+    "pin_url": "",
+    "is_own": False,
+    "pin_authors": "",
+    "run_id": "",
+    "topics": [],
+    "topics_display": "—",
+}
+
+
+def _journal_row(row):
+    """Дополнить строку журнала недостающими ключами единого контракта."""
+    merged = dict(_JOURNAL_ROW_DEFAULTS)
+    merged.update(row)
+    return merged
+
+
 def build_recent_log_rows(request, limit=5):
     """Контекст-хелпер: последние N записей журнала для встраивания в другую
     страницу (напр. «Настройки ИИ-приложения»).
 
-    Отдаёт те же данные, что и колонки «Журнала запросов» (ID, отправлен,
-    кто, язык, тема, модель, статус, режим, время), но без пагинации и
-    фильтров, + ссылка на поиск по всему журналу. Учитывает ограничение
-    видимости (``logs_scope_is_own_user`` → только свои записи).
-
-    Возвращает словарь для ``extra_context``: ``recent_logs`` (список строк)
-    и ``logs_search_url`` (полный журнал). Если у пользователя нет доступа к
-    журналу — ``recent_logs`` пуст и ``can_view_logs`` False.
+    Возвращает ОДИН список ``recent_logs`` — обычные запросы и пакетные
+    прогоны ВМЕСТЕ (в журнале они в одной таблице, контракт строки общий).
+    Свежие сверху. Если у пользователя нет доступа к журналу — список пустой
+    и ``can_view_logs`` False.
     """
     can_view = can_access_logs(request)
     rows = []
     if can_view:
         qs = _scope_logs_qs(AIRequestLog.objects.all(), request.user).order_by("-sent_at")
         logs = list(qs[: max(0, int(limit))])
-        # Batch-записи: статус показываем по статусу прогона (Выполнен/Прерван),
-        # а не по Success/Error записи журнала. Один запрос по ≤5 run_id.
-        batch_run_by_log = {}
-        batch_run_ids = {
-            log.pk: _batch_run_id_from_log(log)
-            for log in logs
-            if _is_batch_solve_log(log)
-        }
-        if batch_run_ids:
-            runs_by_hex = {
-                r.run_id: r
-                for r in AIModelTestRun.objects.filter(run_id__in=set(batch_run_ids.values()))
-            }
-            batch_run_by_log = {
-                log_pk: runs_by_hex[run_hex]
-                for log_pk, run_hex in batch_run_ids.items()
-                if run_hex in runs_by_hex
-            }
-        for log in logs:
-            run = batch_run_by_log.get(log.pk)
-            status_ok = (run.status == "completed") if run else (log.status == "success")
-            rows.append({
-                "id": log.id,
-                "sent_at": log.sent_at,
-                "user_full_name": log.user_full_name or log.username or "—",
-                "external_user_id": log.external_user_id or "",
-                "programming_language_name": log.programming_language_name or "—",
-                "topic_name": log.topic_name or "—",
-                # Промпт (id + имя) — колонка «Промпт» на «Настройке ИИ»;
-                # ссылка ведёт на редактирование промпта, как в журнале.
-                "prompt_id": log.prompt_id,
-                "prompt_name": log.prompt_name or "—",
-                "model_names": ", ".join(log.model_names or []) or "—",
-                "status": log.status,
-                "status_display": (
-                    batch_run_status_display(run.status) if run else log.get_status_display()
-                ),
-                "status_class": "ok" if status_ok else "err",
-                "run_name": run_name_for(run),
-                "mode_display": log.get_mode_display() or "—",
-                # datetime — шаблон форматирует |date:"d.m.Y:H:i:s|
-                "received_at": log.received_at,
-                "duration_seconds": log.duration_seconds,
-                "detail_url": f"/ai/admin/ai/request_logs/{log.id}/",
-            })
+        rows = [entry["row"] for entry in build_journal_rows(request, logs)]
     return {
         "recent_logs": rows,
         "recent_logs_limit": limit,
@@ -355,6 +407,86 @@ def build_recent_log_rows(request, limit=5):
         # тот же контракт, что у admin_request_logs_view.
         "moscow_tz": MOSCOW_TZ,
     }
+
+
+def build_log_table_row(log):
+    """Строка таблицы обычных запросов журнала.
+
+    Контракт — ЕДИНЫЙ для журнала (обычный запрос И пакетный прогон в одной
+    таблице): набор ключей ``_JOURNAL_ROW_DEFAULTS``. Разметка строки —
+    admin/ai/_ai_log_row.html (колонки пакета у обычной строки пустые).
+    """
+    models = list(log.model_names or [])
+    duration_display = (
+        str(round(log.duration_seconds)) if log.duration_seconds is not None else "—"
+    )
+    return _journal_row({
+        "id": log.id,
+        "is_batch": False,
+        "log": log,
+        "external_user_id": log.external_user_id or "",
+        "sender_display": log.user_full_name or log.username or "—",
+        "sent_at": log.sent_at,
+        "received_at": log.received_at,
+        "mode_display": log.get_mode_display() or "—",
+        "programming_language_name": log.programming_language_name or "—",
+        "topic_display": log.topic_name or "—",
+        "prompt_display": log.prompt_name or "—",
+        "prompt_id": log.prompt_id,
+        # Имена-синонимы прежнего контракта (старые шаблоны/тесты читают их).
+        "topic_name": log.topic_name or "—",
+        "prompt_name": log.prompt_name or "—",
+        "model_names": ", ".join(models) or "—",
+        "model_display": ", ".join(models) or "—",
+        "status": log.status,
+        "status_display": log.get_status_display(),
+        "status_class": "ok" if log.status == "success" else "err",
+        "duration_display": duration_display,
+        # Колонка «Время» журнала (у пакета — время прогона).
+        "time_display": duration_display,
+        "detail_url": f"/ai/admin/ai/request_logs/{log.id}/",
+    })
+
+
+def build_journal_rows(request, logs, batch_contexts=None):
+    """Строки журнала запросов — обычные запросы И пакетные прогоны ВМЕСТЕ.
+
+    Одна таблица (ТЗ: «в журнале запросов ВСЁ должно быть в одной таблице»):
+    порядок — как в переданном ``logs`` (свежие сверху), вид строки определяет
+    ``is_batch``. Контракт строки — единый (``_JOURNAL_ROW_DEFAULTS``).
+
+    ``batch_contexts`` — карта контекстов прогона (``_batch_log_row_contexts``);
+    если не передана, пакетные строки определяются по самому логу.
+    """
+    logs = list(logs)
+    if not logs:
+        return []
+    if batch_contexts is None:
+        batch_contexts = _batch_log_row_contexts(logs, user=request.user)
+    batch_logs = [log for log in logs if batch_contexts.get(log.pk) is not None]
+    batch_by_log = {
+        row["id"]: row
+        for row in (build_batch_rows_for_logs(request, batch_logs) if batch_logs else [])
+    }
+    entries = []
+    for log in logs:
+        batch = batch_contexts.get(log.pk)
+        if batch is not None:
+            row = batch_by_log.get(log.pk)
+            if row is None:
+                # Прогон стёрт из БД — строки нет; обычную запись не покажем.
+                continue
+            # Счётчики задач прогона (для развёртки) — из контекста журнала.
+            row.setdefault("tasks_total", batch.get("tasks_total", 0))
+            row.setdefault("tasks_solved_count", batch.get("tasks_solved_count", 0))
+            row.setdefault("tasks_unsolved_count", batch.get("tasks_unsolved_count", 0))
+            entries.append({"log": log, "batch": batch, "row": row, "is_batch": True})
+        else:
+            entries.append({
+                "log": log, "batch": None,
+                "row": build_log_table_row(log), "is_batch": False,
+            })
+    return entries
 
 def build_batch_rows_for_logs(request, logs):
     """Лёгкие строки batch-прогонов для списка записей журнала.
@@ -397,42 +529,124 @@ def build_batch_rows_for_logs(request, logs):
             counters[row["run__run_id"]] = row
         # file_extension строки — первый непустой снимок результата прогона
         # (тот же приоритет, что в _build_batch_log_snapshot).
+        # Раньше тянулись ВСЕ непустые снимки прогона, а в словарь попадал
+        # первый — на прогоне с сотней пар это сотня строк впустую. Теперь:
+        # Min(pk) по прогону → точечная выборка нужных строк.
+        ext_first_pks = {}
         for row in (
             AIModelTestResult.objects
             .filter(run__run_id__in=set(run_ids.values()))
             .exclude(file_extension_snapshot="")
-            .order_by("pk")
-            .values("run__run_id", "file_extension_snapshot")
+            .values("run__run_id")
+            .annotate(first_pk=Min("pk"))
         ):
-            first_ext.setdefault(row["run__run_id"], row["file_extension_snapshot"])
+            ext_first_pks[row["run__run_id"]] = row["first_pk"]
+        if ext_first_pks:
+            for row in (
+                AIModelTestResult.objects
+                .filter(pk__in=list(ext_first_pks.values()))
+                .values("run__run_id", "file_extension_snapshot")
+            ):
+                first_ext.setdefault(row["run__run_id"], row["file_extension_snapshot"])
+    # Темы/промпты/модели прогона — из СНИМКОВ пар (topic_name_snapshot,
+    # prompt_id/prompt_name, model_title): если при запуске тему/промпт не
+    # выбирали, в логе их нет, а фактически задействованные знаем по парам.
+    # distinct() по нужным полям — тянуть тексты ответов не нужно.
+    topics_by_run = {}
+    prompts_by_run = {}
+    models_by_run = {}
+    for row in (
+        AIModelTestResult.objects
+        .filter(run__run_id__in=set(run_ids.values()))
+        .values("run__run_id", "topic_name_snapshot", "prompt_id", "prompt_name", "model_title")
+        .distinct()
+    ):
+        run_key = row["run__run_id"]
+        topic = (row["topic_name_snapshot"] or "").strip()
+        if topic:
+            topics_by_run.setdefault(run_key, [])
+            if topic not in topics_by_run[run_key]:
+                topics_by_run[run_key].append(topic)
+        if row["prompt_id"] and (row["prompt_name"] or "").strip():
+            bucket = prompts_by_run.setdefault(run_key, {})
+            bucket.setdefault(row["prompt_id"], row["prompt_name"].strip())
+        title = (row["model_title"] or "").strip()
+        if title:
+            bucket_models = models_by_run.setdefault(run_key, [])
+            if title not in bucket_models:
+                bucket_models.append(title)
     rows = []
     for log in logs:
         run_hex = run_ids.get(log.pk)
         run = runs.get(run_hex) if run_hex else None
         counter = counters.get(run_hex, {})
         run_status = run.status if run else ""
-        rows.append({
+        # Тема/промпт прогона: сначала ВЫБРАННОЕ при запуске (тема/промпт
+        # формы), затем — фактически задействованные (снимки пар). Если при
+        # запуске ничего не выбирали, остаются только снимки.
+        run_topics = list(topics_by_run.get(run_hex, []))
+        run_prompts = list((prompts_by_run.get(run_hex) or {}).items())
+        if run is not None:
+            run_topic = (run.topic_name or "").strip()
+            if run_topic and run_topic not in run_topics:
+                run_topics.insert(0, run_topic)
+            run_prompt_name = (run.prompt_name or "").strip()
+            if run.prompt_id and run_prompt_name and run.prompt_id not in dict(run_prompts):
+                run_prompts.insert(0, (run.prompt_id, run_prompt_name))
+        finish_meta = run_finish_meta(run)
+        rows.append(_journal_row({
             "id": log.id,
+            "is_batch": True,
+            "log": log,
             "sent_at": log.sent_at,
             "received_at": (
                 timezone.localtime(log.received_at).strftime("%d.%m.%Y %H:%M:%S")
                 if log.received_at else "—"
             ),
             "sender_display": log.user_full_name or log.username or "—",
+            "external_user_id": log.external_user_id or "",
             "status": log.status,
             # Статус прогона («Выполнен»/«Прерван»); прогон стёрт из БД →
             # старое отображение по записи журнала.
             "run_status_display": batch_run_status_display(run_status) or log.get_status_display(),
+            # Колонка «Статус» общего журнала — статус прогона.
+            "status_display": batch_run_status_display(run_status) or log.get_status_display(),
             # Сырой статус прогона — для класса цвета в шаблоне
             # (прогон стёрт из БД → старый статус записи журнала).
             "run_status": run_status or log.status,
             # Колонки «Окончание/Время» — тот же хелпер, что в журнале
             # (прогон не завершён → пустые строки, шаблон покажет «—»).
-            **run_finish_meta(run),
+            **finish_meta,
+            # Колонка «Время» общего журнала — время прогона.
+            "time_display": finish_meta.get("run_duration_display") or "—",
             "run_name": run_name_for(run),
             "run_id": run_hex or "",
             "course_id": run.course_id if run else None,
             "file_extension": first_ext.get(run_hex, ""),
+            # Тема/промпт/модели прогона (из снимков пар + выбранного при
+            # запуске) — для краткой формы журнала: если при запуске их не
+            # выбирали, показываем реально задействованные (все, через запятую).
+            "topics": run_topics,
+            # Готовая строка для колонки «Тема» (шаблон не склеивает сам).
+            "topics_display": ", ".join(run_topics) if run_topics else "—",
+            "prompts": [
+                {"id": pid, "name": name}
+                for pid, name in run_prompts
+            ],
+            "models": models_by_run.get(run_hex, []),
+            # Единый контракт строки журнала: те же колонки, что у обычного
+            # запроса (тема/промпт/модель/время) — чтобы строка пакета в общей
+            # таблице не отличалась набором данных.
+            "mode_display": log.get_mode_display() or "—",
+            "topic_display": ", ".join(run_topics) if run_topics else "—",
+            "prompt_display": ", ".join(name for _pid, name in run_prompts) or "—",
+            "prompt_id": run_prompts[0][0] if run_prompts else None,
+            "model_display": ", ".join(models_by_run.get(run_hex, [])) or "—",
+            # Язык прогона — по расширению (EXTENSION_TO_LANG — тот же
+            # источник, что и в форме запуска).
+            "programming_language_name": (
+                EXTENSION_TO_LANG.get(first_ext.get(run_hex, ""), "") or "—"
+            ),
             "total_pairs": counter.get("total"),
             "solved": counter.get("solved"),
             "failed": counter.get("failed"),
@@ -444,7 +658,7 @@ def build_batch_rows_for_logs(request, logs):
             # и адрес переключения (POST, см. pinned.py).
             "pinned": log.pk in pinned_log_ids,
             "pin_url": f"/ai/admin/ai/request_logs/{log.id}/pin/",
-        })
+        }))
     return rows
 
 
@@ -538,12 +752,32 @@ def build_recent_batch_rows(request, limit=5):
         qs = (
             _scope_logs_qs(AIRequestLog.objects.all(), request.user)
             .filter(source="arm", mode__in=("batch_solve", "solve"))
-            # "Batch solve run <hex>" И "Batch solve rerun <hex>" (перезапуск
-            # нерешённых пар вливается в тот же прогон — лог той же формы).
-            .filter(message__icontains="Batch solve ")
+            # Batch-запись отмечается ИНДЕКСИРОВАННОЙ колонкой
+            # batch_run_id (её пишет arm_runner). Раньше признаком был
+            # message__icontains="Batch solve " — полный scan по всему журналу
+            # на КАЖДУЮ загрузку «Настройки ИИ-приложения».
+            .exclude(batch_run_id="")
             .order_by("-sent_at")
         )
         logs = list(qs[: max(0, int(limit))])
+        # ЛЕГАСИ-записи (до миграции): у них batch_run_id пуст, признак — в
+        # тексте message. Достраиваем выборку по тексту только если новых
+        # записей не хватило (иначе — лишний scan на каждой загрузке).
+        if len(logs) < max(0, int(limit)):
+            legacy_qs = (
+                _scope_logs_qs(AIRequestLog.objects.all(), request.user)
+                .filter(source="arm", mode__in=("batch_solve", "solve"))
+                .filter(batch_run_id="")
+                .filter(message__icontains="Batch solve ")
+                .order_by("-sent_at")
+            )
+            seen = {log.pk for log in logs}
+            for log in legacy_qs:
+                if len(logs) >= max(0, int(limit)):
+                    break
+                if log.pk in seen:
+                    continue
+                logs.append(log)
         rows = build_batch_rows_for_logs(request, logs)
     return {
         "recent_batch_runs": rows,
@@ -600,16 +834,32 @@ def admin_daily_report_view(request):
     if not can_access_logs(request):
         return HttpResponseForbidden("Access denied")
 
+    # Период «от и до» (МСК). Пустые границы = сегодняшний день (по умолчанию).
+    # Границы — полуночи МСК в UTC (единый хелпер ai/services/msk_time.py):
+    # sent_at в БД хранится в UTC, а __date__-фильтр по sent_at ломает индекс
+    # (индекс-хостильный отказ).
+    date_from = _parse_date(request.GET.get("date_from", ""))
+    date_to = _parse_date(request.GET.get("date_to", ""))
+    start_utc, end_utc = msk_day_bounds()
+    if date_from:
+        parsed_from = parse_date(date_from)
+        if parsed_from is not None:
+            start_utc, _ = msk_day_bounds(parsed_from)
+    if date_to:
+        parsed_to = parse_date(date_to)
+        if parsed_to is not None:
+            _, end_utc = msk_day_bounds(parsed_to)
+    # Подписи периода — по МСК (границы храним в UTC).
     now_msk = timezone.localtime(timezone.now(), MOSCOW_TZ)
-    day_start = now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = now_msk.replace(hour=23, minute=59, second=59, microsecond=999_000)
+    start_msk = timezone.localtime(start_utc, MOSCOW_TZ)
+    end_msk = timezone.localtime(end_utc, MOSCOW_TZ)
     # .only() — без message/response_text: тексты тяжёлые, отчёту не нужны.
     logs = list(
         _scope_logs_qs(AIRequestLog.objects.all(), request.user)
         .exclude(source=AIRequestLog.SOURCE_ARM)
         .filter(
-            sent_at__gte=day_start.astimezone(dt_timezone.utc),
-            sent_at__lte=day_end.astimezone(dt_timezone.utc),
+            sent_at__gte=start_utc,
+            sent_at__lte=end_utc,
         )
         .only(
             "id", "sent_at", "external_user_id", "username", "user_full_name",
@@ -666,7 +916,9 @@ def admin_daily_report_view(request):
     rows.sort(key=lambda r: (r["display_name"].casefold(), r["last_sent"]))
 
     # === «Буквенная информация» + фильтры по группе и вузу/школе ===
-    # Названия резолвятся при рендере из вручную-ведомого справочника
+    # Названия берутся из данных DL: ExternalDLAccount.education_*_name
+    # (DL сам отдаёт schoolName/groupName — dl-rest-api.json 1.4.2), а если
+    # названия у конкретного студента нет — из ручного справочника
     # DLEducationName (education_directory — единственный читатель модели);
     # привязка студента → ExternalDLAccount: один запрос по внешним id дня.
     schools, groups, groups_school = education_title_maps()
@@ -677,44 +929,73 @@ def admin_daily_report_view(request):
         .only(
             "external_user_id", "education_school_id", "education_school_kind",
             "education_school_no", "education_group_mask_id",
+            "education_school_name", "education_group_name",
         )
     } if external_ids else {}
+    # Названий у части студентов ещё нет (залогинились до появления
+    # EducationInfo в DL API) — дозагружаем их В ФОНЕ: страница не ждёт DL,
+    # названия появятся в следующем открытии отчёта.
+    try:
+        schedule_education_backfill([
+            acc.external_user_id for acc in accounts.values()
+            if not (acc.education_school_name or "").strip()
+            or not (acc.education_group_name or "").strip()
+        ])
+    except Exception:  # noqa: BLE001 — дозагрузка не должна ломать отчёт
+        logger.exception("education backfill scheduling failed")
     for row in rows:
         account = accounts.get(row["external_user_id"])
-        # Школа — school_display c фолбэком «школа от группы» (группа знает
+        # Школа — school_info c фолбэком «школа от группы» (группа знает
         # своё заведение, у студента поле может быть пустым); группа — map.
-        row["school_title"] = school_title_for(schools, groups_school, account)
-        row["group_title"] = group_display(groups, account)
+        # *_key / *_has_title — сырой ID из DL и признак «названия нет»:
+        # по ключу фильтруем (ввод ID работает), по отсутствию названия
+        # честно пишем «нет названия».
+        school_title, school_key, school_has_title = school_info(schools, groups_school, account)
+        group_title, group_key, group_has_title = group_info(groups, account)
+        row["school_title"] = school_title
+        row["school_key"] = school_key
+        row["school_has_title"] = school_has_title
+        row["group_title"] = group_title
+        row["group_key"] = group_key
+        row["group_has_title"] = group_has_title
 
-    # GET-фильтры — точным совпадением с ОТОБРАЖАЕМЫМ названием (ФИО —
-    # регистронезависимой подстрокой); варианты селектов — отсортированное
-    # множество среди СЕГОДНЯШНИХ строк ДО фильтрации (иначе активный
-    # фильтр убирал бы чужие опции). Фильтр применяется к уже
-    # отсортированным строкам — порядок сохраняется.
+    # GET-фильтры — СВОБОДНЫЙ ввод: подстрока отображаемого названия ИЛИ
+    # сырого ID из DL (регистронезависимо). ФИО — тоже подстрока.
+    # Фильтр применяется к уже отсортированным строкам — порядок сохраняется.
     student_filter = (request.GET.get("student") or "").strip()
     group_filter = (request.GET.get("group") or "").strip()
     school_filter = (request.GET.get("school") or "").strip()
-    group_choices = sorted({r["group_title"] for r in rows})
-    school_choices = sorted({r["school_title"] for r in rows})
     if student_filter:
         needle = student_filter.casefold()
         rows = [r for r in rows if needle in r["display_name"].casefold()]
     if group_filter:
-        rows = [r for r in rows if r["group_title"] == group_filter]
+        needle = group_filter.casefold()
+        rows = [
+            r for r in rows
+            if needle in r["group_title"].casefold() or needle in r["group_key"].casefold()
+        ]
     if school_filter:
-        rows = [r for r in rows if r["school_title"] == school_filter]
+        needle = school_filter.casefold()
+        rows = [
+            r for r in rows
+            if needle in r["school_title"].casefold() or needle in r["school_key"].casefold()
+        ]
 
     context = {
         **ai_admin_site.each_context(request),
         "title": "DL.AI: Дневной отчёт",
-        "date_label": now_msk.strftime("%d.%m.%Y"),
+        "date_label": (
+            now_msk.strftime("%d.%m.%Y")
+            if not (date_from or date_to)
+            else f"{start_msk.strftime('%d.%m.%Y')} — {end_msk.strftime('%d.%m.%Y')}"
+        ),
         "rows": rows,
         "total_count": len(logs),
-        "group_choices": group_choices,
-        "school_choices": school_choices,
         "filters_student": student_filter,
         "filters_group": group_filter,
         "filters_school": school_filter,
+        "filters_date_from": date_from,
+        "filters_date_to": date_to,
     }
     return TemplateResponse(request, "admin/ai/daily_report.html", context)
 
@@ -746,10 +1027,8 @@ def admin_request_logs_view(request):
             | Q(username__icontains=user_q)
             | Q(external_user_id__icontains=user_q)
         )
-    if date_from:
-        qs = qs.filter(sent_at__date__gte=date_from)
-    if date_to:
-        qs = qs.filter(sent_at__date__lte=date_to)
+    # Период «от и до» (МСК) — диапазон по sent_at (индекс-хостильно).
+    qs = _apply_date_range(qs, date_from, date_to)
 
     # response_text в таблицу не вшивается (ленивая подгрузка detail-json по
     # раскрытию строки, см. request_logs_table.html) — с страницы его не читаем,
@@ -762,10 +1041,15 @@ def admin_request_logs_view(request):
     page_number = request.GET.get("page")
     page_obj = paginator.get_page(page_number)
 
-    # Строки страницы парами (log, batch-контекст) — batch-контекст None для
-    # обычных записей. Так шаблон читает его без dict-lookup по pk.
+    # ОДНА таблица на странице: обычные запросы и пакетные прогоны в одном
+    # списке (ТЗ: «в журнале запросов ВСЁ должно быть в одной таблице»).
+    # Порядок — свежие сверху (qs отсортирован по -sent_at).
     batch_contexts = _batch_log_row_contexts(page_obj.object_list, user=request.user)
-    rows = [(log, batch_contexts.get(log.pk)) for log in page_obj.object_list]
+    # Строка таблицы — словарь: {log, batch, row, is_batch}. Шаблон берёт
+    # «row» для краткой строки, «log» — для развёртки деталей.
+    rows = build_journal_rows(
+        request, page_obj.object_list, batch_contexts=batch_contexts,
+    )
 
     # Build the query string carried by pagination links. ``urlencode`` over a
     # QueryDict *without* doseq stringifies each value-list (``str(['x'])`` =
@@ -797,6 +1081,7 @@ def admin_request_logs_view(request):
 
     context = {
         "page_obj": page_obj,
+        # Строки журнала (обычные запросы И пакетные прогоны — одна таблица).
         "rows": rows,
         "filters_query": filters_query_str,
         "moscow_tz": MOSCOW_TZ,
@@ -851,7 +1136,11 @@ def _build_batch_log_snapshot(log):
     что потребляет JS мини-таблицы в /arm/solve/. Возвращает None, если
     прогон/результаты не найдены (тогда детал отрисуется как обычный
     текстовый лог)."""
-    from ..arm_runner import _batch_results_from_db, _build_batch_report
+    from ..arm_runner import (
+        _attach_log_lines,
+        _batch_results_from_db,
+        _build_batch_report,
+    )
 
     run_id_hex = _batch_run_id_from_log(log)
     if not run_id_hex:
@@ -865,16 +1154,28 @@ def _build_batch_log_snapshot(log):
     # текста в HTML — тело результата подтягивается по AJAX при раскрытии
     # строки (тот же эндпоинт, что у /arm/solve/).
     results = _batch_results_from_db(test_run, light=True)
-    report = _build_batch_report(results)
+    report = _build_batch_report(
+        results,
+        run_topic_id=test_run.topic_id,
+        run_topic_name=test_run.topic_name,
+    )
+    # Журнал прогона (сбои модели и повторы) — из сохранённого отчёта.
+    report = _attach_log_lines(report, (test_run.report or {}).get("log_lines"))
     # Карточка «Прогон» (время) — та же, что на /arm/solve/.
     from ..arm_runner import _attach_run_meta
+    # Прогон на паузе ТОЖЕ не завершён — цифры промежуточные (живой поллинг
+    # на фронте стартует и для paused). Раньше пауза считалась «финалом»:
+    # плашки «цифры промежуточные» не было, хотя прогон не закончился.
+    run_in_progress = test_run.status in (
+        AIModelTestRun.STATUS_RUNNING, AIModelTestRun.STATUS_PAUSED,
+    )
     _attach_run_meta(
         report,
         test_run.started_at.timestamp() if test_run.started_at else None,
         test_run.finished_at.timestamp() if test_run.finished_at else None,
-        now_ts=time.time() if test_run.status == AIModelTestRun.STATUS_RUNNING else None,
+        now_ts=time.time() if run_in_progress else None,
     )
-    if test_run.status == AIModelTestRun.STATUS_RUNNING and report is not None:
+    if run_in_progress and report is not None:
         # Отчёт построен по текущим строкам БД прогона — цифры промежуточные:
         # та же плашка честности, что у живого снапшота (arm_runner.
         # _interim_live_report); финал придёт без флага.
@@ -980,9 +1281,18 @@ def _batch_log_row_contexts(logs, user=None):
         )
 
     contexts = {}
+    # Прогоны — точечной выборкой: нужны только поля, которые читаются ниже
+    # (статус, курс, название, время старта/финиша, параметры запуска).
+    # Полная загрузка тянула бы message/error_message (TextField) впустую.
+    # Набор полей совпадает с тем, что читают run_name_for/run_finish_meta.
     runs = {
         r.run_id: r
-        for r in AIModelTestRun.objects.filter(run_id__in=set(run_ids.values()))
+        for r in AIModelTestRun.objects.filter(
+            run_id__in=set(run_ids.values())
+        ).only(
+            "run_id", "course_id", "status", "run_name", "run_params",
+            "started_at", "finished_at",
+        )
     }
 
     # Задачи и расширение — по прогону (run_id уникален), затем раскладываем
@@ -993,41 +1303,59 @@ def _batch_log_row_contexts(logs, user=None):
     # собираем снимки промптов (distinct по prompt_id — сколько использовано,
     # столько и показываем; легаси-пустые снимки не попадают).
     tasks_by_run = {}
+    seen_nodes_by_run = {}
     solved_nodes_by_run = {}
     models_by_run = {}
     prompts_by_run = {}
     ext_by_run = {}
     for r in (
-        AIModelTestResult.objects.select_related("task", "run")
+        AIModelTestResult.objects
         .filter(run__run_id__in=set(run_ids.values()))
+        .values(
+            "run__run_id",
+            "file_extension_snapshot",
+            "verdict",
+            "model_title",
+            "model_key",
+            "prompt_id",
+            "prompt_name",
+            "task__node_id",
+            "task__name",
+        )
         .order_by("id")
     ):
-        # r.run_id — это pk FK-поля run; строковый идентификатор прогона —
-        # r.run.run_id (тот же, что в AIModelTestRun.run_id).
-        run_key = r.run.run_id
-        ext = r.file_extension_snapshot or ""
+        # r["run__run_id"] — строковый идентификатор прогона (тот же, что
+        # в AIModelTestRun.run_id). Тяжёлые поля (raw_response/code/
+        # dl_comment) НЕ тянутся: списку журнала нужны только перечисленные
+        # колонки — на странице 50 прогонов это десятки мегабайт лишнего.
+        run_key = r["run__run_id"]
+        ext = r["file_extension_snapshot"] or ""
         if ext and run_key not in ext_by_run:
             ext_by_run[run_key] = ext
-        node_id = r.task.node_id if r.task else None
+        node_id = r["task__node_id"]
         if node_id:
-            is_solved = r.verdict == "solved"
+            is_solved = r["verdict"] == "solved"
             if is_solved:
                 solved_nodes_by_run.setdefault(run_key, set()).add(node_id)
             bucket = tasks_by_run.setdefault(run_key, [])
-            if not any(t["node_id"] == node_id for t in bucket):
+            # Множество node_id по прогону — вместо any() по списку (был O(n²)
+            # на числе пар прогона).
+            seen_nodes = seen_nodes_by_run.setdefault(run_key, set())
+            if node_id not in seen_nodes:
+                seen_nodes.add(node_id)
                 bucket.append({
                     "node_id": node_id,
-                    "name": r.task.name if r.task else "",
+                    "name": r["task__name"] or "",
                 })
             # Пометки по моделям: модель → решено ли, для развёртки списка задач.
             per_node = models_by_run.setdefault(run_key, {}).setdefault(node_id, {})
-            model_title = r.model_title or r.model_key or ""
+            model_title = r["model_title"] or r["model_key"] or ""
             if model_title and model_title not in per_node:
                 per_node[model_title] = is_solved
-        if r.prompt_id and r.prompt_name:
+        if r["prompt_id"] and r["prompt_name"]:
             run_prompts = prompts_by_run.setdefault(run_key, {})
-            if r.prompt_id not in run_prompts:
-                run_prompts[r.prompt_id] = r.prompt_name
+            if r["prompt_id"] not in run_prompts:
+                run_prompts[r["prompt_id"]] = r["prompt_name"]
 
     for log_pk, run_id in run_ids.items():
         run_obj = runs.get(run_id)
@@ -1130,7 +1458,9 @@ def admin_request_log_xlsx_view(request, log_id):
     # Прогон ещё идёт — в файле только завершённые к этому моменту пары
     # (та же честная пометка, что у прямого скачивания с /arm/solve/).
     note = None
-    if snapshot["run_status"] == AIModelTestRun.STATUS_RUNNING:
+    if snapshot["run_status"] in (
+        AIModelTestRun.STATUS_RUNNING, AIModelTestRun.STATUS_PAUSED,
+    ):
         note = (
             "ВНИМАНИЕ: работа ещё выполняется — в файле пары, завершённые"
             f" на момент скачивания ({snapshot['run_completed_pairs']})."
@@ -1255,9 +1585,12 @@ def resend_request_view(request, log_id):
         if isinstance(response, tuple):
             response_text = str(response[0] or "") if len(response) > 0 else ""
             tokens = response[1] if len(response) > 1 else 0
+            # 5-й элемент кортежа — токены промпта (учёт prompt+completion).
+            prompt_tokens = response[4] if len(response) > 4 else 0
         else:
             response_text = str(response or "")
             tokens = 0
+            prompt_tokens = 0
 
         response_text = response_text[:5000]
 
@@ -1266,6 +1599,7 @@ def resend_request_view(request, log_id):
             new_log.duration_seconds = (end_time - start_time).total_seconds()
             new_log.response_text = response_text
             new_log.tokens = tokens or 0
+            new_log.tokens_prompt = prompt_tokens or 0
             new_log.status = AIRequestLog.STATUS_ERROR
             new_log.error_message = "Модель вернула пустой ответ"
             new_log.save()
@@ -1279,6 +1613,7 @@ def resend_request_view(request, log_id):
         new_log.duration_seconds = (end_time - start_time).total_seconds()
         new_log.response_text = response_text
         new_log.tokens = tokens or 0
+        new_log.tokens_prompt = prompt_tokens or 0
         new_log.status = AIRequestLog.STATUS_SUCCESS
         new_log.save()
 
@@ -1413,20 +1748,29 @@ def _rerun_arm_batch(request, log):
         return JsonResponse({"error": "Прогон ARM не найден в БД"}, status=404)
 
     # 2. Collect node_ids and model_keys from AIModelTestResult rows.
-    results_qs = AIModelTestResult.objects.select_related("task").filter(run=test_run)
-    if not results_qs.exists():
+    # ОДИН запрос вместо четырёх (exists + итерация + distinct + first):
+    # тяжёлые поля (raw_response/code) не нужны — только task.node_id,
+    # model_key и снимок расширения.
+    rows = list(
+        AIModelTestResult.objects.filter(run=test_run)
+        .values("task__node_id", "model_key", "file_extension_snapshot")
+    )
+    if not rows:
         return JsonResponse({"error": "В прогоне нет результатов — нечего перезапускать"}, status=400)
 
     node_ids = []
     seen_nodes = set()
-    for r in results_qs:
-        if r.task and r.task.node_id and r.task.node_id not in seen_nodes:
-            seen_nodes.add(r.task.node_id)
-            node_ids.append(r.task.node_id)
-
-    model_keys = list(
-        results_qs.values_list("model_key", flat=True).distinct()
-    )
+    model_keys = []
+    seen_models = set()
+    for r in rows:
+        node_id = r["task__node_id"]
+        if node_id and node_id not in seen_nodes:
+            seen_nodes.add(node_id)
+            node_ids.append(node_id)
+        model_key = r["model_key"]
+        if model_key and model_key not in seen_models:
+            seen_models.add(model_key)
+            model_keys.append(model_key)
 
     if not node_ids:
         return JsonResponse({"error": "Не найдено задач в результатах прогона"}, status=400)
@@ -1434,7 +1778,12 @@ def _rerun_arm_batch(request, log):
         return JsonResponse({"error": "Не найдено моделей в результатах прогона"}, status=400)
 
     # 3. File extension from first result snapshot.
-    file_extension = (results_qs.first().file_extension_snapshot or "").strip()
+    file_extension = ""
+    for r in rows:
+        snapshot = (r["file_extension_snapshot"] or "").strip()
+        if snapshot:
+            file_extension = snapshot
+            break
     if not file_extension:
         return JsonResponse({"error": "Не найдено расширение файла в результатах прогона"}, status=400)
 

@@ -112,7 +112,11 @@ function initWebSocket() {
 
         ws.onclose = function(event) {
             console.log('WebSocket connection closed');
-            updateVoiceStatus(getVoiceStatusText('connectionClosed'));
+            if (isAiDisabledClose(event)) {
+                showAiDisabledMessage();
+            } else {
+                updateVoiceStatus(getVoiceStatusText('connectionClosed'));
+            }
             setRequestLock(false);
             notEnter = false;
         };
@@ -252,7 +256,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         const selectedLang = this.options[this.selectedIndex].getAttribute("language");
         const submitBtn = document.querySelector("button[type='submit']");
         if (submitBtn) submitBtn.textContent = localization[selectedLang].send;
-        const clearBtn = document.querySelector("button[onclick='clearContext()']");
+        const clearBtn = document.querySelector("#clearContextBtn");
         if (clearBtn) clearBtn.textContent = localization[selectedLang].clear;
         const codeTextEl = document.getElementById("codeText");
         if (codeTextEl) codeTextEl.setAttribute("placeholder", localization[selectedLang].placeholder);

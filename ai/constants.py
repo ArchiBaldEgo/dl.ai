@@ -7,6 +7,13 @@
 from zoneinfo import ZoneInfo
 
 PROMPT_DEVELOPER_GROUP = "prompt_developer"
+# Встроенные группы доступа (AIAccessGroup, сидируются миграцией 0060).
+# «Разработчик промптов» — прежний уровень prompt_developer (всё, что он видел).
+# «Разработчик» — «доступ ко всему, кроме …»: без «Промптов по умолчанию»,
+# доки суперюзера, всех записей журнала, создания/закрытия тасков.
+# Состав и права правятся суперюзером на /ai/admin/ai-groups/.
+BUILTIN_GROUP_PROMPT_DEV = "Разработчик промптов"
+BUILTIN_GROUP_DEVELOPER = "Разработчик"
 ADMIN_LOGOUT_COOKIE_NAME = "ai_admin_logged_out"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 AI_CACHE_KEY_PREFIX = "ai"
@@ -17,4 +24,4 @@ AI_CACHE_KEY_PREFIX = "ai"
 DL_DEFAULT_COURSE_ID = 1450
 # Версия текстов онбординг-wizard (ai-wizard.js + ai/services/onboarding.py).
 # Меняешь шаги/тексты тура — поднимай номер: все увидят этот тур заново один раз.
-WIZARD_VERSION = 8
+WIZARD_VERSION = 11

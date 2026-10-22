@@ -1,0 +1,21 @@
+{
+  "name": "dlai-web-pools",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node WebPools/api/index.js",
+    "start:deepseek": "node WebPools/api/index.js --site=deepseek",
+    "start:kimi": "node WebPools/api/index.js --site=kimi",
+    "seed": "node WebKimi/seed.js",
+    "seed:2": "node WebKimi/seed.js --id=2",
+    "test": "node --test \"WebPools/tests/*.test.js\""
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "proxy-chain": "^3.0.0",
+    "puppeteer": "20.9.0",
+    "puppeteer-extra": "3.3.6",
+    "puppeteer-extra-plugin-stealth": "2.11.2"
+  },
+  "description": "Общий пакет бот-пулов dl.ai: DeepSeek (:3000) и Kimi (:3001). Один node_modules на весь репозиторий — WebKimi/seed.js (ручной логин Kimi) резолвит зависимости из корневого node_modules."
+}

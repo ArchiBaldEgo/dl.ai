@@ -1,0 +1,73 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+{# Страница «Контроль токенов» (ai/admin/tokens.py) — сколько токенов      #}
+{# потрачено: какие модели, кто, в каком режиме. Данные — из журнала       #}
+{# запросов и пар пакетного решения (ai/services/token_usage.py).           #}
+{# CSS/JS — static/admin/ai/tokens/.                                        #}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/tokens/index.css' %}">
+{% endblock %}
+
+{% block content %}
+<div class="ai-tokens-wrap">
+  <p class="help">
+    Сколько токенов потрачено — <strong>промпт + ответ</strong> («ответ» —
+    токены, которые сгенерировала модель, «промпт» — входные). Итоговая
+    карточка — журнал запросов: все режимы (чат, «Реши задачу», «Найти
+    ошибку», пакетное решение); пакетный прогон там — одна сводная запись.
+    Карточка «В том числе — пакетное решение» показывает тот же расход
+    подробно по парам «задача × модель» — это не дополнительный расход.
+    Клик по названию строки в табличных срезах ставит соответствующий
+    фильтр (модель / кто / режим / день).
+  </p>
+
+  <div class="ai-tokens-chips">
+    <span class="ai-tokens-chips-label">Период:</span>
+    <button type="button" class="ai-tokens-chip" data-days="0">Сегодня</button>
+    <button type="button" class="ai-tokens-chip" data-days="7">7 дней</button>
+    <button type="button" class="ai-tokens-chip" data-days="30">30 дней</button>
+    <button type="button" class="ai-tokens-chip" data-days="">Всё время</button>
+  </div>
+
+  <form class="ai-tokens-filters" method="get" action="">
+    <label>С даты <input type="date" name="date_from" value="{{ filters_date_from }}"></label>
+    <label>По дату <input type="date" name="date_to" value="{{ filters_date_to }}"></label>
+    <label>Режим
+      <select name="mode">
+        <option value="">все</option>
+        {% for key, label in mode_choices %}
+          <option value="{{ key }}"{% if filters_mode == key %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Модель
+      <input type="text" name="model" value="{{ filters_model }}" list="ai-tokens-model-list" placeholder="название модели">
+      <datalist id="ai-tokens-model-list">
+        {% for title in model_choices %}
+          <option value="{{ title }}"></option>
+        {% endfor %}
+      </datalist>
+    </label>
+    <label>Кто <input type="text" name="user" value="{{ filters_user }}" placeholder="ФИО / логин"></label>
+    <label>Источник
+      <select name="source">
+        <option value="">все</option>
+        {% for key, label in source_choices %}
+          <option value="{{ key }}"{% if filters_source == key %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="button default">Показать</button>
+    <a class="button" href="?">Сбросить</a>
+  </form>
+
+  {% include "admin/ai/_tokens_panels.html" %}
+</div>
+{% endblock %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script src="{% static 'admin/ai/tokens/index.js' %}" defer></script>
+{% endblock %}

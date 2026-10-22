@@ -114,7 +114,7 @@ async def _ask_sambanova_model_async(
     temperature: Optional[float] = None,
     timeout: float = 30.0,
     response_field: str = "content",
-) -> Tuple[str, Optional[int]]:
+) -> Tuple[str, Optional[int], bool, bool, int]:
     """Generic SambaNova chat completion wrapper with history management.
 
     Args:
@@ -125,6 +125,10 @@ async def _ask_sambanova_model_async(
         temperature: Температура генерации (None = не указывать).
         timeout: Таймаут запроса в секундах.
         response_field: Поле для извлечения ответа ("content" или "reasoning").
+
+    Возвращает ``(текст, токенов_ответа, is_error, длина_обрезана,
+    токенов_промпта)`` — 5-й элемент нужен для учёта токенов (prompt+
+    completion) на странице «Контроль токенов».
     """
     import asyncio
 
@@ -155,17 +159,19 @@ async def _ask_sambanova_model_async(
         _log_response(response)
 
         if response.status_code != 200:
-            return extract_api_error_text(str(response.status_code)), 0
+            return extract_api_error_text(str(response.status_code)), 0, True, False, 0
 
         obj, error_message = safe_parse_response(response.text)
         if obj is None:
-            return error_message, 0
+            return error_message, 0, True, False, 0
 
         if "choices" not in obj or not obj["choices"]:
             logger.warning("Unexpected response structure: %s", obj)
-            return "Неожиданный формат ответа от сервера.", 0
+            return "Неожиданный формат ответа от сервера.", 0, True, False, 0
 
-        completion_tokens = obj.get("usage", {}).get("completion_tokens", 0)
+        usage = obj.get("usage", {}) or {}
+        completion_tokens = usage.get("completion_tokens", 0)
+        prompt_tokens = usage.get("prompt_tokens", 0) or 0
 
         # Извлекаем ответ: content (по умолчанию) или reasoning (GPT-OSS).
         # Фолбэк на reasoning может вернуть рассуждения — они вырезаются
@@ -187,35 +193,37 @@ async def _ask_sambanova_model_async(
                 "или отказ генерации). Попробуйте позже.",
                 0,
                 True,
+                False,
+                0,
             )
 
         conversation_history.append(user_id, {"role": "assistant", "content": assistant_content})
-        return assistant_content, completion_tokens
+        return assistant_content, completion_tokens, False, False, int(prompt_tokens)
 
     except AsyncTimeoutError:
         logger.warning("SambaNova request timeout after %s seconds", timeout)
-        return f"Таймаут запроса ({timeout} сек). Сервер долго не отвечает. Попробуйте позже или уменьшите запрос.", 0
+        return f"Таймаут запроса ({timeout} сек). Сервер долго не отвечает. Попробуйте позже или уменьшите запрос.", 0, True, False, 0
     except requests.exceptions.ConnectionError as e:
         logger.warning("Connection error: %s", e)
-        return classify_network_error(e), 0
+        return classify_network_error(e), 0, True, False, 0
     except requests.exceptions.Timeout:
         logger.warning("Timeout connecting to API")
-        return "Таймаут при подключении к серверу. Попробуйте позже.", 0
+        return "Таймаут при подключении к серверу. Попробуйте позже.", 0, True, False, 0
     except requests.exceptions.RequestException as e:
         logger.warning("Request error: %s", e)
-        return "Ошибка при подключении к серверу API.", 0
+        return "Ошибка при подключении к серверу API.", 0, True, False, 0
     except KeyError as e:
         if is_missing_choices_error(e):
-            return "Ошибка в ответе от сервера AI.", 0
+            return "Ошибка в ответе от сервера AI.", 0, True, False, 0
         raise
     except Exception as e:
         logger.exception("Unexpected error in SambaNova call")
         if is_network_error(e):
-            return "Ошибка подключения. Ваш контекст сохранен, попробуйте позже.", 0
+            return "Ошибка подключения. Ваш контекст сохранен, попробуйте позже.", 0, True, False, 0
         if is_missing_choices_error(e):
-            return "Ошибка в ответе от сервера AI.", 0
+            return "Ошибка в ответе от сервера AI.", 0, True, False, 0
         conversation_history.reset(user_id)
-        return "Что-то пошло не так. Контекст очищен, введите новый запрос.", 0
+        return "Что-то пошло не так. Контекст очищен, введите новый запрос.", 0, True, False, 0
 
 
 # --- Автогенерация функций для каждой модели ---
@@ -230,7 +238,7 @@ def _sambanova_handler_factory(model_key: str, cfg: dict):
     temperature = cfg.get("temperature")
     response_field = cfg.get("response_field", "content")
 
-    async def handler(messages: str, user_id: int) -> Tuple[str, Optional[int], bool]:
+    async def handler(messages: str, user_id: int) -> Tuple[str, Optional[int], bool, bool, int]:
         return await _ask_sambanova_model_async(
             messages,
             user_id,

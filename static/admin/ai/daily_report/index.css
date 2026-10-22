@@ -1,0 +1,86 @@
+/* Стили страницы «Дневной отчёт» (журнал запросов × сегодняшний день).
+   Вынесены из ai/templates/admin/ai/daily_report.html. */
+.ai-daily-header {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  align-items: baseline; justify-content: space-between;
+  margin: 0 0 8px;
+}
+.ai-daily-header h2 { margin: 0; }
+.ai-daily-note { color: var(--body-quiet-color); font-size: 12px; margin: 0 0 10px; }
+/* Фиксированные ширины колонок — таблица не «пляшет» от длинных строк. */
+.ai-daily-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.ai-daily-table .nowrap { white-space: nowrap; }
+.ai-daily-table th, .ai-daily-table td {
+  border: 1px solid var(--hairline-color); padding: 8px 10px;
+  text-align: left; vertical-align: top; word-wrap: break-word; overflow-wrap: anywhere;
+}
+.ai-daily-table th { background: var(--darkened-bg); }
+.ai-daily-count {
+  cursor: pointer; font-weight: 600; white-space: nowrap;
+  user-select: none; text-align: right;
+}
+.ai-daily-count:hover { background: var(--selected-row); }
+.ai-daily-caret {
+  display: inline-block; margin-left: 4px;
+  transition: transform .12s ease; color: var(--body-quiet-color);
+}
+.ai-daily-count.open .ai-daily-caret { transform: rotate(180deg); }
+.ai-daily-detail > td {
+  background: var(--darkened-bg);
+  border-left: 3px solid var(--hairline-color);
+}
+.ai-daily-requests { max-height: 60vh; overflow: auto; }
+.ai-daily-req-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+.ai-daily-req-table th, .ai-daily-req-table td {
+  border: 1px solid var(--hairline-color); padding: 5px 8px;
+  text-align: left; vertical-align: top; word-wrap: break-word; overflow-wrap: anywhere;
+}
+.ai-daily-req-table th { background: var(--darkened-bg); font-weight: 600; }
+/* Клик по строке запроса: разворачивает на месте ровно ту же информацию, */
+/* что в журнале запросов (тексты тянутся лениво, по клику). */
+.ai-daily-req-row { cursor: pointer; }
+.ai-daily-req-row:hover { background: var(--selected-row); }
+.ai-daily-req-detail > td {
+  background: var(--darkened-bg);
+  border-left: 3px solid var(--hairline-color);
+  padding: 10px 12px;
+}
+.ai-daily-req-detail-meta {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 4px 16px; font-size: 12px; margin-bottom: 10px;
+}
+.ai-daily-req-detail h4 { margin: 10px 0 4px; font-size: 13px; }
+.ai-daily-req-block {
+  background: var(--body-bg); border: 1px solid var(--hairline-color);
+  border-radius: 4px; padding: 8px; margin: 0;
+  white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;
+  max-height: 320px; overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px; line-height: 1.45;
+}
+.ai-daily-req-error { color: #b42318; }
+.ai-daily-ok { color: #067647; font-weight: 600; }
+.ai-daily-err { color: #b42318; font-weight: 600; }
+.ai-daily-empty {
+  padding: 20px; text-align: center; color: var(--body-quiet-color);
+}
+/* Фильтры над таблицей: группа / вуз-школа — СВОБОДНЫЙ ввод (datalist — */
+/* только подсказки из справочника, ввод ничем не ограничен). */
+.ai-daily-filters {
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  margin: 0 0 12px;
+}
+.ai-daily-filters label {
+  display: flex; gap: 6px; align-items: center;
+  font-weight: 600; font-size: 12px;
+}
+.ai-daily-filters select,
+.ai-daily-filters input[type="text"] {
+  padding: 5px 8px; border: 1px solid var(--border-color);
+  border-radius: 4px; background: var(--body-bg); color: var(--body-fg);
+}
+/* Честная пометка: в справочнике DL нет названия — показан сырой ID. */
+.ai-daily-no-title {
+  color: var(--body-quiet-color); font-size: 11px; font-style: italic;
+  white-space: nowrap;
+}

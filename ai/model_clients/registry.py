@@ -168,6 +168,12 @@ _MODELS: Dict[str, Dict[str, object]] = {
         # think-теги в content) — помечаем как reasoning, content остаётся чистым.
         "capabilities": _REASONING,
     },
+    "Ollama_MiniMax_M3_1_Flash_Cloud": {
+        "title": "Ollama MiniMax M3.1 Flash",
+        "handler": ollama.ask_Ollama_MiniMax_M3_1_Flash_Cloud_async,
+        # minimax-m3.1-flash:cloud умеет thinking отдельным полем — reasoning.
+        "capabilities": _REASONING,
+    },
 }
 
 

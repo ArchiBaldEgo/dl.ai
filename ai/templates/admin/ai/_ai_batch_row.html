@@ -1,0 +1,91 @@
+{% comment %}
+Строка таблицы ПАКЕТНЫХ РЕШЕНИЙ — ЕДИНЫЙ вид для всех поверхностей.
+
+ТЗ: «ЛЮБОЙ лог пакетного решения должен выглядеть одинаково» — как в блоке
+«Последние пакетные решения» на «Настройке ИИ-приложения». Поэтому строка
+живёт здесь и подключается ОТКУДА УГОДНО:
+  - «Последние пакетные решения» (Настройка ИИ-приложения);
+  - «Последние запросы» → общая таблица журнала (Настройка ИИ-приложения);
+  - «Журнал запросов» → общая таблица журнала;
+  - «Закреплённые пакетные решения».
+
+Шапка — admin/ai/_ai_journal_head.html (11 колонок, общая для журнала).
+«Отдельные» колонки старой 18-колоночной схемы собраны sub-строками
+(.ai-sub): получен/время — в «Отправлен», курс/расширение — в «Прогон»,
+счётчики пар — «решено/всего» в «Парах». Ссылка «Детали →» не нужна —
+вся строка кликабельна (раскрывает результаты прогона).
+
+Контракт строки — ai/admin/request_logs.py::build_batch_rows_for_logs.
+Ожидает в контексте: row (словарь), moscow_tz (для {% timezone %}).
+
+Развёртка (результаты прогона) — СЛЕДУЮЩАЯ строка таблицы
+(.ai-batch-detail), её подключает вызывающий шаблон (colspan больше числа
+колонок — браузер сам ограничит фактическим количеством).
+{% endcomment %}
+<tr class="ai-batch-row{% if row.snapshot_url %} ai-batch-row-clickable{% endif %}"
+    data-snapshot-url="{{ row.snapshot_url }}"
+    data-run-id="{{ row.run_id }}"
+    data-log-id="{{ row.id }}"
+    {% if row.snapshot_url %}title="Кликните, чтобы развернуть результаты прогона"{% endif %}>
+  <td class="ai-log-pin-cell">
+    {% if row.is_own %}
+      <button type="button"
+              class="ai-log-pin-btn{% if row.pinned %} ai-log-pin-btn-active{% endif %}"
+              data-pin-url="{{ row.pin_url }}"
+              {% if row.run_status == 'running' %}disabled title="Прогон ещё выполняется — закрепить можно только завершённые"{% else %}title="{% if row.pinned %}Убрать из «Закреплённых»{% else %}Закрепить в «Закреплённых пакетных решениях»{% endif %}"{% endif %}>{{ row.pinned|yesno:"★,☆" }}</button>
+    {% elif row.pin_authors %}
+      {# Чужое закрепление — метка ★ с автором (открепить может только свой). #}
+      <span class="ai-log-pin-static" title="Закреплено: {{ row.pin_authors }}">★</span>
+    {% else %}
+      <button type="button"
+              class="ai-log-pin-btn"
+              data-pin-url="{{ row.pin_url }}"
+              {% if row.run_status == 'running' %}disabled title="Прогон ещё выполняется — закрепить можно только завершённые"{% else %}title="Закрепить в «Закреплённых пакетных решениях»"{% endif %}>☆</button>
+    {% endif %}
+  </td>
+  <td>
+    {% if row.external_user_id %}
+      <a href="https://dl.gsu.by/report.asp?id={{ row.external_user_id }}" target="_blank" rel="noopener">{{ row.sender_display }}</a>
+    {% else %}
+      {{ row.sender_display }}
+    {% endif %}
+    {# На странице «Закреплённые» прогон закрепили несколько человек — #}
+    {# показываем их под автором запуска (кто ЗАПУСКАЛ — в первой строке). #}
+    {% if row.pin_authors %}
+      <div class="ai-log-pin-authors" title="Закрепили: {{ row.pin_authors }}">★ {{ row.pin_authors }}</div>
+    {% endif %}
+  </td>
+  <td>
+    {# Дата и время — два nowrap-спана подряд: в узкой колонке рвутся ТОЛЬКО #}
+    {# между собой, а не наезжают на соседнюю ячейку (nowrap всей строки #}
+    {# шире колонки). #}
+    <span class="ai-nowrap">{{ row.sent_at|date:"d.m.Y"|default:"—" }}</span>
+    <span class="ai-nowrap">{{ row.sent_at|date:"H:i:s"|default:"—" }}</span>
+    {% if row.received_at and row.received_at != "—" or row.time_display and row.time_display != "—" %}
+      <span class="ai-sub">{% if row.received_at and row.received_at != "—" %}получен {{ row.received_at }}{% endif %}{% if row.time_display and row.time_display != "—" %}{% if row.received_at and row.received_at != "—" %} · {% endif %}{{ row.time_display }}{% endif %}</span>
+    {% endif %}
+  </td>
+  <td>{{ row.mode_display|default:"—" }}</td>
+  <td>
+    {% if row.run_name %}{{ row.run_name }}{% else %}—{% endif %}
+    {% if row.course_id or row.file_extension %}
+      <span class="ai-sub">{% if row.course_id %}курс {{ row.course_id }}{% endif %}{% if row.course_id and row.file_extension %} · {% endif %}{% if row.file_extension %}{{ row.file_extension }}{% endif %}</span>
+    {% endif %}
+  </td>
+  <td>{{ row.programming_language_name|default:"—" }}</td>
+  <td>{{ row.topics_display|default:"—" }}</td>
+  <td>
+    {% for p in row.prompts %}
+      {# Ссылка + запятая — единый nowrap-токен: запятая не переносится #}
+      {# в начало следующей строки при переносе списка промптов. #}
+      <span class="ai-nowrap"><a href="/ai/admin/ai/prompt/{{ p.id }}/change/" target="_blank" rel="noopener">{{ p.name }}</a>{% if not forloop.last %}, {% endif %}</span>
+    {% empty %}
+      —
+    {% endfor %}
+  </td>
+  <td>{{ row.model_display|default:"—" }}</td>
+  {# Пары: «решено/всего»; состав (решено · не решено · всего) — в title. #}
+  <td class="ai-nowrap"
+      title="{% if row.total_pairs %}Решено: {{ row.solved|default:0 }} · не решено: {{ row.failed|default:0 }} · всего пар: {{ row.total_pairs }}{% else %}Прогон без пар{% endif %}">{% if row.total_pairs %}<span class="ai-recent-logs-ok">{{ row.solved|default:0 }}</span>/<span class="{% if row.failed %}ai-recent-logs-err{% endif %}">{{ row.failed|default:0 }}</span>{% else %}—{% endif %}</td>
+  <td class="{% if row.run_status == 'completed' or row.run_status == 'success' %}ai-recent-logs-ok{% elif row.run_status == 'running' or row.run_status == 'paused' %}ai-recent-logs-neutral{% else %}ai-recent-logs-err{% endif %} ai-nowrap">{{ row.run_status_display }}</td>
+</tr>

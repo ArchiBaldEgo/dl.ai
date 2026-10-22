@@ -3,11 +3,14 @@
 PromptForm: форма для редактирования промпта с каскадным выбором
 язык программирования → тема (через prompt_language_topic.js).
 SharedPromptForm: форма для общих промптов.
+ExternalDLAccountAdminForm: карточка DL-аккаунта + право раздавать группы
+доступа связанному локальному пользователю (поле гейтится в админке).
 """
 
 from django import forms
+from django.contrib.admin.widgets import FilteredSelectMultiple
 
-from ..models import ProgrammingLanguage, Prompt, SharedPrompt, Topic
+from ..models import AIAccessGroup, ExternalDLAccount, ProgrammingLanguage, Prompt, SharedPrompt, Topic
 
 
 class TopicForm(forms.ModelForm):
@@ -148,3 +151,37 @@ class SharedPromptForm(forms.ModelForm):
                 'style': 'width: 95%; font-family: monospace; line-height: 1.4; white-space: pre-wrap;'
             }),
         }
+
+
+class ExternalDLAccountAdminForm(forms.ModelForm):
+    """Карточка DL-аккаунта: право раздавать группы доступа связанному юзеру.
+
+    Поле ВИРТУАЛЬНОЕ (M2M живёт на локальном User, не на аккаунте):
+    queryset — «Группы доступа», initial — группы account.user; персистят
+    его в ExternalDLAccountAdmin.save_model (ModelForm.save() посторонние
+    M2M не пишет). Gating поля — get_form админки (can_edit_access_groups),
+    здесь его нет: форма всегда честная (initial от текущего состояния).
+    """
+
+    user_ai_access_groups = forms.ModelMultipleChoiceField(
+        queryset=AIAccessGroup.objects.all(),
+        required=False,
+        widget=FilteredSelectMultiple("Группы доступа", is_stacked=False),
+        label="Группы доступа пользователя",
+        help_text="Права админки локального пользователя выдаются только "
+                  "этими группами (не стоковыми «Группами» Django).",
+    )
+
+    class Meta:
+        model = ExternalDLAccount
+        fields = '__all__'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # raw_id у user: bound-форме доверяем присланному значению, unbound —
+        # instance.user (add-страница с пустым raw_id даст None — поле потом
+        # всё равно уберётся в get_form админки пока юзер не выбран).
+        if self.instance.user_id and not self.is_bound:
+            self.fields["user_ai_access_groups"].initial = (
+                self.instance.user.ai_access_groups.all()
+            )

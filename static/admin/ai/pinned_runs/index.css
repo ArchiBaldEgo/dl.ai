@@ -1,0 +1,9 @@
+/* Стили страницы «Закреплённые пакетные решения».
+   Вынесены из ai/templates/admin/ai/pinned_runs.html. */
+.ai-pinned-wrap { max-width: 100%; }
+/* Отступ таблицы; вид ячеек (.ai-logs-table*/.ai-log-pin-*) — в ГЛОБАЛЬНОМ
+   static/admin/ai/batch_results/index.css (таблица общая с журналом, копии
+   правил отсюда удалены — DRY). */
+.ai-pinned-table { margin: 8px 0; }
+.ai-pinned-empty { color: var(--body-quiet-color); padding: 12px 0; }
+.ai-pinned-actions { margin-top: 12px; display: flex; gap: 8px; }

@@ -47,7 +47,11 @@
     <tbody>
       {% for row in rows %}
       <tr>
-        <td style="padding: 8px; border-bottom: 1px solid #eee;">{{ row.entry.commit_date|date:"d.m.Y" }}</td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">
+          {# Дата только У ПЕРВОЙ записи дня: ordering (-commit_date, …) держит #}
+          {# same-day строки соседними; перенос дня на новую страницу — корректен. #}
+          {% ifchanged row.entry.commit_date %}{{ row.entry.commit_date|date:"d.m.Y" }}{% endifchanged %}
+        </td>
         <td style="padding: 8px; border-bottom: 1px solid #eee;">{{ row.entry.description }}</td>
         <td style="padding: 8px; border-bottom: 1px solid #eee;">{{ row.display_author }}</td>
       </tr>
@@ -76,8 +80,8 @@
 </div>
 
 {# Динамические фильтры (сам применяет, без кнопки) — общий хелпер админки. #}
+{# Хелпер грузится ПЕРВЫМ, потом index.js инициализирует его на форме.    #}
 <script src="{% static 'admin/js/ai_auto_filters.js' %}"></script>
-<script>
-  initAiAutoFilters(document.querySelector('.ai-updates-filter'));
-</script>
+<script src="{% static 'admin/ai/updates/index.js' %}"></script>
+
 {% endblock %}

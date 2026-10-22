@@ -9,9 +9,9 @@
   ``Authorization: Bearer ...`` + ``Content-Type: application/json``;
 - ``proxy_bypass_session()`` — ``requests.Session`` с ``trust_env=False``
   (для внутренних HTTP-вызовов в обход HTTP_PROXY/HTTPS_PROXY);
-- ``BotPoolClient`` — общий HTTP-клиент Puppeteer-бот-пула (WebDeepseek/,
-  WebKimi/): POST /api/send с ретраями и POST /api/restart; веб-модули
-  задают только конфигурацию (DRY вместо двух копий логики).
+- ``BotPoolClient`` — общий HTTP-клиент Puppeteer-бот-пула (WebPools/,
+  сайты deepseek/kimi): POST /api/send с ретраями и POST /api/restart;
+  веб-модули задают только конфигурацию (DRY вместо двух копий логики).
 """
 
 import asyncio
@@ -97,8 +97,51 @@ def make_table_handlers(
     return handlers
 
 
+# Маркеры «мусора» — служебных данных сайта (гидрация Next.js/Remix),
+# которые веб-пул иногда отдаёт вместо ответа модели (юзер видел «код
+# регионов» — JSON-куски разметки страницы). Проверка на границе — простой
+# эвристический чек по подстрокам; основная логика отсечения живёт в
+# WebPools/worker/modules/answerSanitizer.js (единый источник правды).
+SITE_GARBAGE_MARKERS = (
+    "window.HYDRATION_INIT_STATE",
+    "window.__INITIAL_STATE__",
+    "window.__APOLLO_STATE__",
+    "window.__NUXT__",
+    "window.__remixContext",
+    "__NEXT_DATA__",
+    "self.__next_f.push",
+    '"dehydratedAt"',
+)
+
+# Маркеры состояния страницы, которые считаются мусором ТОЛЬКО в JSON-контексте
+# (весь ответ похож на JSON-объект) — иначе ловили бы нормальные ответы
+# модели с примером JSON (ключ "queries" и т.п.).
+SITE_GARBAGE_JSON_MARKERS = (
+    '"mutations"',
+    '"queries"',
+    '"pageProps"',
+)
+
+
+def looks_like_site_garbage(content: str) -> bool:
+    """Похож ли ответ веб-пула на служебные данные страницы (гидрацию).
+
+    Страховка на границе: основной санитайзер — в пуле (JS), здесь ловим
+    только явные маркеры, чтобы мусор не дошёл до пользователя как «ответ».
+    """
+    if content is None:
+        return False
+    text = str(content)
+    if any(marker in text for marker in SITE_GARBAGE_MARKERS):
+        return True
+    stripped = text.strip()
+    if len(stripped) >= 40 and stripped.startswith(("{", "[")):
+        return any(marker in text for marker in SITE_GARBAGE_JSON_MARKERS)
+    return False
+
+
 class BotPoolClient:
-    """HTTP-клиент Puppeteer-бот-пула (WebDeepseek/, WebKimi/).
+    """HTTP-клиент Puppeteer-бот-пула (WebPools/, сайты deepseek/kimi).
 
     Общий протокол у пулов одинаковый: ``POST /api/send`` (с ретраями,
     Retry-After backoff и распознаванием устаревших селекторов) и
@@ -114,7 +157,7 @@ class BotPoolClient:
         site_label: имя сайта для сообщения об изменённой вёрстке
             ("DeepSeek" / "Kimi").
         selector_doc: путь к файлу селекторов в этом сообщении
-            ("WebDeepseek/worker/data.json" / "WebKimi/worker/data.json").
+            ("WebPools/sites/deepseek.js" / "WebPools/sites/kimi.js").
     """
 
     def __init__(
@@ -161,6 +204,13 @@ class BotPoolClient:
         "Бот-пул {site} пуст: нет ни одного готового бота "
         "(Chromium не установлен или бот не залогинен)."
     )
+
+    GARBAGE_ANSWER_MESSAGE = (
+        "Модель вернула вместо ответа служебные данные сайта "
+        "(гидрация страницы) — попробуйте ещё раз."
+    )
+
+    EMPTY_ANSWER_MESSAGE = "Модель вернула пустой ответ — попробуйте ещё раз."
 
     def pool_state(self) -> str:
         """Состояние пула по GET /health: «live» | «empty» | «» (не отвечает).
@@ -213,7 +263,7 @@ class BotPoolClient:
         finally:
             session.close()
 
-    async def ask(self, msg: str, user_id: int, thinking: bool) -> Tuple[str, int, bool]:
+    async def ask(self, msg: str, user_id: int, thinking: bool) -> Tuple[str, int, bool, bool, int]:
         """Отправить сообщение в бот-пул и вернуть (text, tokens, is_error).
 
         До 3 попыток: таймаут/обрыв соединения и 429/5xx — с backoff
@@ -236,22 +286,34 @@ class BotPoolClient:
                     logger.warning("%s bot pool timeout (300s), retrying in %ss (attempt %s/%s)", self.label, wait, attempt, max_attempts)
                     await asyncio.sleep(wait)
                     continue
-                return f"Таймаут при подключении к {self.label} (300с). Попробуйте позже.", 0, True
+                return f"Таймаут при подключении к {self.label} (300с). Попробуйте позже.", 0, True, False, 0
             except requests.ConnectionError as exc:
                 if attempt < max_attempts:
                     wait = min(attempt * 3, 15)
                     logger.warning("%s bot pool connection error: %s, retrying in %ss (attempt %s/%s)", self.label, exc, wait, attempt, max_attempts)
                     await asyncio.sleep(wait)
                     continue
-                return f"Ошибка подключения к {self.label}: {exc}", 0, True
+                return f"Ошибка подключения к {self.label}: {exc}", 0, True, False, 0
 
             logger.debug("%s bot pool response status: %s (attempt %s/%s)", self.label, response.status_code, attempt, max_attempts)
 
             if response.status_code == 200:
                 obj, error_message = safe_parse_response(response.text)
                 if obj is None:
-                    return error_message, 0, True
-                return obj["data"]["content"], 0, False
+                    return error_message, 0, True, False, 0
+                content = (obj.get("data") or {}).get("content") or ""
+                # СТРАХОВКА НА ГРАНИЦЕ: пул иногда отдаёт вместо ответа
+                # служебные данные сайта (гидрация страницы: window.
+                # HYDRATION_INIT_STATE={...}, __NEXT_DATA__ и т.п.). Такой
+                # текст — не ответ модели: показываем честную ошибку, а не
+                # мусор (в пуле мусор режется на уровне worker/server.js).
+                if looks_like_site_garbage(content):
+                    logger.warning("%s bot pool returned site garbage instead of an answer", self.label)
+                    return self.GARBAGE_ANSWER_MESSAGE, 0, True, False, 0
+                if not content.strip():
+                    return self.EMPTY_ANSWER_MESSAGE, 0, True, False, 0
+                # Пул не отдаёт usage — токены 0 (честно: «учёт недоступен»).
+                return content, 0, False, False, 0
 
             if response.status_code in (429, 500, 502, 503, 504):
                 # 429 — все боты pool заняты (pool шлёт Retry-After, ~3с): транзитная
@@ -269,7 +331,12 @@ class BotPoolClient:
                         pass
                     if "UI may have changed" in reason or "All answer XPath selectors failed" in reason:
                         return (f"{self.site_label} изменил интерфейс сайта — селекторы bot-пула устарели, "
-                                f"нужно обновить {self.selector_doc}."), 0, True
+                                f"нужно обновить {self.selector_doc}."), 0, True, False, 0
+                    # Пул сам отсёк мусор (гидрация страницы) — ретраить бессмысленно:
+                    # отдаём честную ошибку сразу.
+                    if "GARBAGE_ANSWER" in reason:
+                        logger.warning("%s bot pool rejected the answer as site garbage: %s", self.label, reason[:200])
+                        return self.GARBAGE_ANSWER_MESSAGE, 0, True, False, 0
                 if attempt < max_attempts:
                     # Уважаем Retry-After (429/503 — бот освобождается/стартует),
                     # иначе мягкий backoff; ограничиваем сверху, чтобы не висеть.
@@ -286,6 +353,6 @@ class BotPoolClient:
             # Живой пул с запускающимся ботом (503 bot_starting) сохраняет прежние
             # формулировки — старт может доехать.
             if response.status_code in (429, 500, 502, 503, 504) and self.pool_state() == "empty":
-                return self.empty_pool_message(), 0, True
+                return self.empty_pool_message(), 0, True, False, 0
 
-            return map_http_error(response.status_code, self.provider), 0, True
+            return map_http_error(response.status_code, self.provider), 0, True, False, 0

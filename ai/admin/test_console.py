@@ -1,11 +1,11 @@
 """Тестовая консоль админки: страница + start/status trio + история логов.
 
-Зеркало ai/admin/prompt_regression.py: page view рендерит шаблон с initial-снимком
-(по ?run_id=; без него — последний прогон пользователя не старше 10 минут),
-start (POST) запускает прогон, status (GET) отдаёт снимок для поллинга
-фронтенда. Полный raw-вывод каждого прогона лежит на диске (последние 10):
-logs/ — список (logs/), просмотр/скачивание (logs/view/). Доступ —
-can_access_test_console (только superuser). Тесты выполняются сабпроцессом
+page view рендерит шаблон с initial-снимком (по ?run_id=; без него —
+последний прогон пользователя не старше 10 минут), start (POST) запускает
+прогон, status (GET) отдаёт снимок для поллинга фронтенда. Полный raw-вывод
+каждого прогона лежит на диске (последние 10): logs/ — список, просмотр/
+скачивание (logs/view/). Просмотр — can_access_test_console, запуск —
+действие action.test_console_run. Тесты выполняются сабпроцессом
 в изолированном test-settings окружении — см. ai/test_console_runner.py.
 """
 
@@ -25,7 +25,7 @@ from ..test_console_runner import (
     read_disk_log,
     start_test_run,
 )
-from .permissions import can_access_test_console
+from .permissions import can_access_test_console, user_has_key
 from .site import ai_admin_site
 
 
@@ -66,8 +66,15 @@ def admin_test_console_view(request):
 
 
 def admin_test_console_start_view(request):
-    """Запуск прогона (POST). Returns {ok, run_id, run} или {ok:false, message}."""
+    """Запуск прогона (POST). Returns {ok, run_id, run} или {ok:false, message}.
+
+    Просмотр консоли — по ключу страницы page.test_console (can_access);
+    запуск — отдельное действие action.test_console_run (аккордеон страницы
+    в «Группах доступа»), чтобы можно было выдать «смотреть, но не рулить».
+    """
     if not can_access_test_console(request):
+        return HttpResponseForbidden("Access denied")
+    if not user_has_key(request.user, "action.test_console_run"):
         return HttpResponseForbidden("Access denied")
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])

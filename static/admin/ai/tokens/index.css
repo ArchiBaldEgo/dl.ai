@@ -1,0 +1,247 @@
+/* Страница «Контроль токенов» (/ai/admin/ai/tokens/). */
+
+.ai-tokens-wrap {
+    max-width: 1400px;
+}
+
+/* Период-кнопки («Сегодня / 7 дней / 30 дней / Всё время») —/actions,
+   а не тогглы: нажатие заполняет поля дат и сразу обновляет панели. */
+.ai-tokens-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.ai-tokens-chips-label {
+    font-size: 12px;
+    color: var(--body-quiet-color, #666);
+}
+
+.ai-tokens-chip {
+    padding: 3px 12px;
+    border: 1px solid var(--hairline-color, #e8e8e8);
+    border-radius: 999px;
+    background: var(--body-bg, #fff);
+    color: var(--body-fg, #333);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.ai-tokens-chip:hover {
+    border-color: var(--link-fg, #79aec8);
+    color: var(--link-fg, #79aec8);
+}
+
+/* Плашка «учёт неполный» — БЛОК над карточками (внутри панельного
+   партиала: она зависит от данных и обязана обновляться при смене
+   фильтров вместе с ними). */
+.ai-tokens-incomplete {
+    margin: 0 0 14px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: #fff3cd;
+    border: 1px solid #ffe08a;
+    color: #7a5b00;
+    font-size: 13px;
+}
+
+.ai-tokens-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+    align-items: flex-end;
+    margin: 12px 0 18px;
+    padding: 12px;
+    background: var(--object-tools-bg, #f8f8f8);
+    border: 1px solid var(--hairline-color, #e8e8e8);
+    border-radius: 6px;
+}
+
+.ai-tokens-filters label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--body-quiet-color, #666);
+}
+
+.ai-tokens-filters input,
+.ai-tokens-filters select {
+    min-width: 150px;
+    padding: 4px 6px;
+}
+
+.ai-tokens-cards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin-bottom: 18px;
+}
+
+.ai-tokens-card {
+    flex: 1 1 260px;
+    padding: 12px 16px;
+    border: 1px solid var(--hairline-color, #e8e8e8);
+    border-radius: 6px;
+    background: var(--body-bg, #fff);
+}
+
+.ai-tokens-card-title {
+    font-size: 12px;
+    color: var(--body-quiet-color, #666);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+}
+
+.ai-tokens-card-value {
+    font-size: 30px;
+    font-weight: 600;
+    line-height: 1.2;
+}
+
+.ai-tokens-card-sub {
+    font-size: 12px;
+    color: var(--body-quiet-color, #666);
+}
+
+/* Ведущая карточка (итог журнала) — крупнее обычной. */
+.ai-tokens-card--lead .ai-tokens-card-value {
+    font-size: 36px;
+}
+
+/* Пояснение во второй карточке: «парный итог — разрез, не слагаемое». */
+.ai-tokens-card-note {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--body-quiet-color, #666);
+}
+
+/* Сетка панелей — РОВНО две колонки. С «auto-fit + minmax(430px, 1fr)» число
+   колонок зависело от ширины окна, и таблицы разной длины «плыли»: колонки
+   соседних панелей не совпадали, длинные названия моделей распирали панель.
+   Фиксированная сетка + обрезка длинных названий внутри панели. */
+.ai-tokens-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    align-items: start;
+}
+
+@media (max-width: 1100px) {
+    .ai-tokens-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.ai-tokens-panel {
+    /* min-width: 0 — без него содержимое таблицы распирает грид-колонку;
+       overflow: hidden — горизонтальная прокрутка остаётся ВНУТРИ панели. */
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--hairline-color, #e8e8e8);
+    border-radius: 6px;
+    padding: 10px 14px 14px;
+    background: var(--body-bg, #fff);
+}
+
+.ai-tokens-panel h3 {
+    margin: 6px 0 10px;
+    font-size: 14px;
+}
+
+.ai-tokens-table {
+    width: 100%;
+    /* Фиксированная раскладка: ширины колонок не «прыгают» от панели к
+       панели, длинное название обрезается (подсказка — в title). */
+    table-layout: fixed;
+    border-collapse: collapse;
+}
+
+.ai-tokens-table th,
+.ai-tokens-table td {
+    padding: 5px 6px;
+    border-bottom: 1px solid var(--hairline-color, #eee);
+    text-align: left;
+    vertical-align: top;
+}
+
+.ai-tokens-table th:not(:first-child),
+.ai-tokens-table td:not(:first-child) {
+    width: 88px;
+}
+
+/* Название среза — обрезается, полный текст в подсказке (title). */
+.ai-tokens-label {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ai-tokens-table th {
+    font-size: 12px;
+    color: var(--body-quiet-color, #666);
+    font-weight: 600;
+}
+
+.ai-tokens-num {
+    text-align: right !important;
+    white-space: nowrap;
+    /* Колонки чисел — цифры одной ширины, строки выравниваются по разрядам. */
+    font-variant-numeric: tabular-nums;
+}
+
+/* Полоска доли строки (share = % от максимума этой таблицы). Один оттенок
+   (акцент), дорожка — светлая ступень ТОГО ЖЕ оттенка: длина читается без
+   легенды, «больше = длиннее». Цвета берутся из темы админки (--accent),
+   поэтому светлая и тёмная темы обе работают. */
+.ai-tokens-bar {
+    display: block;
+    height: 4px;
+    margin-top: 3px;
+    border-radius: 2px;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--accent, #79aec8) 22%, var(--body-bg, #fff));
+}
+
+.ai-tokens-bar-fill {
+    display: block;
+    height: 100%;
+    min-width: 3px;
+    border-radius: 0 2px 2px 0;
+    background: var(--accent, #79aec8);
+}
+
+/* Название-«фильтр»: клик ставит его как фильтр (drill-down). Пунктир —
+   как у прочих «тихих» ссылок проекта (arm-error-link). */
+.ai-tokens-label-link {
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: var(--body-quiet-color, #666);
+    text-underline-offset: 2px;
+}
+
+.ai-tokens-label-link:hover {
+    text-decoration-style: solid;
+    color: var(--link-fg, #79aec8);
+}
+
+.ai-tokens-empty {
+    color: var(--body-quiet-color, #666);
+    font-style: italic;
+}
+
+.ai-tokens-flag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: 9px;
+    background: #fff3cd;
+    border: 1px solid #ffe08a;
+    color: #7a5b00;
+    font-size: 11px;
+    white-space: nowrap;
+}

@@ -72,6 +72,12 @@ _CODE_HINT_RE = _re.compile(
     _re.IGNORECASE,
 )
 
+# Хвостовой inline-комментарий строки кода: «// …» (С-МПА) или « ; …» (i86 —
+# обязательно с пробелом ПЕРЕД «;»: `); c,d byte.` в CoT-строках и C-код вида
+# «int a=0; b=1;» комментарием не являются; строка-комментарий целиком охраняется
+# _COMMENT_START_RE).
+_INLINE_TAIL_RE = _re.compile(r"//.*$|\s;.*$")
+
 
 def _strip_think_blocks(text):
     """Удалить think-блоки рассуждений вместе с содержимым."""
@@ -101,12 +107,23 @@ def _is_prose_sentence(line):
     мало. Два признака прозы: (1) предложение, кончающееся точкой, — код
     кончается «;»/«}»/«end.», а у «end.» есть маркер «end»; (2) много словарных
     слов, из которых ощутимая доля — функциональные (EN/RU стоп-слова).
+
+    Хвостовой inline-комментарий вырезается ПЕРЕД суждением по точке: строка
+    кода с комментарием-предложением в конце («mov R, ax ; вычисляем сумму.»,
+    «y = a + b; // сумма операндов.») — это КОД, срезка такой строки ломает
+    компиляцию. Берём только «//…» и « ;…» (пробел перед `;`): а) `); c,d byte.`
+    в CoT и б) `int a=0; b=1;` комментарием не являются.
     """
     stripped = line.strip()
+    m = _INLINE_TAIL_RE.search(stripped)
+    judged = stripped[:m.start()].strip() if m else stripped
+    if not judged:
+        # Чистый комментарий («; Вводим данные здесь.») — судим по строке целиком.
+        judged = stripped
     # Точка в конце + связные слова — предложение (но «end.» держится на маркере).
-    if stripped.endswith(".") and len(_PROSE_WORD_RE.findall(stripped)) >= 3:
+    if judged.endswith(".") and len(_PROSE_WORD_RE.findall(judged)) >= 3:
         return True
-    words = _PROSE_WORD_RE.findall(line)
+    words = _PROSE_WORD_RE.findall(judged)
     if len(words) < 5:
         return False
     hits = sum(1 for w in words if w.lower() in _PROSE_STOPWORDS)
@@ -183,6 +200,21 @@ def _is_alternative_heading(line):
     return bool(_ALT_HEADING_RE.match(line))
 
 
+def _code_follows_heading(lines, index):
+    """После заголовка «второго решения» СРАЗУ идёт код (оградка/код-строка)?
+
+    Заголовок, открывающий вторую программу с ходу («Альтернатива:» →
+    ```asm …), срезается; если между заголовком и кодом ещё прозовая строка
+    («Альтернатива: нужно иначе. Финальная программа: …код»), срез не
+    делается — иначе пропадала бы ФИНАЛЬНАЯ программа ниже (выкусывание).
+    """
+    for line in lines[index + 1:index + 4]:
+        if not line.strip():
+            continue
+        return line.lstrip().startswith("```") or _line_is_code(line)
+    return False
+
+
 def cut_after_alternative_heading(text):
     """Срезать текст ПОСЛЕ первого заголовка «второго решения».
 
@@ -191,13 +223,14 @@ def cut_after_alternative_heading(text):
     вариант («Вариант 1: …код»), код не трогает. Оградка считается — у
     инструкций вроде «sub ax, y» нет ни одного кодового маркера из
     _CODE_HINT_RE, а «mov + оградка» перед заголовком — уже основное решение.
+    Дополнительно код должен идти СРАЗУ после заголовка (_code_follows_heading).
     Возвращает укороченный текст (или исходный, если срезать нечего).
     """
     lines = text.splitlines()
     code_seen = 0
     for index, line in enumerate(lines):
         if _is_alternative_heading(line):
-            if code_seen >= 2:
+            if code_seen >= 2 and _code_follows_heading(lines, index):
                 return "\n".join(lines[:index]).rstrip()
         elif _line_is_code(line) or line.lstrip().startswith("```"):
             code_seen += 1
@@ -210,9 +243,30 @@ _FENCE_LINE_RE = _re.compile(r"^\s*```[^\n]*$", _re.MULTILINE)
 # --- i8086 asm ---
 _JMP_BEGIN_RE = _re.compile(r"^\s*jmp\s+begin\b", _re.IGNORECASE)
 _BEGIN_LABEL_RE = _re.compile(r"^\s*begin\s*:", _re.IGNORECASE)
+# Анкер каркасного перехода: «jmp begin» — канонический DL-каркас; модели
+# разных провайдеров скашивают каркас по-своему (jmp start/start: — MASM,
+# jmp begin_data/program/…), поэтому ЯКОРОМ считается ЛЮБОЙ «jmp <метка>»
+# со СТАРТОВЫМ именем, у которого ниже есть одноимённая метка. Белый список
+# стартовых имён обязателен: jmp на метке ЦИКЛА (jmp loop_start) якорем не
+# становится — иначе хвостовое окно «съедает» дату-секцию программы.
+_JUMP_ENTRY_RE = _re.compile(r"^\s*jmp\s+([A-Za-z_]\w*)\s*$", _re.IGNORECASE)
+_ENTRY_LABEL_RE = _re.compile(
+    r"^(?:begin|start|prog\w*|program|main|init|entry|go)\w*$",
+    _re.IGNORECASE,
+)
+_LABEL_DEF_RE = _re.compile(r"^\s*([A-Za-z_]\w*)\s*:", )
+# MASM-скелет без jmp-перехода вообще (.model/.stack/.data/.code/org 100h) —
+# тоже якорь: от первой директивы до конца каркаса.
+_MASM_DIR_RE = _re.compile(
+    r"^\s*(?:\.model\b|\.stack\b|\.code\b|\.data\b|org\s+\d+)",
+    _re.IGNORECASE,
+)
 # Концы i8086-программы: каркас DL (ends:/jmp ends + ;$E) и MASM-диалект
-# («end start»); Паскаль-овский «end.» (без пробела+слова) не матчится.
-_ASM_END_RE = _re.compile(r"^\s*(ends\s*:|jmp\s+ends\b|end\s+\w+\b)", _re.IGNORECASE)
+# («end start», «end» без метки); Паскаль-овский «end.» (точка после слова)
+# и проза «The end.» (слово ПЕРЕД end) не матчатся.
+_ASM_END_RE = _re.compile(
+    r"^\s*(ends\s*:|jmp\s+ends\b|end\s+\w+\b|end\s*$)", _re.IGNORECASE,
+)
 _DL_END_MARKER_RE = _re.compile(r";\$E\b", _re.IGNORECASE)
 
 # --- С-МПА (псевдо-C) ---
@@ -361,16 +415,44 @@ def _asm_candidates_for_anchor(lines, start):
     return (start, end, False)
 
 
+def _asm_anchors(lines):
+    """Индексы анкеров каркаса i8086: «jmp <стартовая метка>» с одноимённой
+    меткой ниже, а при их отсутствии — MASM-директивы (.model/.stack/.data/
+    .code/org 100h). «begin:» и метки циклов якорями не считаются: привязка
+    к линии МЕТКИ отрезала бы дату-секцию, а цикл-метка «съедает» программу
+    хвостовым окном."""
+    labeled = set()
+    for line in lines:
+        m = _LABEL_DEF_RE.match(line)
+        if m:
+            labeled.add(m.group(1).lower())
+    anchors = []
+    for i, line in enumerate(lines):
+        m = _JUMP_ENTRY_RE.match(line)
+        if m and _ENTRY_LABEL_RE.match(m.group(1)) and m.group(1).lower() in labeled:
+            anchors.append((i, m.group(1).lower()))
+    if not anchors:
+        # MASM-скелет: только ПЕРВАЯ директива (каждая следующая — якорь
+        # хвостового окна, которые «съедали» дату-секцию: .code-анкер давал
+        # кандидата без .model/.stack/.data).
+        for i, line in enumerate(lines):
+            if _MASM_DIR_RE.match(line):
+                anchors.append((i, None))
+                break
+    return anchors
+
+
 def extract_asm_i86(text, relaxed=False):
-    """Структурный экстрактор ассемблера i8086 (DL-каркас с jmp begin).
+    """Структурный экстрактор ассемблера i8086 (DL-каркас с jmp begin, MASM).
 
     Возвращает код или "" (нет каркасных маркеров — не наш случай).
 
     Модели в CoT упоминают каркас и цитируют «болванки» программ; простая
     привязка к ПЕРВОМУ вхождению тащила болванку + прозу + программу скопом
-    (res#3987). Поэтому: перебираем ВСЕ анкеры (^jmp begin), от каждого —
-    кандидат до ближайшего концевика, валидируем, берём ПОСЛЕДНИЙ валидный
-    (модели цитируют болванки раньше финального ответа).
+    (res#3987). Поэтому: перебираем ВСЕ анкеры (jmp begin — и скашивания
+    каркаса вроде jmp start/start: под MASM, либо MASM-директивы), от
+    каждого — кандидат до ближайшего концевика, валидируем, берём ПОСЛЕДНИЙ
+    валидный (модели цитируют болванки раньше финального ответа).
 
     relaxed=True — строгие прозя-валидации (не-проза, мид-проза) пропускаются:
     аварийный тир «долгое рассуждение без фенсов», когда все строгие тиры
@@ -381,24 +463,41 @@ def extract_asm_i86(text, relaxed=False):
     if not text:
         return ""
     lines = [line for line in text.splitlines()]
-    # Анкер — ТОЛЬКО «jmp begin»: строка «begin:» стоит ПОСЛЕ данных, и
-    # привязка к ней отрезала бы дата-секцию (канд. begin:…Ends: без «n dw…»).
-    anchors = [i for i, line in enumerate(lines) if _JMP_BEGIN_RE.match(line)]
+    anchors = _asm_anchors(lines)
     if not anchors:
         return ""
     candidates = []
-    for start in anchors:
+    for start, anchor_label in anchors:
         span = _asm_candidates_for_anchor(lines, start)
         if span is None:
-            # каркаса конца нет: возможно, модель писала без ;$E — пробуем
-            # до конца текста, но только если у анкера РЕАЛЬНО есть данные
-            # (dw/db/массив) и begin: ниже; иначе — болванка/проза.
+            # Каркаса конца нет: возможно, модель писала без ;$E/обрезал
+            # ответ — пробуем до конца текста, но только если у анкера ниже
+            # РЕАЛЬНО есть данные (dw/db/dup, скан по всему хвосту —
+            # 15-строчный кап терял длинные секции данных) и метка каркаса;
+            # MASM-директиве достаточно самой секции .data/.code ниже.
             end = len(lines) - 1
             marker_seen = False
-            has_data = any(_re.search(r"\b(?:dw|db|dup)\b", lines[j]) for j in range(start + 1, min(start + 15, len(lines))))
-            has_begin = any(_BEGIN_LABEL_RE.match(lines[j]) for j in range(start + 1, len(lines)))
-            if not (has_data and has_begin):
-                continue
+            data_re = _re.compile(r"\b(?:dw|db|dup)\b", _re.IGNORECASE)
+            has_data = any(data_re.search(lines[j]) for j in range(start + 1, len(lines)))
+            if anchor_label is not None:
+                has_label = any(
+                    _re.match(
+                        rf"^\s*{_re.escape(anchor_label)}\s*:",
+                        lines[j], _re.IGNORECASE,
+                    )
+                    for j in range(start + 1, len(lines))
+                )
+                if not (has_data and has_label):
+                    continue
+            else:
+                # MASM-директива: ниже достаточно любых данных или меток
+                # (`.data`/`.code` секция может и не иметь dw/db вовсе).
+                has_any = any(
+                    data_re.search(lines[j]) or _LABEL_DEF_RE.match(lines[j])
+                    for j in range(start + 1, len(lines))
+                )
+                if not has_any:
+                    continue
         else:
             _, end, marker_seen = span
         body = [l for l in lines[start:end + 1]]
@@ -436,6 +535,31 @@ def extract_asm_i86(text, relaxed=False):
     # если есть кандидаты с ;$E — среди них берём последний.
     marked = [c for marker_seen, c in candidates if marker_seen]
     return (marked or [c for _, c in candidates])[-1]
+
+
+def _salvage_glued_mpa(cand_lines):
+    """Спасение склеенного много-main окна С-МПА: декларации до ПЕРВОГО main
+    + весь фрагмент от ПОСЛЕДНЕГО main до конца окна.
+
+    Окно от якоря-декларации, закрывшееся на балансе ДАЛЬНЕГО main (первый
+    main оказался незакрытым — обрез/болванка), раньше браковалось ЦЕЛИКОМ,
+    и декларации выкусывались: DL падал «Undefined variable». Возвращает
+    спасённый текст или None (меньше 4 строк / несбалансирован / не ровно
+    один main).
+    """
+    main_indices = [j for j, l in enumerate(cand_lines) if _MPA_MAIN_RE.match(l)]
+    if len(main_indices) < 2:
+        return None
+    salvaged = cand_lines[:main_indices[0]] + cand_lines[main_indices[-1]:]
+    text = strip_code_fence_lines("\n".join(salvaged)).strip()
+    text_lines = [l for l in text.splitlines() if l.strip()]
+    if len(text_lines) < 4:
+        return None
+    if text.count("{") != text.count("}"):
+        return None
+    if sum(1 for l in text_lines if _MPA_MAIN_RE.match(l)) != 1:
+        return None
+    return text
 
 
 def _closing_brace_line(line):
@@ -502,7 +626,10 @@ def extract_mpa_c(text, relaxed=False):
         ДО main, в кандидата попадали только declи с первым хелпером, main
         выпадал — DL падал («Undefined variable …»). Здесь окончание окна —
         закрытие блока main; хелперы ДО main считаются частью программы.
-        Если main так и не закрылся — последний баланс до EOF.
+        Если баланс до конца текста НЕ сошёлся (обрез/склейка) — окно до EOF:
+        кандидат дальше может спасти мульти-main сальвадж «декларации +
+        последний main», иначе отбракуется проверками ниже (именно так
+        раньше пропадали сами декларации — Undefined variable).
         """
         depth = 0
         opened = False
@@ -519,7 +646,12 @@ def extract_mpa_c(text, relaxed=False):
                 pending_end = i
                 if saw_main:
                     return i
-        return pending_end
+        if pending_end is not None:
+            return pending_end
+        # Баланс не сошёлся вовсе: тянуть до EOF имеет смысл только если в
+        # окне был main (обрез/склейка, которую может спасти сальвадж);
+        # без main это просто хвост текста — окна нет.
+        return len(lines) - 1 if saw_main else None
 
     def end_for(start):
         """Якорь-объявление → до закрытия main (иначе теряются хелперы перед
@@ -541,25 +673,36 @@ def extract_mpa_c(text, relaxed=False):
         cand_line_count = len(candidate.splitlines())
         if cand_line_count < 4:
             continue
-        if candidate.count("{") > candidate.count("}"):
-            continue  # программа не закрыта — модель/болванка обрыв
-        # Два main-а в окне — склейка двух болванок/программ; в строгом
-        # режиме бракуем, в relaxed обрезаем окно до ПОСЛЕДНЕГО main.
+        # Два main-а в окне — склейка двух болванок/программ: спасаем
+        # «декларации + последний main» (иначе декларации выкусываются и DL
+        # падает «Undefined variable»); не сошлось — в строгом режиме бракуем,
+        # в relaxed отрезаем окно до ПОСЛЕДНЕГО main. Проверка ДО
+        # дисбаланса-гейта: окно склейки обычно НЕсбалансировано (первый main
+        # оборван) — иначе оно отбрасывалось бы раньше сальваджа и декларации
+        # пропадали бы.
         main_indices = [j for j, l in enumerate(candidate.splitlines()) if _MPA_MAIN_RE.match(l)]
         if len(main_indices) > 1:
-            if not relaxed:
+            salvaged = _salvage_glued_mpa(candidate.splitlines())
+            if salvaged:
+                candidate = salvaged
+                cand_line_count = len(candidate.splitlines())
+            elif not relaxed:
                 continue
-            truncated = "\n".join(candidate.splitlines()[main_indices[-1]:])
-            truncated = strip_code_fence_lines(truncated).strip()
-            if (
-                truncated.splitlines()
-                and len(truncated.splitlines()) >= 4
-                and truncated.count("{") <= truncated.count("}")
-            ):
-                candidate = truncated
-                cand_line_count = len(truncated.splitlines())
             else:
-                continue
+                truncated = "\n".join(candidate.splitlines()[main_indices[-1]:])
+                truncated = strip_code_fence_lines(truncated).strip()
+                if (
+                    truncated.splitlines()
+                    and len(truncated.splitlines()) >= 4
+                    and truncated.count("{") <= truncated.count("}")
+                ):
+                    candidate = truncated
+                    cand_line_count = len(truncated.splitlines())
+                else:
+                    continue
+        # Программа не закрыта и не спасена — модель/болванка обрыв.
+        if candidate.count("{") > candidate.count("}"):
+            continue
         if not relaxed:
             if _looks_like_prose(candidate):
                 continue
@@ -603,13 +746,15 @@ def has_mpa_markers(text):
 
 
 def has_asm_markers(text):
-    """Быстрый тест: похоже ли на ассемблер i8086 (jmp begin / begin: / ends)."""
+    """Быстрый тест: похоже ли на ассемблер i8086 (jmp begin / begin: / ends /
+    MASM-скелет .model/.stack/.code/.data/org 100h)."""
     if not text:
         return False
     return bool(
         _JMP_BEGIN_RE.search(text)
         or _re.search(r"^\s*begin\s*:", text, _re.MULTILINE | _re.IGNORECASE)
         or _re.search(r"^\s*ends\s*:", text, _re.MULTILINE | _re.IGNORECASE)
+        or _MASM_DIR_RE.search(text)
     )
 
 
@@ -624,6 +769,32 @@ _ASM_GATE_RE = _re.compile(
     _re.IGNORECASE | _re.MULTILINE,
 )
 _MPA_GATE_RE = _re.compile(r"\b__bits\s*\(|\b__in\b|\b__out\b|\bmain\s*\(", _re.IGNORECASE)
+
+
+def language_code_incomplete(code, ext):
+    """True — код выглядит НЕПОЛНЫМ (обрыв генерации посреди программы).
+
+    Такой код не компилируется ни при каком допущении (нет концевика каркаса
+    у .i86 / несбалансированные скобки или нет main у .mpc) — в DL его не
+    отправляют, пара получает авто-ретрай «сразу код». Для прочих
+    расширений полнота не проверяется (False).
+    """
+    if not code:
+        return True
+    ext = (ext or "").strip().lower()
+    if ext in (".i86", ".asm"):
+        return not bool(
+            _DL_END_MARKER_RE.search(code)
+            or _re.search(
+                r"^\s*(?:ends\s*:|jmp\s+ends\b|end\b)",
+                code, _re.IGNORECASE | _re.MULTILINE,
+            )
+        )
+    if ext == ".mpc":
+        if code.count("{") != code.count("}"):
+            return True
+        return not any(_MPA_MAIN_RE.match(line) for line in code.splitlines())
+    return False
 
 
 def has_language_marker(code, ext):

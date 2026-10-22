@@ -328,42 +328,13 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 
   // -----------------------------------------------------------
-  // 4. Pin/Unpin — делегирование
+  // 4. Pin/Unpin и развёртка строк пакетных решений — в ОБЩЕМ модуле
+  //    static/admin/ai/batch_results/rows.js (подключается глобально в
+  //    admin/base_site.html). Здесь этого кода нет намеренно: разметка
+  //    строки одна (admin/ai/_ai_batch_row.html) — значит и поведение
+  //    одно на всех поверхностях (ТЗ: «любой лог пакетного решения
+  //    должен выглядеть одинаково»).
   // -----------------------------------------------------------
-  function pinCsrfToken() {
-    var input = document.querySelector('input[name="csrfmiddlewaretoken"]');
-    if (input && input.value) return input.value;
-    var m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
-    return m ? decodeURIComponent(m[1]) : '';
-  }
-
-  document.addEventListener('click', function (event) {
-    const btn = event.target.closest('.ai-log-pin-btn');
-    if (!btn) return;
-    if (btn.disabled || btn.classList.contains('busy')) return;
-    btn.classList.add('busy');
-
-    fetch(btn.getAttribute('data-pin-url'), {
-      method: 'POST',
-      headers: { 'X-CSRFToken': pinCsrfToken(), 'X-Requested-With': 'XMLHttpRequest' },
-      credentials: 'same-origin',
-    })
-      .then(function (resp) {
-        return resp.json().catch(function () { throw new Error('HTTP ' + resp.status); });
-      })
-      .then(function (data) {
-        if (!data.ok) throw new Error(data.message || 'Не удалось изменить закрепление');
-        btn.classList.toggle('ai-log-pin-btn-active', data.pinned);
-        btn.textContent = data.pinned ? '★' : '☆';
-        btn.title = data.pinned
-          ? 'Убрать из «Закреплённых»'
-          : 'Закрепить в «Закреплённых пакетных решениях»';
-      })
-      .catch(function (err) {
-        alert('Закрепление: ' + err.message);
-      })
-      .finally(function () { btn.classList.remove('busy'); });
-  });
 
   // -----------------------------------------------------------
   // 6. «Показать все задачи»: ленивый загруз batch-снапшота (решённые И

@@ -89,6 +89,10 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'channels',
+    # postgres — нужен ради OpClass/GinIndex: его ready() регистрирует
+    # обёртки выражений в индексах (expression index на UPPER(col) с
+    # gin_trgm_ops — ускорение фильтра журнала по фамилии).
+    'django.contrib.postgres',
 ]
 
 MIDDLEWARE = [
@@ -294,10 +298,10 @@ AI_WS_RATE_LIMIT = int(os.getenv("AI_WS_RATE_LIMIT", "120"))
 AI_HTTP_RATE_LIMIT = int(os.getenv("AI_HTTP_RATE_LIMIT", "60"))
 AI_RATE_LIMIT_WINDOW = int(os.getenv("AI_RATE_LIMIT_WINDOW", "60"))
 
-# When Web DeepSeek is detected as down, restart the WebDeepseek/ pool and re-check once.
+# When Web DeepSeek is detected as down, restart the WebPools/ deepseek site and re-check once.
 AI_WEB_DEEPSEEK_AUTORECOVERY = _env_bool("AI_WEB_DEEPSEEK_AUTORECOVERY", default=True)
 
-# When Web Kimi is detected as down, restart the WebKimi/ pool and re-check once.
+# When Web Kimi is detected as down, restart the WebPools/ kimi site and re-check once.
 AI_WEB_KIMI_AUTORECOVERY = _env_bool("AI_WEB_KIMI_AUTORECOVERY", default=True)
 
 # Provider gates (default off = current behaviour: providers disabled).

@@ -1,0 +1,95 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+{# Страница «Запросы по DL API» (ai/admin/dl_api_requests.py) — заявки на  #}
+{# создание API к DL. Две вкладки: «Актуальные» (API ещё не создан) и     #}
+{# «Неактуальные» (API сделано). В таблице: описание, кто попросил, когда. #}
+{# CSS/JS — static/admin/ai/dl_api_requests/.                                #}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/dl_api_requests/index.css' %}">
+{% endblock %}
+
+{% block content %}
+<div class="ai-dlapi-wrap" data-update-url="/ai/admin/dl-api-requests/update/"
+     data-create-url="/ai/admin/dl-api-requests/create/">
+  <p class="help">
+    Заявки пользователей на создание API к dl.gsu.by. Пока API не создан,
+    заявка висит во вкладке «Актуальные»; как только API сделан — отметьте
+    заявку, и она переедет в «Неактуальные» (вкладка сохраняет за собой
+    пометку «кто сделал» и «когда»).
+  </p>
+
+  {# === Форма создания заявки =========================================== #}
+  {# Заявка создаётся ЗДЕСЬ, в админке: описание + кнопка. Отправка — AJAX #}
+  {# (тот же csrftoken/parseJsonResponse, что у «API создано»).         #}
+  <form class="ai-dlapi-create" id="ai-dlapi-create-form">
+    <label for="ai-dlapi-description">Новая заявка на API к DL
+      <textarea id="ai-dlapi-description" name="description" rows="3"
+                placeholder="Опишите, какой API нужен (какие данные, для чего)"></textarea>
+    </label>
+    <button type="submit" class="button ai-dlapi-create-submit">Создать заявку</button>
+    <span class="ai-dlapi-create-status" aria-live="polite"></span>
+  </form>
+
+  <div class="ai-dlapi-tabs">
+    <a href="?tab=pending" class="ai-dlapi-tab{% if tab == 'pending' %} ai-dlapi-tab-active{% endif %}">
+      Актуальные <span class="ai-dlapi-count">{{ counts.pending }}</span>
+    </a>
+    <a href="?tab=done" class="ai-dlapi-tab{% if tab == 'done' %} ai-dlapi-tab-active{% endif %}">
+      Неактуальные <span class="ai-dlapi-count">{{ counts.done }}</span>
+    </a>
+  </div>
+
+  <table class="ai-dlapi-table">
+    <thead>
+      <tr>
+        <th scope="col">Описание</th>
+        <th scope="col">Кто попросил</th>
+        <th scope="col">Когда попросил</th>
+        <th scope="col">Комментарий</th>
+        <th scope="col"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr data-id="{{ row.id }}">
+          <td class="ai-dlapi-desc">{{ row.description|default:"—" }}</td>
+          <td>
+            {{ row.who }}
+            {% if row.username and row.user_full_name %}
+              <div class="ai-dlapi-sub">{{ row.username }}</div>
+            {% endif %}
+            {% if row.external_user_id %}
+              <div class="ai-dlapi-sub">ID: {{ row.external_user_id }}</div>
+            {% endif %}
+          </td>
+          <td class="nowrap">{{ row.created_label }}</td>
+          <td>
+            {% if row.comment %}{{ row.comment }}{% endif %}
+            {% if row.resolved_label %}
+              <div class="ai-dlapi-sub">Сделано: {{ row.resolved_label }}{% if row.resolved_by %} ({{ row.resolved_by }}){% endif %}</div>
+            {% endif %}
+          </td>
+          <td class="ai-dlapi-actions-cell">
+            {% if tab == 'pending' %}
+              <button type="button" class="button ai-dlapi-done" data-id="{{ row.id }}">API создано</button>
+            {% else %}
+              <button type="button" class="button ai-dlapi-reopen" data-id="{{ row.id }}">Вернуть в актуальные</button>
+            {% endif %}
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="5" class="ai-dlapi-empty">
+          {% if tab == 'pending' %}Актуальных заявок нет.{% else %}Неактуальных заявок нет.{% endif %}
+        </td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script src="{% static 'admin/ai/dl_api_requests/index.js' %}" defer></script>
+{% endblock %}

@@ -100,8 +100,13 @@ async def _ask_openrouter(
     *,
     max_tokens: int = 8000,
     temperature: float = 0.7,
-) -> Tuple[str, Optional[int], bool]:
-    """Generic OpenRouter chat completion wrapper with history management."""
+) -> Tuple[str, Optional[int], bool, bool, int]:
+    """Generic OpenRouter chat completion wrapper with history management.
+
+    Возвращает ``(текст, токенов_ответа, is_error, длина_обрезана,
+    токенов_промпта)`` — 5-й элемент нужен для учёта токенов (prompt+
+    completion) на странице «Контроль токенов».
+    """
     import asyncio
 
     conversation_history.append(user_id, {"role": "user", "content": messages})
@@ -129,28 +134,34 @@ async def _ask_openrouter(
             # возвращались без warning — сохраняем это поведение).
             if response.status_code not in (401, 413, 429):
                 logger.warning("OpenRouter API error: status=%s body=%s", response.status_code, response.text[:500])
-            return map_http_error(response.status_code, "openrouter"), 0, True
+            return map_http_error(response.status_code, "openrouter"), 0, True, False, 0
 
         obj = response.json()
         if "choices" not in obj or not obj["choices"]:
-            return "Неожиданный формат ответа от OpenRouter.", 0, True
+            return "Неожиданный формат ответа от OpenRouter.", 0, True, False, 0
 
-        completion_tokens = obj.get("usage", {}).get("completion_tokens", 0)
-        assistant_content = obj["choices"][0]["message"].get("content", "") or ""
+        choice = obj["choices"][0]
+        usage = obj.get("usage", {}) or {}
+        completion_tokens = usage.get("completion_tokens", 0)
+        prompt_tokens = usage.get("prompt_tokens", 0) or 0
+        assistant_content = choice["message"].get("content", "") or ""
         if not assistant_content.strip():
             logger.warning("OpenRouter model %s returned empty content", model_id)
-            return f"Модель OpenRouter ({model_id}) вернула пустой ответ. Попробуйте позже.", 0, True
+            return f"Модель OpenRouter ({model_id}) вернула пустой ответ. Попробуйте позже.", 0, True, False, 0
         conversation_history.append(user_id, {"role": "assistant", "content": assistant_content})
-        return assistant_content, completion_tokens, False
+        # 4-й элемент — обрез генерации (finish_reason == "length"): честный
+        # сигнал для флага truncated в ARM-раннере (для всех провайдеров с
+        # max_tokens, а не только Ollama/SambaNova).
+        return assistant_content, completion_tokens, False, choice.get("finish_reason") == "length", int(prompt_tokens)
 
     except requests.exceptions.ConnectionError:
-        return "Ошибка подключения к OpenRouter.", 0, True
+        return "Ошибка подключения к OpenRouter.", 0, True, False, 0
     except requests.exceptions.Timeout:
-        return "Таймаут при подключении к OpenRouter. Попробуйте позже.", 0, True
+        return "Таймаут при подключении к OpenRouter. Попробуйте позже.", 0, True, False, 0
     except Exception as e:
         logger.exception("Unexpected error in OpenRouter call")
         conversation_history.reset(user_id)
-        return "Что-то пошло не так. Контекст очищен, введите новый запрос.", 0, True
+        return "Что-то пошло не так. Контекст очищен, введите новый запрос.", 0, True, False, 0
 
 
 # --- Автогенерация функций для каждой модели (через _base.make_table_handlers) ---
@@ -160,7 +171,7 @@ def _openrouter_handler_factory(model_key: str, cfg: dict):
     model_id = cfg["model"]
     max_tokens = cfg["max_tokens"]
 
-    async def handler(messages: str, user_id: int) -> Tuple[str, Optional[int], bool]:
+    async def handler(messages: str, user_id: int) -> Tuple[str, Optional[int], bool, bool, int]:
         return await _ask_openrouter(messages, user_id, model_id, max_tokens=max_tokens)
 
     return handler

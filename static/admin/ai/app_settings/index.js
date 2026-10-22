@@ -1,58 +1,28 @@
 
 (function () {
-    // Клик по строке пакетного решения → развёртка результатов прогона
-    // (та же таблица, что на /arm/solve/ после прогона). Snapshot в HTML
-    // страницы НЕ встраивается (ленивая загрузка): по первому клику он
-    // подтягивается AJAX-ом (GET data-snapshot-url → batch-snapshot view)
-    // и рендерится через window.ArmBatchResults.
-    document.querySelectorAll('.ai-batch-row-clickable').forEach(function (row) {
-        row.addEventListener('click', function (event) {
-            if (event.target.closest('a')) { return; } // клик по «Детали →» — обычный переход
-            if (event.target.closest('button')) { return; } // клик по ★ — закрепление, не развёртка
-            var detailRow = row.nextElementSibling;
-            if (!detailRow || !detailRow.classList.contains('ai-batch-detail')) { return; }
-            var willOpen = detailRow.hidden;
-            var body = detailRow.querySelector('.ai-batch-detail-body');
-            if (willOpen && body && !body.dataset.rendered && !body.dataset.loading) {
-                var url = row.getAttribute('data-snapshot-url');
-                if (!url) { return; }
-                body.dataset.loading = '1';
-                body.innerHTML = '<p class="ai-recent-logs-empty">Загрузка результатов…</p>';
-                fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
-                    .then(function (response) {
-                        if (!response.ok) { throw new Error('HTTP ' + response.status); }
-                        return response.json();
-                    })
-                    .then(function (snapshot) {
-                        body.innerHTML = '';
-                        window.ArmBatchResults.init(
-                            body, snapshot, snapshot.run_id || row.getAttribute('data-run-id') || ''
-                        );
-                        body.dataset.rendered = '1';
-                        delete body.dataset.loading;
-                    })
-                    .catch(function () {
-                        body.innerHTML = '<p class="ai-recent-logs-empty">Не удалось загрузить результаты прогона — попробуйте ещё раз.</p>';
-                        delete body.dataset.loading; // повторная попытка при следующем клике
-                    });
-            }
-            detailRow.hidden = !willOpen;
-            row.classList.toggle('ai-batch-row-open', willOpen);
-        });
-    });
+    // Развёртка строк ПАКЕТНЫХ РЕШЕНИЙ (клик по строке → результаты
+    // прогона) и кнопка ★ живут в ОБЩЕМ модуле
+    // static/admin/ai/batch_results/rows.js (подключается глобально в
+    // admin/base_site.html) — там же делегирование, поэтому работает и
+    // после AJAX-обновления таблицы. Здесь остаётся только развёртка
+    // ОБЫЧНЫХ запросов (admin/ai/_ai_log_row.html).
 
     // «Последние запросы»: клик по строке → ленивая развёртка деталей
     // (JSON GET detail-json → метаданные + текст запроса + ответ модели).
     // Полные тексты в HTML страницы не вшиты — записи журнала бывают
     // большими; подгрузка по первому клику, как у пакетных решений.
+    // Строка — общий партиал admin/ai/_ai_log_row.html: обычный запрос имеет
+    // класс .ai-log-row, пакетное решение — .ai-batch-row (развёртка
+    // результатов прогона обрабатывается выше).
     function escapeDetailHtml(value) {
         return String(value == null ? '' : value)
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
-    document.querySelectorAll('.ai-recent-log-row').forEach(function (row) {
+    document.querySelectorAll('.ai-log-row').forEach(function (row) {
         row.addEventListener('click', function (event) {
             if (event.target.closest('a')) { return; } // клик по ссылке ID — обычный переход
+            if (event.target.closest('button')) { return; } // клик по ★ — закрепление
             var detailRow = row.nextElementSibling;
             if (!detailRow || !detailRow.classList.contains('ai-recent-log-detail')) { return; }
             var willOpen = detailRow.hidden;
@@ -123,39 +93,20 @@
         });
     });
 
-    // ★ Закрепить/открепить batch-прогон прямо из блока «Последние пакетные
-    // решения» (POST toggle, ai/admin/pinned.py). CSRF — из куки csrftoken
-    // (админские страницы всегда её выставляют через {% csrf_token %} форм).
-    function pinCsrfToken() {
-        var input = document.querySelector('input[name="csrfmiddlewaretoken"]');
-        if (input && input.value) return input.value;
-        var m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
-        return m ? decodeURIComponent(m[1]) : '';
-    }
-    document.querySelectorAll('.ai-log-pin-btn').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            if (btn.disabled || btn.classList.contains('busy')) return;
-            btn.classList.add('busy');
-            fetch(btn.getAttribute('data-pin-url'), {
-                method: 'POST',
-                headers: { 'X-CSRFToken': pinCsrfToken(), 'X-Requested-With': 'XMLHttpRequest' },
-                credentials: 'same-origin',
-            })
-                .then(function (resp) {
-                    return resp.json().catch(function () { throw new Error('HTTP ' + resp.status); });
-                })
-                .then(function (data) {
-                    if (!data.ok) { throw new Error(data.message || 'Не удалось изменить закрепление'); }
-                    btn.classList.toggle('ai-log-pin-btn-active', data.pinned);
-                    btn.textContent = data.pinned ? '★' : '☆';
-                    btn.title = data.pinned
-                        ? 'Убрать из «Закреплённых»'
-                        : 'Закрепить в «Закреплённых пакетных решениях»';
-                })
-                .catch(function (err) {
-                    alert('Закрепление: ' + err.message);
-                })
-                .finally(function () { btn.classList.remove('busy'); });
-        });
+    // Кнопка «Сохранить» — сразу под вкл/выкл AI-приложения: единственный
+    // редактируемый филд формы — переключатель is_enabled (первый fieldset),
+    // а штатный submit-row рендерится В САМОМ НИЗУ — после блоков последних
+    // прогонов/запросов. Переносим submit-row прямо под переключатель.
+    // DOMContentLoaded: скрипт грузится из after_field_sets, т.е. ДО того,
+    // как Django отрендерит submit_buttons_bottom (submit-row ещё не в DOM).
+    document.addEventListener('DOMContentLoaded', function () {
+        var toggle = document.querySelector('input[name="is_enabled"]');
+        var submitRow = document.querySelector('.submit-row');
+        if (!toggle || !submitRow) return;
+        var fieldset = toggle.closest('fieldset');
+        // Переносим только «свой» submit-row этой формы (guard от чужих блоков).
+        if (fieldset && submitRow.closest('form') === fieldset.closest('form')) {
+            fieldset.insertAdjacentElement('afterend', submitRow);
+        }
     });
 })();

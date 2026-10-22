@@ -43,10 +43,12 @@ SCOPES = (
     "admin_pinned_runs",
     "admin_aiappsettings",
     "admin_updates",
-    "admin_regression",
     "admin_test_console",
     "admin_tasksolution",
     "admin_test_data",
+    "admin_tokens",
+    "admin_user_models",
+    "admin_dl_api_requests",
 )
 
 # USER_SCOPES: юзерские scope'ы с «общими» шагами (язык/модель/переключатель);

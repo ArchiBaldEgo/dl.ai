@@ -17,9 +17,7 @@
   {% endif %}
   {{ media.css }}
   {% if not actions_on_top and not actions_on_bottom %}
-    <style>
-      #changelist table thead th:first-child {width: inherit}
-    </style>
+    <link rel="stylesheet" href="{% static 'admin/ai/change_list/index.css' %}">
   {% endif %}
 {% endblock %}
 
@@ -71,19 +69,6 @@
             </h3>{% endif %}
           </div>{% endif %}
           {% for spec in cl.filter_specs %}{% admin_list_filter cl spec %}{% endfor %}
-          <script>
-            // Селекторы фильтров: выбор опции = переход на choice.query_string
-            // (в ней уже сохранены остальные активные фильтры и поиск).
-            (function () {
-              var bar = document.getElementById('changelist-filter');
-              if (!bar) return;
-              bar.addEventListener('change', function (event) {
-                var select = event.target.closest('select[data-ai-filter]');
-                if (!select) return;
-                window.location.href = window.location.pathname + select.value;
-              });
-            })();
-          </script>
         </nav>
       {% endif %}
     {% endblock %}
@@ -106,5 +91,7 @@
         </form>
       </div>
     </div>
+    {% comment %}Скрипт в конце блока: к моменту его выполнения таблица результатов уже в DOM (нужен номер страницы для ссылок «правка»).{% endcomment %}
+    <script src="{% static 'admin/ai/change_list/index.js' %}"></script>
   </div>
 {% endblock %}

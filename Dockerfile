@@ -86,9 +86,14 @@ COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip --proxy="$HTTP_PROXY" && \
     pip install --proxy="$HTTP_PROXY" --default-timeout=100 -r requirements.txt
-# Node.js зависимости
-WORKDIR /app/WebDeepseek
-COPY WebDeepseek/package.json WebDeepseek/package-lock.json ./
+# Node.js зависимости — ОДИН общий node_modules в корне репозитория на оба
+# пула (WebPools/) и на WebKimi/seed.js (ручной логин Kimi). Раньше было два
+# (WebDeepseek/node_modules + WebKimi/node_modules) с идентичным набором
+# зависимостей — теперь один install в корне. Корневой node_modules нужен
+# именно для seed.js: Node резолвит зависимости вверх по дереву, поэтому
+# WebKimi/seed.js (который трогать нельзя) находит их без своих копий.
+WORKDIR /app
+COPY package.json package-lock.json ./
 # puppeteer 20.9.0 не имеет CLI `puppeteer` — Chromium качает его postinstall (install.js)
 # во время npm ci. Задаём PUPPETEER_CACHE_DIR и прокси, чтобы скачалось в /opt/puppeteer-cache.
 # Локальная сборка (прокси пуст — единое правило «нет прокси → локально»,
@@ -105,19 +110,6 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm ci --omit=dev --no-audit --no-fund && \
     mkdir -p /opt/puppeteer-runtime && \
     if [ "$NPM_HTTP_PROXY" != "" ]; then cp -r /opt/puppeteer-cache/. /opt/puppeteer-runtime/; fi
-# Node.js зависимости для Web Kimi bot-пула (WebKimi/) — отдельный install,
-# сервисы независимы (паттерн one-service-per-dir). Зависимости идентичны WebDeepseek.
-WORKDIR /app/WebKimi
-COPY WebKimi/package.json WebKimi/package-lock.json ./
-# Web Kimi: тот же npm-шаг с тем же правилом — без прокси Chromium не качать
-# (см. комментарий к WebDeepseek выше).
-RUN --mount=type=cache,target=/root/.npm,sharing=locked \
-    npm config set proxy "$NPM_HTTP_PROXY" && \
-    npm config set https-proxy "$NPM_HTTPS_PROXY" && \
-    if [ -z "$NPM_HTTP_PROXY" ]; then export PUPPETEER_SKIP_DOWNLOAD=1; fi && \
-    PUPPETEER_CACHE_DIR=/opt/puppeteer-cache \
-    HTTP_PROXY="$NPM_HTTP_PROXY" HTTPS_PROXY="$NPM_HTTPS_PROXY" \
-    npm ci --omit=dev --no-audit --no-fund
 COPY . .
 # ==================== РАНТАЙМ ====================
 # Базируется на apt-base — рантайм-библиотеки уже стоят, отдельный apt не нужен
@@ -126,8 +118,8 @@ FROM apt-base AS runtime
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /usr/local/bin/node /usr/local/bin/node
 COPY --from=builder /opt/puppeteer-runtime /opt/puppeteer-runtime
-COPY --from=builder /app/WebDeepseek/node_modules /app/WebDeepseek/node_modules
-COPY --from=builder /app/WebKimi/node_modules /app/WebKimi/node_modules
+# Один общий node_modules (в корне /app) на оба пула вместо двух копий.
+COPY --from=builder /app/node_modules /app/node_modules
 COPY --from=builder /app /app
 ENV PATH="/opt/venv/bin:$PATH" \
     PUPPETEER_CACHE_DIR=/opt/puppeteer-runtime \
@@ -145,4 +137,4 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # (миграции — по DEPLOY.md). until-цикл: depends_on дожидается только старта
 # контейнера db, postgres может ещё не принимать соединения; после 30 попыток —
 # громкий exit 1 без маскировки.
-CMD ["bash", "-c", "if [ \"${AI_BOOTSTRAP_ON_START:-0}\" = \"1\" ] || { [ -z \"${HTTP_PROXY:-}\" ] && [ -z \"${HTTPS_PROXY:-}\" ]; }; then tries=0; until python manage.py migrate --noinput; do tries=$((tries+1)); [ \"$tries\" -ge 30 ] && { echo 'migrate failed (db not ready?)'; exit 1; }; echo \"db not ready, retry migrate in 2s ($tries/30)\"; sleep 2; done; python manage.py collectstatic --noinput; fi; python manage.py sync_update_log || true; exec node /app/WebDeepseek/api/index.js & exec node /app/WebKimi/api/index.js & exec daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application & wait -n"]
+CMD ["bash", "-c", "if [ \"${AI_BOOTSTRAP_ON_START:-0}\" = \"1\" ] || { [ -z \"${HTTP_PROXY:-}\" ] && [ -z \"${HTTPS_PROXY:-}\" ]; }; then tries=0; until python manage.py migrate --noinput; do tries=$((tries+1)); [ \"$tries\" -ge 30 ] && { echo 'migrate failed (db not ready?)'; exit 1; }; echo \"db not ready, retry migrate in 2s ($tries/30)\"; sleep 2; done; python manage.py collectstatic --noinput; if [ ! -e /opt/puppeteer-runtime/chrome ] && [ -d /host-puppeteer-cache/chrome ]; then echo chrome-host-cache-copy; cp -r /host-puppeteer-cache/. /opt/puppeteer-runtime/; fi; fi; python manage.py sync_update_log || true; exec node /app/WebPools/api/index.js --site=deepseek & exec node /app/WebPools/api/index.js --site=kimi & exec daphne -b 0.0.0.0 -p 8000 DjangoTest.asgi:application & wait -n"]

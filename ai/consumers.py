@@ -24,6 +24,7 @@ from .services import (
     PromptResolver,
     WebSocketAuthService,
     CACHE_SERVE_LOG_MESSAGE,
+    can_use_ai,
     conversation_history,
     ensure_task,
     find_passed_solution,
@@ -41,6 +42,11 @@ logger = logging.getLogger(__name__)
 # фронтенд срезает перед рендером, но читает для распознавания терминальности
 # независимо от языка UI (ai-common.js getAiWsStatus/isTerminalAiMessage).
 AI_WS_STATUS_MARKER = "\n[[ai-status:{status}]]"
+
+# Код закрытия WS, когда AI в текущем курсе запрещён флагом DL ``canUseAi``
+# (dl-rest-api.json, UserInfo.canUseAi). Отдельный от 4403 (не аутентифицирован):
+# клиент по нему показывает внятное сообщение вместо «соединение закрыто».
+AI_DISABLED_CLOSE_CODE = 4404
 
 
 def _with_status(text: str, status: str) -> str:
@@ -130,6 +136,14 @@ class MyConsumer(AsyncWebsocketConsumer):
 
         self.user = user
         self.user_info = user_info
+        # Гейт DL «canUseAi»: AI в текущем курсе запрещён → закрываем
+        # соединение с внятным кодом и ТЕКСТОМ (не молчаливый 4403).
+        if not self._can_use_ai():
+            await self.close(
+                code=AI_DISABLED_CLOSE_CODE,
+                reason="AI в этом курсе запрещён (dl.gsu.by)",
+            )
+            return
         self.external_account = await resolve_external_account(user) if user and not isinstance(user, str) else None
         self.user_id = self._extract_user_id(user, user_info, self.external_account)
         self.client_id = self.scope["url_route"]["kwargs"]["client_id"]
@@ -144,6 +158,23 @@ class MyConsumer(AsyncWebsocketConsumer):
         # экране остаётся, просто модель начинает сессию с чистого контекста.
         conversation_history.reset(self.client_id)
         logger.debug("WebSocket connected for client %s, user_id=%s", self.client_id, self.user_id)
+
+    def _can_use_ai(self) -> bool:
+        """Разрешён ли AI этому пользователю (флаг DL ``canUseAi``).
+
+        Источники — как в ``_resolve_course_id``: user_info из аутентификации
+        WS, затем кеш ``external_user_info`` в Django-сессии (её кладут и
+        HTTP-, и WS-аутентификация). Флага нет — разрешено («неизвестно» ≠
+        «запрещено»).
+        """
+        candidates = [self.user_info or {}]
+        session = self.scope.get("session")
+        if session is not None:
+            candidates.append(session.get("external_user_info") or {})
+        for info in candidates:
+            if not can_use_ai(info):
+                return False
+        return True
 
     def _extract_user_id(self, user, user_info, external_account=None) -> str:
         if isinstance(user, str):
@@ -320,7 +351,8 @@ class MyConsumer(AsyncWebsocketConsumer):
         raw_think = data.get("think")
         think = bool(raw_think) if isinstance(raw_think, bool) else None
         result = await self.caller.call(
-            message, self.client_id, model_key, language=language, think=think)
+            message, self.client_id, model_key, language=language, think=think,
+            user=self.user)
         end_time = timezone.now()
 
         # Treat empty response as an error, not a success.
@@ -334,7 +366,8 @@ class MyConsumer(AsyncWebsocketConsumer):
             await self.log_writer.update_error(log, result.response_text, result.error_message, end_time)
         else:
             await self.log_writer.update_success(
-                log, result.response_text, result.tokens, result.model_title, end_time
+                log, result.response_text, result.tokens, result.model_title, end_time,
+                prompt_tokens=getattr(result, "prompt_tokens", 0),
             )
 
         end_str = timezone.localtime(end_time, MOSCOW_TZ).strftime("%H:%M:%S")

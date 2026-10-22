@@ -133,7 +133,11 @@ function initWebSocket() {
 
         ws.onclose = function(event) {
             console.log('WebSocket connection closed');
-            updateVoiceStatus(getVoiceStatusText('connectionClosed'));
+            if (isAiDisabledClose(event)) {
+                showAiDisabledMessage();
+            } else {
+                updateVoiceStatus(getVoiceStatusText('connectionClosed'));
+            }
             setRequestLock(false);
             notEnter = false;
         };
@@ -255,7 +259,7 @@ document.addEventListener("DOMContentLoaded", function() {
             var submitBtn = document.querySelector("button[type='submit']");
             if (submitBtn) submitBtn.textContent = localization[selectedLang].send;
 
-            var clearBtn = document.querySelector("button[onclick='clearContext()']");
+            var clearBtn = document.querySelector("#clearContextBtn");
             if (clearBtn) clearBtn.textContent = localization[selectedLang].clear;
 
             var testOnDlBtn = document.getElementById("testOnDlBtn");
@@ -319,6 +323,16 @@ document.addEventListener("DOMContentLoaded", function() {
 // + savePageState/restorePageState. Возвращает handle для repopulateOnUiLanguageChange.
 document.addEventListener("DOMContentLoaded", function() {
     problemSelectors = initProblemSelectors('solve');
+});
+
+// === Кнопка «Тестирование» (DL) ===
+// Раньше — инлайновый onclick="testOnDl()" в разметке. Правило проекта:
+// в шаблонах — только разметка, весь JS — в файлах. Делегирование по id.
+document.addEventListener("DOMContentLoaded", function() {
+    var btn = document.getElementById('testOnDlBtn');
+    if (!btn || btn.dataset.dlBound === '1') return;
+    btn.dataset.dlBound = '1';
+    btn.addEventListener('click', function () { testOnDl(); });
 });
 
 // === Автозагрузка условия задачи из DL-ссылки ===
@@ -573,9 +587,17 @@ async function _pollDlResult(queueId, statusNode) {
             var data = await response.json().catch(function () { return null; });
             if (data && data.isFinished === true) {
                 var comment = String(data.comment || '').trim();
-                _setDlMessageTextPersist(statusNode,
-                    comment ? 'DL: ' + comment
-                            : getUiString('dlEmptyComment', 'DL: тестирование завершено'));
+                var verdictText = comment ? 'DL: ' + comment
+                                         : getUiString('dlEmptyComment', 'DL: тестирование завершено');
+                // Машина (Дельта), на которой шла проверка (deltaName в ответе
+                // get-solution-result). Показываем её, чтобы было видно, ГДЕ
+                // именно проверялось решение.
+                var deltaName = String((data && data.deltaName) || '').trim();
+                if (deltaName) {
+                    var machineTpl = getUiString('dlMachine', 'машина: {0}');
+                    verdictText += ' (' + machineTpl.replace('{0}', deltaName) + ')';
+                }
+                _setDlMessageTextPersist(statusNode, verdictText);
                 _forgetQueue();
                 return;
             }

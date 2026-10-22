@@ -66,7 +66,13 @@ class LogWriter:
             task_name=task_name,
         )
 
-    def update_success_sync(self, log, response_text: str, tokens: int, model_title: str, end_time=None) -> None:
+    def update_success_sync(
+        self, log, response_text: str, tokens: int, model_title: str, end_time=None,
+        prompt_tokens: int = 0,
+    ) -> None:
+        """Запись успешного ответа. ``tokens`` — токены ОТВЕТА,
+        ``prompt_tokens`` — токены ПРОМПТА (учёт: prompt + completion).
+        """
         from ..models import AIRequestLog
 
         if end_time is None:
@@ -77,6 +83,7 @@ class LogWriter:
         log.model_names = [model_title] if model_title else log.model_names
         log.response_text = str(response_text or "")[:5000]
         log.tokens = tokens or 0
+        log.tokens_prompt = prompt_tokens or 0
 
         # Defense: an empty response is an error, not a success. The consumer
         # already routes empties to update_error via is_error, but keep the guard.
@@ -96,6 +103,7 @@ class LogWriter:
                 "model_names",
                 "response_text",
                 "tokens",
+                "tokens_prompt",
                 "status",
                 "error_message",
             ]
@@ -130,8 +138,13 @@ class LogWriter:
         return self.create_sync(**kwargs)
 
     @sync_to_async
-    def update_success(self, log, response_text: str, tokens: int, model_title: str, end_time=None) -> None:
-        self.update_success_sync(log, response_text, tokens, model_title, end_time)
+    def update_success(
+        self, log, response_text: str, tokens: int, model_title: str, end_time=None,
+        prompt_tokens: int = 0,
+    ) -> None:
+        self.update_success_sync(
+            log, response_text, tokens, model_title, end_time, prompt_tokens=prompt_tokens,
+        )
 
     @sync_to_async
     def update_error(self, log, friendly: str, detailed: str, end_time=None) -> None:

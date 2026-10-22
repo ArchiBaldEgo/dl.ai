@@ -1,0 +1,140 @@
+/* Панель «Мои AI-модели» — общая для админской (/ai/admin/user-models/) и
+   клиентской (/ai/my-models/) страниц.
+
+   Цвета — через переменные с ЗАПАСНЫМИ значениями: на клиентской странице
+   админских переменных (--hairline-color и т.п.) нет, там другая тема
+   (--border/--text-primary из ai_theme.css). Поэтому у каждого свойства
+   два значения: сначала админское, потом клиентское. */
+
+.ai-um-wrap {
+    max-width: 1200px;
+    color: var(--body-fg, var(--text-primary, #333));
+}
+
+.ai-um-page {
+    padding: 16px 20px 40px;
+    overflow: auto;
+}
+
+.ai-um-intro {
+    margin: 0 0 14px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--body-quiet-color, var(--text-secondary, #555));
+}
+
+.ai-um-form {
+    margin: 14px 0 22px;
+    padding: 12px 16px 16px;
+    border: 1px solid var(--hairline-color, #e8e8e8);
+    border-radius: 6px;
+    background: var(--object-tools-bg, #f8f8f8);
+}
+
+.ai-um-form h3 {
+    margin: 0 0 10px;
+}
+
+.ai-um-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+    margin-bottom: 10px;
+}
+
+.ai-um-row label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1 1 240px;
+    font-size: 12px;
+    color: var(--body-quiet-color, #666);
+}
+
+.ai-um-row input,
+.ai-um-row select {
+    padding: 4px 6px;
+    font-size: 13px;
+}
+
+.ai-um-row-checks {
+    align-items: center;
+}
+
+.ai-um-check {
+    flex: 0 0 auto !important;
+    flex-direction: row !important;
+    align-items: center;
+    gap: 6px !important;
+    font-size: 13px !important;
+    color: var(--body-fg, #333) !important;
+}
+
+.ai-um-hint {
+    font-size: 11px;
+    color: var(--body-quiet-color, #777);
+}
+
+.ai-um-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 6px;
+}
+
+.ai-um-message {
+    font-size: 12px;
+}
+
+.ai-um-message-ok {
+    color: #2b7a2b;
+}
+
+.ai-um-message-err {
+    color: #a40000;
+}
+
+.ai-um-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.ai-um-table th,
+.ai-um-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--hairline-color, #eee);
+    text-align: left;
+    vertical-align: top;
+}
+
+.ai-um-table th {
+    font-size: 12px;
+    color: var(--body-quiet-color, #666);
+}
+
+.ai-um-title {
+    font-weight: 600;
+}
+
+.ai-um-mono {
+    font-family: var(--font-family-monospace, monospace);
+    font-size: 12px;
+    word-break: break-all;
+}
+
+.ai-um-url {
+    max-width: 280px;
+}
+
+.ai-um-empty {
+    color: var(--body-quiet-color, #666);
+    font-style: italic;
+}
+
+.ai-um-actions-cell {
+    white-space: nowrap;
+}
+
+.ai-um-actions-cell .button {
+    margin-right: 4px;
+}

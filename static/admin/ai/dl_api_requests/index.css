@@ -1,0 +1,121 @@
+/* Страница «Запросы по DL API» (/ai/admin/dl-api-requests/). */
+
+.ai-dlapi-wrap {
+    max-width: 1200px;
+}
+
+.ai-dlapi-tabs {
+    display: flex;
+    gap: 8px;
+    margin: 12px 0 16px;
+    border-bottom: 1px solid var(--hairline-color, #e8e8e8);
+}
+
+.ai-dlapi-tab {
+    padding: 7px 14px;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    text-decoration: none;
+    color: var(--body-fg, #333);
+    font-size: 13px;
+}
+
+.ai-dlapi-tab-active {
+    background: var(--object-tools-bg, #f8f8f8);
+    border-color: var(--hairline-color, #e8e8e8);
+    font-weight: 600;
+}
+
+.ai-dlapi-count {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 7px;
+    border-radius: 10px;
+    background: var(--hairline-color, #e8e8e8);
+    font-size: 11px;
+    font-weight: 400;
+}
+
+.ai-dlapi-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.ai-dlapi-table th,
+.ai-dlapi-table td {
+    padding: 7px 8px;
+    border-bottom: 1px solid var(--hairline-color, #eee);
+    text-align: left;
+    vertical-align: top;
+}
+
+.ai-dlapi-table th {
+    font-size: 12px;
+    color: var(--body-quiet-color, #666);
+}
+
+.ai-dlapi-desc {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.ai-dlapi-sub {
+    font-size: 11px;
+    color: var(--body-quiet-color, #777);
+}
+
+.ai-dlapi-empty {
+    color: var(--body-quiet-color, #666);
+    font-style: italic;
+}
+
+.ai-dlapi-actions-cell {
+    white-space: nowrap;
+}
+
+/* Форма создания заявки (описание + кнопка) — над вкладками. */
+.ai-dlapi-create {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: flex-end;
+    margin: 12px 0 4px;
+    padding: 12px;
+    border: 1px solid var(--hairline-color, #e8e8e8);
+    border-radius: 8px;
+    background: var(--object-tools-bg, #f8f8f8);
+}
+
+.ai-dlapi-create label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1 1 320px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--body-quiet-color, #666);
+}
+
+.ai-dlapi-create textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: inherit;
+    font-size: 13px;
+    padding: 6px 8px;
+    border: 1px solid var(--border-color, #ccc);
+    border-radius: 4px;
+    background: var(--body-bg, #fff);
+    color: var(--body-fg, #333);
+    resize: vertical;
+}
+
+.ai-dlapi-create-status {
+    font-size: 12px;
+    color: var(--body-quiet-color, #666);
+}
+
+.ai-dlapi-create-err {
+    color: #b42318;
+    font-weight: 600;
+}

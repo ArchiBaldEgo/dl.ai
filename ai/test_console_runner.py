@@ -1,8 +1,8 @@
 """Раннер тестовой консоли админки: запускает пакет ``ai/tests.py`` в изолированном
 subprocess и стримит построчные результаты во в-memory job.
 
-Архитектура зеркалит ``ai/arm_runner.py`` / ``ai/prompt_test_runner.py``:
-module-level ``_jobs`` dict + ``_jobs_lock`` + daemon-воркер + ``get_*_run_snapshot``.
+Архитектура зеркалит ``ai/arm_runner.py``: module-level ``_jobs`` dict +
+``_jobs_lock`` + daemon-воркер + ``get_*_run_snapshot``.
 Отличия:
 - Тесты запускаются **сабпроцессом** ``manage.py test ai --settings=DjangoTest.test_settings
   --verbosity=2`` — изоляция от live-Daphne (``setup_test_environment`` патчит global
@@ -96,8 +96,6 @@ CLASS_TITLES_RU = {
     "BatchRunnerIntegrationTests": "Интеграция пакетного раннера",
     "SambanovaLoggerTests": "Логгер SambaNova",
     "TaskRegistryTests": "Реестр задач",
-    "PromptGradingTests": "Оценка промптов",
-    "PromptRegressionRunnerTests": "Раннер регрессии промптов",
     "ModelSortingTests": "Сортировка моделей",
     "ProblemDataApiTests": "API данных задач",
     "UserTopModelKeysTests": "Топ-модели пользователя",

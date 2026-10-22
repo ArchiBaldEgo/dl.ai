@@ -20,13 +20,28 @@ file AND admin/app_list.html are not shadowed by the stock admin templates
   {{ block.super }}
   <link rel="stylesheet" href="{% static 'admin/css/ai_admin.css' %}">
   <link rel="stylesheet" href="{% static 'admin/css/ai-wizard.css' %}">
+  {% comment %}Общая таблица результатов batch-solve (ARM): CSS подключаем
+  ГЛОБАЛЬНО — partial _ai_batch_results.html включают четыре страницы
+  (настройки приложения, /arm/solve/, «Закреплённые», деталь записи
+  журнала), и в каждой дублировать тег было бы копипастой.{% endcomment %}
+  <link rel="stylesheet" href="{% static 'admin/ai/batch_results/index.css' %}">
 {% endblock %}
 
 {% block extrahead %}
   {{ block.super }}
+  {% comment %}window.ArmBatchResults (общий рендер таблицы результатов) должен
+  быть определён ДО вызывающих скриптов страниц — поэтому подключаем его
+  ПЕРВЫМ, синхронно (без defer), а не defer'ом.{% endcomment %}
+  <script src="{% static 'admin/ai/batch_results/index.js' %}"></script>
+  {% comment %}Общая логика строк ПАКЕТНЫХ РЕШЕНИЙ (развёртка результатов
+  прогона по клику + кнопка ★). Раньше продублирована в трёх файлах
+  (app_settings, pinned_runs, request_logs) — теперь одна, на делегировании,
+  и работает и после AJAX-обновления таблицы журнала.{% endcomment %}
+  <script src="{% static 'admin/ai/batch_results/rows.js' %}"></script>
   <script src="{% static 'admin/js/ai_processes.js' %}" defer></script>
   <script src="{% static 'admin/js/ai_admin_state.js' %}" defer></script>
   <script src="{% static 'admin/js/ai_nav_filter.js' %}" defer></script>
+  <script src="{% static 'admin/js/view_as.js' %}" defer></script>
   {% comment %}Онбординг-wizard на каждой странице админки: решение «показывать ли»
   принимает сервер (ai/admin/onboarding.py ← each_context), конфиг рендерится
   сюда json_script'ом; ПОСЛЕ трёх глобальных скриптов (defer-порядок).{% endcomment %}
@@ -49,18 +64,16 @@ file AND admin/app_list.html are not shadowed by the stock admin templates
       <span class="ai-processes-chip" id="aiProcessesChip">Процессы (0) ▾</span>
     </button>
     <div id="aiProcessesMenu" class="ai-processes-menu" hidden></div>
-    {% comment %}«Зайти как гость» — сосед кнопки «Процессы» (не вложенный:
-    nested <button> невалиден). Суперюзерский POST-переключатель визуального
-    гостевого режима (ai/admin/guest_mode.py): интерфейс как у разработчика
-    промптов, права не режем.{% endcomment %}
-    {% if is_super_user %}
-    <form method="post" action="{% url 'ai_view_as_guest' %}" class="ai-guest-form">
-      {% csrf_token %}
-      <button type="submit" id="aiGuestToggle"
-              class="ai-guest-toggle{% if is_viewing_as_guest %} ai-guest-active{% endif %}">
-        {% if is_viewing_as_guest %}Вернуться в полную админку{% else %}Зайти как гость{% endif %}
-      </button>
-    </form>
+    {% comment %}«Посмотреть как…» — сосед кнопки «Процессы» (не вложенный:
+    nested <button> невалиден). Для РЕАЛЬного суперюзера: клик открывает окно
+    выбора группы (static/admin/js/view_as.js ← ai/admin/guest_mode.py);
+    эмуляция честная — супер-обход отключён, доступ РОВНО как у участника
+    группы (недоступное — 403/логин). Имя группы в сессии → each_context
+    рисует активное состояние кнопки.{% endcomment %}
+    {% if real_super_user %}
+    <button type="button" id="aiViewAsToggle" class="ai-guest-form ai-guest-toggle{% if view_as_group_name %} ai-guest-active{% endif %}" aria-haspopup="dialog">
+      {% if view_as_group_name %}Смотрите как: {{ view_as_group_name }}{% else %}Посмотреть как…{% endif %}
+    </button>
     {% endif %}
   </span>
 {% endblock %}

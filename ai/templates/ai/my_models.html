@@ -1,0 +1,31 @@
+{% extends "ai/base_chat.html" %}
+{% load static %}
+
+{% comment %}Клиентская страница «Мои AI-модели» (/ai/my-models/).
+
+Личная модель пользователя (провайдер + ID модели + свой ключ) нужна
+ВСЕМ, кто пользуется чатом, — поэтому страница есть на клиентской
+стороне (здесь, обычный пользователь) и в админке (/ai/admin/user-models/,
+персонал). Разметка — общий partial ai/_user_models_panel.html; логика
+операций — в сервисе ai/services/user_models.py.
+
+Тексты панели триязычны (RU/EN/FR — язык только через #selectLang, как
+и на остальных клиентских страницах).{% endcomment %}
+
+{% block extra_css %}
+    <link rel="stylesheet" href="/ai/assets/admin/ai/user_models/index.css?v=1"/>
+{% endblock %}
+
+{% block js %}
+    {{ block.super }}
+    <script src="/ai/assets/admin/js/ai-common.js?v=18" defer></script>
+    <script src="/ai/assets/admin/ai/user_models/index.js?v=1" defer></script>
+{% endblock %}
+
+{% comment %}Своя форма (не в общей форме переписки — вложенные form
+невалидны), поэтому переопределяем всю основную область.{% endcomment %}
+{% block main_area %}
+    <div class="ai-um-page">
+        {% include "ai/_user_models_panel.html" with create_url="/ai/my-models/create/" delete_url="/ai/my-models/delete/" %}
+    </div>
+{% endblock %}

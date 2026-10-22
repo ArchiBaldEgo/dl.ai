@@ -5,15 +5,15 @@
 {% endblock %}
 
 {% block js %}
-    <script src="/ai/assets/admin/js/ai-common.js?v=17" defer></script>
-    <script src="/ai/assets/admin/js/decide_task.js?v=9" defer></script>
+    <script src="/ai/assets/admin/js/ai-common.js?v=18" defer></script>
+    <script src="/ai/assets/admin/js/decide_task.js?v=10" defer></script>
 {% endblock %}
 
 {% block solve_selected %}selected{% endblock %}
 
 {% block extra_buttons %}
     {% if node_id %}
-        <button type="button" id="testOnDlBtn" onclick="testOnDl()">{{ t.dlTestButton }}</button>
+        <button type="button" id="testOnDlBtn">{{ t.dlTestButton }}</button>
     {% endif %}
 {% endblock %}
 
@@ -35,8 +35,4 @@
     </div>
 {% endblock %}
 
-{% block extra_body_script %}
-<script>
-    window.AI_TASK_NODE_ID = document.getElementById('messageText').dataset.nodeId || '';
-</script>
-{% endblock %}
+{% block extra_body_script %}{% endblock %}

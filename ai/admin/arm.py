@@ -9,6 +9,7 @@
 новый будет сделан отдельно (раннер single-run в arm_runner.py сохранён).
 """
 
+import json
 import logging
 import re
 
@@ -29,6 +30,8 @@ from ..arm_runner import (
     start_batch_rerun_pairs,
     start_batch_solve_run,
 )
+from ..arm_runner import _fetch_failed_test_data, parse_dl_test_data
+from ..dl_api_client import dl_failed_test_number_from_comment
 from ..model_health import (
     get_arm_solve_model_options,
     get_health_window_date,
@@ -109,19 +112,15 @@ def _resolve_active_course_id_for_session(session_id):
         .first()
     )
     fallback_course_id = DL_DEFAULT_COURSE_ID
-    if last_run and last_run.results.exists():
-        first_result = last_run.results.first()
-        if first_result.task and first_result.task.node_id:
-            # Активируем курс по первой задаче из последнего прогона.
-            # course_id не хранится в БД, но 1450 — единственный курс в DL.
-            pass
 
     # Пытаемся активировать курс 1450 (fallback) через ensure_course_session.
     # Нужен node_id — берём из последнего прогона или дефолт 2606747.
+    # ОДИН запрос на первый результат прогона (было три: exists() + first()
+    # + повтор exists()/first() в том же блоке — одинаково).
     fallback_node_id = 2606747
-    if last_run and last_run.results.exists():
-        first_result = last_run.results.first()
-        if first_result.task and first_result.task.node_id:
+    if last_run:
+        first_result = last_run.results.select_related("task").first()
+        if first_result and first_result.task and first_result.task.node_id:
             fallback_node_id = first_result.task.node_id
 
     ensure_course_session(session_id, fallback_course_id, fallback_node_id)
@@ -141,6 +140,25 @@ def _resolve_active_course_id_for_session(session_id):
 def _resolve_active_course_id(request):
     """Тонкая обёртка над _resolve_active_course_id_for_session для HTTP-запроса."""
     return _resolve_active_course_id_for_session(_resolve_session_id(request))
+
+
+def _fetch_delta_options() -> list[dict]:
+    """Список тестирующих машин (Дельт) для селекта в форме запуска ARM.
+
+    Источник — DL (GET /restapi/get-deltas, открытый эндпоинт, авторизация не
+    нужна). Ответ кэшируется в django-cache на 5 минут: список машин меняется
+    редко, а страница ARM открывается часто. Если DL недоступен — пустой
+    список (форма работает как раньше: машину назначает DL сам).
+    """
+    cache_key = f"{AI_CACHE_KEY_PREFIX}:dl_deltas"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    from ..dl_api_client import fetch_deltas
+
+    options = fetch_deltas()
+    cache.set(cache_key, options, 300)
+    return options
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +247,7 @@ def admin_arm_solve_view(request):
 
     # Список промптов режима «Реши задачу» для ручного выбора на странице.
     # Промпты — студенческий контент: тот же контракт, что у chat-facing
-    # get_prompts (см. querysets.prompt_queryset_for_user — здесь ACL не режем).
+    # get_prompts — здесь выбор не режется никаким ACL.
     # language_name — для промптов «на весь язык» (без темы).
     prompt_options = [
         {
@@ -247,6 +265,11 @@ def admin_arm_solve_view(request):
         ).order_by("topic__topic_name_ru", "prompt_name_ru")
     ]
 
+    # Тестирующие машины (Дельты) — выбор в форме запуска. Список приходит из
+    # DL (GET /restapi/get-deltas, открытый эндпоинт). Если список не пришёл —
+    # форма работает как раньше (машину назначает DL автоматически).
+    delta_options = _fetch_delta_options()
+
     context = {
         **ai_admin_site.each_context(request),
         "title": "ARM: Пакетное решение",
@@ -257,6 +280,7 @@ def admin_arm_solve_view(request):
         "prompt_options": prompt_options,
         "language_options": language_options,
         "topics": topics,
+        "delta_options": delta_options,
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
         "results": results,
         "report": report,
@@ -574,6 +598,24 @@ def admin_arm_solve_start_view(request):
         if course_err:
             return JsonResponse({"ok": False, "message": course_err}, status=400)
 
+    # Тестирующая машина (Дельта) — по выбору оператора. Контракт DL (v1.4.2,
+    # SendSolutionRequest.delta): машина передаётся как ID ("5") или ТОЧНОЕ
+    # название ("DelTA4 at NIT1 Win10 x64"). Пусто — машину назначает DL.
+    # Значение сверяем со списком машин (fetch_deltas): произвольная строка
+    # ушла бы в DL и отбивалась бы 400 без внятного объяснения.
+    delta = str(body.get("delta") or request.POST.get("delta") or "").strip()
+    if delta:
+        known = _fetch_delta_options()
+        if known:
+            known_ids = {str(d["id"]) for d in known}
+            known_names = {d["name"] for d in known if d.get("name")}
+            known_display = {d["display_name"] for d in known if d.get("display_name")}
+            if delta not in known_ids and delta not in known_names and delta not in known_display:
+                return JsonResponse(
+                    {"ok": False, "message": "Выбранная тестирующая машина неизвестна DL."},
+                    status=400,
+                )
+
     session_id = _resolve_session_id(request)
     if not session_id:
         return JsonResponse(
@@ -614,6 +656,7 @@ def admin_arm_solve_start_view(request):
         record_stats=record_stats,
         run_name=run_name,
         save_solutions=save_solutions,
+        delta=delta,
     )
     if not run_id:
         return JsonResponse(
@@ -771,7 +814,7 @@ def admin_arm_solve_result_download_view(request, result_id):
     ``<модель>_<ID узла задачи><file_extension>`` (расширение из снимка, с
     ведущей точкой): у одной задачи скачивают решения нескольких моделей, пара
     «модель + задача» делает имя однозначным. ID узла — узкая ссылка на задачу
-    по всему журналу (DL REST API.md). У DL API поле имени файла при отправке
+    по всему журналу (DL REST API, dl-rest-api.json). У DL API поле имени файла при отправке
     решения отсутствует — подписываем единственное, что у нас под контролем,
     то есть скачивание. Файлы на диске не хранятся — содержимое берётся
     прямо из БД.
@@ -846,12 +889,42 @@ def admin_arm_solve_result_body_view(request, result_id):
     offset = max(0, _int_param("offset", 0))
     length = _int_param("length", 0)
 
+    test_data = parse_dl_test_data(result.dl_test_data)
+    if not test_data and result.dl_queue_id and (result.verdict or "") != "solved":
+        # Данных проваленного теста в строке нет (прогон сделан до появления
+        # фичи) — пробуем забрать их из DL ПРЯМО СЕЙЧАС (DL ещё помнит
+        # решение в очереди) и кешируем в строке, чтобы второй раз не ходить.
+        session_id = _resolve_session_id(request)
+        if session_id:
+            try:
+                fetched = _fetch_failed_test_data(
+                    session_id, result.dl_queue_id, result.dl_comment or "",
+                )
+            except Exception:  # noqa: BLE001 — данные теста не обязательны
+                logger.exception("не удалось забрать данные проваленного теста")
+                fetched = {}
+            if fetched:
+                test_data = fetched
+                AIModelTestResult.objects.filter(pk=result.pk).update(
+                    dl_test_data=json.dumps(fetched, ensure_ascii=False),
+                )
+
     body = {
         "result_id": result.pk,
         "short_response": result.short_response or "",
         "code": result.code or "",
         "dl_comment": result.dl_comment or "",
         "dl_error": result.dl_error or "",
+        # Имя файла решения, отправленного в DL («<модель>_<задача>.<ext>»).
+        "dl_file_name": result.dl_file_name or "",
+        # Входные данные и эталонный ответ проваленного теста (есть только
+        # у НЕ решённых пар, которым DL разрешил выдачу теста).
+        "dl_test_data": test_data,
+        # Номер проваленного теста (из вердикта DL) — показываем в карточке.
+        "dl_test_number": dl_failed_test_number_from_comment(result.dl_comment or ""),
+        # Машина (Дельта), на которой DL проверял решение.
+        "delta_id": result.delta_id or 0,
+        "delta_name": result.delta_name or "",
         "truncated": bool(result.truncated),
         "raw_total": len(raw),
     }

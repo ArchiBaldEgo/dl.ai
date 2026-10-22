@@ -140,6 +140,10 @@ OLLAMA_MODELS: dict[str, dict] = {
         "model": "gpt-oss:120b-cloud",
         "description": "Ollama GPT-OSS 120B — reasoning (thinking отдельным полем)",
     },
+    "Ollama_MiniMax_M3_1_Flash_Cloud": {
+        "model": "minimax-m3.1-flash:cloud",
+        "description": "Ollama MiniMax M3.1 Flash — быстрый чат (thinking отдельным полем)",
+    },
 }
 
 
@@ -170,10 +174,11 @@ def _get_client() -> Client:
 def _stream_once(
     model: str, msg: str, temperature: float, num_predict: int,
     think: bool | None = None,
-) -> Tuple[str, int, str, str]:
+) -> Tuple[str, int, str, str, int]:
     """Синхронный streaming-вызов ollama.chat (запускается через asyncio.to_thread).
 
-    Возвращает ``(content, eval_count, thinking, done_reason)``. Стриминг
+    Возвращает ``(content, eval_count, thinking, done_reason, prompt_eval_count)``.
+    Стриминг
     обязателен: без
     него длинные генерации ARM-solve (промпт ~5k символов + большой num_predict)
     идут минутами без единого байта в ответ, и шлюз api.ollama.com закрывает
@@ -196,11 +201,16 @@ def _stream_once(
     окончание, "length" — генерация обрезана лимитом (нашего num_predict ИЛИ
     скрытым потолком шлюза: были кейсы «done на ~2000 токенах среди фразы»).
     Честный сигнал обреза — главный источник для флага truncated в раннере.
+
+    ``prompt_eval_count`` — токены ПРОМПТА (вход): Ollama отдаёт их в
+    финальном чанке (``prompt_eval_count``). Нужны для учёта токенов
+    (страница «Контроль токенов»): completion и prompt считаются вместе.
     """
     client = _get_client()
     parts: list[str] = []
     thinking_parts: list[str] = []
     tokens = 0
+    prompt_tokens = 0
     done_reason = ""
     extra_kwargs: dict = {"think": think} if think is not None else {}
     for chunk in client.chat(
@@ -221,7 +231,9 @@ def _stream_once(
             done_reason = str(chunk.done_reason)
         if getattr(chunk, "eval_count", 0):
             tokens = int(chunk.eval_count)
-    return "".join(parts), tokens, "".join(thinking_parts), done_reason
+        if getattr(chunk, "prompt_eval_count", 0):
+            prompt_tokens = int(chunk.prompt_eval_count)
+    return "".join(parts), tokens, "".join(thinking_parts), done_reason, prompt_tokens
 
 
 def _chat_sync(
@@ -251,13 +263,13 @@ def _chat_sync(
         sem.release()
 
 
-def _handle_ollama_error(exc: Exception, model_id: str) -> Tuple[str, int, bool, bool]:
-    """Преобразует исключение вызова модели в (текст_ошибки, 0, True, False).
+def _handle_ollama_error(exc: Exception, model_id: str) -> Tuple[str, int, bool, bool, int]:
+    """Преобразует исключение вызова модели в (текст_ошибки, 0, True, False, 0).
 
     Поведение прежнее (таймаут/disconnected/generic), кроме ResponseError 429,
     дошедшего сюда после исчерпания ретраев, — для него friendly-сообщение из
     map_http_error вместо сырого «... (status code: 429)». 4-й элемент —
-    флаг обреза длины: у ошибок всегда False.
+    флаг обреза длины: у ошибок всегда False. 5-й — токены промпта: у ошибок 0.
     """
     # Импорт здесь, чтобы не падать при отсутствии SDK на старых окружениях.
     try:
@@ -267,12 +279,12 @@ def _handle_ollama_error(exc: Exception, model_id: str) -> Tuple[str, int, bool,
     if ResponseError and isinstance(exc, ResponseError):
         if getattr(exc, "status_code", None) == 429:
             logger.error("Ollama 429 for %s после всех ретраев", model_id)
-            return map_http_error(429, "ollama"), 0, True, False
+            return map_http_error(429, "ollama"), 0, True, False, 0
         logger.warning("Ollama API error for %s: %s", model_id, exc)
-        return f"Ошибка Ollama API: {exc}", 0, True, False
+        return f"Ошибка Ollama API: {exc}", 0, True, False, 0
     text = str(exc).lower()
     if "timeout" in text or "timed out" in text:
-        return "Таймаут при подключении к Ollama. Попробуйте позже.", 0, True, False
+        return "Таймаут при подключении к Ollama. Попробуйте позже.", 0, True, False, 0
     if "disconnected" in text:
         logger.warning("Ollama server disconnected for %s (long generation?): %s", model_id, exc)
         return (
@@ -281,9 +293,10 @@ def _handle_ollama_error(exc: Exception, model_id: str) -> Tuple[str, int, bool,
             0,
             True,
             False,
+            0,
         )
     logger.exception("Ollama request failed for %s: %s", model_id, exc)
-    return f"Ошибка Ollama: {exc}", 0, True, False
+    return f"Ошибка Ollama: {exc}", 0, True, False, 0
 
 
 async def _ask_ollama(
@@ -294,27 +307,29 @@ async def _ask_ollama(
     temperature: float = 0.7,
     num_predict: int | None = None,
     think: bool | None = None,
-) -> Tuple[str, int, bool, bool]:
+) -> Tuple[str, int, bool, bool, int]:
     """Общий обработчик для всех моделей Ollama. Обычный чат без инструментов.
 
     Ретраит ollama.ResponseError 429 (rate limit тарифа) с эскалирующим backoff;
     конкурентность входящих вызова ограничена per-process семафором в _chat_sync.
-    Возвращает ``(текст, токенов, is_error, длина_обрезана)`` — 4-й элемент True,
+    Возвращает ``(текст, токенов_ответа, is_error, длина_обрезана,
+    токенов_промпта)`` — 4-й элемент True,
     когда провайдер остановил генерацию лимитом (done_reason == "length": наш
     num_predict ИЛИ скрытый потолок шлюза) — честный сигнал для флага truncated
     в ARM-раннере. Нет done_reason в чанке (старый SDK) — False: обрез по токенам
-    подхватывает model_clients.is_output_truncated.
+    подхватывает model_clients.is_output_truncated. 5-й элемент — токены
+    промпта (``prompt_eval_count``): нужны для учёта токенов (prompt+completion).
     """
     # Cloud-эндпоинт (ollama.com/api/*) требует bearer-токен.
     if "ollama.com" in OLLAMA_HOST and not OLLAMA_API_KEY:
-        return "Ollama API ключ не настроен. Добавьте OLLAMA_API_KEY в .env", 0, True, False
+        return "Ollama API ключ не настроен. Добавьте OLLAMA_API_KEY в .env", 0, True, False, 0
 
     attempts = max(1, int(os.getenv("OLLAMA_MAX_RETRIES", "3")) + 1)
     # None → берём env-потолок (_default_num_predict): прежний жёсткий
     # 4096 обрезал большие ответы моделей.
     if num_predict is None:
         num_predict = _default_num_predict()
-    result: Tuple[str, int, str, str] | None = None
+    result: Tuple[str, int, str, str, int] | None = None
     for attempt in range(1, attempts + 1):
         try:
             result = await asyncio.to_thread(
@@ -332,7 +347,7 @@ async def _ask_ollama(
                 continue
             return _handle_ollama_error(exc, model_id)
 
-    content, tokens, thinking, done_reason = result
+    content, tokens, thinking, done_reason, prompt_tokens = result
 
     if not content.strip():
         # Reasoning-модели (gpt-oss:cloud) иногда кладут
@@ -347,10 +362,10 @@ async def _ask_ollama(
                 "Ollama model %s returned empty content, falling back to thinking (%d chars)",
                 model_id, len(thinking),
             )
-            return thinking, int(tokens), False, done_reason == "length"
+            return thinking, int(tokens), False, done_reason == "length", int(prompt_tokens)
         logger.warning("Ollama model %s returned empty content", model_id)
-        return f"Модель Ollama ({model_id}) вернула пустой ответ. Попробуйте позже.", 0, True, False
-    return content, int(tokens), False, done_reason == "length"
+        return f"Модель Ollama ({model_id}) вернула пустой ответ. Попробуйте позже.", 0, True, False, 0
+    return content, int(tokens), False, done_reason == "length", int(prompt_tokens)
 
 
 # --- Автогенерация функций для каждой модели (через _base.make_table_handlers) ---

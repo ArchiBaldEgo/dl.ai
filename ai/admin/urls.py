@@ -1,13 +1,20 @@
 """URL-маршруты кастомного AI admin site.
 
 Содержит кастомные пути для ARM (solve), статуса моделей,
-регрессионных тестов промптов, логов запросов и личных промптов.
+логов запросов и личных промптов.
 Стандартные admin URL подключаются через ai_admin_site.get_urls().
 """
 
 from django.urls import include, path
 
 from ..views import set_password_view
+from .access_groups import (
+    admin_access_group_delete_view,
+    admin_access_group_member_search_view,
+    admin_access_group_member_toggle_view,
+    admin_access_group_save_view,
+    admin_access_groups_view,
+)
 from .active_runs import admin_active_runs_view
 from .arm import (
     admin_arm_solve_view,
@@ -22,13 +29,18 @@ from .arm import (
     admin_arm_solve_result_download_view,
     admin_arm_solve_result_body_view,
 )
+from .dl_api_requests import (
+    admin_dl_api_request_create_view,
+    admin_dl_api_request_update_view,
+    admin_dl_api_requests_view,
+)
 from .docs import (
     admin_docs_content_view,
     admin_docs_download_view,
     admin_docs_index_view,
     admin_docs_view,
 )
-from .guest_mode import admin_toggle_guest_view
+from .guest_mode import admin_view_as_groups_view, admin_view_as_select_view
 from .request_logs import (
     admin_batch_snapshot_view,
     admin_daily_report_view,
@@ -49,17 +61,14 @@ from .request_logs import admin_request_log_detail_json_view
 from .onboarding import admin_wizard_seen_view
 from .pinned import admin_pinned_run_toggle_view, admin_pinned_runs_view
 from .prompt_defaults import admin_prompt_defaults_view
-from .prompt_regression import (
-    admin_prompt_regression_view,
-    admin_prompt_regression_start_view,
-    admin_prompt_regression_status_view,
-)
 from .site import ai_admin_site
 from .tasks import (
     admin_task_claim_view,
     admin_task_close_view,
     admin_task_create_view,
-    admin_task_restore_view,
+    admin_task_edit_view,
+    admin_task_reopen_view,
+    admin_task_reorder_view,
     admin_tasks_view,
 )
 from .test_console import (
@@ -73,7 +82,13 @@ from .test_data import (
     test_data_emit_request_view,
     test_data_view
 )
+from .tokens import admin_token_usage_view
 from .updates import admin_updates_view
+from .user_models import (
+    admin_user_model_create_view,
+    admin_user_model_delete_view,
+    admin_user_models_view,
+)
 
 
 def get_ai_admin_urls():
@@ -83,7 +98,8 @@ def get_ai_admin_urls():
     """
     custom_urls = [
         path("set-password/", set_password_view, name="set_password_view"),
-        path("view-as-guest/", ai_admin_site.admin_view(admin_toggle_guest_view), name="ai_view_as_guest"),
+        path("view-as/groups/", ai_admin_site.admin_view(admin_view_as_groups_view), name="ai_view_as_groups"),
+        path("view-as/select/", ai_admin_site.admin_view(admin_view_as_select_view), name="ai_view_as_select"),
         path("docs/", ai_admin_site.admin_view(admin_docs_index_view), name="ai_docs"),
         path("docs/<slug:slug>/", ai_admin_site.admin_view(admin_docs_view), name="ai_docs_detail"),
         path("docs/<slug:slug>/content/", ai_admin_site.admin_view(admin_docs_content_view), name="ai_docs_content"),
@@ -103,9 +119,6 @@ def get_ai_admin_urls():
         path("arm/models/refresh/", ai_admin_site.admin_view(admin_model_status_refresh_view), name="ai_arm_model_status_refresh"),
         path("arm/models/state/", ai_admin_site.admin_view(admin_model_status_state_view), name="ai_arm_model_status_state"),
         path("arm/models/", ai_admin_site.admin_view(admin_model_status_view), name="ai_arm_model_status"),
-        path("prompt-regression/start/", ai_admin_site.admin_view(admin_prompt_regression_start_view), name="ai_prompt_regression_start"),
-        path("prompt-regression/status/", ai_admin_site.admin_view(admin_prompt_regression_status_view), name="ai_prompt_regression_status"),
-        path("prompt-regression/", ai_admin_site.admin_view(admin_prompt_regression_view), name="ai_prompt_regression"),
         path("test-console/start/", ai_admin_site.admin_view(admin_test_console_start_view), name="ai_test_console_start"),
         path("test-console/status/", ai_admin_site.admin_view(admin_test_console_status_view), name="ai_test_console_status"),
         path("test-console/logs/view/", ai_admin_site.admin_view(admin_test_console_log_view), name="ai_test_console_log_view"),
@@ -114,11 +127,18 @@ def get_ai_admin_urls():
         path("prompts/my/", ai_admin_site.admin_view(admin_my_prompt_view), name="ai_my_prompt"),
         path("pinned-runs/", ai_admin_site.admin_view(admin_pinned_runs_view), name="ai_pinned_runs"),
         path("tasks/create/", ai_admin_site.admin_view(admin_task_create_view), name="ai_task_create"),
+        path("tasks/<int:task_id>/edit/", ai_admin_site.admin_view(admin_task_edit_view), name="ai_task_edit"),
+        path("tasks/reorder/", ai_admin_site.admin_view(admin_task_reorder_view), name="ai_task_reorder"),
         path("tasks/<int:task_id>/claim/", ai_admin_site.admin_view(admin_task_claim_view), name="ai_task_claim"),
         path("tasks/<int:task_id>/close/", ai_admin_site.admin_view(admin_task_close_view), name="ai_task_close"),
-        path("tasks/<int:task_id>/restore/", ai_admin_site.admin_view(admin_task_restore_view), name="ai_task_restore"),
+        path("tasks/<int:task_id>/reopen/", ai_admin_site.admin_view(admin_task_reopen_view), name="ai_task_reopen"),
         path("tasks/", ai_admin_site.admin_view(admin_tasks_view), name="ai_tasks"),
         path("prompt-defaults/", ai_admin_site.admin_view(admin_prompt_defaults_view), name="ai_prompt_defaults"),
+        path("ai-groups/<int:group_id>/save/", ai_admin_site.admin_view(admin_access_group_save_view), name="ai_access_group_save"),
+        path("ai-groups/<int:group_id>/delete/", ai_admin_site.admin_view(admin_access_group_delete_view), name="ai_access_group_delete"),
+        path("ai-groups/<int:group_id>/members/search/", ai_admin_site.admin_view(admin_access_group_member_search_view), name="ai_access_group_member_search"),
+        path("ai-groups/<int:group_id>/members/toggle/", ai_admin_site.admin_view(admin_access_group_member_toggle_view), name="ai_access_group_member_toggle"),
+        path("ai-groups/", ai_admin_site.admin_view(admin_access_groups_view), name="ai_access_groups"),
         path("updates/", ai_admin_site.admin_view(admin_updates_view), name="ai_updates"),
         path("wizard/seen/", ai_admin_site.admin_view(admin_wizard_seen_view), name="ai_wizard_seen"),
         path("ai/request_logs/task-text/", ai_admin_site.admin_view(admin_request_log_task_text_view), name="ai_request_log_task_text"),
@@ -131,6 +151,16 @@ def get_ai_admin_urls():
         path("ai/request_logs/<int:log_id>/detail-json/", ai_admin_site.admin_view(admin_request_log_detail_json_view), name="ai_request_log_detail_json"),
         path("ai/request_logs/<int:log_id>/rerun-arm/", ai_admin_site.admin_view(rerun_arm_batch_view), name="ai_request_log_rerun_arm"),
         path("ai/request_logs/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),
+        # «Контроль токенов» — расход токенов по моделям/пользователям/режимам.
+        path("ai/tokens/", ai_admin_site.admin_view(admin_token_usage_view), name="ai_token_usage"),
+        # «Мои AI-модели» — личные модели пользователя (только владелец).
+        path("user-models/", ai_admin_site.admin_view(admin_user_models_view), name="ai_user_models"),
+        path("user-models/create/", ai_admin_site.admin_view(admin_user_model_create_view), name="ai_user_model_create"),
+        path("user-models/delete/", ai_admin_site.admin_view(admin_user_model_delete_view), name="ai_user_model_delete"),
+        # «Запросы по DL API» — заявки на создание API к dl.gsu.by.
+        path("dl-api-requests/", ai_admin_site.admin_view(admin_dl_api_requests_view), name="ai_dl_api_requests"),
+        path("dl-api-requests/create/", ai_admin_site.admin_view(admin_dl_api_request_create_view), name="ai_dl_api_request_create"),
+        path("dl-api-requests/update/", ai_admin_site.admin_view(admin_dl_api_request_update_view), name="ai_dl_api_request_update"),
 
         path("test_data/emit_request/",
              ai_admin_site.admin_view(test_data_emit_request_view),name="ai_test_data_emit_request"),

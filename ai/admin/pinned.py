@@ -5,7 +5,7 @@
 пакетные прогоны. Закрепление (★) выполняется из журнала запросов и из
 блока «Последние пакетные решения» на «Настройке ИИ-приложения».
 
-Права — как у журнала (can_access_logs): закрепить можно только доступную
+Права — как у журнала плюс ключ page.pinned_runs (can_access_pinned_runs): закрепить можно только доступную
 самому пользователю запись журнала, поэтому чужие прогоны в закладки
 не попадают.
 
@@ -29,7 +29,7 @@ from .request_logs import (
     _is_batch_solve_log,
     build_batch_rows_for_logs,
 )
-from .permissions import can_access_logs
+from .permissions import can_access_pinned_runs
 from .site import ai_admin_site
 
 PINNED_RUNS_URL = "/ai/admin/pinned-runs/"
@@ -45,7 +45,7 @@ def admin_pinned_runs_view(request):
     Развёрнуть (смотреть результаты) чужой закреплённый прогон может каждый
     с доступом — закреплённые решения являются общей витриной (ТЗ 2026-10-19).
     """
-    if not can_access_logs(request):
+    if not can_access_pinned_runs(request):
         return HttpResponseForbidden("Access denied")
 
     pins = list(
@@ -64,11 +64,16 @@ def admin_pinned_runs_view(request):
     # любой строке, а снапшот-эндпоинт сам допускает закреплённые чужие записи
     # для промпт-разработчика (см. admin_batch_snapshot_view).
     ordered_rows = []
+    # Пины по логу — один проход (был O(n²): список пинов перебирался для
+    # КАЖДОГО пина — на странице десятков закреплений это квадрат).
+    pins_by_log = {}
+    for pin in pins:
+        pins_by_log.setdefault(pin.log_id, []).append(pin)
     for pin in pins:
         row = rows_by_log_id.pop(pin.log_id, None)
         if row is None:
             continue
-        row_pins = [p for p in pins if p.log_id == pin.log_id]
+        row_pins = pins_by_log.get(pin.log_id, [])
         row["is_own"] = any(p.user_id == request.user.pk for p in row_pins)
         row["pin_authors"] = ", ".join(_pin_author_display(p.user) for p in row_pins)
         ordered_rows.append(row)
@@ -98,7 +103,7 @@ def admin_pinned_run_toggle_view(request, log_id):
     """
     if request.method != "POST":
         return JsonResponse({"ok": False, "error": "Метод не поддерживается"}, status=405)
-    if not can_access_logs(request):
+    if not can_access_pinned_runs(request):
         return HttpResponseForbidden("Access denied")
 
     log, error = _get_scoped_log(request, log_id)

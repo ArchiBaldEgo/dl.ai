@@ -18,7 +18,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 BOT_POOL_URL = os.getenv("BOT_POOL_URL", "http://localhost:3000").rstrip("/")
 
-# Web Kimi bot-пул (WebKimi/, loopback :3001). Отдельный от DeepSeek пул —
+# Web Kimi bot-пул (WebPools/, сайт kimi, loopback :3001). Отдельный от DeepSeek —
 # namespaced KIMI_* env, чтобы не коллизировать с PORT/SERVICE_MODEL/BOT_USERNAME.
 KIMI_POOL_URL = os.getenv("KIMI_POOL_URL", "http://localhost:3001").rstrip("/")
 

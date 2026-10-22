@@ -39,12 +39,13 @@ from .services.code_carver import (  # noqa: E402
     _strip_think_blocks,
     _trim_prose_tail,
     has_language_marker,
+    language_code_incomplete,
 )
 from django.utils.html import strip_tags
 
 from .model_clients.exceptions import humanize_model_error
 from .model_clients import is_output_truncated, get_no_think_handler
-from .services.task_registry import dl_task_url
+from .services.task_registry import dl_path_folder, dl_task_url
 from .i18n import get_ui_language_suffix
 from .model_health import get_runtime_model_handlers, is_arm_solve_model
 from .models import AIModelTestResult, AIModelTestRun, AIRequestLog, ArmPromptBinding, ExternalDLAccount, Task
@@ -88,12 +89,29 @@ def _to_float(value, default=0.0):
 
 
 def _extract_model_response(response):
+    """Текст ответа и токены ОТВЕТА из кортежа хендлера.
+
+    Контракт хендлера: ``(content, completion_tokens, is_error, cut_flag,
+    prompt_tokens)`` — 5-й элемент (prompt_tokens) добавлен для учёта
+    токенов (prompt + completion) и НЕ сдвигает прежние позиции.
+    """
     if isinstance(response, tuple):
         response_text = response[0] if len(response) > 0 else ""
         tokens = _to_int(response[1] if len(response) > 1 else 0)
         return str(response_text or ""), tokens
 
     return str(response or ""), 0
+
+
+def _extract_prompt_tokens(response) -> int:
+    """Токены ПРОМПТА из кортежа хендлера (5-й элемент).
+
+    Провайдеры, не отдающие usage (web-пулы), дают 0 — на странице «Контроль
+    токенов» такие строки честно помечаются «учёт недоступен».
+    """
+    if isinstance(response, tuple) and len(response) > 4:
+        return _to_int(response[4])
+    return 0
 
 
 def _is_model_error(response):
@@ -136,16 +154,42 @@ from .grading import (
 # Вердикты DL живут в dl_api_client (dl_verdict_from_comment) — единственный
 # источник (DRY); здесь только алиасы под исторические локальные имена.
 from .dl_api_client import (  # noqa: E402
+    DL_REASON_COMPILE_ERROR as _REASON_COMPILE_ERROR,
+    DL_REASON_UNDEFINED as _REASON_UNDEFINED,
+    DL_REASON_WRONG_ANSWER as _REASON_WRONG_ANSWER,
     DL_VERDICT_FAILED as _VERDICT_FAILED,
     DL_VERDICT_SOLVED as _VERDICT_SOLVED,
+    build_dl_file_name as _build_dl_file_name,
+    dl_failed_test_number_from_comment as _dl_failed_test_number,
+    dl_failure_reason_from_comment as _failure_reason_from_dl_comment,
     dl_verdict_from_comment as _verdict_from_dl_comment,
 )
 
 _VERDICT_SKIPPED = "skipped"
 
+# Причины сбоя пары (ортогональны вердикту). Значения совпадают с
+# AIModelTestResult.FAILURE_REASON_CHOICES — источник истины там, здесь
+# алиасы для кода прогона (как вердикты выше).
+_REASON_MODEL_ERROR = "model_error"
+_REASON_NO_CODE = "no_code"
+_REASON_SKIPPED = "skipped"
+# DL отклонил отправку решения (HTTP 401 — сессия DLSID истекла).
+_REASON_DL_UNAUTHORIZED = "dl_unauthorized"
+
+# Подсказка оператору при 401 от DL: что именно произошло и что делать.
+DL_UNAUTHORIZED_HINT = (
+    "сессия DL истекла — обновите DLSID и перезапустите прогон"
+)
+
 # Лимит позиций в строке «Ошибки по темам» (остальное — «+ ещё N»):
 # отчёт не должен разбухать на больших прогонах.
 _REPORT_ERRORS_ITEM_CAP = 6
+
+# Сколько попыток вызова модели делаем при «Сбое ответа модели»
+# (таймаут/401/429/провайдер упал). ТЗ: «вывести сначала, что сбой, и потом
+# сразу переслать, и так 5 раз» — сбой печатается в журнал прогона, запрос
+# пересылается немедленно, всего до 5 попыток.
+_MODEL_ERROR_MAX_ATTEMPTS = 5
 
 # Тяжёлые поля batch-результата (тело ответа): не встраиваются в снапшот
 # страницы / поллинга (light-режим), подтягиваются по AJAX при раскрытии
@@ -375,13 +419,143 @@ def _per_bucket(results, key_fn, label_fn):
     return rows
 
 
-def _build_batch_report(results):
+def _topic_bucket_key(item):
+    """Ключ группировки по теме: ID темы (не название).
+
+    Названия тем повторяются между языками (курс «[Ассемблер i8086, C-MPA]»
+    держит по одной теме с одинаковым названием на язык) — группировка по
+    названию сливала бы разные темы в одну строку отчёта. Без ID (тема не
+    определена) ключ — пустая строка: такие пары попадают в отдельную
+    строку с честной подписью (см. ``_topic_bucket_label``).
+    """
+    topic_id = item.get("topic_id")
+    if topic_id is None:
+        return ""
+    return str(topic_id)
+
+
+def _topic_bucket_label(item):
+    """Подпись строки «по темам»: название темы, иначе — папка DL, иначе —
+    по-человечески.
+
+    Владелец отдельно просил убрать «Без темы» из отчёта: в прогоне должны
+    быть видны ВСЕ задействованные темы. Тема без названия — это не
+    «отсутствующая тема», а конкретная задача вне темы DL-дерева; подпись
+    строится по ПАПКЕ DL (путь задачи в дереве: «Курс\\Папка\\Задача» →
+    «Папка»), а только если пути нет — по языку/имени задачи.
+    """
+    name = (item.get("topic_name") or "").strip()
+    if name:
+        return name
+    folder = dl_path_folder(item.get("tree_path") or "")
+    if folder:
+        return folder
+    lang = (item.get("prog_lang_name") or "").strip()
+    task_name = (item.get("task_name") or "").strip()
+    if lang and task_name:
+        return f"{task_name} ({lang})"
+    if task_name:
+        return task_name
+    if lang:
+        return f"Задачи без темы ({lang})"
+    return "Задачи без темы"
+
+
+def _topics_used(results):
+    """Список всех тем, задействованных в прогоне (для отчёта и проверок).
+
+    Возвращает ``[{"topic_id", "topic_name", "pairs", "solved"}]`` — по
+    возрастанию числа пар (топ-частая тема первой). Темы без названия
+    подписываются так же, как в строках отчёта.
+    """
+    buckets: dict = {}
+    for item in results:
+        key = _topic_bucket_key(item)
+        bucket = buckets.setdefault(
+            key,
+            {
+                "topic_id": item.get("topic_id"),
+                "topic_name": _topic_bucket_label(item),
+                "pairs": 0,
+                "solved": 0,
+            },
+        )
+        bucket["pairs"] += 1
+        if item.get("verdict") == _VERDICT_SOLVED:
+            bucket["solved"] += 1
+    return sorted(buckets.values(), key=lambda b: (-b["pairs"], b["topic_name"]))
+
+
+def _build_failure_reasons(results):
+    """Секция «Сбои по причинам» отчёта пакетного прогона.
+
+    Таксономия — из ``AIModelTestResult.FAILURE_REASON_CHOICES`` (единый
+    источник): «сбой ответа модели», «не выкушен код», «ошибка компиляции»,
+    «неправильный ответ» (+ честные «причина не распознана» / «пропущено»).
+    Учитываются только пары с непустой причиной (у решённых пар причины
+    нет). Проценты — от числа ВСЕХ пар прогона.
+    """
+    total = len(results)
+    counts: dict = {}
+    for item in results:
+        reason = (item.get("failure_reason") or "").strip()
+        if not reason:
+            continue
+        counts[reason] = counts.get(reason, 0) + 1
+    rows = []
+    for reason, count in counts.items():
+        label = AIModelTestResult.FAILURE_REASON_LABELS.get(reason, reason)
+        rows.append({
+            "key": reason,
+            "label": label,
+            "count": count,
+            "percent": round(count / total * 100, 1) if total else 0.0,
+        })
+    rows.sort(key=lambda row: (-row["count"], row["label"]))
+    return rows
+
+
+def _errors_bucket_key(item):
+    """Ключ группировки строки «Ошибки по темам».
+
+    Как и в «итоге по темам», темы группируются ПО ID (одинаковые названия
+    у разных языков не сливаются). Если ID нет, но название есть — по
+    названию; если нет и его — по ПАПКЕ DL (путь задачи в дереве), а без
+    пути — по самой задаче.
+    """
+    topic_key = _topic_bucket_key(item)
+    if topic_key:
+        return "t:" + topic_key
+    topic_name = (item.get("topic_name") or "").strip()
+    if topic_name:
+        return "n:" + topic_name.lower()
+    folder = dl_path_folder(item.get("tree_path") or "")
+    if folder:
+        return "dl:" + folder.lower()
+    return "task:" + str(item.get("task_node_id") or item.get("task_name") or "?")
+
+
+def _build_batch_report(results, run_topic_id=None, run_topic_name=None):
     """Batch-solve report: per-model + per-topic tables + overall counters.
 
     Добавлено (2026-09): models_count / tasks_count (объём прогона из
     результатов) и errors_by_topic — нерешённые пары (failed/skipped),
     сгруппированные по темам с ограничением на количество позиций в строке
     (компактность отчёта на больших прогонах).
+
+    Добавлено (2026-10): секция ``failure_reasons`` — таксономия сбоев
+    («сбой ответа модели» / «не выкушен код» / «ошибка компиляции» /
+    «неправильный ответ»), см. AIModelTestResult.FAILURE_REASON_CHOICES.
+    Темы группируются ПО ID темы (topic_id), а не по названию: названия
+    совпадают у разных языков (i8086 / C-MPA), и без ID отчёт сливал бы их
+    в одну строку. Тема без названия подписывается по-человечески, а не
+    «Без темы»: в прогоне всегда видно, какие темы задействованы.
+
+    ``run_topic_id``/``run_topic_name`` — тема, выбранная оператором на форме
+    прогона. Пары, у которых собственную тему определить не удалось,
+    наследуют её (ensure_task → fallback_topic_id) — в отчёте это отмечено
+    полем ``run_topic``, чтобы было видно, что часть строк — не «своя» тема
+    задачи, а запасная тема прогона.
     """
     if not results:
         return None
@@ -401,8 +575,8 @@ def _build_batch_report(results):
     )
     per_topic = _per_bucket(
         results,
-        key_fn=lambda r: r.get("topic_name") or "Без темы",
-        label_fn=lambda r: r.get("topic_name") or "Без темы",
+        key_fn=_topic_bucket_key,
+        label_fn=_topic_bucket_label,
     )
 
     # Объём прогона: уникальные модели и задачи из результатов.
@@ -412,29 +586,74 @@ def _build_batch_report(results):
     # Ошибки по темам: пары с вердиктом «не решено» (failed) и «пропущено»
     # (не протестировано) — они и есть проблемы прогона. Items сокращаются
     # до _REPORT_ERRORS_ITEM_CAP позиций на тему (остальное — «+ ещё N»).
+    # reasons — счётчики причин сбоя ВНУТРИ темы (компиляция / неверный
+    # ответ / нет кода / сбой модели): по одной теме видно, ЧЕМ именно
+    # не решено (владелец просил «посмотреть для каждой темы, какие были
+    # ошибки»).
     errors_map: dict = {}
     for r in results:
         verdict = r.get("verdict")
         if verdict in (_VERDICT_SOLVED, None):
             continue
-        topic = r.get("topic_name") or "Без темы"
-        bucket = errors_map.setdefault(topic, {"count": 0, "items": []})
+        key = _errors_bucket_key(r)
+        bucket = errors_map.setdefault(
+            key, {"count": 0, "items": [], "label": _topic_bucket_label(r), "reasons": {}}
+        )
         bucket["count"] += 1
+        reason = (r.get("failure_reason") or "").strip() or "undefined"
+        bucket["reasons"][reason] = bucket["reasons"].get(reason, 0) + 1
         task_label = str(r.get("task_name") or ("#" + str(r.get("task_node_id") or "")))
         model_label = str(r.get("model_title") or r.get("model_key") or "?")
         if len(bucket["items"]) < _REPORT_ERRORS_ITEM_CAP:
-            bucket["items"].append(f"{task_label} × {model_label}")
+            # Позиция — СТРУКТУРА: клиент делает из неё ссылку на карточку
+            # пары в списке «Ответы моделей» (data-key = node_id:model_key)
+            # и печатает причину сбоя прямо рядом с задачей.
+            node_id = r.get("task_node_id")
+            model_key = str(r.get("model_key") or "")
+            bucket["items"].append(
+                {
+                    "task": task_label,
+                    "model": model_label,
+                    "reason": AIModelTestResult.FAILURE_REASON_LABELS.get(reason, reason),
+                    # Номер проваленного теста (если вердикт DL его назвал) —
+                    # показываем рядом с причиной: «какой тест упал».
+                    "test_number": r.get("dl_test_number") or 0,
+                    "node_id": node_id,
+                    "model_key": model_key,
+                    "key": f"{node_id if node_id is not None else ''}:{model_key}",
+                }
+            )
     errors_by_topic = [
         {
-            "topic": topic,
+            "topic": bucket["label"],
             "count": bucket["count"],
             "items": bucket["items"],
             "hidden": bucket["count"] - len(bucket["items"]),
+            "reasons": [
+                {
+                    "key": reason,
+                    "label": AIModelTestResult.FAILURE_REASON_LABELS.get(reason, reason),
+                    "count": count,
+                }
+                for reason, count in sorted(
+                    bucket["reasons"].items(), key=lambda kv: (-kv[1], kv[0])
+                )
+            ],
         }
-        for topic, bucket in sorted(
-            errors_map.items(), key=lambda kv: (-kv[1]["count"], kv[0])
+        for _key, bucket in sorted(
+            errors_map.items(), key=lambda kv: (-kv[1]["count"], kv[1]["label"])
         )
     ]
+
+    failure_reasons = _build_failure_reasons(results)
+
+    # Подсказки оператору по итогам прогона (сейчас — протухшая сессия DL).
+    hints = []
+    if any((r.get("failure_reason") or "") == _REASON_DL_UNAUTHORIZED for r in results):
+        hints.append(
+            "Ошибка DL: send-solution: Не авторизован — сессия DL истекла, "
+            "обновите DLSID и перезапустите прогон"
+        )
 
     return {
         "total_pairs": len(results),
@@ -447,8 +666,28 @@ def _build_batch_report(results):
         "per_topic": per_topic,
         "models_count": models_count,
         "tasks_count": tasks_count,
+        # Тема прогона (запасная тема для задач без своей) — см. докстринг.
+        "run_topic": {
+            "id": run_topic_id,
+            "name": (run_topic_name or "").strip(),
+        } if (run_topic_id or run_topic_name) else None,
         "errors_by_topic": errors_by_topic,
+        "failure_reasons": failure_reasons,
+        "hints": hints,
+        "topics_used": _topics_used(results),
     }
+
+
+def _attach_log_lines(report, log_lines):
+    """Журнал прогона (сбои модели и повторы) — в отчёт.
+
+    Отчёт может быть None (пустые результаты прогона) — тогда журнал
+    некуда класть, но ломать нечего.
+    """
+    if report is None:
+        return None
+    report["log_lines"] = list(log_lines or [])
+    return report
 
 
 def _attach_run_meta(report, started_ts, finished_ts=None, now_ts=None):
@@ -485,12 +724,18 @@ def _interim_live_report(job):
     """
     if job.get("run_type") != "batch":
         return None
-    report = _build_batch_report(job.get("results") or [])
+    report = _build_batch_report(
+        _sort_results_fresh_first(job.get("results") or []),
+        run_topic_id=job.get("topic_id"),
+        run_topic_name=job.get("topic_name"),
+    )
     if report is None:
         return None
     _attach_run_meta(report, job.get("created_at_ts"), None, now_ts=time.time())
     report["interim"] = True
-    return report
+    # Журнал прогона (сбои модели и повторы) — в отчёте, чтобы он был виден
+    # и в живом поллинге, и в сохранённом отчёте.
+    return _attach_log_lines(report, job.get("log_lines"))
 
 
 def _update_job(run_id, **updates):
@@ -802,6 +1047,7 @@ def _run_job_worker(
                     f"admin-{user_id}-{model['key']}-{run_id}",
                 )
                 response_text, tokens = _extract_model_response(response)
+                prompt_tokens = _extract_prompt_tokens(response)
                 # Флаг обреза по факту (tokens упёрся в потолок провайдера).
                 # У ошибочного вызова флага нет — это другой вид сбоя.
                 single_truncated = (
@@ -826,6 +1072,7 @@ def _run_job_worker(
                     "model_title": model["title"],
                     "duration": duration,
                     "tokens": tokens,
+                    "tokens_prompt": prompt_tokens,
                     "short_response": short_response,
                     "status": status,
                     "raw_response": detailed_text,
@@ -841,6 +1088,7 @@ def _run_job_worker(
                     "model_title": model["title"],
                     "duration": duration,
                     "tokens": 0,
+                    "tokens_prompt": 0,
                     "short_response": friendly_text or f"Ошибка вызова модели: {exc_text}",
                     "status": status,
                     "raw_response": detailed_text,
@@ -859,6 +1107,7 @@ def _run_job_worker(
                     "short_response": result_item["short_response"],
                     "raw_response": (result_item["raw_response"] or "")[:8000],
                     "truncated": bool(result_item.get("truncated")),
+                    "updated_at": timezone.now(),
                 },
             )
 
@@ -960,6 +1209,11 @@ def _run_job_worker(
             duration_seconds=(end_time - start_time).total_seconds(),
             response_text=response_summary[:5000],
             status=AIRequestLog.STATUS_SUCCESS if any(r.get("status") == "ok" for r in results) else AIRequestLog.STATUS_ERROR,
+            # Расход одиночного ARM-прогона — в журнал (иначе он не виден
+            # на странице «Контроль токенов»: batch-записи токены пишут,
+            # одиночные — нет). Сумма по парам прогона.
+            tokens=sum(_to_int(r.get("tokens")) for r in results),
+            tokens_prompt=sum(_to_int(r.get("tokens_prompt")) for r in results),
         )
         AIModelTestRun.objects.filter(pk=test_run.pk).update(
             status=AIModelTestRun.STATUS_COMPLETED,
@@ -1114,19 +1368,26 @@ def _extract_code_from_response(text, file_extension=""):
     ни одного структурного маркера (window.HYDRATION-JSON, «[ВСТАВЬТЕ ВАШ
     КОД]», протекшие рассуждения) возвращает "" — в DL такой текст не ходит
     и в code не пишется (реальные кейсы res#194/206/180).
+
+    Конвейер вызывается ДВАЖДЫ: сначала на срезе «Альтернатива:/Вариант 2:»
+    (второе решение не должно затирать основное), а при полностью пустом
+    результате — на СЫРОМ тексте: раннее упоминание «Альтернатива:» в CoT
+    не должно срезать ФИНАЛЬНУЮ программу, записанную ниже.
     """
     from .services.code_carver import has_language_marker
-    code = _extract_code_pipeline(text, file_extension)
+    code = _extract_code_pipeline(text, file_extension, apply_alt_cut=True)
+    if not code and text:
+        code = _extract_code_pipeline(text, file_extension, apply_alt_cut=False)
     if code and not has_language_marker(code, file_extension or ""):
         return ""
     return code
 
 
-def _extract_code_pipeline(text, file_extension):
+def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
     """Extract pure code from an AI response.
 
     Структурные экстракторы С-МПА (services/code_carver.py) идут ПЕРВЫМИ,
-    когда известно расширение: сначала по всему текст (мульти-анкер +
+    когда известно расширение: сначала по всему тексту (мульти-анкер +
     валидация кандидатов внутри), затем по закрытым код-фенсам. Без
     расширения структурники пробуются только как последняя надежда
     (маркеры видны в сыром ответе). Структурники бракуют склейки
@@ -1137,6 +1398,11 @@ def _extract_code_pipeline(text, file_extension):
     прози посреди), незакрытая оградка, карвинг прогона код-строк; каждый
     кандидат проверяется тем же «мид-контролем». Prose-In-Fence (res#5170)
     отбрасывается; утечка оградок срезается strip_code_fence_lines().
+    По фенс-блокам в структурных экстракторах идём С КОНЦА — последний
+    валидный фенс обычно финальный ответ модели (res#4160).
+
+    apply_alt_cut=False отключает срез «Альтернатива:/Вариант 2:»
+    (спасательный прогон _extract_code_from_response).
 
     Если кода в ответе нет вовсе, возвращается пустая строка (воркер
     засчитает «код не извлечён»), а не простыня рассуждений.
@@ -1150,7 +1416,8 @@ def _extract_code_pipeline(text, file_extension):
     from .services import code_carver
     # «Альтернатива:/Вариант 2:…» с кодом второго решения срезаются ДО всех
     # экстракторов (структурники, фенсы и карвинг работают по одному тексту).
-    cleaned = code_carver.cut_after_alternative_heading(cleaned)
+    if apply_alt_cut:
+        cleaned = code_carver.cut_after_alternative_heading(cleaned)
     structural = None
     if ext in (".i86", ".asm"):
         structural = code_carver.extract_asm_i86
@@ -1166,8 +1433,9 @@ def _extract_code_pipeline(text, file_extension):
         if found:
             return found
         # По фенс-блокам: внутри ограды кандидата границы естественны;
-        # последний валидный фенс обычно финальный ответ модели.
-        for block in _CODE_FENCE_RE.findall(cleaned):
+        # последний валидный фенс обычно финальный ответ модели — обходим
+        # С КОНЦА (res#4160).
+        for block in reversed(_CODE_FENCE_RE.findall(cleaned)):
             block = block.strip()
             if not block or _looks_like_prose(block):
                 continue
@@ -1213,7 +1481,7 @@ def _extract_code_pipeline(text, file_extension):
         found = structural(cleaned, relaxed=True)
         if found:
             return code_carver.strip_code_fence_lines(found)
-        for block in _CODE_FENCE_RE.findall(cleaned):
+        for block in reversed(_CODE_FENCE_RE.findall(cleaned)):
             found = structural(block.strip(), relaxed=True)
             if found:
                 return code_carver.strip_code_fence_lines(found)
@@ -1226,7 +1494,7 @@ def _extract_code_pipeline(text, file_extension):
     return ""
 
 
-def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None, course_id=None):
+def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30, poll_interval=3.0, task_id=0, run_id=None, course_id=None, delta="", file_name=""):
     """Send code to DL for real testing and poll for the result.
 
     Returns a dict:
@@ -1235,6 +1503,8 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
             "comment": str,        # DL comment (test result details)
             "submit_error": str,   # error message if send-solution failed
             "queue_id": int,       # DL queue id (0 if submit failed)
+            "delta_id": int,       # id тестирующей машины (Дельты), 0 — не назначена
+            "delta_name": str,     # имя тестирующей машины ("" — не назначена)
             "code_sent": str,      # the code that was sent to DL
             "cancelled": bool,     # True if aborted by cancel request
         }
@@ -1248,16 +1518,29 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
     ``course_id`` (опционально) — если передан, перед send-solution вызывается
     ``ensure_course_session`` для активации курса в сессии DL (иначе send-solution
     отдаёт 400 при courseID=0 в сессии).
+
+    ``delta`` (опционально) — тестирующая машина (Дельта): ID или ТОЧНОЕ
+    название (контракт DL v1.4.2). ``file_name`` (опционально) — имя
+    временного файла решения (контракт DL v1.4.2, SendSolutionRequest.fileName).
     """
-    from .dl_api_client import send_solution_to_dl, get_solution_result_from_dl, DLServerError, ensure_course_session
+    from .dl_api_client import (
+        send_solution_to_dl, get_solution_result_from_dl,
+        DLServerError, DLUnauthorizedError, ensure_course_session,
+    )
 
     result = {
         "verdict": None,
         "comment": "",
         "submit_error": "",
         "queue_id": 0,
+        "delta_id": 0,
+        "delta_name": "",
         "code_sent": code[:5000],
         "cancelled": False,
+        # True — DL отклонил запрос (HTTP 401): сессия DLSID истекла.
+        # Отдельный флаг, чтобы пара получила причину «Ошибка DL: не
+        # авторизован», а не «причина не распознана».
+        "unauthorized": False,
     }
 
     # Activate the course in the DL session before send-solution — DL requires
@@ -1268,7 +1551,17 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
     # Step 1: submit code to DL.
     submit_resp = None
     try:
-        submit_resp = send_solution_to_dl(session_id, node_id, code, file_extension, course_id=course_id)
+        submit_resp = send_solution_to_dl(
+            session_id, node_id, code, file_extension,
+            course_id=course_id, file_name=file_name, delta=delta,
+        )
+    except DLUnauthorizedError as exc:
+        # DL отклонил: сессия DLSID истекла/невалидна (HTTP 401). Пробу с
+        # taskId вместо nodeId НЕ делаем (отказ авторизации не про id) и
+        # поллинг не запускаем — пара закрывается сразу с понятной причиной.
+        result["submit_error"] = f"send-solution: {exc}"
+        result["unauthorized"] = True
+        return result
     except DLServerError as exc:
         msg = str(exc)
         result["submit_error"] = f"send-solution: {msg}"
@@ -1281,7 +1574,10 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
         # nodeId (courseId тот же); если принято — продолжаем поллинг.
         if task_id and task_id != node_id:
             try:
-                alt_resp = send_solution_to_dl(session_id, task_id, code, file_extension, course_id=course_id)
+                alt_resp = send_solution_to_dl(
+                    session_id, task_id, code, file_extension,
+                    course_id=course_id, file_name=file_name, delta=delta,
+                )
                 alt_qid = alt_resp.get("queueId") or 0
                 if alt_qid > 0:
                     # taskId принят — nodeId был не тем идентификатором.
@@ -1329,12 +1625,25 @@ def _test_solution_on_dl(session_id, node_id, code, file_extension, max_polls=30
         time.sleep(poll_interval)
         try:
             poll_resp = get_solution_result_from_dl(session_id, queue_id)
+        except DLUnauthorizedError as exc:
+            # Сессия DL истекла прямо во время опроса — дальше опрашивать
+            # бессмысленно: закрываем пару сразу.
+            result["submit_error"] = f"get-solution-result: {exc}"
+            result["unauthorized"] = True
+            return result
         except Exception as exc:
             result["submit_error"] = f"get-solution-result: {exc}"
             return result
 
         is_finished = poll_resp.get("isFinished")
         comment = poll_resp.get("comment", "") or ""
+        # Машина (Дельта), на которой идёт/шла проверка: deltaId/deltaName
+        # (dl-rest-api.json, GetResultResponse). 0/"" — машина ещё не назначена.
+        try:
+            result["delta_id"] = int(poll_resp.get("deltaId") or 0)
+        except (TypeError, ValueError):
+            result["delta_id"] = 0
+        result["delta_name"] = str(poll_resp.get("deltaName") or "")
 
         if is_finished:
             result["comment"] = comment
@@ -1398,7 +1707,7 @@ def _prepare_batch_run(
     ui_language, dl_test, prompt_id, course_id, solve_file_extension,
     solve_prog_lang_name, programming_language_id, programming_language_name,
     prompt_name, topic_id, topic_name, run_params, rerun, rerun_pairs,
-    start_time, run_name="", save_solutions=False,
+    start_time, run_name="", save_solutions=False, delta="", file_name="",
 ):
     """Однопоточная подготовка batch-прогона (фаза воркера до model-потоков).
 
@@ -1411,7 +1720,11 @@ def _prepare_batch_run(
     писать нечего (guard «нет задач/моделей»: failed-записи сделаны здесь же,
     воркер просто завершается).
     """
-    from .services.task_registry import EXTENSION_TO_LANG, ensure_task
+    from .services.task_registry import (
+        EXTENSION_TO_LANG,
+        dl_tree_path_map,
+        ensure_task,
+    )
 
     user, username, external_id, full_name = _resolve_user(user_id)
     models_titles = [m["title"] for m in ordered_models]
@@ -1459,6 +1772,10 @@ def _prepare_batch_run(
         sent_at=start_time,
         model_names=models_titles,
         message=f"Batch solve rerun {run_id}" if rerun else f"Batch solve run {run_id}",
+        # Индексированный признак batch-записи: заменяет парсинг
+        # «Batch solve run <hex>» из текста message (полный scan по журналу
+        # на каждой загрузке «Настройки ИИ-приложения»).
+        batch_run_id=run_id,
         programming_language_id=programming_language_id,
         programming_language_name=programming_language_name or "",
         topic_id=topic_id,
@@ -1474,13 +1791,25 @@ def _prepare_batch_run(
     # фильтром по этому языку — иначе _resolve_batch_prompt резолвит
     # (новый язык, stale-тема старого) и не находит точную привязку.
     tasks = []
+    # Пути в дереве DL — из кэша дерева курса (без запросов к DL): нужны для
+    # честной подписи темы в отчёте (папка DL, а не имя задачи).
+    path_map = dl_tree_path_map(course_id) if course_id else {}
     for node_id in node_ids:
         task = ensure_task(
             node_id, session_id=session_id, course_id=course_id,
             programming_language_id=programming_language_id,
+            # Тема прогона (выбрана оператором на форме) — запасной вариант,
+            # если тему задачи не удалось определить из ветки DL: без неё в
+            # отчёте появлялись строки «Без темы» вместо задействованных тем.
+            fallback_topic_id=topic_id,
         )
         if task is None:
             continue
+        if not task.tree_path:
+            path = path_map.get(str(node_id))
+            if path:
+                task.tree_path = path[:512]
+                task.save(update_fields=["tree_path"])
         tasks.append(task)
 
     # Refetch со select_related: model-потоки читают task.topic.* /
@@ -1558,7 +1887,11 @@ def _prepare_batch_run(
             "effective_ext": effective_ext,
             "prog_lang_name": prog_lang_name,
             "topic_name": topic_name,
+            "topic_id": task.topic_id,
             "prompt_id": task_prompt_id,
+            # Путь задачи в дереве DL — подпись темы, когда локальная тема
+            # не определена (папка DL вместо имени задачи).
+            "tree_path": task.tree_path or "",
         })
 
     # Кэш имён промптов для записи в «Решённые задачи» (save_solutions):
@@ -1583,6 +1916,8 @@ def _prepare_batch_run(
         "ui_language": ui_language,
         "dl_test": dl_test,
         "save_solutions": bool(save_solutions),
+        "delta": delta or "",
+        "file_name": file_name or "",
         "programming_language_id": programming_language_id,
         "test_run": test_run,
         "log": log,
@@ -1615,6 +1950,8 @@ def _run_batch_job_worker(
     record_stats=False,
     run_name="",
     save_solutions=False,
+    delta="",
+    file_name="",
     rerun=False,
     rerun_pairs=None,
 ):
@@ -1656,7 +1993,7 @@ def _run_batch_job_worker(
             prompt_name=prompt_name, topic_id=topic_id, topic_name=topic_name,
             run_params=run_params, rerun=rerun, rerun_pairs=rerun_pairs,
             start_time=start_time, run_name=run_name,
-            save_solutions=save_solutions,
+            save_solutions=save_solutions, delta=delta, file_name=file_name,
         )
         if ctx is None:
             return
@@ -1719,6 +2056,85 @@ def _batch_progress_entry(job, model_index):
     """Запись job["model_progress"] для модели model_index (или None)."""
     entries = job.get("model_progress") or []
     return entries[model_index] if model_index < len(entries) else None
+
+
+def _append_run_log(run_id, text):
+    """Дописать строку в журнал прогона (in-memory ``job["log_lines"]``).
+
+    Лок берётся ЗДЕСЬ: ``_jobs_lock`` нереентерабельный — вызывать эту
+    функцию из-под уже взятого лока нельзя (дедлок). Воркер пишет сюда
+    события прогона (например, «Сбой ответа модели → повтор»), они видны
+    в живом снапшоте и сохраняются в отчёте прогона.
+    """
+    if not run_id or not text:
+        return
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        job.setdefault("log_lines", []).append({
+            "ts": time.time(),
+            "text": str(text)[:1000],
+        })
+        job["updated_at_ts"] = time.time()
+
+
+def _call_model_with_retries(ctx, model, message, client_id, task_label):
+    """Вызов модели с автоповтором при «Сбое ответа модели».
+
+    Возвращает ``(response, gen_seconds)`` — ответ хендлера (кортеж провайдера)
+    и суммарное время вызовов модели (в попытках повторов тоже). Логика повторов:
+
+    * сбой (провайдер бросил исключение ИЛИ хендлер вернул is_error=True)
+      печатается в журнал прогона **до** следующего вызова — сначала видно
+      сбой, потом запрос уходит заново (ТЗ пользователя);
+    * всего до ``_MODEL_ERROR_MAX_ATTEMPTS`` попыток;
+    * успех — обычное продолжение пары.
+
+    Если все попытки провалились И последняя упала исключением — оно
+    пробрасывается наружу (общий обработчик пары запишет «Сбой ответа
+    модели»). Если хендлер вернул is_error=True — возвращается последний
+    ответ: вызывающий код сам разберёт его как сбой модели.
+    """
+    attempts = 0
+    last_exc = None
+    gen_seconds = 0.0
+    while True:
+        attempts += 1
+        gen_started = perf_counter()
+        try:
+            response = async_to_sync(model["handler"])(message, client_id)
+            last_exc = None
+        except Exception as call_exc:  # noqa: BLE001 — сбой модели, не прогона
+            response = None
+            last_exc = call_exc
+        gen_seconds += round(perf_counter() - gen_started, 2)
+        if _is_cancel_requested(ctx["run_id"]):
+            return None, gen_seconds
+        if last_exc is None and not _is_model_error(response):
+            return response, gen_seconds
+        if last_exc is not None:
+            fail_text = str(last_exc)[:200]
+        else:
+            fail_raw, _ = _extract_model_response(response)
+            fail_text = strip_tags(_strip_think_blocks(fail_raw)).strip()[:200]
+        if attempts < _MODEL_ERROR_MAX_ATTEMPTS:
+            _append_run_log(
+                ctx["run_id"],
+                f"Сбой ответа модели ({model['title']}), задача «{task_label}»: "
+                f"{fail_text or 'ошибка провайдера'} — повтор "
+                f"{attempts + 1}/{_MODEL_ERROR_MAX_ATTEMPTS}",
+            )
+            continue
+        _append_run_log(
+            ctx["run_id"],
+            f"Сбой ответа модели ({model['title']}), задача «{task_label}»: "
+            f"{fail_text or 'ошибка провайдера'} — попыток {_MODEL_ERROR_MAX_ATTEMPTS}, "
+            "пара помечена «Сбой ответа модели»",
+        )
+        if last_exc is not None:
+            raise last_exc
+        return response, gen_seconds
 
 
 def _mark_batch_pair_started(run_id, model_index, model, task_ctx):
@@ -1794,6 +2210,76 @@ def _mark_batch_model_failed(run_id, model_index):
         job["updated_at_ts"] = time.time()
 
 
+# Предел длины входных данных/эталонного ответа, который сохраняется в БД
+# и показывается в карточке пары: файлы тестов в DL бывают до 1 МиБ, а
+# отчёт должен оставаться компактным.
+_TEST_DATA_CHARS_MAX = 8000
+
+
+def _fetch_failed_test_data(session_id, queue_id, comment=""):
+    """Входные данные и эталонный ответ проваленного теста (компактно).
+
+    DL: ``get-failed-tests`` → список подтверждённых проваленных тестов
+    (флаг ``canGetData`` — можно ли забирать данные), ``get-test-data`` →
+    ``{input, expectedOutput}`` по номеру теста. Берём ПЕРВЫЙ тест с
+    ``canGetData``; длинные данные обрезаем.
+
+    ФОЛБЭК: если DL не отдал подходящий тест (пустой список, нет
+    ``canGetData``), номер теста берём из самого вердикта («не пройден 2-й
+    тест», «[testN]: …») и пробуем забрать данные по нему — DL сам
+    откажет, если выдача запрещена.
+
+    Пустой словарь — данных нет (выдача запрещена настройками курса,
+    проверка не завершена, ошибка DL). Ошибки не поднимаются: данные теста
+    — дополнение к отчёту, а не условие прогона.
+    """
+    from .dl_api_client import (
+        get_failed_tests_from_dl,
+        get_test_data_from_dl,
+    )
+
+    test_number = 0
+    for t in get_failed_tests_from_dl(session_id, queue_id):
+        if not t.get("canGetData"):
+            continue
+        try:
+            test_number = int(t.get("testNumber") or 0)
+        except (TypeError, ValueError):
+            test_number = 0
+        if test_number > 0:
+            break
+    if not test_number:
+        # Номер из вердикта DL — последний шанс узнать, какой тест упал.
+        test_number = _dl_failed_test_number(comment)
+    if not test_number:
+        return {}
+    data = get_test_data_from_dl(session_id, queue_id, test_number)
+    if not data:
+        return {}
+    raw_input = data.get("input") or ""
+    raw_expected = data.get("expected_output") or ""
+    return {
+        "test_number": test_number,
+        "input": raw_input[:_TEST_DATA_CHARS_MAX],
+        "input_truncated": len(raw_input) > _TEST_DATA_CHARS_MAX,
+        "expected_output": raw_expected[:_TEST_DATA_CHARS_MAX],
+        "expected_truncated": len(raw_expected) > _TEST_DATA_CHARS_MAX,
+    }
+
+
+def _pair_file_name(model, node_id, file_extension, run_file_name=""):
+    """Имя файла решения, отправляемого в DL (контракт fileName).
+
+    По умолчанию — ПОДПИСАННОЕ: ``<модель>_<задача>.<ext>`` («Gemma4_12345.mcp»):
+    в DL сразу видно, чьё решение и по какой задаче. Имя, заданное оператором
+    на форме прогона, приоритетнее — он назвал файл сам.
+    """
+    if run_file_name:
+        return run_file_name
+    title = (model or {}).get("title") or (model or {}).get("key") or "model"
+    return _build_dl_file_name(f"{title}_{node_id}", file_extension) or ""
+
+
 def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     """Тело одной пары задача×модель. Возвращает result_item; None — отмена.
 
@@ -1809,6 +2295,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     effective_ext = task_ctx["effective_ext"]
     prog_lang_name = task_ctx["prog_lang_name"]
     topic_name = task_ctx["topic_name"]
+    tree_path = task_ctx.get("tree_path") or ""
     task_prompt_id = task_ctx["prompt_id"]
 
     # «Время обработки» пары меряет ТОЛЬКО вызов модели (генерацию): из
@@ -1823,11 +2310,27 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     raw_response = ""
     cleaned_text = ""
     tokens = 0
+    prompt_tokens = 0
     truncated = False
     code_only = ""
     dl_test_comment = ""
     dl_submit_error = ""
     dl_queue_id = 0
+    # Номер проваленного теста (из вердикта DL) — показываем в отчёте рядом
+    # с причиной, чтобы было видно, КАКОЙ именно тест упал.
+    dl_test_number = 0
+    # Машина (Дельта), на которой DL проверял решение (deltaId/deltaName).
+    dl_delta_id = 0
+    dl_delta_name = ""
+    # Имя файла решения, отправленного в DL (подписанное: <модель>_<задача>).
+    pair_file_name = ""
+    # Входные данные и эталонный ответ проваленного теста (только для НЕ
+    # решённых пар, которым DL разрешил выдачу теста).
+    dl_test_data = {}
+    # Причина провала (таксономия сбоев). Пустая строка = причина нет
+    # (пара решена). Заполняется в каждой ветке ниже; последняя присваивание
+    # — в ветке DL-классификации по тексту комментария.
+    failure_reason = _REASON_UNDEFINED
 
     held_dl_lock = False
     try:
@@ -1835,17 +2338,20 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             task.statement, prog_lang_name, topic_name, ctx["ui_language"], task_prompt_id,
             file_extension=effective_ext,
         )
-        gen_started = perf_counter()
-        response = async_to_sync(model["handler"])(
-            message,
-            f"admin-batch-{ctx['user_id']}-{model['key']}-{ctx['run_id']}-{node_id}",
+        # Вызов модели с автоповтором при «Сбое ответа модели»: сбой
+        # печатается в журнал прогона, запрос пересылается СРАЗУ, попыток —
+        # до _MODEL_ERROR_MAX_ATTEMPTS. Исключение провайдера — тоже сбой
+        # модели: после исчерпания попыток пробрасываем его дальше (общий
+        # обработчик пары запишет «Сбой ответа модели»).
+        client_id = f"admin-batch-{ctx['user_id']}-{model['key']}-{ctx['run_id']}-{node_id}"
+        response, gen_seconds = _call_model_with_retries(
+            ctx, model, message, client_id, task.name or node_id,
         )
-        gen_seconds = round(perf_counter() - gen_started, 2)
-        # Отмена могла прийти во время LLM-вызова (его самого не
-        # прервать) — не тратим время на DL-тест и запись пары.
-        if _is_cancel_requested(ctx["run_id"]):
+        # None = отмена прогона пришла во время вызова модели.
+        if response is None:
             return None
         response_text, tokens = _extract_model_response(response)
+        prompt_tokens = _extract_prompt_tokens(response)
         cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
         if not cleaned_text:
             cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
@@ -1869,6 +2375,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         if is_model_err:
             verdict = _VERDICT_FAILED
             status = "error"
+            failure_reason = _REASON_MODEL_ERROR
             dl_submit_error = (friendly or cleaned_text)[:2000]
             short_response = (friendly or cleaned_text)[:300] + (
                 "..." if len(friendly or cleaned_text) > 300 else ""
@@ -1889,6 +2396,14 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 ".i86", ".asm", ".mpc"
             ) and not has_language_marker(code_only, effective_ext)
             if junk_code:
+                code_only = ""
+
+            # Обрезанный ответ с ЧАСТИЧНЫМ кодом: неполная программа (.i86
+            # без концевика каркаса, .mpc с несбалансированными скобками или
+            # без main) не компилируется — в DL не ходим, код считается
+            # «не извлечён» → ниже сработает авто-ретрай «сразу код». Для НЕ
+            # обрезанных (complete) ответов гейт не применяется.
+            if code_only and truncated and language_code_incomplete(code_only, effective_ext):
                 code_only = ""
 
             # Кода НЕ извлекли (при любом исходе, не только обрезе) — один
@@ -1924,6 +2439,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                     if _is_cancel_requested(ctx["run_id"]):
                         return None
                     response_text, tokens = _extract_model_response(retry_response)
+                    prompt_tokens = _extract_prompt_tokens(retry_response)
                     cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
                     if not cleaned_text:
                         cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
@@ -1947,6 +2463,9 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                         )
                         if code_only and effective_ext in (".i86", ".asm", ".mpc") and not has_language_marker(code_only, effective_ext):
                             code_only = ""
+                        # Ретрай тоже мог обрезаться по пути к концевику.
+                        if code_only and truncated and language_code_incomplete(code_only, effective_ext):
+                            code_only = ""
                 except Exception as retry_exc:  # noqa: BLE001
                     gen_seconds += round(perf_counter() - retry_started, 2)
                     # truncated НЕ завышаем: флаг ставился по факту обреза
@@ -1962,26 +2481,49 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             )
             if not code_only and junk_code:
                 verdict = _VERDICT_FAILED
+                failure_reason = _REASON_NO_CODE
                 dl_test_comment = (
                     "Извлечённый текст не похож на программу языка "
                     "курса (нет структурных маркеров) — DL не тестировал"
                 )
             elif not code_only:
                 verdict = _VERDICT_FAILED
-                dl_test_comment = (
-                    "Модель не успела вывести код — ответ оборван лимитом генерации"
-                    if truncated
-                    else "Не удалось извлечь код из ответа модели"
+                # Ретрай тоже может упасть с ошибкой провайдера (429/500/
+                # таймаут) — тогда кода нет НЕ из-за ответа модели, а из-за
+                # СБОЯ модели: причина «не выкушен код» была бы враньём.
+                # Раннер знает об этом по флагу is_model_err (его выставляет
+                # ретрай-ветка выше).
+                failure_reason = (
+                    _REASON_MODEL_ERROR if is_model_err else _REASON_NO_CODE
                 )
+                if is_model_err:
+                    dl_test_comment = (
+                        "Сбой ответа модели при повторной попытке — "
+                        "код не получен"
+                    )
+                else:
+                    dl_test_comment = (
+                        "Модель не успела вывести код — ответ оборван лимитом генерации"
+                        if truncated
+                        else "Не удалось извлечь код из ответа модели"
+                    )
             elif can_run_dl:
                 if not _acquire_dl_run_lock(dl_lock, ctx["run_id"]):
                     return None
                 held_dl_lock = True
+                # Имя файла решения — ПОДПИСАННОЕ: <модель>_<задача>.<ext>
+                # («Gemma4_12345.mcp»). Имя, заданное оператором на форме
+                # прогона, приоритетнее — он назвал файл сам.
+                pair_file_name = _pair_file_name(
+                    model, node_id, effective_ext, ctx.get("file_name") or "",
+                )
                 dl_result = _test_solution_on_dl(
                     ctx["session_id"], node_id, code_only, effective_ext,
                     task_id=task.task_id or 0,
                     run_id=ctx["run_id"],
                     course_id=ctx["course_id"],
+                    delta=ctx.get("delta") or "",
+                    file_name=pair_file_name,
                 )
                 # Отмена пришла во время поллинга DL — прерываем без записи
                 # пары (вердикт не определён). Лок после DL-фазы удерживается
@@ -1991,12 +2533,42 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                     return None
                 dl_test_comment = dl_result.get("comment", "") or ""
                 dl_submit_error = dl_result.get("submit_error", "") or ""
+                # Номер проваленного теста — из вердикта DL (для отчёта).
+                dl_test_number = _dl_failed_test_number(dl_test_comment)
                 dl_verdict = dl_result.get("verdict")
                 dl_queue_id = dl_result.get("queue_id", 0) or 0
+                dl_delta_id = dl_result.get("delta_id", 0) or 0
+                dl_delta_name = dl_result.get("delta_name", "") or ""
                 # solved — только если DL явно подтвердил; иное → failed.
                 verdict = dl_verdict if dl_verdict is not None else _VERDICT_FAILED
+                # Таксономия сбоев: компиляция vs неправильный ответ vs
+                # «не распознано» — по ТЕКСТУ комментария DL (канонический
+                # классификатор dl_failure_reason_from_comment).
+                if verdict == _VERDICT_SOLVED:
+                    failure_reason = ""
+                elif dl_result.get("unauthorized"):
+                    # DL отклонил запрос (401): сессия DLSID истекла. Отдельная
+                    # причина + понятная подсказка в тексте ошибки.
+                    failure_reason = _REASON_DL_UNAUTHORIZED
+                    dl_submit_error = (
+                        f"{dl_submit_error} — {DL_UNAUTHORIZED_HINT}"
+                        if dl_submit_error else DL_UNAUTHORIZED_HINT
+                    )
+                else:
+                    failure_reason = _failure_reason_from_dl_comment(dl_test_comment)
+                    if not failure_reason:
+                        failure_reason = _REASON_UNDEFINED
+                # НЕ решённая пара: забираем входные данные и эталонный
+                # ответ проваленного теста (DL разрешает выдачу не всегда —
+                # флаг canGetData). Данные компактные: в карточке пары
+                # показываются сразу после извлечённого кода.
+                if verdict != _VERDICT_SOLVED and dl_queue_id:
+                    dl_test_data = _fetch_failed_test_data(
+                        ctx["session_id"], dl_queue_id, dl_test_comment,
+                    )
             else:
                 verdict = _VERDICT_FAILED
+                failure_reason = _REASON_UNDEFINED
                 dl_test_comment = (
                     "Не задано расширение файла для тестирования на DL "
                     "(выберите язык/расширение в форме запуска)"
@@ -2011,6 +2583,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         friendly, detailed = humanize_model_error(exc_text, include_detail=True)
         verdict = _VERDICT_FAILED
         status = "error"
+        failure_reason = _REASON_MODEL_ERROR
         short_response = friendly or f"Ошибка вызова модели: {exc_text}"
         raw_response = detailed or cleaned_text
         dl_submit_error = exc_text[:2000]
@@ -2040,14 +2613,20 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 "model_title": model["title"],
                 "status": status,
                 "verdict": verdict,
+                "failure_reason": failure_reason or "",
                 "duration_seconds": duration,
                 "tokens": tokens,
+                "tokens_prompt": prompt_tokens,
                 "short_response": short_response,
                 "raw_response": raw_response or "",
                 "code": code_only or "",
                 "dl_comment": dl_test_comment or "",
                 "dl_error": dl_submit_error or "",
                 "dl_queue_id": dl_queue_id or 0,
+                "dl_file_name": pair_file_name or "",
+                "dl_test_data": json.dumps(dl_test_data, ensure_ascii=False) if dl_test_data else "",
+                "delta_id": dl_delta_id or 0,
+                "delta_name": dl_delta_name or "",
                 "file_extension_snapshot": effective_ext or "",
                 "topic_id_snapshot": task.topic_id,
                 "topic_name_snapshot": topic_name,
@@ -2055,6 +2634,9 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 "prompt_id": pair_prompt_id,
                 "prompt_name": pair_prompt_name,
                 "truncated": bool(truncated),
+                # Свежесть строки: повтор пары обновляет её — по этому полю
+                # результаты сортируются «свежие сверху».
+                "updated_at": timezone.now(),
             },
         )
 
@@ -2068,16 +2650,31 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "model_title": model["title"],
             "duration": duration,
             "tokens": tokens,
+            "tokens_prompt": prompt_tokens,
             "short_response": short_response,
             "status": status,
             "verdict": verdict,
+            "failure_reason": failure_reason or "",
+            "failure_reason_label": AIModelTestResult.FAILURE_REASON_LABELS.get(
+                failure_reason or "", ""
+            ),
             "raw_response": raw_response,
             "code": code_only,
             "dl_comment": dl_test_comment,
             "dl_error": dl_submit_error,
             "dl_queue_id": dl_queue_id,
+            "dl_file_name": pair_file_name or "",
+            # Номер проваленного теста (из вердикта DL) — для отчёта.
+            "dl_test_number": dl_test_number or 0,
+            # Входные/выходные данные проваленного теста — только для НЕ
+            # решённых пар (в карточке идут сразу после извлечённого кода).
+            "dl_test_data": dl_test_data or {},
+            "delta_id": dl_delta_id or 0,
+            "delta_name": dl_delta_name or "",
             "file_extension": effective_ext or "",
             "topic_name": topic_name,
+            # Путь в дереве DL — подпись темы, когда локальной темы нет.
+            "tree_path": tree_path,
             # Скоуп статистики: язык прогона (в batch-прогоне язык один —
             # CLAUDE.md) + тема задачи, как в topic_id_snapshot.
             "programming_language_id": ctx["programming_language_id"],
@@ -2086,6 +2683,10 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "prompt_id": pair_prompt_id,
             "prompt_name": pair_prompt_name,
             "truncated": bool(truncated),
+            # Свежесть пары (epoch) — сортировка «свежие сверху» (см.
+            # _sort_results_fresh_first). У живых элементов — время записи
+            # строки, у строк из БД — AIModelTestResult.updated_at.
+            "updated_ts": result_obj.updated_at.timestamp() if result_obj.updated_at else time.time(),
         }
 
         if ctx["save_solutions"] and verdict == _VERDICT_SOLVED:
@@ -2225,7 +2826,13 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
             # cancelled, чтобы UI корректно показал «Прервано».
             was_cancelled = job.get("cancelled", False)
             report_source = db_results if rerun else (job.get("results") or [])
-            job["report"] = _build_batch_report(report_source)
+            job["report"] = _build_batch_report(
+                report_source,
+                run_topic_id=test_run.topic_id,
+                run_topic_name=test_run.topic_name,
+            )
+            # Журнал прогона — в отчёт (он и сохраняется в БД ниже).
+            job["report"] = _attach_log_lines(job["report"], job.get("log_lines"))
             # Карточка «Прогон» (время): у перезапуска — исходный started_at,
             # у обычного прогона — job.created_at_ts; финиш — момент
             # финализации (updated_at_ts, ставится ниже).
@@ -2249,7 +2856,13 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
 
     if evicted:
         db_results = _batch_results_from_db(test_run)
-        report = _build_batch_report(db_results)
+        report = _build_batch_report(
+            db_results,
+            run_topic_id=test_run.topic_id,
+            run_topic_name=test_run.topic_name,
+        )
+        # Журнал прогона — из сохранённого отчёта (job уже вытеснен).
+        report = _attach_log_lines(report, (test_run.report or {}).get("log_lines"))
         _attach_run_meta(
             report,
             test_run.started_at.timestamp() if test_run.started_at else None,
@@ -2316,12 +2929,19 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
         )[:2000]
     if cancelled:
         batch_error_message = (batch_error_message + " Прервано пользователем.")[:2000]
+    # Токены прогона в записи журнала: сумма по всем парам (ответ + промпт).
+    # Раньше batch-записи оставались с tokens=0 — из-за этого ARM-прогоны
+    # были не видны в учёте токенов (страница «Контроль токенов»).
+    batch_tokens = sum(_to_int(r.get("tokens")) for r in batch_results)
+    batch_prompt_tokens = sum(_to_int(r.get("tokens_prompt")) for r in batch_results)
     AIRequestLog.objects.filter(pk=log.pk).update(
         received_at=end_time,
         duration_seconds=(end_time - start_time).total_seconds(),
         status=AIRequestLog.STATUS_SUCCESS if all_solved_batch else AIRequestLog.STATUS_ERROR,
         response_text=batch_response_text,
         error_message=batch_error_message,
+        tokens=batch_tokens,
+        tokens_prompt=batch_prompt_tokens,
     )
     if cancelled:
         # Прогон уже переведён в STATUS_CANCELLED методом cancel_arm_run
@@ -2362,6 +2982,30 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
         record_batch_solve_stats(stats_results)
 
 
+def _sort_results_fresh_first(results):
+    """Свежие пары — сверху: перезапущенная/пересчитанная пара видна первой.
+
+    Ключ свежести — ``updated_ts`` (epoch-секунды): у строк из БД это
+    ``AIModelTestResult.updated_at`` (обновляется при каждом
+    ``update_or_create``, т.е. и при повторе пары), у живых элементов
+    прогресса — время записи пары. При равенстве времени — выше более новый
+    ``result_id`` (pk). Порядок списка результатов влияет на рендер таблицы
+    (клиент группирует по моделям, внутри группы — порядок массива).
+    """
+    def _key(item):
+        try:
+            ts = float(item.get("updated_ts") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        try:
+            rid = int(item.get("result_id") or 0)
+        except (TypeError, ValueError):
+            rid = 0
+        return (-ts, -rid)
+
+    return sorted(results or [], key=_key)
+
+
 def _light_batch_result_item(item):
     """Легковесная копия batch-результата без тяжёлого тела (lazy_body=True).
 
@@ -2379,6 +3023,22 @@ def _light_batch_result_item(item):
     return light
 
 
+def parse_dl_test_data(raw):
+    """Разобрать сохранённые данные проваленного теста (JSON-строка → dict).
+
+    Пустая/битая строка — пустой словарь (старые строки БД без поля).
+    """
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _batch_results_from_db(test_run, light=False):
     """Rebuild batch result items from persisted AIModelTestResult rows.
 
@@ -2391,11 +3051,15 @@ def _batch_results_from_db(test_run, light=False):
         results = []
         rows = test_run.results.values(
             "pk", "model_key", "model_title", "duration_seconds", "tokens",
-            "status", "verdict", "dl_queue_id", "file_extension_snapshot",
-            "topic_name_snapshot", "prog_lang_snapshot", "truncated",
-            "prompt_id", "prompt_name",
+            "tokens_prompt", "status", "verdict", "failure_reason",
+            "dl_queue_id", "dl_file_name", "dl_test_data", "dl_comment",
+            "file_extension_snapshot", "delta_id", "delta_name",
+            "topic_name_snapshot", "topic_id_snapshot", "prog_lang_snapshot",
+            "truncated", "prompt_id", "prompt_name",
+            "updated_at",
             "task__node_id", "task__name", "task__file_extension",
-        ).order_by("model_title")
+            "task__tree_path",
+        ).order_by("-updated_at", "-pk")
         for r in rows:
             results.append({
                 "result_id": r["pk"],
@@ -2406,20 +3070,36 @@ def _batch_results_from_db(test_run, light=False):
                 "model_title": r["model_title"],
                 "duration": r["duration_seconds"] or 0.0,
                 "tokens": r["tokens"] or 0,
+                "tokens_prompt": r["tokens_prompt"] or 0,
                 "status": r["status"],
                 "verdict": r["verdict"] or _VERDICT_FAILED,
+                "failure_reason": r["failure_reason"] or "",
+                "failure_reason_label": AIModelTestResult.FAILURE_REASON_LABELS.get(
+                    r["failure_reason"] or "", ""
+                ),
                 "truncated": bool(r["truncated"]),
                 "dl_queue_id": r["dl_queue_id"] or 0,
+                "dl_file_name": r["dl_file_name"] or "",
+                # Номер проваленного теста — из вердикта DL (сам комментарий в
+                # лёгкий снапшот не берём — он грузится с телом результата).
+                "dl_test_number": _dl_failed_test_number(r["dl_comment"] or ""),
+                # Данные проваленного теста грузятся вместе с телом (body-эндпоинт).
+                "has_test_data": bool(r["dl_test_data"]),
+                "delta_id": r["delta_id"] or 0,
+                "delta_name": r["delta_name"] or "",
                 "file_extension": r["file_extension_snapshot"] or (r["task__file_extension"] or ""),
                 "topic_name": r["topic_name_snapshot"],
+                "topic_id": r["topic_id_snapshot"],
                 "prog_lang_name": r["prog_lang_snapshot"],
                 "prompt_id": r["prompt_id"],
                 "prompt_name": r["prompt_name"] or "",
+                "tree_path": r["task__tree_path"] or "",
+                "updated_ts": r["updated_at"].timestamp() if r["updated_at"] else 0.0,
                 "lazy_body": True,
             })
         return results
     results = []
-    for r in test_run.results.select_related("task").order_by("model_title"):
+    for r in test_run.results.select_related("task").order_by("-updated_at", "-pk"):
         node_id = r.task.node_id if r.task else ""
         task_name = r.task.name if r.task else ""
         results.append({
@@ -2431,25 +3111,38 @@ def _batch_results_from_db(test_run, light=False):
             "model_title": r.model_title,
             "duration": r.duration_seconds or 0.0,
             "tokens": r.tokens or 0,
+            "tokens_prompt": r.tokens_prompt or 0,
             "short_response": r.short_response,
             "status": r.status,
             "verdict": r.verdict or _VERDICT_FAILED,
+            "failure_reason": r.failure_reason or "",
+            "failure_reason_label": AIModelTestResult.FAILURE_REASON_LABELS.get(
+                r.failure_reason or "", ""
+            ),
             "truncated": bool(r.truncated),
             "raw_response": r.raw_response,
             "code": r.code or "",
             "dl_comment": r.dl_comment or "",
             "dl_error": r.dl_error or "",
             "dl_queue_id": r.dl_queue_id or 0,
+            "dl_file_name": r.dl_file_name or "",
+            "dl_test_number": _dl_failed_test_number(r.dl_comment or ""),
+            "dl_test_data": parse_dl_test_data(r.dl_test_data),
+            "delta_id": r.delta_id or 0,
+            "delta_name": r.delta_name or "",
             "file_extension": r.file_extension_snapshot or (r.task.file_extension if r.task else ""),
             "topic_name": r.topic_name_snapshot,
+            "topic_id": r.topic_id_snapshot,
             "prog_lang_name": r.prog_lang_snapshot,
             "prompt_id": r.prompt_id,
             "prompt_name": r.prompt_name or "",
+            "tree_path": (r.task.tree_path if r.task else "") or "",
+            "updated_ts": r.updated_at.timestamp() if r.updated_at else 0.0,
         })
     return results
 
 
-def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name="", record_stats=False, run_name="", save_solutions=False):
+def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name="", record_stats=False, run_name="", save_solutions=False, delta="", file_name=""):
     """Запускает batch-solve ARM: задачи из DL дерева × модели в фоновом потоке.
 
     Принимает node_ids — список DL node ID (из дерева задач dl.gsu.by).
@@ -2460,6 +3153,10 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     solve_prog_lang_name — название языка для промпта под выбранным расширением.
     run_name — необязательное ручное название прогона (задаётся только при
         запуске; сохраняется в AIModelTestRun.run_name).
+    delta — тестирующая машина (Дельта): ID или ТОЧНОЕ название (контракт DL
+        v1.4.2, SendSolutionRequest.delta). Пусто — машину назначает DL.
+    file_name — имя временного файла решения (контракт DL v1.4.2,
+        SendSolutionRequest.fileName); пусто — DL назовёт файл сам.
     """
     handlers = get_runtime_model_handlers()
     # В solve допущены только Web_* и Ollama_* (нет жёсткого лимита вывода);
@@ -2497,6 +3194,8 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "record_stats": bool(record_stats),
         "save_solutions": bool(save_solutions),
         "run_name": (run_name or "").strip(),
+        "delta": (delta or "").strip(),
+        "file_name": (file_name or "").strip(),
     }
 
     run_id = uuid.uuid4().hex
@@ -2525,7 +3224,14 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "model_progress": [],
         "results": [],
         "report": None,
+        # Журнал прогона (события: сбои модели и повторы) — в живом
+        # снапшоте и в отчёте прогона.
+        "log_lines": [],
         "run_name": (run_name or "").strip(),
+        # Тема прогона (запасная тема для задач без своей) — нужна живому
+        # отчёту, чтобы отметить унаследованные темы.
+        "topic_id": topic_id,
+        "topic_name": (topic_name or "").strip(),
         "run_params": run_params,
         "created_at_ts": now_ts,
         "updated_at_ts": now_ts,
@@ -2537,7 +3243,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, node_ids, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params, "record_stats": record_stats, "run_name": (run_name or "").strip(), "save_solutions": bool(save_solutions)},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params, "record_stats": record_stats, "run_name": (run_name or "").strip(), "save_solutions": bool(save_solutions), "delta": (delta or "").strip(), "file_name": (file_name or "").strip()},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )
@@ -2693,6 +3399,10 @@ def start_batch_rerun_pairs(run_id, user_id, session_id):
             "record_stats": bool(form_params.get("record_stats")),
             "run_name": rerun_run_name,
             "save_solutions": bool(form_params.get("save_solutions")),
+            # Машина проверки и имя файла — из снимка запуска: перезапуск
+            # нерешённых пар идёт на той же Дельте, что и исходный прогон.
+            "delta": form_params.get("delta") or "",
+            "file_name": form_params.get("file_name") or "",
             "rerun": True,
             "rerun_pairs": rerun_pairs,
         },
@@ -2732,7 +3442,13 @@ def _snapshot_from_test_run(test_run, light_results=False):
 
     if is_batch:
         results = _batch_results_from_db(test_run, light=light_results)
-        report = _build_batch_report(results)
+        report = _build_batch_report(
+            results,
+            run_topic_id=test_run.topic_id,
+            run_topic_name=test_run.topic_name,
+        )
+        # Журнал прогона — из сохранённого отчёта.
+        report = _attach_log_lines(report, (test_run.report or {}).get("log_lines"))
         # Карточка «Прогон» (время): из БД-прогона; для живого прогона
         # finished_at пуст — длительность считается до текущего момента.
         _attach_run_meta(
@@ -2859,7 +3575,7 @@ def _rerun_snapshot(rerun_job, live_items, light_results):
         test_run = AIModelTestRun.objects.get(run_id=rerun_job.get("run_id"))
     except AIModelTestRun.DoesNotExist:
         snapshot = dict(rerun_job)
-        snapshot["results"] = list(live_items)
+        snapshot["results"] = _sort_results_fresh_first(list(live_items))
         return snapshot
     live_index = {
         (r.get("model_key"), r.get("task_node_id")): r for r in live_items
@@ -2868,9 +3584,17 @@ def _rerun_snapshot(rerun_job, live_items, light_results):
         live_index.get((row.get("model_key"), row.get("task_node_id")), row)
         for row in _batch_results_from_db(test_run, light=light_results)
     ]
+    results = _sort_results_fresh_first(results)
     snapshot = dict(rerun_job)
     snapshot["results"] = results
-    snapshot["report"] = _build_batch_report(results)
+    snapshot["report"] = _attach_log_lines(
+        _build_batch_report(
+            results,
+            run_topic_id=test_run.topic_id,
+            run_topic_name=test_run.topic_name,
+        ),
+        (test_run.report or {}).get("log_lines"),
+    )
     _attach_run_meta(
         snapshot["report"],
         test_run.started_at.timestamp() if test_run.started_at else None,
@@ -2918,14 +3642,15 @@ def get_arm_run_snapshot(run_id, light_results=False):
                 # согласованность обеспечена замком, а не обходом десятков
                 # мегабайт текста на каждый поллинг.
                 snapshot = dict(job)
-                snapshot["results"] = [
+                snapshot["results"] = _sort_results_fresh_first([
                     _light_batch_result_item(item)
                     for item in job.get("results") or []
-                ]
+                ])
                 if interim_report is not None and snapshot.get("report") is None:
                     snapshot["report"] = interim_report
                 return snapshot
             snapshot = copy.deepcopy(job)
+            snapshot["results"] = _sort_results_fresh_first(snapshot.get("results") or [])
             if interim_report is not None and snapshot.get("report") is None:
                 snapshot["report"] = interim_report
             return snapshot

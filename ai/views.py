@@ -11,6 +11,9 @@
 
 import json
 import os
+import hashlib
+import io
+import mimetypes
 import logging
 import threading
 import time
@@ -38,19 +41,32 @@ from .throttling import rate_limited
 from .model_health import get_available_model_options, trigger_model_health_refresh_async
 from .model_clients import registry
 from .model_clients.registry import DEFAULT_MODEL_KEY, EXPERIMENTAL_MODEL_PREFIXES
-from .models import ProgrammingLanguage, Topic, Prompt, SharedPrompt, AIAppSettings, ExternalDLAccount
+from .models import (
+    AIUserModel, AIAppSettings, ExternalDLAccount, ProgrammingLanguage,
+    Prompt, SharedPrompt, Topic,
+)
 from .auth_backends import (
     ADMIN_EXTERNAL_AUTH_BACKEND,
     create_admin_user_with_password,
-    ensure_prompt_developer_group,
     get_admin_user_by_external_id,
     get_external_user_id_from_request,
     normalize_external_user_id,
 )
-from .constants import PROMPT_DEVELOPER_GROUP
+from .admin.permissions import (
+    add_user_to_builtin_ai_group,
+    is_prompt_developer_user,
+    is_superuser_user,
+)
 from .middleware import _dev_bypass_enabled
-from .services.auth import get_user_identity_for_log
+from .services.auth import ai_disabled_reason, can_use_ai, get_user_identity_for_log
 from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
+from .services.user_models import (
+    PROVIDER_BASE_URLS,
+    delete_user_model,
+    save_user_model,
+    user_model_options,
+    user_model_rows,
+)
 from .services.onboarding import (
     MARK_URL_USER,
     record_wizard_seen,
@@ -75,6 +91,8 @@ from .i18n import (
     get_localized_name,
     get_localized_text,
     get_ui_language_suffix,
+    user_models_strings,
+    user_models_strings_all,
 )
 from .serializers import (
     programming_language as serialize_programming_language,
@@ -224,13 +242,13 @@ def get_groq_limits_view(request):
 
 
 def prompt_developer_access_required(view_func):
-    """Декоратор: разрешает доступ только суперпользователям и членам группы prompt_developer."""
+    """Декоратор: суперпользователь ИЛИ member встроенной группы «Разработчик промптов»."""
     @wraps(view_func)
     def _wrapped(request, *args, **kwargs):
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated:
             return HttpResponseForbidden("Prompt developer access required")
-        if user.is_superuser or user.groups.filter(name=PROMPT_DEVELOPER_GROUP).exists():
+        if is_superuser_user(user) or is_prompt_developer_user(user):
             return view_func(request, *args, **kwargs)
         return HttpResponseForbidden("Prompt developer access required")
 
@@ -316,6 +334,16 @@ def _read_ai_state(request):
         return {}
 
 
+def _ai_disabled_reason(request):
+    """Причина, по которой AI пользователю недоступен (или ``None``).
+
+    Тонкая обёртка над общим хелпером ``ai_disabled_reason``
+    (ai/services/auth.py) — тот же текст отказа на странице, в WS и в
+    HTTP-эндпоинтах отправки решения.
+    """
+    return ai_disabled_reason(request)
+
+
 def _render_ai_page(request, template_name, extra_context=None, wizard_scope=None):
     """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
 
@@ -333,6 +361,11 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         return HttpResponseForbidden("Authentication required")
     if not _is_ai_app_enabled():
         return HttpResponseNotFound("AI app is disabled")
+    # Гейт DL «canUseAi»: AI в текущем курсе запрещён → честная страница
+    # с объяснением (не молчаливая пустая страница).
+    disabled_reason = _ai_disabled_reason(request)
+    if disabled_reason:
+        return HttpResponseForbidden(disabled_reason)
     available_models = get_available_model_options()
     # Self-heal: an empty list means the current 04:00 MSK window was scanned
     # while the upstream key/balance was broken and every model got marked
@@ -396,6 +429,10 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         default_model_key = ""
     saved_state = _read_ai_state(request)
     external_session_id = request.session.get('external_session_id')
+    # Личные модели пользователя («Мои модели»): отдельная optgroup В САМОМ
+    # НИЗУ селектора. Видны ТОЛЬКО владельцу (ai/services/user_models.py) —
+    # чужие модели чужие.
+    user_models = user_model_options(request.user)
     # Клиентские строки трёхъязычного UI (ai/i18n.client_strings): язык — тот
     # же, что у #selectLang (ai_state cookie, «Русский» по умолчанию). JS
     # перелокализует DOM при каждой смене языка сам; серверный словарь нужен
@@ -405,6 +442,7 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         'favorite_models': favorite_models,
         'other_models': other_models,
         'experimental_models': experimental_models,
+        'user_models': user_models,
         'default_model_key': default_model_key,
         'external_session_id': external_session_id,
         'last_update_date': _get_last_update_date(),
@@ -494,7 +532,9 @@ def set_password_view(request):
         new_password_confirm = request.POST.get("new_password_confirm") or ""
 
         if is_admin_registration and target_user and target_user.has_usable_password():
-            ensure_prompt_developer_group(target_user)
+            # Вход по уже установленному паролю: группы НЕ перевыдаём —
+            # состав правит суперюзер на «Группах доступа» (иначе отзыв
+            # членства откатывался бы каждым логином).
             login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
             csrf.rotate_token(request)
             request.session["admin_fresh_auth"] = True
@@ -514,9 +554,12 @@ def set_password_view(request):
             if target_user:
                 target_user.set_password(new_password)
                 target_user.save(update_fields=["password"])
-                ensure_prompt_developer_group(target_user)
+                # Первичная установка пароля = зачисление в baseline-группу
+                # «Разработчик промптов» (однократно, потом «липко»).
+                add_user_to_builtin_ai_group(target_user)
             else:
                 target_user = create_admin_user_with_password(external_user_id, new_password)
+                add_user_to_builtin_ai_group(target_user)
             login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
             csrf.rotate_token(request)
             request.session["admin_fresh_auth"] = True
@@ -537,7 +580,8 @@ def set_password_view(request):
         return response
 
     if is_admin_registration and target_user and target_user.has_usable_password():
-        ensure_prompt_developer_group(target_user)
+        # Вход по уже установленному паролю: группы НЕ перевыдаём —
+        # отзыв членства суперюзером не должен откатываться логином.
         login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
         csrf.rotate_token(request)
         request.session["admin_fresh_auth"] = True
@@ -598,6 +642,75 @@ def find_error_view(request):
         extra_context={"node_id": request.GET.get("nid", "")},
         wizard_scope="find_error",
     )
+
+
+# === «Мои AI-модели» — клиентская страница (/ai/my-models/) ================
+#
+# Личные модели пользователя (провайдер + модель + свой ключ) нужны не
+# только сотрудникам админки: модель должна быть доступна ВСЕМ, кто
+# пользуется чатом. Поэтому страница есть с двух сторон:
+# * /ai/my-models/ — клиентская (обычный аутентифицированный пользователь,
+#   гейт как у страниц чата: _has_page_access);
+# * /ai/admin/user-models/ — админская (персонал, ai/admin/user_models.py).
+# Логика операций — одна, в СЕРВИСЕ (ai/services/user_models.py): вьюхи
+# только гейтят доступ и отдают шаблон (DRY).
+
+
+@require_http_methods(["GET"])
+def my_models_view(request):
+    """Клиентская страница «Мои AI-модели»: список + форма добавления."""
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+    if not _is_ai_app_enabled():
+        return HttpResponseNotFound("AI app is disabled")
+    ui_lang = _read_ai_state(request).get("lang") or ""
+    return render(
+        request,
+        "ai/my_models.html",
+        {
+            "user_models": user_model_rows(request.user),
+            "provider_choices": AIUserModel.PROVIDER_CHOICES,
+            "provider_base_urls": PROVIDER_BASE_URLS,
+            "t": user_models_strings(ui_lang),
+            # Все языки панели — для переключения языка на клиенте
+            # (JS-апплаер перерисовывает подписи при смене #selectLang).
+            "um_i18n": user_models_strings_all(),
+        },
+    )
+
+
+@require_http_methods(["POST"])
+def my_model_save_view(request):
+    """Создать/обновить СВОЮ личную модель (клиентская страница)."""
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"ok": False, "message": "Некорректный запрос"}, status=400)
+    if not isinstance(payload, dict):
+        return JsonResponse({"ok": False, "message": "Некорректный запрос"}, status=400)
+    ok, message, model_pk = save_user_model(request.user, payload)
+    if not ok:
+        status = 404 if message == "Модель не найдена" else 400
+        return JsonResponse({"ok": False, "message": message}, status=status)
+    return JsonResponse({"ok": True, "id": model_pk})
+
+
+@require_http_methods(["POST"])
+def my_model_delete_view(request):
+    """Удалить СВОЮ личную модель (клиентская страница)."""
+    if not _has_page_access(request):
+        return HttpResponseForbidden("Authentication required")
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"ok": False, "message": "Некорректный запрос"}, status=400)
+    ok, message = delete_user_model(request.user, payload.get("id"))
+    if not ok:
+        status = 404 if message == "Модель не найдена" else 400
+        return JsonResponse({"ok": False, "message": message}, status=status)
+    return JsonResponse({"ok": True})
 
 
 @require_http_methods(["POST"])
@@ -740,11 +853,28 @@ def get_model_stats_view(request):
     return JsonResponse({"success": True, "stats": stats})
 
 
+#: Соль валидатора asset_view: одна на жизнь процесса (рестарт контейнера =
+#: новый деплой). Несколько worker-процессов давали бы разные соли и ломали бы
+#: 304-экономию между запросами; у нас Daphne ровно в один процесс.
+_ASSET_BOOT_SALT = os.urandom(16)
+
+
 def asset_view(request, asset_path):
     """Отдаёт статический файл из Django staticfiles по пути (для AI-страниц).
 
     Ассеты ревалидируются браузером (Cache-Control: no-cache + Last-Modified + 304),
     поэтому после деплоя браузер подхватывает обновлённый JS/CSS даже без ?v=-бампа.
+    Условный запрос решается по ETag (md5 КОНТЕНТА + соль старта процесса, а
+    не mtime): mtime при деплое мог не сдвинуться (таймстампы/WSL-копирование),
+    и 304 отдавал СТАРЫЙ файл — «стили падали». Соль (сгенерирована при старте
+    процесса) нужна против «отравленного» кэша браузера: если когда-то в кэш
+    попало ПУСТОЕ тело с живым md5-валидатором, ревалидация честно отвечала
+    304 и браузер навсегда рисовал без стилей (сам не лечился). Новый процесс
+    = новая соль = валидатор не совпадёт = свежие байты гарантированно
+    перекачаются; живой кэш продолжает работать (304 по-прежнему честные 304).
+    Ревалидация по If-Modified-Since остаётся fallback'ом для кэшей без ETag.
+    304 всегда несёт ETag + Cache-Control — иначе браузер без закэшированного
+    тела рисует пустой ресурс.
     """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
@@ -752,14 +882,37 @@ def asset_view(request, asset_path):
     if not asset_full_path or not os.path.isfile(asset_full_path):
         raise Http404("Asset not found")
 
-    statobj = os.stat(asset_full_path)
-    mtime = statobj.st_mtime
-    if not was_modified_since(request.META.get("HTTP_IF_MODIFIED_SINCE"), mtime):
-        return HttpResponseNotModified()
+    with open(asset_full_path, "rb") as fh:
+        data = fh.read()
+    etag = f'"{hashlib.md5(_ASSET_BOOT_SALT + data).hexdigest()}"'
 
-    response = FileResponse(open(asset_full_path, "rb"))
+    if_none_match = request.META.get("HTTP_IF_NONE_MATCH", "")
+    if if_none_match:
+        # Срезаем W/ и кавычки: клиент может прислать слабый валидатор/список.
+        candidates = {
+            tag.strip().removeprefix('W/').strip('"')
+            for tag in if_none_match.split(",")
+        }
+        if etag.strip('"') in candidates:
+            not_modified = HttpResponseNotModified()
+            not_modified["ETag"] = etag
+            not_modified["Cache-Control"] = "no-cache"
+            return not_modified
+    else:
+        statobj = os.stat(asset_full_path)
+        if not was_modified_since(
+            request.META.get("HTTP_IF_MODIFIED_SINCE"), statobj.st_mtime
+        ):
+            not_modified = HttpResponseNotModified()
+            not_modified["ETag"] = etag
+            not_modified["Cache-Control"] = "no-cache"
+            return not_modified
+
+    content_type, _ = mimetypes.guess_type(asset_path)
+    response = FileResponse(io.BytesIO(data), content_type=content_type)
     response["Cache-Control"] = "no-cache"
-    response["Last-Modified"] = http_date(mtime)
+    response["ETag"] = etag
+    response["Last-Modified"] = http_date(os.stat(asset_full_path).st_mtime)
     return response
 
 @require_http_methods(["GET"])
@@ -955,6 +1108,11 @@ def send_solution_view(request):
     """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
+    # Гейт DL «canUseAi»: AI в текущем курсе запрещён → отправка решения
+    # на проверку бессмысленна (пользователь не сможет и сгенерировать код).
+    disabled_reason = _ai_disabled_reason(request)
+    if disabled_reason:
+        return JsonResponse({"error": disabled_reason}, status=403)
 
     try:
         body = json.loads(request.body or "{}")
@@ -1022,9 +1180,17 @@ def send_solution_view(request):
         course_id, _course_err = _resolve_active_course_id_for_session(session_id)
         course_id = course_id or 0
 
+    # Имя временного файла решения (контракт DL v1.4.2, SendSolutionRequest.fileName)
+    # и машина проверки (delta) — необязательные, приходят из тела.
+    file_name = str(body.get("fileName") or "").strip()[:200]
+    delta = str(body.get("delta") or "").strip()[:255]
+
     try:
         from .dl_api_client import send_solution_to_dl
-        data = send_solution_to_dl(session_id, node_id, code, file_extension, course_id=course_id)
+        data = send_solution_to_dl(
+            session_id, node_id, code, file_extension,
+            course_id=course_id, file_name=file_name, delta=delta,
+        )
     except (DLUnauthorizedError, DLApiUnavailable, DLServerError) as exc:
         return dl_error_response(exc)
 
@@ -1077,6 +1243,11 @@ def get_solution_result_view(request):
     """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
+    # Тот же гейт DL «canUseAi», что и на отправке: опрос результата
+    # проверки решения — часть AI-сценария.
+    disabled_reason = _ai_disabled_reason(request)
+    if disabled_reason:
+        return JsonResponse({"error": disabled_reason}, status=403)
 
     try:
         body = json.loads(request.body or "{}")

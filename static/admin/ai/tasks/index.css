@@ -1,6 +1,31 @@
-/* Страница «Таски» (доска задач, ai/admin/tasks.py). */
+/* Страница «Таски» (доска задач, ai/admin/tasks.py). Вкладки front/wish
+   (свои нумерации с №1), перетаскивание строк (data-reorder="1"), фильтры
+   «Не взятые»/«Поиск»/«Мои таски» и архив «Закрытые» (диапазон дат,
+   возврат таска на доску). */
 
 .ai-tasks-wrap { max-width: 100%; }
+
+.ai-tasks-filter {
+  margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap; /* фильтров стало больше (архив: тип + исполнитель + даты) — перенос строк, не разъезд */
+  gap: 10px;
+}
+.ai-tasks-filter label { display: flex; align-items: center; gap: 6px; }
+
+.ai-task-tabs { display: flex; gap: 6px; margin: 0 0 12px; }
+.ai-task-tab {
+  display: inline-block; padding: 4px 14px;
+  border: 1px solid var(--hairline-color); border-radius: 6px 6px 0 0;
+  color: var(--body-quiet-color);
+}
+.ai-task-tab:hover { color: var(--body-fg); }
+.ai-task-tab-active {
+  color: var(--body-fg); font-weight: 600;
+  background: var(--body-bg);
+  border-bottom-color: var(--body-bg);
+}
 
 .ai-tasks-create {
   border: 1px solid var(--hairline-color);
@@ -16,11 +41,7 @@
 .ai-tasks-create textarea { width: 100%; resize: vertical; }
 .ai-tasks-create button { justify-self: start; }
 
-.ai-tasks-filter {
-  display: flex; align-items: center; gap: 8px;
-  margin: 0 0 10px;
-}
-.ai-tasks-filter-label { color: var(--body-quiet-color); }
+.ai-tasks-hint { color: var(--body-quiet-color); font-size: 12px; }
 
 .ai-tasks-scroll { overflow-x: auto; }
 .ai-tasks-table {
@@ -33,36 +54,24 @@
   font-size: 13px;
 }
 .ai-tasks-table th { background: var(--darkened-bg); font-weight: 600; }
+.ai-task-col-no { width: 44px; text-align: center; font-weight: 600; }
 .ai-task-title { font-weight: 600; }
 .ai-task-description { max-width: 420px; white-space: pre-wrap; }
 .ai-task-actions { white-space: nowrap; }
 .ai-task-free { color: var(--body-quiet-color); }
 
-.ai-task-badge {
-  display: inline-block; padding: 2px 8px; border-radius: 10px;
-  font-size: 12px; font-weight: 600; line-height: 1.4;
+/* Перетаскивание: строки front/wish-доски (data-reorder на таблице). */
+table[data-reorder="1"] tbody tr[data-task-id] { cursor: grab; }
+.ai-tasks-table tr.ai-task-dragging { opacity: 0.45; }
+.ai-tasks-table tr.ai-task-drop-above {
+  box-shadow: inset 0 3px 0 0 var(--button-bg);
 }
-.ai-task-priority-high {
-  color: #b42318; background: color-mix(in srgb, #b42318 12%, var(--body-bg));
-}
-.ai-task-priority-normal {
-  color: #b45309; background: color-mix(in srgb, #b45309 14%, var(--body-bg));
-}
-.ai-task-priority-low {
-  color: var(--body-quiet-color); background: var(--darkened-bg);
+.ai-tasks-table tr.ai-task-drop-below {
+  box-shadow: inset 0 -3px 0 0 var(--button-bg);
 }
 
-/* Тип таска: «Фронт» / «Хотелка». */
-.ai-task-kind-front {
-  color: #175cd3; background: color-mix(in srgb, #175cd3 12%, var(--body-bg));
-}
-.ai-task-kind-wishlist {
-  color: #6941c6; background: color-mix(in srgb, #6941c6 12%, var(--body-bg));
-}
-
-/* Закрытый таск — приглушён, но не скрыт: его можно вернуть. */
-.ai-tasks-closed td { opacity: 0.65; }
-.ai-tasks-closed .ai-task-title { text-decoration: line-through; }
+/* Тип таска: «Фронт работы» / «Хотелки» — чип .ai-task-kind (ниже, общий
+   вид) с подкраской по виду. */
 
 .ai-task-btn-claim { padding: 3px 12px; }
 .ai-task-btn-close {
@@ -70,13 +79,33 @@
   color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color));
 }
 .ai-task-btn-close:hover { color: #912018; }
-.ai-task-btn-restore {
-  padding: 3px 12px;
-  color: #067647; border-color: color-mix(in srgb, #067647 50%, var(--hairline-color));
-}
-.ai-task-btn-restore:hover { color: #085d3a; }
 
 /* Кнопка в работе: повторный клик не проходит. */
 .busy { pointer-events: none; opacity: 0.6; }
+
+/* Правка таска (только автору): форма — отдельной строкой под таском. */
+.ai-task-btn-edit { padding: 3px 12px; }
+.ai-task-edit-row[hidden] { display: none; }
+.ai-task-edit-row > td { background: var(--body-bg); }
+.ai-task-edit-form { display: grid; gap: 8px; }
+.ai-task-edit-form .ai-tasks-create-row input[type="text"] { flex: 1 1 auto; }
+.ai-task-edit-form textarea { width: 100%; resize: vertical; }
+.ai-task-edit-actions { display: flex; gap: 8px; }
+.ai-task-btn-reopen { padding: 3px 12px; }
+/* Выбор исполнителя при возврате: «Освободить» заметно отличается. */
+.ai-task-reopen-choice { display: inline-flex; gap: 6px; }
+.ai-task-reopen-choice[hidden] { display: none; }
+.ai-task-btn-reopen[data-reopen-free] {
+  color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color));
+}
+.ai-task-btn-reopen[data-reopen-free]:hover { color: #912018; }
+
+/* Архив «Закрытые»: чип типа таска, строки чуть притушены. */
+.ai-task-kind {
+  display: inline-block; padding: 1px 8px; font-size: 12px;
+  border-radius: 8px; border: 1px solid var(--hairline-color);
+  color: var(--body-quiet-color); white-space: nowrap;
+}
+.ai-task-kind-front { color: var(--body-fg); }
 
 .ai-tasks-empty { color: var(--body-quiet-color); padding: 12px 0; }

@@ -125,6 +125,7 @@ _CLIENT_STRINGS = {
             "оберните код в ```(буква Ё на клавиатуре)"
         ),
         "adminPanel": "Админ-Панель",
+        "myModels": "Мои AI-модели",
         "chat": "Чат с DLAI",
         "decideTask": "Реши задачу",
         "findError": "В чём ошибка?",
@@ -146,6 +147,7 @@ _CLIENT_STRINGS = {
         "sortAccuracy": "Порядок: по точности",
         "sortBoth": "Порядок: скорость + точность",
         "favoritesGroup": "Часто используемые",
+        "myModelsGroup": "Мои модели",
         "allModelsGroup": "Все модели",
         "experimentalModelsGroup": "Экспериментальные модели",
         "noModels": "Сегодня нет доступных моделей",
@@ -167,6 +169,7 @@ _CLIENT_STRINGS = {
             "in ``` (the 'Ё' key on the keyboard)"
         ),
         "adminPanel": "Admin Panel",
+        "myModels": "My AI models",
         "chat": "Chat with DLAI",
         "decideTask": "Solve the task",
         "findError": "What's the error?",
@@ -188,6 +191,7 @@ _CLIENT_STRINGS = {
         "sortAccuracy": "Order: by accuracy",
         "sortBoth": "Order: speed + accuracy",
         "favoritesGroup": "Frequently used",
+        "myModelsGroup": "My models",
         "allModelsGroup": "All models",
         "experimentalModelsGroup": "Experimental models",
         "noModels": "No models available today",
@@ -209,6 +213,7 @@ _CLIENT_STRINGS = {
             "encadrez le code dans ``` (touche 'Ё' du clavier)"
         ),
         "adminPanel": "Panneau Admin",
+        "myModels": "Mes modèles IA",
         "chat": "Chat avec DLAI",
         "decideTask": "Résoudre la tâche",
         "findError": "Quelle est l'erreur?",
@@ -230,6 +235,7 @@ _CLIENT_STRINGS = {
         "sortAccuracy": "Ordre : par précision",
         "sortBoth": "Ordre : vitesse + précision",
         "favoritesGroup": "Fréquemment utilisés",
+        "myModelsGroup": "Mes modèles",
         "allModelsGroup": "Tous les modèles",
         "experimentalModelsGroup": "Modèles expérimentaux",
         "noModels": "Aucun modèle disponible aujourd'hui",
@@ -239,6 +245,191 @@ _CLIENT_STRINGS = {
         "dlTestButton": "Test",
     },
 }
+
+
+# === Тексты страницы «Мои AI-модели» (клиентская + админская) =============
+#
+# Панель «Мои AI-модели» одна и та же и в админке (/ai/admin/user-models/),
+# и на клиентской странице (/ai/my-models/) — поэтому тексты живут здесь, а
+# не в шаблоне. Клиентская часть триязычна (RU/EN/FR — язык только через
+# #selectLang, как и остальные страницы чата); админка не переводится и
+# получает русский вариант.
+_USER_MODELS_STRINGS = {
+    "ru": {
+        "title": "Мои AI-модели",
+        "intro": (
+            "Добавьте свою AI-модель и пользуйтесь ей в чате, в «Реши задачу» "
+            "и в «Найти ошибку» — она появится в селекторе моделей отдельной "
+            "группой «Мои модели». Модель должна работать без VPN: адрес "
+            "провайдера должен быть доступен из сети университета без обхода "
+            "ограничений. Чужие пользователи вашу модель не видят и не могут "
+            "вызвать — она доступна только вам. Ключ API хранится "
+            "зашифрованным и нигде не показывается в открытом виде."
+        ),
+        "newModel": "Новая модель",
+        "editModel": "Правка модели",
+        "listTitle": "Мои модели",
+        "colTitle": "Название",
+        "colProvider": "Провайдер",
+        "colModelId": "ID модели",
+        "colUrl": "Адрес",
+        "colKey": "Ключ",
+        "colState": "Состояние",
+        "fieldTitle": "Название *",
+        "fieldProvider": "Провайдер",
+        "fieldModelId": "ID модели у провайдера *",
+        "fieldBaseUrl": "Базовый URL (для совместимых провайдеров)",
+        "fieldApiKey": "Ключ API",
+        "fieldMaxTokens": "Потолок ответа",
+        "checkVision": "Умеет картинки",
+        "checkThink": "Умеет think",
+        "checkActive": "Активна",
+        "btnSave": "Сохранить модель",
+        "btnCancel": "Отменить правку",
+        "btnEdit": "Править",
+        "btnDelete": "Удалить",
+        "empty": "У вас пока нет своих моделей.",
+        "keySet": "задан",
+        "keyNone": "нет",
+        "stateOn": "активна",
+        "stateOff": "выключена",
+        "hintBaseUrl": "Только https, публичный адрес (не localhost и не внутренняя сеть).",
+        "hintApiKey": "Хранится зашифрованным. Чтобы сменить ключ — введите новый.",
+        "placeholderTitle": "Например: Моя Qwen3 через OpenRouter",
+        "placeholderModelId": "например qwen/qwen3-235b-a22b",
+        "placeholderBaseUrl": "https://api.example.com/v1",
+        "placeholderApiKey": "оставьте пустым, чтобы не менять",
+        "msgSaving": "Сохраняем…",
+        "msgDeleting": "Удаляем…",
+        "msgSaved": "Сохранено. Обновите страницу, чтобы увидеть модель в списке.",
+        "msgDeleteConfirm": "Удалить модель? Её нельзя будет выбрать в чате и на страницах решения.",
+        "errSave": "Ошибка сохранения",
+        "errDelete": "Ошибка удаления",
+    },
+    "en": {
+        "title": "My AI models",
+        "intro": (
+            "Add your own AI model and use it in the chat, in “Solve the task” "
+            "and in “What is the error?” — it will appear in the model selector "
+            "in a separate “My models” group. The model must work without a "
+            "VPN: the provider address must be reachable from the university "
+            "network without bypassing restrictions. Other users cannot see or "
+            "call your model — it is available only to you. The API key is "
+            "stored encrypted and is never shown in plain text."
+        ),
+        "newModel": "New model",
+        "editModel": "Edit model",
+        "listTitle": "My models",
+        "colTitle": "Name",
+        "colProvider": "Provider",
+        "colModelId": "Model ID",
+        "colUrl": "Address",
+        "colKey": "Key",
+        "colState": "State",
+        "fieldTitle": "Name *",
+        "fieldProvider": "Provider",
+        "fieldModelId": "Model ID at the provider *",
+        "fieldBaseUrl": "Base URL (for compatible providers)",
+        "fieldApiKey": "API key",
+        "fieldMaxTokens": "Response limit",
+        "checkVision": "Handles images",
+        "checkThink": "Handles think (reasoning)",
+        "checkActive": "Active",
+        "btnSave": "Save model",
+        "btnCancel": "Cancel editing",
+        "btnEdit": "Edit",
+        "btnDelete": "Delete",
+        "empty": "You have no models of your own yet.",
+        "keySet": "set",
+        "keyNone": "not set",
+        "stateOn": "active",
+        "stateOff": "disabled",
+        "hintBaseUrl": "HTTPS only, public address (not localhost and not the internal network).",
+        "hintApiKey": "Stored encrypted. Enter a new key to change it.",
+        "placeholderTitle": "For example: My Qwen3 via OpenRouter",
+        "placeholderModelId": "for example qwen/qwen3-235b-a22b",
+        "placeholderBaseUrl": "https://api.example.com/v1",
+        "placeholderApiKey": "leave empty to keep the current key",
+        "msgSaving": "Saving…",
+        "msgDeleting": "Deleting…",
+        "msgSaved": "Saved. Refresh the page to see the model in the list.",
+        "msgDeleteConfirm": "Delete the model? It will no longer be selectable in the chat and on the task pages.",
+        "errSave": "Save error",
+        "errDelete": "Delete error",
+    },
+    "fr": {
+        "title": "Mes modèles IA",
+        "intro": (
+            "Ajoutez votre propre modèle IA et utilisez-le dans le chat, dans "
+            "« Résoudre la tâche » et dans « Quelle est l'erreur ? » — il "
+            "apparaîtra dans le sélecteur de modèles, dans un groupe séparé "
+            "« Mes modèles ». Le modèle doit fonctionner sans VPN : l'adresse "
+            "du fournisseur doit être accessible depuis le réseau de "
+            "l'université sans contournement des restrictions. Les autres "
+            "utilisateurs ne voient pas votre modèle et ne peuvent pas "
+            "l'appeler — il n'est accessible qu'à vous. La clé API est "
+            "stockée chiffrée et n'est jamais affichée en clair."
+        ),
+        "newModel": "Nouveau modèle",
+        "editModel": "Modification du modèle",
+        "listTitle": "Mes modèles",
+        "colTitle": "Nom",
+        "colProvider": "Fournisseur",
+        "colModelId": "ID du modèle",
+        "colUrl": "Adresse",
+        "colKey": "Clé",
+        "colState": "État",
+        "fieldTitle": "Nom *",
+        "fieldProvider": "Fournisseur",
+        "fieldModelId": "ID du modèle chez le fournisseur *",
+        "fieldBaseUrl": "URL de base (pour les fournisseurs compatibles)",
+        "fieldApiKey": "Clé API",
+        "fieldMaxTokens": "Limite de réponse",
+        "checkVision": "Comprend les images",
+        "checkThink": "Comprend le think (raisonnement)",
+        "checkActive": "Actif",
+        "btnSave": "Enregistrer le modèle",
+        "btnCancel": "Annuler la modification",
+        "btnEdit": "Modifier",
+        "btnDelete": "Supprimer",
+        "empty": "Vous n'avez pas encore de modèle personnel.",
+        "keySet": "définie",
+        "keyNone": "absente",
+        "stateOn": "actif",
+        "stateOff": "désactivé",
+        "hintBaseUrl": "HTTPS uniquement, adresse publique (ni localhost ni le réseau interne).",
+        "hintApiKey": "Stockée chiffrée. Saisissez une nouvelle clé pour la changer.",
+        "placeholderTitle": "Par exemple : Mon Qwen3 via OpenRouter",
+        "placeholderModelId": "par exemple qwen/qwen3-235b-a22b",
+        "placeholderBaseUrl": "https://api.example.com/v1",
+        "placeholderApiKey": "laissez vide pour ne pas changer la clé",
+        "msgSaving": "Enregistrement…",
+        "msgDeleting": "Suppression…",
+        "msgSaved": "Enregistré. Actualisez la page pour voir le modèle dans la liste.",
+        "msgDeleteConfirm": "Supprimer le modèle ? Il ne sera plus sélectionnable dans le chat et sur les pages de tâche.",
+        "errSave": "Erreur d'enregistrement",
+        "errDelete": "Erreur de suppression",
+    },
+}
+
+
+def user_models_strings(ui_language: str = "") -> dict:
+    """Тексты панели «Мои AI-модели» на языке интерфейса (по умолчанию — RU)."""
+    suffix = get_ui_language_suffix(ui_language)
+    return _USER_MODELS_STRINGS.get(suffix, _USER_MODELS_STRINGS["ru"])
+
+
+def user_models_strings_all() -> dict:
+    """Все языки панели «Мои AI-модели» (для переключения языка на клиенте).
+
+    Ключи — имена языков селекта #selectLang («Русский»/«English»/«Français»):
+    их читает JS-апплаер при смене языка.
+    """
+    return {
+        "Русский": _USER_MODELS_STRINGS["ru"],
+        "English": _USER_MODELS_STRINGS["en"],
+        "Français": _USER_MODELS_STRINGS["fr"],
+    }
 
 
 def client_strings(ui_language: str = "") -> dict:

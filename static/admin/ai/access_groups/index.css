@@ -1,0 +1,114 @@
+/* Страница «Группы доступа» (/ai/admin/ai-groups/, ai/admin/access_groups.py). */
+
+.ai-groups-create {
+  border: 1px solid var(--hairline-color);
+  border-radius: 6px;
+  padding: 10px 14px 14px;
+  margin: 10px 0 18px;
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+}
+.ai-groups-create h3 { margin: 0 12px 0 0; }
+
+.ai-group-card {
+  border: 1px solid var(--hairline-color);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 0 0 12px;
+}
+.ai-group-open { border-color: var(--button-bg); }
+/* Аккордеон: свёрнуто — шапка (название + описание + «Состав»); тело скрыто. */
+.ai-group-head {
+  display: flex; align-items: center; gap: 12px;
+  cursor: pointer; user-select: none; padding: 2px 0;
+}
+.ai-group-head:focus-visible { outline: 2px solid var(--button-bg); }
+.ai-group-head h3 { margin: 0; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.ai-group-desc-preview {
+  color: var(--body-quiet-color); flex: 1 1 auto;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ai-group-caret {
+  display: inline-block; width: 14px; text-align: center;
+  color: var(--body-quiet-color);
+  transition: transform 0.15s ease;
+}
+.ai-group-open .ai-group-caret { transform: rotate(90deg); }
+.ai-group-body { display: none; padding: 10px 2px 2px; }
+.ai-group-open .ai-group-body { display: block; }
+.ai-groups-compose { flex: 0 0 auto; margin-left: 8px; }
+
+.ai-group-badge {
+  display: inline-block; padding: 1px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 600;
+  color: var(--body-quiet-color); background: var(--darkened-bg);
+}
+.ai-group-count { color: var(--body-quiet-color); font-weight: 400; font-size: 12px; }
+.ai-group-desc { color: var(--body-quiet-color); margin: 4px 0 10px; }
+
+.ai-groups-form input[type="text"],
+.ai-groups-form textarea {
+  width: 100%; margin: 0 0 8px;
+}
+.ai-groups-name-static { font-weight: 600; margin: 0 0 8px; }
+
+.ai-groups-perms { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 0 0 10px; }
+.ai-groups-perms fieldset {
+  border: 1px solid var(--hairline-color); border-radius: 4px;
+  padding: 6px 12px 10px; min-width: 260px; margin: 0;
+}
+.ai-groups-perms legend { font-weight: 600; padding: 0 6px; }
+.ai-groups-perm { display: block; padding: 2px 0; }
+.ai-groups-perm code {
+  color: var(--body-quiet-color); font-size: 11px; margin-left: 6px;
+}
+/* Две колонки прав (ТЗ 2026-10-20): слева Страницы/Документация, справа
+   «Действия» — активные страницы с их вложенными чекбоксами сразу. */
+.ai-groups-grid {
+  display: grid; grid-template-columns: minmax(300px, 1fr) minmax(300px, 1fr);
+  gap: 8px 16px; align-items: start;
+}
+.ai-groups-col-left,
+.ai-groups-col-actions {
+  display: flex; flex-direction: column; gap: 8px;
+}
+@media (max-width: 980px) {
+  .ai-groups-grid { grid-template-columns: 1fr; }
+}
+/* Вложенные действия страницы: заголовок = имя страницы, чекбоксы с отступом. */
+.ai-groups-action-block {
+  margin: 2px 0 8px; padding: 2px 0 4px 12px;
+  border-left: 2px solid var(--hairline-color);
+}
+.ai-groups-action-block h4 {
+  margin: 0 0 2px; font-size: 12px; text-transform: none;
+}
+.ai-groups-action-flat {
+  border-left-color: var(--button-bg);
+}
+.ai-groups-perm-child { padding: 1px 0; font-size: 12px; }
+
+.ai-groups-actions { display: flex; gap: 8px; align-items: center; }
+.ai-groups-delete { color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color)); }
+
+.ai-groups-members h4 { margin: 10px 0 6px; }
+.ai-groups-members h5 { margin: 10px 0 4px; color: var(--body-quiet-color); }
+.ai-groups-search { margin: 0 0 8px; }
+.ai-groups-search input[type="text"] { width: 320px; }
+
+.ai-groups-user {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 3px 8px; border-radius: 4px;
+}
+.ai-groups-user:nth-child(odd) { background: var(--darkened-bg); }
+.ai-groups-user .button { padding: 2px 10px; }
+.ai-groups-empty { color: var(--body-quiet-color); }
+
+.busy { pointer-events: none; opacity: 0.6; }
+/* Базовые права (baseline): галочка включена и заблокирована —
+   они выдаются в КОДЕ любому вошедшему в админку, группой не отзываются. */
+.ai-perm-baseline-note {
+  font-size: 11px; font-style: normal;
+  padding: 0 5px; border-radius: 3px;
+  background: var(--darkened-bg); color: var(--body-quiet-color);
+}
+.ai-groups-perm:has(.ai-perm-baseline) code { color: var(--body-quiet-color); }
