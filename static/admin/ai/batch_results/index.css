@@ -56,8 +56,19 @@
   background: var(--darkened-bg);
 }
 .arm-summary-table td.arm-col-num, .arm-summary-table th.arm-col-num {
-  text-align: right; white-space: nowrap; vertical-align: top;
+  text-align: right; vertical-align: top;
 }
+/* nowrap — только ЗНАЧЕНИЯ. Шапки переносятся: в узкой колонке не режутся
+   (см. белый список .arm-summary-table th выше). */
+.arm-summary-table td.arm-col-num { white-space: nowrap; }
+/* Заголовки НЕ прижаты nowrap (это правило .arm-col-num — только для
+   значений): в узких колонках table-layout: fixed длинные слова шапки
+   («НЕ РЕШЁННЫХ», «РЕШЕНО/ВСЕГО») не помещались и НАЛЕЗАЛИ на соседние
+   заголовки. Перенос шапки на две строки — дешевле наезженного текста. */
+.arm-summary-table th { white-space: normal; }
+/* Барьер: если что-то всё же шире ячейки — режем, а не рисуем поверх
+   соседнего заголовка. */
+.arm-summary-table th, .arm-summary-table td { overflow: hidden; }
 /* Ширины колонок — по типу таблицы (table-layout: fixed берёт их из
    первой строки — шапки). Одинаковые таблицы (модели/темы) встают в
    две колонки рядом и читаются как ровный блок. */
@@ -66,8 +77,8 @@
 .arm-summary-table--bucket th:nth-child(3) { width: 20%; }
 .arm-summary-table--bucket th:nth-child(4) { width: 16%; }
 .arm-summary-table--bucket th:nth-child(5) { width: 18%; }
-.arm-summary-table--errors th:nth-child(1) { width: 28%; }
-.arm-summary-table--errors th:nth-child(2) { width: 10%; }
+.arm-summary-table--errors th:nth-child(1) { width: 24%; }
+.arm-summary-table--errors th:nth-child(2) { width: 14%; }
 .arm-summary-table--errors th:nth-child(3) { width: 24%; }
 .arm-summary-table--errors th:nth-child(4) { width: 38%; }
 .arm-summary-table--reasons th:nth-child(1) { width: 60%; }

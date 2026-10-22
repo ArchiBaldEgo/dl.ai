@@ -143,7 +143,7 @@ window.ArmBatchResults = (function () {
       wrapEl.appendChild(empty);
       return;
     }
-    var head = '<thead><tr><th>' + escapeHtml(labelHeader) + '</th><th class="arm-col-num">% решённых</th><th class="arm-col-num">Ср. время, с</th><th class="arm-col-num">Токены</th><th class="arm-col-num">Решено/Всего</th></tr></thead>';
+    var head = '<thead><tr><th>' + escapeHtml(labelHeader) + '</th><th class="arm-col-num">% решённых</th><th class="arm-col-num">Ср. время, с</th><th class="arm-col-num">Токены</th><th class="arm-col-num">Решено / Всего</th></tr></thead>';
     var body = rows.map(function (r) {
       return '<tr><td>' + escapeHtml(r.label) + '</td>'
         + '<td class="arm-col-num">' + escapeHtml(r.percent_solved) + '</td>'

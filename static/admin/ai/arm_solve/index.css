@@ -84,10 +84,17 @@
 .arm-summary-table td.arm-col-num,
 .arm-summary-table th.arm-col-num {
   text-align: right;
+  /* БЕЗ width:1%: с table-layout: fixed (batch_results/index.css) ширины
+     числовых шапок берутся из правил --bucket/--errors/... этого же файла;
+     width:1% схлопывал их до паддинга (~46px) — длинные слова шапки
+     («НЕ РЕШЁННЫХ», «РЕШЕНО/ВСЕГО») резались или наезжали на соседние.
+     В авто-раскладке эта ширина больше нигде не нужна. */
+}
+/* nowrap — только ЗНАЧЕНИЯ (td):
+   шапки переносятся, иначе в узкой колонке table-layout: fixed длинные
+   слова режутся/наезжают на соседние. */
+.arm-summary-table td.arm-col-num {
   white-space: nowrap;
-  /* Числовые колонки сжимаются до содержимого (width:1%), а колонка-обозначение
-     занимает остаток — значения не «уезжают» далеко вправо от подписей. */
-  width: 1%;
 }
 .arm-tasks td,
 .arm-tasks th {
