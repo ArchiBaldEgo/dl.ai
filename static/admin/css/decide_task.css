@@ -34,14 +34,21 @@ body {
     transition: all 0.3s ease;
 }
 
-h1, h2, h3 {
+h1, h2 {
     font-family: 'Roboto', sans-serif;
-    margin-top: 0;
 }
 
-h1 { font-size: 2.5em; color: #333; margin-bottom: 20px; }
-h2 { font-size: 2em; color: #555; margin-bottom: 15px; }
-h3 { font-size: 1.2em; color: #333; margin-bottom: 5px; }
+h1 {
+    font-size: 2.5em;
+    color: #333;
+    margin-bottom: 20px;
+}
+
+h2 {
+    font-size: 2em;
+    color: #555;
+    margin-bottom: 15px;
+}
 
 button {
     padding: 10px 20px;
@@ -98,40 +105,50 @@ button:hover {
     display: block;
 }
 
-/* Grid-раскладка для верхней панели */
 .line-panel {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 12px;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 10px;
     background-color: #d8d8d8;
-    padding: 10px 12px;
+    padding: 8px 12px 16px 12px; 
     position: relative;
     box-sizing: border-box;
-    align-items: start;
+    overflow-x: auto;
 }
 
-/* Селекты всегда на первой строке и растянуты на всю ширину */
 .line-panel > div:first-child {
-    grid-column: 1 / -1;
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
-    gap: 8px;
-    width: 100%;
+    gap: 6px;
+    flex: 0 1 auto;
+    min-width: 0;
 }
 
 #select, #selectType, #selectModelSort {
-    font-size: 18px;
-    flex: 0 1 auto;
-    min-width: 90px;
-    max-width: 220px;
+    font-size: 14px;
+    flex: 1 1 60px;
+    min-width: 60px;
+    max-width: 180px;
+    padding: 4px 6px;
 }
 
 #selectLang {
-    font-size: 18px;
-    flex: 0 0 auto;
+    font-size: 14px;
+    flex: 0 1 auto;
     width: auto;
-    min-width: 80px;
+    min-width: 70px;
+    padding: 4px 6px;
+}
+
+.theme-toggle {
+    flex: 0 0 auto;
+    padding: 4px;
+    height: 32px;
+    width: 32px;
+    font-size: 16px;
 }
 
 hr {
@@ -140,7 +157,6 @@ hr {
     flex: 0 0 auto;
 }
 
-/* Контейнер с двумя колонками */
 .blo {
     display: flex;
     flex: 1 1 auto;
@@ -169,7 +185,6 @@ hr {
     font-size: 18px;
 }
 
-/* Правая колонка (форма) */
 .dv {
     flex: 0 0 35vw;
     display: flex;
@@ -179,7 +194,6 @@ hr {
     min-width: 0;
 }
 
-/* Форма: запрещаем скролл самого контейнера */
 form {
     display: flex;
     flex-direction: column;
@@ -189,45 +203,43 @@ form {
     padding: 0;
     box-sizing: border-box;
     overflow: hidden; 
+    max-height: 100%;
 }
 
-/* Текстовая область: сжимается до предела */
 .messageText, #messageText {
     width: 100%;
-    font-size: 18px;
+    font-size: 16px;
     border: 2px solid #ccc;
     border-radius: 10px;
     box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
     resize: none;
-    flex: 1 1 20px; 
-    min-height: 20px; 
-    margin: 0 0 4px 0; 
+    flex: 1 1 40px; 
+    min-height: 40px; 
+    margin: 4px 0 6px 0; 
     box-sizing: border-box;
     display: block;
     min-width: 0;
     overflow-y: auto;
 }
 
-/* ИСПРАВЛЕНИЕ: Фиксируем высоту блока кнопок */
 .buttons-block {
     display: flex;
     flex-wrap: nowrap;
     flex-direction: row;
     justify-content: flex-start;
     flex: 0 0 auto;
-    height: 38px; /* Фиксированная высота, чтобы кнопки не раздувались */
+    height: 34px; 
     margin-top: 0; 
     margin-bottom: 10px; 
-    gap: 4px; 
+    gap: 8px; 
     width: 100%;
 }
 
-/* Кнопки внутри блока заполняют высоту и центрируют текст */
 .dv button {
     flex: 1 1 0%; 
     min-width: 0; 
-    height: 100%; /* Заполняем высоту .buttons-block */
-    padding: 0 4px; /* Убираем вертикальные отступы, оставляем горизонтальные */
+    height: 100%; 
+    padding: 0 4px; 
     white-space: normal; 
     text-align: center;
     box-sizing: border-box;
@@ -238,7 +250,6 @@ form {
     line-height: 1.1;
 }
 
-/* Планка ровно по центру зазора */
 .resize-button {
     left: -24px; 
     top: 0;
@@ -258,11 +269,10 @@ form {
     border-radius: 4px;
 }
 
-/* Блок с доп. полями (язык, тема, промпт) */
 .top-dv {
     display: flex;
     flex-direction: column;
-    gap: 2px; 
+    gap: 4px; 
     margin-top: 0; 
     flex: 0 0 auto;
     width: 100%;
@@ -276,8 +286,8 @@ form {
     width: 100%;
     max-width: 100%;
     min-width: 0;
-    font-size: 16px;
-    padding: 2px 4px; 
+    font-size: 14px;
+    padding: 6px; 
     box-sizing: border-box;
     border: 1px solid #ccc;
     border-radius: 5px;
@@ -286,8 +296,8 @@ form {
 .top-preprompt {
     display: flex;
     align-items: center;
-    gap: 4px; 
-    font-size: 16px;
+    gap: 6px; 
+    font-size: 14px;
     font-family: 'Roboto', sans-serif;
     width: 100%;
     min-width: 0;
@@ -298,52 +308,27 @@ form {
     min-width: 0;
 }
 
-/* Кнопка голосового режима всегда в первой колонке Grid */
-.voice-mod-div {
-    grid-column: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    position: relative;
-    margin-bottom: 24px;
-}
-
-/* Статус абсолютно позиционирован, чтобы не влиять на ширину */
-.voice-status {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    right: 0;
-    text-align: center;
-    font-size: 12px;
-    color: #666;
-    white-space: nowrap;
-    margin-top: 4px;
-}
-
-/* Кнопки ввода и чекбокс всегда во второй колонке Grid */
 .voice-controls {
-    grid-column: 2;
-    display: none;
-    flex-wrap: nowrap;
-    align-items: flex-start; 
-    gap: 6px;
-    min-width: 0; 
-}
-
-.voice-controls.active {
-    display: flex;
+    display: grid !important;
+    grid-template-columns: auto auto 1fr;
+    grid-template-rows: auto auto;
+    align-items: center;
+    gap: 4px 10px; 
+    flex: 0 1 auto;
+    min-width: 0;
+    padding-top: 2px;
 }
 
 .voice-btn {
     display: flex;
     align-items: center;
-    padding: 8px 12px;
-    font-size: 14px;
-    height: 45px;
+    justify-content: center;
+    padding: 0 10px;
+    font-size: 13px;
+    height: 32px;
     margin: 0;
     white-space: nowrap;
-    flex-shrink: 1; 
+    flex-shrink: 0; 
 }
 
 .voice-btn.recording { background-color: #ff4444; animation: pulse 1.5s infinite; }
@@ -375,42 +360,48 @@ form {
     100% { opacity: 0.3; transform: scale(0.8); }
 }
 
-.voice-mode-btn {
-    margin: 0;
-    width: fit-content;
-    height: 45px;
-    white-space: nowrap;
-}
-
-/* Чекбокс занимает остаток ширины и сжимается */
 .think-checkbox {
+    grid-column: 3;
+    grid-row: 1 / 3;
     display: flex;
     align-items: flex-start; 
-    margin: 12px 0 5px 0;
-    font-size: 14px;
-    flex: 1 1 auto; 
-    min-width: 0;
+    margin: 0;
+    font-size: 13px;
+    min-width: 130px;
 }
 
-/* Текст чекбокса переносится на новые строки */
 .think-checkbox label {
     white-space: normal; 
     word-wrap: break-word;
-    line-height: 1.2;
-    flex: 1 1 auto;
-    min-width: 0;
+    line-height: 1.15;
+    cursor: pointer;
 }
 
 .think-checkbox input {
-    margin-right: 8px;
-    margin-top: 2px; 
+    margin-right: 6px;
+    margin-top: 2px;
     flex: 0 0 auto;
+}
+
+.voice-status {
+    grid-column: 1 / 3;
+    grid-row: 2;
+    text-align: center;
+    font-size: 11px;
+    color: #666;
+    white-space: nowrap;
+    margin: 0;
+    line-height: 1;
+}
+
+.voice-mod-div {
+    display: none !important;
 }
 
 .panel-date {
     position: absolute;
-    right: 20px;
-    bottom: 8px;
+    left: 12px; 
+    bottom: 4px; 
     font-size: 12px;
     color: #333;
     opacity: 0.8;
