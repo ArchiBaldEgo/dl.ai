@@ -23,7 +23,9 @@
    Ширины колонок — из шапки (table-layout: fixed берёт их оттуда). */
 .ai-logs-table--mixed { table-layout: fixed; width: 100%; }
 .ai-logs-table--mixed th, .ai-logs-table--mixed td {
-  overflow-wrap: anywhere; word-break: break-word;
+  /* Перенос по словам (не рвём слова посередине — было anywhere, текст
+     «плавал»); ячейки прижаты к верху строки. */
+  overflow-wrap: break-word; word-break: normal; vertical-align: top;
 }
 .ai-logs-table--mixed th:nth-child(1) { width: 2%; }
 .ai-logs-table--mixed th:nth-child(2) { width: 10%; }

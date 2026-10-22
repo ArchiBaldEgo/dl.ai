@@ -143,7 +143,7 @@ window.ArmBatchResults = (function () {
       wrapEl.appendChild(empty);
       return;
     }
-    var head = '<thead><tr><th>' + escapeHtml(labelHeader) + '</th><th class="arm-col-num">% решённых</th><th class="arm-col-num">Среднее время, сек</th><th class="arm-col-num">Токены</th><th class="arm-col-num">Решено / Всего</th></tr></thead>';
+    var head = '<thead><tr><th>' + escapeHtml(labelHeader) + '</th><th class="arm-col-num">% решённых</th><th class="arm-col-num">Ср. время, с</th><th class="arm-col-num">Токены</th><th class="arm-col-num">Решено/Всего</th></tr></thead>';
     var body = rows.map(function (r) {
       return '<tr><td>' + escapeHtml(r.label) + '</td>'
         + '<td class="arm-col-num">' + escapeHtml(r.percent_solved) + '</td>'
@@ -275,8 +275,14 @@ window.ArmBatchResults = (function () {
       els.list.innerHTML = lines.map(function (line) { return '<li>' + line + '</li>'; }).join('');
     }
     if (els.perModel) {
-      els.perModel.innerHTML = '<h3>Итог по моделям</h3><p class="arm-section-note">Сортировка: процент решённых ↓, среднее время ответа ↑</p>';
+      els.perModel.innerHTML = '<h3>Итог по моделям</h3>';
       renderBucketTable(report.per_model, 'Модель', els.perModel);
+      // Сноска про сортировку — ПОД таблицей: иначе она сдвигала таблицу
+      // вниз относительно соседней («Итог по темам») — колонки «плыли».
+      var sortNote = document.createElement('p');
+      sortNote.className = 'arm-section-note';
+      sortNote.textContent = 'Сортировка: процент решённых ↓, среднее время ответа ↑';
+      els.perModel.appendChild(sortNote);
     }
     var hasRealTopics = (report.per_topic || []).some(function (r) { return r.label && r.label !== 'Без темы'; });
     if (els.perTopic) {
@@ -368,11 +374,14 @@ window.ArmBatchResults = (function () {
         if (!it || typeof it === 'string') {
           return '<div class="arm-error-item">' + escapeHtml(it || '') + '</div>';
         }
+        // Номер проваленного теста (если вердикт DL его назвал) — рядом с
+        // причиной: видно, КАКОЙ тест упал (вход/выход — в карточке пары).
+        const testNote = it.test_number ? ' (тест № ' + escapeHtml(it.test_number) + ')' : '';
         return '<div class="arm-error-item">'
           + '<a href="#" class="arm-error-link" data-arm-result-key="' + escapeHtml(it.key || '') + '"'
           + ' title="Перейти к этой паре в списке «Ответы моделей»">'
           + escapeHtml(it.task || '') + '</a>'
-          + '<span class="arm-error-item-reason">' + escapeHtml(it.reason || '') + '</span>'
+          + '<span class="arm-error-item-reason">' + escapeHtml(it.reason || '') + testNote + '</span>'
           + '<span class="arm-error-item-model">' + escapeHtml(it.model || '') + '</span>'
           + '</div>';
       }).join('');
@@ -481,6 +490,17 @@ window.ArmBatchResults = (function () {
 
   // Карточка пары (задача × модель). Возвращает DOM-узел; у узла есть
   // _armUpdate(row) — точечное обновление без пересоздания.
+  // Мета-строка карточки: «12 сек | 340 ток. | тест № 2» — номер проваленного
+  // теста (если вердикт DL его назвал) виден сразу, без раскрытия карточки.
+  function cardMetaText(row) {
+    var text = (row.duration != null ? row.duration : '') + ' сек | '
+      + (row.tokens != null ? row.tokens : '') + ' ток.';
+    if (row.dl_test_number) {
+      text += ' | тест № ' + escapeHtml(row.dl_test_number);
+    }
+    return text;
+  }
+
   function createResultCard(r, openKeys) {
     var cls = r.verdict === 'solved' ? 'solved' : (r.verdict === 'failed' ? 'failed' : 'skipped');
     var card = document.createElement('details');
@@ -531,7 +551,7 @@ window.ArmBatchResults = (function () {
     top.appendChild(badges);
     var meta = document.createElement('div');
     meta.className = 'arm-meta';
-    meta.textContent = (r.duration != null ? r.duration : '') + ' сек | ' + (r.tokens != null ? r.tokens : '') + ' ток.';
+    meta.innerHTML = cardMetaText(r);
     summary.appendChild(top);
     summary.appendChild(meta);
 
@@ -625,6 +645,12 @@ window.ArmBatchResults = (function () {
         if (dlQueueId) { dlHtml2 += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
         dlFileName = st.dl_file_name || dlFileName;
         if (dlFileName) { dlHtml2 += ' <span style="color:#6b7280;">· файл: ' + escapeHtml(dlFileName) + '</span>'; }
+        // Номер проваленного теста приходит с телом (ленивая загрузка).
+        if (st.dl_test_number) {
+          card._armRow = Object.assign({}, card._armRow || r, { dl_test_number: st.dl_test_number });
+          var metaEl = card.querySelector('.arm-meta');
+          if (metaEl) { metaEl.innerHTML = cardMetaText(card._armRow); }
+        }
         dlHtml2 += deltaLabel(deltaId, deltaName);
         if (r.saved_solution) { dlHtml2 += ' <span style="color:#166534;">· ✓ сохранено в «Решённые задачи»</span>'; }
         if (dlError) { dlHtml2 += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
@@ -700,8 +726,7 @@ window.ArmBatchResults = (function () {
       renderBadges(card, row);
       var metaEl = card.querySelector('.arm-meta');
       if (metaEl) {
-        metaEl.textContent = (row.duration != null ? row.duration : '') + ' сек | '
-          + (row.tokens != null ? row.tokens : '') + ' ток.';
+        metaEl.innerHTML = cardMetaText(row);
       }
       var titleEl = card.querySelector('.arm-result-title');
       if (titleEl && row.task_name) {
@@ -934,10 +959,15 @@ window.ArmBatchResults = (function () {
 
     var reportList = document.createElement('ul'); reportList.className = 'arm-report';
     reportCard.appendChild(reportList);
-    var perModelWrap = document.createElement('div'); reportCard.appendChild(perModelWrap);
-    var perTopicWrap = document.createElement('div'); perTopicWrap.style.marginTop = '16px'; reportCard.appendChild(perTopicWrap);
-    var errorsWrap = document.createElement('div'); errorsWrap.style.marginTop = '16px'; reportCard.appendChild(errorsWrap);
-    var reasonsWrap = document.createElement('div'); reasonsWrap.style.marginTop = '16px'; reportCard.appendChild(reasonsWrap);
+    // Сводные таблицы — блоком в две колонки (модели|темы, ошибки|причины):
+    // одинаковые таблицы встают рядом и колонки совпадают.
+    var summaryGrid = document.createElement('div');
+    summaryGrid.className = 'arm-summary-grid';
+    reportCard.appendChild(summaryGrid);
+    var perModelWrap = document.createElement('div'); summaryGrid.appendChild(perModelWrap);
+    var perTopicWrap = document.createElement('div'); summaryGrid.appendChild(perTopicWrap);
+    var errorsWrap = document.createElement('div'); summaryGrid.appendChild(errorsWrap);
+    var reasonsWrap = document.createElement('div'); summaryGrid.appendChild(reasonsWrap);
     var logWrap = document.createElement('div'); logWrap.style.marginTop = '16px'; reportCard.appendChild(logWrap);
     rootEl.appendChild(reportCard);
 

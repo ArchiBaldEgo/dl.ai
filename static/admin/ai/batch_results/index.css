@@ -43,23 +43,51 @@
 .arm-summary-table th, .arm-summary-table td {
   border-bottom: 1px solid var(--hairline-color);
   padding: 8px 10px; text-align: left;
-  overflow-wrap: anywhere; word-break: break-word;
+  /* НЕ рвём слова посередине (было anywhere — текст «плыл»): перенос только
+     по словам. */
+  overflow-wrap: break-word; word-break: normal;
+  /* Ячейки прижаты к ВЕРХУ: иначе короткий текст в высокой строке
+     «плавал» посередине. */
+  vertical-align: top;
 }
-.arm-summary-table th { font-weight: 600; color: var(--body-quiet-color); }
+.arm-summary-table th {
+  font-weight: 600; color: var(--body-quiet-color);
+  /* Единый вид шапок — таблицы читаются как ровный блок. */
+  background: var(--darkened-bg);
+}
 .arm-summary-table td.arm-col-num, .arm-summary-table th.arm-col-num {
-  text-align: right; white-space: nowrap;
+  text-align: right; white-space: nowrap; vertical-align: top;
 }
 /* Ширины колонок — по типу таблицы (table-layout: fixed берёт их из
-   первой строки — шапки). */
-.arm-summary-table--bucket th:first-child { width: 34%; }
-.arm-summary-table--bucket th:not(:first-child) { width: 16.5%; }
-.arm-summary-table--errors th:nth-child(1) { width: 24%; }
-.arm-summary-table--errors th:nth-child(2) { width: 9%; }
-.arm-summary-table--errors th:nth-child(3) { width: 30%; }
-.arm-summary-table--errors th:nth-child(4) { width: 37%; }
+   первой строки — шапки). Одинаковые таблицы (модели/темы) встают в
+   две колонки рядом и читаются как ровный блок. */
+.arm-summary-table--bucket th:first-child { width: 30%; }
+.arm-summary-table--bucket th:nth-child(2) { width: 16%; }
+.arm-summary-table--bucket th:nth-child(3) { width: 20%; }
+.arm-summary-table--bucket th:nth-child(4) { width: 16%; }
+.arm-summary-table--bucket th:nth-child(5) { width: 18%; }
+.arm-summary-table--errors th:nth-child(1) { width: 28%; }
+.arm-summary-table--errors th:nth-child(2) { width: 10%; }
+.arm-summary-table--errors th:nth-child(3) { width: 24%; }
+.arm-summary-table--errors th:nth-child(4) { width: 38%; }
 .arm-summary-table--reasons th:nth-child(1) { width: 60%; }
 .arm-summary-table--reasons th:nth-child(2),
 .arm-summary-table--reasons th:nth-child(3) { width: 20%; }
+
+/* Блок сводных таблиц — ДВЕ КОЛОНКИ: «Итог по моделям» и «Итог по темам»
+   стоят рядом (одинаковая структура → колонки совпадают), ниже — «Ошибки
+   по темам» и «Сбои по причинам». На узком экране — одна колонка. */
+.arm-summary-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 28px; align-items: start; margin-top: 14px;
+}
+.arm-summary-grid > * { min-width: 0; }
+/* Заголовки блоков — одинаковой высоты, таблицы начинаются на одной линии. */
+.arm-summary-grid h3 { margin: 0 0 8px; font-size: 15px; }
+.arm-summary-grid p.arm-section-note { margin: 6px 0 0; }
+@media (max-width: 980px) {
+  .arm-summary-grid { grid-template-columns: minmax(0, 1fr); }
+}
 
 /* === «Ошибки по темам»: мини-ссылки на нерешённые пары ==================
    Причина сбоя — рядом с задачей, клик по ссылке — скролл к паре в

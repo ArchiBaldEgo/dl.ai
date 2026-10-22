@@ -10093,6 +10093,28 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         # Полной очистки списка при обновлении быть не должно.
         self.assertNotIn("resultsEl.innerHTML = ''", src)
 
+    def test_summary_tables_aligned_in_two_columns(self):
+        """Сводные таблицы — блоком в две колонки (модели|темы, ошибки|причины),
+        без рваных слов и без «плавающих» ячеек (vertical-align: top)."""
+        src = self._static_source("admin", "ai", "batch_results", "index.js")
+        self.assertIn("arm-summary-grid", src)
+        css = self._static_source("admin", "ai", "batch_results", "index.css")
+        self.assertIn(".arm-summary-grid", css)
+        self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr))", css)
+        self.assertIn("vertical-align: top", css)
+        # Слова не рвём посередине (было anywhere — текст «плавал»).
+        self.assertNotIn("overflow-wrap: anywhere", css)
+        # Страница ARM — те же таблицы в том же блоке.
+        tpl = self._source("admin/ai/arm_solve.html")
+        self.assertIn("arm-summary-grid", tpl)
+
+    def test_card_shows_failed_test_number(self):
+        """Номер проваленного теста виден в карточке пары и в отчёте."""
+        src = self._static_source("admin", "ai", "batch_results", "index.js")
+        self.assertIn("dl_test_number", src)
+        self.assertIn("тест №", src)
+        self.assertIn("test_number", src)
+
     def test_log_detail_resend_session_label_and_rerun_route(self):
         src = self._static_source("admin", "ai", "request_logs_detail", "index.js")
         # Протухшая сессия — внятное сообщение вместо JSON.parse-мусора.
