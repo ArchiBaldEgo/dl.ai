@@ -570,19 +570,35 @@ window.ArmBatchResults = (function () {
     dlBlock.innerHTML = dlHtml;
     body.appendChild(dlBlock);
 
+    // Ответ модели + извлечённый код — ЛЕВАЯ колонка (уже): справа, на одном
+    // уровне с ними, входные/эталонные данные проваленного теста (тесно?
+    // нет: колонки грида, см. .arm-card-cols). На узком экране — стопкой.
+    var colsEl = document.createElement('div');
+    colsEl.className = 'arm-card-cols';
+    var colMain = document.createElement('div');
+    colMain.className = 'arm-card-col-main';
+    var colData = document.createElement('div');
+    colData.className = 'arm-card-col-data';
+    colsEl.appendChild(colMain);
+    colsEl.appendChild(colData);
+    // У решённой пары данных теста нет по определению — грид из двух колонок
+    // оставил бы пустое пространство справа, значит одна колонка.
+    if (r.verdict === 'solved') { colsEl.classList.add('arm-card-cols--single'); }
+    body.appendChild(colsEl);
+
     var answerLabel = document.createElement('div');
     answerLabel.style.cssText = 'margin:8px 0 4px; font-weight:600; font-size:13px;';
     answerLabel.textContent = 'Полный ответ модели:';
-    body.appendChild(answerLabel);
+    colMain.appendChild(answerLabel);
     var answerPre = document.createElement('pre');
-    body.appendChild(answerPre);
+    colMain.appendChild(answerPre);
 
     var codeLabel = document.createElement('div');
     codeLabel.style.cssText = 'margin:10px 0 4px; font-weight:600; font-size:13px;';
     codeLabel.textContent = 'Извлечённый код программы:';
-    body.appendChild(codeLabel);
+    colMain.appendChild(codeLabel);
     var codePre = document.createElement('pre');
-    body.appendChild(codePre);
+    colMain.appendChild(codePre);
     var downloadLink = null;
     if (resultId) {
       downloadLink = document.createElement('a');
@@ -590,26 +606,26 @@ window.ArmBatchResults = (function () {
       downloadLink.className = 'arm-button';
       downloadLink.style.cssText = 'display:inline-block; margin-top:6px;';
       downloadLink.textContent = 'Скачать код';
-      body.appendChild(downloadLink);
+      colMain.appendChild(downloadLink);
     }
 
-    // Входные данные и эталонный ответ проваленного теста — блок ПОСЛЕ
-    // извлечённого кода (только у НЕ решённых пар, у которых DL разрешил
-    // выдачу теста). Данные компактные — обрезаны сервером.
+    // Входные данные и эталонный ответ проваленного теста — ПРАВАЯ колонка
+    // (только у НЕ решённых пар, у которых DL разрешил выдачу теста). Данные
+    // компактные — обрезаны сервером.
     var testDataEl = document.createElement('div');
     testDataEl.className = 'arm-test-data';
     testDataEl.hidden = true;
-    body.appendChild(testDataEl);
+    colData.appendChild(testDataEl);
     // Пояснение «почему блока нет»: DL отдаёт данные только подтверждённого
     // проваленного теста с разрешённой выдачей (спека /get-test-data); у
     // ошибок компиляции подтверждённого провала обычно нет вовсе. Без этого
     // текста отсутствие блока выглядит как баг.
     var testDataEmptyEl = document.createElement('div');
     testDataEmptyEl.hidden = true;
-    testDataEmptyEl.style.cssText = 'margin-top:8px; font-size:12px; color:#6b7280;';
+    testDataEmptyEl.style.cssText = 'margin-top:2px; font-size:12px; color:#6b7280;';
     testDataEmptyEl.textContent =
       'Входные/эталонные данные теста DL не выдал — тест не выполнялся (например, ошибка компиляции) или выдача запрещена настройками курса.';
-    body.appendChild(testDataEmptyEl);
+    colData.appendChild(testDataEmptyEl);
     var renderTestData = function (data) {
       if (!data || (!data.input && !data.expected_output)) { testDataEl.hidden = true; return; }
       var parts = [];

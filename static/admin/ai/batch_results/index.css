@@ -225,9 +225,25 @@
 .ai-log-pin-btn-active { color: #d97706; border-color: #d97706; }
 .ai-log-pin-btn.busy { opacity: 0.6; pointer-events: none; }
 .ai-log-pin-static { font-size: 15px; color: var(--body-quiet-color); }
-/* Входные данные и эталонный ответ проваленного теста (блок сразу после
-   извлечённого кода, только у нерешённых пар). */
-.arm-test-data { margin-top: 10px; }
+/* Карточка пары — ДВЕ КОЛОНКИ: слева «уже» ответ модели + извлечённый код,
+   справа на одном уровне — входные/эталонные данные проваленного теста
+   (у решённых/без данных правая колонка пуста или с пояснением).
+   На узком экране колонки перестают в стопку. */
+.arm-card-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 11fr) minmax(0, 9fr);
+  gap: 4px 18px;
+  align-items: start;
+}
+.arm-card-col-main, .arm-card-col-data { min-width: 0; }
+/* Решённая пара: правая колонка пуста — одна колонка на всю ширину. */
+.arm-card-cols--single { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 900px) {
+  .arm-card-cols { grid-template-columns: minmax(0, 1fr); }
+}
+/* Входные данные и эталонный ответ проваленного теста (правая колонка
+   карточки, только у нерешённых пар). */
+.arm-card-col-data .arm-test-data { margin: 12px 0 0; }
 .arm-test-data pre { max-height: 220px; }
 .arm-result-body pre {
   margin: 0; white-space: pre-wrap; word-wrap: break-word;
