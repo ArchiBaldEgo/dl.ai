@@ -6,9 +6,12 @@
  * Отличия от DeepSeek (всё, что было в WebKimi/worker/modules/*):
  * - вход НЕ автоматизируется (телефон/SMS, WeChat QR, email) — сессия
  *   сидируется вручную один раз (WebKimi/seed.js) в постоянный Chrome-профиль;
- * - поле ввода — contenteditable div (НЕ textarea): текст вставляется через
- *   событие paste (ClipboardEvent + DataTransfer) с fallback на keyboard.type;
- * - список сообщений — Virtuoso (виртуализированный);
+ * - поле ввода — contenteditable div (НЕ textarea); с октября 2026 это
+ *   Lexical-редактор (div.chat-input-editor[role=textbox]): paste-инжект
+ *   он игнорирует, текст вводится настоящими клавишами (keyboard.type);
+ * - отправка — кнопка div.send-button-container (fallback — Enter);
+ * - ответ лежит в div.segment-content-box (текст + блоки кода), размышления и
+ *   вызовы инструментов — в блоках класса toolcall-* (вырезаются из снимка);
  * - ответ достаётся класс-независимым robust-fallback (см. worker/modules/promtps.js);
  * - гвард «stale answer»: ответ, совпадающий с пузырём ДО отправки, отбраковывается.
  *
@@ -19,14 +22,13 @@ const fs = require('fs');
 const path = require('path');
 
 const {
-    waitAndClickX,
+    clickIfExists,
     elementExists,
 } = require('../worker/core/page-utils');
 const {
     waitForXPathCompat,
     htmlToMarkdown,
     extractCodeFromPreInner,
-    decodeHtmlEntities,
     getRobustLastAnswerData,
 } = require('../worker/modules/promtps');
 const { log, error } = require('../worker/utils/logger');
@@ -45,7 +47,7 @@ const data = {
     "loginUrls": {
         "kimi": "https://www.kimi.ai/"
     },
-    "_live_inspection_2026_08": "ВНИМАНИЕ: эта инспекция УСТАРЕЛА — worker/logs/application.log показывает, что div.markdown теперь совпадает с пустым скелетом ('matched an empty skeleton (1 chars text)'), т.е. Kimi снова сменил вёрстку и текст ответа больше не внутри div.markdown. Селекторы answer.kimi (//div[..markdown..]) поэтому ловят пустоту. Ответ теперь достаётся НЕ по классу, а класс-независимым robust-fallback в worker/modules/promtps.js (getRobustLastAnswerHtml): берётся весь последний «пузырь» ассистента по структурным признакам (class*='assistant' / последний дочерний блок чат-контейнера) и конвертируется целиком. При провале всех селекторов в лог дампится DOM-диагностика (dumpDomDiagnostics) — по ней можно откалибровать answer.kimi заново. Поле ввода: div.chat-input-editor[role=textbox] (contenteditable). Enter в contenteditable отправляет надёжно.",
+    "_live_inspection_2026_10": "Живая инспекция Kimi (октябрь 2026) — Kimi переделал чат. Поле ввода: div.chat-input-editor[role=textbox] — ТЕПЕРЬ это Lexical-редактор (data-lexical-editor=true, внутри span[data-lexical-text]); paste-инжект больше НЕ работает (событие paste игнорируется) — ввод только настоящими клавишами (keyboard.type). Enter = ОТПРАВКА, Shift+Enter = перенос строки, поэтому многострочный промпт вводится через Shift+Enter. Kimi ВОССТАНАВЛИВАЕТ неотправленный черновик из прошлого запроса — перед вводом редактор чистим (Ctrl+A, Backspace). Кнопка отправки: div.send-button-container (36x36, при генерации та же кнопка получает класс 'stop' — индикатор «генерация идёт»). Ответ: div.chat-content-item.chat-content-item-assistant > (Segment) > div.segment-content-box, внутри — блоки div.markdown (текст) и div.segment-code (КОД: <pre class='language-x'><code class='language-x'> с токенами ПОДСВЕТКИ highlight.js внутри — теги надо срезать, иначе в «код» попадает разметка). Размышления/вызовы инструментов — блоки класса toolcall-* (toolcall-container thinking-container); прежний класс toolcall-content-text больше не встречается. Старый селектор по div.markdown брал только ПОСЛЕДНИЙ markdown-блок (часто — один лишь блок кода, а текст ответа терялся), поэтому ответ берём целиком из div.segment-content-box. У контейнера ответов класс chat-content-list (раньше был virtuoso). ВАЖНО: поле ввода показывается и ГОСТЮ (сессии нет) — у гостя в шапке .not-login-icon и .login-button, а по отправке всплывает модалка входа; поэтому checkAlreadyAuthorized проверяет маркеры гостя, а не только наличие редактора. Локальный профиль WebKimi/worker/.chrome-profiles/bot-1 на момент проверки был РАЗЛОГИНЕН (сессия истекла) — живая проверка ответа невозможна, селекторы ответа взяты из бандла kimi-web-seo (официальные классы Vue-приложения).",
     "xpaths": {
         "auth": {
             "chatUrl": {
@@ -60,10 +62,10 @@ const data = {
                 "kimi": ".chat-input-editor[role='textbox']"
             },
             "sendMessageButton": {
-                "kimi": ""
+                "kimi": "//div[contains(@class,'send-button-container') and not(contains(@class,'disabled')) and not(contains(@class,'stop'))]"
             },
             "answer": {
-                "kimi": "//div[contains(@class,'chat-content-item-assistant')]//div[contains(@class,'markdown')]"
+                "kimi": "//div[contains(@class,'chat-content-item-assistant')][last()]//div[contains(@class,'segment-content-box')][last()]"
             },
             "fullAnswer": {
                 "kimi": "//div[contains(@class,'chat-content-list')]"
@@ -120,6 +122,13 @@ function getTimeoutMs() {
 /**
  * Быстрый путь: если в постоянном профиле уже есть живая сессия, то после
  * открытия kimi.ai сразу появится поле ввода чата — логин не нужен.
+ *
+ * ВАЖНО (живая проверка, октябрь 2026): поле ввода появляется и у ГОСТЯ —
+ * Kimi показывает редактор всегда, а при отправке всплывает модалка входа.
+ * Поэтому одного поля ввода мало: дополнительно проверяем маркеры гостя
+ * (иконка «не залогинен», модалка входа). Иначе пул считал бы гостя
+ * авторизованным и на каждом запросе падал бы с «селекторы не нашли ответ»
+ * вместо честного «пересидируйте профиль».
  */
 async function checkAlreadyAuthorized(ctx, payload = {}) {
     const page = ctx?.page;
@@ -135,9 +144,46 @@ async function checkAlreadyAuthorized(ctx, payload = {}) {
 
     try {
         await page.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: getTimeoutMs() });
-        // Поле ввода чата означает, что мы залогинены.
+        // Поле ввода чата означает, что страница чата открылась.
         await waitForXPathCompat(page, chatInputXPath, { timeout: 15000 });
+        // …но гость тоже видит это поле — проверяем маркеры гостя.
+        await sleep(1500);
+        if (await hasGuestMarkers(page)) {
+            log('Kimi: сессия не найдена — страница открыта как гость (нужен пересев профиля)');
+            return false;
+        }
         return true;
+    } catch (_) {
+        return false;
+    }
+}
+
+/**
+ * Признаки того, что Kimi открыт как гость (сессии нет).
+ * Живая проверка: у гостя в шапке есть .not-login-icon (иконка «не залогинен»)
+ * и .login-button («Log in»), плюс может висеть модалка входа.
+ */
+async function hasGuestMarkers(page) {
+    try {
+        return await page.evaluate(() => {
+            const visible = (n) => {
+                if (!n) return false;
+                const r = n.getBoundingClientRect();
+                return !!(r.width || r.height);
+            };
+            const guestSelectors = [
+                '.not-login-icon',
+                '.not-login-avatar-svg',
+                '.login-modal-next-mask',
+                '[class*="login-modal"]',
+            ];
+            for (const sel of guestSelectors) {
+                for (const n of document.querySelectorAll(sel)) {
+                    if (visible(n)) return true;
+                }
+            }
+            return false;
+        });
     } catch (_) {
         return false;
     }
@@ -179,11 +225,23 @@ async function login(ctx, payload = {}) {
 }
 
 /**
- * Ввод текста в contenteditable div Kimi. element.type() в contenteditable
- * ненадёжен (Kimi слушает input/paste, а не keystroke-накопление), поэтому
- * вставляем через событие paste (ClipboardEvent + DataTransfer) — доказанный
- * подход для [data-testid='msh-chatinput-editor']. Fallback — page.keyboard.type
- * при сфокусированном элементе.
+ * Ввод текста в редактор Kimi.
+ *
+ * ОКТЯБРЬ 2026: Kimi перевёл поле ввода на Lexical-редактор
+ * (div.chat-input-editor[role=textbox], внутри span[data-lexical-text]).
+ * Синтетическое событие 'paste' Lexical ИГНОРИРУЕТ — прежний paste-инжект
+ * (ClipboardEvent + DataTransfer) текст больше НЕ вставляет (проверено живьём:
+ * после paste в редакторе оставался прежний текст). Работает только ввод
+ * настоящими клавишами (keyboard.type) — как это делает человек.
+ *
+ * Ещё два живых наблюдения:
+ * - Kimi ВОССТАНАВЛИВАЕТ неотправленный черновик из прошлого запроса
+ *   (проверено: в редакторе лежал текст прошлой пробы) — перед вводом
+ *   редактор обязателен чистим, иначе промпт уйдёт с чужим хвостом;
+ * - Enter в Kimi = ОТПРАВКА, Shift+Enter — перенос строки, поэтому
+ *   многострочный промпт вводится через Shift+Enter.
+ *
+ * Возвращаем true ТОЛЬКО если текст реально попал в редактор.
  */
 async function typeIntoContentEditable(page, cssSelector, text) {
     const txt = String(text ?? '');
@@ -195,38 +253,57 @@ async function typeIntoContentEditable(page, cssSelector, text) {
         await element.focus();
         await sleep(200);
 
-        // 1) Paste-инжект — основной путь.
-        const injected = await page.evaluate((sel, t) => {
-            const el = document.querySelector(sel);
-            if (!el) return false;
-            el.focus();
-            try {
-                const dt = new DataTransfer();
-                dt.setData('text/plain', t);
-                const ev = new ClipboardEvent('paste', {
-                    clipboardData: dt,
-                    bubbles: true,
-                    cancelable: true,
-                });
-                el.dispatchEvent(ev);
-                // Некоторые редакторы слушают beforeinput/input.
-                el.dispatchEvent(new InputEvent('beforeinput', {
-                    data: t, inputType: 'insertText', bubbles: true, cancelable: true,
-                }));
-                el.dispatchEvent(new InputEvent('input', {
-                    data: t, inputType: 'insertText', bubbles: true,
-                }));
-                return (el.textContent || '').trim().length > 0;
-            } catch (_) {
-                return false;
-            }
-        }, cssSelector, txt);
+        // 0) Чистим редактор (черновик прошлого запроса).
+        await clearEditor(page, cssSelector);
 
-        if (!injected) {
-            // 2) Fallback — посылаем keystrokes в сфокусированный contenteditable.
-            log('typeIntoContentEditable: paste не заполнил поле, fallback на keyboard.type');
-            await page.keyboard.type(txt, { delay: 0 });
-            await sleep(300);
+        // 1) Настоящие клавиши — единственный рабочий путь в Lexical-редакторе.
+        await typeWithLineBreaks(page, txt);
+        await sleep(300);
+        let filled = await readEditorText(page, cssSelector);
+
+        // 2) Fallback — paste-инжект (старая вёрстка Kimi / другие contenteditable).
+        if (!filled) {
+            log('typeIntoContentEditable: keyboard.type не заполнил поле, fallback на paste-инжект');
+            const injected = await page.evaluate((sel, t) => {
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                el.focus();
+                try {
+                    const dt = new DataTransfer();
+                    dt.setData('text/plain', t);
+                    const ev = new ClipboardEvent('paste', {
+                        clipboardData: dt,
+                        bubbles: true,
+                        cancelable: true,
+                    });
+                    el.dispatchEvent(ev);
+                    // Некоторые редакторы слушают beforeinput/input.
+                    el.dispatchEvent(new InputEvent('beforeinput', {
+                        data: t, inputType: 'insertText', bubbles: true, cancelable: true,
+                    }));
+                    el.dispatchEvent(new InputEvent('input', {
+                        data: t, inputType: 'insertText', bubbles: true,
+                    }));
+                    return (el.textContent || '').trim().length > 0;
+                } catch (_) {
+                    return false;
+                }
+            }, cssSelector, txt);
+            if (injected) {
+                await sleep(300);
+                filled = await readEditorText(page, cssSelector);
+            }
+        }
+
+        if (!filled) {
+            error('typeIntoContentEditable: текст не попал в редактор Kimi');
+            return false;
+        }
+        // Промпт должен реально лежать в редакторе — сверяем хвост текста.
+        const tail = txt.trim().split('\n').filter(Boolean).pop() || '';
+        if (tail && !filled.includes(tail.slice(-40))) {
+            error('typeIntoContentEditable: в редакторе Kimi нет нашего текста (черновик/потеря ввода)');
+            return false;
         }
         return true;
     } catch (err) {
@@ -240,13 +317,78 @@ async function typeIntoContentEditable(page, cssSelector, text) {
 }
 
 /**
+ * Очистка редактора: Ctrl+A + Backspace (в сфокусированном Lexical-редакторе
+ * выделяется только содержимое редактора, не страница).
+ * Нужно, потому что Kimi восстанавливает неотправленный черновик.
+ */
+async function clearEditor(page, cssSelector) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const before = await readEditorText(page, cssSelector);
+        if (!before) return true;
+        await page.keyboard.down('Control');
+        try {
+            await page.keyboard.press('KeyA');
+        } finally {
+            await page.keyboard.up('Control');
+        }
+        await page.keyboard.press('Backspace');
+        await sleep(250);
+        const after = await readEditorText(page, cssSelector);
+        if (!after) return true;
+    }
+    const left = await readEditorText(page, cssSelector);
+    if (left) {
+        error('clearEditor: не удалось очистить редактор Kimi — осталось: ' + left.slice(0, 80));
+    }
+    return !left;
+}
+
+/** Текст, который реально лежит в редакторе Kimi (проверка ввода). */
+async function readEditorText(page, cssSelector) {
+    try {
+        const text = await page.evaluate((sel) => {
+            const el = document.querySelector(sel);
+            return el ? (el.innerText || el.textContent || '').trim() : '';
+        }, cssSelector);
+        return String(text || '').trim();
+    } catch (_) {
+        return '';
+    }
+}
+
+/**
+ * Набор текста с корректными переносами строк.
+ * В Kimi Enter отправляет сообщение, Shift+Enter — перенос строки, поэтому
+ * '\n' вводим через Shift+Enter, а всё остальное — обычным keyboard.type.
+ */
+async function typeWithLineBreaks(page, text) {
+    const normalized = String(text ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const lines = normalized.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+        if (i > 0) {
+            await page.keyboard.down('Shift');
+            try {
+                await page.keyboard.press('Enter');
+            } finally {
+                await page.keyboard.up('Shift');
+            }
+        }
+        if (lines[i]) {
+            await page.keyboard.type(lines[i], { delay: 0 });
+        }
+    }
+}
+
+/**
  * Селекторы кнопки «Stop» (генерация ещё идёт) для Kimi.
- * Kimi-специфичный класс кнопки Stop неизвестен (TODO — живая инспекция),
- * поэтому держим широкий набор generic-вариантов (aria-label, role=button, текст).
- * Если ни один не совпадает — isStillGenerating всегда false, и единственный
- * сигнал завершения — подтверждение перечитыванием (confirmMs).
+ *
+ * ОКТЯБРЬ 2026 (живая инспекция): у Kimi одна и та же кнопка отправки
+ * div.send-button-container во время генерации получает модификатор класса
+ * 'stop' (проверено по бандлу kimi-web-seo) — это и есть индикатор «генерация
+ * идёт». Остальные селекторы оставлены как generic-фолбэк.
  */
 const STOP_GENERATING_XPATHS = [
+    "//div[contains(@class,'send-button-container') and contains(@class,'stop')]",
     "//*[@data-testid='virtuoso-item-list']//*[contains(@class,'stop') and not(contains(@class,'hidden'))]",
     "//div[contains(@class,'stop') and not(contains(@class,'hidden'))]",
     "//div[@aria-label='stop' or @aria-label='Stop' or @aria-label='Stop generating' or @aria-label='stop generating']",
@@ -257,19 +399,25 @@ const STOP_GENERATING_XPATHS = [
 
 /**
  * Экстракторы code-block'ов Kimi (в порядке применения).
- * Kimi использует свой Vue markdown-рендер, поэтому работаем по generic
- * <pre><code class="language-x"> и по <pre> без вложенного <code>.
+ *
+ * ОКТЯБРЬ 2026: Kimi рендерит код через свой CodeASTToVNode — внутри
+ * <pre><code class="language-x"> лежат span'ы ПОДСВЕТКИ синтаксиса
+ * (<span class="hljs-keyword">…</span> и т.п.). Раньше мы отдавали innerHTML
+ * как есть — в «код» попадала разметка. Теперь теги срезаются
+ * (extractCodeFromPreInner), остаётся чистый текст кода.
  *
  * Сигнатура extract совпадает с сигнатурой колбэка String.replace:
- * (полное совпадение, ...capture-группы).
+ * (полное совождение, ...capture-группы).
  */
 const PRE_EXTRACTORS = [
     {
         pattern: /<pre\b[^>]*>\s*<code\b([^>]*)>([\s\S]*?)<\/code>\s*<\/pre>/gi,
         extract: (_match, codeAttrs, codeInner) => {
-            const langMatch = String(codeAttrs).match(/class\s*=\s*"[^"]*language-([^"\s]+)[^"]*"/i);
-            const lang = langMatch ? langMatch[1].trim().toLowerCase() : '';
-            return { lang, code: decodeHtmlEntities(codeInner).replace(/\r\n/g, '\n').trim() };
+            const attrs = String(codeAttrs || '');
+            const langMatch = attrs.match(/class\s*=\s*(?:"[^"]*language-([^"'\s]+)[^"]*"|'[^']*language-([^"'\s]+)[^']*')/i);
+            const lang = langMatch ? (langMatch[1] || langMatch[2] || '').trim().toLowerCase() : '';
+            // Теги подсветки внутри <code> срезаем — иначе в код попадёт разметка.
+            return { lang, code: extractCodeFromPreInner(codeInner) };
         },
     },
     {
@@ -277,6 +425,42 @@ const PRE_EXTRACTORS = [
         extract: (_match, preInner) => ({ lang: '', code: extractCodeFromPreInner(preInner) }),
     },
 ];
+
+/**
+ * Конфиг class-независимого robust-fallback для Kimi.
+ *
+ * ОКТЯБРЬ 2026 (разбор бандла kimi-web-seo):
+ * - «размышления» и вызовы инструментов — блоки класса toolcall-* (в т.ч.
+ *   toolcall-container thinking-container);
+ * - текст ответа — div.markdown (внутри div.markdown-container), код —
+ *   div.segment-code (карточка с pre>code);
+ * - оба лежат в div.segment-content-box — это и есть тело ответа.
+ *
+ * Один объект на обе точки использования (robust-fallback и снапшот ДО
+ * отправки) — иначе они разъезжаются при правке селекторов.
+ */
+const KIMI_ROBUST = {
+    extraThinkClass: 'toolcall-|thinking-container',
+    extraThinkLabels: ['已搜索'],
+    // Блок ответа — весь segment-content-box (текст + код), а не один
+    // markdown-блок (иначе терялась часть ответа).
+    blockSelector: "[class*='segment-content-box'], [class*='markdown']",
+    // Ответ разбит на блоки (текст + карточка кода) — отдаём пузырь
+    // целиком, иначе «самый длинный блок» выкинул бы вторую часть.
+    preferWholeBubble: true,
+    // Поддеревья, которые вырезаются из снимка ответа (в XPath-пути и
+    // в robust-fallback): вызовы инструментов, «размышления» и служебный
+    // UI (кнопки, заголовок карточки кода с названием языка).
+    stripSelectors: [
+        '[class*="toolcall-"]',
+        '[class*="thinking-container"]',
+        '[class*="think"]',
+        '[class*="reasoning"]',
+        '[class*="segment-code-header"]',
+        '[class*="segment-assistant-actions"]',
+        '[class*="markdown-actions"]',
+    ],
+};
 
 /**
  * Снимаем один внешний div/section-обёрточный тег (Kimi рендерит markdown внутри
@@ -336,23 +520,32 @@ module.exports = {
         },
         inputExists: async (page, site, service) => {
             const inputXPath = site.data?.xpaths?.chat?.inputLabel?.[service] ||
-                "//*[@data-testid='msh-chatinput-editor']";
+                "//div[contains(@class,'chat-input-editor') and @role='textbox']";
             return elementExists(page, inputXPath);
         },
         typeInput: async (page, site, service, text) => {
             const inputCss = site.data?.xpaths?.chat?.inputLabelCss?.[service] ||
-                "[data-testid='msh-chatinput-editor']";
+                ".chat-input-editor[role='textbox']";
             return typeIntoContentEditable(page, inputCss, text);
         },
         send: async (page, site, service) => {
-            // Отправка: в Kimi намеренно НЕ ищем кнопку отправки по XPath —
-            // data.xpaths.chat.sendMessageButton пуст (""), т.к. реальный селектор
-            // кнопки не выверен, а waitAndClickX жжёт 30с на промахе. Enter в
-            // contenteditable-редакторе Kimi = отправка (Shift+Enter — перенос строки).
+            // ОКТЯБРЬ 2026: у Kimi появилась НАСТОЯЩАЯ кнопка отправки —
+            // div.send-button-container (живая инспекция). Кликаем её; если не
+            // нашлась/клик не сработал — Enter в редакторе = отправка
+            // (Shift+Enter — перенос строки). Обе дороги рабочие.
             const sendBtnXPath = site.data?.xpaths?.chat?.sendMessageButton?.[service];
             let sendClicked = false;
             if (sendBtnXPath) {
-                sendClicked = await waitAndClickX(page, sendBtnXPath);
+                // Кликаем БЕЗ долгого ожидания (waitAndClickX жёг бы 30с на
+                // промахе): сначала мгновенная проверка, затем короткое
+                // ожидание появления кнопки (Vue перерисовывает её после ввода).
+                sendClicked = await clickIfExists(page, sendBtnXPath);
+                if (!sendClicked) {
+                    try {
+                        const el = await waitForXPathCompat(page, sendBtnXPath, { timeout: 3000 });
+                        try { await el.click(); sendClicked = true; } finally { await el.dispose(); }
+                    } catch (_) { /* кнопки нет — уйдём по Enter */ }
+                }
             }
             if (!sendClicked) {
                 if (sendBtnXPath) log('Send button not found via XPath, falling back to Enter key');
@@ -364,23 +557,19 @@ module.exports = {
             }
         },
         answerXPaths: (site, service) => [
+            // ОСНОВНОЙ: последний segment-content-box последнего assistant-item —
+            // это ВЕСЬ ответ (текст + блоки кода), а не один markdown-блок.
             site.data.xpaths.chat.answer[service],
-            // Fallback 1: явно последний assistant-item (getLastOuterHtmlByXPath берёт
-            // последний snapshot-узел в document order — текущий ответ).
-            "//div[contains(@class,'chat-content-item-assistant')][last()]//div[contains(@class,'markdown')]",
-            // ВАРИАНТЫ БЕЗ reasoning (прецедент Fallback 2): контейнер размышлений
-            // тоже может носить 'markdown' — без исключений ловит простыню размышлений.
-            "//div[contains(@class,'chat-content-item-assistant')][last()]//div[contains(@class,'markdown') and not(contains(@class,'think')) and not(contains(@class,'toolcall-content-text'))]",
-            // Fallback 2: answer-markdown без toolcall/thinking-обёртки.
-            // ОГРАНИЧЕНЫ контейнером чата (chat-content-list): глобальные
-            // markdown-блоки ловили служебные блоки страницы (гидрация/лайдинг)
-            // вместо ответа модели. Глобальный вариант оставлен ниже как
-            // последний крайний случай (если класс контейнера сменится).
-            "//div[contains(@class,'chat-content-list')]//div[contains(@class,'markdown-container') and not(contains(@class,'toolcall-content-text'))]//div[contains(@class,'markdown')]",
-            "//div[contains(@class,'chat-content-list')]//div[contains(@class,'markdown') and not(contains(@class,'toolcall-content-text')) and not(contains(@class,'think'))]",
-            "//div[contains(@class,'chat-content-list')]//div[contains(@class,'markdown')]",
-            // Fallback 3: весь последний assistant-item (конвертер разберёт markdown-блоки внутри)
+            // Fallback 1: весь последний assistant-item (конвертер разберёт
+            // markdown-блоки и code-блоки внутри).
             "//div[contains(@class,'chat-content-item-assistant')][last()]",
+            // Fallback 2: последний segment-content-box в контейнере чата
+            // (на случай, если класс assistant-item сменится).
+            "//div[contains(@class,'chat-content-list')]//div[contains(@class,'segment-content-box')][last()]",
+            // Fallback 3: legacy-разметка (старый Kimi): markdown-блок без
+            // размышлений/инструментов.
+            "//div[contains(@class,'chat-content-item-assistant')][last()]//div[contains(@class,'markdown') and not(contains(@class,'think')) and not(contains(@class,'toolcall-content-text'))]",
+            "//div[contains(@class,'chat-content-list')]//div[contains(@class,'markdown') and not(contains(@class,'toolcall-content-text')) and not(contains(@class,'think'))]",
             // Fallback 4: любой markdown-блок (broader — крайний случай; в ответе
             // остаётся фильтр мусора — гидрация страницы не пройдёт).
             "//div[contains(@class,'markdown')]",
@@ -417,12 +606,7 @@ module.exports = {
             confirmMs: 3000,
             maxEmptyStableTicks: 2,
         },
-        robust: {
-            // У Kimi текст «размышлений» живёт в контейнере toolcall-content-text.
-            extraThinkClass: 'toolcall-content-text',
-            extraThinkLabels: ['已搜索'],
-            blockSelector: "[class*='markdown']",
-        },
+        robust: KIMI_ROBUST,
         htmlToMarkdown: (html) => htmlToMarkdown(html, {
             stripOuterDiv,
             preExtractors: PRE_EXTRACTORS,
@@ -432,11 +616,7 @@ module.exports = {
         // не отправилось, а extraction прочитал СТАРЫЙ пузырь (например,
         // kimi.com восстановил прошлый диалог в персистентном Chrome-профиле).
         snapshotBeforeSend: async (page) => {
-            const pre = await getRobustLastAnswerData(page, {
-                extraThinkClass: 'toolcall-content-text',
-                extraThinkLabels: ['已搜索'],
-                blockSelector: "[class*='markdown']",
-            });
+            const pre = await getRobustLastAnswerData(page, KIMI_ROBUST);
             return (pre?.text || '').trim();
         },
         // ГВАРД СВЕЖЕСТИ ОТВЕТА. Если сообщение не отправилось (paste-инжект

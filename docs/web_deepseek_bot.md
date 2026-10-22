@@ -71,7 +71,7 @@ WebPools/
 ├── sites/
 │   ├── index.js         # реестр сайтов
 │   ├── deepseek.js      # дескриптор DeepSeek: env-имена, URL'ы/XPath'ы, Google-OAuth, профиль
-│   └── kimi.js          # дескриптор Kimi: KIMI_* env, contenteditable-ввод, ручной логин, профиль
+│   └── kimi.js          # дескриптор Kimi: KIMI_* env, Lexical-ввод, ручной логин, профиль
 ├── worker/
 │   ├── index.js         # экспортит createBot()
 │   ├── bot.js           # класс Bot, lifecycle (init/sendMessage/close)

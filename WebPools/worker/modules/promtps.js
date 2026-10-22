@@ -208,8 +208,15 @@ function looksCutMidCode(rawHtml) {
     return opens > closes;
 }
 
-async function getLastOuterHtmlByXPath(page, xpath) {
-    return page.evaluate((xp) => {
+/**
+ * outerHTML последнего узла, совпавшего с XPath.
+ *
+ * stripSelectors — CSS-селекторы поддеревьев, которые надо ВЫРЕЗАТЬ из
+ * снимка («размышления» модели, вызовы инструментов). Их текст — не ответ
+ * модели, а служебная вёрстка. Список приходит от сайта (sites/*.js).
+ */
+async function getLastOuterHtmlByXPath(page, xpath, stripSelectors = []) {
+    return page.evaluate((xp, sels) => {
         const result = document.evaluate(
             xp,
             document,
@@ -219,8 +226,17 @@ async function getLastOuterHtmlByXPath(page, xpath) {
         );
         if (!result || result.snapshotLength === 0) return '';
         const node = result.snapshotItem(result.snapshotLength - 1);
-        return node?.outerHTML || '';
-    }, xpath);
+        if (!node) return '';
+        if (!sels || !sels.length) return node.outerHTML || '';
+        // Клонируем и вырезаем — живой DOM трогать нельзя (он нужен сайту).
+        const clone = node.cloneNode(true);
+        for (const sel of sels) {
+            try {
+                clone.querySelectorAll(sel).forEach((n) => n.remove());
+            } catch (_) { /* невалидный селектор — просто пропускаем */ }
+        }
+        return clone.outerHTML || '';
+    }, xpath, stripSelectors);
 }
 
 async function waitForXPathCompat(page, xpath, {
@@ -301,11 +317,12 @@ async function waitLastOuterHtmlStable(page, xpathOrGetter, {
     confirmMs = 0,
     maxEmptyStableTicks = undefined,
     stopXPaths = [],
+    stripSelectors = [],
 } = {}) {
     const isGetter = (typeof xpathOrGetter === 'function');
     const readNow = isGetter
         ? () => xpathOrGetter(page)
-        : () => getLastOuterHtmlByXPath(page, xpathOrGetter);
+        : () => getLastOuterHtmlByXPath(page, xpathOrGetter, stripSelectors);
 
     const start = Date.now();
 
@@ -427,12 +444,20 @@ async function waitLastOuterHtmlStable(page, xpathOrGetter, {
  * ('ds-markdown' / 'markdown'), которые сайты регулярно меняют — поэтому
  * переживает смену вёрстки.
  *
- * @param {object} opts — { extraThinkClass, extraThinkLabels, blockSelector }.
+ * @param {object} opts — { extraThinkClass, extraThinkLabels, blockSelector,
+ *                          stripSelectors, preferWholeBubble }.
+ *   stripSelectors — CSS-селекторы поддеревьев «размышлений»/инструментов,
+ *   которые вырезаются из копии пузыря;
+ *   preferWholeBubble — если в пузыре нашлось несколько блоков, отдать пузырь
+ *   целиком (а не самый длинный блок) — для сайтов, где ответ разбит на
+ *   несколько сегментов (текст + код).
  */
 async function getRobustLastAnswerData(page, {
     extraThinkClass = null,
     extraThinkLabels = [],
     blockSelector = "[class*='markdown']",
+    stripSelectors = [],
+    preferWholeBubble = false,
 } = {}) {
     // ВНИМАНИЕ: в page.evaluate передаются ТОЛЬКО сериализуемые значения —
     // RegExp через границу puppeteer не проходит (превращается в {}). Поэтому
@@ -554,11 +579,24 @@ async function getRobustLastAnswerData(page, {
             : null;
         const classOf = (node) =>
             String(node.getAttribute && node.getAttribute('class') || '');
+        // Сайт-специфичные поддеревья «размышлений»/вызовов инструментов
+        // (CSS-селекторы от sites/*.js) — то же, что и stripSelectors в
+        // XPath-пути. Класс-независимое распознавание ниже остаётся запасным.
+        const stripSels = Array.isArray(opts.stripSelectors) ? opts.stripSelectors : [];
+        const matchesStrip = (node) => {
+            for (const sel of stripSels) {
+                try {
+                    if (node.matches && node.matches(sel)) return true;
+                } catch (_) { /* невалидный селектор — пропускаем */ }
+            }
+            return false;
+        };
         const isThinkNode = (node) =>
             (node.hasAttribute && node.hasAttribute('data-testid') &&
                 /think/i.test(node.getAttribute('data-testid') || '')) ||
             /think/i.test(classOf(node)) ||
             /reason/i.test(classOf(node)) ||
+            matchesStrip(node) ||
             (extraThinkRe ? extraThinkRe.test(classOf(node)) : false);
         const clone = bubble.cloneNode(true);
         clone.querySelectorAll('*').forEach((n) => {
@@ -576,14 +614,14 @@ async function getRobustLastAnswerData(page, {
         // Брали ПОСЛЕДНИЙ блок с текстом, но финал модели не всегда последний
         // (сайт доклеивает свои служебные блоки) — и самый полезный текст
         // терялся. При НЕСКОЛЬКИХ блоках выбираем САМЫЙ СОДЕРЖАТЕЛЬНЫЙ (максимум
-        // непустого текста; при равенстве длин — последний, ближе к финалу
+        // непустого текста; при равенении длин — последний, ближе к финалу
         // генерации). Блоки-мусор (гидрация) в кандидаты не попадают.
         // Единственный блок — как раньше, отдаём весь пузырь (clone).
         const blocks = Array.from(clone.querySelectorAll(opts.blockSelector))
             .filter((n) => (n.innerText || '').trim().length > 0)
             .filter((n) => !looksGarbage(n.innerText || ''));
         let picked = clone;
-        if (blocks.length > 1) {
+        if (blocks.length > 1 && !opts.preferWholeBubble) {
             let best = blocks[0];
             for (let i = 1; i < blocks.length; i++) {
                 const len = (blocks[i].innerText || '').trim().length;
@@ -599,6 +637,8 @@ async function getRobustLastAnswerData(page, {
         garbageMarkers: garbageMarkersSrc,
         garbageJsonMarkers: garbageJsonMarkersSrc,
         blockSelector,
+        stripSelectors,
+        preferWholeBubble: !!opts.preferWholeBubble,
     });
     return data || { html: '', text: '' };
 }
@@ -759,6 +799,10 @@ async function sendMessage(ctx, payload = {}, site) {
         //    HTML), пробуем альтернативные, прежде чем сдаться.
         const answerXPaths = cfg.answerXPaths(site, currentService);
         const toMarkdown = (html) => cfg.htmlToMarkdown(html, site);
+        // Поддеревья «размышлений»/вызовов инструментов, которые надо вырезать
+        // из снимка ответа (сайт-специфичные CSS-селекторы). Работает и в
+        // XPath-пути, и в robust-fallback.
+        const stripSelectors = (cfg.robust && cfg.robust.stripSelectors) || [];
 
         let answer = null;
         let answerXpUsed = null;
@@ -778,6 +822,7 @@ async function sendMessage(ctx, payload = {}, site) {
                         ...cfg.stable,
                         appearTimeoutMs: cfg.appearTimeoutMs(xp, site, currentService, thinking),
                         stopXPaths: cfg.stopXPaths,
+                        stripSelectors,
                     });
                     inner = toMarkdown(answer);
                     if (!looksCutMidCode(answer)) break;
@@ -882,6 +927,7 @@ async function sendMessage(ctx, payload = {}, site) {
                     const retryAnswer = await waitLastOuterHtmlStable(page, xp, {
                         ...cfg.retryStable,
                         stopXPaths: cfg.stopXPaths,
+                        stripSelectors,
                     });
                     const retryInner = toMarkdown(retryAnswer);
                     if (retryInner && retryInner.trim().length >= 1 && retryInner.trim().length > inner.trim().length
