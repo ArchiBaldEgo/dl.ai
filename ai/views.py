@@ -58,7 +58,7 @@ from .admin.permissions import (
     is_superuser_user,
 )
 from .middleware import _dev_bypass_enabled
-from .services.auth import get_user_identity_for_log
+from .services.auth import ai_disabled_reason, can_use_ai, get_user_identity_for_log
 from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
 from .services.user_models import (
     PROVIDER_BASE_URLS,
@@ -334,6 +334,16 @@ def _read_ai_state(request):
         return {}
 
 
+def _ai_disabled_reason(request):
+    """Причина, по которой AI пользователю недоступен (или ``None``).
+
+    Тонкая обёртка над общим хелпером ``ai_disabled_reason``
+    (ai/services/auth.py) — тот же текст отказа на странице, в WS и в
+    HTTP-эндпоинтах отправки решения.
+    """
+    return ai_disabled_reason(request)
+
+
 def _render_ai_page(request, template_name, extra_context=None, wizard_scope=None):
     """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
 
@@ -351,6 +361,11 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         return HttpResponseForbidden("Authentication required")
     if not _is_ai_app_enabled():
         return HttpResponseNotFound("AI app is disabled")
+    # Гейт DL «canUseAi»: AI в текущем курсе запрещён → честная страница
+    # с объяснением (не молчаливая пустая страница).
+    disabled_reason = _ai_disabled_reason(request)
+    if disabled_reason:
+        return HttpResponseForbidden(disabled_reason)
     available_models = get_available_model_options()
     # Self-heal: an empty list means the current 04:00 MSK window was scanned
     # while the upstream key/balance was broken and every model got marked
@@ -1093,6 +1108,11 @@ def send_solution_view(request):
     """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
+    # Гейт DL «canUseAi»: AI в текущем курсе запрещён → отправка решения
+    # на проверку бессмысленна (пользователь не сможет и сгенерировать код).
+    disabled_reason = _ai_disabled_reason(request)
+    if disabled_reason:
+        return JsonResponse({"error": disabled_reason}, status=403)
 
     try:
         body = json.loads(request.body or "{}")
@@ -1160,9 +1180,17 @@ def send_solution_view(request):
         course_id, _course_err = _resolve_active_course_id_for_session(session_id)
         course_id = course_id or 0
 
+    # Имя временного файла решения (контракт DL v1.4.2, SendSolutionRequest.fileName)
+    # и машина проверки (delta) — необязательные, приходят из тела.
+    file_name = str(body.get("fileName") or "").strip()[:200]
+    delta = str(body.get("delta") or "").strip()[:255]
+
     try:
         from .dl_api_client import send_solution_to_dl
-        data = send_solution_to_dl(session_id, node_id, code, file_extension, course_id=course_id)
+        data = send_solution_to_dl(
+            session_id, node_id, code, file_extension,
+            course_id=course_id, file_name=file_name, delta=delta,
+        )
     except (DLUnauthorizedError, DLApiUnavailable, DLServerError) as exc:
         return dl_error_response(exc)
 
@@ -1215,6 +1243,11 @@ def get_solution_result_view(request):
     """
     if not _has_page_access(request):
         return HttpResponseForbidden("Authentication required")
+    # Тот же гейт DL «canUseAi», что и на отправке: опрос результата
+    # проверки решения — часть AI-сценария.
+    disabled_reason = _ai_disabled_reason(request)
+    if disabled_reason:
+        return JsonResponse({"error": disabled_reason}, status=403)
 
     try:
         body = json.loads(request.body or "{}")

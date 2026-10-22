@@ -1373,6 +1373,35 @@ function updateVoiceStatus(message) {
     if (voiceStatus) voiceStatus.textContent = message;
 }
 
+// === Гейт DL «canUseAi»: WS закрыт кодом 4404 = AI в курсе запрещён =====
+//
+// Сервер (ai/consumers.py) закрывает соединение с кодом 4404 и reason
+// «AI в этом курсе запрещён (dl.gsu.by)». Без разбора кода пользователь видел
+// бы молчаливое «Соединение закрыто» — непонятно, почему чат не работает.
+// Поэтому клиент сам показывает внятное ТРЁХЯЗЫЧНОЕ сообщение (язык —
+// только #selectLang, как и весь остальной клиентский текст).
+// Текст сервера не показываем: он русский и не локализован.
+var AI_DISABLED_CLOSE_CODE = 4404;
+
+function isAiDisabledClose(event) {
+    return !!event && event.code === AI_DISABLED_CLOSE_CODE;
+}
+
+function showAiDisabledMessage() {
+    var messages = document.getElementById('messages');
+    if (!messages) return;
+    var text = getUiString('aiDisabled', 'В этом курсе использование ИИ запрещено.');
+    var item = document.createElement('li');
+    item.dataset.role = 'other';
+    var content = document.createElement('div');
+    content.className = 'ai-disabled-notice';
+    content.textContent = text;
+    item.appendChild(content);
+    messages.appendChild(item);
+    messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
+    updateVoiceStatus(text);
+}
+
 // === Localization (shared across all pages) ===
 
 var localization = {
@@ -1416,6 +1445,9 @@ var localization = {
         sharedPrefix: "[Общий]",
         // Кнопка «Тестирование» — отправка кода модели в DL (страница «Реши задачу»).
         dlTestButton: "Тестирование",
+        // AI запрещён в текущем курсе флагом DL canUseAi — WS закрывается
+        // кодом 4404 (см. consumers.py AI_DISABLED_CLOSE_CODE).
+        aiDisabled: "В этом курсе использование ИИ запрещено (dl.gsu.by не разрешил доступ для вашей учётной записи). Обратитесь к преподавателю или в техническую поддержку.",
         dlTesting: "DL: тестирование…",
         dlNoCode: "В последнем ответе модели не найден блок кода",
         dlNoLanguage: "Выберите язык программирования — по нему определяется расширение файла",
@@ -1423,6 +1455,8 @@ var localization = {
         dlTimeout: "DL: тестирование не завершилось за отведённое время",
         dlSendFailed: "DL: не удалось отправить решение на тестирование",
         dlEmptyComment: "DL: тестирование завершено",
+        // Машина (Дельта), на которой DL проверял решение (deltaName).
+        dlMachine: "машина: {0}",
         voiceStatus: {
             listening: "Запись голоса",
             recognized: "Распознано: ",
@@ -1529,6 +1563,9 @@ var localization = {
         sharedPrefix: "[Shared]",
         // «Testing» button — submit the model's code to DL («Реши задачу» page).
         dlTestButton: "Testing",
+        // AI disabled for the current course (DL canUseAi=false) — the WS is
+        // closed with code 4404 (see consumers.py AI_DISABLED_CLOSE_CODE).
+        aiDisabled: "Using AI is not allowed in this course (dl.gsu.by did not grant access for your account). Please contact your teacher or technical support.",
         dlTesting: "DL: testing…",
         dlNoCode: "No code block found in the model's last reply",
         dlNoLanguage: "Select a programming language — it determines the file extension",
@@ -1536,6 +1573,8 @@ var localization = {
         dlTimeout: "DL: testing did not finish within the allotted time",
         dlSendFailed: "DL: failed to submit the solution for testing",
         dlEmptyComment: "DL: testing finished",
+        // The machine (Delta) that ran the DL check (deltaName).
+        dlMachine: "machine: {0}",
         voiceStatus: {
             listening: "Voice recording",
             recognized: "Recognized: ",
@@ -1641,6 +1680,9 @@ var localization = {
         sharedPrefix: "[Partagé]",
         // Bouton « Test » — envoi du code du modèle vers DL (page « Реши задачу »).
         dlTestButton: "Test",
+        // AI désactivé pour le cours courant (DL canUseAi=false) — le WS est
+        // fermé avec le code 4404 (voir consumers.py AI_DISABLED_CLOSE_CODE).
+        aiDisabled: "L'utilisation de l'IA n'est pas autorisée dans ce cours (dl.gsu.by n'a pas accordé l'accès à votre compte). Veuillez contacter votre enseignant ou le support technique.",
         dlTesting: "DL : test en cours…",
         dlNoCode: "Aucun bloc de code trouvé dans la dernière réponse du modèle",
         dlNoLanguage: "Choisissez un langage de programmation — il détermine l'extension du fichier",
@@ -1648,6 +1690,8 @@ var localization = {
         dlTimeout: "DL : le test ne s'est pas terminé dans le délai imparti",
         dlSendFailed: "DL : échec de l'envoi de la solution pour le test",
         dlEmptyComment: "DL : test terminé",
+        // La machine (Delta) qui a effectué le test DL (deltaName).
+        dlMachine: "machine : {0}",
         voiceStatus: {
             listening: "Enregistrement vocal",
             recognized: "Reconnu : ",
@@ -2163,7 +2207,11 @@ function initWebSocket() {
         };
 
         ws.onclose = function(event) {
-            updateVoiceStatus(getVoiceStatusText('connectionClosed'));
+            if (isAiDisabledClose(event)) {
+                showAiDisabledMessage();
+            } else {
+                updateVoiceStatus(getVoiceStatusText('connectionClosed'));
+            }
             setRequestLock(false);
             notEnter = false;
         };

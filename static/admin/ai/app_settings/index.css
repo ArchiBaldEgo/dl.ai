@@ -2,39 +2,12 @@
     padding: 4px 0 0;
 }
 
+/* Отступ таблиц журнала вокруг себя; сам вид ячеек/строк (классы
+   .ai-logs-table*/.ai-log-row/.ai-log-pin-*) — в ГЛОБАЛЬНОМ
+   static/admin/ai/batch_results/index.css (таблица общая с журналом,
+   копии правил отсюда удалены — DRY). */
 .ai-recent-logs-table {
-    width: 100%;
-    border-collapse: collapse;
     margin: 8px 0;
-}
-
-.ai-recent-logs-table th,
-.ai-recent-logs-table td {
-    border: 1px solid var(--hairline-color);
-    padding: 6px 9px;
-    text-align: left;
-    vertical-align: top;
-    font-size: 13px;
-}
-
-.ai-recent-logs-table th {
-    background: var(--darkened-bg);
-    font-weight: 600;
-}
-
-.ai-recent-logs-ok {
-    color: #067647;
-    font-weight: 600;
-}
-
-.ai-recent-logs-err {
-    color: #b42318;
-    font-weight: 600;
-}
-
-.ai-recent-logs-empty {
-    color: var(--body-quiet-color);
-    padding: 8px 0;
 }
 
 .ai-settings-logs-actions {
@@ -43,30 +16,6 @@
 
 .ai-daily-report-bar {
     margin: 6px 0 24px;
-}
-
-.ai-batch-row-clickable {
-    cursor: pointer;
-}
-
-.ai-batch-row-clickable:hover td {
-    background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color));
-}
-
-.ai-batch-row-open td {
-    font-weight: 600;
-}
-
-.ai-batch-detail>td {
-    background: var(--darkened-bg);
-}
-
-.ai-recent-log-row {
-    cursor: pointer;
-}
-
-.ai-recent-log-row:hover td {
-    background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color));
 }
 
 .ai-recent-log-detail>td {
@@ -92,40 +41,4 @@
     border-radius: 4px;
     padding: 8px;
     background: var(--body-bg);
-}
-
-.ai-log-pin-cell {
-    white-space: nowrap;
-    text-align: center;
-}
-
-.ai-log-pin-btn {
-    background: none;
-    border: 1px solid var(--hairline-color);
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 15px;
-    line-height: 1;
-    padding: 3px 7px;
-    color: var(--body-quiet-color);
-}
-
-.ai-log-pin-btn:hover:not(:disabled) {
-    border-color: var(--link-fg);
-    color: var(--link-fg);
-}
-
-.ai-log-pin-btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-}
-
-.ai-log-pin-btn-active {
-    color: #d97706;
-    border-color: #d97706;
-}
-
-.ai-log-pin-btn.busy {
-    opacity: 0.6;
-    pointer-events: none;
 }

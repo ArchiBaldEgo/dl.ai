@@ -69,11 +69,12 @@
               {% endif %}
             </td>
             <td class="cap-cell">
-              {% with caps=row.capabilities %}
-                <span class="cap {% if caps.text %}cap-on{% else %}cap-off{% endif %}">Текст</span>
-                <span class="cap {% if caps.vision %}cap-on{% else %}cap-off{% endif %}">Зрение</span>
-                <span class="cap {% if caps.reasoning %}cap-on{% else %}cap-off{% endif %}">Рассуждения</span>
-              {% endwith %}
+              {# Три состояния бейджа: зелёный (есть и модель активна), зелёный #}
+              {# зачёркнутый (есть, но модель неактивна), серый зачёркнутый   #}
+              {# (способности нет). Классы считает сервер — cap_classes.      #}
+              <span class="cap {{ row.cap_classes.text.class }}" title="{{ row.cap_classes.text.title }}">Текст</span>
+              <span class="cap {{ row.cap_classes.vision.class }}" title="{{ row.cap_classes.vision.title }}">Зрение</span>
+              <span class="cap {{ row.cap_classes.reasoning.class }}" title="{{ row.cap_classes.reasoning.title }}">Рассуждения</span>
             </td>
             <td>{{ row.last_http_code|default:"—" }}</td>
             <td>{{ row.last_http_code_label|default:"—" }}</td>

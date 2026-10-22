@@ -1,0 +1,1225 @@
+{
+  "openapi": "3.0.4",
+  "info": {
+    "title": "DL REST API",
+    "description": "Это документация к API для DL, сделанной на принципах REST. С его помощью можно легко и интуитивно делать запросы для получение информации из-вне сервера DL. Легко адаптируются и добавляются новые endpoint'ы.  \n\nЧтобы наверняка увидеть актуальную страницу можно нажать ctrl+f5.\n\nОтветы с ошибками: ориентируйтесь на HTTP-статус и Content-Type.\nIIS или промежуточный сервер может заменить тело ошибки стандартным текстом или HTML,\nдаже если приложение возвращает JSON. Не пытайтесь безусловно разбирать ответ 4xx/5xx как JSON.\n\nСсылки:\n- [Страница на confluence](http://confluence.newit.gsu.by/display/dldev/DL+REST+API)",
+    "contact": {
+      "email": "ermakovvitalik30@gmail.com"
+    },
+    "version": "1.4.2"
+  },
+  "servers": [
+    {
+      "url": "https://dl.gsu.by/restapi",
+      "description": "Обычный сервер DL"
+    },
+    {
+      "url": "http://dl/restapi",
+      "description": "Отладочный локальный сервер"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Пользователь",
+      "description": "Получение информации о пользователе DL"
+    },
+    {
+      "name": "Задача",
+      "description": "Получение информации о задаче DL"
+    },
+    {
+      "name": "Решения",
+      "description": "Отправка решений на проверку и получение результатов"
+    },
+    {
+      "name": "Дерево задач",
+      "description": "Навигация по дереву курсов и получение списков задач"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "SessionId": {
+        "type": "string",
+        "description": "Session Id хранится в Url-encoded виде внутри cookies. Он существует и валиден некоторое время после того как человек заходит в аккаунт DL из браузера.\nВ API передается URL-decoded GUID, с фигурными скобками или без них.\nНеправильный формат и несуществующая или устаревшая сессия возвращают 401, а не ошибку сервера.\nДля /get-failed-tests и /get-test-data отсутствие или пустое значение sessionId считается некорректным запросом (400).\n\n\nВыглядит он примерно так: `{2DA21836-FD30-433F-B0A3-A4BDA2669B6D}`\n\nДля получения вручную нужно:  \n\n- Зайти в devtools браузера  \n\n- Перейти на вкладку Application  \n\n- Раздел Cookies -> https://dl.gsu.by  \n\n- Найти `DLSID`  \n\n- Включить снизу галочку \"Show URL-decoded\"  \n\n- Скопировать значение\n\n\nДля получения через JavaScript можно использовать следующий код:\n\n    function getSessionId() {\n        const match = document.cookie.match('(?:^|; )DLSID=([^;]*)');\n        return match ? decodeURIComponent(match[1]) : null;\n    }\n\n    console.log(getSessionId());\n"
+      },
+      "SessionRequest": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "$ref": "#/components/schemas/SessionId"
+          }
+        },
+        "required": [
+          "sessionId"
+        ]
+      },
+      "EducationInfo": {
+        "type": "object",
+        "properties": {
+          "form": {
+            "type": "string",
+            "description": "ID класса/курса обучения пользователя из справочника форм обучения"
+          },
+          "schoolId": {
+            "type": "string",
+            "description": "ID школы пользователя"
+          },
+          "schoolKind": {
+            "type": "string",
+            "description": "Тип школы (например, школа, гимназия, лицей)"
+          },
+          "schoolNo": {
+            "type": "string",
+            "description": "Номер школы"
+          },
+          "groupMaskId": {
+            "type": "string",
+            "description": "ID маски группы"
+          },
+          "formLetter": {
+            "type": "string",
+            "description": "Буква класса"
+          },
+          "schoolName": {
+            "type": "string",
+            "description": "Название учебного заведения. Пустая строка, если название отсутствует или его не удалось получить."
+          },
+          "formName": {
+            "type": "string",
+            "description": "Название класса/курса обучения из справочника форм обучения. Пустая строка, если название отсутствует или его не удалось получить."
+          },
+          "groupName": {
+            "type": "string",
+            "description": "Название группы, сформированное по маске группы и классу/курсу обучения пользователя. Пустая строка, если название отсутствует или его не удалось получить."
+          }
+        }
+      },
+      "UserInfo": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "integer",
+            "description": "Id пользователя"
+          },
+          "courseID": {
+            "type": "integer",
+            "description": "Id курса, в которой сейчас находится пользователь"
+          },
+          "nodeId": {
+            "type": "integer",
+            "description": "Id ноды, в которой сейчас находится пользователь"
+          },
+          "taskId": {
+            "type": "integer",
+            "description": "Id задачи, в которой сейчас находится пользователь"
+          },
+          "currentStatement": {
+            "type": "string",
+            "description": "Текст задачи, в которой сейчас находится пользователь"
+          },
+          "email": {
+            "type": "string",
+            "description": "Email пользователя"
+          },
+          "canUseAi": {
+            "type": "boolean",
+            "description": "Флаг — разрешено ли использование AI. Учитывается глобальная настройка AI, затем активное соревнование пользователя с включенным контролем участия. Если такого соревнования нет, проверяется курс из сессии. Во время соревнования используется настройка разрешения AI для соответствующего курса.\n"
+          },
+          "education": {
+            "$ref": "#/components/schemas/EducationInfo"
+          }
+        }
+      },
+      "CompilerInfo": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Название компилятора (например, \"C++ (GCC)\", \"Pascal\", \"Java\")"
+          },
+          "extension": {
+            "type": "string",
+            "description": "Расширение файла, поддерживаемое этим компилятором (например, \"cpp\", \"pas\", \"java\")"
+          }
+        }
+      },
+      "TaskInfo": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Название задачи"
+          },
+          "taskId": {
+            "type": "integer",
+            "description": "Id задачи"
+          },
+          "statement": {
+            "type": "string",
+            "description": "Формулировка задачи"
+          },
+          "path": {
+            "type": "string",
+            "nullable": true,
+            "description": "Полный путь к задаче в дереве курса (например, \"Программирование [Ассемблер i8086, C-MPA]\\Простейшая (Программы с подсказками)\\Сложение\\\")."
+          },
+          "limitation": {
+            "type": "string",
+            "description": "Ограничения задачи (время выполнения, память, настройки тестера). Возвращает текст с тегами <br> или пустую строку, если ограничений нет."
+          },
+          "compilers": {
+            "type": "array",
+            "description": "Список доступных для задачи компиляторов (зависит от настроек курса и типа задачи)",
+            "items": {
+              "$ref": "#/components/schemas/CompilerInfo"
+            }
+          }
+        }
+      },
+      "SolutionRequest": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "fileExtension": {
+            "type": "string",
+            "description": "Расширение файла обязательно с точкой (например `.pas`, `.cpp`, `.py`, `.java`, можно любое), ищется в папке задачи по маске \\*sol\\* c выбранным расширением"
+          },
+          "taskId": {
+            "type": "integer",
+            "description": "Id задачи, для которой запрашивается решение"
+          }
+        },
+        "required": [
+          "sessionId",
+          "fileExtension",
+          "taskId"
+        ]
+      },
+      "SolutionResponse": {
+        "type": "object",
+        "properties": {
+          "solution": {
+            "type": "string",
+            "description": "Содержимое файла решения"
+          }
+        }
+      },
+      "IdUserInfo": {
+        "type": "object",
+        "properties": {
+          "firstName": {
+            "type": "string",
+            "description": "Имя пользователя"
+          },
+          "lastName": {
+            "type": "string",
+            "description": "Фамилия пользователя"
+          },
+          "education": {
+            "$ref": "#/components/schemas/EducationInfo"
+          }
+        }
+      },
+      "SendSolutionRequest": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "nodeId": {
+            "type": "integer",
+            "description": "Id ноды, куда отправляется решение"
+          },
+          "courseId": {
+            "type": "integer",
+            "description": "Id курса, в котором находится нода"
+          },
+          "code": {
+            "type": "string",
+            "description": "Текст исходного кода решения"
+          },
+          "fileExtension": {
+            "type": "string",
+            "description": "Расширение файла обязательно с точкой (например, `.pas`, `.cpp`, `.py`)",
+            "example": ".cpp"
+          },
+          "fileName": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9]+$",
+            "description": "Необязательное имя файла с расширением. В основной части допускаются только латинские буквы, цифры, символы _ и -. Точка допускается только одна, перед расширением. Расширение должно в точности совпадать с fileExtension, включая регистр. Пути, пробелы и зарезервированные имена Windows (CON, PRN, AUX, NUL, COM1–COM9, LPT1–LPT9) не допускаются. Если поле не передано или равно null, имя создается автоматически в виде api_solution_<случайное значение>.<расширение>. Повторное использование одного имени допускается, конкретная отправка определяется по queueId.\n",
+            "example": "Deepseek-4-1-flash_12345.mpc"
+          },
+          "delta": {
+            "type": "string",
+            "description": "Машина для проверки. Может быть передана как ID (например, \"5\") или как точное название (например, \"DelTA4 at NIT1 Win10 x64\"). Если не передано или пусто — машина назначается автоматически."
+          }
+        },
+        "required": [
+          "sessionId",
+          "courseId",
+          "nodeId",
+          "code",
+          "fileExtension"
+        ]
+      },
+      "SendSolutionResponse": {
+        "type": "object",
+        "properties": {
+          "queueId": {
+            "type": "integer",
+            "description": "Id отправленного решения в очереди тестирования (если 0, значит ошибка)"
+          },
+          "message": {
+            "type": "string",
+            "description": "Сообщение о результате отправки или текст ошибки"
+          }
+        }
+      },
+      "GetResultRequest": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "queueId": {
+            "type": "integer",
+            "description": "Id решения из очереди, возвращенный методом /send-solution"
+          }
+        },
+        "required": [
+          "sessionId",
+          "queueId"
+        ]
+      },
+      "GetResultResponse": {
+        "type": "object",
+        "properties": {
+          "isFinished": {
+            "type": "boolean",
+            "description": "Флаг завершения проверки (false — в очереди или тестируется, true — проверка завершена)"
+          },
+          "comment": {
+            "type": "string",
+            "description": "Текстовый вердикт проверки (например, \"Все тесты успешно пройдены\", \"не пройден 2-й тест (неверный ответ)\" или пустая строка, если проверка еще не завершена)"
+          },
+          "deltaId": {
+            "type": "integer",
+            "description": "Id машины, на которой происходило (или происходит) тестирование. 0 - если еще не назначена."
+          },
+          "deltaName": {
+            "type": "string",
+            "description": "Название машины, на которой происходило тестирование. Пустая строка, если еще не назначена."
+          }
+        }
+      },
+      "GetFailedTestsRequest": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "queueId": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Id решения из очереди, возвращенный методом /send-solution"
+          }
+        },
+        "required": [
+          "sessionId",
+          "queueId"
+        ]
+      },
+      "FailedTestInfo": {
+        "type": "object",
+        "properties": {
+          "stepId": {
+            "type": "integer",
+            "description": "Id этапа проверки решения. Значение 0 означает, что номер проваленного теста получен из итогового вердикта, а подробная запись этапа отсутствует."
+          },
+          "testNumber": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Номер теста, на котором зарегистрирована ошибка"
+          },
+          "result": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Начисленный балл за тест, если сохранен подробный протокол. При отсутствии балла поле не передается. Сам по себе нулевой балл не является признаком ошибки."
+          },
+          "message": {
+            "type": "string",
+            "description": "Сообщение для теста, этапа проверки или итоговый вердикт, из которого получен номер проваленного теста. Пустая строка, если сообщение отсутствует."
+          },
+          "canGetData": {
+            "type": "boolean",
+            "description": "Разрешено ли пользователю получить данные теста с учетом прав и настроек курса. Не гарантирует наличие файлов или соответствие лимиту размера."
+          }
+        }
+      },
+      "GetFailedTestsResponse": {
+        "type": "object",
+        "properties": {
+          "isFinished": {
+            "type": "boolean",
+            "description": "Флаг завершения проверки. Если false, tests возвращается пустым массивом."
+          },
+          "tests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FailedTestInfo"
+            },
+            "description": "Список подтвержденных проваленных тестов по этапам проверки. Подробная запись теста необязательна, если этап уже содержит номер провала. Если таких этапов нет, номер извлекается из поддерживаемого формата итогового вердикта: «не пройден N тест (...)», «не пройден N-й тест (...)», «не пройден N-й тест. Решение вызвало ошибку Runtime Error ...», «[testN]: Тест не прошёл: ...», «[test N]: Тест не прошел по времени: ...» или «[testN]: Ошибка исполнения программы: ...» (регистр букв не учитывается). Для сообщений «Не пройдены тесты: 1,3-5» и «неверные тесты: 1,2» возвращаются все указанные номера в порядке возрастания без повторов. Некорректные списки и списки более 10000 номеров не разбираются. Также поддерживаются стандартные английские вердикты с окончанием «on test N»: Wrong answer, Incorrect answer, Presentation error, Runtime error, Time limit exceeded, Memory limit exceeded, Output limit exceeded и Test failed (возможна дополнительная информация в скобках). Если основной вердикт не распознан, проверяется его английский вариант. Ошибки компиляции с префиксом [testN] не считаются провалом теста. Произвольные подписи вроде [n=301], сообщения без номера и ошибки эталонной программы не разбираются. Возвращается не более одного теста для каждого этапа либо номера из итогового вердикта; это не гарантированно полный список всех ошибочных тестов. Один номер теста может встретиться у разных этапов. Если подтвержденных провалов нет или формат вердикта не поддерживается, возвращается пустой массив; это само по себе не означает, что решение верное.\n"
+          }
+        }
+      },
+      "GetTestDataRequest": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "queueId": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Id решения, для которого запрашиваются данные проваленного теста"
+          },
+          "testNumber": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Номер теста из ответа /get-failed-tests"
+          }
+        },
+        "required": [
+          "sessionId",
+          "queueId",
+          "testNumber"
+        ]
+      },
+      "GetTestDataResponse": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "description": "Входные данные теста"
+          },
+          "expectedOutput": {
+            "type": "string",
+            "description": "Эталонный ответ теста. Это не фактический вывод проверяемой программы."
+          }
+        }
+      },
+      "DeltaInfo": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Внутренний ID машины"
+          },
+          "name": {
+            "type": "string",
+            "description": "Системное имя машины (UserName)"
+          },
+          "displayName": {
+            "type": "string",
+            "description": "Отображаемое имя машины"
+          },
+          "isWorking": {
+            "type": "boolean",
+            "description": "Флаг активности (true - Дельта сейчас работает и на связи)"
+          }
+        }
+      },
+      "GetDeltasResponse": {
+        "type": "object",
+        "properties": {
+          "deltas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeltaInfo"
+            },
+            "description": "Массив доступных Дельт"
+          }
+        }
+      },
+      "NodeRequest": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "courseId": {
+            "type": "integer",
+            "description": "Id курса, в котором находится нода"
+          },
+          "nodeId": {
+            "type": "integer",
+            "description": "Id ноды (папки), для которой нужно получить список задач"
+          }
+        },
+        "required": [
+          "sessionId",
+          "courseId",
+          "nodeId"
+        ]
+      },
+      "NodeTasksResponse": {
+        "type": "object",
+        "properties": {
+          "tasks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "nodeId": {
+                  "type": "integer",
+                  "description": "Id ноды задачи"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Название задачи"
+                }
+              }
+            },
+            "description": "Список задач, к которым у пользователя есть доступ"
+          }
+        }
+      },
+      "CourseNodeRequest": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "courseId": {
+            "type": "integer",
+            "description": "Id курса, для которого нужно получить корневые ноды"
+          }
+        },
+        "required": [
+          "sessionId",
+          "courseId"
+        ]
+      },
+      "CourseNodeResponse": {
+        "type": "object",
+        "properties": {
+          "tasksRootId": {
+            "type": "integer",
+            "description": "Id корневой ноды для дерева задач курса"
+          },
+          "theoryRootId": {
+            "type": "integer",
+            "description": "Id корневой ноды для дерева теории курса"
+          }
+        }
+      },
+      "NodeTreeItem": {
+        "type": "object",
+        "properties": {
+          "nodeId": {
+            "type": "integer",
+            "description": "Id ноды"
+          },
+          "name": {
+            "type": "string",
+            "description": "Название папки или задачи"
+          },
+          "isFolder": {
+            "type": "boolean",
+            "description": "Является ли эта нода папкой (true) или задачей (false)"
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeTreeItem"
+            },
+            "description": "Список вложенных нод (если это папка)"
+          }
+        }
+      },
+      "NodeTreeResponse": {
+        "type": "object",
+        "properties": {
+          "tree": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeTreeItem"
+            },
+            "description": "Дерево задач и папок"
+          }
+        }
+      },
+      "GetSolutionsRequest": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "courseId": {
+            "type": "integer",
+            "description": "Id курса, в контексте которого ищутся решения"
+          },
+          "nodeId": {
+            "type": "integer",
+            "description": "Id ноды (задачи)"
+          },
+          "startDate": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Начало периода в формате 'YYYY-MM-DD' или 'YYYY-MM-DD HH:mm:ss' (необязательно)"
+          },
+          "endDate": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Конец периода в формате 'YYYY-MM-DD' или 'YYYY-MM-DD HH:mm:ss' (необязательно)"
+          },
+          "extension": {
+            "type": "string",
+            "description": "Расширение файла без точки (например, cpp, pas, java). Если не указано, вернутся решения с любыми расширениями."
+          },
+          "includeCorrect": {
+            "type": "boolean",
+            "description": "Включать ли в результат решения, прошедшие все тесты. По умолчанию true.",
+            "default": true
+          },
+          "includeIncorrect": {
+            "type": "boolean",
+            "description": "Включать ли в результат неверные решения (ошибки, не пройденные тесты). По умолчанию true.",
+            "default": true
+          }
+        },
+        "required": [
+          "sessionId",
+          "courseId",
+          "nodeId"
+        ]
+      },
+      "SolutionItem": {
+        "type": "object",
+        "properties": {
+          "queueId": {
+            "type": "integer",
+            "description": "Id в очереди"
+          },
+          "userId": {
+            "type": "integer",
+            "description": "Id пользователя, отправившего решение"
+          },
+          "code": {
+            "type": "string",
+            "description": "Исходный код решения"
+          },
+          "result": {
+            "type": "string",
+            "description": "Начисленные баллы за задачу"
+          },
+          "report": {
+            "type": "string",
+            "description": "Текст отчета тестирующей системы (вердикт)"
+          },
+          "isCorrect": {
+            "type": "boolean",
+            "description": "Является ли решение полностью верным"
+          }
+        }
+      },
+      "GetSolutionsResponse": {
+        "type": "object",
+        "properties": {
+          "solutions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SolutionItem"
+            }
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/get-user-info": {
+      "post": {
+        "tags": [
+          "Пользователь"
+        ],
+        "summary": "Получение информации о текущем пользователе",
+        "description": "Принимает `sessionId` в теле запроса и возвращает информацию о пользователе: - Если `sessionId` некорректен или устарел — возвращает 401 Unauthorized. - Если пользователь не находится в конкретной ноде — `nodeId` и `taskId` будут равны 0, а `currentStatement` — пустой строке. - В `education` возвращаются идентификаторы и названия учебного заведения и группы/класса. Если новые названия получить не удалось, остальные данные сохраняются, а названия могут быть пустыми строками. - Для пользователей, не являющихся учащимися, поля `education` возвращаются пустыми строками.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/SessionRequest"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "removeHtmlTags": {
+                        "type": "boolean",
+                        "nullable": true,
+                        "description": "Удалять ли HTML-теги из текстов (по умолчанию `true`, в том числе при передаче null)",
+                        "default": true
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешный ответ с информацией о пользователе",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неавторизован — `sessionId` отсутствует или недействителен"
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера"
+          }
+        }
+      }
+    },
+    "/get-id-user-info": {
+      "get": {
+        "tags": [
+          "Пользователь"
+        ],
+        "summary": "Получение базовой информации о пользователе по ID",
+        "description": "Возвращает имя, фамилию и объект education пользователя по его userId. Объект education имеет тот же формат, что и в /get-user-info, включая идентификаторы и названия учебного заведения и группы/класса. Для пользователей, не являющихся учащимися, поля education возвращаются пустыми строками. Передача sessionId не требуется.\n",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Id пользователя для поиска"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Успешный ответ с информацией о пользователе",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdUserInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь с таким ID не найден"
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера"
+          }
+        }
+      }
+    },
+    "/get-task-info": {
+      "get": {
+        "tags": [
+          "Задача"
+        ],
+        "summary": "Получение информации о задаче по nodeId",
+        "description": "Возвращает название задачи, её ID, формулировку и полный путь в дереве (если передан courseId).\n",
+        "parameters": [
+          {
+            "name": "nodeId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Id ноды, для которой нужно получить информацию о задаче"
+          },
+          {
+            "name": "courseId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Id курса задачи. Необходим для получения полного пути к задаче в дереве, а также ее ограничений и доступных компиляторов."
+          },
+          {
+            "name": "removeHtmlTags",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            },
+            "description": "Удалять ли HTML-теги из текстов (по умолчанию `true`)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Успешный ответ с информацией о задаче",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Задача для переданного `nodeId` не найдена"
+          }
+        }
+      }
+    },
+    "/get-solution": {
+      "post": {
+        "tags": [
+          "Задача"
+        ],
+        "summary": "Получение примера решения задачи",
+        "description": "Позволяет получить содержимое файла решения для заданной задачи, если у пользователя есть права на использование AI и файл решения существует.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SolutionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешный ответ с содержимым файла решения",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SolutionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неавторизован — `sessionId` отсутствует или недействителен"
+          },
+          "403": {
+            "description": "Доступ запрещён — пользователь не может использовать AI для этой задачи"
+          },
+          "404": {
+            "description": "Файл решения не найден"
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера"
+          }
+        }
+      }
+    },
+    "/get-deltas": {
+      "get": {
+        "tags": [
+          "Решения"
+        ],
+        "summary": "Получить список тестирующих машин (Дельт)",
+        "description": "Возвращает список всех зарегистрированных Дельт, включая их статус активности.",
+        "responses": {
+          "200": {
+            "description": "Успешный ответ со списком машин",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetDeltasResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера"
+          }
+        }
+      }
+    },
+    "/send-solution": {
+      "post": {
+        "tags": [
+          "Решения"
+        ],
+        "summary": "Отправить решение на проверку",
+        "description": "Сохраняет переданный код во временный файл и добавляет его в очередь на проверку. Возвращает Id в очереди (queueId). Необязательное поле fileName позволяет задать собственное имя файла. Без этого поля сохраняется автоматическое именование. taskId обозначает задачу, которая может встречаться в нескольких узлах и курсах. Для обозначения места отправки в имени можно использовать courseId и nodeId, а конкретную попытку определяет queueId.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendSolutionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешный ответ (содержит queueId > 0)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendSolutionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Ошибка отправки (некорректное имя файла, несовпадение расширения, нет доступа к задаче и т.п.). Приложение возвращает SendSolutionResponse, но IIS/прокси может заменить тело стандартным текстом или HTML.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendSolutionResponse"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bad Request"
+              },
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неавторизован — `sessionId` отсутствует или недействителен"
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера"
+          }
+        }
+      }
+    },
+    "/get-solution-result": {
+      "post": {
+        "tags": [
+          "Решения"
+        ],
+        "summary": "Получить результат проверки решения",
+        "description": "Возвращает статус завершенности тестирования решения и его результат по переданному queueId. Обычный пользователь может получать только результаты своих решений; администратор и редактор соответствующего курса — также результаты других пользователей. Если решение отсутствует в очереди тестирования и в логах, возвращается 404 Not Found.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GetResultRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешный ответ со статусом и результатом тестирования",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetResultResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректный запрос — sessionId отсутствует"
+          },
+          "401": {
+            "description": "Неавторизован — `sessionId` отсутствует или недействителен"
+          },
+          "403": {
+            "description": "Нет доступа к результату чужого решения"
+          },
+          "404": {
+            "description": "Решение с указанным `queueId` не найдено"
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера"
+          }
+        }
+      }
+    },
+    "/get-failed-tests": {
+      "post": {
+        "tags": [
+          "Решения"
+        ],
+        "summary": "Получить список подтвержденных проваленных тестов решения",
+        "description": "Возвращает подтвержденные проваленные тесты по этапам проверки для указанного queueId. Если подробности теста не сохранены, используется номер провала этапа; если таких этапов нет, используется поддерживаемый формат итогового вердикта (см. GetFailedTestsResponse). Обычный пользователь может просматривать только свои решения при наличии доступа к задаче; администратор и редактор курса могут просматривать решения других пользователей в пределах своих прав. Пока решение находится в очереди или тестируется повторно, возвращается isFinished = false и пустой массив tests. После завершения возвращается не более одного подтвержденного провала на этап проверки, а не полный список всех возможных ошибок. Ошибка компиляции может не иметь номера проваленного теста; общий вердикт следует получать через /get-solution-result. Флаг canGetData обозначает разрешение на получение входных данных и эталонного ответа через /get-test-data.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GetFailedTestsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешный ответ со статусом проверки и списком подтвержденных проваленных тестов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetFailedTestsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректный запрос — sessionId отсутствует или пуст, queueId отсутствует или не является положительным числом"
+          },
+          "401": {
+            "description": "Неавторизован — sessionId недействителен или устарел"
+          },
+          "403": {
+            "description": "Нет доступа к решению или задаче"
+          },
+          "404": {
+            "description": "Решение не найдено или узел не содержит задачи"
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера"
+          }
+        }
+      }
+    },
+    "/get-test-data": {
+      "post": {
+        "tags": [
+          "Решения"
+        ],
+        "summary": "Получить входные данные и эталонный ответ проваленного теста",
+        "description": "Возвращает input и expectedOutput для теста, подтвержденного как проваленный в указанном решении. Номер провала определяется тем же способом, что и в /get-failed-tests, включая итоговый вердикт при отсутствии подробного протокола. Принимает testNumber из ответа /get-failed-tests. Проверка решения должна быть завершена. Применяются те же права на просмотр решения, что и в /get-failed-tests. Для обычных пользователей и редакторов дополнительно учитываются активность курса и настройки выдачи тестов: разрешение на выдачу тестов, выдача первого теста при включенном показе подробных результатов, ограничение на нечетные тесты и запрет последнего теста. Если последний тест запрещен и число тестов определить не удалось, данные не выдаются. Администратор может получать данные без этих ограничений курса. Размер каждого файла ограничен 1 МиБ (1048576 байт); если хотя бы один файл больше, возвращается 413. expectedOutput содержит эталонный ответ, а не фактический вывод программы. Поддерживаются пары файлов N.in/N.out в папке задачи или в архиве tests.rar. Для тестировщиков с другим форматом данных (например, без таких файлов) возвращается 404; данные не восстанавливаются из текста сообщения об ошибке. Данные читаются из текущего набора тестов задачи; исторические версии тестов не восстанавливаются.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GetTestDataRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешный ответ с входными данными и эталонным ответом",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetTestDataResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректный запрос — sessionId отсутствует или пуст, queueId или testNumber отсутствуют или не являются положительными числами"
+          },
+          "401": {
+            "description": "Неавторизован — sessionId недействителен или устарел"
+          },
+          "403": {
+            "description": "Нет доступа к решению или задаче либо выдача данных теста запрещена настройками курса"
+          },
+          "404": {
+            "description": "Решение не найдено, узел не содержит задачи, провал указанного теста не подтвержден либо файлы N.in/N.out отсутствуют или формат хранения не поддерживается"
+          },
+          "409": {
+            "description": "Проверка решения еще не завершена или решение находится в очереди на повторную проверку"
+          },
+          "413": {
+            "description": "Размер входного файла или эталонного ответа превышает 1 МиБ"
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера, в том числе ошибка чтения или повреждение архива тестов"
+          }
+        }
+      }
+    },
+    "/get-solutions": {
+      "post": {
+        "tags": [
+          "Решения"
+        ],
+        "summary": "Получить список решений по задаче",
+        "description": "Возвращает список верных и ошибочных решений для указанной задачи, за выбранный период и с нужным расширением. Обычным пользователям возвращаются только их собственные решения, администраторам/редакторам курса - решения всех пользователей.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GetSolutionsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешный ответ со списком решений",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetSolutionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректный запрос — sessionId отсутствует или равен null"
+          },
+          "401": {
+            "description": "Неавторизован"
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера"
+          }
+        }
+      }
+    },
+    "/get-node-tasks": {
+      "post": {
+        "tags": [
+          "Дерево задач"
+        ],
+        "summary": "Получить список задач внутри папки (без подпапок)",
+        "description": "Возвращает массив `NodeID` задач, которые находятся непосредственно внутри указанной папки. Задачи, к которым у пользователя нет доступа, отфильтровываются.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешный ответ со списком NodeID задач",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeTasksResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неавторизован — `sessionId` отсутствует или недействителен"
+          },
+          "403": {
+            "description": "Доступ к запрошенной папке запрещен"
+          },
+          "404": {
+            "description": "Папка с указанным NodeID не найдена"
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера"
+          }
+        }
+      }
+    },
+    "/get-node-tree": {
+      "post": {
+        "tags": [
+          "Дерево задач"
+        ],
+        "summary": "Получить список всех задач внутри папки (в виде вложенного дерева)",
+        "description": "Возвращает вложенное дерево (hierarchy) всех папок и задач, которые находятся внутри указанной папки. Недоступные пользователю ветки и задачи отфильтровываются.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешный ответ со структурой дерева",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeTreeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неавторизован — `sessionId` отсутствует или недействителен"
+          },
+          "403": {
+            "description": "Доступ к запрошенной корневой папке запрещен"
+          },
+          "404": {
+            "description": "Папка с указанным NodeID не найдена"
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера"
+          }
+        }
+      }
+    },
+    "/get-course-node": {
+      "post": {
+        "tags": [
+          "Дерево задач"
+        ],
+        "summary": "Получить корневые ноды курса",
+        "description": "Возвращает NodeID корня задач и корня теории для переданного `courseId`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CourseNodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешный ответ с корневыми нодами курса",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CourseNodeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неавторизован — `sessionId` отсутствует или недействителен"
+          },
+          "403": {
+            "description": "У пользователя нет доступа к указанному курсу"
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера"
+          }
+        }
+      }
+    }
+  }
+}

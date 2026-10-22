@@ -106,13 +106,19 @@
           ? `${escapeHtml(row.window_date)}${row.is_current_window ? '' : '<div class="quiet">данные из предыдущего окна</div>'}`
           : '-';
 
+        // Три состояния бейджа (классы пришли с сервера — cap_classes):
+        // зелёный (есть и модель активна), зелёный зачёркнутый (есть, но
+        // модель неактивна), серый зачёркнутый (способности нет).
         const caps = row.capabilities || {};
+        const capClasses = row.cap_classes || {};
         const capLabels = { text: 'Текст', vision: 'Зрение', reasoning: 'Рассуждения' };
         const capCell = ['text', 'vision', 'reasoning']
           .map(function (k) {
-            const on = !!caps[k];
             const label = capLabels[k] || k;
-            return `<span class="cap ${on ? 'cap-on' : 'cap-off'}">${label}</span>`;
+            const badge = capClasses[k] || {};
+            const cssClass = badge.class || (caps[k] ? 'cap-on' : 'cap-off');
+            const title = badge.title ? ` title="${escapeHtml(badge.title)}"` : '';
+            return `<span class="cap ${cssClass}"${title}>${label}</span>`;
           })
           .join(' ');
 

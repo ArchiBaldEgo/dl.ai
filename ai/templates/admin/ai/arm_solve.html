@@ -134,6 +134,20 @@
       {% endif %}
 
       <input type="hidden" name="dl_test" value="1" id="armDlTest">
+      {% if delta_options %}
+      <div class="arm-section-head" style="margin-top:18px;">
+        <div>
+          <h2>Тестирующая машина</h2>
+          <p class="arm-section-note">Необязательно. По умолчанию машину назначает dl.gsu.by сам. Если выбрать конкретную — проверка пойдёт именно на ней; в результатах будет видно, какая машина это была.</p>
+        </div>
+      </div>
+      <select name="delta" id="armDeltaSelect" style="padding:6px 10px; width:100%; max-width:500px; margin-bottom:12px;">
+        <option value="">Назначить автоматически</option>
+        {% for d in delta_options %}
+          <option value="{{ d.id }}">{{ d.display_name|default:d.name }}{% if d.name and d.display_name %} ({{ d.name }}){% endif %}</option>
+        {% endfor %}
+      </select>
+      {% endif %}
       {% if not is_super_user %}<div class="arm-warning">Не покидайте страницу, иначе тестирование прервётся.</div>{% endif %}
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
@@ -174,13 +188,17 @@
       <a class="button" id="armSolveDownloadXlsxBtn" style="font-size:13px; display:none;" href="#">Скачать результаты (XLSX)</a>
     </div>
     <ul id="armSolveReportList" class="arm-report"></ul>
-    <div id="armSolvePerModelWrap"></div>
-    <div id="armSolvePerTopicWrap" style="margin-top:16px;"></div>
-    <div id="armSolveErrorsWrap" style="margin-top:16px;"></div>
-    {# Секция «Сбои по причинам» (таксономия сбоев) — тот же разбор, что на #}
-    {# журнале и на «Настройке ИИ-приложения»: контейнер обязателен,       #}
-    {# иначе renderFailureReasons молча ничего не рисует.                  #}
-    <div id="armSolveReasonsWrap" style="margin-top:16px;"></div>
+    {# Сводные таблицы — в две колонки (модели|темы, ошибки|причины):      #}
+    {# одинаковые таблицы встают рядом, колонки совпадают.                 #}
+    <div class="arm-summary-grid">
+      <div id="armSolvePerModelWrap"></div>
+      <div id="armSolvePerTopicWrap"></div>
+      <div id="armSolveErrorsWrap"></div>
+      {# Секция «Сбои по причинам» (таксономия сбоев) — тот же разбор, что на #}
+      {# журнале и на «Настройке ИИ-приложения»: контейнер обязателен,       #}
+      {# иначе renderFailureReasons молча ничего не рисует.                  #}
+      <div id="armSolveReasonsWrap"></div>
+    </div>
   </section>
 
   <section id="armSolveResultsCard" class="arm-card"{% if not results %} style="display:none;"{% endif %}>

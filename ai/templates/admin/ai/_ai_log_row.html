@@ -1,0 +1,52 @@
+{% comment %}
+Строка таблицы обычных запросов журнала.
+
+Журнал — ОДНА таблица (admin/ai/_ai_journal_head.html, 11 колонок): обычные
+запросы и пакетные прогоны в одном списке. Колонки пакета (★, «Прогон», «Пары»)
+у обычной строки пустые; получен/длительность — sub-строкой в «Отправлен».
+Ссылка «Детали →» не нужна — вся строка кликабельна (раскрывает аккордеон).
+
+ОДИН вид на всех поверхностях, где показываются обычные запросы:
+  - «Журнал запросов» (admin/ai/request_logs_table.html);
+  - «Последние запросы» на «Настройке ИИ-приложения»
+    (admin/ai/aiappsettings_change_form.html).
+
+Контракт строки — ai/admin/request_logs.py::build_log_table_row.
+Ожидает в контексте: row (словарь).
+{% endcomment %}
+<tr class="ai-log-row"
+    title="Кликните, чтобы раскрыть детали"
+    data-log-id="{{ row.id }}"
+    data-detail-url="/ai/admin/ai/request_logs/{{ row.id }}/detail-json/">
+  <td class="ai-log-pin-cell"></td>
+  <td>
+    {% if row.external_user_id %}
+      <a href="https://dl.gsu.by/report.asp?id={{ row.external_user_id }}" target="_blank" rel="noopener">{{ row.sender_display }}</a>
+    {% else %}
+      {{ row.sender_display }}
+    {% endif %}
+  </td>
+  <td>
+    {# Дата и время — два nowrap-спана: в узкой колонке рвутся только между #}
+    {# собой, а не наезжают на соседнюю ячейку. #}
+    <span class="ai-nowrap">{{ row.sent_at|date:"d.m.Y"|default:"—" }}</span>
+    <span class="ai-nowrap">{{ row.sent_at|date:"H:i:s"|default:"—" }}</span>
+    {% if row.received_at or row.time_display != "—" %}
+      <span class="ai-sub">{% if row.received_at %}получен {{ row.received_at|date:"H:i:s" }}{% endif %}{% if row.time_display != "—" %}{% if row.received_at %} · {% endif %}{{ row.time_display }}{% endif %}</span>
+    {% endif %}
+  </td>
+  <td>{{ row.mode_display }}</td>
+  <td>—</td>
+  <td>{{ row.programming_language_name }}</td>
+  <td>{{ row.topic_display }}</td>
+  <td>
+    {% if row.prompt_id %}
+      <a href="/ai/admin/ai/prompt/{{ row.prompt_id }}/change/" target="_blank" rel="noopener">{{ row.prompt_display }}</a>
+    {% else %}
+      {{ row.prompt_display }}
+    {% endif %}
+  </td>
+  <td>{{ row.model_display }}</td>
+  <td>—</td>
+  <td class="{% if row.status_class == 'ok' %}ai-logs-status-success{% else %}ai-logs-status-error{% endif %} ai-nowrap">{{ row.status_display }}</td>
+</tr>

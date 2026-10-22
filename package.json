@@ -7,7 +7,8 @@
     "start:deepseek": "node WebPools/api/index.js --site=deepseek",
     "start:kimi": "node WebPools/api/index.js --site=kimi",
     "seed": "node WebKimi/seed.js",
-    "seed:2": "node WebKimi/seed.js --id=2"
+    "seed:2": "node WebKimi/seed.js --id=2",
+    "test": "node --test \"WebPools/tests/*.test.js\""
   },
   "dependencies": {
     "express": "^4.21.2",

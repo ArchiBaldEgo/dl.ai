@@ -10,7 +10,7 @@
 «Разработчик промптов» миграцией и из проверок удалена.
 """
 
-from ..constants import BUILTIN_GROUP_DEVELOPER, BUILTIN_GROUP_PROMPT_DEV
+from ..constants import AI_CACHE_KEY_PREFIX, BUILTIN_GROUP_DEVELOPER, BUILTIN_GROUP_PROMPT_DEV
 from ..models import AIAccessGroup, AIAdminGroupPermission
 
 #: pk группы-эмуляции режима «Посмотреть как…» (ai/admin/guest_mode.py), на
@@ -19,9 +19,58 @@ from ..models import AIAccessGroup, AIAdminGroupPermission
 #: выбранной группы: супер/staff-обход отключён, членство = группа.
 _VIEW_AS_ATTR = "_ai_view_as_group_pk"
 
+#: Атрибут request.user для request-scoped кэша ключей доступа.
+#: user_access_keys дёргается ~20 гейтами на КАЖДЫЙ запрос админки, и
+#: каждый вызов — это m2m-джойн к таблице ключей. Кэш живёт на время
+#: запроса (экземпляр user) и ключуется парой (user.pk, view_as_group_pk) —
+#: кэш только по user.pk сломал бы эмуляцию «Посмотреть как…».
+_ACCESS_KEYS_CACHE_ATTR = "_ai_access_keys_cache"
+
+#: Общий (не request-scoped) кэш полного набора ключей — он от запроса не
+#: зависит: суперюзер видит ВСЕ существующие ключи. Инвалидация — по
+#: post_save/post_delete AIAdminGroupPermission (ai/signals.py).
+_ALL_KEYS_CACHE_KEY = f"{AI_CACHE_KEY_PREFIX}:all_access_keys"
+_ALL_KEYS_CACHE_TTL = 300
+
+#: Версия набора прав (process-local счётчик). Любое изменение состава
+#: групп или самих прав увеличивает счётчик — и request-scoped кэш ключей
+#: (см. ``_ACCESS_KEYS_CACHE_ATTR``) перестаёт совпадать, т.е. права
+#: пересчитываются на следующем гейте. Счётчик локальный для процесса
+#: намеренно: кэш живёт на инстансе request.user, а запрос обслуживает
+#: один процесс — рассинхрона между процессами тут не бывает.
+_ACCESS_KEYS_EPOCH = 0
+
+
+def bump_access_keys_epoch():
+    """Инвалидировать request-scoped кэш ключей доступа (состав групп/права).
+
+    Вызывается из ai/signals.py при изменении AIAccessGroup, его m2m-связей
+    (users/permissions) и AIAdminGroupPermission. Без этого кэш на инстансе
+    request.user отдавал бы права, отменённые прямо в ходе запроса.
+    """
+    global _ACCESS_KEYS_EPOCH
+    _ACCESS_KEYS_EPOCH += 1
+
 
 def _view_as_group_pk(user):
     return getattr(user, _VIEW_AS_ATTR, None)
+
+
+def _all_access_keys() -> set:
+    """Все существующие ключи доступа (для суперпользователя).
+
+    Один SELECT + django-cache: набор ключей меняется редко (правка прав в
+    «Группах доступа»), а суперюзер иначе платит этим запросом на КАЖДЫЙ
+    гейт каждого запроса.
+    """
+    from django.core.cache import cache
+
+    cached = cache.get(_ALL_KEYS_CACHE_KEY)
+    if cached is not None:
+        return set(cached)
+    keys = set(AIAdminGroupPermission.objects.values_list("key", flat=True))
+    cache.set(_ALL_KEYS_CACHE_KEY, keys, _ALL_KEYS_CACHE_TTL)
+    return keys
 
 
 #: Базовые права ЛЮБОГО, кто допущен в админку (ТЗ 2026-10-19): Пакетное
@@ -145,21 +194,40 @@ def user_access_keys(user):
     группой) — весь «Раздел ИИ» + журнал-свои.
     Режим «Посмотреть как…»: ключи РОВНО выбранной группы (+baseline при
     page.admin) — реальные группы юзера игнорируются.
+
+    Результат кэшируется на время запроса (атрибут экземпляра user) под
+    ключом (user.pk, view_as_group_pk): гейтов ~20, а каждый без кэша —
+    это запрос к m2m-таблице ключей.
     """
     if not user or not getattr(user, "is_authenticated", False):
         return set()
     if getattr(user, "is_active", True) is False:
         return set()
-    if _view_as_group_pk(user):
+    view_as_pk = _view_as_group_pk(user)
+    cache_key = (getattr(user, "pk", None), view_as_pk, _ACCESS_KEYS_EPOCH)
+    cached = getattr(user, _ACCESS_KEYS_CACHE_ATTR, None)
+    if cached is not None and cached[0] == cache_key:
+        return set(cached[1])
+    keys = _compute_user_access_keys(user, view_as_pk)
+    try:
+        setattr(user, _ACCESS_KEYS_CACHE_ATTR, (cache_key, keys))
+    except AttributeError:  # pragma: no cover — экземпляр без __dict__
+        pass
+    return set(keys)
+
+
+def _compute_user_access_keys(user, view_as_pk) -> set:
+    """Собственно вычисление ключей (без кэша) — см. ``user_access_keys``."""
+    if view_as_pk:
         group_keys = set(
-            AIAccessGroup.objects.filter(pk=_view_as_group_pk(user))
+            AIAccessGroup.objects.filter(pk=view_as_pk)
             .values_list("permissions__key", flat=True)
         )
         if "page.admin" in group_keys:
             group_keys |= BASELINE_ACCESS_KEYS
         return group_keys
     if user.is_superuser:
-        return set(AIAdminGroupPermission.objects.values_list("key", flat=True))
+        return _all_access_keys()
     group_keys = set(
         AIAccessGroup.objects.filter(users=user)
         .values_list("permissions__key", flat=True)

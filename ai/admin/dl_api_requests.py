@@ -15,12 +15,13 @@
 import json
 
 from django.http import HttpResponseForbidden, JsonResponse
+from django.db.models import Count
 from django.template.response import TemplateResponse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from ..constants import MOSCOW_TZ
-from ..models import AIDLApiRequest
+from ..models import AIDLApiRequest, ExternalDLAccount
 from .permissions import can_access_dl_api_requests
 from .site import ai_admin_site
 
@@ -82,20 +83,71 @@ def admin_dl_api_requests_view(request):
         qs = qs.filter(status=AIDLApiRequest.STATUS_DONE)
     rows = [_row(item) for item in qs.order_by("-created_at")]
 
-    counts = {
-        "pending": AIDLApiRequest.objects.filter(
-            status=AIDLApiRequest.STATUS_PENDING
-        ).count(),
-        "done": AIDLApiRequest.objects.filter(status=AIDLApiRequest.STATUS_DONE).count(),
-    }
+    # Счётчики вкладок — ОДИН запрос с группировкой по статусу вместо двух
+    # COUNT(*): на странице счётчики нужны оба сразу, а таблица заявок может
+    # быть большой.
+    counts = {"pending": 0, "done": 0}
+    for status, total in (
+        AIDLApiRequest.objects.values("status")
+        .annotate(total=Count("id"))
+        .values_list("status", "total")
+    ):
+        if status == AIDLApiRequest.STATUS_PENDING:
+            counts["pending"] = total
+        elif status == AIDLApiRequest.STATUS_DONE:
+            counts["done"] = total
 
+    # each_context — обязателен: без него admin/base.html не рендерит
+    # ЛЕВЫЙ БАР (is_nav_sidebar_enabled приходит только отсюда) и шапку.
     context = {
+        **ai_admin_site.each_context(request),
         "title": "Запросы по DL API",
         "tab": tab,
         "rows": rows,
         "counts": counts,
     }
     return TemplateResponse(request, "admin/ai/dl_api_requests.html", context)
+
+
+@require_POST
+def admin_dl_api_request_create_view(request):
+    """Создать заявку на создание API к DL (форма в админке).
+
+    Тело — JSON: ``{description}``. Права — как у страницы
+    (page.dl_api_requests): без них 403. Описание обязательно.
+    """
+    if not can_access_dl_api_requests(request) or not request.user.is_authenticated:
+        return _forbid()
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return _forbid("Некорректный запрос", status=400)
+    if not isinstance(payload, dict):
+        return _forbid("Некорректный запрос", status=400)
+    description = (payload.get("description") or "").strip()
+    if not description:
+        return _forbid("Описание заявки обязательно", status=400)
+    description = description[:5000]
+
+    user = request.user
+    full_name = (user.get_full_name() or "").strip()
+    external_user_id = ""
+    account = ExternalDLAccount.objects.filter(user=user).first()
+    if account is not None:
+        external_user_id = account.external_user_id or ""
+        full_name = full_name or (
+            (account.external_first_name or "").strip()
+            + " " + (account.external_last_name or "").strip()
+        ).strip()
+    item = AIDLApiRequest.objects.create(
+        description=description,
+        user=user,
+        username=user.username or "",
+        user_full_name=full_name,
+        external_user_id=external_user_id,
+        status=AIDLApiRequest.STATUS_PENDING,
+    )
+    return JsonResponse({"ok": True, "id": item.pk, "status": item.status})
 
 
 @require_POST

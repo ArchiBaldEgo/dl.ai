@@ -5,7 +5,12 @@
 документацию.
 """
 
-from .auth import WebSocketAuthService, get_user_identity_for_log, resolve_external_account
+from .auth import (
+    WebSocketAuthService,
+    can_use_ai,
+    get_user_identity_for_log,
+    resolve_external_account,
+)
 from .auto_translate import translate_object, translate_text, get_translatable_models
 from .conversation_history import ConversationHistory, conversation_history
 from .docs import (
@@ -26,6 +31,7 @@ from .task_registry import apply_dl_task_info, ensure_task
 
 __all__ = [
     "WebSocketAuthService",
+    "can_use_ai",
     "get_user_identity_for_log",
     "resolve_external_account",
     "translate_object",

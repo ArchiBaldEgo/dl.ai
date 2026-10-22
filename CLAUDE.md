@@ -94,7 +94,7 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   `test_console.js`.
 - Root-level: `WebPools/` (общий код обоих пулов: `sites/deepseek.js` :3000, `sites/kimi.js`
   :3001 с отдельным `KIMI_*` env; Kimi login сажается вручную в persistent Chrome profile —
-  `WebKimi/seed.js`, НЕ ТРОГАТЬ), `REST API.md`, `DOCX.md`, `test_arm_solve.py`,
+  `WebKimi/seed.js`, НЕ ТРОГАТЬ), `dl-rest-api.json` (OpenAPI-спека DL API), `DOCX.md`, `test_arm_solve.py`,
   `mail_bridge.py` / `backup_runner.sh` / `health_check.sh` (email→ops bridge). `bot/` —
   LEGACY, не референсится кодом.
 

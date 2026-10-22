@@ -13,16 +13,23 @@
 {% block content %}
 <div class="ai-tokens-wrap">
   <p class="help">
-    Сколько токенов потрачено. Считается <strong>промпт + ответ</strong>:
-    «ответ» — токены, которые сгенерировала модель, «промпт» — входные
-    токены запроса. Источники: журнал запросов (чат, «Реши задачу»,
-    «Найти ошибку», пакетное решение) и подробные пары пакетных прогонов
-    (задача × модель) — это два разреза одного расхода, поэтому суммы
-    разделов между собой <em>не складываются</em>.
-    {% if incomplete %}
-      <span class="ai-tokens-warn">Учёт неполный: web-модели (Web DeepSeek / Web Kimi) токены не отдают — их строки учитываются как 0.</span>
-    {% endif %}
+    Сколько токенов потрачено — <strong>промпт + ответ</strong> («ответ» —
+    токены, которые сгенерировала модель, «промпт» — входные). Итоговая
+    карточка — журнал запросов: все режимы (чат, «Реши задачу», «Найти
+    ошибку», пакетное решение); пакетный прогон там — одна сводная запись.
+    Карточка «В том числе — пакетное решение» показывает тот же расход
+    подробно по парам «задача × модель» — это не дополнительный расход.
+    Клик по названию строки в табличных срезах ставит соответствующий
+    фильтр (модель / кто / режим / день).
   </p>
+
+  <div class="ai-tokens-chips">
+    <span class="ai-tokens-chips-label">Период:</span>
+    <button type="button" class="ai-tokens-chip" data-days="0">Сегодня</button>
+    <button type="button" class="ai-tokens-chip" data-days="7">7 дней</button>
+    <button type="button" class="ai-tokens-chip" data-days="30">30 дней</button>
+    <button type="button" class="ai-tokens-chip" data-days="">Всё время</button>
+  </div>
 
   <form class="ai-tokens-filters" method="get" action="">
     <label>С даты <input type="date" name="date_from" value="{{ filters_date_from }}"></label>
@@ -56,51 +63,7 @@
     <a class="button" href="?">Сбросить</a>
   </form>
 
-  <div class="ai-tokens-cards">
-    <div class="ai-tokens-card">
-      <div class="ai-tokens-card-title">Журнал запросов — всего</div>
-      <div class="ai-tokens-card-value">{{ logs.total.total_tokens }}</div>
-      <div class="ai-tokens-card-sub">
-        ответ: {{ logs.total.completion_tokens }} · промпт: {{ logs.total.prompt_tokens }} ·
-        запросов: {{ logs.total.requests }}
-      </div>
-    </div>
-    <div class="ai-tokens-card">
-      <div class="ai-tokens-card-title">Пакетные пары — всего</div>
-      <div class="ai-tokens-card-value">{{ batch.total.total_tokens }}</div>
-      <div class="ai-tokens-card-sub">
-        ответ: {{ batch.total.completion_tokens }} · промпт: {{ batch.total.prompt_tokens }} ·
-        пар: {{ batch.pairs }}
-      </div>
-    </div>
-  </div>
-
-  <div class="ai-tokens-grid">
-    <section class="ai-tokens-panel">
-      <h3>Журнал: по моделям</h3>
-      {% include "admin/ai/_tokens_table.html" with rows=logs.by_model %}
-    </section>
-    <section class="ai-tokens-panel">
-      <h3>Журнал: по пользователям</h3>
-      {% include "admin/ai/_tokens_table.html" with rows=logs.by_user %}
-    </section>
-    <section class="ai-tokens-panel">
-      <h3>Журнал: по режимам</h3>
-      {% include "admin/ai/_tokens_table.html" with rows=logs.by_mode %}
-    </section>
-    <section class="ai-tokens-panel">
-      <h3>Журнал: по дням</h3>
-      {% include "admin/ai/_tokens_table.html" with rows=logs.by_day %}
-    </section>
-    <section class="ai-tokens-panel">
-      <h3>Пакетные пары: по моделям</h3>
-      {% include "admin/ai/_tokens_table.html" with rows=batch.by_model %}
-    </section>
-    <section class="ai-tokens-panel">
-      <h3>Пакетные пары: по темам</h3>
-      {% include "admin/ai/_tokens_table.html" with rows=batch.by_topic %}
-    </section>
-  </div>
+  {% include "admin/ai/_tokens_panels.html" %}
 </div>
 {% endblock %}
 

@@ -18,6 +18,7 @@
 
 const express = require('express');
 const { makeChatCompletion, makeOpenAIError } = require('./openaiFormat');
+const { sanitizeAnswer } = require('../worker/modules/answerSanitizer');
 
 // Минимальный серверный таймаут /api/send и /v1/chat/completions (мс).
 // worker waitLastOuterHtmlStable = 300000 мс — меньший серверный таймаут
@@ -182,7 +183,23 @@ function createServer({ botManager, config, logger, site }) {
       const content = typeof raw === 'string' ? raw : raw?.content ?? raw?.text ?? '';
       const usage = typeof raw === 'object' ? raw?.usage : undefined;
 
-      return res.json(makeChatCompletion({ model, content, usage }));
+      // Последний рубеж: служебные данные страницы (гидрация) — это НЕ ответ
+      // модели. Не отдаём их клиенту (Django), а честно ругаемся. Пустой ответ
+      // (reason='empty') пропускаем — про него Django знает и сам (своя
+      // проверка на пустоту), метка «гидрация» тут была бы враньём.
+      const sanitized = sanitizeAnswer(content);
+      if (!sanitized.ok && sanitized.reason !== 'empty') {
+        err(`[bot#${bot.id}] answer rejected as site garbage (${sanitized.reason})`);
+        return res.status(502).json(
+          makeOpenAIError({
+            message: `GARBAGE_ANSWER: model returned site data instead of an answer (${sanitized.reason})`,
+            code: 'garbage_answer',
+            type: 'server_error',
+          })
+        );
+      }
+
+      return res.json(makeChatCompletion({ model, content: sanitized.content, usage }));
     } catch (e) {
       err(`[bot#${bot.id}] request failed: ${e?.stack || e}`);
       if (e?.code === 'not_autorized') {
@@ -247,7 +264,18 @@ function createServer({ botManager, config, logger, site }) {
       };
       const out = await withTimeout(bot.sendMessage(payload), Math.max(config.requestTimeoutMs, REQUEST_TIMEOUT_FLOOR_MS));
       const content = typeof out === 'string' ? out : out?.content ?? out?.text ?? '';
-      res.json({ ok: true, data: { content } });
+      // Санитайзер ответа: мусор (гидрация страницы) в Django не уходит.
+      // Пустой ответ пропускаем — про него Django знает и сам.
+      const sanitized = sanitizeAnswer(content);
+      if (!sanitized.ok && sanitized.reason !== 'empty') {
+        err(`[bot#${bot.id}] answer rejected as site garbage (${sanitized.reason})`);
+        return res.status(502).json({
+          ok: false,
+          reason: `GARBAGE_ANSWER: ${sanitized.reason}`,
+          message: 'Model returned site data instead of an answer.',
+        });
+      }
+      res.json({ ok: true, data: { content: sanitized.content } });
     } catch (e) {
       err(`[bot#${bot.id}] request failed: ${e?.stack || e}`);
       if (e?.code === 'not_autorized') {

@@ -50,8 +50,8 @@
   {% timezone moscow_tz %}
   <div class="ai-log-meta">
     <div><strong>Статус:</strong> {{ log.get_status_display }}</div>
-    <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y:H:i:s" }}</div>
-    <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</div>
+    <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y H:i:s" }}</div>
+    <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y H:i:s"|default:"—" }}</div>
     <div><strong>Кто отправлял:</strong>
       {% if log.external_user_id %}
         <a href="https://dl.gsu.by/report.asp?id={{ log.external_user_id }}" target="_blank" rel="noopener">{{ log.user_full_name|default:log.username|default:log.external_user_id }}</a>

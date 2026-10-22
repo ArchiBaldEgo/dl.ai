@@ -30,6 +30,7 @@ from .arm import (
     admin_arm_solve_result_body_view,
 )
 from .dl_api_requests import (
+    admin_dl_api_request_create_view,
     admin_dl_api_request_update_view,
     admin_dl_api_requests_view,
 )
@@ -158,6 +159,7 @@ def get_ai_admin_urls():
         path("user-models/delete/", ai_admin_site.admin_view(admin_user_model_delete_view), name="ai_user_model_delete"),
         # «Запросы по DL API» — заявки на создание API к dl.gsu.by.
         path("dl-api-requests/", ai_admin_site.admin_view(admin_dl_api_requests_view), name="ai_dl_api_requests"),
+        path("dl-api-requests/create/", ai_admin_site.admin_view(admin_dl_api_request_create_view), name="ai_dl_api_request_create"),
         path("dl-api-requests/update/", ai_admin_site.admin_view(admin_dl_api_request_update_view), name="ai_dl_api_request_update"),
 
         path("test_data/emit_request/",

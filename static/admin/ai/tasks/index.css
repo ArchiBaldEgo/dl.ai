@@ -70,12 +70,18 @@ table[data-reorder="1"] tbody tr[data-task-id] { cursor: grab; }
   box-shadow: inset 0 -3px 0 0 var(--button-bg);
 }
 
+/* Тип таска: «Фронт работы» / «Хотелки» — чип .ai-task-kind (ниже, общий
+   вид) с подкраской по виду. */
+
 .ai-task-btn-claim { padding: 3px 12px; }
 .ai-task-btn-close {
   padding: 3px 12px;
   color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color));
 }
 .ai-task-btn-close:hover { color: #912018; }
+
+/* Кнопка в работе: повторный клик не проходит. */
+.busy { pointer-events: none; opacity: 0.6; }
 
 /* Правка таска (только автору): форма — отдельной строкой под таском. */
 .ai-task-btn-edit { padding: 3px 12px; }
@@ -86,13 +92,6 @@ table[data-reorder="1"] tbody tr[data-task-id] { cursor: grab; }
 .ai-task-edit-form textarea { width: 100%; resize: vertical; }
 .ai-task-edit-actions { display: flex; gap: 8px; }
 .ai-task-btn-reopen { padding: 3px 12px; }
-/* Выбор исполнителя при возврате: «Освободить» заметно отличается. */
-.ai-task-reopen-choice { display: inline-flex; gap: 6px; }
-.ai-task-reopen-choice[hidden] { display: none; }
-.ai-task-btn-reopen[data-reopen-free] {
-  color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color));
-}
-.ai-task-btn-reopen[data-reopen-free]:hover { color: #912018; }
 
 /* Архив «Закрытые»: чип типа таска, строки чуть притушены. */
 .ai-task-kind {

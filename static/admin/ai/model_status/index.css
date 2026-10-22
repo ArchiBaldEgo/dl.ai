@@ -66,6 +66,10 @@
   background: rgba(18, 183, 106, 0.16);
   color: #067647;
 }
+/* Способность есть, но модель сейчас неактивна — зелёный зачёркнутый. */
+.cap-inactive {
+  text-decoration: line-through;
+}
 .cap-off {
   background: rgba(100, 116, 139, 0.14);
   color: var(--body-quiet-color);

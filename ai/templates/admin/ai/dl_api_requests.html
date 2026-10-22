@@ -11,13 +11,26 @@
 {% endblock %}
 
 {% block content %}
-<div class="ai-dlapi-wrap" data-update-url="/ai/admin/dl-api-requests/update/">
+<div class="ai-dlapi-wrap" data-update-url="/ai/admin/dl-api-requests/update/"
+     data-create-url="/ai/admin/dl-api-requests/create/">
   <p class="help">
     Заявки пользователей на создание API к dl.gsu.by. Пока API не создан,
     заявка висит во вкладке «Актуальные»; как только API сделан — отметьте
     заявку, и она переедет в «Неактуальные» (вкладка сохраняет за собой
     пометку «кто сделал» и «когда»).
   </p>
+
+  {# === Форма создания заявки =========================================== #}
+  {# Заявка создаётся ЗДЕСЬ, в админке: описание + кнопка. Отправка — AJAX #}
+  {# (тот же csrftoken/parseJsonResponse, что у «API создано»).         #}
+  <form class="ai-dlapi-create" id="ai-dlapi-create-form">
+    <label for="ai-dlapi-description">Новая заявка на API к DL
+      <textarea id="ai-dlapi-description" name="description" rows="3"
+                placeholder="Опишите, какой API нужен (какие данные, для чего)"></textarea>
+    </label>
+    <button type="submit" class="button ai-dlapi-create-submit">Создать заявку</button>
+    <span class="ai-dlapi-create-status" aria-live="polite"></span>
+  </form>
 
   <div class="ai-dlapi-tabs">
     <a href="?tab=pending" class="ai-dlapi-tab{% if tab == 'pending' %} ai-dlapi-tab-active{% endif %}">

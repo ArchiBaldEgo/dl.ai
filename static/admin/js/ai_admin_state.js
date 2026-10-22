@@ -97,7 +97,10 @@
   }
 
   function setupFormState() {
-    var form = document.querySelector(FORM_SELECTORS[window.location.pathname] || "");
+    // На страницах вне карты запросSelector('') кидает TypeError — берём
+    // селектор только если он есть.
+    var formSel = FORM_SELECTORS[window.location.pathname];
+    var form = formSel ? document.querySelector(formSel) : null;
     if (!form) return;
     var key = FORM_KEY_PREFIX + window.location.pathname;
 

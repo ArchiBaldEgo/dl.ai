@@ -15,7 +15,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
 from django import forms
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseRedirect
 from django.utils.html import format_html
 from django.urls import path, reverse
 from django.utils import timezone
@@ -468,6 +468,13 @@ class SharedPromptAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     filter_horizontal = ('programming_languages',)
     actions = ("auto_translate_selected",)
 
+    def get_queryset(self, request):
+        # prefetch_related убирает N+1: language_list дёргал
+        # programming_languages по одному запросу на строку списка.
+        return super().get_queryset(request).prefetch_related(
+            "programming_languages", "owner",
+        )
+
     def language_list(self, obj):
         langs = obj.programming_languages.all()
         return ", ".join([l.language_name for l in langs]) if langs else "Все языки"
@@ -598,7 +605,7 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     search_fields = ("external_user_id", "external_login",
                      "external_first_name", "external_last_name",
                      "dl_email", "education_school_no", "user__username")
-    # Учебные данные приходят из dl.gsu.by при входе пользователя (REST API.md
+    # Учебные данные приходят из dl.gsu.by при входе пользователя (dl-rest-api.json
     # get-user-info) — руками их не правим, только смотрим. external_login
     # («Логин dl.gsu.by») тоже приходит извне — из формы убран полностью,
     # не обязательное поле (правится только самим dl.gsu.by).
@@ -960,6 +967,26 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
             base.append("node_id")
         return base
 
+    def response_change(self, request, obj):
+        """Возврат в список — на ту же страницу, с теми же фильтрами.
+
+        Django сохраняет только фильтры (``_changelist_filters``) и ВЫБРАСЫВАЕТ
+        номер страницы → после правки оператор оказывался на 1-й странице
+        списка («выкидывало наверх»). Номер страницы приходит в querystring
+        формы правки (``p``, его добавляет static/admin/ai/change_list/index.js)
+        — возвращаем весь исходный querystring.
+        """
+        response = super().response_change(request, obj)
+        if "_continue" in request.POST or "_addanother" in request.POST:
+            return response
+        query = request.GET.urlencode()
+        if not query:
+            return response
+        changelist_url = reverse(
+            "admin:ai_task_changelist", current_app=self.admin_site.name,
+        )
+        return HttpResponseRedirect(f"{changelist_url}?{query}")
+
     def refresh_from_dl(self, request, queryset):
         """Fetch name/statement/task_id from DL for the selected tasks.
 
@@ -987,7 +1014,7 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                 )
                 continue
             apply_dl_task_info(task, data)
-            task.save(update_fields=["task_id", "name", "statement"])
+            task.save(update_fields=["task_id", "name", "statement", "tree_path"])
             updated += 1
         self.message_user(request, f"Обновлено из DL: {updated}, ошибок: {failed}.")
     refresh_from_dl.short_description = "Обновить название и условие из DL"

@@ -35,15 +35,105 @@
   padding: 6px 12px;
 }
 
-.arm-summary-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+/* Сводные таблицы — ФИКСИРОВАННОЙ ШИРИНЫ (table-layout: fixed): длинные
+   названия тем/промптов не растягивают таблицу, а переносятся по словам.
+   Иначе развёртка сводки в журнале запросов распирала журнальную таблицу
+   и её можно было «ездить» вправо-влево. */
+.arm-summary-table { width: 100%; border-collapse: collapse; margin-top: 4px; table-layout: fixed; }
 .arm-summary-table th, .arm-summary-table td {
   border-bottom: 1px solid var(--hairline-color);
   padding: 8px 10px; text-align: left;
+  /* НЕ рвём слова посередине (было anywhere — текст «плыл»): перенос только
+     по словам. */
+  overflow-wrap: break-word; word-break: normal;
+  /* Ячейки прижаты к ВЕРХУ: иначе короткий текст в высокой строке
+     «плавал» посередине. */
+  vertical-align: top;
 }
-.arm-summary-table th { font-weight: 600; color: var(--body-quiet-color); }
+.arm-summary-table th {
+  font-weight: 600; color: var(--body-quiet-color);
+  /* Единый вид шапок — таблицы читаются как ровный блок. */
+  background: var(--darkened-bg);
+}
 .arm-summary-table td.arm-col-num, .arm-summary-table th.arm-col-num {
-  text-align: right; white-space: nowrap; width: 1%;
+  text-align: right; vertical-align: top;
 }
+/* nowrap — только ЗНАЧЕНИЯ. Шапки переносятся: в узкой колонке не режутся
+   (см. белый список .arm-summary-table th выше). */
+.arm-summary-table td.arm-col-num { white-space: nowrap; }
+/* Заголовки НЕ прижаты nowrap (это правило .arm-col-num — только для
+   значений): в узких колонках table-layout: fixed длинные слова шапки
+   («НЕ РЕШЁННЫХ», «РЕШЕНО/ВСЕГО») не помещались и НАЛЕЗАЛИ на соседние
+   заголовки. Перенос шапки на две строки — дешевле наезженного текста. */
+.arm-summary-table th { white-space: normal; }
+/* Барьер: если что-то всё же шире ячейки — режем, а не рисуем поверх
+   соседнего заголовка. */
+.arm-summary-table th, .arm-summary-table td { overflow: hidden; }
+/* Ширины колонок — по типу таблицы (table-layout: fixed берёт их из
+   первой строки — шапки). Таблицы идут одна за другой, во всю ширину
+   карточки, поэтому колонка названия забирает почти всё, а колонки с
+   ОДНИМ числом — узкие. */
+.arm-summary-table--bucket th:first-child { width: 46%; }
+.arm-summary-table--bucket th:nth-child(2) { width: 10%; }
+.arm-summary-table--bucket th:nth-child(3) { width: 14%; }
+.arm-summary-table--bucket th:nth-child(4) { width: 12%; }
+.arm-summary-table--bucket th:nth-child(5) { width: 18%; }
+.arm-summary-table--errors th:nth-child(1) { width: 30%; }
+.arm-summary-table--errors th:nth-child(2) { width: 10%; }
+.arm-summary-table--errors th:nth-child(3) { width: 25%; }
+.arm-summary-table--errors th:nth-child(4) { width: 35%; }
+.arm-summary-table--reasons th:nth-child(1) { width: 76%; }
+.arm-summary-table--reasons th:nth-child(2),
+.arm-summary-table--reasons th:nth-child(3) { width: 12%; }
+
+/* Блок сводных таблиц — ОДНА КОЛОНКА: «Итог по моделям», «Итог по темам»,
+   «Ошибки по темам» и «Сбои по причинам» идут ОДНА ЗА ДРУГОЙ, каждая
+   таблица — полноразмерная (на всю ширину карточки). Раньше модели/темы
+   и ошибки/причины стояли по две рядом — читалось неудобно: половина
+   таблицы в одну строку. */
+.arm-summary-grid {
+  display: grid; grid-template-columns: minmax(0, 1fr);
+  gap: 18px 0; align-items: start; margin-top: 14px;
+}
+.arm-summary-grid > * { min-width: 0; }
+/* Заголовки блоков — одинаковой высоты, таблицы начинаются на одной линии. */
+.arm-summary-grid h3 { margin: 0 0 8px; font-size: 15px; }
+.arm-summary-grid p.arm-section-note { margin: 6px 0 0; }
+@media (max-width: 980px) {
+  .arm-summary-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* === «Ошибки по темам»: мини-ссылки на нерешённые пары ==================
+   Причина сбоя — рядом с задачей, клик по ссылке — скролл к паре в
+   списке «Ответы моделей» (кнопка «↑ Наверх» возвращает к сводке). */
+.arm-error-reason { line-height: 1.5; }
+.arm-error-item {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
+  line-height: 1.5; padding: 1px 0;
+}
+.arm-error-link {
+  color: var(--link-fg); cursor: pointer;
+  text-decoration: underline; text-decoration-style: dotted;
+}
+.arm-error-link:hover { text-decoration-style: solid; }
+.arm-error-item-reason { color: #5b21b6; font-size: 12px; }
+.arm-error-item-model { color: var(--body-quiet-color); font-size: 12px; }
+
+/* Кнопка «↑ Наверх» — возврат к сводке после перехода к паре. */
+.arm-backtop {
+  position: fixed; right: 20px; bottom: 20px; z-index: 9000;
+  display: none; padding: 8px 16px; border-radius: 999px;
+  border: 1px solid var(--hairline-color); background: var(--body-bg);
+  color: var(--body-fg); font-size: 13px; cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+}
+.arm-backtop.visible { display: block; }
+/* Подсветка карточки, к которой перешли по ссылке из отчёта. */
+@keyframes arm-result-flash {
+  0% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.6); }
+  100% { box-shadow: 0 0 0 14px rgba(37, 99, 235, 0); }
+}
+.arm-result-flash { animation: arm-result-flash 1.2s ease-out 2; }
 
 .arm-report {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -75,6 +165,17 @@
 .arm-result summary::-webkit-details-marker { display: none; }
 .arm-result-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .arm-result-title { font-weight: 700; }
+/* Бейджи результата (вердикт + причина + «обрезан») — ОДИН контейнер:
+   иначе каждый бейдж был отдельным flex-элементом .arm-result-top
+   (justify-content: space-between) и строка «прыгала» — вердикт слева,
+   причина справа, «обрезан» ещё дальше. */
+.arm-result-badges {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: none;
+}
 /* Ссылка на задачу в DL (r.dl_url → /task.jsp?nid=…&cid=…) в заголовке
    результата: цвет текста карточки, подчёркивание по наведению. */
 .arm-result-title a { color: inherit; text-decoration: none; }
@@ -101,6 +202,52 @@
 .arm-model-group[open] .arm-model-arrow { transform: rotate(90deg); }
 .arm-model-meta { color: var(--body-quiet-color); font-size: 12px; margin-top: 4px; }
 .arm-model-tasks { padding: 10px 10px 12px; }
+
+/* === Строки пакетного решения (общие для всех страниц) ==================
+   Кликабельная строка прогона + подсветка открытой. Правила были
+   продублированы в app_settings/index.css и pinned_runs/index.css —
+   теперь живут здесь (файл подключён ГЛОБАЛЬНО в base_site.html). */
+.ai-batch-row-clickable { cursor: pointer; }
+.ai-batch-row-clickable:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }
+.ai-batch-row-open td { font-weight: 600; }
+.ai-batch-detail > td { background: var(--darkened-bg); }
+/* Цвета статусов .ai-recent-logs-ok/err/neutral — выше, вместе с
+   .ai-logs-status-* (один набор на все поверхности). */
+.ai-recent-logs-empty { color: var(--body-quiet-color); padding: 8px 0; }
+/* Авторы закрепления (страница «Закреплённые») — мелким шрифтом под ФИО. */
+.ai-log-pin-authors { color: var(--body-quiet-color); font-size: 12px; margin-top: 2px; }
+.ai-scroll { overflow-x: auto; }
+.ai-log-pin-cell { white-space: nowrap; text-align: center; }
+.ai-log-pin-btn {
+  background: none; border: 1px solid var(--hairline-color); border-radius: 4px;
+  cursor: pointer; font-size: 15px; line-height: 1; padding: 3px 7px;
+  color: var(--body-quiet-color);
+}
+.ai-log-pin-btn:hover:not(:disabled) { border-color: var(--link-fg); color: var(--link-fg); }
+.ai-log-pin-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.ai-log-pin-btn-active { color: #d97706; border-color: #d97706; }
+.ai-log-pin-btn.busy { opacity: 0.6; pointer-events: none; }
+.ai-log-pin-static { font-size: 15px; color: var(--body-quiet-color); }
+/* Карточка пары — ДВЕ КОЛОНКИ: слева «уже» ответ модели + извлечённый код,
+   справа на одном уровне — входные/эталонные данные проваленного теста
+   (у решённых/без данных правая колонка пуста или с пояснением).
+   На узком экране колонки перестают в стопку. */
+.arm-card-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 11fr) minmax(0, 9fr);
+  gap: 4px 18px;
+  align-items: start;
+}
+.arm-card-col-main, .arm-card-col-data { min-width: 0; }
+/* Решённая пара: правая колонка пуста — одна колонка на всю ширину. */
+.arm-card-cols--single { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 900px) {
+  .arm-card-cols { grid-template-columns: minmax(0, 1fr); }
+}
+/* Входные данные и эталонный ответ проваленного теста (правая колонка
+   карточки, только у нерешённых пар). */
+.arm-card-col-data .arm-test-data { margin: 12px 0 0; }
+.arm-test-data pre { max-height: 220px; }
 .arm-result-body pre {
   margin: 0; white-space: pre-wrap; word-wrap: break-word;
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
@@ -124,3 +271,54 @@
 .arm-filter-toggle .arm-button.active { background: var(--darkened-bg); font-weight: 700; }
 .arm-filter-toggle .arm-button:disabled { opacity: 0.55; cursor: default; }
 @media (max-width: 700px) { .arm-result-top { align-items: flex-start; flex-direction: column; } }
+
+/* === Журнальная таблица — общий вид для ВСЕХ поверхностей ================
+   Шапка admin/ai/_ai_journal_head.html (11 колонок), строки
+   _ai_batch_row/_ai_log_row; таблица включается на четырёх страницах
+   (журнал, настройки, закреплённые, + развёртки на /arm/solve/), поэтому
+   правила живут здесь, а не в CSS одной страницы (раньше ширины были
+   только в CSS журнала — на «Настройке» таблица уезжала).
+
+   11 КОЛОНОК: ★, Кто, Отправлен (sub: получен · время), Режим, Прогон
+   (sub: курс · расширение), Язык, Тема, Промпт, Модель, Пары, Статус.
+   Сумма ширин = ровно 100%. */
+.ai-logs-table { width: 100%; border-collapse: collapse; }
+.ai-logs-table th, .ai-logs-table td {
+  border: 1px solid var(--hairline-color); padding: 8px 10px;
+  text-align: left; vertical-align: top; font-size: 13px;
+}
+.ai-logs-table th { background: var(--darkened-bg); font-weight: 600; }
+.ai-logs-table--mixed { table-layout: fixed; width: 100%; }
+.ai-logs-table--mixed th, .ai-logs-table--mixed td {
+  /* Перенос по словам (не рвём слова посередине — было anywhere, текст
+     «плавал»); ячейки прижаты к верху строки. */
+  overflow-wrap: break-word; word-break: normal; vertical-align: top;
+}
+.ai-logs-table--mixed th:nth-child(1) { width: 3.5%; }
+.ai-logs-table--mixed th:nth-child(2) { width: 11.5%; }
+.ai-logs-table--mixed th:nth-child(3) { width: 14%; }
+.ai-logs-table--mixed th:nth-child(4) { width: 8%; }
+.ai-logs-table--mixed th:nth-child(5) { width: 12%; }
+.ai-logs-table--mixed th:nth-child(6) { width: 8%; }
+.ai-logs-table--mixed th:nth-child(7) { width: 9.5%; }
+.ai-logs-table--mixed th:nth-child(8) { width: 10%; }
+.ai-logs-table--mixed th:nth-child(9) { width: 10.5%; }
+.ai-logs-table--mixed th:nth-child(10) { width: 5.5%; }
+.ai-logs-table--mixed th:nth-child(11) { width: 7.5%; }
+/* Ячейка закрепления (★/☆) — узкая колонка: не раздувать паддинги. */
+.ai-logs-table--mixed .ai-log-pin-cell { padding: 6px 2px; text-align: center; }
+/* Датa/статус/счётчики не переносятся: «21.10.2026 20:23:09» и «Успех» —
+   одной строкой (раньше рвались по буквам в узких колонках). */
+.ai-logs-table--mixed .ai-nowrap { white-space: nowrap; }
+/* Sub-строка ячейки (получен/время, курс/расширение) — тише и мельче главной. */
+.ai-logs-table--mixed .ai-sub {
+  display: block; margin-top: 3px;
+  color: var(--body-quiet-color); font-size: 12px; font-weight: 400;
+}
+/* Статусы — один набор цветов на всех поверхностях. */
+.ai-logs-status-success, .ai-recent-logs-ok { color: #067647; font-weight: 600; }
+.ai-logs-status-error, .ai-recent-logs-err { color: #b42318; font-weight: 600; }
+.ai-logs-status-neutral, .ai-recent-logs-neutral { color: #b45309; font-weight: 600; }
+/* Кликабельная строка обычного запроса (батч — .ai-batch-row-clickable выше). */
+.ai-log-row { cursor: pointer; }
+.ai-log-row:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }

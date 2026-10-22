@@ -1,12 +1,16 @@
 // Доска «Таски» (ai/admin/tasks.py): создать/взять/закрыть таск, вернуть
-// закрытый («Закрытые»; двухшажно — спросить, оставить ли исполнителя,
-// «Освободить» шлёт free_executor) — POST fetch; переставить строки
+// закрытый («Закрытые»; одним кликом — исполнитель сохраняется) — POST fetch;
+// переставить строки
 // фронта/хотелок — HTML5 drag & drop + POST /tasks/reorder/ ({kind, ids};
 // сервер перенумеровывает 1..N в пределах вида). Фильтры «Кто взял»
 // (селект-автосабмит) и дат закрытия архива — обычные GET-формы.
 // JS на делегировании, IIFE.
 (function () {
     'use strict';
+
+    // Ключ сохранённого состояния страницы доски «Таски» (прокрутка,
+    // черновик формы «Новый таск», фильтры) — в localStorage.
+    var PAGE_STATE_KEY = 'ai_tasks_page';
 
     // CSRF — из инпута формы ({% csrf_token %}) или куки; в проде имя куки
     // переименовано в ai_csrftoken, поэтому матчим оба варианта.
@@ -54,6 +58,7 @@
                 if (!data.ok) {
                     throw new Error(data.message || 'Не удалось выполнить действие');
                 }
+                return data;
             });
     }
 
@@ -64,25 +69,6 @@
             button.classList.remove('busy');
             alert(err.message);
         });
-    }
-
-    // «Вернуть» раскрывает выбор исполнителя в своей ячейке (см. шаблон):
-    // main-кнопка data-reopen-ask прячется, показывается ai-task-reopen-choice.
-    function expandReopenChoice(btn) {
-        var cell = btn.closest('.ai-task-actions');
-        if (!cell) return;
-        btn.hidden = true;
-        var choice = cell.querySelector('.ai-task-reopen-choice');
-        if (choice) choice.hidden = false;
-    }
-
-    function collapseReopenChoice(el) {
-        var cell = el.closest('.ai-task-actions');
-        if (!cell) return;
-        var choice = cell.querySelector('.ai-task-reopen-choice');
-        if (choice) choice.hidden = true;
-        var main = cell.querySelector('[data-reopen-ask]');
-        if (main) main.hidden = false;
     }
 
     // Правка таска: форма живёт ОТДЕЛЬНОЙ строкой таблицы (data-edit-row
@@ -105,32 +91,14 @@
 
     // Взять/закрыть/вернуть — успех перезагружает страницу: статусы строк
     // пересчитывает сервер (на фронте после reorder reload не нужен).
-    // «Вернуть» — двухшажный: первый клик спрашивает, оставить ли
-    // исполнителя; «С исполнителем» шлёт POST без тела, «Освободить»
-    // — {"free_executor": true} (исполнитель сбрасывается, таск в
-    // «Не взятые»).
+    // «Вернуть» — одним кликом: исполнитель сохраняется сервером.
     document.addEventListener('click', function (event) {
-        var ask = event.target.closest('[data-reopen-ask]');
-        if (ask) { expandReopenChoice(ask); return; }
-        var cancel = event.target.closest('.ai-task-btn-reopen-cancel');
-        if (cancel) { collapseReopenChoice(cancel); return; }
         // Правка таска (только автору): «Изменить» раскрывает форму правки
         // в строке под таском, «Отмена» прячет её обратно.
         var editToggle = event.target.closest('[data-edit-toggle]');
         if (editToggle) { toggleEditForm(editToggle, true); return; }
         var editCancel = event.target.closest('.ai-task-btn-edit-cancel');
         if (editCancel) { toggleEditForm(editCancel, false); return; }
-        var freeBtn = event.target.closest('[data-reopen-free]');
-        if (freeBtn) {
-            var freeUrl = freeBtn.getAttribute('data-reopen-url');
-            if (freeUrl) {
-                guard(freeBtn, function () {
-                    return post(freeUrl, JSON.stringify({ free_executor: true }))
-                        .then(function () { window.location.reload(); });
-                });
-                return;
-            }
-        }
         var btn = event.target.closest(
             '[data-claim-url], [data-close-url], [data-reopen-url]'
         );
@@ -150,7 +118,15 @@
             var data = new FormData(createForm);
             if (btn) btn.classList.add('busy');
             post(createForm.getAttribute('data-create-url'), data)
-                .then(function () { window.location.reload(); })
+                .then(function () {
+                    // Таск создан — сохранённый черновик формы больше не
+                    // нужен: сбрасываем состояние страницы, иначе он
+                    // воскреснет при следующем открытии доски.
+                    if (window.clearAiPageState) {
+                        window.clearAiPageState(PAGE_STATE_KEY);
+                    }
+                    window.location.reload();
+                })
                 .catch(function (err) {
                     if (btn) btn.classList.remove('busy');
                     alert(err.message);
@@ -181,12 +157,49 @@
             estimate: (form.querySelector('input[name="estimate"]') || {}).value || '',
         };
         post(url, JSON.stringify(payload))
-            .then(function () { window.location.reload(); })
+            .then(function (data) {
+                // Обновляем карточку НА МЕСТЕ: перезагрузка страницы выкидывала
+                // оператора наверх (он правил таск в середине доски).
+                applyEditInPlace(form, data || payload);
+            })
             .catch(function (err) {
                 if (btn) btn.classList.remove('busy');
                 alert(err.message);
             });
     });
+
+    // Карточка таска после правки: значения в строке обновляются, форма
+    // правки сворачивается, страница НЕ перезагружается (скролл сохраняется).
+    function applyEditInPlace(form, data) {
+        var editRow = form.closest('tr[data-edit-row]');
+        if (!editRow) return;
+        var taskId = editRow.getAttribute('data-edit-row');
+        var taskRow = document.querySelector('tr[data-task-id="' + taskId + '"]');
+        if (taskRow) {
+            var title = taskRow.querySelector('.ai-task-title');
+            if (title) title.textContent = data.title || '';
+            var description = taskRow.querySelector('.ai-task-description');
+            if (description) description.textContent = data.description || '—';
+            var estimate = taskRow.querySelector('.ai-task-estimate');
+            if (estimate) estimate.textContent = data.estimate || '—';
+        }
+        // Значения в самой форме — чтобы повторное «Изменить» показывало
+        // уже сохранённые (а не старые) значения.
+        var titleInput = form.querySelector('input[name="title"]');
+        if (titleInput && data.title) titleInput.value = data.title;
+        var descriptionInput = form.querySelector('textarea[name="description"]');
+        if (descriptionInput && data.description) descriptionInput.value = data.description;
+        var estimateInput = form.querySelector('input[name="estimate"]');
+        if (estimateInput && data.estimate) estimateInput.value = data.estimate;
+        var btn = form.querySelector('[type="submit"]');
+        if (btn) btn.classList.remove('busy');
+        // Сворачиваем форму правки и возвращаем кнопку «Изменить».
+        editRow.hidden = true;
+        if (taskRow) {
+            var editBtn = taskRow.querySelector('[data-edit-toggle]');
+            if (editBtn) editBtn.hidden = false;
+        }
+    }
 
     // --- Перетаскивание строк фронта/хотелок (только table[data-reorder="1"]) ---
     var table = document.querySelector('table[data-reorder="1"]');
@@ -274,6 +287,25 @@
                     alert(err.message);
                     window.location.reload();
                 });
+        });
+    }
+
+    // --- Состояние страницы -------------------------------------------
+    // Положение прокрутки, черновик формы «Новый таск» и фильтры (даты
+    // закрытия в архиве) сохраняются в localStorage и восстанавливаются
+    // при следующем открытии доски. Фильтры-ссылки («Кто взял», тип таска,
+    // исполнитель) уезжают в URL сразу (auto-submit) — их восстанавливает
+    // сам URL, поэтому в список полей они не входят.
+    if (window.initAiPageState) {
+        window.initAiPageState({
+            key: PAGE_STATE_KEY,
+            form: document.querySelector('.ai-tasks-create'),
+            fields: ['title', 'description', 'estimate'],
+            forms: [{
+                form: document.querySelector('.ai-tasks-filter'),
+                fields: ['closed_from', 'closed_to'],
+            }],
+            scroll: true,
         });
     }
 })();

@@ -71,6 +71,13 @@ button:hover {
 .msg-assistant { background-color: #eaffea; border-left: 5px solid #4caf50; }
 .msg-dl { background-color: #fff8e1; border-left: 5px solid #ffb300; }
 
+/* Отказ DL «canUseAi»: AI в этом курсе запрещён (WS закрыт кодом 4404,
+   ai/consumers.py). Сообщение в ленте чата — красной рамкой. */
+.ai-disabled-notice {
+    color: #b91c1c;
+    font-weight: 600;
+}
+
 .accordion {
     background-color: #eee;
     color: #444;

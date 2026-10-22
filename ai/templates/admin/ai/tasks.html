@@ -5,8 +5,7 @@
 {# фильтры «Не взятые» (?kind=unclaimed), «Поиск» (активные таски + фильтр   #}
 {# «Кто взял», ?taken=), «Мои таски» (?kind=mine) и архив «Закрытые»         #}
 {# (?kind=closed + ?closed_from/?closed_to + ?task_kind= + ?done_by=;        #}
-{# «Вернуть» спрашивает,                                                     #}
-{# оставить исполнителя (по умолчанию) или освободить таск). Суперюзер/      #}
+{# «Вернуть» сразу возвращает таск тому же исполнителю). Суперюзер/         #}
 {# action-ключи: форма создания, «Закрыть», «Вернуть». CSS/JS —              #}
 {# static/admin/ai/tasks/.                                                   #}
 
@@ -29,7 +28,7 @@
     Закрытый таск уходит с доски в архив «Закрытые» (кто дал, кто выполнил,
     даты, фильтры по датам закрытия, типу и исполнителю); случайно закрытый
     или сделанный не так, как нужно, таск суперюзер может вернуть на доску
-    кнопкой «Вернуть».
+    кнопкой «Вернуть» — таск сразу возвращается тому же исполнителю.
   </p>
 
   <div class="ai-task-tabs">
@@ -53,7 +52,7 @@
       <input type="text" name="estimate" maxlength="100" placeholder="Срок (до 2 недель, до 4 дней…)">
     </div>
     <textarea name="description" rows="3" placeholder="Описание"></textarea>
-    <span class="ai-tasks-hint">Номер приоритета присвоится автоматически (следующий за максимальным в этой вкладке).</span>
+    <span class="ai-tasks-hint">Номер приоритета присвоится автоматически: новый таск встанет первым (№1), остальные сдвинутся вниз.</span>
     <button type="submit" class="button default">Создать таск</button>
   </form>
   {% endif %}
@@ -141,16 +140,9 @@
             <td>{{ row.closed_at|date:"d.m.Y H:i" }}</td>
             {% if can_close %}
             <td class="ai-task-actions">
+              {# Возврат — одним кликом: таск сразу возвращается тому же исполнителю. #}
               <button type="button" class="button ai-task-btn-reopen"
-                      data-reopen-ask="1">Вернуть</button>
-              {# Выбор исполнителя при возврате: оставить за взявшим или освободить. #}
-              <span class="ai-task-reopen-choice" hidden>
-                <button type="button" class="button ai-task-btn-reopen"
-                        data-reopen-url="{{ row.reopen_url }}">С исполнителем</button>
-                <button type="button" class="button ai-task-btn-reopen"
-                        data-reopen-free="1" data-reopen-url="{{ row.reopen_url }}">Освободить</button>
-                <button type="button" class="button ai-task-btn-reopen-cancel">Отмена</button>
-              </span>
+                      data-reopen-url="{{ row.reopen_url }}">Вернуть</button>
             </td>
             {% endif %}
           </tr>
@@ -182,7 +174,7 @@
             <td class="ai-task-col-no">{% if row.priority_no %}{{ row.priority_no }}{% else %}—{% endif %}</td>
             <td class="ai-task-title">{{ row.title }}</td>
             <td class="ai-task-description">{{ row.description|default:"—" }}</td>
-            <td>{{ row.estimate|default:"—" }}</td>
+            <td class="ai-task-estimate">{{ row.estimate|default:"—" }}</td>
             <td>{{ row.created_at|date:"d.m.Y H:i" }}</td>
             <td>{% if row.taken %}{{ row.claimant|default:"—" }}{% else %}<span class="ai-task-free">—</span>{% endif %}</td>
             <td>{% if row.taken %}{{ row.taken_at|date:"d.m.Y H:i" }}{% else %}—{% endif %}</td>
@@ -239,5 +231,7 @@
   {% endif %}
 </div>
 
+{# Состояние страницы (прокрутка, черновик формы, фильтры) — общий хелпер. #}
+<script src="{% static 'admin/js/ai_page_state.js' %}"></script>
 <script src="{% static 'admin/ai/tasks/index.js' %}"></script>
 {% endblock %}
