@@ -1,6 +1,6 @@
 // Доска «Таски» (ai/admin/tasks.py): создать/взять/закрыть таск, вернуть
-// закрытый («Закрытые»; двухшажно — спросить, оставить ли исполнителя,
-// «Освободить» шлёт free_executor) — POST fetch; переставить строки
+// закрытый («Закрытые»; одним кликом — исполнитель сохраняется) — POST fetch;
+// переставить строки
 // фронта/хотелок — HTML5 drag & drop + POST /tasks/reorder/ ({kind, ids};
 // сервер перенумеровывает 1..N в пределах вида). Фильтры «Кто взял»
 // (селект-автосабмит) и дат закрытия архива — обычные GET-формы.
@@ -71,25 +71,6 @@
         });
     }
 
-    // «Вернуть» раскрывает выбор исполнителя в своей ячейке (см. шаблон):
-    // main-кнопка data-reopen-ask прячется, показывается ai-task-reopen-choice.
-    function expandReopenChoice(btn) {
-        var cell = btn.closest('.ai-task-actions');
-        if (!cell) return;
-        btn.hidden = true;
-        var choice = cell.querySelector('.ai-task-reopen-choice');
-        if (choice) choice.hidden = false;
-    }
-
-    function collapseReopenChoice(el) {
-        var cell = el.closest('.ai-task-actions');
-        if (!cell) return;
-        var choice = cell.querySelector('.ai-task-reopen-choice');
-        if (choice) choice.hidden = true;
-        var main = cell.querySelector('[data-reopen-ask]');
-        if (main) main.hidden = false;
-    }
-
     // Правка таска: форма живёт ОТДЕЛЬНОЙ строкой таблицы (data-edit-row
     // с тем же id), кнопка «Изменить» — в строке самого таска. Показ/скрыв
     // по кнопке; в форме — отправка JSON на tasks/<id>/edit/.
@@ -110,32 +91,14 @@
 
     // Взять/закрыть/вернуть — успех перезагружает страницу: статусы строк
     // пересчитывает сервер (на фронте после reorder reload не нужен).
-    // «Вернуть» — двухшажный: первый клик спрашивает, оставить ли
-    // исполнителя; «С исполнителем» шлёт POST без тела, «Освободить»
-    // — {"free_executor": true} (исполнитель сбрасывается, таск в
-    // «Не взятые»).
+    // «Вернуть» — одним кликом: исполнитель сохраняется сервером.
     document.addEventListener('click', function (event) {
-        var ask = event.target.closest('[data-reopen-ask]');
-        if (ask) { expandReopenChoice(ask); return; }
-        var cancel = event.target.closest('.ai-task-btn-reopen-cancel');
-        if (cancel) { collapseReopenChoice(cancel); return; }
         // Правка таска (только автору): «Изменить» раскрывает форму правки
         // в строке под таском, «Отмена» прячет её обратно.
         var editToggle = event.target.closest('[data-edit-toggle]');
         if (editToggle) { toggleEditForm(editToggle, true); return; }
         var editCancel = event.target.closest('.ai-task-btn-edit-cancel');
         if (editCancel) { toggleEditForm(editCancel, false); return; }
-        var freeBtn = event.target.closest('[data-reopen-free]');
-        if (freeBtn) {
-            var freeUrl = freeBtn.getAttribute('data-reopen-url');
-            if (freeUrl) {
-                guard(freeBtn, function () {
-                    return post(freeUrl, JSON.stringify({ free_executor: true }))
-                        .then(function () { window.location.reload(); });
-                });
-                return;
-            }
-        }
         var btn = event.target.closest(
             '[data-claim-url], [data-close-url], [data-reopen-url]'
         );

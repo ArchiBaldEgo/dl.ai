@@ -2,8 +2,9 @@
 
 Два типа тасков-вкладок: «Фронт работы» (front) и «Хотелки» (wish) — у
 каждого СВОЙ числовой уникальный номер с №1 (меньше = важнее, выдаётся
-сервером: max+1 внутри вида; порядок меняют перетаскиванием строк →
-tasks/reorder/ перенумеровывает 1..N в пределах присланного вида).
+сервером: НОВЫЙ таск встаёт первым (№1), существующие сдвигаются на +1;
+порядок меняют перетаскиванием строк → tasks/reorder/ перенумеровывает
+1..N в пределах присланного вида).
 Псевдо-вкладки-фильтры: «Не взятые» (unclaimed) — весь свободный фронт,
 «Поиск» (search) — ВСЕ активные таски (фронт первым) с фильтром «Кто взял»,
 «Мои таски» (mine) — взятые пользователем, «Закрытые» (closed) — архив
@@ -12,10 +13,9 @@ priority_no сбрасывается (номерное пространство 
 (closed) таск пропадает из всех рабочих видов и попадает в «Закрытые»
 (разграничение по датам закрытия, типу и исполнителю + «кто дал»/«кто
 выполнил»/«когда»), откуда суперюзер/action.task_close может ВЕРНУТЬ его
-на доску
-(tasks/reopen/: closed-поля в NULL, новый номер max+1 внутри вида; фронт
-спрашивает — оставить исполнителя (taken_by сохраняется) или освободить
-(тело {"free_executor": true} → в «Не взятые»)). Создать/закрыть/вернуть —
+на доску (tasks/reopen/: closed-поля в NULL, новый номер max+1 внутри вида;
+исполнитель (taken_by) СОХРАНЯЕТСЯ — таск сразу возвращается тому, кто его
+взял). Создать/закрыть/вернуть —
 суперюзер либо ключи
 action.task_create/task_close (см. «Группы доступа»); переставить —
 superuser/action.task_reorder. Взять может любой, кто допущен в админку
@@ -340,8 +340,9 @@ def admin_tasks_view(request):
 def admin_task_create_view(request):
     """Создание таска: суперюзер или action.task_create.
 
-    Номер приоритета присваивает СЕРВЕР (max+1 ВНУТРИ вида таска, атомарно)
-    — клиент его прислать не может; у фронта и хотелок нумерация раздельная
+    Номер приоритета присваивает СЕРВЕР: новый таск встаёт ПЕРВЫМ (№1),
+    существующие активные таски вида сдвигаются на +1 — свежий таск виден
+    сверху доски, а не в конце. У фронта и хотелок нумерация раздельная
     (оба с №1, констрейнт по (kind, priority_no)).
     """
     if not request.user.is_authenticated:
@@ -366,14 +367,29 @@ def admin_task_create_view(request):
     }
     try:
         with transaction.atomic():
-            kwargs["priority_no"] = (
-                AIDevTask.objects.filter(kind=kind).aggregate(
-                    max_no=Max("priority_no")
-                )["max_no"] or 0
-            ) + 1
+            # Новый таск — первым: активные строки вида сдвигаются на 2..N.
+            # Двухпроходная перенумерация (сначала NULL, потом номера) —
+            # частичный уникальный констрейнт (kind, priority_no) запрещает
+            # промежуточные коллизии при прямом сдвиге. select_for_update
+            # сериализует одновременные создания (sqlite его игнорирует).
+            active_ids = list(
+                AIDevTask.objects.select_for_update()
+                .filter(kind=kind, closed_at__isnull=True)
+                .order_by(F("priority_no").asc(nulls_last=True), "-created_at", "-id")
+                .values_list("pk", flat=True)
+            )
+            # Сбрасываем номера ТОЛЬКО у заблокированных строк: таск, который
+            # успел вставить параллельный create, в наш снимок не попал —
+            # его №1 трогать нельзя (иначе он молча стал бы NULL). Наш create
+            # тогда упрётся в констрейнт и честно вернёт 409.
+            AIDevTask.objects.filter(pk__in=active_ids).update(priority_no=None)
+            for number, task_id in enumerate(active_ids, start=2):
+                AIDevTask.objects.filter(pk=task_id).update(priority_no=number)
+            kwargs["priority_no"] = 1
             task = AIDevTask.objects.create(**kwargs)
     except IntegrityError:
-        # Гонка двух одновременных созданий на один max+1 — честный 409.
+        # Гонка двух одновременных созданий (оба ставят новый таск №1) —
+        # честный 409.
         return JsonResponse(
             {"ok": False, "message": "Доска менялась — повторите создание"},
             status=409,
@@ -589,40 +605,23 @@ def admin_task_reopen_view(request, task_id):
     """Вернуть закрытый таск на доску (суперюзер/action.task_close).
 
     Инверсия close (разработчик случайно закрыл таск или выполнил его не
-    так, как нужно). Тело опционально JSON {"free_executor": true} —
-    выбор спрашивает фронт («Вернуть» раскрывает «С исполнителем» /
-    «Освободить»): исполнитель СОХРАНЯЕТСЯ (таск возвращается тому, кто
-    его взял, — пусть переделает) или СБРАСЫВАЕТСЯ (taken_by/taken_at в
-    NULL → таск попадёт в «Не взятые»). closed_at/closed_by сбрасываются
-    всегда; номер присваивается заново (max+1 внутри вида — закрытые
-    номер не занимают, таск идёт в конец доски; гонка с созданием/
-    возвратом на один max+1 → IntegrityError → честный 409).
+    так, как нужно). «Вернуть» — одно действие, без выбора: исполнитель
+    СОХРАНЯЕТСЯ (taken_by/taken_at не трогаются — таск сразу возвращается
+    тому, кто его взял, пусть переделает). closed_at/closed_by сбрасываются;
+    номер присваивается заново (max+1 внутри вида — закрытые номер не
+    занимают, таск идёт в конец доски; гонка с созданием/возвратом на один
+    max+1 → IntegrityError → честный 409).
     """
     if not request.user.is_authenticated:
         return _forbid()
     if not (is_superuser_user(request.user) or user_has_key(request.user, "action.task_close")):
         return _forbid("Возвращать таски может только суперпользователь")
-    # Тело опционально: «С исполнителем» шлёт POST вообще без тела (b"") —
-    # это НЕ ошибка, просто пустой payload; непарсящийся НЕпустой — 400.
-    raw = request.body or b""
-    if raw.strip():
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            return _forbid("Некорректный запрос", status=400)
-    else:
-        payload = {}
     task = AIDevTask.objects.filter(pk=task_id).only("kind", "closed_at").first()
     if task is None:
         return JsonResponse({"ok": False, "message": "Таск не найден"}, status=404)
     if task.closed_at is None:
         return JsonResponse({"ok": False, "message": "Таск уже на доске"}, status=409)
     reopen_kwargs = {"closed_at": None, "closed_by": None, "priority_no": None}
-    # «Освободить»: taken_by/taken_at не трогаем по умолчанию — только при
-    # явном флаге (клиент выбирает между «переделает тот же» и «в Не взятые»).
-    if payload.get("free_executor"):
-        reopen_kwargs["taken_by"] = None
-        reopen_kwargs["taken_at"] = None
     try:
         with transaction.atomic():
             next_no = (

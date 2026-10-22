@@ -13140,8 +13140,8 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
     взять может любой с доступом к доске; создать/закрыть — суперюзер
     (action-ключи выдаются группами); переставить строки фронта и хотелов —
     суперюзер/action.task_reorder (выдан «Разработчику»). Номер приоритета
-    выдаёт СЕРВЕР (max+1 внутри вида; у фронта и хотелов нумерации
-    раздельны, оба с №1); вкладки-фильтры «Не взятые» (свободный фронт) и
+    выдаёт СЕРВЕР (новый таск — №1, остальные сдвигаются; у фронта и хотелов
+    нумерации раздельны, оба с №1); вкладки-фильтры «Не взятые» (свободный фронт) и
     «Поиск» (все таски + фильтр «Кто взял»); закрытие — архив вместо
     удаления (вкладка «Закрытые», возврат reopen'ом); в эмуляции
     «Посмотреть как…» права честные по ключам группы."""
@@ -13271,27 +13271,30 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(task.title, "Поправить промпт №3")
         self.assertEqual(task.estimate, "До 4 дней")
         self.assertEqual(task.kind, "front")
-        # Номер сервер выдан сам (max+1 → первый таск — №1).
+        # Номер сервер выдан сам (новый таск встаёт первым — №1).
         self.assertEqual(task.priority_no, 1)
         self.assertEqual(task.created_by, self.superuser)
 
-    def test_create_front_numbers_are_max_plus_one(self):
-        AIDevTask.objects.create(title="Уже есть", kind="front", priority_no=7)
+    def test_create_front_puts_new_task_on_top_and_shifts_others(self):
+        """Новый таск — ПЕРВЫЙ (№1), существующие активные сдвигаются на +1:
+        свежий таск виден сверху доски, а не в конце (жалоба 2026-10-22)."""
+        old = AIDevTask.objects.create(title="Уже есть", kind="front", priority_no=7)
         wish = AIDevTask.objects.create(title="Хотелка", kind="wish")
         self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
             "title": "Новый фронт", "kind": "front",
         }))
         new_task = AIDevTask.objects.exclude(pk=wish.pk).get(title="Новый фронт")
-        from django.db.models import Max
-        self.assertEqual(new_task.priority_no, AIDevTask.objects.aggregate(
-            no=Max("priority_no")
-        )["no"])
-        self.assertEqual(new_task.priority_no, 8)
+        self.assertEqual(new_task.priority_no, 1)
+        old.refresh_from_db()
+        self.assertEqual(old.priority_no, 2)
+        # Чужой вид (хотелки) не перенумеровывается.
+        wish.refresh_from_db()
+        self.assertIsNone(wish.priority_no)
 
-    def test_create_wish_numbering_is_per_kind_max_plus_one(self):
-        """Хотелки нумеруются СВОЕЙ последовательностью с №1: номер — max+1
-        внутри вида, независимо от максимума фронта (паритет 2026-10-20)."""
-        AIDevTask.objects.create(title="Фронт с номером", kind="front", priority_no=3)
+    def test_create_wish_numbering_is_per_kind(self):
+        """Хотелки нумеруются СВОЕЙ последовательностью с №1 независимо от
+        фронта: новый таск встаёт первым в своём виде, фронт не трогается."""
+        front = AIDevTask.objects.create(title="Фронт с номером", kind="front", priority_no=3)
         resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
             "title": "Хочу фильтры", "kind": "wish",
         }))
@@ -13299,21 +13302,27 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         wish = AIDevTask.objects.get(title="Хочу фильтры")
         self.assertEqual(wish.kind, "wish")
         self.assertEqual(wish.priority_no, 1)
+        front.refresh_from_db()
+        self.assertEqual(front.priority_no, 3)
 
-        # Вторая хотелка продолжает хотелочную последовательность, а не общую.
+        # Вторая хотелка — снова №1, предыдущая сдвигается на №2.
         self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
             "title": "Хочу фильтры 2", "kind": "wish",
         }))
         self.assertEqual(
-            AIDevTask.objects.get(title="Хочу фильтры 2").priority_no, 2
+            AIDevTask.objects.get(title="Хочу фильтры 2").priority_no, 1
         )
-        # Новый таск фронта — по фронту (№4), хотелочные не мешают.
+        wish.refresh_from_db()
+        self.assertEqual(wish.priority_no, 2)
+        # Новый таск фронта — первым по фронту (№1), старый сдвигается на №2.
         self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
             "title": "Новый фронт", "kind": "front",
         }))
         self.assertEqual(
-            AIDevTask.objects.get(title="Новый фронт").priority_no, 4
+            AIDevTask.objects.get(title="Новый фронт").priority_no, 1
         )
+        front.refresh_from_db()
+        self.assertEqual(front.priority_no, 2)
 
     def test_create_validates_title_and_kind(self):
         resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={}))
@@ -13426,17 +13435,19 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.assertIn("task_admin", rows[0]["creator"])  # «кто дал»
         self.assertIn("task_dev", rows[0]["claimant"])  # «кто выполнил»
         self.assertIsNotNone(rows[0]["closed_at"])
-        # Шаблон архива рисуется (колонки + двухшажный «Вернуть»: спрашивает
-        # оставить исполнителя или освободить; у разработчика без действия
+        # Шаблон архива рисуется (колонки + «Вернуть» одним кликом — таск
+        # возвращается тому же исполнителю; у разработчика без действия
         # кнопок нет).
         resp = self.page_view(self._request(self.superuser, path=f"{self.tasks_url}?kind=closed"))
         resp.render()
         html = resp.content.decode()
         self.assertIn("Кто выполнил", html)
-        self.assertIn("data-reopen-ask", html)
         self.assertIn("data-reopen-url", html)
-        self.assertIn("С исполнителем", html)
-        self.assertIn("Освободить", html)
+        # Возврат — одним кликом (без выбора «Освободить»): исполнитель
+        # сохраняется, см. admin_task_reopen_view.
+        self.assertNotIn("data-reopen-ask", html)
+        self.assertNotIn("Освободить", html)
+        self.assertNotIn("С исполнителем", html)
         resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=closed"))
         resp.render()
         self.assertNotIn("data-reopen-url", resp.content.decode())
@@ -13521,8 +13532,9 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
 
     def test_reopen_returns_task_to_board(self):
         """«Вернуть»: закрытые поля в NULL, новый номер max+1 внутри вида,
-        taken_by сохраняется (переделывать тому, кто взял); право — как у
-        закрытия; повторный reopen/закрыто-открытое — 409, чужой id — 404."""
+        taken_by сохраняется БЕЗ выбора (таск сразу возвращается тому, кто
+        взял — переделывать); право — как у закрытия; повторный reopen/
+        закрыто-открытое — 409, чужой id — 404."""
         task = AIDevTask.objects.create(
             title="Верну", kind="front", priority_no=1, created_by=self.superuser,
         )
@@ -13557,48 +13569,11 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         )
         self.assertEqual(resp.status_code, 409)
 
-        # Непарсящийся непустой JSON — 400. Пустое тело (реальный POST UI
-        # «С исполнителем» шлёт fetch без body) валидно и трактуется как
-        # отсутствие флага — проверяется кодовой веткой с raw.strip().
-        resp = self.reopen_view(
-            self._request(self.superuser, "post", "/x/99999/reopen/", body=b"not json"), 99999
-        )
-        self.assertEqual(resp.status_code, 400)
-
-    def test_reopen_with_free_executor_releases_task(self):
-        """«Освободить» ({"free_executor": true}): taken_by/taken_at
-        сбрасываются — таск возвращается в «Не взятые», его можно взять
-        заново; без флага исполнитель сохраняется (см. предыдущий тест)."""
-        task = AIDevTask.objects.create(
-            title="Освобожду", kind="front", priority_no=1, created_by=self.superuser,
-        )
-        self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
-        self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
-        resp = self.reopen_view(
-            self._request(self.superuser, "post", f"/x/{task.id}/reopen/", body={
-                "free_executor": True,
-            }),
-            task.id,
-        )
-        self.assertEqual(resp.status_code, 200)
-        task.refresh_from_db()
-        self.assertIsNone(task.closed_at)
-        self.assertIsNone(task.taken_by)
-        self.assertIsNone(task.taken_at)
-        self.assertEqual(task.priority_no, 1)  # был единственным активным
-        # Таск в «Не взятые» и его можно взять заново.
-        resp = self.page_view(self._request(self.dev, path=f"{self.tasks_url}?kind=unclaimed"))
-        self.assertEqual([r["title"] for r in resp.context_data["rows"]], ["Освобожду"])
-        self.assertEqual(
-            self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id).status_code,
-            200,
-        )
-
     def test_create_after_close_reuses_numbers_and_reorder_skips_closed(self):
-        """Закрытый таск номер не держит: max+1 считается по активным
-        (после закрытия №2 новый таск снова №2 — нумерация остаётся
-        плотной); reorder считает закрытые отсутствующими — присланное
-        множество только активных не даёт 409, закрытые номера не трогает."""
+        """Закрытый таск номер не держит: новый таск встаёт №1, активные
+        сдвигаются (у закрытого номер NULL) — нумерация остаётся плотной;
+        reorder считает закрытые отсутствующими — присланное множество
+        только активных не даёт 409, закрытые номера не трогает."""
         first = AIDevTask.objects.create(title="А", kind="front", priority_no=1)
         second = AIDevTask.objects.create(title="Б", kind="front", priority_no=2)
         self.close_view(self._request(self.superuser, "post", f"/x/{second.id}/close/"), second.id)
@@ -13608,7 +13583,9 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         }))
         self.assertEqual(json.loads(resp.content)["ok"], True)
         new_task = AIDevTask.objects.get(title="Новый")
-        self.assertEqual(new_task.priority_no, 2)
+        self.assertEqual(new_task.priority_no, 1)
+        first.refresh_from_db()
+        self.assertEqual(first.priority_no, 2)
 
         # В тело перестановки входят только АКТИВНЫЕ строки вида;
         # закрытый second не нужен (иначе был бы 409).
@@ -16117,6 +16094,33 @@ class MpaMultiWindowExtractionTests(SimpleTestCase):
         self.assertIn("unsigned __bits(3) x0;", got)
         self.assertIn("unsigned __bits(3) y10;", got)
         self.assertIn("void main", got)
+
+    def test_global_array_declarations_are_kept(self):
+        """Глобальные МАССИВЫ на 100 элементов (`unsigned __bits(8) x[10];`)
+        тоже якоря-объявления: окно начинается с них, а не с `void main`, —
+        иначе в файл уходил голый main, а DL падал «Undefined variable x»
+        (кейс «выкусывания на cmpa», задача #2606894)."""
+        prog = (
+            "unsigned __bits(8) x[100];\n"
+            "unsigned __bits(8) y[100];\n"
+            "unsigned __bits(16) d;\n"
+            "\n"
+            "void main() {\n"
+            "  unsigned __bits(8) a, b;\n"
+            "  int __bits(8) i;\n"
+            "  for (i = 0; i < 100; i++) {\n"
+            "    a = x[i];\n"
+            "    b = y[i];\n"
+            "    d = a + b;\n"
+            "  }\n"
+            "}"
+        )
+        got = self._c("Решение задачи:\n" + prog + "\nГотово.", ext=".mpc")
+        self.assertIn("unsigned __bits(8) x[100];", got)
+        self.assertIn("unsigned __bits(8) y[100];", got)
+        self.assertIn("unsigned __bits(16) d;", got)
+        self.assertIn("void main", got)
+        self.assertEqual(got, prog)
 
     def test_pseudo_c_port_declarations_are_anchors(self):
         """Псевдо-C диалект портов («unsigned char __in __bits(8) N1;» — тип

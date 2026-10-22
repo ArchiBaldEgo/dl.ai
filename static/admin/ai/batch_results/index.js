@@ -216,7 +216,7 @@ window.ArmBatchResults = (function () {
     return line;
   }
 
-  // els = {card, list, perModel, perTopic, errors, reasons, log}
+  // els = {card, list, perModel, perTopic, errors, reasons}
   function renderReport(report, els) {
     // Скип перерисовки отчёта: во время живого прогона поллинг приносит
     // те же цифры — пересобирать таблицы «Итог по моделям/темам» каждые
@@ -228,7 +228,6 @@ window.ArmBatchResults = (function () {
       (report.errors_by_topic || []).length, (report.failure_reasons || []).length,
       (report.hints || []).length,
       (report.run_topic || {}).name || '',
-      (report.log_lines || []).length,
       report.interim ? 1 : 0,
     ].join(':') : 'none';
     if (els._sig === reportSig && els.card && els.card.style.display !== 'none') {
@@ -242,7 +241,6 @@ window.ArmBatchResults = (function () {
       if (els.perTopic) { els.perTopic.innerHTML = ''; }
       if (els.errors) { els.errors.innerHTML = ''; }
       if (els.reasons) { els.reasons.innerHTML = ''; }
-      if (els.log) { els.log.innerHTML = ''; }
       setInterimNote(els.card, false);
       return;
     }
@@ -295,7 +293,6 @@ window.ArmBatchResults = (function () {
     }
     renderErrorsByTopic(report.errors_by_topic || [], els.errors);
     renderFailureReasons(report.failure_reasons || [], els.reasons);
-    renderRunLog(report.log_lines || [], els.log);
     if (els.card) { els.card.style.display = 'block'; }
   }
 
@@ -316,29 +313,6 @@ window.ArmBatchResults = (function () {
       + '<table class="arm-summary-table arm-summary-table--reasons"><thead><tr><th>Причина</th>'
       + '<th class="arm-col-num">Пар</th><th class="arm-col-num">%</th></tr></thead>'
       + '<tbody>' + body.join('') + '</tbody></table>';
-  }
-
-  // «Журнал прогона»: события прогона (сбой ответа модели → повтор).
-  // Сервер присылает готовые строки (arm_runner::_append_run_log) — здесь
-  // только форматируем время.
-  function renderRunLog(lines, wrapEl) {
-    if (!wrapEl) { return; }
-    if (!lines || !lines.length) { wrapEl.innerHTML = ''; return; }
-    const body = lines.map(function (line) {
-      const ts = line && line.ts ? formatLogTime(line.ts) : '';
-      const text = escapeHtml((line && line.text) || '');
-      return '<li>' + (ts ? '<span class="arm-log-time">' + escapeHtml(ts) + '</span> ' : '') + text + '</li>';
-    });
-    wrapEl.innerHTML = '<h3>Журнал прогона</h3>'
-      + '<ul class="arm-run-log">' + body.join('') + '</ul>';
-  }
-
-  // Время строки журнала прогона — московское (как в журнале запросов).
-  function formatLogTime(ts) {
-    const d = new Date((Number(ts) || 0) * 1000);
-    if (isNaN(d.getTime())) { return ''; }
-    const pad = function (n) { return (n < 10 ? '0' : '') + n; };
-    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
 
   // «Ошибки по темам»: нерешённые пары (failed/skipped), компактно — до 6
@@ -1002,7 +976,6 @@ window.ArmBatchResults = (function () {
     var perTopicWrap = document.createElement('div'); summaryGrid.appendChild(perTopicWrap);
     var errorsWrap = document.createElement('div'); summaryGrid.appendChild(errorsWrap);
     var reasonsWrap = document.createElement('div'); summaryGrid.appendChild(reasonsWrap);
-    var logWrap = document.createElement('div'); logWrap.style.marginTop = '16px'; reportCard.appendChild(logWrap);
     rootEl.appendChild(reportCard);
 
     var resultsCard = document.createElement('section');
@@ -1018,7 +991,7 @@ window.ArmBatchResults = (function () {
     var resultsEl = document.createElement('div'); resultsCard.appendChild(resultsEl);
     rootEl.appendChild(resultsCard);
 
-    var reportEls = { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap, errors: errorsWrap, reasons: reasonsWrap, log: logWrap };
+    var reportEls = { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap, errors: errorsWrap, reasons: reasonsWrap };
     renderReport(snapshot.report || null, reportEls);
     // В шапке карточки — переключатель «Все / Не пройденные».
     renderResults(snapshot.results || [], resultsEl, resultsCard, resultsHead);
