@@ -4,15 +4,47 @@
     max-width: 1400px;
 }
 
-.ai-tokens-warn {
-    display: inline-block;
-    margin-left: 6px;
-    padding: 1px 8px;
-    border-radius: 10px;
+/* Период-кнопки («Сегодня / 7 дней / 30 дней / Всё время») —/actions,
+   а не тогглы: нажатие заполняет поля дат и сразу обновляет панели. */
+.ai-tokens-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.ai-tokens-chips-label {
+    font-size: 12px;
+    color: var(--body-quiet-color, #666);
+}
+
+.ai-tokens-chip {
+    padding: 3px 12px;
+    border: 1px solid var(--hairline-color, #e8e8e8);
+    border-radius: 999px;
+    background: var(--body-bg, #fff);
+    color: var(--body-fg, #333);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.ai-tokens-chip:hover {
+    border-color: var(--link-fg, #79aec8);
+    color: var(--link-fg, #79aec8);
+}
+
+/* Плашка «учёт неполный» — БЛОК над карточками (внутри панельного
+   партиала: она зависит от данных и обязана обновляться при смене
+   фильтров вместе с ними). */
+.ai-tokens-incomplete {
+    margin: 0 0 14px;
+    padding: 8px 12px;
+    border-radius: 6px;
     background: #fff3cd;
     border: 1px solid #ffe08a;
     color: #7a5b00;
-    font-size: 12px;
+    font-size: 13px;
 }
 
 .ai-tokens-filters {
@@ -71,6 +103,18 @@
 
 .ai-tokens-card-sub {
     font-size: 12px;
+    color: var(--body-quiet-color, #666);
+}
+
+/* Ведущая карточка (итог журнала) — крупнее обычной. */
+.ai-tokens-card--lead .ai-tokens-card-value {
+    font-size: 36px;
+}
+
+/* Пояснение во второй карточке: «парный итог — разрез, не слагаемое». */
+.ai-tokens-card-note {
+    margin-top: 4px;
+    font-size: 11px;
     color: var(--body-quiet-color, #666);
 }
 
@@ -145,6 +189,44 @@
 .ai-tokens-num {
     text-align: right !important;
     white-space: nowrap;
+    /* Колонки чисел — цифры одной ширины, строки выравниваются по разрядам. */
+    font-variant-numeric: tabular-nums;
+}
+
+/* Полоска доли строки (share = % от максимума этой таблицы). Один оттенок
+   (акцент), дорожка — светлая ступень ТОГО ЖЕ оттенка: длина читается без
+   легенды, «больше = длиннее». Цвета берутся из темы админки (--accent),
+   поэтому светлая и тёмная темы обе работают. */
+.ai-tokens-bar {
+    display: block;
+    height: 4px;
+    margin-top: 3px;
+    border-radius: 2px;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--accent, #79aec8) 22%, var(--body-bg, #fff));
+}
+
+.ai-tokens-bar-fill {
+    display: block;
+    height: 100%;
+    min-width: 3px;
+    border-radius: 0 2px 2px 0;
+    background: var(--accent, #79aec8);
+}
+
+/* Название-«фильтр»: клик ставит его как фильтр (drill-down). Пунктир —
+   как у прочих «тихих» ссылок проекта (arm-error-link). */
+.ai-tokens-label-link {
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: var(--body-quiet-color, #666);
+    text-underline-offset: 2px;
+}
+
+.ai-tokens-label-link:hover {
+    text-decoration-style: solid;
+    color: var(--link-fg, #79aec8);
 }
 
 .ai-tokens-empty {

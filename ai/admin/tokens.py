@@ -19,6 +19,42 @@ from .permissions import can_access_token_usage
 from .site import ai_admin_site
 
 
+def _annotate_shares(rows: list) -> None:
+    """Добавить строкам таблицы «share» — процент от максимума этого среза.
+
+    Числа в колонке «Всего» уже отсортированы по убыванию, но пропорция
+    считывается глазами медленнее, чем длиной полоски: share рисует
+    долю строки от наибольшей строки ЭТОЙ таблицы (не от общего итога) —
+    каждая таблица имеет свой максимум. Строки без расхода полоску
+    не получают (share отсутствует).
+    """
+    max_total = max((int(row.get("total_tokens") or 0) for row in rows), default=0)
+    if max_total <= 0:
+        return
+    for row in rows:
+        share = int(round(float(row["total_tokens"]) / max_total * 100))
+        if share > 0:
+            row["share"] = share
+
+
+def _annotate_averages(report: dict) -> None:
+    """Средний расход на запрос (журнал) и на пару (пакетные прогонки).
+
+    Понятность: абсолютная сумма мало о чём говорит без масштаба —
+    «120 000 токенов за 400 запросов» читается легче со средней строкой
+    в подзаголовке карточки. Целое число (округление вниз/банковское
+    не важно — это подсказка, не бухгалтерия).
+    """
+    logs_total = report["logs"]["total"]
+    requests = int(logs_total.get("requests") or 0)
+    if requests > 0:
+        report["logs"]["avg_per_request"] = int(logs_total["total_tokens"]) // requests
+    batch_total = report["batch"]["total"]
+    pairs = int(report["batch"].get("pairs") or 0)
+    if pairs > 0:
+        report["batch"]["avg_per_pair"] = int(batch_total["total_tokens"]) // pairs
+
+
 @ai_admin_site.admin_view
 def admin_token_usage_view(request):
     """Страница «Контроль токенов»: расход по моделям / пользователям / режимам."""
@@ -40,6 +76,17 @@ def admin_token_usage_view(request):
         user=user,
         source=source,
     )
+
+    # Оформление (не агрегация): полоски долей в таблицах + средние
+    # в карточках-итогах. Мутируем свежепостроенный отчёт — он живёт
+    # только в этом запросе.
+    for section, slice_keys in (
+        (report["logs"], ("by_model", "by_user", "by_mode", "by_day")),
+        (report["batch"], ("by_model", "by_topic")),
+    ):
+        for key in slice_keys:
+            _annotate_shares(section[key])
+    _annotate_averages(report)
 
     # XHR-ветка: при смене фильтров клиент просит ТОЛЬКО панели (карточки +
     # срезы) — без формы, шапки и левого бара. Фильтры приезжают в URL, но

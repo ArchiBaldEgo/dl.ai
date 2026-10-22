@@ -20186,6 +20186,7 @@ class TokensAjaxPartialTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode()
         self.assertIn("ai-tokens-filters", html)
+        self.assertIn("ai-tokens-chip", html)
         self.assertIn("ai-tokens-grid", html)
         self.assertIn("ai-tokens-panel", html)
 
@@ -20244,6 +20245,66 @@ class TokensAjaxPartialTests(_AdminViewRequestMixin, TestCase):
         self.assertIn("X-Requested-With", js)
         self.assertIn("AbortController", js)
         self.assertNotIn("form.submit()", js)
+
+    # === drill-down, полоски долей, средние, плашка неполноты ==============
+
+    def test_share_bars_annotated_and_rendered(self):
+        # view добавляет строкам срезов share (% от максимума таблицы) —
+        # шаблон рисует полоску доли.
+        response = self._get()
+        html = response.content.decode()
+        self.assertIn("ai-tokens-bar", html)
+        self.assertIn("ai-tokens-bar-fill", html)
+
+    def test_drilldown_links_rendered_per_slice(self):
+        response = self._get()
+        html = response.content.decode()
+        # Модель/кто/режим/день — кликабельные названия (фильтр по клику).
+        for fill in ("model", "user", "mode", "day"):
+            self.assertIn(f'data-fill="{fill}"', html)
+
+    def test_multi_model_combo_row_is_not_drilldown_link(self):
+        # Строка из НЕСКОЛЬКИХ моделей: её название — склейка, фильтру-подстроке
+        # не соответствует → drill по ней запрещён (иначе пустые таблицы).
+        AIRequestLog.objects.create(
+            sent_at=timezone.now(),
+            mode=AIRequestLog.MODE_CHAT,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Ollama Gemma", "Ollama Mistral"],
+            tokens=50, tokens_prompt=10,
+        )
+        html = self._get().content.decode()
+        idx = html.find("Ollama Gemma, Ollama Mistral")
+        self.assertNotEqual(idx, -1, "комбинированная строка не отрендерилась")
+        # Класс links-спана стоит ПЕРЕД текстом в том же спане: смотрим окно до.
+        before = html[max(0, idx - 300):idx]
+        self.assertNotIn("label-link", before)
+        # Одиночная модель при этом кликабельна.
+        self.assertIn('data-fill="model"', html)
+
+    def test_averages_shown_in_total_cards(self):
+        html = self._get().content.decode()
+        # 140 токенов на 1 запрос → «в среднем на запрос 140».
+        self.assertIn("в среднем на запрос 140", html)
+
+    def test_incomplete_banner_lives_in_panels_partial(self):
+        # Плашка зависит от ДАННЫХ (incomplete) — лежит в партиале панелей:
+        # при AJAX-смене фильтров она обязана обновляться вместе с ними.
+        html = self._get().content.decode()
+        self.assertNotIn("ai-tokens-incomplete", html)
+        AIRequestLog.objects.create(
+            sent_at=timezone.now(),
+            mode=AIRequestLog.MODE_CHAT,
+            source=AIRequestLog.SOURCE_WEBSOCKET,
+            status=AIRequestLog.STATUS_SUCCESS,
+            model_names=["Web_Kimi"],
+            tokens=0, tokens_prompt=0,
+        )
+        for resp in (self._get(), self._get(xhr=True)):
+            html2 = resp.content.decode()
+            self.assertIn("ai-tokens-incomplete", html2)
+            self.assertIn("учёт неполный", html2.lower())
 
 
 class CanUseAiHttpGateTests(TestCase):

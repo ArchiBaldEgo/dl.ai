@@ -1,24 +1,37 @@
-{# Панели «Контроля токенов»: карточки-итоги + шесть срезов.         #}
-{# Вынесено в партиал ради AJAX-обновления: при смене фильтров      #}
-{# перезапрашивается только этот кусок, а не вся страница целиком.  #}
-{# Обёртка #ai-tokens-panels — ВНУТРИ партиала: XHR-ответ рендерит   #}
-{# партиал целиком, и JS подменяет именно эту обёртку.               #}
+{# Панели «Контроля токенов»: предупреждение о неполноте + карточки-итоги +  #}
+{# шесть срезов. Вынесено в партиал ради AJAX-обновления: при смене фильтров #}
+{# перезапрашивается только этот кусок, а не вся страница целиком.           #}
+{# Обёртка #ai-tokens-panels — ВНУТРИ партиала: XHR-ответ рендерит           #}
+{# партиал целиком, и JS подменяет именно эту обёртку.                       #}
+{# Плашка о неполных web-моделях — тоже здесь: зависимость от данных         #}
+{# (incomplete), значит при смене фильтров обязана обновляться.              #}
 <div id="ai-tokens-panels">
+{% if incomplete %}
+  <p class="ai-tokens-incomplete">
+    Учёт неполный: web-модели (Web DeepSeek / Web Kimi) токены не отдают —
+    их строки учитываются как 0, итоги с ними занижены.
+  </p>
+{% endif %}
+
 <div class="ai-tokens-cards">
-  <div class="ai-tokens-card">
-    <div class="ai-tokens-card-title">Журнал запросов — всего</div>
+  <div class="ai-tokens-card ai-tokens-card--lead">
+    <div class="ai-tokens-card-title">Итого за период — журнал запросов</div>
     <div class="ai-tokens-card-value">{{ logs.total.total_tokens }}</div>
     <div class="ai-tokens-card-sub">
-      ответ: {{ logs.total.completion_tokens }} · промпт: {{ logs.total.prompt_tokens }} ·
-      запросов: {{ logs.total.requests }}
+      ответ {{ logs.total.completion_tokens }} · промпт {{ logs.total.prompt_tokens }} ·
+      запросов {{ logs.total.requests }}{% if logs.avg_per_request %} · в среднем на запрос {{ logs.avg_per_request }}{% endif %}
     </div>
   </div>
   <div class="ai-tokens-card">
-    <div class="ai-tokens-card-title">Пакетные пары — всего</div>
+    <div class="ai-tokens-card-title">В том числе — пакетное решение (пары)</div>
     <div class="ai-tokens-card-value">{{ batch.total.total_tokens }}</div>
     <div class="ai-tokens-card-sub">
-      ответ: {{ batch.total.completion_tokens }} · промпт: {{ batch.total.prompt_tokens }} ·
-      пар: {{ batch.pairs }}
+      ответ {{ batch.total.completion_tokens }} · промпт {{ batch.total.prompt_tokens }}{% if batch.pairs %} ·
+      пар {{ batch.pairs }} · в среднем на пару {{ batch.avg_per_pair }}{% endif %}
+    </div>
+    <div class="ai-tokens-card-note">
+      Это подробный разрез пакетной части итога (прогон в журнале — одна
+      сводная запись): прибавлять к итогу не нужно.
     </div>
   </div>
 </div>
@@ -26,23 +39,23 @@
 <div class="ai-tokens-grid">
   <section class="ai-tokens-panel">
     <h3>Журнал: по моделям</h3>
-    {% include "admin/ai/_tokens_table.html" with rows=logs.by_model %}
+    {% include "admin/ai/_tokens_table.html" with rows=logs.by_model fill="model" %}
   </section>
   <section class="ai-tokens-panel">
     <h3>Журнал: по пользователям</h3>
-    {% include "admin/ai/_tokens_table.html" with rows=logs.by_user %}
+    {% include "admin/ai/_tokens_table.html" with rows=logs.by_user fill="user" %}
   </section>
   <section class="ai-tokens-panel">
     <h3>Журнал: по режимам</h3>
-    {% include "admin/ai/_tokens_table.html" with rows=logs.by_mode %}
+    {% include "admin/ai/_tokens_table.html" with rows=logs.by_mode fill="mode" %}
   </section>
   <section class="ai-tokens-panel">
     <h3>Журнал: по дням</h3>
-    {% include "admin/ai/_tokens_table.html" with rows=logs.by_day %}
+    {% include "admin/ai/_tokens_table.html" with rows=logs.by_day fill="day" %}
   </section>
   <section class="ai-tokens-panel">
     <h3>Пакетные пары: по моделям</h3>
-    {% include "admin/ai/_tokens_table.html" with rows=batch.by_model %}
+    {% include "admin/ai/_tokens_table.html" with rows=batch.by_model fill="model" %}
   </section>
   <section class="ai-tokens-panel">
     <h3>Пакетные пары: по темам</h3>

@@ -1,5 +1,11 @@
-{# Таблица среза токенов: строки — словари TokenSlice.as_dict (ключи: label, #}
-{# total_tokens, completion_tokens, prompt_tokens, requests, incomplete).      #}
+{# Таблица среза токенов: строки — словари TokenSlice.as_dict (ключи: key,    #}
+{# label, total_tokens, completion_tokens, prompt_tokens, requests,           #}
+{# incomplete) + share (процент от максимума ТАБЛИЦЫ — полоска доли).          #}
+{# fill — необязательный параметр (model/user/mode/day): название строки      #}
+{# становится кликабельным и ставит этот фильтр (drill-down). Значение        #}
+{# для фильтра — row.key (для mode: ключ режима), иначе row.label.             #}
+{# СТРОКИ ИЗ НЕСКОЛЬКИХ МОДЕЛЕЙ не drill'ятся по модели: их label — склейка   #}
+{# названий, фильтру-подстроке она не соответствует.                          #}
 <table class="ai-tokens-table">
   <thead>
     <tr>
@@ -14,9 +20,23 @@
     {% for row in rows %}
       <tr>
         <td>
-          <span class="ai-tokens-label" title="{{ row.label }}">{{ row.label }}</span>
+          {% if fill %}
+            {% if fill != "model" or row.models|length == 1 %}
+              <span class="ai-tokens-label ai-tokens-label-link"
+                    data-fill="{{ fill }}"
+                    data-value="{% if fill == "mode" %}{{ row.key }}{% else %}{{ row.label }}{% endif %}"
+                    title="Показать только «{{ row.label }}»">{{ row.label }}</span>
+            {% else %}
+              <span class="ai-tokens-label" title="{{ row.label }}">{{ row.label }}</span>
+            {% endif %}
+          {% else %}
+            <span class="ai-tokens-label" title="{{ row.label }}">{{ row.label }}</span>
+          {% endif %}
           {% if row.incomplete %}
             <span class="ai-tokens-flag" title="Модель не отдаёт usage (web-пул) — учёт по ней неполный">учёт недоступен</span>
+          {% endif %}
+          {% if row.share %}
+            <div class="ai-tokens-bar"><span class="ai-tokens-bar-fill" style="width: {{ row.share|floatformat:0 }}%"></span></div>
           {% endif %}
         </td>
         <td class="ai-tokens-num">{{ row.total_tokens }}</td>
