@@ -600,6 +600,16 @@ window.ArmBatchResults = (function () {
     testDataEl.className = 'arm-test-data';
     testDataEl.hidden = true;
     body.appendChild(testDataEl);
+    // Пояснение «почему блока нет»: DL отдаёт данные только подтверждённого
+    // проваленного теста с разрешённой выдачей (спека /get-test-data); у
+    // ошибок компиляции подтверждённого провала обычно нет вовсе. Без этого
+    // текста отсутствие блока выглядит как баг.
+    var testDataEmptyEl = document.createElement('div');
+    testDataEmptyEl.hidden = true;
+    testDataEmptyEl.style.cssText = 'margin-top:8px; font-size:12px; color:#6b7280;';
+    testDataEmptyEl.textContent =
+      'Входные/эталонные данные теста DL не выдал — тест не выполнялся (например, ошибка компиляции) или выдача запрещена настройками курса.';
+    body.appendChild(testDataEmptyEl);
     var renderTestData = function (data) {
       if (!data || (!data.input && !data.expected_output)) { testDataEl.hidden = true; return; }
       var parts = [];
@@ -620,7 +630,15 @@ window.ArmBatchResults = (function () {
       testDataEl.innerHTML = parts.join('');
       testDataEl.hidden = false;
     };
-    renderTestData(r.dl_test_data);
+    var renderTestDataWithHint = function (data, bodyDone) {
+      renderTestData(data);
+      // Подсказка — только когда тело УЖЕ догружено (lazy-пара до первого
+      // раскрытия не знает, чем ответит body-эндпоинт) и данных нет, у
+      // НЕ решённой пары (у решённой данных по определению нет).
+      var noData = !data || (!data.input && !data.expected_output);
+      testDataEmptyEl.hidden = !(noData && bodyDone && r.verdict !== 'solved');
+    };
+    renderTestDataWithHint(r.dl_test_data, !lazy);
 
     if (lazy) {
       // Тело ещё не в снапшоте: плейсхолдеры + подгрузка при раскрытии.
@@ -661,7 +679,7 @@ window.ArmBatchResults = (function () {
         // Бейдж «обрезан», если в снапшоте его не было (легаси-строки БД).
         card._armBodyTruncated = !!st.truncated;
         renderBadges(card, card._armRow || r);
-        renderTestData(st.dl_test_data);
+        renderTestDataWithHint(st.dl_test_data, true);
         if (moreBtn) { moreBtn.remove(); moreBtn = null; }
         if (st.has_more) {
           // Чанковая догрузка: остаток raw_response — по кнопке.
