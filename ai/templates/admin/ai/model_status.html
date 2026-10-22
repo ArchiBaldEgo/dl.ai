@@ -69,6 +69,10 @@
     background: rgba(18, 183, 106, 0.16);
     color: #067647;
   }
+  /* Способность есть, но модель сейчас неактивна — зелёный зачёркнутый. */
+  .cap-inactive {
+    text-decoration: line-through;
+  }
   .cap-off {
     background: rgba(100, 116, 139, 0.14);
     color: var(--body-quiet-color);
@@ -161,10 +165,10 @@
               {% endif %}
             </td>
             <td class="cap-cell">
-              {% with caps=row.capabilities %}
-                <span class="cap {% if caps.text %}cap-on{% else %}cap-off{% endif %}">Текст</span>
-                <span class="cap {% if caps.vision %}cap-on{% else %}cap-off{% endif %}">Зрение</span>
-                <span class="cap {% if caps.reasoning %}cap-on{% else %}cap-off{% endif %}">Рассуждения</span>
+              {% with caps=row.cap_classes %}
+                <span class="cap {{ caps.text.class }}" title="{{ caps.text.title }}">Текст</span>
+                <span class="cap {{ caps.vision.class }}" title="{{ caps.vision.title }}">Зрение</span>
+                <span class="cap {{ caps.reasoning.class }}" title="{{ caps.reasoning.title }}">Рассуждения</span>
               {% endwith %}
             </td>
             <td>{{ row.last_http_code|default:"—" }}</td>
@@ -285,13 +289,15 @@
           ? `${escapeHtml(row.window_date)}${row.is_current_window ? '' : '<div class="quiet">данные из предыдущего окна</div>'}`
           : '-';
 
-        const caps = row.capabilities || {};
+        const caps = row.cap_classes || {};
         const capLabels = { text: 'Текст', vision: 'Зрение', reasoning: 'Рассуждения' };
         const capCell = ['text', 'vision', 'reasoning']
           .map(function (k) {
-            const on = !!caps[k];
+            const badge = caps[k] || {};
             const label = capLabels[k] || k;
-            return `<span class="cap ${on ? 'cap-on' : 'cap-off'}">${label}</span>`;
+            const cssClass = badge.class || 'cap-off';
+            const title = badge.title ? ` title="${escapeHtml(badge.title)}"` : '';
+            return `<span class="cap ${cssClass}"${title}>${label}</span>`;
           })
           .join(' ');
 

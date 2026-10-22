@@ -1497,6 +1497,26 @@ class MessageComposerTests(TestCase):
         self.assertIn("sum numbers", message)
         self.assertEqual(mode, AIRequestLog.MODE_SOLVE)
 
+    async def test_solve_mode_appends_language_requirements(self):
+        """Курсовые приписки (массивы на 100 элементов, для i8086 — только
+        инструкции 8086) доезжают и до чата: тот же источник, что и в ARM."""
+        data = {
+            "type": "2",
+            "message": "sum numbers",
+            "language": "Русский",
+            "programming_language_name": "C-MPA (С-МПА)",
+            "topic_name": "Массивы",
+        }
+        with patch.object(
+            self.composer.resolver,
+            "resolve_text",
+            new=AsyncMock(return_value=None),
+        ):
+            with patch("ai.services.message_composer.get_default_shared_prompt", new=AsyncMock(return_value=None)):
+                message, mode = await self.composer.compose(data)
+        self.assertIn("100", message)
+        self.assertIn("Требования языка", message)
+
 
 class ModelCallerTests(SimpleTestCase):
     async def test_returns_error_for_unknown_model(self):
@@ -6504,6 +6524,24 @@ class ArmBatchResultsPartialTests(SimpleTestCase):
         self.assertNotIn("Общий CSS", html)
         # Содержимое частички (CSS) рендерится как обычно.
         self.assertIn(".arm-card", html)
+
+    def test_report_tables_stacked_full_width(self):
+        """«Сводка» — четыре полноразмерные таблицы одна за другой (метрики,
+        итог по моделям, итог по темам, ошибки по темам), а колонки с одним
+        числом — узкие (arm-col-num, width: 1%)."""
+        from django.template.loader import render_to_string
+        html = render_to_string("admin/ai/_ai_batch_results.html")
+        # Сетка колонок убрана — таблицы идут друг за другом.
+        self.assertNotIn(".arm-report {", html)
+        self.assertIn(".arm-report-section", html)
+        # Узкие числовые колонки.
+        self.assertIn("arm-col-num", html)
+        self.assertIn("width: 1%", html)
+        # Четыре таблицы отчёта.
+        for marker in ("Показатель", "Итог по моделям", "Итог по темам", "Ошибки по темам"):
+            self.assertIn(marker, html)
+        # Все таблицы отчёта — общий класс (ширина на всю карточку).
+        self.assertIn('<table class="arm-summary-table arm-report-table">', html)
 
 
 class SendSolutionCourseIdTests(SimpleTestCase):
@@ -12342,14 +12380,15 @@ class PinnedBatchRunsTests(TestCase):
 
 class AIDevTaskBoardTests(TestCase):
     """Доска «Таски» (/ai/admin/tasks/, ai/admin/tasks.py): суперюзер
-    создаёт/закрывает, разработчик промптов берёт; важное вверху, у взятого
-    — ФИО+группа+дата; гость-суперюзер видит доску, но не мутирует."""
+    создаёт/закрывает/возвращает, разработчик промптов берёт; свежие сверху,
+    у взятого — ФИО+группа+дата; гость-суперюзер видит доску, но не мутирует."""
 
     def setUp(self):
         from ai.admin.tasks import (
             admin_task_claim_view,
             admin_task_close_view,
             admin_task_create_view,
+            admin_task_restore_view,
             admin_tasks_view,
             TASKS_URL,
         )
@@ -12358,6 +12397,7 @@ class AIDevTaskBoardTests(TestCase):
         self.create_view = admin_task_create_view
         self.claim_view = admin_task_claim_view
         self.close_view = admin_task_close_view
+        self.restore_view = admin_task_restore_view
         self.tasks_url = TASKS_URL
         self.superuser = get_user_model().objects.create_superuser(
             username="task_admin", password="x", email="t@a.com",
@@ -12396,6 +12436,7 @@ class AIDevTaskBoardTests(TestCase):
             "description": "См. тему …",
             "estimate": "До 4 дней",
             "priority": "high",
+            "kind": "wishlist",
         }))
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(json.loads(resp.content)["ok"])
@@ -12403,15 +12444,21 @@ class AIDevTaskBoardTests(TestCase):
         self.assertEqual(task.title, "Поправить промпт №3")
         self.assertEqual(task.estimate, "До 4 дней")
         self.assertEqual(task.priority, "high")
+        self.assertEqual(task.kind, "wishlist")
         self.assertEqual(task.created_by, self.superuser)
 
-    def test_create_validates_title_and_priority(self):
+    def test_create_validates_title_priority_and_kind(self):
         resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={}))
         self.assertEqual(resp.status_code, 400)
         resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
             "title": "x", "priority": "ultra",
         }))
         self.assertEqual(resp.status_code, 400)
+        resp = self.create_view(self._request(self.superuser, "post", path="/x/tasks/create/", data={
+            "title": "x", "kind": "бред",
+        }))
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(AIDevTask.objects.exists())
 
     def test_claim_sets_taken_fields_and_visible_on_page(self):
         task = AIDevTask.objects.create(
@@ -12455,23 +12502,123 @@ class AIDevTaskBoardTests(TestCase):
         resp = self.close_view(self._request(self.dev, "post", f"/x/{task.id}/close/"), task.id)
         self.assertEqual(resp.status_code, 403)
         self.assertTrue(AIDevTask.objects.filter(pk=task.pk).exists())
+        self.assertIsNone(AIDevTask.objects.get(pk=task.pk).closed_at)
 
         self.assertEqual(
             self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id).status_code,
             200,
         )
-        self.assertFalse(AIDevTask.objects.filter(pk=task.pk).exists())
+        # Закрытый таск НЕ удаляется — он уходит в «закрытые».
+        task.refresh_from_db()
+        self.assertIsNotNone(task.closed_at)
 
-    def test_rows_sorted_high_to_low_and_filtered(self):
+    def test_closed_task_hidden_from_open_list_and_shown_in_closed(self):
+        task = AIDevTask.objects.create(title="Т закрытый", created_by=self.superuser)
+        self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+
+        resp = self.page_view(self._request(self.dev, path=self.tasks_url))
+        self.assertEqual([r["title"] for r in resp.context_data["rows"]], [])
+
+        resp = self.page_view(self._request(self.dev, path="/x/?state=closed"))
+        rows = resp.context_data["rows"]
+        self.assertEqual([r["title"] for r in rows], ["Т закрытый"])
+        self.assertTrue(rows[0]["closed"])
+        self.assertIsNotNone(rows[0]["closed_at"])
+
+        resp = self.page_view(self._request(self.dev, path="/x/?state=all"))
+        self.assertEqual([r["title"] for r in resp.context_data["rows"]], ["Т закрытый"])
+
+    def test_restore_brings_task_back_with_same_kind_and_owner(self):
+        """«Вернуть» возвращает таск в открытые — с тем же типом и тем же
+        взявшим (исполнителем)."""
+        task = AIDevTask.objects.create(
+            title="Т на вернуть", kind=AIDevTask.Kind.WISHLIST, created_by=self.superuser,
+        )
+        self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
+        self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+
+        resp = self.restore_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/restore/"), task.id
+        )
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertIsNone(task.closed_at)
+        self.assertEqual(task.kind, "wishlist")
+        self.assertEqual(task.taken_by, self.dev)
+        self.assertIsNotNone(task.taken_at)
+
+    def test_restore_requires_superuser(self):
+        task = AIDevTask.objects.create(title="Т4", created_by=self.superuser)
+        self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+        resp = self.restore_view(self._request(self.dev, "post", f"/x/{task.id}/restore/"), task.id)
+        self.assertEqual(resp.status_code, 403)
+        self.assertIsNotNone(AIDevTask.objects.get(pk=task.pk).closed_at)
+
+    def test_restore_unknown_task_is_404(self):
+        resp = self.restore_view(self._request(self.superuser, "post", "/x/99999/restore/"), 99999)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_rows_sorted_newest_first_and_filtered(self):
+        """Порядок доски — свежие сверху; приоритет остаётся бейджем/фильтром."""
         AIDevTask.objects.create(title="низк", priority="low")
         AIDevTask.objects.create(title="выс", priority="high")
         AIDevTask.objects.create(title="сред")
         resp = self.page_view(self._request(self.dev, path=self.tasks_url))
         titles = [r["title"] for r in resp.context_data["rows"]]
-        self.assertEqual(titles, ["выс", "сред", "низк"])
+        self.assertEqual(titles, ["сред", "выс", "низк"])
         resp = self.page_view(self._request(self.dev, path="/x/?priority=high"))
         titles = [r["title"] for r in resp.context_data["rows"]]
         self.assertEqual(titles, ["выс"])
+
+    def test_kind_filter_and_kind_display(self):
+        AIDevTask.objects.create(title="фронтовая", kind=AIDevTask.Kind.FRONT)
+        AIDevTask.objects.create(title="хотелка", kind=AIDevTask.Kind.WISHLIST)
+        resp = self.page_view(self._request(self.dev, path="/x/?kind=wishlist"))
+        rows = resp.context_data["rows"]
+        self.assertEqual([r["title"] for r in rows], ["хотелка"])
+        self.assertEqual(rows[0]["kind_display"], "Хотелка")
+        resp = self.page_view(self._request(self.dev, path="/x/?kind=front"))
+        self.assertEqual([r["title"] for r in resp.context_data["rows"]], ["фронтовая"])
+
+    def test_page_renders_buttons_and_badges(self):
+        """Рендер страницы: бейджи типа/приоритета и кнопки «Взять» /
+        «Вернуть» (у закрытого таска) на месте."""
+        open_task = AIDevTask.objects.create(
+            title="Открытый", kind=AIDevTask.Kind.WISHLIST, created_by=self.superuser,
+        )
+        closed_task = AIDevTask.objects.create(
+            title="Закрытый", kind=AIDevTask.Kind.FRONT, created_by=self.superuser,
+        )
+        self.close_view(
+            self._request(self.superuser, "post", f"/x/{closed_task.id}/close/"), closed_task.id
+        )
+        resp = self.page_view(self._request(self.superuser, path="/x/?state=all"))
+        html = resp.render().content.decode("utf-8")
+        self.assertIn("Взять", html)
+        self.assertIn("Вернуть", html)
+        self.assertIn("Хотелка", html)
+        self.assertIn("Фронт", html)
+        self.assertIn("data-claim-url=", html)
+        self.assertIn("data-restore-url=", html)
+
+    def test_page_saves_state_and_supports_restore(self):
+        """Доска сохраняет состояние страницы (фильтры/текст/прокрутка) и
+        умеет возвращать закрытый таск кнопкой «Вернуть»."""
+        from pathlib import Path
+
+        base = Path(__file__).resolve().parent.parent
+        html = (base / "ai" / "templates" / "admin" / "ai" / "tasks.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("ai_page_state.js", html)
+        self.assertIn("initAiPageState", html)
+        self.assertIn("data-restore-url", html)
+        js = (base / "static" / "admin" / "ai" / "tasks" / "index.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("data-restore-url", js)
+        # После создания таска черновик формы очищается.
+        self.assertIn("ai_page_state:ai_tasks_page", js)
 
     def test_claimant_display_uses_role_fallback(self):
         """Без DL-аккаунта/справочника у взятого таска — ролевой фолбэк
@@ -13624,6 +13771,25 @@ class MpaMultiWindowExtractionTests(SimpleTestCase):
         )
         self.assertEqual(self._c(wall, ext=".mpc"), small)
 
+    def test_global_bits_declarations_are_kept(self):
+        """Глобальные `unsigned __bits(3) x0;` — якоря-объявления: раньше они
+        не распознавались, окно извлечения начиналось с `void main`, и
+        глобальные переменные ТЕРЯЛИСЬ (кейс «выкусывания» у cmpa: в файл
+        уходил голый main, а глобалы оставались в ответе модели)."""
+        prog = (
+            "unsigned __bits(3) x0;\n"
+            "unsigned __bits(3) x1;\n"
+            "unsigned __bits(3) y10;\n"
+            "void main() {\n"
+            "  y10 = x0 + x1;\n"
+            "}"
+        )
+        wall = "Решение задачи:\n" + prog + "\nГотово."
+        got = self._c(wall, ext=".mpc")
+        self.assertIn("unsigned __bits(3) x0;", got)
+        self.assertIn("unsigned __bits(3) y10;", got)
+        self.assertIn("void main", got)
+
     def test_pseudo_c_port_declarations_are_anchors(self):
         """Псевдо-C диалект портов («unsigned char __in __bits(8) N1;» — тип
         В НАЧАЛЕ строки) тоже является якорем-объявлением: регулярка матчила
@@ -13721,6 +13887,117 @@ class MpaMultiWindowExtractionTests(SimpleTestCase):
             self._c("Ответ:\n```mpc\n" + prog + "\n```\nГотово."),
             prog,
         )
+
+
+class ModelStatusCapabilityBadgeTests(SimpleTestCase):
+    """Три состояния бейджа способности («Состояние моделей»): зелёный —
+    способность есть и модель активна; зелёный зачёркнутый — способность
+    есть, но модель сейчас неактивна; серый зачёркнутый — способности нет."""
+
+    def test_badge_states(self):
+        from ai.admin.model_status import _capability_badge
+
+        self.assertEqual(_capability_badge(True, True)["class"], "cap-on")
+        self.assertEqual(_capability_badge(True, False)["class"], "cap-on cap-inactive")
+        self.assertEqual(_capability_badge(False, True)["class"], "cap-off")
+        self.assertEqual(_capability_badge(False, False)["class"], "cap-off")
+        for badge in (
+            _capability_badge(True, True),
+            _capability_badge(True, False),
+            _capability_badge(False, True),
+        ):
+            self.assertTrue(badge["title"])
+
+    def test_rows_get_cap_classes(self):
+        from ai.admin.model_status import _with_capability_badges
+
+        rows = _with_capability_badges([
+            {
+                "key": "A",
+                "capabilities": {"text": True, "vision": False, "reasoning": True},
+                "is_active": False,
+            },
+        ])
+        caps = rows[0]["cap_classes"]
+        self.assertEqual(caps["text"]["class"], "cap-on cap-inactive")
+        self.assertEqual(caps["vision"]["class"], "cap-off")
+        self.assertEqual(caps["reasoning"]["class"], "cap-on cap-inactive")
+
+    def test_api_serializer_passes_cap_classes(self):
+        from ai.admin.model_status import _serialize_model_status_rows_for_api
+
+        payload = _serialize_model_status_rows_for_api([
+            {
+                "key": "A",
+                "capabilities": {"text": True, "vision": True},
+                "is_active": True,
+                "cap_classes": {
+                    "text": {"class": "cap-on", "title": "t"},
+                    "vision": {"class": "cap-off", "title": "u"},
+                    "reasoning": {"class": "cap-off", "title": "u"},
+                },
+            },
+        ])[0]
+        self.assertEqual(payload["cap_classes"]["text"]["class"], "cap-on")
+        self.assertEqual(payload["cap_classes"]["vision"]["class"], "cap-off")
+
+
+class LanguageRequirementsTests(SimpleTestCase):
+    """Приписки курса к коду решения (services/language_requirements.py).
+
+    Без них часть решений падает на dl.gsu.by с нераспознаваемой причиной
+    («Причина не распознана») или с «Unknown instruction» (#2606916,
+    очередь 15231484, DelTA4_NIT1): массивы нужно объявлять на 100 элементов,
+    а для i8086 — только инструкции 8086.
+    """
+
+    def test_mpa_requirements_by_extension_and_by_name(self):
+        from ai.services.language_requirements import language_requirements
+
+        by_ext = language_requirements("", file_extension=".mpc")
+        self.assertIn("100", by_ext)
+        self.assertIn("С-МПА", by_ext)
+        # По названию языка (чат знает только название) — тот же текст.
+        self.assertEqual(language_requirements("C-MPA (С-МПА)"), by_ext)
+        self.assertEqual(language_requirements("С-МПА"), by_ext)
+
+    def test_asm86_requirements(self):
+        from ai.services.language_requirements import language_requirements
+
+        text = language_requirements("", file_extension=".i86")
+        self.assertIn("8086", text)
+        self.assertIn("100", text)
+        # .asm — тот же язык курса (Ассемблер i8086).
+        self.assertEqual(language_requirements("", file_extension=".asm"), text)
+        self.assertEqual(language_requirements("Ассемблер i8086"), text)
+
+    def test_other_languages_have_no_requirements(self):
+        from ai.services.language_requirements import language_requirements
+
+        self.assertEqual(language_requirements("Python"), "")
+        self.assertEqual(language_requirements("", file_extension=".py"), "")
+
+    def test_ui_language_suffix(self):
+        from ai.services.language_requirements import language_requirements
+
+        en = language_requirements("", file_extension=".mpc", ui_suffix="en")
+        self.assertIn("100", en)
+        self.assertNotIn("Требования языка", en)
+        fr = language_requirements("", file_extension=".i86", ui_suffix="fr")
+        self.assertIn("100", fr)
+        # Неизвестный суффикс → русский текст, а не пусто.
+        self.assertIn("Требования языка", language_requirements("", file_extension=".mpc", ui_suffix="xx"))
+
+    def test_batch_solve_message_contains_requirements(self):
+        from ai.arm_runner import _build_solve_message
+
+        mpa = _build_solve_message("Условие", "C-MPA (С-МПА)", "Тема", file_extension=".mpc")
+        self.assertIn("100", mpa)
+        asm = _build_solve_message("Условие", "Ассемблер i8086", "Тема", file_extension=".i86")
+        self.assertIn("8086", asm)
+        # Обычный язык — курсовых приписок нет.
+        py = _build_solve_message("Условие", "Python", "Тема", file_extension=".py")
+        self.assertNotIn("Требования языка", py)
 
 
 class ArmPromptResultPersistenceTests(TestCase):

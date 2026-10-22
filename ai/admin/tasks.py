@@ -1,15 +1,17 @@
 """Доска задач «Таски» (ТЗ 2026-10-19).
 
-Суперюзер создаёт таски (название, описание, срок — текстом) и выставляет
-приоритет (Высокий/Средний/Низкий — важное вверху, фильтр поверх); закрыть
-(удалить с доски) может только суперюзер. Разработчик промптов берёт таск:
-taken_by/taken_at пишутся атомарно (условный UPDATE — «первый успел»),
+Суперюзер создаёт таски (название, описание, срок — текстом), выставляет
+приоритет (Высокий/Средний/Низкий — бейдж в строке и фильтр поверх) и тип
+(«Фронт» / «Хотелка»). Закрыть и вернуть таск может только суперюзер: закрытый
+таск НЕ удаляется, а уходит в «закрытые» (closed_at) и возвращается кнопкой
+«Вернуть» — с тем же типом и тем же взятым. Разработчик промптов берёт
+таск: taken_by/taken_at пишутся атомарно (условный UPDATE — «первый успел»),
 у взятого таска в таблице сразу ФИО + группа + дата взятия, повторно взять
-нельзя. ModelAdmin не регистрируется — страница целиком кастомная,
-по тому же образцу, что «Закреплённые пакетные решения» (pinned.py).
+нельзя. Порядок доски — свежие сверху (новый таск виден сразу); приоритет
+на порядок не влияет. ModelAdmin не регистрируется — страница целиком
+кастомная, по тому же образцу, что «Закреплённые пакетные решения» (pinned.py).
 """
 
-from django.db.models import Case, When
 from django.http import HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
 from django.utils import timezone
@@ -29,13 +31,9 @@ from .site import ai_admin_site
 
 TASKS_URL = "/ai/admin/tasks/"
 
-# Приоритет на доске: Высокий → Средний → Низкий (аннотация pr_rank),
-# внутри одного приоритета — свежие сверху.
-_PRIORITY_RANK = Case(
-    When(priority=AIDevTask.Priority.HIGH, then=0),
-    When(priority=AIDevTask.Priority.NORMAL, then=1),
-    default=2,
-)
+# Порядок доски: свежие таски сверху (новый таск виден сразу после создания).
+# Приоритет — бейдж в строке и фильтр, на порядок не влияет.
+_TASKS_ORDER = ("-created_at", "-id")
 
 
 def _claimant_display(user, edu_maps=None):
@@ -73,22 +71,30 @@ def _forbid(message="Access denied", status=403):
 
 
 def admin_tasks_view(request):
-    """Страница «Таски»: таблица доски, форма создания (суперюзер), фильтр."""
+    """Страница «Таски»: таблица доски, форма создания (суперюзер), фильтры."""
     if not can_access_tasks(request):
         return HttpResponseForbidden("Access denied")
     guest = is_viewing_as_guest(request)
     superuser = is_superuser_user(request.user)
 
     selected = (request.GET.get("priority") or "").strip()
+    selected_kind = (request.GET.get("kind") or "").strip()
+    # Показ закрытых: open (по умолчанию) | closed | all.
+    state = (request.GET.get("state") or "").strip().lower()
+    if state not in ("open", "closed", "all"):
+        state = "open"
     rows_qs = AIDevTask.objects.select_related(
         "taken_by", "taken_by__external_dl_account"
     )
     if selected in dict(AIDevTask.Priority.choices):
         rows_qs = rows_qs.filter(priority=selected)
-    tasks = list(
-        rows_qs.annotate(pr_rank=_PRIORITY_RANK)
-        .order_by("pr_rank", "-created_at", "-id")
-    )
+    if selected_kind in dict(AIDevTask.Kind.choices):
+        rows_qs = rows_qs.filter(kind=selected_kind)
+    if state == "open":
+        rows_qs = rows_qs.filter(closed_at__isnull=True)
+    elif state == "closed":
+        rows_qs = rows_qs.filter(closed_at__isnull=False)
+    tasks = list(rows_qs.order_by(*_TASKS_ORDER))
     edu_maps = education_title_maps()
     rows = []
     for task in tasks:
@@ -96,6 +102,8 @@ def admin_tasks_view(request):
             "id": task.pk,
             "priority": task.priority,
             "priority_display": task.get_priority_display(),
+            "kind": task.kind,
+            "kind_display": task.get_kind_display(),
             "title": task.title,
             "description": task.description,
             "estimate": task.estimate,
@@ -103,8 +111,11 @@ def admin_tasks_view(request):
             "taken": task.taken_by_id is not None,
             "claimant": _claimant_display(task.taken_by, edu_maps),
             "taken_at": task.taken_at,
+            "closed": task.closed_at is not None,
+            "closed_at": task.closed_at,
             "claim_url": f"{TASKS_URL}{task.pk}/claim/",
             "close_url": f"{TASKS_URL}{task.pk}/close/",
+            "restore_url": f"{TASKS_URL}{task.pk}/restore/",
         })
 
     context = {
@@ -113,6 +124,9 @@ def admin_tasks_view(request):
         "rows": rows,
         "priorities": AIDevTask.Priority.choices,
         "selected_priority": selected,
+        "kinds": AIDevTask.Kind.choices,
+        "selected_kind": selected_kind,
+        "state": state,
         "can_create": superuser and not guest,
         "can_close": superuser and not guest,
         "moscow_tz": MOSCOW_TZ,
@@ -135,11 +149,17 @@ def admin_task_create_view(request):
         return JsonResponse(
             {"ok": False, "message": "Неизвестный приоритет"}, status=400
         )
+    kind = (request.POST.get("kind") or AIDevTask.Kind.FRONT).strip()
+    if kind not in dict(AIDevTask.Kind.choices):
+        return JsonResponse(
+            {"ok": False, "message": "Неизвестный тип таска"}, status=400
+        )
     task = AIDevTask.objects.create(
         title=title,
         description=(request.POST.get("description") or "").strip(),
         estimate=(request.POST.get("estimate") or "").strip(),
         priority=priority,
+        kind=kind,
         created_by=request.user,
     )
     return JsonResponse({"ok": True, "id": task.pk})
@@ -174,11 +194,37 @@ def admin_task_claim_view(request, task_id):
 
 @require_POST
 def admin_task_close_view(request, task_id):
-    """Закрыть таск — удаление с доски (только суперюзер, не в гостевом)."""
+    """Закрыть таск — уходит в «закрытые» (только суперюзер, не в гостевом).
+
+    Таск НЕ удаляется: кнопка «Вернуть» возвращает его в открытые — с тем же
+    типом и тем же взятым (исполнителем). Закрытые видны в доске при фильтре
+    «Закрытые» / «Все».
+    """
     if not is_superuser_user(request.user) or is_viewing_as_guest(request):
         return _forbid("Закрывать таски может только суперпользователь")
-    task = AIDevTask.objects.filter(pk=task_id).only("pk").first()
+    task = AIDevTask.objects.filter(pk=task_id).only("pk", "closed_at").first()
     if task is None:
         return JsonResponse({"ok": False, "message": "Таск не найден"}, status=404)
-    task.delete()
+    if task.closed_at is None:
+        AIDevTask.objects.filter(pk=task.pk, closed_at__isnull=True).update(
+            closed_at=timezone.now(),
+        )
+    return JsonResponse({"ok": True})
+
+
+@require_POST
+def admin_task_restore_view(request, task_id):
+    """Вернуть закрытый таск в открытые (только суперюзер, не в гостевом).
+
+    Тип и взявший (исполнитель) сохраняются — восстанавливается только факт
+    закрытия.
+    """
+    if not is_superuser_user(request.user) or is_viewing_as_guest(request):
+        return _forbid("Возвращать таски может только суперпользователь")
+    task = AIDevTask.objects.filter(pk=task_id).only("pk", "closed_at").first()
+    if task is None:
+        return JsonResponse({"ok": False, "message": "Таск не найден"}, status=404)
+    AIDevTask.objects.filter(pk=task.pk, closed_at__isnull=False).update(
+        closed_at=None,
+    )
     return JsonResponse({"ok": True})

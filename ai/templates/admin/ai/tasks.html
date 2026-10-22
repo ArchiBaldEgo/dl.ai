@@ -1,8 +1,8 @@
 {% extends "admin/base_site.html" %}
 {% load static tz %}
 {# Страница «Таски» — доска задач (ai/admin/tasks.py). Суперюзер: форма #}
-{# создания + кнопка «Закрыть»; разработчик промптов: кнопка «Взять» #}
-{# только у свободных тасков. CSS/JS — статика static/admin/ai/tasks/. #}
+{# создания + кнопки «Закрыть»/«Вернуть»; разработчик промптов: кнопка #}
+{# «Взять» только у свободных тасков. CSS/JS — статика static/admin/ai/tasks/. #}
 
 {% block extrastyle %}
   <link rel="stylesheet" href="{% static 'admin/ai/tasks/index.css' %}">
@@ -13,9 +13,12 @@
   <p class="help">
     Доска задач для разработчиков. Суперюзеры создают таски (название,
     описание, срок — текстом) и закрывают их; разработчики могут взять таск,
-    который им подходит. Важное — вверху: Высокий → Средний → Низкий.
-    У взятого таска показываются ФИО и группа взявшего и дата взятия; взять
-    уже взятый таск нельзя.
+    который им подходит. Сверху — свежие таски, новый таск появляется наверху
+    сразу. Приоритет (Высокий → Средний → Низкий) показан бейджем в строке,
+    тип (Фронт / Хотелка) — тоже бейджем. Закрытый таск не удаляется, а уходит
+    в «закрытые»: его можно вернуть одной кнопкой «Вернуть» — тип и взявший
+    (исполнитель) сохранятся. У взятого таска показываются ФИО и группа
+    взявшего и дата взятия; взять уже взятый таск нельзя.
   </p>
 
   {% if can_create %}
@@ -26,6 +29,11 @@
       <input type="text" name="title" maxlength="200" placeholder="Название *" required>
       <select name="priority">
         {% for value, label in priorities %}
+          <option value="{{ value }}">{{ label }}</option>
+        {% endfor %}
+      </select>
+      <select name="kind" data-ai-field="kind">
+        {% for value, label in kinds %}
           <option value="{{ value }}">{{ label }}</option>
         {% endfor %}
       </select>
@@ -44,6 +52,19 @@
         <option value="{{ value }}"{% if selected_priority == value %} selected{% endif %}>{{ label }}</option>
       {% endfor %}
     </select>
+    <label class="ai-tasks-filter-label">Тип:</label>
+    <select name="kind" data-ai-filter>
+      <option value="">Все</option>
+      {% for value, label in kinds %}
+        <option value="{{ value }}"{% if selected_kind == value %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <label class="ai-tasks-filter-label">Показать:</label>
+    <select name="state" data-ai-filter>
+      <option value="open"{% if state == "open" %} selected{% endif %}>Открытые</option>
+      <option value="closed"{% if state == "closed" %} selected{% endif %}>Закрытые</option>
+      <option value="all"{% if state == "all" %} selected{% endif %}>Все</option>
+    </select>
     <a href="/ai/admin/tasks/" class="button ai-tasks-filter-reset">Сбросить</a>
   </form>
 
@@ -52,6 +73,7 @@
     <table class="ai-tasks-table">
       <thead>
         <tr>
+          <th>Тип</th>
           <th>Приоритет</th>
           <th>Название</th>
           <th>Описание</th>
@@ -59,13 +81,17 @@
           <th>Создан</th>
           <th>Взял</th>
           <th>Взят</th>
+          <th>Закрыт</th>
           <th></th>
         </tr>
       </thead>
       <tbody>
         {% timezone moscow_tz %}
         {% for row in rows %}
-          <tr class="{% if row.taken %}ai-tasks-taken{% endif %}">
+          <tr class="{% if row.taken %}ai-tasks-taken{% endif %}{% if row.closed %} ai-tasks-closed{% endif %}">
+            <td>
+              <span class="ai-task-badge ai-task-kind-{{ row.kind }}">{{ row.kind_display }}</span>
+            </td>
             <td>
               <span class="ai-task-badge ai-task-priority-{{ row.priority }}">{{ row.priority_display }}</span>
             </td>
@@ -75,14 +101,22 @@
             <td>{{ row.created_at|date:"d.m.Y H:i" }}</td>
             <td>{% if row.taken %}{{ row.claimant|default:"—" }}{% else %}<span class="ai-task-free">—</span>{% endif %}</td>
             <td>{% if row.taken %}{{ row.taken_at|date:"d.m.Y H:i" }}{% else %}—{% endif %}</td>
+            <td>{% if row.closed %}{{ row.closed_at|date:"d.m.Y H:i" }}{% else %}—{% endif %}</td>
             <td class="ai-task-actions">
-              {% if not row.taken %}
-                <button type="button" class="button ai-task-btn-claim"
-                        data-claim-url="{{ row.claim_url }}">Взять</button>
-              {% endif %}
-              {% if can_close and row.taken %}
-                <button type="button" class="button ai-task-btn-close"
-                        data-close-url="{{ row.close_url }}">Закрыть</button>
+              {% if row.closed %}
+                {% if can_close %}
+                  <button type="button" class="button ai-task-btn-restore"
+                          data-restore-url="{{ row.restore_url }}">Вернуть</button>
+                {% endif %}
+              {% else %}
+                {% if not row.taken %}
+                  <button type="button" class="button ai-task-btn-claim"
+                          data-claim-url="{{ row.claim_url }}">Взять</button>
+                {% endif %}
+                {% if can_close and row.taken %}
+                  <button type="button" class="button ai-task-btn-close"
+                          data-close-url="{{ row.close_url }}">Закрыть</button>
+                {% endif %}
               {% endif %}
             </td>
           </tr>
@@ -93,14 +127,23 @@
   </div>
   {% else %}
     <p class="ai-tasks-empty">
-      {% if selected_priority %}Тасков с таким приоритетом нет — сбросьте фильтр.{% else %}Пока тасков нет.{% if can_create %} Создайте первый таск формой выше.{% endif %}{% endif %}
+      {% if selected_priority or selected_kind %}{% if state == "closed" %}Закрытых тасков с такими условиями нет — сбросьте фильтр.{% else %}Тасков с такими условиями нет — сбросьте фильтр.{% endif %}{% else %}{% if state == "closed" %}Закрытых тасков пока нет.{% else %}Пока тасков нет.{% if can_create %} Создайте первый таск формой выше.{% endif %}{% endif %}{% endif %}
     </p>
   {% endif %}
 </div>
 
 <script src="{% static 'admin/ai/tasks/index.js' %}"></script>
 <script src="{% static 'admin/js/ai_auto_filters.js' %}"></script>
+<script src="{% static 'admin/js/ai_page_state.js' %}"></script>
 <script>
   initAiAutoFilters(document.querySelector('.ai-tasks-filter'));
+  // Состояние страницы доски: положение прокрутки, фильтры, текст формы
+  // создания (восстанавливаются при следующем открытии).
+  initAiPageState({
+    key: 'ai_tasks_page',
+    form: document.querySelector('.ai-tasks-create'),
+    fields: ['title', 'description', 'estimate'],
+    scroll: true,
+  });
 </script>
 {% endblock %}

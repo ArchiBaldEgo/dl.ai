@@ -59,6 +59,7 @@ from .tasks import (
     admin_task_claim_view,
     admin_task_close_view,
     admin_task_create_view,
+    admin_task_restore_view,
     admin_tasks_view,
 )
 from .test_console import (
@@ -115,6 +116,7 @@ def get_ai_admin_urls():
         path("tasks/create/", ai_admin_site.admin_view(admin_task_create_view), name="ai_task_create"),
         path("tasks/<int:task_id>/claim/", ai_admin_site.admin_view(admin_task_claim_view), name="ai_task_claim"),
         path("tasks/<int:task_id>/close/", ai_admin_site.admin_view(admin_task_close_view), name="ai_task_close"),
+        path("tasks/<int:task_id>/restore/", ai_admin_site.admin_view(admin_task_restore_view), name="ai_task_restore"),
         path("tasks/", ai_admin_site.admin_view(admin_tasks_view), name="ai_tasks"),
         path("prompt-defaults/", ai_admin_site.admin_view(admin_prompt_defaults_view), name="ai_prompt_defaults"),
         path("updates/", ai_admin_site.admin_view(admin_updates_view), name="ai_updates"),

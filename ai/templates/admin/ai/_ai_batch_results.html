@@ -46,19 +46,13 @@ NB: комментарии с решёткой Django вырезает толь�
     padding: 8px 10px; text-align: left;
   }
   .arm-summary-table th { font-weight: 600; color: var(--body-quiet-color); }
+  /* Колонка с ОДНИМ числом (счётчик, процент, время) — узкая: ширину
+     забирает колонка названия. */
   .arm-summary-table td.arm-col-num, .arm-summary-table th.arm-col-num {
     text-align: right; white-space: nowrap; width: 1%;
   }
-
-  .arm-report {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 10px; margin: 0; padding: 0; list-style: none;
-  }
-  .arm-report li {
-    border: 1px solid var(--hairline-color); border-radius: 6px; padding: 10px;
-    background: color-mix(in srgb, var(--body-bg) 94%, var(--hairline-color));
-    font-size: 14px;
-  }
+  /* Таблицы сводки идут одна за другой, во всю ширину карточки. */
+  .arm-report-section { margin-top: 16px; }
 
   .arm-badge { border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 700; white-space: nowrap; }
   .arm-badge.solved { color: #166534; background: #dcfce7; }
@@ -312,6 +306,38 @@ window.ArmBatchResults = (function () {
     return line;
   }
 
+  // Сводка прогона: таблица метрик. Каждая строка — одно число, поэтому
+  // колонка «Значение» узкая (arm-col-num), а ширину забирает «Показатель».
+  function renderSummaryTable(report) {
+    const rows = [
+      ['Всего пар', report.total_pairs],
+      ['Решено', report.solved],
+      ['Не решено', report.failed],
+      ['Пропущено', report.skipped],
+      ['Токенов', report.tokens_total],
+    ];
+    if (Number(report.truncated_pairs) > 0) {
+      rows.push(['Обрезано лимитом генерации', report.truncated_pairs]);
+    }
+    const body = rows.map(function (row) {
+      return '<tr><td>' + escapeHtml(row[0]) + '</td>'
+        + '<td class="arm-col-num">' + escapeHtml(row[1]) + '</td></tr>';
+    }).join('');
+    let html = '<table class="arm-summary-table arm-report-table">'
+      + '<thead><tr><th>Показатель</th><th class="arm-col-num">Значение</th></tr></thead>'
+      + '<tbody>' + body + '</tbody></table>';
+    // Время прогона и объём — текстом (не число): строкой под таблицей.
+    const notes = [];
+    const timeLine = runMetaLine(report);
+    if (timeLine) { notes.push('Прогон: ' + escapeHtml(timeLine)); }
+    const volumeLine = runVolumeLine(report);
+    if (volumeLine) { notes.push('Объём: ' + escapeHtml(volumeLine)); }
+    if (notes.length) {
+      html += '<p class="arm-section-note">' + notes.join(' · ') + '</p>';
+    }
+    return html;
+  }
+
   // els = {card, list, perModel, perTopic, errors}
   function renderReport(report, els) {
     if (!report) {
@@ -325,21 +351,7 @@ window.ArmBatchResults = (function () {
     }
     setInterimNote(els.card, !!report.interim);
     if (els.list) {
-      const lines = [
-        'Всего пар: ' + escapeHtml(report.total_pairs),
-        'Решено: ' + escapeHtml(report.solved),
-        'Не решено: ' + escapeHtml(report.failed),
-        'Пропущено: ' + escapeHtml(report.skipped),
-        'Токенов: ' + escapeHtml(report.tokens_total),
-      ];
-      if (Number(report.truncated_pairs) > 0) {
-        lines.push('Обрезано лимитом генерации: ' + escapeHtml(report.truncated_pairs));
-      }
-      const timeLine = runMetaLine(report);
-      if (timeLine) { lines.push('<strong>Прогон:</strong> ' + escapeHtml(timeLine)); }
-      const volumeLine = runVolumeLine(report);
-      if (volumeLine) { lines.push('<strong>Объём:</strong> ' + escapeHtml(volumeLine)); }
-      els.list.innerHTML = lines.map(function (line) { return '<li>' + line + '</li>'; }).join('');
+      els.list.innerHTML = renderSummaryTable(report);
     }
     if (els.perModel) {
       els.perModel.innerHTML = '<h3>Итог по моделям</h3><p class="arm-section-note">Сортировка: процент решённых ↓, среднее время ответа ↑</p>';
@@ -738,11 +750,11 @@ window.ArmBatchResults = (function () {
     reportHead.appendChild(downloadBtn);
     reportCard.appendChild(reportHead);
 
-    var reportList = document.createElement('ul'); reportList.className = 'arm-report';
+    var reportList = document.createElement('div');
     reportCard.appendChild(reportList);
-    var perModelWrap = document.createElement('div'); reportCard.appendChild(perModelWrap);
-    var perTopicWrap = document.createElement('div'); perTopicWrap.style.marginTop = '16px'; reportCard.appendChild(perTopicWrap);
-    var errorsWrap = document.createElement('div'); errorsWrap.style.marginTop = '16px'; reportCard.appendChild(errorsWrap);
+    var perModelWrap = document.createElement('div'); perModelWrap.className = 'arm-report-section'; reportCard.appendChild(perModelWrap);
+    var perTopicWrap = document.createElement('div'); perTopicWrap.className = 'arm-report-section'; reportCard.appendChild(perTopicWrap);
+    var errorsWrap = document.createElement('div'); errorsWrap.className = 'arm-report-section'; reportCard.appendChild(errorsWrap);
     rootEl.appendChild(reportCard);
 
     var resultsCard = document.createElement('section');

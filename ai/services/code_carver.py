@@ -216,16 +216,23 @@ _ASM_END_RE = _re.compile(r"^\s*(ends\s*:|jmp\s+ends\b|end\s+\w+\b)", _re.IGNORE
 _DL_END_MARKER_RE = _re.compile(r";\$E\b", _re.IGNORECASE)
 
 # --- С-МПА (псевдо-C) ---
-# Якорь-объявление С-МПА: ДВА диалекта порядка слов —
+# Якорь-объявление С-МПА: ТРИ диалекта порядка слов —
 #   старый DL-каркас:        «int N1 __in __bits(8);»
 #   псевдо-C от моделей:     «unsigned char __in __bits(8) N1;»
+#   псевдо-C без типа:       «unsigned __bits(3) x0;»
 # — тип в начале (в т.ч. с префиксом unsigned), флаг __in/__out/__bits( дальше
 # в любом месте. Второй порядок долгое время не матчится: декларации-порты не
 # становились якорем, окно снимали по main, порты выпадали — «Undefined
-# variable N1» на DL (лог задачи, queue 15211904).
+# variable N1» на DL (лог задачи, queue 15211904). Третий диалект — глобальные
+# переменные без имени типа: тоже не матчился, окно бралось по main, и
+# глобальные объявления терялись (модель отдала «unsigned __bits(3) x0; …»,
+# в файл ушло только «void main() {…}» — DL не видел переменных).
 _MPA_DECL_RE = _re.compile(
-    r"^\s*(?:unsigned\s+)?(?:int|void|char|short|long)\b"
-    r".*(?:\b__in\b|\b__out\b|__bits\s*\()",
+    r"^\s*(?:"
+    r"(?:unsigned\s+)?(?:int|void|char|short|long)\b"
+    r".*(?:\b__in\b|\b__out\b|__bits\s*\()"
+    r"|(?:unsigned\s+)?__bits\s*\(\s*\d+\s*\)\s*[A-Za-z_]\w*"
+    r")",
     _re.IGNORECASE,
 )
 _MPA_MAIN_RE = _re.compile(r"^\s*(?:int|void)\s+main\b", _re.IGNORECASE)

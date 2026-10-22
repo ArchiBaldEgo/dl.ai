@@ -112,6 +112,17 @@ def _guess_extension(prog_lang_name: str) -> str:
     return ""
 
 
+def language_extension(prog_lang_name: str) -> str:
+    """Расширение файла по названию языка (публичная обёртка _guess_extension).
+
+    Единственный источник соответствия «название языка → расширение»
+    (обратный к EXTENSION_TO_LANG): требования курса к коду
+    (services/language_requirements.py) определяются по расширению, а название
+    языка знает только клиент чата.
+    """
+    return _guess_extension(prog_lang_name)
+
+
 def extension_to_language_ids(file_extension):
     """Вернуть id ``ProgrammingLanguage``, чьё расширение совпадает с данным.
 

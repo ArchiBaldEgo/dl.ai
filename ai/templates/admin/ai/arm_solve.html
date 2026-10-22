@@ -68,29 +68,9 @@
     font-size: 13px;
   }
 
-  .arm-summary-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-top: 4px;
-  }
-  .arm-summary-table th,
-  .arm-summary-table td {
-    border-bottom: 1px solid var(--hairline-color);
-    padding: 8px 10px;
-    text-align: left;
-  }
-  .arm-summary-table th {
-    font-weight: 600;
-    color: var(--body-quiet-color);
-  }
-  .arm-summary-table td.arm-col-num,
-  .arm-summary-table th.arm-col-num {
-    text-align: right;
-    white-space: nowrap;
-    /* Числовые колонки сжимаются до содержимого (width:1%), а колонка-обозначение
-       занимает остаток — значения не «уезжают» далеко вправо от подписей. */
-    width: 1%;
-  }
+  /* Стили .arm-summary-table / .arm-report-section — в общем partial
+     _ai_batch_results.html (window.ArmBatchResults), чтобы таблицы сводки
+     выглядели одинаково на всех страницах. */
   .arm-tasks td,
   .arm-tasks th {
     vertical-align: middle;
@@ -163,23 +143,6 @@
 
   @keyframes arm-spin {
     to { transform: rotate(360deg); }
-  }
-
-  .arm-report {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 10px;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-
-  .arm-report li {
-    border: 1px solid var(--hairline-color);
-    border-radius: 6px;
-    padding: 10px;
-    background: color-mix(in srgb, var(--body-bg) 94%, var(--hairline-color));
-    font-size: 14px;
   }
 
   .arm-badge {
@@ -470,10 +433,10 @@
       <button type="button" class="button" id="armSolveRetryUnsolvedBtn" style="font-size:13px; display:none;" title="Заново решить только нерешённые пары (задача × модель) — результаты вольются в этот же прогон, счётчики сводки обновятся">Перезапустить нерешённые пары</button>
       <a class="button" id="armSolveDownloadXlsxBtn" style="font-size:13px; display:none;" href="#">Скачать результаты (XLSX)</a>
     </div>
-    <ul id="armSolveReportList" class="arm-report"></ul>
-    <div id="armSolvePerModelWrap"></div>
-    <div id="armSolvePerTopicWrap" style="margin-top:16px;"></div>
-    <div id="armSolveErrorsWrap" style="margin-top:16px;"></div>
+    <div id="armSolveReportList"></div>
+    <div id="armSolvePerModelWrap" class="arm-report-section"></div>
+    <div id="armSolvePerTopicWrap" class="arm-report-section"></div>
+    <div id="armSolveErrorsWrap" class="arm-report-section"></div>
   </section>
 
   <section id="armSolveResultsCard" class="arm-card"{% if not results %} style="display:none;"{% endif %}>

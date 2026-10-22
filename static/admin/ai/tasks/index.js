@@ -1,6 +1,6 @@
-// Доска «Таски» (ai/admin/tasks.py): создать/взять/закрыть таск — POST fetch.
-// JS целиком на делегировании, выживает после любого замен DOM. Успех →
-// location.reload(): сортировку и статусы строк пересчитывает сервер.
+// Доска «Таски» (ai/admin/tasks.py): создать/взять/закрыть/вернуть таск —
+// POST fetch. JS целиком на делегировании, выживает после любой замены DOM.
+// Успех → location.reload(): сортировку и статусы строк пересчитывает сервер.
 (function () {
     'use strict';
 
@@ -53,9 +53,11 @@
     }
 
     document.addEventListener('click', function (event) {
-        var btn = event.target.closest('[data-claim-url], [data-close-url]');
+        var btn = event.target.closest('[data-claim-url], [data-close-url], [data-restore-url]');
         if (!btn) return;
-        var url = btn.getAttribute('data-claim-url') || btn.getAttribute('data-close-url');
+        var url = btn.getAttribute('data-claim-url')
+            || btn.getAttribute('data-close-url')
+            || btn.getAttribute('data-restore-url');
         if (!url) return;
         guard(btn, function () { return post(url); });
     });
@@ -80,6 +82,12 @@
                     if (!payload.ok) {
                         throw new Error(payload.message || 'Не удалось создать таск');
                     }
+                    // Форма очищена — сбрасываем и сохранённое состояние
+                    // страницы, иначе черновик вернётся при следующем
+                    // открытии доски.
+                    try {
+                        window.localStorage.removeItem('ai_page_state:ai_tasks_page');
+                    } catch (e) { /* не критично */ }
                     window.location.reload();
                 })
                 .catch(function (err) {

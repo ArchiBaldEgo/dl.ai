@@ -55,7 +55,21 @@ class SolveModeBuilder(ModeMessageBuilder):
         if prompt_text:
             prefix = "Preprompt" if language not in ("Русский", "Russian") else "Промпт"
             base += f"\n\n{prefix}: {prompt_text}"
+        # Требования курса к коду (массивы на 100 элементов, для i8086 — только
+        # инструкции 8086) — те же, что и в пакетном прогоне
+        # (services/language_requirements.py, единый источник).
+        base += self._language_requirements(language, prog_lng_name)
         return base
+
+    @staticmethod
+    def _language_requirements(ui_language: str, prog_lng_name: str) -> str:
+        from ..i18n import get_ui_language_suffix
+        from .language_requirements import language_requirements
+
+        text = language_requirements(
+            prog_lng_name, ui_suffix=get_ui_language_suffix(ui_language),
+        )
+        return ("\n" + text) if text else ""
 
     def _build_default_message(self, ui_language, prog_lng_name, topic_name, message):
         # Клауза «на языке X, тема Y» — только когда поля заданы. На /ai/solve-problem/

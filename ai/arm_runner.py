@@ -216,16 +216,23 @@ _CUT_RETRY_INSTRUCTION = {
 }
 
 
-def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None):
+def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None,
+                         file_extension=""):
     """Compose the solve prompt for one task.
 
     Промпт берётся только по явному ``prompt_id`` — это pk ``Prompt`` из
     суперпюзерской привязки ArmPromptBinding (mode=solve); ручного выбора и
     fallback'ов (topic-bound Prompt, SharedPrompt mode=solve) больше нет:
     нет привязки → прогон без промпта, только базовая инструкция.
+
+    Поверх промпта — приписки курса: без комментариев, без рассуждений и
+    требования языка (services/language_requirements.py: массивы на 100
+    элементов, для i8086 — только инструкции 8086). Без них часть решений
+    падает на DL с нераспознаваемой причиной («Причина не распознана»).
     """
     from .i18n import get_language_instruction, get_ui_language_suffix
     from .models import Prompt
+    from .services.language_requirements import language_requirements
 
     message = None
     if prompt_id:
@@ -252,6 +259,11 @@ def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language
     message += get_language_instruction(ui_language)
     message += "\n" + _NO_COMMENTS_INSTRUCTION[ui_suffix]
     message += "\n" + _NO_RAMBLE_INSTRUCTION[ui_suffix]
+    lang_req = language_requirements(
+        prog_lang_name, file_extension=file_extension, ui_suffix=ui_suffix,
+    )
+    if lang_req:
+        message += "\n" + lang_req
     return message
 
 
@@ -1821,6 +1833,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     try:
         message = _build_solve_message(
             task.statement, prog_lang_name, topic_name, ctx["ui_language"], task_prompt_id,
+            file_extension=effective_ext,
         )
         gen_started = perf_counter()
         response = async_to_sync(model["handler"])(

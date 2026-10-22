@@ -16,6 +16,49 @@ from ..model_health import (
 )
 from .permissions import can_access_model_status
 
+# Три состояния бейджа способности модели:
+#   cap-on        — способность есть, модель активна (зелёный);
+#   cap-inactive  — способность есть, но модель сейчас НЕ активна
+#                   (зелёный зачёркнутый);
+#   cap-off       — способности нет (серый зачёркнутый).
+# Логика одна и та же для серверного рендера и для JS-обновления таблицы:
+# считается здесь и отдаётся готовыми классами (cap_classes).
+_CAPABILITY_KEYS = ("text", "vision", "reasoning")
+# Состояние бейджа → (CSS-классы, подсказка). «Зелёный зачёркнутый» — это
+# зелёный бейдж (cap-on) с классом зачёркивания (cap-inactive).
+_CAP_BADGES = {
+    "on": ("cap-on", "Способность есть, модель активна"),
+    "inactive": ("cap-on cap-inactive", "Способность есть, но модель сейчас неактивна"),
+    "off": ("cap-off", "Способности нет"),
+}
+
+
+def _capability_badge(has_capability: bool, is_active: bool) -> dict:
+    if not has_capability:
+        state = "off"
+    elif is_active:
+        state = "on"
+    else:
+        state = "inactive"
+    css_class, title = _CAP_BADGES[state]
+    return {"class": css_class, "title": title}
+
+
+def _with_capability_badges(rows):
+    """Дополнить строки состояния готовыми классами бейджей способностей."""
+    enriched = []
+    for row in rows:
+        caps = row.get("capabilities") or {}
+        is_active = bool(row.get("is_active"))
+        enriched.append({
+            **row,
+            "cap_classes": {
+                key: _capability_badge(bool(caps.get(key)), is_active)
+                for key in _CAPABILITY_KEYS
+            },
+        })
+    return enriched
+
 
 def _serialize_model_status_rows_for_api(rows):
     serialized = []
@@ -29,6 +72,7 @@ def _serialize_model_status_rows_for_api(rows):
             "key": row.get("key") or "",
             "title": row.get("title") or "",
             "capabilities": row.get("capabilities") or {"text": True, "vision": False, "reasoning": False},
+            "cap_classes": row.get("cap_classes") or {},
             "is_active": bool(row.get("is_active")),
             "status_label": row.get("status_label") or "",
             "window_date": window_date.isoformat() if window_date else "",
@@ -60,7 +104,7 @@ def admin_model_status_view(request):
         **ai_admin_site.each_context(request),
         "title": "AI: Состояние моделей",
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
-        "model_status_rows": get_model_status_rows(),
+        "model_status_rows": _with_capability_badges(get_model_status_rows()),
         "refresh_message": refresh_message,
         "refresh_error": refresh_error,
         "refresh_in_progress": is_model_health_refresh_running(),
@@ -77,7 +121,7 @@ def admin_model_status_state_view(request):
     if request.method != "GET":
         return HttpResponseNotAllowed(["GET"])
 
-    rows = get_model_status_rows()
+    rows = _with_capability_badges(get_model_status_rows())
     progress = get_refresh_progress()
     return JsonResponse({
         "ok": True,

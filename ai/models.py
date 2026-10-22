@@ -788,18 +788,27 @@ class AIDevTask(models.Model):
 
     Создаётся суперюзером (название, описание, срок — ТЕКСТОМ, как просили:
     «До 2 недель», «До 4 дней» — никаких расчётных дат), приоритет Высокий/
-    Средний/Низкий выставляет суперюзер; на доске важное вверху. Разработчик
+    Средний/Низкий выставляет суперюзер; на доске порядок — свежие сверху
+    (новый таск появляется наверху), приоритет — бейдж и фильтр. Разработчик
     забирает таск («Взять»): taken_by/taken_at пишутся атомарно (условный
     UPDATE, «первый успел»), у взятого таска в таблице — ФИО + группа +
-    дата взятия, повторно взять нельзя. Закрыть (удалить с доски) может
-    только суперюзер. ModelAdmin не регистрируется — доска целиком
-    кастомная страница (ai/admin/tasks.py), как и «Закреплённые прогоны».
+    дата взятия, повторно взять нельзя. Закрыть может только суперюзер:
+    таск НЕ удаляется, а уходит в «закрытые» (closed_at) — кнопка «Вернуть»
+    возвращает его в открытые с тем же типом и тем же взятым. ModelAdmin не
+    регистрируется — доска целиком кастомная страница (ai/admin/tasks.py),
+    как и «Закреплённые прогоны».
     """
 
     class Priority(models.TextChoices):
         HIGH = "high", "Высокий"
         NORMAL = "normal", "Средний"
         LOW = "low", "Низкий"
+
+    class Kind(models.TextChoices):
+        """Тип таска на доске: фронтовая работа или хотелка."""
+
+        FRONT = "front", "Фронт"
+        WISHLIST = "wishlist", "Хотелка"
 
     title = models.CharField(max_length=200, verbose_name="Название")
     description = models.TextField(
@@ -813,6 +822,11 @@ class AIDevTask(models.Model):
         max_length=10, choices=Priority.choices, default=Priority.NORMAL,
         verbose_name="Приоритет",
     )
+    kind = models.CharField(
+        max_length=16, choices=Kind.choices, default=Kind.FRONT,
+        verbose_name="Тип",
+        help_text="Фронт — работа над фронтом; Хотелка — пожелание.",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True,
         on_delete=models.SET_NULL, related_name="created_dev_tasks",
@@ -825,6 +839,9 @@ class AIDevTask(models.Model):
     )
     taken_at = models.DateTimeField(null=True, blank=True, verbose_name="Взят")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
+    # Закрытый таск НЕ удаляется, а уходит в «закрытые»: кнопка «Вернуть»
+    # возвращает его в открытые — с тем же типом и тем же взятым (исполнителем).
+    closed_at = models.DateTimeField(null=True, blank=True, verbose_name="Закрыт")
 
     class Meta:
         verbose_name = "Таск (доска задач)"
@@ -833,7 +850,8 @@ class AIDevTask(models.Model):
 
     def __str__(self):
         suffix = f" (взял {self.taken_by_id})" if self.taken_by_id else ""
-        return f"[{self.get_priority_display()}] {self.title}{suffix}"
+        closed = " [закрыт]" if self.closed_at else ""
+        return f"[{self.get_priority_display()}] {self.title}{suffix}{closed}"
 
 
 class AICourseTreeCache(models.Model):

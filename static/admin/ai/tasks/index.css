@@ -52,11 +52,31 @@
   color: var(--body-quiet-color); background: var(--darkened-bg);
 }
 
+/* Тип таска: «Фронт» / «Хотелка». */
+.ai-task-kind-front {
+  color: #175cd3; background: color-mix(in srgb, #175cd3 12%, var(--body-bg));
+}
+.ai-task-kind-wishlist {
+  color: #6941c6; background: color-mix(in srgb, #6941c6 12%, var(--body-bg));
+}
+
+/* Закрытый таск — приглушён, но не скрыт: его можно вернуть. */
+.ai-tasks-closed td { opacity: 0.65; }
+.ai-tasks-closed .ai-task-title { text-decoration: line-through; }
+
 .ai-task-btn-claim { padding: 3px 12px; }
 .ai-task-btn-close {
   padding: 3px 12px;
   color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color));
 }
 .ai-task-btn-close:hover { color: #912018; }
+.ai-task-btn-restore {
+  padding: 3px 12px;
+  color: #067647; border-color: color-mix(in srgb, #067647 50%, var(--hairline-color));
+}
+.ai-task-btn-restore:hover { color: #085d3a; }
+
+/* Кнопка в работе: повторный клик не проходит. */
+.busy { pointer-events: none; opacity: 0.6; }
 
 .ai-tasks-empty { color: var(--body-quiet-color); padding: 12px 0; }
