@@ -149,13 +149,6 @@
                 <button type="button" class="theme-toggle doc-toggle" id="userDocsBtn"
                     aria-label="{{ t.userDocs }}" title="{{ t.userDocs }}">?</button>
             </div>
-            <div class="voice-mod-div">
-                <button type="button" class="voice-mode-btn" id="voiceModeBtn">
-                    {{ t.voiceMode }}
-                </button>
-                <div class="voice-status" id="voiceStatus"></div>
-            </div>
-            <!-- Голосовые контролы (скрыты по умолчанию) -->
             <div class="voice-controls" id="voiceControls">
                 <button type="button" class="voice-btn" id="voiceInputBtn">
                     <span class="voice-input-indicator" id="voiceIndicator"></span>
@@ -165,11 +158,11 @@
                     {{ t.voiceOutput }}
                 </button>
 
-                <!-- Чекбокс для think-тегов -->
                 <div class="think-checkbox">
                     <input type="checkbox" id="speakThinkContent" checked>
                     <label for="speakThinkContent" id="speakThinkLabel">{{ t.speakThinkLabel }}</label>
                 </div>
+                <div class="voice-status" id="voiceStatus"></div>
             </div>
             <div id="modelLimitsWidget"></div>
             <div class="panel-date"><span class="ai-last-update-label">{{ t.lastUpdate }}</span>: {{ last_update_date|date:"d.m.Y" }}</div>
