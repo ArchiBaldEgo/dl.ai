@@ -9,6 +9,7 @@
 новый будет сделан отдельно (раннер single-run в arm_runner.py сохранён).
 """
 
+import json
 import logging
 import re
 
@@ -29,7 +30,8 @@ from ..arm_runner import (
     start_batch_rerun_pairs,
     start_batch_solve_run,
 )
-from ..arm_runner import parse_dl_test_data
+from ..arm_runner import _fetch_failed_test_data, parse_dl_test_data
+from ..dl_api_client import dl_failed_test_number_from_comment
 from ..model_health import (
     get_arm_solve_model_options,
     get_health_window_date,
@@ -887,6 +889,26 @@ def admin_arm_solve_result_body_view(request, result_id):
     offset = max(0, _int_param("offset", 0))
     length = _int_param("length", 0)
 
+    test_data = parse_dl_test_data(result.dl_test_data)
+    if not test_data and result.dl_queue_id and (result.verdict or "") != "solved":
+        # Данных проваленного теста в строке нет (прогон сделан до появления
+        # фичи) — пробуем забрать их из DL ПРЯМО СЕЙЧАС (DL ещё помнит
+        # решение в очереди) и кешируем в строке, чтобы второй раз не ходить.
+        session_id = _resolve_session_id(request)
+        if session_id:
+            try:
+                fetched = _fetch_failed_test_data(
+                    session_id, result.dl_queue_id, result.dl_comment or "",
+                )
+            except Exception:  # noqa: BLE001 — данные теста не обязательны
+                logger.exception("не удалось забрать данные проваленного теста")
+                fetched = {}
+            if fetched:
+                test_data = fetched
+                AIModelTestResult.objects.filter(pk=result.pk).update(
+                    dl_test_data=json.dumps(fetched, ensure_ascii=False),
+                )
+
     body = {
         "result_id": result.pk,
         "short_response": result.short_response or "",
@@ -897,7 +919,9 @@ def admin_arm_solve_result_body_view(request, result_id):
         "dl_file_name": result.dl_file_name or "",
         # Входные данные и эталонный ответ проваленного теста (есть только
         # у НЕ решённых пар, которым DL разрешил выдачу теста).
-        "dl_test_data": parse_dl_test_data(result.dl_test_data),
+        "dl_test_data": test_data,
+        # Номер проваленного теста (из вердикта DL) — показываем в карточке.
+        "dl_test_number": dl_failed_test_number_from_comment(result.dl_comment or ""),
         # Машина (Дельта), на которой DL проверял решение.
         "delta_id": result.delta_id or 0,
         "delta_name": result.delta_name or "",

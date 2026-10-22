@@ -7546,6 +7546,40 @@ class ArmLightSnapshotTests(TestCase):
         with self.assertRaises(Http404):
             admin_arm_solve_result_body_view(request, 999999)
 
+    def test_result_body_endpoint_fetches_missing_test_data(self):
+        """В строке нет данных проваленного теста (прогон сделан до фичи) —
+        body-эндпоинт забирает их из DL и КЕШИРУЕТ в строке."""
+        from ai.admin.arm import admin_arm_solve_result_body_view
+
+        self.result.verdict = "failed"
+        self.result.failure_reason = "wrong_answer"
+        self.result.dl_comment = "не пройден 2-й тест (неверный ответ)"
+        self.result.dl_queue_id = 77
+        self.result.dl_test_data = None
+        self.result.save(update_fields=[
+            "verdict", "failure_reason", "dl_comment", "dl_queue_id", "dl_test_data",
+        ])
+
+        fetched = {
+            "test_number": 2, "input": "1 2\n", "expected_output": "3\n",
+            "input_truncated": False, "expected_truncated": False,
+        }
+        request = self.factory.get(f"/ai/admin/arm/solve/result/{self.result.id}/body/")
+        request.user = self.superuser
+        request.session = {}
+        request.COOKIES = {}
+        with patch("ai.admin.arm._resolve_session_id", return_value="DLSID"), \
+                patch("ai.admin.arm._fetch_failed_test_data", return_value=fetched) as fetch:
+            response = admin_arm_solve_result_body_view(request, self.result.id)
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)["result"]
+        self.assertEqual(data["dl_test_data"]["input"], "1 2\n")
+        self.assertEqual(data["dl_test_number"], 2)
+        fetch.assert_called_once()
+        # Данные закэшированы в строке — второй раз в DL не ходим.
+        self.result.refresh_from_db()
+        self.assertEqual(json.loads(self.result.dl_test_data)["test_number"], 2)
+
     def test_result_body_endpoint_chunked(self):
         """Чанковая загрузка raw_response: окно offset/length, метаданные
         raw_total/raw_offset/raw_has_more/raw_next, флаг truncated.
@@ -20479,6 +20513,42 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
             data = arm_runner._fetch_failed_test_data("DLSID", 77)
         self.assertEqual(data, {})
         data_call.assert_not_called()
+
+    def test_failed_test_number_parsed_from_verdict(self):
+        """Номер проваленного теста берём из вердикта DL — когда
+        get-failed-tests ничего не отдал (или отдал без canGetData)."""
+        from ai import arm_runner
+        from ai.dl_api_client import dl_failed_test_number_from_comment
+
+        self.assertEqual(
+            dl_failed_test_number_from_comment("не пройден 2-й тест (неверный ответ)"),
+            2,
+        )
+        self.assertEqual(dl_failed_test_number_from_comment("[test5]: Ошибка"), 5)
+        self.assertEqual(dl_failed_test_number_from_comment("Wrong answer on test 3"), 3)
+        self.assertEqual(dl_failed_test_number_from_comment("Ошибка компиляции"), 0)
+
+        with patch("ai.dl_api_client.get_failed_tests_from_dl", return_value=[]), \
+                patch("ai.dl_api_client.get_test_data_from_dl",
+                      return_value={"input": "1 2\n", "expected_output": "3\n"}) as data_call:
+            data = arm_runner._fetch_failed_test_data(
+                "DLSID", 77, "не пройден 2-й тест (неверный ответ)",
+            )
+        self.assertEqual(data["test_number"], 2)
+        self.assertEqual(data_call.call_args[0][2], 2)
+
+    def test_report_error_item_carries_test_number(self):
+        """В «Ошибках по темам» позиция несёт номер проваленного теста."""
+        from ai.arm_runner import _build_batch_report
+
+        report = _build_batch_report([
+            {"model_key": "A", "model_title": "A", "topic_name": "Циклы",
+             "verdict": "failed", "duration": 1.0, "task_node_id": 7,
+             "task_name": "Зад7", "failure_reason": "wrong_answer",
+             "dl_test_number": 2},
+        ])
+        item = report["errors_by_topic"][0]["items"][0]
+        self.assertEqual(item["test_number"], 2)
 
     def test_dl_client_failed_tests_and_test_data(self):
         from ai import dl_api_client

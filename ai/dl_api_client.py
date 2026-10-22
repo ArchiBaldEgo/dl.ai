@@ -1070,6 +1070,48 @@ def dl_failure_reason_from_comment(comment: str) -> str:
     return DL_REASON_UNDEFINED
 
 
+def dl_failed_test_number_from_comment(comment: str) -> int:
+    """Номер проваленного теста из вердикта DL (0 — номер не определён).
+
+    Канонический разбор (рядом с ``dl_verdict_from_comment``): DL отдаёт
+    вердикт текстом, а данные теста надо запрашивать по НОМЕРУ теста. Если
+    ``/get-failed-tests`` не отдал подходящий тест (или отдал без
+    ``canGetData``), номер всё равно можно вытащить из самого вердикта.
+
+    Поддерживаемые форматы (как в документации DL API):
+    «[testN]: …», «[test N]: …», «не пройден N тест», «не пройден N-й тест»,
+    «Не пройдены тесты: 1,3-5», «неверные тесты: 1,2», «… on test N»
+    (английские вердикты: Wrong answer / Runtime error / Time limit exceeded …).
+    """
+    text = (comment or "").strip()
+    if not text:
+        return 0
+    # «[testN]» / «[test N]»
+    match = re.search(r"\[\s*test\s*(\d+)\s*\]", text, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    # «Не пройдены тесты: 1,3-5» / «неверные тесты: 1,2» — берём первый.
+    match = re.search(
+        r"(?:пройдены|неверные|провален\w*|ошиб\w*)\s+тесты\s*:\s*([\d,\s\-]+)",
+        text, re.IGNORECASE,
+    )
+    if match:
+        numbers = re.findall(r"\d+", match.group(1))
+        if numbers:
+            return int(numbers[0])
+    # «не пройден 2-й тест» / «не пройден 2 тест»
+    match = re.search(
+        r"не\s*пройден\w*\s+(\d+)\s*(?:-\s*й)?\s*тест", text, re.IGNORECASE,
+    )
+    if match:
+        return int(match.group(1))
+    # «… on test 3» (английский вердикт)
+    match = re.search(r"\bon\s+test\s+(\d+)", text, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
 def get_solutions_from_dl(
     session_id: str,
     course_id: int,

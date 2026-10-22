@@ -160,6 +160,7 @@ from .dl_api_client import (  # noqa: E402
     DL_VERDICT_FAILED as _VERDICT_FAILED,
     DL_VERDICT_SOLVED as _VERDICT_SOLVED,
     build_dl_file_name as _build_dl_file_name,
+    dl_failed_test_number_from_comment as _dl_failed_test_number,
     dl_failure_reason_from_comment as _failure_reason_from_dl_comment,
     dl_verdict_from_comment as _verdict_from_dl_comment,
 )
@@ -602,6 +603,9 @@ def _build_batch_report(results, run_topic_id=None, run_topic_name=None):
                     "task": task_label,
                     "model": model_label,
                     "reason": AIModelTestResult.FAILURE_REASON_LABELS.get(reason, reason),
+                    # Номер проваленного теста (если вердикт DL его назвал) —
+                    # показываем рядом с причиной: «какой тест упал».
+                    "test_number": r.get("dl_test_number") or 0,
                     "node_id": node_id,
                     "model_key": model_key,
                     "key": f"{node_id if node_id is not None else ''}:{model_key}",
@@ -2200,7 +2204,7 @@ def _mark_batch_model_failed(run_id, model_index):
 _TEST_DATA_CHARS_MAX = 8000
 
 
-def _fetch_failed_test_data(session_id, queue_id):
+def _fetch_failed_test_data(session_id, queue_id, comment=""):
     """Входные данные и эталонный ответ проваленного теста (компактно).
 
     DL: ``get-failed-tests`` → список подтверждённых проваленных тестов
@@ -2208,11 +2212,19 @@ def _fetch_failed_test_data(session_id, queue_id):
     ``{input, expectedOutput}`` по номеру теста. Берём ПЕРВЫЙ тест с
     ``canGetData``; длинные данные обрезаем.
 
+    ФОЛБЭК: если DL не отдал подходящий тест (пустой список, нет
+    ``canGetData``), номер теста берём из самого вердикта («не пройден 2-й
+    тест», «[testN]: …») и пробуем забрать данные по нему — DL сам
+    откажет, если выдача запрещена.
+
     Пустой словарь — данных нет (выдача запрещена настройками курса,
     проверка не завершена, ошибка DL). Ошибки не поднимаются: данные теста
     — дополнение к отчёту, а не условие прогона.
     """
-    from .dl_api_client import get_failed_tests_from_dl, get_test_data_from_dl
+    from .dl_api_client import (
+        get_failed_tests_from_dl,
+        get_test_data_from_dl,
+    )
 
     test_number = 0
     for t in get_failed_tests_from_dl(session_id, queue_id):
@@ -2224,6 +2236,9 @@ def _fetch_failed_test_data(session_id, queue_id):
             test_number = 0
         if test_number > 0:
             break
+    if not test_number:
+        # Номер из вердикта DL — последний шанс узнать, какой тест упал.
+        test_number = _dl_failed_test_number(comment)
     if not test_number:
         return {}
     data = get_test_data_from_dl(session_id, queue_id, test_number)
@@ -2289,6 +2304,9 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     dl_test_comment = ""
     dl_submit_error = ""
     dl_queue_id = 0
+    # Номер проваленного теста (из вердикта DL) — показываем в отчёте рядом
+    # с причиной, чтобы было видно, КАКОЙ именно тест упал.
+    dl_test_number = 0
     # Машина (Дельта), на которой DL проверял решение (deltaId/deltaName).
     dl_delta_id = 0
     dl_delta_name = ""
@@ -2502,6 +2520,8 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                     return None
                 dl_test_comment = dl_result.get("comment", "") or ""
                 dl_submit_error = dl_result.get("submit_error", "") or ""
+                # Номер проваленного теста — из вердикта DL (для отчёта).
+                dl_test_number = _dl_failed_test_number(dl_test_comment)
                 dl_verdict = dl_result.get("verdict")
                 dl_queue_id = dl_result.get("queue_id", 0) or 0
                 dl_delta_id = dl_result.get("delta_id", 0) or 0
@@ -2531,7 +2551,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 # показываются сразу после извлечённого кода.
                 if verdict != _VERDICT_SOLVED and dl_queue_id:
                     dl_test_data = _fetch_failed_test_data(
-                        ctx["session_id"], dl_queue_id,
+                        ctx["session_id"], dl_queue_id, dl_test_comment,
                     )
             else:
                 verdict = _VERDICT_FAILED
@@ -2631,6 +2651,8 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "dl_error": dl_submit_error,
             "dl_queue_id": dl_queue_id,
             "dl_file_name": pair_file_name or "",
+            # Номер проваленного теста (из вердикта DL) — для отчёта.
+            "dl_test_number": dl_test_number or 0,
             # Входные/выходные данные проваленного теста — только для НЕ
             # решённых пар (в карточке идут сразу после извлечённого кода).
             "dl_test_data": dl_test_data or {},
@@ -3017,7 +3039,7 @@ def _batch_results_from_db(test_run, light=False):
         rows = test_run.results.values(
             "pk", "model_key", "model_title", "duration_seconds", "tokens",
             "tokens_prompt", "status", "verdict", "failure_reason",
-            "dl_queue_id", "dl_file_name", "dl_test_data",
+            "dl_queue_id", "dl_file_name", "dl_test_data", "dl_comment",
             "file_extension_snapshot", "delta_id", "delta_name",
             "topic_name_snapshot", "topic_id_snapshot", "prog_lang_snapshot",
             "truncated", "prompt_id", "prompt_name",
@@ -3045,6 +3067,9 @@ def _batch_results_from_db(test_run, light=False):
                 "truncated": bool(r["truncated"]),
                 "dl_queue_id": r["dl_queue_id"] or 0,
                 "dl_file_name": r["dl_file_name"] or "",
+                # Номер проваленного теста — из вердикта DL (сам комментарий в
+                # лёгкий снапшот не берём — он грузится с телом результата).
+                "dl_test_number": _dl_failed_test_number(r["dl_comment"] or ""),
                 # Данные проваленного теста грузятся вместе с телом (body-эндпоинт).
                 "has_test_data": bool(r["dl_test_data"]),
                 "delta_id": r["delta_id"] or 0,
@@ -3088,6 +3113,7 @@ def _batch_results_from_db(test_run, light=False):
             "dl_error": r.dl_error or "",
             "dl_queue_id": r.dl_queue_id or 0,
             "dl_file_name": r.dl_file_name or "",
+            "dl_test_number": _dl_failed_test_number(r.dl_comment or ""),
             "dl_test_data": parse_dl_test_data(r.dl_test_data),
             "delta_id": r.delta_id or 0,
             "delta_name": r.delta_name or "",
