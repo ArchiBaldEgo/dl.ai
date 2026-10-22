@@ -10080,8 +10080,11 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         css = self._static_source("admin", "ai", "batch_results", "index.css")
         self.assertIn("table-layout: fixed", css)
         self.assertIn(".arm-summary-table--errors", css)
+        # Правило журнальной таблицы — В ГЛОБАЛЬНОМ CSS (batch_results),
+        # page-CSS журнала НЕ дублирует его (один владелец).
+        self.assertIn(".ai-logs-table--mixed { table-layout: fixed", css)
         logs_css = self._static_source("admin", "ai", "request_logs", "index.css")
-        self.assertIn(".ai-logs-table--mixed { table-layout: fixed", logs_css)
+        self.assertNotIn(".ai-logs-table--mixed", logs_css)
 
     def test_batch_results_list_updated_incrementally(self):
         """Новая пара (+1 задача) ДОБАВЛЯЕТСЯ в таблицу, а не пересобирает
@@ -16685,39 +16688,37 @@ class RequestLogFiltersUiTests(TestCase):
         self.assertIn("loadLazyResponse(detailRow);", js)
 
     def test_table_columns_order(self):
-        """Одна шапка журнала — 18 колонок (admin/ai/_ai_journal_head.html):
-        ★, Кто отправлял, Отправлен, Получен, Режим, Название прогона, Курс,
-        Расширение, Язык, Тема, Промпт, Модель, Решено, Не решено, Всего пар,
-        Статус, Время, (Детали). ID и Источник вынесены в развёртку."""
+        """Одна шапка журнала — 11 колонок (admin/ai/_ai_journal_head.html):
+        ★, Кто отправлял, Отправлен, Режим, Прогон, Язык, Тема, Промпт,
+        Модель, Пары, Статус. Слитые воедино данные (получен/время,
+        курс/расширение, счётчики пар, «Детали») не потеряны: получен/время
+        и курс/расширение — sub-строками, пары — «решено/всего」 в «Парах»,
+        детали — по клику на строку."""
         from django.template.loader import get_template
         head = get_template("admin/ai/_ai_journal_head.html").template.source
         order = [
             "<th>Кто отправлял</th>",
-            "<th>Отправлен</th>",
-            "<th>Получен</th>",
+            "<th title=\"Отправлен; sub-строкой — получен · длительность\">Отправлен</th>",
             "<th>Режим</th>",
-            "<th>Название прогона</th>",
-            "<th>Курс</th>",
-            "<th>Расширение</th>",
+            "<th title=\"Название прогона; sub-строкой — курс · расширение\">Прогон</th>",
             "<th>Язык</th>",
             "<th>Тема</th>",
             "<th>Промпт</th>",
             "<th>Модель</th>",
-            "<th>Решено</th>",
-            "<th>Не решено</th>",
-            "<th>Всего пар</th>",
+            "<th title=\"Решено / всего пар\">Пары</th>",
             "<th>Статус</th>",
         ]
         positions = [head.index(item) for item in order]
         self.assertEqual(positions, sorted(positions))
-        self.assertEqual(head.count("<th"), 18)
+        self.assertEqual(head.count("<th"), 11)
         self.assertNotIn("<th>ID</th>", head)
         self.assertNotIn("<th>Источник</th>", head)
-        # Развёртка строки обычного запроса — на 18 колонок.
+        # Развёртки — colspan ЗАВЕДОМО больше числа колонок (браузер
+        # ограничит фактическим; синхронизировать со шапкой не надо).
         src = get_template("admin/ai/_ai_log_detail.html").template.source
-        self.assertIn('colspan="18"', src)
+        self.assertIn('colspan="1000"', src)
         detail = get_template("admin/ai/_ai_batch_detail.html").template.source
-        self.assertIn('colspan="18"', detail)
+        self.assertIn('colspan="1000"', detail)
 
     def test_index_js_filter_fields(self):
         from django.conf import settings
@@ -17637,12 +17638,17 @@ class SettingsPagesAlignmentTests(TestCase):
 
     def test_journal_head_has_all_columns(self):
         src = self._read("ai", "templates", "admin", "ai", "_ai_journal_head.html")
-        for title in ("Кто отправлял", "Отправлен", "Получен", "Режим",
-                      "Название прогона", "Курс", "Расширение", "Язык",
-                      "Тема", "Промпт", "Модель", "Решено",
-                      "Не решено", "Всего пар", "Статус"):
-            self.assertIn("<th>%s</th>" % title, src)
-        self.assertIn('<th title="От начала прогона до его окончания">Время</th>', src)
+        self.assertIn("<th>Кто отправлял</th>", src)
+        # Остальные th несут title (пояснения слитых данных) — проверяем хвост.
+        for tail in (">Отправлен</th>", ">Режим</th>", ">Язык</th>",
+                     ">Тема</th>", ">Промпт</th>", ">Модель</th>",
+                     ">Статус</th>"):
+            self.assertIn(tail, src)
+        # Слитые колонки — поясняются в title (получен/время, курс/расширение,
+        # состав пар).
+        self.assertIn('title="Отправлен; sub-строкой — получен · длительность"', src)
+        self.assertIn('title="Название прогона; sub-строкой — курс · расширение"', src)
+        self.assertIn('title="Решено / всего пар">Пары</th>', src)
         self.assertIn("★", src)
         # ★ — закрепление пакета; в обычной строке ячейка пустая.
         log_row = self._read("ai", "templates", "admin", "ai", "_ai_log_row.html")
@@ -17650,27 +17656,30 @@ class SettingsPagesAlignmentTests(TestCase):
 
     def test_batch_row_partial_shows_run_and_counts(self):
         src = self._read("ai", "templates", "admin", "ai", "_ai_batch_row.html")
-        self.assertIn("{{ row.run_name|default:\"—\" }}", src)
-        self.assertIn("{{ row.course_id|default:\"—\" }}", src)
-        self.assertIn("{{ row.file_extension|default:\"—\" }}", src)
+        self.assertIn("{{ row.run_name }}", src)
+        self.assertIn('{{ row.sent_at|date:"d.m.Y"|default:"—" }}', src)
+        self.assertIn("курс {{ row.course_id }}", src)
+        self.assertIn("{{ row.file_extension }}", src)
         self.assertIn("{{ row.topics_display|default:\"—\" }}", src)
-        self.assertIn("{{ row.solved|default:\"—\" }}", src)
-        self.assertIn("{{ row.failed|default:\"—\" }}", src)
-        self.assertIn("{{ row.total_pairs|default:\"—\" }}", src)
-        self.assertIn("{{ row.time_display|default:\"—\" }}", src)
+        self.assertIn("{{ row.solved|default:0 }}</span>/<span", src)
+        self.assertIn("{{ row.failed|default:0 }}", src)
+        self.assertIn("{{ row.total_pairs }}", src)
+        self.assertIn("{{ row.time_display }}", src)
+        self.assertIn("получен {{ row.received_at }}", src)
         # Промпт(ы) прогона — ссылками на промпт.
         self.assertIn("/ai/admin/ai/prompt/{{ p.id }}/change/", src)
 
-    def test_batch_detail_colspan_matches_head(self):
+    def test_batch_detail_colspan_exceeds_head(self):
         head = self._read("ai", "templates", "admin", "ai", "_ai_journal_head.html")
         detail = self._read("ai", "templates", "admin", "ai", "_ai_batch_detail.html")
         columns = head.count("<th>") + head.count("<th ")
-        self.assertIn('colspan="%d"' % columns, detail)
+        colspan = int(detail.split('colspan="')[1].split('"')[0])
+        self.assertGreater(colspan, columns)
 
     def test_log_row_partial_contract(self):
         src = self._read("ai", "templates", "admin", "ai", "_ai_log_row.html")
         self.assertIn("{{ row.sender_display }}", src)
-        self.assertIn('{{ row.received_at|date:"d.m.Y:H:i:s"|default:"—" }}', src)
+        self.assertIn("получен {{ row.received_at|date:\"H:i:s\" }}", src)
         self.assertIn("{{ row.topic_display }}", src)
         self.assertIn("{{ row.prompt_display }}", src)
         self.assertIn("{{ row.model_display }}", src)

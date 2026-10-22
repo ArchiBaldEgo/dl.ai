@@ -12,43 +12,11 @@
 /* Кнопки ПОД фильтрами («Дневной отчёт», затем «Сбросить»): flex-контейнер
    .ai-logs-filters переносит блок на новую строку за счёт flex-basis: 100%. */
 .ai-logs-actions { flex-basis: 100%; display: flex; gap: 12px; }
-.ai-logs-table { width: 100%; border-collapse: collapse; }
-.ai-logs-table th, .ai-logs-table td {
-  border: 1px solid var(--hairline-color); padding: 8px 10px;
-  text-align: left; vertical-align: top;
-}
-/* Журнал (18 колонок) — таблица ФИКСИРОВАННОЙ ШИРИНЫ: раскрытие сводки
-   пакетного решения не должно растягивать журнал, и таблицу нельзя
-   «ездить» вправо-влево (в .ai-scroll появлялась горизонтальная прокрутка).
-   Ширины колонок — из шапки (table-layout: fixed берёт их оттуда). */
-.ai-logs-table--mixed { table-layout: fixed; width: 100%; }
-.ai-logs-table--mixed th, .ai-logs-table--mixed td {
-  /* Перенос по словам (не рвём слова посередине — было anywhere, текст
-     «плавал»); ячейки прижаты к верху строки. */
-  overflow-wrap: break-word; word-break: normal; vertical-align: top;
-}
-.ai-logs-table--mixed th:nth-child(1) { width: 2%; }
-.ai-logs-table--mixed th:nth-child(2) { width: 10%; }
-.ai-logs-table--mixed th:nth-child(3) { width: 6%; }
-.ai-logs-table--mixed th:nth-child(4) { width: 6%; }
-.ai-logs-table--mixed th:nth-child(5) { width: 5%; }
-.ai-logs-table--mixed th:nth-child(6) { width: 9%; }
-.ai-logs-table--mixed th:nth-child(7) { width: 4%; }
-.ai-logs-table--mixed th:nth-child(8) { width: 4%; }
-.ai-logs-table--mixed th:nth-child(9) { width: 5%; }
-.ai-logs-table--mixed th:nth-child(10) { width: 9%; }
-.ai-logs-table--mixed th:nth-child(11) { width: 9%; }
-.ai-logs-table--mixed th:nth-child(12) { width: 9%; }
-.ai-logs-table--mixed th:nth-child(13) { width: 4%; }
-.ai-logs-table--mixed th:nth-child(14) { width: 4%; }
-.ai-logs-table--mixed th:nth-child(15) { width: 4%; }
-.ai-logs-table--mixed th:nth-child(16) { width: 4%; }
-.ai-logs-table--mixed th:nth-child(17) { width: 4%; }
-.ai-logs-table--mixed th:nth-child(18) { width: 2%; }
-.ai-logs-table th { background: var(--darkened-bg); }
-.ai-logs-status-success { color: #067647; font-weight: 600; }
-.ai-logs-status-error { color: #b42318; font-weight: 600; }
-.ai-logs-status-neutral { color: #b45309; font-weight: 600; }
+/* Базовый вид журнальной таблицы (.ai-logs-table*, ширины колонок .ai-logs-
+   table--mixed, .ai-sub, .ai-nowrap, статусы .ai-logs-status-*) и правила
+   строк (.ai-log-row, .ai-log-pin-*) живут в ГЛОБАЛЬНОМ
+   static/admin/ai/batch_results/index.css — таблица журнала включается и на
+   «Настройке ИИ-приложения» и на «Закреплённых» (копии здесь удалены). */
 .ai-logs-paginator {
   margin-top: 16px; display: flex; gap: 8px;
   align-items: center; flex-wrap: wrap;
@@ -57,18 +25,7 @@
   padding: 24px; border: 1px dashed var(--hairline-color);
   border-radius: 6px; text-align: center; color: var(--body-quiet-color);
 }
-.ai-log-row { cursor: pointer; }
-.ai-log-row:hover { background: var(--selected-row); }
-.ai-log-pin-cell { white-space: nowrap; text-align: center; }
-.ai-log-pin-btn {
-  background: none; border: 1px solid var(--hairline-color); border-radius: 4px;
-  cursor: pointer; font-size: 15px; line-height: 1; padding: 3px 7px;
-  color: var(--body-quiet-color);
-}
-.ai-log-pin-btn:hover:not(:disabled) { border-color: var(--link-fg); color: var(--link-fg); }
-.ai-log-pin-btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.ai-log-pin-btn-active { color: #d97706; border-color: #d97706; }
-.ai-log-pin-btn.busy { opacity: 0.6; pointer-events: none; }
+/* Строки (.ai-log-row) и закрепления (.ai-log-pin-*) — глобальный CSS. */
 .ai-log-task-link {
   background: none; border: none; padding: 0;
   color: var(--link-fg); cursor: pointer;
@@ -192,27 +149,3 @@
 @media (max-width: 800px) {
   .ai-log-detail-content { grid-template-columns: 1fr; }
 }
-/* === Из main: нейтральный статус (running/paused прогона) и ленивый блок
-   «Показать все задачи» в развёртке batch-строки (были только в инлайне
-   main-версии — после разрезания шаблона потерялись) === */
-.ai-logs-status-neutral { color: #b45309; font-weight: 600; }
-/* === «Показать все задачи» (ленивый блок в развёртке batch-строки) === */
-.ai-log-tasks-block { padding: 8px 12px; border-top: 1px solid var(--hairline-color); }
-.ai-log-all-tasks-btn {
-  padding: 4px 12px; font-size: 12px; cursor: pointer;
-  border: 1px solid var(--border-color); border-radius: 4px;
-  background: var(--body-bg); color: var(--body-fg);
-}
-.ai-log-all-tasks-btn:hover { background: var(--selected-row); }
-.ai-log-all-tasks-btn:disabled { opacity: 0.6; cursor: default; }
-.ai-log-all-tasks-list {
-  margin-top: 8px; max-height: 320px; overflow: auto;
-  font-size: 12px; display: grid; gap: 2px;
-}
-.ai-log-all-tasks-list .ai-alltask { display: flex; gap: 6px; align-items: baseline; }
-.ai-log-all-tasks-list .ai-alltask-solved { color: #067647; }
-.ai-log-all-tasks-list .ai-alltask-failed { color: #b42318; }
-.ai-log-all-tasks-loading, .ai-log-all-tasks-error {
-  margin-top: 8px; font-size: 12px; color: var(--body-quiet-color);
-}
-.ai-log-all-tasks-error { color: #b42318; }

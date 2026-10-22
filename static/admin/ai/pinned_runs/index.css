@@ -1,14 +1,9 @@
 /* Стили страницы «Закреплённые пакетные решения».
    Вынесены из ai/templates/admin/ai/pinned_runs.html. */
 .ai-pinned-wrap { max-width: 100%; }
-.ai-pinned-table { width: 100%; border-collapse: collapse; margin: 8px 0; }
-.ai-pinned-table th,
-.ai-pinned-table td {
-  border: 1px solid var(--hairline-color); padding: 6px 9px;
-  text-align: left; vertical-align: top; font-size: 13px;
-}
-.ai-pinned-table th { background: var(--darkened-bg); font-weight: 600; }
+/* Отступ таблицы; вид ячеек (.ai-logs-table*/.ai-log-pin-*) — в ГЛОБАЛЬНОМ
+   static/admin/ai/batch_results/index.css (таблица общая с журналом, копии
+   правил отсюда удалены — DRY). */
+.ai-pinned-table { margin: 8px 0; }
 .ai-pinned-empty { color: var(--body-quiet-color); padding: 12px 0; }
-/* Общие правила (.ai-batch-row*, .ai-log-pin-*, .ai-recent-logs-*) — в
-   ГЛОБАЛЬНОМ static/admin/ai/batch_results/index.css (DRY). */
 .ai-pinned-actions { margin-top: 12px; display: flex; gap: 8px; }

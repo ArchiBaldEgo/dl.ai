@@ -10,8 +10,10 @@ log в контексте есть не на всех поверхностях (
 давала NoReverseMatch → 500 на «Настройке ИИ-приложения» и «Закреплённых
 пакетных решениях»).
 {% endcomment %}
+{# colspan задаётся ЗАВЕДОМО больше числа колонок шапки — браузер ограничит #}
+{# фактическим числом колонок таблицы, синхронизировать со шапкой не надо. #}
 <tr class="ai-batch-detail" hidden>
-  <td colspan="18">
+  <td colspan="1000">
     <div class="ai-batch-detail-body"></div>
     {% if not row.snapshot_url %}
       <p class="ai-recent-logs-empty">Прогон не найден в БД — результаты недоступны.</p>

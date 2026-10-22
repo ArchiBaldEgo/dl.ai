@@ -2,30 +2,13 @@
     padding: 4px 0 0;
 }
 
+/* Отступ таблиц журнала вокруг себя; сам вид ячеек/строк (классы
+   .ai-logs-table*/.ai-log-row/.ai-log-pin-*) — в ГЛОБАЛЬНОМ
+   static/admin/ai/batch_results/index.css (таблица общая с журналом,
+   копии правил отсюда удалены — DRY). */
 .ai-recent-logs-table {
-    width: 100%;
-    border-collapse: collapse;
     margin: 8px 0;
 }
-
-.ai-recent-logs-table th,
-.ai-recent-logs-table td {
-    border: 1px solid var(--hairline-color);
-    padding: 6px 9px;
-    text-align: left;
-    vertical-align: top;
-    font-size: 13px;
-}
-
-.ai-recent-logs-table th {
-    background: var(--darkened-bg);
-    font-weight: 600;
-}
-
-/* Общие правила строк пакетных решений (.ai-batch-row*, .ai-log-pin-*,
-   .ai-recent-logs-ok/err/empty, .ai-scroll) — в ГЛОБАЛЬНОМ
-   static/admin/ai/batch_results/index.css (подключён в base_site.html);
-   копия отсюда удалена (DRY). */
 
 .ai-settings-logs-actions {
     margin-top: 10px;
@@ -33,14 +16,6 @@
 
 .ai-daily-report-bar {
     margin: 6px 0 24px;
-}
-
-.ai-log-row {
-    cursor: pointer;
-}
-
-.ai-log-row:hover td {
-    background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color));
 }
 
 .ai-recent-log-detail>td {

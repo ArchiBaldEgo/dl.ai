@@ -11,7 +11,9 @@
 {% endcomment %}
 {% load ai_duration %}
 <tr class="ai-log-detail-row">
-  <td class="ai-log-detail-cell" colspan="18">
+  {# colspan заведомо больше числа колонок — браузер ограничит фактическим #}
+  {# числом колонок, синхронизировать со шапкой (_ai_journal_head) не надо. #}
+  <td class="ai-log-detail-cell" colspan="1000">
     <div class="ai-log-detail-content">
 
       <div class="ai-log-detail-section">
@@ -24,8 +26,8 @@
           <div><strong>Статус:</strong> {{ log.get_status_display }}</div>
           <div><strong>Время ответа:</strong> {% if log.duration_seconds %}{{ log.duration_seconds|human_duration }}{% else %}—{% endif %}</div>
           <div><strong>Токенов:</strong> {{ log.tokens|default:"—" }}</div>
-          <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y:H:i:s" }}</div>
-          <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y:H:i:s"|default:"—" }}</div>
+          <div><strong>Отправлен:</strong> {{ log.sent_at|date:"d.m.Y H:i:s" }}</div>
+          <div><strong>Получен:</strong> {{ log.received_at|date:"d.m.Y H:i:s"|default:"—" }}</div>
           <div><strong>Кто:</strong>
             {% if log.external_user_id %}
               <a href="https://dl.gsu.by/report.asp?id={{ log.external_user_id }}" target="_blank" rel="noopener">{{ log.user_full_name|default:log.username }} [{{ log.external_user_id }}]</a>

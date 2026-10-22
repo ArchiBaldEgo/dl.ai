@@ -57,7 +57,7 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
     {% if recent_batch_runs %}
     {% include "admin/ai/_ai_batch_results.html" %}
     <div class="ai-scroll">
-      <table class="ai-recent-logs-table ai-batch-table">
+      <table class="ai-recent-logs-table ai-batch-table ai-logs-table ai-logs-table--mixed">
         <thead>
           {% include "admin/ai/_ai_journal_head.html" %}
         </thead>
@@ -115,7 +115,8 @@ ai.admin.logs.build_recent_log_rows / build_recent_batch_rows (учитываю�
               {% include "admin/ai/_ai_log_row.html" with row=row %}
               {# Развёртка: подробная информация по записи (лениво — AJAX по первому клику). #}
               <tr class="ai-recent-log-detail" hidden>
-                <td colspan="18">
+                {# colspan заведомо больше числа колонок — браузер ограничит. #}
+                <td colspan="1000">
                   <div class="ai-recent-log-detail-body"></div>
                 </td>
               </tr>

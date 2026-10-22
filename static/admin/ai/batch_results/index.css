@@ -208,10 +208,8 @@
 .ai-batch-row-clickable:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }
 .ai-batch-row-open td { font-weight: 600; }
 .ai-batch-detail > td { background: var(--darkened-bg); }
-.ai-recent-logs-ok { color: #067647; font-weight: 600; }
-.ai-recent-logs-err { color: #b42318; font-weight: 600; }
-/* Нейтральный статус (прогон идёт / на паузе) — не ошибка, но и не успех. */
-.ai-recent-logs-neutral { color: #b45309; font-weight: 600; }
+/* Цвета статусов .ai-recent-logs-ok/err/neutral — выше, вместе с
+   .ai-logs-status-* (один набор на все поверхности). */
 .ai-recent-logs-empty { color: var(--body-quiet-color); padding: 8px 0; }
 /* Авторы закрепления (страница «Закреплённые») — мелким шрифтом под ФИО. */
 .ai-log-pin-authors { color: var(--body-quiet-color); font-size: 12px; margin-top: 2px; }
@@ -254,3 +252,54 @@
 .arm-filter-toggle .arm-button.active { background: var(--darkened-bg); font-weight: 700; }
 .arm-filter-toggle .arm-button:disabled { opacity: 0.55; cursor: default; }
 @media (max-width: 700px) { .arm-result-top { align-items: flex-start; flex-direction: column; } }
+
+/* === Журнальная таблица — общий вид для ВСЕХ поверхностей ================
+   Шапка admin/ai/_ai_journal_head.html (11 колонок), строки
+   _ai_batch_row/_ai_log_row; таблица включается на четырёх страницах
+   (журнал, настройки, закреплённые, + развёртки на /arm/solve/), поэтому
+   правила живут здесь, а не в CSS одной страницы (раньше ширины были
+   только в CSS журнала — на «Настройке» таблица уезжала).
+
+   11 КОЛОНОК: ★, Кто, Отправлен (sub: получен · время), Режим, Прогон
+   (sub: курс · расширение), Язык, Тема, Промпт, Модель, Пары, Статус.
+   Сумма ширин = ровно 100%. */
+.ai-logs-table { width: 100%; border-collapse: collapse; }
+.ai-logs-table th, .ai-logs-table td {
+  border: 1px solid var(--hairline-color); padding: 8px 10px;
+  text-align: left; vertical-align: top; font-size: 13px;
+}
+.ai-logs-table th { background: var(--darkened-bg); font-weight: 600; }
+.ai-logs-table--mixed { table-layout: fixed; width: 100%; }
+.ai-logs-table--mixed th, .ai-logs-table--mixed td {
+  /* Перенос по словам (не рвём слова посередине — было anywhere, текст
+     «плавал»); ячейки прижаты к верху строки. */
+  overflow-wrap: break-word; word-break: normal; vertical-align: top;
+}
+.ai-logs-table--mixed th:nth-child(1) { width: 3.5%; }
+.ai-logs-table--mixed th:nth-child(2) { width: 11.5%; }
+.ai-logs-table--mixed th:nth-child(3) { width: 14%; }
+.ai-logs-table--mixed th:nth-child(4) { width: 8%; }
+.ai-logs-table--mixed th:nth-child(5) { width: 12%; }
+.ai-logs-table--mixed th:nth-child(6) { width: 8%; }
+.ai-logs-table--mixed th:nth-child(7) { width: 9.5%; }
+.ai-logs-table--mixed th:nth-child(8) { width: 10%; }
+.ai-logs-table--mixed th:nth-child(9) { width: 10.5%; }
+.ai-logs-table--mixed th:nth-child(10) { width: 5.5%; }
+.ai-logs-table--mixed th:nth-child(11) { width: 7.5%; }
+/* Ячейка закрепления (★/☆) — узкая колонка: не раздувать паддинги. */
+.ai-logs-table--mixed .ai-log-pin-cell { padding: 6px 2px; text-align: center; }
+/* Датa/статус/счётчики не переносятся: «21.10.2026 20:23:09» и «Успех» —
+   одной строкой (раньше рвались по буквам в узких колонках). */
+.ai-logs-table--mixed .ai-nowrap { white-space: nowrap; }
+/* Sub-строка ячейки (получен/время, курс/расширение) — тише и мельче главной. */
+.ai-logs-table--mixed .ai-sub {
+  display: block; margin-top: 3px;
+  color: var(--body-quiet-color); font-size: 12px; font-weight: 400;
+}
+/* Статусы — один набор цветов на всех поверхностях. */
+.ai-logs-status-success, .ai-recent-logs-ok { color: #067647; font-weight: 600; }
+.ai-logs-status-error, .ai-recent-logs-err { color: #b42318; font-weight: 600; }
+.ai-logs-status-neutral, .ai-recent-logs-neutral { color: #b45309; font-weight: 600; }
+/* Кликабельная строка обычного запроса (батч — .ai-batch-row-clickable выше). */
+.ai-log-row { cursor: pointer; }
+.ai-log-row:hover td { background: color-mix(in srgb, var(--body-bg) 92%, var(--hairline-color)); }

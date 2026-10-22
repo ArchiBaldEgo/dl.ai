@@ -29,6 +29,15 @@ services:
       # идентичным набором зависимостей.
       - WebPools_node_modules:/app/node_modules
 #      - WebPools_puppeteer_cache:/app/.puppeteer-cache
+      # Chrome для Puppeteer в ЛОКАЛЬНОЙ сборке не качается (install.js без
+      # прокси висит навсегда — см. Dockerfile), поэтому /opt/puppeteer-runtime
+      # в образе пуст и оба бот-пула падают на «Could not find Chrome». Отдаём
+      # кэш Chrome 115 хоста (~/.cache/puppeteer, путь как у npx puppeteer по
+      # умолчанию) как READ-ONLY источник: CMD локального режима копирует его
+      # в /opt/puppeteer-runtime на старте, если в образе Chrome нет. На проде
+      # каталог на хосте — пустая заглушка от compose, chrome в образе есть,
+      # копия не происходит.
+      - ${HOME:-/root}/.cache/puppeteer:/host-puppeteer-cache:ro
     ports:
       - "8000:8000"
     env_file:
