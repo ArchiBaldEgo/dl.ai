@@ -4448,11 +4448,15 @@ class BatchParallelWorkerTests(TransactionTestCase):
         self.assertFalse(row.truncated)
         self.assertIn("Не удалось извлечь код", row.dl_comment)
 
-    def test_no_code_retry_prefers_nothink_handler(self):
-        """Ollama-модель: повтор идёт через no-think хендлер (get_no_think_handler;
-        Ollama API think=False по docs.ollama.com/capabilities/thinking), а не
-        через обычный. Провайдер определяется по __module__ — фейк держит
-        оllama-модуль и имя из реестра."""
+    def test_batch_solve_uses_nothink_handler_from_first_attempt(self):
+        """Ollama-модель: think выключен с ПЕРВОГО вызова пакета.
+
+        Reasoning стримится отдельным полем и съедает общий num_predict —
+        ответ обрывается лимитом генерации до кода. По докам Ollama
+        (docs.ollama.com/capabilities/thinking) это гасится ``think: false``
+        (ai.model_clients.get_no_think_handler). Провайдер определяется по
+        __module__ — фейк держит ollama-модуль.
+        """
         import os
         from ai import arm_runner
         from ai.model_clients import get_no_think_handler
@@ -4462,13 +4466,16 @@ class BatchParallelWorkerTests(TransactionTestCase):
 
         async def real_handler(messages, conv_id):
             calls.append(("plain", messages))
-            return ("мусор без кода", 50, False)
+            return ("program p; begin writeln(1); end.", 60, False)
 
         real_handler.__module__ = "ai.model_clients.ollama"
         real_handler.__name__ = "ask_Ollama_NotInRegistry_async"  # нет в _NOTHINK_HANDLERS
 
         async def nothink_proxy(messages, conv_id):
             calls.append(("nothink", messages))
+            # Первый ответ — мусор (провоцирует авто-ретрай), второй — код.
+            if sum(1 for kind, _ in calls if kind == "nothink") == 1:
+                return ("мусор без кода", 50, False)
             return ("program p; begin writeln(1); end.", 60, False)
 
         models = [{"key": "Ollama_NotInRegistry", "title": "Ollama NotInRegistry",
@@ -4487,8 +4494,8 @@ class BatchParallelWorkerTests(TransactionTestCase):
         finally:
             arm_runner._jobs.pop(run_id, None)
 
-        # Первый вызов — реальный хендлер (мусор), второй — no-think прокси.
-        self.assertEqual([kind for kind, _ in calls], ["plain", "nothink"])
+        # Оба вызова — через no-think хендлер; обычный не тронут вовсе.
+        self.assertEqual([kind for kind, _ in calls], ["nothink", "nothink"])
         run = AIModelTestRun.objects.get(run_id=run_id)
         row = AIModelTestResult.objects.get(run=run, model_key="Ollama_NotInRegistry")
         self.assertEqual(row.verdict, "solved")
@@ -18731,10 +18738,186 @@ class UserModelSecurityTests(SimpleTestCase):
             _, error = validate_base_url("https://my-own-domain.example/v1")
         self.assertEqual(error, ERR_PRIVATE_HOST)
 
+    def test_unresolvable_host_without_proxy_is_rejected(self):
+        # Нет прокси и нет прямого DNS → адрес проверить нечем: отказ.
+        from ai.services.user_models import ERR_BAD_HOST, validate_base_url
+        from unittest.mock import patch
+        import socket
+        with patch(
+            "ai.services.user_models.socket.getaddrinfo",
+            side_effect=socket.gaierror,
+        ), patch("ai.services.user_models._egress_proxy", return_value=""):
+            _, error = validate_base_url("https://api.mistral.ai/v1")
+        self.assertEqual(error, ERR_BAD_HOST)
+
+    def test_unresolvable_host_is_resolved_via_doh_through_proxy(self):
+        # Корпоративная сеть: прямой DNS внешние имена не разрешает, выход
+        # только через прокси. SSRF-проверка должна пройти через DoH.
+        from ai.services.user_models import validate_base_url
+        from unittest.mock import patch
+        import socket
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"Answer": [
+                    {"type": 5, "data": "api.mistral.ai."},  # CNAME — пропуск
+                    {"type": 1, "data": "172.66.2.203"},
+                ]}
+
+        calls = []
+
+        def fake_doh(url, **kwargs):
+            calls.append((url, kwargs))
+            # AAAA-ответов нет — тип просто не поддерживается резолвером.
+            return _Resp()
+
+        with patch(
+            "ai.services.user_models.socket.getaddrinfo",
+            side_effect=socket.gaierror,
+        ), patch(
+            "ai.services.user_models._egress_proxy",
+            return_value="http://proxy.gsu.by:3128",
+        ), patch("ai.services.user_models.httpx.get", side_effect=fake_doh):
+            url, error = validate_base_url("https://api.mistral.ai/v1")
+        self.assertEqual(error, "")
+        self.assertEqual(url, "https://api.mistral.ai/v1")
+        # DoH шёл через ТОТ ЖЕ прокси и по IP-литеральному эндпоинту.
+        self.assertTrue(calls)
+        self.assertEqual(calls[0][1]["proxy"], "http://proxy.gsu.by:3128")
+        self.assertTrue(calls[0][0].startswith("https://1.1.1.1/"))
+
+    def test_doh_unreachable_with_proxy_reports_network_error(self):
+        # Прокси есть, но ни прямой DNS, ни DoH не ответили — сообщение
+        # должно указывать на сеть, а не на «неверный домен».
+        from ai.services.user_models import ERR_DNS_UNAVAILABLE, validate_base_url
+        from unittest.mock import patch
+        import socket
+        with patch(
+            "ai.services.user_models.socket.getaddrinfo",
+            side_effect=socket.gaierror,
+        ), patch(
+            "ai.services.user_models._egress_proxy",
+            return_value="http://proxy.gsu.by:3128",
+        ), patch(
+            "ai.services.user_models.httpx.get",
+            side_effect=OSError("proxy unreachable"),
+        ):
+            _, error = validate_base_url("https://api.mistral.ai/v1")
+        self.assertEqual(error, ERR_DNS_UNAVAILABLE)
+
+    def test_doh_private_answer_is_rejected(self):
+        # DoH вернул приватный адрес → SSRF-фильтр срабатывает и на этом пути.
+        from ai.services.user_models import ERR_PRIVATE_HOST, validate_base_url
+        from unittest.mock import patch
+        import socket
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"Answer": [{"type": 1, "data": "10.0.0.5"}]}
+
+        with patch(
+            "ai.services.user_models.socket.getaddrinfo",
+            side_effect=socket.gaierror,
+        ), patch(
+            "ai.services.user_models._egress_proxy",
+            return_value="http://proxy.gsu.by:3128",
+        ), patch("ai.services.user_models.httpx.get", return_value=_Resp()):
+            _, error = validate_base_url("https://internal.example/v1")
+        self.assertEqual(error, ERR_PRIVATE_HOST)
+
     def test_default_base_urls_are_https(self):
         from ai.services.user_models import PROVIDER_BASE_URLS
         for provider, url in PROVIDER_BASE_URLS.items():
             self.assertTrue(url.startswith("https://"), provider)
+
+
+class UserModelCallProxyTests(SimpleTestCase):
+    """Вызов личной модели идёт тем же прокси, что и остальные провайдеры.
+
+    В проде прямой выход в интернет закрыт — без прокси модель была бы
+    недостижима, даже если адрес сохранён.
+    """
+
+    @staticmethod
+    def _model():
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            pk=7,
+            provider="openai",
+            model_id="mistral-large-latest",
+            base_url="https://api.mistral.ai/v1",
+            api_key_encrypted="",
+            max_tokens=8000,
+        )
+
+    @staticmethod
+    def _fake_async_client(captured):
+        """httpx.AsyncClient-двойник: копит kwargs и отдаёт валидный ответ."""
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            async def post(self, url, **kwargs):
+                class _Resp:
+                    status_code = 200
+
+                    def json(self):
+                        return {
+                            "choices": [{"message": {"content": "ок"}}],
+                            "usage": {"completion_tokens": 1, "prompt_tokens": 1},
+                        }
+
+                return _Resp()
+
+        return _FakeClient
+
+    def test_call_uses_configured_proxy(self):
+        import asyncio
+        from unittest.mock import patch
+        from ai.services.user_models import call_user_model
+
+        captured = {}
+        with patch(
+            "ai.services.user_models._egress_proxy",
+            return_value="http://proxy.gsu.by:3128",
+        ), patch(
+            "ai.services.user_models.httpx.AsyncClient",
+            self._fake_async_client(captured),
+        ):
+            content, _, is_error, _, _ = asyncio.run(
+                call_user_model(self._model(), "привет")
+            )
+        self.assertFalse(is_error)
+        self.assertEqual(content, "ок")
+        self.assertEqual(captured["proxy"], "http://proxy.gsu.by:3128")
+        # Никакого неявного чтения env-прокси: прокси задан явно.
+        self.assertFalse(captured["trust_env"])
+
+    def test_call_without_proxy_goes_direct(self):
+        import asyncio
+        from unittest.mock import patch
+        from ai.services.user_models import call_user_model
+
+        captured = {}
+        with patch(
+            "ai.services.user_models._egress_proxy", return_value="",
+        ), patch(
+            "ai.services.user_models.httpx.AsyncClient",
+            self._fake_async_client(captured),
+        ):
+            asyncio.run(call_user_model(self._model(), "привет"))
+        self.assertIsNone(captured["proxy"])
 
 
 class UserModelIsolationTests(TestCase):

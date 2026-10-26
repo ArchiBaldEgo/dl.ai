@@ -2079,12 +2079,30 @@ def _append_run_log(run_id, text):
         job["updated_at_ts"] = time.time()
 
 
+def _batch_solve_handler(model):
+    """Хендлер вызова модели в «Пакетном решении»: без think, если провайдер умеет.
+
+    Рассуждения в пакете не нужны: Ollama стримит их в отдельное поле
+    ``thinking``, и они съедают общий ``num_predict`` — ответ обрывается
+    лимитом генерации ДО кода (обрезы вида «thinking не дописан, content
+    пуст»). По докам Ollama (docs.ollama.com/capabilities/thinking) они
+    гасятся полем ``think: false`` — «request no thinking output», весь
+    бюджет остаётся ответу. У провайдеров без API-переключателя
+    (web-пулы, OpenRouter) возвращается обычный хендлер: запрет
+    рассуждений там уже сидит в базовом solve-сообщении
+    (``_NO_RAMBLE_INSTRUCTION``).
+    """
+    return get_no_think_handler(model["handler"]) or model["handler"]
+
+
 def _call_model_with_retries(ctx, model, message, client_id, task_label):
     """Вызов модели с автоповтором при «Сбое ответа модели».
 
     Возвращает ``(response, gen_seconds)`` — ответ хендлера (кортеж провайдера)
     и суммарное время вызовов модели (в попытках повторов тоже). Логика повторов:
 
+    * вызов идёт через ``_batch_solve_handler`` — у Ollama think выключен с
+      ПЕРВОГО запроса (reasoning не отнимает бюджет генерации у кода);
     * сбой (провайдер бросил исключение ИЛИ хендлер вернул is_error=True)
       печатается в журнал прогона **до** следующего вызова — сначала видно
       сбой, потом запрос уходит заново (ТЗ пользователя);
@@ -2099,11 +2117,12 @@ def _call_model_with_retries(ctx, model, message, client_id, task_label):
     attempts = 0
     last_exc = None
     gen_seconds = 0.0
+    call_handler = _batch_solve_handler(model)
     while True:
         attempts += 1
         gen_started = perf_counter()
         try:
-            response = async_to_sync(model["handler"])(message, client_id)
+            response = async_to_sync(call_handler)(message, client_id)
             last_exc = None
         except Exception as call_exc:  # noqa: BLE001 — сбой модели, не прогона
             response = None
@@ -2407,14 +2426,9 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 code_only = ""
 
             # Кода НЕ извлекли (при любом исходе, не только обрезе) — один
-            # авто-ретрай к ТОЙ ЖЕ модели, БЕЗ think-механики. Думающие модели
-            # подводят протекшим reasoning'ом; по докам Ollama
-            # (docs.ollama.com/capabilities/thinking) он глушится полем
-            # ``think: false`` в запросе (ai.model_clients.get_no_think_handler);
-            # провайдерам без API-переключателя повтор идёт обычным хендлером —
-            # запрет рассуждений уже сидит в базовом сообщении
-            # (_NO_RAMBLE_INSTRUCTION), а повторы недетерминированную генерацию
-            # переразыгрывают. Обрез — отдельная причина: ретрай ещё и с
+            # авто-ретрай к ТОЙ ЖЕ модели (тот же «без think» хендлер —
+            # _batch_solve_handler). Повторы недетерминированную генерацию
+            # переразыгрывают; обрез — отдельная причина: ретрай ещё и с
             # припиской «сразу код» (_CUT_RETRY_INSTRUCTION). Повторный вызов
             # НЕ срывает пару: при исключении держим первый ответ; если и
             # ретрай неудачен — пара пишется как была (с truncated-флагом при
@@ -2424,10 +2438,10 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                     return None
                 retry_started = perf_counter()
                 try:
-                    # Хендлер ретрая: «без think», если провайдер умеет
-                    # (Ollama think=False); приписка «сразу код» — только при
-                    # обрезе, у прочих причин задача идёт дословно.
-                    retry_call = get_no_think_handler(model["handler"]) or model["handler"]
+                    # Тот же хендлер, что и первый вызов: у Ollama think
+                    # выключен; приписка «сразу код» — только при обрезе, у
+                    # прочих причин задача идёт дословно.
+                    retry_call = _batch_solve_handler(model)
                     retry_message = message
                     if truncated:
                         retry_message += "\n" + _CUT_RETRY_INSTRUCTION[get_ui_language_suffix(ctx["ui_language"])]
