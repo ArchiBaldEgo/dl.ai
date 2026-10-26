@@ -35,6 +35,12 @@
 (function () {
     "use strict";
 
+    // === Логирование ===
+    function debug(source, scope, message) {
+        var extra = Array.prototype.slice.call(arguments, 3);
+        console.debug.apply(console, [`[${source}](${scope}) : ${message}`].concat(extra));
+    }
+
     // === Константы раскладки ===
     var CONFIG_ID = "ai-wizard-config";
     var SPOT_PAD = 6;        // «подушка» вокруг подсвеченного элемента
@@ -551,8 +557,9 @@
         parts.btnSkip.type = "button";
         parts.btnSkip.className = BTN_SKIP;
         parts.btnSkip.textContent = currentLabels().skip;
+        // Кнопка "Скрыть"
         parts.btnSkip.addEventListener("click", function () {
-            stop({ mark: true });
+          stop({ mark: true, disableWizard: true});
         });
 
         parts.btnPrev = document.createElement("button");
@@ -1086,46 +1093,141 @@
     }
 
     // === Отметка «просмотрено» ===
-
     function markSeen() {
-        if (marked || !cfg || !cfg.mark_url) return;
-        marked = true;
-        var body;
-        try {
-            body = JSON.stringify({ scope: String(cfg.scope || "") });
-        } catch (e) {
-            return;
-        }
-        var options = {
-            method: "POST",
-            credentials: "same-origin",
-            // keepalive: отметка по жесту пользователя — вкладка могла закрыться
-            // сразу; fetch без keepalive браузер снимет при выгрузке страницы.
-            keepalive: true,
-            headers: {
-                "X-CSRFToken": getCsrfToken(),
-                "Content-Type": "application/json"
-            },
-            body: body
-        };
-        try {
-            fetch(cfg.mark_url, options)
-                .then(function (resp) {
-                    var type = resp && resp.headers
-                        ? String(resp.headers.get("content-type") || "")
-                        : "";
-                    if (resp && resp.ok && type.indexOf("application/json") !== -1) return;
-                    // Протухшая админ-сессия даёт HTML-редирект, не OK, не JSON:
-                    // тихо игнорируем, одной строкой debug.
-                    console.debug("[ai-wizard] seen-mark answer ignored (not ok / non-JSON)");
-                })
-                .catch(function () {
-                    console.debug("[ai-wizard] seen-mark request failed (network)");
+      if (marked || !cfg || !cfg.mark_url) return;
+
+      marked = true;
+      var body;
+      
+      
+      try {
+        body = JSON.stringify({ scope: String(cfg.scope || "") });
+      } catch (e) {
+        return;
+      }
+
+      var options = {
+        method: "POST",
+        credentials: "same-origin",
+        // keepalive: отметка по жесту пользователя — вкладка могла закрыться
+        // сразу; fetch без keepalive браузер снимет при выгрузке страницы.
+        keepalive: true,
+        headers: {
+          "X-CSRFToken": getCsrfToken(),
+          "Content-Type": "application/json"
+        },
+        body: body
+      };
+
+      try {
+        fetch(cfg.mark_url, options)
+          .then(function (resp) {
+            var type = resp && resp.headers
+              ? String(resp.headers.get("content-type") || "")
+              : "";
+
+            // OK
+            if (resp && resp.ok && type.indexOf("application/json") !== -1) {
+              debug("ai_wizard", "seen-mark", "ok")
+              return;
+            }
+
+            if (type.indexOf("application/json") !== -1) {
+              return resp.json()
+                .then(function (payload) {
+                  debug("ai_wizard", "seen-mark", "error payload", payload);
+                }).catch(function () {
+                  debug("ai_wizard", "seen-mark", "error body unreadable");
                 });
-        } catch (e) {
-            console.debug("[ai-wizard] seen-mark not sent");
-        }
+            }
+
+            if (type.indexOf("text/html") !== -1) {
+              return resp.text().then(function (html) {
+                // только маркер, не весь HTML
+                var isCsrf = html.indexOf("CSRF") !== -1;
+                debug("ai_wizard", "seen-mark", "html error body", { csrf: isCsrf });
+              }).catch(function () { /* ignore */ });
+            }
+
+            // NOTE: Протухшая админ-сессия даёт HTML-редирект, не OK, не JSON:
+            //  тихо игнорируем, одной строкой debug.
+            debug("ai_wizard", "seen-mark", "answer ignored (not ok / non-JSON)")
+          })
+          .catch(function () {
+            debug("ai_wizard", "seen-mark", "request failed")
+          });
+      } catch (error) {
+        debug("ai_wizard", "seen-mark", "request failed", {
+          message: error && error.message,
+          name: error && error.name
+        });
+      }
     }
+
+  // Disables wizard
+  function disable() {
+    if (!cfg || !cfg.mark_url) return;
+
+    var body;
+    try {
+      body = JSON.stringify({ scope: "disabled" });
+    } catch (e) {
+      return;
+    }
+
+    var options = {
+      method: "POST",
+      credentials: "same-origin",
+      // keepalive: вкладка могла закрыться сразу после «Скрыть» —
+      // браузер без keepalive снимет запрос при выгрузке страницы.
+      keepalive: true,
+      headers: {
+        "X-CSRFToken": getCsrfToken(),
+        "Content-Type": "application/json"
+      },
+      body: body
+    };
+
+    try {
+      fetch(cfg.mark_url, options)
+        .then(function (resp) {
+          var type = resp && resp.headers
+            ? String(resp.headers.get("content-type") || "")
+            : "";
+
+          if (resp && resp.ok && type.indexOf("application/json") !== -1) {
+            debug("ai_wizard", "disable", "ok");
+            return;
+          }
+
+          if (type.indexOf("application/json") !== -1) {
+            return resp.json()
+              .then(function (payload) {
+                debug("ai_wizard", "disable", "error payload", payload);
+              }).catch(function () {
+                debug("ai_wizard", "disable", "error body unreadable");
+              });
+          }
+
+          if (type.indexOf("text/html") !== -1) {
+            return resp.text().then(function (html) {
+              var isCsrf = html.indexOf("CSRF") !== -1;
+              debug("ai_wizard", "disable", "html error body", { csrf: isCsrf });
+            }).catch(function () { /* ignore */ });
+          }
+
+          debug("ai_wizard", "disable", "answer ignored (not ok / non-JSON)");
+        })
+        .catch(function () {
+          debug("ai_wizard", "disable", "request failed");
+        });
+    } catch (error) {
+      debug("ai_wizard", "disable", "request failed", {
+        message: error && error.message,
+        name: error && error.name
+      });
+    }
+  }
 
     // === API ===
 
@@ -1176,18 +1278,29 @@
         show(0);
     }
 
+    /* NOTE:
+    {
+      mark: отметить, что user увидел определённый wizard
+      disableWizard: отключить появление всех автоматических wizard
+    }
+    */ 
     function stop(opts) {
         if (!active) return; // нечего останавливать (отметку не шлём)
+
         active = false;
         runSeq++;
         pendingWait = false;
         clearInterval(pollTimer);
         pollTimer = null;
+        
         document.removeEventListener("scroll", onScroll, true);
         window.removeEventListener("resize", onScroll);
         document.removeEventListener("keydown", onKeydown);
+        
         removeLayers();
         restoreState();
+        
+        //  NOTE: Функционал скрытия окна
         // Отметка «seen» — только по жесту пользователя (Готово/Скрыть/Escape/
         // Далее) или если в туре он уже что-то нажимал. Автозакрытие без единого
         // жеста (цели исчезли до первого щелчка) флаг НЕ сжигает — иначе wizard
@@ -1195,7 +1308,17 @@
         // Перезапуск из кнопок (mark:false) отметку тоже не шлёт.
         var veto = opts && opts.mark === false;
         var force = opts && opts.mark === true;
-        if (!veto && (force || interacted)) markSeen();
+        var disableWizard = opts && opts.disableWizard === true;
+
+        if (!veto && (force || interacted)) {
+          if (disableWizard) {
+            disable();
+          } else {
+            markSeen();
+          }
+        }
+
+        // Exit
         steps = [];
         index = -1;
         cfg = null;
@@ -1262,7 +1385,10 @@
         var scope = btn.dataset && btn.dataset.scope
             ? String(btn.dataset.scope)
             : (conf ? String(conf.scope || "") : "");
+        
+        
         if (!conf || !scope) return;
+
         restartTour(conf, scope);
     }
 
@@ -1279,6 +1405,38 @@
         if (restartBtn) startFromRestartBtn(restartBtn);
     }
 
+    // Adds `?` help element
+    function addViewWizardButton() {
+      const content = document.getElementById("content");
+
+      // 
+      const title = content.firstElementChild;
+      title.style.display = 'flex';
+      title.style.alignItems = 'center';
+      title.style.gap = '8px';
+
+      const help = document.createElement("button");
+      help.setAttribute('data-ai-wizard-restart', '');
+      help.textContent = "?";
+      help.id = "ai-wizard-restart";
+      
+      // open wizard 
+      help.addEventListener("click", (event) => {
+        var conf = readConfig() || fallbackConfig();
+        var scope = btn.dataset && btn.dataset.scope
+            ? String(btn.dataset.scope)
+            : (conf ? String(conf.scope || "") : "");
+        
+        if (!conf || !scope) return;
+
+        restartTour(conf, scope);
+      });
+
+      title.appendChild(help);
+
+      // content.insertBefore(button, content.firstElementChild.nextSibling);
+    }
+
     // === Boot ===
 
     // Слушатель всегда вешается на DOMContentLoaded (НЕ window.onload: страницы
@@ -1289,9 +1447,13 @@
     // не находились, тур автопрогонялся до конца и СЖИГАЛ флаг «seen» (потом
     // «wizard показался не сразу, а только по кнопке»).
     function boot() {
+        // Искусственно создаём динамически кнопку визарда
+        addViewWizardButton();
+
         document.addEventListener("click", onDelegatedClick);
         var conf = readConfig();
         if (!conf || conf.show !== true) return;
+
 
         var autoStarted = false; // автостарт — ровно один за загрузку страницы
         function autoStart() {
