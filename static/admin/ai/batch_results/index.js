@@ -59,6 +59,23 @@ window.ArmBatchResults = (function () {
         return data.result;
       });
   }
+  // Данные проваленных тестов: сервер отдаёт СПИСОК записей (по одной на
+  // каждый подтверждённый провал — DL проверяет решение по этапам). Старые
+  // строки БД и старый API хранили один dict — нормализуем к массиву, чтобы
+  // рендер знал ровно один формат.
+  function normalizeTestData(data) {
+    if (!data) { return []; }
+    if (Array.isArray(data)) {
+      return data.filter(function (entry) { return entry && typeof entry === 'object'; });
+    }
+    if (typeof data === 'object') { return [data]; }
+    return [];
+  }
+  function hasTestData(data) {
+    return normalizeTestData(data).some(function (entry) {
+      return entry.input || entry.expected_output;
+    });
+  }
   // Загрузить (и закрепить в кэше) состояние тела: первый чанк raw_response —
   // сразу, остальное догружается позже (state.has_more). В кэше может лежать
   // и обещание, и разрешённое состояние — Promise.resolve нормализует оба:
@@ -79,7 +96,7 @@ window.ArmBatchResults = (function () {
         dl_error: b.dl_error || '',
         dl_queue_id: b.dl_queue_id || 0,
         dl_file_name: b.dl_file_name || '',
-        dl_test_data: b.dl_test_data || {},
+        dl_test_data: normalizeTestData(b.dl_test_data),
         delta_id: b.delta_id || 0,
         delta_name: b.delta_name || '',
         truncated: !!b.truncated,
@@ -583,9 +600,9 @@ window.ArmBatchResults = (function () {
       colMain.appendChild(downloadLink);
     }
 
-    // Входные данные и эталонный ответ проваленного теста — ПРАВАЯ колонка
-    // (только у НЕ решённых пар, у которых DL разрешил выдачу теста). Данные
-    // компактные — обрезаны сервером.
+    // Входные данные и эталонные ответы проваленных тестов — ПРАВАЯ колонка
+    // (только у НЕ решённых пар, у которых DL разрешил выдачу теста). Запись
+    // на каждый подтверждённый провал; данные компактные — обрезаны сервером.
     var testDataEl = document.createElement('div');
     testDataEl.className = 'arm-test-data';
     testDataEl.hidden = true;
@@ -601,22 +618,32 @@ window.ArmBatchResults = (function () {
       'Входные/эталонные данные теста DL не выдал — тест не выполнялся (например, ошибка компиляции) или выдача запрещена настройками курса.';
     colData.appendChild(testDataEmptyEl);
     var renderTestData = function (data) {
-      if (!data || (!data.input && !data.expected_output)) { testDataEl.hidden = true; return; }
+      // Записи без файлов пропускаем: DL мог подтвердить провал, но не
+      // разрешить выдачу данных (404/403 по конкретному тесту).
+      var entries = normalizeTestData(data).filter(function (entry) {
+        return entry.input || entry.expected_output;
+      });
+      if (!entries.length) { testDataEl.hidden = true; return; }
       var parts = [];
-      if (data.test_number) {
-        parts.push('<div style="font-weight:600; font-size:13px; margin-bottom:4px;">Данные проваленного теста № '
-          + escapeHtml(data.test_number) + '</div>');
-      }
-      if (data.input) {
-        parts.push('<div style="font-size:12px; color:#6b7280;">Входные данные'
-          + (data.input_truncated ? ' (начало)' : '') + ':</div>');
-        parts.push('<pre>' + escapeHtml(data.input) + '</pre>');
-      }
-      if (data.expected_output) {
-        parts.push('<div style="font-size:12px; color:#6b7280;">Эталонный ответ'
-          + (data.expected_truncated ? ' (начало)' : '') + ':</div>');
-        parts.push('<pre>' + escapeHtml(data.expected_output) + '</pre>');
-      }
+      entries.forEach(function (entry, index) {
+        var heading = entry.test_number
+          ? 'Данные проваленного теста № ' + escapeHtml(entry.test_number)
+          : 'Данные проваленного теста #' + (index + 1);
+        // Заголовок у каждой записи, когда их несколько: иначе непонятно,
+        // к какому тесту относятся файлы.
+        parts.push('<div style="font-weight:600; font-size:13px; margin:'
+          + (index ? '10px' : '0') + ' 0 4px;">' + heading + '</div>');
+        if (entry.input) {
+          parts.push('<div style="font-size:12px; color:#6b7280;">Входные данные'
+            + (entry.input_truncated ? ' (начало)' : '') + ':</div>');
+          parts.push('<pre>' + escapeHtml(entry.input) + '</pre>');
+        }
+        if (entry.expected_output) {
+          parts.push('<div style="font-size:12px; color:#6b7280;">Эталонный ответ'
+            + (entry.expected_truncated ? ' (начало)' : '') + ':</div>');
+          parts.push('<pre>' + escapeHtml(entry.expected_output) + '</pre>');
+        }
+      });
       testDataEl.innerHTML = parts.join('');
       testDataEl.hidden = false;
     };
@@ -625,8 +652,7 @@ window.ArmBatchResults = (function () {
       // Подсказка — только когда тело УЖЕ догружено (lazy-пара до первого
       // раскрытия не знает, чем ответит body-эндпоинт) и данных нет, у
       // НЕ решённой пары (у решённой данных по определению нет).
-      var noData = !data || (!data.input && !data.expected_output);
-      testDataEmptyEl.hidden = !(noData && bodyDone && r.verdict !== 'solved');
+      testDataEmptyEl.hidden = !(!hasTestData(data) && bodyDone && r.verdict !== 'solved');
     };
     renderTestDataWithHint(r.dl_test_data, !lazy);
 

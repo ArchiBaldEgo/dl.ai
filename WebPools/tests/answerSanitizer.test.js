@@ -105,3 +105,21 @@ test('htmlToMarkdown сохраняет пример кода с <script> вну
     const md = toMarkdown(html);
     assert.ok(md.includes('alert(1)'), 'код ответа не должен теряться при чистке script-тегов');
 });
+
+test('htmlToMarkdown разводит соседние блоки переводами строк', () => {
+    // Реальный баг DeepSeek: две программы лежали в соседних <div>, шаг
+    // «снести все теги» склеивал их в «jmp ends ;$Ejmp begin» — маркер конца
+    // первой программы приклеивался к началу второй.
+    const html = '<div class="markdown"><div>jmp ends ;$E</div><div>jmp begin</div></div>';
+    const md = toMarkdown(html);
+    assert.ok(!/\$Ejmp/.test(md), 'текст соседних блоков не должен слипаться');
+    assert.match(md, /;\$E\n+jmp begin/);
+});
+
+test('htmlToMarkdown разводит строки таблицы и ячейки', () => {
+    const html = '<table><tr><td>1</td><td>2</td></tr><tr><td>3</td><td>4</td></tr></table>';
+    const md = toMarkdown(html);
+    assert.ok(!/12/.test(md), 'соседние ячейки не должны слипаться');
+    assert.match(md, /1\t2/);
+    assert.match(md, /3\t4/);
+});

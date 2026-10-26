@@ -268,6 +268,25 @@ _ASM_END_RE = _re.compile(
     r"^\s*(ends\s*:|jmp\s+ends\b|end\s+\w+\b|end\s*$)", _re.IGNORECASE,
 )
 _DL_END_MARKER_RE = _re.compile(r";\$E\b", _re.IGNORECASE)
+# ;$E, приклеенный к следующему тексту БЕЗ пробела («;$Ejmp begin»): веб-пул
+# склеил размышления и финальный ответ (конвертер DOM потерял границу блоков).
+# \b у канонического маркера такую склейку не ловит (E и j — оба \w), поэтому
+# второй «jmp begin» не становится началом строки, а карвер тянет ОБЕ
+# программы в одного кандидата — двойной код уходит в файл решения.
+_DL_END_MARKER_GLUED_RE = _re.compile(r";\$E(?=\w)", _re.IGNORECASE)
+
+
+def normalize_dl_marker_glue(text):
+    """Поставить перевод строки после ;$E, приклеенного к тексту.
+
+    «jmp ends ;$Ejmp begin» → «jmp ends ;$E\\njmp begin». Без этого второй
+    каркас не распознаётся как отдельная программа (см.
+    _DL_END_MARKER_GLUED_RE). Обычный ответ не меняется: ;$E там и так
+    завершает строку (предикат ``(?=\\w)`` срабатывает только на склейке).
+    """
+    if not text:
+        return text
+    return _DL_END_MARKER_GLUED_RE.sub(lambda m: m.group(0) + "\n", text)
 
 # --- С-МПА (псевдо-C) ---
 # Якорь-объявление С-МПА: ТРИ диалекта порядка слов —
@@ -442,30 +461,18 @@ def _asm_anchors(lines):
     return anchors
 
 
-def extract_asm_i86(text, relaxed=False):
-    """Структурный экстрактор ассемблера i8086 (DL-каркас с jmp begin, MASM).
+def _asm_candidates(lines, relaxed=False):
+    """Валидные кандидаты-программы i8086: ``(marker_seen, start, end, code)``.
 
-    Возвращает код или "" (нет каркасных маркеров — не наш случай).
-
-    Модели в CoT упоминают каркас и цитируют «болванки» программ; простая
-    привязка к ПЕРВОМУ вхождению тащила болванку + прозу + программу скопом
-    (res#3987). Поэтому: перебираем ВСЕ анкеры (jmp begin — и скашивания
-    каркаса вроде jmp start/start: под MASM, либо MASM-директивы), от
-    каждого — кандидат до ближайшего концевика, валидируем, берём ПОСЛЕДНИЙ
-    валидный (модели цитируют болванки раньше финального ответа).
-
-    relaxed=True — строгие прозя-валидации (не-проза, мид-проза) пропускаются:
-    аварийный тир «долгое рассуждение без фенсов», когда все строгие тиры
-    дали пусто; структурные минимумы (концевик, ≥4 строк, один jmp begin)
-    остаются, а вердикт определит DL. Вызывающий код применяет гейт
-    has_language_marker.
+    ``start``/``end`` — индексы строк исходного текста (включительно): от
+    анкера-перехода до концевика каркаса; ``code`` — уже очищенный текст
+    программы. Один проход нужен и экстрактору (выбор последнего), и
+    нормализации «Полного ответа модели» (обрезка склеенного черновика) —
+    правила валидации у них обязаны совпадать.
     """
-    if not text:
-        return ""
-    lines = [line for line in text.splitlines()]
     anchors = _asm_anchors(lines)
     if not anchors:
-        return ""
+        return []
     candidates = []
     for start, anchor_label in anchors:
         span = _asm_candidates_for_anchor(lines, start)
@@ -527,14 +534,64 @@ def extract_asm_i86(text, relaxed=False):
             if not cut_code or _looks_like_prose(cut_code) or len(cut_code.splitlines()) < 4:
                 continue
             candidate = cut_code
-        candidates.append((marker_seen, candidate))
+        candidates.append((marker_seen, start, end, candidate))
+    return candidates
+
+
+def extract_asm_i86(text, relaxed=False):
+    """Структурный экстрактор ассемблера i8086 (DL-каркас с jmp begin, MASM).
+
+    Возвращает код или "" (нет каркасных маркеров — не наш случай).
+
+    Модели в CoT упоминают каркас и цитируют «болванки» программ; простая
+    привязка к ПЕРВОМУ вхождению тащила болванку + прозу + программу скопом
+    (res#3987). Поэтому: перебираем ВСЕ анкеры (jmp begin — и скашивания
+    каркаса вроде jmp start/start: под MASM, либо MASM-директивы), от
+    каждого — кандидат до ближайшего концевика, валидируем, берём ПОСЛЕДНИЙ
+    валидный (модели цитируют болванки раньше финального ответа).
+
+    relaxed=True — строгие прозя-валидации (не-проза, мид-проза) пропускаются:
+    аварийный тир «долгое рассуждение без фенсов», когда все строгие тиры
+    дали пусто; структурные минимумы (концевик, ≥4 строк, один jmp begin)
+    остаются, а вердикт определит DL. Вызывающий код применяет гейт
+    has_language_marker.
+    """
+    if not text:
+        return ""
+    lines = normalize_dl_marker_glue(text).splitlines()
+    candidates = _asm_candidates(lines, relaxed=relaxed)
     if not candidates:
         return ""
     # Выбор: ПОСЛЕДНИЙ кандидат (модели пишут болванки/цитаты раньше финального
     # ответа, res#4160: программа дана дважды — берём чистый второй заход);
     # если есть кандидаты с ;$E — среди них берём последний.
-    marked = [c for marker_seen, c in candidates if marker_seen]
-    return (marked or [c for _, c in candidates])[-1]
+    marked = [c for c in candidates if c[0]]
+    return (marked or candidates)[-1][3]
+
+
+def collapse_duplicated_asm_answer(text):
+    """Склеенный ответ «черновик + финал» → только финальная программа.
+
+    Веб-пул отдаёт размышления и финальный ответ БЕЗ разделителя
+    («...jmp ends ;$Ejmp begin...»): в «Полном ответе модели» и в
+    «Извлечённом коде» программа видна дважды. Если последняя валидная
+    программа ТОЧНО повторяет более раннюю (модель вывела тот же код в
+    рассуждении и в ответе), оставляем текст с начала последней программы.
+    Нет точного дубля (черновик отличается, программы нет, проза) — текст
+    возвращается как есть (после безопасной нормализации склейки ;$E).
+    """
+    if not text:
+        return text
+    normalized = normalize_dl_marker_glue(text)
+    lines = normalized.splitlines()
+    candidates = _asm_candidates(lines)
+    marked = [c for c in candidates if c[0]] or candidates
+    if len(marked) < 2:
+        return normalized
+    last = marked[-1]
+    if any(c[3] == last[3] for c in marked[:-1]):
+        return "\n".join(lines[last[1]:]).strip()
+    return normalized
 
 
 def _salvage_glued_mpa(cand_lines):

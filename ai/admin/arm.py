@@ -901,8 +901,8 @@ def admin_arm_solve_result_body_view(request, result_id):
                     session_id, result.dl_queue_id, result.dl_comment or "",
                 )
             except Exception:  # noqa: BLE001 — данные теста не обязательны
-                logger.exception("не удалось забрать данные проваленного теста")
-                fetched = {}
+                logger.exception("не удалось забрать данные проваленных тестов")
+                fetched = []
             if fetched:
                 test_data = fetched
                 AIModelTestResult.objects.filter(pk=result.pk).update(
@@ -917,8 +917,9 @@ def admin_arm_solve_result_body_view(request, result_id):
         "dl_error": result.dl_error or "",
         # Имя файла решения, отправленного в DL («<модель>_<задача>.<ext>»).
         "dl_file_name": result.dl_file_name or "",
-        # Входные данные и эталонный ответ проваленного теста (есть только
-        # у НЕ решённых пар, которым DL разрешил выдачу теста).
+        # Входные данные и эталонные ответы проваленных тестов — по записи на
+        # каждый подтверждённый провал (есть только у НЕ решённых пар, которым
+        # DL разрешил выдачу теста).
         "dl_test_data": test_data,
         # Номер проваленного теста (из вердикта DL) — показываем в карточке.
         "dl_test_number": dl_failed_test_number_from_comment(result.dl_comment or ""),
