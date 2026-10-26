@@ -29,7 +29,16 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 # ломает httpx-заголовок Authorization (Bearer …) крэшем, а не ошибкой API.
 OLLAMA_API_KEY = (os.getenv("OLLAMA_API_KEY") or os.getenv("OLLAMA_TOKEN") or "").strip() or None
 
-PROXY = os.getenv("PROXY")
+# PROXY — историческое имя проекта; стандартные HTTP(S)_PROXY тоже понимаем
+# (иначе клиент с trust_env=False при непустом только стандартном прокси
+# уходил бы напрямую и не достучался до интернета). Единый источник для
+# всех внешних вызовов — см. ai/env_mode.py (прокси = маркер прода).
+PROXY = (
+    os.getenv("PROXY")
+    or os.getenv("HTTPS_PROXY")
+    or os.getenv("HTTP_PROXY")
+    or ""
+).strip() or None
 proxies = {"http": PROXY, "https": PROXY} if PROXY else None
 
 # Centralized SambaCloud model IDs to avoid code edits on every deprecation.

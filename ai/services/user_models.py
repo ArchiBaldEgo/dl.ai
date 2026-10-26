@@ -14,13 +14,20 @@
     ::1, fc00::/7, fe80::/10);
   - DNS-резолв host'а не попадает в приватные диапазоны (проверяются ВСЕ
     A/AAAA-записи — иначе «example.com → 127.0.0.1» обходит фильтр);
+  - если системный DNS недоступен (корпоративная сеть: выход в интернет
+    только через прокси, прямой резолв внешних имён не работает), адрес
+    резолвится через DNS-over-HTTPS по IP-литеральным эндпоинтам ЧЕРЕЗ тот
+    же прокси — SSRF-проверка не отключается из-за особенностей сети;
   - никаких credentials в URL (``user:pass@host``), никаких нестандартных
     схем;
   - порт — из белого списка (443, 8443) либо отсутствует.
 * Ключ API хранится шифром Fernet (ключ — ``AI_USER_MODEL_SECRET_KEY`` в
   .env). В открытом виде ключ не показывается никогда, в лог не пишется.
-* Вызов идёт с ``trust_env=False`` (мимо HTTP_PROXY из окружения) и без
-  следования редиректам (редирект на внутренний адрес — классический SSRF).
+* Вызов идёт через тот же ``PROXY``, что и остальные провайдеры (в проде
+  прямой выход закрыт — без прокси модель недостижима), с
+  ``trust_env=False`` (явная конфигурация, а не случайные env-переменные) и
+  без следования редиректам (редирект на внутренний адрес — классический
+  SSRF).
 * Ответ модели экранируется на клиенте как и любой HTML модели (CLAUDE.md).
 """
 
@@ -52,6 +59,23 @@ ERR_CREDENTIALS_IN_URL = "Адрес модели не должен содерж
 ERR_PRIVATE_HOST = "Адрес модели не может указывать на локальный или внутренний адрес."
 ERR_BAD_PORT = "Адрес модели должен использовать порт 443 (или 8443)."
 ERR_BAD_HOST = "Не удалось разрешить адрес модели (проверьте домен)."
+# Прокси настроен (прод), но и прямой DNS, и DoH через прокси не ответили:
+# это сбой сети/прокси, а не ошибка в домене — не сбиваем пользователя с толку.
+ERR_DNS_UNAVAILABLE = (
+    "Не удалось проверить домен модели: сервер не достучался до DNS. "
+    "Попробуйте позже."
+)
+
+# DoH-эндпоинты по IP-литералам: их резолвить не нужно, а запрос идёт через
+# тот же прокси, что и вызов модели. Нужны там, где системный DNS внешние
+# имена не разрешает (корпоративная сеть: выход только через прокси).
+# Формат ответа — JSON DNS API Cloudflare/Google.
+DOH_ENDPOINTS = (
+    "https://1.1.1.1/dns-query",
+    "https://8.8.8.8/resolve",
+)
+# Короткий таймаут: это интерактивное сохранение формы, а не фоновая задача.
+DOH_TIMEOUT = 3.0
 
 # Провайдеры с известным публичным endpoint'ом: base_url можно не указывать.
 PROVIDER_BASE_URLS = {
@@ -76,6 +100,21 @@ def _is_private_ip(ip: ipaddress._BaseAddress) -> bool:
     return False
 
 
+def _egress_proxy() -> str:
+    """Прокси для внешних вызовов (тот же, что у остальных провайдеров).
+
+    ``ai/model_clients/config.py`` — единственный владелец конфигурации
+    внешних AI API (CLAUDE.md), поэтому берём прокси оттуда, а не читаем
+    env заново. Импорт ленивый: пакет ``model_clients`` тянет реестр
+    моделей, а сервис личных моделей не должен от него зависеть при загрузке.
+    """
+    try:
+        from ..model_clients.config import proxies
+    except Exception:  # noqa: BLE001 — конфиг недоступен → прямой выход
+        return ""
+    return ((proxies or {}).get("https") or (proxies or {}).get("http") or "").strip()
+
+
 def _resolved_ips(host: str) -> list:
     """A/AAAA-записи host'а (пустой список — если разрешить не удалось)."""
     try:
@@ -94,13 +133,49 @@ def _resolved_ips(host: str) -> list:
     return ips
 
 
+def _resolved_ips_via_doh(host: str, proxy: str) -> list:
+    """A/AAAA host'а через DNS-over-HTTPS (JSON DNS API) с выходом в прокси.
+
+    Эндпоинты — IP-литералы (резолв не нужен). Любая ошибка конкретного
+    резолвера — пробуем следующий; ни один не ответил → пустой список.
+    """
+    ips = []
+    for endpoint in DOH_ENDPOINTS:
+        for record_type in ("A", "AAAA"):
+            try:
+                response = httpx.get(
+                    endpoint,
+                    params={"name": host, "type": record_type},
+                    headers={"accept": "application/dns-json"},
+                    proxy=proxy or None,
+                    timeout=DOH_TIMEOUT,
+                    trust_env=False,
+                )
+                if response.status_code != 200:
+                    break
+                data = response.json()
+            except Exception:  # noqa: BLE001 — резолвер недоступен
+                break
+            for answer in data.get("Answer") or []:
+                # 1 = A, 28 = AAAA; CNAME (5) пропускаем.
+                if int(answer.get("type") or 0) not in (1, 28):
+                    continue
+                try:
+                    ips.append(ipaddress.ip_address(answer.get("data") or ""))
+                except ValueError:
+                    continue
+        if ips:
+            return ips
+    return ips
+
+
 def validate_base_url(raw_url: str) -> tuple[str, str]:
     """Проверить пользовательский endpoint. Возвращает ``(url, error)``.
 
     ``error`` — пустая строка, если адрес корректен; иначе — текст причины
     (показывается пользователю). Проверка SSRF выполняется ЗДЕСЬ, при
     сохранении: адрес из БД считается уже проверенным (но при вызове мы всё
-    равно не следуем редиректам и не пускаем env-прокси).
+    равно не следуем редиректам, а прокси берём из конфига явно, не из env).
     """
     url = (raw_url or "").strip()
     if not url:
@@ -139,8 +214,17 @@ def validate_base_url(raw_url: str) -> tuple[str, str]:
     # DNS-резолв: ВСЕ адреса должны быть публичными (иначе — SSRF через
     # «свой» домен, у которого A-запись смотрит во внутреннюю сеть).
     ips = _resolved_ips(host)
+    proxy = ""
     if not ips:
-        return "", ERR_BAD_HOST
+        # Прямой DNS внешние имена не разрешает (типовая корпоративная сеть:
+        # выход только через прокси). Резолвим тем же путём, которым пойдёт
+        # вызов, — DoH через прокси; без прокси фоллбэка нет (прямой вызов
+        # всё равно был бы недостижим, а проверка SSRF — важнее).
+        proxy = _egress_proxy()
+        if proxy:
+            ips = _resolved_ips_via_doh(host, proxy)
+    if not ips:
+        return "", (ERR_DNS_UNAVAILABLE if proxy else ERR_BAD_HOST)
     if any(_is_private_ip(ip) for ip in ips):
         return "", ERR_PRIVATE_HOST
 
@@ -420,9 +504,14 @@ async def call_user_model(model, message: str, client_id: str = "") -> tuple:
         "stream": False,
     }
     url = f"{base_url}/chat/completions"
+    # Тот же выход, что у остальных провайдеров: в проде прямой доступ
+    # закрыт, работает только прокси (config.proxies). trust_env=False —
+    # прокси задаём явно, а не подхватываем из окружения.
+    proxy = _egress_proxy()
     try:
         async with httpx.AsyncClient(
             timeout=120.0,
+            proxy=proxy or None,
             trust_env=False,
             follow_redirects=False,
         ) as client:
