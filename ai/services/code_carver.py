@@ -78,6 +78,18 @@ _CODE_HINT_RE = _re.compile(
 # _COMMENT_START_RE).
 _INLINE_TAIL_RE = _re.compile(r"//.*$|\s;.*$")
 
+# Заголовок-подпись рассуждения (CoT): «And main function:», «Now the code:»,
+# «Теперь функция:». Заканчивается двоеточием, ≥2 слова, без синтаксиса
+# операторов. Метки и ветвления сюда НЕ попадают: метка — одно слово
+# (loop_start:, begin:, Ends:), case/default/public исключены явно. Такой
+# заголовок между декларациями и main ранее оставался в коде (слово «main»
+# делает строку «кодовой» для _line_is_code) → DL падал «Ошибка синтаксиса».
+_PROSE_HEADING_RE = _re.compile(
+    r"^(?!\s*(?:case|default|public|private|protected)\b)"
+    r"[^\s;{}()=/\[\]]+(?:\s+[^\s;{}()=/\[\]]+)+:\s*$",
+    _re.IGNORECASE,
+)
+
 
 def _strip_think_blocks(text):
     """Удалить think-блоки рассуждений вместе с содержимым."""
@@ -104,8 +116,9 @@ def _is_prose_sentence(line):
 
     Строки CoT часто содержат редкие «кодовые» символы («Need determine
     sizes: a,b,RES word (2 bytes?); c,d byte.»), поэтому только `_CODE_HINT_RE`
-    мало. Два признака прозы: (1) предложение, кончающееся точкой, — код
-    кончается «;»/«}»/«end.», а у «end.» есть маркер «end»; (2) много словарных
+    мало. Признаки прозы: (1) предложение, кончающееся точкой, — код
+    кончается «;»/«}»/«end.», а у «end.» есть маркер «end»; (2) заголовок-
+    подпись («And main function:», «Now the code:»); (3) много словарных
     слов, из которых ощутимая доля — функциональные (EN/RU стоп-слова).
 
     Хвостовой inline-комментарий вырезается ПЕРЕД суждением по точке: строка
@@ -122,6 +135,11 @@ def _is_prose_sentence(line):
         judged = stripped
     # Точка в конце + связные слова — предложение (но «end.» держится на маркере).
     if judged.endswith(".") and len(_PROSE_WORD_RE.findall(judged)) >= 3:
+        return True
+    # Заголовок-подпись рассуждения: «And main function:» — не код, хотя и
+    # содержит слово main (иначе `_line_is_code` признаёт его кодом и строка
+    # остаётся МЕЖДУ декларациями и main → DL «Ошибка синтаксиса»).
+    if _PROSE_HEADING_RE.match(judged):
         return True
     words = _PROSE_WORD_RE.findall(judged)
     if len(words) < 5:
@@ -342,7 +360,8 @@ def _mid_prose_lines(code):
     CoT + проза + настоящая программа — всё склеено одним кандидатом).
     Строки-комментарии (// ; #) — часть кода и мусором не считаются.
     Мусор: не-кодовая строка из ≥4 словарных слов (даже без точки — CoT-фразы
-    «Need maybe `step`? Not») или явно прозя-предложение.
+    «Need maybe `step`? Not»), заголовок-подпись («And main function:») или
+    явно прозя-предложение.
     """
     lines = [l for l in code.splitlines() if l.strip()]
     if len(lines) < 3:
@@ -353,7 +372,7 @@ def _mid_prose_lines(code):
         if _COMMENT_START_RE.match(stripped):
             continue
         words = _PROSE_WORD_RE.findall(stripped)
-        if len(words) < 4:
+        if len(words) < 4 and not _PROSE_HEADING_RE.match(stripped):
             continue
         if not _line_is_code(line) or _is_prose_sentence(line):
             hits.append(line)
@@ -366,8 +385,9 @@ def _cut_mid_prose(code):
     Возвращает (cleaned_text, cut_count). Одиночная проза-вставка между
     объяв­лениями и main (или между инструкциями) не ломает компиляцию,
     если её вырезать; браковать весь кандидат — терять хороший код.
-    Мусор-строка: не-коммент из ≥4 слов, не имеющая кодовых признаков
-    (_line_is_code) или прямо прозя-предложение (точка + связные слова).
+    Мусор-строка: не-коммент из ≥4 слов (или заголовок-подпись, даже короткий),
+    не имеющая кодовых признаков (_line_is_code) или прямо прозя-предложение
+    (точка + связные слова).
     """
     lines = list(code.splitlines())
     if len(lines) < 3:
@@ -378,7 +398,8 @@ def _cut_mid_prose(code):
         stripped = line.strip()
         if 0 < i < len(lines) - 1 and stripped and _COMMENT_START_RE.match(stripped) is None:
             words = _PROSE_WORD_RE.findall(stripped)
-            if len(words) >= 4 and (not _line_is_code(line) or _is_prose_sentence(line)):
+            if (len(words) >= 4 or _PROSE_HEADING_RE.match(stripped)) and (
+                    not _line_is_code(line) or _is_prose_sentence(line)):
                 cut += 1
                 continue
         kept.append(line)

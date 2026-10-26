@@ -11438,6 +11438,33 @@ class StructuralCarverTests(SimpleTestCase):
         cleaned = _clean_model_text(text, ".i86")
         self.assertEqual(cleaned.count("jmp begin"), 1)
 
+    def test_asm_prose_heading_between_skeleton_parts_cut(self):
+        """Тот же класс, что #2606757, для i86: «And main function:» внутри
+        скелета — проза, а не код; в файл уходит ОДНА программа."""
+        text = ("Simple task.\nProgram:\njmp begin\na db 0\nb db 0\n\n"
+                "And main function:\ny db 0\nbegin:\nmov al,a\nsub al,b\n"
+                "mov y,al\nends:\njmp ends ;$E")
+        got = self._c(text, ext=".i86")
+        self.assertNotIn("And main function", got)
+        self.assertEqual(got.count("jmp begin"), 1)
+        self.assertEqual(got.count(";$E"), 1)
+        self.assertIn("mov y,al", got)
+
+    def test_asm_two_programs_with_heading_only_final_carved(self):
+        """Две РАЗНЫЕ программы и заголовок между ними: выкусывается только
+        финальная (один jmp begin / один ;$E), заголовок не попадает."""
+        first = "jmp begin\na db 0\nb db 0\nbegin:\nmov al,a\nEnds:\njmp Ends ;$E"
+        final = "jmp begin\nx dw 2\nbegin:\nmov ax,x\nEnds:\njmp Ends ;$E"
+        got = self._c(
+            "First version:\n" + first + "\n\nFinal version:\n" + final,
+            ext=".i86",
+        )
+        self.assertEqual(got.count("jmp begin"), 1)
+        self.assertEqual(got.count(";$E"), 1)
+        self.assertIn("x dw 2", got)
+        self.assertNotIn("a db 0", got)
+        self.assertNotIn("First version", got)
+
     def test_asm_program_repeated_clean_last_wins(self):
         """res#4160: модель дала программу дважды; первый заход с CoT-хвостом,
         второй чистый с «jmp Ends ;$E» — берётся ПОСЛЕДНИЙ валидный."""
@@ -11603,6 +11630,30 @@ class StructuralCarverTests(SimpleTestCase):
         self.assertIn("y = a + b;", got)
         self.assertNotIn("Также нужно помнить", got)
         self.assertNotIn("Удачи!", got)
+
+    def test_mpc_prose_heading_between_decls_and_main_cut(self):
+        """Кейс #2606757: «And main function:» между декларациями и main —
+        заголовок рассуждения, а не код (слово «main» делало строку «кодовой»
+        для _line_is_code, и она оставалась в файле → DL «Ошибка синтаксиса
+        (строка 5): And main function:»)."""
+        from ai.services.code_carver import _is_prose_sentence
+
+        text = (
+            "Following the format:\n"
+            "```c\nint __in __bits(8) a;\nint __in __bits(8) b;\n"
+            "int __out __bits(16) y;\n```\n\n"
+            "And main function:\n"
+            "```c\nvoid main() {\n    y = a * b;\n}\n```\n"
+        )
+        got = self._c(text, ext=".mpc")
+        self.assertIn("int __in __bits(8) a;", got)
+        self.assertIn("y = a * b;", got)
+        self.assertNotIn("And main function", got)
+
+        # Метки и ветвления — код, а не прозя-заголовок.
+        self.assertFalse(_is_prose_sentence("loop_start:"))
+        self.assertFalse(_is_prose_sentence("case 1:"))
+        self.assertFalse(_is_prose_sentence("default:"))
 
     def test_mpc_outline_glue_rejected_final_main_wins(self):
         """res#1225-класс: болванки-фенсы в CoT; склейка «болванка + финал»
