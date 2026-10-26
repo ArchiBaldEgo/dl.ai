@@ -150,6 +150,23 @@ function htmlToMarkdown(html, { stripOuterDiv, preExtractors = [] }) {
     s = s.replace(/<li\b[^>]*>/gi, '\n- ');
     s = s.replace(/<\/li>/gi, '\n');
 
+    // 6б) Границы БЛОЧНЫХ контейнеров → перевод строки. Просто снести тег
+    //     (шаг 7) нельзя: текст соседних <div>/<section> склеивается без
+    //     разделителя. Реальный случай DeepSeek: две программы в разных
+    //     блоках слипались в «jmp ends ;$Ejmp begin» — маркер конца ;$E
+    //     приклеивался к следующей программе, и экстрактор кода на бэкенде
+    //     видел ОДНУ строку (дубль программы в «Извлечённом коде»).
+    //     Строки таблиц разводим табуляцией, а не переносом.
+    s = s.replace(/<\/(td|th)\s*>/gi, '\t');
+    s = s.replace(
+        /<\/(div|section|article|header|footer|aside|main|nav|blockquote|table|thead|tbody|tfoot|tr|dl|dt|dd|figure|figcaption|details|summary|address|form|fieldset|pre|hr)\s*>/gi,
+        '\n',
+    );
+    s = s.replace(
+        /<(div|section|article|header|footer|aside|main|nav|blockquote|table|thead|tbody|tfoot|tr|dl|dt|dd|figure|figcaption|details|summary|address|form|fieldset|pre|hr)\b[^>]*>/gi,
+        '\n',
+    );
+
     // 7) Убираем все прочие теги (span/div/svg/etc)
     s = s.replace(/<\/?[^>]+>/g, '');
 
@@ -574,9 +591,12 @@ async function getRobustLastAnswerData(page, {
         // «思考中…») — отдельные короткие надписи, тоже удаляются. Отсутствие
         // контейнеров не меняет поведение (удаление — нулевой ущерб).
         const extraThinkRe = opts.extraThinkClass ? new RegExp(opts.extraThinkClass, 'i') : null;
-        const extraLabelsRe = opts.extraThinkLabels
-            ? new RegExp(`^(Thought for|Thinking|思考|已深度思考|${opts.extraThinkLabels}|Поразмышлял)`, 'i')
-            : null;
+        // Базовые надписи «идёт размышление» срезаются ВСЕГДА (не только когда
+        // сайт передал extraThinkLabels): раньше при пустом списке (DeepSeek)
+        // регулярка не собиралась вовсе, и «Thought for 12 s» ехало в ответ.
+        const thinkLabels = ['Thought for', 'Thinking', '思考', '已深度思考', 'Поразмышлял'];
+        if (opts.extraThinkLabels) thinkLabels.push(opts.extraThinkLabels);
+        const extraLabelsRe = new RegExp(`^(${thinkLabels.join('|')})`, 'i');
         const classOf = (node) =>
             String(node.getAttribute && node.getAttribute('class') || '');
         // Сайт-специфичные поддеревья «размышлений»/вызовов инструментов

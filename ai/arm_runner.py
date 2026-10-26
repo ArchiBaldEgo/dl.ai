@@ -38,6 +38,7 @@ from .services.code_carver import (  # noqa: E402
     _mid_prose_lines,
     _strip_think_blocks,
     _trim_prose_tail,
+    collapse_duplicated_asm_answer,
     has_language_marker,
     language_code_incomplete,
 )
@@ -112,6 +113,21 @@ def _extract_prompt_tokens(response) -> int:
     if isinstance(response, tuple) and len(response) > 4:
         return _to_int(response[4])
     return 0
+
+
+def _clean_model_text(response_text, file_extension=""):
+    """Текст ответа модели для отчёта и извлечения кода.
+
+    Единая гигиена: strip_tags + вырезание think-блоков (+ безопасное
+    схлопывание склеенного «черновик + финал» у i8086 — веб-пулы отдают
+    размышления и ответ без разделителя, и код в «Полном ответе модели»
+    дублировался). Пустая строка — ответа нет (плейсхолдер ставит вызывающий,
+    чтобы залогировать случай).
+    """
+    cleaned = strip_tags(_strip_think_blocks(response_text)).strip()
+    if cleaned and file_extension in (".i86", ".asm"):
+        cleaned = collapse_duplicated_asm_answer(cleaned)
+    return cleaned
 
 
 def _is_model_error(response):
@@ -194,8 +210,12 @@ _MODEL_ERROR_MAX_ATTEMPTS = 5
 # Тяжёлые поля batch-результата (тело ответа): не встраиваются в снапшот
 # страницы / поллинга (light-режим), подтягиваются по AJAX при раскрытии
 # строки (см. _light_batch_result_item / admin_arm_solve_result_body_view).
+# dl_test_data — данные КАЖДОГО проваленного теста (до _TEST_DATA_MAX_TESTS
+# записей по 2 файла): в снапшоте большого прогона это десятки мегабайт на
+# поллинг, а видны они только в раскрытой карточке — туда их и отдаём.
 _BATCH_LAZY_BODY_KEYS = (
     "raw_response", "code", "short_response", "dl_comment", "dl_error",
+    "dl_test_data",
 )
 
 
@@ -2233,48 +2253,14 @@ def _mark_batch_model_failed(run_id, model_index):
 # и показывается в карточке пары: файлы тестов в DL бывают до 1 МиБ, а
 # отчёт должен оставаться компактным.
 _TEST_DATA_CHARS_MAX = 8000
+# Потолок числа тестов, данные которых сохраняем/показываем: DL отдаёт не
+# более одного провала на этап проверки (этапов бывает несколько), но отчёт
+# должен оставаться компактным и не ходить в DL десятки раз.
+_TEST_DATA_MAX_TESTS = 10
 
 
-def _fetch_failed_test_data(session_id, queue_id, comment=""):
-    """Входные данные и эталонный ответ проваленного теста (компактно).
-
-    DL: ``get-failed-tests`` → список подтверждённых проваленных тестов
-    (флаг ``canGetData`` — можно ли забирать данные), ``get-test-data`` →
-    ``{input, expectedOutput}`` по номеру теста. Берём ПЕРВЫЙ тест с
-    ``canGetData``; длинные данные обрезаем.
-
-    ФОЛБЭК: если DL не отдал подходящий тест (пустой список, нет
-    ``canGetData``), номер теста берём из самого вердикта («не пройден 2-й
-    тест», «[testN]: …») и пробуем забрать данные по нему — DL сам
-    откажет, если выдача запрещена.
-
-    Пустой словарь — данных нет (выдача запрещена настройками курса,
-    проверка не завершена, ошибка DL). Ошибки не поднимаются: данные теста
-    — дополнение к отчёту, а не условие прогона.
-    """
-    from .dl_api_client import (
-        get_failed_tests_from_dl,
-        get_test_data_from_dl,
-    )
-
-    test_number = 0
-    for t in get_failed_tests_from_dl(session_id, queue_id):
-        if not t.get("canGetData"):
-            continue
-        try:
-            test_number = int(t.get("testNumber") or 0)
-        except (TypeError, ValueError):
-            test_number = 0
-        if test_number > 0:
-            break
-    if not test_number:
-        # Номер из вердикта DL — последний шанс узнать, какой тест упал.
-        test_number = _dl_failed_test_number(comment)
-    if not test_number:
-        return {}
-    data = get_test_data_from_dl(session_id, queue_id, test_number)
-    if not data:
-        return {}
+def _pack_test_data(test_number, data):
+    """Компактная запись данных одного теста (обрезаем длинные файлы)."""
     raw_input = data.get("input") or ""
     raw_expected = data.get("expected_output") or ""
     return {
@@ -2284,6 +2270,58 @@ def _fetch_failed_test_data(session_id, queue_id, comment=""):
         "expected_output": raw_expected[:_TEST_DATA_CHARS_MAX],
         "expected_truncated": len(raw_expected) > _TEST_DATA_CHARS_MAX,
     }
+
+
+def _fetch_failed_test_data(session_id, queue_id, comment=""):
+    """Входные/эталонные данные ВСЕХ подтверждённых проваленных тестов.
+
+    DL: ``get-failed-tests`` → список подтверждённых провалов (по одному на
+    этап проверки; ``canGetData`` — можно ли забирать данные), затем
+    ``get-test-data`` по каждому номеру → ``{input, expectedOutput}``.
+    Возвращаем данные КАЖДОГО теста, у которого DL их выдал (до
+    ``_TEST_DATA_MAX_TESTS``) — не только первого: «не прошло» на разных
+    этапах/тестах должно быть видно целиком.
+
+    ФОЛБЭК: если DL не отдал ни одного теста с ``canGetData`` (пустой
+    список, нет флага), номер берём из вердикта («не пройден 2-й тест»,
+    «[testN]: …») и пробуем по нему — DL сам откажет, если выдача запрещена.
+    Отказ по одному тесту (404/403 — например, последний тест курса) не
+    мешает забрать данные остальных.
+
+    Пустой список — данных нет (выдача запрещена настройками курса,
+    проверка не завершена, ошибка DL). Ошибки не поднимаются: данные теста
+    — дополнение к отчёту, а не условие прогона.
+    """
+    from .dl_api_client import (
+        get_failed_tests_from_dl,
+        get_test_data_from_dl,
+    )
+
+    numbers = []
+    for t in get_failed_tests_from_dl(session_id, queue_id):
+        if not t.get("canGetData"):
+            continue
+        try:
+            number = int(t.get("testNumber") or 0)
+        except (TypeError, ValueError):
+            number = 0
+        if number > 0 and number not in numbers:
+            numbers.append(number)
+        if len(numbers) >= _TEST_DATA_MAX_TESTS:
+            break
+    if not numbers:
+        # Номер из вердикта DL — последний шанс узнать, какой тест упал.
+        number = _dl_failed_test_number(comment)
+        if number:
+            numbers = [number]
+
+    entries = []
+    for number in numbers:
+        data = get_test_data_from_dl(session_id, queue_id, number)
+        if not data or not (data.get("input") or data.get("expected_output")):
+            continue
+        entries.append(_pack_test_data(number, data))
+    return entries
 
 
 def _pair_file_name(model, node_id, file_extension, run_file_name=""):
@@ -2343,9 +2381,10 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     dl_delta_name = ""
     # Имя файла решения, отправленного в DL (подписанное: <модель>_<задача>).
     pair_file_name = ""
-    # Входные данные и эталонный ответ проваленного теста (только для НЕ
-    # решённых пар, которым DL разрешил выдачу теста).
-    dl_test_data = {}
+    # Входные данные и эталонные ответы проваленных тестов (только для НЕ
+    # решённых пар, которым DL разрешил выдачу теста). Список: DL отдаёт по
+    # одному провалу на каждый этап проверки.
+    dl_test_data = []
     # Причина провала (таксономия сбоев). Пустая строка = причина нет
     # (пара решена). Заполняется в каждой ветке ниже; последняя присваивание
     # — в ветке DL-классификации по тексту комментария.
@@ -2371,7 +2410,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             return None
         response_text, tokens = _extract_model_response(response)
         prompt_tokens = _extract_prompt_tokens(response)
-        cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
+        cleaned_text = _clean_model_text(response_text, effective_ext)
         if not cleaned_text:
             cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
             logger.warning("ARM batch: model %s returned empty response for task node_id=%s", model["key"], node_id)
@@ -2454,7 +2493,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                         return None
                     response_text, tokens = _extract_model_response(retry_response)
                     prompt_tokens = _extract_prompt_tokens(retry_response)
-                    cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
+                    cleaned_text = _clean_model_text(response_text, effective_ext)
                     if not cleaned_text:
                         cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
                         logger.warning(
@@ -2572,10 +2611,10 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                     failure_reason = _failure_reason_from_dl_comment(dl_test_comment)
                     if not failure_reason:
                         failure_reason = _REASON_UNDEFINED
-                # НЕ решённая пара: забираем входные данные и эталонный
-                # ответ проваленного теста (DL разрешает выдачу не всегда —
-                # флаг canGetData). Данные компактные: в карточке пары
-                # показываются сразу после извлечённого кода.
+                # НЕ решённая пара: забираем входные данные и эталонные
+                # ответы ВСЕХ подтверждённых проваленных тестов (DL разрешает
+                # выдачу не всегда — флаг canGetData). Данные компактные и
+                # показываются в раскрытой карточке вместе с телом результата.
                 if verdict != _VERDICT_SOLVED and dl_queue_id:
                     dl_test_data = _fetch_failed_test_data(
                         ctx["session_id"], dl_queue_id, dl_test_comment,
@@ -2682,7 +2721,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "dl_test_number": dl_test_number or 0,
             # Входные/выходные данные проваленного теста — только для НЕ
             # решённых пар (в карточке идут сразу после извлечённого кода).
-            "dl_test_data": dl_test_data or {},
+            "dl_test_data": dl_test_data or [],
             "delta_id": dl_delta_id or 0,
             "delta_name": dl_delta_name or "",
             "file_extension": effective_ext or "",
@@ -3023,11 +3062,11 @@ def _sort_results_fresh_first(results):
 def _light_batch_result_item(item):
     """Легковесная копия batch-результата без тяжёлого тела (lazy_body=True).
 
-    Полный ответ модели / код / DL-комментарии не идут в снапшот страницы и
-    поллинга: большой прогон — это десятки мегабайт текста. Тело подтягивается
-    отдельно через /arm/solve/result/<id>/body/ при раскрытии строки (см.
-    _ai_batch_results.html). Метаданные (верdict/время/токены/тема) остаются —
-    по ним строится таблица и отчёт.
+    Полный ответ модели / код / DL-комментарии / данные проваленных тестов не
+    идут в снапшот страницы и поллинга: большой прогон — это десятки мегабайт
+    текста. Тело подтягивается отдельно через /arm/solve/result/<id>/body/ при
+    раскрытии строки (см. _ai_batch_results.html). Метаданные
+    (верdict/время/токены/тема) остаются — по ним строится таблица и отчёт.
     """
     light = {
         k: v for k, v in item.items()
@@ -3038,19 +3077,27 @@ def _light_batch_result_item(item):
 
 
 def parse_dl_test_data(raw):
-    """Разобрать сохранённые данные проваленного теста (JSON-строка → dict).
+    """Разобрать сохранённые данные проваленных тестов (JSON → список dict).
 
-    Пустая/битая строка — пустой словарь (старые строки БД без поля).
+    Новый формат — список записей по тестам (DL отдаёт по одному провалу на
+    этап проверки). Старые строки БД хранят ОДИН dict — нормализуем его в
+    одноэлементный список, чтобы UI и тесты не знали про легаси-формат.
+    Пустая/битая строка — пустой список.
     """
     if not raw:
-        return {}
-    if isinstance(raw, dict):
-        return raw
-    try:
-        data = json.loads(raw)
-    except (TypeError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+        return []
+    if isinstance(raw, (dict, list)):
+        data = raw
+    else:
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
 
 
 def _batch_results_from_db(test_run, light=False):

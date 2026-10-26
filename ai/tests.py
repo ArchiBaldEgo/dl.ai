@@ -7587,10 +7587,10 @@ class ArmLightSnapshotTests(TestCase):
             "verdict", "failure_reason", "dl_comment", "dl_queue_id", "dl_test_data",
         ])
 
-        fetched = {
+        fetched = [{
             "test_number": 2, "input": "1 2\n", "expected_output": "3\n",
             "input_truncated": False, "expected_truncated": False,
-        }
+        }]
         request = self.factory.get(f"/ai/admin/arm/solve/result/{self.result.id}/body/")
         request.user = self.superuser
         request.session = {}
@@ -7600,12 +7600,12 @@ class ArmLightSnapshotTests(TestCase):
             response = admin_arm_solve_result_body_view(request, self.result.id)
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.content)["result"]
-        self.assertEqual(data["dl_test_data"]["input"], "1 2\n")
+        self.assertEqual(data["dl_test_data"][0]["input"], "1 2\n")
         self.assertEqual(data["dl_test_number"], 2)
         fetch.assert_called_once()
         # Данные закэшированы в строке — второй раз в DL не ходим.
         self.result.refresh_from_db()
-        self.assertEqual(json.loads(self.result.dl_test_data)["test_number"], 2)
+        self.assertEqual(json.loads(self.result.dl_test_data)[0]["test_number"], 2)
 
     def test_result_body_endpoint_chunked(self):
         """Чанковая загрузка raw_response: окно offset/length, метаданные
@@ -11411,6 +11411,32 @@ class StructuralCarverTests(SimpleTestCase):
         self.assertIn("jmp begin", got)
         self.assertIn(";$E", got)
         self.assertNotIn("We need solve", got)
+
+    def test_asm_glued_duplicate_collapses_to_single_program(self):
+        """Веб-пул склеил черновик и финал без разделителя («;$Ejmp begin»):
+        и «Полный ответ модели», и извлечённый код — ОДНА программа."""
+        from ai.arm_runner import _clean_model_text
+        from ai.services.code_carver import collapse_duplicated_asm_answer
+
+        program = ("jmp begin\na db 0\nb db 0\ny db 0\nbegin:\nmov al,a\n"
+                   "sub al,b\nmov y,al\nends:\njmp ends ;$E")
+        # Граница блоков потеряна конвертером пула: второй «jmp begin» приклеен
+        # прямо к ;$E первого экземпляра.
+        text = "Simple task: a and b are bytes, y = a - b as byte.\n\nProgram:\n" \
+            + program + program
+
+        collapsed = collapse_duplicated_asm_answer(text)
+        self.assertEqual(collapsed.count("jmp begin"), 1)
+        self.assertEqual(collapsed.count("jmp ends"), 1)
+        self.assertTrue(collapsed.endswith(";$E"))
+
+        got = self._c(text, ext=".i86")
+        self.assertEqual(got.count("jmp begin"), 1)
+        self.assertTrue(got.endswith(";$E"))
+
+        # Отчёт («Полный ответ модели») — тот же единственный экземпляр.
+        cleaned = _clean_model_text(text, ".i86")
+        self.assertEqual(cleaned.count("jmp begin"), 1)
 
     def test_asm_program_repeated_clean_last_wins(self):
         """res#4160: модель дала программу дважды; первый заход с CoT-хвостом,
@@ -20960,8 +20986,9 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
 
     - файл, отправляемый в DL, подписан: ``<модель>_<задача>.<ext>``
       («Gemma4_12345.mcp»);
-    - для НЕ решённых пар забираются входные данные и эталонный ответ
-      проваленного теста (DL: get-failed-tests → get-test-data) — компактно.
+    - для НЕ решённых пар забираются входные данные и эталонные ответы
+      проваленных тестов (DL: get-failed-tests → get-test-data) — компактно,
+      по записи на каждый подтверждённый провал.
     """
 
     def setUp(self):
@@ -20997,6 +21024,19 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
             "my_sol.mpc",
         )
 
+    def test_parse_dl_test_data_normalizes_legacy_dict(self):
+        """Старые строки БД хранили ОДИН dict — parse отдаёт список, чтобы
+        UI/тесты не знали про легаси-формат; битый JSON — пустой список."""
+        from ai.arm_runner import parse_dl_test_data
+
+        legacy = {"test_number": 2, "input": "1 2\n", "expected_output": "3\n"}
+        self.assertEqual(parse_dl_test_data(json.dumps(legacy)), [legacy])
+        self.assertEqual(parse_dl_test_data(legacy), [legacy])
+        self.assertEqual(parse_dl_test_data([legacy, "мусор"]), [legacy])
+        self.assertEqual(parse_dl_test_data("not json"), [])
+        self.assertEqual(parse_dl_test_data(""), [])
+        self.assertEqual(parse_dl_test_data(None), [])
+
     def test_failed_test_data_is_compact(self):
         from ai import arm_runner
 
@@ -21006,10 +21046,43 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
                 patch("ai.dl_api_client.get_test_data_from_dl",
                       return_value={"input": long_text, "expected_output": "42"}):
             data = arm_runner._fetch_failed_test_data("DLSID", 77)
-        self.assertEqual(data["test_number"], 3)
-        self.assertEqual(data["expected_output"], "42")
-        self.assertTrue(data["input_truncated"])
-        self.assertLessEqual(len(data["input"]), arm_runner._TEST_DATA_CHARS_MAX)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["test_number"], 3)
+        self.assertEqual(data[0]["expected_output"], "42")
+        self.assertTrue(data[0]["input_truncated"])
+        self.assertLessEqual(len(data[0]["input"]), arm_runner._TEST_DATA_CHARS_MAX)
+
+    def test_failed_test_data_collects_every_confirmed_failure(self):
+        """DL может подтвердить провал на нескольких этапах — забираем данные
+        КАЖДОГО теста (не только первого), дубли номеров схлопываем, а отказ
+        DL по одному тесту не мешает остальным."""
+        from ai import arm_runner
+
+        responses = {
+            1: {"input": "1\n", "expected_output": "2\n"},
+            4: {},  # DL не выдал файлы конкретно по этому тесту (404)
+            5: {"input": "5\n", "expected_output": "10\n"},
+        }
+
+        def fake_get_data(session_id, queue_id, test_number):
+            return responses.get(test_number, {})
+
+        failed = [
+            {"testNumber": 1, "canGetData": True},
+            {"testNumber": 1, "canGetData": True},   # дубль этапа
+            {"testNumber": 2, "canGetData": False},  # выдача запрещена
+            {"testNumber": 4, "canGetData": True},
+            {"testNumber": 5, "canGetData": True},
+        ]
+        with patch("ai.dl_api_client.get_failed_tests_from_dl", return_value=failed), \
+                patch("ai.dl_api_client.get_test_data_from_dl",
+                      side_effect=fake_get_data) as data_call:
+            data = arm_runner._fetch_failed_test_data("DLSID", 77)
+        self.assertEqual([e["test_number"] for e in data], [1, 5])
+        self.assertEqual(data[1]["expected_output"], "10\n")
+        # Номер с canGetData=False в DL не ходим.
+        asked = [call[0][2] for call in data_call.call_args_list]
+        self.assertEqual(asked, [1, 4, 5])
 
     def test_failed_test_data_absent_without_permission(self):
         from ai import arm_runner
@@ -21018,7 +21091,7 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
                    return_value=[{"testNumber": 1, "canGetData": False}]), \
                 patch("ai.dl_api_client.get_test_data_from_dl") as data_call:
             data = arm_runner._fetch_failed_test_data("DLSID", 77)
-        self.assertEqual(data, {})
+        self.assertEqual(data, [])
         data_call.assert_not_called()
 
     def test_failed_test_number_parsed_from_verdict(self):
@@ -21041,7 +21114,7 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
             data = arm_runner._fetch_failed_test_data(
                 "DLSID", 77, "не пройден 2-й тест (неверный ответ)",
             )
-        self.assertEqual(data["test_number"], 2)
+        self.assertEqual(data[0]["test_number"], 2)
         self.assertEqual(data_call.call_args[0][2], 2)
 
     def test_report_error_item_carries_test_number(self):
@@ -21135,10 +21208,10 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
         run = AIModelTestRun.objects.get(run_id=run_id)
         row = AIModelTestResult.objects.get(run=run, model_key="M1")
         self.assertEqual(row.dl_file_name, "Gemma4_12345.mcp")
-        # Данные проваленного теста — в строке прогона.
+        # Данные проваленного теста — в строке прогона (список записей).
         data = json.loads(row.dl_test_data)
-        self.assertEqual(data["input"], "2 3\n")
-        self.assertEqual(data["expected_output"], "5\n")
+        self.assertEqual(data[0]["input"], "2 3\n")
+        self.assertEqual(data[0]["expected_output"], "5\n")
 
 
 def _fake_response(status_code, payload):

@@ -37,6 +37,11 @@ const { toBool } = require('../worker/utils/env');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
+// Варианты answer-XPath БЕЗ reasoning: контейнер размышлений тоже носит
+// ds-markdown — без исключения основной селектор ловит «простыню размышлений»
+// (и продублированный в ней черновик программы).
+const NOT_THINK = " and not(contains(@class,'think')) and not(contains(@class,'reason'))";
+
 /**
  * URL'ы и XPath'ы сайта (бывший WebDeepseek/worker/data.json).
  */
@@ -128,7 +133,7 @@ const data = {
                 "deepseek": "//div[contains(@class,'ds-button') and contains(@class,'primary') and not(contains(@class,'disabled'))] | //button[contains(@class,'send') or contains(@aria-label,'send') or contains(@data-testid,'send')] | //div[@role='button' and not(contains(@class,'disabled')) and .//textarea]"
             },
             "answer": {
-                "deepseek": "//div[contains(@class, 'ds-message')]/div[contains(@class, 'ds-markdown')]"
+                "deepseek": "//div[contains(@class, 'ds-message')]/div[contains(@class, 'ds-markdown')" + NOT_THINK + "]"
             },
             "fullAnswer": {
                 "deepseek": "//div[contains(@class, 'ds-message')]"
@@ -425,10 +430,6 @@ const STOP_GENERATING_XPATHS = [
     "//button[.//text()[contains(.,'Stop') or contains(.,'Остановить') or contains(.,'stop')]]",
 ];
 
-// Варианты answer-XPath БЕЗ reasoning: контейнер размышлений тоже носит
-// ds-markdown — без исключения fallback ловит «простыню размышлений».
-const NOT_THINK = " and not(contains(@class,'think')) and not(contains(@class,'reason'))";
-
 /**
  * Экстракторы code-block'ов DeepSeek (в порядке применения).
  * Первый — специфичный для DeepSeek (md-code-block + span.d813de27),
@@ -544,7 +545,7 @@ module.exports = {
             site.data.xpaths.chat.answer[service],
             // Fallback 1: any element with ds-markdown class inside a message
             // (ограничены контейнером сообщения ds-message).
-            "//div[contains(@class,'ds-message')]//div[contains(@class,'ds-markdown')]",
+            "//div[contains(@class,'ds-message')]//div[contains(@class,'ds-markdown')" + NOT_THINK + "]",
             "//div[contains(@class,'ds-message')]/div[contains(@class,'ds-markdown')" + NOT_THINK + "]",
             // Fallback 1a: markdown внутри сообщения (ds-message покрывает и
             // обёртку сообщения — ответ всегда внутри неё).
@@ -593,6 +594,15 @@ module.exports = {
             extraThinkClass: null,
             extraThinkLabels: [],
             blockSelector: "[class*='ds-markdown'], [class*='markdown']",
+            // Поддеревья «размышлений» вырезаются и из снимка по answer-XPath
+            // (stripSelectors применяется в getLastOuterHtmlByXPath), и из
+            // robust-пузыря. У DeepThink контейнер носит тот же ds-markdown —
+            // без вырезания в ответ попадает черновик из размышлений.
+            stripSelectors: [
+                '[class*="think"]',
+                '[class*="reasoning"]',
+                '[class*="reason"]',
+            ],
         },
         htmlToMarkdown: (html) => htmlToMarkdown(html, {
             stripOuterDiv,
