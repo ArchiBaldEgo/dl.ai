@@ -79,7 +79,7 @@
         <div class="arm-models" id="armLanguageChecks">
           {% for lang in language_options %}
             <label class="arm-model">
-              <input type="checkbox" class="arm-lang-check" data-ext="{{ lang.extension }}" data-name="{{ lang.name }}"> {{ lang.name }}
+              <input type="checkbox" class="arm-lang-check" value="{{ lang.id }}" data-ext="{{ lang.extension }}" data-name="{{ lang.name }}"> {{ lang.name }}
             </label>
           {% endfor %}
         </div>
