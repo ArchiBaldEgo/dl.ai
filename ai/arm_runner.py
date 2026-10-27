@@ -2298,17 +2298,21 @@ def _mark_batch_model_failed(run_id, model_index):
         job["updated_at_ts"] = time.time()
 
 
-def _pair_file_name(model, node_id, file_extension, run_file_name=""):
+def _pair_file_name(model, task_id, file_extension, run_file_name=""):
     """Имя файла решения, отправляемого в DL (контракт fileName).
 
-    По умолчанию — ПОДПИСАННОЕ: ``<модель>_<задача>.<ext>`` («Gemma4_12345.mcp»):
-    в DL сразу видно, чьё решение и по какой задаче. Имя, заданное оператором
-    на форме прогона, приоритетнее — он назвал файл сам.
+    По умолчанию — ПОДПИСАННОЕ: ``<модель>_<task_id>.<ext>``
+    («Gemma4_12345.mcp»): в DL сразу видно, чьё решение и по какой задаче.
+    ``task_id`` — ID задачи DL (поле taskId из get-task-info), а не node_id
+    узла дерева: именно taskId — идентификатор задачи, который видит
+    пользователь в DL. Если taskId ещё не подтянут (старая запись Task),
+    вызывающий передаёт node_id как fallback. Имя, заданное оператором на
+    форме прогона, приоритетнее — он назвал файл сам.
     """
     if run_file_name:
         return run_file_name
     title = (model or {}).get("title") or (model or {}).get("key") or "model"
-    return _build_dl_file_name(f"{title}_{node_id}", file_extension) or ""
+    return _build_dl_file_name(f"{title}_{task_id}", file_extension) or ""
 
 
 def _process_batch_pair(ctx, task_ctx, model, dl_lock):
@@ -2353,7 +2357,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     # Машина (Дельта), на которой DL проверял решение (deltaId/deltaName).
     dl_delta_id = 0
     dl_delta_name = ""
-    # Имя файла решения, отправленного в DL (подписанное: <модель>_<задача>).
+    # Имя файла решения, отправленного в DL (подписанное: <модель>_<task_id>).
     pair_file_name = ""
     # Входные данные и эталонные ответы проваленных тестов (только для НЕ
     # решённых пар, которым DL разрешил выдачу теста). Список: DL отдаёт по
@@ -2538,11 +2542,12 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 if not _acquire_dl_run_lock(dl_lock, ctx["run_id"]):
                     return None
                 held_dl_lock = True
-                # Имя файла решения — ПОДПИСАННОЕ: <модель>_<задача>.<ext>
-                # («Gemma4_12345.mcp»). Имя, заданное оператором на форме
-                # прогона, приоритетнее — он назвал файл сам.
+                # Имя файла решения — ПОДПИСАННОЕ: <модель>_<task_id>.<ext>
+                # («Gemma4_12345.mcp»). taskId из get-task-info приоритетнее
+                # node_id узла дерева; node_id — fallback для старых Task.
                 pair_file_name = _pair_file_name(
-                    model, node_id, effective_ext, ctx.get("file_name") or "",
+                    model, task.task_id or node_id, effective_ext,
+                    ctx.get("file_name") or "",
                 )
                 dl_result = _test_solution_on_dl(
                     ctx["session_id"], node_id, code_only, effective_ext,

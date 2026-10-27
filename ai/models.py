@@ -1221,7 +1221,8 @@ class AIModelTestResult(models.Model):
     # DL queue id из send-solution (0 — отправка не удалась).
     dl_queue_id = models.IntegerField(null=True, blank=True, verbose_name="DL: queueId")
     # Имя файла решения, отправленного в DL (контракт fileName): по умолчанию
-    # подписанное — <модель>_<задача>.<ext> («Gemma4_12345.mcp»).
+    # подписанное — <модель>_<task_id>.<ext> («Gemma4_12345.mcp»), где task_id —
+    # ID задачи DL из get-task-info (fallback — node_id узла дерева).
     # null=True и БЕЗ default — на SQLite это обычный ALTER TABLE ADD COLUMN:
     # пересоздание таблицы (default/не-null) падало бы на postgres-only
     # GinIndex модели (gin_trgm_ops) — см. миграцию 0071.

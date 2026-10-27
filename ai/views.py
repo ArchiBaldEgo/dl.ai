@@ -1199,9 +1199,9 @@ def send_solution_view(request):
         progLanguageId (int, optional): fallback — id ProgrammingLanguage, имя
             берётся из БД, затем то же _guess_extension.
         modelKey (str, optional): модель, сгенерировавшая код, — для
-            подписанного имени файла ``<модель>_<задача>.<ext>``.
+            подписанного имени файла ``<модель>_<task_id>.<ext>``.
         fileName (str, optional): имя файла; если не задано — строится из
-            modelKey (или последней модели решения) и nodeId.
+            modelKey (или последней модели решения) и taskId (fallback nodeId).
         sessionId (str, optional): falls back to session/cookie.
     """
     if not _has_page_access(request):
@@ -1282,10 +1282,17 @@ def send_solution_view(request):
     # и машина проверки (delta) — необязательные, приходят из тела.
     file_name = str(body.get("fileName") or "").strip()[:200]
     if not file_name:
-        # Подписанное имя по умолчанию — ``<модель>_<задача>.<ext>``:
-        # в DL сразу видно, чья это попытка и по какой задаче. Модель — из
-        # тела (клиент знает выбранную в селекторе), иначе из последней
-        # генерации решения для узла; чистка/транслитерация — build_dl_file_name.
+        # Подписанное имя по умолчанию — ``<модель>_<task_id>.<ext>``:
+        # в DL сразу видно, чья это попытка и по какой задаче. taskId берём из
+        # локальной записи Task (get-task-info); если задачи ещё нет в ARM —
+        # fallback на nodeId узла. Модель — из тела (клиент знает выбранную в
+        # селекторе), иначе из последней генерации решения для узла;
+        # чистка/транслитерация — build_dl_file_name.
+        from .models import Task
+        file_task_id = (
+            Task.objects.filter(node_id=node_id)
+            .values_list("task_id", flat=True).first()
+        ) or node_id
         model_label = str(body.get("modelTitle") or "").strip()[:200]
         if not model_label:
             model_key = str(body.get("modelKey") or "").strip()
@@ -1298,7 +1305,7 @@ def send_solution_view(request):
             _key, model_label = last_solve_model(node_id)
         model_label = model_label or "dlai"
         from .dl_api_client import build_dl_file_name
-        file_name = build_dl_file_name(f"{model_label}_{node_id}", file_extension) or ""
+        file_name = build_dl_file_name(f"{model_label}_{file_task_id}", file_extension) or ""
     delta = str(body.get("delta") or "").strip()[:255]
 
     try:

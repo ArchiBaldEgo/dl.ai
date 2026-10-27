@@ -7371,8 +7371,9 @@ class RequestLogXlsxTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_result_download_named_model_and_task(self):
-        """Имя файла решения: <модель>_<ID узла задачи><расширение> (у одной
-        задачи скачивают решения нескольких моделей — пара делает имя
+        """Имя файла решения: <модель>_<task_id><расширение> (taskId из
+        get-task-info — тот же номер, что в имени файла, отправленного в DL;
+        у одной задачи скачивают решения нескольких моделей — пара делает имя
         однозначной); у DL API поля имени файла нет — подписываем скачивание."""
         from ai.models import AIModelTestResult
         from ai.admin.arm import admin_arm_solve_result_download_view
@@ -7381,6 +7382,21 @@ class RequestLogXlsxTests(TestCase):
         request.user = self.superuser
         response = admin_arm_solve_result_download_view(request, result.id)
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response["Content-Disposition"],
+            'attachment; filename="Model_One_6101.pas"',
+        )
+
+    def test_result_download_falls_back_to_node_id_without_task_id(self):
+        """Старые Task без taskId (поле пустое) — в имени node_id узла."""
+        from ai.models import AIModelTestResult
+        from ai.admin.arm import admin_arm_solve_result_download_view
+        self.t1.task_id = None
+        self.t1.save(update_fields=["task_id"])
+        result = AIModelTestResult.objects.get(model_key="M1")
+        request = self.factory.get(f"/ai/admin/arm/solve/result/{result.id}/download/")
+        request.user = self.superuser
+        response = admin_arm_solve_result_download_view(request, result.id)
         self.assertEqual(
             response["Content-Disposition"],
             'attachment; filename="Model_One_5101.pas"',
@@ -7400,7 +7416,7 @@ class RequestLogXlsxTests(TestCase):
         response = admin_arm_solve_result_download_view(request, result.id)
         self.assertEqual(
             response["Content-Disposition"],
-            'attachment; filename="Model_Two_K2.7_5101.pas"',
+            'attachment; filename="Model_Two_K2.7_6101.pas"',
         )
 
         request = self.factory.get(f"/ai/admin/arm/solve/result/{result.id}/download/")
@@ -13172,6 +13188,23 @@ class SendSolutionViewTests(TestCase):
         self.assertEqual(
             mock_send.call_args.kwargs.get("file_name"),
             "Gemma_4_Ollama_100.pas",
+        )
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_file_name_uses_task_id_of_local_task(self, mock_send):
+        """Если узел известен ARM (локальная Task), в имени файла — taskId,
+        а не nodeId: это тот же идентификатор, что в пакетном решении."""
+        from ai.models import Task
+        Task.objects.create(node_id=100, task_id=777, name="T")
+        mock_send.return_value = {"queueId": 1, "message": "ok"}
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 100, "code": "x", "courseId": 1450,
+            "progLanguageName": "Pascal", "modelTitle": "Gemma 4 (Ollama)",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            mock_send.call_args.kwargs.get("file_name"),
+            "Gemma_4_Ollama_777.pas",
         )
 
     @patch("ai.dl_api_client.send_solution_to_dl")
@@ -22310,8 +22343,9 @@ class FetchDeltasTests(TestCase):
 class BatchPairFileNameAndTestDataTests(TransactionTestCase):
     """Подпись файла решения и данные проваленного теста.
 
-    - файл, отправляемый в DL, подписан: ``<модель>_<задача>.<ext>``
-      («Gemma4_12345.mcp»);
+    - файл, отправляемый в DL, подписан: ``<модель>_<task_id>.<ext>``
+      («Gemma4_12445.mcp»), где task_id — ID задачи DL из get-task-info
+      (fallback на node_id, если taskId ещё не подтянут);
     - для НЕ решённых пар забираются входные данные и эталонные ответы
       проваленных тестов (DL: get-failed-tests → get-test-data) — компактно,
       по записи на каждый подтверждённый провал.
@@ -22334,8 +22368,9 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
     def test_pair_file_name_is_signed(self):
         from ai.arm_runner import _pair_file_name
 
+        # Второй аргумент — task_id (ID задачи DL), а не node_id узла.
         self.assertEqual(
-            _pair_file_name({"title": "Gemma4"}, 12345, ".mcp"), "Gemma4_12345.mcp",
+            _pair_file_name({"title": "Gemma4"}, 12445, ".mcp"), "Gemma4_12445.mcp",
         )
         # Кириллица/пробелы в названии модели — по контракту DL (латиница).
         name = _pair_file_name({"title": "Веб Ким"}, 7, ".mcp")
@@ -22529,11 +22564,11 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
                 )
         finally:
             arm_runner._jobs.pop(run_id, None)
-        # Имя файла — подписанное по контракту DL.
-        self.assertEqual(captured.get("file_name"), "Gemma4_12345.mcp")
+        # Имя файла — подписанное: task_id задачи (12445), не node_id (12345).
+        self.assertEqual(captured.get("file_name"), "Gemma4_12445.mcp")
         run = AIModelTestRun.objects.get(run_id=run_id)
         row = AIModelTestResult.objects.get(run=run, model_key="M1")
-        self.assertEqual(row.dl_file_name, "Gemma4_12345.mcp")
+        self.assertEqual(row.dl_file_name, "Gemma4_12445.mcp")
         # Данные проваленного теста — в строке прогона (список записей).
         data = json.loads(row.dl_test_data)
         self.assertEqual(data[0]["input"], "2 3\n")
