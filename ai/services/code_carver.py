@@ -1051,19 +1051,32 @@ def _asm_anchors(lines, ext=".asm"):
     .code/org 100h). «begin:» и метки циклов якорями не считаются: привязка
     к линии МЕТКИ отрезала бы дату-секцию, а цикл-метка «съедает» программу
     хвостовым окном. Комментарии маскируются: `jmp begin` в `; …` — не анкер.
+
+    Анкер — только ПРЯМОЙ переход (метка объявлена НИЖЕ перехода), как у
+    `jmp begin` через секцию данных. Обратный переход на метку цикла
+    (`jmp main_loop`, где `main_loop:` выше) якорем не является — иначе
+    эвристика имени (`main\\w*`) принимала цикл-метку за точку входа, и
+    выкушенный «кандидат» начинался с `jmp main_loop`, теряя данные и начало
+    программы (DL: «Неопределён символ main_loop, строка 1»).
     """
     scan = _scan_comment_spans(lines, ext) if ext else None
     judged = scan.blanked if scan is not None else lines
-    labeled = set()
-    for line in judged:
+    label_lines = {}
+    for i, line in enumerate(judged):
         m = _LABEL_DEF_RE.match(line)
         if m:
-            labeled.add(m.group(1).lower())
+            label_lines.setdefault(m.group(1).lower(), []).append(i)
     anchors = []
     for i, line in enumerate(judged):
         m = _JUMP_ENTRY_RE.match(line)
-        if m and _ENTRY_LABEL_RE.match(m.group(1)) and m.group(1).lower() in labeled:
-            anchors.append((i, m.group(1).lower()))
+        if not m or not _ENTRY_LABEL_RE.match(m.group(1)):
+            continue
+        label = m.group(1).lower()
+        # Прямой переход: определение метки строго ниже перехода. Список
+        # (а не одна строка) — программы могут повторяться (`jmp begin` и
+        # `begin:` во втором заходе), и каждый заход обязан остаться анкером.
+        if any(def_line > i for def_line in label_lines.get(label, ())):
+            anchors.append((i, label))
     if not anchors:
         # MASM-скелет: только ПЕРВАЯ директива (каждая следующая — якорь
         # хвостового окна, которые «съедали» дату-секцию: .code-анкер давал

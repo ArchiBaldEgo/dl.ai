@@ -11444,6 +11444,69 @@ class StructuralCarverTests(SimpleTestCase):
         self.assertIn(";$E", got)
         self.assertNotIn("We need solve", got)
 
+    def test_asm_loop_label_is_not_entry_anchor(self):
+        """Регрессия пары #2606750 (queueId 15245957): цикл-метка `main_loop`
+        матчилась шаблоном входа `main\\w*`, и последний «кандидат» начинался
+        с `jmp main_loop` — терялись секция данных и начало программы, DL
+        ругался «Неопределён символ main_loop (строка 1)». Якорь — только
+        ПРЯМОЙ переход (`jmp begin`), обратный переход на цикл — не якорь."""
+        text = (
+            "jmp begin\n"
+            "in_str db 100 dup(0)\n"
+            "out_str db 100 dup(0)\n"
+            "counter db 0\n"
+            "temp dw 0\n"
+            "begin:\n"
+            "lea si,in_str\n"
+            "lea di,out_str\n"
+            "mov byte ptr [counter],0\n"
+            "main_loop:\n"
+            "mov al,[si]\n"
+            "cmp al,'#'\n"
+            "je finish\n"
+            "cmp al,'a'\n"
+            "jne copy_char\n"
+            "inc byte ptr [counter]\n"
+            "mov al,[counter]\n"
+            "mov ah,0\n"
+            "mov bl,10\n"
+            "div bl\n"
+            "mov bl,al\n"
+            "mov bh,ah\n"
+            "cmp bl,0\n"
+            "je skip_tens\n"
+            "mov al,bl\n"
+            "add al,'0'\n"
+            "mov [di],al\n"
+            "inc di\n"
+            "skip_tens:\n"
+            "mov al,bh\n"
+            "add al,'0'\n"
+            "mov [di],al\n"
+            "inc di\n"
+            "mov al,[si]\n"
+            "copy_char:\n"
+            "mov [di],al\n"
+            "inc di\n"
+            "inc si\n"
+            "jmp main_loop\n"
+            "finish:\n"
+            "mov al,'#'\n"
+            "mov [di],al\n"
+            "inc di\n"
+            "mov al,0\n"
+            "mov [di],al\n"
+            "ends:\n"
+            "jmp ends ;$E"
+        )
+        got = self._c(text, ext=".i86")
+        self.assertTrue(got.startswith("jmp begin"), got[:80])
+        self.assertIn("in_str db 100 dup(0)", got)
+        self.assertIn("begin:", got)
+        self.assertIn("main_loop:", got)
+        self.assertIn("jmp main_loop", got)
+        self.assertTrue(got.rstrip().endswith(";$E"))
+
     def test_asm_glued_duplicate_collapses_to_single_program(self):
         """Веб-пул склеил черновик и финал без разделителя («;$Ejmp begin»):
         и «Полный ответ модели», и извлечённый код — ОДНА программа."""
