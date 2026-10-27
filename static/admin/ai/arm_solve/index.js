@@ -747,8 +747,13 @@
       if (langIds.size) {
         allPrompts
           .filter(function (p) {
-            return p.language_id !== null && p.language_id !== undefined
-              && langIds.has(String(p.language_id));
+            // Промпт без языка (ни своего, ни через тему) — общий для всех
+            // языков: показываем его при любом выборе. Промпты другого языка
+            // скрываем — в селекте только выбранные язык(и).
+            if (p.language_id === null || p.language_id === undefined || p.language_id === '') {
+              return true;
+            }
+            return langIds.has(String(p.language_id));
           })
           .slice()
           .sort(function (a, b) { return promptOptionLabel(a).localeCompare(promptOptionLabel(b), 'ru'); })

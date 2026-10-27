@@ -23337,6 +23337,12 @@ class PromptDebugAdminViewTests(_AdminViewRequestMixin, TestCase):
         self.assertNotIn('id="armSaveSolutions"', html)
         # Фильтр промптов по языку: у опций есть language_id.
         self.assertIn('"language_id": %d' % self.lang.id, html)
+        # Чекбокс языка несёт value=id: по нему селектор промптов фильтрует
+        # список и восстанавливается язык из run_params. Без value браузер
+        # отдаёт "on" — селект промптов оказывался пустым.
+        self.assertIn(
+            'class="arm-lang-check" value="%d"' % self.lang.id, html,
+        )
 
     def test_start_passes_run_type_and_attempts(self):
         calls = {}
