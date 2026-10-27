@@ -20,11 +20,15 @@ log в контексте есть не на всех поверхностях (
     {% endif %}
     <div class="ai-batch-detail-actions">
       <a class="resend-btn" href="{% url 'ai_request_log_xlsx' row.id %}">Скачать XLSX</a>
+      {# Отладку промтов повторять тем же прогоном нельзя: правки промптов уже #}
+      {# применены, повтор — это новый запуск из формы /arm/prompt-debug/.      #}
+      {% if row.run_type != "prompt_debug" %}
       <form method="post" class="ai-batch-rerun-form" action="{% url 'ai_request_log_rerun_arm' row.id %}">
         {% csrf_token %}
         <button type="submit" class="resend-btn">↻ Повторить прогон</button>
         <span class="ai-batch-rerun-status"></span>
       </form>
+      {% endif %}
       <button type="button" class="ai-log-all-tasks-btn" data-log-id="{{ row.id }}" data-snapshot-url="{% url 'ai_request_log_batch_snapshot' row.id %}">Показать все задачи</button>
       <div class="ai-log-all-tasks-list" hidden></div>
     </div>

@@ -4530,7 +4530,10 @@ class BatchParallelWorkerTests(TransactionTestCase):
             return orig_pair(ctx, task_ctx, model, dl_lock)
 
         try:
-            with patch.object(arm_runner, "_process_batch_pair", spy_pair):
+            # Процессор пары выбирается из реестра _PAIR_PROCESSORS (полиморфизм
+            # вместо ветвления по run_type) — подменяем запись реестра, а не
+            # глобальное имя.
+            with patch.dict(arm_runner._PAIR_PROCESSORS, {"batch": spy_pair}):
                 with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
                     arm_runner._run_batch_job_worker(
                         run_id, node_ids, models, self.user.id, "DLSID-1",
@@ -22775,3 +22778,722 @@ class ArmDeltaFormTests(_AdminViewRequestMixin, TestCase):
             response = admin_arm_solve_view(request)
         self.assertEqual(response.status_code, 200)
         self.assertNotIn('id="armDeltaSelect"', response.render().content.decode())
+
+
+# ── ARM «Отладка промтов» (run_type=prompt_debug) ──────────────────────────
+# Сервис правки промпта (ai/services/prompt_debug.py), ACL-хелпер
+# can_edit_prompt, раннер (попытки/коммит/проверка), страница/старт и журнал.
+
+
+class PromptDebugSanitizeTests(SimpleTestCase):
+    """sanitize_addition: от ответа модели остаётся только текст дополнения."""
+
+    def test_strips_fences_label_and_whitespace(self):
+        from ai.services.prompt_debug import sanitize_addition
+
+        text = "```\nТЕКСТ ДОПОЛНЕНИЯ:\nПроверяй   граничные\nслучаи.\n```"
+        self.assertEqual(sanitize_addition(text), "Проверяй граничные случаи.")
+
+    def test_short_or_empty_returns_blank(self):
+        from ai.services.prompt_debug import sanitize_addition
+
+        self.assertEqual(sanitize_addition(""), "")
+        self.assertEqual(sanitize_addition("ок"), "")
+
+
+class PromptDebugCommitTests(TestCase):
+    """commit_prompt_additions: куда пишется правка и как она накапливается."""
+
+    def setUp(self):
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.lang,
+        )
+        self.owner = get_user_model().objects.create_user(
+            username="pd_owner", password="x", is_staff=True,
+        )
+        self.stranger = get_user_model().objects.create_user(
+            username="pd_stranger", password="x", is_staff=True,
+        )
+
+    def test_appends_to_prompt_text_ru_with_single_heading(self):
+        from ai.services.prompt_debug import PROMPT_DEBUG_HEADER, commit_prompt_additions
+
+        prompt = Prompt.objects.create(
+            prompt_name_ru="P", prompt_text_ru="Реши задачу.", owner=self.owner,
+            programming_language=self.lang, topic=self.topic,
+        )
+        ok, error, info = commit_prompt_additions(
+            prompt.pk, ["Проверяй формат вывода."], user=self.owner,
+        )
+        self.assertTrue(ok, error)
+        self.assertEqual(info["target_field"], "prompt_text_ru")
+        prompt.refresh_from_db()
+        self.assertEqual(
+            prompt.prompt_text_ru,
+            "Реши задачу.\n\n" + PROMPT_DEBUG_HEADER + "\n- Проверяй формат вывода.",
+        )
+        # Повторное дополнение — без второй шапки и без дубля.
+        ok, _error, info2 = commit_prompt_additions(
+            prompt.pk, ["Проверяй формат вывода."], user=self.owner,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(info2["appended"], [])
+        self.assertEqual(info2["already_present"], ["Проверяй формат вывода."])
+        prompt.refresh_from_db()
+        self.assertEqual(prompt.prompt_text_ru.count(PROMPT_DEBUG_HEADER), 1)
+        self.assertEqual(prompt.prompt_text_ru.count("- Проверяй формат вывода."), 1)
+
+    def test_override_takes_priority_and_ru_stays_untouched(self):
+        from ai.services.prompt_debug import commit_prompt_additions
+
+        prompt = Prompt.objects.create(
+            prompt_name_ru="P", prompt_text_ru="Старый RU.",
+            prompt_text_override="Override base.", owner=self.owner,
+            programming_language=self.lang,
+        )
+        ok, _error, info = commit_prompt_additions(
+            prompt.pk, ["Учитывай пустой ввод."], user=self.owner,
+        )
+        self.assertTrue(ok)
+        prompt.refresh_from_db()
+        self.assertEqual(info["target_field"], "prompt_text_override")
+        self.assertTrue(prompt.prompt_text_override.startswith("Override base."))
+        self.assertIn("Учитывай пустой ввод.", prompt.prompt_text_override)
+        self.assertEqual(prompt.prompt_text_ru, "Старый RU.")
+
+    def test_shared_prompt_materializes_raw_text_without_placeholders(self):
+        """Первый коммит в shared-промпт: override = СЫРОЙ текст (плейсхолдеры
+        не подставлены), сам общий промпт не изменён."""
+        from ai.services.prompt_debug import commit_prompt_additions
+
+        shared = SharedPrompt.objects.create(
+            prompt_name_ru="Общий",
+            prompt_text_ru="Реши {message} на {language}, тема {topic}.",
+        )
+        prompt = Prompt.objects.create(
+            prompt_name_ru="P",
+            shared_prompt=shared,
+            owner=self.owner,
+            programming_language=self.lang,
+        )
+        ok, _error, info = commit_prompt_additions(
+            prompt.pk, ["Проверяй корректность ввода."], user=self.owner,
+        )
+        self.assertTrue(ok)
+        prompt.refresh_from_db()
+        shared.refresh_from_db()
+        self.assertEqual(info["target_field"], "prompt_text_override")
+        self.assertIsNotNone(prompt.prompt_text_override)
+        self.assertIn("{message}", prompt.prompt_text_override)
+        self.assertIn("{language}", prompt.prompt_text_override)
+        self.assertIn("Проверяй корректность ввода.", prompt.prompt_text_override)
+        self.assertEqual(
+            shared.prompt_text_ru, "Реши {message} на {language}, тема {topic}.",
+        )
+
+    def test_foreign_prompt_without_rights_is_rejected(self):
+        from ai.services.prompt_debug import commit_prompt_additions
+
+        prompt = Prompt.objects.create(
+            prompt_name_ru="P", prompt_text_ru="База.", owner=self.owner,
+            programming_language=self.lang,
+        )
+        ok, error, _info = commit_prompt_additions(
+            prompt.pk, ["Проверяй корректность ввода."], user=self.stranger,
+        )
+        self.assertFalse(ok)
+        self.assertIn("Нет прав", error)
+        prompt.refresh_from_db()
+        self.assertEqual(prompt.prompt_text_ru, "База.")
+
+    def test_editor_membership_allows_commit(self):
+        from ai.services.prompt_debug import commit_prompt_additions
+
+        prompt = Prompt.objects.create(
+            prompt_name_ru="P", prompt_text_ru="База.", owner=self.owner,
+            programming_language=self.lang,
+        )
+        prompt.editors.add(self.stranger)
+        ok, error, _info = commit_prompt_additions(
+            prompt.pk, ["Проверяй корректность ввода."], user=self.stranger,
+        )
+        self.assertTrue(ok, error)
+
+
+class CanEditPromptTests(TestCase):
+    """Единый владелец правил правки промпта (страница и фоновый раннер)."""
+
+    def setUp(self):
+        from ai.admin.permissions import add_user_to_builtin_ai_group
+        from ai.constants import BUILTIN_GROUP_PROMPT_DEV
+
+        self.owner = get_user_model().objects.create_user(
+            username="acl_owner", password="x", is_staff=True,
+        )
+        self.stranger = get_user_model().objects.create_user(
+            username="acl_stranger", password="x", is_staff=True,
+        )
+        self.prompt_developer = get_user_model().objects.create_user(
+            username="acl_pd", password="x",
+        )
+        add_user_to_builtin_ai_group(self.prompt_developer, BUILTIN_GROUP_PROMPT_DEV)
+        self.prompt = Prompt.objects.create(
+            prompt_name_ru="P", prompt_text_ru="t", owner=self.owner,
+        )
+
+    def test_rules(self):
+        from ai.admin.permissions import can_edit_prompt
+
+        self.assertTrue(can_edit_prompt(self.owner, self.prompt))
+        self.assertFalse(can_edit_prompt(self.stranger, self.prompt))
+        # Разработчик промптов — чужое не правит (только участник/владелец).
+        self.assertFalse(can_edit_prompt(self.prompt_developer, self.prompt))
+        # Суперюзер — любые промпты.
+        superuser = get_user_model().objects.create_superuser(
+            username="acl_super", password="x", email="s@x.io",
+        )
+        self.assertTrue(can_edit_prompt(superuser, self.prompt))
+        # Ключ «перезаписывать чужие».
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+
+        group = AIAccessGroup.objects.create(name="Редакторы ACL")
+        perm, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.prompt_admin.edit_others",
+            defaults={"label": "x", "section": "page"},
+        )
+        group.permissions.add(perm)
+        group.users.add(self.stranger)
+        self.assertTrue(can_edit_prompt(self.stranger, self.prompt))
+        # PromptAdmin делегирует в тот же хелпер.
+        from ai.admin import PromptAdmin
+        from django.contrib.admin.sites import AdminSite
+
+        admin = PromptAdmin(Prompt, AdminSite())
+        request = RequestFactory().get("/")
+        request.user = self.prompt_developer
+        self.assertFalse(admin._can_edit_prompt(request, self.prompt))
+
+
+class PromptDebugRunnerTests(TestCase):
+    """Полный путь пары «Отладка промтов» через воркер (модели/DL замоканы)."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="pd_runner", password="x", is_staff=True,
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.lang,
+        )
+        self.task = Task.objects.create(
+            node_id=7301, task_id=8301, name="A", statement="Сложите a и b",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.prompt = Prompt.objects.create(
+            prompt_name_ru="Промпт отладки",
+            prompt_text_ru="Реши задачу на Pascal.",
+            owner=self.user,
+            programming_language=self.lang,
+            topic=self.topic,
+        )
+
+    # ── helpers ────────────────────────────────────────────────────────────
+    class _Model:
+        """Модель: код на решение + «редактор», распознаваемый по заданию."""
+
+        def __init__(self):
+            self.solve_calls = 0
+            self.editor_calls = 0
+
+        async def handler(self, messages, conv_id):
+            text = messages if isinstance(messages, str) else str(messages)
+            if "Верни ТОЛЬКО текст дополнения" in text:
+                self.editor_calls += 1
+                return (f"Проверяй граничные случаи, вариант {self.editor_calls}.", 5)
+            self.solve_calls += 1
+            return ("program a; begin writeln(1); end.", 10)
+
+    @staticmethod
+    def _dl(verdicts):
+        """DL-мок: verdicts по номеру вызова (последний повторяется)."""
+        calls = {"n": 0}
+
+        def dl(session_id, node_id, code, ext, **kwargs):
+            verdict = verdicts[min(calls["n"], len(verdicts) - 1)]
+            calls["n"] += 1
+            if verdict == "solved":
+                return {
+                    "verdict": "solved", "comment": "Все тесты успешно пройдены",
+                    "submit_error": "", "queue_id": 1, "code_sent": code,
+                }
+            return {
+                "verdict": "failed", "comment": "Тест 1: неверный ответ",
+                "submit_error": "", "queue_id": 1, "code_sent": code,
+            }
+
+        return dl, calls
+
+    def _seed_job(self, run_id):
+        import time as _t
+        from ai import arm_runner
+
+        now_ts = _t.time()
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "prompt_debug", "status": "running",
+            "error_message": "", "total_models": 1, "total_pairs": 1,
+            "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "", "current_model_title": "",
+            "current_task_node_id": "", "current_task_name": "",
+            "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+
+    def _run(self, run_id, model, dl_mock, *, prompt_attempts, prompt_id="__own__"):
+        from ai import arm_runner
+
+        self._seed_job(run_id)
+        try:
+            with (
+                patch("ai.arm_runner._test_solution_on_dl", dl_mock),
+                patch("ai.arm_runner.fetch_failed_test_data", return_value=[]),
+            ):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.task.node_id],
+                    [{"key": "FakeModel", "title": "FakeModel", "handler": model.handler}],
+                    self.user.id, "DLSID-1",
+                    ui_language="Русский", dl_test=True,
+                    prompt_id=(
+                        self.prompt.pk if prompt_id == "__own__" else prompt_id
+                    ),
+                    course_id=1450,
+                    programming_language_id=self.lang.id,
+                    programming_language_name=self.lang.language_name,
+                    topic_id=self.topic.id,
+                    topic_name=self.topic.topic_name_ru,
+                    run_type="prompt_debug",
+                    prompt_attempts=prompt_attempts,
+                )
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        from ai.models import AIModelTestRun
+
+        return AIModelTestRun.objects.get(run_id=run_id)
+
+    # ── tests ──────────────────────────────────────────────────────────────
+    def test_fail_then_solve_commits_additions(self):
+        """Два провала → успех: обе правки сохранены, шапка одна."""
+        from ai.services.prompt_debug import PROMPT_DEBUG_HEADER
+
+        run_id = "d" * 32
+        model = self._Model()
+        dl_mock, dl_calls = self._dl(["failed", "failed", "solved", "solved"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=3)
+
+        self.assertEqual(run.run_type, "prompt_debug")
+        self.assertEqual(run.status, "completed")
+        row = run.results.get()
+        payload = row.prompt_debug
+        self.assertEqual(len(payload["attempts"]), 3)
+        self.assertTrue(payload["committed"])
+        self.assertEqual(payload["attempts"][0]["verdict"], "failed")
+        self.assertTrue(payload["attempts"][0]["applied"])
+        self.assertTrue(payload["attempts"][1]["applied"])
+        self.assertEqual(payload["attempts"][2]["verdict"], "solved")
+        self.assertEqual(payload["attempts"][2]["addition"], "")
+        # Проверочный проход: решено итоговым промптом.
+        self.assertEqual(payload["verification"]["verdict"], "solved")
+        self.assertGreaterEqual(dl_calls["n"], 4)
+
+        self.prompt.refresh_from_db()
+        self.assertIn(PROMPT_DEBUG_HEADER, self.prompt.prompt_text_ru)
+        self.assertIn("вариант 1.", self.prompt.prompt_text_ru)
+        self.assertIn("вариант 2.", self.prompt.prompt_text_ru)
+        self.assertEqual(self.prompt.prompt_text_ru.count(PROMPT_DEBUG_HEADER), 1)
+
+        log = AIRequestLog.objects.get(message=f"Prompt debug run {run_id}")
+        self.assertEqual(log.mode, AIRequestLog.MODE_PROMPT_DEBUG)
+        self.assertEqual(log.batch_run_id, run_id)
+        # Сводка прогона: промпт дополнен, правки по парам, проверка.
+        report = run.report or {}
+        self.assertEqual(report["prompt_debug"]["prompts_updated"], 1)
+        self.assertEqual(report["prompt_debug"]["committed_pairs"], 1)
+        self.assertEqual(report["prompt_debug"]["verification"]["checked"], 1)
+        self.assertEqual(report["prompt_debug"]["verification"]["solved"], 1)
+
+    def test_exhausted_attempts_do_not_commit(self):
+        """Пара так и не решена — промпт не изменён, правки только в payload."""
+        run_id = "e" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["failed"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=2)
+
+        row = run.results.get()
+        payload = row.prompt_debug
+        self.assertEqual(len(payload["attempts"]), 2)
+        self.assertFalse(payload["committed"])
+        self.assertIn("не сохранены", payload["commit_error"])
+        self.assertTrue(payload["attempts"][0]["addition"])
+        self.assertFalse(payload["attempts"][0]["applied"])
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
+        self.assertEqual(model.editor_calls, 1)
+
+    def test_attempt_limit_one_makes_no_edits(self):
+        run_id = "f" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["failed"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=1)
+
+        payload = run.results.get().prompt_debug
+        self.assertEqual(len(payload["attempts"]), 1)
+        self.assertFalse(payload["committed"])
+        self.assertEqual(model.editor_calls, 0)
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
+
+    def test_no_rights_skips_pair_without_model_call(self):
+        other = get_user_model().objects.create_user(
+            username="pd_other_owner", password="x", is_staff=True,
+        )
+        self.prompt.owner = other
+        self.prompt.save(update_fields=["owner"])
+        self.user.is_staff = False
+        self.user.save(update_fields=["is_staff"])
+
+        run_id = "a" * 32
+        model = self._Model()
+        dl_mock, dl_calls = self._dl(["solved"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=2)
+
+        row = run.results.get()
+        self.assertEqual(row.verdict, "skipped")
+        self.assertEqual(row.failure_reason, "skipped")
+        self.assertTrue(row.prompt_debug["skipped"])
+        self.assertIn("нет прав", row.prompt_debug["skip_reason"])
+        self.assertEqual(model.solve_calls, 0)
+        self.assertEqual(model.editor_calls, 0)
+        self.assertEqual(dl_calls["n"], 0)
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
+
+    def test_verification_rerun_reads_final_prompt(self):
+        """Проверка идёт по УЖЕ дополненному промпту и пишет свой вердикт."""
+        from ai import arm_runner
+        from ai.services.prompt_debug import PROMPT_DEBUG_HEADER
+
+        seen_messages = []
+
+        class _CapturingModel(self._Model):
+            async def handler(self, messages, conv_id):
+                seen_messages.append(messages)
+                return await super().handler(messages, conv_id)
+
+        run_id = "b" * 32
+        model = _CapturingModel()
+        dl_mock, _calls = self._dl(["failed", "solved", "solved"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=2)
+
+        payload = run.results.get().prompt_debug
+        self.assertTrue(payload["committed"])
+        self.assertEqual(payload["verification"]["verdict"], "solved")
+        # Последний вызов модели — проверочный: в сообщении уже есть дополнение.
+        self.assertIn(PROMPT_DEBUG_HEADER, seen_messages[-1])
+        self.assertIn("вариант 1.", seen_messages[-1])
+        # usage пары суммирует попытки, редактора и проверку (токены моделей).
+        self.assertGreater(payload["usage"]["tokens"], 0)
+
+
+    def test_default_binding_keeps_edits_across_runs(self):
+        """Промпт «по привязке» правится в ТОЙ ЖЕ строке и остаётся действующим.
+
+        Второй прогон по той же привязке видит уже дополненный текст, правки
+        не дублируются, сама привязка и номер промпта не меняются.
+        """
+        from ai.models import ArmPromptBinding
+        from ai.services.prompt_debug import PROMPT_DEBUG_HEADER
+
+        binding = ArmPromptBinding.objects.create(
+            programming_language=self.lang, topic=self.topic,
+            mode=ArmPromptBinding.MODE_SOLVE, prompt=self.prompt,
+        )
+        # Прогон 1: провал → правка → успех.
+        model1 = self._Model()
+        dl1, _calls1 = self._dl(["failed", "solved", "solved"])
+        self._run("1" * 32, model1, dl1, prompt_attempts=2, prompt_id=None)
+
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru.count(PROMPT_DEBUG_HEADER), 1)
+        self.assertIn("вариант 1.", self.prompt.prompt_text_ru)
+
+        # Прогон 2: та же привязка, пара решается сразу — редактор не зовётся,
+        # сообщение уже содержит накопленное дополнение.
+        seen = []
+
+        class _CapturingModel(self._Model):
+            async def handler(self, messages, conv_id):
+                seen.append(messages)
+                return await super().handler(messages, conv_id)
+
+        model2 = _CapturingModel()
+        dl2, _calls2 = self._dl(["solved", "solved"])
+        self._run("2" * 32, model2, dl2, prompt_attempts=2, prompt_id=None)
+
+        self.assertEqual(model2.editor_calls, 0)
+        self.assertIn(PROMPT_DEBUG_HEADER, seen[0])
+        self.assertIn("вариант 1.", seen[0])
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru.count(PROMPT_DEBUG_HEADER), 1)
+        self.assertEqual(self.prompt.prompt_text_ru.count("вариант 1."), 1)
+        binding.refresh_from_db()
+        self.assertEqual(binding.prompt_id, self.prompt.pk)
+
+    def test_task_without_prompt_is_skipped(self):
+        """Нет привязки и нет ручного промпта → пара пропущена, модель не зовётся."""
+        task = Task.objects.create(
+            node_id=7302, task_id=8302, name="B", statement="x",
+            topic=None, programming_language=None, file_extension=".pas",
+        )
+        model = self._Model()
+        dl_mock, dl_calls = self._dl(["solved"])
+        self._seed_job("3" * 32)
+        from ai import arm_runner
+
+        try:
+            with (
+                patch("ai.arm_runner._test_solution_on_dl", dl_mock),
+                patch("ai.arm_runner.fetch_failed_test_data", return_value=[]),
+            ):
+                arm_runner._run_batch_job_worker(
+                    "3" * 32, [task.node_id],
+                    [{"key": "FakeModel", "title": "FakeModel", "handler": model.handler}],
+                    self.user.id, "DLSID-1",
+                    ui_language="Русский", dl_test=True,
+                    prompt_id=None, course_id=1450,
+                    programming_language_id=self.lang.id,
+                    programming_language_name=self.lang.language_name,
+                    run_type="prompt_debug", prompt_attempts=2,
+                )
+        finally:
+            arm_runner._jobs.pop("3" * 32, None)
+
+        from ai.models import AIModelTestRun
+
+        row = AIModelTestRun.objects.get(run_id="3" * 32).results.get()
+        self.assertEqual(row.verdict, "skipped")
+        self.assertTrue(row.prompt_debug["skipped"])
+        self.assertIn("промпта", row.prompt_debug["skip_reason"])
+        self.assertEqual(model.solve_calls, 0)
+        self.assertEqual(dl_calls["n"], 0)
+
+
+class PromptDebugAdminViewTests(_AdminViewRequestMixin, TestCase):
+    """Страница /arm/prompt-debug/ и её старт: режим, попытки, права."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(
+            username="pd_admin", password="x", is_staff=True,
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.lang,
+        )
+        self.prompt = Prompt.objects.create(
+            prompt_name_ru="Свой промпт", prompt_text_ru="Реши.",
+            owner=self.user, programming_language=self.lang, topic=self.topic,
+        )
+
+    def _page(self):
+        from ai.admin.arm import admin_arm_prompt_debug_view
+
+        request = self._admin_request(
+            self.user, path="/ai/admin/arm/prompt-debug/",
+        )
+        with (
+            patch("ai.admin.arm._resolve_active_course_id", return_value=(1450, "")),
+            patch("ai.admin.arm._fetch_delta_options", return_value=[]),
+            patch("ai.admin.arm.get_arm_solve_model_options", return_value=[]),
+        ):
+            response = admin_arm_prompt_debug_view(request)
+        return response, response.render().content.decode()
+
+    def _start(self, payload):
+        from ai.admin.arm import admin_arm_prompt_debug_start_view
+
+        request = self._admin_request(
+            self.user, method="post", path="/ai/admin/arm/prompt-debug/start/",
+            data=json.dumps(payload), content_type="application/json",
+        )
+        request.session["external_session_id"] = "DLSID-TEST"
+        return admin_arm_prompt_debug_start_view(request)
+
+    def test_page_renders_debug_mode(self):
+        _response, html = self._page()
+        self.assertIn("ARM: Отладка промтов", html)
+        self.assertIn('name="prompt_attempts"', html)
+        self.assertIn("/ai/admin/arm/prompt-debug/start/", html)
+        self.assertIn('id="arm-solve-mode"', html)
+        self.assertNotIn('id="armSaveSolutions"', html)
+        # Фильтр промптов по языку: у опций есть language_id.
+        self.assertIn('"language_id": %d' % self.lang.id, html)
+
+    def test_start_passes_run_type_and_attempts(self):
+        calls = {}
+
+        def fake_start(*args, **kwargs):
+            calls["kwargs"] = kwargs
+            return "run-1", ""
+
+        with (
+            patch("ai.admin.arm.start_batch_solve_run", side_effect=fake_start),
+            patch("ai.admin.arm.get_arm_run_snapshot", return_value={"run_id": "run-1"}),
+        ):
+            response = self._start({
+                "node_ids": [7301],
+                "models": ["FakeModel"],
+                "language_id": self.lang.id,
+                "course_id": 1450,
+                "prompt_id": self.prompt.pk,
+                "prompt_attempts": "",
+                "record_stats": True,
+                "save_solutions": True,
+            })
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)
+        self.assertTrue(body["ok"])
+        self.assertEqual(calls["kwargs"]["run_type"], "prompt_debug")
+        # Пустое поле попыток → дефолт 5.
+        self.assertEqual(calls["kwargs"]["prompt_attempts"], 5)
+        # Статистика и кэш решений для отладки принудительно выключены.
+        self.assertFalse(calls["kwargs"]["record_stats"])
+        self.assertFalse(calls["kwargs"]["save_solutions"])
+
+    def test_start_rejects_invalid_attempts(self):
+        for value in (11, "abc", 0):
+            response = self._start({
+                "node_ids": [7301],
+                "models": ["FakeModel"],
+                "language_id": self.lang.id,
+                "course_id": 1450,
+                "prompt_id": self.prompt.pk,
+                "prompt_attempts": value,
+            })
+            self.assertEqual(response.status_code, 400, value)
+            self.assertIn(
+                "Попыток на пару", json.loads(response.content)["message"],
+            )
+
+    def test_start_rejects_foreign_prompt_without_rights(self):
+        other = get_user_model().objects.create_user(
+            username="pd_admin_other", password="x", is_staff=True,
+        )
+        foreign = Prompt.objects.create(
+            prompt_name_ru="Чужой", prompt_text_ru="x", owner=other,
+            programming_language=self.lang,
+        )
+        response = self._start({
+            "node_ids": [7301],
+            "models": ["FakeModel"],
+            "language_id": self.lang.id,
+            "course_id": 1450,
+            "prompt_id": foreign.pk,
+            "prompt_attempts": 3,
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Нет прав", json.loads(response.content)["message"])
+
+
+class PromptDebugJournalTests(TestCase):
+    """Журнал и лёгкие снапшоты: режим prompt_debug виден и не теряется."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun
+
+        self.user = get_user_model().objects.create_user(
+            username="pd_journal", password="x",
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.lang,
+        )
+        self.task = Task.objects.create(
+            node_id=7401, task_id=8401, name="A", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.run_id = "c" * 32
+        self.run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_PROMPT_DEBUG,
+            status=AIModelTestRun.STATUS_COMPLETED,
+            course_id=1450,
+        )
+        from ai.models import AIModelTestResult
+
+        self.result = AIModelTestResult.objects.create(
+            run=self.run, task=self.task,
+            model_key="FakeModel", model_title="FakeModel",
+            status="ok", verdict="solved",
+            duration_seconds=1.0, tokens=10,
+            short_response="r", raw_response="raw", code="code",
+            dl_comment="c", dl_queue_id=1,
+            file_extension_snapshot=".pas",
+            topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+            prompt_debug={
+                "prompt_id": 1, "prompt_name": "P", "max_attempts": 3,
+                "attempts": [
+                    {"attempt": 1, "verdict": "failed", "dl_comment": "x",
+                     "addition": "Проверяй корректность ввода.", "applied": True},
+                ],
+                "committed": True, "commit_error": "",
+                "usage": {"duration": 1.0, "tokens": 10, "prompt_tokens": 0},
+                "verification": {"verdict": "solved", "dl_comment": "ok"},
+                "skipped": False, "skip_reason": "",
+            },
+        )
+        self.log = AIRequestLog.objects.create(
+            user=self.user, source="arm", mode=AIRequestLog.MODE_PROMPT_DEBUG,
+            message=f"Prompt debug run {self.run_id}",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+            batch_run_id=self.run_id,
+        )
+
+    def test_is_batch_solve_log_covers_prompt_debug(self):
+        from ai.admin.request_logs import _is_batch_solve_log
+
+        self.assertTrue(_is_batch_solve_log(self.log))
+
+    def test_row_contexts_carry_run_type(self):
+        from ai.admin.request_logs import _batch_log_row_contexts
+
+        ctx = _batch_log_row_contexts([self.log])[self.log.pk]
+        self.assertEqual(ctx["run_type"], "prompt_debug")
+
+    def test_snapshot_and_light_results(self):
+        from ai.admin.request_logs import _build_batch_log_snapshot
+
+        snapshot = _build_batch_log_snapshot(self.log)
+        self.assertEqual(snapshot["run_type"], "prompt_debug")
+        self.assertEqual(snapshot["results"][0]["has_prompt_debug"], True)
+        self.assertEqual(
+            snapshot["results"][0]["prompt_debug_state"]["verification"], "solved",
+        )
+        self.assertNotIn("prompt_debug", snapshot["results"][0])
+
+    def test_list_user_runs_page_url(self):
+        from ai import arm_runner
+
+        run_id = "d" * 32
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "user_id": self.user.id, "run_type": "prompt_debug",
+            "status": "running", "completed_pairs": 0, "total_pairs": 1,
+            "run_name": "pd", "current_task_name": "",
+            "created_at_ts": time.time(), "updated_at_ts": time.time(),
+        }
+        try:
+            runs = arm_runner.list_user_runs(self.user.id)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        row = next(r for r in runs if r["run_id"] == run_id)
+        self.assertEqual(row["run_type"], "prompt_debug")
+        self.assertEqual(row["page_url"], "/ai/admin/arm/prompt-debug/")

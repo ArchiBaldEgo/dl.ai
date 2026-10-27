@@ -638,6 +638,9 @@ def build_batch_rows_for_logs(request, logs):
             "time_display": finish_meta.get("run_duration_display") or "—",
             "run_name": run_name_for(run),
             "run_id": run_hex or "",
+            # batch | prompt_debug — развёртка строки прячет «Повторить
+            # прогон» у отладки промтов.
+            "run_type": run.run_type if run else "",
             "course_id": run.course_id if run else None,
             "file_extension": first_ext.get(run_hex, ""),
             # Тема/промпт/модели прогона (из снимков пар + выбранного при
@@ -748,9 +751,10 @@ def build_recent_batch_rows(request, limit=5):
     """Контекст-хелпер: последние N batch-solve прогонов (для страницы
     «Настройки ИИ-приложения»).
 
-    Отбирает записи журнала пакетного решения (source="arm",
-    mode=batch_solve|solve, sentinel "Batch solve run|rerun <hex>" в message)
-    с учётом ограничения видимости («только свои» для prompt_developer).
+    Отбирает записи журнала пакетного решения и отладки промтов (source="arm",
+    mode=batch_solve|solve|prompt_debug, sentinel "Batch solve run|rerun <hex>"
+    в message — у prompt_debug он же) с учётом ограничения видимости
+    («только свои» для prompt_developer).
 
     Строка — ЛЁГКАЯ: шапка прогона (один запрос AIModelTestRun) и
     count-агрегат результатов (AIModelTestResult) — без текстов решений:
@@ -768,7 +772,7 @@ def build_recent_batch_rows(request, limit=5):
     if can_view:
         qs = (
             _scope_logs_qs(AIRequestLog.objects.all(), request.user)
-            .filter(source="arm", mode__in=("batch_solve", "solve"))
+            .filter(source="arm", mode__in=("batch_solve", "solve", "prompt_debug"))
             # Batch-запись отмечается ИНДЕКСИРОВАННОЙ колонкой
             # batch_run_id (её пишет arm_runner). Раньше признаком был
             # message__icontains="Batch solve " — полный scan по всему журналу
@@ -783,7 +787,7 @@ def build_recent_batch_rows(request, limit=5):
         if len(logs) < max(0, int(limit)):
             legacy_qs = (
                 _scope_logs_qs(AIRequestLog.objects.all(), request.user)
-                .filter(source="arm", mode__in=("batch_solve", "solve"))
+                .filter(source="arm", mode__in=("batch_solve", "solve", "prompt_debug"))
                 .filter(batch_run_id="")
                 .filter(message__icontains="Batch solve ")
                 .order_by("-sent_at")
@@ -1222,12 +1226,13 @@ def admin_request_logs_view(request):
 
 
 def _is_batch_solve_log(log):
-    """True для записей batch-solve ARM-прогона (старых mode=solve+sentinel и
-    новых mode=batch_solve). У таких логов вместо текста запроса в деталях
-    рисуется мини-таблица результатов из /arm/solve/."""
+    """True для записей batch-solve ARM-прогона (старых mode=solve+sentinel,
+    новых mode=batch_solve и mode=prompt_debug — «Отладка промтов» рисуется
+    той же мини-таблицей результатов). У таких логов вместо текста запроса в
+    деталях рисуется мини-таблица результатов из /arm/solve/."""
     return (
         log.source == "arm"
-        and log.mode in ("batch_solve", "solve")
+        and log.mode in ("batch_solve", "solve", "prompt_debug")
         # "Batch solve run <hex>" и "Batch solve rerun <hex>" — оба ведут в
         # таблицу результатов (см. _BATCH_RUN_ID_RE).
         and _batch_run_id_from_log(log) is not None
@@ -1331,6 +1336,9 @@ def _build_batch_log_snapshot(log):
 
     return {
         "run_id": run_id_hex,
+        # batch | prompt_debug — деталь журнала по-разному подписывает прогон
+        # и скрывает «Повторить прогон» у отладки промтов.
+        "run_type": test_run.run_type,
         "course_id": test_run.course_id,
         "file_extension": file_extension,
         "node_ids": node_ids,
@@ -1395,7 +1403,7 @@ def _batch_log_row_contexts(logs, user=None):
             run_id__in=set(run_ids.values())
         ).only(
             "run_id", "course_id", "status", "run_name", "run_params",
-            "started_at", "finished_at",
+            "run_type", "started_at", "finished_at",
         )
     }
 
@@ -1492,6 +1500,9 @@ def _batch_log_row_contexts(logs, user=None):
                 for pid, name in prompts_by_run.get(run_id, {}).items()
             ],
             "run_id": run_id,
+            # batch | prompt_debug: строка журнала помечается режимом и не
+            # предлагает «Повторить прогон» для отладки промтов.
+            "run_type": run_obj.run_type,
             "course_id": run_obj.course_id,
             "file_extension": ext_by_run.get(run_id, ""),
             "tasks": tasks,

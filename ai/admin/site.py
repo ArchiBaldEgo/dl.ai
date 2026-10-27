@@ -523,6 +523,7 @@ class AIAdminSite(admin.AdminSite):
             ("Документация", "Разработчик", "AiDocsDeveloper", docs_url + "developer/", (is_staff or user_has_key(request.user, "docs.developer")), "⚙", "Документация для разработчика", "docs.developer", ()),
             ("Документация", "Суперюзер", "AiDocsSuperuser", docs_url + "superuser/", user_has_key(request.user, "docs.superuser"), "⚙", "Инструкция для суперадмина", "docs.superuser", ()),
             ("ARM", "Пакетное решение", "AiArmSolve", "/ai/admin/arm/solve/", show_arm, "▤", "Пакетный прогон моделей по задачам DL", "page.arm_solve", ()),
+            ("ARM", "Отладка промтов", "AiArmPromptDebug", "/ai/admin/arm/prompt-debug/", show_arm, "✎", "Автоправка промптов по провалам DL", "page.arm_solve", ()),
             ("ARM", "Состояние моделей", "AiModelStatus", "/ai/admin/arm/models/", show_model_status, "◉", "Доступность AI-моделей сегодня", "page.model_status", ()),
             # Журнал — родительский ключ page.logs («читать свои»), «читать
             # все» — вложенный page.logs_all (легаси-ключи page.logs_own —

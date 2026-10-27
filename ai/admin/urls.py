@@ -19,6 +19,8 @@ from .active_runs import admin_active_runs_view
 from .arm import (
     admin_arm_solve_view,
     admin_arm_solve_start_view,
+    admin_arm_prompt_debug_view,
+    admin_arm_prompt_debug_start_view,
     admin_arm_solve_status_view,
     admin_arm_solve_load_tree_view,
     admin_arm_solve_cancel_view,
@@ -119,6 +121,11 @@ def get_ai_admin_urls():
         path("arm/solve/result/<int:result_id>/body/", ai_admin_site.admin_view(admin_arm_solve_result_body_view), name="ai_arm_solve_result_body"),
         path("arm/solve/report/<str:run_id>/xlsx/", ai_admin_site.admin_view(admin_arm_solve_report_xlsx_view), name="ai_arm_solve_report_xlsx"),
         path("arm/solve/", ai_admin_site.admin_view(admin_arm_solve_view), name="ai_arm_solve"),
+        # «Отладка промтов» — та же форма/раннер в режиме prompt_debug;
+        # статус, отмена, пауза, тело и XLSX — общие эндпоинты /arm/solve/*
+        # (в них адресация по run_id, странице нужен только старт).
+        path("arm/prompt-debug/start/", ai_admin_site.admin_view(admin_arm_prompt_debug_start_view), name="ai_arm_prompt_debug_start"),
+        path("arm/prompt-debug/", ai_admin_site.admin_view(admin_arm_prompt_debug_view), name="ai_arm_prompt_debug"),
         path("arm/models/refresh/", ai_admin_site.admin_view(admin_model_status_refresh_view), name="ai_arm_model_status_refresh"),
         path("arm/models/state/", ai_admin_site.admin_view(admin_model_status_state_view), name="ai_arm_model_status_state"),
         path("arm/models/", ai_admin_site.admin_view(admin_model_status_view), name="ai_arm_model_status"),

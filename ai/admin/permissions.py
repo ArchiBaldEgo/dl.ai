@@ -276,6 +276,39 @@ def can_access_prompt_admin(request):
     )
 
 
+def can_edit_prompt(user, obj=None):
+    """Может ли пользователь править промпт (без ``request``).
+
+    Единственный владелец правил правки промпта: ModelAdmin
+    (``PromptAdmin._can_edit_prompt``) и фоновый ARM-раннер («Отладка
+    промтов» пишет промпт из рабочего потока, где ``request`` уже нет).
+
+    ``obj is None`` — право «заводить новые промпты» (те же гейты, кроме
+    владельца/редактора: владельца у новой строки ещё нет).
+    """
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_active", True) is False:
+        return False
+    if not (
+        is_staff_or_superuser(user)
+        or is_prompt_developer_user(user)
+        or user_has_key(user, "page.prompt_admin")
+    ):
+        return False
+    if is_superuser_user(user):
+        return True
+    # «Перезаписывать чужие промпты» — действие страницы «Мой промпт»
+    # (аккордеон в «Группах доступа»).
+    if user_has_key(user, "page.prompt_admin.edit_others"):
+        return True
+    if obj is None:
+        return True
+    if obj.owner_id == user.pk:
+        return True
+    return obj.editors.filter(pk=user.pk).exists()
+
+
 def can_access_prompt_defaults(request):
     """Доступ к «Промптам по умолчанию»: суперюзер ИЛИ ключ page.prompt_defaults.
 

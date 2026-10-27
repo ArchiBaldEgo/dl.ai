@@ -56,7 +56,7 @@ from ..services.task_registry import (
     solve_language_options,
 )
 from ..constants import AI_CACHE_KEY_PREFIX, DL_DEFAULT_COURSE_ID
-from .permissions import can_access_arm, is_superuser_user
+from .permissions import can_access_arm, can_edit_prompt, is_superuser_user
 
 # TTL кэша дерева задач курса в Redis (см. admin_arm_solve_load_tree_view).
 _DL_TREE_CACHE_TTL = 30 * 60
@@ -64,6 +64,16 @@ _DL_TREE_CACHE_TTL = 30 * 60
 # Жёсткий потолок окна raw_response за один запрос body-эндпоинта (символов):
 # чанковая загрузка больших ответов (обрезанные пары — десятки КБ текста).
 _BODY_RAW_CHUNK_MAX = 60000
+
+# «Отладка промтов»: попыток на пару (включая первую) по умолчанию и пределы
+# значения в форме запуска. Лимит режет стоимость прогона: каждая попытка —
+# это DL-тест + вызов модели-редактора.
+PROMPT_DEBUG_DEFAULT_ATTEMPTS = 5
+PROMPT_DEBUG_MIN_ATTEMPTS = 1
+PROMPT_DEBUG_MAX_ATTEMPTS = 10
+
+PROMPT_DEBUG_RUN_TYPE = "prompt_debug"
+PROMPT_DEBUG_MODE_LABEL = "Отладка промтов"
 
 
 def _resolve_session_id(request):
@@ -190,8 +200,19 @@ def _resolve_solve_language(language_id, file_extension):
 
 
 def admin_arm_solve_view(request):
+    """ARM: Пакетное решение (run_type=batch)."""
+    return _render_arm_solve_page(request, run_type="batch")
+
+
+def admin_arm_prompt_debug_view(request):
+    """ARM: Отладка промтов (run_type=prompt_debug) — общая форма, другой режим."""
+    return _render_arm_solve_page(request, run_type="prompt_debug")
+
+
+def _render_arm_solve_page(request, *, run_type):
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
+    is_prompt_debug = run_type == "prompt_debug"
 
     active_run_id = (request.GET.get("run_id") or "").strip()
     active_run_snapshot = None
@@ -215,7 +236,9 @@ def admin_arm_solve_view(request):
         # из localStorage, а не из run_params этого прогона.
         # Снапшот лёгкий (без raw_response/code — lazy_body): большой прогон
         # это десятки МБ текста, иначе страница грузится катастрофически долго.
-        active_run_snapshot = get_latest_batch_run_snapshot(request.user.id, light_results=True)
+        active_run_snapshot = get_latest_batch_run_snapshot(
+            request.user.id, light_results=True, run_type=run_type,
+        )
         if active_run_snapshot:
             is_previous_run = True
             results = active_run_snapshot.get("results") or []
@@ -255,6 +278,13 @@ def admin_arm_solve_view(request):
             "name": p.prompt_name_ru or f"Промпт #{p.pk}",
             "topic_id": p.topic_id,
             "topic_name": p.topic.topic_name_ru if p.topic else "",
+            # Язык промпта — прямой или через тему (клиентский фильтр селектора:
+            # выбрали язык(и) → в списке только их промпты).
+            "language_id": (
+                p.programming_language_id
+                if p.programming_language_id
+                else (p.topic.programming_language_id if p.topic else None)
+            ),
             "language_name": (
                 p.programming_language.language_name if p.programming_language
                 else (p.topic.programming_language.language_name if p.topic and p.topic.programming_language else "")
@@ -272,7 +302,11 @@ def admin_arm_solve_view(request):
 
     context = {
         **ai_admin_site.each_context(request),
-        "title": "ARM: Пакетное решение",
+        "title": "ARM: Отладка промтов" if is_prompt_debug else "ARM: Пакетное решение",
+        # Режим страницы: шаблон/JS ветвятся по нему (общая форма).
+        "arm_mode": "prompt_debug" if is_prompt_debug else "batch",
+        # Значение по умолчанию поля «Попыток на пару» (включая первую).
+        "prompt_debug_attempts": PROMPT_DEBUG_DEFAULT_ATTEMPTS,
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "arm_back_url": arm_back_url,
         "model_options": get_arm_solve_model_options(),
@@ -281,11 +315,16 @@ def admin_arm_solve_view(request):
         "language_options": language_options,
         "topics": topics,
         "delta_options": delta_options,
+        # Дерево/статус/отмена/тело результата — общие эндпоинты по run_id
+        # (страницы различаются только стартом и собственным списком прогонов).
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
         "results": results,
         "report": report,
         "error_message": error_message,
-        "arm_solve_start_url": "/ai/admin/arm/solve/start/",
+        "arm_solve_start_url": (
+            "/ai/admin/arm/prompt-debug/start/"
+            if is_prompt_debug else "/ai/admin/arm/solve/start/"
+        ),
         "arm_solve_status_url": "/ai/admin/arm/solve/status/",
         "active_run_id": active_run_id,
         "active_run_snapshot": active_run_snapshot or {},
@@ -493,8 +532,32 @@ def admin_arm_solve_load_tree_view(request):
 
 
 def admin_arm_solve_start_view(request):
+    """Старт «Пакетного решения» (run_type=batch)."""
+    return _start_arm_run(request, run_type="batch")
+
+
+def admin_arm_prompt_debug_start_view(request):
+    """Старт «Отладки промтов» (run_type=prompt_debug)."""
+    return _start_arm_run(request, run_type="prompt_debug")
+
+
+def _parse_prompt_attempts(raw):
+    """«Попыток на пару» из формы: пусто → дефолт; вне 1..10 или не число → None."""
+    if raw is None or str(raw).strip() == "":
+        return PROMPT_DEBUG_DEFAULT_ATTEMPTS
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if value < PROMPT_DEBUG_MIN_ATTEMPTS or value > PROMPT_DEBUG_MAX_ATTEMPTS:
+        return None
+    return value
+
+
+def _start_arm_run(request, *, run_type):
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
+    is_prompt_debug = run_type == PROMPT_DEBUG_RUN_TYPE
 
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
@@ -567,6 +630,34 @@ def admin_arm_solve_start_view(request):
         # на каждую задачу (по теме из ветки DL). prompt_id остаётся None.
         prompt_id = None
         prompt_name = ""
+    # «Отладка промтов»: лимит попыток на пару (включая первую) и права на
+    # правку ВЫБРАННОГО промпта. Промпты «по привязке» проверяются в раннере
+    # per-task (привязка резолвится только там); при отсутствии прав пара
+    # помечается skipped, а не портит чужой промпт.
+    prompt_attempts = 0
+    if is_prompt_debug:
+        prompt_attempts = _parse_prompt_attempts(
+            body.get("prompt_attempts", request.POST.get("prompt_attempts"))
+        )
+        if prompt_attempts is None:
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "message": (
+                        "«Попыток на пару» — целое число от "
+                        f"{PROMPT_DEBUG_MIN_ATTEMPTS} до {PROMPT_DEBUG_MAX_ATTEMPTS}."
+                    ),
+                },
+                status=400,
+            )
+        if prompt_override is not None and not can_edit_prompt(request.user, prompt_override):
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "message": f"Нет прав на редактирование промпта «{prompt_name}»",
+                },
+                status=400,
+            )
     # Название прогона — необязательно, задаётся только при запуске
     # (хранится в AIModelTestRun.run_name).
     run_name = str(body.get("run_name") or request.POST.get("run_name") or "").strip()[:200]
@@ -585,6 +676,12 @@ def admin_arm_solve_start_view(request):
         body.get("save_solutions")
         or request.POST.get("save_solutions") in ("1", "true", "True", "on")
     )
+    if is_prompt_debug:
+        # Отладка промтов: промежуточный код (по ещё не сохранённому промпту)
+        # в кэш «Решённых задач» не пишется, статистика моделей несопоставима
+        # (пары решались разными версиями промпта) — оба флага принудительно off.
+        record_stats = False
+        save_solutions = False
     # Course ID: берём из активного курса пользователя (не из запроса).
     # Фронтенд больше не отправляет course_id — он определяется автоматически.
     course_id_from_body = body.get("course_id") or request.POST.get("course_id")
@@ -657,6 +754,8 @@ def admin_arm_solve_start_view(request):
         run_name=run_name,
         save_solutions=save_solutions,
         delta=delta,
+        run_type=run_type,
+        prompt_attempts=prompt_attempts,
     )
     if not run_id:
         return JsonResponse(
@@ -931,6 +1030,9 @@ def admin_arm_solve_result_body_view(request, result_id):
         "delta_id": result.delta_id or 0,
         "delta_name": result.delta_name or "",
         "truncated": bool(result.truncated),
+        # «Отладка промтов»: попытки, дополнения и проверка пары (у обычных
+        # batch-строк — пустой dict).
+        "prompt_debug": result.prompt_debug or {},
         "raw_total": len(raw),
     }
     if length > 0:

@@ -37,6 +37,7 @@ from .permissions import (
     can_access_logs,
     can_access_prompt_admin,
     can_edit_access_groups,
+    can_edit_prompt,
     is_prompt_developer_user,
     is_staff_or_superuser,
     is_superuser_user,
@@ -244,19 +245,9 @@ class PromptAdmin(admin.ModelAdmin):
         return super().lookup_allowed(lookup, value)
 
     def _can_edit_prompt(self, request, obj):
-        if not (is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user) or can_access_prompt_admin(request)):
-            return False
-        if is_superuser_user(request.user):
-            return True
-        # «Перезаписывать чужие промпты» — действие страницы «Мой промпт»
-        # (аккордеон в «Группах доступа»).
-        if user_has_key(request.user, "page.prompt_admin.edit_others"):
-            return True
-        if obj is None:
-            return True
-        if obj.owner_id == request.user.pk:
-            return True
-        return obj.editors.filter(pk=request.user.pk).exists()
+        # Правила живут в permissions.can_edit_prompt (общий владелец с
+        # фоновым ARM-раннером «Отладка промтов», у него нет request).
+        return can_edit_prompt(request.user, obj)
 
     def has_module_permission(self, request):
         if is_staff_or_superuser(request.user):
