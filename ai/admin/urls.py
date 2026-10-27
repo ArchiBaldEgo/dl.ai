@@ -85,8 +85,10 @@ from .test_data import (
 from .tokens import admin_token_usage_view
 from .updates import admin_updates_view
 from .user_models import (
+    admin_user_model_access_view,
     admin_user_model_create_view,
     admin_user_model_delete_view,
+    admin_user_model_search_users_view,
     admin_user_models_view,
 )
 
@@ -157,6 +159,8 @@ def get_ai_admin_urls():
         path("user-models/", ai_admin_site.admin_view(admin_user_models_view), name="ai_user_models"),
         path("user-models/create/", ai_admin_site.admin_view(admin_user_model_create_view), name="ai_user_model_create"),
         path("user-models/delete/", ai_admin_site.admin_view(admin_user_model_delete_view), name="ai_user_model_delete"),
+        path("user-models/access/", ai_admin_site.admin_view(admin_user_model_access_view), name="ai_user_model_access"),
+        path("user-models/search-users/", ai_admin_site.admin_view(admin_user_model_search_users_view), name="ai_user_model_search_users"),
         # «Запросы по DL API» — заявки на создание API к dl.gsu.by.
         path("dl-api-requests/", ai_admin_site.admin_view(admin_dl_api_requests_view), name="ai_dl_api_requests"),
         path("dl-api-requests/create/", ai_admin_site.admin_view(admin_dl_api_request_create_view), name="ai_dl_api_request_create"),

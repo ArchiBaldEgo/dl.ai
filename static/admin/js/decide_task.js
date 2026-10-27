@@ -89,9 +89,11 @@ function initWebSocket() {
         ws.onmessage = function(event) {
             // Восстановленный [[DL]]-статус (см. persistDlMessage в ai-common.js) —
             // не реплика диалога: рендерим жёлтым DL-сообщением и выходим.
-            var dlText = parsePersistedDlMessage(event.data);
-            if (dlText !== null) {
-                _appendDlMessage(dlText);
+            // Конверт {"v":1,...} несёт ещё и данные проваленного теста.
+            var dlPayload = parsePersistedDlPayload(event.data);
+            if (dlPayload !== null) {
+                var dlNode = _appendDlMessage(dlPayload.text);
+                if (dlPayload.tests.length) _renderDlTestData(dlNode, dlPayload.tests);
                 return;
             }
             appendPersistedMessage(event.data);
@@ -372,6 +374,7 @@ async function loadTaskFromUrl() {
     // Один повтор на кратковременный сбой DL/сети: «раз через раз» нередко —
     // единичный таймаут/5xx апстрима, второй запрос почти всегда проходит.
     var lastError = null;
+    var denialReason = '';
     for (var attempt = 0; attempt < 2; attempt++) {
         try {
             var url = new URL('/ai/api/task-info/', window.location.origin);
@@ -386,7 +389,13 @@ async function loadTaskFromUrl() {
                 return false;
             }
             if (!response.ok) {
-                var errorText = await response.text();
+                // Причина отказа (403 «доступ закрыт»/DL) — в статусную строку:
+                // иначе пользователь видит пустое условие без объяснений.
+                var errorText = await readApiErrorText(response);
+                if (response.status === 403) {
+                    denialReason = errorText;
+                    updateVoiceStatus(errorText);
+                }
                 throw new Error('HTTP ' + response.status + ': ' + errorText);
             }
             var data = await response.json();
@@ -428,7 +437,8 @@ async function loadTaskFromUrl() {
             restoreTaskTextForNode();
         }
     }
-    updateVoiceStatus(getUiString('taskLoadError', 'Не удалось загрузить условие задачи'));
+    updateVoiceStatus(denialReason
+        || getUiString('taskLoadError', 'Не удалось загрузить условие задачи'));
     return false;
 }
 
@@ -463,6 +473,21 @@ document.addEventListener("DOMContentLoaded", async () => {
 // «DL») и ПЕРСИСТИРУЕТСЯ в localStorage [[DL]]-записью (см. persistDlMessage
 // в ai-common.js) — после перезагрузки восстанавливается, а незавершённый
 // поллинг возобновляется по сохранённому queueId (_dlQueueKey).
+
+// Выбранная в селекторе модель — для подписи файла решения в DL
+// (<model>_<task_id>.<format>). Значение/текст опции берём безопасно:
+// селектора может не быть (страница без моделей).
+function selectedModelKey() {
+    var select = document.getElementById('select');
+    return select ? (select.value || '') : '';
+}
+
+function selectedModelTitle() {
+    var select = document.getElementById('select');
+    if (!select || select.selectedIndex < 0) return '';
+    var option = select.options[select.selectedIndex];
+    return option ? (option.textContent || '').trim() : '';
+}
 
 var DL_POLL_INTERVAL_MS = 3000;
 var DL_POLL_MAX_ATTEMPTS = 40; // 40 × 3 с ≈ 2 минуты на всю проверку
@@ -543,7 +568,10 @@ function _appendDlMessage(text) {
     var message = document.createElement('li');
     message.dataset.role = 'dl';
     var content = document.createElement('div');
-    content.textContent = text;
+    var verdict = document.createElement('div');
+    verdict.className = 'dl-verdict';
+    verdict.textContent = text;
+    content.appendChild(verdict);
     message.appendChild(content);
     messages.appendChild(message);
     messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
@@ -552,18 +580,117 @@ function _appendDlMessage(text) {
     return content;
 }
 
+// Текст вердикта живёт в отдельном узле, чтобы блоки данных теста
+// (добавляются следом) не затирались при обновлении статуса.
+function _dlVerdictNode(node) {
+    if (!node) return null;
+    for (var i = 0; i < node.children.length; i++) {
+        if (node.children[i].classList.contains('dl-verdict')) return node.children[i];
+    }
+    return null;
+}
+
 // Пользователь мог нажать «Очистить контекст» (или страницу перезагрузили) —
 // в этом случае узел оторван от DOM и обновлять/поллить больше нечего.
 function _setDlMessageText(node, text) {
     if (!node || !node.isConnected) return;
-    node.textContent = text;
+    var verdict = _dlVerdictNode(node);
+    if (verdict) verdict.textContent = text;
+    else node.textContent = text;
 }
 
 // Обновление DL-статуса: узел в DOM + та же [[DL]]-запись в localStorage
 // (после перезагрузки сообщение восстанавливается уже финальным текстом).
-function _setDlMessageTextPersist(node, text) {
+function _setDlMessageTextPersist(node, text, tests) {
     _setDlMessageText(node, text);
-    persistDlMessage(text);
+    persistDlMessage(text, tests);
+}
+
+// Данные проваленного теста (get-test-data): только DOM + textContent —
+// DL отдаёт произвольный текст, innerHTML тут недопустим.
+function _appendDlTestField(block, label, value, truncated) {
+    var labelNode = document.createElement('div');
+    labelNode.className = 'dl-test-data-label';
+    labelNode.textContent = label + (truncated
+        ? ' ' + getUiString('dlTestTruncated', '(начало)') : '');
+    block.appendChild(labelNode);
+    var pre = document.createElement('pre');
+    pre.className = 'dl-test-data-value';
+    var text = String(value == null ? '' : value).replace(/\r\n?/g, '\n');
+    text = text.replace(/\n+$/, '');
+    pre.textContent = text || '—';
+    block.appendChild(pre);
+}
+
+function _renderDlTestData(node, tests) {
+    if (!node || !node.isConnected) return;
+    if (!Array.isArray(tests) || !tests.length) return;
+    var list = document.createElement('div');
+    list.className = 'dl-test-data-list';
+    tests.forEach(function (entry) {
+        if (!entry) return;
+        var block = document.createElement('div');
+        block.className = 'dl-test-data';
+        var heading = document.createElement('div');
+        heading.className = 'dl-test-data-title';
+        heading.textContent = getUiString('dlTestHeading', 'Тест № {0}')
+            .replace('{0}', String(entry.test_number == null ? '?' : entry.test_number));
+        block.appendChild(heading);
+        _appendDlTestField(block, getUiString('dlTestInput', 'Входные данные'),
+            entry.input, entry.input_truncated);
+        _appendDlTestField(block, getUiString('dlTestOutput', 'Выходные данные (эталон)'),
+            entry.expected_output, entry.expected_truncated);
+        list.appendChild(block);
+    });
+    if (list.children.length) node.appendChild(list);
+}
+
+function _appendDlNote(node, text) {
+    if (!node || !node.isConnected) return;
+    var note = document.createElement('div');
+    note.className = 'dl-test-data-note';
+    note.textContent = text;
+    node.appendChild(note);
+}
+
+// DL не выдаёт данные теста, если он не выполнялся (ошибка компиляции) или
+// выдача запрещена настройками курса — в этом случае показываем пояснение.
+async function _fetchDlTestData(queueId, comment) {
+    try {
+        var response = await fetch('/ai/api/dl-test-data/', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
+            },
+            body: JSON.stringify({ queueId: queueId, comment: comment || '' })
+        });
+        var data = await response.json().catch(function () { return null; });
+        if (!response.ok || !data || data.ok !== true) return null;
+        return {
+            solved: data.solved === true,
+            tests: Array.isArray(data.tests) ? data.tests : []
+        };
+    } catch (error) {
+        console.error('DL test data error:', error);
+        return null;
+    }
+}
+
+async function _showDlTestData(queueId, comment, statusNode, verdictText) {
+    var result = await _fetchDlTestData(queueId, comment);
+    if (!result || result.solved) return;
+    if (statusNode && statusNode.isConnected) {
+        if (result.tests.length) {
+            _renderDlTestData(statusNode, result.tests);
+        } else {
+            _appendDlNote(statusNode, getUiString('dlTestUnavailable',
+                'DL не выдал данные теста — тест не выполнялся (например, ошибка компиляции) или выдача запрещена настройками курса.'));
+        }
+    }
+    // Данные теста переживают перезагрузку даже если узел уже оторван от DOM.
+    persistDlMessage(verdictText, result.tests);
 }
 
 async function _pollDlResult(queueId, statusNode) {
@@ -599,6 +726,9 @@ async function _pollDlResult(queueId, statusNode) {
                 }
                 _setDlMessageTextPersist(statusNode, verdictText);
                 _forgetQueue();
+                // Данные проваленного теста (входные/эталонные выходные).
+                // Решённое решение сервер отсекает без вызовов DL.
+                _showDlTestData(queueId, comment, statusNode, verdictText);
                 return;
             }
             // 401/403 (протухшая сессия) и 404 (решения нет в DL) — ждать
@@ -671,7 +801,11 @@ async function testOnDl() {
                 nodeId: nodeId,
                 code: code,
                 progLanguageId: langId,
-                progLanguageName: langName
+                progLanguageName: langName,
+                // Подписанное имя файла в DL: <модель>_<задача>.<ext>
+                // (сервер строит его сам, если эти поля пусты).
+                modelKey: selectedModelKey(),
+                modelTitle: selectedModelTitle()
             })
         });
         var data = await response.json().catch(function () { return null; });
@@ -706,7 +840,8 @@ function _resumePendingDlPoll() {
     if (!queueId) return;
     if (_dlTestRunning) return; // параллельный ручной прогон уже идёт
     var dlNodes = document.querySelectorAll('#messages li[data-role="dl"]');
-    var content = dlNodes.length ? dlNodes[dlNodes.length - 1].querySelector('div') : null;
+    // Контейнер DL-сообщения — прямой дочерний div (внутри него уже вердикт).
+    var content = dlNodes.length ? dlNodes[dlNodes.length - 1].firstElementChild : null;
     if (!content) content = _appendDlMessage(getUiString('dlTesting', 'DL: тестирование…'));
     _pollDlResult(queueId, content);
 }

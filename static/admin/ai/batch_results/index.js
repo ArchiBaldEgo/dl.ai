@@ -615,7 +615,7 @@ window.ArmBatchResults = (function () {
     testDataEmptyEl.hidden = true;
     testDataEmptyEl.style.cssText = 'margin-top:2px; font-size:12px; color:#6b7280;';
     testDataEmptyEl.textContent =
-      'Входные/эталонные данные теста DL не выдал — тест не выполнялся (например, ошибка компиляции) или выдача запрещена настройками курса.';
+      'Входные/выходные данные теста DL не выдал — тест не выполнялся (например, ошибка компиляции) или выдача запрещена настройками курса.';
     colData.appendChild(testDataEmptyEl);
     var renderTestData = function (data) {
       // Записи без файлов пропускаем: DL мог подтвердить провал, но не
@@ -625,6 +625,11 @@ window.ArmBatchResults = (function () {
       });
       if (!entries.length) { testDataEl.hidden = true; return; }
       var parts = [];
+      // DL отдаёт CRLF ("1\r\n2\r\n"); старые строки БД тоже могут содержать
+      // \r — нормализуем при рендере, чтобы не было литерала «\r» в <pre>.
+      var normalizeNewlines = function (value) {
+        return String(value == null ? '' : value).replace(/\r\n?/g, '\n');
+      };
       entries.forEach(function (entry, index) {
         var heading = entry.test_number
           ? 'Данные проваленного теста № ' + escapeHtml(entry.test_number)
@@ -636,12 +641,12 @@ window.ArmBatchResults = (function () {
         if (entry.input) {
           parts.push('<div style="font-size:12px; color:#6b7280;">Входные данные'
             + (entry.input_truncated ? ' (начало)' : '') + ':</div>');
-          parts.push('<pre>' + escapeHtml(entry.input) + '</pre>');
+          parts.push('<pre>' + escapeHtml(normalizeNewlines(entry.input)) + '</pre>');
         }
         if (entry.expected_output) {
-          parts.push('<div style="font-size:12px; color:#6b7280;">Эталонный ответ'
+          parts.push('<div style="font-size:12px; color:#6b7280;">Выходные данные (эталон)'
             + (entry.expected_truncated ? ' (начало)' : '') + ':</div>');
-          parts.push('<pre>' + escapeHtml(entry.expected_output) + '</pre>');
+          parts.push('<pre>' + escapeHtml(normalizeNewlines(entry.expected_output)) + '</pre>');
         }
       });
       testDataEl.innerHTML = parts.join('');

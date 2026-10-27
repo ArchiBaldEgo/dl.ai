@@ -2,14 +2,17 @@
 {# Панель «Мои AI-модели» — общий partial для админской (/ai/admin/user-models/) #}
 {# и клиентской (/ai/my-models/) страниц. Разметка ОДНА, тексты — из t.*    #}
 {# (клиентская часть триязычна; админка отдаёт русский вариант).            #}
-{# URL создания/удаления — в data-атрибутах контейнера (у страниц разные). #}
+{# URL создания/удаления/доступа/поиска — в data-атрибутах контейнера.      #}
 <div class="ai-um-wrap"
      data-create-url="{{ create_url }}"
-     data-delete-url="{{ delete_url }}">
+     data-delete-url="{{ delete_url }}"
+     data-access-url="{{ access_url }}"
+     data-search-url="{{ search_url }}">
   {# Данные для JS (правка строки, дефолтный base_url провайдера) — через #}
   {# json_script, а не инлайн-подстановка в <script> (CLAUDE.md).            #}
   {{ provider_base_urls|json_script:"ai-um-provider-urls" }}
   {{ user_models|json_script:"ai-um-rows" }}
+  {% if all_models %}{{ all_models|json_script:"ai-um-all-rows" }}{% endif %}
   {# Все языки панели — для переключения языка на клиенте (JS-апплаер    #}
   {# перерисовывает подписи при смене #selectLang). Начальная отрисовка #}
   {# — серверная, текущим языком (t.*).                                #}
@@ -52,6 +55,20 @@
       <label class="ai-um-check"><input type="checkbox" name="supports_vision"> {{ t.checkVision }}</label>
       <label class="ai-um-check"><input type="checkbox" name="supports_think"> {{ t.checkThink }}</label>
       <label class="ai-um-check"><input type="checkbox" name="is_active" checked> {{ t.checkActive }}</label>
+      <label class="ai-um-check"><input type="checkbox" name="is_public" id="ai-um-public"> <span id="ai-um-public-label">{{ t.checkPublic }}</span></label>
+    </div>
+    {# Предупреждение о публичности: показывается только при включённом  #}
+    {# чекбоксе (по умолчанию он ВЫКЛ — модель остаётся приватной).     #}
+    <div class="ai-um-public-warning" id="ai-um-public-warning" hidden>{{ t.publicWarning }}</div>
+    {# Адресный доступ: поиск получателя по DL-id/ФИО + чипы выбранных. #}
+    <div class="ai-um-share">
+      <label for="ai-um-share-search">{{ t.fieldShare }}</label>
+      <input type="search" id="ai-um-share-search" autocomplete="off"
+             placeholder="{{ t.shareSearchPlaceholder }}">
+      <div class="ai-um-share-results" id="ai-um-share-results" hidden></div>
+      <div class="ai-um-share-chips" id="ai-um-share-chips"></div>
+      <div class="ai-um-share-empty" id="ai-um-share-empty">{{ t.shareEmpty }}</div>
+      <div class="ai-um-share-hint" id="ai-um-share-hint" hidden></div>
     </div>
     <div class="ai-um-actions">
       <button type="submit" class="button default" id="ai-um-save">{{ t.btnSave }}</button>
@@ -61,7 +78,7 @@
   </form>
 
   <h3>{{ t.listTitle }}</h3>
-  <table class="ai-um-table">
+  <table class="ai-um-table" id="ai-um-table">
     <thead>
       <tr>
         <th scope="col">{{ t.colTitle }}</th>
@@ -70,6 +87,7 @@
         <th scope="col">{{ t.colUrl }}</th>
         <th scope="col">{{ t.colKey }}</th>
         <th scope="col">{{ t.colState }}</th>
+        <th scope="col">{{ t.colAccess }}</th>
         <th scope="col"></th>
       </tr>
     </thead>
@@ -82,14 +100,65 @@
           <td class="ai-um-mono ai-um-url">{{ model.base_url|default:"—" }}</td>
           <td data-has-key="{% if model.has_key %}1{% else %}0{% endif %}">{% if model.has_key %}{{ t.keySet }}{% else %}{{ t.keyNone }}{% endif %}</td>
           <td data-active="{% if model.is_active %}1{% else %}0{% endif %}">{% if model.is_active %}{{ t.stateOn }}{% else %}{{ t.stateOff }}{% endif %}</td>
+          <td class="ai-um-access" data-public="{% if model.is_public %}1{% else %}0{% endif %}" data-grants="{{ model.grants|length }}">{% if model.is_public %}{{ t.accessPublic }}{% elif model.grants %}{{ model.grants|length }} {{ t.accessUnit }}{% else %}{{ t.accessPrivate }}{% endif %}</td>
           <td class="ai-um-actions-cell">
             <button type="button" class="button ai-um-edit" data-id="{{ model.id }}">{{ t.btnEdit }}</button>
             <button type="button" class="button ai-um-delete" data-id="{{ model.id }}">{{ t.btnDelete }}</button>
           </td>
         </tr>
       {% empty %}
-        <tr><td colspan="7" class="ai-um-empty">{{ t.empty }}</td></tr>
+        <tr><td colspan="8" class="ai-um-empty">{{ t.empty }}</td></tr>
       {% endfor %}
     </tbody>
   </table>
+
+  {% if all_models %}
+    {# Таблица «Все модели» — ТОЛЬКО суперюзеру. Управление ограничено  #}
+    {# доступом: адреса, ключи и настройки чужих моделей не показываются. #}
+    <h3 class="ai-um-all-title">{{ t.allModelsTitle }}</h3>
+    <p class="ai-um-intro" id="ai-um-all-intro">{{ t.allModelsIntro }}</p>
+    <table class="ai-um-table ai-um-all-models" id="ai-um-all-models">
+      <thead>
+        <tr>
+          <th scope="col">{{ t.colTitle }}</th>
+          <th scope="col">{{ t.colOwner }}</th>
+          <th scope="col">{{ t.colAccess }}</th>
+          <th scope="col">{{ t.colState }}</th>
+          <th scope="col">{{ t.colManage }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for model in all_models %}
+          <tr data-id="{{ model.id }}">
+            <td class="ai-um-title">{{ model.title }}</td>
+            <td>{{ model.owner_display }}{% if model.owner_dl_id %} <span class="ai-um-mono">[{{ model.owner_dl_id }}]</span>{% endif %}</td>
+            <td class="ai-um-access" data-public="{% if model.is_public %}1{% else %}0{% endif %}" data-grants="{{ model.grants|length }}">{% if model.is_public %}{{ t.accessPublic }}{% elif model.grants %}{{ model.grants|length }} {{ t.accessUnit }}{% else %}{{ t.accessPrivate }}{% endif %}</td>
+            <td data-active="{% if model.is_active %}1{% else %}0{% endif %}">{% if model.is_active %}{{ t.stateOn }}{% else %}{{ t.stateOff }}{% endif %}</td>
+            <td class="ai-um-actions-cell">
+              <button type="button" class="button ai-um-access-edit" data-id="{{ model.id }}">{{ t.btnAccess }}</button>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="ai-um-access-panel" id="ai-um-access-panel" hidden>
+      <h4>{{ t.accessPanelTitle }}: <span id="ai-um-access-panel-title"></span></h4>
+      <label class="ai-um-check"><input type="checkbox" id="ai-um-access-public"> <span id="ai-um-access-public-label">{{ t.checkPublic }}</span></label>
+      <div class="ai-um-public-warning" id="ai-um-access-public-warning" hidden>{{ t.publicWarning }}</div>
+      <div class="ai-um-share">
+        <input type="search" id="ai-um-access-search" autocomplete="off"
+               placeholder="{{ t.shareSearchPlaceholder }}">
+        <div class="ai-um-share-results" id="ai-um-access-results" hidden></div>
+        <div class="ai-um-share-chips" id="ai-um-access-chips"></div>
+        <div class="ai-um-share-empty" id="ai-um-access-empty">{{ t.shareEmpty }}</div>
+        <div class="ai-um-share-hint" id="ai-um-access-hint" hidden></div>
+      </div>
+      <div class="ai-um-actions">
+        <button type="button" class="button default" id="ai-um-access-save">{{ t.btnSaveAccess }}</button>
+        <button type="button" class="button" id="ai-um-access-cancel">{{ t.btnCancel }}</button>
+        <span class="ai-um-message" id="ai-um-access-message"></span>
+      </div>
+    </div>
+  {% endif %}
 </div>

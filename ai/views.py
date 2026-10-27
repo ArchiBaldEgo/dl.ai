@@ -62,11 +62,16 @@ from .services.auth import ai_disabled_reason, can_use_ai, get_user_identity_for
 from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
 from .services.user_models import (
     PROVIDER_BASE_URLS,
+    admin_user_model_rows,
     delete_user_model,
+    public_user_model_options,
     save_user_model,
+    set_user_model_access,
+    shared_user_model_options,
     user_model_options,
     user_model_rows,
 )
+from .services.user_directory import search_users_for_sharing
 from .services.onboarding import (
     MARK_URL_USER,
     record_wizard_seen,
@@ -295,6 +300,42 @@ def _has_page_access(request):
     return bool(get_external_user_id_from_request(request))
 
 
+def _access_denied_reason(request) -> str:
+    """Почему доступ к приложению закрыт (для 403-ответов и страниц).
+
+    Пользователь должен видеть ПРИЧИНУ отказа, а не безликое «Authentication
+    required»: чаще всего это отсутствие входа через dl.gsu.by (браузер без
+    DLSID-куки), отключённая учётная запись или неподтверждённый внешний id.
+    """
+    user = getattr(request, "user", None)
+    if not user or not getattr(user, "is_authenticated", False):
+        return (
+            "Доступ закрыт: нет активной сессии. Войдите на dl.gsu.by и "
+            "откройте страницу DLAI заново."
+        )
+    if getattr(user, "is_active", True) is False:
+        return "Доступ закрыт: учётная запись отключена администратором."
+    return (
+        "Доступ закрыт: не удалось подтвердить пользователя dl.gsu.by "
+        "(браузер не передал DLSID). Войдите заново на dl.gsu.by."
+    )
+
+
+def _deny_access(request, *, as_json: bool = True):
+    """403 с причиной: JSON для API-эндпоинтов, текст для страниц.
+
+    ``Cache-Control: no-store`` — отказ не должен закэшироваться браузером:
+    иначе после повторного входа страница/API ещё долго получает старый 403.
+    """
+    reason = _access_denied_reason(request)
+    if as_json:
+        response = JsonResponse({"error": reason}, status=403)
+    else:
+        response = HttpResponseForbidden(reason)
+    response["Cache-Control"] = "no-store"
+    return response
+
+
 def _get_last_update_date():
     """Return the commit_date of the most recent UpdateLog entry, or None.
 
@@ -358,7 +399,7 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
     (ai_wizard → json_script в base_chat.html).
     """
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=False)
     if not _is_ai_app_enabled():
         return HttpResponseNotFound("AI app is disabled")
     # Гейт DL «canUseAi»: AI в текущем курсе запрещён → честная страница
@@ -429,10 +470,12 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         default_model_key = ""
     saved_state = _read_ai_state(request)
     external_session_id = request.session.get('external_session_id')
-    # Личные модели пользователя («Мои модели»): отдельная optgroup В САМОМ
-    # НИЗУ селектора. Видны ТОЛЬКО владельцу (ai/services/user_models.py) —
-    # чужие модели чужие.
-    user_models = user_model_options(request.user)
+    # Личные модели: три optgroup внизу селектора — свои («Мои модели»),
+    # адресно выданные («Доступные мне») и публичные. Приватные чужие модели
+    # не попадают ни в одну группу (ai/services/user_models.py).
+    user_models_options = user_model_options(request.user)
+    shared_user_models = shared_user_model_options(request.user)
+    public_user_models = public_user_model_options(request.user)
     # Клиентские строки трёхъязычного UI (ai/i18n.client_strings): язык — тот
     # же, что у #selectLang (ai_state cookie, «Русский» по умолчанию). JS
     # перелокализует DOM при каждой смене языка сам; серверный словарь нужен
@@ -442,7 +485,9 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         'favorite_models': favorite_models,
         'other_models': other_models,
         'experimental_models': experimental_models,
-        'user_models': user_models,
+        'user_models_options': user_models_options,
+        'shared_user_models': shared_user_models,
+        'public_user_models': public_user_models,
         'default_model_key': default_model_key,
         'external_session_id': external_session_id,
         'last_update_date': _get_last_update_date(),
@@ -485,7 +530,7 @@ def ai_root_view(request):
     from django.shortcuts import redirect
 
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=False)
     tab_map = {
         "solve": "/ai/solve-problem/",
         "find_error": "/ai/find-error/",
@@ -660,18 +705,30 @@ def find_error_view(request):
 def my_models_view(request):
     """Клиентская страница «Мои AI-модели»: список + форма добавления."""
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=False)
     if not _is_ai_app_enabled():
         return HttpResponseNotFound("AI app is disabled")
     ui_lang = _read_ai_state(request).get("lang") or ""
+    # Строки таблицы панели — ``user_models``; селектор моделей страницы —
+    # ``user_models_options`` (раньше оба звались ``user_models``, из-за чего
+    # optgroup рендерился с пустыми value — строки таблицы не опции селектора).
     return render(
         request,
         "ai/my_models.html",
         {
             "user_models": user_model_rows(request.user),
+            "user_models_options": user_model_options(request.user),
+            "shared_user_models": shared_user_model_options(request.user),
+            "public_user_models": public_user_model_options(request.user),
+            # Таблица «Все модели» — только реальному суперюзеру («Посмотреть
+            # как…» её не показывает: эмуляция честная).
+            "all_models": admin_user_model_rows() if is_superuser_user(request.user) else None,
             "provider_choices": AIUserModel.PROVIDER_CHOICES,
             "provider_base_urls": PROVIDER_BASE_URLS,
-            "t": user_models_strings(ui_lang),
+            # base_chat.html (шапка/селектор) читает t.* из client_strings,
+            # панель — из user_models_strings; панельные ключи не конфликтуют
+            # с клиентскими (title/intro панели в шапке не используются).
+            "t": {**client_strings(ui_lang), **user_models_strings(ui_lang)},
             # Все языки панели — для переключения языка на клиенте
             # (JS-апплаер перерисовывает подписи при смене #selectLang).
             "um_i18n": user_models_strings_all(),
@@ -683,7 +740,7 @@ def my_models_view(request):
 def my_model_save_view(request):
     """Создать/обновить СВОЮ личную модель (клиентская страница)."""
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
     try:
         payload = json.loads(request.body or b"{}")
     except json.JSONDecodeError:
@@ -701,7 +758,7 @@ def my_model_save_view(request):
 def my_model_delete_view(request):
     """Удалить СВОЮ личную модель (клиентская страница)."""
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
     try:
         payload = json.loads(request.body or b"{}")
     except json.JSONDecodeError:
@@ -714,6 +771,43 @@ def my_model_delete_view(request):
 
 
 @require_http_methods(["POST"])
+def my_model_access_view(request):
+    """Изменить доступ к модели (клиентская страница): владелец/суперюзер.
+
+    Тело — ``{id, is_public, shared_with: [id…]}``. Меняются ТОЛЬКО эти два
+    поля: конфигурация и ключи модели этой операцией не трогаются.
+    """
+    if not _has_page_access(request):
+        return _deny_access(request, as_json=True)
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"ok": False, "message": "Некорректный запрос"}, status=400)
+    if not isinstance(payload, dict):
+        return JsonResponse({"ok": False, "message": "Некорректный запрос"}, status=400)
+    ok, message = set_user_model_access(
+        request.user, payload.get("id"), payload.get("is_public"),
+        payload.get("shared_with"),
+    )
+    if not ok:
+        status = 404 if message == "Модель не найдена" else 400
+        return JsonResponse({"ok": False, "message": message}, status=status)
+    return JsonResponse({"ok": True})
+
+
+@require_http_methods(["GET"])
+def my_model_search_users_view(request):
+    """Поиск получателей доступа по DL-id (точно) или ФИО/логину.
+
+    Ответ — только ``{id, display, dl_id}``: без email, групп и прав.
+    """
+    if not _has_page_access(request):
+        return _deny_access(request, as_json=True)
+    users = search_users_for_sharing(request.GET.get("q", ""), request.user)
+    return JsonResponse({"ok": True, "users": users})
+
+
+@require_http_methods(["POST"])
 def wizard_seen_view(request):
     """Отметка «онбординг-wizard закрыт» с клиентских страниц (ai-wizard.js).
 
@@ -722,7 +816,7 @@ def wizard_seen_view(request):
     дубликат. Без @rate_limited: RateLimitMiddleware уже покрывает /ai/.
     """
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
     scope = scope_from_request_body(request.body)
     if scope is None:
         return JsonResponse({"ok": False, "error": "bad_scope"}, status=400)
@@ -733,7 +827,7 @@ def wizard_seen_view(request):
 def get_languages(request):
     """API: возвращает список всех языков программирования."""
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
     languages = [
         serialize_programming_language(lang)
         for lang in ProgrammingLanguage.objects.order_by('language_name')
@@ -744,7 +838,7 @@ def get_languages(request):
 def get_topics(request):
     """API: возвращает список всех тем с локализованными названиями."""
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
     ui_language = request.GET.get('ui_language', 'Русский')
     topics = [
         serialize_topic(topic, ui_language)
@@ -756,7 +850,7 @@ def get_topics(request):
 def get_prompts(request):
     """API: возвращает список промптов, доступных текущему пользователю."""
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
 
     ui_language = request.GET.get('ui_language', 'Русский')
     prompts = [
@@ -769,7 +863,7 @@ def get_prompts(request):
 def get_shared_prompts(request):
     """Возвращает общие (shared) промпты с привязкой к языкам."""
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
 
     ui_language = request.GET.get('ui_language', 'Русский')
     language_id = request.GET.get('language_id')
@@ -791,7 +885,7 @@ def get_shared_prompts(request):
 def get_problem_data(request):
     """Возвращает языки, темы, промпты и общие промпты одним запросом."""
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
 
     ui_language = request.GET.get('ui_language', 'Русский')
 
@@ -832,7 +926,7 @@ def get_model_stats_view(request):
     («ничего»), фолбэков между скоупами нет.
     """
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
 
     try:
         language_id = int(request.GET.get("progLng") or "")
@@ -877,7 +971,7 @@ def asset_view(request, asset_path):
     тела рисует пустой ресурс.
     """
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=False)
     asset_full_path = finders.find(asset_path)
     if not asset_full_path or not os.path.isfile(asset_full_path):
         raise Http404("Asset not found")
@@ -924,7 +1018,7 @@ def get_task_info_view(request):
         removeHtmlTags (bool, default True): strip HTML from texts.
     """
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
 
     try:
         node_id = int(request.GET.get("nodeId", ""))
@@ -1059,7 +1153,7 @@ def get_task_solution_view(request):
         sessionId (str, optional): DL session id; falls back to request session/cookie.
     """
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
 
     try:
         body = json.loads(request.body or "{}")
@@ -1104,10 +1198,14 @@ def send_solution_view(request):
             («Реши задачу»); расширение резолвится через _guess_extension.
         progLanguageId (int, optional): fallback — id ProgrammingLanguage, имя
             берётся из БД, затем то же _guess_extension.
+        modelKey (str, optional): модель, сгенерировавшая код, — для
+            подписанного имени файла ``<модель>_<задача>.<ext>``.
+        fileName (str, optional): имя файла; если не задано — строится из
+            modelKey (или последней модели решения) и nodeId.
         sessionId (str, optional): falls back to session/cookie.
     """
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
     # Гейт DL «canUseAi»: AI в текущем курсе запрещён → отправка решения
     # на проверку бессмысленна (пользователь не сможет и сгенерировать код).
     disabled_reason = _ai_disabled_reason(request)
@@ -1183,6 +1281,24 @@ def send_solution_view(request):
     # Имя временного файла решения (контракт DL v1.4.2, SendSolutionRequest.fileName)
     # и машина проверки (delta) — необязательные, приходят из тела.
     file_name = str(body.get("fileName") or "").strip()[:200]
+    if not file_name:
+        # Подписанное имя по умолчанию — ``<модель>_<задача>.<ext>``:
+        # в DL сразу видно, чья это попытка и по какой задаче. Модель — из
+        # тела (клиент знает выбранную в селекторе), иначе из последней
+        # генерации решения для узла; чистка/транслитерация — build_dl_file_name.
+        model_label = str(body.get("modelTitle") or "").strip()[:200]
+        if not model_label:
+            model_key = str(body.get("modelKey") or "").strip()
+            if model_key:
+                from .model_clients.registry import registry
+                entry = registry.get(model_key) or {}
+                model_label = entry.get("title") or model_key
+        if not model_label:
+            from .services.solution_cache import last_solve_model
+            _key, model_label = last_solve_model(node_id)
+        model_label = model_label or "dlai"
+        from .dl_api_client import build_dl_file_name
+        file_name = build_dl_file_name(f"{model_label}_{node_id}", file_extension) or ""
     delta = str(body.get("delta") or "").strip()[:255]
 
     try:
@@ -1242,7 +1358,7 @@ def get_solution_result_view(request):
         sessionId (str, optional): falls back to session/cookie.
     """
     if not _has_page_access(request):
-        return HttpResponseForbidden("Authentication required")
+        return _deny_access(request, as_json=True)
     # Тот же гейт DL «canUseAi», что и на отправке: опрос результата
     # проверки решения — часть AI-сценария.
     disabled_reason = _ai_disabled_reason(request)
@@ -1284,6 +1400,64 @@ def get_solution_result_view(request):
             logger.exception("Failed to record solution result for queue %s", queue_id)
 
     return JsonResponse(data)
+
+
+@require_http_methods(["POST"])
+def get_dl_test_data_view(request):
+    """Входные/эталонные данные проваленного теста DL (ручная проверка).
+
+    Request body (JSON):
+        queueId (int, required): id, полученный от send-solution.
+        comment (str, optional): вердикт DL; если он «решено», в DL не ходим
+            (незачем запрашивать данные у успешного решения).
+        sessionId (str, optional): falls back to session/cookie.
+
+    Данные теста — необязательное дополнение к отчёту: отказ/сбой DL не
+    поднимается наружу, отдаётся пустой список. Фронтенд рисует блоки
+    «Входные данные» / «Выходные данные (эталон)».
+    """
+    if not _has_page_access(request):
+        return _deny_access(request, as_json=True)
+    disabled_reason = _ai_disabled_reason(request)
+    if disabled_reason:
+        return JsonResponse({"error": disabled_reason}, status=403)
+
+    try:
+        body = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Некорректный JSON"}, status=400)
+    if not isinstance(body, dict):
+        return JsonResponse({"error": "Некорректный JSON"}, status=400)
+
+    try:
+        queue_id = int(body.get("queueId"))
+    except (ValueError, TypeError):
+        return JsonResponse(
+            {"error": "queueId обязателен и должен быть числом"}, status=400,
+        )
+
+    from .dl_api_client import DL_VERDICT_SOLVED, dl_verdict_from_comment
+
+    comment = str(body.get("comment") or "").strip()
+    if comment and dl_verdict_from_comment(comment) == DL_VERDICT_SOLVED:
+        return JsonResponse({"ok": True, "solved": True, "tests": []})
+
+    session_id = str(body.get("sessionId") or "").strip()
+    if not session_id:
+        session_id = request.session.get("external_session_id", "").strip()
+    if not session_id:
+        session_id = resolve_dl_session_id(request)
+    if not session_id:
+        return JsonResponse({"error": "sessionId обязателен"}, status=400)
+
+    from .services.dl_test_data import fetch_failed_test_data
+
+    try:
+        tests = fetch_failed_test_data(session_id, queue_id, comment)
+    except Exception:  # noqa: BLE001 — данные теста не обязательны
+        logger.exception("Не удалось получить данные теста DL (queue %s)", queue_id)
+        tests = []
+    return JsonResponse({"ok": True, "solved": False, "tests": tests})
 
 
 @prompt_developer_access_required
@@ -1372,7 +1546,9 @@ def chat_user_docs_view(request):
     ответ несёт lang и fingerprint (mtime, size) для поллинга изменений.
     """
     if not _has_page_access(request):
-        return JsonResponse({'success': False, 'error': 'forbidden'}, status=403)
+        return JsonResponse(
+            {'success': False, 'error': _access_denied_reason(request)}, status=403,
+        )
     lang = get_ui_language_suffix(request.GET.get('lang', ''))
     try:
         rendered = render_chapter_html("user", lang=lang)
@@ -1393,7 +1569,9 @@ def chat_user_docs_view(request):
 def chat_user_docs_download_view(request):
     """Скачивание инструкции пользователя как .md-файла (с учётом ?lang=)."""
     if not _has_page_access(request):
-        return JsonResponse({'success': False, 'error': 'forbidden'}, status=403)
+        return JsonResponse(
+            {'success': False, 'error': _access_denied_reason(request)}, status=403,
+        )
     lang = get_ui_language_suffix(request.GET.get('lang', ''))
     try:
         data = read_chapter_markdown("user", lang=lang)

@@ -1,8 +1,10 @@
 """Личные AI-модели пользователя: учёт, безопасность, вызов.
 
 Владелец: пользователь приносит СВОЮ модель (провайдер + ID модели + свой
-ключ). Модель доступна ТОЛЬКО ему: чужие её не видят (селектор), не могут
-вызвать (проверка владельца) и не могут отредактировать.
+ключ). По умолчанию модель доступна ТОЛЬКО ему: чужие её не видят
+(селектор), не могут вызвать (проверка доступа) и не могут отредактировать.
+Владелец может дать доступ адресно (``shared_with``) или всем
+(``is_public``) — только на пользовательских страницах, не в ARM.
 
 БЕЗОПАСНОСТЬ (владелец отдельно потребовал «защиту от атак»):
 
@@ -39,6 +41,7 @@ import socket
 from urllib.parse import urlparse
 
 import httpx
+from django.db.models import Q
 
 from ..constants import MOSCOW_TZ  # noqa: F401  (единый источник TZ проекта)
 
@@ -296,25 +299,94 @@ def user_models_for(user) -> list:
     )
 
 
+def _option(model, access: str) -> dict:
+    """Опция модели для селектора (JSON для фронта)."""
+    return {
+        "key": f"User_{model.pk}",
+        "title": model.title,
+        "model_id": model.model_id,
+        "provider": model.provider,
+        "supports_vision": bool(model.supports_vision),
+        "supports_think": bool(model.supports_think),
+        "access": access,
+    }
+
+
+def _owner_suffix_title(model) -> str:
+    """«Название — владелец»: одинаковые названия у разных людей различимы."""
+    from .user_directory import display_name_for_user
+
+    owner = display_name_for_user(model.user)
+    return f"{model.title} — {owner}" if owner else model.title
+
+
 def user_model_options(user) -> list:
     """Опции личных моделей для селектора (JSON для фронта)."""
+    return [_option(model, "owner") for model in user_models_for(user)]
+
+
+def shared_user_models_for(user) -> list:
+    """Активные модели, доступ к которым выдан этому пользователю лично."""
+    from ..models import AIUserModel
+
+    if not user or not getattr(user, "is_authenticated", False):
+        return []
+    if not hasattr(user, "_meta") or not isinstance(getattr(user, "pk", None), int):
+        return []
+    return list(
+        AIUserModel.objects.filter(
+            shared_with=user, is_active=True, user__is_active=True,
+        )
+        .exclude(user=user)
+        .select_related("user", "user__external_dl_account")
+        .order_by("title")
+        .distinct()
+    )
+
+
+def public_user_models_for(user) -> list:
+    """Публичные модели ДРУГИХ пользователей (не свои, не уже выданные)."""
+    from ..models import AIUserModel
+
+    if not user or not getattr(user, "is_authenticated", False):
+        return []
+    if not hasattr(user, "_meta") or not isinstance(getattr(user, "pk", None), int):
+        return []
+    return list(
+        AIUserModel.objects.filter(
+            is_public=True, is_active=True, user__is_active=True,
+        )
+        .exclude(user=user)
+        .exclude(shared_with=user)
+        .select_related("user", "user__external_dl_account")
+        .order_by("title")
+        .distinct()
+    )
+
+
+def shared_user_model_options(user) -> list:
+    """Опции «Доступные мне» (грант владельца)."""
     return [
-        {
-            "key": f"User_{model.pk}",
-            "title": model.title,
-            "model_id": model.model_id,
-            "provider": model.provider,
-            "supports_vision": bool(model.supports_vision),
-            "supports_think": bool(model.supports_think),
-        }
-        for model in user_models_for(user)
+        {**_option(model, "shared"), "title": _owner_suffix_title(model)}
+        for model in shared_user_models_for(user)
+    ]
+
+
+def public_user_model_options(user) -> list:
+    """Опции «Публичные» (владелец открыл модель всем)."""
+    return [
+        {**_option(model, "public"), "title": _owner_suffix_title(model)}
+        for model in public_user_models_for(user)
     ]
 
 
 def find_user_model(user, model_key: str):
-    """Найти ЛИЧНУЮ модель пользователя по ключу ``User_<pk>``.
+    """Найти ЛИЧНУЮ модель по ключу ``User_<pk>`` с учётом доступа.
 
-    Владелец проверяется ЗДЕСЯ: чужой ключ → None (вызов не состоится).
+    Доступна владельцу, получателю гранта и любому пользователю, если
+    владелец сделал модель публичной. Приватная чужая модель → None
+    (существование записи не подтверждаем). Выключенная модель или
+    выключенный владелец — тоже None.
     """
     from ..models import AIUserModel
 
@@ -327,7 +399,14 @@ def find_user_model(user, model_key: str):
     if not raw_id.isdigit():
         return None
     return (
-        AIUserModel.objects.filter(pk=int(raw_id), user=user, is_active=True).first()
+        AIUserModel.objects.filter(pk=int(raw_id), is_active=True)
+        .filter(
+            Q(user=user)
+            | Q(user__is_active=True, is_public=True)
+            | Q(user__is_active=True, shared_with=user)
+        )
+        .distinct()
+        .first()
     )
 
 
@@ -346,12 +425,23 @@ DEFAULT_MAX_TOKENS = 8000
 MIN_MAX_TOKENS = 256
 MAX_MAX_TOKENS = 200000
 
+#: Потолок числа получателей доступа на одну модель: список доступа — не
+#: рассылка на весь поток, а адресная выдача нескольким людям.
+MAX_SHARED_USERS = 100
+
 
 def clean_user_text(value, limit):
     """Обрезать и убрать управляющие символы из пользовательского ввода."""
     text = (value or "").strip()
     text = "".join(ch for ch in text if ch == "\n" or ch == "\t" or ord(ch) >= 32)
     return text[:limit]
+
+
+def _grant_rows(model) -> list:
+    """Кому выдан доступ: ``[{id, display, dl_id}]`` (без email/прав)."""
+    from .user_directory import user_brief
+
+    return [user_brief(grantee) for grantee in model.shared_with.all()]
 
 
 def user_model_rows(user) -> list:
@@ -361,7 +451,12 @@ def user_model_rows(user) -> list:
     if not user or not getattr(user, "is_authenticated", False):
         return []
     rows = []
-    for model in AIUserModel.objects.filter(user=user).order_by("title"):
+    models = (
+        AIUserModel.objects.filter(user=user)
+        .prefetch_related("shared_with", "shared_with__external_dl_account")
+        .order_by("title")
+    )
+    for model in models:
         rows.append({
             "id": model.pk,
             "title": model.title,
@@ -373,11 +468,83 @@ def user_model_rows(user) -> list:
             "supports_vision": model.supports_vision,
             "supports_think": model.supports_think,
             "is_active": model.is_active,
+            "is_public": model.is_public,
+            "grants": _grant_rows(model),
             "has_key": bool(model.api_key_encrypted),
             "created_at": model.created_at,
             "updated_at": model.updated_at,
         })
     return rows
+
+
+def admin_user_model_rows() -> list:
+    """Все личные модели для суперюзерской таблицы «Все модели».
+
+    Только идентичность и доступ: НИКАКИХ base_url/api_key/model_id/
+    max_tokens/supports_* — суперюзер управляет доступом, но не читает
+    чужие настройки и ключи.
+    """
+    from ..models import AIUserModel
+    from .user_directory import display_name_for_user, dl_id_for_user
+
+    rows = []
+    models = (
+        AIUserModel.objects.select_related("user", "user__external_dl_account")
+        .prefetch_related("shared_with", "shared_with__external_dl_account")
+        .order_by("title")
+    )
+    for model in models:
+        rows.append({
+            "id": model.pk,
+            "title": model.title,
+            "owner_display": display_name_for_user(model.user),
+            "owner_dl_id": dl_id_for_user(model.user),
+            "is_public": model.is_public,
+            "is_active": model.is_active,
+            "grants": _grant_rows(model),
+        })
+    return rows
+
+
+def _coerce_bool(value, default: bool = False) -> bool:
+    """Булево из JSON: строка ``"false"`` не должна включать публичность."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "on", "yes", "да")
+    return bool(value)
+
+
+def _resolve_share_users(owner, raw_ids) -> tuple:
+    """Нормализовать список id получателей: ``(users, error)``.
+
+    Не-int значения молча отбрасываются, дубли схлопываются, неактивные и
+    сам владелец исключаются, список обрезается до ``MAX_SHARED_USERS``.
+    """
+    from django.contrib.auth import get_user_model
+
+    if raw_ids is None:
+        return None, ""
+    if not isinstance(raw_ids, (list, tuple)):
+        return None, "Некорректный список получателей доступа"
+    ids = []
+    for value in raw_ids:
+        try:
+            pk = int(value)
+        except (TypeError, ValueError):
+            continue
+        if pk > 0 and pk not in ids:
+            ids.append(pk)
+    ids = ids[:MAX_SHARED_USERS]
+    if not ids:
+        return [], ""
+    users = list(
+        get_user_model().objects.filter(pk__in=ids, is_active=True)
+        .exclude(pk=getattr(owner, "pk", None))
+    )
+    return users, ""
 
 
 def save_user_model(user, payload: dict) -> tuple:
@@ -388,7 +555,9 @@ def save_user_model(user, payload: dict) -> tuple:
 
     ``payload`` — словарь с полями: id, title, provider, model_id,
     base_url, api_key, max_tokens, supports_vision, supports_think,
-    is_active.
+    is_active, is_public, shared_with (список id получателей). Поля доступа
+    необязательны: если их НЕ передали, текущий доступ не трогаем (старые
+    клиенты и тесты продолжают работать).
     """
     from ..models import AIUserModel
 
@@ -433,6 +602,13 @@ def save_user_model(user, payload: dict) -> tuple:
         max_tokens = DEFAULT_MAX_TOKENS
     max_tokens = max(MIN_MAX_TOKENS, min(max_tokens, MAX_MAX_TOKENS))
 
+    # Доступ валидируется ДО save(): ошибка не должна оставлять
+    # полусозданную запись. ``None`` = поле не передано, значение не меняем.
+    wants_public = payload.get("is_public")
+    share_users, share_error = _resolve_share_users(user, payload.get("shared_with"))
+    if share_error:
+        return False, share_error, None
+
     model_pk = payload.get("id")
     if model_pk:
         try:
@@ -457,8 +633,59 @@ def save_user_model(user, payload: dict) -> tuple:
     instance.supports_vision = bool(payload.get("supports_vision"))
     instance.supports_think = bool(payload.get("supports_think"))
     instance.is_active = bool(payload.get("is_active", True))
+    if wants_public is not None:
+        instance.is_public = _coerce_bool(wants_public)
     instance.save()
+    if share_users is not None:
+        instance.shared_with.set(share_users)
     return True, "", instance.pk
+
+
+def set_user_model_access(actor, model_pk, is_public, shared_with_ids) -> tuple:
+    """Изменить ТОЛЬКО доступ к модели: публичность и список получателей.
+
+    Разрешено владельцу и реальному суперюзеру (режим «Посмотреть как…» —
+    нет). Конфигурация модели (название, провайдер, URL, ключ, настройки)
+    этой операцией не меняется НИКОГДА: суперюзер управляет доступом, но не
+    читает и не правит чужие ключи.
+
+    Возвращает ``(ok, message)``; чужая приватная модель для не-суперюзера
+    — «Модель не найдена» (существование не подтверждаем).
+    """
+    from ..models import AIUserModel
+
+    if not actor or not getattr(actor, "is_authenticated", False):
+        return False, "Access denied"
+    try:
+        model_pk = int(model_pk or 0)
+    except (TypeError, ValueError):
+        return False, "Некорректный идентификатор"
+    if model_pk <= 0:
+        return False, "Некорректный идентификатор"
+
+    instance = AIUserModel.objects.filter(pk=model_pk).first()
+    if instance is None:
+        return False, "Модель не найдена"
+
+    # Ленивый импорт: сервисы не должны тянуть admin на загрузке модуля.
+    from ..admin.permissions import is_superuser_user
+
+    is_owner = instance.user_id == getattr(actor, "pk", None)
+    if not is_owner and not is_superuser_user(actor):
+        return False, "Модель не найдена"
+
+    share_users, share_error = _resolve_share_users(instance.user, shared_with_ids)
+    if share_error:
+        return False, share_error
+
+    # ``None`` = поле не передано → не трогаем соответствующую настройку
+    # (запрос «только публичность» не должен молча снимать все гранты).
+    if is_public is not None:
+        instance.is_public = _coerce_bool(is_public)
+        instance.save(update_fields=["is_public", "updated_at"])
+    if share_users is not None:
+        instance.shared_with.set(share_users)
+    return True, ""
 
 
 def delete_user_model(user, model_pk) -> tuple:

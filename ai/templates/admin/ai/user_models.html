@@ -8,14 +8,14 @@
 
 {% block extrastyle %}
   {{ block.super }}
-  <link rel="stylesheet" href="{% static 'admin/ai/user_models/index.css' %}">
+  <link rel="stylesheet" href="{% static 'admin/ai/user_models/index.css' %}?v=3">
 {% endblock %}
 
 {% block content %}
-  {% include "ai/_user_models_panel.html" with create_url="/ai/admin/user-models/create/" delete_url="/ai/admin/user-models/delete/" %}
+  {% include "ai/_user_models_panel.html" with create_url="/ai/admin/user-models/create/" delete_url="/ai/admin/user-models/delete/" access_url="/ai/admin/user-models/access/" search_url="/ai/admin/user-models/search-users/" %}
 {% endblock %}
 
 {% block extrahead %}
   {{ block.super }}
-  <script src="{% static 'admin/ai/user_models/index.js' %}" defer></script>
+  <script src="{% static 'admin/ai/user_models/index.js' %}?v=3" defer></script>
 {% endblock %}
