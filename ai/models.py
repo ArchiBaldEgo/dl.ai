@@ -1503,9 +1503,12 @@ class AIUserModel(models.Model):
     """Личная AI-модель пользователя (провайдер + модель + свои ключи).
 
     Пользователь сам приносит провайдера и модель (OpenAI-совместимый
-    endpoint). Модель доступна ТОЛЬКО ему: чужие пользователи её не видят
-    (селектор моделей), не могут вызвать (проверка владельца в
-    ai/services/user_models.py) и не могут отредактировать.
+    endpoint). По умолчанию модель доступна ТОЛЬКО владельцу: чужие
+    пользователи её не видят (селектор моделей), не могут вызвать (проверка
+    доступа в ai/services/user_models.py) и не могут отредактировать.
+    Владелец может открыть доступ адресно (``shared_with``) или всем
+    пользователям сразу (``is_public``) — но только на пользовательских
+    страницах, не в ARM.
 
     Безопасность:
     - ``base_url`` — только https, без приватных/локальных адресов (SSRF-защита
@@ -1559,6 +1562,18 @@ class AIUserModel(models.Model):
     supports_vision = models.BooleanField(default=False, verbose_name="Умеет картинки")
     supports_think = models.BooleanField(default=False, verbose_name="Умеет think")
     is_active = models.BooleanField(default=True, verbose_name="Активна")
+    is_public = models.BooleanField(
+        default=False,
+        verbose_name="Доступна всем",
+        help_text="Видна и доступна всем пользователям на страницах чата, "
+                  "«Реши задачу» и «В чём ошибка?» (в ARM не попадает).",
+    )
+    shared_with = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        related_name="ai_shared_user_models",
+        verbose_name="Пользователи с доступом",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Добавлена")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменена")
 

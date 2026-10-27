@@ -30,7 +30,7 @@ from ..arm_runner import (
     start_batch_rerun_pairs,
     start_batch_solve_run,
 )
-from ..arm_runner import _fetch_failed_test_data, parse_dl_test_data
+from ..services.dl_test_data import fetch_failed_test_data, parse_dl_test_data
 from ..dl_api_client import dl_failed_test_number_from_comment
 from ..model_health import (
     get_arm_solve_model_options,
@@ -897,7 +897,7 @@ def admin_arm_solve_result_body_view(request, result_id):
         session_id = _resolve_session_id(request)
         if session_id:
             try:
-                fetched = _fetch_failed_test_data(
+                fetched = fetch_failed_test_data(
                     session_id, result.dl_queue_id, result.dl_comment or "",
                 )
             except Exception:  # noqa: BLE001 — данные теста не обязательны

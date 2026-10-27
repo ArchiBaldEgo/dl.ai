@@ -9,11 +9,14 @@
 то есть endpoint провайдера должен быть доступен из сети университета без
 обхода ограничений.
 
-Доступность — ТОЛЬКО владельцу:
-* список показывает только его модели (запрос фильтруется по ``user``);
+Доступность: по умолчанию только владельцу.
+* список «Мои модели» показывает только его записи (фильтр по ``user``);
 * правка/удаление — только своей записи (владелец проверяется по pk);
-* вызов чужой модели невозможен: ключ ``User_<pk>`` резолвится только
-  владельцем (ai/services/user_models.py::find_user_model).
+* владелец может открыть модель адресно (``shared_with``) или всем
+  (``is_public``) — но только на пользовательских страницах, не в ARM;
+* суперюзер видит таблицу «Все модели» и меняет ТОЛЬКО доступ
+  (публичность/список получателей) — чужие URL/ключи/настройки не читает
+  и не меняет (ai/services/user_models.py::set_user_model_access).
 
 Безопасность ввода (владелец отдельно потребовал «защиту от атак»):
 * ``base_url`` — только https, без приватных/локальных/линковых адресов,
@@ -32,17 +35,20 @@ import json
 
 from django.http import HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_GET, require_POST
 
 from ..i18n import user_models_strings, user_models_strings_all
 from ..models import AIUserModel
+from ..services.user_directory import search_users_for_sharing
 from ..services.user_models import (
     PROVIDER_BASE_URLS,
+    admin_user_model_rows,
     save_user_model,
     delete_user_model,
+    set_user_model_access,
     user_model_rows,
 )
-from .permissions import can_access_user_models
+from .permissions import can_access_user_models, is_superuser_user
 from .site import ai_admin_site
 
 #: URL страницы — из клиентского шаблона тоже (там админский путь).
@@ -66,6 +72,9 @@ def admin_user_models_view(request):
         **ai_admin_site.each_context(request),
         "title": "Мои AI-модели",
         "user_models": user_model_rows(request.user),
+        # Таблица «Все модели» — только реальному суперюзеру (режим
+        # «Посмотреть как…» её не показывает: эмуляция честная).
+        "all_models": admin_user_model_rows() if is_superuser_user(request.user) else None,
         "provider_choices": AIUserModel.PROVIDER_CHOICES,
         "provider_base_urls": PROVIDER_BASE_URLS,
         "can_edit": True,
@@ -118,3 +127,37 @@ def admin_user_model_delete_view(request):
         status = 404 if message == "Модель не найдена" else 400
         return _forbid(message, status=status)
     return JsonResponse({"ok": True})
+
+
+@require_POST
+def admin_user_model_access_view(request):
+    """Изменить доступ к модели (владелец или суперюзер): только доступ.
+
+    Тело — ``{id, is_public, shared_with: [id…]}``. Конфигурационные поля
+    (URL, ключ, провайдер, модель, лимиты) этой операцией не меняются.
+    """
+    if not can_access_user_models(request) or not request.user.is_authenticated:
+        return _forbid()
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return _forbid("Некорректный запрос", status=400)
+    if not isinstance(payload, dict):
+        return _forbid("Некорректный запрос", status=400)
+    ok, message = set_user_model_access(
+        request.user, payload.get("id"), payload.get("is_public"),
+        payload.get("shared_with"),
+    )
+    if not ok:
+        status = 404 if message == "Модель не найдена" else 400
+        return _forbid(message, status=status)
+    return JsonResponse({"ok": True})
+
+
+@require_GET
+def admin_user_model_search_users_view(request):
+    """Поиск получателей доступа (админка): DL-id точно или ФИО/логин."""
+    if not can_access_user_models(request) or not request.user.is_authenticated:
+        return _forbid()
+    users = search_users_for_sharing(request.GET.get("q", ""), request.user)
+    return JsonResponse({"ok": True, "users": users})

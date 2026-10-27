@@ -36,6 +36,7 @@ from .services.code_carver import (  # noqa: E402
     _looks_like_code,
     _looks_like_prose,
     _mid_prose_lines,
+    _scan_comment_spans,
     _strip_think_blocks,
     _trim_prose_tail,
     collapse_duplicated_asm_answer,
@@ -47,6 +48,7 @@ from django.utils.html import strip_tags
 from .model_clients.exceptions import humanize_model_error
 from .model_clients import is_output_truncated, get_no_think_handler
 from .services.task_registry import dl_path_folder, dl_task_url
+from .services.dl_test_data import fetch_failed_test_data, parse_dl_test_data
 from .i18n import get_ui_language_suffix
 from .model_health import get_runtime_model_handlers, is_arm_solve_model
 from .models import AIModelTestResult, AIModelTestRun, AIRequestLog, ArmPromptBinding, ExternalDLAccount, Task
@@ -1345,7 +1347,7 @@ _UNCLOSED_FENCE_RE = _re.compile(r"```[^\n]*\r?\n(.*)\Z", _re.DOTALL)
 
 # Функциональные слова EN/RU. Если их доля в тексте высока — это связная проза
 # (цепочка рассуждений модели), а не код. Ключевые слова Pascal/ассемблера
-def _carve_code_block(cleaned):
+def _carve_code_block(cleaned, ext=""):
     """Вырезать самый длинный непрерывный фрагмент кода из текста без оградок.
 
     Ответ вида «проза-вступление… \n код \n проза-заключение» целиком заваливает
@@ -1353,16 +1355,39 @@ def _carve_code_block(cleaned):
     строк (_line_is_code), допуская ≤2 подряд некодовых строк внутри (пустые
     строки, комментарии языка). Берём самое длинное окно и валидируем его
     существующими проверками: ≥2 кодовых строк, `_looks_like_code`, не проза.
+
+    Комментарии/строки (в т. ч. многострочные `/* … */`, докстринги, `{ … }`)
+    не считаются код-строками-анкерами, но и НЕ рвут прогон: зазор считается
+    только по строкам вне спанов, а окно расширяется на соседние строки
+    спана. Иначе длинный комментарий в начале программы сдвигал бы старт
+    окна, и `#include`/заголовок модуля терялись.
     """
     lines = [line for line in cleaned.splitlines() if line.strip()]
-    code_idx = [i for i, line in enumerate(lines) if _line_is_code(line)]
+    ext = (ext or "").strip().lower()
+    if ext:
+        scan = _scan_comment_spans(lines, ext)
+        judged = scan.blanked
+        span_lines = scan.span_lines
+    else:
+        judged = lines
+        span_lines = set()
+
+    code_idx = [
+        i for i, line in enumerate(judged)
+        if i not in span_lines and _line_is_code(line, ext)
+    ]
     if len(code_idx) < 2:
         return ""
+
+    def _gap(a, b):
+        # Некодовые строки МЕЖДУ a и b; строки спанов прозрачны.
+        return sum(1 for i in range(a + 1, b) if i not in span_lines)
+
     # Разбиваем индексы кодовых строк на прогоны с «зазором» ≤2 некодовых строк.
     runs = []
     run = [code_idx[0]]
     for prev, cur in zip(code_idx, code_idx[1:]):
-        if cur - prev <= 3:  # зазор ≤2 некодовых строк (строки prev/cur соседние)
+        if _gap(prev, cur) <= 2:
             run.append(cur)
         else:
             runs.append((run[0], run[-1]))
@@ -1371,14 +1396,25 @@ def _carve_code_block(cleaned):
 
     # Самый длинный прогон — кандидат на код (по числу строк, потом по длине).
     start, end = max(runs, key=lambda se: (se[1] - se[0] + 1))
-    window_lines = _trim_prose_tail(lines[start:end + 1])
+    # Расширяем окно на смежные строки комментариев/строк: заголовок файла
+    # (`/* … */`, docstring) и хвостовой закрыватель — часть кода.
+    first, last = start, end
+    while first - 1 >= 0 and (first - 1) in span_lines:
+        first -= 1
+    while last + 1 < len(lines) and (last + 1) in span_lines:
+        last += 1
+    window_lines = _trim_prose_tail(lines[first:last + 1], ext)
     window = "\n".join(window_lines).strip()
-    code_lines = sum(1 for line in window_lines if _line_is_code(line))
+    kept = len(window_lines)
+    code_lines = sum(
+        1 for i in range(first, first + kept)
+        if i not in span_lines and _line_is_code(judged[i], ext)
+    )
     if code_lines < 2 or not window:
         return ""
-    if _looks_like_prose(window):
+    if _looks_like_prose(window, ext):
         return ""
-    return window if _looks_like_code(window) else ""
+    return window if _looks_like_code(window, ext) else ""
 
 
 def _extract_code_from_response(text, file_extension=""):
@@ -1394,10 +1430,15 @@ def _extract_code_from_response(text, file_extension=""):
     результате — на СЫРОМ тексте: раннее упоминание «Альтернатива:» в CoT
     не должно срезать ФИНАЛЬНУЮ программу, записанную ниже.
     """
-    from .services.code_carver import has_language_marker
+    from .services.code_carver import has_language_marker, strip_prose_heading_lines
     code = _extract_code_pipeline(text, file_extension, apply_alt_cut=True)
     if not code and text:
         code = _extract_code_pipeline(text, file_extension, apply_alt_cut=False)
+    # Финальная зачистка подписей модели — для ВСЕХ тиров и расширений:
+    # фенс/незакрытый фенс/карвинг/whole-text тоже не должны протаскивать
+    # «Код:»/«**Решение**:» в файл решения.
+    if code:
+        code = strip_prose_heading_lines(code, file_extension or "").strip()
     if code and not has_language_marker(code, file_extension or ""):
         return ""
     return code
@@ -1457,14 +1498,14 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
         # С КОНЦА (res#4160).
         for block in reversed(_CODE_FENCE_RE.findall(cleaned)):
             block = block.strip()
-            if not block or _looks_like_prose(block):
+            if not block or _looks_like_prose(block, ext):
                 continue
             found = structural(block)
             if found:
                 return code_carver.strip_code_fence_lines(found)
 
     matches = _CODE_FENCE_RE.findall(cleaned)
-    code_blocks = [m for m in matches if not _looks_like_prose(m)]
+    code_blocks = [m for m in matches if not _looks_like_prose(m, ext)]
     if code_blocks:
         # Самый длинный не-прозрачный код-подобный БЛОК без рассуждений
         # посреди (проза-строки в середине = не код).
@@ -1472,9 +1513,14 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
             candidate = candidate.strip()
             if not candidate:
                 continue
-            if _mid_prose_lines(candidate):
+            # Подпись модели ДО мид-контроля: иначе «Код:» в начале фенса
+            # бракует валидный блок как «прозу посреди кода».
+            candidate = code_carver.strip_prose_heading_lines(candidate, ext).strip()
+            if not candidate:
+                continue
+            if _mid_prose_lines(candidate, ext):
                 continue  # рассуждения внутри блока — это не код
-            if _looks_like_code(candidate):
+            if _looks_like_code(candidate, ext):
                 return code_carver.strip_code_fence_lines(candidate)
         # все оградки — проза/мусор; продолжаем конвейер (незакрытая/карвинг ниже)
     # Незакрытая оградка: всё после открывающей строки — код (маркер сильный,
@@ -1482,13 +1528,14 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
     unclosed = _UNCLOSED_FENCE_RE.search(cleaned)
     if unclosed:
         tail_lines = [line for line in unclosed.group(1).splitlines() if line.strip()]
-        tail_lines = _trim_prose_tail(tail_lines)
+        tail_lines = _trim_prose_tail(tail_lines, ext)
         candidate = "\n".join(tail_lines).strip()
-        if candidate and not _looks_like_prose(candidate) and not _mid_prose_lines(candidate):
+        candidate = code_carver.strip_prose_heading_lines(candidate, ext).strip()
+        if candidate and not _looks_like_prose(candidate, ext) and not _mid_prose_lines(candidate, ext):
             return code_carver.strip_code_fence_lines(candidate)
     # Смесь «проза + код» без оградок — карвинг самого длинного код-фрагмента.
-    carved = _carve_code_block(cleaned)
-    if carved and not _mid_prose_lines(carved):
+    carved = _carve_code_block(cleaned, ext)
+    if carved and not _mid_prose_lines(carved, ext):
         return code_carver.strip_code_fence_lines(carved)
     # === Аварийный relaxed-тир: «долгое рассуждение без фенсов» ===
     # Простыня CoT, внутри которой модель ПОЛНОСТЬЮ проговаривает программу
@@ -1506,10 +1553,10 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
             if found:
                 return code_carver.strip_code_fence_lines(found)
     # Без оградок: проза-рассуждения и текст без кодовых маркеров — не код.
-    if _looks_like_prose(cleaned):
+    if _looks_like_prose(cleaned, ext):
         return ""
     whole = code_carver.strip_code_fence_lines(cleaned)
-    if _looks_like_code(whole) and not _mid_prose_lines(whole):
+    if _looks_like_code(whole, ext) and not _mid_prose_lines(whole, ext):
         return whole
     return ""
 
@@ -2249,81 +2296,6 @@ def _mark_batch_model_failed(run_id, model_index):
         job["updated_at_ts"] = time.time()
 
 
-# Предел длины входных данных/эталонного ответа, который сохраняется в БД
-# и показывается в карточке пары: файлы тестов в DL бывают до 1 МиБ, а
-# отчёт должен оставаться компактным.
-_TEST_DATA_CHARS_MAX = 8000
-# Потолок числа тестов, данные которых сохраняем/показываем: DL отдаёт не
-# более одного провала на этап проверки (этапов бывает несколько), но отчёт
-# должен оставаться компактным и не ходить в DL десятки раз.
-_TEST_DATA_MAX_TESTS = 10
-
-
-def _pack_test_data(test_number, data):
-    """Компактная запись данных одного теста (обрезаем длинные файлы)."""
-    raw_input = data.get("input") or ""
-    raw_expected = data.get("expected_output") or ""
-    return {
-        "test_number": test_number,
-        "input": raw_input[:_TEST_DATA_CHARS_MAX],
-        "input_truncated": len(raw_input) > _TEST_DATA_CHARS_MAX,
-        "expected_output": raw_expected[:_TEST_DATA_CHARS_MAX],
-        "expected_truncated": len(raw_expected) > _TEST_DATA_CHARS_MAX,
-    }
-
-
-def _fetch_failed_test_data(session_id, queue_id, comment=""):
-    """Входные/эталонные данные ВСЕХ подтверждённых проваленных тестов.
-
-    DL: ``get-failed-tests`` → список подтверждённых провалов (по одному на
-    этап проверки; ``canGetData`` — можно ли забирать данные), затем
-    ``get-test-data`` по каждому номеру → ``{input, expectedOutput}``.
-    Возвращаем данные КАЖДОГО теста, у которого DL их выдал (до
-    ``_TEST_DATA_MAX_TESTS``) — не только первого: «не прошло» на разных
-    этапах/тестах должно быть видно целиком.
-
-    ФОЛБЭК: если DL не отдал ни одного теста с ``canGetData`` (пустой
-    список, нет флага), номер берём из вердикта («не пройден 2-й тест»,
-    «[testN]: …») и пробуем по нему — DL сам откажет, если выдача запрещена.
-    Отказ по одному тесту (404/403 — например, последний тест курса) не
-    мешает забрать данные остальных.
-
-    Пустой список — данных нет (выдача запрещена настройками курса,
-    проверка не завершена, ошибка DL). Ошибки не поднимаются: данные теста
-    — дополнение к отчёту, а не условие прогона.
-    """
-    from .dl_api_client import (
-        get_failed_tests_from_dl,
-        get_test_data_from_dl,
-    )
-
-    numbers = []
-    for t in get_failed_tests_from_dl(session_id, queue_id):
-        if not t.get("canGetData"):
-            continue
-        try:
-            number = int(t.get("testNumber") or 0)
-        except (TypeError, ValueError):
-            number = 0
-        if number > 0 and number not in numbers:
-            numbers.append(number)
-        if len(numbers) >= _TEST_DATA_MAX_TESTS:
-            break
-    if not numbers:
-        # Номер из вердикта DL — последний шанс узнать, какой тест упал.
-        number = _dl_failed_test_number(comment)
-        if number:
-            numbers = [number]
-
-    entries = []
-    for number in numbers:
-        data = get_test_data_from_dl(session_id, queue_id, number)
-        if not data or not (data.get("input") or data.get("expected_output")):
-            continue
-        entries.append(_pack_test_data(number, data))
-    return entries
-
-
 def _pair_file_name(model, node_id, file_extension, run_file_name=""):
     """Имя файла решения, отправляемого в DL (контракт fileName).
 
@@ -2616,7 +2588,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 # выдачу не всегда — флаг canGetData). Данные компактные и
                 # показываются в раскрытой карточке вместе с телом результата.
                 if verdict != _VERDICT_SOLVED and dl_queue_id:
-                    dl_test_data = _fetch_failed_test_data(
+                    dl_test_data = fetch_failed_test_data(
                         ctx["session_id"], dl_queue_id, dl_test_comment,
                     )
             else:
@@ -3074,30 +3046,6 @@ def _light_batch_result_item(item):
     }
     light["lazy_body"] = True
     return light
-
-
-def parse_dl_test_data(raw):
-    """Разобрать сохранённые данные проваленных тестов (JSON → список dict).
-
-    Новый формат — список записей по тестам (DL отдаёт по одному провалу на
-    этап проверки). Старые строки БД хранят ОДИН dict — нормализуем его в
-    одноэлементный список, чтобы UI и тесты не знали про легаси-формат.
-    Пустая/битая строка — пустой список.
-    """
-    if not raw:
-        return []
-    if isinstance(raw, (dict, list)):
-        data = raw
-    else:
-        try:
-            data = json.loads(raw)
-        except (TypeError, ValueError):
-            return []
-    if isinstance(data, dict):
-        return [data]
-    if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-    return []
 
 
 def _batch_results_from_db(test_run, light=False):

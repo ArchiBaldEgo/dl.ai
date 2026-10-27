@@ -244,10 +244,10 @@
 @media (max-width: 900px) {
   .arm-card-cols { grid-template-columns: minmax(0, 1fr); }
 }
-/* Входные данные и эталонный ответ проваленного теста (правая колонка
-   карточки, только у нерешённых пар). */
+/* Входные данные и выходные данные (эталон) проваленного теста (правая
+   колонка карточки, только у нерешённых пар). */
 .arm-card-col-data .arm-test-data { margin: 12px 0 0; }
-.arm-test-data pre { max-height: 220px; }
+.arm-test-data pre { max-height: 220px; white-space: pre-wrap; word-break: break-word; }
 .arm-result-body pre {
   margin: 0; white-space: pre-wrap; word-wrap: break-word;
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;

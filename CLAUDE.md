@@ -41,6 +41,13 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
     (fail-маркеры приоритетнее success; нераспознанное → failed);
   - кэш решённых задач → `ai/services/solution_cache.py` (`TaskSolution`) —
     детальные правила записи/отдачи в gotchas-deep;
+  - входные/эталонные данные DL-тестов (нормализация `\r\n`, обрезка, разбор
+    сохранённых снапшотов) → `ai/services/dl_test_data.py` (единственный владелец;
+    ARM и «Реши задачу» импортируют оттуда);
+  - доступ к личным AI-моделям (свои/shared/public, поиск получателя, правка
+    доступа суперюзером) → `ai/services/user_models.py` + `ai/services/
+    user_directory.py` (DL-id/ФИО); ключи/endpoint'ы чужих моделей суперюзеру
+    не показываются;
   - identity `AIRequestLog`/`get_user_identity_for_log` см. выше; capability-метаданные
     (Text/Vision/Reasoning) живут в `registry.py`, НЕ в DB.
 - **Encapsulation.** `ConversationHistory.get()` — defensive copy, не мутировать;
@@ -83,6 +90,8 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   `groq.py`/`openrouter.py`/`sambanova.py`/`ollama.py`.
 - `arm_runner.py` — async ARM runner; in-memory live job, DB (`AIModelTestRun`/`Result`)
   source of truth; батч-солв, перезапуски пар, карвер кода — gotchas-deep.
+  Подписи модели (`Код:`, `**Код**:`, `Функция main():` и т. п.) вычищает
+  `code_carver.strip_prose_heading_lines` (оба режима + финальный гейт всех языков).
 - Журнал запросов — `ai/admin/request_logs.py` (`/ai/admin/ai/request_logs/`;
   `request_logs.html` скелет + партиал `request_logs_table.html`, AJAX меняет обёртку
   целиком; JS на делегировании).

@@ -25,6 +25,7 @@ from ai.views import (
     get_task_solution_view,
     send_solution_view,
     get_solution_result_view,
+    get_dl_test_data_view,
     health_view,
     set_password_view,
     get_groq_limits_view,
@@ -46,6 +47,7 @@ urlpatterns = [
     path('ai/api/groq-limits/', get_groq_limits_view, name='get_groq_limits'),
     path('ai/api/send-solution/', send_solution_view, name='send_solution'),
     path('ai/api/get-solution-result/', get_solution_result_view, name='get_solution_result'),
+    path('ai/api/dl-test-data/', get_dl_test_data_view, name='get_dl_test_data'),
     path('ai/api/wizard-seen/', wizard_seen_view, name='ai_wizard_seen'),
 
 ] + static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)

@@ -675,6 +675,10 @@ def build_dl_file_name(base_name: str, file_extension: str) -> str:
     base = _dl_transliterate(base)
     # Только разрешённые символы: латиница, цифры, дефис, подчёркивание.
     base = re.sub(r"[^A-Za-z0-9_-]+", "_", base)
+    # Схлопываем повторы разделителей: «Gemma 4 (Ollama)_100» → не
+    # «Gemma_4_Ollama__100», а читаемое «Gemma_4_Ollama_100».
+    base = re.sub(r"_{2,}", "_", base)
+    base = re.sub(r"-{2,}", "-", base)
     base = base.strip("_-")
     if not base:
         return None
@@ -924,9 +928,14 @@ def get_test_data_from_dl(
         return {}
     if not isinstance(data, dict):
         return {}
+    # DL отдаёт CRLF ("1\r\n2\r\n"). Нормализуем на границе клиента, чтобы
+    # ВСЕ потребители (ARM, ручная проверка) получали уже готовый к показу
+    # текст; импорт ленивый — services/__init__ тянет модель/реестр.
+    from .services.dl_test_data import normalize_test_data_text
+
     return {
-        "input": str(data.get("input") or ""),
-        "expected_output": str(data.get("expectedOutput") or ""),
+        "input": normalize_test_data_text(data.get("input")),
+        "expected_output": normalize_test_data_text(data.get("expectedOutput")),
     }
 
 

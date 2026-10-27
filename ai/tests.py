@@ -5356,6 +5356,22 @@ class ModelSortingTests(SimpleTestCase):
         for m in context["other_models"]:
             self.assertNotEqual(m["key"], "OR_Nemotron_Nano_12B_VL")
 
+    def test_selector_context_separates_user_model_options_from_panel_rows(self):
+        """base_chat.html читает ``user_models_options``: строки таблицы панели
+        (ключ ``user_models``) не должны попадать в optgroup — у них нет
+        ``key``, и option рендерился с пустым value."""
+        from ai.views import _render_ai_page
+        request = self.factory.get("/ai/chat/")
+        request.user = self._make_user(pk=1)
+        request.session = {}
+        request.user_info = {"userId": "sort-user"}
+        request.COOKIES = {"userId": "sort-user"}
+        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=[]),              patch("ai.views._get_user_top_model_keys", return_value=[]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
+            _render_ai_page(request, "ai/chat.html")
+        context = mock_render.call_args[0][2]
+        self.assertIn("user_models_options", context)
+        self.assertNotIn("user_models", context)
+
 
 
 # ===================================================================
@@ -7596,7 +7612,7 @@ class ArmLightSnapshotTests(TestCase):
         request.session = {}
         request.COOKIES = {}
         with patch("ai.admin.arm._resolve_session_id", return_value="DLSID"), \
-                patch("ai.admin.arm._fetch_failed_test_data", return_value=fetched) as fetch:
+                patch("ai.admin.arm.fetch_failed_test_data", return_value=fetched) as fetch:
             response = admin_arm_solve_result_body_view(request, self.result.id)
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.content)["result"]
@@ -11707,6 +11723,418 @@ class StructuralCarverTests(SimpleTestCase):
         self.assertFalse(has_language_marker('[ВСТАВЬТЕ ВАШ КОД]', '.mpc'))
 
 
+class ProseHeadingPredicateTests(SimpleTestCase):
+    """Предикат подписи модели: однословные/markdown-заголовки («Код:»,
+    «**Код**:», «Функция main():») срезаются, а метки/ветвления/комментарии —
+    нет (иначе DL падает «Ошибка синтаксиса» на строке-подписи)."""
+
+    def test_recognizes_heading_variants(self):
+        from ai.services.code_carver import _is_prose_heading_line
+        headings = (
+            "Код:", "Решение:", "Программа:", "Ответ:", "Итог:", "Вывод:",
+            "**Код**:", "*Решение*:", "`Код`:", "**Код:**",
+            "- Code:", "* Решение:", "1. Code:",
+            "Code:", "Solution:", "Answer:", "Listing:",
+            "And main function:", "The final program:",
+            "Функция main():", "Финальный код:",
+        )
+        for line in headings:
+            with self.subTest(line=line):
+                self.assertTrue(_is_prose_heading_line(line))
+
+    def test_keeps_labels_control_and_comments(self):
+        from ai.services.code_carver import _is_prose_heading_line
+        code_lines = (
+            "loop_start:", "L1:", "start:", "begin:", "ends:", "main:",
+            "case 1:", "default:", "public:", "private:", "protected:",
+            "// Code:", "; Решение:", "# Code:",
+            "if (x):", "1:", "@label:",
+            '"Код":', '"Code":', "mov ax, x", "y = a + b;",
+            "x dw 2 ; число икс.",
+        )
+        for line in code_lines:
+            with self.subTest(line=line):
+                self.assertFalse(_is_prose_heading_line(line))
+
+    def test_jump_target_whitelisted_word_preserved(self):
+        from ai.services.code_carver import (
+            _candidate_protected_labels, _is_prose_heading_line,
+        )
+        referenced = _candidate_protected_labels(["je Code", "Code:", "mov ax, 1"])
+        self.assertFalse(_is_prose_heading_line("Code:", referenced))
+        goto_ref = _candidate_protected_labels(["goto Code;", "Code:"])
+        self.assertFalse(_is_prose_heading_line("Code:", goto_ref))
+        pascal_ref = _candidate_protected_labels(["label Code;", "Code:"])
+        self.assertFalse(_is_prose_heading_line("Code:", pascal_ref))
+        unreferenced = _candidate_protected_labels(["Code:", "mov ax, 1"])
+        self.assertTrue(_is_prose_heading_line("Code:", unreferenced))
+
+
+class ProseHeadingCleanupTests(SimpleTestCase):
+    """Сквозная зачистка подписей модели из извлечённого кода (strict и
+    relaxed, С-МПА и i8086, фенсы прочих языков)."""
+
+    def _c(self, text, ext=".mpc"):
+        from ai.arm_runner import _extract_code_from_response
+        return _extract_code_from_response(text, file_extension=ext)
+
+    def test_mpc_single_word_heading_between_decls_and_main_removed(self):
+        text = (
+            "int N1 __in __bits(8);\nint RES __out __bits(8);\n\n"
+            "Код:\n\nvoid main() {\n    RES = N1 + 1;\n}\n"
+        )
+        got = self._c(text, ".mpc")
+        self.assertNotIn("Код", got)
+        self.assertIn("int N1 __in __bits(8);", got)
+        self.assertIn("void main", got)
+        self.assertIn("RES = N1 + 1;", got)
+
+    def test_mpc_bold_and_bullet_headings_removed(self):
+        for heading in ("**Код**:", "- Решение:", "`Code`:"):
+            with self.subTest(heading=heading):
+                text = (
+                    "int N1 __in __bits(8);\nint RES __out __bits(8);\n\n"
+                    f"{heading}\n\nvoid main() {{\n    RES = N1 + 1;\n}}\n"
+                )
+                got = self._c(text, ".mpc")
+                self.assertNotIn("Код", got)
+                self.assertNotIn("Code", got)
+                self.assertNotIn("Решение", got)
+                self.assertIn("RES = N1 + 1;", got)
+
+    def test_mpc_heading_with_parentheses_removed(self):
+        text = (
+            "int N1 __in __bits(8);\nint RES __out __bits(8);\n\n"
+            "Функция main():\n\nvoid main() {\n    RES = N1 + 1;\n}\n"
+        )
+        got = self._c(text, ".mpc")
+        self.assertNotIn("Функция", got)
+        self.assertIn("RES = N1 + 1;", got)
+
+    def test_asm_single_word_heading_removed(self):
+        text = (
+            "jmp begin\nx dw 1\nbegin:\nmov ax, x\nКод:\njmp ends\nends:\n;$E\n"
+        )
+        got = self._c(text, ".i86")
+        self.assertNotIn("Код", got)
+        self.assertIn("mov ax, x", got)
+        self.assertTrue(got.rstrip().endswith(";$E"))
+
+    def test_asm_markdown_and_bullet_heading_removed(self):
+        for heading in ("**Код**:", "- Solution:"):
+            with self.subTest(heading=heading):
+                text = (
+                    "jmp begin\nx dw 1\nbegin:\nmov ax, x\n"
+                    f"{heading}\njmp ends\nends:\n;$E\n"
+                )
+                got = self._c(text, ".i86")
+                self.assertNotIn("Код", got)
+                self.assertNotIn("Solution", got)
+                self.assertIn("mov ax, x", got)
+
+    def test_asm_conditional_jump_target_named_like_heading_kept(self):
+        text = (
+            "jmp begin\nx dw 1\nbegin:\nmov ax, x\nje Code\nCode:\n"
+            "mov bx, 2\njmp ends\nends:\n;$E\n"
+        )
+        got = self._c(text, ".i86")
+        self.assertIn("je Code", got)
+        self.assertIn("Code:", got)
+
+    def test_relaxed_removes_heading_but_keeps_prose_sentence(self):
+        from ai.services.code_carver import extract_mpa_c
+        text = (
+            "int N1 __in __bits(8);\nКод:\n"
+            "Here the model reasons at length in plain English.\n"
+            "void main() {\nN1 = 1;\n}\n"
+        )
+        strict = extract_mpa_c(text)
+        relaxed = extract_mpa_c(text, relaxed=True)
+        self.assertNotIn("Код", strict)
+        self.assertNotIn("Код", relaxed)
+        self.assertIn("N1 = 1;", relaxed)
+        # relaxed по-прежнему НЕ выбрасывает обычную прозу внутри окна.
+        self.assertIn("Here the model reasons", relaxed)
+
+    def test_asm_relaxed_removes_heading(self):
+        from ai.services.code_carver import extract_asm_i86
+        text = "jmp begin\nx dw 1\nbegin:\nmov ax, x\nCode:\njmp ends\nends:\n;$E\n"
+        got = extract_asm_i86(text, relaxed=True)
+        self.assertNotIn("Code:", got)
+        self.assertIn("mov ax, x", got)
+
+    def test_trailing_heading_removed(self):
+        from ai.services.code_carver import (
+            _is_trailing_prose, strip_prose_heading_lines,
+        )
+        self.assertTrue(_is_trailing_prose("Код:"))
+        self.assertFalse(_is_trailing_prose("loop_start:"))
+        self.assertEqual(
+            strip_prose_heading_lines("mov ax, x\nCode:\nmov bx, y"),
+            "mov ax, x\nmov bx, y",
+        )
+
+    def test_heading_in_generic_fence_removed(self):
+        text = "```pascal\nКод:\nprogram a;\nbegin\nwriteln(1);\nend.\n```\n"
+        self.assertEqual(
+            self._c(text, ".pas"),
+            "program a;\nbegin\nwriteln(1);\nend.",
+        )
+
+    def test_all_heading_candidate_returns_empty(self):
+        from ai.services.code_carver import strip_prose_heading_lines
+        self.assertEqual(strip_prose_heading_lines("Код:\nРешение:"), "")
+        self.assertEqual(self._c("Код:\nРешение:", ".mpc"), "")
+
+
+class CommentSpanScannerTests(SimpleTestCase):
+    """Сканер комментариев/строк: кавычки важнее открывателей комментария."""
+
+    def test_c_comment_opener_inside_string_is_not_comment(self):
+        from ai.services.code_carver import _scan_comment_spans
+        scan = _scan_comment_spans(['printf("/*");', "int x = 1; // {", "/* { } */"], ".c")
+        self.assertIn("printf(", scan.blanked[0])
+        self.assertNotIn("/*", scan.blanked[0])
+        self.assertIn("int x = 1;", scan.blanked[1])
+        self.assertNotIn("{", scan.blanked[1])
+        self.assertEqual(scan.span_lines, frozenset({2}))
+
+    def test_pascal_doubled_quote_and_brace_in_string(self):
+        from ai.services.code_carver import _scan_comment_spans
+        scan = _scan_comment_spans(["writeln('it''s { ok }');"], ".pas")
+        self.assertEqual(scan.span_lines, frozenset())
+        self.assertNotIn("{", scan.blanked[0])
+
+    def test_verilog_apostrophe_is_based_literal_not_string(self):
+        from ai.services.code_carver import _scan_comment_spans
+        scan = _scan_comment_spans(["assign y = 4'b1010; // note"], ".v")
+        self.assertIn("4'b1010", scan.blanked[0])
+        self.assertNotIn("note", scan.blanked[0])
+
+    def test_python_hash_inside_string_is_not_comment(self):
+        from ai.services.code_carver import _scan_comment_spans
+        scan = _scan_comment_spans(['s = "# not comment"', "x = 1  # real"], ".py")
+        self.assertNotIn("#", scan.blanked[0])
+        self.assertIn("x = 1", scan.blanked[1])
+        self.assertNotIn("real", scan.blanked[1])
+
+    def test_unclosed_block_extends_to_eof(self):
+        from ai.services.code_carver import _scan_comment_spans
+        scan = _scan_comment_spans(["/* start", "still comment", "end */"], ".c")
+        self.assertEqual(scan.span_lines, frozenset({0, 1, 2}))
+
+
+class AllLanguageExtractionTests(SimpleTestCase):
+    """Выкусывание кода для ВСЕХ расширений решения (SOLVE_EXTENSION_CHOICES).
+
+    Регрессии: многострочные комментарии/докстринги считались прозой и
+    теряли код; ключевые слова Verilog/Java/Python/Pascal не были маркерами,
+    из-за чего выбрасывались `endmodule`, порт-листы и заголовки функций.
+    """
+
+    # ext -> (метка фенса, ровно код)
+    SAMPLES = {
+        ".py": ("python", "def add(a, b):\n    return a + b"),
+        ".c": ("c", "#include <stdio.h>\nint main(void) {\n    return 0;\n}"),
+        ".cpp": ("cpp", "#include <iostream>\nint main() {\n    return 0;\n}"),
+        ".java": (
+            "java",
+            "public class Main {\n    public static void main(String[] args) {\n"
+            "        System.out.println(1);\n    }\n}",
+        ),
+        ".pas": ("pascal", "program Sum;\nvar a: integer;\nbegin\n  writeln(a);\nend."),
+        ".v": ("verilog", "module m(input a, output b);\n    assign b = a;\nendmodule"),
+        ".mpc": (
+            "c",
+            "int N1 __in __bits(8);\nint RES __out __bits(8);\n"
+            "void main() {\n    RES = N1 + 1;\n}",
+        ),
+        ".i86": (
+            "asm",
+            "jmp begin\nx dw 1\nbegin:\nmov ax, x\nadd ax, 2\njmp ends\n"
+            "ends:\njmp ends ;$E",
+        ),
+        ".asm": (
+            "asm",
+            "jmp begin\nx dw 1\nbegin:\nmov ax, x\nadd ax, 2\njmp ends\n"
+            "ends:\njmp ends ;$E",
+        ),
+    }
+
+    def _c(self, text, ext):
+        from ai.arm_runner import _extract_code_from_response
+        return _extract_code_from_response(text, file_extension=ext).strip()
+
+    def _assert_exact(self, got, expected, ext):
+        self.assertEqual(
+            [line.rstrip() for line in got.splitlines()],
+            [line.rstrip() for line in expected.splitlines()],
+            msg=f"ext={ext}",
+        )
+
+    def test_fenced_heading_all_languages(self):
+        for ext, (lang, code) in self.SAMPLES.items():
+            with self.subTest(ext=ext):
+                text = f"Вот решение:\n```{lang}\nКод:\n{code}\n```\nГотово!"
+                self._assert_exact(self._c(text, ext), code, ext)
+
+    def test_unfenced_prose_all_languages(self):
+        for ext, (_lang, code) in self.SAMPLES.items():
+            with self.subTest(ext=ext):
+                text = f"Вот решение:\n{code}\nГотово!"
+                self._assert_exact(self._c(text, ext), code, ext)
+
+    def test_mid_fence_heading_all_languages(self):
+        for ext, (lang, code) in self.SAMPLES.items():
+            with self.subTest(ext=ext):
+                lines = code.splitlines()
+                mid = max(1, len(lines) // 2)
+                broken = "\n".join(lines[:mid] + ["Код:"] + lines[mid:])
+                text = f"```{lang}\n{broken}\n```"
+                self._assert_exact(self._c(text, ext), code, ext)
+
+    def test_verilog_port_list_and_endmodule_preserved(self):
+        code = (
+            "module top(\n"
+            "    input wire clk,\n"
+            "    input wire rst,\n"
+            "    input wire [7:0] a,\n"
+            "    output reg [7:0] y\n"
+            ");\n"
+            "always @(posedge clk) begin\n"
+            "    if (rst) y <= 8'b0;\n"
+            "    else y <= a;\n"
+            "end\n"
+            "endmodule"
+        )
+        self._assert_exact(self._c(code, ".v"), code, ".v")
+
+    def test_c_family_block_comment_preserved(self):
+        for ext in (".c", ".cpp", ".java"):
+            with self.subTest(ext=ext):
+                code = (
+                    "/* Считает сумму.\n"
+                    "   Вторая строка. */\n"
+                    "#include <stdio.h>\n"
+                    "int main(void) {\n"
+                    "    return 0;\n"
+                    "}"
+                )
+                self._assert_exact(self._c(code, ext), code, ext)
+        code_v = (
+            "/* Модуль сумматора.\n"
+            "   Вторая строка. */\n"
+            "module adder(input a, output b);\n"
+            "    assign b = a;\n"
+            "endmodule"
+        )
+        self._assert_exact(self._c(code_v, ".v"), code_v, ".v")
+
+    def test_python_docstring_preserved(self):
+        code = (
+            '"""\n'
+            "Вычисляет сумму.\n"
+            "Вторая строка.\n"
+            '"""\n'
+            "def add(a, b):\n"
+            "    return a + b"
+        )
+        self._assert_exact(self._c(code, ".py"), code, ".py")
+
+    def test_pascal_brace_and_paren_comments_preserved(self):
+        code_brace = (
+            "{ Сумма двух чисел. }\n"
+            "program Sum;\n"
+            "begin\n"
+            "  writeln(1);\n"
+            "end."
+        )
+        self._assert_exact(self._c(code_brace, ".pas"), code_brace, ".pas")
+        code_paren = (
+            "(* Сумма двух чисел. *)\n"
+            "program Sum;\n"
+            "begin\n"
+            "  writeln(1);\n"
+            "end."
+        )
+        self._assert_exact(self._c(code_paren, ".pas"), code_paren, ".pas")
+
+    def test_cmpa_block_comment_preserved(self):
+        from ai.services.code_carver import extract_mpa_c
+        code = (
+            "int N1 __in __bits(8);\n"
+            "int RES __out __bits(8);\n"
+            "/* Комментарий\n"
+            "   про алгоритм. */\n"
+            "void main() {\n"
+            "    RES = N1 + 1;\n"
+            "}"
+        )
+        self._assert_exact(self._c(code, ".mpc"), code, ".mpc")
+        self._assert_exact(extract_mpa_c(code), code, ".mpc")
+        # `}` внутри комментария не закрывает окно программы.
+        with_brace = code.replace("про алгоритм.", "про алгоритм }.")
+        self._assert_exact(self._c(with_brace, ".mpc"), with_brace, ".mpc")
+
+    def test_async_python_preserved(self):
+        from ai.services.code_carver import _is_prose_heading_line
+        for line in (
+            "async def fetch(url):",
+            "async for item in gen():",
+            "async with lock:",
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(_is_prose_heading_line(line))
+        self.assertTrue(_is_prose_heading_line("Async operations:"))
+        code = (
+            "import asyncio\n"
+            "async def fetch(url):\n"
+            "    return url\n"
+            "async def main():\n"
+            "    async with asyncio.TaskGroup() as tg:\n"
+            '        tg.create_task(fetch("x"))\n'
+            "    async for item in gen():\n"
+            "        print(item)"
+        )
+        self._assert_exact(self._c(code, ".py"), code, ".py")
+
+    def test_commented_code_not_prose(self):
+        from ai.services.code_carver import _looks_like_prose
+        pas = (
+            "program Demo;\n"
+            "var i: integer;\n"
+            "begin\n"
+            "  { for i := 1 to 10 do }\n"
+            "  writeln(i);\n"
+            "end."
+        )
+        self.assertFalse(_looks_like_prose(pas, ".pas"))
+        self._assert_exact(self._c(pas, ".pas"), pas, ".pas")
+        py = "def main():\n    # for value in items:\n    return 1"
+        self.assertFalse(_looks_like_prose(py, ".py"))
+        self._assert_exact(self._c(py, ".py"), py, ".py")
+
+    def test_heading_like_line_inside_comment_preserved(self):
+        from ai.services.code_carver import strip_prose_heading_lines
+        code = "/*\n * Input signals:\n * Код:\n */\nint main(void) {\n    return 0;\n}"
+        self.assertEqual(strip_prose_heading_lines(code, ".c"), code)
+
+    def test_snake_case_identifiers_not_prose(self):
+        from ai.services.code_carver import _looks_like_prose
+        code = (
+            "def is_valid(has_flag):\n"
+            "    if is_valid(has_flag):\n"
+            "        return has_flag\n"
+            "    return can_run()"
+        )
+        self.assertFalse(_looks_like_prose(code))
+
+    def test_french_prose_rejected(self):
+        from ai.services.code_carver import _looks_like_prose
+        prose = "Le programme doit calculer la somme des éléments du tableau. " * 3
+        self.assertTrue(_looks_like_prose(prose))
+
+
 class ArmVerdictFixCommandTests(TestCase):
     """fix_arm_verdicts: пересчёт вердиктов по dl_comment (dry-run/commit)."""
 
@@ -12610,6 +13038,62 @@ class ChatUserDocsLangTests(TestCase):
         self.assertEqual(data["lang"], "ru")
 
 
+class AccessDeniedReasonTests(TestCase):
+    """403 объясняет ПРИЧИНУ отказа: JSON {"error": …} для API-эндпоинтов,
+    текст — для страниц (безликое «Authentication required» не помогает
+    пользователю понять, что случилось: сессия, отключённая учётка, DLSID)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def test_api_json_reason_for_anonymous(self):
+        from django.contrib.auth.models import AnonymousUser
+        from ai.views import get_languages
+        request = self.factory.get("/ai/api/languages/")
+        request.user = AnonymousUser()
+        request.session = {}
+        response = get_languages(request)
+        self.assertEqual(response.status_code, 403)
+        data = json.loads(response.content)
+        self.assertIn("Доступ закрыт", data["error"])
+        self.assertIn("сессии", data["error"])
+
+    def test_api_json_reason_for_inactive_user(self):
+        from ai.views import get_languages
+        user = get_user_model().objects.create_user(
+            username="deny-inactive", password="x", is_active=False,
+        )
+        request = self.factory.get("/ai/api/languages/")
+        request.user = user
+        request.session = {}
+        response = get_languages(request)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("отключена", json.loads(response.content)["error"])
+
+    def test_api_json_reason_for_missing_external_id(self):
+        from ai.views import get_languages
+        user = get_user_model().objects.create_user(
+            username="deny-noext", password="x",
+        )
+        request = self.factory.get("/ai/api/languages/")
+        request.user = user
+        request.session = {}
+        request.COOKIES = {}
+        response = get_languages(request)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("DLSID", json.loads(response.content)["error"])
+
+    def test_page_403_is_text_reason(self):
+        from django.contrib.auth.models import AnonymousUser
+        from ai.views import my_models_view
+        request = self.factory.get("/ai/my-models/")
+        request.user = AnonymousUser()
+        request.session = {}
+        response = my_models_view(request)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Доступ закрыт", response.content.decode())
+
+
 class SendSolutionViewTests(TestCase):
     """send_solution_view / get_solution_result_view — URL-прокси к DL REST
     для кнопки «Тестирование» страницы «Реши задачу» (/ai/api/send-solution/,
@@ -12675,6 +13159,47 @@ class SendSolutionViewTests(TestCase):
         })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(mock_send.call_args.args[3], ".mpc")
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_file_name_signed_with_model_and_task(self, mock_send):
+        """Имя файла в DL — ``<модель>_<задача>.<ext>`` (модель из тела)."""
+        mock_send.return_value = {"queueId": 1, "message": "ok"}
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 100, "code": "x", "courseId": 1450,
+            "progLanguageName": "Pascal", "modelTitle": "Gemma 4 (Ollama)",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            mock_send.call_args.kwargs.get("file_name"),
+            "Gemma_4_Ollama_100.pas",
+        )
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_explicit_file_name_wins(self, mock_send):
+        mock_send.return_value = {"queueId": 1, "message": "ok"}
+        self._post_send({
+            "sessionId": "SID", "nodeId": 100, "code": "x", "courseId": 1450,
+            "progLanguageName": "Pascal", "fileName": "my_solution",
+        })
+        self.assertEqual(
+            mock_send.call_args.kwargs.get("file_name"), "my_solution",
+        )
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_file_name_falls_back_to_last_solve_model(self, mock_send):
+        """Без modelTitle/modelKey — модель последней генерации для узла."""
+        mock_send.return_value = {"queueId": 1, "message": "ok"}
+        with patch(
+            "ai.services.solution_cache.last_solve_model",
+            return_value=("Gemma_4", "Gemma 4"),
+        ):
+            self._post_send({
+                "sessionId": "SID", "nodeId": 100, "code": "x",
+                "courseId": 1450, "progLanguageName": "Pascal",
+            })
+        self.assertEqual(
+            mock_send.call_args.kwargs.get("file_name"), "Gemma_4_100.pas",
+        )
 
     def test_no_extension_and_no_language_returns_400(self):
         response = self._post_send({
@@ -12840,6 +13365,155 @@ class SendSolutionViewTests(TestCase):
         self.assertEqual(solution.verdict, TaskSolution.VERDICT_PASSED)
         self.assertIsNone(solution.queue_id)
         self.assertEqual(solution.dl_comment, "Все тесты успешно пройдены")
+
+
+class DlTestDataNormalizationTests(SimpleTestCase):
+    """CRLF из DL (``"1\\r\\n2\\r\\n"``) нормализуется на границе клиента,
+    при упаковке (обрезка не оставляет висящий ``\\r``) и при чтении старых
+    строк БД — литерал ``\\r`` не должен доходить до UI."""
+
+    @staticmethod
+    def _response(payload):
+        response = MagicMock()
+        response.status_code = 200
+        response.content = json.dumps(payload).encode("utf-8")
+        return response
+
+    def test_get_test_data_normalizes_crlf(self):
+        from ai.dl_api_client import get_test_data_from_dl
+
+        with patch("ai.dl_api_client._dl_request",
+                   return_value=self._response(
+                       {"input": "1\r\n2\r\n", "expectedOutput": "YES\r\n1 5"})):
+            data = get_test_data_from_dl("DLSID", 15230210, 1)
+        self.assertEqual(data["input"], "1\n2\n")
+        self.assertEqual(data["expected_output"], "YES\n1 5")
+
+    def test_get_test_data_normalizes_lone_cr(self):
+        from ai.dl_api_client import get_test_data_from_dl
+
+        with patch("ai.dl_api_client._dl_request",
+                   return_value=self._response(
+                       {"input": "a\rb", "expectedOutput": "c\rd"})):
+            data = get_test_data_from_dl("DLSID", 1, 1)
+        self.assertEqual(data["input"], "a\nb")
+        self.assertEqual(data["expected_output"], "c\nd")
+
+    def test_pack_truncation_does_not_leave_cr(self):
+        from ai.services.dl_test_data import TEST_DATA_CHARS_MAX, pack_test_data
+
+        raw = ("x" * (TEST_DATA_CHARS_MAX - 1)) + "\r\n" + "y" * 10
+        entry = pack_test_data(1, {"input": raw, "expected_output": "ok\r\n"})
+        self.assertTrue(entry["input_truncated"])
+        self.assertEqual(len(entry["input"]), TEST_DATA_CHARS_MAX)
+        self.assertNotIn("\r", entry["input"])
+        self.assertEqual(entry["expected_output"], "ok\n")
+
+    def test_parse_normalizes_legacy_rows(self):
+        from ai.services.dl_test_data import parse_dl_test_data
+
+        legacy = [{"test_number": 2, "input": "1\r\n2\r\n",
+                   "expected_output": "3\r\n"}]
+        parsed = parse_dl_test_data(json.dumps(legacy))
+        self.assertEqual(parsed[0]["input"], "1\n2\n")
+        self.assertEqual(parsed[0]["expected_output"], "3\n")
+
+
+class DLTestDataEndpointTests(TestCase):
+    """POST /ai/api/dl-test-data/ — входные/выходные данные проваленного
+    теста для страницы «Реши задачу». Решённое решение не ходит в DL."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_superuser(
+            username="dl_data_user", password="***", email="dd@t.com",
+        )
+
+    def _post(self, body, user_info=None):
+        from ai.views import get_dl_test_data_view
+
+        request = self.factory.post(
+            "/ai/api/dl-test-data/", data=json.dumps(body),
+            content_type="application/json",
+        )
+        request.user = self.user
+        request.session = {}
+        request.COOKIES = {"userId": self.user.username}
+        if user_info is not None:
+            request.user_info = user_info
+        return get_dl_test_data_view(request)
+
+    def test_url_wired(self):
+        from django.urls import reverse
+
+        self.assertEqual(reverse("get_dl_test_data"), "/ai/api/dl-test-data/")
+
+    def test_path_not_in_post_poll_paths(self):
+        from ai.throttling import _POST_POLL_PATHS
+
+        self.assertNotIn("/ai/api/dl-test-data/", _POST_POLL_PATHS)
+
+    def test_forbidden_without_page_access(self):
+        from ai.views import get_dl_test_data_view
+
+        request = self.factory.post(
+            "/ai/api/dl-test-data/", data=json.dumps({"queueId": 42}),
+            content_type="application/json",
+        )
+        request.user = self.user
+        request.session = {}
+        request.COOKIES = {}
+        response = get_dl_test_data_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_invalid_queue_id_returns_400(self):
+        response = self._post({"queueId": "abc", "sessionId": "SID"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_missing_session_returns_400(self):
+        response = self._post({"queueId": 42})
+        self.assertEqual(response.status_code, 400)
+
+    @patch("ai.dl_api_client.get_failed_tests_from_dl")
+    @patch("ai.dl_api_client.get_test_data_from_dl")
+    def test_solved_comment_skips_dl(self, mock_data, mock_failed):
+        response = self._post({
+            "queueId": 42, "sessionId": "SID",
+            "comment": "Все тесты успешно пройдены",
+        })
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["solved"])
+        self.assertEqual(data["tests"], [])
+        mock_failed.assert_not_called()
+        mock_data.assert_not_called()
+
+    @patch("ai.dl_api_client.get_failed_tests_from_dl")
+    @patch("ai.dl_api_client.get_test_data_from_dl")
+    def test_failed_test_returns_normalized_data(self, mock_data, mock_failed):
+        mock_failed.return_value = [{"testNumber": 2, "canGetData": True}]
+        mock_data.return_value = {"input": "1\r\n2\r\n",
+                                  "expected_output": "YES\r\n1 5"}
+        response = self._post({
+            "queueId": 42, "sessionId": "SID", "comment": "не пройден 2-й тест",
+        })
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertFalse(data["solved"])
+        self.assertEqual(len(data["tests"]), 1)
+        self.assertEqual(data["tests"][0]["test_number"], 2)
+        self.assertEqual(data["tests"][0]["input"], "1\n2\n")
+        self.assertEqual(data["tests"][0]["expected_output"], "YES\n1 5")
+
+    @patch("ai.dl_api_client.get_failed_tests_from_dl", side_effect=RuntimeError("boom"))
+    def test_dl_error_is_swallowed(self, mock_failed):
+        response = self._post({"queueId": 42, "sessionId": "SID"})
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"])
+        self.assertFalse(data["solved"])
+        self.assertEqual(data["tests"], [])
 
 
 class SolutionPollRateLimitTests(SimpleTestCase):
@@ -19099,6 +19773,8 @@ class UserModelsAdminViewTests(_AdminViewRequestMixin, TestCase):
         ids = [row["id"] for row in response.context_data["user_models"]]
         self.assertIn(mine.pk, ids)
         self.assertNotIn(self.foreign.pk, ids)
+        # Таблица «Все модели» — только реальному суперюзеру.
+        self.assertIsNone(response.context_data["all_models"])
 
     def test_cannot_update_foreign_model(self):
         response = self._post("/ai/admin/user-models/create/", {
@@ -19198,6 +19874,469 @@ class MyModelsClientViewTests(TestCase):
             response = my_model_delete_view(request)
         self.assertEqual(response.status_code, 404)
         self.assertTrue(AIUserModel.objects.filter(pk=foreign.pk).exists())
+
+    def test_page_separates_panel_rows_from_selector_options(self):
+        """Строки таблицы и опции селектора — разные списки: раньше обе
+        назывались ``user_models``, из-за чего optgroup рендерился с
+        пустыми value (у строк таблицы нет ``key``)."""
+        from ai.models import AIUserModel
+        from ai.views import my_models_view
+        model = AIUserModel.objects.create(
+            user=self.user, title="Своя", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m",
+        )
+        from django.http import HttpResponse
+        request = self._client_request(self.user)
+        with patch("ai.views.get_external_user_id_from_request", return_value="777"), \
+                patch("ai.views.render", return_value=HttpResponse("ok")) as render_mock:
+            my_models_view(request)
+        context = render_mock.call_args[0][2]
+        self.assertEqual([row["id"] for row in context["user_models"]], [model.pk])
+        self.assertEqual(
+            [opt["key"] for opt in context["user_models_options"]],
+            [f"User_{model.pk}"],
+        )
+        self.assertIsNone(context["all_models"])
+
+    def test_all_models_table_only_for_real_superuser(self):
+        from ai.views import my_models_view
+        from django.http import HttpResponse
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_superuser"])
+        request = self._client_request(self.user)
+        with patch("ai.views.get_external_user_id_from_request", return_value="777"), \
+                patch("ai.views.render", return_value=HttpResponse("ok")) as render_mock:
+            my_models_view(request)
+        self.assertIsNotNone(render_mock.call_args[0][2]["all_models"])
+
+        # «Посмотреть как…» — эмуляция честная: таблицы нет.
+        setattr(self.user, "_ai_view_as_group_pk", 1)
+        try:
+            request = self._client_request(self.user)
+            with patch("ai.views.get_external_user_id_from_request",
+                       return_value="777"), \
+                    patch("ai.views.render", return_value=HttpResponse("ok")) as render_mock:
+                my_models_view(request)
+        finally:
+            delattr(self.user, "_ai_view_as_group_pk")
+        self.assertIsNone(render_mock.call_args[0][2]["all_models"])
+
+
+class UserModelSharingTests(TestCase):
+    """Доступ к личным моделям: приватная / адресная выдача / публичная."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        user_model = get_user_model()
+        self.owner = user_model.objects.create_user(username="sh-owner", password="x")
+        self.friend = user_model.objects.create_user(username="sh-friend", password="x")
+        self.stranger = user_model.objects.create_user(username="sh-stranger", password="x")
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="Общая", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m", base_url="https://api.openai.com/v1",
+        )
+        self.key = f"User_{self.model.pk}"
+
+    def test_private_model_stays_invisible(self):
+        from ai.services.user_models import find_user_model, user_model_options
+        self.assertEqual(len(user_model_options(self.owner)), 1)
+        self.assertEqual(user_model_options(self.friend), [])
+        self.assertIsNone(find_user_model(self.friend, self.key))
+
+    def test_shared_model_visible_to_grantee_only(self):
+        from ai.services.user_models import (
+            find_user_model, shared_user_model_options,
+        )
+        self.model.shared_with.add(self.friend)
+        options = shared_user_model_options(self.friend)
+        self.assertEqual([o["key"] for o in options], [self.key])
+        self.assertEqual(options[0]["access"], "shared")
+        # В title — владелец, чтобы одинаковые названия различались.
+        self.assertIn("sh-owner", options[0]["title"])
+        self.assertIsNotNone(find_user_model(self.friend, self.key))
+        self.assertIsNone(find_user_model(self.stranger, self.key))
+        self.assertEqual(shared_user_model_options(self.stranger), [])
+
+    def test_public_model_visible_to_everyone_but_owner(self):
+        from ai.services.user_models import (
+            find_user_model, public_user_model_options, user_model_options,
+        )
+        self.model.is_public = True
+        self.model.save(update_fields=["is_public"])
+        self.assertEqual(
+            [o["key"] for o in public_user_model_options(self.stranger)],
+            [self.key],
+        )
+        self.assertEqual(public_user_model_options(self.stranger)[0]["access"], "public")
+        self.assertIsNotNone(find_user_model(self.stranger, self.key))
+        # Своя модель не дублируется в «Публичных».
+        self.assertEqual(public_user_model_options(self.owner), [])
+        self.assertEqual(len(user_model_options(self.owner)), 1)
+
+    def test_public_model_granted_goes_to_shared_group_only(self):
+        from ai.services.user_models import (
+            public_user_model_options, shared_user_model_options,
+        )
+        self.model.is_public = True
+        self.model.save(update_fields=["is_public"])
+        self.model.shared_with.add(self.friend)
+        self.assertEqual(
+            [o["key"] for o in shared_user_model_options(self.friend)], [self.key],
+        )
+        self.assertEqual(public_user_model_options(self.friend), [])
+
+    def test_inactive_model_and_owner_are_hidden(self):
+        from ai.models import AIUserModel
+        from ai.services.user_models import find_user_model
+        self.model.is_public = True
+        self.model.save(update_fields=["is_public"])
+        self.model.is_active = False
+        self.model.save(update_fields=["is_active"])
+        self.assertIsNone(find_user_model(self.stranger, self.key))
+
+        self.model.is_active = True
+        self.model.save(update_fields=["is_active"])
+        user_model = get_user_model()
+        user_model.objects.filter(pk=self.owner.pk).update(is_active=False)
+        self.owner.refresh_from_db()
+        self.assertIsNone(find_user_model(self.stranger, self.key))
+
+    def test_owner_suffix_distinguishes_duplicate_titles(self):
+        from ai.models import AIUserModel
+        from ai.services.user_models import public_user_model_options
+        self.owner.first_name = "Иван"
+        self.owner.save(update_fields=["first_name"])
+        self.model.is_public = True
+        self.model.save(update_fields=["is_public"])
+        AIUserModel.objects.create(
+            user=self.friend, title="Общая", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m2", is_public=True,
+        )
+        titles = [o["title"] for o in public_user_model_options(self.stranger)]
+        self.assertEqual(len(titles), 2)
+        self.assertEqual(len(set(titles)), 2)
+        self.assertTrue(any("Иван" in title for title in titles))
+
+
+class UserModelSharingCrudTests(TestCase):
+    """Сохранение доступа владельцем: поля, валидация, обратная совместимость."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        user_model = get_user_model()
+        self.owner = user_model.objects.create_user(username="crud-owner", password="x")
+        self.friend = user_model.objects.create_user(username="crud-friend", password="x")
+        self.friend2 = user_model.objects.create_user(username="crud-friend2", password="x")
+        self.inactive = user_model.objects.create_user(
+            username="crud-inactive", password="x", is_active=False,
+        )
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="Моя", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m", base_url="https://api.openai.com/v1",
+        )
+
+    def _payload(self, **overrides):
+        payload = {
+            "id": self.model.pk, "title": "Моя", "provider": "openai",
+            "model_id": "m", "base_url": "https://api.openai.com/v1",
+            "max_tokens": 8000, "is_active": True,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_owner_can_set_access(self):
+        from ai.services.user_models import save_user_model
+        ok, message, _ = save_user_model(self.owner, self._payload(
+            is_public=True,
+            shared_with=[self.friend.pk, self.friend2.pk, self.friend.pk],
+        ))
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+        self.assertEqual(
+            set(self.model.shared_with.values_list("pk", flat=True)),
+            {self.friend.pk, self.friend2.pk},
+        )
+
+    def test_legacy_payload_keeps_current_access(self):
+        from ai.services.user_models import save_user_model
+        self.model.is_public = True
+        self.model.save(update_fields=["is_public"])
+        self.model.shared_with.add(self.friend)
+        ok, message, _ = save_user_model(self.owner, self._payload(title="Новое имя"))
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+        self.assertEqual(
+            list(self.model.shared_with.values_list("pk", flat=True)),
+            [self.friend.pk],
+        )
+
+    def test_self_inactive_and_bad_ids_are_filtered(self):
+        from ai.services.user_models import save_user_model
+        ok, message, _ = save_user_model(self.owner, self._payload(
+            shared_with=[self.owner.pk, self.inactive.pk, "мусор", -5,
+                         self.friend.pk],
+        ))
+        self.assertTrue(ok, message)
+        self.assertEqual(
+            list(self.model.shared_with.values_list("pk", flat=True)),
+            [self.friend.pk],
+        )
+
+    def test_share_cap(self):
+        from ai.services import user_models as service
+        with patch.object(service, "MAX_SHARED_USERS", 1):
+            ok, message, _ = service.save_user_model(self.owner, self._payload(
+                shared_with=[self.friend.pk, self.friend2.pk],
+            ))
+        self.assertTrue(ok, message)
+        self.assertEqual(self.model.shared_with.count(), 1)
+
+    def test_foreign_model_is_untouched(self):
+        from ai.models import AIUserModel
+        from ai.services.user_models import save_user_model
+        user_model = get_user_model()
+        foreign_owner = user_model.objects.create_user(username="crud-fo", password="x")
+        foreign = AIUserModel.objects.create(
+            user=foreign_owner, title="Чужая",
+            provider=AIUserModel.PROVIDER_OPENAI, model_id="fm",
+        )
+        ok, message, _ = save_user_model(self.owner, {
+            "id": foreign.pk, "title": "Взлом", "provider": "openai",
+            "model_id": "x", "is_public": True, "shared_with": [self.friend.pk],
+        })
+        self.assertFalse(ok)
+        self.assertEqual(message, "Модель не найдена")
+        foreign.refresh_from_db()
+        self.assertEqual(foreign.title, "Чужая")
+        self.assertFalse(foreign.is_public)
+        self.assertEqual(foreign.shared_with.count(), 0)
+
+
+class UserModelSuperuserAccessTests(_AdminViewRequestMixin, TestCase):
+    """Суперюзер меняет ТОЛЬКО доступ к чужим моделям."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        self.factory = RequestFactory()
+        user_model = get_user_model()
+        self.superuser = user_model.objects.create_superuser(
+            username="su-access", password="x", email="su@t.com",
+        )
+        self.owner = user_model.objects.create_user(username="su-owner", password="x")
+        self.grantee = user_model.objects.create_user(username="su-grantee", password="x")
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="Чужая", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="orig-model", base_url="https://api.example.com/v1",
+            api_key_encrypted="cipher", max_tokens=1234,
+        )
+
+    def _post(self, user, payload):
+        from ai.admin.user_models import admin_user_model_access_view
+        request = self._admin_request(
+            user, method="post", path="/ai/admin/user-models/access/",
+            data=json.dumps(payload), content_type="application/json",
+        )
+        return admin_user_model_access_view(request)
+
+    def test_superuser_changes_access_only(self):
+        response = self._post(self.superuser, {
+            "id": self.model.pk, "is_public": True,
+            "shared_with": [self.grantee.pk],
+            # Конфигурация в теле — должна игнорироваться.
+            "title": "Взлом", "model_id": "hacked", "api_key": "new",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+        self.assertEqual(
+            list(self.model.shared_with.values_list("pk", flat=True)),
+            [self.grantee.pk],
+        )
+        self.assertEqual(self.model.title, "Чужая")
+        self.assertEqual(self.model.model_id, "orig-model")
+        self.assertEqual(self.model.api_key_encrypted, "cipher")
+        self.assertEqual(self.model.max_tokens, 1234)
+
+    def test_partial_payload_does_not_wipe_other_setting(self):
+        """POST только с is_public не снимает выданные гранты (и наоборот)."""
+        self.model.shared_with.set([self.grantee])
+        response = self._post(self.superuser, {
+            "id": self.model.pk, "is_public": True,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+        self.assertEqual(
+            list(self.model.shared_with.values_list("pk", flat=True)),
+            [self.grantee.pk],
+        )
+        response = self._post(self.superuser, {
+            "id": self.model.pk, "shared_with": [],
+        })
+        self.assertEqual(response.status_code, 200)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+        self.assertEqual(list(self.model.shared_with.all()), [])
+
+    def test_non_superuser_gets_not_found(self):
+        group = self._view_as_group("SU-группа", ["page.user_models"])
+        group.users.add(self.grantee)
+        response = self._post(self.grantee, {
+            "id": self.model.pk, "is_public": True, "shared_with": [],
+        })
+        self.assertEqual(response.status_code, 404)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+
+    def test_view_as_superuser_is_rejected(self):
+        setattr(self.superuser, "_ai_view_as_group_pk", 1)
+        try:
+            response = self._post(self.superuser, {
+                "id": self.model.pk, "is_public": True, "shared_with": [],
+            })
+        finally:
+            delattr(self.superuser, "_ai_view_as_group_pk")
+        self.assertEqual(response.status_code, 404)
+
+    def test_all_models_rows_have_no_config_fields(self):
+        from ai.services.user_models import admin_user_model_rows
+        rows = admin_user_model_rows()
+        row = next(item for item in rows if item["id"] == self.model.pk)
+        self.assertEqual(row["owner_display"], "su-owner")
+        for forbidden in ("base_url", "api_key", "api_key_encrypted",
+                          "model_id", "provider", "max_tokens",
+                          "supports_vision", "supports_think"):
+            self.assertNotIn(forbidden, row)
+
+
+class UserSearchTests(TestCase):
+    """Поиск получателей доступа: DL-id точно, ФИО/логин подстрокой."""
+
+    def setUp(self):
+        from ai.models import ExternalDLAccount
+        User = get_user_model()
+        self.me = User.objects.create_user(username="search-me", password="x")
+        self.alice = User.objects.create_user(
+            username="user_101", password="x", first_name="Алиса",
+            last_name="Иванова",
+        )
+        ExternalDLAccount.objects.create(
+            user=self.alice, external_user_id="101", external_login="alice",
+            external_first_name="Алиса", external_last_name="Иванова",
+        )
+        self.bob = User.objects.create_user(
+            username="user_102", password="x", first_name="Bob", last_name="Petrov",
+        )
+        ExternalDLAccount.objects.create(
+            user=self.bob, external_user_id="102", external_login="bob",
+        )
+        self.gone = User.objects.create_user(
+            username="user_103", password="x", is_active=False,
+        )
+
+    def test_exact_dl_id(self):
+        from ai.services.user_directory import search_users_for_sharing
+        result = search_users_for_sharing("101", exclude_user=self.me)
+        self.assertEqual([u["id"] for u in result], [self.alice.pk])
+        self.assertEqual(result[0]["dl_id"], "101")
+        self.assertIn("Алиса", result[0]["display"])
+
+    def test_partial_dl_id_is_not_exact_match(self):
+        from ai.services.user_directory import search_users_for_sharing
+        # Числовой запрос — ТОЧНЫЙ DL-id, «10» не должен находить 101/102.
+        self.assertEqual(search_users_for_sharing("10", exclude_user=self.me), [])
+
+    def test_name_substring(self):
+        from ai.services.user_directory import search_users_for_sharing
+        # Латиница: SQLite в тестах не умеет регистронезависимый LIKE для
+        # кириллицы (в проде — Postgres, там ILIKE работает и для неё).
+        ids = [u["id"] for u in search_users_for_sharing("petr", exclude_user=self.me)]
+        self.assertEqual(ids, [self.bob.pk])
+
+    def test_short_text_query_returns_nothing(self):
+        from ai.services.user_directory import search_users_for_sharing
+        self.assertEqual(search_users_for_sharing("а", exclude_user=self.me), [])
+
+    def test_inactive_and_self_excluded(self):
+        from ai.services.user_directory import search_users_for_sharing
+        ids = [u["id"] for u in search_users_for_sharing("user_", exclude_user=self.me)]
+        self.assertNotIn(self.me.pk, ids)
+        self.assertNotIn(self.gone.pk, ids)
+
+    def test_response_has_no_private_fields(self):
+        from ai.services.user_directory import search_users_for_sharing
+        result = search_users_for_sharing("101", exclude_user=self.me)
+        self.assertEqual(set(result[0]), {"id", "display", "dl_id"})
+
+    def test_limit(self):
+        from ai.services import user_directory
+        with patch.object(user_directory, "MAX_SEARCH_RESULTS", 1):
+            result = user_directory.search_users_for_sharing(
+                "user_", exclude_user=self.me, limit=20,
+            )
+        self.assertEqual(len(result), 1)
+
+
+class UserModelClientAccessViewTests(TestCase):
+    """Клиентский эндпоинт доступа: гейт страницы, владелец/чужой."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        self.factory = RequestFactory()
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="cli-owner", password="x")
+        self.other = User.objects.create_user(username="cli-other", password="x")
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="Моя", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m",
+        )
+
+    def _post(self, user, payload, external_id="777"):
+        from ai.views import my_model_access_view
+        request = self.factory.post(
+            "/ai/my-models/access/", data=json.dumps(payload),
+            content_type="application/json",
+        )
+        request.user = user
+        request.session = {}
+        request.COOKIES = {}
+        with patch("ai.views.get_external_user_id_from_request",
+                   return_value=external_id):
+            return my_model_access_view(request)
+
+    def test_owner_sets_public(self):
+        response = self._post(self.owner, {"id": self.model.pk, "is_public": True,
+                                           "shared_with": []})
+        self.assertEqual(response.status_code, 200)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+
+    def test_foreign_private_model_is_not_found(self):
+        response = self._post(self.other, {"id": self.model.pk, "is_public": True,
+                                           "shared_with": []})
+        self.assertEqual(response.status_code, 404)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+
+    def test_forbidden_without_page_access(self):
+        response = self._post(self.owner, {"id": self.model.pk, "is_public": True},
+                              external_id="")
+        self.assertEqual(response.status_code, 403)
+
+    def test_search_endpoint_returns_brief(self):
+        from ai.views import my_model_search_users_view
+        request = self.factory.get("/ai/my-models/search-users/", {"q": "cli-other"})
+        request.user = self.owner
+        request.session = {}
+        request.COOKIES = {}
+        with patch("ai.views.get_external_user_id_from_request", return_value="777"):
+            response = my_model_search_users_view(request)
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertEqual([u["id"] for u in data["users"]], [self.other.pk])
+        self.assertEqual(set(data["users"][0]), {"id", "display", "dl_id"})
 
 
 class DLApiRequestsTests(_AdminViewRequestMixin, TestCase):
@@ -20917,6 +22056,15 @@ class DlFileNameContractTests(TestCase):
         name = build_dl_file_name("Проверка новых задач", ".pas")
         self.assertEqual(name, "Proverka_novyh_zadach.pas")
 
+    def test_repeated_separators_collapsed(self):
+        """«Gemma 4 (Ollama)_100» → «Gemma_4_Ollama_100» (без «__»)."""
+        from ai.dl_api_client import build_dl_file_name
+
+        self.assertEqual(
+            build_dl_file_name("Gemma 4 (Ollama)_100", ".pas"),
+            "Gemma_4_Ollama_100.pas",
+        )
+
     def test_existing_extension_in_base_is_replaced(self):
         from ai.dl_api_client import build_dl_file_name
 
@@ -21078,7 +22226,7 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
     def test_parse_dl_test_data_normalizes_legacy_dict(self):
         """Старые строки БД хранили ОДИН dict — parse отдаёт список, чтобы
         UI/тесты не знали про легаси-формат; битый JSON — пустой список."""
-        from ai.arm_runner import parse_dl_test_data
+        from ai.services.dl_test_data import parse_dl_test_data
 
         legacy = {"test_number": 2, "input": "1 2\n", "expected_output": "3\n"}
         self.assertEqual(parse_dl_test_data(json.dumps(legacy)), [legacy])
@@ -21089,25 +22237,25 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
         self.assertEqual(parse_dl_test_data(None), [])
 
     def test_failed_test_data_is_compact(self):
-        from ai import arm_runner
+        from ai.services.dl_test_data import TEST_DATA_CHARS_MAX, fetch_failed_test_data
 
         long_text = "x" * 20000
         with patch("ai.dl_api_client.get_failed_tests_from_dl",
                    return_value=[{"testNumber": 3, "canGetData": True}]), \
                 patch("ai.dl_api_client.get_test_data_from_dl",
                       return_value={"input": long_text, "expected_output": "42"}):
-            data = arm_runner._fetch_failed_test_data("DLSID", 77)
+            data = fetch_failed_test_data("DLSID", 77)
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]["test_number"], 3)
         self.assertEqual(data[0]["expected_output"], "42")
         self.assertTrue(data[0]["input_truncated"])
-        self.assertLessEqual(len(data[0]["input"]), arm_runner._TEST_DATA_CHARS_MAX)
+        self.assertLessEqual(len(data[0]["input"]), TEST_DATA_CHARS_MAX)
 
     def test_failed_test_data_collects_every_confirmed_failure(self):
         """DL может подтвердить провал на нескольких этапах — забираем данные
         КАЖДОГО теста (не только первого), дубли номеров схлопываем, а отказ
         DL по одному тесту не мешает остальным."""
-        from ai import arm_runner
+        from ai.services.dl_test_data import fetch_failed_test_data
 
         responses = {
             1: {"input": "1\n", "expected_output": "2\n"},
@@ -21128,7 +22276,7 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
         with patch("ai.dl_api_client.get_failed_tests_from_dl", return_value=failed), \
                 patch("ai.dl_api_client.get_test_data_from_dl",
                       side_effect=fake_get_data) as data_call:
-            data = arm_runner._fetch_failed_test_data("DLSID", 77)
+            data = fetch_failed_test_data("DLSID", 77)
         self.assertEqual([e["test_number"] for e in data], [1, 5])
         self.assertEqual(data[1]["expected_output"], "10\n")
         # Номер с canGetData=False в DL не ходим.
@@ -21136,20 +22284,20 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
         self.assertEqual(asked, [1, 4, 5])
 
     def test_failed_test_data_absent_without_permission(self):
-        from ai import arm_runner
+        from ai.services.dl_test_data import fetch_failed_test_data
 
         with patch("ai.dl_api_client.get_failed_tests_from_dl",
                    return_value=[{"testNumber": 1, "canGetData": False}]), \
                 patch("ai.dl_api_client.get_test_data_from_dl") as data_call:
-            data = arm_runner._fetch_failed_test_data("DLSID", 77)
+            data = fetch_failed_test_data("DLSID", 77)
         self.assertEqual(data, [])
         data_call.assert_not_called()
 
     def test_failed_test_number_parsed_from_verdict(self):
         """Номер проваленного теста берём из вердикта DL — когда
         get-failed-tests ничего не отдал (или отдал без canGetData)."""
-        from ai import arm_runner
         from ai.dl_api_client import dl_failed_test_number_from_comment
+        from ai.services.dl_test_data import fetch_failed_test_data
 
         self.assertEqual(
             dl_failed_test_number_from_comment("не пройден 2-й тест (неверный ответ)"),
@@ -21162,7 +22310,7 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
         with patch("ai.dl_api_client.get_failed_tests_from_dl", return_value=[]), \
                 patch("ai.dl_api_client.get_test_data_from_dl",
                       return_value={"input": "1 2\n", "expected_output": "3\n"}) as data_call:
-            data = arm_runner._fetch_failed_test_data(
+            data = fetch_failed_test_data(
                 "DLSID", 77, "не пройден 2-й тест (неверный ответ)",
             )
         self.assertEqual(data[0]["test_number"], 2)

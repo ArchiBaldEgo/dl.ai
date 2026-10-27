@@ -32,7 +32,7 @@
     <!-- Тема подключается ПОСЛЕ страничных CSS, чтобы переменные перепобивали значения. -->
     <link rel="stylesheet" href="/ai/assets/admin/css/ai_theme.css?v=3"/>
     {% block js %}
-    <script src="/ai/assets/admin/js/ai-common.js?v=18" defer></script>
+    <script src="/ai/assets/admin/js/ai-common.js?v=21" defer></script>
     <script src="/ai/assets/admin/js/chat_template.js?v=6" defer></script>
     {% endblock %}
     {% block extra_js %}
@@ -56,7 +56,7 @@
                     <option language="French"{% if saved_lang == 'French' %} selected{% endif %}>Français</option>
                 </select>
                 <select id="select">
-                    {% if available_models or user_models %}
+                    {% if available_models or user_models_options or shared_user_models or public_user_models %}
                         {% if favorite_models %}
                             <optgroup data-ai-group="favorites" label="{{ t.favoritesGroup }}">
                                 {% for model in favorite_models %}
@@ -85,12 +85,31 @@
                                 {% endfor %}
                             </optgroup>
                         {% endif %}
-                        <!-- Личные модели пользователя («Мои модели») — самый низ селектора.
-                             Видны ТОЛЬКО владельцу: чужие модели чужие (проверка владельца —
-                             ai/services/user_models.py::find_user_model, резолв — в ModelCaller). -->
-                        {% if user_models %}
+                        <!-- Личные модели — три группы в самом низу селектора:
+                             свои («Мои модели»), адресно выданные («Доступные мне»)
+                             и публичные. Приватные чужие сюда не попадают; резолв
+                             ключа — ai/services/user_models.py::find_user_model. -->
+                        {% if user_models_options %}
                             <optgroup data-ai-group="mine" label="{{ t.myModelsGroup }}">
-                                {% for model in user_models %}
+                                {% for model in user_models_options %}
+                                    <option value="{{ model.key }}" data-avg-seconds="" data-percent-solved="">
+                                        {{ model.title }}
+                                    </option>
+                                {% endfor %}
+                            </optgroup>
+                        {% endif %}
+                        {% if shared_user_models %}
+                            <optgroup data-ai-group="shared" label="{{ t.sharedModelsGroup }}">
+                                {% for model in shared_user_models %}
+                                    <option value="{{ model.key }}" data-avg-seconds="" data-percent-solved="">
+                                        {{ model.title }}
+                                    </option>
+                                {% endfor %}
+                            </optgroup>
+                        {% endif %}
+                        {% if public_user_models %}
+                            <optgroup data-ai-group="public" label="{{ t.publicModelsGroup }}">
+                                {% for model in public_user_models %}
                                     <option value="{{ model.key }}" data-avg-seconds="" data-percent-solved="">
                                         {{ model.title }}
                                     </option>

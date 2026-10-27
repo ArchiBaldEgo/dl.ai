@@ -647,6 +647,22 @@ function initModelSortSelector() {
 var PROBLEM_DATA_KEY = 'ai_problem_data_cache';
 var problemData = null;
 
+// Причина отказа API-запроса человеческим текстом: JSON {"error": ...}
+// (наши 403 с причиной), иначе — тело ответа. Обрезка — чтобы HTML-страница
+// ошибки не раздувала интерфейс.
+async function readApiErrorText(response) {
+    var raw = '';
+    try { raw = await response.text(); } catch (e) {}
+    var text = raw || '';
+    try {
+        var parsed = JSON.parse(text);
+        if (parsed && parsed.error) text = String(parsed.error);
+    } catch (e) {}
+    text = (text || '').replace(/\s+/g, ' ').trim();
+    if (text.length > 300) text = text.slice(0, 300) + '…';
+    return text || ('HTTP ' + response.status);
+}
+
 async function fetchProblemData() {
     if (problemData) return problemData;
     try {
@@ -666,7 +682,11 @@ async function fetchProblemData() {
         const url = new URL('/ai/api/problem-data/', window.location.origin);
         url.searchParams.set('ui_language', uiLang);
         const response = await fetch(url.toString());
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        if (!response.ok) {
+            // Причина отказа (403 — доступ закрыт, 5xx — сбой) должна быть
+            // ВИДНА: иначе селекторы молча пустые и непонятно, что случилось.
+            throw new Error(await readApiErrorText(response));
+        }
         const data = await response.json();
         problemData = data;
         try {
@@ -675,7 +695,11 @@ async function fetchProblemData() {
         return data;
     } catch (error) {
         console.error('Error fetching problem data:', error);
-        return { languages: [], topics: [], prompts: [], shared_prompts: [] };
+        var reason = (error && error.message) ? error.message : '';
+        return {
+            languages: [], topics: [], prompts: [], shared_prompts: [],
+            error: reason
+        };
     }
 }
 
@@ -704,7 +728,18 @@ function initProblemSelectors(mode) {
     }
 
     function populateLanguages(languages) {
-        selectProgLng.innerHTML = '<option value="">' + getUiString('select_prog_lang', 'Выберите язык программирования') + '</option>';
+        // Пустой список + причина отказа (403/5xx) — показываем ПРИЧИНУ в
+        // первой опции: иначе «выбор языка не работает» без объяснений.
+        // textContent (не innerHTML): причина может прийти с сервера.
+        var placeholder = getUiString('select_prog_lang', 'Выберите язык программирования');
+        if ((!languages || languages.length === 0) && problemData && problemData.error) {
+            placeholder = problemData.error;
+        }
+        selectProgLng.innerHTML = '';
+        var placeholderOption = document.createElement('option');
+        placeholderOption.value = '';
+        placeholderOption.textContent = placeholder;
+        selectProgLng.appendChild(placeholderOption);
         if (languages && languages.length > 0) {
             languages.forEach(lang => {
                 const option = new Option(lang.language_name, lang.id);
@@ -1457,6 +1492,12 @@ var localization = {
         dlEmptyComment: "DL: тестирование завершено",
         // Машина (Дельта), на которой DL проверял решение (deltaName).
         dlMachine: "машина: {0}",
+        // Данные проваленного теста (get-test-data) на странице «Реши задачу».
+        dlTestHeading: "Тест № {0}",
+        dlTestInput: "Входные данные",
+        dlTestOutput: "Выходные данные (эталон)",
+        dlTestTruncated: "(начало)",
+        dlTestUnavailable: "DL не выдал данные теста — тест не выполнялся (например, ошибка компиляции) или выдача запрещена настройками курса.",
         voiceStatus: {
             listening: "Запись голоса",
             recognized: "Распознано: ",
@@ -1509,6 +1550,9 @@ var localization = {
         favoritesGroup: "Часто используемые",
         allModelsGroup: "Все модели",
         experimentalModelsGroup: "Экспериментальные модели",
+        myModelsGroup: "Мои модели",
+        sharedModelsGroup: "Доступные мне",
+        publicModelsGroup: "Публичные",
         noModels: "Сегодня нет доступных моделей",
         docsTour: "Подсказки",
         openMenu: "Открыть меню",
@@ -1575,6 +1619,12 @@ var localization = {
         dlEmptyComment: "DL: testing finished",
         // The machine (Delta) that ran the DL check (deltaName).
         dlMachine: "machine: {0}",
+        // Failed-test data (get-test-data) on the «Реши задачу» page.
+        dlTestHeading: "Test #{0}",
+        dlTestInput: "Input",
+        dlTestOutput: "Output (expected)",
+        dlTestTruncated: "(beginning)",
+        dlTestUnavailable: "DL did not provide the test data — the test did not run (e.g. a compilation error) or output is restricted by the course settings.",
         voiceStatus: {
             listening: "Voice recording",
             recognized: "Recognized: ",
@@ -1626,6 +1676,9 @@ var localization = {
         favoritesGroup: "Frequently used",
         allModelsGroup: "All models",
         experimentalModelsGroup: "Experimental models",
+        myModelsGroup: "My models",
+        sharedModelsGroup: "Shared with me",
+        publicModelsGroup: "Public",
         noModels: "No models available today",
         docsTour: "Guide tips",
         openMenu: "Open menu",
@@ -1692,6 +1745,12 @@ var localization = {
         dlEmptyComment: "DL : test terminé",
         // La machine (Delta) qui a effectué le test DL (deltaName).
         dlMachine: "machine : {0}",
+        // Données du test échoué (get-test-data) sur la page « Résoudre la tâche ».
+        dlTestHeading: "Test n° {0}",
+        dlTestInput: "Données d'entrée",
+        dlTestOutput: "Sortie (attendue)",
+        dlTestTruncated: "(début)",
+        dlTestUnavailable: "DL n'a pas fourni les données du test — le test n'a pas été exécuté (par exemple, une erreur de compilation) ou la sortie est interdite par les paramètres du cours.",
         voiceStatus: {
             listening: "Enregistrement vocal",
             recognized: "Reconnu : ",
@@ -1743,6 +1802,9 @@ var localization = {
         favoritesGroup: "Fréquemment utilisés",
         allModelsGroup: "Tous les modèles",
         experimentalModelsGroup: "Modèles expérimentaux",
+        myModelsGroup: "Mes modèles",
+        sharedModelsGroup: "Partagés avec moi",
+        publicModelsGroup: "Publics",
         noModels: "Aucun modèle disponible aujourd'hui",
         docsTour: "Aide",
         openMenu: "Ouvrir le menu",
@@ -2493,8 +2555,18 @@ function appendPersistedMessage(raw) {
 // «DL: тестирование…» превращается в финальный вердикт без дублей
 // (иском запись с конца независимо от позиции: пока DL тестировал,
 // пользователь мог отправить новые реплики диалога).
-function persistDlMessage(text) {
-    var entry = DL_MSG_MARKER + String(text || '');
+// Вместе с вердиктом сохраняем и данные проваленного теста (если есть), чтобы
+// блок «Входные данные / Выходные данные (эталон)» переживал перезагрузку.
+// Формат обратной совместимости: без данных — обычный текст, с данными —
+// JSON-конверт {"v":1,"text":"…","tests":[…]} после маркера.
+function persistDlMessage(text, tests) {
+    var payload = String(text || '');
+    if (Array.isArray(tests) && tests.length) {
+        try {
+            payload = JSON.stringify({ v: 1, text: payload, tests: tests });
+        } catch (e) { /* циклические/огромные данные — остаёмся на тексте */ }
+    }
+    var entry = DL_MSG_MARKER + payload;
     var arr = loadPersistedMessages();
     for (var i = arr.length - 1; i >= 0; i--) {
         if (String(arr[i]).lastIndexOf(DL_MSG_MARKER, 0) === 0) {
@@ -2511,6 +2583,26 @@ function persistDlMessage(text) {
 function parsePersistedDlMessage(raw) {
     var s = String(raw || '');
     return s.lastIndexOf(DL_MSG_MARKER, 0) === 0 ? s.slice(DL_MSG_MARKER.length) : null;
+}
+
+// Разобранная [[DL]]-запись: {text, tests}. Старые записи — просто текст,
+// новые — JSON-конверт; битый JSON не должен терять вердикт.
+function parsePersistedDlPayload(raw) {
+    var text = parsePersistedDlMessage(raw);
+    if (text === null) return null;
+    var trimmed = text.replace(/^\s+/, '');
+    if (trimmed.charAt(0) === '{') {
+        try {
+            var data = JSON.parse(trimmed);
+            if (data && data.v === 1 && typeof data.text === 'string') {
+                return {
+                    text: data.text,
+                    tests: Array.isArray(data.tests) ? data.tests : [],
+                };
+            }
+        } catch (e) { /* старый/повреждённый конверт — читаем как текст */ }
+    }
+    return { text: text, tests: [] };
 }
 
 function clearPersistedMessages() {
@@ -2570,7 +2662,10 @@ function applySharedUiLanguageTexts() {
         var groupLabels = {
             favorites: getUiString('favoritesGroup', 'Часто используемые'),
             all: getUiString('allModelsGroup', 'Все модели'),
-            experimental: getUiString('experimentalModelsGroup', 'Экспериментальные модели')
+            experimental: getUiString('experimentalModelsGroup', 'Экспериментальные модели'),
+            mine: getUiString('myModelsGroup', 'Мои модели'),
+            shared: getUiString('sharedModelsGroup', 'Доступные мне'),
+            public: getUiString('publicModelsGroup', 'Публичные')
         };
         Array.prototype.forEach.call(modelSelect.querySelectorAll('optgroup[data-ai-group]'), function (group) {
             var label = groupLabels[group.getAttribute('data-ai-group')];
