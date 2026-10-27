@@ -653,8 +653,9 @@ function _appendDlNote(node, text) {
     node.appendChild(note);
 }
 
-// DL не выдаёт данные теста, если он не выполнялся (ошибка компиляции) или
-// выдача запрещена настройками курса — в этом случае показываем пояснение.
+// DL не выдаёт данные теста, когда выдача тестовых данных запрещена
+// настройками курса (та же причина даёт canGetData=false и 403 на
+// get-test-data) или данные недоступны — в этом случае показываем пояснение.
 async function _fetchDlTestData(queueId, comment) {
     try {
         var response = await fetch('/ai/api/dl-test-data/', {
@@ -686,7 +687,7 @@ async function _showDlTestData(queueId, comment, statusNode, verdictText) {
             _renderDlTestData(statusNode, result.tests);
         } else {
             _appendDlNote(statusNode, getUiString('dlTestUnavailable',
-                'DL не выдал данные теста — тест не выполнялся (например, ошибка компиляции) или выдача запрещена настройками курса.'));
+                'DL не выдал данные теста: выдача тестовых данных запрещена настройками курса или данные теста недоступны.'));
         }
     }
     // Данные теста переживают перезагрузку даже если узел уже оторван от DOM.

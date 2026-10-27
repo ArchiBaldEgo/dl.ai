@@ -608,14 +608,15 @@ window.ArmBatchResults = (function () {
     testDataEl.hidden = true;
     colData.appendChild(testDataEl);
     // Пояснение «почему блока нет»: DL отдаёт данные только подтверждённого
-    // проваленного теста с разрешённой выдачей (спека /get-test-data); у
-    // ошибок компиляции подтверждённого провала обычно нет вовсе. Без этого
-    // текста отсутствие блока выглядит как баг.
+    // проваленного теста с разрешённой выдачей (спека /get-test-data). Если
+    // курс запретил выдачу, /get-failed-tests отдаёт canGetData=false, а
+    // /get-test-data — 403 (проверено на реальной паре). Без этого текста
+    // отсутствие блока выглядит как баг.
     var testDataEmptyEl = document.createElement('div');
     testDataEmptyEl.hidden = true;
     testDataEmptyEl.style.cssText = 'margin-top:2px; font-size:12px; color:#6b7280;';
     testDataEmptyEl.textContent =
-      'Входные/выходные данные теста DL не выдал — тест не выполнялся (например, ошибка компиляции) или выдача запрещена настройками курса.';
+      'Входные/выходные данные теста DL не выдал: выдача тестовых данных запрещена настройками курса или данные теста недоступны.';
     colData.appendChild(testDataEmptyEl);
     var renderTestData = function (data) {
       // Записи без файлов пропускаем: DL мог подтвердить провал, но не

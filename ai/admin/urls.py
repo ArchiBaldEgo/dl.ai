@@ -47,6 +47,7 @@ from .request_logs import (
     admin_request_log_detail_view,
     admin_request_log_task_text_view,
     admin_request_log_xlsx_view,
+    admin_request_logs_counters_view,
     admin_request_logs_view,
     resend_request_view,
     rerun_arm_batch_view,
@@ -146,6 +147,8 @@ def get_ai_admin_urls():
         path("ai/request_logs/task-text/", ai_admin_site.admin_view(admin_request_log_task_text_view), name="ai_request_log_task_text"),
         path("ai/request_logs/<int:log_id>/xlsx/", ai_admin_site.admin_view(admin_request_log_xlsx_view), name="ai_request_log_xlsx"),
         path("ai/request_logs/daily-report/", ai_admin_site.admin_view(admin_daily_report_view), name="ai_request_log_daily_report"),
+        # Живые счётчики пакетных строк (AJAX: цифры «Пары»/статус/время).
+        path("ai/request_logs/counters/", ai_admin_site.admin_view(admin_request_logs_counters_view), name="ai_request_logs_counters"),
         path("ai/request_logs/<int:log_id>/batch-snapshot/", ai_admin_site.admin_view(admin_batch_snapshot_view), name="ai_request_log_batch_snapshot"),
         path("ai/request_logs/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
         path("ai/request_logs/<int:log_id>/resend/", ai_admin_site.admin_view(resend_request_view), name="ai_request_log_resend"),
