@@ -117,7 +117,11 @@ class Command(BaseCommand):
 
     def handle(self, *list_args, **options):
         if options["list"]:
-            qs = AIModelTestRun.objects.filter(run_type="batch").order_by("-started_at")[:20]
+            # Оба batch-подобных типа: пакетное решение и отладка промтов
+            # (у отладки record_stats всегда False — в статистику не шла).
+            qs = AIModelTestRun.objects.filter(
+                run_type__in=("batch", "prompt_debug")
+            ).order_by("-started_at")[:20]
             for r in qs:
                 name = r.run_name or (r.run_params or {}).get("run_name") or "—"
                 contributed = "да" if (r.run_params or {}).get("record_stats") else "—"

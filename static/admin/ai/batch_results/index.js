@@ -100,6 +100,7 @@ window.ArmBatchResults = (function () {
         delta_id: b.delta_id || 0,
         delta_name: b.delta_name || '',
         truncated: !!b.truncated,
+        prompt_debug: (b.prompt_debug && typeof b.prompt_debug === 'object') ? b.prompt_debug : {},
       };
       bodyCache[resultId] = state;
       return state;
@@ -246,6 +247,14 @@ window.ArmBatchResults = (function () {
       (report.hints || []).length,
       (report.run_topic || {}).name || '',
       report.interim ? 1 : 0,
+      // «Отладка промтов»: сводка появляется/меняется после основного прохода
+      // и проверки — без неё скип перерисовки оставил бы старые цифры.
+      (report.prompt_debug || {}).prompts_updated || 0,
+      (report.prompt_debug || {}).committed_pairs || 0,
+      (report.prompt_debug || {}).skipped_pairs || 0,
+      ((report.prompt_debug || {}).verification || {}).checked || 0,
+      ((report.prompt_debug || {}).verification || {}).solved || 0,
+      ((report.prompt_debug || {}).verification || {}).regressed || 0,
     ].join(':') : 'none';
     if (els._sig === reportSig && els.card && els.card.style.display !== 'none') {
       return;
@@ -284,6 +293,17 @@ window.ArmBatchResults = (function () {
       }
       const volumeLine = runVolumeLine(report);
       if (volumeLine) { lines.push('<strong>Объём:</strong> ' + escapeHtml(volumeLine)); }
+      // «Отладка промтов»: цифры, которых нет в подсказках (правки по парам
+      // и пропущенные пары); «промптов дополнено»/«проверка» приходят hints.
+      const pdStats = report.prompt_debug;
+      if (pdStats) {
+        if (pdStats.committed_pairs) {
+          lines.push('Пар с сохранёнными правками промпта: ' + escapeHtml(pdStats.committed_pairs));
+        }
+        if (pdStats.skipped_pairs) {
+          lines.push('Пропущено пар (промпт недоступен для правки): ' + escapeHtml(pdStats.skipped_pairs));
+        }
+      }
       (report.hints || []).forEach(function (hint) {
         lines.push('<strong class="arm-report-hint">' + escapeHtml(hint) + '</strong>');
       });
@@ -450,12 +470,30 @@ window.ArmBatchResults = (function () {
   // обновляются на месте (вердикт / причина / время / токены). Иначе
   // каждый тик поллинга (2 с) пересоздавал бы тысячу DOM-узлов, страница
   // «прыгала» бы, а раскрытые карточки теряли бы загруженное тело.
+  // Сводка блока «Отладка промпта» для сигнатуры карточки: payload приходит
+  // только с телом строки, поэтому поллинг видит компактный
+  // prompt_debug_state (коммит/попытки/вердикт проверки) — по нему и решаем,
+  // что блок появился или изменился (проверка идёт после основного прохода).
+  function promptDebugStateSig(r) {
+    if (r.prompt_debug && typeof r.prompt_debug === 'object') {
+      var pd = r.prompt_debug;
+      var v = pd.verification || {};
+      return 'full:' + ((pd.attempts || []).length) + ':' + (pd.committed ? 1 : 0)
+        + ':' + (pd.skipped ? 1 : 0) + ':' + (v.verdict || '');
+    }
+    var st = r.prompt_debug_state || {};
+    if (!r.has_prompt_debug && !st.attempts) { return ''; }
+    return 'state:' + (st.attempts || 0) + ':' + (st.committed ? 1 : 0)
+      + ':' + (st.skipped ? 1 : 0) + ':' + (st.verification || '');
+  }
+
   function rowSignature(r) {
     return [
       r.verdict || '', r.failure_reason || '', r.failure_reason_label || '',
       r.truncated ? '1' : '0',
       r.duration == null ? '' : r.duration,
       r.tokens == null ? '' : r.tokens,
+      promptDebugStateSig(r),
     ].join('|');
   }
 
@@ -492,6 +530,80 @@ window.ArmBatchResults = (function () {
     return text;
   }
 
+  // ── Блок «Отладка промпта» (run_type=prompt_debug) ─────────────────────
+  // Вместо извлечённого кода у пары показывается то, что модель дописала в
+  // промпт по каждой попытке. Контракт payload —
+  // ai/services/prompt_debug.py::empty_payload. Всё, что пришло от модели
+  // (дополнения, комментарии DL), выводится ТОЛЬКО через escapeHtml.
+  function promptDebugSummaryHtml(state) {
+    if (!state) { return ''; }
+    var bits = [];
+    if (state.attempts) { bits.push('попыток: ' + escapeHtml(state.attempts)); }
+    if (state.skipped) { bits.push('пара пропущена'); }
+    else if (state.committed) { bits.push('правки сохранены'); }
+    if (state.verification) {
+      bits.push('проверка: ' + (state.verification === 'solved' ? 'решено' : 'не решено'));
+    }
+    return '<strong>Отладка промпта:</strong> ' + bits.join(' · ')
+      + ' <span style="color:#6b7280;">· раскройте строку для подробностей</span>';
+  }
+
+  function buildPromptDebugHtml(pd) {
+    if (!pd || typeof pd !== 'object') { return ''; }
+    var attempts = Array.isArray(pd.attempts) ? pd.attempts : [];
+    var heading = 'Отладка промпта';
+    if (pd.prompt_name) { heading += ': «' + escapeHtml(pd.prompt_name) + '»'; }
+    if (pd.max_attempts) {
+      heading += ' · попыток: ' + escapeHtml(attempts.length) + ' из ' + escapeHtml(pd.max_attempts);
+    }
+    var parts = ['<div style="font-weight:600; font-size:13px; margin-bottom:4px;">' + heading + '</div>'];
+    if (pd.skipped) {
+      parts.push('<div style="font-size:13px; color:#6b7280;">Пара пропущена'
+        + (pd.skip_reason ? ': ' + escapeHtml(pd.skip_reason) : '') + '</div>');
+      return parts.join('');
+    }
+    attempts.forEach(function (a) {
+      var rows = ['<div style="margin-top:6px;"><strong>Попытка ' + escapeHtml(a.attempt)
+        + '</strong> ' + verdictBadge(a.verdict) + '</div>'];
+      if (a.dl_comment) {
+        rows.push('<div style="font-size:12px; color:#374151; margin:2px 0 4px;">DL: '
+          + escapeHtml(a.dl_comment) + '</div>');
+      }
+      if (a.addition) {
+        if (a.applied) {
+          rows.push('<div style="font-size:12px; color:#166534; background:#dcfce7;'
+            + ' padding:4px 6px; border-radius:4px;"><strong>Добавлено в промпт:</strong> '
+            + escapeHtml(a.addition) + '</div>');
+        } else {
+          rows.push('<div style="font-size:12px; color:#6b7280; background:#f3f4f6;'
+            + ' padding:4px 6px; border-radius:4px;"><strong>Предложено, но не сохранено:</strong> '
+            + escapeHtml(a.addition)
+            + ' <em>(правка не сохранена — задача не решена)</em></div>');
+        }
+      }
+      parts.push(rows.join(''));
+    });
+    if (pd.committed) {
+      parts.push('<div style="margin-top:6px; font-size:12px; color:#166534;">✓ Промпт дополнен и сохранён.</div>');
+    } else if (pd.commit_error) {
+      parts.push('<div style="margin-top:6px; font-size:12px; color:#991b1b;">Не удалось сохранить промпт: '
+        + escapeHtml(pd.commit_error) + '</div>');
+    }
+    var ver = pd.verification || {};
+    if (ver.verdict) {
+      parts.push('<div style="margin-top:6px;"><strong>Проверка после правок:</strong> '
+        + verdictBadge(ver.verdict) + '</div>');
+      if (ver.dl_comment) {
+        parts.push('<div style="font-size:12px; color:#374151; margin:2px 0 0;">DL: '
+          + escapeHtml(ver.dl_comment) + '</div>');
+      }
+    } else if (attempts.length) {
+      parts.push('<div style="margin-top:6px; font-size:12px; color:#6b7280;">'
+        + 'Проверка после правок ещё не выполнялась.</div>');
+    }
+    return parts.join('');
+  }
+
   function createResultCard(r, openKeys) {
     var cls = r.verdict === 'solved' ? 'solved' : (r.verdict === 'failed' ? 'failed' : 'skipped');
     var card = document.createElement('details');
@@ -501,6 +613,7 @@ window.ArmBatchResults = (function () {
     card._armKey = rkey;
     card._armRow = r;
     card._armSig = rowSignature(r);
+    card._armPdSig = promptDebugStateSig(r);
     if (openKeys.has(rkey)) { card.setAttribute('open', ''); }
 
     var lazy = !!r.lazy_body;               // тело подтягивается по AJAX
@@ -549,6 +662,11 @@ window.ArmBatchResults = (function () {
     var body = document.createElement('div');
     body.className = 'arm-result-body';
 
+    // Пара отладки промтов: вместо «Извлечённого кода» — блок с попытками и
+    // дописанным в промпт текстом (payload приходит с телом строки).
+    var promptDebugRow = !!(r.has_prompt_debug
+      || (r.prompt_debug && typeof r.prompt_debug === 'object'
+          && Object.keys(r.prompt_debug).length));
     var dlBlock = document.createElement('div');
     dlBlock.style.cssText = 'padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:13px; color:#1f2937; background:' + (r.verdict === 'solved' ? '#dcfce7' : '#fee2e2') + ';';
     var dlHtml = '<strong>DL тест:</strong> ';
@@ -560,6 +678,31 @@ window.ArmBatchResults = (function () {
     if (dlError) { dlHtml += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
     dlBlock.innerHTML = dlHtml;
     body.appendChild(dlBlock);
+
+    // Блок «Отладка промпта» — сразу под DL-вердиктом (payload грузится с
+    // телом; до загрузки показываем компактную сводку из prompt_debug_state).
+    var pdEl = document.createElement('div');
+    pdEl.className = 'arm-prompt-debug';
+    pdEl.style.cssText = 'padding:8px 12px; margin-bottom:8px; border-radius:4px;'
+      + ' background:#f9fafb; border:1px solid #e5e7eb;';
+    pdEl.hidden = true;
+    body.appendChild(pdEl);
+    var renderPromptDebug = function (payload) {
+      if (payload && typeof payload === 'object' && Object.keys(payload).length) {
+        pdEl.innerHTML = buildPromptDebugHtml(payload);
+        pdEl.hidden = false;
+        return;
+      }
+      var state = r.prompt_debug_state;
+      if (promptDebugRow && state) {
+        pdEl.innerHTML = promptDebugSummaryHtml(state);
+        pdEl.hidden = false;
+        return;
+      }
+      pdEl.hidden = true;
+      pdEl.innerHTML = '';
+    };
+    renderPromptDebug(r.prompt_debug);
 
     // Ответ модели + извлечённый код — ЛЕВАЯ колонка (уже): справа, на одном
     // уровне с ними, входные/эталонные данные проваленного теста (тесно?
@@ -598,6 +741,13 @@ window.ArmBatchResults = (function () {
       downloadLink.style.cssText = 'display:inline-block; margin-top:6px;';
       downloadLink.textContent = 'Скачать код';
       colMain.appendChild(downloadLink);
+    }
+    if (promptDebugRow) {
+      // Смысл пары — правка промпта: код/скачивание не показываем (блок
+      // «Отладка промпта» стоит выше, под DL-вердиктом).
+      codeLabel.style.display = 'none';
+      codePre.style.display = 'none';
+      if (downloadLink) { downloadLink.style.display = 'none'; }
     }
 
     // Входные данные и эталонные ответы проваленных тестов — ПРАВАЯ колонка
@@ -697,7 +847,14 @@ window.ArmBatchResults = (function () {
         dlBlock.innerHTML = dlHtml2;
         answerPre.textContent = st.raw || st.short_response || '';
         codePre.textContent = st.code || '— код не извлечён —';
-        if (downloadLink) { downloadLink.style.display = st.code ? '' : 'none'; }
+        if (downloadLink) {
+          downloadLink.style.display = (!promptDebugRow && st.code) ? '' : 'none';
+        }
+        // Блок «Отладка промпта» приходит вместе с телом (в т.ч. вердикт
+        // проверочного прохода, который идёт после основного прогона).
+        if (st.prompt_debug && Object.keys(st.prompt_debug).length) {
+          renderPromptDebug(st.prompt_debug);
+        }
         // Бейдж «обрезан», если в снапшоте его не было (легаси-строки БД).
         card._armBodyTruncated = !!st.truncated;
         renderBadges(card, card._armRow || r);
@@ -744,6 +901,15 @@ window.ArmBatchResults = (function () {
       card.addEventListener('toggle', function () {
         if (card.open) { loadBody(); }
       });
+      // Блок «Отладка промпта» изменился (коммит/проверка пришли после
+      // первого раскрытия) — сбрасываем закэшированное тело и перечитываем
+      // его, иначе карточка осталась бы со старым вердиктом проверки.
+      card._armReloadBody = function () {
+        if (!resultId) { return; }
+        delete bodyCache[resultId];
+        bodyLoaded = false;
+        if (card.open) { loadBody(); }
+      };
     } else {
       // Полный item в снапшоте (обратная совместимость) — рендер как раньше.
       answerPre.textContent = r.raw_response || r.short_response || '';
@@ -761,6 +927,19 @@ window.ArmBatchResults = (function () {
       if (sig === card._armSig) { return; }
       card._armSig = sig;
       card._armRow = row;
+      // Блок отладки промпта: полный payload есть только в полном снапшоте,
+      // в лёгком — сводка prompt_debug_state (смена = перечитать тело).
+      var pdSig = promptDebugStateSig(row);
+      if (pdSig !== card._armPdSig) {
+        card._armPdSig = pdSig;
+        var fullPd = (row.prompt_debug && typeof row.prompt_debug === 'object')
+          ? row.prompt_debug : null;
+        if (fullPd && Object.keys(fullPd).length) {
+          renderPromptDebug(fullPd);
+        } else if (card._armReloadBody) {
+          card._armReloadBody();
+        }
+      }
       card.className = 'arm-result '
         + (row.verdict === 'solved' ? 'solved' : (row.verdict === 'failed' ? 'failed' : 'skipped'));
       renderBadges(card, row);

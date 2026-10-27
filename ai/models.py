@@ -721,6 +721,7 @@ class AIRequestLog(models.Model):
     MODE_FIND_ERROR = "find_error"
     MODE_ARM = "arm"
     MODE_BATCH_SOLVE = "batch_solve"
+    MODE_PROMPT_DEBUG = "prompt_debug"
     MODE_TESTING = "testing"
 
     MODE_CHOICES = (
@@ -729,6 +730,7 @@ class AIRequestLog(models.Model):
         (MODE_FIND_ERROR, "Найти ошибку"),
         (MODE_ARM, "ARM"),
         (MODE_BATCH_SOLVE, "Пакетное решение"),
+        (MODE_PROMPT_DEBUG, "Отладка промтов"),
         (MODE_TESTING, "Тестирование"),
     )
 
@@ -1063,10 +1065,12 @@ class AIModelTestRun(models.Model):
 
     RUN_TYPE_SINGLE = "single"
     RUN_TYPE_BATCH = "batch"
+    RUN_TYPE_PROMPT_DEBUG = "prompt_debug"
 
     RUN_TYPE_CHOICES = (
         (RUN_TYPE_SINGLE, "Single (find-error)"),
         (RUN_TYPE_BATCH, "Batch (solve)"),
+        (RUN_TYPE_PROMPT_DEBUG, "Prompt debug"),
     )
 
     run_id = models.CharField(max_length=64, unique=True, db_index=True, verbose_name="ID прогона")
@@ -1252,6 +1256,16 @@ class AIModelTestResult(models.Model):
     # is_output_truncated). Ретрай с припиской «сразу код» уже сделан во время
     # прогона; пара помечается чинно, потому что часть ответа реально потеряна.
     truncated = models.BooleanField(default=False, verbose_name="Ответ обрезан")
+    # Отладка промтов (`run.run_type == "prompt_debug"`): попытки пары,
+    # дополнения промпта, факт коммита и результат проверочного прохода.
+    # Контракт — ai/services/prompt_debug.py::empty_payload.
+    # Nullable и БЕЗ Python-default: на SQLite AddField с default пересоздаёт
+    # таблицу, а у модели есть postgres-only GinIndex (gin_trgm_ops) —
+    # пересоздание падает на "gin_trgm_ops" (та же причина, что у updated_at).
+    # Читатели всегда берут ``... or {}``.
+    prompt_debug = models.JSONField(
+        null=True, blank=True, verbose_name="Отладка промпта",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
     # Время последнего обновления строки. Повтор пары перезаписывает её через
     # update_or_create → updated_at меняется, created_at остаётся прежним.
