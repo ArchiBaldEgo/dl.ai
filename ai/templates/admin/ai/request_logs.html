@@ -4,6 +4,8 @@
 {% load static %}
 <link rel="stylesheet" href="{% static 'admin/ai/request_logs/index.css' %}">
 <script src="{% static 'admin/ai/request_logs/index.js' %}"></script>
+{# Живые цифры пакетных строк: «Пары»/статус/время обновляются без перезагрузки. #}
+<script src="{% static 'admin/ai/request_logs/live.js' %}?v=1"></script>
 
 <div class="ai-logs-wrap">
   {% include "admin/ai/_ai_back_nav.html" %}

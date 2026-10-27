@@ -1497,7 +1497,7 @@ var localization = {
         dlTestInput: "Входные данные",
         dlTestOutput: "Выходные данные (эталон)",
         dlTestTruncated: "(начало)",
-        dlTestUnavailable: "DL не выдал данные теста — тест не выполнялся (например, ошибка компиляции) или выдача запрещена настройками курса.",
+        dlTestUnavailable: "DL не выдал данные теста: выдача тестовых данных запрещена настройками курса или данные теста недоступны.",
         voiceStatus: {
             listening: "Запись голоса",
             recognized: "Распознано: ",
@@ -1624,7 +1624,7 @@ var localization = {
         dlTestInput: "Input",
         dlTestOutput: "Output (expected)",
         dlTestTruncated: "(beginning)",
-        dlTestUnavailable: "DL did not provide the test data — the test did not run (e.g. a compilation error) or output is restricted by the course settings.",
+        dlTestUnavailable: "DL did not provide the test data: test-data issuance is disabled by the course settings or the test data is unavailable.",
         voiceStatus: {
             listening: "Voice recording",
             recognized: "Recognized: ",
@@ -1750,7 +1750,7 @@ var localization = {
         dlTestInput: "Données d'entrée",
         dlTestOutput: "Sortie (attendue)",
         dlTestTruncated: "(début)",
-        dlTestUnavailable: "DL n'a pas fourni les données du test — le test n'a pas été exécuté (par exemple, une erreur de compilation) ou la sortie est interdite par les paramètres du cours.",
+        dlTestUnavailable: "DL n'a pas fourni les données du test : la diffusion des données de test est interdite par les paramètres du cours ou les données sont indisponibles.",
         voiceStatus: {
             listening: "Enregistrement vocal",
             recognized: "Reconnu : ",

@@ -61,9 +61,9 @@
     {# шире колонки). #}
     <span class="ai-nowrap">{{ row.sent_at|date:"d.m.Y"|default:"—" }}</span>
     <span class="ai-nowrap">{{ row.sent_at|date:"H:i:s"|default:"—" }}</span>
-    {% if row.received_at and row.received_at != "—" or row.time_display and row.time_display != "—" %}
-      <span class="ai-sub">{% if row.received_at and row.received_at != "—" %}получен {{ row.received_at }}{% endif %}{% if row.time_display and row.time_display != "—" %}{% if row.received_at and row.received_at != "—" %} · {% endif %}{{ row.time_display }}{% endif %}</span>
-    {% endif %}
+    {# Пустой span ничего не занимает; live.js дописывает «получен … · время», #}
+    {# когда прогон завершится (идущий прогон → текст пуст). #}
+    <span class="ai-sub ai-live-time">{% if row.received_at and row.received_at != "—" %}получен {{ row.received_at }}{% endif %}{% if row.time_display and row.time_display != "—" %}{% if row.received_at and row.received_at != "—" %} · {% endif %}{{ row.time_display }}{% endif %}</span>
   </td>
   <td>{{ row.mode_display|default:"—" }}</td>
   <td>
@@ -85,7 +85,8 @@
   </td>
   <td>{{ row.model_display|default:"—" }}</td>
   {# Пары: «решено/всего»; состав (решено · не решено · всего) — в title. #}
-  <td class="ai-nowrap"
-      title="{% if row.total_pairs %}Решено: {{ row.solved|default:0 }} · не решено: {{ row.failed|default:0 }} · всего пар: {{ row.total_pairs }}{% else %}Прогон без пар{% endif %}">{% if row.total_pairs %}<span class="ai-recent-logs-ok">{{ row.solved|default:0 }}</span>/<span class="{% if row.failed %}ai-recent-logs-err{% endif %}">{{ row.failed|default:0 }}</span>{% else %}—{% endif %}</td>
-  <td class="{% if row.run_status == 'completed' or row.run_status == 'success' %}ai-recent-logs-ok{% elif row.run_status == 'running' or row.run_status == 'paused' %}ai-recent-logs-neutral{% else %}ai-recent-logs-err{% endif %} ai-nowrap">{{ row.run_status_display }}</td>
+  {# data-live-pairs / ai-live-* — hooks живого обновления цифр (live.js). #}
+  <td class="ai-nowrap" data-live-pairs
+      title="{% if row.total_pairs %}Решено: {{ row.solved|default:0 }} · не решено: {{ row.failed|default:0 }} · всего пар: {{ row.total_pairs }}{% else %}Прогон без пар{% endif %}"><span class="ai-live-pairs-empty"{% if row.total_pairs %} hidden{% endif %}>—</span><span class="ai-live-pairs-values"{% if not row.total_pairs %} hidden{% endif %}><span class="ai-recent-logs-ok ai-live-solved">{{ row.solved|default:0 }}</span>/<span class="{% if row.failed %}ai-recent-logs-err{% endif %} ai-live-failed">{{ row.failed|default:0 }}</span></span></td>
+  <td class="{% if row.run_status == 'completed' or row.run_status == 'success' %}ai-recent-logs-ok{% elif row.run_status == 'running' or row.run_status == 'paused' %}ai-recent-logs-neutral{% else %}ai-recent-logs-err{% endif %} ai-nowrap" data-live-status>{{ row.run_status_display }}</td>
 </tr>

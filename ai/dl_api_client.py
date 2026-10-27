@@ -979,6 +979,18 @@ _DL_COMPILE_OK_RE = re.compile(
     r"|(?:успешн|прошл|удачн)[^\n]{0,40}?(?:компиляц|сборк|build|compile)",
     re.IGNORECASE,
 )
+# Маркеры ОШИБКИ ИСПОЛНЕНИЯ (программа собралась, но упала во время работы):
+# «Ошибка исполнения программы: Integer overflow.», «Runtime error on test 3»,
+# «Деление на ноль», «Segmentation fault». Проверяются ДО wrong_answer:
+# «Ошибка исполнения: неверный индекс массива» — это падение, а не ответ.
+DL_RUNTIME_MARKERS = (
+    "ошибка исполнения", "ошибк исполнен", "ошибка во время выполнения",
+    "runtime error", "runtime exception",
+    "integer overflow", "переполнение", "stack overflow",
+    "деление на ноль", "деление на нуль", "division by zero",
+    "segmentation fault", "access violation",
+    "index out of range", "исключение",
+)
 # Маркеры НЕПРАВИЛЬНОГО ОТВЕТА (программа собралась, но результат не тот).
 # Основы — «стебли» без окончаний: «неправильн» покрывает «неправильный/
 # неправильно», «неверн» — «неверный/неверно». Иначе комментарий
@@ -1012,6 +1024,7 @@ DL_WRONG_ANSWER_STRONG_MARKERS = (
 # Причины сбоя (ортогональны вердикту: вердикт — «прошёл ли DL», причина —
 # «почему нет»). Значения совпадают с AIModelTestResult.FAILURE_REASON_CHOICES.
 DL_REASON_COMPILE_ERROR = "compile_error"
+DL_REASON_RUNTIME_ERROR = "runtime_error"
 DL_REASON_WRONG_ANSWER = "wrong_answer"
 DL_REASON_UNDEFINED = "undefined"
 
@@ -1049,10 +1062,12 @@ def dl_failure_reason_from_comment(comment: str) -> str:
        комментарии есть СИЛЬНЫЙ маркер неверного ответа («Неправильный
        ответ: значение переменной не равно ожидаемому») — это
        ``wrong_answer``;
-    3. маркеры неверного ответа → ``wrong_answer``;
-    4. иначе, если комментарий содержит любой провальный маркер →
+    3. маркеры ошибки исполнения («Ошибка исполнения программы: Integer
+       overflow», «Runtime error», «Деление на ноль») → ``runtime_error``;
+    4. маркеры неверного ответа → ``wrong_answer``;
+    5. иначе, если комментарий содержит любой провальный маркер →
        ``undefined`` (провал DL, причина не распознана);
-    5. иначе (успех) → ``""`` (пустая строка — причина нет).
+    6. иначе (успех) → ``""`` (пустая строка — причина нет).
 
     Провал НИКОГДА не переименовывается в успех: нераспознанный провал =
     ``undefined``, а не пустая строка.
@@ -1068,6 +1083,10 @@ def dl_failure_reason_from_comment(comment: str) -> str:
         # Отступаем только при явном «неправильный ответ».
         if not any(m in comment_lower for m in DL_WRONG_ANSWER_STRONG_MARKERS):
             return DL_REASON_COMPILE_ERROR
+    # Ошибка исполнения — ДО wrong_answer: «Ошибка исполнения: неверный
+    # индекс массива» это падение программы, а не неверный ответ.
+    if any(m in comment_lower for m in DL_RUNTIME_MARKERS):
+        return DL_REASON_RUNTIME_ERROR
     if any(m in comment_lower for m in DL_WRONG_ANSWER_MARKERS):
         return DL_REASON_WRONG_ANSWER
     if any(m in comment_lower for m in DL_FAILURE_MARKERS):

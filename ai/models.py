@@ -1160,6 +1160,7 @@ class AIModelTestResult(models.Model):
     FR_MODEL_ERROR = "model_error"
     FR_NO_CODE = "no_code"
     FR_COMPILE_ERROR = "compile_error"
+    FR_RUNTIME_ERROR = "runtime_error"
     FR_WRONG_ANSWER = "wrong_answer"
     FR_UNDEFINED = "undefined"
     FR_SKIPPED = "skipped"
@@ -1171,6 +1172,7 @@ class AIModelTestResult(models.Model):
         (FR_MODEL_ERROR, "Сбой ответа модели"),
         (FR_NO_CODE, "Не выкушен код"),
         (FR_COMPILE_ERROR, "Ошибка компиляции"),
+        (FR_RUNTIME_ERROR, "Ошибка исполнения программы"),
         (FR_WRONG_ANSWER, "Неправильный ответ"),
         (FR_UNDEFINED, "Причина не распознана"),
         (FR_SKIPPED, "Пропущено"),

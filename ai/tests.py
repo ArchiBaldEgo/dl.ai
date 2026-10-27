@@ -15818,6 +15818,114 @@ class RequestLogDetailJsonTests(TestCase):
         self.assertEqual(resp.status_code, 404)
 
 
+class RequestLogsLiveCountersTests(TestCase):
+    """Живые счётчики пакетных строк журнала (AJAX «Пары»/статус/время).
+
+    Эндпоинт /ai/admin/ai/request_logs/counters/ опрашивается
+    static/admin/ai/request_logs/live.js на «Журнале запросов» и «Настройке
+    ИИ-приложения»; права и скоуп — как у самого журнала.
+    """
+
+    RUN_ID = "a" * 32
+
+    def setUp(self):
+        from ai.admin.request_logs import admin_request_logs_counters_view
+        from django.contrib.sessions.middleware import SessionMiddleware
+        self.view = admin_request_logs_counters_view
+        self._middleware = SessionMiddleware(lambda req: None)
+        self.admin = get_user_model().objects.create_superuser(
+            username="live_admin", password="***", email="live@t.com",
+        )
+        self.pd = get_user_model().objects.create_user(
+            username="live_pd", password="***",
+        )
+        make_prompt_developer(self.pd)
+
+    def _get(self, user, run_ids=None):
+        request = RequestFactory().get(
+            "/ai/admin/ai/request_logs/counters/",
+            {"run_ids": run_ids if run_ids is not None else self.RUN_ID},
+        )
+        request.user = user
+        self._middleware.process_request(request)
+        return self.view(request)
+
+    def _make_run(self, *, status="running", finished=False, user=None):
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        started = timezone.now() - timedelta(seconds=90)
+        run = AIModelTestRun.objects.create(
+            run_id=self.RUN_ID,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=status,
+            course_id=1450,
+            started_at=started,
+            finished_at=timezone.now() if finished else None,
+        )
+        for index, verdict in enumerate(("solved", "solved", "failed")):
+            AIModelTestResult.objects.create(
+                run=run, model_key=f"Model{index}", model_title=f"Model{index}",
+                status="ok", verdict=verdict,
+            )
+        AIRequestLog.objects.create(
+            user=user or self.admin,
+            source="arm",
+            mode="batch_solve",
+            message=f"Batch solve run {self.RUN_ID}",
+            batch_run_id=self.RUN_ID,
+            status=AIRequestLog.STATUS_SUCCESS,
+            sent_at=started,
+            received_at=timezone.now() if finished else None,
+        )
+        return run
+
+    def test_running_run_counters(self):
+        self._make_run(status="running")
+        data = json.loads(self._get(self.admin).content)
+        self.assertTrue(data["ok"])
+        info = data["runs"][self.RUN_ID]
+        self.assertEqual((info["total"], info["solved"], info["failed"]), (3, 2, 1))
+        self.assertEqual(info["status_display"], "Выполняется…")
+        self.assertEqual(info["status_class"], "ai-recent-logs-neutral")
+        self.assertFalse(info["finished"])
+        self.assertEqual(info["time_display"], "")
+
+    def test_completed_run_counters_and_time(self):
+        self._make_run(status="completed", finished=True)
+        data = json.loads(self._get(self.admin).content)
+        info = data["runs"][self.RUN_ID]
+        self.assertEqual(info["status_display"], "Выполнен")
+        self.assertEqual(info["status_class"], "ai-recent-logs-ok")
+        self.assertTrue(info["finished"])
+        self.assertEqual(info["time_display"], "1 мин 30 с")
+        self.assertRegex(info["received_at"], r"^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}$")
+
+    def test_prompt_developer_does_not_see_foreign_run(self):
+        self._make_run(user=self.admin)
+        data = json.loads(self._get(self.pd).content)
+        self.assertEqual(data["runs"], {})
+
+    def test_prompt_developer_sees_own_run(self):
+        self._make_run(user=self.pd)
+        data = json.loads(self._get(self.pd).content)
+        self.assertIn(self.RUN_ID, data["runs"])
+
+    def test_invalid_and_missing_run_ids_are_ignored(self):
+        data = json.loads(self._get(self.admin, run_ids="bad,../../x").content)
+        self.assertEqual(data["runs"], {})
+        data = json.loads(self._get(self.admin, run_ids="").content)
+        self.assertEqual(data["runs"], {})
+
+    def test_post_is_rejected(self):
+        request = RequestFactory().post(
+            "/ai/admin/ai/request_logs/counters/", {"run_ids": self.RUN_ID},
+        )
+        request.user = self.admin
+        self._middleware.process_request(request)
+        resp = self.view(request)
+        self.assertEqual(resp.status_code, 405)
+
+
 class AssetViewAccessTests(TestCase):
     """asset_view (/ai/assets/): prod требует внешний id (user_info / userId-cookie);
     dev-bypass (DEBUG + AI_DEV_AUTH_BYPASS) — достаточно валидной Django-сессии.
@@ -19183,6 +19291,25 @@ class FailureReasonClassifierTests(SimpleTestCase):
             "Ошибка синтаксиса",
         ):
             self.assertEqual(self._reason(comment), "compile_error", comment)
+
+    def test_runtime_error_markers(self):
+        # Программа собралась, но упала во время исполнения — отдельная
+        # причина, а не «неправильный ответ» и не «не распознано».
+        for comment in (
+            "Ошибка исполнения программы: Integer overflow.",
+            "Ошибка исполнения программы: деление на ноль",
+            "Runtime error on test 3",
+            "Integer overflow",
+            "Segmentation fault",
+        ):
+            self.assertEqual(self._reason(comment), "runtime_error", comment)
+
+    def test_runtime_error_label(self):
+        from ai.models import AIModelTestResult
+        self.assertEqual(
+            AIModelTestResult.FAILURE_REASON_LABELS["runtime_error"],
+            "Ошибка исполнения программы",
+        )
 
     def test_wrong_answer_markers(self):
         for comment in (
