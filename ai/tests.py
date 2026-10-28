@@ -23262,6 +23262,28 @@ class PromptDebugRunnerTests(TestCase):
         # Нет исправлений — нет и колонки: счётчик в разрезах не появляется.
         self.assertNotIn("fixed", run.report["per_model"][0])
 
+    def test_legacy_saved_report_without_fixed_stats_renders(self):
+        """Сохранённый отчёт СТАРОГО прогона (до статистики «исправлено») не
+        имеет части ключей — страница не падает KeyError'ом, счётчики
+        достраиваются нулями."""
+        from ai import arm_runner
+
+        report = {"hints": []}
+        arm_runner._attach_prompt_debug_report(
+            report, [], stats={
+                "prompts_updated": 1,
+                "committed_pairs": 1,
+                "skipped_pairs": 0,
+                "verification": {"checked": 1, "solved": 1},
+            },
+        )
+        stats = report["prompt_debug"]
+        self.assertEqual(stats["fixed"], 0)
+        self.assertEqual(stats["fixed_by_topic"], [])
+        self.assertEqual(stats["verification"]["failed"], 0)
+        self.assertEqual(stats["verification"]["regressed"], 0)
+        self.assertFalse(any("Исправлено" in h for h in report["hints"]))
+
     def test_exhausted_attempts_do_not_commit(self):
         """Пара так и не решена — промпт не изменён, правки только в payload."""
         run_id = "e" * 32

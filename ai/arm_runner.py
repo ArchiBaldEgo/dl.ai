@@ -3826,7 +3826,21 @@ def _attach_prompt_debug_report(report, results, stats=None):
     """
     if not report:
         return report
-    stats = stats or _prompt_debug_report_stats(results)
+    stats = dict(stats or _prompt_debug_report_stats(results))
+    # Сохранённые отчёты старых прогонов (до появления статистики
+    # «исправлено») не имеют части ключей — достраиваем форму, иначе
+    # открытие страницы падало KeyError'ом.
+    stats.setdefault("prompts_updated", 0)
+    stats.setdefault("committed_pairs", 0)
+    stats.setdefault("fixed", 0)
+    stats.setdefault("fixed_by_topic", [])
+    stats.setdefault("skipped_pairs", 0)
+    verification = dict(stats.get("verification") or {})
+    verification.setdefault("checked", 0)
+    verification.setdefault("solved", 0)
+    verification.setdefault("failed", 0)
+    verification.setdefault("regressed", 0)
+    stats["verification"] = verification
     report["prompt_debug"] = stats
     hints = report.setdefault("hints", [])
     if stats["fixed"]:
@@ -3836,15 +3850,15 @@ def _attach_prompt_debug_report(report, results, stats=None):
         )
     if stats["prompts_updated"]:
         hints.append(f"Промптов дополнено: {stats['prompts_updated']}.")
-    if stats["verification"]["checked"]:
+    if verification["checked"]:
         hints.append(
             "Проверка после правок промптов: решено "
-            f"{stats['verification']['solved']} из {stats['verification']['checked']} пар."
+            f"{verification['solved']} из {verification['checked']} пар."
         )
-    if stats["verification"]["regressed"]:
+    if verification["regressed"]:
         hints.append(
             "Перестали решаться после проверки: "
-            f"{stats['verification']['regressed']}."
+            f"{verification['regressed']}."
         )
     return report
 
