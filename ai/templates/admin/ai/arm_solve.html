@@ -79,7 +79,8 @@
         <div class="arm-models" id="armLanguageChecks">
           {% for lang in language_options %}
             <label class="arm-model">
-              <input type="checkbox" class="arm-lang-check" value="{{ lang.id }}" data-ext="{{ lang.extension }}" data-name="{{ lang.name }}"> {{ lang.name }}
+              {# id — ключ сохранения формы (ai_admin_state.js): у чекбокса без name/id выбор языка не запоминался. #}
+              <input type="checkbox" class="arm-lang-check" id="armLangCheck{{ lang.id }}" value="{{ lang.id }}" data-ext="{{ lang.extension }}" data-name="{{ lang.name }}"> {{ lang.name }}
             </label>
           {% endfor %}
         </div>

@@ -4704,10 +4704,10 @@ class BatchParallelWorkerTests(TransactionTestCase):
         # Модель B: обе пары решены — падение соседа её не задело.
         self.assertTrue(all(r.verdict == "solved" for r in b_rows))
 
-    def test_model_loop_crash_marks_progress_error(self):
-        """Падение цикла модели вне тела пары (сбой БД-записи): статус модели
-        «error» в model_progress, вторая модель дорешивает, прогон completed,
-        в ошибке журнала — примечание о прерванной модели."""
+    def test_pair_write_crash_is_contained_and_run_not_success(self):
+        """Сбой БД-записи пары не обрывает цикл модели: оставшиеся пары модели
+        дорешиваются, прогон completed, но НЕ успешный — в ошибке журнала
+        примечание о парах без результата."""
         from ai import arm_runner
         from ai.models import AIModelTestResult, AIModelTestRun
 
@@ -4715,9 +4715,11 @@ class BatchParallelWorkerTests(TransactionTestCase):
             return ("program p; begin writeln(1); end.", 7)
 
         real_update = AIModelTestResult.objects.update_or_create
+        solver_calls = {"a": 0}
 
         def flaky_update_or_create(**kwargs):
             if kwargs.get("model_key") == "ModelA":
+                solver_calls["a"] += 1
                 raise RuntimeError("db write exploded")
             return real_update(**kwargs)
 
@@ -4738,18 +4740,21 @@ class BatchParallelWorkerTests(TransactionTestCase):
             arm_runner._jobs.pop(run_id, None)
 
         run = AIModelTestRun.objects.get(run_id=run_id)
-        # Падение одного model-цикла НЕ валит прогон в FAILED.
+        # Падение записи пары НЕ валит ни прогон, ни цикл модели.
         self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
-        # ModelB решила все свои пары; ModelA — ни одной (каждая запись падала).
+        # ModelB решила все свои пары; у ModelA записи падали — строк нет.
         rows = [r.model_key for r in AIModelTestResult.objects.filter(run=run)]
         self.assertEqual(rows, ["ModelB", "ModelB"])
         progress = {e["model_key"]: e for e in job["model_progress"]}
-        self.assertEqual(progress["ModelA"]["status"], "error")
+        # Цикл ModelA дошёл до конца (все пары обработаны), сбои учтены.
+        self.assertEqual(progress["ModelA"]["status"], "done")
+        self.assertEqual(progress["ModelA"]["pair_errors"], 2)
         self.assertEqual(progress["ModelB"]["status"], "done")
-        # Примечание о прерванной модели — в журнале; статус лога Error.
+        # Журнал — Error с примечанием о парах без результата.
         log = AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
         self.assertEqual(log.status, AIRequestLog.STATUS_ERROR)
-        self.assertIn("Модели, прерванные ошибкой цикла: «Model A»", log.error_message)
+        self.assertIn("Пары со сбоем обработки (нет результата): 2", log.error_message)
+        self.assertIn("«Model A»", log.error_message)
 
     def test_cancel_mid_run_stops_models_and_keeps_partial(self):
         """Отмена на середине прогона: обе модели обрывают текущую пару, БД —
@@ -10186,6 +10191,17 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         from pathlib import Path
         path = Path(__file__).resolve().parent.parent.joinpath("static", *parts)
         return path.read_text(encoding="utf-8")
+
+    def test_prompt_debug_form_state_is_remembered(self):
+        """Форма «Отладки промтов» запоминается между визитами: страница
+        зарегистрирована в общем механизме ai_admin_state.js (свой pathname —
+        без записи форма сбрасывалась), а у чекбоксов языков есть id — без
+        name/id у них нет ключа сохранения, и выбор языка терялся."""
+        src = self._static_source("admin", "js", "ai_admin_state.js")
+        self.assertIn('"/ai/admin/arm/prompt-debug/": "#armSolveForm"', src)
+        tpl = self._source("admin/ai/arm_solve.html")
+        self.assertIn('id="armLangCheck{{ lang.id }}"', tpl)
+        self.assertIn('name="prompt_attempts"', tpl)
 
     def test_rerun_pairs_post_sends_csrf_token(self):
         src = self._static_source("admin", "ai", "arm_solve", "index.js")
@@ -23454,6 +23470,77 @@ class PromptDebugRunnerTests(TestCase):
         self.prompt.refresh_from_db()
         self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
 
+    def test_pair_close_crash_does_not_kill_model_loop(self):
+        """Сбой ЗАКРЫТИЯ пары (коммит/запись payload) не обрывает цикл модели.
+
+        Регрессия: ``_finish_prompt_debug_pair`` вызывался ВНЕ try — его
+        исключение уносило весь цикл модели, оставшиеся пары попадали только
+        в проверку («основной проход по паре не выполнялся»), а промпт для них
+        не правился.
+        """
+        from ai import arm_runner
+
+        second = Task.objects.create(
+            node_id=7305, task_id=8305, name="B", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        run_id = "7" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["solved"])
+        real_finish = arm_runner._finish_prompt_debug_pair
+        calls = {"n": 0}
+
+        def flaky_finish(ctx, task_ctx, model_, payload, state):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("БД недоступна")
+            return real_finish(ctx, task_ctx, model_, payload, state)
+
+        with patch("ai.arm_runner._finish_prompt_debug_pair", side_effect=flaky_finish):
+            run = self._run(
+                run_id, model, dl_mock, prompt_attempts=2,
+                node_ids=[self.task.node_id, second.node_id],
+            )
+
+        self.assertEqual(run.status, "completed")
+        rows = {row.task.node_id: row for row in run.results.select_related("task")}
+        self.assertEqual(set(rows), {self.task.node_id, second.node_id})
+        for node_id, row in rows.items():
+            payload = row.prompt_debug or {}
+            # Основной проход был у ОБЕИХ пар — проверка не пишет «не выполнялся».
+            self.assertEqual(payload.get("note") or "", "", node_id)
+            self.assertEqual(len(payload.get("attempts") or []), 1, node_id)
+        # Сбой пары не должен оставлять вечную строку «выполняется…».
+        live = [r for r in (self._job.get("results") or []) if r.get("_live")]
+        self.assertEqual(live, [])
+        self.assertEqual(self._job.get("completed_pairs"), 2)
+
+    def test_commit_retry_saves_addition_after_transient_error(self):
+        """Транзиентный сбой БД при коммите не теряет успешную правку промпта."""
+        from ai.services import prompt_debug as pd
+
+        run_id = "8" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["failed", "solved", "solved"])
+        real_commit = pd.commit_prompt_additions
+        calls = {"n": 0}
+
+        def flaky_commit(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("deadlock detected")
+            return real_commit(*args, **kwargs)
+
+        with patch("ai.services.prompt_debug.commit_prompt_additions",
+                   side_effect=flaky_commit):
+            run = self._run(run_id, model, dl_mock, prompt_attempts=3)
+
+        self.prompt.refresh_from_db()
+        self.assertIn("вариант 1.", self.prompt.prompt_text_ru)
+        payload = run.results.get().prompt_debug or {}
+        self.assertTrue(payload.get("committed"))
+        self.assertEqual(calls["n"], 2)
+
     def test_zero_attempts_loops_until_skip_button(self):
         """Попыток = 0 → цикл без ограничения; метка «Далее» закрывает пару."""
         from ai import arm_runner
@@ -23691,7 +23778,9 @@ class PromptDebugAdminViewTests(_AdminViewRequestMixin, TestCase):
         # список и восстанавливается язык из run_params. Без value браузер
         # отдаёт "on" — селект промптов оказывался пустым.
         self.assertIn(
-            'class="arm-lang-check" value="%d"' % self.lang.id, html,
+            'class="arm-lang-check" id="armLangCheck%d" value="%d"'
+            % (self.lang.id, self.lang.id),
+            html,
         )
 
     def test_start_passes_run_type_and_attempts(self):

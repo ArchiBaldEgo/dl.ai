@@ -2446,6 +2446,25 @@ def _mark_batch_pair_started(run_id, model_index, model, task_ctx):
         job["updated_at_ts"] = time.time()
 
 
+def _mark_batch_pair_failed(run_id, model_index, exc):
+    """Учесть непредвиденный сбой пары (строка в БД не записалась).
+
+    Сам сбой не обрывает цикл модели (см. ``_run_batch_model_loop``), но прогон
+    не должен отчитываться как успешный: финализация добавит примечание и
+    переведёт журнал в Error.
+    """
+    message = str(exc)[:300] or exc.__class__.__name__
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        entry = _batch_progress_entry(job, model_index)
+        if entry:
+            entry["pair_errors"] = entry.get("pair_errors", 0) + 1
+            entry["last_pair_error"] = message
+        job["updated_at_ts"] = time.time()
+
+
 def _mark_batch_pair_finished(run_id, model_index, item=None):
     """Записать результат пары и сдвинуть прогресс (под _jobs_lock).
 
@@ -3355,6 +3374,28 @@ def _publish_pair_started(ctx, task_ctx, model):
         job["updated_at_ts"] = time.time()
 
 
+def _drop_live_pair(run_id, model, task_ctx):
+    """Убрать строку «выполняется…» пары, которая так и не дала результат.
+
+    Иначе непредвиденный сбой пары оставил бы в таблице вечное «в работе».
+    """
+    key = (model["key"], task_ctx["node_id"])
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        results = job.get("results") or []
+        job["results"] = [
+            row for row in results
+            if not (
+                row.get("_live")
+                and not row.get("result_id")
+                and (row.get("model_key"), row.get("task_node_id")) == key
+            )
+        ]
+        job["updated_at_ts"] = time.time()
+
+
 def _store_prompt_debug_payload(ctx, task_ctx, model, item, payload):
     """Записать payload отладки пары в БД и в живые результаты.
 
@@ -3503,6 +3544,27 @@ def _run_prompt_debug_attempts(ctx, task_ctx, model, dl_lock, prompt, payload, s
         )
 
 
+def _commit_prompt_additions_with_retry(prompt_id, additions, user, *, attempts=2):
+    """Коммит правок промпта с одним повтором на транзиентный сбой.
+
+    Пара уже РЕШЕНА по дополненному промпту — потерять правку из-за разового
+    сбоя БД нельзя («промпт не изменился» при зелёной паре). Повтор безопасен:
+    ``commit_prompt_additions`` идемпотентен (дедуп по тексту).
+    """
+    from .services.prompt_debug import commit_prompt_additions
+
+    error = ""
+    for attempt in range(attempts):
+        try:
+            return commit_prompt_additions(prompt_id, additions, user=user)
+        except Exception as exc:  # noqa: BLE001 — сбой коммита не должен валить пару
+            error = str(exc)[:300] or exc.__class__.__name__
+            logger.exception(
+                "ARM prompt debug: коммит промпта не удался (попытка %s)", attempt + 1,
+            )
+    return False, f"Не удалось сохранить правки промпта: {error}", {}
+
+
 def _finish_prompt_debug_pair(ctx, task_ctx, model, payload, state):
     """Итог пары: коммит успешных правок + запись payload. Возвращает item.
 
@@ -3510,14 +3572,12 @@ def _finish_prompt_debug_pair(ctx, task_ctx, model, payload, state):
     остаются лишь в payload (в UI — «предложено, но не сохранено»).
     ``None`` — прогон отменён, цикл модели завершается.
     """
-    from .services.prompt_debug import commit_prompt_additions
-
     item = state.get("item")
     additions = state.get("additions") or []
     solved = bool(state.get("solved")) and not state.get("cancelled")
     if additions and solved:
-        ok, error, info = commit_prompt_additions(
-            payload["prompt_id"], additions, user=ctx.get("user"),
+        ok, error, info = _commit_prompt_additions_with_retry(
+            payload["prompt_id"], additions, ctx.get("user"),
         )
         if ok:
             payload["committed"] = True
@@ -3558,6 +3618,10 @@ def _process_prompt_debug_pair(ctx, task_ctx, model, dl_lock):
     после каждой), а коммит делается в ``_finish_prompt_debug_pair``. Раньше
     исключение редактора уносило весь цикл модели, и в UI оставался только
     результат проверочного прохода — «промпт не менялся».
+
+    Закрытие пары (коммит + запись payload) — ВНУТРИ try: сбой записи не
+    должен ни валить цикл модели, ни оставлять пару без payload'а, иначе
+    проверка показывала бы «основной проход не выполнялся».
     """
     from .services.prompt_debug import empty_payload
 
@@ -3583,6 +3647,7 @@ def _process_prompt_debug_pair(ctx, task_ctx, model, dl_lock):
         _run_prompt_debug_attempts(
             ctx, task_ctx, model, dl_lock, prompt, payload, state,
         )
+        return _finish_prompt_debug_pair(ctx, task_ctx, model, payload, state)
     except Exception as exc:  # noqa: BLE001 — сбой пары не должен валить модель
         logger.exception("ARM prompt debug: пара упала с исключением")
         payload["stopped"] = (
@@ -3594,7 +3659,14 @@ def _process_prompt_debug_pair(ctx, task_ctx, model, dl_lock):
             f"«{task_ctx['task_name']}» ({model['title']}): отладка прервана "
             f"сбоем — {str(exc)[:200] or exc.__class__.__name__}",
         )
-    return _finish_prompt_debug_pair(ctx, task_ctx, model, payload, state)
+        # Повторно коммитить не пытаемся (сбой мог случиться ПОСЛЕ коммита):
+        # только дописываем payload, чтобы пара не осталась «без основного
+        # прохода» в проверке и в карточке.
+        try:
+            _store_prompt_debug_payload(ctx, task_ctx, model, state.get("item"), payload)
+        except Exception:  # noqa: BLE001 — запись уже не спасти, цикл важнее
+            logger.exception("ARM prompt debug: payload пары не записан")
+        return state.get("item")
 
 
 def _attach_prompt_debug_verification(ctx, model, task_ctx, item):
@@ -3926,7 +3998,26 @@ def _run_batch_model_loop(ctx, model, model_index, dl_lock):
             # Строка «выполняется…» — сразу, а не по завершении пары: иначе
             # первые минуты прогона таблица «Ответы моделей» пуста.
             _publish_pair_started(ctx, task_ctx, model)
-            item = processor(ctx, task_ctx, model, dl_lock)
+            try:
+                item = processor(ctx, task_ctx, model, dl_lock)
+            except Exception as exc:  # noqa: BLE001 — сбой ПАРЫ, не модели
+                # Непредвиденный сбой одной пары не должен обрывать цикл
+                # модели: иначе оставшиеся задачи вообще не решаются (в
+                # «Отладке промтов» проверка показывала бы их как «основной
+                # проход не выполнялся», а промпт не правился).
+                logger.exception(
+                    "ARM batch: пара «%s» (%s) упала",
+                    task_ctx.get("task_name"), model["key"],
+                )
+                _append_run_log(
+                    run_id,
+                    f"«{task_ctx.get('task_name')}» ({model['title']}): сбой пары — "
+                    f"{str(exc)[:200] or exc.__class__.__name__}",
+                )
+                _drop_live_pair(run_id, model, task_ctx)
+                _mark_batch_pair_failed(run_id, model_index, exc)
+                _mark_batch_pair_finished(run_id, model_index)
+                continue
             _mark_batch_pair_finished(run_id, model_index, item)
             if item is None:
                 # Отмена — модель прекращает работу; записанные другими
@@ -3954,6 +4045,7 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
     start_time = ctx["start_time"]
     is_prompt_debug = ctx.get("run_type") == AIModelTestRun.RUN_TYPE_PROMPT_DEBUG
     model_loop_errors: list = []
+    pair_error_entries: list = []
     cancelled = False
 
     # Finalize: build report from in-memory results (or DB if evicted).
@@ -4004,6 +4096,12 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
                 entry for entry in (job.get("model_progress") or [])
                 if entry.get("status") == "error"
             ]
+            # Пары, у которых непредвиденный сбой не дал записать результат:
+            # цикл модели при этом ДОШЁЛ до конца, но прогон не успешный.
+            pair_error_entries = [
+                entry for entry in (job.get("model_progress") or [])
+                if entry.get("pair_errors")
+            ]
             job["updated_at_ts"] = time.time()
             results = list(job.get("results") or [])
             report = job["report"]
@@ -4038,6 +4136,7 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
     all_solved_batch = (
         bool(batch_results) and solved_pairs == len(batch_results)
         and not model_loop_errors
+        and not pair_error_entries
     )
     # Сводный ответ для журнала: per-model вердикты + ошибки (до 5000 символов).
     batch_summary_parts = []
@@ -4081,6 +4180,17 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
             + ", ".join(
                 "«%s»" % (e.get("model_title") or e.get("model_key") or "?")
                 for e in model_loop_errors
+            )
+        )[:2000]
+    if pair_error_entries:
+        batch_error_message = (
+            batch_error_message + (" " if batch_error_message else "")
+            + "Пары со сбоем обработки (нет результата): "
+            + str(sum(_to_int(e.get("pair_errors")) for e in pair_error_entries))
+            + " — модели: "
+            + ", ".join(
+                "«%s»" % (e.get("model_title") or e.get("model_key") or "?")
+                for e in pair_error_entries
             )
         )[:2000]
     if cancelled:
