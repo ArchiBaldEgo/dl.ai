@@ -23218,8 +23218,15 @@ class PromptDebugRunnerTests(TestCase):
         return AIModelTestRun.objects.get(run_id=run_id)
 
     # ── tests ──────────────────────────────────────────────────────────────
-    def test_fail_then_solve_commits_additions(self):
-        """Два провала → успех: обе правки сохранены, шапка одна."""
+    def test_fail_then_solve_commits_only_effective_addition(self):
+        """Два провала → успех: в промпт идёт ТОЛЬКО последняя правка.
+
+        Регресс по реальному прогону: 4 попытки давали один и тот же вердикт DL,
+        решилась только 5-я — а в промпт попадали все четыре пересказа одного
+        правила. Дополнение сохраняется, только если именно после него пара
+        прошла; несработавшие остаются в payload (UI: «на результат не
+        повлияло»), но не в общем промпте.
+        """
         from ai.services.prompt_debug import PROMPT_DEBUG_HEADER
 
         run_id = "d" * 32
@@ -23234,17 +23241,22 @@ class PromptDebugRunnerTests(TestCase):
         self.assertEqual(len(payload["attempts"]), 3)
         self.assertTrue(payload["committed"])
         self.assertEqual(payload["attempts"][0]["verdict"], "failed")
-        self.assertTrue(payload["attempts"][0]["applied"])
+        # Первая правка не изменила вердикт → не сохранена, но помечена как
+        # «не повлияло» (а не «пара не решена»).
+        self.assertFalse(payload["attempts"][0]["applied"])
+        self.assertTrue(payload["attempts"][0]["ineffective"])
+        # Вторая — при ней пара решилась.
         self.assertTrue(payload["attempts"][1]["applied"])
+        self.assertFalse(payload["attempts"][1].get("ineffective"))
         self.assertEqual(payload["attempts"][2]["verdict"], "solved")
         self.assertEqual(payload["attempts"][2]["addition"], "")
-        # Проверочный проход: решено итоговым промптом.
+        # Проверочный проход: решено итоговым (сокращённым) промптом.
         self.assertEqual(payload["verification"]["verdict"], "solved")
         self.assertGreaterEqual(dl_calls["n"], 4)
 
         self.prompt.refresh_from_db()
         self.assertIn(PROMPT_DEBUG_HEADER, self.prompt.prompt_text_ru)
-        self.assertIn("вариант 1.", self.prompt.prompt_text_ru)
+        self.assertNotIn("вариант 1.", self.prompt.prompt_text_ru)
         self.assertIn("вариант 2.", self.prompt.prompt_text_ru)
         self.assertEqual(self.prompt.prompt_text_ru.count(PROMPT_DEBUG_HEADER), 1)
 
