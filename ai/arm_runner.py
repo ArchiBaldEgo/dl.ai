@@ -28,6 +28,8 @@ from django.utils import timezone
 # Хелперы распознавания прозы/кода живут в services/code_carver.py
 # (services — их домен по CLAUDE.md); ре-экспорт для совместимости.
 from .services.code_carver import (  # noqa: E402
+    FENCED_BLOCK_RE,
+    UNCLOSED_FENCE_RE,
     _PROSE_WORD_RE,
     _THINK_RE,
     _is_prose_sentence,
@@ -277,13 +279,40 @@ _NO_RAMBLE_INSTRUCTION = {
     "fr": "Ne détaille ni ton raisonnement ni tes calculs intermédiaires — produis immédiatement le code final de la solution.",
 }
 
+# Контракт формата ответа: РОВНО ОДИН блок кода в ``` в самом конце. Без него
+# flash/thinking-модели (GLM, DeepSeek) пишут черновики в оградах прямо в CoT,
+# и извлечение утаскивало в DL черновик/обрывок вместо финальной программы
+# (кейсы #2606800/#2606786/#2606762). Приписывается ПОСЛЕДНЕЙ строкой
+# solve-сообщения — это финальная директива, важнее хвоста требований языка.
+_OUTPUT_FENCE_INSTRUCTION = {
+    "ru": (
+        "Формат ответа: верни РОВНО ОДИН блок кода в тройных обратных кавычках "
+        "(```) в самом конце сообщения; внутри блока — только программа, без "
+        "комментариев и пояснений; после закрывающих ``` не пиши ничего. "
+        "Черновики и рассуждения в блок кода не включай."
+    ),
+    "en": (
+        "Response format: return EXACTLY ONE code block in triple backticks "
+        "(```) at the very end of your message; inside the block — only the "
+        "program, with no comments or explanations; write nothing after the "
+        "closing ```. Do not include drafts or reasoning in the code block."
+    ),
+    "fr": (
+        "Format de réponse : renvoie EXACTEMENT UN bloc de code entre triples "
+        "backticks (```) tout à la fin de ton message ; dans le bloc — seulement "
+        "le programme, sans commentaires ni explications ; n'écris rien après "
+        "les ``` fermants. N'inclus pas de brouillons ni de raisonnement dans "
+        "le bloc de code."
+    ),
+}
+
 # Приписка авто-ретрая обрезанной пары: ответ упёрся в потолок генерации
 # (model_clients.is_output_truncated), код не успел родиться — один повторный
 # вызов с прямой командой «только код».
 _CUT_RETRY_INSTRUCTION = {
-    "ru": "Твой предыдущий ответ был обрезан лимитом длины. Ни текста, ни вычислений, ни объяснений — выведи только окончательный код решения целиком, одним блоком.",
-    "en": "Your previous answer was cut off by the length limit. No text, no arithmetic, no explanations — output only the complete final solution code in a single block.",
-    "fr": "Ta réponse précédente a été tronquée par la limite de longueur. Ni texte, ni calculs, ni explications — produis uniquement le code final complet de la solution en un seul bloc.",
+    "ru": "Твой предыдущий ответ был обрезан лимитом длины. Ни текста, ни вычислений, ни объяснений — выведи только окончательный код решения целиком, одним блоком в ``` … ``` без текста после него.",
+    "en": "Your previous answer was cut off by the length limit. No text, no arithmetic, no explanations — output only the complete final solution code in a single ``` block with no text after it.",
+    "fr": "Ta réponse précédente a été tronquée par la limite de longueur. Ni texte, ni calculs, ni explications — produis uniquement le code final complet de la solution en un seul bloc ``` sans texte après.",
 }
 
 
@@ -317,6 +346,8 @@ def _compose_solve_message(message, task_statement, prog_lang_name, topic_name, 
     )
     if lang_req:
         message += "\n" + lang_req
+    # Контракт формата — последней строкой: «ровно один ```-блок в конце».
+    message += "\n" + _OUTPUT_FENCE_INSTRUCTION[ui_suffix]
     return message
 
 
@@ -1507,15 +1538,10 @@ def start_arm_sequential_run(
     return run_id, ""
 
 
-import re as _re
-
-# Открывающая строка оградки может содержать любой «язык» (c-mpa, c++, c#…)
-# и \r\n — прежний паттерн ([a-zA-Z]*\n) пропускал эти теги, и слово «c-mpa»
-# попадало внутрь извлечённого кода первой строкой (ошибка компиляции на DL).
-_CODE_FENCE_RE = _re.compile(r"```[^\n]*\r?\n(.*?)```", _re.DOTALL)
-# Незакрытая оградка (модель забывает закрывающие ``` — чаще при обрезке ответа):
-# всё после открывающей строки трактуется как код до конца текста.
-_UNCLOSED_FENCE_RE = _re.compile(r"```[^\n]*\r?\n(.*)\Z", _re.DOTALL)
+# Оградки парсит services/code_carver.py (единственный владелец);
+# алиасы сохранены для читаемости конвейера извлечения.
+_CODE_FENCE_RE = FENCED_BLOCK_RE
+_UNCLOSED_FENCE_RE = UNCLOSED_FENCE_RE
 
 
 # Функциональные слова EN/RU. Если их доля в тексте высока — это связная проза
@@ -1620,20 +1646,22 @@ def _extract_code_from_response(text, file_extension=""):
 def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
     """Extract pure code from an AI response.
 
-    Структурные экстракторы С-МПА (services/code_carver.py) идут ПЕРВЫМИ,
-    когда известно расширение: сначала по всему тексту (мульти-анкер +
-    валидация кандидатов внутри), затем по закрытым код-фенсам. Без
-    расширения структурники пробуются только как последняя надежда
-    (маркеры видны в сыром ответе). Структурники бракуют склейки
-    «болванка из CoT + программа» и вырезают проза-вставки из середины
-    (res#3987); победившего кандидата выбирают по полноте (больше строк).
+    ГЛАВНЫЙ тир — ```-оградки (контракт ответа, см. _OUTPUT_FENCE_INSTRUCTION):
+    ответом считается ПОСЛЕДНИЙ валидный закрытый блок (модель пишет черновики
+    в оградах прямо в CoT — первый/самый длинный блок почти всегда черновик,
+    кейсы #2606800/#2606786/#2606762). Внутри блока проза не «бракует»
+    кандидата, а вырезается (code_carver.sanitize_fenced_block); прогон
+    структурника (strict → relaxed) идёт по содержимому оградки, не по всему
+    тексту — иначе границы блоков теряются и черновик склеивается с финалом.
 
-    Дальше прежний конвейер: закрытые фенсы (не проза, код-подобные, БЕЗ
-    прози посреди), незакрытая оградка, карвинг прогона код-строк; каждый
-    кандидат проверяется тем же «мид-контролем». Prose-In-Fence (res#5170)
-    отбрасывается; утечка оградок срезается strip_code_fence_lines().
-    По фенс-блокам в структурных экстракторах идём С КОНЦА — последний
-    валидный фенс обычно финальный ответ модели (res#4160).
+    Если последняя оградка НЕ закрыта (ответ оборван внутри фенса), закрытые
+    блоки — черновики: берём только хвост незакрытой оградки; не вышло — пусто
+    (воркер сделает авто-ретрай «сразу код»), черновик в DL не уходит.
+
+    Остальные тиры (фолбэки для ответов БЕЗ оградок и для «финал без фенса»):
+    структурник по всему тексту → незакрытая оградка → карвинг прогона
+    код-строк → relaxed-структурник (простыня CoT, #2606801) → whole-text.
+    Утечка оградок срезается strip_code_fence_lines().
 
     apply_alt_cut=False отключает срез «Альтернатива:/Вариант 2:»
     (спасательный прогон _extract_code_from_response).
@@ -1646,7 +1674,6 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
     cleaned = _strip_think_blocks(text).strip()
     ext = (file_extension or "").strip().lower()
 
-    # === Вариант B: структурные экстракторы языков курса ===
     from .services import code_carver
     # «Альтернатива:/Вариант 2:…» с кодом второго решения срезаются ДО всех
     # экстракторов (структурники, фенсы и карвинг работают по одному тексту).
@@ -1662,40 +1689,56 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
             structural = code_carver.extract_asm_i86
         elif code_carver.has_mpa_markers(cleaned):
             structural = code_carver.extract_mpa_c
+
+    def _accept_fence(block):
+        """Код из содержимого оградки (уже без прозы) или ""."""
+        if _looks_like_prose(block, ext):
+            return ""
+        candidate = code_carver.sanitize_fenced_block(block, ext)
+        if not candidate:
+            return ""
+        if structural is not None:
+            found = structural(candidate) or structural(candidate, relaxed=True)
+            return code_carver.strip_code_fence_lines(found) if found else ""
+        if _mid_prose_lines(candidate, ext):
+            return ""
+        return code_carver.strip_code_fence_lines(candidate) if _looks_like_code(candidate, ext) else ""
+
+    # === Главный тир: последняя ЗАКРЫТАЯ оградка — финальный ответ ===
+    closed_fences = _CODE_FENCE_RE.findall(cleaned)
+    # «Финальный блок не закрыт» определяется по ТЕКСТУ ПОСЛЕ последнего
+    # закрытого блока (не по чётности строк-оградок): веб-пулы склеивают
+    # открывающую ``` с прозой («…Вывести только код.```asm»), такая строка
+    # не начинается с ``` и ломала счёт чётности — валидный закрытый финал
+    # принимался за обрыв («код не извлечён», логи GLM 5.3 Flash на
+    # #2606800/#2606786/#2606762 при живом прогоне 2026-10-28).
+    last_block_end = None
+    for match in _CODE_FENCE_RE.finditer(cleaned):
+        last_block_end = match.end()
+    unclosed_after = (
+        _UNCLOSED_FENCE_RE.search(cleaned[last_block_end:])
+        if closed_fences and last_block_end is not None else None
+    )
+    if unclosed_after is not None:
+        found = _accept_fence(unclosed_after.group(1))
+        if found:
+            return found
+        # Финал не извлёкся: черновик из закрытых блоков не подменяет его —
+        # пустой код включит авто-ретрай воркера.
+        return ""
+    if closed_fences:
+        for block in reversed(closed_fences):
+            found = _accept_fence(block)
+            if found:
+                return found
+        # Ни один фенс не валиден — финал мог быть БЕЗ оградки (```-цитата
+        # посреди CoT, а программа ниже); не обрываем пайплайн, идём дальше.
+
+    # === Фолбэки: ответ мог прийти без оградок ===
     if structural is not None:
         found = structural(cleaned)
         if found:
             return found
-        # По фенс-блокам: внутри ограды кандидата границы естественны;
-        # последний валидный фенс обычно финальный ответ модели — обходим
-        # С КОНЦА (res#4160).
-        for block in reversed(_CODE_FENCE_RE.findall(cleaned)):
-            block = block.strip()
-            if not block or _looks_like_prose(block, ext):
-                continue
-            found = structural(block)
-            if found:
-                return code_carver.strip_code_fence_lines(found)
-
-    matches = _CODE_FENCE_RE.findall(cleaned)
-    code_blocks = [m for m in matches if not _looks_like_prose(m, ext)]
-    if code_blocks:
-        # Самый длинный не-прозрачный код-подобный БЛОК без рассуждений
-        # посреди (проза-строки в середине = не код).
-        for candidate in sorted(code_blocks, key=len, reverse=True):
-            candidate = candidate.strip()
-            if not candidate:
-                continue
-            # Подпись модели ДО мид-контроля: иначе «Код:» в начале фенса
-            # бракует валидный блок как «прозу посреди кода».
-            candidate = code_carver.strip_prose_heading_lines(candidate, ext).strip()
-            if not candidate:
-                continue
-            if _mid_prose_lines(candidate, ext):
-                continue  # рассуждения внутри блока — это не код
-            if _looks_like_code(candidate, ext):
-                return code_carver.strip_code_fence_lines(candidate)
-        # все оградки — проза/мусор; продолжаем конвейер (незакрытая/карвинг ниже)
     # Незакрытая оградка: всё после открывающей строки — код (маркер сильный,
     # бракуем только очевидную прозу и рассуждения посреди).
     unclosed = _UNCLOSED_FENCE_RE.search(cleaned)
@@ -1721,10 +1764,6 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
         found = structural(cleaned, relaxed=True)
         if found:
             return code_carver.strip_code_fence_lines(found)
-        for block in reversed(_CODE_FENCE_RE.findall(cleaned)):
-            found = structural(block.strip(), relaxed=True)
-            if found:
-                return code_carver.strip_code_fence_lines(found)
     # Без оградок: проза-рассуждения и текст без кодовых маркеров — не код.
     if _looks_like_prose(cleaned, ext):
         return ""
