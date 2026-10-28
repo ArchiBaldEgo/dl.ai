@@ -3553,16 +3553,19 @@ def _commit_prompt_additions_with_retry(prompt_id, additions, user, *, attempts=
     """
     from .services.prompt_debug import commit_prompt_additions
 
-    error = ""
     for attempt in range(attempts):
         try:
             return commit_prompt_additions(prompt_id, additions, user=user)
-        except Exception as exc:  # noqa: BLE001 — сбой коммита не должен валить пару
-            error = str(exc)[:300] or exc.__class__.__name__
+        except Exception:  # noqa: BLE001 — сбой коммита не должен валить пару
+            # Техническая причина (SQL и т. п.) — только в лог: пользователю она
+            # ничего не говорит, а в карточке пары выводится человеческий текст.
             logger.exception(
                 "ARM prompt debug: коммит промпта не удался (попытка %s)", attempt + 1,
             )
-    return False, f"Не удалось сохранить правки промпта: {error}", {}
+    return False, (
+        "Правки не записаны: сбой при сохранении промпта. "
+        "Техническая причина — в журнале прогона; пару можно запустить заново."
+    ), {}
 
 
 def _finish_prompt_debug_pair(ctx, task_ctx, model, payload, state):

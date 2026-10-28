@@ -23004,6 +23004,27 @@ class PromptDebugCommitTests(TestCase):
             shared.prompt_text_ru, "Реши {message} на {language}, тема {topic}.",
         )
 
+    def test_prompt_without_shared_prompt_commits_under_lock(self):
+        """Регресс: ``select_for_update`` + ``select_related("shared_prompt")``.
+
+        ``shared_prompt`` — nullable FK, и Postgres отвечал «FOR UPDATE cannot be
+        applied to the nullable side of an outer join» на КАЖДЫЙ коммит в
+        обычный промпт (без общего предка) — правки из отладки не сохранялись
+        вовсе. Блокировка берётся только на строку Prompt.
+        """
+        from ai.services.prompt_debug import commit_prompt_additions
+
+        prompt = Prompt.objects.create(
+            prompt_name_ru="Обычный", prompt_text_ru="Реши задачу.",
+            owner=self.owner, programming_language=self.lang, topic=self.topic,
+        )
+        self.assertIsNone(prompt.shared_prompt_id)
+        ok, error, info = commit_prompt_additions(
+            prompt.pk, ["Проверяй формат вывода."], user=self.owner,
+        )
+        self.assertTrue(ok, error)
+        self.assertEqual(info["target_field"], "prompt_text_ru")
+
     def test_foreign_prompt_without_rights_is_rejected(self):
         from ai.services.prompt_debug import commit_prompt_additions
 
@@ -23540,6 +23561,33 @@ class PromptDebugRunnerTests(TestCase):
         payload = run.results.get().prompt_debug or {}
         self.assertTrue(payload.get("committed"))
         self.assertEqual(calls["n"], 2)
+
+    def test_commit_failure_reports_human_readable_error(self):
+        """Сбой коммита: в карточке — человеческая фраза, а не текст СУБД.
+
+        Регресс по жалобе на «Не удалось сохранить промпт: Не удалось сохранить
+        правки промпта: FOR UPDATE cannot be applied…» — двойной префикс и
+        сырой SQL ничего не говорят пользователю; техническая причина остаётся
+        в логе прогона (logger.exception в retry-обёртке).
+        """
+        run_id = "9" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["failed", "solved", "solved"])
+
+        with patch("ai.services.prompt_debug.commit_prompt_additions",
+                   side_effect=RuntimeError(
+                       "FOR UPDATE cannot be applied to the nullable side "
+                       "of an outer join")):
+            run = self._run(run_id, model, dl_mock, prompt_attempts=3)
+
+        payload = run.results.get().prompt_debug or {}
+        error = payload.get("commit_error") or ""
+        self.assertTrue(error, "ошибка коммита должна быть в payload")
+        self.assertNotIn("FOR UPDATE", error)
+        self.assertNotIn("Не удалось сохранить промпт:", error)
+        self.assertIn("Правки не записаны", error)
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
 
     def test_zero_attempts_loops_until_skip_button(self):
         """Попыток = 0 → цикл без ограничения; метка «Далее» закрывает пару."""
