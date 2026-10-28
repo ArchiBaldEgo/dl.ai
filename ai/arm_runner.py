@@ -3572,15 +3572,24 @@ def _finish_prompt_debug_pair(ctx, task_ctx, model, payload, state):
     """Итог пары: коммит успешных правок + запись payload. Возвращает item.
 
     Коммит — только если пара В ИТОГЕ решена (и не отменена); иначе правки
-    остаются лишь в payload (в UI — «предложено, но не сохранено»).
+    остаются лишь в payload (в UI — «предложено, но не сохранено»). Из
+    накопленных дополнений сохраняется только последнее (см. ниже).
     ``None`` — прогон отменён, цикл модели завершается.
     """
     item = state.get("item")
     additions = state.get("additions") or []
     solved = bool(state.get("solved")) and not state.get("cancelled")
     if additions and solved:
+        # В промпт идёт ТОЛЬКО последнее дополнение — то, при котором пара
+        # прошла. Пока пара шла failed→failed, её вердикт DL не менялся, значит
+        # предыдущие дополнения ничего не дали: сохранять их — значит копить в
+        # ОБЩЕМ промпте неподтверждённый текст (на практике — 4 пересказа
+        # одного правила за один прогон), который затем действует на все задачи
+        # с этой привязкой. Эффект сохранённого текста отдельно меряет
+        # проверочный проход; тексты несработавших дополнений остаются в
+        # payload и видны в карточке пары.
         ok, error, info = _commit_prompt_additions_with_retry(
-            payload["prompt_id"], additions, ctx.get("user"),
+            payload["prompt_id"], additions[-1:], ctx.get("user"),
         )
         if ok:
             payload["committed"] = True
@@ -3588,7 +3597,13 @@ def _finish_prompt_debug_pair(ctx, task_ctx, model, payload, state):
                 info.get("already_present") or []
             )
             for entry in payload["attempts"]:
-                entry["applied"] = bool(entry["addition"]) and entry["addition"] in saved
+                if not entry.get("addition"):
+                    continue
+                entry["applied"] = entry["addition"] in saved
+                if not entry["applied"]:
+                    # Не сработало: пара решилась только позже (или другим
+                    # дополнением). UI объясняет это отдельной подписью.
+                    entry["ineffective"] = True
             _append_run_log(
                 ctx["run_id"],
                 f"Промпт «{payload['prompt_name']}» дополнен "

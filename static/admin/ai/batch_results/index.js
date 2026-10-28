@@ -679,10 +679,16 @@ window.ArmBatchResults = (function () {
           rows.push('<div class="arm-pd-addition applied"><strong>Добавлено в промпт:</strong> '
             + escapeHtml(a.addition) + '</div>');
         } else {
+          // ineffective — пара решилась не благодаря этой правке (вердикт DL
+          // не изменился), поэтому в промпт она не попала. Второй текст — для
+          // пар, которые так и не решились: сохранять там нечего.
+          var note = a.ineffective
+            ? 'в промпт не сохранено — на результат не повлияло'
+            : 'в промпт не сохранено — пара не решена';
           rows.push('<div class="arm-pd-addition pending"><strong>Дополнение к промпту '
             + '(применено в следующей попытке):</strong> '
             + escapeHtml(a.addition)
-            + ' <em>(в промпт не сохранено — пара не решена)</em></div>');
+            + ' <em>(' + note + ')</em></div>');
         }
       }
       parts.push(rows.join(''));
