@@ -652,6 +652,10 @@ _MASM_DIR_RE = _re.compile(
 _ASM_END_RE = _re.compile(
     r"^\s*(ends\s*:|jmp\s+ends\b|end\s+\w+\b|end\s*$)", _re.IGNORECASE,
 )
+# «ends:» — метка, а не конец программы: за ней идёт «jmp ends». Конец
+# кандидата обязан включать этот переход (см. _asm_candidates_for_anchor).
+_ASM_ENDS_LABEL_RE = _re.compile(r"^\s*ends\s*:", _re.IGNORECASE)
+_ASM_JMP_ENDS_RE = _re.compile(r"^\s*jmp\s+ends\b", _re.IGNORECASE)
 _DL_END_MARKER_RE = _re.compile(r";\$E\b", _re.IGNORECASE)
 # ;$E, приклеенный к следующему тексту БЕЗ пробела («;$Ejmp begin»): веб-пул
 # склеил размышления и финальный ответ (конвертер DOM потерял границу блоков).
@@ -1163,7 +1167,12 @@ def _asm_prelude_start(lines, start, ext=".asm"):
 def _asm_candidates_for_anchor(lines, start, ext=".asm"):
     """Кандидат от анкера start до ближайшего концевого каркаса.
 
-    ;$E сильнее (DL-маркер конца), ends:/jmp ends/end <метка> — минимум.
+    ;$E сильнее (DL-маркер конца). Иначе конец программы — МЕТКА ``ends:``
+    (это точка выхода, а не просто слово): ``jmp ends`` внутри тела — обычный
+    переход на неё, и оборвать на нём кандидата нельзя (иначе терялся весь
+    оставшийся код — ветка else, метка и останавливающий цикл). ``jmp ends``
+    как конец берётся, только если метки ``ends:`` ниже нет вовсе, плюс
+    MASM-овские ``end <метка>``/``end``.
     ;$E внутри прозя-строки (CoT-цитата «…Ends: jmp Ends ;$E.») концом НЕ
     считается. Без концевика кандидата НЕТ (программа обрывается — либо
     болванка из рассуждений, либо модель дала каркас без конца). Возвращает
@@ -1174,7 +1183,8 @@ def _asm_candidates_for_anchor(lines, start, ext=".asm"):
     чтобы цитата в комментарии не закрыла программу.
     """
     scan = _scan_comment_spans(lines, ext) if ext else None
-    end = None
+    ends_label = None
+    fallback = None
     for i in range(start + 1, len(lines)):
         line = lines[i]
         if _DL_END_MARKER_RE.search(line) and len(line.strip()) <= 60:
@@ -1183,11 +1193,29 @@ def _asm_candidates_for_anchor(lines, start, ext=".asm"):
             # концом программы не считаются.
             return (start, i, True)
         judged = scan.blanked[i] if scan is not None else line
-        if _ASM_END_RE.match(judged) and end is None:
-            end = i  # продолжаем искать ;$E дальше, но ends: — минимум
-    if end is None:
+        if _ASM_ENDS_LABEL_RE.match(judged):
+            if ends_label is None:
+                ends_label = i
+            continue
+        if _ASM_END_RE.match(judged) and fallback is None:
+            fallback = i
+    if ends_label is not None:
+        # За меткой идёт останавливающий «jmp ends» (бесконечный цикл);
+        # без него программа «проваливается» в секцию данных.
+        end = ends_label
+        j = ends_label + 1
+        while j < len(lines):
+            nxt = scan.blanked[j] if scan is not None else lines[j]
+            if not nxt.strip():
+                j += 1
+                continue
+            if _ASM_JMP_ENDS_RE.match(nxt):
+                end = j
+            break
+        return (start, end, False)
+    if fallback is None:
         return None
-    return (start, end, False)
+    return (start, fallback, False)
 
 
 def _asm_anchors(lines, ext=".asm"):
@@ -1447,9 +1475,13 @@ def extract_mpa_c(text, relaxed=False):
     __bits) и браковал его целиком, оставляя пару без кода. Окно без «{» или
     с несошедшимся до конца текста балансом — отбрасывается. Валидации
     применяются к КАЖДОМУ окну (не проза, скобки сбалансированы, ≤1 main,
-    дубли __bits — локально в окне); дубли программ МЕЖДУ окнами — норма
-    (модель переписывает программу в рассуждении). Выбор: максимум строк,
-    сортировка устойчива — при равенстве берётся ПОСЛЕДНИЙ (финальный ответ
+    дубли __bits на файловом уровне окна); дубли программ МЕЖДУ окнами — норма
+    (модель переписывает программу в рассуждении).
+
+    Выбор: сначала окна от якорей ФАЙЛОВОГО уровня (rank 0), только если их
+    нет — окна от локальных объявлений (rank 1, битая болванка сдвинула
+    настоящую программу на глубину >0). Внутри ранга — максимум строк,
+    сортировка устойчива: при равенстве берётся ПОСЛЕДНИЙ (финальный ответ
     модели обычно позже; res#4160).
 
     relaxed=True — аварийный тир «долгое рассуждение без фенсов»: прозя-
@@ -1826,12 +1858,19 @@ def sanitize_fenced_block(block, ext=""):
 
     Оградка — контракт ответа: модель сама отделила код. Поэтому прозу внутри
     не «бракуем» (иначе теряем хорошую программу), а вырезаем: подписи
-    (``strip_prose_heading_lines``), проза-строки посреди (``_cut_mid_prose``)
-    и строки с протёкшим CoT (``cut_prose_lines``). ``""`` — кода не осталось.
+    (``strip_prose_heading_lines``), проза-строки посреди (``_cut_mid_prose``),
+    строки с протёкшим CoT (``cut_prose_lines``) и хвостовая проза-предложение
+    (``_strip_prose_tail``: с момента, когда блок уходит в DL как есть,
+    структурник его больше не дочищает). ``""`` — кода не осталось.
     """
     code = strip_prose_heading_lines(block or "", ext)
     code, _ = _cut_mid_prose(code, ext)
     code = cut_prose_lines(code, ext)
+    code = "\n".join(
+        _strip_prose_tail(
+            code.splitlines(), keep_marker_re=_DL_END_MARKER_RE, ext=ext,
+        )
+    )
     code = normalize_dl_marker_glue(code)
     code = strip_code_fence_lines(code)
     return code.strip()

@@ -286,23 +286,27 @@ _NO_RAMBLE_INSTRUCTION = {
 # solve-сообщения — это финальная директива, важнее хвоста требований языка.
 _OUTPUT_FENCE_INSTRUCTION = {
     "ru": (
-        "Формат ответа: верни РОВНО ОДИН блок кода в тройных обратных кавычках "
-        "(```) в самом конце сообщения; внутри блока — только программа, без "
-        "комментариев и пояснений; после закрывающих ``` не пиши ничего. "
-        "Черновики и рассуждения в блок кода не включай."
+        "Формат ответа: выведи ТОЛЬКО ГОТОВЫЙ (финальный) код решения — "
+        "РОВНО ОДИН блок кода в тройных обратных кавычках (```) в самом конце "
+        "сообщения. Внутри блока — только готовая программа, без комментариев "
+        "и пояснений; кода вне блока не пиши вовсе; после закрывающих ``` не "
+        "пиши ничего. Черновики и рассуждения в блок кода не включай."
     ),
     "en": (
-        "Response format: return EXACTLY ONE code block in triple backticks "
-        "(```) at the very end of your message; inside the block — only the "
-        "program, with no comments or explanations; write nothing after the "
-        "closing ```. Do not include drafts or reasoning in the code block."
+        "Response format: output ONLY the FINAL (ready) solution code — "
+        "EXACTLY ONE code block in triple backticks (```) at the very end of "
+        "your message. Inside the block — only the finished program, with no "
+        "comments or explanations; write no code outside the block; write "
+        "nothing after the closing ```. Do not include drafts or reasoning in "
+        "the code block."
     ),
     "fr": (
-        "Format de réponse : renvoie EXACTEMENT UN bloc de code entre triples "
-        "backticks (```) tout à la fin de ton message ; dans le bloc — seulement "
-        "le programme, sans commentaires ni explications ; n'écris rien après "
-        "les ``` fermants. N'inclus pas de brouillons ni de raisonnement dans "
-        "le bloc de code."
+        "Format de réponse : produis UNIQUEMENT le code FINAL (prêt) de la "
+        "solution — EXACTEMENT UN bloc de code entre triples backticks (```) "
+        "tout à la fin de ton message. Dans le bloc — seulement le programme "
+        "final, sans commentaires ni explications ; n'écris aucun code en "
+        "dehors du bloc ; n'écris rien après les ``` fermants. N'inclus pas de "
+        "brouillons ni de raisonnement dans le bloc de code."
     ),
 }
 
@@ -1650,9 +1654,11 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
     ответом считается ПОСЛЕДНИЙ валидный закрытый блок (модель пишет черновики
     в оградах прямо в CoT — первый/самый длинный блок почти всегда черновик,
     кейсы #2606800/#2606786/#2606762). Внутри блока проза не «бракует»
-    кандидата, а вырезается (code_carver.sanitize_fenced_block); прогон
-    структурника (strict → relaxed) идёт по содержимому оградки, не по всему
-    тексту — иначе границы блоков теряются и черновик склеивается с финалом.
+    кандидата, а вырезается (code_carver.sanitize_fenced_block), после чего
+    блок уходит в DL КАК ЕСТЬ: структурник языка работает только валидатором
+    («это программа»), границы блока он не переопределяет — иначе его
+    эвристики конца (`jmp ends` в теле, `ends:` без цикла) обрезали идеальный
+    фенс (живые прогоны i8086, 2026-10-29).
 
     Если последняя оградка НЕ закрыта (ответ оборван внутри фенса), закрытые
     блоки — черновики: берём только хвост незакрытой оградки; не вышло — пусто
@@ -1691,15 +1697,24 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
             structural = code_carver.extract_mpa_c
 
     def _accept_fence(block):
-        """Код из содержимого оградки (уже без прозы) или ""."""
+        """Код из содержимого оградки (уже без прозы) или "".
+
+        Оградка — контракт ответа, поэтому её содержимое уходит в DL КАК ЕСТЬ:
+        структурник языка здесь только ВАЛИДАТОР («в блоке действительно
+        программа»). Его результат не отдаём — иначе он режет блок по своим
+        эвристикам конца (`jmp ends` в теле принимался за конец программы,
+        `ends:` терял останавливающий цикл), и в DL уходил обрезанный хвост
+        идеального ответа модели.
+        """
         if _looks_like_prose(block, ext):
             return ""
         candidate = code_carver.sanitize_fenced_block(block, ext)
         if not candidate:
             return ""
         if structural is not None:
-            found = structural(candidate) or structural(candidate, relaxed=True)
-            return code_carver.strip_code_fence_lines(found) if found else ""
+            if not structural(candidate):
+                return ""
+            return code_carver.strip_code_fence_lines(candidate)
         if _mid_prose_lines(candidate, ext):
             return ""
         return code_carver.strip_code_fence_lines(candidate) if _looks_like_code(candidate, ext) else ""
