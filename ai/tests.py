@@ -3358,6 +3358,45 @@ class ExtractCodeFromResponseTests(SimpleTestCase):
         )
         self.assertEqual(self.extract(text, file_extension=".i86"), "")
 
+    def test_ends_label_keeps_halting_jump(self):
+        """`ends:` — метка останова, а не конец программы: «jmp ends» за ней
+        обязан остаться в извлечённом коде.
+
+        Карвер кончал кандидата на строке `ends:` и терял бесконечный цикл —
+        программа «проваливалась» в секцию данных (живой прогон: `mov y, ax`
+        → `ends:` без `jmp ends`).
+        """
+        code = (
+            "jmp begin\n\na dw 0\nb db 0\ny dw 0\n\nbegin:\n"
+            "mov ax, a\nmov bl, b\nmov bh, 0\nadd ax, bx\nmov y, ax\n\n"
+            "ends:\njmp ends"
+        )
+        self.assertEqual(
+            self.extract(f"```asm\n{code}\n```", file_extension=".i86"), code,
+        )
+
+    def test_body_jmp_ends_does_not_truncate_program(self):
+        """`jmp ends` ВНУТРИ тела — обычный переход на метку выхода, а не
+        конец программы: кандидат обязан дойти до `ends:` (иначе терялись
+        ветка else и останавливающий цикл)."""
+        code = (
+            "jmp begin\na db 0\nb db 0\ny db 0\nbegin:\n"
+            "mov al, a\ncmp al, b\njge else_ge\n"
+            "mov al, 10\nmov y, al\njmp ends\n"
+            "else_ge:\nmov al, 5\nmov y, al\nends:\njmp ends"
+        )
+        self.assertEqual(
+            self.extract(f"```asm\n{code}\n```", file_extension=".i86"), code,
+        )
+
+    def test_fenced_block_trailing_prose_cut(self):
+        """Хвостовая проза внутри оградки срезается, а код возвращается как
+        есть: после перехода на «фенс — источник кода» структурник блок
+        больше не дочищает."""
+        block = "jmp begin\nbegin:\nmov ax, x\nmov RES, ax\nends:\njmp ends ;$E"
+        text = f"```asm\n{block}\nThis program copies x into RES.\n```"
+        self.assertEqual(self.extract(text, file_extension=".i86"), block)
+
     def test_glued_opening_fence_is_not_unclosed(self):
         """Открывающая ``` приклеена к прозе («…только код.```asm»).
 
@@ -17368,6 +17407,18 @@ class BaseChatTemplateLocalizationTests(SimpleTestCase):
         self.assertIn("Envoyer", html)
         self.assertIn("Panneau Admin", html)
 
+    def test_browser_check_loads_before_common_js(self):
+        """Предупреждение об устаревшем браузере обязано грузиться ДО
+        ai-common.js: старый движок бросает SyntaxError на его синтаксисе и
+        не выполняет ни одного скрипта страницы — проверка внутри
+        ai-common.js не запустилась бы вовсе."""
+        html = self._render("Русский")
+        # Ищем именно теги <script src=…>: имена файлов упоминаются и в
+        # комментарии-пояснении выше тега.
+        browser = html.index('src="/ai/assets/admin/js/ai-browser-check.js')
+        common = html.index('src="/ai/assets/admin/js/ai-common.js')
+        self.assertLess(browser, common)
+
 
 class BatchRunStatusPausedDisplayTests(SimpleTestCase):
     """Пауза batch-прогона — «Пауза» в журнале и «Настройке ИИ» (2026-10)."""
@@ -22131,7 +22182,8 @@ class CanUseAiClientTests(SimpleTestCase):
         sources = self._js()
         for name, src in sources.items():
             self.assertIn("isAiDisabledClose(event)", src, name)
-            self.assertIn("showAiDisabledMessage()", src, name)
+            # Событие передаётся, чтобы фронт дописал код причины из reason.
+            self.assertIn("showAiDisabledMessage(event)", src, name)
 
     def test_disabled_close_code_matches_server(self):
         from ai.consumers import AI_DISABLED_CLOSE_CODE
