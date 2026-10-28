@@ -145,22 +145,57 @@
   font-size: 14px;
 }
 
+/* Бейджи и плашки вердиктов: фон — оттенок сигнального цвета, ПРИМЕШАННЫЙ к
+   --body-bg темы админки (color-mix). Раньше фон был захардкожен светлым
+   (#dcfce7, #f1f5f9 …), и в тёмной теме карточки пестрели белыми пятнами. */
 .arm-badge { border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 700; white-space: nowrap; }
-.arm-badge.solved { color: #166534; background: #dcfce7; }
-.arm-badge.failed { color: #991b1b; background: #fee2e2; }
-.arm-badge.skipped { color: #475467; background: #f1f5f9; }
+.arm-badge.solved { color: #166534; background: color-mix(in srgb, #16a34a 20%, var(--body-bg)); }
+.arm-badge.failed { color: #991b1b; background: color-mix(in srgb, #dc2626 18%, var(--body-bg)); }
+.arm-badge.skipped { color: var(--body-quiet-color); background: color-mix(in srgb, var(--body-fg) 9%, var(--body-bg)); }
 /* Ответ обрезан потолком генерации (num_predict/max_tokens) — см. is_output_truncated. */
-.arm-badge.truncated { color: #9a3412; background: #ffedd5; }
+.arm-badge.truncated { color: #9a3412; background: color-mix(in srgb, #f59e0b 20%, var(--body-bg)); }
 /* «Исправлено»: пара сначала не прошла, после правки промпта прошла DL
    (prompt_debug.is_fixed). Бирюзовый — отличим и от вердикта, и от причины. */
-.arm-badge.fixed { color: #0e7490; background: #cffafe; }
+.arm-badge.fixed { color: #0e7490; background: color-mix(in srgb, #06b6d4 20%, var(--body-bg)); }
 /* Причина сбоя пары (таксономия: сбой модели / не выкушен код / ошибка
    компиляции / неправильный ответ). Фиолетовый — чтобы бейдж причины
    отличался от вердикта (зелёный/красный/серый). */
-.arm-badge.arm-reason { color: #5b21b6; background: #ede9fe; }
+.arm-badge.arm-reason { color: #5b21b6; background: color-mix(in srgb, #8b5cf6 20%, var(--body-bg)); }
 /* Пара решается прямо сейчас (живая строка «_live»): видна сразу после
    старта пары, чтобы таблица не пустовала первые минуты прогона. */
-.arm-badge.running { color: #1d4ed8; background: #e0e7ff; }
+.arm-badge.running { color: #1d4ed8; background: color-mix(in srgb, #6366f1 20%, var(--body-bg)); }
+
+/* --- Блок «Отладка промпта» и DL-плашка (рендерит index.js) ---------------
+   Все фоны — оттенки сигнальных цветов поверх --body-bg темы, а не
+   захардкоженные светлые панели: в тёмной теме белый прямоугольник на всю
+   карточку выглядел «дыркой» в оформлении. Текстовые акценты тоже
+   подмешивают --body-fg, чтобы читаться на обоих фонах. */
+.arm-dl-block {
+  padding: 8px 12px; margin-bottom: 8px; border-radius: 4px;
+  font-size: 13px; color: var(--body-fg);
+}
+.arm-dl-block.solved { background: color-mix(in srgb, #16a34a 16%, var(--body-bg)); }
+.arm-dl-block.failed { background: color-mix(in srgb, #dc2626 14%, var(--body-bg)); }
+.arm-prompt-debug {
+  padding: 8px 12px; margin-bottom: 8px; border-radius: 4px;
+  background: var(--darkened-bg); border: 1px solid var(--hairline-color);
+}
+.arm-pd-attempt { margin-top: 8px; padding: 6px 8px; border-radius: 6px; }
+.arm-pd-attempt.solved { background: color-mix(in srgb, #16a34a 12%, var(--body-bg)); border-left: 3px solid #16a34a; }
+.arm-pd-attempt.failed { background: color-mix(in srgb, #dc2626 10%, var(--body-bg)); border-left: 3px solid #dc2626; }
+.arm-pd-dl { font-size: 12px; color: var(--body-quiet-color); margin: 2px 0 4px; }
+.arm-pd-addition { font-size: 12px; padding: 4px 6px; border-radius: 4px; }
+.arm-pd-addition.applied { background: color-mix(in srgb, #16a34a 20%, var(--body-bg)); }
+.arm-pd-addition.pending { color: var(--body-quiet-color); background: color-mix(in srgb, var(--body-fg) 8%, var(--body-bg)); }
+.arm-pd-note { color: var(--body-quiet-color); }
+.arm-pd-stopped {
+  margin-top: 6px; font-size: 12px; padding: 4px 6px; border-radius: 4px;
+  color: color-mix(in srgb, #b45309 80%, var(--body-fg));
+  background: color-mix(in srgb, #f59e0b 16%, var(--body-bg));
+}
+.arm-pd-ok { margin-top: 6px; font-size: 12px; color: color-mix(in srgb, #16a34a 80%, var(--body-fg)); }
+.arm-pd-error { margin-top: 6px; font-size: 12px; color: color-mix(in srgb, #dc2626 80%, var(--body-fg)); }
+.arm-muted { color: var(--body-quiet-color); }
 
 .arm-result { border: 1px solid var(--hairline-color); border-radius: 6px; padding: 0; margin-bottom: 8px; overflow: hidden; }
 .arm-result:nth-child(even) { background: color-mix(in srgb, var(--body-bg) 95%, var(--hairline-color)); }
@@ -190,7 +225,9 @@
 /* Плашка промежуточного отчёта (report.interim): цифры ещё не окончательные. */
 .arm-report-interim-note {
   margin: 0 0 10px; padding: 8px 12px; border-radius: 6px; font-weight: 600;
-  color: #9a3412; background: #ffedd5; border: 1px solid #fdba74;
+  color: color-mix(in srgb, #b45309 80%, var(--body-fg));
+  background: color-mix(in srgb, #f59e0b 18%, var(--body-bg));
+  border: 1px solid color-mix(in srgb, #f59e0b 45%, var(--hairline-color));
 }
 .arm-meta { color: var(--body-quiet-color); font-size: 12px; margin-top: 4px; }
 .arm-result-body { border-top: 1px solid var(--hairline-color); padding: 12px 14px 14px; }

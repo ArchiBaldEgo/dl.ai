@@ -1,9 +1,11 @@
 {% extends "admin/base_site.html" %}
 {% load static %}
 
+{% block bodyclass %}arm-page{% endblock %}
+
 {% block extrastyle %}
   {{ block.super }}
-  <link rel="stylesheet" href="{% static 'admin/ai/arm_solve/index.css' %}?v=2">
+  <link rel="stylesheet" href="{% static 'admin/ai/arm_solve/index.css' %}?v=3">
 {% endblock %}
 
 {% block content %}

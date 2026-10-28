@@ -266,12 +266,10 @@ def commit_prompt_additions(prompt_id, additions, *, user) -> tuple[bool, str, d
         return False, "Нет текста дополнения для сохранения", {}
 
     with transaction.atomic():
-        prompt = (
-            Prompt.objects.select_for_update()
-            .select_related("shared_prompt")
-            .filter(pk=prompt_id)
-            .first()
-        )
+        # Без select_related("shared_prompt"): FK nullable, и Postgres отвечает
+        # «FOR UPDATE cannot be applied to the nullable side of an outer join».
+        # Общий промпт дочитывается лениво уже после взятия блокировки.
+        prompt = Prompt.objects.select_for_update().filter(pk=prompt_id).first()
         if prompt is None:
             return False, "Промпт не найден", {}
         if not _can_edit_prompt(user, prompt):

@@ -150,7 +150,7 @@ window.ArmBatchResults = (function () {
     if (!deltaId && !deltaName) { return ''; }
     var text = deltaName ? escapeHtml(deltaName) : ('#' + escapeHtml(deltaId));
     if (deltaId && deltaName) { text += ' (id ' + escapeHtml(deltaId) + ')'; }
-    return ' <span style="color:#6b7280;">· машина: ' + text + '</span>';
+    return ' <span class="arm-muted">· машина: ' + text + '</span>';
   }
 
   function isFailedRow(r) {
@@ -640,7 +640,7 @@ window.ArmBatchResults = (function () {
       bits.push('проверка: ' + (state.verification === 'solved' ? 'решено' : 'не решено'));
     }
     return '<strong>Отладка промпта:</strong> ' + bits.join(' · ')
-      + ' <span style="color:#6b7280;">· раскройте строку для подробностей</span>';
+      + ' <span class="arm-muted">· раскройте строку для подробностей</span>';
   }
 
   function buildPromptDebugHtml(pd) {
@@ -654,35 +654,32 @@ window.ArmBatchResults = (function () {
     }
     var parts = ['<div style="font-weight:600; font-size:13px; margin-bottom:4px;">' + heading + '</div>'];
     if (pd.skipped) {
-      parts.push('<div style="font-size:13px; color:#6b7280;">Пара пропущена'
+      parts.push('<div class="arm-muted" style="font-size:13px;">Пара пропущена'
         + (pd.skip_reason ? ': ' + escapeHtml(pd.skip_reason) : '') + '</div>');
       return parts.join('');
     }
     if (pd.note) {
-      parts.push('<div style="font-size:12px; color:#6b7280; margin-bottom:4px;">'
+      parts.push('<div class="arm-muted" style="font-size:12px; margin-bottom:4px;">'
         + escapeHtml(pd.note) + '</div>');
     }
     // Попытки идут по порядку: первая неудача — КРАСНЫМ, дальше видно, как
     // промпт дополнялся от попытки к попытке (а не только готовый итог).
+    // Фоны/цвета — классы из batch_results/index.css (оттенки поверх темы
+    // админки): захардкоженные светлые панели в тёмной теме были белыми.
     attempts.forEach(function (a) {
       var isSolved = a.verdict === 'solved';
-      var rows = ['<div style="margin-top:8px; padding:6px 8px; border-radius:6px;'
-        + (isSolved
-          ? ' background:#f0fdf4; border-left:3px solid #16a34a;">'
-          : ' background:#fef2f2; border-left:3px solid #dc2626;">')
+      var rows = ['<div class="arm-pd-attempt ' + (isSolved ? 'solved' : 'failed') + '">'
         + '<strong>Попытка ' + escapeHtml(a.attempt) + '</strong> ' + verdictBadge(a.verdict) + '</div>'];
       if (a.dl_comment) {
-        rows.push('<div style="font-size:12px; color:#374151; margin:2px 0 4px;">DL: '
+        rows.push('<div class="arm-pd-dl">DL: '
           + escapeHtml(a.dl_comment) + '</div>');
       }
       if (a.addition) {
         if (a.applied) {
-          rows.push('<div style="font-size:12px; color:#166534; background:#dcfce7;'
-            + ' padding:4px 6px; border-radius:4px;"><strong>Добавлено в промпт:</strong> '
+          rows.push('<div class="arm-pd-addition applied"><strong>Добавлено в промпт:</strong> '
             + escapeHtml(a.addition) + '</div>');
         } else {
-          rows.push('<div style="font-size:12px; color:#6b7280; background:#f3f4f6;'
-            + ' padding:4px 6px; border-radius:4px;"><strong>Дополнение к промпту '
+          rows.push('<div class="arm-pd-addition pending"><strong>Дополнение к промпту '
             + '(применено в следующей попытке):</strong> '
             + escapeHtml(a.addition)
             + ' <em>(в промпт не сохранено — пара не решена)</em></div>');
@@ -691,14 +688,14 @@ window.ArmBatchResults = (function () {
       parts.push(rows.join(''));
     });
     if (pd.stopped) {
-      parts.push('<div style="margin-top:6px; font-size:12px; color:#92400e; background:#fffbeb;'
-        + ' padding:4px 6px; border-radius:4px;">Цикл попыток остановлен: '
+      parts.push('<div class="arm-pd-stopped">Цикл попыток остановлен: '
         + escapeHtml(pd.stopped) + '</div>');
     }
     if (pd.committed) {
-      parts.push('<div style="margin-top:6px; font-size:12px; color:#166534;">✓ Промпт дополнен и сохранён.</div>');
+      parts.push('<div class="arm-pd-ok">✓ Промпт дополнен и сохранён.</div>');
     } else if (pd.commit_error) {
-      parts.push('<div style="margin-top:6px; font-size:12px; color:#991b1b;">Не удалось сохранить промпт: '
+      // commit_error — уже законченная фраза (её собирает раннер), префикс не добавляем.
+      parts.push('<div class="arm-pd-error">'
         + escapeHtml(pd.commit_error) + '</div>');
     }
     var ver = pd.verification || {};
@@ -706,11 +703,11 @@ window.ArmBatchResults = (function () {
       parts.push('<div style="margin-top:6px;"><strong>Проверка после правок:</strong> '
         + verdictBadge(ver.verdict) + '</div>');
       if (ver.dl_comment) {
-        parts.push('<div style="font-size:12px; color:#374151; margin:2px 0 0;">DL: '
+        parts.push('<div class="arm-pd-dl" style="margin:2px 0 0;">DL: '
           + escapeHtml(ver.dl_comment) + '</div>');
       }
     } else if (attempts.length) {
-      parts.push('<div style="margin-top:6px; font-size:12px; color:#6b7280;">'
+      parts.push('<div class="arm-muted" style="margin-top:6px; font-size:12px;">'
         + 'Проверка после правок ещё не выполнялась.</div>');
     }
     return parts.join('');
@@ -783,14 +780,16 @@ window.ArmBatchResults = (function () {
       || (r.prompt_debug && typeof r.prompt_debug === 'object'
           && Object.keys(r.prompt_debug).length));
     var dlBlock = document.createElement('div');
-    dlBlock.style.cssText = 'padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:13px; color:#1f2937; background:' + (r.verdict === 'solved' ? '#dcfce7' : '#fee2e2') + ';';
+    // Фон плашки — оттенок вердикта поверх темы админки (классы в
+    // batch_results/index.css), иначе в тёмной теме белая панель.
+    dlBlock.className = 'arm-dl-block ' + (r.verdict === 'solved' ? 'solved' : 'failed');
     var dlHtml = '<strong>DL тест:</strong> ';
-    if (dlComment) { dlHtml += escapeHtml(dlComment); } else { dlHtml += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
-    if (dlQueueId) { dlHtml += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
-    if (dlFileName) { dlHtml += ' <span style="color:#6b7280;">· файл: ' + escapeHtml(dlFileName) + '</span>'; }
+    if (dlComment) { dlHtml += escapeHtml(dlComment); } else { dlHtml += '<span class="arm-muted">итог тестов отсутствует</span>'; }
+    if (dlQueueId) { dlHtml += ' <span class="arm-muted">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
+    if (dlFileName) { dlHtml += ' <span class="arm-muted">· файл: ' + escapeHtml(dlFileName) + '</span>'; }
     dlHtml += deltaLabel(deltaId, deltaName);
-    if (r.saved_solution) { dlHtml += ' <span style="color:#166534;">· ✓ сохранено в «Решённые задачи»</span>'; }
-    if (dlError) { dlHtml += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
+    if (r.saved_solution) { dlHtml += ' <span class="arm-pd-ok" style="margin:0;">· ✓ сохранено в «Решённые задачи»</span>'; }
+    if (dlError) { dlHtml += '<div class="arm-pd-error" style="margin-top:4px;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
     dlBlock.innerHTML = dlHtml;
     body.appendChild(dlBlock);
 
@@ -798,8 +797,6 @@ window.ArmBatchResults = (function () {
     // телом; до загрузки показываем компактную сводку из prompt_debug_state).
     var pdEl = document.createElement('div');
     pdEl.className = 'arm-prompt-debug';
-    pdEl.style.cssText = 'padding:8px 12px; margin-bottom:8px; border-radius:4px;'
-      + ' background:#f9fafb; border:1px solid #e5e7eb;';
     pdEl.hidden = true;
     body.appendChild(pdEl);
     var renderPromptDebug = function (payload) {
@@ -879,7 +876,8 @@ window.ArmBatchResults = (function () {
     // отсутствие блока выглядит как баг.
     var testDataEmptyEl = document.createElement('div');
     testDataEmptyEl.hidden = true;
-    testDataEmptyEl.style.cssText = 'margin-top:2px; font-size:12px; color:#6b7280;';
+    testDataEmptyEl.className = 'arm-muted';
+    testDataEmptyEl.style.cssText = 'margin-top:2px; font-size:12px;';
     testDataEmptyEl.textContent =
       'Входные/выходные данные теста DL не выдал: выдача тестовых данных запрещена настройками курса или данные теста недоступны.';
     colData.appendChild(testDataEmptyEl);
@@ -905,12 +903,12 @@ window.ArmBatchResults = (function () {
         parts.push('<div style="font-weight:600; font-size:13px; margin:'
           + (index ? '10px' : '0') + ' 0 4px;">' + heading + '</div>');
         if (entry.input) {
-          parts.push('<div style="font-size:12px; color:#6b7280;">Входные данные'
+          parts.push('<div class="arm-muted" style="font-size:12px;">Входные данные'
             + (entry.input_truncated ? ' (начало)' : '') + ':</div>');
           parts.push('<pre>' + escapeHtml(normalizeNewlines(entry.input)) + '</pre>');
         }
         if (entry.expected_output) {
-          parts.push('<div style="font-size:12px; color:#6b7280;">Выходные данные (эталон)'
+          parts.push('<div class="arm-muted" style="font-size:12px;">Выходные данные (эталон)'
             + (entry.expected_truncated ? ' (начало)' : '') + ':</div>');
           parts.push('<pre>' + escapeHtml(normalizeNewlines(entry.expected_output)) + '</pre>');
         }
@@ -930,7 +928,7 @@ window.ArmBatchResults = (function () {
     if (lazy) {
       // Тело ещё не в снапшоте: плейсхолдеры + подгрузка при раскрытии.
       // Содержимое dl-блока тоже приходит из body-эндпоинта.
-      dlBlock.innerHTML = '<strong>DL тест:</strong> <span style="color:#6b7280;">' +
+      dlBlock.innerHTML = '<strong>DL тест:</strong> <span class="arm-muted">' +
         (card.open ? 'загрузка…' : 'раскройте строку для загрузки') + '</span>';
       answerPre.textContent = '';
       codePre.textContent = '';
@@ -945,11 +943,15 @@ window.ArmBatchResults = (function () {
         dlQueueId = st.dl_queue_id || dlQueueId;
         deltaId = st.delta_id || deltaId;
         deltaName = st.delta_name || deltaName;
+        // Вердикт из тела может отличаться от лёгкой строки — перекрашиваем
+        // плашку DL тем же классом темы, что и при первой отрисовке.
+        dlBlock.className = 'arm-dl-block '
+          + ((st.verdict || r.verdict) === 'solved' ? 'solved' : 'failed');
         var dlHtml2 = '<strong>DL тест:</strong> ';
-        if (dlComment) { dlHtml2 += escapeHtml(dlComment); } else { dlHtml2 += '<span style="color:#6b7280;">итог тестов отсутствует</span>'; }
-        if (dlQueueId) { dlHtml2 += ' <span style="color:#6b7280;">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
+        if (dlComment) { dlHtml2 += escapeHtml(dlComment); } else { dlHtml2 += '<span class="arm-muted">итог тестов отсутствует</span>'; }
+        if (dlQueueId) { dlHtml2 += ' <span class="arm-muted">· queueId: ' + escapeHtml(dlQueueId) + '</span>'; }
         dlFileName = st.dl_file_name || dlFileName;
-        if (dlFileName) { dlHtml2 += ' <span style="color:#6b7280;">· файл: ' + escapeHtml(dlFileName) + '</span>'; }
+        if (dlFileName) { dlHtml2 += ' <span class="arm-muted">· файл: ' + escapeHtml(dlFileName) + '</span>'; }
         // Номер проваленного теста приходит с телом (ленивая загрузка).
         if (st.dl_test_number) {
           card._armRow = Object.assign({}, card._armRow || r, { dl_test_number: st.dl_test_number });
@@ -957,8 +959,8 @@ window.ArmBatchResults = (function () {
           if (metaEl) { metaEl.innerHTML = cardMetaText(card._armRow); }
         }
         dlHtml2 += deltaLabel(deltaId, deltaName);
-        if (r.saved_solution) { dlHtml2 += ' <span style="color:#166534;">· ✓ сохранено в «Решённые задачи»</span>'; }
-        if (dlError) { dlHtml2 += '<div style="margin-top:4px; color:#991b1b;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
+        if (r.saved_solution) { dlHtml2 += ' <span class="arm-pd-ok" style="margin:0;">· ✓ сохранено в «Решённые задачи»</span>'; }
+        if (dlError) { dlHtml2 += '<div class="arm-pd-error" style="margin-top:4px;"><strong>Ошибка DL:</strong> ' + escapeHtml(dlError) + '</div>'; }
         dlBlock.innerHTML = dlHtml2;
         answerPre.textContent = st.raw || st.short_response || '';
         codePre.textContent = st.code || '— код не извлечён —';
@@ -1012,7 +1014,7 @@ window.ArmBatchResults = (function () {
           // Живая строка «выполняется…»: результата в БД ещё нет — грузить
           // нечего. Карточка будет пересоздана, когда пара завершится.
           bodyLoaded = true;
-          dlBlock.innerHTML = '<strong>DL тест:</strong> <span style="color:#6b7280;">'
+          dlBlock.innerHTML = '<strong>DL тест:</strong> <span class="arm-muted">'
             + 'пара ещё решается</span>';
           answerPre.textContent = 'Модель решает задачу — ответ появится после завершения пары.';
           codePre.textContent = '— код ещё не получен —';
@@ -1022,7 +1024,7 @@ window.ArmBatchResults = (function () {
           bodyLoaded = true;
           fillBody(st);
         }).catch(function () {
-          dlBlock.innerHTML = '<strong>DL тест:</strong> <span style="color:#6b7280;">итог тестов отсутствует</span>';
+          dlBlock.innerHTML = '<strong>DL тест:</strong> <span class="arm-muted">итог тестов отсутствует</span>';
           answerPre.textContent = 'Не удалось загрузить ответ модели.';
           codePre.textContent = '— код недоступен —';
         });

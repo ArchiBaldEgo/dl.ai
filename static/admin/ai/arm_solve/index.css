@@ -1,5 +1,12 @@
 /* Стили страницы «Пакетное решение» (ARM).
    Вынесены из ai/templates/admin/ai/arm_solve.html. */
+/* Фон ВСЕЙ страницы — под тему админки (body.arm-page ставит шаблон через
+   {% block bodyclass %}): мягкий оттенок основного цвета поверх затемнённого
+   фона. В светлой теме это голубовато-серый, а не чистый белый лист; в тёмной
+   — тёмный. Внешние поля вокруг .arm-wrap больше не «белеют». */
+body.arm-page {
+  background: color-mix(in srgb, var(--primary) 10%, var(--darkened-bg));
+}
 .arm-wrap {
   max-width: 1280px;
   margin: 0 auto;
@@ -294,8 +301,10 @@
 .arm-tree-badge {
   border-radius: 999px; padding: 2px 7px; font-size: 11px; font-weight: 700;
 }
-.arm-tree-badge.ok { color: #166534; background: #dcfce7; }
-.arm-tree-badge.no { color: #475467; background: #f1f5f9; }
+/* Оттенки поверх темы админки (не захардкоженный светлый фон): в тёмной теме
+   белые плашки в дереве задач выглядели чужими. */
+.arm-tree-badge.ok { color: #166534; background: color-mix(in srgb, #16a34a 20%, var(--body-bg)); }
+.arm-tree-badge.no { color: var(--body-quiet-color); background: color-mix(in srgb, var(--body-fg) 9%, var(--body-bg)); }
 
 /* Строки списка «Процессы» (несколько одновременных прогонов) */
 .arm-proc-row {
