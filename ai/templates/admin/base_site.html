@@ -24,7 +24,7 @@ file AND admin/app_list.html are not shadowed by the stock admin templates
   ГЛОБАЛЬНО — partial _ai_batch_results.html включают четыре страницы
   (настройки приложения, /arm/solve/, «Закреплённые», деталь записи
   журнала), и в каждой дублировать тег было бы копипастой.{% endcomment %}
-  <link rel="stylesheet" href="{% static 'admin/ai/batch_results/index.css' %}">
+  <link rel="stylesheet" href="{% static 'admin/ai/batch_results/index.css' %}?v=3">
 {% endblock %}
 
 {% block extrahead %}
@@ -32,7 +32,7 @@ file AND admin/app_list.html are not shadowed by the stock admin templates
   {% comment %}window.ArmBatchResults (общий рендер таблицы результатов) должен
   быть определён ДО вызывающих скриптов страниц — поэтому подключаем его
   ПЕРВЫМ, синхронно (без defer), а не defer'ом.{% endcomment %}
-  <script src="{% static 'admin/ai/batch_results/index.js' %}?v=2"></script>
+  <script src="{% static 'admin/ai/batch_results/index.js' %}?v=4"></script>
   {% comment %}Общая логика строк ПАКЕТНЫХ РЕШЕНИЙ (развёртка результатов
   прогона по клику + кнопка ★). Раньше продублирована в трёх файлах
   (app_settings, pinned_runs, request_logs) — теперь одна, на делегировании,

@@ -117,9 +117,26 @@ window.ArmBatchResults = (function () {
       .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
   }
   function verdictBadge(v) {
+    // Пустой вердикт — пара ещё решается (живая строка «выполняется…»):
+    // бейджа нет, статус рисуется отдельным бейджем running.
+    if (!v) { return ''; }
     var labels = { solved: 'Решено', failed: 'Не решено', skipped: 'Пропущено' };
     var cls = v === 'solved' ? 'solved' : (v === 'failed' ? 'failed' : 'skipped');
     return '<span class="arm-badge ' + cls + '">' + escapeHtml(labels[v] || v) + '</span>';
+  }
+  // Пара решается прямо сейчас (серверная строка-заглушка «_live»): карточка
+  // видна сразу после старта пары и заменяется итоговой по завершении.
+  function isRunningRow(r) {
+    return !!r && !r.verdict && r.status === 'running';
+  }
+  function runningBadge() {
+    return '<span class="arm-badge running">выполняется…</span>';
+  }
+  // CSS-класс карточки: живая пара — своя кромка (не «Пропущено»).
+  function rowStateClass(r) {
+    if (isRunningRow(r)) { return 'running'; }
+    return r && r.verdict === 'solved' ? 'solved'
+      : (r && r.verdict === 'failed' ? 'failed' : 'skipped');
   }
   // Бейдж «обрезан»: ответ упёрся в потолок генерации провайдера (Ollama
   // num_predict / SambaNova max_tokens) — стрим остановлен ровно на лимите,
@@ -138,7 +155,26 @@ window.ArmBatchResults = (function () {
 
   function isFailedRow(r) {
     // «Не пройденные»: не решено (failed) или пропущено (skipped).
-    return !!r && r.verdict !== 'solved';
+    // Ещё решающаяся пара (пустой вердикт) — не «не пройденная»: итога нет.
+    return !!r && !isRunningRow(r) && r.verdict !== 'solved';
+  }
+
+  // «Исправлено» — пара сначала не прошла, а после правки промпта прошла
+  // (решение принимает сервер: ai/services/prompt_debug.py::is_fixed —
+  // в лёгком снапшоте флаг лежит в prompt_debug_state.fixed).
+  function isFixedRow(r) {
+    if (!r) { return false; }
+    if (r.prompt_debug && typeof r.prompt_debug === 'object') {
+      return !!(r.prompt_debug.committed
+        && (r.prompt_debug.attempts || []).length
+        && r.prompt_debug.attempts[0].verdict !== 'solved'
+        && r.prompt_debug.attempts[r.prompt_debug.attempts.length - 1].verdict === 'solved');
+    }
+    return !!(r.prompt_debug_state && r.prompt_debug_state.fixed);
+  }
+
+  function fixedBadge() {
+    return '<span class="arm-badge fixed" title="Сначала не прошло — после дополнения промпта задача прошла DL">✓ исправлено</span>';
   }
 
   // Бейдж причины сбоя («сбой ответа модели» / «не выкушен код» /
@@ -161,10 +197,17 @@ window.ArmBatchResults = (function () {
       wrapEl.appendChild(empty);
       return;
     }
-    var head = '<thead><tr><th>' + escapeHtml(labelHeader) + '</th><th class="arm-col-num">% решённых</th><th class="arm-col-num">Ср. время, с</th><th class="arm-col-num">Токены</th><th class="arm-col-num">Решено / Всего</th></tr></thead>';
+    // Колонка «Исправлено» — только там, где она есть по смыслу: у
+    // «Отладки промтов» сервер считает пары, прошедшие после правки промпта
+    // (у пакетного прогона поля нет — колонка не появляется).
+    var hasFixed = rows.some(function (r) { return r && r.fixed != null; });
+    var head = '<thead><tr><th>' + escapeHtml(labelHeader) + '</th><th class="arm-col-num">% решённых</th>'
+      + (hasFixed ? '<th class="arm-col-num" title="Сначала не прошло — после правки промпта прошло">Исправлено</th>' : '')
+      + '<th class="arm-col-num">Ср. время, с</th><th class="arm-col-num">Токены</th><th class="arm-col-num">Решено / Всего</th></tr></thead>';
     var body = rows.map(function (r) {
       return '<tr><td>' + escapeHtml(r.label) + '</td>'
         + '<td class="arm-col-num">' + escapeHtml(r.percent_solved) + '</td>'
+        + (hasFixed ? '<td class="arm-col-num">' + escapeHtml(r.fixed || 0) + '</td>' : '')
         + '<td class="arm-col-num">' + escapeHtml(r.avg_duration) + '</td>'
         + '<td class="arm-col-num">' + escapeHtml(r.tokens) + '</td>'
         + '<td class="arm-col-num">' + escapeHtml(r.solved) + ' / ' + escapeHtml(r.total) + '</td></tr>';
@@ -241,6 +284,7 @@ window.ArmBatchResults = (function () {
     // 2 с незачем. Сигнатура — счётчики отчёта + состав секций.
     var reportSig = report ? [
       report.total_pairs, report.solved, report.failed, report.skipped,
+      report.running || 0,
       report.tokens_total, report.truncated_pairs,
       (report.per_model || []).length, (report.per_topic || []).length,
       (report.errors_by_topic || []).length, (report.failure_reasons || []).length,
@@ -251,6 +295,8 @@ window.ArmBatchResults = (function () {
       // и проверки — без неё скип перерисовки оставил бы старые цифры.
       (report.prompt_debug || {}).prompts_updated || 0,
       (report.prompt_debug || {}).committed_pairs || 0,
+      (report.prompt_debug || {}).fixed || 0,
+      ((report.prompt_debug || {}).fixed_by_topic || []).length,
       (report.prompt_debug || {}).skipped_pairs || 0,
       ((report.prompt_debug || {}).verification || {}).checked || 0,
       ((report.prompt_debug || {}).verification || {}).solved || 0,
@@ -266,6 +312,7 @@ window.ArmBatchResults = (function () {
       if (els.perModel) { els.perModel.innerHTML = ''; }
       if (els.perTopic) { els.perTopic.innerHTML = ''; }
       if (els.errors) { els.errors.innerHTML = ''; }
+      if (els.fixed) { els.fixed.innerHTML = ''; }
       if (els.reasons) { els.reasons.innerHTML = ''; }
       setInterimNote(els.card, false);
       return;
@@ -277,8 +324,13 @@ window.ArmBatchResults = (function () {
         'Решено: ' + escapeHtml(report.solved),
         'Не решено: ' + escapeHtml(report.failed),
         'Пропущено: ' + escapeHtml(report.skipped),
-        'Токенов: ' + escapeHtml(report.tokens_total),
       ];
+      // Живой прогон: пары, которые сейчас решаются. Строка появляется сразу
+      // после старта — «Сводка» не выглядит пустой/пропавшей.
+      if (Number(report.running) > 0) {
+        lines.push('В работе: ' + escapeHtml(report.running));
+      }
+      lines.push('Токенов: ' + escapeHtml(report.tokens_total));
       if (Number(report.truncated_pairs) > 0) {
         lines.push('Обрезано лимитом генерации: ' + escapeHtml(report.truncated_pairs));
       }
@@ -297,6 +349,10 @@ window.ArmBatchResults = (function () {
       // и пропущенные пары); «промптов дополнено»/«проверка» приходят hints.
       const pdStats = report.prompt_debug;
       if (pdStats) {
+        if (pdStats.fixed) {
+          lines.push('Исправлено правкой промпта: ' + escapeHtml(pdStats.fixed)
+            + ' — сначала не прошло, после дополнения промпта прошло');
+        }
         if (pdStats.committed_pairs) {
           lines.push('Пар с сохранёнными правками промпта: ' + escapeHtml(pdStats.committed_pairs));
         }
@@ -329,8 +385,44 @@ window.ArmBatchResults = (function () {
       }
     }
     renderErrorsByTopic(report.errors_by_topic || [], els.errors);
+    renderFixedByTopic((report.prompt_debug || {}).fixed_by_topic || [], els.fixed);
     renderFailureReasons(report.failure_reasons || [], els.reasons);
     if (els.card) { els.card.style.display = 'block'; }
+  }
+
+  // «Исправлено по темам» — пары, которые сначала не прошли, а после правки
+  // промпта прошли (сервер: arm_runner::_prompt_debug_fixed_by_topic; форма
+  // строк та же, что у «Ошибок по темам» — тема + мини-ссылки на карточки).
+  function renderFixedByTopic(rows, wrapEl) {
+    if (!wrapEl) { return; }
+    if (!rows || !rows.length) { wrapEl.innerHTML = ''; return; }
+    const body = rows.map(function (row) {
+      const items = (row.items || []).map(function (it) {
+        if (!it || typeof it === 'string') {
+          return '<div class="arm-error-item">' + escapeHtml(it || '') + '</div>';
+        }
+        const attempts = it.attempts
+          ? ' <span class="arm-section-note">· попыток: ' + escapeHtml(it.attempts) + '</span>'
+          : '';
+        return '<div class="arm-error-item">'
+          + '<a href="#" class="arm-error-link" data-arm-result-key="' + escapeHtml(it.key || '') + '"'
+          + ' title="Перейти к этой паре в списке «Ответы моделей»">'
+          + escapeHtml(it.task || '') + '</a>'
+          + '<span class="arm-error-item-reason">' + escapeHtml(it.prompt || '') + attempts + '</span>'
+          + '<span class="arm-error-item-model">' + escapeHtml(it.model || '') + '</span>'
+          + '</div>';
+      }).join('');
+      const hidden = row.hidden > 0
+        ? '<div class="arm-error-item"><span class="arm-section-note">+ ещё ' + escapeHtml(row.hidden) + '</span></div>'
+        : '';
+      return '<tr><td>' + escapeHtml(row.topic) + '</td>'
+        + '<td class="arm-col-num">' + escapeHtml(row.count) + '</td>'
+        + '<td>' + items + hidden + '</td></tr>';
+    });
+    wrapEl.innerHTML = '<h3>Исправлено по темам</h3>'
+      + '<table class="arm-summary-table arm-summary-table--errors"><thead><tr><th>Тема</th>'
+      + '<th class="arm-col-num">Исправлено</th><th>Что исправлено</th></tr></thead>'
+      + '<tbody>' + body.join('') + '</tbody></table>';
   }
 
   // «Сбои по причинам» — таксономия сбоев прогона (сбой ответа модели /
@@ -484,12 +576,13 @@ window.ArmBatchResults = (function () {
     var st = r.prompt_debug_state || {};
     if (!r.has_prompt_debug && !st.attempts) { return ''; }
     return 'state:' + (st.attempts || 0) + ':' + (st.committed ? 1 : 0)
+      + ':' + (st.fixed ? 1 : 0)
       + ':' + (st.skipped ? 1 : 0) + ':' + (st.verification || '');
   }
 
   function rowSignature(r) {
     return [
-      r.verdict || '', r.failure_reason || '', r.failure_reason_label || '',
+      r.status || '', r.verdict || '', r.failure_reason || '', r.failure_reason_label || '',
       r.truncated ? '1' : '0',
       r.duration == null ? '' : r.duration,
       r.tokens == null ? '' : r.tokens,
@@ -512,7 +605,8 @@ window.ArmBatchResults = (function () {
     var badges = card.querySelector('.arm-result-badges');
     if (!badges || !row) { return; }
     var truncated = !!row.truncated || !!card._armBodyTruncated;
-    badges.innerHTML = verdictBadge(row.verdict)
+    badges.innerHTML = (isRunningRow(row) ? runningBadge() : verdictBadge(row.verdict))
+      + (isFixedRow(row) ? fixedBadge() : '')
       + (row.failure_reason ? failureReasonBadge(row.failure_reason, row.failure_reason_label) : '')
       + (truncated ? truncatedBadge() : '');
   }
@@ -541,6 +635,7 @@ window.ArmBatchResults = (function () {
     if (state.attempts) { bits.push('попыток: ' + escapeHtml(state.attempts)); }
     if (state.skipped) { bits.push('пара пропущена'); }
     else if (state.committed) { bits.push('правки сохранены'); }
+    if (state.stopped) { bits.push('цикл попыток остановлен'); }
     if (state.verification) {
       bits.push('проверка: ' + (state.verification === 'solved' ? 'решено' : 'не решено'));
     }
@@ -553,8 +648,9 @@ window.ArmBatchResults = (function () {
     var attempts = Array.isArray(pd.attempts) ? pd.attempts : [];
     var heading = 'Отладка промпта';
     if (pd.prompt_name) { heading += ': «' + escapeHtml(pd.prompt_name) + '»'; }
-    if (pd.max_attempts) {
-      heading += ' · попыток: ' + escapeHtml(attempts.length) + ' из ' + escapeHtml(pd.max_attempts);
+    if (attempts.length) {
+      heading += ' · попыток: ' + escapeHtml(attempts.length)
+        + (pd.max_attempts ? (' из ' + escapeHtml(pd.max_attempts)) : ' (без ограничения)');
     }
     var parts = ['<div style="font-weight:600; font-size:13px; margin-bottom:4px;">' + heading + '</div>'];
     if (pd.skipped) {
@@ -562,9 +658,19 @@ window.ArmBatchResults = (function () {
         + (pd.skip_reason ? ': ' + escapeHtml(pd.skip_reason) : '') + '</div>');
       return parts.join('');
     }
+    if (pd.note) {
+      parts.push('<div style="font-size:12px; color:#6b7280; margin-bottom:4px;">'
+        + escapeHtml(pd.note) + '</div>');
+    }
+    // Попытки идут по порядку: первая неудача — КРАСНЫМ, дальше видно, как
+    // промпт дополнялся от попытки к попытке (а не только готовый итог).
     attempts.forEach(function (a) {
-      var rows = ['<div style="margin-top:6px;"><strong>Попытка ' + escapeHtml(a.attempt)
-        + '</strong> ' + verdictBadge(a.verdict) + '</div>'];
+      var isSolved = a.verdict === 'solved';
+      var rows = ['<div style="margin-top:8px; padding:6px 8px; border-radius:6px;'
+        + (isSolved
+          ? ' background:#f0fdf4; border-left:3px solid #16a34a;">'
+          : ' background:#fef2f2; border-left:3px solid #dc2626;">')
+        + '<strong>Попытка ' + escapeHtml(a.attempt) + '</strong> ' + verdictBadge(a.verdict) + '</div>'];
       if (a.dl_comment) {
         rows.push('<div style="font-size:12px; color:#374151; margin:2px 0 4px;">DL: '
           + escapeHtml(a.dl_comment) + '</div>');
@@ -576,13 +682,19 @@ window.ArmBatchResults = (function () {
             + escapeHtml(a.addition) + '</div>');
         } else {
           rows.push('<div style="font-size:12px; color:#6b7280; background:#f3f4f6;'
-            + ' padding:4px 6px; border-radius:4px;"><strong>Предложено, но не сохранено:</strong> '
+            + ' padding:4px 6px; border-radius:4px;"><strong>Дополнение к промпту '
+            + '(применено в следующей попытке):</strong> '
             + escapeHtml(a.addition)
-            + ' <em>(правка не сохранена — задача не решена)</em></div>');
+            + ' <em>(в промпт не сохранено — пара не решена)</em></div>');
         }
       }
       parts.push(rows.join(''));
     });
+    if (pd.stopped) {
+      parts.push('<div style="margin-top:6px; font-size:12px; color:#92400e; background:#fffbeb;'
+        + ' padding:4px 6px; border-radius:4px;">Цикл попыток остановлен: '
+        + escapeHtml(pd.stopped) + '</div>');
+    }
     if (pd.committed) {
       parts.push('<div style="margin-top:6px; font-size:12px; color:#166534;">✓ Промпт дополнен и сохранён.</div>');
     } else if (pd.commit_error) {
@@ -605,9 +717,8 @@ window.ArmBatchResults = (function () {
   }
 
   function createResultCard(r, openKeys) {
-    var cls = r.verdict === 'solved' ? 'solved' : (r.verdict === 'failed' ? 'failed' : 'skipped');
     var card = document.createElement('details');
-    card.className = 'arm-result ' + cls;
+    card.className = 'arm-result ' + rowStateClass(r);
     var rkey = (r.task_node_id || '') + ':' + (r.model_key || '');
     card.setAttribute('data-key', rkey);
     card._armKey = rkey;
@@ -627,6 +738,10 @@ window.ArmBatchResults = (function () {
     var deltaName = r.delta_name || '';
     var code = r.code || '';
     var resultId = r.result_id || '';
+    // Идентификатор, с которым карточка построена: у живой строки его нет.
+    // Появился — карточку пересоздают (см. renderResults): ленивый загрузчик
+    // тела захватывает resultId замыканием и иначе остался бы без него.
+    card._armResultId = resultId;
 
     var summary = document.createElement('summary');
     var top = document.createElement('div');
@@ -854,6 +969,11 @@ window.ArmBatchResults = (function () {
         // проверочного прохода, который идёт после основного прогона).
         if (st.prompt_debug && Object.keys(st.prompt_debug).length) {
           renderPromptDebug(st.prompt_debug);
+          // Полный payload нужен и бейджу «исправлено» — в лёгком снапшоте
+          // его нет, а фиксированность пары видна только по попыткам.
+          card._armRow = Object.assign({}, card._armRow || r, {
+            prompt_debug: st.prompt_debug,
+          });
         }
         // Бейдж «обрезан», если в снапшоте его не было (легаси-строки БД).
         card._armBodyTruncated = !!st.truncated;
@@ -888,6 +1008,16 @@ window.ArmBatchResults = (function () {
       };
       var loadBody = function () {
         if (bodyLoaded) { return; }
+        if (!resultId) {
+          // Живая строка «выполняется…»: результата в БД ещё нет — грузить
+          // нечего. Карточка будет пересоздана, когда пара завершится.
+          bodyLoaded = true;
+          dlBlock.innerHTML = '<strong>DL тест:</strong> <span style="color:#6b7280;">'
+            + 'пара ещё решается</span>';
+          answerPre.textContent = 'Модель решает задачу — ответ появится после завершения пары.';
+          codePre.textContent = '— код ещё не получен —';
+          return;
+        }
         loadResultBodyState(resultId).then(function (st) {
           bodyLoaded = true;
           fillBody(st);
@@ -940,8 +1070,7 @@ window.ArmBatchResults = (function () {
           card._armReloadBody();
         }
       }
-      card.className = 'arm-result '
-        + (row.verdict === 'solved' ? 'solved' : (row.verdict === 'failed' ? 'failed' : 'skipped'));
+      card.className = 'arm-result ' + rowStateClass(row);
       renderBadges(card, row);
       var metaEl = card.querySelector('.arm-meta');
       if (metaEl) {
@@ -987,18 +1116,26 @@ window.ArmBatchResults = (function () {
   }
 
   function updateModelGroup(g, group) {
-    var solvedCount = group.tasks.filter(function (t) { return t.verdict === 'solved'; }).length;
+    // Ещё решающиеся пары («выполняется…») в «решено из» не входят — иначе
+    // модель выглядела бы нерешившей при пустом прогоне, а группа — красной.
+    var running = group.tasks.filter(isRunningRow);
+    var finished = group.tasks.filter(function (t) { return !isRunningRow(t); });
+    var solvedCount = finished.filter(function (t) { return t.verdict === 'solved'; }).length;
     var totalTokens = group.tasks.reduce(function (s, t) { return s + (t.tokens || 0); }, 0);
-    var withTime = group.tasks.filter(function (t) { return t.duration != null; });
+    var withTime = finished.filter(function (t) { return t.duration != null; });
     var avgTime = withTime.length
       ? (withTime.reduce(function (s, t) { return s + (t.duration || 0); }, 0) / withTime.length).toFixed(1)
       : '';
     // Кромка группы — итог модели: зелёная (всё решено), красная (ни одной),
-    // серая (частично).
-    g.el.className = 'arm-model-group '
-      + (solvedCount === group.tasks.length ? 'all-solved'
-        : (solvedCount === 0 ? 'none-solved' : 'part-solved'));
-    g.meta.textContent = 'Решено: ' + solvedCount + ' из ' + group.tasks.length
+    // серая (частично/ещё решается).
+    var stateCls = 'part-solved';
+    if (finished.length) {
+      stateCls = solvedCount === finished.length ? 'all-solved'
+        : (solvedCount === 0 ? 'none-solved' : 'part-solved');
+    }
+    g.el.className = 'arm-model-group ' + stateCls;
+    g.meta.textContent = 'Решено: ' + solvedCount + ' из ' + finished.length
+      + (running.length ? ' · в работе: ' + running.length : '')
       + (avgTime ? ' · среднее время: ' + avgTime + ' сек' : '')
       + (totalTokens ? ' · токенов: ' + totalTokens : '');
   }
@@ -1107,6 +1244,18 @@ window.ArmBatchResults = (function () {
         var rkey = (r.task_node_id || '') + ':' + (r.model_key || '');
         seenCards[rkey] = true;
         var card = state.cards[rkey];
+        // «Выполняется…» → пара завершилась: у строки появился result_id, а
+        // ленивый загрузчик тела захватил при создании пустой идентификатор.
+        // Такую карточку пересоздаём (раскрытие сохраняем), иначе тело
+        // результата никогда не загрузилось бы.
+        if (card && card._armResultId !== (r.result_id || '')) {
+          var wasOpen = !!card.open;
+          var fresh = createResultCard(r, openKeys);
+          if (wasOpen) { fresh.setAttribute('open', ''); }
+          if (card.parentNode) { card.parentNode.replaceChild(fresh, card); }
+          state.cards[rkey] = fresh;
+          card = fresh;
+        }
         if (!card) {
           card = createResultCard(r, openKeys);
           state.cards[rkey] = card;
@@ -1186,6 +1335,7 @@ window.ArmBatchResults = (function () {
     var perModelWrap = document.createElement('div'); summaryGrid.appendChild(perModelWrap);
     var perTopicWrap = document.createElement('div'); summaryGrid.appendChild(perTopicWrap);
     var errorsWrap = document.createElement('div'); summaryGrid.appendChild(errorsWrap);
+    var fixedWrap = document.createElement('div'); summaryGrid.appendChild(fixedWrap);
     var reasonsWrap = document.createElement('div'); summaryGrid.appendChild(reasonsWrap);
     rootEl.appendChild(reportCard);
 
@@ -1202,7 +1352,7 @@ window.ArmBatchResults = (function () {
     var resultsEl = document.createElement('div'); resultsCard.appendChild(resultsEl);
     rootEl.appendChild(resultsCard);
 
-    var reportEls = { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap, errors: errorsWrap, reasons: reasonsWrap };
+    var reportEls = { card: reportCard, list: reportList, perModel: perModelWrap, perTopic: perTopicWrap, errors: errorsWrap, fixed: fixedWrap, reasons: reasonsWrap };
     renderReport(snapshot.report || null, reportEls);
     // В шапке карточки — переключатель «Все / Не пройденные».
     renderResults(snapshot.results || [], resultsEl, resultsCard, resultsHead);
