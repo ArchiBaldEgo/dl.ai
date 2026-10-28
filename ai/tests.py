@@ -3307,6 +3307,116 @@ class ExtractCodeFromResponseTests(SimpleTestCase):
         text = f"```asm\n{main}\n```\nAlternative solution:\n```asm\nmov bx, z\nadd bx, 1\n```"
         self.assertEqual(self.extract(text), main)
 
+    # === «Выкусывание» 2026-10: последний ```-блок, а не черновик CoT ===
+
+    def test_last_fence_wins_over_longer_draft(self):
+        """#2606800: длинный черновик в ограде + короткий финальный — финал.
+
+        Раньше структурник по всему тексту/«самый длинный фенс» отдавали
+        черновик (`t dw 0`, метка `neg`) — DL падал «Неверная инструкция».
+        """
+        draft = (
+            "jmp begin\nt dw 0\nbegin:\nmov ax, a\njs neg\n"
+            "neg:\nmov RES, ax\nends:\njmp ends ;$E"
+        )
+        final = "jmp begin\nbegin:\nmov ax, b\nends:\njmp ends ;$E"
+        text = f"```asm\n{draft}\n```\nИтоговый вариант:\n```asm\n{final}\n```"
+        self.assertEqual(self.extract(text, file_extension=".i86"), final)
+
+    def test_cot_prose_inside_final_fence_cut(self):
+        """#2606786: гибридная строка «код + CoT» внутри ограды вырезается."""
+        code = (
+            "jmp begin\na dw 0\nb db 0\ny db 0\nbegin:\n"
+            "mov al, b\ncbw\n"
+            "mov y, 10 — wait, can't write immediate to memory directly? No.\n"
+            "mov y, al\nends:\njmp ends ;$E"
+        )
+        got = self.extract(f"```asm\n{code}\n```", file_extension=".i86")
+        self.assertIn("mov y, al", got)
+        self.assertNotIn("wait", got)
+        self.assertNotIn("—", got)
+        self.assertTrue(got.endswith("jmp ends ;$E"))
+
+    def test_draft_fragment_then_final_fence_wins(self):
+        """#2606762: обрывок черновика без `;$E` + финальный блок — финал."""
+        draft = "jmp begin\na db 0\nb db 0\nbegin:\nmov al, a\ncbw\nmov z, ah"
+        final = (
+            "jmp begin\na db 0\nb db 0\ny db 0\nz db 0\nbegin:\n"
+            "mov al, b\ncbw\nmov bx, ax\nmov al, a\ncbw\ncwd\nidiv bx\n"
+            "mov y, al\nmov z, dl\nends:\njmp ends ;$E"
+        )
+        text = f"```asm\n{draft}\n```\nФинальный ответ:\n```asm\n{final}\n```"
+        self.assertEqual(self.extract(text, file_extension=".i86"), final)
+
+    def test_unclosed_final_fence_not_replaced_by_closed_draft(self):
+        """Обрезанный финал в незакрытой ограде: черновик из закрытого блока
+        в DL не уходит — код «не извлечён» (воркер сделает авто-ретрай)."""
+        draft = "jmp begin\nbegin:\nmov ax, a\nends:\njmp ends ;$E"
+        text = (
+            f"```asm\n{draft}\n```\nФинал:\n```asm\n"
+            "jmp begin\nbegin:\nmov al, b\nmov bl,"
+        )
+        self.assertEqual(self.extract(text, file_extension=".i86"), "")
+
+    def test_glued_opening_fence_is_not_unclosed(self):
+        """Открывающая ``` приклеена к прозе («…только код.```asm»).
+
+        Счёт чётности строк-оградок принимал такой ответ за «финал оборван»
+        и возвращал пустой код, хотя последний блок закрыт (живой прогон
+        GLM 5.3 Flash, 2026-10-28).
+        """
+        draft = "jmp begin\nbegin:\nmov ax, 1\nends:\njmp ends ;$E"
+        final = "jmp begin\nbegin:\nmov ax, a\nends:\njmp ends ;$E"
+        text = (
+            f"```asm\n{draft}\n```\n"
+            f"Проверка: всё верно.\n"
+            f"Не добавлять комментарии. Вывести только код.```asm\n{final}\n```"
+        )
+        self.assertEqual(self.extract(text, file_extension=".i86"), final)
+
+    # === «Выкусывание» 2026-10, вторая причина: программа приклеена к прозе ===
+    # В логах #2606786/#2606762 ответ вообще без оград, и финальный «jmp begin»
+    # склеен с последней фразой CoT («…if ajmp begin», «…сходится.jmp begin»).
+    # Анкер каркаса — строка целиком, поэтому финал не находился, и в DL уходил
+    # ранний черновик с русской прозой.
+
+    def test_entry_glued_to_prose_final_program_wins(self):
+        """#2606786: проза склеена с `jmp begin` финальной программы."""
+        draft = (
+            "jmp begin\na dw 0\nb db 0\ny db 0\nbegin:\nmov al, b\ncbw\n"
+            "mov bx, ax\nmov ax, a\ncmp ax, bx\njge else1\n"
+            "mov y, 10 — wait, can't write immediate to memory directly?\n"
+        )
+        final = (
+            "jmp begin\na dw 0\nb db 0\ny db 0\nbegin:\n"
+            "mov al, b\ncbw\nmov bx, ax\nmov ax, a\ncmp ax, bx\njl m10\n"
+            "mov al, 5\nmov y, al\njmp ends\nm10:\nmov al, 10\nmov y, al\n"
+            "ends:\njmp ends ;$E"
+        )
+        text = f"Check: after cmp ax, bx and jl m10: if a{draft}\n" \
+               f"Check: after cmp ax,bx and jl m10: if a{final}"
+        got = self.extract(text, file_extension=".i86")
+        self.assertEqual(got, final)
+        self.assertNotIn("wait", got)
+        self.assertNotIn("else1", got)
+
+    def test_entry_glued_to_russian_prose_final_program_wins(self):
+        """#2606762: «…Пример сходится.jmp begin» — финал, а не обрывок CoT."""
+        fragment = (
+            "jmp begin\na db 0\nb db 0\ny db 0\nz db 0\nbegin:\n"
+            "mov al, a\ncbw          ; ax = a\nmov bl, b\nmov y, al\nmov z, ah"
+        )
+        final = (
+            "jmp begin\na db 0\nb db 0\ny db 0\nz db 0\nbegin:\n"
+            "mov al,b\ncbw\nmov bx,ax\nmov al,a\ncbw\ncwd\nidiv bx\n"
+            "mov y,al\nmov z,dl\nends:\njmp ends ;$E"
+        )
+        text = f"Черновик:\n{fragment}\n\nРезультат: пример сходится.{final}"
+        got = self.extract(text, file_extension=".i86")
+        self.assertEqual(got, final)
+        self.assertNotIn("ax = a", got)
+        self.assertNotIn("сходится", got)
+
 
 class OllamaNumPredictTests(SimpleTestCase):
     """Потолок генерации Ollama: env OLLAMA_NUM_PREDICT, дефолт 32768
@@ -9395,6 +9505,13 @@ class SolveMessageTests(TestCase):
         self.assertIn("Не расписывай ход рассуждений", self._message())
         self.assertIn("Не расписывай ход рассуждений", self._message(prompt_id=self.prompt.id))
 
+    def test_fence_instruction_appended_always(self):
+        # Контракт формата «ровно один ```-блок в самом конце» — последняя
+        # строка КАЖДОГО solve-сообщения (извлечение берёт последний блок).
+        for message in (self._message(), self._message(prompt_id=self.prompt.id)):
+            self.assertIn("РОВНО ОДИН блок кода", message)
+            self.assertIn("в самом конце", message)
+
 
 # ===================================================================
 # W9: старт /arm/solve/ — язык, привязка, record_stats
@@ -11405,16 +11522,21 @@ class FilterSelectBarTests(_AdminViewRequestMixin, TestCase):
 
 class ArmCodeExtractionTests(SimpleTestCase):
     """Извлечение чистого кода из ответа модели (_extract_code_from_response):
-    longest-fence побеждает; текст без фенсов — рассуждения, а не код (пусто);
-    think-блоки вырезаются целиком (в т.ч. незакрытые и код внутри них)."""
+    ПОСЛЕДНИЙ валидный ```-блок побеждает (финальный ответ, а не черновик
+    CoT); текст без фенсов — рассуждения, а не код (пусто); think-блоки
+    вырезаются целиком (в т.ч. незакрытые и код внутри них)."""
 
     def _extract(self, text):
         from ai.arm_runner import _extract_code_from_response
         return _extract_code_from_response(text)
 
-    def test_longest_fence_wins(self):
-        text = "```asm\nmov ax, 1\n```\nмусор\n```pascal\nprogram a; begin end.\n```"
-        self.assertEqual(self._extract(text), "program a; begin end.")
+    def test_last_fence_wins(self):
+        # Последний блок — финальный ответ, даже если он короче черновика выше.
+        text = (
+            "```pascal\nprogram a; begin writeln(1); end; end.\n```\n"
+            "мусор\n```asm\nmov ax, 1\n```"
+        )
+        self.assertEqual(self._extract(text), "mov ax, 1")
 
     def test_no_fences_returns_empty(self):
         self.assertEqual(self._extract("We need answer code only, no explanations."), "")
@@ -11653,6 +11775,92 @@ class StructuralCarverTests(SimpleTestCase):
         self.assertEqual(got.count("jmp begin"), 1)
         self.assertEqual(got.count(";$E"), 1)
         self.assertIn("mov y,al", got)
+
+    def test_asm_segment_dialect_full_program_kept(self):
+        """Segment-MASM GLM 5.3 Flash («assume … data segment … end start»):
+        структурник узнаёт диалект, «assume» и секция данных не теряются."""
+        text = (
+            "Решение:\n```asm\nassume cs:code, ds:data\n\ndata segment\n"
+            "    a db 25\n    b db 4\n    y db ?\n    z db ?\ndata ends\n\n"
+            "code segment\nstart:\n    mov ax, data\n    mov ds, ax\n"
+            "    mov al, a\n    cbw\n    div b\n    mov y, al\n    mov z, ah\n"
+            "    mov ax, 4C00h\n    int 21h\ncode ends\n\nend start\n```"
+        )
+        got = self._c(text, ext=".i86")
+        self.assertTrue(got.startswith("assume cs:code, ds:data"), got[:80])
+        self.assertIn("data segment", got)
+        self.assertIn("div b", got)
+        self.assertTrue(got.rstrip().endswith("end start"))
+
+    def test_asm_nasm_section_before_org_keeps_data(self):
+        """NASM-секции Gemma 4 («section .data» до «org 100h»): анкер —
+        section, а не org, иначе секция данных выкусывалась."""
+        text = (
+            "```assembly\nsection .data\n    n db 5\n    f dw 0\n\n"
+            "section .text\n    org 100h\n    mov al, [n]\n    mov cx, ax\n"
+            "    mov ax, 1\ncmp cx, 0\n    je end_calc\nloop_fact:\n"
+            "    mul cx\n    loop loop_fact\nend_calc:\n    mov [f], ax\n```"
+        )
+        got = self._c(text, ext=".i86")
+        self.assertTrue(got.startswith("section .data"), got[:80])
+        self.assertIn("n db 5", got)
+        self.assertIn("f dw 0", got)
+        self.assertIn("mov [f], ax", got)
+
+    def test_asm_memory_operand_with_si_not_prose(self):
+        """`mov [arr + si], [arr + si - 1]` — не проза.
+
+        «si» есть в стоп-словах (исп./фр. «если»), и строка набирала 40%
+        стоп-слов → вырезалась из кода (Gemma 4, сортировка вставками).
+        """
+        text = (
+            "```asm\njmp begin\narr dw 8 dup(0)\nbegin:\n    mov si, 14\n"
+            "    mov al, [arr + si]\n    mov [arr + si], [arr + si - 1]\n"
+            "    dec si\n    jmp begin\nEnds:\njmp Ends ;$E\n```"
+        )
+        got = self._c(text, ext=".i86")
+        self.assertIn("mov [arr + si], [arr + si - 1]", got)
+        self.assertIn("mov al, [arr + si]", got)
+
+    def test_asm_org_prelude_before_jmp_anchor_kept(self):
+        """DOS-стиль GPT-OSS 120B: `org 100h` + данные ДО `jmp start`.
+
+        Анкер по jmp начинал кандидата с перехода — прелюдия отрезалась.
+        Заодно проверяем, что `inc byte ptr cnt` не считается прозой
+        (мнемоники inc/dec/add/sub/div/test/… раньше отсутствовали в
+        кодовых маркерах, и такие строки вырезались как рассуждение).
+        """
+        text = (
+            "```asm\norg 100h\njmp start\nstr db 'example$',0\ncount db 0\n"
+            "start:\n    mov si, offset str\nnext:\n    lodsb\n    cmp al, '$'\n"
+            "    je done\n    inc byte ptr count\n    dec si\n    jmp next\n"
+            "done:\n    mov ah, 4Ch\n    int 21h\n```"
+        )
+        got = self._c(text, ext=".i86")
+        self.assertTrue(got.startswith("org 100h"), got[:80])
+        self.assertIn("str db 'example$',0", got)
+        self.assertIn("inc byte ptr count", got)
+        self.assertIn("dec si", got)
+
+    def test_alternative_heading_mid_reasoning_keeps_final_program(self):
+        """GLM 5.3 Flash: «Альтернатива:» посреди CoT с фрагментом, финальная
+        программа ниже. Срез по заголовку терял финал — извлекался черновик
+        (`a db 250` вместо `a db 1`); срезаем только хвостовую альтернативу."""
+        text = (
+            "Проверю: adc допустим.\n\n"
+            "Альтернатива: использовать XOR AH,AH:\n\n"
+            "```\n    xor ax, ax\n    mov al, a\n    add ax, bx\n```\n\n"
+            "Но вариант с adc проще. Ещё проще:\n\n"
+            "```\n    mov al, a\n    xor ah, ah\n    mov dl, b\n```\n\n"
+            "Итоговая программа:\n\n"
+            "```asm\n.model small\n.data\n    a db 1\n    y db ?\n.code\n"
+            "start:\n    mov ax, @data\n    mov ds, ax\n    mov al, a\n"
+            "    mov y, al\n    mov ax, 4C00h\n    int 21h\nend start\n```"
+        )
+        got = self._c(text, ext=".i86")
+        self.assertIn("a db 1", got)
+        self.assertTrue(got.rstrip().endswith("end start"), got[-80:])
+        self.assertNotIn("xor ax, ax", got)
 
     def test_asm_two_programs_with_heading_only_final_carved(self):
         """Две РАЗНЫЕ программы и заголовок между ними: выкусывается только
@@ -22913,6 +23121,57 @@ class PromptDebugSanitizeTests(SimpleTestCase):
         self.assertEqual(sanitize_addition("ок"), "")
 
 
+class PromptDebugMessageTests(SimpleTestCase):
+    """build_debug_message: модели-редактору уходит ошибка DL и данные теста.
+
+    Требование пользователя: при отладке промтов модель получает и сообщение
+    DL, и входные/эталонные данные проваленного теста. Раньше эти блоки не
+    покрывались тестами — состав задания мог молча разъехаться с DL REST API.
+    """
+
+    @staticmethod
+    def _message(**overrides):
+        from ai.services.prompt_debug import build_debug_message
+
+        params = {
+            "current_prompt": "Реши задачу на Ассемблере.",
+            "task_statement": "Посчитайте y по формуле",
+            "code": "org 100h\nmov ax, 1",
+            "dl_comment": "[test1]: Тест не прошел: y sgn[2]: -20.",
+            "raw_response": "Вот решение: ...",
+            "test_data": [{
+                "test_number": 1,
+                "input": "a sgn: 30\nb sgn[2]: 50",
+                "expected_output": "y sgn[2]: -20",
+            }],
+        }
+        params.update(overrides)
+        return build_debug_message(**params)
+
+    def test_includes_dl_comment_and_test_data(self):
+        message = self._message()
+        self.assertIn("КОММЕНТАРИЙ DL (ОШИБКА)", message)
+        self.assertIn("Тест не прошел: y sgn[2]: -20.", message)
+        self.assertIn("ДАННЫЕ ПРОВАЛЕННОГО ТЕСТА", message)
+        self.assertIn("Тест 1", message)
+        self.assertIn("a sgn: 30", message)
+        self.assertIn("b sgn[2]: 50", message)
+        self.assertIn("y sgn[2]: -20", message)
+
+    def test_test_data_section_omitted_without_data(self):
+        message = self._message(test_data=[], dl_comment="")
+        self.assertNotIn("ДАННЫЕ ПРОВАЛЕННОГО ТЕСТА", message)
+        self.assertNotIn("КОММЕНТАРИЙ DL (ОШИБКА)", message)
+        # Задание всё равно просит текст дополнения.
+        self.assertIn("Верни ТОЛЬКО текст дополнения", message)
+
+    def test_test_data_kept_when_budget_tight(self):
+        """Тест-данные приоритетнее кода/ответа: длинный промпт их не вытесняет."""
+        message = self._message(current_prompt="Правило. " * 600)
+        self.assertIn("a sgn: 30", message)
+        self.assertIn("y sgn[2]: -20", message)
+
+
 class PromptDebugCommitTests(TestCase):
     """commit_prompt_additions: куда пишется правка и как она накапливается."""
 
@@ -23138,9 +23397,13 @@ class PromptDebugRunnerTests(TestCase):
         def __init__(self):
             self.solve_calls = 0
             self.editor_calls = 0
+            # Все полученные задания (строка) — тесты проверяют, что редактору
+            # ушли ошибка DL и данные проваленного теста.
+            self.messages = []
 
         async def handler(self, messages, conv_id):
             text = messages if isinstance(messages, str) else str(messages)
+            self.messages.append(text)
             if "Верни ТОЛЬКО текст дополнения" in text:
                 self.editor_calls += 1
                 return (f"Проверяй граничные случаи, вариант {self.editor_calls}.", 5)
@@ -23183,7 +23446,7 @@ class PromptDebugRunnerTests(TestCase):
         }
 
     def _run(self, run_id, model, dl_mock, *, prompt_attempts, prompt_id="__own__",
-             node_ids=None):
+             node_ids=None, test_data=None):
         """Прогнать воркер; живой job остаётся в self._job после воркера."""
         from ai import arm_runner
 
@@ -23192,7 +23455,10 @@ class PromptDebugRunnerTests(TestCase):
         try:
             with (
                 patch("ai.arm_runner._test_solution_on_dl", dl_mock),
-                patch("ai.arm_runner.fetch_failed_test_data", return_value=[]),
+                patch(
+                    "ai.arm_runner.fetch_failed_test_data",
+                    return_value=list(test_data or []),
+                ),
             ):
                 arm_runner._run_batch_job_worker(
                     run_id, node_ids,
@@ -23294,6 +23560,41 @@ class PromptDebugRunnerTests(TestCase):
         light_row = snapshot["results"][0]
         self.assertTrue(light_row["prompt_debug_state"]["fixed"])
         self.assertTrue(light_row["prompt_debug_state"]["committed"])
+
+    def test_editor_gets_dl_comment_and_failed_test_data(self):
+        """Редактор промпта получает сообщение DL и вход/эталон проваленного теста.
+
+        Требование пользователя: при отладке промтов модель видит не только
+        код и промпт, но и то, что именно сказал DL и на каких данных пара
+        упала (DL REST API get-failed-tests + get-test-data).
+        """
+        run_id = "e" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["failed", "failed"])
+        test_data = [{
+            "test_number": 1,
+            "input": "a sgn: 30\nb sgn[2]: 50",
+            "expected_output": "y sgn[2]: -20",
+            "input_truncated": False,
+            "expected_truncated": False,
+        }]
+        run = self._run(
+            run_id, model, dl_mock, prompt_attempts=2, test_data=test_data,
+        )
+
+        editor_messages = [
+            text for text in model.messages
+            if "Верни ТОЛЬКО текст дополнения" in text
+        ]
+        self.assertEqual(len(editor_messages), 1)
+        message = editor_messages[0]
+        self.assertIn("Тест 1: неверный ответ", message)
+        self.assertIn("a sgn: 30", message)
+        self.assertIn("b sgn[2]: 50", message)
+        self.assertIn("y sgn[2]: -20", message)
+        # Данные теста сохраняются в строке пары (карточка результата).
+        row = run.results.get()
+        self.assertEqual(row.dl_test_data, json.dumps(test_data, ensure_ascii=False))
 
     def test_first_try_solve_is_not_fixed(self):
         """Пара, решённая с первой попытки, — НЕ «исправленная» правкой."""

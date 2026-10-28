@@ -52,6 +52,13 @@ _PROSE_STOPWORDS = frozenset({
     "sans", "sous", "vers", "chez", "car", "ni", "or",
 })
 
+# Регистры i8086 — омографы стоп-слов («si» исп./фр., «ds»/«es»/«ss»):
+# в ассемблерной строке они часть операндов, а не проза.
+_ASM_REGISTER_WORDS = frozenset({
+    "si", "di", "ds", "es", "ss", "cs", "bp", "sp",
+    "ax", "bx", "cx", "dx", "al", "ah", "bl", "bh", "cl", "ch", "dl", "dh",
+})
+
 
 def _looks_like_prose(text, ext=""):
     """True, если текст похож на связную прозу (рассуждения модели), а не код.
@@ -133,8 +140,39 @@ _V_HINT_RE = _re.compile(
     r"assign|always|posedge|negedge|endcase)\b",
     _re.IGNORECASE,
 )
+# Мнемоники i8086, которых нет в _CODE_HINT_RE (там только mov/jmp/cmp/int/…).
+# Без них строка «inc byte ptr cnt_c» (5 словарных слов, ни одного известного
+# маркера) классифицировалась как проза и ВЫРЕЗАЛАСЬ из кода (GPT-OSS 120B,
+# задача «гласные и согласные», живой прогон 2026-10-28). Инструкция считается
+# кодом, только если после мнемоники есть операндный признак (запятая, скобка,
+# цифра, «@», регистр, byte/word/ptr/offset/dup) или операндов нет вовсе
+# (`nop`/`ret`/`hlt`): так проза «add the values» кодом не становится.
+_ASM_MNEMONICS = (
+    r"(?:inc|dec|add|adc|sub|sbb|mul|imul|div|idiv|neg|not|and|or|xor|test|"
+    r"shl|shr|sal|sar|rol|ror|rcl|rcr|"
+    r"mov|movsx|movzx|push|pop|pusha|popa|pushf|popf|xchg|lea|lds|les|"
+    r"lodsb|lodsw|stosb|stosw|movsb|movsw|cmpsb|scasb|"
+    r"cmp|jmp|je|jne|jz|jnz|jg|jge|jl|jle|ja|jae|jb|jbe|js|jns|jo|jno|"
+    r"jc|jnc|jp|jnp|loop|loope|loopne|jcxz|"
+    r"call|ret|retn|int|into|iret|nop|hlt|wait|"
+    r"cbw|cwd|cwde|cdq|lahf|sahf|clc|stc|cmc|cld|std|cli|sti|"
+    r"org|assume|segment|proc|endp|equ|db|dw|dd)"
+)
+_ASM_OPERAND_HINT = (
+    r"[,\[\]\d@?'\"]|"
+    r"\b(?:ax|bx|cx|dx|si|di|bp|sp|al|ah|bl|bh|cl|ch|dl|dh|"
+    r"cs|ds|es|ss|byte|word|dword|ptr|offset|dup|xmm\d)\b"
+)
 # Метка i8086 (`begin:`, `loop_start:`) — тоже код, хотя ключевого слова нет.
-_ASM_HINT_RE = _re.compile(r"^\s*[A-Za-z_]\w*\s*:\s*(?:;.*)?$")
+_ASM_HINT_RE = _re.compile(
+    r"^\s*[A-Za-z_]\w*\s*:\s*(?:;.*)?$"
+    rf"|^\s*{_ASM_MNEMONICS}\b\s*(?:$|(?=[^\n]*{_ASM_OPERAND_HINT}))"
+    # Ветвления/вызов: операнд — метка (`jae sort_done`, `call find_end`),
+    # а не регистр/число. Идентификатор-операнд допустим ТОЛЬКО здесь:
+    # «add the values» остаётся прозой.
+    r"|^\s*(?:j\w+|call|loop\w*|jcxz)\s+[A-Za-z_]\w*\b",
+    _re.IGNORECASE | _re.MULTILINE,
+)
 
 _HINT_BY_EXT = {
     ".c": _C_FAMILY_HINT_RE,
@@ -393,7 +431,14 @@ def _is_prose_sentence(line, ext="", in_comment=False):
     words = _PROSE_WORD_RE.findall(judged)
     if len(words) < 5:
         return False
-    hits = sum(1 for w in words if w.lower() in _PROSE_STOPWORDS)
+    hits = sum(
+        1 for w in words
+        if w.lower() in _PROSE_STOPWORDS
+        # Регистры i8086 — омографы стоп-слов («si» исп./фр. «если», «ds»/«es»):
+        # «mov [arr + si], [arr + si - 1]» набирала 40% стоп-слов и ВЫРЕЗАЛАСЬ
+        # как проза (Gemma 4, сортировка вставками, живой прогон 2026-10-29).
+        and not (ext in (".i86", ".asm") and w.lower() in _ASM_REGISTER_WORDS)
+    )
     return hits / len(words) >= 0.3
 
 
@@ -514,6 +559,34 @@ def _code_follows_heading(lines, index):
     return False
 
 
+def _alternative_is_tail(lines, index):
+    """После заголовка «второго решения» — ОДИН код-блок и больше кода нет.
+
+    Заголовок может стоять ПОСРЕДИ рассуждения (GLM 5.3 Flash, живой прогон
+    2026-10-28: «Альтернатива: xor/…» — фрагмент в ограде, а финальная
+    программа ниже ещё через прозу и оградки). Срез по такому заголовку
+    выбрасывал финальный ответ, и извлекался ранний черновик (`a db 250`
+    вместо `a db 1`). Поэтому срезаем, только когда первый кодовый блок —
+    последний код в ответе; дальше допустима лишь проза.
+    """
+    i = index + 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines):
+        return True
+    if lines[i].lstrip().startswith("```"):
+        j = i + 1
+        while j < len(lines) and not lines[j].strip().startswith("```"):
+            j += 1
+        rest = lines[j + 1:] if j < len(lines) else []
+    else:
+        j = i
+        while j < len(lines) and (not lines[j].strip() or _line_is_code(lines[j])):
+            j += 1
+        rest = lines[j:]
+    return not any(l.strip().startswith("```") or _line_is_code(l) for l in rest)
+
+
 def cut_after_alternative_heading(text):
     """Срезать текст ПОСЛЕ первого заголовка «второго решения».
 
@@ -522,14 +595,16 @@ def cut_after_alternative_heading(text):
     вариант («Вариант 1: …код»), код не трогает. Оградка считается — у
     инструкций вроде «sub ax, y» нет ни одного кодового маркера из
     _CODE_HINT_RE, а «mov + оградка» перед заголовком — уже основное решение.
-    Дополнительно код должен идти СРАЗУ после заголовка (_code_follows_heading).
+    Дополнительно код должен идти СРАЗУ после заголовка (_code_follows_heading)
+    и это должен быть ПОСЛЕДНИЙ код ответа (_alternative_is_tail).
     Возвращает укороченный текст (или исходный, если срезать нечего).
     """
     lines = text.splitlines()
     code_seen = 0
     for index, line in enumerate(lines):
         if _is_alternative_heading(line):
-            if code_seen >= 2 and _code_follows_heading(lines, index):
+            if (code_seen >= 2 and _code_follows_heading(lines, index)
+                    and _alternative_is_tail(lines, index)):
                 return "\n".join(lines[:index]).rstrip()
         elif _line_is_code(line) or line.lstrip().startswith("```"):
             code_seen += 1
@@ -549,15 +624,26 @@ _BEGIN_LABEL_RE = _re.compile(r"^\s*begin\s*:", _re.IGNORECASE)
 # стартовых имён обязателен: jmp на метке ЦИКЛА (jmp loop_start) якорем не
 # становится — иначе хвостовое окно «съедает» дату-секцию программы.
 _JUMP_ENTRY_RE = _re.compile(r"^\s*jmp\s+([A-Za-z_]\w*)\s*$", _re.IGNORECASE)
-_ENTRY_LABEL_RE = _re.compile(
-    r"^(?:begin|start|prog\w*|program|main|init|entry|go)\w*$",
-    _re.IGNORECASE,
-)
+# Белый список стартовых имён — один владелец паттерна (анкер каркаса и
+# нормализация склейки «проза+программа» ниже обязаны совпадать).
+_ENTRY_LABEL_NAMES = r"(?:begin|start|prog\w*|program|main|init|entry|go)\w*"
+_ENTRY_LABEL_RE = _re.compile(rf"^{_ENTRY_LABEL_NAMES}$", _re.IGNORECASE)
 _LABEL_DEF_RE = _re.compile(r"^\s*([A-Za-z_]\w*)\s*:", )
 # MASM-скелет без jmp-перехода вообще (.model/.stack/.data/.code/org 100h) —
 # тоже якорь: от первой директивы до конца каркаса.
 _MASM_DIR_RE = _re.compile(
-    r"^\s*(?:\.model\b|\.stack\b|\.code\b|\.data\b|org\s+\d+)",
+    r"^\s*(?:\.model\b|\.stack\b|\.code\b|\.data\b|org\s+\d+"
+    # Segment-диалект MASM (без .model): «assume cs:code, ds:data» и
+    # «data segment»/«code segment». GLM 5.3 Flash отвечает именно так
+    # (живой прогон 2026-10-28): без этих анкеров структурник не узнавал
+    # программу, и карвинг терял «assume»/«data segment» — код без секции
+    # данных не компилируется.
+    r"|assume\s+[A-Za-z_]|[A-Za-z_]\w*\s+segment\b"
+    # NASM-секции: «section .data» / «section .text» перед org 100h.
+    # Gemma 4 отвечает так (живой прогон 2026-10-28): единственным анкером
+    # оставался «org 100h», и кандидат начинался с него — секция данных
+    # (n db 5 / f dw 0) выкусывалась, программа не компилируется.
+    r"|section\s+\.\w+)",
     _re.IGNORECASE,
 )
 # Концы i8086-программы: каркас DL (ends:/jmp ends + ;$E) и MASM-диалект
@@ -573,19 +659,37 @@ _DL_END_MARKER_RE = _re.compile(r";\$E\b", _re.IGNORECASE)
 # второй «jmp begin» не становится началом строки, а карвер тянет ОБЕ
 # программы в одного кандидата — двойной код уходит в файл решения.
 _DL_END_MARKER_GLUED_RE = _re.compile(r";\$E(?=\w)", _re.IGNORECASE)
+# Программа, приклеенная к хвосту рассуждения БЕЗ перевода строки
+# («…и сравнивай, if ajmp begin», «…Пример сходится.jmp begin»): конвертер
+# пула/страницы склеил последнюю фразу CoT и финальный ответ. Анкер каркаса —
+# строка ЦЕЛИКОМ («jmp begin»), поэтому финальная программа не находилась, и
+# карвер тянул ранее процитированный черновик из CoT (логи #2606786/#2606762:
+# в DL уходил фрагмент с русской прозой). `jmp` в середине строки в ассемблере
+# невалиден, так что разрыв перед ним безопасен; список меток — стартовые
+# имена, как у _ENTRY_LABEL_RE.
+_ASM_ENTRY_GLUED_RE = _re.compile(
+    rf"(?<=\S)(jmp\s+{_ENTRY_LABEL_NAMES})[ \t]*$",
+    _re.IGNORECASE | _re.MULTILINE,
+)
 
 
 def normalize_dl_marker_glue(text):
-    """Поставить перевод строки после ;$E, приклеенного к тексту.
+    """Развести склейки «текст + код», потерявшие перевод строки в пуле.
 
-    «jmp ends ;$Ejmp begin» → «jmp ends ;$E\\njmp begin». Без этого второй
-    каркас не распознаётся как отдельная программа (см.
-    _DL_END_MARKER_GLUED_RE). Обычный ответ не меняется: ;$E там и так
-    завершает строку (предикат ``(?=\\w)`` срабатывает только на склейке).
+    Два случая (оба — потеря границы блоков конвертером):
+
+    * «jmp ends ;$Ejmp begin» → «… ;$E\\njmp begin» — иначе второй каркас не
+      распознаётся отдельной программой (_DL_END_MARKER_GLUED_RE);
+    * «…if ajmp begin» / «…сходится.jmp begin» → «…if a\\njmp begin» — иначе
+      финальная программа не даёт анкера и карвер берёт черновик из CoT
+      (_ASM_ENTRY_GLUED_RE; логи #2606786/#2606762).
+
+    Обычный ответ не меняется: под оба предиката попадает только склейка.
     """
     if not text:
         return text
-    return _DL_END_MARKER_GLUED_RE.sub(lambda m: m.group(0) + "\n", text)
+    text = _DL_END_MARKER_GLUED_RE.sub(lambda m: m.group(0) + "\n", text)
+    return _ASM_ENTRY_GLUED_RE.sub(lambda m: "\n" + m.group(1), text)
 
 # --- С-МПА (псевдо-C) ---
 # Якорь-объявление С-МПА: ТРИ диалекта порядка слов —
@@ -1015,6 +1119,33 @@ def strip_prose_heading_lines(text, ext=""):
     return "\n".join(kept)
 
 
+# Прелюдия программы i8086 — строки, которые обязаны остаться в коде, даже
+# если анкером стал `jmp <стартовая метка>` НИЖЕ них (DOS-стиль
+# `org 100h` → данные → `jmp start`): GPT-OSS 120B, живой прогон 2026-10-28.
+_ASM_PRELUDE_RE = _re.compile(
+    r"^\s*(?:org\s+\d+|section\s+\.\w+|\.(?:model|stack|data|code|bss|186|286)\b"
+    r"|assume\b|[A-Za-z_]\w*\s+segment\b"
+    r"|[A-Za-z_]\w*\s+(?:db|dw|dd)\b"
+    r"|(?:db|dw|dd)\s"
+    r"|[A-Za-z_]\w*\s+equ\b)",
+    _re.IGNORECASE,
+)
+
+
+def _asm_prelude_start(lines, start, ext=".asm"):
+    """Сдвинуть начало кандидата вверх по прелюдии (org/section/данные)."""
+    scan = _scan_comment_spans(lines, ext) if ext else None
+    judged = scan.blanked if scan is not None else lines
+    i = start
+    while i > 0:
+        prev = judged[i - 1]
+        if not prev.strip() or _ASM_PRELUDE_RE.match(prev):
+            i -= 1
+            continue
+        break
+    return i
+
+
 def _asm_candidates_for_anchor(lines, start, ext=".asm"):
     """Кандидат от анкера start до ближайшего концевого каркаса.
 
@@ -1104,6 +1235,7 @@ def _asm_candidates(lines, relaxed=False, ext=".asm"):
     judged = scan.blanked if scan is not None else lines
     candidates = []
     for start, anchor_label in anchors:
+        start = _asm_prelude_start(lines, start, ext)
         span = _asm_candidates_for_anchor(lines, start, ext)
         if span is None:
             # Каркаса конца нет: возможно, модель писала без ;$E/обрезал
@@ -1159,7 +1291,14 @@ def _asm_candidates(lines, relaxed=False, ext=".asm"):
         # (болванка из CoT + программа) — бракуем и в relaxed (res#3987):
         # такая склейка не компилируется ни при каком прозо-допущении.
         # Строки begin:/Ends: — законная часть каркаса.
-        inner_jmp = sum(1 for j, l in enumerate(cand_lines) if j and _JMP_BEGIN_RE.match(l))
+        # Прелюдия (org/section/данные) может стоять до анкера — первый
+        # `jmp begin` после неё и ЕСТЬ анкер, дублем он не считается.
+        first_body = 0
+        while (first_body < len(cand_lines)
+               and _ASM_PRELUDE_RE.match(cand_lines[first_body])):
+            first_body += 1
+        inner_jmp = sum(1 for j, l in enumerate(cand_lines)
+                        if j > first_body and _JMP_BEGIN_RE.match(l))
         if inner_jmp:
             continue
         if not relaxed:
@@ -1535,3 +1674,82 @@ def has_language_marker(code, ext):
     if ext == ".mpc":
         return bool(_MPA_GATE_RE.search(code))
     return True
+
+
+# --- Оградки: единственный владелец разбора --------------------------------
+# Открывающая строка может нести любой «язык» (c-mpa, c++, c#…) и \r\n —
+# прежний паттерн ([a-zA-Z]*\n) пропускал такие теги, и слово «c-mpa» попадало
+# в извлечённый код первой строкой (ошибка компиляции на DL).
+FENCED_BLOCK_RE = _re.compile(r"```[^\n]*\r?\n(.*?)```", _re.DOTALL)
+# Незакрытая оградка (модель забывает закрывающие ``` — чаще при обрезке ответа):
+# всё после открывающей строки трактуется как код до конца текста.
+# Открывающая ``` может быть ПРИКЛЕЕНА к прозе («…Вывести только код.```asm\n»)
+# — шаблон ищет её в любом месте строки, поэтому склейка не прячет финальный
+# блок (логи GLM 5.3 Flash, живой прогон 2026-10-28).
+UNCLOSED_FENCE_RE = _re.compile(r"```[^\n]*\r?\n(.*)\Z", _re.DOTALL)
+
+# Кириллица в коде курса (.i86/.asm/.mpc). После маски комментариев/строк её
+# наличие — протёкшая проза модели, а не код (реальные DL-ошибки
+# «Неверный символ — russian letter»).
+_CYRILLIC_RE = _re.compile(r"[А-Яа-яЁё]")
+
+# Признак связного текста в строке «код + проза»: тире/многоточие. В коде
+# курса (ассемблер/С-МПА) эти знаки вне комментариев/строк не встречаются,
+# а `?` брать нельзя — в C-МПА `a ? b : c` это настоящий тернарник.
+_INLINE_PROSE_RE = _re.compile(r"[—–…]")
+
+
+def cut_prose_lines(text, ext=""):
+    """Вырезать из фенс-блока строки с протёкшей прозой модели.
+
+    В отличие от ``_mid_prose_lines`` (только бракует кандидата) здесь строка
+    режется: внутри оградки модель уже отделила код, поэтому строка-рассуждение
+    — мусор, а не повод выбросить всю программу. Строки, целиком лежащие в
+    комментариях/строковых литералах, и защищённые метки не трогаются.
+
+    Признаки прозы считаются по ``_scan_comment_spans`` (комментарий/строковый
+    литерал замаскирован): кириллица вне комментариев/строк (код курса
+    латинский) либо «код + связный текст» (≥3 словарных слова с тире/
+    многоточием). Для прочих расширений правило не применяется — там свои
+    синтаксисы.
+    """
+    if not text:
+        return ""
+    ext = (ext or "").strip().lower()
+    if ext not in (".i86", ".asm", ".mpc"):
+        return text
+    lines = text.splitlines()
+    scan = _scan_comment_spans(lines, ext)
+    protected = _candidate_protected_labels(lines, ext)
+    kept = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or i in scan.span_lines:
+            kept.append(line)
+            continue
+        judged = scan.blanked[i]
+        if _is_prose_heading_line(stripped, protected):
+            continue
+        if _CYRILLIC_RE.search(judged):
+            continue
+        words = _PROSE_WORD_RE.findall(judged)
+        if len(words) >= 3 and _INLINE_PROSE_RE.search(judged):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def sanitize_fenced_block(block, ext=""):
+    """Привести содержимое одной ```-оградки к чистому коду.
+
+    Оградка — контракт ответа: модель сама отделила код. Поэтому прозу внутри
+    не «бракуем» (иначе теряем хорошую программу), а вырезаем: подписи
+    (``strip_prose_heading_lines``), проза-строки посреди (``_cut_mid_prose``)
+    и строки с протёкшим CoT (``cut_prose_lines``). ``""`` — кода не осталось.
+    """
+    code = strip_prose_heading_lines(block or "", ext)
+    code, _ = _cut_mid_prose(code, ext)
+    code = cut_prose_lines(code, ext)
+    code = normalize_dl_marker_glue(code)
+    code = strip_code_fence_lines(code)
+    return code.strip()
