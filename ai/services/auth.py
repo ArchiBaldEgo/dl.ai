@@ -65,23 +65,79 @@ def resolve_user_info_for_request(request) -> dict | None:
     return None
 
 
+_AI_DISABLED_FALLBACK = (
+    "В этом курсе использование ИИ запрещено (dl.gsu.by не разрешил "
+    "доступ для вашей учётной записи). Обратитесь к преподавателю или "
+    "в техническую поддержку."
+)
+
+# Протокол WebSocket ограничивает reason закрытия 123 байтами UTF-8.
+_WS_CLOSE_REASON_MAX_BYTES = 123
+
+
+def ai_restriction_details(user_info: dict | None) -> tuple[str, str]:
+    """``(code, message)`` причины отказа из ``UserInfo.aiRestriction``.
+
+    dl-rest-api.json 1.4.5: DL отдаёт объект ТОЛЬКО при ``canUseAi=false`` —
+    одна основная причина (глобальный запрет, ограничение курса или
+    соревнование). ``message`` — готовый текст для пользователя, ``code`` —
+    машиночитаемый идентификатор (например, ``COMPETITION_AI_DISABLED``).
+    Старый DL/кеш без объекта → ``("", "")``.
+    """
+    restriction = user_info.get("aiRestriction") if isinstance(user_info, dict) else None
+    if not isinstance(restriction, dict):
+        return "", ""
+    return (
+        str(restriction.get("code") or "").strip(),
+        str(restriction.get("message") or "").strip(),
+    )
+
+
+def format_ai_disabled_reason(user_info: dict | None) -> str:
+    """Текст отказа: сообщение DL + код причины (оба — для пользователя/поддержки).
+
+    Нет ``aiRestriction`` (старый DL, dev-bypass, кеш без поля) — прежняя
+    формулировка: код причины придумывать нельзя.
+    """
+    code, message = ai_restriction_details(user_info)
+    if not message and not code:
+        return _AI_DISABLED_FALLBACK
+    parts = []
+    if message:
+        parts.append(message if message.endswith((".", "!", "?")) else message + ".")
+    parts.append(f"Код причины: {code}." if code else "")
+    return " ".join(part for part in parts if part)
+
+
 def ai_disabled_reason(request) -> str | None:
     """Причина, по которой AI пользователю недоступен (или ``None``).
 
     DL отдаёт флаг ``canUseAi`` (dl-rest-api.json, UserInfo.canUseAi) — «разрешено
-    ли использование AI в текущем курсе». Раньше приложение его НЕ читало —
-    запрет DL молча игнорировался.
+    ли использование AI в текущем курсе» — и при отказе объект
+    ``aiRestriction`` с текстом и кодом причины. Раньше приложение его НЕ
+    читало — запрет DL молча игнорировался; теперь текст DL выводится как есть.
 
     Единая формулировка для всех точек отказа (страница, WS, HTTP-эндпоинты
     отправки решения): правка текста — в одном месте.
     """
-    if can_use_ai(resolve_user_info_for_request(request)):
+    user_info = resolve_user_info_for_request(request)
+    if can_use_ai(user_info):
         return None
-    return (
-        "В этом курсе использование ИИ запрещено (dl.gsu.by не разрешил "
-        "доступ для вашей учётной записи). Обратитесь к преподавателю или "
-        "в техническую поддержку."
-    )
+    return format_ai_disabled_reason(user_info)
+
+
+def ws_ai_disabled_reason(user_info: dict | None) -> str:
+    """Причина отказа для ``close(reason=…)`` WS (≤123 байт UTF-8).
+
+    Код идёт ПЕРВЫМ: длинный русский текст DL в лимит не влезает, и при
+    обрезке код должен остаться (по нему фронт/логи различают событие).
+    """
+    code, message = ai_restriction_details(user_info)
+    text = f"{code}: {message}" if code and message else format_ai_disabled_reason(user_info)
+    encoded = text.encode("utf-8")
+    if len(encoded) <= _WS_CLOSE_REASON_MAX_BYTES:
+        return text
+    return encoded[:_WS_CLOSE_REASON_MAX_BYTES].decode("utf-8", errors="ignore").rstrip()
 
 
 class WebSocketAuthService:

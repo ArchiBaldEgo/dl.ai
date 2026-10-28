@@ -31,6 +31,7 @@ from .services import (
     get_user_identity_for_log,
     mark_cache_used,
     resolve_external_account,
+    ws_ai_disabled_reason,
 )
 from .throttling import rate_limiter
 
@@ -137,11 +138,13 @@ class MyConsumer(AsyncWebsocketConsumer):
         self.user = user
         self.user_info = user_info
         # Гейт DL «canUseAi»: AI в текущем курсе запрещён → закрываем
-        # соединение с внятным кодом и ТЕКСТОМ (не молчаливый 4403).
-        if not self._can_use_ai():
+        # соединение с внятным кодом и причиной от DL (message + code из
+        # aiRestriction; не молчаливый 4403).
+        disabled_info = self._ai_disabled_info()
+        if disabled_info is not None:
             await self.close(
                 code=AI_DISABLED_CLOSE_CODE,
-                reason="AI в этом курсе запрещён (dl.gsu.by)",
+                reason=ws_ai_disabled_reason(disabled_info),
             )
             return
         self.external_account = await resolve_external_account(user) if user and not isinstance(user, str) else None
@@ -159,13 +162,14 @@ class MyConsumer(AsyncWebsocketConsumer):
         conversation_history.reset(self.client_id)
         logger.debug("WebSocket connected for client %s, user_id=%s", self.client_id, self.user_id)
 
-    def _can_use_ai(self) -> bool:
-        """Разрешён ли AI этому пользователю (флаг DL ``canUseAi``).
+    def _ai_disabled_info(self) -> dict | None:
+        """user_info, в котором DL запретил AI (``canUseAi=false``), или None.
 
         Источники — как в ``_resolve_course_id``: user_info из аутентификации
         WS, затем кеш ``external_user_info`` в Django-сессии (её кладут и
         HTTP-, и WS-аутентификация). Флага нет — разрешено («неизвестно» ≠
-        «запрещено»).
+        «запрещено»). Возвращается сам словарь, чтобы причина отказа
+        (``aiRestriction``) бралась из того же payload, что и флаг.
         """
         candidates = [self.user_info or {}]
         session = self.scope.get("session")
@@ -173,8 +177,12 @@ class MyConsumer(AsyncWebsocketConsumer):
             candidates.append(session.get("external_user_info") or {})
         for info in candidates:
             if not can_use_ai(info):
-                return False
-        return True
+                return info
+        return None
+
+    def _can_use_ai(self) -> bool:
+        """Разрешён ли AI этому пользователю (флаг DL ``canUseAi``)."""
+        return self._ai_disabled_info() is None
 
     def _extract_user_id(self, user, user_info, external_account=None) -> str:
         if isinstance(user, str):

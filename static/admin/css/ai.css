@@ -536,3 +536,58 @@ form {
     z-index: 1000;
     font-variant-numeric: tabular-nums;
 }
+/* === Предупреждение об устаревшем браузере (ai-browser-check.js) =========
+   Баннер фиксирован сверху и виден ДО того, как сломается остальной JS.
+   #content на страницах чата — height:100vh, поэтому при показе баннера он
+   сжимается на высоту баннера через --ai-browser-warning-h (её пишет скрипт:
+   высота зависит от переноса текста). Браузер без CSS-переменных (IE11)
+   правила с var() игнорирует — баннер всё равно виден поверх страницы. */
+.ai-browser-warning {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 11000;
+    display: flex;
+    align-items: center;
+    box-sizing: border-box;
+    padding: 8px 40px 8px 16px;
+    background: var(--bg-msg-dl, #fff8e1);
+    color: var(--text-primary, #333333);
+    border-bottom: 1px solid var(--border, #cccccc);
+    font-size: 14px;
+    line-height: 1.35;
+}
+
+.ai-browser-warning__text {
+    flex: 1 1 auto;
+}
+
+.ai-browser-warning__close {
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    transform: translateY(-50%);
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.7;
+}
+
+.ai-browser-warning__close:hover,
+.ai-browser-warning__close:focus-visible {
+    opacity: 1;
+    background: var(--border-soft, rgba(0, 0, 0, 0.1));
+}
+
+html.ai-browser-warning-visible #content {
+    height: calc(100vh - var(--ai-browser-warning-h, 0px));
+    margin-top: var(--ai-browser-warning-h, 0px);
+}
