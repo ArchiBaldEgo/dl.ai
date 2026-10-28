@@ -31,6 +31,10 @@
   // generic-restore конфликтовал бы с ними (KISS: страница короткая).
   var FORM_SELECTORS = {
     "/ai/admin/arm/solve/": "#armSolveForm",
+    // «Отладка промтов» — та же форма (#armSolveForm), что и пакетное
+    // решение, но свой pathname: без этой строки выбор моделей/языка/промпта/
+    // числа попыток сбрасывался при каждом возврате на страницу.
+    "/ai/admin/arm/prompt-debug/": "#armSolveForm",
     "/ai/admin/arm/find-error/": "#armRunForm",
     "/ai/admin/test-console/": "#tcRunForm"
   };
