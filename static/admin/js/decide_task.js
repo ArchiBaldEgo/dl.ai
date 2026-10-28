@@ -136,7 +136,7 @@ function initWebSocket() {
         ws.onclose = function(event) {
             console.log('WebSocket connection closed');
             if (isAiDisabledClose(event)) {
-                showAiDisabledMessage();
+                showAiDisabledMessage(event);
             } else {
                 updateVoiceStatus(getVoiceStatusText('connectionClosed'));
             }

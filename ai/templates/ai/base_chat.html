@@ -23,6 +23,11 @@
         }
     })();
     </script>
+    <!-- Предупреждение об устаревшем браузере. Отдельный ES5-файл и ДО
+         ai-common.js: браузер без async/await не распарсит ai-common.js
+         (SyntaxError) и не выполнит ни одного скрипта страницы — проверка
+         внутри ai-common.js там просто не запустится (см. шапку файла). -->
+    <script src="/ai/assets/admin/js/ai-browser-check.js?v=1" defer></script>
     {% block extra_meta %}{% endblock %}
     {% block css %}
     <link rel="stylesheet" href="/ai/assets/admin/css/ai.css?v={{ request.COOKIES.csrftoken|default:'1' }}"/>

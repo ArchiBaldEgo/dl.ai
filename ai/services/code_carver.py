@@ -713,6 +713,20 @@ _MPA_DECL_RE = _re.compile(
 )
 _MPA_MAIN_RE = _re.compile(r"^\s*(?:int|void)\s+main\b", _re.IGNORECASE)
 _CLOSING_BRACE_RE = _re.compile(r"^\s*}\s*;?\s*$")
+# Простое глобальное объявление без портов (``char A[100];``, ``int x;``):
+# тип в начале, `;` в конце, без фигурных скобок. Такие строки — не якоря
+# (в декларации нет __in/__out/__bits), и без них окно, начатое с якоря-
+# объявления, теряло массивы входа ВЫШЕ него — «Undefined variable A» в DL.
+_PLAIN_DECL_LINE_RE = _re.compile(
+    r"^\s*(?:const\s+|static\s+)*(?:unsigned\s+|signed\s+)*"
+    r"(?:int|char|short|long|float|double)\b[^;{}]*;\s*(?://.*)?$",
+    _re.IGNORECASE,
+)
+# Имя переменной в объявлении __bits (для проверки дублей на файловом уровне).
+_MPA_DECL_NAME_RE = _re.compile(
+    r"\b[\w]+\s+(?:__in\s+|__out\s+|\s)*\s*__bits\s*\(\s*\d+\s*\)\s*[A-Za-z_]\w*",
+    _re.IGNORECASE,
+)
 
 
 def strip_code_fence_lines(text):
@@ -1407,6 +1421,22 @@ def _closing_brace_line(line):
     return bool(_CLOSING_BRACE_RE.match(stripped) or _re.search(r"}\s*;?\s*$", stripped))
 
 
+def _brace_depths(judged_lines):
+    """Глубина фигурных скобок НА НАЧАЛЕ каждой строки (0 — файловый уровень).
+
+    ``judged_lines`` — текст с уже замаскированными комментариями
+    (``_scan_comment_spans(...).blanked``), иначе скобка в комментарии
+    сдвинула бы глубину.
+    """
+    depth = 0
+    depths = []
+    for line in judged_lines:
+        depths.append(depth)
+        stripped = line.strip()
+        depth += stripped.count("{") - stripped.count("}")
+    return depths
+
+
 def extract_mpa_c(text, relaxed=False):
     """Структурный экстрактор С-МПА (псевдо-C с __in/__bits) и обычного C.
 
@@ -1433,11 +1463,29 @@ def extract_mpa_c(text, relaxed=False):
     lines = [line for line in text.splitlines()]
     scan = _scan_comment_spans(lines, ".mpc")
     judged = scan.blanked
+    # Якоря — только на ФАЙЛОВОМ уровне (глубина скобок 0): локальные
+    # объявления внутри функций (`int __bits(8) i;`) якорями не являются.
+    # Иначе окно стартовало с середины функции, и в код уходил хвост fact()
+    # без портов и заголовка — «Undefined variable x/R» в DL (кейс «Реши
+    # задачу», C-МПА: `int fact(int n) { int __bits(16) f; int __bits(8) i; …`).
+    depths = _brace_depths(judged)
     anchors = [
         i for i, line in enumerate(judged)
-        if _MPA_DECL_RE.match(line) or _MPA_MAIN_RE.match(line)
+        if depths[i] == 0 and (_MPA_DECL_RE.match(line) or _MPA_MAIN_RE.match(line))
     ]
-    if not anchors:
+    # Запасные якоря — объявления ВНУТРИ функций: сами по себе они кандидаты
+    # не годятся (обрезок с середины функции), но спасают «простыню» с
+    # незакрытой болванкой выше финальной программы: та сдвигает программу на
+    # глубину >0, окон файлового уровня там нет, и без запасных якорей код не
+    # извлекался бы вовсе. Такие кандидаты — ТОЛЬКО если ни один файловый
+    # якорь не дал результата (см. rank при выборе).
+    anchor_set = set(anchors)
+    inner_anchors = [
+        i for i, line in enumerate(judged)
+        if i not in anchor_set
+        and (_MPA_DECL_RE.match(line) or _MPA_MAIN_RE.match(line))
+    ]
+    if not anchors and not inner_anchors:
         return ""
 
     def window_end(start):
@@ -1501,11 +1549,36 @@ def extract_mpa_c(text, relaxed=False):
             return window_end_from_decl(start)
         return window_end(start)
 
+    def window_start(anchor):
+        """Подъём начала окна к блоку простых глобальных объявлений.
+
+        Якорь-объявление ``__out``/``__bits`` не видит глобальные переменные
+        БЕЗ портов (``char A[100];`` — входной массив, ``int x;``): окно
+        начиналось с якоря, и объявления выше выпадали из кода («Undefined
+        variable A» в DL; кейс «Реши задачу» C-МПА). Тянем начало вверх по
+        подряд идущим простым объявлениям, пропуская пустые строки и
+        строки-оградки; первая строка не-объявления — граница (проза/скобка).
+        """
+        i = anchor - 1
+        while i >= 0:
+            stripped = judged[i].strip()
+            if not stripped or _FENCE_LINE_RE.match(judged[i]):
+                i -= 1
+                continue
+            if _PLAIN_DECL_LINE_RE.match(judged[i]) and not _MPA_DECL_RE.match(judged[i]):
+                anchor = i
+                i -= 1
+                continue
+            break
+        return anchor
+
     candidates = []
-    for start in anchors:
+    for start in anchors + inner_anchors:
+        rank = 0 if start in anchor_set else 1
         end = end_for(start)
         if end is None or end <= start:
             continue
+        start = window_start(start)
         body = [l for l in lines[start:end + 1]]
         body = _strip_prose_tail(body, ext=".mpc")
         candidate = strip_code_fence_lines("\n".join(body)).strip()
@@ -1567,12 +1640,17 @@ def extract_mpa_c(text, relaxed=False):
                 continue
             # Дубли С-МПА-деклараций (одна и та же __bits-переменная объявлена
             # дважды) — склеились объявления из болванки и программы (в
-            # пределах ОДНОГО окна; между окнами дубли — норма).
-            mpa_decl_names = _re.findall(
-                r"\b[\w]+\s+(?:__in\s+|__out\s+|\s)*\s*__bits\s*\(\s*\d+\s*\)\s*[A-Za-z_]\w*",
-                cand_view,
-                _re.IGNORECASE,
-            )
+            # пределах ОДНОГО окна; между окнами дубли — норма). Считаются
+            # ТОЛЬКО объявления файлового уровня (глубина 0): одноимённые
+            # ЛОКАЛЬНЫЕ переменные в разных функциях (`int __bits(16) f;` в
+            # fact и в main) — нормальный C, а не склейка; раньше они
+            # браковали полный кандидат, и в код уходил обрезок с середины
+            # функции.
+            mpa_decl_names = []
+            cand_depths = _brace_depths(cand_scan.blanked)
+            for j, line in enumerate(cand_scan.blanked):
+                if cand_depths[j] == 0:
+                    mpa_decl_names.extend(_MPA_DECL_NAME_RE.findall(line))
             mpa_decl_norm = [_re.sub(r"\s+", " ", d).strip().lower() for d in mpa_decl_names]
             if len(mpa_decl_norm) != len(set(mpa_decl_norm)):
                 continue
@@ -1584,13 +1662,17 @@ def extract_mpa_c(text, relaxed=False):
                 continue
             candidate = cut_code
             cand_line_count = len(candidate.splitlines())
-        candidates.append((cand_line_count, candidate))
+        candidates.append((rank, cand_line_count, candidate))
     if not candidates:
         return ""
-    # Лучший: больше строк (полный кандидат decls+main длиннее main-одного);
-    # сортировка устойчива — при равенстве длина берётся ПОСЛЕДНИЙ.
-    candidates.sort(key=lambda t: t[0])
-    return candidates[-1][1]
+    # Файловые якоря (rank 0) важнее запасных (rank 1): обрезок с середины
+    # функции не должен перебить полную программу, даже если он длиннее.
+    # Внутри ранга — больше строк (полный кандидат decls+main длиннее
+    # main-одного); сортировка устойчива — при равенстве берётся ПОСЛЕДНИЙ.
+    best_rank = min(rank for rank, _count, _cand in candidates)
+    best = [item for item in candidates if item[0] == best_rank]
+    best.sort(key=lambda t: t[1])
+    return best[-1][2]
 
 
 def has_mpa_markers(text):

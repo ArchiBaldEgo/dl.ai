@@ -6648,6 +6648,95 @@ class OllamaHandlerTests(SimpleTestCase):
             self.assertFalse(cut)
             self.assertIn("пустой ответ", content)
 
+    async def test_thinking_not_returned_when_think_disabled(self):
+        """think=False — рассуждения просили выключить: пустой content + thinking
+        не превращается в ответ (это утёкшая CoT, а не ответ)."""
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.return_value = self._thinking_stream(
+                "Let me carefully analyze this problem", eval_count=7)
+
+            gpt_oss = getattr(ollama, "ask_Ollama_Gpt_Oss_20B_Cloud_async")
+            content, tokens, is_error, _cut, _prompt = await gpt_oss(
+                "hi", "client", think=False)
+            self.assertTrue(is_error)
+            self.assertEqual(tokens, 0)
+            self.assertIn("только рассуждения", content)
+            self.assertNotIn("analyze", content)
+
+    async def test_nothink_retry_never_returns_thinking(self):
+        """ARM-ретрай «без think» (nothink_handler) при пустом content и
+        рассуждениях в thinking отдаёт ошибку, а не CoT."""
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.return_value = self._thinking_stream(
+                "The task: Find the value of an expression", eval_count=9)
+
+            retry = ollama.nothink_handler(
+                getattr(ollama, "ask_Ollama_Gpt_Oss_20B_Cloud_async"))
+            content, _tokens, is_error, _cut, _prompt = await retry("hi", "client")
+            self.assertTrue(is_error)
+            self.assertIn("только рассуждения", content)
+
+    async def test_thinking_always_model_translates_think_false_to_default(self):
+        """GLM 5.3 Flash: think=false не глушит CoT, а переносит её в content —
+        поэтому поле в запрос не идёт (think=None), а thinking отбрасывается."""
+        from ai.model_clients import ollama
+        self.assertTrue(ollama.OLLAMA_MODELS["Ollama_Glm_5_3_Flash_Cloud"].get("thinking_always"))
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.return_value = self._thinking_stream(
+                "The task: Find the value of an expression", eval_count=11)
+
+            glm_5_3 = getattr(ollama, "ask_Ollama_Glm_5_3_Flash_Cloud_async")
+            content, _tokens, is_error, _cut, _prompt = await glm_5_3(
+                "hi", "client", think=False)
+            # think=False → поле не подставлено вовсе (иначе CoT утекла бы в content).
+            self.assertNotIn("think", mock_client.chat.call_args.kwargs)
+            # Рассуждение не стало ответом.
+            self.assertTrue(is_error)
+            self.assertIn("только рассуждения", content)
+
+    async def test_thinking_always_nothink_handler_keeps_default_mode(self):
+        """ARM-ретрай GLM 5.3: think никуда не передаётся, CoT не становится ответом."""
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.return_value = self._thinking_stream(
+                "Let me carefully analyze this problem", eval_count=5)
+
+            retry = ollama.nothink_handler(
+                getattr(ollama, "ask_Ollama_Glm_5_3_Flash_Cloud_async"))
+            content, _tokens, is_error, _cut, _prompt = await retry("hi", "client")
+            self.assertNotIn("think", mock_client.chat.call_args.kwargs)
+            self.assertTrue(is_error)
+            self.assertIn("только рассуждения", content)
+
+    async def test_nothink_retry_still_requests_think_false_for_others(self):
+        """Модели с рабочим think=false по-прежнему получают think=False."""
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.return_value = self._stream("program p;", eval_count=5)
+
+            retry = ollama.nothink_handler(
+                getattr(ollama, "ask_Ollama_Gemma_4_Cloud_async"))
+            result = await retry("hi", "client")
+            self.assertEqual(result[0], "program p;")
+            self.assertIs(mock_client.chat.call_args.kwargs.get("think"), False)
+
 
 class OllamaRateLimitTests(SimpleTestCase):
     """Защита от 429 Ollama Cloud: per-process семафор + ретраи с backoff.
@@ -17401,6 +17490,78 @@ class MpaMultiWindowExtractionTests(SimpleTestCase):
         self.assertIn("void main", got)
         self.assertEqual(got, prog)
 
+    def test_plain_c_globals_above_ports_are_kept(self):
+        """Обычные C-объявления БЕЗ портов выше деклараций `__out`
+        (`char A[100];` — входной массив) не якоря: окно начиналось с
+        `int __out __bits(16) res;`, и объявления ВЫШЕ него выпадали из кода
+        («Undefined variable A» в DL; кейс «Реши задачу», C-МПА, фенс ```c,
+        где массив стоит первой строкой)."""
+        prog = (
+            "char A[100];\n"
+            "int __out __bits(16) res;\n"
+            "\n"
+            "void main() {\n"
+            "  int i = 0;\n"
+            "  if (A[0] == '#') {\n"
+            "    res = 0;\n"
+            "  }\n"
+            "}"
+        )
+        fenced = "The code looks good. No comments, clean code.\n\n```c\n" + prog + "\n```\n"
+        self.assertEqual(self._c(fenced, ext=".mpc"), prog)
+
+    def test_local_declarations_are_not_anchors(self):
+        """Локальные `int __bits(…)` внутри функции — НЕ якоря окна: раньше
+        окно стартовало с `int __bits(8) i;` внутри fact(), и в код уходил
+        хвост функции без портов и заголовка. Плюс одноимённые локальные
+        `int __bits(16) f;` в fact() и main() — нормальный C, а не склейка
+        двух программ: проверка дублей теперь только на файловом уровне."""
+        prog = (
+            "int __in __bits(16) x;\n"
+            "int __in __bits(16) y;\n"
+            "int __in __bits(8) a;\n"
+            "int __in __bits(8) b;\n"
+            "int __out __bits(16) R;\n"
+            "\n"
+            "int fact(int n) {\n"
+            "    int __bits(16) f;\n"
+            "    int __bits(8) i;\n"
+            "    f = 1;\n"
+            "    i = 1;\n"
+            "    while (i <= n) {\n"
+            "        f = f * i;\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    return f;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    int __bits(16) denom;\n"
+            "    int __bits(16) f;\n"
+            "    denom = a - b;\n"
+            "    if (denom != 0) {\n"
+            "        f = fact(x);\n"
+            "        R = f + y / denom;\n"
+            "    }\n"
+            "}"
+        )
+        fenced = "```c\n" + prog + "\n```\n"
+        self.assertEqual(self._c(fenced, ext=".mpc"), prog)
+
+    def test_plain_globals_kept_across_blank_lines(self):
+        """Подъём к глобальным объявлениям пересекает пустые строки и
+        несколько объявлений подряд (`const int N` + массив + порт)."""
+        prog = (
+            "const int N = 10;\n"
+            "\n"
+            "char A[100];\n"
+            "int __out __bits(16) res;\n"
+            "void main() {\n"
+            "  res = N;\n"
+            "}"
+        )
+        self.assertEqual(self._c("Решение:\n" + prog + "\nГотово.", ext=".mpc"), prog)
+
     def test_pseudo_c_port_declarations_are_anchors(self):
         """Псевдо-C диалект портов («unsigned char __in __bits(8) N1;» — тип
         В НАЧАЛЕ строки) тоже является якорем-объявлением: регулярка матчила
@@ -21769,6 +21930,50 @@ class CanUseAiGateTests(TestCase):
         self.assertFalse(can_use_ai({"canUseAi": "no"}))
         self.assertTrue(can_use_ai({"canUseAi": "true"}))
 
+    def test_restriction_message_and_code_shown(self):
+        """DL 1.4.5: UserInfo.aiRestriction несёт message и code отказа —
+        оба выводятся пользователю (страница, JSON-эндпоинты)."""
+        from ai.services.auth import format_ai_disabled_reason
+
+        user_info = {
+            "canUseAi": False,
+            "aiRestriction": {
+                "code": "COMPETITION_AI_DISABLED",
+                "message": "Использование ИИ запрещено настройкой курса во время действующей контрольной.",
+                "courseId": 1461,
+                "eventType": "CONTROL_WORK",
+            },
+        }
+        text = format_ai_disabled_reason(user_info)
+        self.assertIn("настройкой курса во время действующей контрольной", text)
+        self.assertIn("COMPETITION_AI_DISABLED", text)
+
+    def test_restriction_absent_falls_back_to_generic_text(self):
+        """Старый DL / dev без aiRestriction — прежняя формулировка, кода не
+        выдумываем."""
+        from ai.services.auth import format_ai_disabled_reason
+
+        text = format_ai_disabled_reason({"canUseAi": False})
+        self.assertIn("запрещено", text)
+        self.assertNotIn("Код причины", text)
+
+    def test_ws_close_reason_keeps_code_within_byte_limit(self):
+        """WS close reason ≤123 байт: длинный русский текст DL обрезается, а
+        КОД причины (латиница) остаётся первым — по нему фронт различает
+        событие."""
+        from ai.services.auth import ws_ai_disabled_reason
+
+        user_info = {
+            "canUseAi": False,
+            "aiRestriction": {
+                "code": "COMPETITION_AI_DISABLED",
+                "message": "Длинное пояснение " * 20,
+            },
+        }
+        reason = ws_ai_disabled_reason(user_info)
+        self.assertLessEqual(len(reason.encode("utf-8")), 123)
+        self.assertTrue(reason.startswith("COMPETITION_AI_DISABLED:"))
+
     def test_chat_page_returns_403_with_reason(self):
         """Страница чата при canUseAi=false → 403 с ТЕКСТОМ (не пустая)."""
         from ai.views import chat_view
@@ -21787,6 +21992,35 @@ class CanUseAiGateTests(TestCase):
         self.assertEqual(response.status_code, 403)
         body = response.content.decode()
         self.assertIn("запрещено", body)
+
+    def test_chat_page_403_shows_dl_message_and_code(self):
+        """Страница при отказе DL выводит ТЕКСТ и КОД из aiRestriction, а
+        отказ не кэшируется (после снятия ограничения не висит старый 403)."""
+        from ai.views import chat_view
+
+        factory = RequestFactory()
+        request = factory.get("/ai/chat/")
+        request.user = get_user_model().objects.create_user(
+            username="student-restriction", password="***")
+        request.session = {}
+        request.user_info = {
+            "userId": "student",
+            "canUseAi": False,
+            "aiRestriction": {
+                "code": "GLOBAL_AI_DISABLED",
+                "message": "Использование ИИ запрещено глобальной настройкой.",
+            },
+        }
+        request.COOKIES = {"userId": "student"}
+        with patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)), \
+             patch("ai.views.get_available_model_options", return_value=[]), \
+             patch("ai.views.trigger_model_health_refresh_async"):
+            response = chat_view(request)
+        self.assertEqual(response.status_code, 403)
+        body = response.content.decode()
+        self.assertIn("глобальной настройкой", body)
+        self.assertIn("GLOBAL_AI_DISABLED", body)
+        self.assertEqual(response["Cache-Control"], "no-store")
 
     def test_chat_page_allowed_without_flag(self):
         """Без флага страница открывается (гейт не блокирует)."""
@@ -21833,7 +22067,7 @@ class CanUseAiGateTests(TestCase):
 
         async_to_sync(run)()
         self.assertEqual(closed.get("code"), AI_DISABLED_CLOSE_CODE)
-        self.assertIn("запрещён", closed.get("reason", ""))
+        self.assertIn("запрещ", closed.get("reason", ""))
 
     def test_consumer_allows_when_flag_absent(self):
         """Без флага WS подключается (accept вызывается)."""

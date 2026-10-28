@@ -1422,10 +1422,21 @@ function isAiDisabledClose(event) {
     return !!event && event.code === AI_DISABLED_CLOSE_CODE;
 }
 
-function showAiDisabledMessage() {
+// Код причины отказа DL (aiRestriction.code) сервер ставит ПЕРВЫМ в reason
+// закрытия — «COMPETITION_AI_DISABLED: <текст DL>». Берём только код: текст DL
+// русский, а клиентский текст обязан быть трёхъязычным, поэтому локализованное
+// сообщение остаётся нашим, а код дописывается латиницей (язык-нейтрален).
+function aiDisabledCodeFromReason(reason) {
+    var match = /^([A-Z][A-Z0-9_]+):/.exec(reason || '');
+    return match ? match[1] : '';
+}
+
+function showAiDisabledMessage(event) {
     var messages = document.getElementById('messages');
     if (!messages) return;
     var text = getUiString('aiDisabled', 'В этом курсе использование ИИ запрещено.');
+    var code = aiDisabledCodeFromReason(event && event.reason);
+    if (code) text += ' (' + code + ')';
     var item = document.createElement('li');
     item.dataset.role = 'other';
     var content = document.createElement('div');
@@ -2270,7 +2281,7 @@ function initWebSocket() {
 
         ws.onclose = function(event) {
             if (isAiDisabledClose(event)) {
-                showAiDisabledMessage();
+                showAiDisabledMessage(event);
             } else {
                 updateVoiceStatus(getVoiceStatusText('connectionClosed'));
             }

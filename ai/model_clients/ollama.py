@@ -103,6 +103,12 @@ OLLAMA_MODELS: dict[str, dict] = {
     "Ollama_Glm_5_3_Flash_Cloud": {
         "model": "glm-5.3-flash:cloud",
         "description": "Ollama GLM 5.3 Flash — обычный чат",
+        # У модели НЕТ рабочего «режима без рассуждений»: think=false не
+        # глушит CoT, а переносит его в content — рассуждение выглядит как
+        # ответ (живой замер: 18k символов английского CoT, ни одного
+        # ```-блока). Поэтому think=false транслируется в think=None, а
+        # рассуждение отбрасывается вместе с полем thinking (см. фабрики).
+        "thinking_always": True,
     },
     "Ollama_Glm_5_2_Cloud": {
         "model": "glm-5.2:cloud",
@@ -307,6 +313,7 @@ async def _ask_ollama(
     temperature: float = 0.7,
     num_predict: int | None = None,
     think: bool | None = None,
+    fallback_to_thinking: bool | None = None,
 ) -> Tuple[str, int, bool, bool, int]:
     """Общий обработчик для всех моделей Ollama. Обычный чат без инструментов.
 
@@ -319,7 +326,15 @@ async def _ask_ollama(
     в ARM-раннере. Нет done_reason в чанке (старый SDK) — False: обрез по токенам
     подхватывает model_clients.is_output_truncated. 5-й элемент — токены
     промпта (``prompt_eval_count``): нужны для учёта токенов (prompt+completion).
+
+    ``fallback_to_thinking`` — можно ли отдать поле ``thinking`` как ответ,
+    когда content пуст (фолбэк для gpt-oss/minimax). None — авто: фолбэк
+    разрешён только когда рассуждения НЕ просили выключить (``think is not
+    False``); при ``think=False`` (и в ARM-ретрае «без think») поле thinking
+    не ответ, а утёкшее рассуждение — отдаём честную ошибку.
     """
+    if fallback_to_thinking is None:
+        fallback_to_thinking = think is not False
     # Cloud-эндпоинт (ollama.com/api/*) требует bearer-токен.
     if "ollama.com" in OLLAMA_HOST and not OLLAMA_API_KEY:
         return "Ollama API ключ не настроен. Добавьте OLLAMA_API_KEY в .env", 0, True, False, 0
@@ -354,7 +369,9 @@ async def _ask_ollama(
         # весь ответ в поле ``thinking``, оставляя content пустым — отдаём его
         # пользователю вместо ошибки «пустой ответ». Если это рассуждения без
         # кода, они вырезаются think-фильтром в arm_runner (не попадают в код).
-        if thinking.strip():
+        # Рассуждения просили выключить (think=False / ARM-ретрай) — фолбэк
+        # запрещён: это не ответ, а утёкшая CoT.
+        if thinking.strip() and fallback_to_thinking:
             # Стрим оборвался ДО финального ответа по лимиту шлюза/длины
             # (done_reason != "stop") — это именно «обрезано», а не «молчит»:
             # ARM-раннер пометит пару truncated и разово переспросит.
@@ -363,6 +380,19 @@ async def _ask_ollama(
                 model_id, len(thinking),
             )
             return thinking, int(tokens), False, done_reason == "length", int(prompt_tokens)
+        if thinking.strip():
+            logger.warning(
+                "Ollama model %s returned only reasoning (%d chars), no answer",
+                model_id, len(thinking),
+            )
+            return (
+                f"Модель Ollama ({model_id}) вернула только рассуждения без ответа. "
+                "Попробуйте другую модель или повторите позже.",
+                0,
+                True,
+                False,
+                0,
+            )
         logger.warning("Ollama model %s returned empty content", model_id)
         return f"Модель Ollama ({model_id}) вернула пустой ответ. Попробуйте позже.", 0, True, False, 0
     return content, int(tokens), False, done_reason == "length", int(prompt_tokens)
@@ -373,12 +403,20 @@ async def _ask_ollama(
 
 def _ollama_handler_factory(model_key: str, cfg: dict):
     model_id = cfg["model"]
+    # Модели без рабочего think=false (см. "thinking_always" в OLLAMA_MODELS):
+    # просьба «без рассуждений» транслируется в think=None — иначе CoT
+    # переезжает в content и выглядит как ответ.
+    thinking_always = bool(cfg.get("thinking_always"))
 
     # ``think`` — клиентский переключатель рассуждений (кнопка Think в чате):
     # None — поле в запрос не подставляется вовсе (поведение модели по умолчанию,
     # совместимость с вызовами без аргумента — ModelCaller передаёт kwarg только
     # при think is not None и провайдере ollama, см. model_clients.supports_think).
     async def handler(msg: str, user_id: int, *, think: bool | None = None) -> Tuple[str, int, bool]:
+        if think is False and thinking_always:
+            return await _ask_ollama(
+                msg, user_id, model_id, think=None, fallback_to_thinking=False,
+            )
         return await _ask_ollama(msg, user_id, model_id, think=think)
 
     return handler
@@ -389,11 +427,19 @@ def _nothink_handler_factory(model_key: str, cfg: dict):
     тот же generic-вызов, но с полем ``think: false`` в запросе (доки
     docs.ollama.com/capabilities/thinking — «request no thinking output»):
     протекшее рассуждение залило ответ → повторяем задачу у той же модели в
-    режиме «только ответ»."""
+    режиме «только ответ».
+
+    У моделей с ``"thinking_always"`` think=false не работает и вдобавок
+    заливает CoT в content — для них поле в запрос не идёт (think=None), а
+    поле thinking отбрасывается (fallback_to_thinking=False), т.е. режим
+    «только ответ» эмулируется на нашей стороне."""
     model_id = cfg["model"]
+    think_arg = None if cfg.get("thinking_always") else False
 
     async def handler(msg: str, user_id: int) -> Tuple[str, int, bool]:
-        return await _ask_ollama(msg, user_id, model_id, think=False)
+        return await _ask_ollama(
+            msg, user_id, model_id, think=think_arg, fallback_to_thinking=False,
+        )
 
     return handler
 

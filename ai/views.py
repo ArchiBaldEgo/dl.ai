@@ -406,7 +406,11 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
     # с объяснением (не молчаливая пустая страница).
     disabled_reason = _ai_disabled_reason(request)
     if disabled_reason:
-        return HttpResponseForbidden(disabled_reason)
+        response = HttpResponseForbidden(disabled_reason)
+        # Отказ не должен закэшироваться: иначе после снятия ограничения
+        # страница ещё долго отдаёт старый 403 (как в _deny_access).
+        response["Cache-Control"] = "no-store"
+        return response
     available_models = get_available_model_options()
     # Self-heal: an empty list means the current 04:00 MSK window was scanned
     # while the upstream key/balance was broken and every model got marked
