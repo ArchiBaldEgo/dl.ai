@@ -20,15 +20,15 @@
     margin: 0 0 14px;
     font-size: 13px;
     line-height: 1.5;
-    color: var(--body-quiet-color, var(--text-secondary, #555));
+    color: var(--body-quiet-color, var(--text-muted, #555));
 }
 
 .ai-um-form {
     margin: 14px 0 22px;
     padding: 12px 16px 16px;
-    border: 1px solid var(--hairline-color, #e8e8e8);
+    border: 1px solid var(--hairline-color, var(--border, #e8e8e8));
     border-radius: 6px;
-    background: var(--object-tools-bg, #f8f8f8);
+    background: var(--object-tools-bg, var(--bg-accordion, #f8f8f8));
 }
 
 .ai-um-form h3 {
@@ -48,7 +48,7 @@
     gap: 4px;
     flex: 1 1 240px;
     font-size: 12px;
-    color: var(--body-quiet-color, #666);
+    color: var(--body-quiet-color, var(--text-muted, #666));
 }
 
 .ai-um-row input,
@@ -67,12 +67,12 @@
     align-items: center;
     gap: 6px !important;
     font-size: 13px !important;
-    color: var(--body-fg, #333) !important;
+    color: var(--body-fg, var(--text-primary, #333)) !important;
 }
 
 .ai-um-hint {
     font-size: 11px;
-    color: var(--body-quiet-color, #777);
+    color: var(--body-quiet-color, var(--text-muted, #777));
 }
 
 .ai-um-actions {
@@ -102,14 +102,14 @@
 .ai-um-table th,
 .ai-um-table td {
     padding: 6px 8px;
-    border-bottom: 1px solid var(--hairline-color, #eee);
+    border-bottom: 1px solid var(--hairline-color, var(--border-soft, #eee));
     text-align: left;
     vertical-align: top;
 }
 
 .ai-um-table th {
     font-size: 12px;
-    color: var(--body-quiet-color, #666);
+    color: var(--body-quiet-color, var(--text-muted, #666));
 }
 
 .ai-um-title {
@@ -127,7 +127,7 @@
 }
 
 .ai-um-empty {
-    color: var(--body-quiet-color, #666);
+    color: var(--body-quiet-color, var(--text-muted, #666));
     font-style: italic;
 }
 
@@ -161,7 +161,7 @@
 
 .ai-um-share label {
     font-size: 12px;
-    color: var(--body-quiet-color, #666);
+    color: var(--body-quiet-color, var(--text-muted, #666));
 }
 
 .ai-um-share input[type="search"] {
@@ -172,9 +172,9 @@
 .ai-um-share-results {
     max-height: 220px;
     overflow: auto;
-    border: 1px solid var(--hairline-color, #e0e0e0);
+    border: 1px solid var(--hairline-color, var(--border, #e0e0e0));
     border-radius: 4px;
-    background: var(--body-bg, #fff);
+    background: var(--body-bg, var(--bg-surface, #fff));
 }
 
 .ai-um-share-result {
@@ -182,7 +182,7 @@
     width: 100%;
     padding: 6px 8px;
     border: none;
-    border-bottom: 1px solid var(--hairline-color, #f0f0f0);
+    border-bottom: 1px solid var(--hairline-color, var(--border-soft, #f0f0f0));
     background: transparent;
     text-align: left;
     font-size: 13px;
@@ -197,7 +197,7 @@
 .ai-um-share-none {
     padding: 6px 8px;
     font-size: 12px;
-    color: var(--body-quiet-color, #777);
+    color: var(--body-quiet-color, var(--text-muted, #777));
 }
 
 .ai-um-share-chips {
@@ -229,7 +229,7 @@
 .ai-um-share-empty,
 .ai-um-share-hint {
     font-size: 11px;
-    color: var(--body-quiet-color, #777);
+    color: var(--body-quiet-color, var(--text-muted, #777));
 }
 
 .ai-um-access-cell,
@@ -245,9 +245,9 @@
 .ai-um-access-panel {
     margin: 16px 0 8px;
     padding: 12px 16px 16px;
-    border: 1px solid var(--hairline-color, #e8e8e8);
+    border: 1px solid var(--hairline-color, var(--border, #e8e8e8));
     border-radius: 6px;
-    background: var(--object-tools-bg, #f8f8f8);
+    background: var(--object-tools-bg, var(--bg-accordion, #f8f8f8));
 }
 
 .ai-um-access-panel h4 {

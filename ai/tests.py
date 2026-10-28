@@ -2875,6 +2875,44 @@ class BatchReportTests(SimpleTestCase):
         self.assertEqual(per_topic["Линейные"]["percent_solved"], 100.0)
         self.assertEqual(per_topic["Циклы"]["percent_solved"], 50.0)
 
+    def test_live_pairs_counted_only_in_interim_report(self):
+        """Незавершённые пары (_live) — отдельный счётчик «в работе».
+
+        В ИТОГОВУЮ сводку они не идут (вердикт промежуточный), а в
+        промежуточной сводке живого прогона видны отдельной строкой: без этого
+        «Сводка» пропадала с экрана, пока ни одна пара не завершилась.
+        """
+        from ai.arm_runner import _build_batch_report, _empty_interim_report
+
+        results = [
+            self._item("A", "Линейные", "solved", 2.0, 10, topic_id=1),
+            dict(
+                self._item("A", "Циклы", "", 0.0, 0, topic_id=2),
+                _live=True, status="running",
+            ),
+        ]
+        final = _build_batch_report(results)
+        self.assertEqual(final["total_pairs"], 1)
+        self.assertEqual(final["running"], 0)
+        self.assertEqual(final["per_model"][0]["total"], 1)
+        # Живая пара не ошибка — вердикта у неё ещё нет.
+        self.assertEqual(final["errors_by_topic"], [])
+
+        interim = _build_batch_report(results, include_live=True)
+        self.assertEqual(interim["running"], 1)
+        self.assertEqual(interim["total_pairs"], 1)  # считаются пары с итогом
+        self.assertEqual(interim["per_model"][0]["total"], 1)
+        self.assertEqual(interim["per_model"][0]["running"], 1)
+        self.assertEqual(interim["errors_by_topic"], [])
+
+        # Прогон, у которого ещё нет ни одной строки: сводка не None (карточка
+        # остаётся, пока не стартовала первая пара). Пары «в работе» не
+        # выдумываем — считаем только реальные живые строки.
+        empty = _empty_interim_report()
+        self.assertEqual(empty["running"], 0)
+        self.assertEqual(empty["total_pairs"], 0)
+        self.assertEqual(empty["per_model"], [])
+
     def test_report_volume_and_errors_by_topic(self):
         """Объём прогона (модели/задачи) и ошибки, сгруппированные по темам
         (failed/skipped; позиции сокращаются до капа, остаток — hidden)."""
@@ -4122,6 +4160,58 @@ class BatchRunnerIntegrationTests(TestCase):
         log = AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
         self.assertEqual(log.status, AIRequestLog.STATUS_SUCCESS)
         self.assertEqual(log.error_message, "")
+
+    def test_running_pair_visible_before_first_result(self):
+        """Пакетный прогон: пара видна в результатах ещё ДО первого ответа.
+
+        Строка-заглушка («выполняется…») публикуется на старте пары и
+        заменяется итоговой по завершении — иначе таблица «Ответы моделей»
+        пустовала бы все минуты первого вызова модели, а после перезагрузки
+        страницы пустой список читался бы как «результаты пропали».
+        """
+        import time as _t
+        from ai import arm_runner
+
+        seen = {}
+        run_id = "test-batch-live-" + uuid.uuid4().hex[:8]
+
+        async def fake_handler(messages, conv_id):
+            job = arm_runner._jobs.get(run_id) or {}
+            seen["rows"] = [dict(row) for row in (job.get("results") or [])]
+            return ("program a; begin writeln(1); end.", 12)
+
+        ordered_models = [{"key": "FakeModel", "title": "FakeModel", "handler": fake_handler}]
+        now_ts = _t.time()
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 1,
+            "total_pairs": 1, "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "FakeModel", "current_model_title": "FakeModel",
+            "current_task_node_id": "", "current_task_name": "",
+            "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        dl_ok = lambda sid, node_id, code, ext, **kw: {
+            "verdict": "solved", "comment": "Все тесты успешно пройдены",
+            "submit_error": "", "queue_id": 1, "code_sent": code,
+        }
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", dl_ok):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t1.node_id], ordered_models,
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                )
+        finally:
+            job = arm_runner._jobs.pop(run_id, {}) or {}
+
+        self.assertEqual(len(seen["rows"]), 1)
+        self.assertTrue(seen["rows"][0]["_live"])
+        self.assertEqual(seen["rows"][0]["status"], "running")
+        self.assertEqual(seen["rows"][0]["task_node_id"], self.t1.node_id)
+        # Итоговая строка заменила заглушку (не задвоила), completed_pairs = 1.
+        self.assertEqual(len(job["results"]), 1)
+        self.assertFalse(job["results"][0].get("_live"))
+        self.assertEqual(job["completed_pairs"], 1)
 
 
 class BatchParallelWorkerTests(TransactionTestCase):
@@ -18186,14 +18276,20 @@ class ArmDlUrlAndInterimReportTests(TestCase):
         finally:
             arm_runner._jobs.pop(self.run_id, None)
 
-    def test_interim_report_skipped_for_single_runs_and_empty_results(self):
-        """_interim_live_report: single-прогоны и пустые results → None."""
+    def test_interim_report_skipped_for_single_runs_kept_for_empty_batch(self):
+        """_interim_live_report: у single-прогонов сводки нет; пустой batch —
+        отчёт нулей (карточка «Сводка» не исчезает с экрана)."""
         from ai import arm_runner
 
         self.assertIsNone(arm_runner._interim_live_report(self._make_job(run_type="single")))
         job = self._make_job()
         job["results"] = []
-        self.assertIsNone(arm_runner._interim_live_report(job))
+        report = arm_runner._interim_live_report(job)
+        self.assertIsNotNone(report)
+        self.assertTrue(report["interim"])
+        self.assertEqual(report["running"], 0)
+        self.assertEqual(report["total_pairs"], 0)
+        self.assertEqual(report["per_model"], [])
 
     def test_xlsx_running_note_lands_in_first_row(self):
         """build_arm_results_xlsx(note=…) пишет пометку в шапку листа
@@ -23034,14 +23130,14 @@ class PromptDebugRunnerTests(TestCase):
 
         return dl, calls
 
-    def _seed_job(self, run_id):
+    def _seed_job(self, run_id, total_pairs=1):
         import time as _t
         from ai import arm_runner
 
         now_ts = _t.time()
         arm_runner._jobs[run_id] = {
             "run_id": run_id, "run_type": "prompt_debug", "status": "running",
-            "error_message": "", "total_models": 1, "total_pairs": 1,
+            "error_message": "", "total_models": 1, "total_pairs": total_pairs,
             "completed_pairs": 0, "completed_models": 0,
             "current_model_key": "", "current_model_title": "",
             "current_task_node_id": "", "current_task_name": "",
@@ -23049,17 +23145,20 @@ class PromptDebugRunnerTests(TestCase):
             "created_at_ts": now_ts, "updated_at_ts": now_ts,
         }
 
-    def _run(self, run_id, model, dl_mock, *, prompt_attempts, prompt_id="__own__"):
+    def _run(self, run_id, model, dl_mock, *, prompt_attempts, prompt_id="__own__",
+             node_ids=None):
+        """Прогнать воркер; живой job остаётся в self._job после воркера."""
         from ai import arm_runner
 
-        self._seed_job(run_id)
+        node_ids = list(node_ids or [self.task.node_id])
+        self._seed_job(run_id, total_pairs=len(node_ids))
         try:
             with (
                 patch("ai.arm_runner._test_solution_on_dl", dl_mock),
                 patch("ai.arm_runner.fetch_failed_test_data", return_value=[]),
             ):
                 arm_runner._run_batch_job_worker(
-                    run_id, [self.task.node_id],
+                    run_id, node_ids,
                     [{"key": "FakeModel", "title": "FakeModel", "handler": model.handler}],
                     self.user.id, "DLSID-1",
                     ui_language="Русский", dl_test=True,
@@ -23074,6 +23173,7 @@ class PromptDebugRunnerTests(TestCase):
                     run_type="prompt_debug",
                     prompt_attempts=prompt_attempts,
                 )
+                self._job = arm_runner._jobs.get(run_id) or {}
         finally:
             arm_runner._jobs.pop(run_id, None)
         from ai.models import AIModelTestRun
@@ -23120,6 +23220,47 @@ class PromptDebugRunnerTests(TestCase):
         self.assertEqual(report["prompt_debug"]["committed_pairs"], 1)
         self.assertEqual(report["prompt_debug"]["verification"]["checked"], 1)
         self.assertEqual(report["prompt_debug"]["verification"]["solved"], 1)
+        # «Исправлено»: сначала не прошло, после правки промпта прошло.
+        self.assertEqual(report["prompt_debug"]["fixed"], 1)
+        fixed_topics = report["prompt_debug"]["fixed_by_topic"]
+        self.assertEqual(len(fixed_topics), 1)
+        self.assertEqual(fixed_topics[0]["topic"], self.topic.topic_name_ru)
+        self.assertEqual(fixed_topics[0]["count"], 1)
+        self.assertEqual(fixed_topics[0]["items"][0]["attempts"], 3)
+        # Те же цифры — в разрезе модели/темы (колонка «Исправлено»).
+        self.assertEqual(report["per_model"][0]["fixed"], 1)
+        self.assertEqual(report["per_topic"][0]["fixed"], 1)
+
+        # Лёгкий снапшот (страница/поллинг, job уже нет — из БД): цифры
+        # берутся из сохранённого отчёта, а не пересчитываются по строкам
+        # без payload'ов (иначе «Сводка» показывала бы нули).
+        from ai import arm_runner
+
+        snapshot = arm_runner.get_arm_run_snapshot(run_id, light_results=True)
+        light_stats = snapshot["report"]["prompt_debug"]
+        self.assertEqual(light_stats["prompts_updated"], 1)
+        self.assertEqual(light_stats["committed_pairs"], 1)
+        self.assertEqual(light_stats["fixed"], 1)
+        self.assertEqual(light_stats["verification"]["solved"], 1)
+        light_row = snapshot["results"][0]
+        self.assertTrue(light_row["prompt_debug_state"]["fixed"])
+        self.assertTrue(light_row["prompt_debug_state"]["committed"])
+
+    def test_first_try_solve_is_not_fixed(self):
+        """Пара, решённая с первой попытки, — НЕ «исправленная» правкой."""
+        run_id = "9" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["solved", "solved"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=3)
+
+        payload = run.results.get().prompt_debug
+        self.assertEqual(len(payload["attempts"]), 1)
+        self.assertFalse(payload["committed"])
+        stats = (run.report or {}).get("prompt_debug") or {}
+        self.assertEqual(stats.get("fixed"), 0)
+        self.assertEqual(stats.get("fixed_by_topic"), [])
+        # Нет исправлений — нет и колонки: счётчик в разрезах не появляется.
+        self.assertNotIn("fixed", run.report["per_model"][0])
 
     def test_exhausted_attempts_do_not_commit(self):
         """Пара так и не решена — промпт не изменён, правки только в payload."""
@@ -23247,6 +23388,193 @@ class PromptDebugRunnerTests(TestCase):
         self.assertEqual(self.prompt.prompt_text_ru.count("вариант 1."), 1)
         binding.refresh_from_db()
         self.assertEqual(binding.prompt_id, self.prompt.pk)
+
+    # ── сбой редактора / безлимитные попытки / живые попытки ───────────────
+    def test_editor_failure_closes_pair_and_keeps_model_loop(self):
+        """Сбой редактора закрывает ПАРУ (payload с попытками), а не цикл модели.
+
+        Регрессия: исключение провайдера в вызове редактора раньше уносило
+        весь цикл модели — оставшиеся задачи не решались, а у пары не было
+        payload'а (в UI оставался только вердикт проверки).
+        """
+        second = Task.objects.create(
+            node_id=7304, task_id=8304, name="B", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+        class _EditorBoomModel(self._Model):
+            async def handler(self, messages, conv_id):
+                text = messages if isinstance(messages, str) else str(messages)
+                if "Верни ТОЛЬКО текст дополнения" in text:
+                    self.editor_calls += 1
+                    raise RuntimeError("пул ботов недоступен")
+                self.solve_calls += 1
+                return ("program a; begin writeln(1); end.", 10)
+
+        run_id = "4" * 32
+        model = _EditorBoomModel()
+        dl_mock, _calls = self._dl(["failed"])
+        run = self._run(
+            run_id, model, dl_mock, prompt_attempts=2,
+            node_ids=[self.task.node_id, second.node_id],
+        )
+
+        self.assertEqual(run.status, "completed")
+        rows = list(run.results.all())
+        # Обе задачи модели отработаны — цикл модели не упал.
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            payload = row.prompt_debug or {}
+            self.assertEqual(len(payload.get("attempts") or []), 1)
+            self.assertIn("Редактор промпта не ответил", payload.get("stopped") or "")
+            self.assertFalse(payload.get("committed"))
+        self.assertGreaterEqual(model.editor_calls, 2)
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
+
+    def test_zero_attempts_loops_until_skip_button(self):
+        """Попыток = 0 → цикл без ограничения; метка «Далее» закрывает пару."""
+        from ai import arm_runner
+
+        run_id = "5" * 32
+        node_id = self.task.node_id
+
+        class _SkipOnFirstSolveModel(self._Model):
+            async def handler(self, messages, conv_id):
+                text = messages if isinstance(messages, str) else str(messages)
+                if "Верни ТОЛЬКО текст дополнения" in text:
+                    self.editor_calls += 1
+                    return ("Проверяй граничные случаи подробнее.", 5)
+                self.solve_calls += 1
+                # Пользователь нажал «Далее», пока шла первая попытка.
+                arm_runner._jobs[run_id].setdefault("skipped_pairs", set()).add(
+                    ("FakeModel", node_id)
+                )
+                return ("program a; begin writeln(1); end.", 10)
+
+        model = _SkipOnFirstSolveModel()
+        dl_mock, dl_calls = self._dl(["failed"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=0)
+
+        payload = run.results.get().prompt_debug
+        # Без «Далее» цикл был бы бесконечным: DL всегда проваливает.
+        self.assertEqual(len(payload["attempts"]), 1)
+        self.assertTrue(payload["stopped_by_user"])
+        self.assertIn("Далее", payload["stopped"])
+        self.assertEqual(payload["max_attempts"], 0)
+        self.assertEqual(model.editor_calls, 0)
+        self.assertEqual(dl_calls["n"], 2)  # попытка + проверочный проход
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
+
+    def test_failed_attempt_visible_in_live_results(self):
+        """Первая неудача публикуется в живых результатах до конца пары."""
+        from ai import arm_runner
+
+        run_id = "6" * 32
+        observed = []
+
+        class _InspectingModel(self._Model):
+            async def handler(self, messages, conv_id):
+                text = messages if isinstance(messages, str) else str(messages)
+                if "Верни ТОЛЬКО текст дополнения" in text:
+                    self.editor_calls += 1
+                    return ("Проверяй граничные случаи подробнее.", 5)
+                self.solve_calls += 1
+                if self.solve_calls == 2:
+                    # Вторая попытка: пара уже должна быть видна в job.
+                    observed.extend(
+                        dict(row) for row in arm_runner._jobs[run_id].get("results") or []
+                    )
+                return ("program a; begin writeln(1); end.", 10)
+
+        model = _InspectingModel()
+        dl_mock, _calls = self._dl(["failed", "solved", "solved"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=2)
+        job = self._job
+
+        self.assertEqual(len(observed), 1)
+        self.assertTrue(observed[0]["_live"])
+        self.assertEqual(observed[0]["verdict"], "failed")
+        self.assertEqual(len(observed[0]["prompt_debug"]["attempts"]), 1)
+        # Итоговая пара ЗАМЕНИЛА живую, а не задвоила её.
+        self.assertEqual(len(job["results"]), 1)
+        self.assertFalse(job["results"][0].get("_live"))
+        self.assertEqual(job["completed_pairs"], 1)
+        self.assertEqual(run.results.count(), 1)
+
+    def test_pair_row_visible_from_the_first_model_call(self):
+        """Строка пары видна в результатах с самого старта («выполняется…»).
+
+        Раньше строка появлялась только по завершении пары: первые минуты
+        прогона «Ответы моделей» были пусты, а после перезагрузки страницы
+        пустой список читался как «результаты пропали». Сводка при этом тоже
+        не исчезает — «в работе N».
+        """
+        from ai import arm_runner
+
+        run_id = "4" * 32
+        probe = self._Model()
+        seen = {}
+
+        async def handler(messages, conv_id):
+            if "results" not in seen:
+                job = arm_runner._jobs.get(run_id) or {}
+                seen["results"] = [dict(row) for row in (job.get("results") or [])]
+                seen["report"] = arm_runner._interim_live_report(job)
+            return await probe.handler(messages, conv_id)
+
+        model = type("ProbeModel", (), {"handler": staticmethod(handler)})()
+        dl_mock, _calls = self._dl(["failed", "solved", "solved"])
+        _run = self._run(run_id, model, dl_mock, prompt_attempts=2)
+
+        live = seen["results"]
+        self.assertEqual(len(live), 1)
+        self.assertTrue(live[0]["_live"])
+        self.assertEqual(live[0]["status"], "running")
+        self.assertEqual(live[0]["verdict"], "")
+        self.assertIsNone(live[0]["result_id"])
+        # Сводка живого прогона существует (раньше была None → карточка скрыта).
+        self.assertIsNotNone(seen["report"])
+        self.assertEqual(seen["report"]["running"], 1)
+        self.assertEqual(seen["report"]["total_pairs"], 0)
+        self.assertTrue(seen["report"]["interim"])
+
+        # После завершения пары заглушка заменена итоговой строкой — без дублей.
+        job = self._job
+        self.assertEqual(len(job["results"]), 1)
+        self.assertFalse(job["results"][0].get("_live"))
+        self.assertEqual(job["results"][0]["verdict"], "solved")
+        self.assertEqual(job["completed_pairs"], 1)
+
+    def test_request_skip_marks_only_current_prompt_debug_pairs(self):
+        from ai import arm_runner
+
+        run_id = "7" * 32
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "prompt_debug", "status": "running",
+            "model_progress": [
+                {"model_key": "M1", "current_task_node_id": "7301"},
+                {"model_key": "M2", "current_task_node_id": ""},
+            ],
+        }
+        batch_id = "8" * 32
+        arm_runner._jobs[batch_id] = {
+            "run_id": batch_id, "run_type": "batch", "status": "running",
+            "model_progress": [{"model_key": "M1", "current_task_node_id": "7301"}],
+        }
+        try:
+            self.assertEqual(arm_runner.request_prompt_debug_skip(run_id), 1)
+            self.assertTrue(
+                arm_runner._is_pair_skip_requested(run_id, "M1", "7301")
+            )
+            # Повторное нажатие ничего нового не помечает.
+            self.assertEqual(arm_runner.request_prompt_debug_skip(run_id), 0)
+            # Обычный пакетный прогон «Далее» не поддерживает.
+            self.assertEqual(arm_runner.request_prompt_debug_skip(batch_id), 0)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+            arm_runner._jobs.pop(batch_id, None)
 
     def test_task_without_prompt_is_skipped(self):
         """Нет привязки и нет ручного промпта → пара пропущена, модель не зовётся."""
@@ -23376,7 +23704,8 @@ class PromptDebugAdminViewTests(_AdminViewRequestMixin, TestCase):
         self.assertFalse(calls["kwargs"]["save_solutions"])
 
     def test_start_rejects_invalid_attempts(self):
-        for value in (11, "abc", 0):
+        # 0 — НЕ ошибка: «без ограничения» (остановка кнопкой «Далее»).
+        for value in (11, "abc", -1):
             response = self._start({
                 "node_ids": [7301],
                 "models": ["FakeModel"],
@@ -23389,6 +23718,28 @@ class PromptDebugAdminViewTests(_AdminViewRequestMixin, TestCase):
             self.assertIn(
                 "Попыток на пару", json.loads(response.content)["message"],
             )
+
+    def test_start_accepts_zero_attempts_as_unlimited(self):
+        calls = {}
+
+        def fake_start(*args, **kwargs):
+            calls["kwargs"] = kwargs
+            return "run-1", ""
+
+        with (
+            patch("ai.admin.arm.start_batch_solve_run", side_effect=fake_start),
+            patch("ai.admin.arm.get_arm_run_snapshot", return_value={"run_id": "run-1"}),
+        ):
+            response = self._start({
+                "node_ids": [7301],
+                "models": ["FakeModel"],
+                "language_id": self.lang.id,
+                "course_id": 1450,
+                "prompt_id": self.prompt.pk,
+                "prompt_attempts": 0,
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls["kwargs"]["prompt_attempts"], 0)
 
     def test_start_rejects_foreign_prompt_without_rights(self):
         other = get_user_model().objects.create_user(

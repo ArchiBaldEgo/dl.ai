@@ -3,7 +3,7 @@
 
 {% block extrastyle %}
   {{ block.super }}
-  <link rel="stylesheet" href="{% static 'admin/ai/arm_solve/index.css' %}">
+  <link rel="stylesheet" href="{% static 'admin/ai/arm_solve/index.css' %}?v=2">
 {% endblock %}
 
 {% block content %}
@@ -119,10 +119,10 @@
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
           <h2>Попыток на пару</h2>
-          <p class="arm-section-note">Включая первую попытку. После каждой неудачи DL промпт дописывается и задача решается заново; правки сохраняются только если пара в итоге прошла. Затем все пары решаются ещё раз по итоговым промптам (проверка).</p>
+          <p class="arm-section-note">Включая первую попытку. После каждой неудачи DL промпт дописывается и задача решается заново; правки сохраняются только если пара в итоге прошла. Затем все пары решаются ещё раз по итоговым промптам (проверка). <strong>0 — без ограничения:</strong> задача решается, пока не получится, либо пока вы не нажмёте «Далее» в списке процессов (тогда пара пропускается, правки не сохраняются).</p>
         </div>
       </div>
-      <input type="number" name="prompt_attempts" id="armPromptAttempts" min="{{ prompt_debug_attempts_min|default:1 }}" max="{{ prompt_debug_attempts_max|default:10 }}" step="1" value="{{ prompt_debug_attempts }}" style="padding:6px 10px; width:120px; margin-bottom:12px;">
+      <input type="number" name="prompt_attempts" id="armPromptAttempts" min="{{ prompt_debug_attempts_min|default:0 }}" max="{{ prompt_debug_attempts_max|default:10 }}" step="1" value="{{ prompt_debug_attempts }}" style="padding:6px 10px; width:120px; margin-bottom:12px;">
       <div class="arm-warning">Правятся только промпты, на которые у вас есть права (свои, либо ключ «Перезаписывать чужие промпты»). Пары с чужими промптами пропускаются. Промпт «по привязке» (по умолчанию) остаётся тем же и накапливает правки.</div>
       {% endif %}
 
@@ -245,9 +245,11 @@
 {# Адреса эндпоинтов для статического JS (шаблонных переменных в .js нет). #}
 {{ arm_solve_start_url|json_script:"arm-solve-start-url" }}
 {{ arm_solve_status_url|json_script:"arm-solve-status-url" }}
+{# «Далее» — пропустить зацикленную пару (только «Отладка промтов»). #}
+{{ arm_prompt_debug_skip_url|json_script:"arm-prompt-debug-skip-url" }}
 {{ arm_solve_tree_url|json_script:"arm-solve-tree-url" }}
 
 {% include "admin/ai/_ai_batch_results.html" %}
 
-<script src="{% static 'admin/ai/arm_solve/index.js' %}"></script>
+<script src="{% static 'admin/ai/arm_solve/index.js' %}?v=2"></script>
 {% endblock %}

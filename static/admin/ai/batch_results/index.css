@@ -151,16 +151,23 @@
 .arm-badge.skipped { color: #475467; background: #f1f5f9; }
 /* Ответ обрезан потолком генерации (num_predict/max_tokens) — см. is_output_truncated. */
 .arm-badge.truncated { color: #9a3412; background: #ffedd5; }
+/* «Исправлено»: пара сначала не прошла, после правки промпта прошла DL
+   (prompt_debug.is_fixed). Бирюзовый — отличим и от вердикта, и от причины. */
+.arm-badge.fixed { color: #0e7490; background: #cffafe; }
 /* Причина сбоя пары (таксономия: сбой модели / не выкушен код / ошибка
    компиляции / неправильный ответ). Фиолетовый — чтобы бейдж причины
    отличался от вердикта (зелёный/красный/серый). */
 .arm-badge.arm-reason { color: #5b21b6; background: #ede9fe; }
+/* Пара решается прямо сейчас (живая строка «_live»): видна сразу после
+   старта пары, чтобы таблица не пустовала первые минуты прогона. */
+.arm-badge.running { color: #1d4ed8; background: #e0e7ff; }
 
 .arm-result { border: 1px solid var(--hairline-color); border-radius: 6px; padding: 0; margin-bottom: 8px; overflow: hidden; }
 .arm-result:nth-child(even) { background: color-mix(in srgb, var(--body-bg) 95%, var(--hairline-color)); }
 .arm-result.solved { border-left: 4px solid #16a34a; }
 .arm-result.failed { border-left: 4px solid #dc2626; }
 .arm-result.skipped { border-left: 4px solid #94a3b8; }
+.arm-result.running { border-left: 4px solid #6366f1; }
 .arm-result summary { cursor: pointer; list-style: none; padding: 12px 14px; }
 .arm-result summary::-webkit-details-marker { display: none; }
 .arm-result-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }

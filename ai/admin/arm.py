@@ -26,6 +26,7 @@ from ..arm_runner import (
     get_arm_run_snapshot,
     get_latest_batch_run_snapshot,
     pause_arm_run,
+    request_prompt_debug_skip,
     resume_arm_run,
     start_batch_rerun_pairs,
     start_batch_solve_run,
@@ -67,9 +68,10 @@ _BODY_RAW_CHUNK_MAX = 60000
 
 # «Отладка промтов»: попыток на пару (включая первую) по умолчанию и пределы
 # значения в форме запуска. Лимит режет стоимость прогона: каждая попытка —
-# это DL-тест + вызов модели-редактора.
+# это DL-тест + вызов модели-редактора. 0 — БЕЗ ограничения: пара долбится,
+# пока не решится или пока пользователь не нажмёт «Далее» на странице прогона.
 PROMPT_DEBUG_DEFAULT_ATTEMPTS = 5
-PROMPT_DEBUG_MIN_ATTEMPTS = 1
+PROMPT_DEBUG_MIN_ATTEMPTS = 0
 PROMPT_DEBUG_MAX_ATTEMPTS = 10
 
 PROMPT_DEBUG_RUN_TYPE = "prompt_debug"
@@ -307,6 +309,8 @@ def _render_arm_solve_page(request, *, run_type):
         "arm_mode": "prompt_debug" if is_prompt_debug else "batch",
         # Значение по умолчанию поля «Попыток на пару» (включая первую).
         "prompt_debug_attempts": PROMPT_DEBUG_DEFAULT_ATTEMPTS,
+        "prompt_debug_attempts_min": PROMPT_DEBUG_MIN_ATTEMPTS,
+        "prompt_debug_attempts_max": PROMPT_DEBUG_MAX_ATTEMPTS,
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "arm_back_url": arm_back_url,
         "model_options": get_arm_solve_model_options(),
@@ -326,6 +330,9 @@ def _render_arm_solve_page(request, *, run_type):
             if is_prompt_debug else "/ai/admin/arm/solve/start/"
         ),
         "arm_solve_status_url": "/ai/admin/arm/solve/status/",
+        # Кнопка «Далее» (только «Отладка промтов»): пропустить зацикленную
+        # пару и перейти к следующей задаче.
+        "arm_prompt_debug_skip_url": "/ai/admin/arm/prompt-debug/skip/",
         "active_run_id": active_run_id,
         "active_run_snapshot": active_run_snapshot or {},
         "is_previous_run": is_previous_run,
@@ -542,7 +549,11 @@ def admin_arm_prompt_debug_start_view(request):
 
 
 def _parse_prompt_attempts(raw):
-    """«Попыток на пару» из формы: пусто → дефолт; вне 1..10 или не число → None."""
+    """«Попыток на пару» из формы: пусто → дефолт; 0 = без ограничения.
+
+    Вне 0..10 или не число → None (400). 0 — «долбить задачу, пока не решится
+    или пока пользователь не нажмёт «Далее» на странице прогона».
+    """
     if raw is None or str(raw).strip() == "":
         return PROMPT_DEBUG_DEFAULT_ATTEMPTS
     try:
@@ -645,7 +656,8 @@ def _start_arm_run(request, *, run_type):
                     "ok": False,
                     "message": (
                         "«Попыток на пару» — целое число от "
-                        f"{PROMPT_DEBUG_MIN_ATTEMPTS} до {PROMPT_DEBUG_MAX_ATTEMPTS}."
+                        f"{PROMPT_DEBUG_MIN_ATTEMPTS} (0 — без ограничения) до "
+                        f"{PROMPT_DEBUG_MAX_ATTEMPTS}."
                     ),
                 },
                 status=400,
@@ -868,6 +880,40 @@ def admin_arm_solve_resume_view(request):
     return JsonResponse({
         "ok": True,
         "message": "Прогон продолжается",
+        "run": get_arm_run_snapshot(run_id, light_results=True),
+    })
+
+
+def admin_arm_prompt_debug_skip_view(request):
+    """Кнопка «Далее»: пропустить текущие пары зацикленной задачи.
+
+    Пара закрывается на границе попыток (in-flight вызов модели доживает);
+    правки не сохраняются — пара не решена. Работает только для прогонов
+    «Отладки промтов».
+    """
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    run_id = _run_id_from_request(request)
+    if not run_id:
+        return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
+
+    marked = request_prompt_debug_skip(run_id)
+    if not marked:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": "Сейчас нет решаемой пары — пропускать нечего.",
+            },
+            status=404,
+        )
+
+    return JsonResponse({
+        "ok": True,
+        "message": f"Пропускаем {marked} пар(у/ы) — переход к следующей задаче",
         "run": get_arm_run_snapshot(run_id, light_results=True),
     })
 

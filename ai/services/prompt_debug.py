@@ -59,7 +59,32 @@ def empty_payload(*, prompt=None, max_attempts=0, skipped=False, skip_reason="")
         "verification": {},
         "skipped": bool(skipped),
         "skip_reason": skip_reason or "",
+        # Досрочная остановка цикла попыток («Далее», сбой редактора, отмена) —
+        # человекочитаемая причина и флаг «пользователь пропустил пару».
+        "stopped": "",
+        "stopped_by_user": False,
+        # Пояснение к паре, у которой нет попыток (например, основной проход
+        # не выполнялся) — чтобы пустой блок не выглядел сбоем отображения.
+        "note": "",
     }
+
+
+def is_fixed(payload) -> bool:
+    """Пара «сначала не прошло — после правки промпта прошло» (исправлена).
+
+    Единственное определение «исправлено»: первая попытка пары НЕ решена,
+    итоговая (основного прохода) — решена, правки сохранены (``committed``).
+    Проверочный проход не учитывается — у него отдельная статистика.
+    """
+    if not isinstance(payload, dict) or not payload.get("committed"):
+        return False
+    attempts = payload.get("attempts") or []
+    if not attempts:
+        return False
+    return (
+        attempts[0].get("verdict") != "solved"
+        and attempts[-1].get("verdict") == "solved"
+    )
 
 
 def payload_state(payload) -> dict:
@@ -73,11 +98,18 @@ def payload_state(payload) -> dict:
     if not isinstance(payload, dict) or not payload:
         return {}
     verification = payload.get("verification") or {}
+    attempts = payload.get("attempts") or []
     return {
         "committed": bool(payload.get("committed")),
+        # «Исправлено» — бейдж карточки без загрузки тела строки.
+        "fixed": is_fixed(payload),
         "skipped": bool(payload.get("skipped")),
-        "attempts": len(payload.get("attempts") or []),
+        "attempts": len(attempts),
+        # Вердикт последней попытки — по нему отчёт считает «перестали
+        # решаться после проверки», не загружая тела строк.
+        "last_verdict": (attempts[-1].get("verdict") or "") if attempts else "",
         "verification": verification.get("verdict") or "",
+        "stopped": bool(payload.get("stopped")),
     }
 
 

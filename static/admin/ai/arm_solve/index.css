@@ -4,6 +4,12 @@
   max-width: 1280px;
   margin: 0 auto;
   color: var(--body-fg);
+  /* Фон страницы — под выбранную тему админки: панель сидит на «затемнённом»
+     фоне (светлая тема #f8f8f8, тёмная #212121), карточки — на --body-bg.
+     Без этого в тёмной теме карточки сливались с фоном страницы. */
+  background: var(--darkened-bg);
+  border-radius: 10px;
+  padding: 16px;
 }
 
 .arm-header {

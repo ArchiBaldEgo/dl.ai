@@ -21,6 +21,7 @@ from .arm import (
     admin_arm_solve_start_view,
     admin_arm_prompt_debug_view,
     admin_arm_prompt_debug_start_view,
+    admin_arm_prompt_debug_skip_view,
     admin_arm_solve_status_view,
     admin_arm_solve_load_tree_view,
     admin_arm_solve_cancel_view,
@@ -125,6 +126,7 @@ def get_ai_admin_urls():
         # статус, отмена, пауза, тело и XLSX — общие эндпоинты /arm/solve/*
         # (в них адресация по run_id, странице нужен только старт).
         path("arm/prompt-debug/start/", ai_admin_site.admin_view(admin_arm_prompt_debug_start_view), name="ai_arm_prompt_debug_start"),
+        path("arm/prompt-debug/skip/", ai_admin_site.admin_view(admin_arm_prompt_debug_skip_view), name="ai_arm_prompt_debug_skip"),
         path("arm/prompt-debug/", ai_admin_site.admin_view(admin_arm_prompt_debug_view), name="ai_arm_prompt_debug"),
         path("arm/models/refresh/", ai_admin_site.admin_view(admin_model_status_refresh_view), name="ai_arm_model_status_refresh"),
         path("arm/models/state/", ai_admin_site.admin_view(admin_model_status_state_view), name="ai_arm_model_status_state"),
