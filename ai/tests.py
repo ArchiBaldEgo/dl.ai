@@ -22902,6 +22902,15 @@ class DlFileNameContractTests(TestCase):
 
         self.assertEqual(build_dl_file_name("sol.cpp", ".pas"), "sol.pas")
 
+    def test_dot_in_model_title_keeps_version_and_task_id(self):
+        """Точка в названии модели не должна съедать версию и taskId."""
+        from ai.dl_api_client import build_dl_file_name
+
+        self.assertEqual(
+            build_dl_file_name("Ollama DeepSeek 4.1 Flash_2606918", ".mpc"),
+            "Ollama_DeepSeek_4_1_Flash_2606918.mpc",
+        )
+
     def test_reserved_windows_name_escaped(self):
         from ai.dl_api_client import build_dl_file_name
 

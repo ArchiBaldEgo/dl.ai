@@ -668,9 +668,15 @@ def build_dl_file_name(base_name: str, file_extension: str) -> str:
         return None
 
     base = (base_name or "").strip()
-    # Отрезаем расширение, если оператор уже написал «имя.расширение».
+    # Отрезаем расширение, если оператор уже написал «имя.расширение». Точка
+    # бывает и в названии модели («Ollama DeepSeek 4.1 Flash_2606918»), и
+    # слепой rsplit по последней точке съедал версию И taskId
+    # («Ollama_DeepSeek_4.mcp»). Поэтому отрезаем только короткий
+    # буквенно-цифровой хвост — он и выглядит как расширение.
     if "." in base:
-        base = base.rsplit(".", 1)[0]
+        stem, tail = base.rsplit(".", 1)
+        if re.fullmatch(r"[A-Za-z0-9]{1,10}", tail):
+            base = stem
     # Кириллица → латиница (иначе имя превратится в «_»/пустую основу).
     base = _dl_transliterate(base)
     # Только разрешённые символы: латиница, цифры, дефис, подчёркивание.
