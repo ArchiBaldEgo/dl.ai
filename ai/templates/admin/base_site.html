@@ -24,7 +24,7 @@ file AND admin/app_list.html are not shadowed by the stock admin templates
   ГЛОБАЛЬНО — partial _ai_batch_results.html включают четыре страницы
   (настройки приложения, /arm/solve/, «Закреплённые», деталь записи
   журнала), и в каждой дублировать тег было бы копипастой.{% endcomment %}
-  <link rel="stylesheet" href="{% static 'admin/ai/batch_results/index.css' %}">
+  <link rel="stylesheet" href="{% static 'admin/ai/batch_results/index.css' %}?v=4">
 {% endblock %}
 
 {% block extrahead %}
@@ -32,14 +32,14 @@ file AND admin/app_list.html are not shadowed by the stock admin templates
   {% comment %}window.ArmBatchResults (общий рендер таблицы результатов) должен
   быть определён ДО вызывающих скриптов страниц — поэтому подключаем его
   ПЕРВЫМ, синхронно (без defer), а не defer'ом.{% endcomment %}
-  <script src="{% static 'admin/ai/batch_results/index.js' %}"></script>
+  <script src="{% static 'admin/ai/batch_results/index.js' %}?v=6"></script>
   {% comment %}Общая логика строк ПАКЕТНЫХ РЕШЕНИЙ (развёртка результатов
   прогона по клику + кнопка ★). Раньше продублирована в трёх файлах
   (app_settings, pinned_runs, request_logs) — теперь одна, на делегировании,
   и работает и после AJAX-обновления таблицы журнала.{% endcomment %}
   <script src="{% static 'admin/ai/batch_results/rows.js' %}"></script>
   <script src="{% static 'admin/js/ai_processes.js' %}" defer></script>
-  <script src="{% static 'admin/js/ai_admin_state.js' %}" defer></script>
+  <script src="{% static 'admin/js/ai_admin_state.js' %}?v=2" defer></script>
   <script src="{% static 'admin/js/ai_nav_filter.js' %}" defer></script>
   <script src="{% static 'admin/js/view_as.js' %}" defer></script>
   {% comment %}Онбординг-wizard на каждой странице админки: решение «показывать ли»

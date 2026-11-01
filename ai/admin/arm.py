@@ -26,11 +26,12 @@ from ..arm_runner import (
     get_arm_run_snapshot,
     get_latest_batch_run_snapshot,
     pause_arm_run,
+    request_prompt_debug_skip,
     resume_arm_run,
     start_batch_rerun_pairs,
     start_batch_solve_run,
 )
-from ..arm_runner import _fetch_failed_test_data, parse_dl_test_data
+from ..services.dl_test_data import fetch_failed_test_data, parse_dl_test_data
 from ..dl_api_client import dl_failed_test_number_from_comment
 from ..model_health import (
     get_arm_solve_model_options,
@@ -56,7 +57,7 @@ from ..services.task_registry import (
     solve_language_options,
 )
 from ..constants import AI_CACHE_KEY_PREFIX, DL_DEFAULT_COURSE_ID
-from .permissions import can_access_arm, is_superuser_user
+from .permissions import can_access_arm, can_edit_prompt, is_superuser_user
 
 # TTL кэша дерева задач курса в Redis (см. admin_arm_solve_load_tree_view).
 _DL_TREE_CACHE_TTL = 30 * 60
@@ -64,6 +65,17 @@ _DL_TREE_CACHE_TTL = 30 * 60
 # Жёсткий потолок окна raw_response за один запрос body-эндпоинта (символов):
 # чанковая загрузка больших ответов (обрезанные пары — десятки КБ текста).
 _BODY_RAW_CHUNK_MAX = 60000
+
+# «Отладка промтов»: попыток на пару (включая первую) по умолчанию и пределы
+# значения в форме запуска. Лимит режет стоимость прогона: каждая попытка —
+# это DL-тест + вызов модели-редактора. 0 — БЕЗ ограничения: пара долбится,
+# пока не решится или пока пользователь не нажмёт «Далее» на странице прогона.
+PROMPT_DEBUG_DEFAULT_ATTEMPTS = 5
+PROMPT_DEBUG_MIN_ATTEMPTS = 0
+PROMPT_DEBUG_MAX_ATTEMPTS = 10
+
+PROMPT_DEBUG_RUN_TYPE = "prompt_debug"
+PROMPT_DEBUG_MODE_LABEL = "Отладка промтов"
 
 
 def _resolve_session_id(request):
@@ -190,8 +202,19 @@ def _resolve_solve_language(language_id, file_extension):
 
 
 def admin_arm_solve_view(request):
+    """ARM: Пакетное решение (run_type=batch)."""
+    return _render_arm_solve_page(request, run_type="batch")
+
+
+def admin_arm_prompt_debug_view(request):
+    """ARM: Отладка промтов (run_type=prompt_debug) — общая форма, другой режим."""
+    return _render_arm_solve_page(request, run_type="prompt_debug")
+
+
+def _render_arm_solve_page(request, *, run_type):
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
+    is_prompt_debug = run_type == "prompt_debug"
 
     active_run_id = (request.GET.get("run_id") or "").strip()
     active_run_snapshot = None
@@ -215,7 +238,9 @@ def admin_arm_solve_view(request):
         # из localStorage, а не из run_params этого прогона.
         # Снапшот лёгкий (без raw_response/code — lazy_body): большой прогон
         # это десятки МБ текста, иначе страница грузится катастрофически долго.
-        active_run_snapshot = get_latest_batch_run_snapshot(request.user.id, light_results=True)
+        active_run_snapshot = get_latest_batch_run_snapshot(
+            request.user.id, light_results=True, run_type=run_type,
+        )
         if active_run_snapshot:
             is_previous_run = True
             results = active_run_snapshot.get("results") or []
@@ -255,6 +280,13 @@ def admin_arm_solve_view(request):
             "name": p.prompt_name_ru or f"Промпт #{p.pk}",
             "topic_id": p.topic_id,
             "topic_name": p.topic.topic_name_ru if p.topic else "",
+            # Язык промпта — прямой или через тему (клиентский фильтр селектора:
+            # выбрали язык(и) → в списке только их промпты).
+            "language_id": (
+                p.programming_language_id
+                if p.programming_language_id
+                else (p.topic.programming_language_id if p.topic else None)
+            ),
             "language_name": (
                 p.programming_language.language_name if p.programming_language
                 else (p.topic.programming_language.language_name if p.topic and p.topic.programming_language else "")
@@ -272,7 +304,13 @@ def admin_arm_solve_view(request):
 
     context = {
         **ai_admin_site.each_context(request),
-        "title": "ARM: Пакетное решение",
+        "title": "ARM: Отладка промтов" if is_prompt_debug else "ARM: Пакетное решение",
+        # Режим страницы: шаблон/JS ветвятся по нему (общая форма).
+        "arm_mode": "prompt_debug" if is_prompt_debug else "batch",
+        # Значение по умолчанию поля «Попыток на пару» (включая первую).
+        "prompt_debug_attempts": PROMPT_DEBUG_DEFAULT_ATTEMPTS,
+        "prompt_debug_attempts_min": PROMPT_DEBUG_MIN_ATTEMPTS,
+        "prompt_debug_attempts_max": PROMPT_DEBUG_MAX_ATTEMPTS,
         "health_window_date": get_health_window_date().strftime("%d.%m.%Y"),
         "arm_back_url": arm_back_url,
         "model_options": get_arm_solve_model_options(),
@@ -281,12 +319,20 @@ def admin_arm_solve_view(request):
         "language_options": language_options,
         "topics": topics,
         "delta_options": delta_options,
+        # Дерево/статус/отмена/тело результата — общие эндпоинты по run_id
+        # (страницы различаются только стартом и собственным списком прогонов).
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
         "results": results,
         "report": report,
         "error_message": error_message,
-        "arm_solve_start_url": "/ai/admin/arm/solve/start/",
+        "arm_solve_start_url": (
+            "/ai/admin/arm/prompt-debug/start/"
+            if is_prompt_debug else "/ai/admin/arm/solve/start/"
+        ),
         "arm_solve_status_url": "/ai/admin/arm/solve/status/",
+        # Кнопка «Далее» (только «Отладка промтов»): пропустить зацикленную
+        # пару и перейти к следующей задаче.
+        "arm_prompt_debug_skip_url": "/ai/admin/arm/prompt-debug/skip/",
         "active_run_id": active_run_id,
         "active_run_snapshot": active_run_snapshot or {},
         "is_previous_run": is_previous_run,
@@ -493,8 +539,36 @@ def admin_arm_solve_load_tree_view(request):
 
 
 def admin_arm_solve_start_view(request):
+    """Старт «Пакетного решения» (run_type=batch)."""
+    return _start_arm_run(request, run_type="batch")
+
+
+def admin_arm_prompt_debug_start_view(request):
+    """Старт «Отладки промтов» (run_type=prompt_debug)."""
+    return _start_arm_run(request, run_type="prompt_debug")
+
+
+def _parse_prompt_attempts(raw):
+    """«Попыток на пару» из формы: пусто → дефолт; 0 = без ограничения.
+
+    Вне 0..10 или не число → None (400). 0 — «долбить задачу, пока не решится
+    или пока пользователь не нажмёт «Далее» на странице прогона».
+    """
+    if raw is None or str(raw).strip() == "":
+        return PROMPT_DEBUG_DEFAULT_ATTEMPTS
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if value < PROMPT_DEBUG_MIN_ATTEMPTS or value > PROMPT_DEBUG_MAX_ATTEMPTS:
+        return None
+    return value
+
+
+def _start_arm_run(request, *, run_type):
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
+    is_prompt_debug = run_type == PROMPT_DEBUG_RUN_TYPE
 
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
@@ -567,6 +641,35 @@ def admin_arm_solve_start_view(request):
         # на каждую задачу (по теме из ветки DL). prompt_id остаётся None.
         prompt_id = None
         prompt_name = ""
+    # «Отладка промтов»: лимит попыток на пару (включая первую) и права на
+    # правку ВЫБРАННОГО промпта. Промпты «по привязке» проверяются в раннере
+    # per-task (привязка резолвится только там); при отсутствии прав пара
+    # помечается skipped, а не портит чужой промпт.
+    prompt_attempts = 0
+    if is_prompt_debug:
+        prompt_attempts = _parse_prompt_attempts(
+            body.get("prompt_attempts", request.POST.get("prompt_attempts"))
+        )
+        if prompt_attempts is None:
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "message": (
+                        "«Попыток на пару» — целое число от "
+                        f"{PROMPT_DEBUG_MIN_ATTEMPTS} (0 — без ограничения) до "
+                        f"{PROMPT_DEBUG_MAX_ATTEMPTS}."
+                    ),
+                },
+                status=400,
+            )
+        if prompt_override is not None and not can_edit_prompt(request.user, prompt_override):
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "message": f"Нет прав на редактирование промпта «{prompt_name}»",
+                },
+                status=400,
+            )
     # Название прогона — необязательно, задаётся только при запуске
     # (хранится в AIModelTestRun.run_name).
     run_name = str(body.get("run_name") or request.POST.get("run_name") or "").strip()[:200]
@@ -585,6 +688,12 @@ def admin_arm_solve_start_view(request):
         body.get("save_solutions")
         or request.POST.get("save_solutions") in ("1", "true", "True", "on")
     )
+    if is_prompt_debug:
+        # Отладка промтов: промежуточный код (по ещё не сохранённому промпту)
+        # в кэш «Решённых задач» не пишется, статистика моделей несопоставима
+        # (пары решались разными версиями промпта) — оба флага принудительно off.
+        record_stats = False
+        save_solutions = False
     # Course ID: берём из активного курса пользователя (не из запроса).
     # Фронтенд больше не отправляет course_id — он определяется автоматически.
     course_id_from_body = body.get("course_id") or request.POST.get("course_id")
@@ -657,6 +766,8 @@ def admin_arm_solve_start_view(request):
         run_name=run_name,
         save_solutions=save_solutions,
         delta=delta,
+        run_type=run_type,
+        prompt_attempts=prompt_attempts,
     )
     if not run_id:
         return JsonResponse(
@@ -773,6 +884,40 @@ def admin_arm_solve_resume_view(request):
     })
 
 
+def admin_arm_prompt_debug_skip_view(request):
+    """Кнопка «Далее»: пропустить текущие пары зацикленной задачи.
+
+    Пара закрывается на границе попыток (in-flight вызов модели доживает);
+    правки не сохраняются — пара не решена. Работает только для прогонов
+    «Отладки промтов».
+    """
+    if not can_access_arm(request):
+        return HttpResponseForbidden("Access denied")
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    run_id = _run_id_from_request(request)
+    if not run_id:
+        return JsonResponse({"ok": False, "message": "run_id is required"}, status=400)
+
+    marked = request_prompt_debug_skip(run_id)
+    if not marked:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": "Сейчас нет решаемой пары — пропускать нечего.",
+            },
+            status=404,
+        )
+
+    return JsonResponse({
+        "ok": True,
+        "message": f"Пропускаем {marked} пар(у/ы) — переход к следующей задаче",
+        "run": get_arm_run_snapshot(run_id, light_results=True),
+    })
+
+
 def admin_arm_solve_rerun_pairs_view(request):
     """Перезапуск нерешённых пар (задача × модель) со слиянием в тот же прогон.
 
@@ -811,13 +956,14 @@ def admin_arm_solve_result_download_view(request, result_id):
     """Скачать извлечённый код модели как файл программы.
 
     Отдаёт ``AIModelTestResult.code`` как ``text/plain`` во вложении. Имя файла —
-    ``<модель>_<ID узла задачи><file_extension>`` (расширение из снимка, с
-    ведущей точкой): у одной задачи скачивают решения нескольких моделей, пара
-    «модель + задача» делает имя однозначным. ID узла — узкая ссылка на задачу
-    по всему журналу (DL REST API, dl-rest-api.json). У DL API поле имени файла при отправке
-    решения отсутствует — подписываем единственное, что у нас под контролем,
-    то есть скачивание. Файлы на диске не хранятся — содержимое берётся
-    прямо из БД.
+    ``<модель>_<task_id><file_extension>`` (``task_id`` — ID задачи DL из
+    get-task-info, как и в имени файла, отправленном в DL; расширение из
+    снимка, с ведущей точкой): у одной задачи скачивают решения нескольких
+    моделей, пара «модель + задача» делает имя однозначным. Если taskId не
+    подтянут (старая запись Task) — fallback на node_id узла (DL REST API,
+    dl-rest-api.json). У DL API поле имени файла при отправке решения
+    отсутствует — подписываем единственное, что у нас под контролем, то есть
+    скачивание. Файлы на диске не хранятся — содержимое берётся прямо из БД.
     """
     if not can_access_arm(request):
         return HttpResponseForbidden("Access denied")
@@ -837,16 +983,19 @@ def admin_arm_solve_result_download_view(request, result_id):
     # точки — «K2.7» — их оставляем). Пустой title и key — fallback на id.
     model_name = (result.model_title or result.model_key or "").strip()
     model_name = re.sub(r"[^\w.]+", "_", model_name).strip("._")
-    # Задача в имя: node_id (ID узла DL — у Task он уникален и обязателен);
-    # в легаси-одиночных прогонах task может быть NULL — тогда «_result_<id>».
-    task_node_id = str(result.task.node_id).strip() if result.task else ""
-    task_node_id = re.sub(r"[^\w.]+", "_", task_node_id).strip("._")
+    # Задача в имя: task_id (ID задачи DL из get-task-info — тот же, что в
+    # имени файла, отправленного в DL); у старых Task task_id может быть пуст —
+    # тогда node_id узла. В легаси-одиночных прогонах task NULL — «_result_<id>».
+    task_ref = ""
+    if result.task:
+        task_ref = str(result.task.task_id or result.task.node_id or "").strip()
+    task_ref = re.sub(r"[^\w.]+", "_", task_ref).strip("._")
     if not model_name:
         base = f"result_{result_id}"
-    elif not task_node_id:
+    elif not task_ref:
         base = f"{model_name}_result_{result_id}"
     else:
-        base = f"{model_name}_{task_node_id}"
+        base = f"{model_name}_{task_ref}"
     filename = f"{base}{ext}"
 
     response = HttpResponse(code, content_type="text/plain; charset=utf-8")
@@ -897,12 +1046,12 @@ def admin_arm_solve_result_body_view(request, result_id):
         session_id = _resolve_session_id(request)
         if session_id:
             try:
-                fetched = _fetch_failed_test_data(
+                fetched = fetch_failed_test_data(
                     session_id, result.dl_queue_id, result.dl_comment or "",
                 )
             except Exception:  # noqa: BLE001 — данные теста не обязательны
-                logger.exception("не удалось забрать данные проваленного теста")
-                fetched = {}
+                logger.exception("не удалось забрать данные проваленных тестов")
+                fetched = []
             if fetched:
                 test_data = fetched
                 AIModelTestResult.objects.filter(pk=result.pk).update(
@@ -917,8 +1066,9 @@ def admin_arm_solve_result_body_view(request, result_id):
         "dl_error": result.dl_error or "",
         # Имя файла решения, отправленного в DL («<модель>_<задача>.<ext>»).
         "dl_file_name": result.dl_file_name or "",
-        # Входные данные и эталонный ответ проваленного теста (есть только
-        # у НЕ решённых пар, которым DL разрешил выдачу теста).
+        # Входные данные и эталонные ответы проваленных тестов — по записи на
+        # каждый подтверждённый провал (есть только у НЕ решённых пар, которым
+        # DL разрешил выдачу теста).
         "dl_test_data": test_data,
         # Номер проваленного теста (из вердикта DL) — показываем в карточке.
         "dl_test_number": dl_failed_test_number_from_comment(result.dl_comment or ""),
@@ -926,6 +1076,9 @@ def admin_arm_solve_result_body_view(request, result_id):
         "delta_id": result.delta_id or 0,
         "delta_name": result.delta_name or "",
         "truncated": bool(result.truncated),
+        # «Отладка промтов»: попытки, дополнения и проверка пары (у обычных
+        # batch-строк — пустой dict).
+        "prompt_debug": result.prompt_debug or {},
         "raw_total": len(raw),
     }
     if length > 0:

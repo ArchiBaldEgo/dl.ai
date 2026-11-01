@@ -35,7 +35,15 @@
     // (arm-solve-start-url / arm-solve-status-url) — в .js-файле шаблонных
     // переменных быть не может.
     const startUrl = readJsonScript('arm-solve-start-url', '');
+    // Режим страницы (общая форма): batch — «Пакетное решение»,
+    // prompt_debug — «Отладка промтов» (попытки на пару, никакого
+    // перезапуска нерешённых пар и выгрузки XLSX).
+    const armMode = readJsonScript('arm-solve-mode', 'batch');
+    const isPromptDebug = armMode === 'prompt_debug';
+    const modeLabel = isPromptDebug ? 'отладку промтов' : 'пакет';
     const statusUrl = readJsonScript('arm-solve-status-url', '');
+    // «Отладка промтов»: «Далее» — пропустить зацикленную пару (попыток = 0).
+    const skipPairUrl = readJsonScript('arm-prompt-debug-skip-url', '');
     const processesCard = document.getElementById('armSolveProcessesCard');
     const processesList = document.getElementById('armSolveProcessesList');
     // Мультипроцессы: страница ведёт список запущенных прогонов (по одному
@@ -68,8 +76,11 @@
     function setSubmitDisabled(disabled) {
       // Блокировка только на время ЗАПУСКА: сами прогоны идут параллельно и
       // форму не блокируют — можно запускать следующие пакеты, не дожидаясь.
+      // Лейблы — из data-атрибутов шаблона (у отладки промтов своя кнопка).
       submitBtn.disabled = disabled;
-      submitBtn.textContent = disabled ? 'Запускаем...' : 'Запустить пакет';
+      submitBtn.textContent = disabled
+        ? (submitBtn.dataset.busyLabel || 'Запускаем...')
+        : (submitBtn.dataset.idleLabel || 'Запустить пакет');
     }
     function setError(text) {
       if (!text) { errorEl.textContent = ''; errorEl.style.display = 'none'; return; }
@@ -118,7 +129,8 @@
       if (downloadBtn) {
         const hasResults = (run.results || []).length > 0;
         const isDone = run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
-        downloadBtn.style.display = (hasResults && isDone) ? '' : 'none';
+        // У отладки промтов выгрузки нет: в таблице не код, а правки промпта.
+        downloadBtn.style.display = (!isPromptDebug && hasResults && isDone) ? '' : 'none';
         if (run.run_id) {
           downloadBtn.href = '/ai/admin/arm/solve/report/' + encodeURIComponent(run.run_id) + '/xlsx/';
         }
@@ -202,7 +214,15 @@
       const pauseBtnEl = document.createElement('button');
       pauseBtnEl.type = 'button'; pauseBtnEl.className = 'arm-button';
       pauseBtnEl.style.display = 'none';
-      actions.appendChild(showBtn); actions.appendChild(pauseBtnEl); actions.appendChild(cancelBtnEl);
+      // «Далее» (только отладка промтов): пропустить текущую пару и перейти к
+      // следующей задаче — выход из «зацикленной» задачи при попытках = 0.
+      const skipBtnEl = document.createElement('button');
+      skipBtnEl.type = 'button'; skipBtnEl.className = 'arm-button';
+      skipBtnEl.textContent = 'Далее';
+      skipBtnEl.title = 'Пропустить текущую задачу и перейти к следующей (правки промпта не сохраняются)';
+      skipBtnEl.style.display = 'none';
+      actions.appendChild(showBtn); actions.appendChild(pauseBtnEl);
+      actions.appendChild(skipBtnEl); actions.appendChild(cancelBtnEl);
       row.appendChild(nameEl); row.appendChild(statusEl); row.appendChild(actions);
       if (processesList) { processesList.appendChild(row); }
       showBtn.addEventListener('click', function () { focusRun(runId); });
@@ -211,6 +231,34 @@
         try { await cancelRunRequest(runId); await pollRunOnce(runId); }
         catch (e) { setError(e.message || 'Ошибка прерывания'); }
         cancelBtnEl.disabled = false;
+      });
+      skipBtnEl.addEventListener('click', async function () {
+        skipBtnEl.disabled = true;
+        try {
+          const response = await fetch(skipPairUrl, {
+            method: 'POST', credentials: 'same-origin',
+            headers: {
+              'X-CSRFToken': getCsrfToken(), 'X-Requested-With': 'XMLHttpRequest',
+              'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            },
+            body: new URLSearchParams({ run_id: runId }),
+          });
+          const data = await parseJsonResponse(response);
+          if (!response.ok || !data.ok) {
+            throw new Error(data.message || 'Не удалось пропустить задачу');
+          }
+          setError('');
+          if (data.run && runStates.has(runId)) {
+            runStates.get(runId).snapshot = data.run;
+            updateProcessesRow(runId);
+            if (runId === focusedRunId) {
+              try { applyRunSnapshot(data.run); } catch (e) { console.error('ARM render error:', e); }
+            }
+          }
+        } catch (e) {
+          setError(e.message || 'Не удалось пропустить задачу');
+        }
+        skipBtnEl.disabled = false;
       });
       pauseBtnEl.addEventListener('click', async function () {
         pauseBtnEl.disabled = true;
@@ -228,7 +276,7 @@
         } catch (e) { setError(e.message || 'Ошибка паузы'); }
         pauseBtnEl.disabled = false;
       });
-      procRows.set(runId, { row: row, nameEl: nameEl, statusEl: statusEl, showBtn: showBtn, cancelBtn: cancelBtnEl, pauseBtn: pauseBtnEl });
+      procRows.set(runId, { row: row, nameEl: nameEl, statusEl: statusEl, showBtn: showBtn, cancelBtn: cancelBtnEl, pauseBtn: pauseBtnEl, skipBtn: skipBtnEl });
     }
     function procRunLabel(runId, st) {
       const langLabel = st.lang || st.ext;
@@ -278,6 +326,11 @@
         ui.statusEl.textContent = s.status || '—';
       }
       ui.cancelBtn.style.display = st.running ? '' : 'none';
+      // «Далее» — только на странице «Отладка промтов» и только пока прогон
+      // идёт: пропускает текущую пару (актуально при попытках = 0).
+      if (ui.skipBtn) {
+        ui.skipBtn.style.display = (isPromptDebug && s.status === 'running') ? '' : 'none';
+      }
       // Кнопка Пауза/Продолжить: running → Пауза; paused → Продолжить; прочее — скрыта.
       if (ui.pauseBtn) {
         if (s.status === 'running') {
@@ -711,10 +764,64 @@
       topicSelect.disabled = !topics.length;
     }
 
+    // Ручной выбор промпта фильтруется по выбранным языкам: показываются
+    // только промпты этого языка (topic.programming_language) или промпты
+    // «на весь язык» (programming_language у самого промпта). Placeholder
+    // остаётся всегда: value="" = «по привязке» (промпт по умолчанию).
+    // Без выбранных языков селект выключен — выбирать нечего.
+    function promptOptionLabel(p) {
+      let suffix = '';
+      if (p.topic_name) {
+        suffix = ' — ' + p.topic_name;
+      } else if (p.language_name) {
+        suffix = ' — на весь язык (' + p.language_name + ')';
+      }
+      return (p.name || ('Prompt #' + p.id)) + suffix;
+    }
+    function rebuildPromptOptions() {
+      if (!promptSelect) { return; }
+      const langIds = new Set(selectedLanguages().map(function (l) { return String(l.id); }));
+      const previous = String(promptSelect.value || '');
+      promptSelect.innerHTML = '';
+      const ph = document.createElement('option');
+      ph.value = '';
+      ph.textContent = langIds.size ? 'По привязке (по умолчанию)' : '— выберите язык(и) —';
+      promptSelect.appendChild(ph);
+      if (langIds.size) {
+        allPrompts
+          .filter(function (p) {
+            // Промпт без языка (ни своего, ни через тему) — общий для всех
+            // языков: показываем его при любом выборе. Промпты другого языка
+            // скрываем — в селекте только выбранные язык(и).
+            if (p.language_id === null || p.language_id === undefined || p.language_id === '') {
+              return true;
+            }
+            return langIds.has(String(p.language_id));
+          })
+          .slice()
+          .sort(function (a, b) { return promptOptionLabel(a).localeCompare(promptOptionLabel(b), 'ru'); })
+          .forEach(function (p) {
+            const o = document.createElement('option');
+            o.value = String(p.id);
+            o.textContent = promptOptionLabel(p);
+            promptSelect.appendChild(o);
+          });
+      }
+      promptSelect.disabled = !langIds.size;
+      // Если прежний ручной выбор выпал из нового набора языков — сброс на
+      // «по привязке», чтобы на сервер не ушёл чужой язык промпт.
+      const stillValid = Array.prototype.some.call(promptSelect.options, function (o) {
+        return o.value === previous && previous !== '';
+      });
+      promptSelect.value = stillValid ? previous : '';
+      updateBoundPromptLabel();
+    }
+
     // Язык(и) → чекбоксы: расширения выбранных языков (readonly), темы
     // (только при ровно одном языке — при нескольких тема для журнала не
     // задаётся, привязки всё равно резолвятся per-task в worker'е). Смена
-    // набора языков сбрасывает тему (ручной выбор промпта не сбрасывается).
+    // набора языков сбрасывает тему и пересобирает список промптов этого
+    // языка(ов).
     function selectedLanguages() {
       return Array.prototype.map.call(
         document.querySelectorAll('input.arm-lang-check:checked'),
@@ -751,6 +858,7 @@
           topicSelect.disabled = true;
         }
       }
+      rebuildPromptOptions();
       applyTopicSelection('');
     }
 
@@ -873,6 +981,9 @@
     function updateRetryUnsolvedButton(run) {
       const retryBtn = document.getElementById('armSolveRetryUnsolvedBtn');
       if (!retryBtn) { return; }
+      // У отладки промтов перезапуска нерешённых пар нет: прогон повторяется
+      // целиком из формы (правки промпта уже применены).
+      if (isPromptDebug) { retryBtn.style.display = 'none'; return; }
       const isDone = run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
       // Во время перезапуска прогон снова 'running' — кнопка скрыта isDone-веткой.
       const pairs = isDone ? countUnsolvedPairs(run) : 0;
@@ -895,7 +1006,7 @@
       setError('');
       // Старую таблицу не гасим: она останется до первого снапшота нового
       // прогона (при неудаче запуска таблица сохраняется — не теряем данные).
-      setProgress('Запускаем batch solve' + (langs.length > 1 ? ' (' + langs.length + ' процесса)...' : '...'), true);
+      setProgress('Запускаем ' + modeLabel + (langs.length > 1 ? ' (' + langs.length + ' процесса)...' : '...'), true);
       const baseBody = new URLSearchParams(new FormData(form));
       // Чекбоксы языков без name в FormData не попадают; language_id и
       // расширение подставляются per-язык ниже.
@@ -924,7 +1035,7 @@
       }
       setSubmitDisabled(false);
       if (!startedRuns.length) {
-        setError(failedLangs.join('; ') || 'Ошибка запуска batch solve');
+        setError(failedLangs.join('; ') || ('Ошибка запуска: ' + modeLabel));
         stopProgress();
         setCancelVisible(false);
         return;
@@ -1059,6 +1170,11 @@
             promptSelect.options, function (o) { return o.value === rpPromptId; }
           );
           promptSelect.value = promptExists ? rpPromptId : '';
+        }
+        // Число попыток (только отладка промтов) — снимок формы запуска.
+        const attemptsInput = document.getElementById('armPromptAttempts');
+        if (attemptsInput && rp.prompt_attempts != null && rp.prompt_attempts !== '') {
+          attemptsInput.value = String(rp.prompt_attempts);
         }
         if (runNameInput) { runNameInput.value = String(rp.run_name || ''); }
         updateBoundPromptLabel();

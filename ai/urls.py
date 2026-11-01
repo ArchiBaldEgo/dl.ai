@@ -12,6 +12,8 @@ urlpatterns = [
     path('ai/my-models/', views.my_models_view, name='ai_my_models'),
     path('ai/my-models/create/', views.my_model_save_view, name='ai_my_model_create'),
     path('ai/my-models/delete/', views.my_model_delete_view, name='ai_my_model_delete'),
+    path('ai/my-models/access/', views.my_model_access_view, name='ai_my_model_access'),
+    path('ai/my-models/search-users/', views.my_model_search_users_view, name='ai_my_model_search_users'),
     path('ai/docs/', views.chat_user_docs_view, name='ai_user_docs'),
     path('ai/docs/download/', views.chat_user_docs_download_view, name='ai_user_docs_download'),
 ]

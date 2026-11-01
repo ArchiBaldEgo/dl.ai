@@ -1,9 +1,11 @@
 {% extends "admin/base_site.html" %}
 {% load static %}
 
+{% block bodyclass %}arm-page{% endblock %}
+
 {% block extrastyle %}
   {{ block.super }}
-  <link rel="stylesheet" href="{% static 'admin/ai/arm_solve/index.css' %}">
+  <link rel="stylesheet" href="{% static 'admin/ai/arm_solve/index.css' %}?v=3">
 {% endblock %}
 
 {% block content %}
@@ -13,7 +15,11 @@
   <div class="arm-header">
     <div class="arm-title-block">
       {% include "admin/ai/_ai_back_nav.html" %}
+      {% if arm_mode == "prompt_debug" %}
+      <p class="arm-subtitle">Пара «задача × модель» решается обычным путём и проверяется через DL. Если DL не принял решение, модель дописывает короткое дополнение к промпту и задача решается заново — до прохождения или исчерпания попыток. Сохраняются только правки, после которых пара прошла DL; в конце все пары решаются заново по итоговым промптам (проверка).</p>
+      {% else %}
       <p class="arm-subtitle">Каждой выбранной модели отправляется условие каждой задачи из дерева DL; ответ проверяется через DL (send-solution / get-solution-result).</p>
+      {% endif %}
     </div>
   </div>
 
@@ -75,7 +81,8 @@
         <div class="arm-models" id="armLanguageChecks">
           {% for lang in language_options %}
             <label class="arm-model">
-              <input type="checkbox" class="arm-lang-check" data-ext="{{ lang.extension }}" data-name="{{ lang.name }}"> {{ lang.name }}
+              {# id — ключ сохранения формы (ai_admin_state.js): у чекбокса без name/id выбор языка не запоминался. #}
+              <input type="checkbox" class="arm-lang-check" id="armLangCheck{{ lang.id }}" value="{{ lang.id }}" data-ext="{{ lang.extension }}" data-name="{{ lang.name }}"> {{ lang.name }}
             </label>
           {% endfor %}
         </div>
@@ -111,6 +118,18 @@
       </select>
       <p id="armBoundPromptLabel" class="arm-section-note" style="display:none; margin:0 0 12px;"></p>
 
+      {% if arm_mode == "prompt_debug" %}
+      <div class="arm-section-head" style="margin-top:18px;">
+        <div>
+          <h2>Попыток на пару</h2>
+          <p class="arm-section-note">Включая первую попытку. После каждой неудачи DL промпт дописывается и задача решается заново; правки сохраняются только если пара в итоге прошла. Затем все пары решаются ещё раз по итоговым промптам (проверка). <strong>0 — без ограничения:</strong> задача решается, пока не получится, либо пока вы не нажмёте «Далее» в списке процессов (тогда пара пропускается, правки не сохраняются).</p>
+        </div>
+      </div>
+      <input type="number" name="prompt_attempts" id="armPromptAttempts" min="{{ prompt_debug_attempts_min|default:0 }}" max="{{ prompt_debug_attempts_max|default:10 }}" step="1" value="{{ prompt_debug_attempts }}" style="padding:6px 10px; width:120px; margin-bottom:12px;">
+      <div class="arm-warning">Правятся только промпты, на которые у вас есть права (свои, либо ключ «Перезаписывать чужие промпты»). Пары с чужими промптами пропускаются. Промпт «по привязке» (по умолчанию) остаётся тем же и накапливает правки.</div>
+      {% endif %}
+
+      {% if arm_mode != "prompt_debug" %}
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
           <h2>Решённые задачи</h2>
@@ -132,6 +151,7 @@
         <input type="checkbox" name="record_stats" id="armRecordStats" value="1"> Заносить результаты в БД
       </label>
       {% endif %}
+      {% endif %}{# /arm_mode != prompt_debug: кэш и статистика недоступны #}
 
       <input type="hidden" name="dl_test" value="1" id="armDlTest">
       {% if delta_options %}
@@ -162,7 +182,9 @@
         <span class="arm-progress-text"></span>
       </div>
       <div class="arm-actions">
-        <button type="submit" class="default" id="armSolveSubmit">Запустить пакет</button>
+        <button type="submit" class="default" id="armSolveSubmit"
+                data-idle-label="{% if arm_mode == 'prompt_debug' %}Запустить отладку{% else %}Запустить пакет{% endif %}"
+                data-busy-label="{% if arm_mode == 'prompt_debug' %}Запускаем отладку...{% else %}Запускаем...{% endif %}">{% if arm_mode == 'prompt_debug' %}Запустить отладку{% else %}Запустить пакет{% endif %}</button>
         <button type="button" class="button" id="armSolveCancelBtn" style="display:none;">Прервать тестирование</button>
       </div>
     </section>
@@ -205,7 +227,11 @@
     <div class="arm-section-head">
       <div>
         <h2>Ответы моделей</h2>
+        {% if arm_mode == "prompt_debug" %}
+        <p class="arm-section-note">Раскройте модель — внутри её задачи, вердикты, комментарии DL по каждой попытке и текст, добавленный в промпт</p>
+        {% else %}
         <p class="arm-section-note">Раскройте модель — внутри её задачи, вердикты и полные ответы</p>
+        {% endif %}
       </div>
       <div id="armSolveFilterHost"></div>
     </div>
@@ -214,15 +240,19 @@
 </div>
 
 {{ active_run_snapshot|json_script:"arm-solve-initial-run" }}
+{# Режим страницы: batch (пакетное решение) или prompt_debug (отладка промтов). #}
+{{ arm_mode|json_script:"arm-solve-mode" }}
 {{ arm_prompt_bindings|json_script:"arm-prompt-bindings" }}
 {{ prompt_options|json_script:"arm-prompt-options" }}
 {{ topics|json_script:"arm-topics" }}
 {# Адреса эндпоинтов для статического JS (шаблонных переменных в .js нет). #}
 {{ arm_solve_start_url|json_script:"arm-solve-start-url" }}
 {{ arm_solve_status_url|json_script:"arm-solve-status-url" }}
+{# «Далее» — пропустить зацикленную пару (только «Отладка промтов»). #}
+{{ arm_prompt_debug_skip_url|json_script:"arm-prompt-debug-skip-url" }}
 {{ arm_solve_tree_url|json_script:"arm-solve-tree-url" }}
 
 {% include "admin/ai/_ai_batch_results.html" %}
 
-<script src="{% static 'admin/ai/arm_solve/index.js' %}"></script>
+<script src="{% static 'admin/ai/arm_solve/index.js' %}?v=2"></script>
 {% endblock %}

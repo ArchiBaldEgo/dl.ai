@@ -28,6 +28,8 @@ from django.utils import timezone
 # Хелперы распознавания прозы/кода живут в services/code_carver.py
 # (services — их домен по CLAUDE.md); ре-экспорт для совместимости.
 from .services.code_carver import (  # noqa: E402
+    FENCED_BLOCK_RE,
+    UNCLOSED_FENCE_RE,
     _PROSE_WORD_RE,
     _THINK_RE,
     _is_prose_sentence,
@@ -36,8 +38,10 @@ from .services.code_carver import (  # noqa: E402
     _looks_like_code,
     _looks_like_prose,
     _mid_prose_lines,
+    _scan_comment_spans,
     _strip_think_blocks,
     _trim_prose_tail,
+    collapse_duplicated_asm_answer,
     has_language_marker,
     language_code_incomplete,
 )
@@ -46,6 +50,9 @@ from django.utils.html import strip_tags
 from .model_clients.exceptions import humanize_model_error
 from .model_clients import is_output_truncated, get_no_think_handler
 from .services.task_registry import dl_path_folder, dl_task_url
+from .services.dl_test_data import fetch_failed_test_data, parse_dl_test_data
+from .services.prompt_debug import is_fixed as _is_prompt_debug_fixed
+from .services.prompt_debug import payload_state as _prompt_debug_payload_state
 from .i18n import get_ui_language_suffix
 from .model_health import get_runtime_model_handlers, is_arm_solve_model
 from .models import AIModelTestResult, AIModelTestRun, AIRequestLog, ArmPromptBinding, ExternalDLAccount, Task
@@ -112,6 +119,21 @@ def _extract_prompt_tokens(response) -> int:
     if isinstance(response, tuple) and len(response) > 4:
         return _to_int(response[4])
     return 0
+
+
+def _clean_model_text(response_text, file_extension=""):
+    """Текст ответа модели для отчёта и извлечения кода.
+
+    Единая гигиена: strip_tags + вырезание think-блоков (+ безопасное
+    схлопывание склеенного «черновик + финал» у i8086 — веб-пулы отдают
+    размышления и ответ без разделителя, и код в «Полном ответе модели»
+    дублировался). Пустая строка — ответа нет (плейсхолдер ставит вызывающий,
+    чтобы залогировать случай).
+    """
+    cleaned = strip_tags(_strip_think_blocks(response_text)).strip()
+    if cleaned and file_extension in (".i86", ".asm"):
+        cleaned = collapse_duplicated_asm_answer(cleaned)
+    return cleaned
 
 
 def _is_model_error(response):
@@ -194,8 +216,15 @@ _MODEL_ERROR_MAX_ATTEMPTS = 5
 # Тяжёлые поля batch-результата (тело ответа): не встраиваются в снапшот
 # страницы / поллинга (light-режим), подтягиваются по AJAX при раскрытии
 # строки (см. _light_batch_result_item / admin_arm_solve_result_body_view).
+# dl_test_data — данные КАЖДОГО проваленного теста (до _TEST_DATA_MAX_TESTS
+# записей по 2 файла): в снапшоте большого прогона это десятки мегабайт на
+# поллинг, а видны они только в раскрытой карточке — туда их и отдаём.
 _BATCH_LAZY_BODY_KEYS = (
     "raw_response", "code", "short_response", "dl_comment", "dl_error",
+    "dl_test_data",
+    # Отладка промтов: попытки + тексты дополнений + комментарии DL каждой
+    # попытки — такие же тяжёлые тела, грузятся при раскрытии строки.
+    "prompt_debug",
 )
 
 
@@ -250,14 +279,80 @@ _NO_RAMBLE_INSTRUCTION = {
     "fr": "Ne détaille ni ton raisonnement ni tes calculs intermédiaires — produis immédiatement le code final de la solution.",
 }
 
+# Контракт формата ответа: РОВНО ОДИН блок кода в ``` в самом конце. Без него
+# flash/thinking-модели (GLM, DeepSeek) пишут черновики в оградах прямо в CoT,
+# и извлечение утаскивало в DL черновик/обрывок вместо финальной программы
+# (кейсы #2606800/#2606786/#2606762). Приписывается ПОСЛЕДНЕЙ строкой
+# solve-сообщения — это финальная директива, важнее хвоста требований языка.
+_OUTPUT_FENCE_INSTRUCTION = {
+    "ru": (
+        "Формат ответа: выведи ТОЛЬКО ГОТОВЫЙ (финальный) код решения — "
+        "РОВНО ОДИН блок кода в тройных обратных кавычках (```) в самом конце "
+        "сообщения. Внутри блока — только готовая программа, без комментариев "
+        "и пояснений; кода вне блока не пиши вовсе; после закрывающих ``` не "
+        "пиши ничего. Черновики и рассуждения в блок кода не включай."
+    ),
+    "en": (
+        "Response format: output ONLY the FINAL (ready) solution code — "
+        "EXACTLY ONE code block in triple backticks (```) at the very end of "
+        "your message. Inside the block — only the finished program, with no "
+        "comments or explanations; write no code outside the block; write "
+        "nothing after the closing ```. Do not include drafts or reasoning in "
+        "the code block."
+    ),
+    "fr": (
+        "Format de réponse : produis UNIQUEMENT le code FINAL (prêt) de la "
+        "solution — EXACTEMENT UN bloc de code entre triples backticks (```) "
+        "tout à la fin de ton message. Dans le bloc — seulement le programme "
+        "final, sans commentaires ni explications ; n'écris aucun code en "
+        "dehors du bloc ; n'écris rien après les ``` fermants. N'inclus pas de "
+        "brouillons ni de raisonnement dans le bloc de code."
+    ),
+}
+
 # Приписка авто-ретрая обрезанной пары: ответ упёрся в потолок генерации
 # (model_clients.is_output_truncated), код не успел родиться — один повторный
 # вызов с прямой командой «только код».
 _CUT_RETRY_INSTRUCTION = {
-    "ru": "Твой предыдущий ответ был обрезан лимитом длины. Ни текста, ни вычислений, ни объяснений — выведи только окончательный код решения целиком, одним блоком.",
-    "en": "Your previous answer was cut off by the length limit. No text, no arithmetic, no explanations — output only the complete final solution code in a single block.",
-    "fr": "Ta réponse précédente a été tronquée par la limite de longueur. Ni texte, ni calculs, ni explications — produis uniquement le code final complet de la solution en un seul bloc.",
+    "ru": "Твой предыдущий ответ был обрезан лимитом длины. Ни текста, ни вычислений, ни объяснений — выведи только окончательный код решения целиком, одним блоком в ``` … ``` без текста после него.",
+    "en": "Your previous answer was cut off by the length limit. No text, no arithmetic, no explanations — output only the complete final solution code in a single ``` block with no text after it.",
+    "fr": "Ta réponse précédente a été tronquée par la limite de longueur. Ni texte, ni calculs, ni explications — produis uniquement le code final complet de la solution en un seul bloc ``` sans texte après.",
 }
+
+
+def _compose_solve_message(message, task_statement, prog_lang_name, topic_name, ui_language="Русский",
+                           file_extension=""):
+    """Дописать к тексту промпта приписки курса (общий хвост solve-сообщения).
+
+    Поверх промпта — гарантия условия задачи, «без комментариев», «без
+    рассуждений» и требования языка (services/language_requirements.py:
+    массивы на 100 элементов, для i8086 — только инструкции 8086). Без них
+    часть решений падает на DL с нераспознаваемой причиной.
+
+    Вынесено из ``_build_solve_message``, чтобы «Отладка промтов» собирала
+    сообщение с дополнениями промпта ТЕМ ЖЕ путём (DRY).
+    """
+    from .i18n import get_language_instruction, get_ui_language_suffix
+    from .services.language_requirements import language_requirements
+
+    message = message or ""
+    # Гарантия полного входа: если выбранный шаблон промпта не содержал
+    # плейсхолдер {message}, условие задачи могло потеряться — дописываем его
+    # явно, чтобы модели всегда приходил полный текст задачи.
+    if task_statement and task_statement.strip() and task_statement.strip() not in message:
+        message = message.rstrip() + f"\n\nУсловие задачи:\n{task_statement}"
+    ui_suffix = get_ui_language_suffix(ui_language)
+    message += get_language_instruction(ui_language)
+    message += "\n" + _NO_COMMENTS_INSTRUCTION[ui_suffix]
+    message += "\n" + _NO_RAMBLE_INSTRUCTION[ui_suffix]
+    lang_req = language_requirements(
+        prog_lang_name, file_extension=file_extension, ui_suffix=ui_suffix,
+    )
+    if lang_req:
+        message += "\n" + lang_req
+    # Контракт формата — последней строкой: «ровно один ```-блок в конце».
+    message += "\n" + _OUTPUT_FENCE_INSTRUCTION[ui_suffix]
+    return message
 
 
 def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None,
@@ -268,15 +363,8 @@ def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language
     суперпюзерской привязки ArmPromptBinding (mode=solve); ручного выбора и
     fallback'ов (topic-bound Prompt, SharedPrompt mode=solve) больше нет:
     нет привязки → прогон без промпта, только базовая инструкция.
-
-    Поверх промпта — приписки курса: без комментариев, без рассуждений и
-    требования языка (services/language_requirements.py: массивы на 100
-    элементов, для i8086 — только инструкции 8086). Без них часть решений
-    падает на DL с нераспознаваемой причиной («Причина не распознана»).
     """
-    from .i18n import get_language_instruction, get_ui_language_suffix
     from .models import Prompt
-    from .services.language_requirements import language_requirements
 
     message = None
     if prompt_id:
@@ -294,21 +382,10 @@ def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language
             f"Выведи только готовое решение (код), без пояснений. "
             f"Условие задачи: {task_statement}."
         )
-    # Гарантия полного входа: если выбранный шаблон промпта не содержал
-    # плейсхолдер {message}, условие задачи могло потеряться — дописываем его
-    # явно, чтобы модели всегда приходил полный текст задачи.
-    if task_statement and task_statement.strip() and task_statement.strip() not in (message or ""):
-        message = (message or "").rstrip() + f"\n\nУсловие задачи:\n{task_statement}"
-    ui_suffix = get_ui_language_suffix(ui_language)
-    message += get_language_instruction(ui_language)
-    message += "\n" + _NO_COMMENTS_INSTRUCTION[ui_suffix]
-    message += "\n" + _NO_RAMBLE_INSTRUCTION[ui_suffix]
-    lang_req = language_requirements(
-        prog_lang_name, file_extension=file_extension, ui_suffix=ui_suffix,
+    return _compose_solve_message(
+        message, task_statement, prog_lang_name, topic_name,
+        ui_language, file_extension=file_extension,
     )
-    if lang_req:
-        message += "\n" + lang_req
-    return message
 
 
 def _build_summary(results):
@@ -393,9 +470,17 @@ def _per_bucket(results, key_fn, label_fn):
             continue
         bucket = buckets.setdefault(
             key,
-            {"label": label_fn(item), "solved": 0, "total": 0, "durations": [], "tokens": 0},
+            {
+                "label": label_fn(item), "solved": 0, "total": 0,
+                "durations": [], "tokens": 0, "running": 0,
+            },
         )
         bucket["tokens"] += _to_int(item.get("tokens"))
+        # Ещё решающаяся пара (промежуточная сводка): в total/процент не идёт,
+        # иначе «Итог по моделям» показывал бы её как нерешённую.
+        if item.get("_live"):
+            bucket["running"] += 1
+            continue
         if verdict == _VERDICT_SKIPPED:
             continue
         bucket["total"] += 1
@@ -408,9 +493,14 @@ def _per_bucket(results, key_fn, label_fn):
         total = bucket["total"] or 1
         durations = bucket["durations"] or [0.0]
         rows.append({
+            # Ключ бакета — чтобы вызывающий мог довесить в строку счётчики
+            # другого разреза (например «исправлено» у отладки промтов).
+            "key": key,
             "label": bucket["label"],
             "solved": bucket["solved"],
             "total": bucket["total"],
+            # Пары «в работе» — только в промежуточной сводке.
+            "running": bucket["running"],
             "percent_solved": round(bucket["solved"] / total * 100, 1) if bucket["total"] else 0.0,
             "avg_duration": round(sum(durations) / len(durations), 2),
             "tokens": bucket["tokens"],
@@ -491,7 +581,8 @@ def _build_failure_reasons(results):
 
     Таксономия — из ``AIModelTestResult.FAILURE_REASON_CHOICES`` (единый
     источник): «сбой ответа модели», «не выкушен код», «ошибка компиляции»,
-    «неправильный ответ» (+ честные «причина не распознана» / «пропущено»).
+    «ошибка исполнения программы», «неправильный ответ» (+ честные «причина
+    не распознана» / «пропущено»).
     Учитываются только пары с непустой причиной (у решённых пар причины
     нет). Проценты — от числа ВСЕХ пар прогона.
     """
@@ -535,7 +626,73 @@ def _errors_bucket_key(item):
     return "task:" + str(item.get("task_node_id") or item.get("task_name") or "?")
 
 
-def _build_batch_report(results, run_topic_id=None, run_topic_name=None):
+def _prompt_debug_row_fixed(row):
+    """«Исправлено» по строке результата — из полного payload'а ИЛИ из
+    компактной сводки (лёгкий снапшот несёт только ``prompt_debug_state``)."""
+    payload = row.get("prompt_debug")
+    if isinstance(payload, dict) and payload:
+        return _is_prompt_debug_fixed(payload)
+    return bool((row.get("prompt_debug_state") or {}).get("fixed"))
+
+
+def _prompt_debug_fixed_results(results):
+    """Пары «сначала не прошло — после правки промпта прошло» (исправленные).
+
+    Признак — ровно то, что просил оператор: первая попытка пары НЕ решена,
+    итоговая попытка основного прохода решена, правки сохранены
+    (``committed``). Проверочный проход в счёт не входит: у него своя
+    статистика («проверка после правок» / «перестали решаться»), иначе одна
+    и та же пара считалась бы исправленной дважды.
+    """
+    return [row for row in results or [] if _prompt_debug_row_fixed(row)]
+
+
+def _prompt_debug_fixed_by_topic(fixed_results):
+    """«Исправлено» по темам — та же форма, что ``errors_by_topic``."""
+    buckets: dict = {}
+    for row in fixed_results:
+        key = _errors_bucket_key(row)
+        payload = row.get("prompt_debug") or {}
+        state = row.get("prompt_debug_state") or {}
+        bucket = buckets.setdefault(
+            key, {"count": 0, "items": [], "label": _topic_bucket_label(row)},
+        )
+        bucket["count"] += 1
+        if len(bucket["items"]) >= _REPORT_ERRORS_ITEM_CAP:
+            continue
+        node_id = row.get("task_node_id")
+        model_key = str(row.get("model_key") or "")
+        bucket["items"].append(
+            {
+                "task": str(row.get("task_name") or ("#" + str(node_id or ""))),
+                "model": str(row.get("model_title") or model_key or "?"),
+                "attempts": (
+                    len(payload.get("attempts") or [])
+                    if payload else int(state.get("attempts") or 0)
+                ),
+                # В лёгком снапшоте payload'а нет — берём промпт самой строки.
+                "prompt": str(payload.get("prompt_name") or row.get("prompt_name") or ""),
+                "node_id": node_id,
+                "model_key": model_key,
+                "key": f"{node_id if node_id is not None else ''}:{model_key}",
+            }
+        )
+    return [
+        {
+            "topic": bucket["label"],
+            "count": bucket["count"],
+            "items": bucket["items"],
+            "hidden": bucket["count"] - len(bucket["items"]),
+        }
+        for _key, bucket in sorted(
+            buckets.items(), key=lambda kv: (-kv[1]["count"], kv[1]["label"])
+        )
+    ]
+
+
+def _build_batch_report(
+    results, run_topic_id=None, run_topic_name=None, *, include_live=False,
+):
     """Batch-solve report: per-model + per-topic tables + overall counters.
 
     Добавлено (2026-09): models_count / tasks_count (объём прогона из
@@ -545,7 +702,8 @@ def _build_batch_report(results, run_topic_id=None, run_topic_name=None):
 
     Добавлено (2026-10): секция ``failure_reasons`` — таксономия сбоев
     («сбой ответа модели» / «не выкушен код» / «ошибка компиляции» /
-    «неправильный ответ»), см. AIModelTestResult.FAILURE_REASON_CHOICES.
+    «ошибка исполнения программы» / «неправильный ответ»), см.
+    AIModelTestResult.FAILURE_REASON_CHOICES.
     Темы группируются ПО ID темы (topic_id), а не по названию: названия
     совпадают у разных языков (i8086 / C-MPA), и без ID отчёт сливал бы их
     в одну строку. Тема без названия подписывается по-человечески, а не
@@ -557,8 +715,16 @@ def _build_batch_report(results, run_topic_id=None, run_topic_name=None):
     полем ``run_topic``, чтобы было видно, что часть строк — не «своя» тема
     задачи, а запасная тема прогона.
     """
+    # Незавершённые пары (флаг _live — пара ещё решается/в цикле попыток) в
+    # ИТОГОВУЮ сводку не идут: их вердикт промежуточный. Промежуточная сводка
+    # выполняющегося прогона (``include_live=True``) их учитывает отдельным
+    # счётчиком ``running`` — иначе на прогоне, где все пары ещё в работе,
+    # карточка «Сводка» пропадала бы с экрана.
+    if not include_live:
+        results = [r for r in results if not r.get("_live")]
     if not results:
         return None
+    running = sum(1 for r in results if r.get("_live"))
     solved = sum(1 for r in results if r.get("verdict") == _VERDICT_SOLVED)
     failed = sum(1 for r in results if r.get("verdict") == _VERDICT_FAILED)
     skipped = sum(1 for r in results if r.get("verdict") == _VERDICT_SKIPPED)
@@ -579,6 +745,24 @@ def _build_batch_report(results, run_topic_id=None, run_topic_name=None):
         label_fn=_topic_bucket_label,
     )
 
+    # «Отладка промтов»: у моделей/тем показываем, сколько пар было
+    # исправлено правкой промпта (первая попытка — провал, далее — решено).
+    # Для пакетного прогона payload'ов нет, счётчик везде 0 и колонка не
+    # рисуется.
+    fixed_results = _prompt_debug_fixed_results(results)
+    if fixed_results:
+        for rows, key_fn in (
+            (per_model, lambda r: r.get("model_key") or r.get("model_title")),
+            (per_topic, _topic_bucket_key),
+        ):
+            counts: dict = {}
+            for r in fixed_results:
+                k = key_fn(r)
+                if k is not None:
+                    counts[k] = counts.get(k, 0) + 1
+            for row in rows:
+                row["fixed"] = counts.get(row.get("key"), 0)
+
     # Объём прогона: уникальные модели и задачи из результатов.
     models_count = len({r.get("model_key") or r.get("model_title") for r in results} - {None})
     tasks_count = len({r.get("task_node_id") for r in results if r.get("task_node_id")})
@@ -592,6 +776,10 @@ def _build_batch_report(results, run_topic_id=None, run_topic_name=None):
     # ошибки»).
     errors_map: dict = {}
     for r in results:
+        # Ещё решающаяся пара (промежуточная сводка) — не ошибка: вердикта у
+        # неё пока нет.
+        if r.get("_live"):
+            continue
         verdict = r.get("verdict")
         if verdict in (_VERDICT_SOLVED, None):
             continue
@@ -656,10 +844,14 @@ def _build_batch_report(results, run_topic_id=None, run_topic_name=None):
         )
 
     return {
-        "total_pairs": len(results),
+        # Пары с итогом (в промежуточной сводке — без ещё решающихся).
+        "total_pairs": len(results) - running,
         "solved": solved,
         "failed": failed,
         "skipped": skipped,
+        # Пары «в работе» (промежуточная сводка живого прогона): показаны
+        # отдельной строкой, в solved/failed не входят.
+        "running": running,
         "truncated_pairs": truncated_pairs,
         "tokens_total": tokens_total,
         "per_model": per_model,
@@ -712,6 +904,34 @@ def _attach_run_meta(report, started_ts, finished_ts=None, now_ts=None):
     }
 
 
+def _empty_interim_report():
+    """Сводка живого прогона, у которого ещё нет ни одной строки.
+
+    Карточка «Сводка» не должна исчезать с экрана на первых минутах прогона
+    (пока не стартовала первая пара): показываем нули с плашкой «цифры
+    промежуточные» вместо скрытия. Контракт — тот же, что у
+    ``_build_batch_report``.
+    """
+    return {
+        "total_pairs": 0,
+        "solved": 0,
+        "failed": 0,
+        "skipped": 0,
+        "running": 0,
+        "truncated_pairs": 0,
+        "tokens_total": 0,
+        "per_model": [],
+        "per_topic": [],
+        "models_count": 0,
+        "tasks_count": 0,
+        "run_topic": None,
+        "errors_by_topic": [],
+        "failure_reasons": [],
+        "hints": [],
+        "topics_used": [],
+    }
+
+
 def _interim_live_report(job):
     """Промежуточный отчёт выполняющегося batch-прогона.
 
@@ -719,19 +939,29 @@ def _interim_live_report(job):
     парам (job["results"]) на каждом тике, флаг interim=True — фронту рисовать
     плашку «цифры промежуточные». Итоговый отчёт (без interim) кладёт
     _finalize_batch_run. Rerun-прогоны сюда не попадают — у них свой отчёт в
-    _rerun_snapshot. Пустые результаты → None (карточка «Сводки» просто
-    скрыта, ничего не считается).
+    _rerun_snapshot. Пустые результаты → отчёт нулей (карточка «Сводки»
+    остаётся на экране), кроме single-прогонов — у них сводки нет вовсе.
     """
-    if job.get("run_type") != "batch":
+    if job.get("run_type") not in (
+        AIModelTestRun.RUN_TYPE_BATCH, AIModelTestRun.RUN_TYPE_PROMPT_DEBUG,
+    ):
         return None
+    results = _sort_results_fresh_first(job.get("results") or [])
+    # include_live=True: пары, которые сейчас решаются, видны в сводке
+    # отдельным счётчиком «в работе». Без этого на прогоне, где ни одна пара
+    # ещё не завершилась, отчёт был None и карточка «Сводка» исчезала с
+    # экрана — оператор читал это как «результаты пропали».
     report = _build_batch_report(
-        _sort_results_fresh_first(job.get("results") or []),
+        results,
         run_topic_id=job.get("topic_id"),
         run_topic_name=job.get("topic_name"),
+        include_live=True,
     )
     if report is None:
-        return None
+        report = _empty_interim_report()
     _attach_run_meta(report, job.get("created_at_ts"), None, now_ts=time.time())
+    if job.get("run_type") == AIModelTestRun.RUN_TYPE_PROMPT_DEBUG:
+        _attach_prompt_debug_report(report, results)
     report["interim"] = True
     # Журнал прогона (сбои модели и повторы) — в отчёте, чтобы он был виден
     # и в живом поллинге, и в сохранённом отчёте.
@@ -1312,20 +1542,15 @@ def start_arm_sequential_run(
     return run_id, ""
 
 
-import re as _re
-
-# Открывающая строка оградки может содержать любой «язык» (c-mpa, c++, c#…)
-# и \r\n — прежний паттерн ([a-zA-Z]*\n) пропускал эти теги, и слово «c-mpa»
-# попадало внутрь извлечённого кода первой строкой (ошибка компиляции на DL).
-_CODE_FENCE_RE = _re.compile(r"```[^\n]*\r?\n(.*?)```", _re.DOTALL)
-# Незакрытая оградка (модель забывает закрывающие ``` — чаще при обрезке ответа):
-# всё после открывающей строки трактуется как код до конца текста.
-_UNCLOSED_FENCE_RE = _re.compile(r"```[^\n]*\r?\n(.*)\Z", _re.DOTALL)
+# Оградки парсит services/code_carver.py (единственный владелец);
+# алиасы сохранены для читаемости конвейера извлечения.
+_CODE_FENCE_RE = FENCED_BLOCK_RE
+_UNCLOSED_FENCE_RE = UNCLOSED_FENCE_RE
 
 
 # Функциональные слова EN/RU. Если их доля в тексте высока — это связная проза
 # (цепочка рассуждений модели), а не код. Ключевые слова Pascal/ассемблера
-def _carve_code_block(cleaned):
+def _carve_code_block(cleaned, ext=""):
     """Вырезать самый длинный непрерывный фрагмент кода из текста без оградок.
 
     Ответ вида «проза-вступление… \n код \n проза-заключение» целиком заваливает
@@ -1333,16 +1558,39 @@ def _carve_code_block(cleaned):
     строк (_line_is_code), допуская ≤2 подряд некодовых строк внутри (пустые
     строки, комментарии языка). Берём самое длинное окно и валидируем его
     существующими проверками: ≥2 кодовых строк, `_looks_like_code`, не проза.
+
+    Комментарии/строки (в т. ч. многострочные `/* … */`, докстринги, `{ … }`)
+    не считаются код-строками-анкерами, но и НЕ рвут прогон: зазор считается
+    только по строкам вне спанов, а окно расширяется на соседние строки
+    спана. Иначе длинный комментарий в начале программы сдвигал бы старт
+    окна, и `#include`/заголовок модуля терялись.
     """
     lines = [line for line in cleaned.splitlines() if line.strip()]
-    code_idx = [i for i, line in enumerate(lines) if _line_is_code(line)]
+    ext = (ext or "").strip().lower()
+    if ext:
+        scan = _scan_comment_spans(lines, ext)
+        judged = scan.blanked
+        span_lines = scan.span_lines
+    else:
+        judged = lines
+        span_lines = set()
+
+    code_idx = [
+        i for i, line in enumerate(judged)
+        if i not in span_lines and _line_is_code(line, ext)
+    ]
     if len(code_idx) < 2:
         return ""
+
+    def _gap(a, b):
+        # Некодовые строки МЕЖДУ a и b; строки спанов прозрачны.
+        return sum(1 for i in range(a + 1, b) if i not in span_lines)
+
     # Разбиваем индексы кодовых строк на прогоны с «зазором» ≤2 некодовых строк.
     runs = []
     run = [code_idx[0]]
     for prev, cur in zip(code_idx, code_idx[1:]):
-        if cur - prev <= 3:  # зазор ≤2 некодовых строк (строки prev/cur соседние)
+        if _gap(prev, cur) <= 2:
             run.append(cur)
         else:
             runs.append((run[0], run[-1]))
@@ -1351,14 +1599,25 @@ def _carve_code_block(cleaned):
 
     # Самый длинный прогон — кандидат на код (по числу строк, потом по длине).
     start, end = max(runs, key=lambda se: (se[1] - se[0] + 1))
-    window_lines = _trim_prose_tail(lines[start:end + 1])
+    # Расширяем окно на смежные строки комментариев/строк: заголовок файла
+    # (`/* … */`, docstring) и хвостовой закрыватель — часть кода.
+    first, last = start, end
+    while first - 1 >= 0 and (first - 1) in span_lines:
+        first -= 1
+    while last + 1 < len(lines) and (last + 1) in span_lines:
+        last += 1
+    window_lines = _trim_prose_tail(lines[first:last + 1], ext)
     window = "\n".join(window_lines).strip()
-    code_lines = sum(1 for line in window_lines if _line_is_code(line))
+    kept = len(window_lines)
+    code_lines = sum(
+        1 for i in range(first, first + kept)
+        if i not in span_lines and _line_is_code(judged[i], ext)
+    )
     if code_lines < 2 or not window:
         return ""
-    if _looks_like_prose(window):
+    if _looks_like_prose(window, ext):
         return ""
-    return window if _looks_like_code(window) else ""
+    return window if _looks_like_code(window, ext) else ""
 
 
 def _extract_code_from_response(text, file_extension=""):
@@ -1374,10 +1633,15 @@ def _extract_code_from_response(text, file_extension=""):
     результате — на СЫРОМ тексте: раннее упоминание «Альтернатива:» в CoT
     не должно срезать ФИНАЛЬНУЮ программу, записанную ниже.
     """
-    from .services.code_carver import has_language_marker
+    from .services.code_carver import has_language_marker, strip_prose_heading_lines
     code = _extract_code_pipeline(text, file_extension, apply_alt_cut=True)
     if not code and text:
         code = _extract_code_pipeline(text, file_extension, apply_alt_cut=False)
+    # Финальная зачистка подписей модели — для ВСЕХ тиров и расширений:
+    # фенс/незакрытый фенс/карвинг/whole-text тоже не должны протаскивать
+    # «Код:»/«**Решение**:» в файл решения.
+    if code:
+        code = strip_prose_heading_lines(code, file_extension or "").strip()
     if code and not has_language_marker(code, file_extension or ""):
         return ""
     return code
@@ -1386,20 +1650,24 @@ def _extract_code_from_response(text, file_extension=""):
 def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
     """Extract pure code from an AI response.
 
-    Структурные экстракторы С-МПА (services/code_carver.py) идут ПЕРВЫМИ,
-    когда известно расширение: сначала по всему тексту (мульти-анкер +
-    валидация кандидатов внутри), затем по закрытым код-фенсам. Без
-    расширения структурники пробуются только как последняя надежда
-    (маркеры видны в сыром ответе). Структурники бракуют склейки
-    «болванка из CoT + программа» и вырезают проза-вставки из середины
-    (res#3987); победившего кандидата выбирают по полноте (больше строк).
+    ГЛАВНЫЙ тир — ```-оградки (контракт ответа, см. _OUTPUT_FENCE_INSTRUCTION):
+    ответом считается ПОСЛЕДНИЙ валидный закрытый блок (модель пишет черновики
+    в оградах прямо в CoT — первый/самый длинный блок почти всегда черновик,
+    кейсы #2606800/#2606786/#2606762). Внутри блока проза не «бракует»
+    кандидата, а вырезается (code_carver.sanitize_fenced_block), после чего
+    блок уходит в DL КАК ЕСТЬ: структурник языка работает только валидатором
+    («это программа»), границы блока он не переопределяет — иначе его
+    эвристики конца (`jmp ends` в теле, `ends:` без цикла) обрезали идеальный
+    фенс (живые прогоны i8086, 2026-10-29).
 
-    Дальше прежний конвейер: закрытые фенсы (не проза, код-подобные, БЕЗ
-    прози посреди), незакрытая оградка, карвинг прогона код-строк; каждый
-    кандидат проверяется тем же «мид-контролем». Prose-In-Fence (res#5170)
-    отбрасывается; утечка оградок срезается strip_code_fence_lines().
-    По фенс-блокам в структурных экстракторах идём С КОНЦА — последний
-    валидный фенс обычно финальный ответ модели (res#4160).
+    Если последняя оградка НЕ закрыта (ответ оборван внутри фенса), закрытые
+    блоки — черновики: берём только хвост незакрытой оградки; не вышло — пусто
+    (воркер сделает авто-ретрай «сразу код»), черновик в DL не уходит.
+
+    Остальные тиры (фолбэки для ответов БЕЗ оградок и для «финал без фенса»):
+    структурник по всему тексту → незакрытая оградка → карвинг прогона
+    код-строк → relaxed-структурник (простыня CoT, #2606801) → whole-text.
+    Утечка оградок срезается strip_code_fence_lines().
 
     apply_alt_cut=False отключает срез «Альтернатива:/Вариант 2:»
     (спасательный прогон _extract_code_from_response).
@@ -1412,7 +1680,6 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
     cleaned = _strip_think_blocks(text).strip()
     ext = (file_extension or "").strip().lower()
 
-    # === Вариант B: структурные экстракторы языков курса ===
     from .services import code_carver
     # «Альтернатива:/Вариант 2:…» с кодом второго решения срезаются ДО всех
     # экстракторов (структурники, фенсы и карвинг работают по одному тексту).
@@ -1428,47 +1695,78 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
             structural = code_carver.extract_asm_i86
         elif code_carver.has_mpa_markers(cleaned):
             structural = code_carver.extract_mpa_c
+
+    def _accept_fence(block):
+        """Код из содержимого оградки (уже без прозы) или "".
+
+        Оградка — контракт ответа, поэтому её содержимое уходит в DL КАК ЕСТЬ:
+        структурник языка здесь только ВАЛИДАТОР («в блоке действительно
+        программа»). Его результат не отдаём — иначе он режет блок по своим
+        эвристикам конца (`jmp ends` в теле принимался за конец программы,
+        `ends:` терял останавливающий цикл), и в DL уходил обрезанный хвост
+        идеального ответа модели.
+        """
+        if _looks_like_prose(block, ext):
+            return ""
+        candidate = code_carver.sanitize_fenced_block(block, ext)
+        if not candidate:
+            return ""
+        if structural is not None:
+            if not structural(candidate):
+                return ""
+            return code_carver.strip_code_fence_lines(candidate)
+        if _mid_prose_lines(candidate, ext):
+            return ""
+        return code_carver.strip_code_fence_lines(candidate) if _looks_like_code(candidate, ext) else ""
+
+    # === Главный тир: последняя ЗАКРЫТАЯ оградка — финальный ответ ===
+    closed_fences = _CODE_FENCE_RE.findall(cleaned)
+    # «Финальный блок не закрыт» определяется по ТЕКСТУ ПОСЛЕ последнего
+    # закрытого блока (не по чётности строк-оградок): веб-пулы склеивают
+    # открывающую ``` с прозой («…Вывести только код.```asm»), такая строка
+    # не начинается с ``` и ломала счёт чётности — валидный закрытый финал
+    # принимался за обрыв («код не извлечён», логи GLM 5.3 Flash на
+    # #2606800/#2606786/#2606762 при живом прогоне 2026-10-28).
+    last_block_end = None
+    for match in _CODE_FENCE_RE.finditer(cleaned):
+        last_block_end = match.end()
+    unclosed_after = (
+        _UNCLOSED_FENCE_RE.search(cleaned[last_block_end:])
+        if closed_fences and last_block_end is not None else None
+    )
+    if unclosed_after is not None:
+        found = _accept_fence(unclosed_after.group(1))
+        if found:
+            return found
+        # Финал не извлёкся: черновик из закрытых блоков не подменяет его —
+        # пустой код включит авто-ретрай воркера.
+        return ""
+    if closed_fences:
+        for block in reversed(closed_fences):
+            found = _accept_fence(block)
+            if found:
+                return found
+        # Ни один фенс не валиден — финал мог быть БЕЗ оградки (```-цитата
+        # посреди CoT, а программа ниже); не обрываем пайплайн, идём дальше.
+
+    # === Фолбэки: ответ мог прийти без оградок ===
     if structural is not None:
         found = structural(cleaned)
         if found:
             return found
-        # По фенс-блокам: внутри ограды кандидата границы естественны;
-        # последний валидный фенс обычно финальный ответ модели — обходим
-        # С КОНЦА (res#4160).
-        for block in reversed(_CODE_FENCE_RE.findall(cleaned)):
-            block = block.strip()
-            if not block or _looks_like_prose(block):
-                continue
-            found = structural(block)
-            if found:
-                return code_carver.strip_code_fence_lines(found)
-
-    matches = _CODE_FENCE_RE.findall(cleaned)
-    code_blocks = [m for m in matches if not _looks_like_prose(m)]
-    if code_blocks:
-        # Самый длинный не-прозрачный код-подобный БЛОК без рассуждений
-        # посреди (проза-строки в середине = не код).
-        for candidate in sorted(code_blocks, key=len, reverse=True):
-            candidate = candidate.strip()
-            if not candidate:
-                continue
-            if _mid_prose_lines(candidate):
-                continue  # рассуждения внутри блока — это не код
-            if _looks_like_code(candidate):
-                return code_carver.strip_code_fence_lines(candidate)
-        # все оградки — проза/мусор; продолжаем конвейер (незакрытая/карвинг ниже)
     # Незакрытая оградка: всё после открывающей строки — код (маркер сильный,
     # бракуем только очевидную прозу и рассуждения посреди).
     unclosed = _UNCLOSED_FENCE_RE.search(cleaned)
     if unclosed:
         tail_lines = [line for line in unclosed.group(1).splitlines() if line.strip()]
-        tail_lines = _trim_prose_tail(tail_lines)
+        tail_lines = _trim_prose_tail(tail_lines, ext)
         candidate = "\n".join(tail_lines).strip()
-        if candidate and not _looks_like_prose(candidate) and not _mid_prose_lines(candidate):
+        candidate = code_carver.strip_prose_heading_lines(candidate, ext).strip()
+        if candidate and not _looks_like_prose(candidate, ext) and not _mid_prose_lines(candidate, ext):
             return code_carver.strip_code_fence_lines(candidate)
     # Смесь «проза + код» без оградок — карвинг самого длинного код-фрагмента.
-    carved = _carve_code_block(cleaned)
-    if carved and not _mid_prose_lines(carved):
+    carved = _carve_code_block(cleaned, ext)
+    if carved and not _mid_prose_lines(carved, ext):
         return code_carver.strip_code_fence_lines(carved)
     # === Аварийный relaxed-тир: «долгое рассуждение без фенсов» ===
     # Простыня CoT, внутри которой модель ПОЛНОСТЬЮ проговаривает программу
@@ -1481,15 +1779,11 @@ def _extract_code_pipeline(text, file_extension, apply_alt_cut=True):
         found = structural(cleaned, relaxed=True)
         if found:
             return code_carver.strip_code_fence_lines(found)
-        for block in reversed(_CODE_FENCE_RE.findall(cleaned)):
-            found = structural(block.strip(), relaxed=True)
-            if found:
-                return code_carver.strip_code_fence_lines(found)
     # Без оградок: проза-рассуждения и текст без кодовых маркеров — не код.
-    if _looks_like_prose(cleaned):
+    if _looks_like_prose(cleaned, ext):
         return ""
     whole = code_carver.strip_code_fence_lines(cleaned)
-    if _looks_like_code(whole) and not _mid_prose_lines(whole):
+    if _looks_like_code(whole, ext) and not _mid_prose_lines(whole, ext):
         return whole
     return ""
 
@@ -1708,6 +2002,7 @@ def _prepare_batch_run(
     solve_prog_lang_name, programming_language_id, programming_language_name,
     prompt_name, topic_id, topic_name, run_params, rerun, rerun_pairs,
     start_time, run_name="", save_solutions=False, delta="", file_name="",
+    run_type=AIModelTestRun.RUN_TYPE_BATCH, prompt_attempts=0,
 ):
     """Однопоточная подготовка batch-прогона (фаза воркера до model-потоков).
 
@@ -1743,13 +2038,20 @@ def _prepare_batch_run(
         )
         test_run = AIModelTestRun.objects.get(run_id=run_id)
     else:
+        is_prompt_debug = run_type == AIModelTestRun.RUN_TYPE_PROMPT_DEBUG
+        run_message = (
+            f"Prompt debug: {len(node_ids)} задач × {len(ordered_models)} моделей, "
+            f"попыток на пару: {prompt_attempts}"
+            if is_prompt_debug
+            else f"Batch solve: {len(node_ids)} задач × {len(ordered_models)} моделей"
+        )
         test_run = AIModelTestRun.objects.create(
             run_id=run_id,
-            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            run_type=run_type,
             user=user,
             status=AIModelTestRun.STATUS_RUNNING,
             started_at=start_time,
-            message=f"Batch solve: {len(node_ids)} задач × {len(ordered_models)} моделей",
+            message=run_message,
             total_models=len(ordered_models),
             programming_language_id=programming_language_id,
             programming_language_name=programming_language_name or "",
@@ -1762,16 +2064,22 @@ def _prepare_batch_run(
             run_name=(run_name or "")[:255],
         )
     state["test_run"] = test_run
+    if run_type == AIModelTestRun.RUN_TYPE_PROMPT_DEBUG:
+        log_mode = AIRequestLog.MODE_PROMPT_DEBUG
+        log_message = f"Prompt debug run {run_id}"
+    else:
+        log_mode = AIRequestLog.MODE_BATCH_SOLVE
+        log_message = f"Batch solve rerun {run_id}" if rerun else f"Batch solve run {run_id}"
     log = AIRequestLog.objects.create(
         user=user,
         username=username,
         external_user_id=external_id,
         user_full_name=full_name,
         source=AIRequestLog.SOURCE_ARM,
-        mode=AIRequestLog.MODE_BATCH_SOLVE,
+        mode=log_mode,
         sent_at=start_time,
         model_names=models_titles,
-        message=f"Batch solve rerun {run_id}" if rerun else f"Batch solve run {run_id}",
+        message=log_message,
         # Индексированный признак batch-записи: заменяет парсинг
         # «Batch solve run <hex>» из текста message (полный scan по журналу
         # на каждой загрузке «Настройки ИИ-приложения»).
@@ -1925,6 +2233,13 @@ def _prepare_batch_run(
         "prompt_name_cache": prompt_name_cache,
         "rerun_pairs": rerun_pairs,
         "start_time": start_time,
+        "run_type": run_type,
+        "prompt_attempts": int(prompt_attempts or 0),
+        # «Отладка промтов»: payload пар (по (model_key, node_id)) для
+        # проверочного прохода и счётчиков отчёта; пары с чужими/отсутствующими
+        # промптами — в skipped (в проверке не участвуют).
+        "prompt_debug_payloads": {},
+        "prompt_debug_skipped": set(),
     }
 
 
@@ -1954,6 +2269,8 @@ def _run_batch_job_worker(
     file_name="",
     rerun=False,
     rerun_pairs=None,
+    run_type=AIModelTestRun.RUN_TYPE_BATCH,
+    prompt_attempts=0,
 ):
     """Daemon worker for a batch-solve run.
 
@@ -1994,6 +2311,7 @@ def _run_batch_job_worker(
             run_params=run_params, rerun=rerun, rerun_pairs=rerun_pairs,
             start_time=start_time, run_name=run_name,
             save_solutions=save_solutions, delta=delta, file_name=file_name,
+            run_type=run_type, prompt_attempts=prompt_attempts,
         )
         if ctx is None:
             return
@@ -2018,6 +2336,15 @@ def _run_batch_job_worker(
                 thread.start()
             for thread in threads:
                 thread.join()
+
+        # «Отладка промтов»: после основного прохода — проверка всех пар по
+        # итоговым промптам (владелец решения: пользователь). Отменённый прогон
+        # проверку не запускает.
+        if (
+            ctx.get("run_type") == AIModelTestRun.RUN_TYPE_PROMPT_DEBUG
+            and not _is_cancel_requested(run_id)
+        ):
+            _run_prompt_debug_verification(ctx, ordered_models, dl_lock)
 
         _finalize_batch_run(ctx, record_stats=record_stats, rerun=rerun, rerun_pairs=rerun_pairs)
     except Exception as exc:
@@ -2079,12 +2406,30 @@ def _append_run_log(run_id, text):
         job["updated_at_ts"] = time.time()
 
 
+def _batch_solve_handler(model):
+    """Хендлер вызова модели в «Пакетном решении»: без think, если провайдер умеет.
+
+    Рассуждения в пакете не нужны: Ollama стримит их в отдельное поле
+    ``thinking``, и они съедают общий ``num_predict`` — ответ обрывается
+    лимитом генерации ДО кода (обрезы вида «thinking не дописан, content
+    пуст»). По докам Ollama (docs.ollama.com/capabilities/thinking) они
+    гасятся полем ``think: false`` — «request no thinking output», весь
+    бюджет остаётся ответу. У провайдеров без API-переключателя
+    (web-пулы, OpenRouter) возвращается обычный хендлер: запрет
+    рассуждений там уже сидит в базовом solve-сообщении
+    (``_NO_RAMBLE_INSTRUCTION``).
+    """
+    return get_no_think_handler(model["handler"]) or model["handler"]
+
+
 def _call_model_with_retries(ctx, model, message, client_id, task_label):
     """Вызов модели с автоповтором при «Сбое ответа модели».
 
     Возвращает ``(response, gen_seconds)`` — ответ хендлера (кортеж провайдера)
     и суммарное время вызовов модели (в попытках повторов тоже). Логика повторов:
 
+    * вызов идёт через ``_batch_solve_handler`` — у Ollama think выключен с
+      ПЕРВОГО запроса (reasoning не отнимает бюджет генерации у кода);
     * сбой (провайдер бросил исключение ИЛИ хендлер вернул is_error=True)
       печатается в журнал прогона **до** следующего вызова — сначала видно
       сбой, потом запрос уходит заново (ТЗ пользователя);
@@ -2099,11 +2444,12 @@ def _call_model_with_retries(ctx, model, message, client_id, task_label):
     attempts = 0
     last_exc = None
     gen_seconds = 0.0
+    call_handler = _batch_solve_handler(model)
     while True:
         attempts += 1
         gen_started = perf_counter()
         try:
-            response = async_to_sync(model["handler"])(message, client_id)
+            response = async_to_sync(call_handler)(message, client_id)
             last_exc = None
         except Exception as call_exc:  # noqa: BLE001 — сбой модели, не прогона
             response = None
@@ -2154,14 +2500,37 @@ def _mark_batch_pair_started(run_id, model_index, model, task_ctx):
         job["updated_at_ts"] = time.time()
 
 
+def _mark_batch_pair_failed(run_id, model_index, exc):
+    """Учесть непредвиденный сбой пары (строка в БД не записалась).
+
+    Сам сбой не обрывает цикл модели (см. ``_run_batch_model_loop``), но прогон
+    не должен отчитываться как успешный: финализация добавит примечание и
+    переведёт журнал в Error.
+    """
+    message = str(exc)[:300] or exc.__class__.__name__
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        entry = _batch_progress_entry(job, model_index)
+        if entry:
+            entry["pair_errors"] = entry.get("pair_errors", 0) + 1
+            entry["last_pair_error"] = message
+        job["updated_at_ts"] = time.time()
+
+
 def _mark_batch_pair_finished(run_id, model_index, item=None):
     """Записать результат пары и сдвинуть прогресс (под _jobs_lock).
 
-    ``completed_pairs`` выводится из фактического числа результатов, а не из
-    независимого счётчика: model-потоки завершают пары вперемешку, общий
-    счётчик ``+= 1`` терял бы обновления (classic lost update). Отменённые
+    ``completed_pairs`` выводится из фактического числа ЗАВЕРШЁННЫХ результатов,
+    а не из независимого счётчика: model-потоки завершают пары вперемешку,
+    общий счётчик ``+= 1`` терял бы обновления (classic lost update). Отменённые
     пары результата не пишут — инвариант ``completed_pairs == len(results)``
     сохраняется и для обычного прогона, и для перезапуска.
+
+    Upsert по ключу (модель, задача): «Отладка промтов» публикует пару ещё во
+    время попыток (``_publish_live_result``, флаг ``_live``), итоговая строка
+    ЗАМЕНЯЕТ её, а не задваивает (иначе счётчик завершённых пар не сходится).
     """
     with _jobs_lock:
         job = _jobs.get(run_id)
@@ -2169,8 +2538,17 @@ def _mark_batch_pair_finished(run_id, model_index, item=None):
             return
         entry = _batch_progress_entry(job, model_index)
         if item is not None:
-            job.setdefault("results", []).append(item)
-            job["completed_pairs"] = len(job["results"])
+            results = job.setdefault("results", [])
+            key = (item.get("model_key"), item.get("task_node_id"))
+            for index, existing in enumerate(results):
+                if (existing.get("model_key"), existing.get("task_node_id")) == key:
+                    results[index] = item
+                    break
+            else:
+                results.append(item)
+            job["completed_pairs"] = sum(
+                1 for row in results if not row.get("_live")
+            )
             if entry:
                 entry["done"] += 1
         if entry:
@@ -2210,74 +2588,21 @@ def _mark_batch_model_failed(run_id, model_index):
         job["updated_at_ts"] = time.time()
 
 
-# Предел длины входных данных/эталонного ответа, который сохраняется в БД
-# и показывается в карточке пары: файлы тестов в DL бывают до 1 МиБ, а
-# отчёт должен оставаться компактным.
-_TEST_DATA_CHARS_MAX = 8000
-
-
-def _fetch_failed_test_data(session_id, queue_id, comment=""):
-    """Входные данные и эталонный ответ проваленного теста (компактно).
-
-    DL: ``get-failed-tests`` → список подтверждённых проваленных тестов
-    (флаг ``canGetData`` — можно ли забирать данные), ``get-test-data`` →
-    ``{input, expectedOutput}`` по номеру теста. Берём ПЕРВЫЙ тест с
-    ``canGetData``; длинные данные обрезаем.
-
-    ФОЛБЭК: если DL не отдал подходящий тест (пустой список, нет
-    ``canGetData``), номер теста берём из самого вердикта («не пройден 2-й
-    тест», «[testN]: …») и пробуем забрать данные по нему — DL сам
-    откажет, если выдача запрещена.
-
-    Пустой словарь — данных нет (выдача запрещена настройками курса,
-    проверка не завершена, ошибка DL). Ошибки не поднимаются: данные теста
-    — дополнение к отчёту, а не условие прогона.
-    """
-    from .dl_api_client import (
-        get_failed_tests_from_dl,
-        get_test_data_from_dl,
-    )
-
-    test_number = 0
-    for t in get_failed_tests_from_dl(session_id, queue_id):
-        if not t.get("canGetData"):
-            continue
-        try:
-            test_number = int(t.get("testNumber") or 0)
-        except (TypeError, ValueError):
-            test_number = 0
-        if test_number > 0:
-            break
-    if not test_number:
-        # Номер из вердикта DL — последний шанс узнать, какой тест упал.
-        test_number = _dl_failed_test_number(comment)
-    if not test_number:
-        return {}
-    data = get_test_data_from_dl(session_id, queue_id, test_number)
-    if not data:
-        return {}
-    raw_input = data.get("input") or ""
-    raw_expected = data.get("expected_output") or ""
-    return {
-        "test_number": test_number,
-        "input": raw_input[:_TEST_DATA_CHARS_MAX],
-        "input_truncated": len(raw_input) > _TEST_DATA_CHARS_MAX,
-        "expected_output": raw_expected[:_TEST_DATA_CHARS_MAX],
-        "expected_truncated": len(raw_expected) > _TEST_DATA_CHARS_MAX,
-    }
-
-
-def _pair_file_name(model, node_id, file_extension, run_file_name=""):
+def _pair_file_name(model, task_id, file_extension, run_file_name=""):
     """Имя файла решения, отправляемого в DL (контракт fileName).
 
-    По умолчанию — ПОДПИСАННОЕ: ``<модель>_<задача>.<ext>`` («Gemma4_12345.mcp»):
-    в DL сразу видно, чьё решение и по какой задаче. Имя, заданное оператором
-    на форме прогона, приоритетнее — он назвал файл сам.
+    По умолчанию — ПОДПИСАННОЕ: ``<модель>_<task_id>.<ext>``
+    («Gemma4_12345.mcp»): в DL сразу видно, чьё решение и по какой задаче.
+    ``task_id`` — ID задачи DL (поле taskId из get-task-info), а не node_id
+    узла дерева: именно taskId — идентификатор задачи, который видит
+    пользователь в DL. Если taskId ещё не подтянут (старая запись Task),
+    вызывающий передаёт node_id как fallback. Имя, заданное оператором на
+    форме прогона, приоритетнее — он назвал файл сам.
     """
     if run_file_name:
         return run_file_name
     title = (model or {}).get("title") or (model or {}).get("key") or "model"
-    return _build_dl_file_name(f"{title}_{node_id}", file_extension) or ""
+    return _build_dl_file_name(f"{title}_{task_id}", file_extension) or ""
 
 
 def _process_batch_pair(ctx, task_ctx, model, dl_lock):
@@ -2322,11 +2647,12 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     # Машина (Дельта), на которой DL проверял решение (deltaId/deltaName).
     dl_delta_id = 0
     dl_delta_name = ""
-    # Имя файла решения, отправленного в DL (подписанное: <модель>_<задача>).
+    # Имя файла решения, отправленного в DL (подписанное: <модель>_<task_id>).
     pair_file_name = ""
-    # Входные данные и эталонный ответ проваленного теста (только для НЕ
-    # решённых пар, которым DL разрешил выдачу теста).
-    dl_test_data = {}
+    # Входные данные и эталонные ответы проваленных тестов (только для НЕ
+    # решённых пар, которым DL разрешил выдачу теста). Список: DL отдаёт по
+    # одному провалу на каждый этап проверки.
+    dl_test_data = []
     # Причина провала (таксономия сбоев). Пустая строка = причина нет
     # (пара решена). Заполняется в каждой ветке ниже; последняя присваивание
     # — в ветке DL-классификации по тексту комментария.
@@ -2334,10 +2660,14 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
 
     held_dl_lock = False
     try:
-        message = _build_solve_message(
-            task.statement, prog_lang_name, topic_name, ctx["ui_language"], task_prompt_id,
-            file_extension=effective_ext,
-        )
+        # «Отладка промтов» подкладывает готовое сообщение с дополнениями
+        # промпта (все гейты пары ниже переиспользуются как есть).
+        message = task_ctx.get("solve_message_override")
+        if not message:
+            message = _build_solve_message(
+                task.statement, prog_lang_name, topic_name, ctx["ui_language"], task_prompt_id,
+                file_extension=effective_ext,
+            )
         # Вызов модели с автоповтором при «Сбое ответа модели»: сбой
         # печатается в журнал прогона, запрос пересылается СРАЗУ, попыток —
         # до _MODEL_ERROR_MAX_ATTEMPTS. Исключение провайдера — тоже сбой
@@ -2352,7 +2682,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             return None
         response_text, tokens = _extract_model_response(response)
         prompt_tokens = _extract_prompt_tokens(response)
-        cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
+        cleaned_text = _clean_model_text(response_text, effective_ext)
         if not cleaned_text:
             cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
             logger.warning("ARM batch: model %s returned empty response for task node_id=%s", model["key"], node_id)
@@ -2407,14 +2737,9 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 code_only = ""
 
             # Кода НЕ извлекли (при любом исходе, не только обрезе) — один
-            # авто-ретрай к ТОЙ ЖЕ модели, БЕЗ think-механики. Думающие модели
-            # подводят протекшим reasoning'ом; по докам Ollama
-            # (docs.ollama.com/capabilities/thinking) он глушится полем
-            # ``think: false`` в запросе (ai.model_clients.get_no_think_handler);
-            # провайдерам без API-переключателя повтор идёт обычным хендлером —
-            # запрет рассуждений уже сидит в базовом сообщении
-            # (_NO_RAMBLE_INSTRUCTION), а повторы недетерминированную генерацию
-            # переразыгрывают. Обрез — отдельная причина: ретрай ещё и с
+            # авто-ретрай к ТОЙ ЖЕ модели (тот же «без think» хендлер —
+            # _batch_solve_handler). Повторы недетерминированную генерацию
+            # переразыгрывают; обрез — отдельная причина: ретрай ещё и с
             # припиской «сразу код» (_CUT_RETRY_INSTRUCTION). Повторный вызов
             # НЕ срывает пару: при исключении держим первый ответ; если и
             # ретрай неудачен — пара пишется как была (с truncated-флагом при
@@ -2424,10 +2749,10 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                     return None
                 retry_started = perf_counter()
                 try:
-                    # Хендлер ретрая: «без think», если провайдер умеет
-                    # (Ollama think=False); приписка «сразу код» — только при
-                    # обрезе, у прочих причин задача идёт дословно.
-                    retry_call = get_no_think_handler(model["handler"]) or model["handler"]
+                    # Тот же хендлер, что и первый вызов: у Ollama think
+                    # выключен; приписка «сразу код» — только при обрезе, у
+                    # прочих причин задача идёт дословно.
+                    retry_call = _batch_solve_handler(model)
                     retry_message = message
                     if truncated:
                         retry_message += "\n" + _CUT_RETRY_INSTRUCTION[get_ui_language_suffix(ctx["ui_language"])]
@@ -2440,7 +2765,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                         return None
                     response_text, tokens = _extract_model_response(retry_response)
                     prompt_tokens = _extract_prompt_tokens(retry_response)
-                    cleaned_text = strip_tags(_strip_think_blocks(response_text)).strip()
+                    cleaned_text = _clean_model_text(response_text, effective_ext)
                     if not cleaned_text:
                         cleaned_text = "Модель вернула пустой ответ (нет содержимого)."
                         logger.warning(
@@ -2511,11 +2836,12 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                 if not _acquire_dl_run_lock(dl_lock, ctx["run_id"]):
                     return None
                 held_dl_lock = True
-                # Имя файла решения — ПОДПИСАННОЕ: <модель>_<задача>.<ext>
-                # («Gemma4_12345.mcp»). Имя, заданное оператором на форме
-                # прогона, приоритетнее — он назвал файл сам.
+                # Имя файла решения — ПОДПИСАННОЕ: <модель>_<task_id>.<ext>
+                # («Gemma4_12345.mcp»). taskId из get-task-info приоритетнее
+                # node_id узла дерева; node_id — fallback для старых Task.
                 pair_file_name = _pair_file_name(
-                    model, node_id, effective_ext, ctx.get("file_name") or "",
+                    model, task.task_id or node_id, effective_ext,
+                    ctx.get("file_name") or "",
                 )
                 dl_result = _test_solution_on_dl(
                     ctx["session_id"], node_id, code_only, effective_ext,
@@ -2558,12 +2884,12 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
                     failure_reason = _failure_reason_from_dl_comment(dl_test_comment)
                     if not failure_reason:
                         failure_reason = _REASON_UNDEFINED
-                # НЕ решённая пара: забираем входные данные и эталонный
-                # ответ проваленного теста (DL разрешает выдачу не всегда —
-                # флаг canGetData). Данные компактные: в карточке пары
-                # показываются сразу после извлечённого кода.
+                # НЕ решённая пара: забираем входные данные и эталонные
+                # ответы ВСЕХ подтверждённых проваленных тестов (DL разрешает
+                # выдачу не всегда — флаг canGetData). Данные компактные и
+                # показываются в раскрытой карточке вместе с телом результата.
                 if verdict != _VERDICT_SOLVED and dl_queue_id:
-                    dl_test_data = _fetch_failed_test_data(
+                    dl_test_data = fetch_failed_test_data(
                         ctx["session_id"], dl_queue_id, dl_test_comment,
                     )
             else:
@@ -2668,7 +2994,7 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             "dl_test_number": dl_test_number or 0,
             # Входные/выходные данные проваленного теста — только для НЕ
             # решённых пар (в карточке идут сразу после извлечённого кода).
-            "dl_test_data": dl_test_data or {},
+            "dl_test_data": dl_test_data or [],
             "delta_id": dl_delta_id or 0,
             "delta_name": dl_delta_name or "",
             "file_extension": effective_ext or "",
@@ -2734,6 +3060,953 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
     return None
 
 
+# ---------------------------------------------------------------- Prompt debug
+#
+# «Отладка промтов» (run_type=prompt_debug): пара решается обычным batch-путём,
+# при провале DL модель-«редактор» дописывает короткое дополнение к промпту и
+# задача решается заново — до успеха или исчерпания ``prompt_attempts``.
+# Дополнения сохраняются ТОЛЬКО если пара в итоге решена (владелец: сервис
+# ai/services/prompt_debug.py; раннер его оркестрирует).
+
+
+def _load_prompt_for_debug(prompt_id):
+    """Промпт пары (со shared) или None — «править нечего»."""
+    from .models import Prompt
+
+    if not prompt_id:
+        return None
+    try:
+        pid = int(prompt_id)
+    except (TypeError, ValueError):
+        return None
+    return Prompt.objects.select_related("shared_prompt").filter(pk=pid).first()
+
+
+def _can_edit_prompt_for_debug(user, prompt):
+    """ACL правки промпта без request (раннер работает в фоновом потоке)."""
+    from .admin.permissions import can_edit_prompt
+
+    try:
+        return bool(can_edit_prompt(user, prompt))
+    except Exception:  # noqa: BLE001 — права не должны ронять прогон
+        logger.exception("ARM prompt debug: проверка прав на промпт упала")
+        return False
+
+
+def _prompt_debug_text(prompt, task_ctx, task, pending_additions):
+    """Действующий текст промпта + НЕ закоммиченные дополнения этой пары."""
+    from .services.prompt_debug import PROMPT_DEBUG_HEADER
+
+    text = prompt.get_effective_text(
+        "Русский", task_ctx["prog_lang_name"], task_ctx["topic_name"], task.statement, "",
+    )
+    pending = []
+    for addition in pending_additions:
+        needle = " ".join(str(addition or "").casefold().split())
+        if needle and needle not in " ".join(text.casefold().split()):
+            pending.append(addition)
+    if not pending:
+        return text
+    if PROMPT_DEBUG_HEADER not in text:
+        text = text.rstrip() + "\n\n" + PROMPT_DEBUG_HEADER
+    return text + "".join("\n- " + addition for addition in pending)
+
+
+def _accumulate_usage(usage, *, duration=0.0, tokens=0, prompt_tokens=0):
+    """Прибавить стоимость вызова к суммарному usage пары (in place)."""
+    usage["duration"] = round(float(usage.get("duration") or 0) + float(duration or 0), 2)
+    usage["tokens"] = int(usage.get("tokens") or 0) + int(tokens or 0)
+    usage["prompt_tokens"] = int(usage.get("prompt_tokens") or 0) + int(prompt_tokens or 0)
+    return usage
+
+
+def _propose_prompt_addition(ctx, model, task_ctx, item, prompt_text):
+    """Модель-редактор: короткое дополнение к промпту по провалу DL.
+
+    Возвращает ``(addition, usage, error)``; пустое дополнение — редактор не
+    смог (текст не по делу/сбой модели) — попытки пары останавливаются.
+    Исключение провайдера ловится здесь и возвращается как ``error``: сбой
+    редактора закрывает ПАРУ, а не цикл модели (см. ``_process_prompt_debug_pair``).
+    """
+    from .services.prompt_debug import build_debug_message, sanitize_addition
+
+    task = task_ctx["task"]
+    message = build_debug_message(
+        current_prompt=prompt_text,
+        task_statement=task.statement,
+        code=item.get("code") or "",
+        dl_comment=item.get("dl_comment") or "",
+        raw_response=item.get("raw_response") or "",
+        test_data=item.get("dl_test_data") or [],
+    )
+    client_id = (
+        f"admin-prompt-debug-{ctx['user_id']}-{model['key']}-"
+        f"{ctx['run_id']}-{task_ctx['node_id']}"
+    )
+    # Сбой вызова редактора НЕ должен валить цикл модели: без этой ловушки
+    # исключение провайдера уносило всю модель (оставшиеся задачи не решались),
+    # а пара оставалась без payload'а попыток — в UI было видно только
+    # «Проверка: не решено». Пара честно закрывается, попытки сохраняются.
+    usage = {"duration": 0.0, "tokens": 0, "prompt_tokens": 0}
+    try:
+        response, seconds = _call_model_with_retries(
+            ctx, model, message, client_id, f"правка промпта: {task_ctx['task_name']}",
+        )
+    except Exception as exc:  # noqa: BLE001 — сбой модели, не прогона
+        logger.exception("ARM prompt debug: вызов редактора упал")
+        _append_run_log(
+            ctx["run_id"],
+            f"«{task_ctx['task_name']}» ({model['title']}): редактор промпта "
+            f"не ответил — {str(exc)[:200] or 'ошибка провайдера'}",
+        )
+        return "", usage, str(exc)[:300]
+    usage["duration"] = seconds
+    if response is None:
+        return "", usage, ""
+    response_text, tokens = _extract_model_response(response)
+    usage["tokens"] = tokens or 0
+    usage["prompt_tokens"] = _extract_prompt_tokens(response) or 0
+    addition = sanitize_addition(_clean_model_text(response_text, ""))
+    return addition, usage, ""
+
+
+def _prompt_debug_item(ctx, task_ctx, model, *, payload, result_obj, status, verdict,
+                       failure_reason, short_response="", duration=0.0, tokens=0,
+                       prompt_tokens=0):
+    """result_item пары отладки в контракте batch-результата (UI общий)."""
+    task = task_ctx["task"]
+    return {
+        "result_id": result_obj.pk if result_obj is not None else None,
+        "task_id": task.id,
+        "task_node_id": task.node_id,
+        "task_name": task.name,
+        "dl_url": dl_task_url(task.node_id, ctx["course_id"]),
+        "model_key": model["key"],
+        "model_title": model["title"],
+        "duration": duration,
+        "tokens": tokens,
+        "tokens_prompt": prompt_tokens,
+        "short_response": short_response,
+        "status": status,
+        "verdict": verdict,
+        "failure_reason": failure_reason or "",
+        "failure_reason_label": AIModelTestResult.FAILURE_REASON_LABELS.get(
+            failure_reason or "", ""
+        ),
+        "raw_response": "",
+        "code": "",
+        "dl_comment": "",
+        "dl_error": "",
+        "dl_queue_id": 0,
+        "dl_file_name": "",
+        "dl_test_number": 0,
+        "dl_test_data": [],
+        "delta_id": 0,
+        "delta_name": "",
+        "file_extension": task_ctx["effective_ext"] or "",
+        "topic_name": task_ctx["topic_name"],
+        "tree_path": task_ctx.get("tree_path") or "",
+        "programming_language_id": ctx["programming_language_id"],
+        "topic_id": task.topic_id,
+        "prog_lang_name": task_ctx["prog_lang_name"],
+        "prompt_id": payload.get("prompt_id"),
+        "prompt_name": payload.get("prompt_name") or "",
+        "truncated": False,
+        "updated_ts": time.time(),
+        "prompt_debug": payload,
+        "skipped": True,
+    }
+
+
+def _write_prompt_debug_skipped(ctx, task_ctx, model, dl_lock, reason, prompt):
+    """Пара пропущена: нет промпта / нет прав на его правку. Модель не зовём."""
+    from .services.prompt_debug import empty_payload
+
+    payload = empty_payload(
+        prompt=prompt,
+        max_attempts=_prompt_debug_loop_limit(ctx.get("prompt_attempts")),
+        skipped=True,
+        skip_reason=reason,
+    )
+    task = task_ctx["task"]
+    result_obj, _ = AIModelTestResult.objects.update_or_create(
+        run=ctx["test_run"],
+        model_key=model["key"],
+        task=task,
+        defaults={
+            "model_title": model["title"],
+            "status": "error",
+            "verdict": _VERDICT_SKIPPED,
+            "failure_reason": _REASON_SKIPPED,
+            "duration_seconds": 0.0,
+            "tokens": 0,
+            "tokens_prompt": 0,
+            "short_response": reason,
+            "raw_response": "",
+            "code": "",
+            "dl_comment": "",
+            "dl_error": "",
+            "dl_queue_id": 0,
+            "dl_file_name": "",
+            "dl_test_data": "",
+            "file_extension_snapshot": task_ctx["effective_ext"] or "",
+            "topic_id_snapshot": task.topic_id,
+            "topic_name_snapshot": task_ctx["topic_name"],
+            "prog_lang_snapshot": task_ctx["prog_lang_name"],
+            "prompt_id": prompt.pk if prompt is not None else None,
+            "prompt_name": payload["prompt_name"],
+            "truncated": False,
+            "prompt_debug": payload,
+            "updated_at": timezone.now(),
+        },
+    )
+    item = _prompt_debug_item(
+        ctx, task_ctx, model, payload=payload, result_obj=result_obj,
+        status="error", verdict=_VERDICT_SKIPPED, failure_reason=_REASON_SKIPPED,
+        short_response=reason,
+    )
+    ctx["prompt_debug_skipped"].add((model["key"], task_ctx["node_id"]))
+    ctx["prompt_debug_payloads"][(model["key"], task_ctx["node_id"])] = payload
+    _append_run_log(
+        ctx["run_id"],
+        f"«{task_ctx['task_name']}» ({model['title']}): пропущено — {reason}",
+    )
+    return item
+
+
+def _prompt_debug_attempt_label(attempt, max_attempts):
+    """«3/5» или «3 (без ограничения)» — подпись попытки для журнала."""
+    if max_attempts:
+        return f"{attempt}/{max_attempts}"
+    return f"{attempt} (без ограничения)"
+
+
+def _prompt_debug_loop_limit(raw):
+    """Лимит попыток пары: 0/пусто — БЕЗ ограничения (стоп — кнопка «Далее»)."""
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_pair_skip_requested(run_id, model_key, node_id):
+    """Нажата ли «Далее» для этой пары (метку ставит ``request_prompt_debug_skip``)."""
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return False
+        return (model_key, node_id) in (job.get("skipped_pairs") or set())
+
+
+def request_prompt_debug_skip(run_id):
+    """Кнопка «Далее»: пропустить ТЕКУЩИЕ пары всех моделей прогона.
+
+    Возвращает число помеченных пар (0 — пары уже не выполняются). Метка
+    живёт в живом job'е: воркер проверяет её на границе попыток и закрывает
+    пару, не сохраняя правки (пара не решена).
+    """
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job or job.get("run_type") != AIModelTestRun.RUN_TYPE_PROMPT_DEBUG:
+            return 0
+        skipped = job.setdefault("skipped_pairs", set())
+        marked = 0
+        for entry in job.get("model_progress") or []:
+            node_id = entry.get("current_task_node_id")
+            model_key = entry.get("model_key")
+            if node_id and model_key and (model_key, node_id) not in skipped:
+                skipped.add((model_key, node_id))
+                marked += 1
+        job["updated_at_ts"] = time.time()
+        return marked
+
+
+def _publish_live_result(run_id, item):
+    """Показать незавершённую пару в живых результатах (прогресс отладки).
+
+    НЕ завершает пару: ``completed_pairs`` считается только по строкам без
+    ``_live``, а ``_mark_batch_pair_finished`` заменяет живую строку итоговой
+    (upsert по ключу модель+задача). Так поллинг видит «Попытка 1 — не решено»
+    ещё до того, как пара дорешает.
+    """
+    key = (item.get("model_key"), item.get("task_node_id"))
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        results = job.setdefault("results", [])
+        live = dict(item)
+        # Payload мутирует по ходу пары (попытки дописываются) — в снапшот
+        # кладём стабильную копию, иначе уже отданный «живой» снимок
+        # «дорисовывает» попытки, которых на момент снимка не было.
+        live["prompt_debug"] = copy.deepcopy(item.get("prompt_debug") or {})
+        live["_live"] = True
+        for index, existing in enumerate(results):
+            if (existing.get("model_key"), existing.get("task_node_id")) == key:
+                results[index] = live
+                break
+        else:
+            results.append(live)
+        job["completed_pairs"] = sum(1 for row in results if not row.get("_live"))
+        job["updated_at_ts"] = time.time()
+
+
+def _publish_pair_started(ctx, task_ctx, model):
+    """Показать пару в «Ответах моделей» СРАЗУ после старта.
+
+    Без этого строка появлялась только по завершении пары (первые минуты
+    прогона таблица пуста — оператор видит «результаты пропали», а после
+    перезагрузки страницы пустой список выглядит как потеря данных).
+    Строка живёт в ``job["results"]`` с флагом ``_live`` (в completed_pairs и
+    в итоговую сводку не идёт) и заменяется итоговой по ключу
+    (модель, задача) в ``_mark_batch_pair_finished``.
+    """
+    task = task_ctx["task"]
+    run_id = ctx["run_id"]
+    is_prompt_debug = ctx.get("run_type") == AIModelTestRun.RUN_TYPE_PROMPT_DEBUG
+    item = {
+        # Итоговой строки в БД ещё нет — тело грузить некуда; карточка
+        # показывает «выполняется…».
+        "result_id": None,
+        "task_id": task.id,
+        "task_node_id": task.node_id,
+        "task_name": task.name,
+        "dl_url": dl_task_url(task.node_id, ctx.get("course_id")),
+        "model_key": model["key"],
+        "model_title": model["title"],
+        "duration": 0.0,
+        "tokens": 0,
+        "tokens_prompt": 0,
+        "short_response": "",
+        "status": "running",
+        "verdict": "",
+        "failure_reason": "",
+        "failure_reason_label": "",
+        "truncated": False,
+        "dl_queue_id": 0,
+        "dl_file_name": "",
+        "dl_test_number": 0,
+        "has_test_data": False,
+        "delta_id": 0,
+        "delta_name": "",
+        "file_extension": task_ctx.get("effective_ext") or "",
+        "topic_name": task_ctx.get("topic_name") or "",
+        "tree_path": task_ctx.get("tree_path") or "",
+        "programming_language_id": ctx.get("programming_language_id"),
+        "topic_id": task.topic_id,
+        "prog_lang_name": task_ctx.get("prog_lang_name") or "",
+        "prompt_id": task_ctx.get("prompt_id"),
+        "prompt_name": "",
+        "updated_ts": time.time(),
+        "lazy_body": True,
+        "has_prompt_debug": is_prompt_debug,
+        "prompt_debug_state": {},
+        "_live": True,
+    }
+    if is_prompt_debug:
+        # Карточка сразу показывает, по какому промпту идёт отладка (попыток 0 —
+        # первая ещё выполняется); сам payload заменяется итоговым.
+        item["prompt_debug"] = {
+            "prompt_id": task_ctx.get("prompt_id"),
+            "prompt_name": "",
+            "attempts": [],
+            "committed": False,
+        }
+
+    key = (model["key"], task.node_id)
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        results = job.setdefault("results", [])
+        for index, existing in enumerate(results):
+            if (existing.get("model_key"), existing.get("task_node_id")) == key:
+                results[index] = item
+                break
+        else:
+            results.append(item)
+        job["updated_at_ts"] = time.time()
+
+
+def _drop_live_pair(run_id, model, task_ctx):
+    """Убрать строку «выполняется…» пары, которая так и не дала результат.
+
+    Иначе непредвиденный сбой пары оставил бы в таблице вечное «в работе».
+    """
+    key = (model["key"], task_ctx["node_id"])
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        results = job.get("results") or []
+        job["results"] = [
+            row for row in results
+            if not (
+                row.get("_live")
+                and not row.get("result_id")
+                and (row.get("model_key"), row.get("task_node_id")) == key
+            )
+        ]
+        job["updated_at_ts"] = time.time()
+
+
+def _store_prompt_debug_payload(ctx, task_ctx, model, item, payload):
+    """Записать payload отладки пары в БД и в живые результаты.
+
+    Вызывается после КАЖДОЙ попытки (а не только в конце): пользователь
+    видит первую неудачу красной и каждое следующее дополнение промпта по
+    мере их появления, а не готовый итог с проверкой.
+    """
+    usage = payload.get("usage") or {}
+    result_id = (item or {}).get("result_id")
+    if not result_id:
+        result_id = (
+            AIModelTestResult.objects.filter(
+                run=ctx["test_run"], model_key=model["key"], task=task_ctx["task"],
+            ).values_list("pk", flat=True).first()
+        )
+    if result_id:
+        AIModelTestResult.objects.filter(pk=result_id).update(
+            prompt_debug=payload,
+            duration_seconds=usage.get("duration") or 0.0,
+            tokens=usage.get("tokens") or 0,
+            tokens_prompt=usage.get("prompt_tokens") or 0,
+            updated_at=timezone.now(),
+        )
+    ctx["prompt_debug_payloads"][(model["key"], task_ctx["node_id"])] = payload
+    if item is not None:
+        item["result_id"] = item.get("result_id") or result_id
+        item["prompt_debug"] = payload
+        item["duration"] = usage.get("duration") or 0.0
+        item["tokens"] = usage.get("tokens") or 0
+        item["tokens_prompt"] = usage.get("prompt_tokens") or 0
+        item["updated_ts"] = time.time()
+        _publish_live_result(ctx["run_id"], item)
+    return item
+
+
+def _run_prompt_debug_attempts(ctx, task_ctx, model, dl_lock, prompt, payload, state):
+    """Цикл попыток пары: решить → дополнить промпт → решить заново.
+
+    Мутирует ``payload`` (попытки, usage) и ``state`` (item/solved/additions).
+    Каждая попытка — обычный ``_process_batch_pair`` (все гейты: мусор, обрез,
+    авто-ретрай, DL-тест, таксономия, данные теста) с сообщением из
+    АКТУАЛЬНОГО промпта (перечитывается из БД: другие пары/модели успевают
+    закоммитить свои дополнения) плюс несохранённые дополнения этой пары.
+    """
+    task = task_ctx["task"]
+    max_attempts = payload["max_attempts"]
+    usage = payload["usage"]
+    attempt = 0
+    while True:
+        attempt += 1
+        fresh = _load_prompt_for_debug(prompt.pk)
+        if fresh is not None:
+            prompt = fresh
+        prompt_text = _prompt_debug_text(prompt, task_ctx, task, state["additions"])
+        pair_ctx = dict(task_ctx)
+        pair_ctx["solve_message_override"] = _compose_solve_message(
+            prompt_text, task.statement, task_ctx["prog_lang_name"],
+            task_ctx["topic_name"], ctx["ui_language"],
+            file_extension=task_ctx["effective_ext"],
+        )
+        # Копия ctx: save_solutions=False — промежуточный код не должен
+        # попадать в кэш, промпт ещё не сохранён.
+        attempt_ctx = dict(ctx)
+        attempt_ctx["save_solutions"] = False
+        item = _process_batch_pair(attempt_ctx, pair_ctx, model, dl_lock)
+        if item is None:
+            state["cancelled"] = True
+            return
+        state["item"] = item
+        _accumulate_usage(
+            usage,
+            duration=item.get("duration") or 0,
+            tokens=item.get("tokens") or 0,
+            prompt_tokens=item.get("tokens_prompt") or 0,
+        )
+        solved = item.get("verdict") == _VERDICT_SOLVED
+        state["solved"] = solved
+        payload["attempts"].append({
+            "attempt": attempt,
+            "verdict": item.get("verdict") or _VERDICT_FAILED,
+            "dl_comment": (item.get("dl_comment") or "")[:2000],
+            "addition": "",
+            "applied": False,
+        })
+        label = _prompt_debug_attempt_label(attempt, max_attempts)
+        if solved:
+            _append_run_log(
+                ctx["run_id"],
+                f"«{task_ctx['task_name']}» ({model['title']}): решено "
+                f"с попытки {label}",
+            )
+            break
+        reason = item.get("failure_reason_label") or item.get("failure_reason") or ""
+        _append_run_log(
+            ctx["run_id"],
+            f"«{task_ctx['task_name']}» ({model['title']}): попытка "
+            f"{label} не решена — {reason or 'причина не распознана'}",
+        )
+        # Попытка видна в UI сразу (красная плашка «Не решено»), не только
+        # в готовом итоге пары.
+        _store_prompt_debug_payload(ctx, task_ctx, model, item, payload)
+        if max_attempts and attempt >= max_attempts:
+            payload["stopped"] = f"Исчерпан лимит попыток ({max_attempts})"
+            break
+        if _is_pair_skip_requested(ctx["run_id"], model["key"], task_ctx["node_id"]):
+            payload["stopped"] = "Пара пропущена по кнопке «Далее»"
+            payload["stopped_by_user"] = True
+            _append_run_log(
+                ctx["run_id"],
+                f"«{task_ctx['task_name']}» ({model['title']}): пропущено по "
+                "кнопке «Далее» — переходим к следующей задаче",
+            )
+            break
+        # Провал не от DL (сбой модели / протухший DLSID / нет кода от модели) —
+        # правка промпта тут не поможет.
+        if not (item.get("dl_comment") or "") or item.get("failure_reason") in (
+            _REASON_MODEL_ERROR, _REASON_DL_UNAUTHORIZED,
+        ):
+            payload["stopped"] = (
+                "Правка промпта не поможет: "
+                + (item.get("failure_reason_label") or "это не провал DL")
+            )
+            break
+        addition, editor_usage, editor_error = _propose_prompt_addition(
+            ctx, model, task_ctx, item, prompt_text,
+        )
+        _accumulate_usage(usage, **editor_usage)
+        if editor_error:
+            payload["stopped"] = f"Редактор промпта не ответил: {editor_error}"
+            break
+        if not addition:
+            payload["stopped"] = "Редактор не предложил дополнение"
+            _append_run_log(
+                ctx["run_id"],
+                f"«{task_ctx['task_name']}» ({model['title']}): редактор не предложил "
+                "дополнение — попытки остановлены",
+            )
+            break
+        state["additions"].append(addition)
+        payload["attempts"][-1]["addition"] = addition
+        _store_prompt_debug_payload(ctx, task_ctx, model, item, payload)
+        _append_run_log(
+            ctx["run_id"],
+            f"«{task_ctx['task_name']}» ({model['title']}): промпт дополнен, "
+            f"повтор {_prompt_debug_attempt_label(attempt + 1, max_attempts)}",
+        )
+
+
+def _commit_prompt_additions_with_retry(prompt_id, additions, user, *, attempts=2):
+    """Коммит правок промпта с одним повтором на транзиентный сбой.
+
+    Пара уже РЕШЕНА по дополненному промпту — потерять правку из-за разового
+    сбоя БД нельзя («промпт не изменился» при зелёной паре). Повтор безопасен:
+    ``commit_prompt_additions`` идемпотентен (дедуп по тексту).
+    """
+    from .services.prompt_debug import commit_prompt_additions
+
+    for attempt in range(attempts):
+        try:
+            return commit_prompt_additions(prompt_id, additions, user=user)
+        except Exception:  # noqa: BLE001 — сбой коммита не должен валить пару
+            # Техническая причина (SQL и т. п.) — только в лог: пользователю она
+            # ничего не говорит, а в карточке пары выводится человеческий текст.
+            logger.exception(
+                "ARM prompt debug: коммит промпта не удался (попытка %s)", attempt + 1,
+            )
+    return False, (
+        "Правки не записаны: сбой при сохранении промпта. "
+        "Техническая причина — в журнале прогона; пару можно запустить заново."
+    ), {}
+
+
+def _finish_prompt_debug_pair(ctx, task_ctx, model, payload, state):
+    """Итог пары: коммит успешных правок + запись payload. Возвращает item.
+
+    Коммит — только если пара В ИТОГЕ решена (и не отменена); иначе правки
+    остаются лишь в payload (в UI — «предложено, но не сохранено»). Из
+    накопленных дополнений сохраняется только последнее (см. ниже).
+    ``None`` — прогон отменён, цикл модели завершается.
+    """
+    item = state.get("item")
+    additions = state.get("additions") or []
+    solved = bool(state.get("solved")) and not state.get("cancelled")
+    if additions and solved:
+        # В промпт идёт ТОЛЬКО последнее дополнение — то, при котором пара
+        # прошла. Пока пара шла failed→failed, её вердикт DL не менялся, значит
+        # предыдущие дополнения ничего не дали: сохранять их — значит копить в
+        # ОБЩЕМ промпте неподтверждённый текст (на практике — 4 пересказа
+        # одного правила за один прогон), который затем действует на все задачи
+        # с этой привязкой. Эффект сохранённого текста отдельно меряет
+        # проверочный проход; тексты несработавших дополнений остаются в
+        # payload и видны в карточке пары.
+        ok, error, info = _commit_prompt_additions_with_retry(
+            payload["prompt_id"], additions[-1:], ctx.get("user"),
+        )
+        if ok:
+            payload["committed"] = True
+            saved = list(info.get("appended") or []) + list(
+                info.get("already_present") or []
+            )
+            for entry in payload["attempts"]:
+                if not entry.get("addition"):
+                    continue
+                entry["applied"] = entry["addition"] in saved
+                if not entry["applied"]:
+                    # Не сработало: пара решилась только позже (или другим
+                    # дополнением). UI объясняет это отдельной подписью.
+                    entry["ineffective"] = True
+            _append_run_log(
+                ctx["run_id"],
+                f"Промпт «{payload['prompt_name']}» дополнен "
+                f"({len(info.get('appended') or [])} новых) — правки сохранены",
+            )
+        else:
+            payload["commit_error"] = error
+            _append_run_log(
+                ctx["run_id"],
+                f"Промпт «{payload['prompt_name']}» НЕ сохранён: {error}",
+            )
+    elif additions and not state.get("cancelled"):
+        payload["commit_error"] = "Задача не решена — правки не сохранены"
+        _append_run_log(
+            ctx["run_id"],
+            f"«{task_ctx['task_name']}» ({model['title']}): задача не решена — "
+            "правки промпта не сохранены",
+        )
+    _store_prompt_debug_payload(ctx, task_ctx, model, item, payload)
+    if state.get("cancelled"):
+        return None
+    return item
+
+
+def _process_prompt_debug_pair(ctx, task_ctx, model, dl_lock):
+    """Пара «Отладки промтов»: решить → дополнить промпт → решить заново.
+
+    Пара обязана закрыться ВСЕГДА и с payload'ом: сбой редактора/провайдера
+    ловится здесь, попытки успевают записаться (``_store_prompt_debug_payload``
+    после каждой), а коммит делается в ``_finish_prompt_debug_pair``. Раньше
+    исключение редактора уносило весь цикл модели, и в UI оставался только
+    результат проверочного прохода — «промпт не менялся».
+
+    Закрытие пары (коммит + запись payload) — ВНУТРИ try: сбой записи не
+    должен ни валить цикл модели, ни оставлять пару без payload'а, иначе
+    проверка показывала бы «основной проход не выполнялся».
+    """
+    from .services.prompt_debug import empty_payload
+
+    payload = empty_payload(max_attempts=_prompt_debug_loop_limit(ctx.get("prompt_attempts")))
+    state = {"item": None, "solved": False, "additions": [], "cancelled": False}
+    try:
+        prompt = _load_prompt_for_debug(task_ctx.get("prompt_id"))
+        if prompt is None:
+            return _write_prompt_debug_skipped(
+                ctx, task_ctx, model, dl_lock,
+                "у задачи нет промпта (нет привязки) — править нечего", None,
+            )
+        if not _can_edit_prompt_for_debug(ctx.get("user"), prompt):
+            from .i18n import get_localized_name
+
+            return _write_prompt_debug_skipped(
+                ctx, task_ctx, model, dl_lock,
+                f"нет прав на редактирование промпта "
+                f"«{get_localized_name(prompt, 'Русский', 'prompt_name')}»",
+                prompt,
+            )
+        payload = empty_payload(prompt=prompt, max_attempts=payload["max_attempts"])
+        _run_prompt_debug_attempts(
+            ctx, task_ctx, model, dl_lock, prompt, payload, state,
+        )
+        return _finish_prompt_debug_pair(ctx, task_ctx, model, payload, state)
+    except Exception as exc:  # noqa: BLE001 — сбой пары не должен валить модель
+        logger.exception("ARM prompt debug: пара упала с исключением")
+        payload["stopped"] = (
+            "Отладка пары прервана сбоем: "
+            + (str(exc)[:300] or exc.__class__.__name__)
+        )
+        _append_run_log(
+            ctx["run_id"],
+            f"«{task_ctx['task_name']}» ({model['title']}): отладка прервана "
+            f"сбоем — {str(exc)[:200] or exc.__class__.__name__}",
+        )
+        # Повторно коммитить не пытаемся (сбой мог случиться ПОСЛЕ коммита):
+        # только дописываем payload, чтобы пара не осталась «без основного
+        # прохода» в проверке и в карточке.
+        try:
+            _store_prompt_debug_payload(ctx, task_ctx, model, state.get("item"), payload)
+        except Exception:  # noqa: BLE001 — запись уже не спасти, цикл важнее
+            logger.exception("ARM prompt debug: payload пары не записан")
+        return state.get("item")
+
+
+def _attach_prompt_debug_verification(ctx, model, task_ctx, item):
+    """Проверочный проход: вердикт в payload + суммарный usage пары."""
+    from .services.prompt_debug import empty_payload
+
+    key = (model["key"], task_ctx["node_id"])
+    payload = ctx["prompt_debug_payloads"].get(key)
+    if payload is None:
+        row = AIModelTestResult.objects.filter(
+            pk=item.get("result_id"),
+        ).values("prompt_debug").first()
+        payload = (row or {}).get("prompt_debug") or {}
+    if not payload:
+        # Пары не было в основном проходе (цикл модели упал до неё) — честная
+        # пометка вместо пустого блока «Отладка промпта» с одной проверкой.
+        payload = empty_payload(
+            prompt=_load_prompt_for_debug(item.get("prompt_id")),
+            max_attempts=_prompt_debug_loop_limit(ctx.get("prompt_attempts")),
+        )
+        payload["note"] = (
+            "Основной проход по паре не выполнялся — показан только результат проверки."
+        )
+    payload["verification"] = {
+        "verdict": item.get("verdict") or _VERDICT_FAILED,
+        "dl_comment": (item.get("dl_comment") or "")[:2000],
+    }
+    usage = payload.get("usage") or {"duration": 0.0, "tokens": 0, "prompt_tokens": 0}
+    _accumulate_usage(
+        usage,
+        duration=item.get("duration") or 0,
+        tokens=item.get("tokens") or 0,
+        prompt_tokens=item.get("tokens_prompt") or 0,
+    )
+    payload["usage"] = usage
+    if item.get("result_id"):
+        AIModelTestResult.objects.filter(pk=item["result_id"]).update(
+            prompt_debug=payload,
+            duration_seconds=usage["duration"],
+            tokens=usage["tokens"],
+            tokens_prompt=usage["prompt_tokens"],
+            updated_at=timezone.now(),
+        )
+    item["prompt_debug"] = payload
+    item["duration"] = usage["duration"]
+    item["tokens"] = usage["tokens"]
+    item["tokens_prompt"] = usage["prompt_tokens"]
+    ctx["prompt_debug_payloads"][key] = payload
+    verdict = payload["verification"]["verdict"]
+    _append_run_log(
+        ctx["run_id"],
+        f"Проверка «{task_ctx['task_name']}» ({model['title']}): "
+        + ("решено" if verdict == _VERDICT_SOLVED else "не решено"),
+    )
+    return item
+
+
+def _merge_verification_item(run_id, model_index, item):
+    """Заменить элемент пары в job["results"] результатом проверки.
+
+    НЕ ``_mark_batch_pair_finished(item)``: пара уже учтена основным проходом,
+    повторная запись задвоила бы её в отчёте и в ``entry["done"]``.
+    """
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        results = job.setdefault("results", [])
+        key = (item.get("model_key"), item.get("task_node_id"))
+        for index, existing in enumerate(results):
+            if (existing.get("model_key"), existing.get("task_node_id")) == key:
+                results[index] = item
+                break
+        else:
+            results.append(item)
+        job["completed_pairs"] = sum(1 for row in results if not row.get("_live"))
+        job["updated_at_ts"] = time.time()
+
+
+def _mark_prompt_debug_verification_started(run_id, model_index):
+    """Проверочный проход модели: прогресс снова «running»."""
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if not job:
+            return
+        entry = _batch_progress_entry(job, model_index)
+        if entry:
+            entry["status"] = "running"
+            entry["current_task_node_id"] = ""
+            entry["current_task_name"] = ""
+        job["completed_models"] = sum(
+            1 for e in (job.get("model_progress") or [])
+            if e.get("status") != "running"
+        )
+        job["verification_started"] = True
+        job["updated_at_ts"] = time.time()
+
+
+def _run_prompt_debug_verification_loop(ctx, model, model_index, dl_lock):
+    """Проверка после правок: все пары модели решаются заново по итоговым промптам."""
+    _close_stale_connections_if_safe()
+    run_id = ctx["run_id"]
+    try:
+        _mark_prompt_debug_verification_started(run_id, model_index)
+        for task_ctx in ctx["task_ctxs"]:
+            if (model["key"], task_ctx["node_id"]) in ctx["prompt_debug_skipped"]:
+                continue
+            if _is_cancel_requested(run_id):
+                break
+            if not _wait_resume(run_id):
+                break
+            _mark_batch_pair_started(run_id, model_index, model, task_ctx)
+            # Обычный batch-путь: промпт читается из БД — уже с правками.
+            item = _process_batch_pair(ctx, task_ctx, model, dl_lock)
+            if item is not None:
+                _attach_prompt_debug_verification(ctx, model, task_ctx, item)
+                _merge_verification_item(run_id, model_index, item)
+            # Только сброс «текущей задачи» (item=None) — пара не задваивается.
+            _mark_batch_pair_finished(run_id, model_index)
+            if item is None:
+                break
+    except Exception:
+        logger.exception("ARM prompt debug: проверочный цикл модели %s упал", model["key"])
+        _mark_batch_model_failed(run_id, model_index)
+    finally:
+        _mark_batch_model_finished(run_id, model_index)
+        _close_stale_connections_if_safe()
+
+
+def _run_prompt_debug_verification(ctx, ordered_models, dl_lock):
+    """Проверочная фаза после основного прохода (до финализации)."""
+    _append_run_log(
+        ctx["run_id"],
+        "Проверка после правок промптов: пары решаются заново по итоговым промптам",
+    )
+    if len(ordered_models) == 1:
+        _run_prompt_debug_verification_loop(ctx, ordered_models[0], 0, dl_lock)
+        return
+    threads = [
+        threading.Thread(
+            target=_run_prompt_debug_verification_loop,
+            args=(ctx, model, model_index, dl_lock),
+            name=f"arm-prompt-debug-verify-{ctx['run_id'][:8]}-{model['key']}",
+            daemon=True,
+        )
+        for model_index, model in enumerate(ordered_models)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+
+def _prompt_debug_report_stats(results):
+    """Счётчики «Отладки промтов» для отчёта и подсказок.
+
+    Работает и по полным payload'ам, и по лёгким строкам: в лёгком снапшоте
+    ``prompt_debug`` не тащится, но ``prompt_debug_state`` несёт те же
+    признаки (коммит / попытки / вердикт проверки / исправлено), поэтому
+    «Сводка» не обнуляется на завершённом прогоне, открытом с сервера.
+    """
+    committed = 0
+    skipped = 0
+    fixed = 0
+    checked = 0
+    verified_solved = 0
+    regressed = 0
+    prompt_ids = set()
+    for row in results or []:
+        payload = row.get("prompt_debug")
+        if isinstance(payload, dict) and payload:
+            attempts = payload.get("attempts") or []
+            verification = payload.get("verification") or {}
+            was_committed = bool(payload.get("committed"))
+            fixed_flag = _is_prompt_debug_fixed(payload)
+            was_skipped = bool(payload.get("skipped"))
+            last_verdict = (attempts[-1].get("verdict") or "") if attempts else ""
+            prompt_id = payload.get("prompt_id")
+        else:
+            state = row.get("prompt_debug_state") or {}
+            if not state:
+                continue
+            verification = (
+                {"verdict": state.get("verification") or ""}
+                if state.get("verification") else {}
+            )
+            was_committed = bool(state.get("committed"))
+            fixed_flag = bool(state.get("fixed"))
+            was_skipped = bool(state.get("skipped"))
+            last_verdict = state.get("last_verdict") or ""
+            prompt_id = None  # в лёгком снапшоте ID промпта нет
+        if was_committed:
+            committed += 1
+            if prompt_id:
+                prompt_ids.add(prompt_id)
+        if fixed_flag:
+            fixed += 1
+        if was_skipped:
+            skipped += 1
+        if verification.get("verdict"):
+            checked += 1
+            if verification["verdict"] == _VERDICT_SOLVED:
+                verified_solved += 1
+            elif last_verdict == _VERDICT_SOLVED:
+                regressed += 1
+    fixed_results = _prompt_debug_fixed_results(results)
+    return {
+        "prompts_updated": len(prompt_ids),
+        "committed_pairs": committed,
+        # «Сначала не прошло — после правки промпта прошло».
+        "fixed": fixed,
+        "fixed_by_topic": _prompt_debug_fixed_by_topic(fixed_results),
+        "skipped_pairs": skipped,
+        "verification": {
+            "checked": checked,
+            "solved": verified_solved,
+            "failed": checked - verified_solved,
+            "regressed": regressed,
+        },
+    }
+
+
+def _attach_prompt_debug_report(report, results, stats=None):
+    """Секция ``prompt_debug`` + подсказки в отчёт (живой и сохранённый).
+
+    ``stats`` — готовые цифры (у завершённого прогона они посчитаны по полным
+    payload'ам и сохранены в ``AIModelTestRun.report``; пересчёт по лёгкому
+    снапшоту не знает ID промптов и дал бы меньше).
+    """
+    if not report:
+        return report
+    stats = dict(stats or _prompt_debug_report_stats(results))
+    # Сохранённые отчёты старых прогонов (до появления статистики
+    # «исправлено») не имеют части ключей — достраиваем форму, иначе
+    # открытие страницы падало KeyError'ом.
+    stats.setdefault("prompts_updated", 0)
+    stats.setdefault("committed_pairs", 0)
+    stats.setdefault("fixed", 0)
+    stats.setdefault("fixed_by_topic", [])
+    stats.setdefault("skipped_pairs", 0)
+    verification = dict(stats.get("verification") or {})
+    verification.setdefault("checked", 0)
+    verification.setdefault("solved", 0)
+    verification.setdefault("failed", 0)
+    verification.setdefault("regressed", 0)
+    stats["verification"] = verification
+    report["prompt_debug"] = stats
+    hints = report.setdefault("hints", [])
+    if stats["fixed"]:
+        hints.append(
+            f"Исправлено правкой промпта: {stats['fixed']} пар — сначала не "
+            "прошло, после дополнения промпта прошло."
+        )
+    if stats["prompts_updated"]:
+        hints.append(f"Промптов дополнено: {stats['prompts_updated']}.")
+    if verification["checked"]:
+        hints.append(
+            "Проверка после правок промптов: решено "
+            f"{verification['solved']} из {verification['checked']} пар."
+        )
+    if verification["regressed"]:
+        hints.append(
+            "Перестали решаться после проверки: "
+            f"{verification['regressed']}."
+        )
+    return report
+
+
 def _close_stale_connections_if_safe():
     """Чистка протухших коннектов воркера без разрыва TestCase-транзакции.
 
@@ -2756,6 +4029,13 @@ def _close_stale_connections_if_safe():
         pass
 
 
+#: Процессор пары по типу прогона (полиморфизм вместо ветвления по run_type).
+_PAIR_PROCESSORS = {
+    AIModelTestRun.RUN_TYPE_BATCH: _process_batch_pair,
+    AIModelTestRun.RUN_TYPE_PROMPT_DEBUG: _process_prompt_debug_pair,
+}
+
+
 def _run_batch_model_loop(ctx, model, model_index, dl_lock):
     """Цикл ОДНОЙ модели по её задачам — таргет model-потока (или inline при N=1).
 
@@ -2765,9 +4045,13 @@ def _run_batch_model_loop(ctx, model, model_index, dl_lock):
     (мутации — только под _jobs_lock); падение цикла одной модели с
     исключением не задевает остальные и не валит прогон в FAILED
     (финализация добавит примечание в batch_error_message).
+
+    Процессор пары выбирается по типу прогона (``_PAIR_PROCESSORS``):
+    «Отладка промтов» — своя пара, остальное — обычная (без ветвлений).
     """
     _close_stale_connections_if_safe()
     run_id = ctx["run_id"]
+    processor = _PAIR_PROCESSORS.get(ctx.get("run_type"), _process_batch_pair)
     try:
         for task_ctx in ctx["task_ctxs"]:
             # Перезапуск: у задачи фиксированный список моделей (только
@@ -2783,7 +4067,29 @@ def _run_batch_model_loop(ctx, model, model_index, dl_lock):
             if not _wait_resume(run_id):
                 break
             _mark_batch_pair_started(run_id, model_index, model, task_ctx)
-            item = _process_batch_pair(ctx, task_ctx, model, dl_lock)
+            # Строка «выполняется…» — сразу, а не по завершении пары: иначе
+            # первые минуты прогона таблица «Ответы моделей» пуста.
+            _publish_pair_started(ctx, task_ctx, model)
+            try:
+                item = processor(ctx, task_ctx, model, dl_lock)
+            except Exception as exc:  # noqa: BLE001 — сбой ПАРЫ, не модели
+                # Непредвиденный сбой одной пары не должен обрывать цикл
+                # модели: иначе оставшиеся задачи вообще не решаются (в
+                # «Отладке промтов» проверка показывала бы их как «основной
+                # проход не выполнялся», а промпт не правился).
+                logger.exception(
+                    "ARM batch: пара «%s» (%s) упала",
+                    task_ctx.get("task_name"), model["key"],
+                )
+                _append_run_log(
+                    run_id,
+                    f"«{task_ctx.get('task_name')}» ({model['title']}): сбой пары — "
+                    f"{str(exc)[:200] or exc.__class__.__name__}",
+                )
+                _drop_live_pair(run_id, model, task_ctx)
+                _mark_batch_pair_failed(run_id, model_index, exc)
+                _mark_batch_pair_finished(run_id, model_index)
+                continue
             _mark_batch_pair_finished(run_id, model_index, item)
             if item is None:
                 # Отмена — модель прекращает работу; записанные другими
@@ -2809,7 +4115,9 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
     test_run = ctx["test_run"]
     log = ctx["log"]
     start_time = ctx["start_time"]
+    is_prompt_debug = ctx.get("run_type") == AIModelTestRun.RUN_TYPE_PROMPT_DEBUG
     model_loop_errors: list = []
+    pair_error_entries: list = []
     cancelled = False
 
     # Finalize: build report from in-memory results (or DB if evicted).
@@ -2825,6 +4133,14 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
             # flip). Не перетираем отмену обратно в completed — сохраняем
             # cancelled, чтобы UI корректно показал «Прервано».
             was_cancelled = job.get("cancelled", False)
+            # Строки-заглушки «выполняется…» (пара стартовала, но результат не
+            # отдан — отмена/сбой цикла) в завершённом прогоне не остаются:
+            # иначе карточка вечно показывала бы решающуюся пару. Строки с
+            # result_id (незавершённый цикл попыток отладки) сохраняются.
+            job["results"] = [
+                row for row in (job.get("results") or [])
+                if not (row.get("_live") and not row.get("result_id"))
+            ]
             report_source = db_results if rerun else (job.get("results") or [])
             job["report"] = _build_batch_report(
                 report_source,
@@ -2842,6 +4158,8 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
                 if rerun else job.get("created_at_ts"),
                 time.time(),
             )
+            if is_prompt_debug:
+                _attach_prompt_debug_report(job["report"], report_source)
             job["status"] = "cancelled" if was_cancelled else "completed"
             if was_cancelled:
                 job["cancelled"] = True
@@ -2849,6 +4167,12 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
             model_loop_errors = [
                 entry for entry in (job.get("model_progress") or [])
                 if entry.get("status") == "error"
+            ]
+            # Пары, у которых непредвиденный сбой не дал записать результат:
+            # цикл модели при этом ДОШЁЛ до конца, но прогон не успешный.
+            pair_error_entries = [
+                entry for entry in (job.get("model_progress") or [])
+                if entry.get("pair_errors")
             ]
             job["updated_at_ts"] = time.time()
             results = list(job.get("results") or [])
@@ -2868,6 +4192,8 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
             test_run.started_at.timestamp() if test_run.started_at else None,
             timezone.now().timestamp(),
         )
+        if is_prompt_debug:
+            _attach_prompt_debug_report(report, db_results)
 
     end_time = timezone.now()
     if evicted or rerun:
@@ -2882,6 +4208,7 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
     all_solved_batch = (
         bool(batch_results) and solved_pairs == len(batch_results)
         and not model_loop_errors
+        and not pair_error_entries
     )
     # Сводный ответ для журнала: per-model вердикты + ошибки (до 5000 символов).
     batch_summary_parts = []
@@ -2927,6 +4254,17 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
                 for e in model_loop_errors
             )
         )[:2000]
+    if pair_error_entries:
+        batch_error_message = (
+            batch_error_message + (" " if batch_error_message else "")
+            + "Пары со сбоем обработки (нет результата): "
+            + str(sum(_to_int(e.get("pair_errors")) for e in pair_error_entries))
+            + " — модели: "
+            + ", ".join(
+                "«%s»" % (e.get("model_title") or e.get("model_key") or "?")
+                for e in pair_error_entries
+            )
+        )[:2000]
     if cancelled:
         batch_error_message = (batch_error_message + " Прервано пользователем.")[:2000]
     # Токены прогона в записи журнала: сумма по всем парам (ответ + промпт).
@@ -2962,7 +4300,9 @@ def _finalize_batch_run(ctx, *, record_stats, rerun, rerun_pairs):
     # Глобальная статистика моделей (селектор чата): инкремент по парам
     # этого прогона. Только вне _jobs_lock (нереентерабельный лок) и только
     # по флагу суперюзера; частичные (прерванные) результаты тоже считаются.
-    if record_stats and batch_results:
+    # Отладка промтов статистику моделей не пишет: пары решались разными
+    # версиями промпта (сравнение с обычным прогоном было бы нечестным).
+    if record_stats and batch_results and not is_prompt_debug:
         from .services.model_stats import record_batch_solve_stats
 
         stats_results = batch_results
@@ -3009,34 +4349,24 @@ def _sort_results_fresh_first(results):
 def _light_batch_result_item(item):
     """Легковесная копия batch-результата без тяжёлого тела (lazy_body=True).
 
-    Полный ответ модели / код / DL-комментарии не идут в снапшот страницы и
-    поллинга: большой прогон — это десятки мегабайт текста. Тело подтягивается
-    отдельно через /arm/solve/result/<id>/body/ при раскрытии строки (см.
-    _ai_batch_results.html). Метаданные (верdict/время/токены/тема) остаются —
-    по ним строится таблица и отчёт.
+    Полный ответ модели / код / DL-комментарии / данные проваленных тестов не
+    идут в снапшот страницы и поллинга: большой прогон — это десятки мегабайт
+    текста. Тело подтягивается отдельно через /arm/solve/result/<id>/body/ при
+    раскрытии строки (см. _ai_batch_results.html). Метаданные
+    (верdict/время/токены/тема) остаются — по ним строится таблица и отчёт.
     """
     light = {
         k: v for k, v in item.items()
         if k not in _BATCH_LAZY_BODY_KEYS
     }
     light["lazy_body"] = True
+    # Флаг для рендерера: у строки есть блок «Отладка промпта» (сам payload
+    # подтягивается body-эндпоинтом при раскрытии). Компактная сводка нужна,
+    # чтобы поллинг заметил появление/смену блока (коммит, проверка) и
+    # перерисовал карточку, не таская текст попыток.
+    light["has_prompt_debug"] = bool(item.get("prompt_debug"))
+    light["prompt_debug_state"] = _prompt_debug_payload_state(item.get("prompt_debug"))
     return light
-
-
-def parse_dl_test_data(raw):
-    """Разобрать сохранённые данные проваленного теста (JSON-строка → dict).
-
-    Пустая/битая строка — пустой словарь (старые строки БД без поля).
-    """
-    if not raw:
-        return {}
-    if isinstance(raw, dict):
-        return raw
-    try:
-        data = json.loads(raw)
-    except (TypeError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 def _batch_results_from_db(test_run, light=False):
@@ -3055,7 +4385,7 @@ def _batch_results_from_db(test_run, light=False):
             "dl_queue_id", "dl_file_name", "dl_test_data", "dl_comment",
             "file_extension_snapshot", "delta_id", "delta_name",
             "topic_name_snapshot", "topic_id_snapshot", "prog_lang_snapshot",
-            "truncated", "prompt_id", "prompt_name",
+            "truncated", "prompt_id", "prompt_name", "prompt_debug",
             "updated_at",
             "task__node_id", "task__name", "task__file_extension",
             "task__tree_path",
@@ -3096,6 +4426,10 @@ def _batch_results_from_db(test_run, light=False):
                 "tree_path": r["task__tree_path"] or "",
                 "updated_ts": r["updated_at"].timestamp() if r["updated_at"] else 0.0,
                 "lazy_body": True,
+                # Payload отладки не тянем — флаг и компактная сводка
+                # (сам текст попыток — по AJAX вместе с телом).
+                "has_prompt_debug": bool(r["prompt_debug"]),
+                "prompt_debug_state": _prompt_debug_payload_state(r["prompt_debug"]),
             })
         return results
     results = []
@@ -3136,14 +4470,21 @@ def _batch_results_from_db(test_run, light=False):
             "prog_lang_name": r.prog_lang_snapshot,
             "prompt_id": r.prompt_id,
             "prompt_name": r.prompt_name or "",
+            "prompt_debug": r.prompt_debug or {},
             "tree_path": (r.task.tree_path if r.task else "") or "",
             "updated_ts": r.updated_at.timestamp() if r.updated_at else 0.0,
         })
     return results
 
 
-def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name="", record_stats=False, run_name="", save_solutions=False, delta="", file_name=""):
+def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_language="Русский", dl_test=True, prompt_id=None, course_id=None, solve_file_extension="", solve_prog_lang_name="", programming_language_id=None, programming_language_name="", prompt_name="", topic_id=None, topic_name="", record_stats=False, run_name="", save_solutions=False, delta="", file_name="", run_type=AIModelTestRun.RUN_TYPE_BATCH, prompt_attempts=0):
     """Запускает batch-solve ARM: задачи из DL дерева × модели в фоновом потоке.
+
+    ``run_type`` — ``batch`` (пакетное решение) или ``prompt_debug`` (отладка
+    промтов: при провале DL модель-редактор дописывает промпт и задача
+    решается заново, ``prompt_attempts`` — лимит попыток на пару, включая
+    первую); у prompt_debug в конце идёт проверочный проход всех пар.
+
 
     Принимает node_ids — список DL node ID (из дерева задач dl.gsu.by).
     Возвращает (run_id, error_message).
@@ -3196,6 +4537,8 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         "run_name": (run_name or "").strip(),
         "delta": (delta or "").strip(),
         "file_name": (file_name or "").strip(),
+        "run_type": run_type,
+        "prompt_attempts": int(prompt_attempts or 0) if run_type == AIModelTestRun.RUN_TYPE_PROMPT_DEBUG else 0,
     }
 
     run_id = uuid.uuid4().hex
@@ -3204,7 +4547,8 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     job = {
         "run_id": run_id,
         "user_id": user_id,
-        "run_type": "batch",
+        "run_type": run_type,
+        "prompt_attempts": int(prompt_attempts or 0),
         "status": "running",
         "error_message": "",
         "cancel_requested": False,
@@ -3243,7 +4587,7 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
     worker = threading.Thread(
         target=_run_batch_job_worker,
         args=(run_id, node_ids, ordered_models, user_id, session_id),
-        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params, "record_stats": record_stats, "run_name": (run_name or "").strip(), "save_solutions": bool(save_solutions), "delta": (delta or "").strip(), "file_name": (file_name or "").strip()},
+        kwargs={"ui_language": ui_language, "dl_test": dl_test, "prompt_id": prompt_id, "course_id": course_id, "solve_file_extension": solve_file_extension, "solve_prog_lang_name": solve_prog_lang_name, "programming_language_id": programming_language_id, "programming_language_name": programming_language_name, "prompt_name": prompt_name, "topic_id": topic_id, "topic_name": topic_name, "run_params": run_params, "record_stats": record_stats, "run_name": (run_name or "").strip(), "save_solutions": bool(save_solutions), "delta": (delta or "").strip(), "file_name": (file_name or "").strip(), "run_type": run_type, "prompt_attempts": int(prompt_attempts or 0)},
         name=f"arm-batch-run-{run_id[:8]}",
         daemon=True,
     )
@@ -3296,6 +4640,14 @@ def start_batch_rerun_pairs(run_id, user_id, session_id):
         test_run = AIModelTestRun.objects.get(run_id=run_id)
     except AIModelTestRun.DoesNotExist:
         return None, "Прогон не найден", []
+
+    if test_run.run_type == AIModelTestRun.RUN_TYPE_PROMPT_DEBUG:
+        # Перезапуск нерешённых пар правил бы промпты без проверочного прохода
+        # и без лимита попыток — для отладки это другой сценарий.
+        return None, (
+            "Перезапуск нерешённых пар недоступен для отладки промтов — "
+            "запустите прогон заново из формы"
+        ), []
 
     if test_run.status in (
         AIModelTestRun.STATUS_RUNNING,
@@ -3416,7 +4768,9 @@ def start_batch_rerun_pairs(run_id, user_id, session_id):
 def _snapshot_from_test_run(test_run, light_results=False):
     """Снапшот прогона из БД; light_results=True — без тяжёлого тела результатов
     (batch; см. get_arm_run_snapshot)."""
-    is_batch = test_run.run_type == AIModelTestRun.RUN_TYPE_BATCH
+    is_batch = test_run.run_type in (
+        AIModelTestRun.RUN_TYPE_BATCH, AIModelTestRun.RUN_TYPE_PROMPT_DEBUG,
+    )
     status_map = {
         AIModelTestRun.STATUS_RUNNING: "running",
         AIModelTestRun.STATUS_PAUSED: "paused",
@@ -3461,11 +4815,18 @@ def _snapshot_from_test_run(test_run, light_results=False):
                 AIModelTestRun.STATUS_PAUSED,
             ) else None,
         )
+        if test_run.run_type == AIModelTestRun.RUN_TYPE_PROMPT_DEBUG:
+            # У завершённого прогона цифры уже посчитаны по полным payload'ам
+            # и лежат в сохранённом отчёте — берём их (в лёгком снапшоте
+            # payload'ов нет, а ID промптов из строки не восстановить).
+            # У живого/эвакуированного — считаем по строкам (промежуточно).
+            saved_pd = (test_run.report or {}).get("prompt_debug")
+            _attach_prompt_debug_report(report, results, stats=saved_pd or None)
         is_failed = test_run.status == AIModelTestRun.STATUS_FAILED
         total_pairs = (test_run.report or {}).get("total_pairs") if test_run.report else None
         return {
             "run_id": test_run.run_id,
-            "run_type": "batch",
+            "run_type": test_run.run_type,
             "status": status_map.get(test_run.status, test_run.status),
             "error_message": test_run.error_message or ("Batch solve завершился с ошибкой" if is_failed else ""),
             "run_name": test_run.run_name or (test_run.run_params or {}).get("run_name", ""),
@@ -3540,20 +4901,20 @@ def _mark_orphaned_run_failed(test_run):
     return test_run
 
 
-def get_latest_batch_run_snapshot(user_id, light_results=False):
+def get_latest_batch_run_snapshot(user_id, light_results=False,
+                                  run_type=AIModelTestRun.RUN_TYPE_BATCH):
     """Снапшот последнего batch-прогона пользователя (для /arm/solve/ без run_id).
 
     Страница «Пакетное решение» показывает таблицу предыдущего запуска, когда
     открыта без ``?run_id=``. Источник истины — БД (AIModelTestRun); живой job
     берётся через обычный get_arm_run_snapshot. Возвращает None, если у
-    пользователя ещё не было batch-прогонов.
+    пользователя ещё не было batch-прогонов. ``run_type`` выбирает страницу:
+    пакетное решение и «Отладка промтов» показывают каждая свои прогоны.
     """
     if not user_id:
         return None
     last = (
-        AIModelTestRun.objects.filter(
-            run_type=AIModelTestRun.RUN_TYPE_BATCH, user_id=user_id
-        )
+        AIModelTestRun.objects.filter(run_type=run_type, user_id=user_id)
         .order_by("-started_at", "-id")
         .first()
     )
@@ -3685,7 +5046,10 @@ def list_user_runs(user_id, since_ts=0.0):
             status = job.get("status", "")
             if status != "running" and float(job.get("updated_at_ts") or 0.0) < since_ts:
                 continue
-            is_batch = job.get("run_type") == "batch"
+            job_run_type = job.get("run_type") or "single"
+            is_batch = job_run_type in (
+                AIModelTestRun.RUN_TYPE_BATCH, AIModelTestRun.RUN_TYPE_PROMPT_DEBUG,
+            )
             if is_batch:
                 completed = job.get("completed_pairs", 0)
                 total = job.get("total_pairs", 0)
@@ -3696,11 +5060,15 @@ def list_user_runs(user_id, since_ts=0.0):
                 current = job.get("current_model_title", "")
             runs.append({
                 "run_id": job.get("run_id", ""),
-                "run_type": "batch" if is_batch else "single",
+                "run_type": job_run_type,
                 # У single-прогонов нет своей страницы (старый ARM-скрипт
                 # «В чём ошибка» удалён, новый пока не сделан) — исторические
                 # запуски просто не ссылаются никуда.
-                "page_url": "/ai/admin/arm/solve/" if is_batch else "",
+                "page_url": (
+                    "/ai/admin/arm/prompt-debug/"
+                    if job_run_type == AIModelTestRun.RUN_TYPE_PROMPT_DEBUG
+                    else "/ai/admin/arm/solve/" if is_batch else ""
+                ),
                 "name": job.get("run_name", ""),
                 "status": status,
                 "completed": completed,

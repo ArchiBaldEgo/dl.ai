@@ -523,6 +523,7 @@ class AIAdminSite(admin.AdminSite):
             ("Документация", "Разработчик", "AiDocsDeveloper", docs_url + "developer/", (is_staff or user_has_key(request.user, "docs.developer")), "⚙", "Документация для разработчика", "docs.developer", ()),
             ("Документация", "Суперюзер", "AiDocsSuperuser", docs_url + "superuser/", user_has_key(request.user, "docs.superuser"), "⚙", "Инструкция для суперадмина", "docs.superuser", ()),
             ("ARM", "Пакетное решение", "AiArmSolve", "/ai/admin/arm/solve/", show_arm, "▤", "Пакетный прогон моделей по задачам DL", "page.arm_solve", ()),
+            ("ARM", "Отладка промтов", "AiArmPromptDebug", "/ai/admin/arm/prompt-debug/", show_arm, "✎", "Автоправка промптов по провалам DL", "page.arm_solve", ()),
             ("ARM", "Состояние моделей", "AiModelStatus", "/ai/admin/arm/models/", show_model_status, "◉", "Доступность AI-моделей сегодня", "page.model_status", ()),
             # Журнал — родительский ключ page.logs («читать свои»), «читать
             # все» — вложенный page.logs_all (легаси-ключи page.logs_own —
@@ -560,22 +561,12 @@ class AIAdminSite(admin.AdminSite):
     def _user_display_name(user):
         """Человекочитаемое имя для приветствия в шапке админки.
 
-        Предпочитаем полное имя, затем имя+фамилию, иначе username без префикса
-        ``user_`` (DL-провижненные аккаунты — это ``user_<id>``).
+        Логика — в общем сервисе (ai/services/user_directory.py), чтобы
+        админка, списки доступа и поиск получателя показывали одно и то же.
         """
-        if not user or not getattr(user, "is_authenticated", False):
-            return ""
-        full = (getattr(user, "get_full_name", lambda: "")() or "").strip()
-        if full:
-            return full
-        first = (getattr(user, "first_name", "") or "").strip()
-        last = (getattr(user, "last_name", "") or "").strip()
-        if first or last:
-            return f"{first} {last}".strip()
-        username = getattr(user, "get_username", lambda: "")() or ""
-        if username.startswith("user_"):
-            return username[5:]
-        return username
+        from ..services.user_directory import display_name_for_user
+
+        return display_name_for_user(user)
 
     @staticmethod
     def _user_role_label(user, is_super, is_staff, is_pd):
@@ -598,16 +589,12 @@ class AIAdminSite(admin.AdminSite):
     def _user_dl_id(user):
         """DL-идентификатор пользователя для приветствия «[id] ФИО».
 
-        DL-провижненные аккаунты — это username ``user_<id>``; возвращаем id
-        без префикса. Локальным пользователям (без префикса) — username, а
-        если он пуст — pk.
+        Логика — в общем сервисе (ai/services/user_directory.py): сначала
+        ``external_user_id``, затем username без префикса ``user_``, затем pk.
         """
-        if not user or not getattr(user, "is_authenticated", False):
-            return ""
-        username = getattr(user, "get_username", lambda: "")() or ""
-        if username.startswith("user_"):
-            return username[5:]
-        return username or str(getattr(user, "pk", "") or "")
+        from ..services.user_directory import dl_id_for_user
+
+        return dl_id_for_user(user)
 
     @staticmethod
     def _aiappsettings_url():

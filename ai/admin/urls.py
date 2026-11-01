@@ -19,6 +19,9 @@ from .active_runs import admin_active_runs_view
 from .arm import (
     admin_arm_solve_view,
     admin_arm_solve_start_view,
+    admin_arm_prompt_debug_view,
+    admin_arm_prompt_debug_start_view,
+    admin_arm_prompt_debug_skip_view,
     admin_arm_solve_status_view,
     admin_arm_solve_load_tree_view,
     admin_arm_solve_cancel_view,
@@ -47,6 +50,7 @@ from .request_logs import (
     admin_request_log_detail_view,
     admin_request_log_task_text_view,
     admin_request_log_xlsx_view,
+    admin_request_logs_counters_view,
     admin_request_logs_view,
     resend_request_view,
     rerun_arm_batch_view,
@@ -85,8 +89,10 @@ from .test_data import (
 from .tokens import admin_token_usage_view
 from .updates import admin_updates_view
 from .user_models import (
+    admin_user_model_access_view,
     admin_user_model_create_view,
     admin_user_model_delete_view,
+    admin_user_model_search_users_view,
     admin_user_models_view,
 )
 
@@ -116,6 +122,12 @@ def get_ai_admin_urls():
         path("arm/solve/result/<int:result_id>/body/", ai_admin_site.admin_view(admin_arm_solve_result_body_view), name="ai_arm_solve_result_body"),
         path("arm/solve/report/<str:run_id>/xlsx/", ai_admin_site.admin_view(admin_arm_solve_report_xlsx_view), name="ai_arm_solve_report_xlsx"),
         path("arm/solve/", ai_admin_site.admin_view(admin_arm_solve_view), name="ai_arm_solve"),
+        # «Отладка промтов» — та же форма/раннер в режиме prompt_debug;
+        # статус, отмена, пауза, тело и XLSX — общие эндпоинты /arm/solve/*
+        # (в них адресация по run_id, странице нужен только старт).
+        path("arm/prompt-debug/start/", ai_admin_site.admin_view(admin_arm_prompt_debug_start_view), name="ai_arm_prompt_debug_start"),
+        path("arm/prompt-debug/skip/", ai_admin_site.admin_view(admin_arm_prompt_debug_skip_view), name="ai_arm_prompt_debug_skip"),
+        path("arm/prompt-debug/", ai_admin_site.admin_view(admin_arm_prompt_debug_view), name="ai_arm_prompt_debug"),
         path("arm/models/refresh/", ai_admin_site.admin_view(admin_model_status_refresh_view), name="ai_arm_model_status_refresh"),
         path("arm/models/state/", ai_admin_site.admin_view(admin_model_status_state_view), name="ai_arm_model_status_state"),
         path("arm/models/", ai_admin_site.admin_view(admin_model_status_view), name="ai_arm_model_status"),
@@ -144,6 +156,8 @@ def get_ai_admin_urls():
         path("ai/request_logs/task-text/", ai_admin_site.admin_view(admin_request_log_task_text_view), name="ai_request_log_task_text"),
         path("ai/request_logs/<int:log_id>/xlsx/", ai_admin_site.admin_view(admin_request_log_xlsx_view), name="ai_request_log_xlsx"),
         path("ai/request_logs/daily-report/", ai_admin_site.admin_view(admin_daily_report_view), name="ai_request_log_daily_report"),
+        # Живые счётчики пакетных строк (AJAX: цифры «Пары»/статус/время).
+        path("ai/request_logs/counters/", ai_admin_site.admin_view(admin_request_logs_counters_view), name="ai_request_logs_counters"),
         path("ai/request_logs/<int:log_id>/batch-snapshot/", ai_admin_site.admin_view(admin_batch_snapshot_view), name="ai_request_log_batch_snapshot"),
         path("ai/request_logs/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
         path("ai/request_logs/<int:log_id>/resend/", ai_admin_site.admin_view(resend_request_view), name="ai_request_log_resend"),
@@ -157,6 +171,8 @@ def get_ai_admin_urls():
         path("user-models/", ai_admin_site.admin_view(admin_user_models_view), name="ai_user_models"),
         path("user-models/create/", ai_admin_site.admin_view(admin_user_model_create_view), name="ai_user_model_create"),
         path("user-models/delete/", ai_admin_site.admin_view(admin_user_model_delete_view), name="ai_user_model_delete"),
+        path("user-models/access/", ai_admin_site.admin_view(admin_user_model_access_view), name="ai_user_model_access"),
+        path("user-models/search-users/", ai_admin_site.admin_view(admin_user_model_search_users_view), name="ai_user_model_search_users"),
         # «Запросы по DL API» — заявки на создание API к dl.gsu.by.
         path("dl-api-requests/", ai_admin_site.admin_view(admin_dl_api_requests_view), name="ai_dl_api_requests"),
         path("dl-api-requests/create/", ai_admin_site.admin_view(admin_dl_api_request_create_view), name="ai_dl_api_request_create"),

@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 #: не показывается. У главных страниц админки — свой тур
 #: (admin_*; контент страницы, без хрома — хром расписывает главный экран).
 SCOPES = (
+    "disabled", # for hiding
     "chat",
     "solve",
     "find_error",
@@ -63,12 +64,12 @@ MARK_URL_ADMIN = "/ai/admin/wizard/seen/"
 
 def scope_name_valid(scope):
     """True — scope входит в SCOPES."""
+
     return scope in SCOPES
 
 
 def user_basics_seen(user, exclude_scope):
     """True — юзер уже видел тур любой ДРУГОЙ юзер-страницы.
-
     Шаги-«общие» (язык/модель/переключатель, common в реестре движка) одинаковы
     во всех юзер-турах: показав их один раз, повтор не нужен. Учитываются
     ТОЛЬКО отметки текущей версии: строка прошлого тура (version меньше
@@ -76,6 +77,7 @@ def user_basics_seen(user, exclude_scope):
     обновлённый тур ещё не показывали. НО это режет только ШАГИ С common —
     у чата таких нет (всегда полный строгий тур).
     """
+
     if exclude_scope not in USER_SCOPES:
         return False
     if user is None or not getattr(user, "is_authenticated", False):
@@ -92,43 +94,52 @@ def user_basics_seen(user, exclude_scope):
 
 
 def should_show_wizard(user, scope):
-
     """Нет отметки (или старая версия) → True.
-
     Аноним/фейк-пользователь (нет ``is_authenticated``) → False,
     сам флаг не пишем.
     """
+
     if not scope_name_valid(scope):
-        return False
+      return False
     if user is None or not getattr(user, "is_authenticated", False):
-        return False
+      return False
+    
     try:
-        row = AIWizardSeen.objects.filter(user=user, scope=scope).only("version").first()
-    except Exception:
-        # Таблицы может не быть до миграции — не роняем ради тура страницу.
-        logger.exception("Failed to read wizard state: scope=%s", scope)
+      if AIWizardSeen.objects.filter(user=user, scope="disabled").exists():
         return False
+
+      row = AIWizardSeen.objects.filter(user=user, scope=scope).only("version").first()
+    
+    except Exception:
+      # Таблицы может не быть до миграции — не роняем ради тура страницу.
+      logger.exception("Failed to read wizard state: scope=%s", scope)
+      return False
+
     return row is None or row.version < WIZARD_VERSION
 
 
 def record_wizard_seen(user, scope):
-    """Закрытие тура → отметка текущей версии (idempotent, бампит version)."""
-    if not scope_name_valid(scope):
-        return
-    if user is None or not getattr(user, "is_authenticated", False):
-        return
-    try:
-        AIWizardSeen.objects.update_or_create(
-            user=user,
-            scope=scope,
-            defaults={"version": WIZARD_VERSION, "created_at": timezone.now()},
-        )
-    except Exception:
-        logger.exception("Failed to record wizard seen: scope=%s", scope)
+  """Закрытие тура → отметка текущей версии (idempotent, бампит version)."""
+
+  if not scope_name_valid(scope):
+    return
+  if user is None or not getattr(user, "is_authenticated", False):
+    return
+  try:
+
+    AIWizardSeen.objects.update_or_create(
+        user=user,
+        scope=scope,
+        defaults={"version": WIZARD_VERSION, "created_at": timezone.now()},
+    )
+
+  except Exception:
+    logger.exception("Failed to record wizard seen: scope=%s", scope)
 
 
 def wizard_boot_payload(user, scope, mark_url, role="", basics_seen=False):
     """Конфиг для {{ ai_wizard|json_script }} в шаблоне (ai-wizard.js читает его)."""
+
     return {
         "scope": scope,
         "version": WIZARD_VERSION,
@@ -141,6 +152,7 @@ def wizard_boot_payload(user, scope, mark_url, role="", basics_seen=False):
 
 def scope_from_request_body(body):
     """scope из JSON-тела POST либо None (битый JSON/неизвестный scope)."""
+
     try:
         payload = json.loads(body or b"{}")
     except (TypeError, ValueError):

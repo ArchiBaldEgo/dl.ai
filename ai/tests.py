@@ -2875,6 +2875,44 @@ class BatchReportTests(SimpleTestCase):
         self.assertEqual(per_topic["Линейные"]["percent_solved"], 100.0)
         self.assertEqual(per_topic["Циклы"]["percent_solved"], 50.0)
 
+    def test_live_pairs_counted_only_in_interim_report(self):
+        """Незавершённые пары (_live) — отдельный счётчик «в работе».
+
+        В ИТОГОВУЮ сводку они не идут (вердикт промежуточный), а в
+        промежуточной сводке живого прогона видны отдельной строкой: без этого
+        «Сводка» пропадала с экрана, пока ни одна пара не завершилась.
+        """
+        from ai.arm_runner import _build_batch_report, _empty_interim_report
+
+        results = [
+            self._item("A", "Линейные", "solved", 2.0, 10, topic_id=1),
+            dict(
+                self._item("A", "Циклы", "", 0.0, 0, topic_id=2),
+                _live=True, status="running",
+            ),
+        ]
+        final = _build_batch_report(results)
+        self.assertEqual(final["total_pairs"], 1)
+        self.assertEqual(final["running"], 0)
+        self.assertEqual(final["per_model"][0]["total"], 1)
+        # Живая пара не ошибка — вердикта у неё ещё нет.
+        self.assertEqual(final["errors_by_topic"], [])
+
+        interim = _build_batch_report(results, include_live=True)
+        self.assertEqual(interim["running"], 1)
+        self.assertEqual(interim["total_pairs"], 1)  # считаются пары с итогом
+        self.assertEqual(interim["per_model"][0]["total"], 1)
+        self.assertEqual(interim["per_model"][0]["running"], 1)
+        self.assertEqual(interim["errors_by_topic"], [])
+
+        # Прогон, у которого ещё нет ни одной строки: сводка не None (карточка
+        # остаётся, пока не стартовала первая пара). Пары «в работе» не
+        # выдумываем — считаем только реальные живые строки.
+        empty = _empty_interim_report()
+        self.assertEqual(empty["running"], 0)
+        self.assertEqual(empty["total_pairs"], 0)
+        self.assertEqual(empty["per_model"], [])
+
     def test_report_volume_and_errors_by_topic(self):
         """Объём прогона (модели/задачи) и ошибки, сгруппированные по темам
         (failed/skipped; позиции сокращаются до капа, остаток — hidden)."""
@@ -3268,6 +3306,155 @@ class ExtractCodeFromResponseTests(SimpleTestCase):
         main = "mov ax, x\nsub ax, y\nmov R, ax"
         text = f"```asm\n{main}\n```\nAlternative solution:\n```asm\nmov bx, z\nadd bx, 1\n```"
         self.assertEqual(self.extract(text), main)
+
+    # === «Выкусывание» 2026-10: последний ```-блок, а не черновик CoT ===
+
+    def test_last_fence_wins_over_longer_draft(self):
+        """#2606800: длинный черновик в ограде + короткий финальный — финал.
+
+        Раньше структурник по всему тексту/«самый длинный фенс» отдавали
+        черновик (`t dw 0`, метка `neg`) — DL падал «Неверная инструкция».
+        """
+        draft = (
+            "jmp begin\nt dw 0\nbegin:\nmov ax, a\njs neg\n"
+            "neg:\nmov RES, ax\nends:\njmp ends ;$E"
+        )
+        final = "jmp begin\nbegin:\nmov ax, b\nends:\njmp ends ;$E"
+        text = f"```asm\n{draft}\n```\nИтоговый вариант:\n```asm\n{final}\n```"
+        self.assertEqual(self.extract(text, file_extension=".i86"), final)
+
+    def test_cot_prose_inside_final_fence_cut(self):
+        """#2606786: гибридная строка «код + CoT» внутри ограды вырезается."""
+        code = (
+            "jmp begin\na dw 0\nb db 0\ny db 0\nbegin:\n"
+            "mov al, b\ncbw\n"
+            "mov y, 10 — wait, can't write immediate to memory directly? No.\n"
+            "mov y, al\nends:\njmp ends ;$E"
+        )
+        got = self.extract(f"```asm\n{code}\n```", file_extension=".i86")
+        self.assertIn("mov y, al", got)
+        self.assertNotIn("wait", got)
+        self.assertNotIn("—", got)
+        self.assertTrue(got.endswith("jmp ends ;$E"))
+
+    def test_draft_fragment_then_final_fence_wins(self):
+        """#2606762: обрывок черновика без `;$E` + финальный блок — финал."""
+        draft = "jmp begin\na db 0\nb db 0\nbegin:\nmov al, a\ncbw\nmov z, ah"
+        final = (
+            "jmp begin\na db 0\nb db 0\ny db 0\nz db 0\nbegin:\n"
+            "mov al, b\ncbw\nmov bx, ax\nmov al, a\ncbw\ncwd\nidiv bx\n"
+            "mov y, al\nmov z, dl\nends:\njmp ends ;$E"
+        )
+        text = f"```asm\n{draft}\n```\nФинальный ответ:\n```asm\n{final}\n```"
+        self.assertEqual(self.extract(text, file_extension=".i86"), final)
+
+    def test_unclosed_final_fence_not_replaced_by_closed_draft(self):
+        """Обрезанный финал в незакрытой ограде: черновик из закрытого блока
+        в DL не уходит — код «не извлечён» (воркер сделает авто-ретрай)."""
+        draft = "jmp begin\nbegin:\nmov ax, a\nends:\njmp ends ;$E"
+        text = (
+            f"```asm\n{draft}\n```\nФинал:\n```asm\n"
+            "jmp begin\nbegin:\nmov al, b\nmov bl,"
+        )
+        self.assertEqual(self.extract(text, file_extension=".i86"), "")
+
+    def test_ends_label_keeps_halting_jump(self):
+        """`ends:` — метка останова, а не конец программы: «jmp ends» за ней
+        обязан остаться в извлечённом коде.
+
+        Карвер кончал кандидата на строке `ends:` и терял бесконечный цикл —
+        программа «проваливалась» в секцию данных (живой прогон: `mov y, ax`
+        → `ends:` без `jmp ends`).
+        """
+        code = (
+            "jmp begin\n\na dw 0\nb db 0\ny dw 0\n\nbegin:\n"
+            "mov ax, a\nmov bl, b\nmov bh, 0\nadd ax, bx\nmov y, ax\n\n"
+            "ends:\njmp ends"
+        )
+        self.assertEqual(
+            self.extract(f"```asm\n{code}\n```", file_extension=".i86"), code,
+        )
+
+    def test_body_jmp_ends_does_not_truncate_program(self):
+        """`jmp ends` ВНУТРИ тела — обычный переход на метку выхода, а не
+        конец программы: кандидат обязан дойти до `ends:` (иначе терялись
+        ветка else и останавливающий цикл)."""
+        code = (
+            "jmp begin\na db 0\nb db 0\ny db 0\nbegin:\n"
+            "mov al, a\ncmp al, b\njge else_ge\n"
+            "mov al, 10\nmov y, al\njmp ends\n"
+            "else_ge:\nmov al, 5\nmov y, al\nends:\njmp ends"
+        )
+        self.assertEqual(
+            self.extract(f"```asm\n{code}\n```", file_extension=".i86"), code,
+        )
+
+    def test_fenced_block_trailing_prose_cut(self):
+        """Хвостовая проза внутри оградки срезается, а код возвращается как
+        есть: после перехода на «фенс — источник кода» структурник блок
+        больше не дочищает."""
+        block = "jmp begin\nbegin:\nmov ax, x\nmov RES, ax\nends:\njmp ends ;$E"
+        text = f"```asm\n{block}\nThis program copies x into RES.\n```"
+        self.assertEqual(self.extract(text, file_extension=".i86"), block)
+
+    def test_glued_opening_fence_is_not_unclosed(self):
+        """Открывающая ``` приклеена к прозе («…только код.```asm»).
+
+        Счёт чётности строк-оградок принимал такой ответ за «финал оборван»
+        и возвращал пустой код, хотя последний блок закрыт (живой прогон
+        GLM 5.3 Flash, 2026-10-28).
+        """
+        draft = "jmp begin\nbegin:\nmov ax, 1\nends:\njmp ends ;$E"
+        final = "jmp begin\nbegin:\nmov ax, a\nends:\njmp ends ;$E"
+        text = (
+            f"```asm\n{draft}\n```\n"
+            f"Проверка: всё верно.\n"
+            f"Не добавлять комментарии. Вывести только код.```asm\n{final}\n```"
+        )
+        self.assertEqual(self.extract(text, file_extension=".i86"), final)
+
+    # === «Выкусывание» 2026-10, вторая причина: программа приклеена к прозе ===
+    # В логах #2606786/#2606762 ответ вообще без оград, и финальный «jmp begin»
+    # склеен с последней фразой CoT («…if ajmp begin», «…сходится.jmp begin»).
+    # Анкер каркаса — строка целиком, поэтому финал не находился, и в DL уходил
+    # ранний черновик с русской прозой.
+
+    def test_entry_glued_to_prose_final_program_wins(self):
+        """#2606786: проза склеена с `jmp begin` финальной программы."""
+        draft = (
+            "jmp begin\na dw 0\nb db 0\ny db 0\nbegin:\nmov al, b\ncbw\n"
+            "mov bx, ax\nmov ax, a\ncmp ax, bx\njge else1\n"
+            "mov y, 10 — wait, can't write immediate to memory directly?\n"
+        )
+        final = (
+            "jmp begin\na dw 0\nb db 0\ny db 0\nbegin:\n"
+            "mov al, b\ncbw\nmov bx, ax\nmov ax, a\ncmp ax, bx\njl m10\n"
+            "mov al, 5\nmov y, al\njmp ends\nm10:\nmov al, 10\nmov y, al\n"
+            "ends:\njmp ends ;$E"
+        )
+        text = f"Check: after cmp ax, bx and jl m10: if a{draft}\n" \
+               f"Check: after cmp ax,bx and jl m10: if a{final}"
+        got = self.extract(text, file_extension=".i86")
+        self.assertEqual(got, final)
+        self.assertNotIn("wait", got)
+        self.assertNotIn("else1", got)
+
+    def test_entry_glued_to_russian_prose_final_program_wins(self):
+        """#2606762: «…Пример сходится.jmp begin» — финал, а не обрывок CoT."""
+        fragment = (
+            "jmp begin\na db 0\nb db 0\ny db 0\nz db 0\nbegin:\n"
+            "mov al, a\ncbw          ; ax = a\nmov bl, b\nmov y, al\nmov z, ah"
+        )
+        final = (
+            "jmp begin\na db 0\nb db 0\ny db 0\nz db 0\nbegin:\n"
+            "mov al,b\ncbw\nmov bx,ax\nmov al,a\ncbw\ncwd\nidiv bx\n"
+            "mov y,al\nmov z,dl\nends:\njmp ends ;$E"
+        )
+        text = f"Черновик:\n{fragment}\n\nРезультат: пример сходится.{final}"
+        got = self.extract(text, file_extension=".i86")
+        self.assertEqual(got, final)
+        self.assertNotIn("ax = a", got)
+        self.assertNotIn("сходится", got)
 
 
 class OllamaNumPredictTests(SimpleTestCase):
@@ -4123,6 +4310,58 @@ class BatchRunnerIntegrationTests(TestCase):
         self.assertEqual(log.status, AIRequestLog.STATUS_SUCCESS)
         self.assertEqual(log.error_message, "")
 
+    def test_running_pair_visible_before_first_result(self):
+        """Пакетный прогон: пара видна в результатах ещё ДО первого ответа.
+
+        Строка-заглушка («выполняется…») публикуется на старте пары и
+        заменяется итоговой по завершении — иначе таблица «Ответы моделей»
+        пустовала бы все минуты первого вызова модели, а после перезагрузки
+        страницы пустой список читался бы как «результаты пропали».
+        """
+        import time as _t
+        from ai import arm_runner
+
+        seen = {}
+        run_id = "test-batch-live-" + uuid.uuid4().hex[:8]
+
+        async def fake_handler(messages, conv_id):
+            job = arm_runner._jobs.get(run_id) or {}
+            seen["rows"] = [dict(row) for row in (job.get("results") or [])]
+            return ("program a; begin writeln(1); end.", 12)
+
+        ordered_models = [{"key": "FakeModel", "title": "FakeModel", "handler": fake_handler}]
+        now_ts = _t.time()
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 1,
+            "total_pairs": 1, "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "FakeModel", "current_model_title": "FakeModel",
+            "current_task_node_id": "", "current_task_name": "",
+            "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        dl_ok = lambda sid, node_id, code, ext, **kw: {
+            "verdict": "solved", "comment": "Все тесты успешно пройдены",
+            "submit_error": "", "queue_id": 1, "code_sent": code,
+        }
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", dl_ok):
+                arm_runner._run_batch_job_worker(
+                    run_id, [self.t1.node_id], ordered_models,
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                )
+        finally:
+            job = arm_runner._jobs.pop(run_id, {}) or {}
+
+        self.assertEqual(len(seen["rows"]), 1)
+        self.assertTrue(seen["rows"][0]["_live"])
+        self.assertEqual(seen["rows"][0]["status"], "running")
+        self.assertEqual(seen["rows"][0]["task_node_id"], self.t1.node_id)
+        # Итоговая строка заменила заглушку (не задвоила), completed_pairs = 1.
+        self.assertEqual(len(job["results"]), 1)
+        self.assertFalse(job["results"][0].get("_live"))
+        self.assertEqual(job["completed_pairs"], 1)
+
 
 class BatchParallelWorkerTests(TransactionTestCase):
     """Параллельное решение batch-solve: каждая модель — независимый цикл.
@@ -4448,11 +4687,15 @@ class BatchParallelWorkerTests(TransactionTestCase):
         self.assertFalse(row.truncated)
         self.assertIn("Не удалось извлечь код", row.dl_comment)
 
-    def test_no_code_retry_prefers_nothink_handler(self):
-        """Ollama-модель: повтор идёт через no-think хендлер (get_no_think_handler;
-        Ollama API think=False по docs.ollama.com/capabilities/thinking), а не
-        через обычный. Провайдер определяется по __module__ — фейк держит
-        оllama-модуль и имя из реестра."""
+    def test_batch_solve_uses_nothink_handler_from_first_attempt(self):
+        """Ollama-модель: think выключен с ПЕРВОГО вызова пакета.
+
+        Reasoning стримится отдельным полем и съедает общий num_predict —
+        ответ обрывается лимитом генерации до кода. По докам Ollama
+        (docs.ollama.com/capabilities/thinking) это гасится ``think: false``
+        (ai.model_clients.get_no_think_handler). Провайдер определяется по
+        __module__ — фейк держит ollama-модуль.
+        """
         import os
         from ai import arm_runner
         from ai.model_clients import get_no_think_handler
@@ -4462,13 +4705,16 @@ class BatchParallelWorkerTests(TransactionTestCase):
 
         async def real_handler(messages, conv_id):
             calls.append(("plain", messages))
-            return ("мусор без кода", 50, False)
+            return ("program p; begin writeln(1); end.", 60, False)
 
         real_handler.__module__ = "ai.model_clients.ollama"
         real_handler.__name__ = "ask_Ollama_NotInRegistry_async"  # нет в _NOTHINK_HANDLERS
 
         async def nothink_proxy(messages, conv_id):
             calls.append(("nothink", messages))
+            # Первый ответ — мусор (провоцирует авто-ретрай), второй — код.
+            if sum(1 for kind, _ in calls if kind == "nothink") == 1:
+                return ("мусор без кода", 50, False)
             return ("program p; begin writeln(1); end.", 60, False)
 
         models = [{"key": "Ollama_NotInRegistry", "title": "Ollama NotInRegistry",
@@ -4487,8 +4733,8 @@ class BatchParallelWorkerTests(TransactionTestCase):
         finally:
             arm_runner._jobs.pop(run_id, None)
 
-        # Первый вызов — реальный хендлер (мусор), второй — no-think прокси.
-        self.assertEqual([kind for kind, _ in calls], ["plain", "nothink"])
+        # Оба вызова — через no-think хендлер; обычный не тронут вовсе.
+        self.assertEqual([kind for kind, _ in calls], ["nothink", "nothink"])
         run = AIModelTestRun.objects.get(run_id=run_id)
         row = AIModelTestResult.objects.get(run=run, model_key="Ollama_NotInRegistry")
         self.assertEqual(row.verdict, "solved")
@@ -4523,7 +4769,10 @@ class BatchParallelWorkerTests(TransactionTestCase):
             return orig_pair(ctx, task_ctx, model, dl_lock)
 
         try:
-            with patch.object(arm_runner, "_process_batch_pair", spy_pair):
+            # Процессор пары выбирается из реестра _PAIR_PROCESSORS (полиморфизм
+            # вместо ветвления по run_type) — подменяем запись реестра, а не
+            # глобальное имя.
+            with patch.dict(arm_runner._PAIR_PROCESSORS, {"batch": spy_pair}):
                 with patch("ai.arm_runner._test_solution_on_dl", self._dl_ok()):
                     arm_runner._run_batch_job_worker(
                         run_id, node_ids, models, self.user.id, "DLSID-1",
@@ -4604,10 +4853,10 @@ class BatchParallelWorkerTests(TransactionTestCase):
         # Модель B: обе пары решены — падение соседа её не задело.
         self.assertTrue(all(r.verdict == "solved" for r in b_rows))
 
-    def test_model_loop_crash_marks_progress_error(self):
-        """Падение цикла модели вне тела пары (сбой БД-записи): статус модели
-        «error» в model_progress, вторая модель дорешивает, прогон completed,
-        в ошибке журнала — примечание о прерванной модели."""
+    def test_pair_write_crash_is_contained_and_run_not_success(self):
+        """Сбой БД-записи пары не обрывает цикл модели: оставшиеся пары модели
+        дорешиваются, прогон completed, но НЕ успешный — в ошибке журнала
+        примечание о парах без результата."""
         from ai import arm_runner
         from ai.models import AIModelTestResult, AIModelTestRun
 
@@ -4615,9 +4864,11 @@ class BatchParallelWorkerTests(TransactionTestCase):
             return ("program p; begin writeln(1); end.", 7)
 
         real_update = AIModelTestResult.objects.update_or_create
+        solver_calls = {"a": 0}
 
         def flaky_update_or_create(**kwargs):
             if kwargs.get("model_key") == "ModelA":
+                solver_calls["a"] += 1
                 raise RuntimeError("db write exploded")
             return real_update(**kwargs)
 
@@ -4638,18 +4889,21 @@ class BatchParallelWorkerTests(TransactionTestCase):
             arm_runner._jobs.pop(run_id, None)
 
         run = AIModelTestRun.objects.get(run_id=run_id)
-        # Падение одного model-цикла НЕ валит прогон в FAILED.
+        # Падение записи пары НЕ валит ни прогон, ни цикл модели.
         self.assertEqual(run.status, AIModelTestRun.STATUS_COMPLETED)
-        # ModelB решила все свои пары; ModelA — ни одной (каждая запись падала).
+        # ModelB решила все свои пары; у ModelA записи падали — строк нет.
         rows = [r.model_key for r in AIModelTestResult.objects.filter(run=run)]
         self.assertEqual(rows, ["ModelB", "ModelB"])
         progress = {e["model_key"]: e for e in job["model_progress"]}
-        self.assertEqual(progress["ModelA"]["status"], "error")
+        # Цикл ModelA дошёл до конца (все пары обработаны), сбои учтены.
+        self.assertEqual(progress["ModelA"]["status"], "done")
+        self.assertEqual(progress["ModelA"]["pair_errors"], 2)
         self.assertEqual(progress["ModelB"]["status"], "done")
-        # Примечание о прерванной модели — в журнале; статус лога Error.
+        # Журнал — Error с примечанием о парах без результата.
         log = AIRequestLog.objects.get(message=f"Batch solve run {run_id}")
         self.assertEqual(log.status, AIRequestLog.STATUS_ERROR)
-        self.assertIn("Модели, прерванные ошибкой цикла: «Model A»", log.error_message)
+        self.assertIn("Пары со сбоем обработки (нет результата): 2", log.error_message)
+        self.assertIn("«Model A»", log.error_message)
 
     def test_cancel_mid_run_stops_models_and_keeps_partial(self):
         """Отмена на середине прогона: обе модели обрывают текущую пару, БД —
@@ -5348,6 +5602,22 @@ class ModelSortingTests(SimpleTestCase):
             self.assertNotIn(m["key"], exp_keys)
         for m in context["other_models"]:
             self.assertNotEqual(m["key"], "OR_Nemotron_Nano_12B_VL")
+
+    def test_selector_context_separates_user_model_options_from_panel_rows(self):
+        """base_chat.html читает ``user_models_options``: строки таблицы панели
+        (ключ ``user_models``) не должны попадать в optgroup — у них нет
+        ``key``, и option рендерился с пустым value."""
+        from ai.views import _render_ai_page
+        request = self.factory.get("/ai/chat/")
+        request.user = self._make_user(pk=1)
+        request.session = {}
+        request.user_info = {"userId": "sort-user"}
+        request.COOKIES = {"userId": "sort-user"}
+        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=[]),              patch("ai.views._get_user_top_model_keys", return_value=[]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
+            _render_ai_page(request, "ai/chat.html")
+        context = mock_render.call_args[0][2]
+        self.assertIn("user_models_options", context)
+        self.assertNotIn("user_models", context)
 
 
 
@@ -6417,6 +6687,95 @@ class OllamaHandlerTests(SimpleTestCase):
             self.assertFalse(cut)
             self.assertIn("пустой ответ", content)
 
+    async def test_thinking_not_returned_when_think_disabled(self):
+        """think=False — рассуждения просили выключить: пустой content + thinking
+        не превращается в ответ (это утёкшая CoT, а не ответ)."""
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.return_value = self._thinking_stream(
+                "Let me carefully analyze this problem", eval_count=7)
+
+            gpt_oss = getattr(ollama, "ask_Ollama_Gpt_Oss_20B_Cloud_async")
+            content, tokens, is_error, _cut, _prompt = await gpt_oss(
+                "hi", "client", think=False)
+            self.assertTrue(is_error)
+            self.assertEqual(tokens, 0)
+            self.assertIn("только рассуждения", content)
+            self.assertNotIn("analyze", content)
+
+    async def test_nothink_retry_never_returns_thinking(self):
+        """ARM-ретрай «без think» (nothink_handler) при пустом content и
+        рассуждениях в thinking отдаёт ошибку, а не CoT."""
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.return_value = self._thinking_stream(
+                "The task: Find the value of an expression", eval_count=9)
+
+            retry = ollama.nothink_handler(
+                getattr(ollama, "ask_Ollama_Gpt_Oss_20B_Cloud_async"))
+            content, _tokens, is_error, _cut, _prompt = await retry("hi", "client")
+            self.assertTrue(is_error)
+            self.assertIn("только рассуждения", content)
+
+    async def test_thinking_always_model_translates_think_false_to_default(self):
+        """GLM 5.3 Flash: think=false не глушит CoT, а переносит её в content —
+        поэтому поле в запрос не идёт (think=None), а thinking отбрасывается."""
+        from ai.model_clients import ollama
+        self.assertTrue(ollama.OLLAMA_MODELS["Ollama_Glm_5_3_Flash_Cloud"].get("thinking_always"))
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.return_value = self._thinking_stream(
+                "The task: Find the value of an expression", eval_count=11)
+
+            glm_5_3 = getattr(ollama, "ask_Ollama_Glm_5_3_Flash_Cloud_async")
+            content, _tokens, is_error, _cut, _prompt = await glm_5_3(
+                "hi", "client", think=False)
+            # think=False → поле не подставлено вовсе (иначе CoT утекла бы в content).
+            self.assertNotIn("think", mock_client.chat.call_args.kwargs)
+            # Рассуждение не стало ответом.
+            self.assertTrue(is_error)
+            self.assertIn("только рассуждения", content)
+
+    async def test_thinking_always_nothink_handler_keeps_default_mode(self):
+        """ARM-ретрай GLM 5.3: think никуда не передаётся, CoT не становится ответом."""
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.return_value = self._thinking_stream(
+                "Let me carefully analyze this problem", eval_count=5)
+
+            retry = ollama.nothink_handler(
+                getattr(ollama, "ask_Ollama_Glm_5_3_Flash_Cloud_async"))
+            content, _tokens, is_error, _cut, _prompt = await retry("hi", "client")
+            self.assertNotIn("think", mock_client.chat.call_args.kwargs)
+            self.assertTrue(is_error)
+            self.assertIn("только рассуждения", content)
+
+    async def test_nothink_retry_still_requests_think_false_for_others(self):
+        """Модели с рабочим think=false по-прежнему получают think=False."""
+        from ai.model_clients import ollama
+        with patch("ai.model_clients.ollama.OLLAMA_API_KEY", "test-key"), \
+             patch("ai.model_clients.ollama.OLLAMA_HOST", "https://ollama.com"), \
+             patch("ai.model_clients.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.chat.return_value = self._stream("program p;", eval_count=5)
+
+            retry = ollama.nothink_handler(
+                getattr(ollama, "ask_Ollama_Gemma_4_Cloud_async"))
+            result = await retry("hi", "client")
+            self.assertEqual(result[0], "program p;")
+            self.assertIs(mock_client.chat.call_args.kwargs.get("think"), False)
+
 
 class OllamaRateLimitTests(SimpleTestCase):
     """Защита от 429 Ollama Cloud: per-process семафор + ретраи с backoff.
@@ -7348,8 +7707,9 @@ class RequestLogXlsxTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_result_download_named_model_and_task(self):
-        """Имя файла решения: <модель>_<ID узла задачи><расширение> (у одной
-        задачи скачивают решения нескольких моделей — пара делает имя
+        """Имя файла решения: <модель>_<task_id><расширение> (taskId из
+        get-task-info — тот же номер, что в имени файла, отправленного в DL;
+        у одной задачи скачивают решения нескольких моделей — пара делает имя
         однозначной); у DL API поля имени файла нет — подписываем скачивание."""
         from ai.models import AIModelTestResult
         from ai.admin.arm import admin_arm_solve_result_download_view
@@ -7358,6 +7718,21 @@ class RequestLogXlsxTests(TestCase):
         request.user = self.superuser
         response = admin_arm_solve_result_download_view(request, result.id)
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response["Content-Disposition"],
+            'attachment; filename="Model_One_6101.pas"',
+        )
+
+    def test_result_download_falls_back_to_node_id_without_task_id(self):
+        """Старые Task без taskId (поле пустое) — в имени node_id узла."""
+        from ai.models import AIModelTestResult
+        from ai.admin.arm import admin_arm_solve_result_download_view
+        self.t1.task_id = None
+        self.t1.save(update_fields=["task_id"])
+        result = AIModelTestResult.objects.get(model_key="M1")
+        request = self.factory.get(f"/ai/admin/arm/solve/result/{result.id}/download/")
+        request.user = self.superuser
+        response = admin_arm_solve_result_download_view(request, result.id)
         self.assertEqual(
             response["Content-Disposition"],
             'attachment; filename="Model_One_5101.pas"',
@@ -7377,7 +7752,7 @@ class RequestLogXlsxTests(TestCase):
         response = admin_arm_solve_result_download_view(request, result.id)
         self.assertEqual(
             response["Content-Disposition"],
-            'attachment; filename="Model_Two_K2.7_5101.pas"',
+            'attachment; filename="Model_Two_K2.7_6101.pas"',
         )
 
         request = self.factory.get(f"/ai/admin/arm/solve/result/{result.id}/download/")
@@ -7580,25 +7955,25 @@ class ArmLightSnapshotTests(TestCase):
             "verdict", "failure_reason", "dl_comment", "dl_queue_id", "dl_test_data",
         ])
 
-        fetched = {
+        fetched = [{
             "test_number": 2, "input": "1 2\n", "expected_output": "3\n",
             "input_truncated": False, "expected_truncated": False,
-        }
+        }]
         request = self.factory.get(f"/ai/admin/arm/solve/result/{self.result.id}/body/")
         request.user = self.superuser
         request.session = {}
         request.COOKIES = {}
         with patch("ai.admin.arm._resolve_session_id", return_value="DLSID"), \
-                patch("ai.admin.arm._fetch_failed_test_data", return_value=fetched) as fetch:
+                patch("ai.admin.arm.fetch_failed_test_data", return_value=fetched) as fetch:
             response = admin_arm_solve_result_body_view(request, self.result.id)
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.content)["result"]
-        self.assertEqual(data["dl_test_data"]["input"], "1 2\n")
+        self.assertEqual(data["dl_test_data"][0]["input"], "1 2\n")
         self.assertEqual(data["dl_test_number"], 2)
         fetch.assert_called_once()
         # Данные закэшированы в строке — второй раз в DL не ходим.
         self.result.refresh_from_db()
-        self.assertEqual(json.loads(self.result.dl_test_data)["test_number"], 2)
+        self.assertEqual(json.loads(self.result.dl_test_data)[0]["test_number"], 2)
 
     def test_result_body_endpoint_chunked(self):
         """Чанковая загрузка raw_response: окно offset/length, метаданные
@@ -9258,6 +9633,13 @@ class SolveMessageTests(TestCase):
         self.assertIn("Не расписывай ход рассуждений", self._message())
         self.assertIn("Не расписывай ход рассуждений", self._message(prompt_id=self.prompt.id))
 
+    def test_fence_instruction_appended_always(self):
+        # Контракт формата «ровно один ```-блок в самом конце» — последняя
+        # строка КАЖДОГО solve-сообщения (извлечение берёт последний блок).
+        for message in (self._message(), self._message(prompt_id=self.prompt.id)):
+            self.assertIn("РОВНО ОДИН блок кода", message)
+            self.assertIn("в самом конце", message)
+
 
 # ===================================================================
 # W9: старт /arm/solve/ — язык, привязка, record_stats
@@ -10054,6 +10436,17 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         from pathlib import Path
         path = Path(__file__).resolve().parent.parent.joinpath("static", *parts)
         return path.read_text(encoding="utf-8")
+
+    def test_prompt_debug_form_state_is_remembered(self):
+        """Форма «Отладки промтов» запоминается между визитами: страница
+        зарегистрирована в общем механизме ai_admin_state.js (свой pathname —
+        без записи форма сбрасывалась), а у чекбоксов языков есть id — без
+        name/id у них нет ключа сохранения, и выбор языка терялся."""
+        src = self._static_source("admin", "js", "ai_admin_state.js")
+        self.assertIn('"/ai/admin/arm/prompt-debug/": "#armSolveForm"', src)
+        tpl = self._source("admin/ai/arm_solve.html")
+        self.assertIn('id="armLangCheck{{ lang.id }}"', tpl)
+        self.assertIn('name="prompt_attempts"', tpl)
 
     def test_rerun_pairs_post_sends_csrf_token(self):
         src = self._static_source("admin", "ai", "arm_solve", "index.js")
@@ -11257,16 +11650,21 @@ class FilterSelectBarTests(_AdminViewRequestMixin, TestCase):
 
 class ArmCodeExtractionTests(SimpleTestCase):
     """Извлечение чистого кода из ответа модели (_extract_code_from_response):
-    longest-fence побеждает; текст без фенсов — рассуждения, а не код (пусто);
-    think-блоки вырезаются целиком (в т.ч. незакрытые и код внутри них)."""
+    ПОСЛЕДНИЙ валидный ```-блок побеждает (финальный ответ, а не черновик
+    CoT); текст без фенсов — рассуждения, а не код (пусто); think-блоки
+    вырезаются целиком (в т.ч. незакрытые и код внутри них)."""
 
     def _extract(self, text):
         from ai.arm_runner import _extract_code_from_response
         return _extract_code_from_response(text)
 
-    def test_longest_fence_wins(self):
-        text = "```asm\nmov ax, 1\n```\nмусор\n```pascal\nprogram a; begin end.\n```"
-        self.assertEqual(self._extract(text), "program a; begin end.")
+    def test_last_fence_wins(self):
+        # Последний блок — финальный ответ, даже если он короче черновика выше.
+        text = (
+            "```pascal\nprogram a; begin writeln(1); end; end.\n```\n"
+            "мусор\n```asm\nmov ax, 1\n```"
+        )
+        self.assertEqual(self._extract(text), "mov ax, 1")
 
     def test_no_fences_returns_empty(self):
         self.assertEqual(self._extract("We need answer code only, no explanations."), "")
@@ -11404,6 +11802,208 @@ class StructuralCarverTests(SimpleTestCase):
         self.assertIn("jmp begin", got)
         self.assertIn(";$E", got)
         self.assertNotIn("We need solve", got)
+
+    def test_asm_loop_label_is_not_entry_anchor(self):
+        """Регрессия пары #2606750 (queueId 15245957): цикл-метка `main_loop`
+        матчилась шаблоном входа `main\\w*`, и последний «кандидат» начинался
+        с `jmp main_loop` — терялись секция данных и начало программы, DL
+        ругался «Неопределён символ main_loop (строка 1)». Якорь — только
+        ПРЯМОЙ переход (`jmp begin`), обратный переход на цикл — не якорь."""
+        text = (
+            "jmp begin\n"
+            "in_str db 100 dup(0)\n"
+            "out_str db 100 dup(0)\n"
+            "counter db 0\n"
+            "temp dw 0\n"
+            "begin:\n"
+            "lea si,in_str\n"
+            "lea di,out_str\n"
+            "mov byte ptr [counter],0\n"
+            "main_loop:\n"
+            "mov al,[si]\n"
+            "cmp al,'#'\n"
+            "je finish\n"
+            "cmp al,'a'\n"
+            "jne copy_char\n"
+            "inc byte ptr [counter]\n"
+            "mov al,[counter]\n"
+            "mov ah,0\n"
+            "mov bl,10\n"
+            "div bl\n"
+            "mov bl,al\n"
+            "mov bh,ah\n"
+            "cmp bl,0\n"
+            "je skip_tens\n"
+            "mov al,bl\n"
+            "add al,'0'\n"
+            "mov [di],al\n"
+            "inc di\n"
+            "skip_tens:\n"
+            "mov al,bh\n"
+            "add al,'0'\n"
+            "mov [di],al\n"
+            "inc di\n"
+            "mov al,[si]\n"
+            "copy_char:\n"
+            "mov [di],al\n"
+            "inc di\n"
+            "inc si\n"
+            "jmp main_loop\n"
+            "finish:\n"
+            "mov al,'#'\n"
+            "mov [di],al\n"
+            "inc di\n"
+            "mov al,0\n"
+            "mov [di],al\n"
+            "ends:\n"
+            "jmp ends ;$E"
+        )
+        got = self._c(text, ext=".i86")
+        self.assertTrue(got.startswith("jmp begin"), got[:80])
+        self.assertIn("in_str db 100 dup(0)", got)
+        self.assertIn("begin:", got)
+        self.assertIn("main_loop:", got)
+        self.assertIn("jmp main_loop", got)
+        self.assertTrue(got.rstrip().endswith(";$E"))
+
+    def test_asm_glued_duplicate_collapses_to_single_program(self):
+        """Веб-пул склеил черновик и финал без разделителя («;$Ejmp begin»):
+        и «Полный ответ модели», и извлечённый код — ОДНА программа."""
+        from ai.arm_runner import _clean_model_text
+        from ai.services.code_carver import collapse_duplicated_asm_answer
+
+        program = ("jmp begin\na db 0\nb db 0\ny db 0\nbegin:\nmov al,a\n"
+                   "sub al,b\nmov y,al\nends:\njmp ends ;$E")
+        # Граница блоков потеряна конвертером пула: второй «jmp begin» приклеен
+        # прямо к ;$E первого экземпляра.
+        text = "Simple task: a and b are bytes, y = a - b as byte.\n\nProgram:\n" \
+            + program + program
+
+        collapsed = collapse_duplicated_asm_answer(text)
+        self.assertEqual(collapsed.count("jmp begin"), 1)
+        self.assertEqual(collapsed.count("jmp ends"), 1)
+        self.assertTrue(collapsed.endswith(";$E"))
+
+        got = self._c(text, ext=".i86")
+        self.assertEqual(got.count("jmp begin"), 1)
+        self.assertTrue(got.endswith(";$E"))
+
+        # Отчёт («Полный ответ модели») — тот же единственный экземпляр.
+        cleaned = _clean_model_text(text, ".i86")
+        self.assertEqual(cleaned.count("jmp begin"), 1)
+
+    def test_asm_prose_heading_between_skeleton_parts_cut(self):
+        """Тот же класс, что #2606757, для i86: «And main function:» внутри
+        скелета — проза, а не код; в файл уходит ОДНА программа."""
+        text = ("Simple task.\nProgram:\njmp begin\na db 0\nb db 0\n\n"
+                "And main function:\ny db 0\nbegin:\nmov al,a\nsub al,b\n"
+                "mov y,al\nends:\njmp ends ;$E")
+        got = self._c(text, ext=".i86")
+        self.assertNotIn("And main function", got)
+        self.assertEqual(got.count("jmp begin"), 1)
+        self.assertEqual(got.count(";$E"), 1)
+        self.assertIn("mov y,al", got)
+
+    def test_asm_segment_dialect_full_program_kept(self):
+        """Segment-MASM GLM 5.3 Flash («assume … data segment … end start»):
+        структурник узнаёт диалект, «assume» и секция данных не теряются."""
+        text = (
+            "Решение:\n```asm\nassume cs:code, ds:data\n\ndata segment\n"
+            "    a db 25\n    b db 4\n    y db ?\n    z db ?\ndata ends\n\n"
+            "code segment\nstart:\n    mov ax, data\n    mov ds, ax\n"
+            "    mov al, a\n    cbw\n    div b\n    mov y, al\n    mov z, ah\n"
+            "    mov ax, 4C00h\n    int 21h\ncode ends\n\nend start\n```"
+        )
+        got = self._c(text, ext=".i86")
+        self.assertTrue(got.startswith("assume cs:code, ds:data"), got[:80])
+        self.assertIn("data segment", got)
+        self.assertIn("div b", got)
+        self.assertTrue(got.rstrip().endswith("end start"))
+
+    def test_asm_nasm_section_before_org_keeps_data(self):
+        """NASM-секции Gemma 4 («section .data» до «org 100h»): анкер —
+        section, а не org, иначе секция данных выкусывалась."""
+        text = (
+            "```assembly\nsection .data\n    n db 5\n    f dw 0\n\n"
+            "section .text\n    org 100h\n    mov al, [n]\n    mov cx, ax\n"
+            "    mov ax, 1\ncmp cx, 0\n    je end_calc\nloop_fact:\n"
+            "    mul cx\n    loop loop_fact\nend_calc:\n    mov [f], ax\n```"
+        )
+        got = self._c(text, ext=".i86")
+        self.assertTrue(got.startswith("section .data"), got[:80])
+        self.assertIn("n db 5", got)
+        self.assertIn("f dw 0", got)
+        self.assertIn("mov [f], ax", got)
+
+    def test_asm_memory_operand_with_si_not_prose(self):
+        """`mov [arr + si], [arr + si - 1]` — не проза.
+
+        «si» есть в стоп-словах (исп./фр. «если»), и строка набирала 40%
+        стоп-слов → вырезалась из кода (Gemma 4, сортировка вставками).
+        """
+        text = (
+            "```asm\njmp begin\narr dw 8 dup(0)\nbegin:\n    mov si, 14\n"
+            "    mov al, [arr + si]\n    mov [arr + si], [arr + si - 1]\n"
+            "    dec si\n    jmp begin\nEnds:\njmp Ends ;$E\n```"
+        )
+        got = self._c(text, ext=".i86")
+        self.assertIn("mov [arr + si], [arr + si - 1]", got)
+        self.assertIn("mov al, [arr + si]", got)
+
+    def test_asm_org_prelude_before_jmp_anchor_kept(self):
+        """DOS-стиль GPT-OSS 120B: `org 100h` + данные ДО `jmp start`.
+
+        Анкер по jmp начинал кандидата с перехода — прелюдия отрезалась.
+        Заодно проверяем, что `inc byte ptr cnt` не считается прозой
+        (мнемоники inc/dec/add/sub/div/test/… раньше отсутствовали в
+        кодовых маркерах, и такие строки вырезались как рассуждение).
+        """
+        text = (
+            "```asm\norg 100h\njmp start\nstr db 'example$',0\ncount db 0\n"
+            "start:\n    mov si, offset str\nnext:\n    lodsb\n    cmp al, '$'\n"
+            "    je done\n    inc byte ptr count\n    dec si\n    jmp next\n"
+            "done:\n    mov ah, 4Ch\n    int 21h\n```"
+        )
+        got = self._c(text, ext=".i86")
+        self.assertTrue(got.startswith("org 100h"), got[:80])
+        self.assertIn("str db 'example$',0", got)
+        self.assertIn("inc byte ptr count", got)
+        self.assertIn("dec si", got)
+
+    def test_alternative_heading_mid_reasoning_keeps_final_program(self):
+        """GLM 5.3 Flash: «Альтернатива:» посреди CoT с фрагментом, финальная
+        программа ниже. Срез по заголовку терял финал — извлекался черновик
+        (`a db 250` вместо `a db 1`); срезаем только хвостовую альтернативу."""
+        text = (
+            "Проверю: adc допустим.\n\n"
+            "Альтернатива: использовать XOR AH,AH:\n\n"
+            "```\n    xor ax, ax\n    mov al, a\n    add ax, bx\n```\n\n"
+            "Но вариант с adc проще. Ещё проще:\n\n"
+            "```\n    mov al, a\n    xor ah, ah\n    mov dl, b\n```\n\n"
+            "Итоговая программа:\n\n"
+            "```asm\n.model small\n.data\n    a db 1\n    y db ?\n.code\n"
+            "start:\n    mov ax, @data\n    mov ds, ax\n    mov al, a\n"
+            "    mov y, al\n    mov ax, 4C00h\n    int 21h\nend start\n```"
+        )
+        got = self._c(text, ext=".i86")
+        self.assertIn("a db 1", got)
+        self.assertTrue(got.rstrip().endswith("end start"), got[-80:])
+        self.assertNotIn("xor ax, ax", got)
+
+    def test_asm_two_programs_with_heading_only_final_carved(self):
+        """Две РАЗНЫЕ программы и заголовок между ними: выкусывается только
+        финальная (один jmp begin / один ;$E), заголовок не попадает."""
+        first = "jmp begin\na db 0\nb db 0\nbegin:\nmov al,a\nEnds:\njmp Ends ;$E"
+        final = "jmp begin\nx dw 2\nbegin:\nmov ax,x\nEnds:\njmp Ends ;$E"
+        got = self._c(
+            "First version:\n" + first + "\n\nFinal version:\n" + final,
+            ext=".i86",
+        )
+        self.assertEqual(got.count("jmp begin"), 1)
+        self.assertEqual(got.count(";$E"), 1)
+        self.assertIn("x dw 2", got)
+        self.assertNotIn("a db 0", got)
+        self.assertNotIn("First version", got)
 
     def test_asm_program_repeated_clean_last_wins(self):
         """res#4160: модель дала программу дважды; первый заход с CoT-хвостом,
@@ -11571,6 +12171,30 @@ class StructuralCarverTests(SimpleTestCase):
         self.assertNotIn("Также нужно помнить", got)
         self.assertNotIn("Удачи!", got)
 
+    def test_mpc_prose_heading_between_decls_and_main_cut(self):
+        """Кейс #2606757: «And main function:» между декларациями и main —
+        заголовок рассуждения, а не код (слово «main» делало строку «кодовой»
+        для _line_is_code, и она оставалась в файле → DL «Ошибка синтаксиса
+        (строка 5): And main function:»)."""
+        from ai.services.code_carver import _is_prose_sentence
+
+        text = (
+            "Following the format:\n"
+            "```c\nint __in __bits(8) a;\nint __in __bits(8) b;\n"
+            "int __out __bits(16) y;\n```\n\n"
+            "And main function:\n"
+            "```c\nvoid main() {\n    y = a * b;\n}\n```\n"
+        )
+        got = self._c(text, ext=".mpc")
+        self.assertIn("int __in __bits(8) a;", got)
+        self.assertIn("y = a * b;", got)
+        self.assertNotIn("And main function", got)
+
+        # Метки и ветвления — код, а не прозя-заголовок.
+        self.assertFalse(_is_prose_sentence("loop_start:"))
+        self.assertFalse(_is_prose_sentence("case 1:"))
+        self.assertFalse(_is_prose_sentence("default:"))
+
     def test_mpc_outline_glue_rejected_final_main_wins(self):
         """res#1225-класс: болванки-фенсы в CoT; склейка «болванка + финал»
         бракуется по двум main; финальный main-блок — единственный валидный."""
@@ -11621,6 +12245,418 @@ class StructuralCarverTests(SimpleTestCase):
         """Батч-воркер: мусору без маркеров не ходит в DL (проверка константы)."""
         from ai.arm_runner import has_language_marker
         self.assertFalse(has_language_marker('[ВСТАВЬТЕ ВАШ КОД]', '.mpc'))
+
+
+class ProseHeadingPredicateTests(SimpleTestCase):
+    """Предикат подписи модели: однословные/markdown-заголовки («Код:»,
+    «**Код**:», «Функция main():») срезаются, а метки/ветвления/комментарии —
+    нет (иначе DL падает «Ошибка синтаксиса» на строке-подписи)."""
+
+    def test_recognizes_heading_variants(self):
+        from ai.services.code_carver import _is_prose_heading_line
+        headings = (
+            "Код:", "Решение:", "Программа:", "Ответ:", "Итог:", "Вывод:",
+            "**Код**:", "*Решение*:", "`Код`:", "**Код:**",
+            "- Code:", "* Решение:", "1. Code:",
+            "Code:", "Solution:", "Answer:", "Listing:",
+            "And main function:", "The final program:",
+            "Функция main():", "Финальный код:",
+        )
+        for line in headings:
+            with self.subTest(line=line):
+                self.assertTrue(_is_prose_heading_line(line))
+
+    def test_keeps_labels_control_and_comments(self):
+        from ai.services.code_carver import _is_prose_heading_line
+        code_lines = (
+            "loop_start:", "L1:", "start:", "begin:", "ends:", "main:",
+            "case 1:", "default:", "public:", "private:", "protected:",
+            "// Code:", "; Решение:", "# Code:",
+            "if (x):", "1:", "@label:",
+            '"Код":', '"Code":', "mov ax, x", "y = a + b;",
+            "x dw 2 ; число икс.",
+        )
+        for line in code_lines:
+            with self.subTest(line=line):
+                self.assertFalse(_is_prose_heading_line(line))
+
+    def test_jump_target_whitelisted_word_preserved(self):
+        from ai.services.code_carver import (
+            _candidate_protected_labels, _is_prose_heading_line,
+        )
+        referenced = _candidate_protected_labels(["je Code", "Code:", "mov ax, 1"])
+        self.assertFalse(_is_prose_heading_line("Code:", referenced))
+        goto_ref = _candidate_protected_labels(["goto Code;", "Code:"])
+        self.assertFalse(_is_prose_heading_line("Code:", goto_ref))
+        pascal_ref = _candidate_protected_labels(["label Code;", "Code:"])
+        self.assertFalse(_is_prose_heading_line("Code:", pascal_ref))
+        unreferenced = _candidate_protected_labels(["Code:", "mov ax, 1"])
+        self.assertTrue(_is_prose_heading_line("Code:", unreferenced))
+
+
+class ProseHeadingCleanupTests(SimpleTestCase):
+    """Сквозная зачистка подписей модели из извлечённого кода (strict и
+    relaxed, С-МПА и i8086, фенсы прочих языков)."""
+
+    def _c(self, text, ext=".mpc"):
+        from ai.arm_runner import _extract_code_from_response
+        return _extract_code_from_response(text, file_extension=ext)
+
+    def test_mpc_single_word_heading_between_decls_and_main_removed(self):
+        text = (
+            "int N1 __in __bits(8);\nint RES __out __bits(8);\n\n"
+            "Код:\n\nvoid main() {\n    RES = N1 + 1;\n}\n"
+        )
+        got = self._c(text, ".mpc")
+        self.assertNotIn("Код", got)
+        self.assertIn("int N1 __in __bits(8);", got)
+        self.assertIn("void main", got)
+        self.assertIn("RES = N1 + 1;", got)
+
+    def test_mpc_bold_and_bullet_headings_removed(self):
+        for heading in ("**Код**:", "- Решение:", "`Code`:"):
+            with self.subTest(heading=heading):
+                text = (
+                    "int N1 __in __bits(8);\nint RES __out __bits(8);\n\n"
+                    f"{heading}\n\nvoid main() {{\n    RES = N1 + 1;\n}}\n"
+                )
+                got = self._c(text, ".mpc")
+                self.assertNotIn("Код", got)
+                self.assertNotIn("Code", got)
+                self.assertNotIn("Решение", got)
+                self.assertIn("RES = N1 + 1;", got)
+
+    def test_mpc_heading_with_parentheses_removed(self):
+        text = (
+            "int N1 __in __bits(8);\nint RES __out __bits(8);\n\n"
+            "Функция main():\n\nvoid main() {\n    RES = N1 + 1;\n}\n"
+        )
+        got = self._c(text, ".mpc")
+        self.assertNotIn("Функция", got)
+        self.assertIn("RES = N1 + 1;", got)
+
+    def test_asm_single_word_heading_removed(self):
+        text = (
+            "jmp begin\nx dw 1\nbegin:\nmov ax, x\nКод:\njmp ends\nends:\n;$E\n"
+        )
+        got = self._c(text, ".i86")
+        self.assertNotIn("Код", got)
+        self.assertIn("mov ax, x", got)
+        self.assertTrue(got.rstrip().endswith(";$E"))
+
+    def test_asm_markdown_and_bullet_heading_removed(self):
+        for heading in ("**Код**:", "- Solution:"):
+            with self.subTest(heading=heading):
+                text = (
+                    "jmp begin\nx dw 1\nbegin:\nmov ax, x\n"
+                    f"{heading}\njmp ends\nends:\n;$E\n"
+                )
+                got = self._c(text, ".i86")
+                self.assertNotIn("Код", got)
+                self.assertNotIn("Solution", got)
+                self.assertIn("mov ax, x", got)
+
+    def test_asm_conditional_jump_target_named_like_heading_kept(self):
+        text = (
+            "jmp begin\nx dw 1\nbegin:\nmov ax, x\nje Code\nCode:\n"
+            "mov bx, 2\njmp ends\nends:\n;$E\n"
+        )
+        got = self._c(text, ".i86")
+        self.assertIn("je Code", got)
+        self.assertIn("Code:", got)
+
+    def test_relaxed_removes_heading_but_keeps_prose_sentence(self):
+        from ai.services.code_carver import extract_mpa_c
+        text = (
+            "int N1 __in __bits(8);\nКод:\n"
+            "Here the model reasons at length in plain English.\n"
+            "void main() {\nN1 = 1;\n}\n"
+        )
+        strict = extract_mpa_c(text)
+        relaxed = extract_mpa_c(text, relaxed=True)
+        self.assertNotIn("Код", strict)
+        self.assertNotIn("Код", relaxed)
+        self.assertIn("N1 = 1;", relaxed)
+        # relaxed по-прежнему НЕ выбрасывает обычную прозу внутри окна.
+        self.assertIn("Here the model reasons", relaxed)
+
+    def test_asm_relaxed_removes_heading(self):
+        from ai.services.code_carver import extract_asm_i86
+        text = "jmp begin\nx dw 1\nbegin:\nmov ax, x\nCode:\njmp ends\nends:\n;$E\n"
+        got = extract_asm_i86(text, relaxed=True)
+        self.assertNotIn("Code:", got)
+        self.assertIn("mov ax, x", got)
+
+    def test_trailing_heading_removed(self):
+        from ai.services.code_carver import (
+            _is_trailing_prose, strip_prose_heading_lines,
+        )
+        self.assertTrue(_is_trailing_prose("Код:"))
+        self.assertFalse(_is_trailing_prose("loop_start:"))
+        self.assertEqual(
+            strip_prose_heading_lines("mov ax, x\nCode:\nmov bx, y"),
+            "mov ax, x\nmov bx, y",
+        )
+
+    def test_heading_in_generic_fence_removed(self):
+        text = "```pascal\nКод:\nprogram a;\nbegin\nwriteln(1);\nend.\n```\n"
+        self.assertEqual(
+            self._c(text, ".pas"),
+            "program a;\nbegin\nwriteln(1);\nend.",
+        )
+
+    def test_all_heading_candidate_returns_empty(self):
+        from ai.services.code_carver import strip_prose_heading_lines
+        self.assertEqual(strip_prose_heading_lines("Код:\nРешение:"), "")
+        self.assertEqual(self._c("Код:\nРешение:", ".mpc"), "")
+
+
+class CommentSpanScannerTests(SimpleTestCase):
+    """Сканер комментариев/строк: кавычки важнее открывателей комментария."""
+
+    def test_c_comment_opener_inside_string_is_not_comment(self):
+        from ai.services.code_carver import _scan_comment_spans
+        scan = _scan_comment_spans(['printf("/*");', "int x = 1; // {", "/* { } */"], ".c")
+        self.assertIn("printf(", scan.blanked[0])
+        self.assertNotIn("/*", scan.blanked[0])
+        self.assertIn("int x = 1;", scan.blanked[1])
+        self.assertNotIn("{", scan.blanked[1])
+        self.assertEqual(scan.span_lines, frozenset({2}))
+
+    def test_pascal_doubled_quote_and_brace_in_string(self):
+        from ai.services.code_carver import _scan_comment_spans
+        scan = _scan_comment_spans(["writeln('it''s { ok }');"], ".pas")
+        self.assertEqual(scan.span_lines, frozenset())
+        self.assertNotIn("{", scan.blanked[0])
+
+    def test_verilog_apostrophe_is_based_literal_not_string(self):
+        from ai.services.code_carver import _scan_comment_spans
+        scan = _scan_comment_spans(["assign y = 4'b1010; // note"], ".v")
+        self.assertIn("4'b1010", scan.blanked[0])
+        self.assertNotIn("note", scan.blanked[0])
+
+    def test_python_hash_inside_string_is_not_comment(self):
+        from ai.services.code_carver import _scan_comment_spans
+        scan = _scan_comment_spans(['s = "# not comment"', "x = 1  # real"], ".py")
+        self.assertNotIn("#", scan.blanked[0])
+        self.assertIn("x = 1", scan.blanked[1])
+        self.assertNotIn("real", scan.blanked[1])
+
+    def test_unclosed_block_extends_to_eof(self):
+        from ai.services.code_carver import _scan_comment_spans
+        scan = _scan_comment_spans(["/* start", "still comment", "end */"], ".c")
+        self.assertEqual(scan.span_lines, frozenset({0, 1, 2}))
+
+
+class AllLanguageExtractionTests(SimpleTestCase):
+    """Выкусывание кода для ВСЕХ расширений решения (SOLVE_EXTENSION_CHOICES).
+
+    Регрессии: многострочные комментарии/докстринги считались прозой и
+    теряли код; ключевые слова Verilog/Java/Python/Pascal не были маркерами,
+    из-за чего выбрасывались `endmodule`, порт-листы и заголовки функций.
+    """
+
+    # ext -> (метка фенса, ровно код)
+    SAMPLES = {
+        ".py": ("python", "def add(a, b):\n    return a + b"),
+        ".c": ("c", "#include <stdio.h>\nint main(void) {\n    return 0;\n}"),
+        ".cpp": ("cpp", "#include <iostream>\nint main() {\n    return 0;\n}"),
+        ".java": (
+            "java",
+            "public class Main {\n    public static void main(String[] args) {\n"
+            "        System.out.println(1);\n    }\n}",
+        ),
+        ".pas": ("pascal", "program Sum;\nvar a: integer;\nbegin\n  writeln(a);\nend."),
+        ".v": ("verilog", "module m(input a, output b);\n    assign b = a;\nendmodule"),
+        ".mpc": (
+            "c",
+            "int N1 __in __bits(8);\nint RES __out __bits(8);\n"
+            "void main() {\n    RES = N1 + 1;\n}",
+        ),
+        ".i86": (
+            "asm",
+            "jmp begin\nx dw 1\nbegin:\nmov ax, x\nadd ax, 2\njmp ends\n"
+            "ends:\njmp ends ;$E",
+        ),
+        ".asm": (
+            "asm",
+            "jmp begin\nx dw 1\nbegin:\nmov ax, x\nadd ax, 2\njmp ends\n"
+            "ends:\njmp ends ;$E",
+        ),
+    }
+
+    def _c(self, text, ext):
+        from ai.arm_runner import _extract_code_from_response
+        return _extract_code_from_response(text, file_extension=ext).strip()
+
+    def _assert_exact(self, got, expected, ext):
+        self.assertEqual(
+            [line.rstrip() for line in got.splitlines()],
+            [line.rstrip() for line in expected.splitlines()],
+            msg=f"ext={ext}",
+        )
+
+    def test_fenced_heading_all_languages(self):
+        for ext, (lang, code) in self.SAMPLES.items():
+            with self.subTest(ext=ext):
+                text = f"Вот решение:\n```{lang}\nКод:\n{code}\n```\nГотово!"
+                self._assert_exact(self._c(text, ext), code, ext)
+
+    def test_unfenced_prose_all_languages(self):
+        for ext, (_lang, code) in self.SAMPLES.items():
+            with self.subTest(ext=ext):
+                text = f"Вот решение:\n{code}\nГотово!"
+                self._assert_exact(self._c(text, ext), code, ext)
+
+    def test_mid_fence_heading_all_languages(self):
+        for ext, (lang, code) in self.SAMPLES.items():
+            with self.subTest(ext=ext):
+                lines = code.splitlines()
+                mid = max(1, len(lines) // 2)
+                broken = "\n".join(lines[:mid] + ["Код:"] + lines[mid:])
+                text = f"```{lang}\n{broken}\n```"
+                self._assert_exact(self._c(text, ext), code, ext)
+
+    def test_verilog_port_list_and_endmodule_preserved(self):
+        code = (
+            "module top(\n"
+            "    input wire clk,\n"
+            "    input wire rst,\n"
+            "    input wire [7:0] a,\n"
+            "    output reg [7:0] y\n"
+            ");\n"
+            "always @(posedge clk) begin\n"
+            "    if (rst) y <= 8'b0;\n"
+            "    else y <= a;\n"
+            "end\n"
+            "endmodule"
+        )
+        self._assert_exact(self._c(code, ".v"), code, ".v")
+
+    def test_c_family_block_comment_preserved(self):
+        for ext in (".c", ".cpp", ".java"):
+            with self.subTest(ext=ext):
+                code = (
+                    "/* Считает сумму.\n"
+                    "   Вторая строка. */\n"
+                    "#include <stdio.h>\n"
+                    "int main(void) {\n"
+                    "    return 0;\n"
+                    "}"
+                )
+                self._assert_exact(self._c(code, ext), code, ext)
+        code_v = (
+            "/* Модуль сумматора.\n"
+            "   Вторая строка. */\n"
+            "module adder(input a, output b);\n"
+            "    assign b = a;\n"
+            "endmodule"
+        )
+        self._assert_exact(self._c(code_v, ".v"), code_v, ".v")
+
+    def test_python_docstring_preserved(self):
+        code = (
+            '"""\n'
+            "Вычисляет сумму.\n"
+            "Вторая строка.\n"
+            '"""\n'
+            "def add(a, b):\n"
+            "    return a + b"
+        )
+        self._assert_exact(self._c(code, ".py"), code, ".py")
+
+    def test_pascal_brace_and_paren_comments_preserved(self):
+        code_brace = (
+            "{ Сумма двух чисел. }\n"
+            "program Sum;\n"
+            "begin\n"
+            "  writeln(1);\n"
+            "end."
+        )
+        self._assert_exact(self._c(code_brace, ".pas"), code_brace, ".pas")
+        code_paren = (
+            "(* Сумма двух чисел. *)\n"
+            "program Sum;\n"
+            "begin\n"
+            "  writeln(1);\n"
+            "end."
+        )
+        self._assert_exact(self._c(code_paren, ".pas"), code_paren, ".pas")
+
+    def test_cmpa_block_comment_preserved(self):
+        from ai.services.code_carver import extract_mpa_c
+        code = (
+            "int N1 __in __bits(8);\n"
+            "int RES __out __bits(8);\n"
+            "/* Комментарий\n"
+            "   про алгоритм. */\n"
+            "void main() {\n"
+            "    RES = N1 + 1;\n"
+            "}"
+        )
+        self._assert_exact(self._c(code, ".mpc"), code, ".mpc")
+        self._assert_exact(extract_mpa_c(code), code, ".mpc")
+        # `}` внутри комментария не закрывает окно программы.
+        with_brace = code.replace("про алгоритм.", "про алгоритм }.")
+        self._assert_exact(self._c(with_brace, ".mpc"), with_brace, ".mpc")
+
+    def test_async_python_preserved(self):
+        from ai.services.code_carver import _is_prose_heading_line
+        for line in (
+            "async def fetch(url):",
+            "async for item in gen():",
+            "async with lock:",
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(_is_prose_heading_line(line))
+        self.assertTrue(_is_prose_heading_line("Async operations:"))
+        code = (
+            "import asyncio\n"
+            "async def fetch(url):\n"
+            "    return url\n"
+            "async def main():\n"
+            "    async with asyncio.TaskGroup() as tg:\n"
+            '        tg.create_task(fetch("x"))\n'
+            "    async for item in gen():\n"
+            "        print(item)"
+        )
+        self._assert_exact(self._c(code, ".py"), code, ".py")
+
+    def test_commented_code_not_prose(self):
+        from ai.services.code_carver import _looks_like_prose
+        pas = (
+            "program Demo;\n"
+            "var i: integer;\n"
+            "begin\n"
+            "  { for i := 1 to 10 do }\n"
+            "  writeln(i);\n"
+            "end."
+        )
+        self.assertFalse(_looks_like_prose(pas, ".pas"))
+        self._assert_exact(self._c(pas, ".pas"), pas, ".pas")
+        py = "def main():\n    # for value in items:\n    return 1"
+        self.assertFalse(_looks_like_prose(py, ".py"))
+        self._assert_exact(self._c(py, ".py"), py, ".py")
+
+    def test_heading_like_line_inside_comment_preserved(self):
+        from ai.services.code_carver import strip_prose_heading_lines
+        code = "/*\n * Input signals:\n * Код:\n */\nint main(void) {\n    return 0;\n}"
+        self.assertEqual(strip_prose_heading_lines(code, ".c"), code)
+
+    def test_snake_case_identifiers_not_prose(self):
+        from ai.services.code_carver import _looks_like_prose
+        code = (
+            "def is_valid(has_flag):\n"
+            "    if is_valid(has_flag):\n"
+            "        return has_flag\n"
+            "    return can_run()"
+        )
+        self.assertFalse(_looks_like_prose(code))
+
+    def test_french_prose_rejected(self):
+        from ai.services.code_carver import _looks_like_prose
+        prose = "Le programme doit calculer la somme des éléments du tableau. " * 3
+        self.assertTrue(_looks_like_prose(prose))
 
 
 class ArmVerdictFixCommandTests(TestCase):
@@ -12526,6 +13562,62 @@ class ChatUserDocsLangTests(TestCase):
         self.assertEqual(data["lang"], "ru")
 
 
+class AccessDeniedReasonTests(TestCase):
+    """403 объясняет ПРИЧИНУ отказа: JSON {"error": …} для API-эндпоинтов,
+    текст — для страниц (безликое «Authentication required» не помогает
+    пользователю понять, что случилось: сессия, отключённая учётка, DLSID)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def test_api_json_reason_for_anonymous(self):
+        from django.contrib.auth.models import AnonymousUser
+        from ai.views import get_languages
+        request = self.factory.get("/ai/api/languages/")
+        request.user = AnonymousUser()
+        request.session = {}
+        response = get_languages(request)
+        self.assertEqual(response.status_code, 403)
+        data = json.loads(response.content)
+        self.assertIn("Доступ закрыт", data["error"])
+        self.assertIn("сессии", data["error"])
+
+    def test_api_json_reason_for_inactive_user(self):
+        from ai.views import get_languages
+        user = get_user_model().objects.create_user(
+            username="deny-inactive", password="x", is_active=False,
+        )
+        request = self.factory.get("/ai/api/languages/")
+        request.user = user
+        request.session = {}
+        response = get_languages(request)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("отключена", json.loads(response.content)["error"])
+
+    def test_api_json_reason_for_missing_external_id(self):
+        from ai.views import get_languages
+        user = get_user_model().objects.create_user(
+            username="deny-noext", password="x",
+        )
+        request = self.factory.get("/ai/api/languages/")
+        request.user = user
+        request.session = {}
+        request.COOKIES = {}
+        response = get_languages(request)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("DLSID", json.loads(response.content)["error"])
+
+    def test_page_403_is_text_reason(self):
+        from django.contrib.auth.models import AnonymousUser
+        from ai.views import my_models_view
+        request = self.factory.get("/ai/my-models/")
+        request.user = AnonymousUser()
+        request.session = {}
+        response = my_models_view(request)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Доступ закрыт", response.content.decode())
+
+
 class SendSolutionViewTests(TestCase):
     """send_solution_view / get_solution_result_view — URL-прокси к DL REST
     для кнопки «Тестирование» страницы «Реши задачу» (/ai/api/send-solution/,
@@ -12591,6 +13683,64 @@ class SendSolutionViewTests(TestCase):
         })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(mock_send.call_args.args[3], ".mpc")
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_file_name_signed_with_model_and_task(self, mock_send):
+        """Имя файла в DL — ``<модель>_<задача>.<ext>`` (модель из тела)."""
+        mock_send.return_value = {"queueId": 1, "message": "ok"}
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 100, "code": "x", "courseId": 1450,
+            "progLanguageName": "Pascal", "modelTitle": "Gemma 4 (Ollama)",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            mock_send.call_args.kwargs.get("file_name"),
+            "Gemma_4_Ollama_100.pas",
+        )
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_file_name_uses_task_id_of_local_task(self, mock_send):
+        """Если узел известен ARM (локальная Task), в имени файла — taskId,
+        а не nodeId: это тот же идентификатор, что в пакетном решении."""
+        from ai.models import Task
+        Task.objects.create(node_id=100, task_id=777, name="T")
+        mock_send.return_value = {"queueId": 1, "message": "ok"}
+        response = self._post_send({
+            "sessionId": "SID", "nodeId": 100, "code": "x", "courseId": 1450,
+            "progLanguageName": "Pascal", "modelTitle": "Gemma 4 (Ollama)",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            mock_send.call_args.kwargs.get("file_name"),
+            "Gemma_4_Ollama_777.pas",
+        )
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_explicit_file_name_wins(self, mock_send):
+        mock_send.return_value = {"queueId": 1, "message": "ok"}
+        self._post_send({
+            "sessionId": "SID", "nodeId": 100, "code": "x", "courseId": 1450,
+            "progLanguageName": "Pascal", "fileName": "my_solution",
+        })
+        self.assertEqual(
+            mock_send.call_args.kwargs.get("file_name"), "my_solution",
+        )
+
+    @patch("ai.dl_api_client.send_solution_to_dl")
+    def test_file_name_falls_back_to_last_solve_model(self, mock_send):
+        """Без modelTitle/modelKey — модель последней генерации для узла."""
+        mock_send.return_value = {"queueId": 1, "message": "ok"}
+        with patch(
+            "ai.services.solution_cache.last_solve_model",
+            return_value=("Gemma_4", "Gemma 4"),
+        ):
+            self._post_send({
+                "sessionId": "SID", "nodeId": 100, "code": "x",
+                "courseId": 1450, "progLanguageName": "Pascal",
+            })
+        self.assertEqual(
+            mock_send.call_args.kwargs.get("file_name"), "Gemma_4_100.pas",
+        )
 
     def test_no_extension_and_no_language_returns_400(self):
         response = self._post_send({
@@ -12756,6 +13906,155 @@ class SendSolutionViewTests(TestCase):
         self.assertEqual(solution.verdict, TaskSolution.VERDICT_PASSED)
         self.assertIsNone(solution.queue_id)
         self.assertEqual(solution.dl_comment, "Все тесты успешно пройдены")
+
+
+class DlTestDataNormalizationTests(SimpleTestCase):
+    """CRLF из DL (``"1\\r\\n2\\r\\n"``) нормализуется на границе клиента,
+    при упаковке (обрезка не оставляет висящий ``\\r``) и при чтении старых
+    строк БД — литерал ``\\r`` не должен доходить до UI."""
+
+    @staticmethod
+    def _response(payload):
+        response = MagicMock()
+        response.status_code = 200
+        response.content = json.dumps(payload).encode("utf-8")
+        return response
+
+    def test_get_test_data_normalizes_crlf(self):
+        from ai.dl_api_client import get_test_data_from_dl
+
+        with patch("ai.dl_api_client._dl_request",
+                   return_value=self._response(
+                       {"input": "1\r\n2\r\n", "expectedOutput": "YES\r\n1 5"})):
+            data = get_test_data_from_dl("DLSID", 15230210, 1)
+        self.assertEqual(data["input"], "1\n2\n")
+        self.assertEqual(data["expected_output"], "YES\n1 5")
+
+    def test_get_test_data_normalizes_lone_cr(self):
+        from ai.dl_api_client import get_test_data_from_dl
+
+        with patch("ai.dl_api_client._dl_request",
+                   return_value=self._response(
+                       {"input": "a\rb", "expectedOutput": "c\rd"})):
+            data = get_test_data_from_dl("DLSID", 1, 1)
+        self.assertEqual(data["input"], "a\nb")
+        self.assertEqual(data["expected_output"], "c\nd")
+
+    def test_pack_truncation_does_not_leave_cr(self):
+        from ai.services.dl_test_data import TEST_DATA_CHARS_MAX, pack_test_data
+
+        raw = ("x" * (TEST_DATA_CHARS_MAX - 1)) + "\r\n" + "y" * 10
+        entry = pack_test_data(1, {"input": raw, "expected_output": "ok\r\n"})
+        self.assertTrue(entry["input_truncated"])
+        self.assertEqual(len(entry["input"]), TEST_DATA_CHARS_MAX)
+        self.assertNotIn("\r", entry["input"])
+        self.assertEqual(entry["expected_output"], "ok\n")
+
+    def test_parse_normalizes_legacy_rows(self):
+        from ai.services.dl_test_data import parse_dl_test_data
+
+        legacy = [{"test_number": 2, "input": "1\r\n2\r\n",
+                   "expected_output": "3\r\n"}]
+        parsed = parse_dl_test_data(json.dumps(legacy))
+        self.assertEqual(parsed[0]["input"], "1\n2\n")
+        self.assertEqual(parsed[0]["expected_output"], "3\n")
+
+
+class DLTestDataEndpointTests(TestCase):
+    """POST /ai/api/dl-test-data/ — входные/выходные данные проваленного
+    теста для страницы «Реши задачу». Решённое решение не ходит в DL."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_superuser(
+            username="dl_data_user", password="***", email="dd@t.com",
+        )
+
+    def _post(self, body, user_info=None):
+        from ai.views import get_dl_test_data_view
+
+        request = self.factory.post(
+            "/ai/api/dl-test-data/", data=json.dumps(body),
+            content_type="application/json",
+        )
+        request.user = self.user
+        request.session = {}
+        request.COOKIES = {"userId": self.user.username}
+        if user_info is not None:
+            request.user_info = user_info
+        return get_dl_test_data_view(request)
+
+    def test_url_wired(self):
+        from django.urls import reverse
+
+        self.assertEqual(reverse("get_dl_test_data"), "/ai/api/dl-test-data/")
+
+    def test_path_not_in_post_poll_paths(self):
+        from ai.throttling import _POST_POLL_PATHS
+
+        self.assertNotIn("/ai/api/dl-test-data/", _POST_POLL_PATHS)
+
+    def test_forbidden_without_page_access(self):
+        from ai.views import get_dl_test_data_view
+
+        request = self.factory.post(
+            "/ai/api/dl-test-data/", data=json.dumps({"queueId": 42}),
+            content_type="application/json",
+        )
+        request.user = self.user
+        request.session = {}
+        request.COOKIES = {}
+        response = get_dl_test_data_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_invalid_queue_id_returns_400(self):
+        response = self._post({"queueId": "abc", "sessionId": "SID"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_missing_session_returns_400(self):
+        response = self._post({"queueId": 42})
+        self.assertEqual(response.status_code, 400)
+
+    @patch("ai.dl_api_client.get_failed_tests_from_dl")
+    @patch("ai.dl_api_client.get_test_data_from_dl")
+    def test_solved_comment_skips_dl(self, mock_data, mock_failed):
+        response = self._post({
+            "queueId": 42, "sessionId": "SID",
+            "comment": "Все тесты успешно пройдены",
+        })
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["solved"])
+        self.assertEqual(data["tests"], [])
+        mock_failed.assert_not_called()
+        mock_data.assert_not_called()
+
+    @patch("ai.dl_api_client.get_failed_tests_from_dl")
+    @patch("ai.dl_api_client.get_test_data_from_dl")
+    def test_failed_test_returns_normalized_data(self, mock_data, mock_failed):
+        mock_failed.return_value = [{"testNumber": 2, "canGetData": True}]
+        mock_data.return_value = {"input": "1\r\n2\r\n",
+                                  "expected_output": "YES\r\n1 5"}
+        response = self._post({
+            "queueId": 42, "sessionId": "SID", "comment": "не пройден 2-й тест",
+        })
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertFalse(data["solved"])
+        self.assertEqual(len(data["tests"]), 1)
+        self.assertEqual(data["tests"][0]["test_number"], 2)
+        self.assertEqual(data["tests"][0]["input"], "1\n2\n")
+        self.assertEqual(data["tests"][0]["expected_output"], "YES\n1 5")
+
+    @patch("ai.dl_api_client.get_failed_tests_from_dl", side_effect=RuntimeError("boom"))
+    def test_dl_error_is_swallowed(self, mock_failed):
+        response = self._post({"queueId": 42, "sessionId": "SID"})
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertTrue(data["ok"])
+        self.assertFalse(data["solved"])
+        self.assertEqual(data["tests"], [])
 
 
 class SolutionPollRateLimitTests(SimpleTestCase):
@@ -15060,6 +16359,114 @@ class RequestLogDetailJsonTests(TestCase):
         self.assertEqual(resp.status_code, 404)
 
 
+class RequestLogsLiveCountersTests(TestCase):
+    """Живые счётчики пакетных строк журнала (AJAX «Пары»/статус/время).
+
+    Эндпоинт /ai/admin/ai/request_logs/counters/ опрашивается
+    static/admin/ai/request_logs/live.js на «Журнале запросов» и «Настройке
+    ИИ-приложения»; права и скоуп — как у самого журнала.
+    """
+
+    RUN_ID = "a" * 32
+
+    def setUp(self):
+        from ai.admin.request_logs import admin_request_logs_counters_view
+        from django.contrib.sessions.middleware import SessionMiddleware
+        self.view = admin_request_logs_counters_view
+        self._middleware = SessionMiddleware(lambda req: None)
+        self.admin = get_user_model().objects.create_superuser(
+            username="live_admin", password="***", email="live@t.com",
+        )
+        self.pd = get_user_model().objects.create_user(
+            username="live_pd", password="***",
+        )
+        make_prompt_developer(self.pd)
+
+    def _get(self, user, run_ids=None):
+        request = RequestFactory().get(
+            "/ai/admin/ai/request_logs/counters/",
+            {"run_ids": run_ids if run_ids is not None else self.RUN_ID},
+        )
+        request.user = user
+        self._middleware.process_request(request)
+        return self.view(request)
+
+    def _make_run(self, *, status="running", finished=False, user=None):
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        started = timezone.now() - timedelta(seconds=90)
+        run = AIModelTestRun.objects.create(
+            run_id=self.RUN_ID,
+            run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=status,
+            course_id=1450,
+            started_at=started,
+            finished_at=timezone.now() if finished else None,
+        )
+        for index, verdict in enumerate(("solved", "solved", "failed")):
+            AIModelTestResult.objects.create(
+                run=run, model_key=f"Model{index}", model_title=f"Model{index}",
+                status="ok", verdict=verdict,
+            )
+        AIRequestLog.objects.create(
+            user=user or self.admin,
+            source="arm",
+            mode="batch_solve",
+            message=f"Batch solve run {self.RUN_ID}",
+            batch_run_id=self.RUN_ID,
+            status=AIRequestLog.STATUS_SUCCESS,
+            sent_at=started,
+            received_at=timezone.now() if finished else None,
+        )
+        return run
+
+    def test_running_run_counters(self):
+        self._make_run(status="running")
+        data = json.loads(self._get(self.admin).content)
+        self.assertTrue(data["ok"])
+        info = data["runs"][self.RUN_ID]
+        self.assertEqual((info["total"], info["solved"], info["failed"]), (3, 2, 1))
+        self.assertEqual(info["status_display"], "Выполняется…")
+        self.assertEqual(info["status_class"], "ai-recent-logs-neutral")
+        self.assertFalse(info["finished"])
+        self.assertEqual(info["time_display"], "")
+
+    def test_completed_run_counters_and_time(self):
+        self._make_run(status="completed", finished=True)
+        data = json.loads(self._get(self.admin).content)
+        info = data["runs"][self.RUN_ID]
+        self.assertEqual(info["status_display"], "Выполнен")
+        self.assertEqual(info["status_class"], "ai-recent-logs-ok")
+        self.assertTrue(info["finished"])
+        self.assertEqual(info["time_display"], "1 мин 30 с")
+        self.assertRegex(info["received_at"], r"^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}$")
+
+    def test_prompt_developer_does_not_see_foreign_run(self):
+        self._make_run(user=self.admin)
+        data = json.loads(self._get(self.pd).content)
+        self.assertEqual(data["runs"], {})
+
+    def test_prompt_developer_sees_own_run(self):
+        self._make_run(user=self.pd)
+        data = json.loads(self._get(self.pd).content)
+        self.assertIn(self.RUN_ID, data["runs"])
+
+    def test_invalid_and_missing_run_ids_are_ignored(self):
+        data = json.loads(self._get(self.admin, run_ids="bad,../../x").content)
+        self.assertEqual(data["runs"], {})
+        data = json.loads(self._get(self.admin, run_ids="").content)
+        self.assertEqual(data["runs"], {})
+
+    def test_post_is_rejected(self):
+        request = RequestFactory().post(
+            "/ai/admin/ai/request_logs/counters/", {"run_ids": self.RUN_ID},
+        )
+        request.user = self.admin
+        self._middleware.process_request(request)
+        resp = self.view(request)
+        self.assertEqual(resp.status_code, 405)
+
+
 class AssetViewAccessTests(TestCase):
     """asset_view (/ai/assets/): prod требует внешний id (user_info / userId-cookie);
     dev-bypass (DEBUG + AI_DEV_AUTH_BYPASS) — достаточно валидной Django-сессии.
@@ -16000,6 +17407,18 @@ class BaseChatTemplateLocalizationTests(SimpleTestCase):
         self.assertIn("Envoyer", html)
         self.assertIn("Panneau Admin", html)
 
+    def test_browser_check_loads_before_common_js(self):
+        """Предупреждение об устаревшем браузере обязано грузиться ДО
+        ai-common.js: старый движок бросает SyntaxError на его синтаксисе и
+        не выполняет ни одного скрипта страницы — проверка внутри
+        ai-common.js не запустилась бы вовсе."""
+        html = self._render("Русский")
+        # Ищем именно теги <script src=…>: имена файлов упоминаются и в
+        # комментарии-пояснении выше тега.
+        browser = html.index('src="/ai/assets/admin/js/ai-browser-check.js')
+        common = html.index('src="/ai/assets/admin/js/ai-common.js')
+        self.assertLess(browser, common)
+
 
 class BatchRunStatusPausedDisplayTests(SimpleTestCase):
     """Пауза batch-прогона — «Пауза» в журнале и «Настройке ИИ» (2026-10)."""
@@ -16121,6 +17540,78 @@ class MpaMultiWindowExtractionTests(SimpleTestCase):
         self.assertIn("unsigned __bits(16) d;", got)
         self.assertIn("void main", got)
         self.assertEqual(got, prog)
+
+    def test_plain_c_globals_above_ports_are_kept(self):
+        """Обычные C-объявления БЕЗ портов выше деклараций `__out`
+        (`char A[100];` — входной массив) не якоря: окно начиналось с
+        `int __out __bits(16) res;`, и объявления ВЫШЕ него выпадали из кода
+        («Undefined variable A» в DL; кейс «Реши задачу», C-МПА, фенс ```c,
+        где массив стоит первой строкой)."""
+        prog = (
+            "char A[100];\n"
+            "int __out __bits(16) res;\n"
+            "\n"
+            "void main() {\n"
+            "  int i = 0;\n"
+            "  if (A[0] == '#') {\n"
+            "    res = 0;\n"
+            "  }\n"
+            "}"
+        )
+        fenced = "The code looks good. No comments, clean code.\n\n```c\n" + prog + "\n```\n"
+        self.assertEqual(self._c(fenced, ext=".mpc"), prog)
+
+    def test_local_declarations_are_not_anchors(self):
+        """Локальные `int __bits(…)` внутри функции — НЕ якоря окна: раньше
+        окно стартовало с `int __bits(8) i;` внутри fact(), и в код уходил
+        хвост функции без портов и заголовка. Плюс одноимённые локальные
+        `int __bits(16) f;` в fact() и main() — нормальный C, а не склейка
+        двух программ: проверка дублей теперь только на файловом уровне."""
+        prog = (
+            "int __in __bits(16) x;\n"
+            "int __in __bits(16) y;\n"
+            "int __in __bits(8) a;\n"
+            "int __in __bits(8) b;\n"
+            "int __out __bits(16) R;\n"
+            "\n"
+            "int fact(int n) {\n"
+            "    int __bits(16) f;\n"
+            "    int __bits(8) i;\n"
+            "    f = 1;\n"
+            "    i = 1;\n"
+            "    while (i <= n) {\n"
+            "        f = f * i;\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    return f;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    int __bits(16) denom;\n"
+            "    int __bits(16) f;\n"
+            "    denom = a - b;\n"
+            "    if (denom != 0) {\n"
+            "        f = fact(x);\n"
+            "        R = f + y / denom;\n"
+            "    }\n"
+            "}"
+        )
+        fenced = "```c\n" + prog + "\n```\n"
+        self.assertEqual(self._c(fenced, ext=".mpc"), prog)
+
+    def test_plain_globals_kept_across_blank_lines(self):
+        """Подъём к глобальным объявлениям пересекает пустые строки и
+        несколько объявлений подряд (`const int N` + массив + порт)."""
+        prog = (
+            "const int N = 10;\n"
+            "\n"
+            "char A[100];\n"
+            "int __out __bits(16) res;\n"
+            "void main() {\n"
+            "  res = N;\n"
+            "}"
+        )
+        self.assertEqual(self._c("Решение:\n" + prog + "\nГотово.", ext=".mpc"), prog)
 
     def test_pseudo_c_port_declarations_are_anchors(self):
         """Псевдо-C диалект портов («unsigned char __in __bits(8) N1;» — тип
@@ -17221,14 +18712,20 @@ class ArmDlUrlAndInterimReportTests(TestCase):
         finally:
             arm_runner._jobs.pop(self.run_id, None)
 
-    def test_interim_report_skipped_for_single_runs_and_empty_results(self):
-        """_interim_live_report: single-прогоны и пустые results → None."""
+    def test_interim_report_skipped_for_single_runs_kept_for_empty_batch(self):
+        """_interim_live_report: у single-прогонов сводки нет; пустой batch —
+        отчёт нулей (карточка «Сводка» не исчезает с экрана)."""
         from ai import arm_runner
 
         self.assertIsNone(arm_runner._interim_live_report(self._make_job(run_type="single")))
         job = self._make_job()
         job["results"] = []
-        self.assertIsNone(arm_runner._interim_live_report(job))
+        report = arm_runner._interim_live_report(job)
+        self.assertIsNotNone(report)
+        self.assertTrue(report["interim"])
+        self.assertEqual(report["running"], 0)
+        self.assertEqual(report["total_pairs"], 0)
+        self.assertEqual(report["per_model"], [])
 
     def test_xlsx_running_note_lands_in_first_row(self):
         """build_arm_results_xlsx(note=…) пишет пометку в шапку листа
@@ -18426,6 +19923,25 @@ class FailureReasonClassifierTests(SimpleTestCase):
         ):
             self.assertEqual(self._reason(comment), "compile_error", comment)
 
+    def test_runtime_error_markers(self):
+        # Программа собралась, но упала во время исполнения — отдельная
+        # причина, а не «неправильный ответ» и не «не распознано».
+        for comment in (
+            "Ошибка исполнения программы: Integer overflow.",
+            "Ошибка исполнения программы: деление на ноль",
+            "Runtime error on test 3",
+            "Integer overflow",
+            "Segmentation fault",
+        ):
+            self.assertEqual(self._reason(comment), "runtime_error", comment)
+
+    def test_runtime_error_label(self):
+        from ai.models import AIModelTestResult
+        self.assertEqual(
+            AIModelTestResult.FAILURE_REASON_LABELS["runtime_error"],
+            "Ошибка исполнения программы",
+        )
+
     def test_wrong_answer_markers(self):
         for comment in (
             "Неправильный ответ на тесте 2",
@@ -18731,10 +20247,186 @@ class UserModelSecurityTests(SimpleTestCase):
             _, error = validate_base_url("https://my-own-domain.example/v1")
         self.assertEqual(error, ERR_PRIVATE_HOST)
 
+    def test_unresolvable_host_without_proxy_is_rejected(self):
+        # Нет прокси и нет прямого DNS → адрес проверить нечем: отказ.
+        from ai.services.user_models import ERR_BAD_HOST, validate_base_url
+        from unittest.mock import patch
+        import socket
+        with patch(
+            "ai.services.user_models.socket.getaddrinfo",
+            side_effect=socket.gaierror,
+        ), patch("ai.services.user_models._egress_proxy", return_value=""):
+            _, error = validate_base_url("https://api.mistral.ai/v1")
+        self.assertEqual(error, ERR_BAD_HOST)
+
+    def test_unresolvable_host_is_resolved_via_doh_through_proxy(self):
+        # Корпоративная сеть: прямой DNS внешние имена не разрешает, выход
+        # только через прокси. SSRF-проверка должна пройти через DoH.
+        from ai.services.user_models import validate_base_url
+        from unittest.mock import patch
+        import socket
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"Answer": [
+                    {"type": 5, "data": "api.mistral.ai."},  # CNAME — пропуск
+                    {"type": 1, "data": "172.66.2.203"},
+                ]}
+
+        calls = []
+
+        def fake_doh(url, **kwargs):
+            calls.append((url, kwargs))
+            # AAAA-ответов нет — тип просто не поддерживается резолвером.
+            return _Resp()
+
+        with patch(
+            "ai.services.user_models.socket.getaddrinfo",
+            side_effect=socket.gaierror,
+        ), patch(
+            "ai.services.user_models._egress_proxy",
+            return_value="http://proxy.gsu.by:3128",
+        ), patch("ai.services.user_models.httpx.get", side_effect=fake_doh):
+            url, error = validate_base_url("https://api.mistral.ai/v1")
+        self.assertEqual(error, "")
+        self.assertEqual(url, "https://api.mistral.ai/v1")
+        # DoH шёл через ТОТ ЖЕ прокси и по IP-литеральному эндпоинту.
+        self.assertTrue(calls)
+        self.assertEqual(calls[0][1]["proxy"], "http://proxy.gsu.by:3128")
+        self.assertTrue(calls[0][0].startswith("https://1.1.1.1/"))
+
+    def test_doh_unreachable_with_proxy_reports_network_error(self):
+        # Прокси есть, но ни прямой DNS, ни DoH не ответили — сообщение
+        # должно указывать на сеть, а не на «неверный домен».
+        from ai.services.user_models import ERR_DNS_UNAVAILABLE, validate_base_url
+        from unittest.mock import patch
+        import socket
+        with patch(
+            "ai.services.user_models.socket.getaddrinfo",
+            side_effect=socket.gaierror,
+        ), patch(
+            "ai.services.user_models._egress_proxy",
+            return_value="http://proxy.gsu.by:3128",
+        ), patch(
+            "ai.services.user_models.httpx.get",
+            side_effect=OSError("proxy unreachable"),
+        ):
+            _, error = validate_base_url("https://api.mistral.ai/v1")
+        self.assertEqual(error, ERR_DNS_UNAVAILABLE)
+
+    def test_doh_private_answer_is_rejected(self):
+        # DoH вернул приватный адрес → SSRF-фильтр срабатывает и на этом пути.
+        from ai.services.user_models import ERR_PRIVATE_HOST, validate_base_url
+        from unittest.mock import patch
+        import socket
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"Answer": [{"type": 1, "data": "10.0.0.5"}]}
+
+        with patch(
+            "ai.services.user_models.socket.getaddrinfo",
+            side_effect=socket.gaierror,
+        ), patch(
+            "ai.services.user_models._egress_proxy",
+            return_value="http://proxy.gsu.by:3128",
+        ), patch("ai.services.user_models.httpx.get", return_value=_Resp()):
+            _, error = validate_base_url("https://internal.example/v1")
+        self.assertEqual(error, ERR_PRIVATE_HOST)
+
     def test_default_base_urls_are_https(self):
         from ai.services.user_models import PROVIDER_BASE_URLS
         for provider, url in PROVIDER_BASE_URLS.items():
             self.assertTrue(url.startswith("https://"), provider)
+
+
+class UserModelCallProxyTests(SimpleTestCase):
+    """Вызов личной модели идёт тем же прокси, что и остальные провайдеры.
+
+    В проде прямой выход в интернет закрыт — без прокси модель была бы
+    недостижима, даже если адрес сохранён.
+    """
+
+    @staticmethod
+    def _model():
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            pk=7,
+            provider="openai",
+            model_id="mistral-large-latest",
+            base_url="https://api.mistral.ai/v1",
+            api_key_encrypted="",
+            max_tokens=8000,
+        )
+
+    @staticmethod
+    def _fake_async_client(captured):
+        """httpx.AsyncClient-двойник: копит kwargs и отдаёт валидный ответ."""
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            async def post(self, url, **kwargs):
+                class _Resp:
+                    status_code = 200
+
+                    def json(self):
+                        return {
+                            "choices": [{"message": {"content": "ок"}}],
+                            "usage": {"completion_tokens": 1, "prompt_tokens": 1},
+                        }
+
+                return _Resp()
+
+        return _FakeClient
+
+    def test_call_uses_configured_proxy(self):
+        import asyncio
+        from unittest.mock import patch
+        from ai.services.user_models import call_user_model
+
+        captured = {}
+        with patch(
+            "ai.services.user_models._egress_proxy",
+            return_value="http://proxy.gsu.by:3128",
+        ), patch(
+            "ai.services.user_models.httpx.AsyncClient",
+            self._fake_async_client(captured),
+        ):
+            content, _, is_error, _, _ = asyncio.run(
+                call_user_model(self._model(), "привет")
+            )
+        self.assertFalse(is_error)
+        self.assertEqual(content, "ок")
+        self.assertEqual(captured["proxy"], "http://proxy.gsu.by:3128")
+        # Никакого неявного чтения env-прокси: прокси задан явно.
+        self.assertFalse(captured["trust_env"])
+
+    def test_call_without_proxy_goes_direct(self):
+        import asyncio
+        from unittest.mock import patch
+        from ai.services.user_models import call_user_model
+
+        captured = {}
+        with patch(
+            "ai.services.user_models._egress_proxy", return_value="",
+        ), patch(
+            "ai.services.user_models.httpx.AsyncClient",
+            self._fake_async_client(captured),
+        ):
+            asyncio.run(call_user_model(self._model(), "привет"))
+        self.assertIsNone(captured["proxy"])
 
 
 class UserModelIsolationTests(TestCase):
@@ -18839,6 +20531,8 @@ class UserModelsAdminViewTests(_AdminViewRequestMixin, TestCase):
         ids = [row["id"] for row in response.context_data["user_models"]]
         self.assertIn(mine.pk, ids)
         self.assertNotIn(self.foreign.pk, ids)
+        # Таблица «Все модели» — только реальному суперюзеру.
+        self.assertIsNone(response.context_data["all_models"])
 
     def test_cannot_update_foreign_model(self):
         response = self._post("/ai/admin/user-models/create/", {
@@ -18938,6 +20632,469 @@ class MyModelsClientViewTests(TestCase):
             response = my_model_delete_view(request)
         self.assertEqual(response.status_code, 404)
         self.assertTrue(AIUserModel.objects.filter(pk=foreign.pk).exists())
+
+    def test_page_separates_panel_rows_from_selector_options(self):
+        """Строки таблицы и опции селектора — разные списки: раньше обе
+        назывались ``user_models``, из-за чего optgroup рендерился с
+        пустыми value (у строк таблицы нет ``key``)."""
+        from ai.models import AIUserModel
+        from ai.views import my_models_view
+        model = AIUserModel.objects.create(
+            user=self.user, title="Своя", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m",
+        )
+        from django.http import HttpResponse
+        request = self._client_request(self.user)
+        with patch("ai.views.get_external_user_id_from_request", return_value="777"), \
+                patch("ai.views.render", return_value=HttpResponse("ok")) as render_mock:
+            my_models_view(request)
+        context = render_mock.call_args[0][2]
+        self.assertEqual([row["id"] for row in context["user_models"]], [model.pk])
+        self.assertEqual(
+            [opt["key"] for opt in context["user_models_options"]],
+            [f"User_{model.pk}"],
+        )
+        self.assertIsNone(context["all_models"])
+
+    def test_all_models_table_only_for_real_superuser(self):
+        from ai.views import my_models_view
+        from django.http import HttpResponse
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_superuser"])
+        request = self._client_request(self.user)
+        with patch("ai.views.get_external_user_id_from_request", return_value="777"), \
+                patch("ai.views.render", return_value=HttpResponse("ok")) as render_mock:
+            my_models_view(request)
+        self.assertIsNotNone(render_mock.call_args[0][2]["all_models"])
+
+        # «Посмотреть как…» — эмуляция честная: таблицы нет.
+        setattr(self.user, "_ai_view_as_group_pk", 1)
+        try:
+            request = self._client_request(self.user)
+            with patch("ai.views.get_external_user_id_from_request",
+                       return_value="777"), \
+                    patch("ai.views.render", return_value=HttpResponse("ok")) as render_mock:
+                my_models_view(request)
+        finally:
+            delattr(self.user, "_ai_view_as_group_pk")
+        self.assertIsNone(render_mock.call_args[0][2]["all_models"])
+
+
+class UserModelSharingTests(TestCase):
+    """Доступ к личным моделям: приватная / адресная выдача / публичная."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        user_model = get_user_model()
+        self.owner = user_model.objects.create_user(username="sh-owner", password="x")
+        self.friend = user_model.objects.create_user(username="sh-friend", password="x")
+        self.stranger = user_model.objects.create_user(username="sh-stranger", password="x")
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="Общая", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m", base_url="https://api.openai.com/v1",
+        )
+        self.key = f"User_{self.model.pk}"
+
+    def test_private_model_stays_invisible(self):
+        from ai.services.user_models import find_user_model, user_model_options
+        self.assertEqual(len(user_model_options(self.owner)), 1)
+        self.assertEqual(user_model_options(self.friend), [])
+        self.assertIsNone(find_user_model(self.friend, self.key))
+
+    def test_shared_model_visible_to_grantee_only(self):
+        from ai.services.user_models import (
+            find_user_model, shared_user_model_options,
+        )
+        self.model.shared_with.add(self.friend)
+        options = shared_user_model_options(self.friend)
+        self.assertEqual([o["key"] for o in options], [self.key])
+        self.assertEqual(options[0]["access"], "shared")
+        # В title — владелец, чтобы одинаковые названия различались.
+        self.assertIn("sh-owner", options[0]["title"])
+        self.assertIsNotNone(find_user_model(self.friend, self.key))
+        self.assertIsNone(find_user_model(self.stranger, self.key))
+        self.assertEqual(shared_user_model_options(self.stranger), [])
+
+    def test_public_model_visible_to_everyone_but_owner(self):
+        from ai.services.user_models import (
+            find_user_model, public_user_model_options, user_model_options,
+        )
+        self.model.is_public = True
+        self.model.save(update_fields=["is_public"])
+        self.assertEqual(
+            [o["key"] for o in public_user_model_options(self.stranger)],
+            [self.key],
+        )
+        self.assertEqual(public_user_model_options(self.stranger)[0]["access"], "public")
+        self.assertIsNotNone(find_user_model(self.stranger, self.key))
+        # Своя модель не дублируется в «Публичных».
+        self.assertEqual(public_user_model_options(self.owner), [])
+        self.assertEqual(len(user_model_options(self.owner)), 1)
+
+    def test_public_model_granted_goes_to_shared_group_only(self):
+        from ai.services.user_models import (
+            public_user_model_options, shared_user_model_options,
+        )
+        self.model.is_public = True
+        self.model.save(update_fields=["is_public"])
+        self.model.shared_with.add(self.friend)
+        self.assertEqual(
+            [o["key"] for o in shared_user_model_options(self.friend)], [self.key],
+        )
+        self.assertEqual(public_user_model_options(self.friend), [])
+
+    def test_inactive_model_and_owner_are_hidden(self):
+        from ai.models import AIUserModel
+        from ai.services.user_models import find_user_model
+        self.model.is_public = True
+        self.model.save(update_fields=["is_public"])
+        self.model.is_active = False
+        self.model.save(update_fields=["is_active"])
+        self.assertIsNone(find_user_model(self.stranger, self.key))
+
+        self.model.is_active = True
+        self.model.save(update_fields=["is_active"])
+        user_model = get_user_model()
+        user_model.objects.filter(pk=self.owner.pk).update(is_active=False)
+        self.owner.refresh_from_db()
+        self.assertIsNone(find_user_model(self.stranger, self.key))
+
+    def test_owner_suffix_distinguishes_duplicate_titles(self):
+        from ai.models import AIUserModel
+        from ai.services.user_models import public_user_model_options
+        self.owner.first_name = "Иван"
+        self.owner.save(update_fields=["first_name"])
+        self.model.is_public = True
+        self.model.save(update_fields=["is_public"])
+        AIUserModel.objects.create(
+            user=self.friend, title="Общая", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m2", is_public=True,
+        )
+        titles = [o["title"] for o in public_user_model_options(self.stranger)]
+        self.assertEqual(len(titles), 2)
+        self.assertEqual(len(set(titles)), 2)
+        self.assertTrue(any("Иван" in title for title in titles))
+
+
+class UserModelSharingCrudTests(TestCase):
+    """Сохранение доступа владельцем: поля, валидация, обратная совместимость."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        user_model = get_user_model()
+        self.owner = user_model.objects.create_user(username="crud-owner", password="x")
+        self.friend = user_model.objects.create_user(username="crud-friend", password="x")
+        self.friend2 = user_model.objects.create_user(username="crud-friend2", password="x")
+        self.inactive = user_model.objects.create_user(
+            username="crud-inactive", password="x", is_active=False,
+        )
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="Моя", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m", base_url="https://api.openai.com/v1",
+        )
+
+    def _payload(self, **overrides):
+        payload = {
+            "id": self.model.pk, "title": "Моя", "provider": "openai",
+            "model_id": "m", "base_url": "https://api.openai.com/v1",
+            "max_tokens": 8000, "is_active": True,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_owner_can_set_access(self):
+        from ai.services.user_models import save_user_model
+        ok, message, _ = save_user_model(self.owner, self._payload(
+            is_public=True,
+            shared_with=[self.friend.pk, self.friend2.pk, self.friend.pk],
+        ))
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+        self.assertEqual(
+            set(self.model.shared_with.values_list("pk", flat=True)),
+            {self.friend.pk, self.friend2.pk},
+        )
+
+    def test_legacy_payload_keeps_current_access(self):
+        from ai.services.user_models import save_user_model
+        self.model.is_public = True
+        self.model.save(update_fields=["is_public"])
+        self.model.shared_with.add(self.friend)
+        ok, message, _ = save_user_model(self.owner, self._payload(title="Новое имя"))
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+        self.assertEqual(
+            list(self.model.shared_with.values_list("pk", flat=True)),
+            [self.friend.pk],
+        )
+
+    def test_self_inactive_and_bad_ids_are_filtered(self):
+        from ai.services.user_models import save_user_model
+        ok, message, _ = save_user_model(self.owner, self._payload(
+            shared_with=[self.owner.pk, self.inactive.pk, "мусор", -5,
+                         self.friend.pk],
+        ))
+        self.assertTrue(ok, message)
+        self.assertEqual(
+            list(self.model.shared_with.values_list("pk", flat=True)),
+            [self.friend.pk],
+        )
+
+    def test_share_cap(self):
+        from ai.services import user_models as service
+        with patch.object(service, "MAX_SHARED_USERS", 1):
+            ok, message, _ = service.save_user_model(self.owner, self._payload(
+                shared_with=[self.friend.pk, self.friend2.pk],
+            ))
+        self.assertTrue(ok, message)
+        self.assertEqual(self.model.shared_with.count(), 1)
+
+    def test_foreign_model_is_untouched(self):
+        from ai.models import AIUserModel
+        from ai.services.user_models import save_user_model
+        user_model = get_user_model()
+        foreign_owner = user_model.objects.create_user(username="crud-fo", password="x")
+        foreign = AIUserModel.objects.create(
+            user=foreign_owner, title="Чужая",
+            provider=AIUserModel.PROVIDER_OPENAI, model_id="fm",
+        )
+        ok, message, _ = save_user_model(self.owner, {
+            "id": foreign.pk, "title": "Взлом", "provider": "openai",
+            "model_id": "x", "is_public": True, "shared_with": [self.friend.pk],
+        })
+        self.assertFalse(ok)
+        self.assertEqual(message, "Модель не найдена")
+        foreign.refresh_from_db()
+        self.assertEqual(foreign.title, "Чужая")
+        self.assertFalse(foreign.is_public)
+        self.assertEqual(foreign.shared_with.count(), 0)
+
+
+class UserModelSuperuserAccessTests(_AdminViewRequestMixin, TestCase):
+    """Суперюзер меняет ТОЛЬКО доступ к чужим моделям."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        self.factory = RequestFactory()
+        user_model = get_user_model()
+        self.superuser = user_model.objects.create_superuser(
+            username="su-access", password="x", email="su@t.com",
+        )
+        self.owner = user_model.objects.create_user(username="su-owner", password="x")
+        self.grantee = user_model.objects.create_user(username="su-grantee", password="x")
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="Чужая", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="orig-model", base_url="https://api.example.com/v1",
+            api_key_encrypted="cipher", max_tokens=1234,
+        )
+
+    def _post(self, user, payload):
+        from ai.admin.user_models import admin_user_model_access_view
+        request = self._admin_request(
+            user, method="post", path="/ai/admin/user-models/access/",
+            data=json.dumps(payload), content_type="application/json",
+        )
+        return admin_user_model_access_view(request)
+
+    def test_superuser_changes_access_only(self):
+        response = self._post(self.superuser, {
+            "id": self.model.pk, "is_public": True,
+            "shared_with": [self.grantee.pk],
+            # Конфигурация в теле — должна игнорироваться.
+            "title": "Взлом", "model_id": "hacked", "api_key": "new",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+        self.assertEqual(
+            list(self.model.shared_with.values_list("pk", flat=True)),
+            [self.grantee.pk],
+        )
+        self.assertEqual(self.model.title, "Чужая")
+        self.assertEqual(self.model.model_id, "orig-model")
+        self.assertEqual(self.model.api_key_encrypted, "cipher")
+        self.assertEqual(self.model.max_tokens, 1234)
+
+    def test_partial_payload_does_not_wipe_other_setting(self):
+        """POST только с is_public не снимает выданные гранты (и наоборот)."""
+        self.model.shared_with.set([self.grantee])
+        response = self._post(self.superuser, {
+            "id": self.model.pk, "is_public": True,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+        self.assertEqual(
+            list(self.model.shared_with.values_list("pk", flat=True)),
+            [self.grantee.pk],
+        )
+        response = self._post(self.superuser, {
+            "id": self.model.pk, "shared_with": [],
+        })
+        self.assertEqual(response.status_code, 200)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+        self.assertEqual(list(self.model.shared_with.all()), [])
+
+    def test_non_superuser_gets_not_found(self):
+        group = self._view_as_group("SU-группа", ["page.user_models"])
+        group.users.add(self.grantee)
+        response = self._post(self.grantee, {
+            "id": self.model.pk, "is_public": True, "shared_with": [],
+        })
+        self.assertEqual(response.status_code, 404)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+
+    def test_view_as_superuser_is_rejected(self):
+        setattr(self.superuser, "_ai_view_as_group_pk", 1)
+        try:
+            response = self._post(self.superuser, {
+                "id": self.model.pk, "is_public": True, "shared_with": [],
+            })
+        finally:
+            delattr(self.superuser, "_ai_view_as_group_pk")
+        self.assertEqual(response.status_code, 404)
+
+    def test_all_models_rows_have_no_config_fields(self):
+        from ai.services.user_models import admin_user_model_rows
+        rows = admin_user_model_rows()
+        row = next(item for item in rows if item["id"] == self.model.pk)
+        self.assertEqual(row["owner_display"], "su-owner")
+        for forbidden in ("base_url", "api_key", "api_key_encrypted",
+                          "model_id", "provider", "max_tokens",
+                          "supports_vision", "supports_think"):
+            self.assertNotIn(forbidden, row)
+
+
+class UserSearchTests(TestCase):
+    """Поиск получателей доступа: DL-id точно, ФИО/логин подстрокой."""
+
+    def setUp(self):
+        from ai.models import ExternalDLAccount
+        User = get_user_model()
+        self.me = User.objects.create_user(username="search-me", password="x")
+        self.alice = User.objects.create_user(
+            username="user_101", password="x", first_name="Алиса",
+            last_name="Иванова",
+        )
+        ExternalDLAccount.objects.create(
+            user=self.alice, external_user_id="101", external_login="alice",
+            external_first_name="Алиса", external_last_name="Иванова",
+        )
+        self.bob = User.objects.create_user(
+            username="user_102", password="x", first_name="Bob", last_name="Petrov",
+        )
+        ExternalDLAccount.objects.create(
+            user=self.bob, external_user_id="102", external_login="bob",
+        )
+        self.gone = User.objects.create_user(
+            username="user_103", password="x", is_active=False,
+        )
+
+    def test_exact_dl_id(self):
+        from ai.services.user_directory import search_users_for_sharing
+        result = search_users_for_sharing("101", exclude_user=self.me)
+        self.assertEqual([u["id"] for u in result], [self.alice.pk])
+        self.assertEqual(result[0]["dl_id"], "101")
+        self.assertIn("Алиса", result[0]["display"])
+
+    def test_partial_dl_id_is_not_exact_match(self):
+        from ai.services.user_directory import search_users_for_sharing
+        # Числовой запрос — ТОЧНЫЙ DL-id, «10» не должен находить 101/102.
+        self.assertEqual(search_users_for_sharing("10", exclude_user=self.me), [])
+
+    def test_name_substring(self):
+        from ai.services.user_directory import search_users_for_sharing
+        # Латиница: SQLite в тестах не умеет регистронезависимый LIKE для
+        # кириллицы (в проде — Postgres, там ILIKE работает и для неё).
+        ids = [u["id"] for u in search_users_for_sharing("petr", exclude_user=self.me)]
+        self.assertEqual(ids, [self.bob.pk])
+
+    def test_short_text_query_returns_nothing(self):
+        from ai.services.user_directory import search_users_for_sharing
+        self.assertEqual(search_users_for_sharing("а", exclude_user=self.me), [])
+
+    def test_inactive_and_self_excluded(self):
+        from ai.services.user_directory import search_users_for_sharing
+        ids = [u["id"] for u in search_users_for_sharing("user_", exclude_user=self.me)]
+        self.assertNotIn(self.me.pk, ids)
+        self.assertNotIn(self.gone.pk, ids)
+
+    def test_response_has_no_private_fields(self):
+        from ai.services.user_directory import search_users_for_sharing
+        result = search_users_for_sharing("101", exclude_user=self.me)
+        self.assertEqual(set(result[0]), {"id", "display", "dl_id"})
+
+    def test_limit(self):
+        from ai.services import user_directory
+        with patch.object(user_directory, "MAX_SEARCH_RESULTS", 1):
+            result = user_directory.search_users_for_sharing(
+                "user_", exclude_user=self.me, limit=20,
+            )
+        self.assertEqual(len(result), 1)
+
+
+class UserModelClientAccessViewTests(TestCase):
+    """Клиентский эндпоинт доступа: гейт страницы, владелец/чужой."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        self.factory = RequestFactory()
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="cli-owner", password="x")
+        self.other = User.objects.create_user(username="cli-other", password="x")
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="Моя", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m",
+        )
+
+    def _post(self, user, payload, external_id="777"):
+        from ai.views import my_model_access_view
+        request = self.factory.post(
+            "/ai/my-models/access/", data=json.dumps(payload),
+            content_type="application/json",
+        )
+        request.user = user
+        request.session = {}
+        request.COOKIES = {}
+        with patch("ai.views.get_external_user_id_from_request",
+                   return_value=external_id):
+            return my_model_access_view(request)
+
+    def test_owner_sets_public(self):
+        response = self._post(self.owner, {"id": self.model.pk, "is_public": True,
+                                           "shared_with": []})
+        self.assertEqual(response.status_code, 200)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+
+    def test_foreign_private_model_is_not_found(self):
+        response = self._post(self.other, {"id": self.model.pk, "is_public": True,
+                                           "shared_with": []})
+        self.assertEqual(response.status_code, 404)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+
+    def test_forbidden_without_page_access(self):
+        response = self._post(self.owner, {"id": self.model.pk, "is_public": True},
+                              external_id="")
+        self.assertEqual(response.status_code, 403)
+
+    def test_search_endpoint_returns_brief(self):
+        from ai.views import my_model_search_users_view
+        request = self.factory.get("/ai/my-models/search-users/", {"q": "cli-other"})
+        request.user = self.owner
+        request.session = {}
+        request.COOKIES = {}
+        with patch("ai.views.get_external_user_id_from_request", return_value="777"):
+            response = my_model_search_users_view(request)
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertEqual([u["id"] for u in data["users"]], [self.other.pk])
+        self.assertEqual(set(data["users"][0]), {"id", "display", "dl_id"})
 
 
 class DLApiRequestsTests(_AdminViewRequestMixin, TestCase):
@@ -19824,6 +21981,50 @@ class CanUseAiGateTests(TestCase):
         self.assertFalse(can_use_ai({"canUseAi": "no"}))
         self.assertTrue(can_use_ai({"canUseAi": "true"}))
 
+    def test_restriction_message_and_code_shown(self):
+        """DL 1.4.5: UserInfo.aiRestriction несёт message и code отказа —
+        оба выводятся пользователю (страница, JSON-эндпоинты)."""
+        from ai.services.auth import format_ai_disabled_reason
+
+        user_info = {
+            "canUseAi": False,
+            "aiRestriction": {
+                "code": "COMPETITION_AI_DISABLED",
+                "message": "Использование ИИ запрещено настройкой курса во время действующей контрольной.",
+                "courseId": 1461,
+                "eventType": "CONTROL_WORK",
+            },
+        }
+        text = format_ai_disabled_reason(user_info)
+        self.assertIn("настройкой курса во время действующей контрольной", text)
+        self.assertIn("COMPETITION_AI_DISABLED", text)
+
+    def test_restriction_absent_falls_back_to_generic_text(self):
+        """Старый DL / dev без aiRestriction — прежняя формулировка, кода не
+        выдумываем."""
+        from ai.services.auth import format_ai_disabled_reason
+
+        text = format_ai_disabled_reason({"canUseAi": False})
+        self.assertIn("запрещено", text)
+        self.assertNotIn("Код причины", text)
+
+    def test_ws_close_reason_keeps_code_within_byte_limit(self):
+        """WS close reason ≤123 байт: длинный русский текст DL обрезается, а
+        КОД причины (латиница) остаётся первым — по нему фронт различает
+        событие."""
+        from ai.services.auth import ws_ai_disabled_reason
+
+        user_info = {
+            "canUseAi": False,
+            "aiRestriction": {
+                "code": "COMPETITION_AI_DISABLED",
+                "message": "Длинное пояснение " * 20,
+            },
+        }
+        reason = ws_ai_disabled_reason(user_info)
+        self.assertLessEqual(len(reason.encode("utf-8")), 123)
+        self.assertTrue(reason.startswith("COMPETITION_AI_DISABLED:"))
+
     def test_chat_page_returns_403_with_reason(self):
         """Страница чата при canUseAi=false → 403 с ТЕКСТОМ (не пустая)."""
         from ai.views import chat_view
@@ -19842,6 +22043,35 @@ class CanUseAiGateTests(TestCase):
         self.assertEqual(response.status_code, 403)
         body = response.content.decode()
         self.assertIn("запрещено", body)
+
+    def test_chat_page_403_shows_dl_message_and_code(self):
+        """Страница при отказе DL выводит ТЕКСТ и КОД из aiRestriction, а
+        отказ не кэшируется (после снятия ограничения не висит старый 403)."""
+        from ai.views import chat_view
+
+        factory = RequestFactory()
+        request = factory.get("/ai/chat/")
+        request.user = get_user_model().objects.create_user(
+            username="student-restriction", password="***")
+        request.session = {}
+        request.user_info = {
+            "userId": "student",
+            "canUseAi": False,
+            "aiRestriction": {
+                "code": "GLOBAL_AI_DISABLED",
+                "message": "Использование ИИ запрещено глобальной настройкой.",
+            },
+        }
+        request.COOKIES = {"userId": "student"}
+        with patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)), \
+             patch("ai.views.get_available_model_options", return_value=[]), \
+             patch("ai.views.trigger_model_health_refresh_async"):
+            response = chat_view(request)
+        self.assertEqual(response.status_code, 403)
+        body = response.content.decode()
+        self.assertIn("глобальной настройкой", body)
+        self.assertIn("GLOBAL_AI_DISABLED", body)
+        self.assertEqual(response["Cache-Control"], "no-store")
 
     def test_chat_page_allowed_without_flag(self):
         """Без флага страница открывается (гейт не блокирует)."""
@@ -19888,7 +22118,7 @@ class CanUseAiGateTests(TestCase):
 
         async_to_sync(run)()
         self.assertEqual(closed.get("code"), AI_DISABLED_CLOSE_CODE)
-        self.assertIn("запрещён", closed.get("reason", ""))
+        self.assertIn("запрещ", closed.get("reason", ""))
 
     def test_consumer_allows_when_flag_absent(self):
         """Без флага WS подключается (accept вызывается)."""
@@ -19952,7 +22182,8 @@ class CanUseAiClientTests(SimpleTestCase):
         sources = self._js()
         for name, src in sources.items():
             self.assertIn("isAiDisabledClose(event)", src, name)
-            self.assertIn("showAiDisabledMessage()", src, name)
+            # Событие передаётся, чтобы фронт дописал код причины из reason.
+            self.assertIn("showAiDisabledMessage(event)", src, name)
 
     def test_disabled_close_code_matches_server(self):
         from ai.consumers import AI_DISABLED_CLOSE_CODE
@@ -20657,10 +22888,28 @@ class DlFileNameContractTests(TestCase):
         name = build_dl_file_name("Проверка новых задач", ".pas")
         self.assertEqual(name, "Proverka_novyh_zadach.pas")
 
+    def test_repeated_separators_collapsed(self):
+        """«Gemma 4 (Ollama)_100» → «Gemma_4_Ollama_100» (без «__»)."""
+        from ai.dl_api_client import build_dl_file_name
+
+        self.assertEqual(
+            build_dl_file_name("Gemma 4 (Ollama)_100", ".pas"),
+            "Gemma_4_Ollama_100.pas",
+        )
+
     def test_existing_extension_in_base_is_replaced(self):
         from ai.dl_api_client import build_dl_file_name
 
         self.assertEqual(build_dl_file_name("sol.cpp", ".pas"), "sol.pas")
+
+    def test_dot_in_model_title_keeps_version_and_task_id(self):
+        """Точка в названии модели не должна съедать версию и taskId."""
+        from ai.dl_api_client import build_dl_file_name
+
+        self.assertEqual(
+            build_dl_file_name("Ollama DeepSeek 4.1 Flash_2606918", ".mpc"),
+            "Ollama_DeepSeek_4_1_Flash_2606918.mpc",
+        )
 
     def test_reserved_windows_name_escaped(self):
         from ai.dl_api_client import build_dl_file_name
@@ -20775,10 +23024,12 @@ class FetchDeltasTests(TestCase):
 class BatchPairFileNameAndTestDataTests(TransactionTestCase):
     """Подпись файла решения и данные проваленного теста.
 
-    - файл, отправляемый в DL, подписан: ``<модель>_<задача>.<ext>``
-      («Gemma4_12345.mcp»);
-    - для НЕ решённых пар забираются входные данные и эталонный ответ
-      проваленного теста (DL: get-failed-tests → get-test-data) — компактно.
+    - файл, отправляемый в DL, подписан: ``<модель>_<task_id>.<ext>``
+      («Gemma4_12445.mcp»), где task_id — ID задачи DL из get-task-info
+      (fallback на node_id, если taskId ещё не подтянут);
+    - для НЕ решённых пар забираются входные данные и эталонные ответы
+      проваленных тестов (DL: get-failed-tests → get-test-data) — компактно,
+      по записи на каждый подтверждённый провал.
     """
 
     def setUp(self):
@@ -20798,8 +23049,9 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
     def test_pair_file_name_is_signed(self):
         from ai.arm_runner import _pair_file_name
 
+        # Второй аргумент — task_id (ID задачи DL), а не node_id узла.
         self.assertEqual(
-            _pair_file_name({"title": "Gemma4"}, 12345, ".mcp"), "Gemma4_12345.mcp",
+            _pair_file_name({"title": "Gemma4"}, 12445, ".mcp"), "Gemma4_12445.mcp",
         )
         # Кириллица/пробелы в названии модели — по контракту DL (латиница).
         name = _pair_file_name({"title": "Веб Ким"}, 7, ".mcp")
@@ -20814,35 +23066,81 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
             "my_sol.mpc",
         )
 
+    def test_parse_dl_test_data_normalizes_legacy_dict(self):
+        """Старые строки БД хранили ОДИН dict — parse отдаёт список, чтобы
+        UI/тесты не знали про легаси-формат; битый JSON — пустой список."""
+        from ai.services.dl_test_data import parse_dl_test_data
+
+        legacy = {"test_number": 2, "input": "1 2\n", "expected_output": "3\n"}
+        self.assertEqual(parse_dl_test_data(json.dumps(legacy)), [legacy])
+        self.assertEqual(parse_dl_test_data(legacy), [legacy])
+        self.assertEqual(parse_dl_test_data([legacy, "мусор"]), [legacy])
+        self.assertEqual(parse_dl_test_data("not json"), [])
+        self.assertEqual(parse_dl_test_data(""), [])
+        self.assertEqual(parse_dl_test_data(None), [])
+
     def test_failed_test_data_is_compact(self):
-        from ai import arm_runner
+        from ai.services.dl_test_data import TEST_DATA_CHARS_MAX, fetch_failed_test_data
 
         long_text = "x" * 20000
         with patch("ai.dl_api_client.get_failed_tests_from_dl",
                    return_value=[{"testNumber": 3, "canGetData": True}]), \
                 patch("ai.dl_api_client.get_test_data_from_dl",
                       return_value={"input": long_text, "expected_output": "42"}):
-            data = arm_runner._fetch_failed_test_data("DLSID", 77)
-        self.assertEqual(data["test_number"], 3)
-        self.assertEqual(data["expected_output"], "42")
-        self.assertTrue(data["input_truncated"])
-        self.assertLessEqual(len(data["input"]), arm_runner._TEST_DATA_CHARS_MAX)
+            data = fetch_failed_test_data("DLSID", 77)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["test_number"], 3)
+        self.assertEqual(data[0]["expected_output"], "42")
+        self.assertTrue(data[0]["input_truncated"])
+        self.assertLessEqual(len(data[0]["input"]), TEST_DATA_CHARS_MAX)
+
+    def test_failed_test_data_collects_every_confirmed_failure(self):
+        """DL может подтвердить провал на нескольких этапах — забираем данные
+        КАЖДОГО теста (не только первого), дубли номеров схлопываем, а отказ
+        DL по одному тесту не мешает остальным."""
+        from ai.services.dl_test_data import fetch_failed_test_data
+
+        responses = {
+            1: {"input": "1\n", "expected_output": "2\n"},
+            4: {},  # DL не выдал файлы конкретно по этому тесту (404)
+            5: {"input": "5\n", "expected_output": "10\n"},
+        }
+
+        def fake_get_data(session_id, queue_id, test_number):
+            return responses.get(test_number, {})
+
+        failed = [
+            {"testNumber": 1, "canGetData": True},
+            {"testNumber": 1, "canGetData": True},   # дубль этапа
+            {"testNumber": 2, "canGetData": False},  # выдача запрещена
+            {"testNumber": 4, "canGetData": True},
+            {"testNumber": 5, "canGetData": True},
+        ]
+        with patch("ai.dl_api_client.get_failed_tests_from_dl", return_value=failed), \
+                patch("ai.dl_api_client.get_test_data_from_dl",
+                      side_effect=fake_get_data) as data_call:
+            data = fetch_failed_test_data("DLSID", 77)
+        self.assertEqual([e["test_number"] for e in data], [1, 5])
+        self.assertEqual(data[1]["expected_output"], "10\n")
+        # Номер с canGetData=False в DL не ходим.
+        asked = [call[0][2] for call in data_call.call_args_list]
+        self.assertEqual(asked, [1, 4, 5])
 
     def test_failed_test_data_absent_without_permission(self):
-        from ai import arm_runner
+        from ai.services.dl_test_data import fetch_failed_test_data
 
         with patch("ai.dl_api_client.get_failed_tests_from_dl",
                    return_value=[{"testNumber": 1, "canGetData": False}]), \
                 patch("ai.dl_api_client.get_test_data_from_dl") as data_call:
-            data = arm_runner._fetch_failed_test_data("DLSID", 77)
-        self.assertEqual(data, {})
+            data = fetch_failed_test_data("DLSID", 77)
+        self.assertEqual(data, [])
         data_call.assert_not_called()
 
     def test_failed_test_number_parsed_from_verdict(self):
         """Номер проваленного теста берём из вердикта DL — когда
         get-failed-tests ничего не отдал (или отдал без canGetData)."""
-        from ai import arm_runner
         from ai.dl_api_client import dl_failed_test_number_from_comment
+        from ai.services.dl_test_data import fetch_failed_test_data
 
         self.assertEqual(
             dl_failed_test_number_from_comment("не пройден 2-й тест (неверный ответ)"),
@@ -20855,10 +23153,10 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
         with patch("ai.dl_api_client.get_failed_tests_from_dl", return_value=[]), \
                 patch("ai.dl_api_client.get_test_data_from_dl",
                       return_value={"input": "1 2\n", "expected_output": "3\n"}) as data_call:
-            data = arm_runner._fetch_failed_test_data(
+            data = fetch_failed_test_data(
                 "DLSID", 77, "не пройден 2-й тест (неверный ответ)",
             )
-        self.assertEqual(data["test_number"], 2)
+        self.assertEqual(data[0]["test_number"], 2)
         self.assertEqual(data_call.call_args[0][2], 2)
 
     def test_report_error_item_carries_test_number(self):
@@ -20947,15 +23245,15 @@ class BatchPairFileNameAndTestDataTests(TransactionTestCase):
                 )
         finally:
             arm_runner._jobs.pop(run_id, None)
-        # Имя файла — подписанное по контракту DL.
-        self.assertEqual(captured.get("file_name"), "Gemma4_12345.mcp")
+        # Имя файла — подписанное: task_id задачи (12445), не node_id (12345).
+        self.assertEqual(captured.get("file_name"), "Gemma4_12445.mcp")
         run = AIModelTestRun.objects.get(run_id=run_id)
         row = AIModelTestResult.objects.get(run=run, model_key="M1")
-        self.assertEqual(row.dl_file_name, "Gemma4_12345.mcp")
-        # Данные проваленного теста — в строке прогона.
+        self.assertEqual(row.dl_file_name, "Gemma4_12445.mcp")
+        # Данные проваленного теста — в строке прогона (список записей).
         data = json.loads(row.dl_test_data)
-        self.assertEqual(data["input"], "2 3\n")
-        self.assertEqual(data["expected_output"], "5\n")
+        self.assertEqual(data[0]["input"], "2 3\n")
+        self.assertEqual(data[0]["expected_output"], "5\n")
 
 
 def _fake_response(status_code, payload):
@@ -21095,3 +23393,1231 @@ class ArmDeltaFormTests(_AdminViewRequestMixin, TestCase):
             response = admin_arm_solve_view(request)
         self.assertEqual(response.status_code, 200)
         self.assertNotIn('id="armDeltaSelect"', response.render().content.decode())
+
+
+# ── ARM «Отладка промтов» (run_type=prompt_debug) ──────────────────────────
+# Сервис правки промпта (ai/services/prompt_debug.py), ACL-хелпер
+# can_edit_prompt, раннер (попытки/коммит/проверка), страница/старт и журнал.
+
+
+class PromptDebugSanitizeTests(SimpleTestCase):
+    """sanitize_addition: от ответа модели остаётся только текст дополнения."""
+
+    def test_strips_fences_label_and_whitespace(self):
+        from ai.services.prompt_debug import sanitize_addition
+
+        text = "```\nТЕКСТ ДОПОЛНЕНИЯ:\nПроверяй   граничные\nслучаи.\n```"
+        self.assertEqual(sanitize_addition(text), "Проверяй граничные случаи.")
+
+    def test_short_or_empty_returns_blank(self):
+        from ai.services.prompt_debug import sanitize_addition
+
+        self.assertEqual(sanitize_addition(""), "")
+        self.assertEqual(sanitize_addition("ок"), "")
+
+
+class PromptDebugMessageTests(SimpleTestCase):
+    """build_debug_message: модели-редактору уходит ошибка DL и данные теста.
+
+    Требование пользователя: при отладке промтов модель получает и сообщение
+    DL, и входные/эталонные данные проваленного теста. Раньше эти блоки не
+    покрывались тестами — состав задания мог молча разъехаться с DL REST API.
+    """
+
+    @staticmethod
+    def _message(**overrides):
+        from ai.services.prompt_debug import build_debug_message
+
+        params = {
+            "current_prompt": "Реши задачу на Ассемблере.",
+            "task_statement": "Посчитайте y по формуле",
+            "code": "org 100h\nmov ax, 1",
+            "dl_comment": "[test1]: Тест не прошел: y sgn[2]: -20.",
+            "raw_response": "Вот решение: ...",
+            "test_data": [{
+                "test_number": 1,
+                "input": "a sgn: 30\nb sgn[2]: 50",
+                "expected_output": "y sgn[2]: -20",
+            }],
+        }
+        params.update(overrides)
+        return build_debug_message(**params)
+
+    def test_includes_dl_comment_and_test_data(self):
+        message = self._message()
+        self.assertIn("КОММЕНТАРИЙ DL (ОШИБКА)", message)
+        self.assertIn("Тест не прошел: y sgn[2]: -20.", message)
+        self.assertIn("ДАННЫЕ ПРОВАЛЕННОГО ТЕСТА", message)
+        self.assertIn("Тест 1", message)
+        self.assertIn("a sgn: 30", message)
+        self.assertIn("b sgn[2]: 50", message)
+        self.assertIn("y sgn[2]: -20", message)
+
+    def test_test_data_section_omitted_without_data(self):
+        message = self._message(test_data=[], dl_comment="")
+        self.assertNotIn("ДАННЫЕ ПРОВАЛЕННОГО ТЕСТА", message)
+        self.assertNotIn("КОММЕНТАРИЙ DL (ОШИБКА)", message)
+        # Задание всё равно просит текст дополнения.
+        self.assertIn("Верни ТОЛЬКО текст дополнения", message)
+
+    def test_test_data_kept_when_budget_tight(self):
+        """Тест-данные приоритетнее кода/ответа: длинный промпт их не вытесняет."""
+        message = self._message(current_prompt="Правило. " * 600)
+        self.assertIn("a sgn: 30", message)
+        self.assertIn("y sgn[2]: -20", message)
+
+
+class PromptDebugCommitTests(TestCase):
+    """commit_prompt_additions: куда пишется правка и как она накапливается."""
+
+    def setUp(self):
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.lang,
+        )
+        self.owner = get_user_model().objects.create_user(
+            username="pd_owner", password="x", is_staff=True,
+        )
+        self.stranger = get_user_model().objects.create_user(
+            username="pd_stranger", password="x", is_staff=True,
+        )
+
+    def test_appends_to_prompt_text_ru_with_single_heading(self):
+        from ai.services.prompt_debug import PROMPT_DEBUG_HEADER, commit_prompt_additions
+
+        prompt = Prompt.objects.create(
+            prompt_name_ru="P", prompt_text_ru="Реши задачу.", owner=self.owner,
+            programming_language=self.lang, topic=self.topic,
+        )
+        ok, error, info = commit_prompt_additions(
+            prompt.pk, ["Проверяй формат вывода."], user=self.owner,
+        )
+        self.assertTrue(ok, error)
+        self.assertEqual(info["target_field"], "prompt_text_ru")
+        prompt.refresh_from_db()
+        self.assertEqual(
+            prompt.prompt_text_ru,
+            "Реши задачу.\n\n" + PROMPT_DEBUG_HEADER + "\n- Проверяй формат вывода.",
+        )
+        # Повторное дополнение — без второй шапки и без дубля.
+        ok, _error, info2 = commit_prompt_additions(
+            prompt.pk, ["Проверяй формат вывода."], user=self.owner,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(info2["appended"], [])
+        self.assertEqual(info2["already_present"], ["Проверяй формат вывода."])
+        prompt.refresh_from_db()
+        self.assertEqual(prompt.prompt_text_ru.count(PROMPT_DEBUG_HEADER), 1)
+        self.assertEqual(prompt.prompt_text_ru.count("- Проверяй формат вывода."), 1)
+
+    def test_override_takes_priority_and_ru_stays_untouched(self):
+        from ai.services.prompt_debug import commit_prompt_additions
+
+        prompt = Prompt.objects.create(
+            prompt_name_ru="P", prompt_text_ru="Старый RU.",
+            prompt_text_override="Override base.", owner=self.owner,
+            programming_language=self.lang,
+        )
+        ok, _error, info = commit_prompt_additions(
+            prompt.pk, ["Учитывай пустой ввод."], user=self.owner,
+        )
+        self.assertTrue(ok)
+        prompt.refresh_from_db()
+        self.assertEqual(info["target_field"], "prompt_text_override")
+        self.assertTrue(prompt.prompt_text_override.startswith("Override base."))
+        self.assertIn("Учитывай пустой ввод.", prompt.prompt_text_override)
+        self.assertEqual(prompt.prompt_text_ru, "Старый RU.")
+
+    def test_shared_prompt_materializes_raw_text_without_placeholders(self):
+        """Первый коммит в shared-промпт: override = СЫРОЙ текст (плейсхолдеры
+        не подставлены), сам общий промпт не изменён."""
+        from ai.services.prompt_debug import commit_prompt_additions
+
+        shared = SharedPrompt.objects.create(
+            prompt_name_ru="Общий",
+            prompt_text_ru="Реши {message} на {language}, тема {topic}.",
+        )
+        prompt = Prompt.objects.create(
+            prompt_name_ru="P",
+            shared_prompt=shared,
+            owner=self.owner,
+            programming_language=self.lang,
+        )
+        ok, _error, info = commit_prompt_additions(
+            prompt.pk, ["Проверяй корректность ввода."], user=self.owner,
+        )
+        self.assertTrue(ok)
+        prompt.refresh_from_db()
+        shared.refresh_from_db()
+        self.assertEqual(info["target_field"], "prompt_text_override")
+        self.assertIsNotNone(prompt.prompt_text_override)
+        self.assertIn("{message}", prompt.prompt_text_override)
+        self.assertIn("{language}", prompt.prompt_text_override)
+        self.assertIn("Проверяй корректность ввода.", prompt.prompt_text_override)
+        self.assertEqual(
+            shared.prompt_text_ru, "Реши {message} на {language}, тема {topic}.",
+        )
+
+    def test_prompt_without_shared_prompt_commits_under_lock(self):
+        """Регресс: ``select_for_update`` + ``select_related("shared_prompt")``.
+
+        ``shared_prompt`` — nullable FK, и Postgres отвечал «FOR UPDATE cannot be
+        applied to the nullable side of an outer join» на КАЖДЫЙ коммит в
+        обычный промпт (без общего предка) — правки из отладки не сохранялись
+        вовсе. Блокировка берётся только на строку Prompt.
+        """
+        from ai.services.prompt_debug import commit_prompt_additions
+
+        prompt = Prompt.objects.create(
+            prompt_name_ru="Обычный", prompt_text_ru="Реши задачу.",
+            owner=self.owner, programming_language=self.lang, topic=self.topic,
+        )
+        self.assertIsNone(prompt.shared_prompt_id)
+        ok, error, info = commit_prompt_additions(
+            prompt.pk, ["Проверяй формат вывода."], user=self.owner,
+        )
+        self.assertTrue(ok, error)
+        self.assertEqual(info["target_field"], "prompt_text_ru")
+
+    def test_foreign_prompt_without_rights_is_rejected(self):
+        from ai.services.prompt_debug import commit_prompt_additions
+
+        prompt = Prompt.objects.create(
+            prompt_name_ru="P", prompt_text_ru="База.", owner=self.owner,
+            programming_language=self.lang,
+        )
+        ok, error, _info = commit_prompt_additions(
+            prompt.pk, ["Проверяй корректность ввода."], user=self.stranger,
+        )
+        self.assertFalse(ok)
+        self.assertIn("Нет прав", error)
+        prompt.refresh_from_db()
+        self.assertEqual(prompt.prompt_text_ru, "База.")
+
+    def test_editor_membership_allows_commit(self):
+        from ai.services.prompt_debug import commit_prompt_additions
+
+        prompt = Prompt.objects.create(
+            prompt_name_ru="P", prompt_text_ru="База.", owner=self.owner,
+            programming_language=self.lang,
+        )
+        prompt.editors.add(self.stranger)
+        ok, error, _info = commit_prompt_additions(
+            prompt.pk, ["Проверяй корректность ввода."], user=self.stranger,
+        )
+        self.assertTrue(ok, error)
+
+
+class CanEditPromptTests(TestCase):
+    """Единый владелец правил правки промпта (страница и фоновый раннер)."""
+
+    def setUp(self):
+        from ai.admin.permissions import add_user_to_builtin_ai_group
+        from ai.constants import BUILTIN_GROUP_PROMPT_DEV
+
+        self.owner = get_user_model().objects.create_user(
+            username="acl_owner", password="x", is_staff=True,
+        )
+        self.stranger = get_user_model().objects.create_user(
+            username="acl_stranger", password="x", is_staff=True,
+        )
+        self.prompt_developer = get_user_model().objects.create_user(
+            username="acl_pd", password="x",
+        )
+        add_user_to_builtin_ai_group(self.prompt_developer, BUILTIN_GROUP_PROMPT_DEV)
+        self.prompt = Prompt.objects.create(
+            prompt_name_ru="P", prompt_text_ru="t", owner=self.owner,
+        )
+
+    def test_rules(self):
+        from ai.admin.permissions import can_edit_prompt
+
+        self.assertTrue(can_edit_prompt(self.owner, self.prompt))
+        self.assertFalse(can_edit_prompt(self.stranger, self.prompt))
+        # Разработчик промптов — чужое не правит (только участник/владелец).
+        self.assertFalse(can_edit_prompt(self.prompt_developer, self.prompt))
+        # Суперюзер — любые промпты.
+        superuser = get_user_model().objects.create_superuser(
+            username="acl_super", password="x", email="s@x.io",
+        )
+        self.assertTrue(can_edit_prompt(superuser, self.prompt))
+        # Ключ «перезаписывать чужие».
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+
+        group = AIAccessGroup.objects.create(name="Редакторы ACL")
+        perm, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.prompt_admin.edit_others",
+            defaults={"label": "x", "section": "page"},
+        )
+        group.permissions.add(perm)
+        group.users.add(self.stranger)
+        self.assertTrue(can_edit_prompt(self.stranger, self.prompt))
+        # PromptAdmin делегирует в тот же хелпер.
+        from ai.admin import PromptAdmin
+        from django.contrib.admin.sites import AdminSite
+
+        admin = PromptAdmin(Prompt, AdminSite())
+        request = RequestFactory().get("/")
+        request.user = self.prompt_developer
+        self.assertFalse(admin._can_edit_prompt(request, self.prompt))
+
+
+class PromptDebugRunnerTests(TestCase):
+    """Полный путь пары «Отладка промтов» через воркер (модели/DL замоканы)."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="pd_runner", password="x", is_staff=True,
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.lang,
+        )
+        self.task = Task.objects.create(
+            node_id=7301, task_id=8301, name="A", statement="Сложите a и b",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.prompt = Prompt.objects.create(
+            prompt_name_ru="Промпт отладки",
+            prompt_text_ru="Реши задачу на Pascal.",
+            owner=self.user,
+            programming_language=self.lang,
+            topic=self.topic,
+        )
+
+    # ── helpers ────────────────────────────────────────────────────────────
+    class _Model:
+        """Модель: код на решение + «редактор», распознаваемый по заданию."""
+
+        def __init__(self):
+            self.solve_calls = 0
+            self.editor_calls = 0
+            # Все полученные задания (строка) — тесты проверяют, что редактору
+            # ушли ошибка DL и данные проваленного теста.
+            self.messages = []
+
+        async def handler(self, messages, conv_id):
+            text = messages if isinstance(messages, str) else str(messages)
+            self.messages.append(text)
+            if "Верни ТОЛЬКО текст дополнения" in text:
+                self.editor_calls += 1
+                return (f"Проверяй граничные случаи, вариант {self.editor_calls}.", 5)
+            self.solve_calls += 1
+            return ("program a; begin writeln(1); end.", 10)
+
+    @staticmethod
+    def _dl(verdicts):
+        """DL-мок: verdicts по номеру вызова (последний повторяется)."""
+        calls = {"n": 0}
+
+        def dl(session_id, node_id, code, ext, **kwargs):
+            verdict = verdicts[min(calls["n"], len(verdicts) - 1)]
+            calls["n"] += 1
+            if verdict == "solved":
+                return {
+                    "verdict": "solved", "comment": "Все тесты успешно пройдены",
+                    "submit_error": "", "queue_id": 1, "code_sent": code,
+                }
+            return {
+                "verdict": "failed", "comment": "Тест 1: неверный ответ",
+                "submit_error": "", "queue_id": 1, "code_sent": code,
+            }
+
+        return dl, calls
+
+    def _seed_job(self, run_id, total_pairs=1):
+        import time as _t
+        from ai import arm_runner
+
+        now_ts = _t.time()
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "prompt_debug", "status": "running",
+            "error_message": "", "total_models": 1, "total_pairs": total_pairs,
+            "completed_pairs": 0, "completed_models": 0,
+            "current_model_key": "", "current_model_title": "",
+            "current_task_node_id": "", "current_task_name": "",
+            "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+
+    def _run(self, run_id, model, dl_mock, *, prompt_attempts, prompt_id="__own__",
+             node_ids=None, test_data=None):
+        """Прогнать воркер; живой job остаётся в self._job после воркера."""
+        from ai import arm_runner
+
+        node_ids = list(node_ids or [self.task.node_id])
+        self._seed_job(run_id, total_pairs=len(node_ids))
+        try:
+            with (
+                patch("ai.arm_runner._test_solution_on_dl", dl_mock),
+                patch(
+                    "ai.arm_runner.fetch_failed_test_data",
+                    return_value=list(test_data or []),
+                ),
+            ):
+                arm_runner._run_batch_job_worker(
+                    run_id, node_ids,
+                    [{"key": "FakeModel", "title": "FakeModel", "handler": model.handler}],
+                    self.user.id, "DLSID-1",
+                    ui_language="Русский", dl_test=True,
+                    prompt_id=(
+                        self.prompt.pk if prompt_id == "__own__" else prompt_id
+                    ),
+                    course_id=1450,
+                    programming_language_id=self.lang.id,
+                    programming_language_name=self.lang.language_name,
+                    topic_id=self.topic.id,
+                    topic_name=self.topic.topic_name_ru,
+                    run_type="prompt_debug",
+                    prompt_attempts=prompt_attempts,
+                )
+                self._job = arm_runner._jobs.get(run_id) or {}
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        from ai.models import AIModelTestRun
+
+        return AIModelTestRun.objects.get(run_id=run_id)
+
+    # ── tests ──────────────────────────────────────────────────────────────
+    def test_fail_then_solve_commits_only_effective_addition(self):
+        """Два провала → успех: в промпт идёт ТОЛЬКО последняя правка.
+
+        Регресс по реальному прогону: 4 попытки давали один и тот же вердикт DL,
+        решилась только 5-я — а в промпт попадали все четыре пересказа одного
+        правила. Дополнение сохраняется, только если именно после него пара
+        прошла; несработавшие остаются в payload (UI: «на результат не
+        повлияло»), но не в общем промпте.
+        """
+        from ai.services.prompt_debug import PROMPT_DEBUG_HEADER
+
+        run_id = "d" * 32
+        model = self._Model()
+        dl_mock, dl_calls = self._dl(["failed", "failed", "solved", "solved"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=3)
+
+        self.assertEqual(run.run_type, "prompt_debug")
+        self.assertEqual(run.status, "completed")
+        row = run.results.get()
+        payload = row.prompt_debug
+        self.assertEqual(len(payload["attempts"]), 3)
+        self.assertTrue(payload["committed"])
+        self.assertEqual(payload["attempts"][0]["verdict"], "failed")
+        # Первая правка не изменила вердикт → не сохранена, но помечена как
+        # «не повлияло» (а не «пара не решена»).
+        self.assertFalse(payload["attempts"][0]["applied"])
+        self.assertTrue(payload["attempts"][0]["ineffective"])
+        # Вторая — при ней пара решилась.
+        self.assertTrue(payload["attempts"][1]["applied"])
+        self.assertFalse(payload["attempts"][1].get("ineffective"))
+        self.assertEqual(payload["attempts"][2]["verdict"], "solved")
+        self.assertEqual(payload["attempts"][2]["addition"], "")
+        # Проверочный проход: решено итоговым (сокращённым) промптом.
+        self.assertEqual(payload["verification"]["verdict"], "solved")
+        self.assertGreaterEqual(dl_calls["n"], 4)
+
+        self.prompt.refresh_from_db()
+        self.assertIn(PROMPT_DEBUG_HEADER, self.prompt.prompt_text_ru)
+        self.assertNotIn("вариант 1.", self.prompt.prompt_text_ru)
+        self.assertIn("вариант 2.", self.prompt.prompt_text_ru)
+        self.assertEqual(self.prompt.prompt_text_ru.count(PROMPT_DEBUG_HEADER), 1)
+
+        log = AIRequestLog.objects.get(message=f"Prompt debug run {run_id}")
+        self.assertEqual(log.mode, AIRequestLog.MODE_PROMPT_DEBUG)
+        self.assertEqual(log.batch_run_id, run_id)
+        # Сводка прогона: промпт дополнен, правки по парам, проверка.
+        report = run.report or {}
+        self.assertEqual(report["prompt_debug"]["prompts_updated"], 1)
+        self.assertEqual(report["prompt_debug"]["committed_pairs"], 1)
+        self.assertEqual(report["prompt_debug"]["verification"]["checked"], 1)
+        self.assertEqual(report["prompt_debug"]["verification"]["solved"], 1)
+        # «Исправлено»: сначала не прошло, после правки промпта прошло.
+        self.assertEqual(report["prompt_debug"]["fixed"], 1)
+        fixed_topics = report["prompt_debug"]["fixed_by_topic"]
+        self.assertEqual(len(fixed_topics), 1)
+        self.assertEqual(fixed_topics[0]["topic"], self.topic.topic_name_ru)
+        self.assertEqual(fixed_topics[0]["count"], 1)
+        self.assertEqual(fixed_topics[0]["items"][0]["attempts"], 3)
+        # Те же цифры — в разрезе модели/темы (колонка «Исправлено»).
+        self.assertEqual(report["per_model"][0]["fixed"], 1)
+        self.assertEqual(report["per_topic"][0]["fixed"], 1)
+
+        # Лёгкий снапшот (страница/поллинг, job уже нет — из БД): цифры
+        # берутся из сохранённого отчёта, а не пересчитываются по строкам
+        # без payload'ов (иначе «Сводка» показывала бы нули).
+        from ai import arm_runner
+
+        snapshot = arm_runner.get_arm_run_snapshot(run_id, light_results=True)
+        light_stats = snapshot["report"]["prompt_debug"]
+        self.assertEqual(light_stats["prompts_updated"], 1)
+        self.assertEqual(light_stats["committed_pairs"], 1)
+        self.assertEqual(light_stats["fixed"], 1)
+        self.assertEqual(light_stats["verification"]["solved"], 1)
+        light_row = snapshot["results"][0]
+        self.assertTrue(light_row["prompt_debug_state"]["fixed"])
+        self.assertTrue(light_row["prompt_debug_state"]["committed"])
+
+    def test_editor_gets_dl_comment_and_failed_test_data(self):
+        """Редактор промпта получает сообщение DL и вход/эталон проваленного теста.
+
+        Требование пользователя: при отладке промтов модель видит не только
+        код и промпт, но и то, что именно сказал DL и на каких данных пара
+        упала (DL REST API get-failed-tests + get-test-data).
+        """
+        run_id = "e" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["failed", "failed"])
+        test_data = [{
+            "test_number": 1,
+            "input": "a sgn: 30\nb sgn[2]: 50",
+            "expected_output": "y sgn[2]: -20",
+            "input_truncated": False,
+            "expected_truncated": False,
+        }]
+        run = self._run(
+            run_id, model, dl_mock, prompt_attempts=2, test_data=test_data,
+        )
+
+        editor_messages = [
+            text for text in model.messages
+            if "Верни ТОЛЬКО текст дополнения" in text
+        ]
+        self.assertEqual(len(editor_messages), 1)
+        message = editor_messages[0]
+        self.assertIn("Тест 1: неверный ответ", message)
+        self.assertIn("a sgn: 30", message)
+        self.assertIn("b sgn[2]: 50", message)
+        self.assertIn("y sgn[2]: -20", message)
+        # Данные теста сохраняются в строке пары (карточка результата).
+        row = run.results.get()
+        self.assertEqual(row.dl_test_data, json.dumps(test_data, ensure_ascii=False))
+
+    def test_first_try_solve_is_not_fixed(self):
+        """Пара, решённая с первой попытки, — НЕ «исправленная» правкой."""
+        run_id = "9" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["solved", "solved"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=3)
+
+        payload = run.results.get().prompt_debug
+        self.assertEqual(len(payload["attempts"]), 1)
+        self.assertFalse(payload["committed"])
+        stats = (run.report or {}).get("prompt_debug") or {}
+        self.assertEqual(stats.get("fixed"), 0)
+        self.assertEqual(stats.get("fixed_by_topic"), [])
+        # Нет исправлений — нет и колонки: счётчик в разрезах не появляется.
+        self.assertNotIn("fixed", run.report["per_model"][0])
+
+    def test_legacy_saved_report_without_fixed_stats_renders(self):
+        """Сохранённый отчёт СТАРОГО прогона (до статистики «исправлено») не
+        имеет части ключей — страница не падает KeyError'ом, счётчики
+        достраиваются нулями."""
+        from ai import arm_runner
+
+        report = {"hints": []}
+        arm_runner._attach_prompt_debug_report(
+            report, [], stats={
+                "prompts_updated": 1,
+                "committed_pairs": 1,
+                "skipped_pairs": 0,
+                "verification": {"checked": 1, "solved": 1},
+            },
+        )
+        stats = report["prompt_debug"]
+        self.assertEqual(stats["fixed"], 0)
+        self.assertEqual(stats["fixed_by_topic"], [])
+        self.assertEqual(stats["verification"]["failed"], 0)
+        self.assertEqual(stats["verification"]["regressed"], 0)
+        self.assertFalse(any("Исправлено" in h for h in report["hints"]))
+
+    def test_exhausted_attempts_do_not_commit(self):
+        """Пара так и не решена — промпт не изменён, правки только в payload."""
+        run_id = "e" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["failed"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=2)
+
+        row = run.results.get()
+        payload = row.prompt_debug
+        self.assertEqual(len(payload["attempts"]), 2)
+        self.assertFalse(payload["committed"])
+        self.assertIn("не сохранены", payload["commit_error"])
+        self.assertTrue(payload["attempts"][0]["addition"])
+        self.assertFalse(payload["attempts"][0]["applied"])
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
+        self.assertEqual(model.editor_calls, 1)
+
+    def test_attempt_limit_one_makes_no_edits(self):
+        run_id = "f" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["failed"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=1)
+
+        payload = run.results.get().prompt_debug
+        self.assertEqual(len(payload["attempts"]), 1)
+        self.assertFalse(payload["committed"])
+        self.assertEqual(model.editor_calls, 0)
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
+
+    def test_no_rights_skips_pair_without_model_call(self):
+        other = get_user_model().objects.create_user(
+            username="pd_other_owner", password="x", is_staff=True,
+        )
+        self.prompt.owner = other
+        self.prompt.save(update_fields=["owner"])
+        self.user.is_staff = False
+        self.user.save(update_fields=["is_staff"])
+
+        run_id = "a" * 32
+        model = self._Model()
+        dl_mock, dl_calls = self._dl(["solved"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=2)
+
+        row = run.results.get()
+        self.assertEqual(row.verdict, "skipped")
+        self.assertEqual(row.failure_reason, "skipped")
+        self.assertTrue(row.prompt_debug["skipped"])
+        self.assertIn("нет прав", row.prompt_debug["skip_reason"])
+        self.assertEqual(model.solve_calls, 0)
+        self.assertEqual(model.editor_calls, 0)
+        self.assertEqual(dl_calls["n"], 0)
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
+
+    def test_verification_rerun_reads_final_prompt(self):
+        """Проверка идёт по УЖЕ дополненному промпту и пишет свой вердикт."""
+        from ai import arm_runner
+        from ai.services.prompt_debug import PROMPT_DEBUG_HEADER
+
+        seen_messages = []
+
+        class _CapturingModel(self._Model):
+            async def handler(self, messages, conv_id):
+                seen_messages.append(messages)
+                return await super().handler(messages, conv_id)
+
+        run_id = "b" * 32
+        model = _CapturingModel()
+        dl_mock, _calls = self._dl(["failed", "solved", "solved"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=2)
+
+        payload = run.results.get().prompt_debug
+        self.assertTrue(payload["committed"])
+        self.assertEqual(payload["verification"]["verdict"], "solved")
+        # Последний вызов модели — проверочный: в сообщении уже есть дополнение.
+        self.assertIn(PROMPT_DEBUG_HEADER, seen_messages[-1])
+        self.assertIn("вариант 1.", seen_messages[-1])
+        # usage пары суммирует попытки, редактора и проверку (токены моделей).
+        self.assertGreater(payload["usage"]["tokens"], 0)
+
+
+    def test_default_binding_keeps_edits_across_runs(self):
+        """Промпт «по привязке» правится в ТОЙ ЖЕ строке и остаётся действующим.
+
+        Второй прогон по той же привязке видит уже дополненный текст, правки
+        не дублируются, сама привязка и номер промпта не меняются.
+        """
+        from ai.models import ArmPromptBinding
+        from ai.services.prompt_debug import PROMPT_DEBUG_HEADER
+
+        binding = ArmPromptBinding.objects.create(
+            programming_language=self.lang, topic=self.topic,
+            mode=ArmPromptBinding.MODE_SOLVE, prompt=self.prompt,
+        )
+        # Прогон 1: провал → правка → успех.
+        model1 = self._Model()
+        dl1, _calls1 = self._dl(["failed", "solved", "solved"])
+        self._run("1" * 32, model1, dl1, prompt_attempts=2, prompt_id=None)
+
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru.count(PROMPT_DEBUG_HEADER), 1)
+        self.assertIn("вариант 1.", self.prompt.prompt_text_ru)
+
+        # Прогон 2: та же привязка, пара решается сразу — редактор не зовётся,
+        # сообщение уже содержит накопленное дополнение.
+        seen = []
+
+        class _CapturingModel(self._Model):
+            async def handler(self, messages, conv_id):
+                seen.append(messages)
+                return await super().handler(messages, conv_id)
+
+        model2 = _CapturingModel()
+        dl2, _calls2 = self._dl(["solved", "solved"])
+        self._run("2" * 32, model2, dl2, prompt_attempts=2, prompt_id=None)
+
+        self.assertEqual(model2.editor_calls, 0)
+        self.assertIn(PROMPT_DEBUG_HEADER, seen[0])
+        self.assertIn("вариант 1.", seen[0])
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru.count(PROMPT_DEBUG_HEADER), 1)
+        self.assertEqual(self.prompt.prompt_text_ru.count("вариант 1."), 1)
+        binding.refresh_from_db()
+        self.assertEqual(binding.prompt_id, self.prompt.pk)
+
+    # ── сбой редактора / безлимитные попытки / живые попытки ───────────────
+    def test_editor_failure_closes_pair_and_keeps_model_loop(self):
+        """Сбой редактора закрывает ПАРУ (payload с попытками), а не цикл модели.
+
+        Регрессия: исключение провайдера в вызове редактора раньше уносило
+        весь цикл модели — оставшиеся задачи не решались, а у пары не было
+        payload'а (в UI оставался только вердикт проверки).
+        """
+        second = Task.objects.create(
+            node_id=7304, task_id=8304, name="B", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+
+        class _EditorBoomModel(self._Model):
+            async def handler(self, messages, conv_id):
+                text = messages if isinstance(messages, str) else str(messages)
+                if "Верни ТОЛЬКО текст дополнения" in text:
+                    self.editor_calls += 1
+                    raise RuntimeError("пул ботов недоступен")
+                self.solve_calls += 1
+                return ("program a; begin writeln(1); end.", 10)
+
+        run_id = "4" * 32
+        model = _EditorBoomModel()
+        dl_mock, _calls = self._dl(["failed"])
+        run = self._run(
+            run_id, model, dl_mock, prompt_attempts=2,
+            node_ids=[self.task.node_id, second.node_id],
+        )
+
+        self.assertEqual(run.status, "completed")
+        rows = list(run.results.all())
+        # Обе задачи модели отработаны — цикл модели не упал.
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            payload = row.prompt_debug or {}
+            self.assertEqual(len(payload.get("attempts") or []), 1)
+            self.assertIn("Редактор промпта не ответил", payload.get("stopped") or "")
+            self.assertFalse(payload.get("committed"))
+        self.assertGreaterEqual(model.editor_calls, 2)
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
+
+    def test_pair_close_crash_does_not_kill_model_loop(self):
+        """Сбой ЗАКРЫТИЯ пары (коммит/запись payload) не обрывает цикл модели.
+
+        Регрессия: ``_finish_prompt_debug_pair`` вызывался ВНЕ try — его
+        исключение уносило весь цикл модели, оставшиеся пары попадали только
+        в проверку («основной проход по паре не выполнялся»), а промпт для них
+        не правился.
+        """
+        from ai import arm_runner
+
+        second = Task.objects.create(
+            node_id=7305, task_id=8305, name="B", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        run_id = "7" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["solved"])
+        real_finish = arm_runner._finish_prompt_debug_pair
+        calls = {"n": 0}
+
+        def flaky_finish(ctx, task_ctx, model_, payload, state):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("БД недоступна")
+            return real_finish(ctx, task_ctx, model_, payload, state)
+
+        with patch("ai.arm_runner._finish_prompt_debug_pair", side_effect=flaky_finish):
+            run = self._run(
+                run_id, model, dl_mock, prompt_attempts=2,
+                node_ids=[self.task.node_id, second.node_id],
+            )
+
+        self.assertEqual(run.status, "completed")
+        rows = {row.task.node_id: row for row in run.results.select_related("task")}
+        self.assertEqual(set(rows), {self.task.node_id, second.node_id})
+        for node_id, row in rows.items():
+            payload = row.prompt_debug or {}
+            # Основной проход был у ОБЕИХ пар — проверка не пишет «не выполнялся».
+            self.assertEqual(payload.get("note") or "", "", node_id)
+            self.assertEqual(len(payload.get("attempts") or []), 1, node_id)
+        # Сбой пары не должен оставлять вечную строку «выполняется…».
+        live = [r for r in (self._job.get("results") or []) if r.get("_live")]
+        self.assertEqual(live, [])
+        self.assertEqual(self._job.get("completed_pairs"), 2)
+
+    def test_commit_retry_saves_addition_after_transient_error(self):
+        """Транзиентный сбой БД при коммите не теряет успешную правку промпта."""
+        from ai.services import prompt_debug as pd
+
+        run_id = "8" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["failed", "solved", "solved"])
+        real_commit = pd.commit_prompt_additions
+        calls = {"n": 0}
+
+        def flaky_commit(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("deadlock detected")
+            return real_commit(*args, **kwargs)
+
+        with patch("ai.services.prompt_debug.commit_prompt_additions",
+                   side_effect=flaky_commit):
+            run = self._run(run_id, model, dl_mock, prompt_attempts=3)
+
+        self.prompt.refresh_from_db()
+        self.assertIn("вариант 1.", self.prompt.prompt_text_ru)
+        payload = run.results.get().prompt_debug or {}
+        self.assertTrue(payload.get("committed"))
+        self.assertEqual(calls["n"], 2)
+
+    def test_commit_failure_reports_human_readable_error(self):
+        """Сбой коммита: в карточке — человеческая фраза, а не текст СУБД.
+
+        Регресс по жалобе на «Не удалось сохранить промпт: Не удалось сохранить
+        правки промпта: FOR UPDATE cannot be applied…» — двойной префикс и
+        сырой SQL ничего не говорят пользователю; техническая причина остаётся
+        в логе прогона (logger.exception в retry-обёртке).
+        """
+        run_id = "9" * 32
+        model = self._Model()
+        dl_mock, _calls = self._dl(["failed", "solved", "solved"])
+
+        with patch("ai.services.prompt_debug.commit_prompt_additions",
+                   side_effect=RuntimeError(
+                       "FOR UPDATE cannot be applied to the nullable side "
+                       "of an outer join")):
+            run = self._run(run_id, model, dl_mock, prompt_attempts=3)
+
+        payload = run.results.get().prompt_debug or {}
+        error = payload.get("commit_error") or ""
+        self.assertTrue(error, "ошибка коммита должна быть в payload")
+        self.assertNotIn("FOR UPDATE", error)
+        self.assertNotIn("Не удалось сохранить промпт:", error)
+        self.assertIn("Правки не записаны", error)
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
+
+    def test_zero_attempts_loops_until_skip_button(self):
+        """Попыток = 0 → цикл без ограничения; метка «Далее» закрывает пару."""
+        from ai import arm_runner
+
+        run_id = "5" * 32
+        node_id = self.task.node_id
+
+        class _SkipOnFirstSolveModel(self._Model):
+            async def handler(self, messages, conv_id):
+                text = messages if isinstance(messages, str) else str(messages)
+                if "Верни ТОЛЬКО текст дополнения" in text:
+                    self.editor_calls += 1
+                    return ("Проверяй граничные случаи подробнее.", 5)
+                self.solve_calls += 1
+                # Пользователь нажал «Далее», пока шла первая попытка.
+                arm_runner._jobs[run_id].setdefault("skipped_pairs", set()).add(
+                    ("FakeModel", node_id)
+                )
+                return ("program a; begin writeln(1); end.", 10)
+
+        model = _SkipOnFirstSolveModel()
+        dl_mock, dl_calls = self._dl(["failed"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=0)
+
+        payload = run.results.get().prompt_debug
+        # Без «Далее» цикл был бы бесконечным: DL всегда проваливает.
+        self.assertEqual(len(payload["attempts"]), 1)
+        self.assertTrue(payload["stopped_by_user"])
+        self.assertIn("Далее", payload["stopped"])
+        self.assertEqual(payload["max_attempts"], 0)
+        self.assertEqual(model.editor_calls, 0)
+        self.assertEqual(dl_calls["n"], 2)  # попытка + проверочный проход
+        self.prompt.refresh_from_db()
+        self.assertEqual(self.prompt.prompt_text_ru, "Реши задачу на Pascal.")
+
+    def test_failed_attempt_visible_in_live_results(self):
+        """Первая неудача публикуется в живых результатах до конца пары."""
+        from ai import arm_runner
+
+        run_id = "6" * 32
+        observed = []
+
+        class _InspectingModel(self._Model):
+            async def handler(self, messages, conv_id):
+                text = messages if isinstance(messages, str) else str(messages)
+                if "Верни ТОЛЬКО текст дополнения" in text:
+                    self.editor_calls += 1
+                    return ("Проверяй граничные случаи подробнее.", 5)
+                self.solve_calls += 1
+                if self.solve_calls == 2:
+                    # Вторая попытка: пара уже должна быть видна в job.
+                    observed.extend(
+                        dict(row) for row in arm_runner._jobs[run_id].get("results") or []
+                    )
+                return ("program a; begin writeln(1); end.", 10)
+
+        model = _InspectingModel()
+        dl_mock, _calls = self._dl(["failed", "solved", "solved"])
+        run = self._run(run_id, model, dl_mock, prompt_attempts=2)
+        job = self._job
+
+        self.assertEqual(len(observed), 1)
+        self.assertTrue(observed[0]["_live"])
+        self.assertEqual(observed[0]["verdict"], "failed")
+        self.assertEqual(len(observed[0]["prompt_debug"]["attempts"]), 1)
+        # Итоговая пара ЗАМЕНИЛА живую, а не задвоила её.
+        self.assertEqual(len(job["results"]), 1)
+        self.assertFalse(job["results"][0].get("_live"))
+        self.assertEqual(job["completed_pairs"], 1)
+        self.assertEqual(run.results.count(), 1)
+
+    def test_pair_row_visible_from_the_first_model_call(self):
+        """Строка пары видна в результатах с самого старта («выполняется…»).
+
+        Раньше строка появлялась только по завершении пары: первые минуты
+        прогона «Ответы моделей» были пусты, а после перезагрузки страницы
+        пустой список читался как «результаты пропали». Сводка при этом тоже
+        не исчезает — «в работе N».
+        """
+        from ai import arm_runner
+
+        run_id = "4" * 32
+        probe = self._Model()
+        seen = {}
+
+        async def handler(messages, conv_id):
+            if "results" not in seen:
+                job = arm_runner._jobs.get(run_id) or {}
+                seen["results"] = [dict(row) for row in (job.get("results") or [])]
+                seen["report"] = arm_runner._interim_live_report(job)
+            return await probe.handler(messages, conv_id)
+
+        model = type("ProbeModel", (), {"handler": staticmethod(handler)})()
+        dl_mock, _calls = self._dl(["failed", "solved", "solved"])
+        _run = self._run(run_id, model, dl_mock, prompt_attempts=2)
+
+        live = seen["results"]
+        self.assertEqual(len(live), 1)
+        self.assertTrue(live[0]["_live"])
+        self.assertEqual(live[0]["status"], "running")
+        self.assertEqual(live[0]["verdict"], "")
+        self.assertIsNone(live[0]["result_id"])
+        # Сводка живого прогона существует (раньше была None → карточка скрыта).
+        self.assertIsNotNone(seen["report"])
+        self.assertEqual(seen["report"]["running"], 1)
+        self.assertEqual(seen["report"]["total_pairs"], 0)
+        self.assertTrue(seen["report"]["interim"])
+
+        # После завершения пары заглушка заменена итоговой строкой — без дублей.
+        job = self._job
+        self.assertEqual(len(job["results"]), 1)
+        self.assertFalse(job["results"][0].get("_live"))
+        self.assertEqual(job["results"][0]["verdict"], "solved")
+        self.assertEqual(job["completed_pairs"], 1)
+
+    def test_request_skip_marks_only_current_prompt_debug_pairs(self):
+        from ai import arm_runner
+
+        run_id = "7" * 32
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "prompt_debug", "status": "running",
+            "model_progress": [
+                {"model_key": "M1", "current_task_node_id": "7301"},
+                {"model_key": "M2", "current_task_node_id": ""},
+            ],
+        }
+        batch_id = "8" * 32
+        arm_runner._jobs[batch_id] = {
+            "run_id": batch_id, "run_type": "batch", "status": "running",
+            "model_progress": [{"model_key": "M1", "current_task_node_id": "7301"}],
+        }
+        try:
+            self.assertEqual(arm_runner.request_prompt_debug_skip(run_id), 1)
+            self.assertTrue(
+                arm_runner._is_pair_skip_requested(run_id, "M1", "7301")
+            )
+            # Повторное нажатие ничего нового не помечает.
+            self.assertEqual(arm_runner.request_prompt_debug_skip(run_id), 0)
+            # Обычный пакетный прогон «Далее» не поддерживает.
+            self.assertEqual(arm_runner.request_prompt_debug_skip(batch_id), 0)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+            arm_runner._jobs.pop(batch_id, None)
+
+    def test_task_without_prompt_is_skipped(self):
+        """Нет привязки и нет ручного промпта → пара пропущена, модель не зовётся."""
+        task = Task.objects.create(
+            node_id=7302, task_id=8302, name="B", statement="x",
+            topic=None, programming_language=None, file_extension=".pas",
+        )
+        model = self._Model()
+        dl_mock, dl_calls = self._dl(["solved"])
+        self._seed_job("3" * 32)
+        from ai import arm_runner
+
+        try:
+            with (
+                patch("ai.arm_runner._test_solution_on_dl", dl_mock),
+                patch("ai.arm_runner.fetch_failed_test_data", return_value=[]),
+            ):
+                arm_runner._run_batch_job_worker(
+                    "3" * 32, [task.node_id],
+                    [{"key": "FakeModel", "title": "FakeModel", "handler": model.handler}],
+                    self.user.id, "DLSID-1",
+                    ui_language="Русский", dl_test=True,
+                    prompt_id=None, course_id=1450,
+                    programming_language_id=self.lang.id,
+                    programming_language_name=self.lang.language_name,
+                    run_type="prompt_debug", prompt_attempts=2,
+                )
+        finally:
+            arm_runner._jobs.pop("3" * 32, None)
+
+        from ai.models import AIModelTestRun
+
+        row = AIModelTestRun.objects.get(run_id="3" * 32).results.get()
+        self.assertEqual(row.verdict, "skipped")
+        self.assertTrue(row.prompt_debug["skipped"])
+        self.assertIn("промпта", row.prompt_debug["skip_reason"])
+        self.assertEqual(model.solve_calls, 0)
+        self.assertEqual(dl_calls["n"], 0)
+
+
+class PromptDebugAdminViewTests(_AdminViewRequestMixin, TestCase):
+    """Страница /arm/prompt-debug/ и её старт: режим, попытки, права."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(
+            username="pd_admin", password="x", is_staff=True,
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.lang,
+        )
+        self.prompt = Prompt.objects.create(
+            prompt_name_ru="Свой промпт", prompt_text_ru="Реши.",
+            owner=self.user, programming_language=self.lang, topic=self.topic,
+        )
+
+    def _page(self):
+        from ai.admin.arm import admin_arm_prompt_debug_view
+
+        request = self._admin_request(
+            self.user, path="/ai/admin/arm/prompt-debug/",
+        )
+        with (
+            patch("ai.admin.arm._resolve_active_course_id", return_value=(1450, "")),
+            patch("ai.admin.arm._fetch_delta_options", return_value=[]),
+            patch("ai.admin.arm.get_arm_solve_model_options", return_value=[]),
+        ):
+            response = admin_arm_prompt_debug_view(request)
+        return response, response.render().content.decode()
+
+    def _start(self, payload):
+        from ai.admin.arm import admin_arm_prompt_debug_start_view
+
+        request = self._admin_request(
+            self.user, method="post", path="/ai/admin/arm/prompt-debug/start/",
+            data=json.dumps(payload), content_type="application/json",
+        )
+        request.session["external_session_id"] = "DLSID-TEST"
+        return admin_arm_prompt_debug_start_view(request)
+
+    def test_page_renders_debug_mode(self):
+        _response, html = self._page()
+        self.assertIn("ARM: Отладка промтов", html)
+        self.assertIn('name="prompt_attempts"', html)
+        self.assertIn("/ai/admin/arm/prompt-debug/start/", html)
+        self.assertIn('id="arm-solve-mode"', html)
+        self.assertNotIn('id="armSaveSolutions"', html)
+        # Фильтр промптов по языку: у опций есть language_id.
+        self.assertIn('"language_id": %d' % self.lang.id, html)
+        # Чекбокс языка несёт value=id: по нему селектор промптов фильтрует
+        # список и восстанавливается язык из run_params. Без value браузер
+        # отдаёт "on" — селект промптов оказывался пустым.
+        self.assertIn(
+            'class="arm-lang-check" id="armLangCheck%d" value="%d"'
+            % (self.lang.id, self.lang.id),
+            html,
+        )
+
+    def test_start_passes_run_type_and_attempts(self):
+        calls = {}
+
+        def fake_start(*args, **kwargs):
+            calls["kwargs"] = kwargs
+            return "run-1", ""
+
+        with (
+            patch("ai.admin.arm.start_batch_solve_run", side_effect=fake_start),
+            patch("ai.admin.arm.get_arm_run_snapshot", return_value={"run_id": "run-1"}),
+        ):
+            response = self._start({
+                "node_ids": [7301],
+                "models": ["FakeModel"],
+                "language_id": self.lang.id,
+                "course_id": 1450,
+                "prompt_id": self.prompt.pk,
+                "prompt_attempts": "",
+                "record_stats": True,
+                "save_solutions": True,
+            })
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)
+        self.assertTrue(body["ok"])
+        self.assertEqual(calls["kwargs"]["run_type"], "prompt_debug")
+        # Пустое поле попыток → дефолт 5.
+        self.assertEqual(calls["kwargs"]["prompt_attempts"], 5)
+        # Статистика и кэш решений для отладки принудительно выключены.
+        self.assertFalse(calls["kwargs"]["record_stats"])
+        self.assertFalse(calls["kwargs"]["save_solutions"])
+
+    def test_start_rejects_invalid_attempts(self):
+        # 0 — НЕ ошибка: «без ограничения» (остановка кнопкой «Далее»).
+        for value in (11, "abc", -1):
+            response = self._start({
+                "node_ids": [7301],
+                "models": ["FakeModel"],
+                "language_id": self.lang.id,
+                "course_id": 1450,
+                "prompt_id": self.prompt.pk,
+                "prompt_attempts": value,
+            })
+            self.assertEqual(response.status_code, 400, value)
+            self.assertIn(
+                "Попыток на пару", json.loads(response.content)["message"],
+            )
+
+    def test_start_accepts_zero_attempts_as_unlimited(self):
+        calls = {}
+
+        def fake_start(*args, **kwargs):
+            calls["kwargs"] = kwargs
+            return "run-1", ""
+
+        with (
+            patch("ai.admin.arm.start_batch_solve_run", side_effect=fake_start),
+            patch("ai.admin.arm.get_arm_run_snapshot", return_value={"run_id": "run-1"}),
+        ):
+            response = self._start({
+                "node_ids": [7301],
+                "models": ["FakeModel"],
+                "language_id": self.lang.id,
+                "course_id": 1450,
+                "prompt_id": self.prompt.pk,
+                "prompt_attempts": 0,
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls["kwargs"]["prompt_attempts"], 0)
+
+    def test_start_rejects_foreign_prompt_without_rights(self):
+        other = get_user_model().objects.create_user(
+            username="pd_admin_other", password="x", is_staff=True,
+        )
+        foreign = Prompt.objects.create(
+            prompt_name_ru="Чужой", prompt_text_ru="x", owner=other,
+            programming_language=self.lang,
+        )
+        response = self._start({
+            "node_ids": [7301],
+            "models": ["FakeModel"],
+            "language_id": self.lang.id,
+            "course_id": 1450,
+            "prompt_id": foreign.pk,
+            "prompt_attempts": 3,
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Нет прав", json.loads(response.content)["message"])
+
+
+class PromptDebugJournalTests(TestCase):
+    """Журнал и лёгкие снапшоты: режим prompt_debug виден и не теряется."""
+
+    def setUp(self):
+        from ai.models import AIModelTestRun
+
+        self.user = get_user_model().objects.create_user(
+            username="pd_journal", password="x",
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.lang,
+        )
+        self.task = Task.objects.create(
+            node_id=7401, task_id=8401, name="A", statement="x",
+            topic=self.topic, programming_language=self.lang, file_extension=".pas",
+        )
+        self.run_id = "c" * 32
+        self.run = AIModelTestRun.objects.create(
+            run_id=self.run_id,
+            run_type=AIModelTestRun.RUN_TYPE_PROMPT_DEBUG,
+            status=AIModelTestRun.STATUS_COMPLETED,
+            course_id=1450,
+        )
+        from ai.models import AIModelTestResult
+
+        self.result = AIModelTestResult.objects.create(
+            run=self.run, task=self.task,
+            model_key="FakeModel", model_title="FakeModel",
+            status="ok", verdict="solved",
+            duration_seconds=1.0, tokens=10,
+            short_response="r", raw_response="raw", code="code",
+            dl_comment="c", dl_queue_id=1,
+            file_extension_snapshot=".pas",
+            topic_name_snapshot="Линейные", prog_lang_snapshot="Pascal",
+            prompt_debug={
+                "prompt_id": 1, "prompt_name": "P", "max_attempts": 3,
+                "attempts": [
+                    {"attempt": 1, "verdict": "failed", "dl_comment": "x",
+                     "addition": "Проверяй корректность ввода.", "applied": True},
+                ],
+                "committed": True, "commit_error": "",
+                "usage": {"duration": 1.0, "tokens": 10, "prompt_tokens": 0},
+                "verification": {"verdict": "solved", "dl_comment": "ok"},
+                "skipped": False, "skip_reason": "",
+            },
+        )
+        self.log = AIRequestLog.objects.create(
+            user=self.user, source="arm", mode=AIRequestLog.MODE_PROMPT_DEBUG,
+            message=f"Prompt debug run {self.run_id}",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+            batch_run_id=self.run_id,
+        )
+
+    def test_is_batch_solve_log_covers_prompt_debug(self):
+        from ai.admin.request_logs import _is_batch_solve_log
+
+        self.assertTrue(_is_batch_solve_log(self.log))
+
+    def test_row_contexts_carry_run_type(self):
+        from ai.admin.request_logs import _batch_log_row_contexts
+
+        ctx = _batch_log_row_contexts([self.log])[self.log.pk]
+        self.assertEqual(ctx["run_type"], "prompt_debug")
+
+    def test_snapshot_and_light_results(self):
+        from ai.admin.request_logs import _build_batch_log_snapshot
+
+        snapshot = _build_batch_log_snapshot(self.log)
+        self.assertEqual(snapshot["run_type"], "prompt_debug")
+        self.assertEqual(snapshot["results"][0]["has_prompt_debug"], True)
+        self.assertEqual(
+            snapshot["results"][0]["prompt_debug_state"]["verification"], "solved",
+        )
+        self.assertNotIn("prompt_debug", snapshot["results"][0])
+
+    def test_list_user_runs_page_url(self):
+        from ai import arm_runner
+
+        run_id = "d" * 32
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "user_id": self.user.id, "run_type": "prompt_debug",
+            "status": "running", "completed_pairs": 0, "total_pairs": 1,
+            "run_name": "pd", "current_task_name": "",
+            "created_at_ts": time.time(), "updated_at_ts": time.time(),
+        }
+        try:
+            runs = arm_runner.list_user_runs(self.user.id)
+        finally:
+            arm_runner._jobs.pop(run_id, None)
+        row = next(r for r in runs if r["run_id"] == run_id)
+        self.assertEqual(row["run_type"], "prompt_debug")
+        self.assertEqual(row["page_url"], "/ai/admin/arm/prompt-debug/")

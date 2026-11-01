@@ -59,6 +59,9 @@ logger = logging.getLogger(__name__)
 # arm_runner._run_batch_job_worker с rerun=True). Единственная копия паттерна:
 # отсюда его читают _batch_run_id_from_log и все потребители.
 _BATCH_RUN_ID_RE = re.compile(r"Batch solve (?:rerun|run) ([0-9a-f]{32})")
+# Строгий формат run_id для AJAX-обновления счётчиков: только 32 hex-символа
+# (uuid4().hex из arm_runner), иначе мусор в query уходит в БД.
+_RUN_ID_HEX_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _batch_run_id_from_log(log):
@@ -120,6 +123,20 @@ def run_finish_meta(run):
         "run_finished_at": timezone.localtime(finished_at, MOSCOW_TZ).strftime("%d.%m.%Y %H:%M:%S"),
         "run_duration_display": format_human_duration(duration),
     }
+
+
+def batch_run_status_class(status):
+    """CSS-класс статуса пакетного прогона — как в admin/ai/_ai_batch_row.html.
+
+    Живое обновление цифр (admin_request_logs_counters_view) красит ячейку
+    статуса тем же классом, что серверный рендер строки: completed — зелёный,
+    running/paused — нейтральный, cancelled/failed — красный.
+    """
+    if status in ("completed", "success"):
+        return "ai-recent-logs-ok"
+    if status in ("running", "paused"):
+        return "ai-recent-logs-neutral"
+    return "ai-recent-logs-err"
 
 
 def _parse_date(value: str) -> str:
@@ -621,6 +638,9 @@ def build_batch_rows_for_logs(request, logs):
             "time_display": finish_meta.get("run_duration_display") or "—",
             "run_name": run_name_for(run),
             "run_id": run_hex or "",
+            # batch | prompt_debug — развёртка строки прячет «Повторить
+            # прогон» у отладки промтов.
+            "run_type": run.run_type if run else "",
             "course_id": run.course_id if run else None,
             "file_extension": first_ext.get(run_hex, ""),
             # Тема/промпт/модели прогона (из снимков пар + выбранного при
@@ -731,9 +751,10 @@ def build_recent_batch_rows(request, limit=5):
     """Контекст-хелпер: последние N batch-solve прогонов (для страницы
     «Настройки ИИ-приложения»).
 
-    Отбирает записи журнала пакетного решения (source="arm",
-    mode=batch_solve|solve, sentinel "Batch solve run|rerun <hex>" в message)
-    с учётом ограничения видимости («только свои» для prompt_developer).
+    Отбирает записи журнала пакетного решения и отладки промтов (source="arm",
+    mode=batch_solve|solve|prompt_debug, sentinel "Batch solve run|rerun <hex>"
+    в message — у prompt_debug он же) с учётом ограничения видимости
+    («только свои» для prompt_developer).
 
     Строка — ЛЁГКАЯ: шапка прогона (один запрос AIModelTestRun) и
     count-агрегат результатов (AIModelTestResult) — без текстов решений:
@@ -751,7 +772,7 @@ def build_recent_batch_rows(request, limit=5):
     if can_view:
         qs = (
             _scope_logs_qs(AIRequestLog.objects.all(), request.user)
-            .filter(source="arm", mode__in=("batch_solve", "solve"))
+            .filter(source="arm", mode__in=("batch_solve", "solve", "prompt_debug"))
             # Batch-запись отмечается ИНДЕКСИРОВАННОЙ колонкой
             # batch_run_id (её пишет arm_runner). Раньше признаком был
             # message__icontains="Batch solve " — полный scan по всему журналу
@@ -766,7 +787,7 @@ def build_recent_batch_rows(request, limit=5):
         if len(logs) < max(0, int(limit)):
             legacy_qs = (
                 _scope_logs_qs(AIRequestLog.objects.all(), request.user)
-                .filter(source="arm", mode__in=("batch_solve", "solve"))
+                .filter(source="arm", mode__in=("batch_solve", "solve", "prompt_debug"))
                 .filter(batch_run_id="")
                 .filter(message__icontains="Batch solve ")
                 .order_by("-sent_at")
@@ -815,6 +836,93 @@ def admin_batch_snapshot_view(request, log_id):
         # Прогон стёрт из БД — развёртка недоступна (как и раньше).
         return JsonResponse({"error": "run-not-found"}, status=404)
     return JsonResponse(snapshot)
+
+
+def admin_request_logs_counters_view(request):
+    """Живые счётчики пакетных строк журнала — AJAX-обновление цифр.
+
+    Страницы «Журнал запросов» и «Настройка ИИ-приложения» показывают
+    пакетные прогоны общей строкой (_ai_batch_row.html): «Пары» (решено /
+    не решено / всего), статус и время. Пока прогон идёт, эти числа меняются;
+    страница опрашивает эндпоинт раз в несколько секунд и правит ТОЛЬКО
+    цифры в уже отрисованных строках (static/admin/ai/request_logs/live.js) —
+    без замены таблицы, чтобы не схлопывать раскрытые развёртки.
+
+    Параметр ``run_ids`` — 32 hex-символа через запятую (data-run-id строк).
+    Права — как у журнала: прогон отдаётся, только если пользователю видна
+    его batch-запись (prompt_developer видит лишь свои). Невалидные id и
+    неизвестные/невидимые прогоны просто отсутствуют в ответе.
+    """
+    if not can_access_logs(request):
+        return HttpResponseForbidden("Access denied")
+    if request.method != "GET":
+        return JsonResponse({"ok": False, "error": "Метод не поддерживается"}, status=405)
+
+    wanted = []
+    for raw in (request.GET.get("run_ids") or "").split(","):
+        run_hex = raw.strip().lower()
+        if _RUN_ID_HEX_RE.match(run_hex) and run_hex not in wanted:
+            wanted.append(run_hex)
+    wanted = wanted[:100]
+    if not wanted:
+        return JsonResponse({"ok": True, "runs": {}})
+
+    # Видимость — через batch-запись журнала (та же скоуп-функция, что у
+    # страницы): чужой прогон prompt_developer не получит даже счётчиков.
+    visible_logs = list(
+        _scope_logs_qs(
+            AIRequestLog.objects.filter(batch_run_id__in=wanted), request.user,
+        ).only("batch_run_id", "received_at", "status")
+    )
+    logs_by_run = {log.batch_run_id: log for log in visible_logs if log.batch_run_id}
+    visible_runs = set(logs_by_run)
+    if not visible_runs:
+        return JsonResponse({"ok": True, "runs": {}})
+
+    runs = {
+        run.run_id: run
+        for run in AIModelTestRun.objects.filter(run_id__in=visible_runs)
+    }
+    # Count-агрегат — один запрос на все строки (без текстов решений).
+    counters = {}
+    for row in (
+        AIModelTestResult.objects
+        .filter(run__run_id__in=visible_runs)
+        .values("run__run_id")
+        .annotate(
+            total=Count("pk"),
+            solved=Count("pk", filter=Q(verdict=AIModelTestResult.VERDICT_SOLVED)),
+            failed=Count("pk", filter=Q(verdict=AIModelTestResult.VERDICT_FAILED)),
+        )
+    ):
+        counters[row["run__run_id"]] = row
+
+    payload = {}
+    for run_hex, log in logs_by_run.items():
+        run = runs.get(run_hex)
+        counter = counters.get(run_hex, {})
+        # Статус: у найденного прогона — его, у стёртого из БД — статус
+        # записи журнала (как в build_batch_rows_for_logs).
+        run_status = run.status if run else ""
+        status_key = run_status or log.status
+        finish_meta = run_finish_meta(run)
+        payload[run_hex] = {
+            "total": counter.get("total") or 0,
+            "solved": counter.get("solved") or 0,
+            "failed": counter.get("failed") or 0,
+            "status": run_status,
+            "status_display": (
+                batch_run_status_display(run_status) or log.get_status_display()
+            ),
+            "status_class": batch_run_status_class(status_key),
+            "received_at": (
+                timezone.localtime(log.received_at, MOSCOW_TZ).strftime("%d.%m.%Y %H:%M:%S")
+                if log.received_at else ""
+            ),
+            "time_display": finish_meta.get("run_duration_display") or "",
+            "finished": bool(run and run.finished_at),
+        }
+    return JsonResponse({"ok": True, "runs": payload})
 
 
 def admin_daily_report_view(request):
@@ -1118,12 +1226,13 @@ def admin_request_logs_view(request):
 
 
 def _is_batch_solve_log(log):
-    """True для записей batch-solve ARM-прогона (старых mode=solve+sentinel и
-    новых mode=batch_solve). У таких логов вместо текста запроса в деталях
-    рисуется мини-таблица результатов из /arm/solve/."""
+    """True для записей batch-solve ARM-прогона (старых mode=solve+sentinel,
+    новых mode=batch_solve и mode=prompt_debug — «Отладка промтов» рисуется
+    той же мини-таблицей результатов). У таких логов вместо текста запроса в
+    деталях рисуется мини-таблица результатов из /arm/solve/."""
     return (
         log.source == "arm"
-        and log.mode in ("batch_solve", "solve")
+        and log.mode in ("batch_solve", "solve", "prompt_debug")
         # "Batch solve run <hex>" и "Batch solve rerun <hex>" — оба ведут в
         # таблицу результатов (см. _BATCH_RUN_ID_RE).
         and _batch_run_id_from_log(log) is not None
@@ -1227,6 +1336,9 @@ def _build_batch_log_snapshot(log):
 
     return {
         "run_id": run_id_hex,
+        # batch | prompt_debug — деталь журнала по-разному подписывает прогон
+        # и скрывает «Повторить прогон» у отладки промтов.
+        "run_type": test_run.run_type,
         "course_id": test_run.course_id,
         "file_extension": file_extension,
         "node_ids": node_ids,
@@ -1291,7 +1403,7 @@ def _batch_log_row_contexts(logs, user=None):
             run_id__in=set(run_ids.values())
         ).only(
             "run_id", "course_id", "status", "run_name", "run_params",
-            "started_at", "finished_at",
+            "run_type", "started_at", "finished_at",
         )
     }
 
@@ -1388,6 +1500,9 @@ def _batch_log_row_contexts(logs, user=None):
                 for pid, name in prompts_by_run.get(run_id, {}).items()
             ],
             "run_id": run_id,
+            # batch | prompt_debug: строка журнала помечается режимом и не
+            # предлагает «Повторить прогон» для отладки промтов.
+            "run_type": run_obj.run_type,
             "course_id": run_obj.course_id,
             "file_extension": ext_by_run.get(run_id, ""),
             "tasks": tasks,

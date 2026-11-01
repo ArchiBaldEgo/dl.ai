@@ -712,7 +712,14 @@ def token_usage_report(
         user=user, source=source,
     )
     batch = collect_batch_slices(
-        AIModelTestRun.objects.filter(run_type=AIModelTestRun.RUN_TYPE_BATCH),
+        # Пакетное решение и отладка промтов: в обоих раннер тратит токены
+        # моделей на пары «задача × модель» (у отладки — ещё на редактора).
+        AIModelTestRun.objects.filter(
+            run_type__in=(
+                AIModelTestRun.RUN_TYPE_BATCH,
+                AIModelTestRun.RUN_TYPE_PROMPT_DEBUG,
+            )
+        ),
         date_from=date_from, date_to=date_to, model=model,
     )
     return {

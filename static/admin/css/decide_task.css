@@ -93,6 +93,52 @@ button:hover {
 .accordion-dl { background-color: #ffb300; color: #fff; }
 .accordion-dl.active, .accordion-dl:hover { background-color: #c98a10; }
 
+/* Данные проваленного теста DL (get-test-data) внутри DL-сообщения. */
+.dl-test-data-list {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.dl-test-data {
+    background: rgba(255, 255, 255, 0.75);
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    border-radius: 4px;
+    padding: 6px 8px;
+}
+
+.dl-test-data-title {
+    font-weight: bold;
+    margin-bottom: 4px;
+}
+
+.dl-test-data-label {
+    font-size: 12px;
+    color: #555;
+}
+
+.dl-test-data-value {
+    margin: 2px 0 6px;
+    padding: 4px 6px;
+    background: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 3px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 13px;
+    max-height: 240px;
+    overflow: auto;
+}
+
+.dl-test-data-note {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #6b5a00;
+    font-style: italic;
+}
+
 .panel {
     padding: 0 10px;
     display: none;

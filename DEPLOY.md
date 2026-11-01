@@ -109,6 +109,13 @@ nano .env
   - `CSRF_COOKIE_DOMAIN=.gsu.by`
   - `SESSION_COOKIE_DOMAIN=.gsu.by`
 - `USE_X_FORWARDED_PROTO=1` (если TLS терминируется на nginx/прокси)
+- `AI_USER_MODEL_SECRET_KEY` — Fernet-ключ (44 символа) для шифрования ключей
+  личных AI-моделей на странице «Мои AI-модели». Без него сохранение модели
+  с ключом отвечает «Сервер не настроен на хранение ключей». Сгенерировать
+  один раз:
+  `docker compose exec web python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+  и вписать результат в `.env`; **менять ключ нельзя** — ранее сохранённые
+  ключи моделей перестанут расшифровываться.
 
 Если прокси вам не нужен (или имя прокси не резолвится на сервере), оставьте `HTTP_PROXY/HTTPS_PROXY/PROXY` пустыми или удалите эти строки.
 

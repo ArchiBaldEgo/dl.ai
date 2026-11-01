@@ -668,13 +668,23 @@ def build_dl_file_name(base_name: str, file_extension: str) -> str:
         return None
 
     base = (base_name or "").strip()
-    # Отрезаем расширение, если оператор уже написал «имя.расширение».
+    # Отрезаем расширение, если оператор уже написал «имя.расширение». Точка
+    # бывает и в названии модели («Ollama DeepSeek 4.1 Flash_2606918»), и
+    # слепой rsplit по последней точке съедал версию И taskId
+    # («Ollama_DeepSeek_4.mcp»). Поэтому отрезаем только короткий
+    # буквенно-цифровой хвост — он и выглядит как расширение.
     if "." in base:
-        base = base.rsplit(".", 1)[0]
+        stem, tail = base.rsplit(".", 1)
+        if re.fullmatch(r"[A-Za-z0-9]{1,10}", tail):
+            base = stem
     # Кириллица → латиница (иначе имя превратится в «_»/пустую основу).
     base = _dl_transliterate(base)
     # Только разрешённые символы: латиница, цифры, дефис, подчёркивание.
     base = re.sub(r"[^A-Za-z0-9_-]+", "_", base)
+    # Схлопываем повторы разделителей: «Gemma 4 (Ollama)_100» → не
+    # «Gemma_4_Ollama__100», а читаемое «Gemma_4_Ollama_100».
+    base = re.sub(r"_{2,}", "_", base)
+    base = re.sub(r"-{2,}", "-", base)
     base = base.strip("_-")
     if not base:
         return None
@@ -924,9 +934,14 @@ def get_test_data_from_dl(
         return {}
     if not isinstance(data, dict):
         return {}
+    # DL отдаёт CRLF ("1\r\n2\r\n"). Нормализуем на границе клиента, чтобы
+    # ВСЕ потребители (ARM, ручная проверка) получали уже готовый к показу
+    # текст; импорт ленивый — services/__init__ тянет модель/реестр.
+    from .services.dl_test_data import normalize_test_data_text
+
     return {
-        "input": str(data.get("input") or ""),
-        "expected_output": str(data.get("expectedOutput") or ""),
+        "input": normalize_test_data_text(data.get("input")),
+        "expected_output": normalize_test_data_text(data.get("expectedOutput")),
     }
 
 
@@ -970,6 +985,18 @@ _DL_COMPILE_OK_RE = re.compile(
     r"|(?:успешн|прошл|удачн)[^\n]{0,40}?(?:компиляц|сборк|build|compile)",
     re.IGNORECASE,
 )
+# Маркеры ОШИБКИ ИСПОЛНЕНИЯ (программа собралась, но упала во время работы):
+# «Ошибка исполнения программы: Integer overflow.», «Runtime error on test 3»,
+# «Деление на ноль», «Segmentation fault». Проверяются ДО wrong_answer:
+# «Ошибка исполнения: неверный индекс массива» — это падение, а не ответ.
+DL_RUNTIME_MARKERS = (
+    "ошибка исполнения", "ошибк исполнен", "ошибка во время выполнения",
+    "runtime error", "runtime exception",
+    "integer overflow", "переполнение", "stack overflow",
+    "деление на ноль", "деление на нуль", "division by zero",
+    "segmentation fault", "access violation",
+    "index out of range", "исключение",
+)
 # Маркеры НЕПРАВИЛЬНОГО ОТВЕТА (программа собралась, но результат не тот).
 # Основы — «стебли» без окончаний: «неправильн» покрывает «неправильный/
 # неправильно», «неверн» — «неверный/неверно». Иначе комментарий
@@ -1003,6 +1030,7 @@ DL_WRONG_ANSWER_STRONG_MARKERS = (
 # Причины сбоя (ортогональны вердикту: вердикт — «прошёл ли DL», причина —
 # «почему нет»). Значения совпадают с AIModelTestResult.FAILURE_REASON_CHOICES.
 DL_REASON_COMPILE_ERROR = "compile_error"
+DL_REASON_RUNTIME_ERROR = "runtime_error"
 DL_REASON_WRONG_ANSWER = "wrong_answer"
 DL_REASON_UNDEFINED = "undefined"
 
@@ -1040,10 +1068,12 @@ def dl_failure_reason_from_comment(comment: str) -> str:
        комментарии есть СИЛЬНЫЙ маркер неверного ответа («Неправильный
        ответ: значение переменной не равно ожидаемому») — это
        ``wrong_answer``;
-    3. маркеры неверного ответа → ``wrong_answer``;
-    4. иначе, если комментарий содержит любой провальный маркер →
+    3. маркеры ошибки исполнения («Ошибка исполнения программы: Integer
+       overflow», «Runtime error», «Деление на ноль») → ``runtime_error``;
+    4. маркеры неверного ответа → ``wrong_answer``;
+    5. иначе, если комментарий содержит любой провальный маркер →
        ``undefined`` (провал DL, причина не распознана);
-    5. иначе (успех) → ``""`` (пустая строка — причина нет).
+    6. иначе (успех) → ``""`` (пустая строка — причина нет).
 
     Провал НИКОГДА не переименовывается в успех: нераспознанный провал =
     ``undefined``, а не пустая строка.
@@ -1059,6 +1089,10 @@ def dl_failure_reason_from_comment(comment: str) -> str:
         # Отступаем только при явном «неправильный ответ».
         if not any(m in comment_lower for m in DL_WRONG_ANSWER_STRONG_MARKERS):
             return DL_REASON_COMPILE_ERROR
+    # Ошибка исполнения — ДО wrong_answer: «Ошибка исполнения: неверный
+    # индекс массива» это падение программы, а не неверный ответ.
+    if any(m in comment_lower for m in DL_RUNTIME_MARKERS):
+        return DL_REASON_RUNTIME_ERROR
     if any(m in comment_lower for m in DL_WRONG_ANSWER_MARKERS):
         return DL_REASON_WRONG_ANSWER
     if any(m in comment_lower for m in DL_FAILURE_MARKERS):

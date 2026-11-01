@@ -438,14 +438,16 @@ def ensure_task(node_id, *, programming_language_id=None, topic_id=None, session
             if topic_id is not None and task.topic_id != topic_id:
                 task.topic_id = topic_id
                 dirty = True
-            # Backfill missing topic/extension/statement from DL for pre-existing
-            # tasks created before auto-detection was added. topic_stale тоже
-            # требует фэтча: перегадать тему можно только из path.
+            # Backfill missing topic/extension/statement/task_id from DL for
+            # pre-existing tasks created before auto-detection was added.
+            # task_id нужен для подписи файла решения (<модель>_<taskId>.ext):
+            # без него имя падало бы на node_id. topic_stale тоже требует
+            # фэтча: перегадать тему можно только из path.
             # tree_path НЕ требует фэтча: его заполняет воркер прогона из
             # кэша дерева курса (dl_tree_path_map) — без обращения к DL.
             if session_id and (
                 not task.topic_id or topic_stale or not task.file_extension
-                or not task.statement
+                or not task.statement or not task.task_id
             ):
                 try:
                     data = fetch_task_info(node_id, session_id=session_id, remove_html_tags=True, course_id=course_id)
