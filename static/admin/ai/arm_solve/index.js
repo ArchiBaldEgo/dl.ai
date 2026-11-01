@@ -542,6 +542,14 @@
           const name = document.createElement('span');
           name.className = 'arm-tree-task-name';
           name.textContent = node.name || '(без названия)';
+          // TODO: Здесь проверяем статус задачи и меняем по нему имя
+          function getClassName() {
+            // TODO: ...
+            options = ["arm-tree-task-good", "arm-tree-task-bad", "arm-tree-task-undefined"]
+            return options[Math.floor(Math.random() * options.length)];
+          }
+          name.className = getClassName(node);
+          
           li.appendChild(name);
           container.appendChild(li);
         }

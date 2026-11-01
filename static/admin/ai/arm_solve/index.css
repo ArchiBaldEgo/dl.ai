@@ -4,6 +4,9 @@
    {% block bodyclass %}): мягкий оттенок основного цвета поверх затемнённого
    фона. В светлой теме это голубовато-серый, а не чистый белый лист; в тёмной
    — тёмный. Внешние поля вокруг .arm-wrap больше не «белеют». */
+
+@import "task_status.css";
+
 body.arm-page {
   background: color-mix(in srgb, var(--primary) 10%, var(--darkened-bg));
 }
