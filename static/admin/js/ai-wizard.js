@@ -1423,8 +1423,8 @@
       // open wizard 
       help.addEventListener("click", (event) => {
         var conf = readConfig() || fallbackConfig();
-        var scope = btn.dataset && btn.dataset.scope
-            ? String(btn.dataset.scope)
+        var scope = help.dataset && help.dataset.scope
+            ? String(help.dataset.scope)
             : (conf ? String(conf.scope || "") : "");
         
         if (!conf || !scope) return;

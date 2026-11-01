@@ -2846,3 +2846,31 @@ function updateLoadTimeFooter() {
         if (el) el.textContent = fmt.replace('{total}', (tm.total / 1000).toFixed(2));
     } catch (e) {}
 }
+
+window.addEventListener('keydown', function(event) {
+    // Ищем обертку меню
+    const menuWrapper = document.querySelector('.voice-menu-wrapper');
+    
+    // Проверяем, открыто ли меню (есть ли класс 'open')
+    // Если меню нет или оно закрыто — выходим, хоткеи не работают
+    if (!menuWrapper || !menuWrapper.classList.contains('open')) {
+        return;
+    }
+
+    // Если меню открыто — перехватываем F2, F3, F4
+    if (event.key === 'F2') {
+        event.preventDefault(); // Отменяем стандартное действие браузера
+        event.stopPropagation();
+        document.getElementById('voiceInputBtn')?.click();
+    } 
+    else if (event.key === 'F3') {
+        event.preventDefault();
+        event.stopPropagation();
+        document.getElementById('voiceOutputBtn')?.click();
+    } 
+    else if (event.key === 'F4') {
+        event.preventDefault();
+        event.stopPropagation();
+        document.getElementById('speakThinkContent')?.click();
+    }
+});
