@@ -965,6 +965,7 @@ _DL_SUCCESS_MARKERS_RE = re.compile(
 
 DL_VERDICT_SOLVED = "solved"
 DL_VERDICT_FAILED = "failed"
+DL_VERDICT_NONE = None
 
 # Маркеры ОШИБКИ КОМПИЛЯЦИИ. Проверяются ПЕРВЫМИ: комментарий «Ошибка
 # компиляции в строке 5» — это про компиляцию, а не про неверный ответ,
