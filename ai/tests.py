@@ -993,10 +993,13 @@ class PromptAdminAccessTests(TestCase):
         readonly_fields = self.prompt_admin.get_readonly_fields(request, self.readonly_prompt)
         editable_fields = self.prompt_admin.get_readonly_fields(request, self.editable_prompt)
 
-        self.assertEqual(editable_fields, ())
+        # Владелец/редактор управляет составом редакторов, но не может
+        # передать владение (owner меняет только суперюзер).
+        self.assertEqual(editable_fields, ("owner",))
         self.assertEqual(
             readonly_fields,
             (
+                "owner", "editors",
                 "programming_language", "topic",
                 "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
                 "shared_prompt", "prompt_text_override",
@@ -5499,6 +5502,12 @@ class ModelSortingTests(SimpleTestCase):
 
     def setUp(self):
         self.factory = RequestFactory()
+        # SimpleTestCase запрещает запросы к БД, а _render_ai_page проверяет
+        # доступ к админке (ключи групп лежат в БД). Здесь проверяется только
+        # сортировка моделей — право доступа подменяем.
+        patcher = patch("ai.views.can_access_admin", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _make_user(self, pk=1):
         return SimpleNamespace(
