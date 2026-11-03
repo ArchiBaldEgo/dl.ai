@@ -112,14 +112,18 @@ button:hover {
     display: block;
 }
 
+/* --- Верхняя панель: один стандарт высоты/рамки/радиуса для всех
+   контролов (селекторы, кнопки-иконки, текстовые ссылки). Раньше селекторы
+   были ~27px, кнопки 32px, ссылки 32px — панель выглядела «рваной». --- */
 .line-panel {
     display: flex;
     flex-wrap: nowrap;
-    align-items: flex-start;
+    align-items: center;
     justify-content: flex-start;
-    gap: 10px;
+    gap: 12px;
     background-color: #d8d8d8;
-    padding: 8px 12px 16px 12px; 
+    /* Нижний отступ — место под абсолютную дату обновления (bottom: 4px). */
+    padding: 8px 12px 18px 12px;
     position: relative;
     box-sizing: border-box;
     overflow-x: auto;
@@ -129,33 +133,48 @@ button:hover {
     display: flex;
     flex-wrap: nowrap;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     flex: 0 1 auto;
     min-width: 0;
 }
 
-#select, #selectType, #selectModelSort {
+/* Все селекторы главной панели: одинаковая высота, рамка, радиус, шрифт.
+   ID-селекторы стоят рядом с классовым, чтобы перебить страничные копии
+   правил в decide_task.css / find_error.css (одинаковая специфичность,
+   ai_theme.css подключён последним). */
+.line-panel select,
+#select, #selectType, #selectModelSort, #selectLang {
+    height: 36px;
+    box-sizing: border-box;
+    font-family: inherit;
     font-size: 14px;
+    line-height: 1.2;
+    padding: 0 8px;
+    border: 1px solid var(--border, #ccc);
+    border-radius: 8px;
+    background-color: var(--bg-input, #fff);
+    color: var(--text-primary, #333);
+}
+
+#select, #selectType, #selectModelSort {
     flex: 1 1 60px;
     min-width: 60px;
     max-width: 180px;
-    padding: 4px 6px;
 }
 
 #selectLang {
-    font-size: 14px;
     flex: 0 1 auto;
     width: auto;
     min-width: 70px;
-    padding: 4px 6px;
 }
 
 .theme-toggle {
     flex: 0 0 auto;
-    padding: 4px;
-    height: 32px;
-    width: 32px;
+    padding: 0;
+    height: 36px;
+    width: 36px;
     font-size: 16px;
+    box-sizing: border-box;
 }
 
 hr {
@@ -326,16 +345,19 @@ form {
     padding-top: 2px;
 }
 
+/* Голосовые кнопки живут в той же панели — высота/радиус как у остальных
+   контролов шапки (36px, 8px), иначе ряд «пляшет». */
 .voice-btn {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 0 10px;
+    padding: 0 12px;
     font-size: 13px;
-    height: 32px;
+    height: 36px;
+    border-radius: 8px;
     margin: 0;
     white-space: nowrap;
-    flex-shrink: 0; 
+    flex-shrink: 0;
 }
 
 .voice-btn.recording { background-color: #ff4444; animation: pulse 1.5s infinite; }
@@ -452,24 +474,52 @@ form {
 }
 
 /* Ссылки верхней панели: «Мои модели» / «Админ-Панель» (были в правом
-   выдвижном меню). Высота и вертикальные отступы — как у .theme-toggle,
-   чтобы кнопки не разъезжались в .line-panel. */
+   выдвижном меню). Контурная кнопка того же размера, что и остальные
+   контролы (36px, радиус 8px); «Админ-Панель» выделена акцентом. */
 .panel-link {
     display: inline-flex;
     align-items: center;
-    height: 32px;
-    padding: 0 12px;
-    border-radius: 6px;
-    background-color: var(--bg-toggle, rgb(207, 205, 205));
+    justify-content: center;
+    height: 36px;
+    padding: 0 14px;
+    box-sizing: border-box;
+    border: 1px solid var(--border, #ccc);
+    border-radius: 8px;
+    background-color: transparent;
     color: var(--text-primary, #333);
+    font-family: inherit;
     font-size: 14px;
+    font-weight: 500;
+    line-height: 1;
     text-decoration: none;
     white-space: nowrap;
+    transition: background-color 0.2s ease, color 0.2s ease,
+        border-color 0.2s ease;
 }
 
 .panel-link:hover {
-    background-color: var(--bg-toggle-hover, rgb(119, 119, 119));
+    background-color: var(--bg-toggle, rgb(207, 205, 205));
+    color: var(--text-primary, #333);
+}
+
+/* Вход в админку — отдельный акцент, чтобы не путался с личными моделями. */
+#adminPanelTopBtn {
+    color: var(--accent-blue, #2196F3);
+    border-color: var(--accent-blue, #2196F3);
+}
+
+#adminPanelTopBtn:hover {
+    background-color: var(--accent-blue, #2196F3);
     color: #fff;
+}
+
+/* Единый видимый фокус для клавиатуры на всех контролах шапки. */
+.line-panel select:focus-visible,
+.theme-toggle:focus-visible,
+.panel-link:focus-visible,
+.think-toggle:focus-visible {
+    outline: 2px solid var(--accent-blue, #2196F3);
+    outline-offset: 2px;
 }
 
 .shared-prompt-section {

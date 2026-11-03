@@ -96,6 +96,14 @@ def make_ai_group_member(user, group_name):
 class ChatViewTests(SimpleTestCase):
     def setUp(self):
         self.factory = RequestFactory()
+        # Фейковый request.user без прав Django; проверка доступа к админке
+        # ходит в БД за ключами групп — в SimpleTestCase это запрещено.
+        patcher = patch("ai.views.can_access_admin", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        dev_patcher = patch("ai.views.is_prompt_developer_user", return_value=False)
+        dev_patcher.start()
+        self.addCleanup(dev_patcher.stop)
 
     def _chat_request(self, user=None):
         request = self.factory.get("/ai/chat/")
@@ -2695,6 +2703,14 @@ class ChatViewSelfHealTests(SimpleTestCase):
 
     def setUp(self):
         self.factory = RequestFactory()
+        # Фейковый request.user без прав Django; проверка доступа к админке
+        # ходит в БД за ключами групп — в SimpleTestCase это запрещено.
+        patcher = patch("ai.views.can_access_admin", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        dev_patcher = patch("ai.views.is_prompt_developer_user", return_value=False)
+        dev_patcher.start()
+        self.addCleanup(dev_patcher.stop)
 
     def _chat_request(self):
         request = self.factory.get("/ai/chat/")
@@ -5508,6 +5524,9 @@ class ModelSortingTests(SimpleTestCase):
         patcher = patch("ai.views.can_access_admin", return_value=False)
         patcher.start()
         self.addCleanup(patcher.stop)
+        dev_patcher = patch("ai.views.is_prompt_developer_user", return_value=False)
+        dev_patcher.start()
+        self.addCleanup(dev_patcher.stop)
 
     def _make_user(self, pk=1):
         return SimpleNamespace(
