@@ -589,7 +589,7 @@ class AdminExternalAuthTests(TestCase):
         self.assertTrue(user.check_password("strong-pass-123"))
         self.assertEqual(request.session[SESSION_KEY], str(user.pk))
 
-    def test_admin_external_users_are_assigned_prompt_developer_group(self):
+    def test_admin_external_users_are_assigned_users_group(self):
         request = self._request(
             method="post",
             path="/ai/admin/set-password/",
@@ -603,14 +603,52 @@ class AdminExternalAuthTests(TestCase):
 
         set_password_view(request)
 
-        # Зачисление при первой установке пароля — во встроенную группу
-        # доступа «Разработчик промптов» (Django-Group больше не используется).
-        from ai.constants import BUILTIN_GROUP_PROMPT_DEV
+        # Baseline новой аудитории — встроенная группа «Пользователи»
+        # (без прав: входа в админку нет вовсе). Роли выдаёт суперюзер.
+        from ai.constants import BUILTIN_GROUP_PROMPT_DEV, BUILTIN_GROUP_USERS
         from ai.models import AIAccessGroup
 
-        group = AIAccessGroup.objects.get(name=BUILTIN_GROUP_PROMPT_DEV)
+        users_group = AIAccessGroup.objects.get(name=BUILTIN_GROUP_USERS)
         user = self.user_model.objects.get(username="24680")
-        self.assertTrue(user.ai_access_groups.filter(pk=group.pk).exists())
+        self.assertTrue(user.ai_access_groups.filter(pk=users_group.pk).exists())
+        self.assertFalse(
+            user.ai_access_groups.filter(name=BUILTIN_GROUP_PROMPT_DEV).exists()
+        )
+
+    def test_set_password_denied_for_plain_user_without_admin_access(self):
+        """Страница первого пароля — тоже админка: обычный «Пользователь»
+        в неё не попадает (иначе установка пароля стала бы лазейкой)."""
+        from ai.admin.site import ai_admin_site
+        from ai.models import ExternalDLAccount
+
+        user = self.user_model.objects.create_user(username="plain-12345", password="pass-123")
+        ExternalDLAccount.objects.create(user=user, external_user_id="12345")
+        request = self._request(path="/ai/admin/set-password/", user_id="12345")
+        request.user = user
+        self.assertFalse(ai_admin_site.has_permission(request))
+
+        make_prompt_developer(user)
+        self.assertTrue(ai_admin_site.has_permission(request))
+
+    def test_login_shows_no_access_page_for_plain_user(self):
+        """DLSID валиден, но page.admin нет: вместо бесконечного цикла
+        login → index → login — честная страница «Нет доступа» (403)."""
+        from ai.admin.site import ai_admin_site
+        from ai.models import ExternalDLAccount
+
+        user = self.user_model.objects.create_user(username="plain-login", password="pass-123")
+        ExternalDLAccount.objects.create(user=user, external_user_id="12345")
+        request = self._request(path="/ai/admin/login/", user_id="12345")
+        request.user = user
+
+        response = ai_admin_site.login(request)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("ai/admin_no_access.html", response.template_name)
+
+        make_prompt_developer(user)
+        response = ai_admin_site.login(request)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/ai/admin/")
 
     def test_mapped_external_user_without_password_sets_password_on_existing_user(self):
         user = self.user_model.objects.create_user(username="external-login")
@@ -639,6 +677,57 @@ class AdminExternalAuthTests(TestCase):
         self.assertEqual(response["Location"], "/ai/admin/ai/prompt/add/")
         self.assertTrue(user.check_password("strong-pass-123"))
         self.assertEqual(self.user_model.objects.filter(username="13579").count(), 0)
+
+
+class UsersGroupProvisioningTests(TestCase):
+    """Baseline новой аудитории — «Пользователи»: админки нет вовсе."""
+
+    def setUp(self):
+        self.user_model = get_user_model()
+
+    @staticmethod
+    def _payload(user_id="77001", login="student"):
+        return {
+            "userId": user_id,
+            "login": login,
+            "firstName": "Пётр",
+            "lastName": "Петров",
+        }
+
+    def test_new_user_gets_only_users_group(self):
+        from ai.admin.permissions import can_access_admin
+        from ai.constants import BUILTIN_GROUP_PROMPT_DEV, BUILTIN_GROUP_USERS
+        from ai.external_account import get_or_create_user_from_external
+
+        user, created = get_or_create_user_from_external(self._payload())
+        self.assertTrue(created)
+        self.assertEqual(
+            list(user.ai_access_groups.values_list("name", flat=True)),
+            [BUILTIN_GROUP_USERS],
+        )
+        self.assertFalse(user.ai_access_groups.filter(name=BUILTIN_GROUP_PROMPT_DEV).exists())
+        self.assertFalse(can_access_admin(user))
+
+    def test_relogin_does_not_restore_revoked_role(self):
+        from ai.constants import BUILTIN_GROUP_USERS
+        from ai.external_account import get_or_create_user_from_external
+
+        user, _ = get_or_create_user_from_external(self._payload())
+        user.ai_access_groups.clear()
+        get_or_create_user_from_external(self._payload())
+        self.assertEqual(user.ai_access_groups.count(), 0)
+        # Группа «Пользователи» существует и пуста по правам.
+        users_group = user.ai_access_groups.model.objects.get(name=BUILTIN_GROUP_USERS)
+        self.assertTrue(users_group.is_builtin)
+        self.assertEqual(users_group.permissions.count(), 0)
+
+    def test_add_user_to_builtin_group_defaults_to_users(self):
+        from ai.admin.permissions import add_user_to_builtin_ai_group
+        from ai.constants import BUILTIN_GROUP_USERS
+
+        user = self.user_model.objects.create_user(username="default-group", password="x")
+        group = add_user_to_builtin_ai_group(user)
+        self.assertEqual(group.name, BUILTIN_GROUP_USERS)
 
 
 class ExternalAccountStudentInfoTests(TestCase):
@@ -11753,6 +11842,43 @@ class PromptChangelistFilterTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self._names(response), ["A", "D"])
 
+    def test_active_topic_always_listed_even_without_prompts(self):
+        """Активное значение обязано быть среди опций: иначе браузер
+        показывает первый пункт «Все», и фильтр выглядит сброшенным."""
+        from ai.models import Topic
+
+        empty = Topic.objects.create(
+            topic_name_ru="Пустая", programming_language=self.pascal,
+        )
+        response = self._view({"topic": str(empty.pk)})
+        topic_filter = self._filter(response, "PromptTopicFilter")
+        values = [str(value) for value, _ in topic_filter.lookup_choices]
+        self.assertIn(str(empty.pk), values)
+        self.assertEqual(self._names(response), [])
+
+    def test_active_topic_none_listed(self):
+        response = self._view({"topic": "__none__"})
+        topic_filter = self._filter(response, "PromptTopicFilter")
+        values = [str(value) for value, _ in topic_filter.lookup_choices]
+        self.assertIn("__none__", values)
+
+    def test_search_request_keeps_active_filters(self):
+        """?q=… вместе с языком/темой: ChangeList.params несёт фильтры
+        (строковая форма поиска рендерит их скрытыми полями), выдача
+        отфильтрована, а селекторы получили data-ai-filter-param для
+        клиентской синхронизации."""
+        response = self._view({
+            "q": "A", "lang": str(self.pascal.pk),
+            "topic": str(self.topic_pascal.pk),
+        })
+        cl = response.context_data["cl"]
+        self.assertEqual(cl.params.get("lang"), str(self.pascal.pk))
+        self.assertEqual(cl.params.get("topic"), str(self.topic_pascal.pk))
+        self.assertEqual(self._names(response), ["A"])
+        html = response.rendered_content
+        self.assertIn('data-ai-filter-param="lang"', html)
+        self.assertIn('data-ai-filter-param="topic"', html)
+
     def test_mine_filter_does_not_redirect(self):
         make_prompt_developer(self.alice)
         response = self._view({"mine": "1"}, user=self.alice)
@@ -11772,6 +11898,116 @@ class PromptChangelistFilterTests(_AdminViewRequestMixin, TestCase):
 
     def test_search_by_owner_first_name(self):
         self.assertEqual(self._names(self._view({"q": "Сидорова"})), ["A", "C"])
+
+
+class PromptEditorOwnerTests(_AdminViewRequestMixin, TestCase):
+    """Поле «Доступ» промпта: владелец/редактор добавляет соредакторов сам,
+    чужой промпт виден только на чтение, суперюзер — по-прежнему любой."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        from ai.admin.models import PromptAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import ProgrammingLanguage
+
+        self.admin = PromptAdmin(Prompt, ai_admin_site)
+        self.language = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.owner = get_user_model().objects.create_user(
+            username="prompt-owner", password="x", first_name="Ольга",
+        )
+        make_prompt_developer(self.owner)
+        self.editor = get_user_model().objects.create_user(
+            username="prompt-editor", password="x", first_name="Егор",
+        )
+        make_prompt_developer(self.editor)
+        self.outsider = get_user_model().objects.create_user(
+            username="prompt-outsider", password="x", first_name="Ирина",
+        )
+        make_prompt_developer(self.outsider)
+        self.plain = get_user_model().objects.create_user(
+            username="prompt-plain", password="x",
+        )
+        self.prompt = Prompt.objects.create(
+            prompt_name_ru="Свой", prompt_text_ru="t", mode="solve",
+            programming_language=self.language, owner=self.owner,
+        )
+
+    def _request(self, user, method="get", path="/ai/admin/ai/prompt/", data=None):
+        return self._admin_request(user, method=method, path=path, data=data)
+
+    def test_owner_gets_editable_editors_and_readonly_owner(self):
+        request = self._request(self.owner)
+        self.assertEqual(
+            self.admin.get_readonly_fields(request, self.prompt), ("owner",),
+        )
+        names = [name for name, _ in self.admin.get_fieldsets(request, self.prompt)]
+        self.assertIn("Доступ", names)
+
+    def test_outsider_gets_access_block_readonly(self):
+        request = self._request(self.outsider)
+        readonly = self.admin.get_readonly_fields(request, self.prompt)
+        self.assertIn("owner", readonly)
+        self.assertIn("editors", readonly)
+        names = [name for name, _ in self.admin.get_fieldsets(request, self.prompt)]
+        self.assertIn("Доступ", names)
+
+    def test_add_form_has_no_access_block_for_non_superuser(self):
+        request = self._request(self.owner)
+        names = [name for name, _ in self.admin.get_fieldsets(request, None)]
+        self.assertNotIn("Доступ", names)
+
+    def test_editors_widget_uses_editor_search_endpoint(self):
+        from ai.admin.models import PromptEditorAutocomplete
+
+        request = self._request(self.owner)
+        formfield = self.admin.formfield_for_manytomany(
+            Prompt._meta.get_field("editors"), request,
+        )
+        self.assertIsInstance(formfield.widget, PromptEditorAutocomplete)
+        self.assertIn("prompt/editor-search/", formfield.widget.get_url())
+
+    def test_editor_search_returns_select2_json_for_prompt_dev(self):
+        request = self._request(
+            self.owner, path="/ai/admin/ai/prompt/editor-search/",
+            data={"term": "Егор"},
+        )
+        response = self.admin.editor_search_view(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["results"][0]["id"], self.editor.pk)
+        self.assertIn("Егор", payload["results"][0]["text"])
+
+    def test_editor_search_denied_for_plain_user(self):
+        request = self._request(
+            self.plain, path="/ai/admin/ai/prompt/editor-search/",
+            data={"term": "Егор"},
+        )
+        response = self.admin.editor_search_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_owner_saves_new_editor_through_change_form(self):
+        request = self._request(
+            self.owner, method="post",
+            path=f"/ai/admin/ai/prompt/{self.prompt.pk}/change/",
+            data={
+                "mode": "solve",
+                "programming_language": str(self.language.pk),
+                "topic": "",
+                "shared_prompt": "",
+                "prompt_name_ru": "Свой",
+                "prompt_name_en": "",
+                "prompt_name_fr": "",
+                "prompt_text_ru": "t",
+                "prompt_text_en": "",
+                "prompt_text_fr": "",
+                "prompt_text_override": "",
+                "editors": [str(self.editor.pk)],
+                "_save": "Сохранить",
+            },
+        )
+        response = self.admin.changeform_view(request, object_id=str(self.prompt.pk))
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(self.prompt.editors.filter(pk=self.editor.pk).exists())
 
 
 class PromptBulkAddEditorActionTests(_AdminViewRequestMixin, TestCase):
@@ -16238,7 +16474,7 @@ class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
 
         # Пересоздание пустой: у нового юзера ключей не прибавится.
         from ai.admin.permissions import add_user_to_builtin_ai_group, user_has_key
-        recreated = add_user_to_builtin_ai_group(self.plain)
+        recreated = add_user_to_builtin_ai_group(self.plain, BUILTIN_GROUP_PROMPT_DEV)
         self.assertEqual(recreated.name, BUILTIN_GROUP_PROMPT_DEV)
         self.assertTrue(recreated.is_builtin)
         self.assertEqual(recreated.permissions.count(), 0)
@@ -17080,6 +17316,10 @@ class WizardUserPageContextTests(TestCase):
         self.super_user = self.user_model.objects.create_user(
             username="wz-context-super", password="x", is_superuser=True,
         )
+        self.prompt_dev_user = self.user_model.objects.create_user(
+            username="wz-context-pd", password="x",
+        )
+        make_prompt_developer(self.prompt_dev_user)
 
     def test_chat_page_contains_wizard_config_and_assets(self):
         html = self._render(chat_view, "/ai/chat/")
@@ -17109,11 +17349,14 @@ class WizardUserPageContextTests(TestCase):
         self.assertIn('"show": false', html)
 
     def test_payload_carries_role_for_engine_steps(self):
-        """Роль в конфиге: ролевые шаги движка (side-меню чата — super/staff)."""
+        """Роль в конфиге: ролевые шаги движка («Админ-Панель» —
+        prompt_dev/staff/super)."""
         from ai.views import decide_task_view, find_error_view
 
         html = self._render(chat_view, "/ai/chat/", user=self.plain_user)
         self.assertIn('"role": ""', html)
+        html = self._render(chat_view, "/ai/chat/", user=self.prompt_dev_user)
+        self.assertIn('"role": "prompt_dev"', html)
         html = self._render(chat_view, "/ai/chat/", user=self.staff_user)
         self.assertIn('"role": "staff"', html)
         html = self._render(chat_view, "/ai/chat/", user=self.super_user)
@@ -17569,7 +17812,7 @@ class WsStatusMarkerTests(SimpleTestCase):
 class BaseChatTemplateLocalizationTests(SimpleTestCase):
     """base_chat.html рендерится во всех трёх языках из t = client_strings()."""
 
-    def _render(self, lang):
+    def _render(self, lang, can_access_admin=True):
         import datetime
         from django.template.loader import render_to_string
         from ai.i18n import client_strings
@@ -17577,6 +17820,7 @@ class BaseChatTemplateLocalizationTests(SimpleTestCase):
         context = {
             "request": request,
             "t": client_strings(lang),
+            "can_access_admin": can_access_admin,
             "available_models": [
                 {"key": "X_1", "title": "X 1"},
                 {"key": "OR_X", "title": "X Open"},
@@ -17599,6 +17843,18 @@ class BaseChatTemplateLocalizationTests(SimpleTestCase):
         self.assertIn('label="Все модели"', html)
         self.assertIn("Отправить", html)
         self.assertIn("Админ-Панель", html)
+        # Верхняя панель: «Мои модели» — всем, админка — по правам.
+        self.assertIn('id="myModelsTopBtn"', html)
+        self.assertIn('id="adminPanelTopBtn"', html)
+        self.assertNotIn('class="sidebar"', html)
+        self.assertNotIn("toggle-button", html)
+
+    def test_plain_user_has_no_admin_panel_link(self):
+        html = self._render("Русский", can_access_admin=False)
+        self.assertIn('id="myModelsTopBtn"', html)
+        self.assertIn("Мои AI-модели", html)
+        self.assertNotIn('id="adminPanelTopBtn"', html)
+        self.assertNotIn("Админ-Панель", html)
 
     def test_english_render(self):
         html = self._render("English")

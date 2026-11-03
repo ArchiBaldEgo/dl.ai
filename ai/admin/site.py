@@ -12,6 +12,7 @@ from django.contrib import admin
 from django.contrib.auth import logout as auth_logout
 from django.http import HttpResponseForbidden
 from django.shortcuts import redirect
+from django.template.response import TemplateResponse
 from django.urls import path
 from django.utils.http import urlencode
 
@@ -180,7 +181,12 @@ class AIAdminSite(admin.AdminSite):
         if _is_admin_set_password_path(request.path):
             if not external_id:
                 return False
-            return _session_matches_external_id(request, external_id)
+            # Обычный пользователь («Пользователи») в админку не входит вовсе —
+            # в том числе на страницу первого пароля: роль сначала выдаёт
+            # суперюзер, иначе установка пароля была бы лазейкой в админку.
+            if not _session_matches_external_id(request, external_id):
+                return False
+            return can_access_admin(user)
         # For every other admin page the user must have a verified
         # external id (DLSID / DLID / uid query) on the current request,
         # AND the local session must belong to the same user that the
@@ -303,6 +309,12 @@ class AIAdminSite(admin.AdminSite):
 
         next_url = safe_relative_url(request.GET.get("next"), "/ai/admin/")
         if get_external_user_id_from_request(request):
+            # DLSID валиден, но админка пользователю не положена (группа
+            # «Пользователи», без page.admin): показываем страницу «Нет
+            # доступа». Редирект на next здесь дал бы бесконечный цикл
+            # login → index → login, ведь has_permission его не пускает.
+            if request.user.is_authenticated and not can_access_admin(request.user):
+                return TemplateResponse(request, "ai/admin_no_access.html", status=403)
             return redirect(next_url)
 
         url = os.getenv("EXTERNAL_AUTH_REDIRECT_URL", "https://dl.gsu.by")

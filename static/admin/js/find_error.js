@@ -262,8 +262,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (codeTextEl) codeTextEl.setAttribute("placeholder", localization[selectedLang].placeholder);
         const taskTextEl = document.getElementById("taskText");
         if (taskTextEl) taskTextEl.setAttribute("placeholder", getUiString('taskplace', 'Вставьте сюда условие задачи'));
-        const sidebarHeader = document.querySelector(".sidebar-header");
-        if (sidebarHeader) sidebarHeader.textContent = localization[selectedLang].adminPanel;
         const testPanelLink = document.getElementById("testPanelLink");
         if (testPanelLink) {
             testPanelLink.textContent = localization[selectedLang].testPanel;

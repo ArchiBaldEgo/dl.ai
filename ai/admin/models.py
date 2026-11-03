@@ -11,7 +11,11 @@ import copy
 from django.contrib import admin
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.contrib.admin.utils import flatten_fieldsets
-from django.contrib.admin.widgets import AutocompleteSelect, FilteredSelectMultiple
+from django.contrib.admin.widgets import (
+    AutocompleteSelect,
+    AutocompleteSelectMultiple,
+    FilteredSelectMultiple,
+)
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
@@ -52,7 +56,11 @@ from ..dl_api_client import (
 from ..http_utils import resolve_dl_session_id
 from ..services.task_registry import apply_dl_task_info
 from ..services.task_registry import dl_task_url
-from ..services.user_directory import display_name_for_user, dl_id_for_user
+from ..services.user_directory import (
+    display_name_for_user,
+    dl_id_for_user,
+    search_users_for_sharing,
+)
 
 User = get_user_model()
 
@@ -268,10 +276,25 @@ class PromptTopicFilter(admin.SimpleListFilter):
         language_id = self._active_language(request)
         if language_id:
             topics = topics.filter(programming_language_id=language_id)
-        choices = [(str(topic.pk), self._label(topic)) for topic in topics]
-        if model_admin.model.objects.filter(topic__isnull=True).exists():
-            choices.append((_TOPIC_NONE, "— без темы (на весь язык)"))
-        return choices
+        # dict — без дублей. Активное значение обязано быть среди опций даже
+        # если у темы нет промптов (или она другого языка): иначе браузер
+        # показывает первый пункт «Все», и фильтр выглядит сброшенным.
+        choices = {str(topic.pk): self._label(topic) for topic in topics}
+        value = self.value()
+        if value and value != _TOPIC_NONE and value not in choices:
+            topic = (
+                Topic.objects.select_related("programming_language")
+                .filter(pk=value)
+                .first()
+            )
+            if topic is not None:
+                choices[str(topic.pk)] = self._label(topic)
+        if (
+            value == _TOPIC_NONE
+            or model_admin.model.objects.filter(topic__isnull=True).exists()
+        ):
+            choices[_TOPIC_NONE] = "— без темы (на весь язык)"
+        return list(choices.items())
 
     def queryset(self, request, queryset):
         value = self.value()
@@ -329,6 +352,19 @@ class PromptAddEditorForm(forms.Form):
         # у поля, созданного без него, виджет остался бы с пустым списком и
         # падал на optgroups при рендере формы.
         field.widget.choices = field.choices
+
+
+class PromptEditorAutocomplete(AutocompleteSelectMultiple):
+    """select2 для поля «Редакторы» — поиск мимо гейта ``page.mgmt_users``.
+
+    Стоковый ``admin:autocomplete`` пользователей доступен только ключу
+    управления пользователями, а поле «Доступ» нужно ВЛАДЕЛЬЦУ промпта —
+    он обычный разработчик промптов. Источник тот же справочник, что в
+    «Моих моделях» (``search_users_for_sharing``): ФИО / логин / DL-id.
+    """
+
+    def get_url(self):
+        return reverse("admin:ai_prompt_editor_search")
 
 
 class PromptAdmin(admin.ModelAdmin):
@@ -508,10 +544,18 @@ class PromptAdmin(admin.ModelAdmin):
                 ("Переопределение текста", {"fields": advanced_fields, "classes": ("collapse",)}),
                 ("Доступ", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
             )
-        return (
+        fieldsets = [
             (None, {"fields": main_fields}),
             ("Переопределение текста", {"fields": advanced_fields, "classes": ("collapse",)}),
-        )
+        ]
+        if obj is not None:
+            # «Доступ» виден всем, кому промпт доступен: владелец/редактор
+            # добавляет соредакторов (см. get_readonly_fields), остальные
+            # видят блок только на чтение.
+            fieldsets.append(
+                ("Доступ", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
+            )
+        return tuple(fieldsets)
 
     def get_urls(self):
         urls = super().get_urls()
@@ -521,8 +565,34 @@ class PromptAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.admin_translate_field_view),
                 name="ai_prompt_translate_field",
             ),
+            path(
+                "editor-search/",
+                self.admin_site.admin_view(self.editor_search_view),
+                name="ai_prompt_editor_search",
+            ),
         ]
         return custom + urls
+
+    def editor_search_view(self, request):
+        """AJAX-поиск пользователя для поля «Редакторы» (select2).
+
+        Формат select2: ``{"results": [{"id", "text"}]}``. Гейт — тот же, что
+        у самого листинга промптов: владелец/редактор промпта является
+        разработчиком промптов, а не «управляющим пользователями».
+        """
+        from django.http import JsonResponse
+
+        if request.method != "GET":
+            return JsonResponse({"results": []}, status=405)
+        if not can_access_prompt_admin(request):
+            return JsonResponse({"results": []}, status=403)
+        term = (request.GET.get("term") or "").strip()
+        results = []
+        for item in search_users_for_sharing(term, request.user):
+            dl_id = item.get("dl_id") or ""
+            text = f'{item["display"]} ({dl_id})' if dl_id else item["display"]
+            results.append({"id": item["id"], "text": text})
+        return JsonResponse({"results": results})
 
     def admin_translate_field_view(self, request):
         """AJAX-перевод для языковых табов формы промпта.
@@ -556,13 +626,30 @@ class PromptAdmin(admin.ModelAdmin):
         if is_staff_or_superuser(request.user):
             return ()
         if self._can_edit_prompt(request, obj):
-            return ()
+            # Владелец/редактор управляет составом редакторов, но не может
+            # передать владение — это делает суперюзер.
+            return ("owner",)
         return (
+            "owner", "editors",
             "programming_language", "topic",
             "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
             "shared_prompt", "prompt_text_override",
             "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
         )
+
+    def formfield_for_manytomany(self, db_field, request, **kwargs):
+        formfield = super().formfield_for_manytomany(db_field, request, **kwargs)
+        if db_field.name == "editors" and formfield is not None:
+            # Свой поиск редакторов (владельцу без page.mgmt_users стоковый
+            # admin:autocomplete вернул бы 403).
+            # Как у стокового formfield_for_manytomany: виджету передаётся
+            # само M2M-поле (не relation) — от него select2 берёт
+            # app_label/model/field и признак required.
+            formfield.widget = PromptEditorAutocomplete(
+                db_field, self.admin_site,
+            )
+            formfield.widget.choices = formfield.choices
+        return formfield
 
     def save_model(self, request, obj, form, change):
         if not change and not obj.owner_id:

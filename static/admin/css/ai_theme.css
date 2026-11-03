@@ -12,7 +12,6 @@
     --bg-body: #ffffff;
     --bg-panel: #d8d8d8;
     --bg-surface: #ffffff;          /* #messages, .panel, textarea */
-    --bg-sidebar: #ffffff;
     --bg-toggle: rgb(207, 205, 205);
     --bg-toggle-hover: rgb(119, 119, 119);
     --bg-think: #f0f8ff;
@@ -33,7 +32,6 @@
     --footer-bg: rgba(255, 255, 255, 0.82);
     --footer-text: #444444;
     --footer-border: rgba(0, 0, 0, 0.08);
-    --sidebar-link: #000000;
     --accent-blue: #2196F3;
     color-scheme: light;
 }
@@ -43,7 +41,6 @@
     --bg-body: #121212;
     --bg-panel: #2a2a2a;
     --bg-surface: #1e1e1e;
-    --bg-sidebar: #242424;
     --bg-toggle: #3a3a3a;
     --bg-toggle-hover: #555555;
     --bg-think: #1c2530;
@@ -64,7 +61,6 @@
     --footer-bg: rgba(20, 20, 20, 0.85);
     --footer-text: #cccccc;
     --footer-border: rgba(255, 255, 255, 0.08);
-    --sidebar-link: #e0e0e0;
     --accent-blue: #5ea8f5;
     color-scheme: dark;
 }
@@ -136,28 +132,15 @@ hr { border-color: var(--border); }
     background-color: var(--bg-surface);
 }
 
-.sidebar {
-    background-color: var(--bg-sidebar);
-    box-shadow: -2px 0 5px var(--shadow);
-    border-left-color: var(--border-soft);
-}
-
-.sidebar-header {
-    border-bottom-color: var(--border-soft);
-}
-
-/* Ссылка на админ-панель в боковой панели — тема-aware (вместо inline color:black). */
-.sidebar-admin-link {
-    text-decoration: none;
-    color: var(--sidebar-link);
-}
-
-.toggle-button {
+/* Ссылки верхней панели («Мои модели» / «Админ-Панель») — тема-aware. */
+.panel-link {
     background-color: var(--bg-toggle);
+    color: var(--text-primary);
 }
 
-.toggle-button:hover {
+.panel-link:hover {
     background-color: var(--bg-toggle-hover);
+    color: #fff;
 }
 
 .voice-status {

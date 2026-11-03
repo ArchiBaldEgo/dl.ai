@@ -105,7 +105,8 @@
                 "#themeToggleBtn": { title: "Light or dark", text: "Click — the page turns dark. Click again — light." },
                 "#userDocsBtn": { title: "The “?” button", text: "This is the user guide. Click if anything is unclear. You can also show these tips again there." },
                 "#voiceModeBtn": { title: "Voice mode", text: "Would you rather speak than type? Click it — you can speak by voice." },
-                "#content .toggle-button": { title: "Side menu", text: "The arrow on the right opens the menu with a link to the admin panel." },
+                "#myModelsTopBtn": { title: "My models", text: "Here you can connect your own AI model: your key and address, so it appears in the model list. If you don’t need it, you can skip this." },
+                "#adminPanelTopBtn": { title: "Admin panel", text: "The admin panel entry button. It is shown only if you have the rights: “Prompt developer” or higher." },
                 "#messages": { title: "History", text: "History: everything you write and the model answers appears here." },
                 "#messageText": { title: "Type your question here", text: "Just type your question into this field." },
                 '.buttons-block button[type="submit"]': { title: "The “Send” button", text: "When the question is written, click this button." },
@@ -137,7 +138,8 @@
                 "#themeToggleBtn": { title: "Clair ou sombre", text: "Clique — la page devient sombre. Clique encore — claire à nouveau." },
                 "#userDocsBtn": { title: "Le bouton « ? »", text: "C’est le guide utilisateur. Clique si quelque chose n’est pas clair. Tu peux aussi réafficher ces astuces ici." },
                 "#voiceModeBtn": { title: "Mode vocal", text: "Tu préfères parler plutôt que taper ? Clique — tu peux parler avec la voix." },
-                "#content .toggle-button": { title: "Menu latéral", text: "La flèche à droite ouvre le menu, qui contient le lien vers le panneau admin." },
+                "#myModelsTopBtn": { title: "Mes modèles", text: "Ici, tu peux connecter ton propre modèle d’IA : ta clé et ton adresse, pour qu’il apparaisse dans la liste des modèles. Si tu n’en as pas besoin, tu peux ne pas l’ouvrir." },
+                "#adminPanelTopBtn": { title: "Panneau admin", text: "Le bouton d’entrée du panneau admin. Il s’affiche seulement si tu as les droits : « Développeur de prompts » ou plus." },
                 "#messages": { title: "Historique", text: "Historique : tout ce que tu écris et que le modèle répond s’affiche ici." },
                 "#messageText": { title: "Tu écris ta question ici", text: "Écris simplement ta question dans ce champ." },
                 '.buttons-block button[type="submit"]': { title: "Le bouton « Envoyer »", text: "Quand la question est écrite, clique sur ce bouton." },
@@ -266,8 +268,8 @@
         chat: [
             // Строгий порядок чата (ранг: явный rank сильнее геометрии):
             // язык → модель → think → сортировка → режим → тема → «?» →
-            // голосовой → боковое меню (супер/штаб) → история → ввод →
-            // отправить → очистить.
+            // голосовой → «Мои модели» → «Админ-Панель» (по правам) →
+            // история → ввод → отправить → очистить.
             // Шагов с common в чате НЕТ: basics_seen не режет чат — тур всегда
             // полный и строгий (ранги).
             { sel: "#selectLang", rank: 10, title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français. Сам текст вопросов и ответов — всегда на том языке, на котором ты пишешь.", pos: "bottom" },
@@ -278,11 +280,12 @@
             { sel: "#themeToggleBtn", rank: 15, title: "Светлое или тёмное", text: "Нажми — страница станет тёмной. Ещё раз — снова светлой. Как тебе удобнее читать.", pos: "bottom" },
             { sel: "#userDocsBtn", rank: 16, title: "Кнопка «?»", text: "Это полная инструкция — нажми, если что-то непонятно. Она есть на русском, английском и французском (язык как у страницы); если перевод не подгрузился — покажется русская версия. Там же можно снова показать эти подсказки.", pos: "bottom" },
             { sel: "#voiceModeBtn", rank: 17, title: "Голосовой ввод", text: "Хочешь говорить, а не печатать? Нажми — можно говорить голосом.", pos: "bottom" },
-            { sel: "#content .toggle-button", rank: 18, title: "Боковое меню", text: "Стрелочка справа открывает меню, там ссылка на админ-панель.", pos: "left", roles: ["super", "staff"] },
-            { sel: "#messages", rank: 19, title: "История", text: "История: всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
-            { sel: "#messageText", rank: 20, title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
-            { sel: '.buttons-block button[type="submit"]', rank: 21, title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
-            { sel: '#clearContextBtn', rank: 22, title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top" }
+            { sel: "#myModelsTopBtn", rank: 18, title: "Мои модели", text: "Здесь можно подключить свою AI-модель: свой ключ и адрес — она появится в списке моделей. Не нужно — можно не открывать.", pos: "bottom" },
+            { sel: "#adminPanelTopBtn", rank: 19, title: "Админ-Панель", text: "Кнопка входа в админ-панель. Видна, только если у тебя есть права: «Разработчик промптов» и выше.", pos: "bottom", roles: ["super", "staff", "prompt_dev"] },
+            { sel: "#messages", rank: 20, title: "История", text: "История: всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
+            { sel: "#messageText", rank: 21, title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
+            { sel: '.buttons-block button[type="submit"]', rank: 22, title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
+            { sel: '#clearContextBtn', rank: 23, title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top" }
         ],
 
         // Эталон пользователя (v4): «Реши задачу — Язык программирования, тема,

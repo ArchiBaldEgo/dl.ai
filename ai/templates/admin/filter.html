@@ -7,7 +7,12 @@
 {% load i18n %}
 <label class="ai-filter-select">
   <span class="ai-filter-select-label">{{ title }}</span>
-  <select data-ai-filter autocomplete="off">
+  {# data-ai-filter-param — имя GET-параметра: у SimpleListFilter это
+     parameter_name, у стокового ChoicesFieldListFilter — lookup_kwarg
+     (напр. mode__exact). По нему change_list/index.js сверяет выбранное
+     значение с URL, если сервер не пометил ни одну опцию selected. #}
+  {% firstof spec.parameter_name spec.lookup_kwarg as filter_param %}
+  <select data-ai-filter data-ai-filter-param="{{ filter_param }}" autocomplete="off">
   {% for choice in choices %}
     <option value="{{ choice.query_string|iriencode }}"{% if choice.selected %} selected{% endif %}>{{ choice.display }}</option>
   {% endfor %}

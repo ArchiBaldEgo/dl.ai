@@ -54,6 +54,7 @@ from .auth_backends import (
 )
 from .admin.permissions import (
     add_user_to_builtin_ai_group,
+    can_access_admin,
     is_prompt_developer_user,
     is_superuser_user,
 )
@@ -497,19 +498,25 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         'last_update_date': _get_last_update_date(),
         'saved_lang': saved_state.get('lang') or '',
         't': client_strings(saved_state.get('lang') or ''),
+        # Кнопка «Админ-Панель» в верхней панели — только тем, кому админка
+        # реально доступна (super/staff/page.admin: «Разработчик промптов»+).
+        'can_access_admin': can_access_admin(request.user),
     }
     if wizard_scope:
         # Онбординг-wizard этой страницы: решение «показывать ли» принимает
         # сервис по флагу в БД (ai/services/onboarding.py), шаблон рендерит его
         # через json_script — ai-wizard.js конфиг читает с DOM. Роль отдаётся
-        # движку для ролевых шагов (super/staff видят шаг про админ-панель),
-        # basics_seen — были ли уже показаны «общие» шаги в туре другой страницы
-        # (режут они только common-шаги solve/find_error; чат всегда полный).
+        # движку для ролевых шагов (prompt_dev/staff/super видят шаг про
+        # админ-панель), basics_seen — были ли уже показаны «общие» шаги в туре
+        # другой страницы (режут они только common-шаги solve/find_error; чат
+        # всегда полный).
         user = request.user
         if getattr(user, "is_superuser", False):
             role = "super"
         elif getattr(user, "is_staff", False):
             role = "staff"
+        elif is_prompt_developer_user(user):
+            role = "prompt_dev"
         else:
             role = ""
         context["ai_wizard"] = wizard_boot_payload(
@@ -601,13 +608,14 @@ def set_password_view(request):
             error_message = "Пароль должен быть не менее 8 символов."
         else:
             if target_user:
+                # Действующему юзеру пароль просто ставим: группы НЕ трогаем —
+                # состав правит суперюзер, повторное зачисление откатывало бы
+                # отзыв роли каждым логином.
                 target_user.set_password(new_password)
                 target_user.save(update_fields=["password"])
-                # Первичная установка пароля = зачисление в baseline-группу
-                # «Разработчик промптов» (однократно, потом «липко»).
-                add_user_to_builtin_ai_group(target_user)
             else:
                 target_user = create_admin_user_with_password(external_user_id, new_password)
+                # Новый юзер — только baseline «Пользователи» (без админки).
                 add_user_to_builtin_ai_group(target_user)
             login(request, target_user, backend=ADMIN_EXTERNAL_AUTH_BACKEND)
             csrf.rotate_token(request)
@@ -729,6 +737,9 @@ def my_models_view(request):
             "all_models": admin_user_model_rows() if is_superuser_user(request.user) else None,
             "provider_choices": AIUserModel.PROVIDER_CHOICES,
             "provider_base_urls": PROVIDER_BASE_URLS,
+            # Шапка base_chat.html: кнопка «Админ-Панель» по тому же правилу,
+            # что и на страницах чата.
+            "can_access_admin": can_access_admin(request.user),
             # base_chat.html (шапка/селектор) читает t.* из client_strings,
             # панель — из user_models_strings; панельные ключи не конфликтуют
             # с клиентскими (title/intro панели в шапке не используются).

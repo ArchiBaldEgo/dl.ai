@@ -10,7 +10,12 @@
 «Разработчик промптов» миграцией и из проверок удалена.
 """
 
-from ..constants import AI_CACHE_KEY_PREFIX, BUILTIN_GROUP_DEVELOPER, BUILTIN_GROUP_PROMPT_DEV
+from ..constants import (
+    AI_CACHE_KEY_PREFIX,
+    BUILTIN_GROUP_DEVELOPER,
+    BUILTIN_GROUP_PROMPT_DEV,
+    BUILTIN_GROUP_USERS,
+)
 from ..models import AIAccessGroup, AIAdminGroupPermission
 
 #: pk группы-эмуляции режима «Посмотреть как…» (ai/admin/guest_mode.py), на
@@ -96,8 +101,8 @@ def is_prompt_developer_user(user):
     """Членство во встроенной группе «Разработчик промптов».
 
     Табличное право (AIAccessGroup), а не Django-Group: выдаётся
-    автоматически при провиженинге нового DL-пользователя и правится
-    суперюзером на «Группах доступа» (отзыв теперь «липкий»).
+    суперюзером на «Группах доступа» (новичок получает только «Пользователи»;
+    отзыв «липкий» — повторный вход и установка пароля его не возвращают).
     В режиме «Посмотреть как…» — только выбранная группа.
     """
     if not user or not getattr(user, "is_authenticated", False):
@@ -135,11 +140,12 @@ def user_has_group_name(user, name):
     return user.ai_access_groups.filter(name=name).exists()
 
 
-def add_user_to_builtin_ai_group(user, name=BUILTIN_GROUP_PROMPT_DEV):
+def add_user_to_builtin_ai_group(user, name=BUILTIN_GROUP_USERS):
     """Зачисляет пользователя во встроенную группу доступа по имени.
 
-    Используется провиженингом внешних DL-аккаунтов (baseline-доступ новой
-    аудитории) и тестами; группу создаёт, если миграционный сид потерян.
+    Дефолт — «Пользователи»: baseline новой аудитории не даёт входа в
+    админку вовсе (роли выдаются суперюзером явно). Тесты/явные вызовы для
+    роли передают имя группы. Группу создаёт, если миграционный сид потерян.
     """
     group, _ = AIAccessGroup.objects.get_or_create(
         name=name, defaults={"is_builtin": True}
