@@ -9,13 +9,15 @@ import csv
 import copy
 
 from django.contrib import admin
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.contrib.admin.utils import flatten_fieldsets
-from django.contrib.admin.widgets import FilteredSelectMultiple
+from django.contrib.admin.widgets import AutocompleteSelect, FilteredSelectMultiple
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin
 from django.db.models import Q
 from django import forms
 from django.http import HttpResponse, HttpResponseRedirect
+from django.template.response import TemplateResponse
 from django.utils.html import format_html
 from django.urls import path, reverse
 from django.utils import timezone
@@ -50,6 +52,7 @@ from ..dl_api_client import (
 from ..http_utils import resolve_dl_session_id
 from ..services.task_registry import apply_dl_task_info
 from ..services.task_registry import dl_task_url
+from ..services.user_directory import display_name_for_user, dl_id_for_user
 
 User = get_user_model()
 
@@ -137,8 +140,21 @@ class TopicAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         self.message_user(request, msg, level=("success" if not failed else "warning"))
 
 
+def _user_filter_label(user):
+    """Подпись пользователя в фильтрах: «ФИО (DL-id)», без дублей.
+
+    Для DL-аккаунтов без имён ``display_name_for_user`` возвращает сам DL-id
+    (``user_42`` → ``42``) — тогда не повторяем его дважды.
+    """
+    display = (display_name_for_user(user) or "").strip()
+    dl_id = (dl_id_for_user(user) or "").strip()
+    if not display or display == dl_id:
+        return dl_id or display
+    return f"{display} ({dl_id})"
+
+
 class PromptUserIdFilter(admin.SimpleListFilter):
-    title = "ID владельца"
+    title = "Владелец / редактор"
     parameter_name = "user_id"
 
     def lookups(self, request, model_admin):
@@ -148,11 +164,14 @@ class PromptUserIdFilter(admin.SimpleListFilter):
             return ()
 
         users = (
-            User.objects.filter(Q(owned_prompts__isnull=False) | Q(editable_prompts__isnull=False))
+            User.objects.filter(
+                Q(owned_prompts__isnull=False) | Q(editable_prompts__isnull=False)
+            )
+            .select_related("external_dl_account")
             .distinct()
             .order_by("id")
         )
-        return [(str(user.id), f"{user.id}: {user.get_username()}") for user in users]
+        return [(str(user.id), _user_filter_label(user)) for user in users]
 
     def queryset(self, request, queryset):
         value = self.value()
@@ -177,6 +196,25 @@ class PromptLanguageFilter(admin.SimpleListFilter):
             for lang in ProgrammingLanguage.objects.order_by("language_name")
         ]
 
+    def choices(self, changelist):
+        """Как стоковый ``SimpleListFilter.choices``, но смена языка снимает
+        тему: темы принадлежат языку, и сохранённая тема другого языка давала
+        пустой список («фильтры сломались»)."""
+        yield {
+            "selected": self.value() is None,
+            "query_string": changelist.get_query_string(remove=[self.parameter_name]),
+            "display": "Все",
+        }
+        for lookup, title in self.lookup_choices:
+            yield {
+                "selected": self.value() == str(lookup),
+                "query_string": changelist.get_query_string(
+                    {self.parameter_name: lookup},
+                    remove=["topic", "topic__id__exact"],
+                ),
+                "display": title,
+            }
+
     def queryset(self, request, queryset):
         value = self.value()
         if not value:
@@ -184,6 +222,113 @@ class PromptLanguageFilter(admin.SimpleListFilter):
         return queryset.filter(
             Q(topic__programming_language_id=value) | Q(programming_language_id=value)
         )
+
+
+#: Значение опции «без темы» в ``PromptTopicFilter``.
+_TOPIC_NONE = "__none__"
+
+
+class PromptTopicFilter(admin.SimpleListFilter):
+    """Темы только тех языков, что выбраны фильтром языка.
+
+    Стоковый FK-фильтр выводил ВСЕ темы курса, с одинаковыми названиями у
+    разных языков (дубли неотличимы) — и после выбора языка список тем не
+    сужался, поэтому легко было выбрать несовместимую пару и получить пустой
+    список. Здесь подпись включает язык, выдача ограничена активным языком и
+    только темами, у которых есть промпты.
+    """
+
+    title = "Тема"
+    parameter_name = "topic"
+
+    @staticmethod
+    def _active_language(request):
+        value = (request.GET.get("lang") or "").strip()
+        return value if value.isdigit() else None
+
+    @staticmethod
+    def _label(topic):
+        name = topic.topic_name_ru or f"Тема #{topic.pk}"
+        language = getattr(topic.programming_language, "language_name", "") or ""
+        return f"{language} — {name}" if language else name
+
+    # Старые закладки со стоковым topic__id__exact не ломаются и без
+    # объявления параметра: ChangeList пропускает необработанный параметр как
+    # обычный ORM-lookup (topic__id__exact — валидный путь поля).
+
+    def lookups(self, request, model_admin):
+        topics = (
+            Topic.objects.select_related("programming_language")
+            .filter(prompt__isnull=False)
+            .distinct()
+            .order_by(
+                "programming_language__language_name", "topic_name_ru", "pk",
+            )
+        )
+        language_id = self._active_language(request)
+        if language_id:
+            topics = topics.filter(programming_language_id=language_id)
+        choices = [(str(topic.pk), self._label(topic)) for topic in topics]
+        if model_admin.model.objects.filter(topic__isnull=True).exists():
+            choices.append((_TOPIC_NONE, "— без темы (на весь язык)"))
+        return choices
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if not value:
+            return queryset
+        if value == _TOPIC_NONE:
+            return queryset.filter(topic__isnull=True)
+        return queryset.filter(topic_id=value)
+
+
+class PromptMineFilter(admin.SimpleListFilter):
+    """«Только мои» — владелец или редактор текущего пользователя.
+
+    Раньше этот режим включался только недокументированным ``?mine=1`` и
+    ронял changelist в редирект ``?e=1`` (параметр никто не потреблял).
+    """
+
+    title = "Мои"
+    parameter_name = "mine"
+
+    def lookups(self, request, model_admin):
+        return (("1", "Только мои"),)
+
+    def queryset(self, request, queryset):
+        if self.value() != "1":
+            return queryset
+        return queryset.filter(
+            Q(owner=request.user) | Q(editors=request.user),
+        ).distinct()
+
+
+class PromptAddEditorForm(forms.Form):
+    """Один пользователь, которому даём право править выбранные промпты.
+
+    Поле — административный autocomplete (select2): ищем по ФИО, логину и
+    DL-ID тем же эндпоинтом, что и поле «Редакторы» на форме промпта.
+    """
+
+    editor = forms.ModelChoiceField(
+        queryset=User.objects.none(),
+        label="Пользователь",
+        help_text="Начните вводить ФИО, логин или DL-ID.",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from .site import ai_admin_site
+
+        field = self.fields["editor"]
+        field.queryset = User.objects.filter(is_active=True)
+        field.widget = AutocompleteSelect(
+            Prompt._meta.get_field("editors"), ai_admin_site,
+        )
+        # AutocompleteSelect читает варианты из self.choices (ModelChoiceIterator):
+        # у поля, созданного без него, виджет остался бы с пустым списком и
+        # падал на optgroups при рендере формы.
+        field.widget.choices = field.choices
 
 
 class PromptAdmin(admin.ModelAdmin):
@@ -198,15 +343,28 @@ class PromptAdmin(admin.ModelAdmin):
         'short_prompt_text',
     )
     list_display_links = ('prompt_name_ru',)
-    # Режим первым: чипы «Все / Реши задачу / В чём ошибка» — главный
-    # селектор списка (см. MODE_SOLVE / MODE_FIND_ERROR).
-    list_filter = ('mode', PromptUserIdFilter, PromptLanguageFilter, 'topic')
+    # Режим первым: «Все / Реши задачу / В чём ошибка» — главный селектор
+    # списка (см. MODE_SOLVE / MODE_FIND_ERROR). Тема — свой фильтр: подпись
+    # с языком и выдача только по активному языку (PromptTopicFilter).
+    list_filter = (
+        'mode', PromptUserIdFilter, PromptLanguageFilter, PromptTopicFilter,
+        PromptMineFilter,
+    )
     # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
     show_facets = admin.ShowFacets.NEVER
     list_per_page = 25
-    search_fields = ('prompt_name_ru', 'prompt_text_ru', 'owner__username', '=owner__id')
+    # Владельца ищем и по ФИО: в списке видна колонка «Владелец», и поиск по
+    # введённой оттуда фамилии раньше давал пусто.
+    search_fields = (
+        'prompt_name_ru', 'prompt_text_ru',
+        'owner__username', '=owner__id',
+        'owner__first_name', 'owner__last_name',
+    )
     autocomplete_fields = ("owner", "editors")
-    actions = ("export_prompts_csv", "auto_translate_selected", "set_mode_solve", "set_mode_find_error")
+    actions = (
+        "export_prompts_csv", "auto_translate_selected", "set_mode_solve",
+        "set_mode_find_error", "add_editor",
+    )
 
     @admin.action(description='Назначить режим «Реши задачу»')
     def set_mode_solve(self, request, queryset):
@@ -217,6 +375,58 @@ class PromptAdmin(admin.ModelAdmin):
     def set_mode_find_error(self, request, queryset):
         queryset.update(mode=Prompt.MODE_FIND_ERROR)
         self.message_user(request, "Выбранным промптам назначен режим «В чём ошибка».")
+
+    def has_add_editor_permission(self, request):
+        # Выдача прав на чужие промпты — суперюзер (зеркало «Доступ»-
+        # fieldset'а и инлайна на странице пользователя).
+        return is_superuser_user(request.user)
+
+    @admin.action(
+        description="Добавить редактора…", permissions=["add_editor"],
+    )
+    def add_editor(self, request, queryset):
+        """Массовая выдача права редактирования: выделить промпты → выбрать
+        человека один раз → он добавлен в ``editors`` всех выбранных.
+
+        Первый POST — вызов действия; второй — уже форма с выбранным
+        пользователем (различаем по наличию поля ``editor``).
+        """
+        applying = "editor" in request.POST
+        form = PromptAddEditorForm(request.POST if applying else None)
+        if applying and form.is_valid():
+            editor = form.cleaned_data["editor"]
+            changed = 0
+            for prompt in queryset:
+                if prompt.owner_id == editor.pk:
+                    continue  # владельцу право не нужно — он и так правит
+                prompt.editors.add(editor)
+                changed += 1
+            self.message_user(
+                request,
+                f"Редактор «{display_name_for_user(editor)}» добавлен: "
+                f"{changed} из {queryset.count()} промптов"
+                + (" (у остальных он владелец)." if changed < queryset.count() else "."),
+            )
+            return HttpResponseRedirect(request.get_full_path())
+
+        prompt_ids = list(queryset.values_list("pk", flat=True))
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Добавить редактора",
+            "form": form,
+            "prompt_count": len(prompt_ids),
+            "prompt_ids": prompt_ids,
+            "prompt_preview": list(
+                queryset.order_by("prompt_name_ru", "pk")
+                .values_list("prompt_name_ru", "pk")[:20]
+            ),
+            "action_checkbox_name": ACTION_CHECKBOX_NAME,
+            "opts": self.model._meta,
+        }
+        return TemplateResponse(
+            request, "admin/ai/prompt_add_editor.html", context,
+        )
+
     # Prompt has no created_at field, so date_hierarchy is intentionally None.
     date_hierarchy = None
 
@@ -238,11 +448,6 @@ class PromptAdmin(admin.ModelAdmin):
     @admin.display(description="Режим", ordering="mode")
     def mode_name(self, obj):
         return obj.get_mode_display()
-
-    def lookup_allowed(self, lookup, value, request=None):
-        if lookup == "mine":
-            return True
-        return super().lookup_allowed(lookup, value)
 
     def _can_edit_prompt(self, request, obj):
         # Правила живут в permissions.can_edit_prompt (общий владелец с

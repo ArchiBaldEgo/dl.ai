@@ -11648,6 +11648,212 @@ class FilterSelectBarTests(_AdminViewRequestMixin, TestCase):
         self.assertNotIn("ai-filter-chip-group", html)
 
 
+class PromptChangelistFilterTests(_AdminViewRequestMixin, TestCase):
+    """Фильтры списка «Промпты»: язык/тема согласованы, «Мои» больше не
+    уводит в редирект ``?e=1``, подписи владельца — ФИО/DL-id."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        from ai.models import ProgrammingLanguage, Topic
+
+        self.su = get_user_model().objects.create_user(
+            username="prompt-filter-su", password="x",
+            is_superuser=True, is_staff=True,
+        )
+        self.alice = get_user_model().objects.create_user(
+            username="alice", password="x",
+            first_name="Алиса", last_name="Сидорова",
+        )
+        self.bob = get_user_model().objects.create_user(
+            username="bob", password="x",
+            first_name="Боб", last_name="Ким",
+        )
+        self.pascal = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.c_lang = ProgrammingLanguage.objects.create(language_name="C")
+        self.topic_pascal = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.pascal,
+        )
+        self.topic_c = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.c_lang,
+        )
+        self.p_owned = Prompt.objects.create(
+            prompt_name_ru="A", prompt_text_ru="t", mode="solve",
+            topic=self.topic_pascal, owner=self.alice,
+        )
+        self.p_other = Prompt.objects.create(
+            prompt_name_ru="B", prompt_text_ru="t", mode="solve",
+            topic=self.topic_c, owner=self.bob,
+        )
+        self.p_no_topic = Prompt.objects.create(
+            prompt_name_ru="C", prompt_text_ru="t", mode="find_error",
+            programming_language=self.pascal, owner=self.alice,
+        )
+        self.p_shared = Prompt.objects.create(
+            prompt_name_ru="D", prompt_text_ru="t", mode="solve",
+            topic=self.topic_pascal, owner=self.bob,
+        )
+        self.p_shared.editors.add(self.alice)
+
+    def _view(self, params=None, user=None):
+        from ai.admin.models import PromptAdmin
+        from ai.admin.site import ai_admin_site
+
+        admin = PromptAdmin(Prompt, ai_admin_site)
+        request = self._admin_request(
+            user or self.su, path="/ai/admin/ai/prompt/", data=params or {},
+        )
+        return admin.changelist_view(request)
+
+    def _names(self, response):
+        return sorted(
+            response.context_data["cl"].result_list.values_list(
+                "prompt_name_ru", flat=True,
+            )
+        )
+
+    def _filter(self, response, name):
+        return next(
+            spec for spec in response.context_data["cl"].filter_specs
+            if type(spec).__name__ == name
+        )
+
+    def test_language_switch_drops_incompatible_topic(self):
+        """Выбор языка снимает ?topic: тема другого языка давала пустой список."""
+        response = self._view({
+            "lang": str(self.pascal.pk), "topic": str(self.topic_c.pk),
+        })
+        self.assertEqual(response.status_code, 200)
+        lang_filter = self._filter(response, "PromptLanguageFilter")
+        choices = list(lang_filter.choices(response.context_data["cl"]))
+        pascal = next(ch for ch in choices if ch["display"] == "Pascal")
+        self.assertIn(f"lang={self.pascal.pk}", pascal["query_string"])
+        self.assertNotIn("topic=", pascal["query_string"])
+
+    def test_topic_choices_scoped_to_language_with_language_label(self):
+        response = self._view({"lang": str(self.pascal.pk)})
+        topic_filter = self._filter(response, "PromptTopicFilter")
+        displays = [ch["display"] for ch in topic_filter.choices(
+            response.context_data["cl"],
+        )]
+        self.assertIn("Pascal — Линейные", displays)
+        self.assertNotIn("C — Линейные", displays)
+
+    def test_topic_filter_and_no_topic_option(self):
+        self.assertEqual(
+            self._names(self._view({"topic": str(self.topic_pascal.pk)})),
+            ["A", "D"],
+        )
+        self.assertEqual(
+            self._names(self._view({"topic": "__none__"})), ["C"],
+        )
+
+    def test_legacy_topic_param_does_not_break(self):
+        """Старая ссылка со стоковым topic__id__exact не уводит в ?e=1."""
+        response = self._view({"topic__id__exact": str(self.topic_pascal.pk)})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._names(response), ["A", "D"])
+
+    def test_mine_filter_does_not_redirect(self):
+        make_prompt_developer(self.alice)
+        response = self._view({"mine": "1"}, user=self.alice)
+        self.assertEqual(response.status_code, 200)
+        # Владелец A/C + редактор D; чужой B не виден.
+        self.assertEqual(self._names(response), ["A", "C", "D"])
+
+    def test_owner_filter_labels_use_full_name_and_dl_id(self):
+        response = self._view()
+        user_filter = self._filter(response, "PromptUserIdFilter")
+        labels = dict(user_filter.lookup_choices)
+        self.assertEqual(labels[str(self.alice.pk)], "Алиса Сидорова (alice)")
+
+    def test_owner_filter_includes_editor(self):
+        response = self._view({"user_id": str(self.alice.pk)})
+        self.assertEqual(self._names(response), ["A", "C", "D"])
+
+    def test_search_by_owner_first_name(self):
+        self.assertEqual(self._names(self._view({"q": "Сидорова"})), ["A", "C"])
+
+
+class PromptBulkAddEditorActionTests(_AdminViewRequestMixin, TestCase):
+    """Массовая выдача права редактирования: «Добавить редактора…» из списка
+    промптов (суперюзер, промежуточная форма с autocomplete)."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        from ai.admin.models import PromptAdmin
+        from ai.admin.site import ai_admin_site
+
+        self.admin = PromptAdmin(Prompt, ai_admin_site)
+        self.su = get_user_model().objects.create_user(
+            username="editor-su", password="x",
+            is_superuser=True, is_staff=True,
+        )
+        self.alice = get_user_model().objects.create_user(
+            username="editor-alice", password="x", first_name="Алиса",
+        )
+        self.bob = get_user_model().objects.create_user(
+            username="editor-bob", password="x", first_name="Боб",
+        )
+        self.p1 = Prompt.objects.create(
+            prompt_name_ru="One", prompt_text_ru="t", owner=self.alice,
+        )
+        self.p2 = Prompt.objects.create(
+            prompt_name_ru="Two", prompt_text_ru="t", owner=self.bob,
+        )
+
+    def _post(self, data, user=None):
+        return self._admin_request(
+            user or self.su, method="post",
+            path="/ai/admin/ai/prompt/", data=data,
+        )
+
+    def _action_request(self, extra=None):
+        from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+
+        data = {
+            "action": ["add_editor"],
+            ACTION_CHECKBOX_NAME: [str(self.p1.pk), str(self.p2.pk)],
+            "index": ["0"],
+        }
+        data.update(extra or {})
+        return self._post(data)
+
+    def _action_queryset(self):
+        return Prompt.objects.filter(pk__in=[self.p1.pk, self.p2.pk])
+
+    def test_first_call_renders_intermediate_form(self):
+        request = self._action_request()
+        response = self.admin.add_editor(request, self._action_queryset())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.template_name, "admin/ai/prompt_add_editor.html")
+        self.assertEqual(response.context_data["prompt_count"], 2)
+        self.assertContains(response, 'name="action" value="add_editor"')
+
+    def test_second_call_adds_editor_skipping_owner(self):
+        request = self._action_request({"editor": [str(self.alice.pk)]})
+        response = self.admin.add_editor(request, self._action_queryset())
+        self.assertEqual(response.status_code, 302)
+        # A — её промпт (владелец, пропуск), B — чужой (добавлена редактором).
+        self.assertNotIn(self.alice, self.p1.editors.all())
+        self.assertIn(self.alice, self.p2.editors.all())
+        request = self._action_request({"editor": [str(self.bob.pk)]})
+        self.admin.add_editor(request, self._action_queryset())
+        self.assertIn(self.bob, self.p1.editors.all())
+        self.assertNotIn(self.bob, self.p2.editors.all())
+
+    def test_invalid_editor_rerenders_form_with_errors(self):
+        request = self._action_request({"editor": ["999999"]})
+        response = self.admin.add_editor(request, self._action_queryset())
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context_data["form"].errors)
+
+    def test_only_superuser_can_use_action(self):
+        request = self._post({}, user=self.alice)
+        self.assertFalse(self.admin.has_add_editor_permission(request))
+        self.assertNotIn("add_editor", self.admin.get_actions(request))
+        self.assertTrue(self.admin.has_add_editor_permission(self._post({})))
+
+
 class ArmCodeExtractionTests(SimpleTestCase):
     """Извлечение чистого кода из ответа модели (_extract_code_from_response):
     ПОСЛЕДНИЙ валидный ```-блок побеждает (финальный ответ, а не черновик
