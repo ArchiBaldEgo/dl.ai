@@ -1456,6 +1456,7 @@ var localization = {
         clear: "Очистить контекст",
         placeholder: "Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)\nПример форматирования кода:\n```\nprint('Hello, world!')\n```",
         adminPanel: "Админ-Панель",
+        myModels: "Мои AI-модели",
         testPanel: "Тест-панель",
         chat: "Чат с DLAI",
         decideTask: "Реши задачу",
@@ -1583,6 +1584,7 @@ var localization = {
         clear: "Clear Context",
         placeholder: "Ask a question (preferably in English to avoid errors), for nice formatting wrap the code in ```\nExample of code formatting:\n```\nprint('Hello, world!')\n```",
         adminPanel: "Admin Panel",
+        myModels: "My AI models",
         testPanel: "Test Panel",
         chat: "Chat with DLAI",
         decideTask: "Solve the task",
@@ -1709,6 +1711,7 @@ var localization = {
         clear: "Effacer le contexte",
         placeholder: "Posez une question (de préférence en anglais pour éviter les erreurs), pour un bon formatage, encadrez le code dans ```\nExemple de formatage du code:\n```\nprint('Hello, world!')\n```",
         adminPanel: "Panneau Admin",
+        myModels: "Mes modèles IA",
         testPanel: "Panneau Test",
         chat: "Chat avec DLAI",
         decideTask: "Résoudre la tâche",
@@ -2302,16 +2305,6 @@ document.addEventListener("keydown", function(event) {
     }
 });
 
-// === Common: sidebar toggle ===
-
-var toggleButton = document.querySelector('.toggle-button');
-var sidebar = document.querySelector('.sidebar');
-if (toggleButton && sidebar) {
-    toggleButton.addEventListener('click', function() {
-        sidebar.classList.toggle('open');
-    });
-}
-
 // === Common: theme toggle (light/dark), persisted in localStorage('ai-theme') ===
 // Атрибут data-theme на <html> выставляется инлайн-скриптом в <head> до отрисовки
 // (без FOUC) — по умолчанию 'light'. Здесь только переключаем по клику и храним выбор.
@@ -2697,8 +2690,12 @@ function applySharedUiLanguageTexts() {
     }
     var thinkBtn = document.getElementById('thinkToggleBtn');
     if (thinkBtn) updateThinkToggleLabel();
-    var menuBtn = document.querySelector('.toggle-button');
-    if (menuBtn) menuBtn.setAttribute('aria-label', getUiString('openMenu', 'Открыть меню'));
+    // Верхняя панель: «Мои модели» и «Админ-Панель» (последняя рендерится
+    // только при can_access_admin — здесь только текст для видимой ссылки).
+    var myModelsBtn = document.getElementById('myModelsTopBtn');
+    if (myModelsBtn) myModelsBtn.textContent = getUiString('myModels', 'Мои AI-модели');
+    var adminPanelBtn = document.getElementById('adminPanelTopBtn');
+    if (adminPanelBtn) adminPanelBtn.textContent = getUiString('adminPanel', 'Админ-Панель');
     var docsBtn = document.getElementById('userDocsBtn');
     if (docsBtn) {
         var docsLabel = getUiString('userDocs', 'Инструкция пользователя');

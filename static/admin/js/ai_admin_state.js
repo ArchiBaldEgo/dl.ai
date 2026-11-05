@@ -54,6 +54,22 @@
   function setupChangelistState() {
     if (!document.getElementById("changelist")) return;
     var key = QS_KEY_PREFIX + window.location.pathname;
+
+    // AJAX-фильтры (static/admin/ai/change_list/index.js) меняют URL без
+    // перезагрузки — сохраняем новое состояние, иначе возврат на страницу
+    // восстановил бы фильтры, с которыми её ОТКРЫВАЛИ, а не последние.
+    function saveCurrentQuery() {
+      var current = new URLSearchParams(window.location.search);
+      if (current.get("reset")) {
+        localStorage.removeItem(key);
+      } else if (window.location.search) {
+        localStorage.setItem(key, window.location.search);
+      } else {
+        localStorage.removeItem(key);
+      }
+    }
+    window.addEventListener("ai:changelist-navigated", saveCurrentQuery);
+
     var params = new URLSearchParams(window.location.search);
 
     if (params.get("reset")) {
@@ -73,7 +89,17 @@
     var sameOrigin = referrer && referrer.origin === window.location.origin;
     if (sameOrigin && referrer.pathname !== window.location.pathname) {
       // Вернулись со страницы объекта/по ссылке меню — возвращаем фильтры.
-      window.location.replace(window.location.pathname + saved);
+      // Если changelist-модуль уже загружен (static/admin/ai/change_list/
+      // index.js, обычный скрипт в body — выполняется раньше defer-скриптов),
+      // возврат идёт тем же AJAX-механизмом, что и смена фильтра: без второй
+      // полной загрузки страницы. Если модуля нет (другой шаблон/старый
+      // кэш браузера) — прежний полный переход.
+      var restoreUrl = window.location.pathname + saved;
+      if (typeof window.aiChangelistLoad === "function") {
+        window.aiChangelistLoad(restoreUrl, "replace");
+      } else {
+        window.location.replace(restoreUrl);
+      }
     } else if (sameOrigin) {
       // Пришли с этой же страницы без querystring — фильтры сняли руками.
       localStorage.removeItem(key);

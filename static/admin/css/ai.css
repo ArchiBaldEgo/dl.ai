@@ -112,15 +112,26 @@ button:hover {
     display: block;
 }
 
+<<<<<<< HEAD
 /* Убрали overflow-x: auto, чтобы выпадающее меню не обрезалось */
 .line-panel {
     display: flex;
     flex-wrap: wrap;
     align-items: flex-start;
+=======
+/* --- Верхняя панель: один стандарт высоты/рамки/радиуса для всех
+   контролов (селекторы, кнопки-иконки, текстовые ссылки). Раньше селекторы
+   были ~27px, кнопки 32px, ссылки 32px — панель выглядела «рваной». --- */
+.line-panel {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+>>>>>>> origin/main
     justify-content: flex-start;
-    gap: 10px;
+    gap: 12px;
     background-color: #d8d8d8;
-    padding: 8px 12px 16px 12px; 
+    /* Нижний отступ — место под абсолютную дату обновления (bottom: 4px). */
+    padding: 8px 12px 18px 12px;
     position: relative;
     box-sizing: border-box;
     overflow: visible;
@@ -130,40 +141,68 @@ button:hover {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     flex: 0 1 auto;
     min-width: 0;
 }
 
-#select, #selectType, #selectModelSort {
+/* Все селекторы главной панели: одинаковая высота, рамка, радиус, шрифт.
+   ID-селекторы стоят рядом с классовым, чтобы перебить страничные копии
+   правил в decide_task.css / find_error.css (одинаковая специфичность,
+   ai_theme.css подключён последним). */
+.line-panel select,
+#select, #selectType, #selectModelSort, #selectLang {
+    height: 36px;
+    box-sizing: border-box;
+    font-family: inherit;
     font-size: 14px;
+    line-height: 1.2;
+    padding: 0 8px;
+    border: 1px solid var(--border, #ccc);
+    border-radius: 8px;
+    background-color: var(--bg-input, #fff);
+    color: var(--text-primary, #333);
+}
+
+#select, #selectType, #selectModelSort {
     flex: 1 1 60px;
     min-width: 60px;
     max-width: 180px;
+<<<<<<< HEAD
     padding: 0 6px;
     height: 32px;
     box-sizing: border-box;
+=======
+>>>>>>> origin/main
 }
 
 #selectLang {
-    font-size: 14px;
     flex: 0 1 auto;
     width: auto;
     min-width: 70px;
+<<<<<<< HEAD
     padding: 0 6px;
     height: 32px;
     box-sizing: border-box;
+=======
+>>>>>>> origin/main
 }
 
 .theme-toggle {
     flex: 0 0 auto;
     padding: 0;
+<<<<<<< HEAD
     height: 32px !important;
     width: 32px !important;
     font-size: 16px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
+=======
+    height: 36px;
+    width: 36px;
+    font-size: 16px;
+>>>>>>> origin/main
     box-sizing: border-box;
 }
 
@@ -373,9 +412,12 @@ form {
     display: flex !important;
 }
 
+/* Голосовые кнопки живут в той же панели — высота/радиус как у остальных
+   контролов шапки (36px, 8px), иначе ряд «пляшет». */
 .voice-btn {
-    display: flex;
+    display: inline-flex;
     align-items: center;
+<<<<<<< HEAD
     justify-content: space-between;
     width: 100%;
     padding: 8px 12px;
@@ -391,6 +433,16 @@ form {
     margin: 0;
     cursor: pointer;
     box-sizing: border-box;
+=======
+    justify-content: center;
+    padding: 0 12px;
+    font-size: 13px;
+    height: 36px;
+    border-radius: 8px;
+    margin: 0;
+    white-space: nowrap;
+    flex-shrink: 0;
+>>>>>>> origin/main
 }
 
 .voice-btn:hover {
@@ -531,59 +583,54 @@ form {
     align-items: center;
 }
 
-.toggle-button {
-    margin: 0;
-    padding: 0;
-    position: absolute;
-    top: 10px;
-    right: 0;
-    border: none;
-    background-color: rgb(207, 205, 205);
-    cursor: pointer;
-    transition: all 0.3s ease;
-    z-index: 1001;
-    height: 50px;
-    border-radius: 30px 0 0 30px;
+/* Ссылки верхней панели: «Мои модели» / «Админ-Панель» (были в правом
+   выдвижном меню). Контурная кнопка того же размера, что и остальные
+   контролы (36px, радиус 8px); «Админ-Панель» выделена акцентом. */
+.panel-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 36px;
+    padding: 0 14px;
+    box-sizing: border-box;
+    border: 1px solid var(--border, #ccc);
+    border-radius: 8px;
+    background-color: transparent;
+    color: var(--text-primary, #333);
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: background-color 0.2s ease, color 0.2s ease,
+        border-color 0.2s ease;
 }
 
-.toggle-button::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: -30px;
-    width: 30px;
-    height: 100%;
-    transition: all 0.3s ease;
-    z-index: -1;
+.panel-link:hover {
+    background-color: var(--bg-toggle, rgb(207, 205, 205));
+    color: var(--text-primary, #333);
 }
 
-.toggle-button:hover { background-color: rgb(119, 119, 119); }
-
-.sidebar {
-    position: fixed;
-    top: 0;
-    right: -300px;
-    width: 300px;
-    height: 100%;
-    background-color: white;
-    box-shadow: -2px 0 5px rgba(0, 0, 0, 0.2);
-    transition: transform 0.3s ease-in-out;
-    display: flex;
-    flex-direction: column;
-    border-left: 1px solid rgba(0, 0, 0, 0.1);
-    z-index: 1000;
+/* Вход в админку — отдельный акцент, чтобы не путался с личными моделями. */
+#adminPanelTopBtn {
+    color: var(--accent-blue, #2196F3);
+    border-color: var(--accent-blue, #2196F3);
 }
 
-.sidebar-header {
-    padding: 15px;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+#adminPanelTopBtn:hover {
+    background-color: var(--accent-blue, #2196F3);
+    color: #fff;
 }
 
-.sidebar-content { padding: 15px; flex: 1; }
-.sidebar.open { transform: translateX(-300px); }
-.sidebar.open + .toggle-button { transform: translateX(-300px); }
-.toggle-button svg { transition: transform 0.3s ease; transform: rotate(180deg); }
-.sidebar.open + .toggle-button svg { transform: rotate(0deg); }
+/* Единый видимый фокус для клавиатуры на всех контролах шапки. */
+.line-panel select:focus-visible,
+.theme-toggle:focus-visible,
+.panel-link:focus-visible,
+.think-toggle:focus-visible {
+    outline: 2px solid var(--accent-blue, #2196F3);
+    outline-offset: 2px;
+}
 
 .shared-prompt-section {
     display: flex;

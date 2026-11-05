@@ -39,6 +39,7 @@ from django.utils import timezone
 
 from ..constants import MOSCOW_TZ
 from .msk_time import msk_day_bounds, parse_date  # noqa: F401 (реэкспорт)
+from .user_search import flat_user_q
 
 # Модели, которые не отдают usage: токены по ним всегда 0. Список — из
 # префиксов ключей (см. ai/model_clients/registry.py).
@@ -145,11 +146,12 @@ def _filter_logs(qs, *, date_from, date_to, mode: str, model: str, user: str, so
     if source:
         qs = qs.filter(source=source)
     if user:
-        qs = qs.filter(
-            Q(user_full_name__icontains=user)
-            | Q(username__icontains=user)
-            | Q(external_user_id__icontains=user)
+        # Универсальный поиск: id (DL-id/логин) и ФИО в любом порядке.
+        user_filter = flat_user_q(
+            ("external_user_id", "username", "user_full_name"), user,
         )
+        if user_filter is not None:
+            qs = qs.filter(user_filter)
     if model:
         # model_names — JSONField-список; JSON-индексов нет, поэтому фильтр
         # делается в Python (выборка ограничена фильтрами и периодом).

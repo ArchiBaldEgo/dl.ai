@@ -72,9 +72,6 @@ document.getElementById("selectLang").addEventListener("change", function() {
     var messageText = document.getElementById("messageText");
     if (messageText) messageText.setAttribute("placeholder", localization[selectedLang].placeholder);
 
-    var sidebarHeader = document.querySelector(".sidebar-header");
-    if (sidebarHeader) sidebarHeader.textContent = localization[selectedLang].adminPanel;
-
     var testPanelLink = document.getElementById("testPanelLink");
     if (testPanelLink) testPanelLink.textContent = localization[selectedLang].testPanel;
 

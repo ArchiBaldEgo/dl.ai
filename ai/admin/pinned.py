@@ -48,12 +48,29 @@ def admin_pinned_runs_view(request):
     if not can_access_pinned_runs(request):
         return HttpResponseForbidden("Access denied")
 
+    # .only() — только поля, которые реально читает страница и построитель
+    # строк (log.message нужен легаси-записям без batch_run_id; тяжёлые
+    # request_text/response_text/error_message не грузим). Свои закрепления
+    # известны из этой же выборки — передаём их в построитель строк, чтобы он
+    # не делал второй запрос к AIPinnedBatchRun.
     pins = list(
         AIPinnedBatchRun.objects.select_related("log", "user")
+        .only(
+            "log_id", "user_id",
+            "log__id", "log__batch_run_id", "log__message", "log__sent_at",
+            "log__received_at", "log__user_full_name", "log__username",
+            "log__external_user_id", "log__status", "log__mode",
+            "user__id", "user__username", "user__first_name", "user__last_name",
+        )
         .order_by("-created_at", "-id")
     )
     logs = [pin.log for pin in pins]
-    rows = build_batch_rows_for_logs(request, logs)
+    own_pinned_log_ids = {
+        pin.log_id for pin in pins if pin.user_id == request.user.pk
+    }
+    rows = build_batch_rows_for_logs(
+        request, logs, pinned_log_ids=own_pinned_log_ids,
+    )
     # Порядок страницы — по дате закрепления (AIPinnedBatchRun.ordering),
     # а не по sent_at строк.
     rows_by_log_id = {row["id"]: row for row in rows}

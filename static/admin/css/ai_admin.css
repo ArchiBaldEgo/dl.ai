@@ -791,6 +791,13 @@ a.ai-docs-chapter:hover {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }
+
+/* AJAX-фильтры кастомных страниц (static/admin/js/ai_ajax_filters.js):
+   пока область результатов перерисовывается — приглушена. */
+.ai-ajax-busy {
+  opacity: 0.55;
+  transition: opacity 0.12s ease;
+}
 .results { overflow-x: auto; }
 
 @media (max-width: 1150px) {

@@ -76,6 +76,40 @@ window.ArmBatchResults = (function () {
       return entry.input || entry.expected_output;
     });
   }
+  // DL отдаёт CRLF ("1\r\n2\r\n"); старые строки БД тоже могут содержать
+  // \r — нормализуем при рендере, чтобы не было литерала «\r» в <pre>.
+  function normalizeNewlines(value) {
+    return String(value == null ? '' : value).replace(/\r\n?/g, '\n');
+  }
+  // Вход/эталон проваленного теста — один рендер на все места: карточка
+  // результата и каждая неудачная попытка «Отладки промпта» (там модель
+  // ошибается на КОНКРЕТНОМ входе, и это и есть суть правки промпта).
+  function testDataEntriesHtml(data, firstMargin) {
+    var entries = normalizeTestData(data).filter(function (entry) {
+      return entry.input || entry.expected_output;
+    });
+    var parts = [];
+    entries.forEach(function (entry, index) {
+      var heading = entry.test_number
+        ? 'Данные проваленного теста № ' + escapeHtml(entry.test_number)
+        : 'Данные проваленного теста #' + (index + 1);
+      // Заголовок у каждой записи, когда их несколько: иначе непонятно,
+      // к какому тесту относятся файлы.
+      parts.push('<div style="font-weight:600; font-size:13px; margin:'
+        + (index ? '10px' : (firstMargin || '0')) + ' 0 4px;">' + heading + '</div>');
+      if (entry.input) {
+        parts.push('<div class="arm-muted" style="font-size:12px;">Входные данные'
+          + (entry.input_truncated ? ' (начало)' : '') + ':</div>');
+        parts.push('<pre>' + escapeHtml(normalizeNewlines(entry.input)) + '</pre>');
+      }
+      if (entry.expected_output) {
+        parts.push('<div class="arm-muted" style="font-size:12px;">Выходные данные (эталон)'
+          + (entry.expected_truncated ? ' (начало)' : '') + ':</div>');
+        parts.push('<pre>' + escapeHtml(normalizeNewlines(entry.expected_output)) + '</pre>');
+      }
+    });
+    return parts.join('');
+  }
   // Загрузить (и закрепить в кэше) состояние тела: первый чанк raw_response —
   // сразу, остальное догружается позже (state.has_more). В кэше может лежать
   // и обещание, и разрешённое состояние — Promise.resolve нормализует оба:
@@ -674,6 +708,12 @@ window.ArmBatchResults = (function () {
         rows.push('<div class="arm-pd-dl">DL: '
           + escapeHtml(a.dl_comment) + '</div>');
       }
+      // Каждая неудачная попытка — со СВОИМИ входом/эталоном: видно, на каком
+      // тесте модель ошиблась до правки промпта и после неё.
+      var attemptTestData = testDataEntriesHtml(a.test_data, '6px');
+      if (attemptTestData) {
+        rows.push('<div class="arm-pd-testdata">' + attemptTestData + '</div>');
+      }
       if (a.addition) {
         if (a.applied) {
           rows.push('<div class="arm-pd-addition applied"><strong>Добавлено в промпт:</strong> '
@@ -711,6 +751,11 @@ window.ArmBatchResults = (function () {
       if (ver.dl_comment) {
         parts.push('<div class="arm-pd-dl" style="margin:2px 0 0;">DL: '
           + escapeHtml(ver.dl_comment) + '</div>');
+      }
+      var verificationTestData = testDataEntriesHtml(ver.test_data, '6px');
+      if (verificationTestData) {
+        parts.push('<div class="arm-pd-testdata">'
+          + verificationTestData + '</div>');
       }
     } else if (attempts.length) {
       parts.push('<div class="arm-muted" style="margin-top:6px; font-size:12px;">'
@@ -890,36 +935,13 @@ window.ArmBatchResults = (function () {
     var renderTestData = function (data) {
       // Записи без файлов пропускаем: DL мог подтвердить провал, но не
       // разрешить выдачу данных (404/403 по конкретному тесту).
-      var entries = normalizeTestData(data).filter(function (entry) {
+      if (!normalizeTestData(data).filter(function (entry) {
         return entry.input || entry.expected_output;
-      });
-      if (!entries.length) { testDataEl.hidden = true; return; }
-      var parts = [];
-      // DL отдаёт CRLF ("1\r\n2\r\n"); старые строки БД тоже могут содержать
-      // \r — нормализуем при рендере, чтобы не было литерала «\r» в <pre>.
-      var normalizeNewlines = function (value) {
-        return String(value == null ? '' : value).replace(/\r\n?/g, '\n');
-      };
-      entries.forEach(function (entry, index) {
-        var heading = entry.test_number
-          ? 'Данные проваленного теста № ' + escapeHtml(entry.test_number)
-          : 'Данные проваленного теста #' + (index + 1);
-        // Заголовок у каждой записи, когда их несколько: иначе непонятно,
-        // к какому тесту относятся файлы.
-        parts.push('<div style="font-weight:600; font-size:13px; margin:'
-          + (index ? '10px' : '0') + ' 0 4px;">' + heading + '</div>');
-        if (entry.input) {
-          parts.push('<div class="arm-muted" style="font-size:12px;">Входные данные'
-            + (entry.input_truncated ? ' (начало)' : '') + ':</div>');
-          parts.push('<pre>' + escapeHtml(normalizeNewlines(entry.input)) + '</pre>');
-        }
-        if (entry.expected_output) {
-          parts.push('<div class="arm-muted" style="font-size:12px;">Выходные данные (эталон)'
-            + (entry.expected_truncated ? ' (начало)' : '') + ':</div>');
-          parts.push('<pre>' + escapeHtml(normalizeNewlines(entry.expected_output)) + '</pre>');
-        }
-      });
-      testDataEl.innerHTML = parts.join('');
+      }).length) {
+        testDataEl.hidden = true;
+        return;
+      }
+      testDataEl.innerHTML = testDataEntriesHtml(data);
       testDataEl.hidden = false;
     };
     var renderTestDataWithHint = function (data, bodyDone) {

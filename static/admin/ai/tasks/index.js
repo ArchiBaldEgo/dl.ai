@@ -134,10 +134,10 @@
         });
     }
 
-    // Фильтр «Кто взял» на «Поиске»: смена селекта — GET этой же страницы.
-    document.addEventListener('change', function (event) {
-        var select = event.target.closest('[data-autosubmit="1"]');
-        if (select && select.form) select.form.submit();
+    // Фильтры «Кто взял» / архива: AJAX без перезагрузки, заменяется только
+    // #ai-tasks-results (форма и позиция прокрутки остаются).
+    document.querySelectorAll('.ai-tasks-filter').forEach(function (form) {
+        initAiAjaxFilters(form, { targets: ['#ai-tasks-results'] });
     });
 
     // Правка таска: сабмит формы правки — POST JSON {title, description,

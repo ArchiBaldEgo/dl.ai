@@ -168,6 +168,30 @@
                         <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
                     </svg>
                 </button>
+<<<<<<< HEAD
+=======
+                <!-- Инструкция пользователя «?» (ai-common.js initUserDocs):
+                     модалка с HTML-рендером главы DOCX.md + скачивание .md -->
+                <button type="button" class="theme-toggle doc-toggle" id="userDocsBtn"
+                    aria-label="{{ t.userDocs }}" title="{{ t.userDocs }}">?</button>
+                {# Личные модели — всем (владелец = текущий пользователь,   #}
+                {# права проверяет сервер страницы). Вход в админку — только #}
+                {# тем, кому она реально доступна (can_access_admin: staff/  #}
+                {# super/ключ page.admin, т.е. «Разработчик промптов» и выше). #}
+                <a href="/ai/my-models/" class="panel-link" id="myModelsTopBtn">{{ t.myModels }}</a>
+                {% if can_access_admin %}
+                    <a href="/ai/admin/" class="panel-link" id="adminPanelTopBtn">{{ t.adminPanel }}</a>
+                {% endif %}
+            </div>
+            <div class="voice-controls" id="voiceControls">
+                <button type="button" class="voice-btn" id="voiceInputBtn">
+                    <span class="voice-input-indicator" id="voiceIndicator"></span>
+                    {{ t.voiceInput }}
+                </button>
+                <button type="button" class="voice-btn" id="voiceOutputBtn">
+                    {{ t.voiceOutput }}
+                </button>
+>>>>>>> origin/main
 
                 <div class="voice-menu-wrapper">
                     <button type="button" class="voice-mode-btn" id="voiceModeBtn" onclick="this.parentElement.classList.toggle('open')">
@@ -224,28 +248,6 @@
         </div>
         {% endblock %}
 
-        <div class="sidebar">
-            <a href="/ai/admin/login/?next=/ai/admin/" class="sidebar-admin-link">
-                <div class="sidebar-header" id="adminPanelLink">
-                    {{ t.adminPanel }}
-                </div>
-            </a>
-            {# Свои AI-модели (личные провайдер+модель+ключ) — доступны только #}
-            {# владельцу, поэтому ссылка ведёт на клиентскую страницу: там   #}
-            {# права проверяет сам сервер (владелец — текущий пользователь).  #}
-            <a href="/ai/my-models/" class="sidebar-admin-link">
-                <div class="sidebar-header" id="myModelsLink">
-                    {{ t.myModels }}
-                </div>
-            </a>
-        </div>
-
-        <button class="toggle-button" type="button" aria-label="{{ t.openMenu }}">
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="9 18 15 12 9 6" />
-            </svg>
-        </button>
     </div>
     <footer id="load-time-footer" class="load-time-footer" aria-live="polite"></footer>
 

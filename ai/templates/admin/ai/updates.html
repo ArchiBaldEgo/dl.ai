@@ -13,7 +13,7 @@
 {% block content %}
 <div id="content-main" class="ai-updates-wrap">
   {% include "admin/ai/_ai_back_nav.html" %}
-  <p class="paginator">
+  <p class="paginator" id="ai-updates-count">
     {% blocktrans with total=total_count %}Всего записей: {{ total }}{% endblocktrans %}
   </p>
 
@@ -29,12 +29,13 @@
     </select>
     <input type="date" name="date_from" value="{{ date_from }}" placeholder="{% trans 'С' %}" style="padding: 4px 8px;">
     <input type="date" name="date_to" value="{{ date_to }}" placeholder="{% trans 'По' %}" style="padding: 4px 8px;">
-    {# Кнопки отправки нет: любой фильтр применяется сам (ai_auto_filters.js: #}
-    {# текст с паузой, селекты и даты мгновенно). #}
+    {# Кнопки отправки нет: любой фильтр применяется сам (ai_ajax_filters.js: текст с паузой, селекты/даты мгновенно, без перезагрузки). #}
     <a href="{% url 'ai_updates' %}" class="button" style="padding: 4px 16px;">{% trans 'Сбросить' %}</a>
     <a href="/ai/admin/ai/updatelog/?hidden__exact=1" class="button" style="padding: 4px 16px;">{% trans 'Скрытые записи' %}</a>
   </form>
 
+  <!-- Результаты фильтра: заменяются AJAX'ом, форма с фокусом — нет. -->
+  <div id="ai-updates-results">
   <!-- Commits table -->
   <table style="width: 100%; border-collapse: collapse;">
     <thead>
@@ -77,11 +78,12 @@
     {% endif %}
   </div>
   {% endif %}
+  </div>
 </div>
 
-{# Динамические фильтры (сам применяет, без кнопки) — общий хелпер админки. #}
-{# Хелпер грузится ПЕРВЫМ, потом index.js инициализирует его на форме.    #}
-<script src="{% static 'admin/js/ai_auto_filters.js' %}"></script>
+{# Динамические фильтры (сам применяет, без кнопки) — общий AJAX-хелпер. #}
+{# Хелпер грузится ПЕРВЫМ, потом index.js инициализирует его на форме. #}
+<script src="{% static 'admin/js/ai_ajax_filters.js' %}"></script>
 <script src="{% static 'admin/ai/updates/index.js' %}"></script>
 
 {% endblock %}

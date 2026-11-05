@@ -97,6 +97,10 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Сжатие больших HTML (админка, дневной отчёт, журнал). Стоит сразу после
+    # SecurityMiddleware и до всего, что читает/пишет body. Тестовый клиент не
+    # шлёт Accept-Encoding, поэтому тела ответов в тестах не меняются.
+    'django.middleware.gzip.GZipMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'ai.middleware.CsrfSessionFallbackMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -218,6 +222,12 @@ DATABASES = {
         'PASSWORD': DB_PASSWORD,
         'HOST': DB_HOST,
         'PORT': DB_PORT,
+        # Переиспользование соединений между запросами: без этого каждый
+        # запрос платит полный TCP/TLS-handshake до Postgres. 60 с — компромисс
+        # между выигрышем и количеством «спящих» коннектов; health-check не даёт
+        # упасть на соединении, убитом сервером/сетью.
+        'CONN_MAX_AGE': int(os.getenv("DB_CONN_MAX_AGE", "60")),
+        'CONN_HEALTH_CHECKS': True,
     }
 }
 

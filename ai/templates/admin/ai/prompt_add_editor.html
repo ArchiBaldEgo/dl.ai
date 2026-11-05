@@ -1,0 +1,67 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+{% comment %}Промежуточная страница action'а «Добавить редактора…»
+   (ai/admin/models.py::PromptAdmin.add_editor): выбрать человека один раз и
+   выдать ему право править все отмеченные промпты. Скрытые _selected_action
+   повторяют выбор — форма действия отправляет их заново.{% endcomment %}
+
+{% block extrahead %}
+  {{ block.super }}
+  {{ form.media }}
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">На главную</a>
+  &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">Раздел ИИ</a>
+  &rsaquo; <a href="{% url 'admin:ai_prompt_changelist' %}">Промпты</a>
+  &rsaquo; Добавить редактора
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  <h1>Добавить редактора</h1>
+  <p>
+    Выбрано промптов: <strong>{{ prompt_count }}</strong>. Человек будет добавлен
+    в «Редакторы» каждого из них и сможет править их как свои (удалять чужие
+    промпты он по-прежнему не сможет).
+  </p>
+  {% if prompt_preview %}
+    <ul>
+      {% for name, pk in prompt_preview %}
+        <li>{% if name %}{{ name }}{% else %}Prompt #{{ pk }}{% endif %}</li>
+      {% endfor %}
+      {% if prompt_count > prompt_preview|length %}
+        <li>… и ещё {{ prompt_count|add:"-20" }}</li>
+      {% endif %}
+    </ul>
+  {% endif %}
+
+  <form method="post" novalidate>
+    {% csrf_token %}
+    <input type="hidden" name="action" value="add_editor">
+    {% for pk in prompt_ids %}
+      <input type="hidden" name="{{ action_checkbox_name }}" value="{{ pk }}">
+    {% endfor %}
+
+    <fieldset class="module aligned">
+      {% for field in form %}
+        <div class="form-row{% if field.errors %} errors{% endif %}">
+          {{ field.errors }}
+          <div>
+            {{ field.label_tag }}
+            {{ field }}
+            {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+          </div>
+        </div>
+      {% endfor %}
+    </fieldset>
+
+    <div class="submit-row">
+      <input type="submit" value="Добавить редактора" class="default">
+      <a href="{% url 'admin:ai_prompt_changelist' %}" class="closelink">Отмена</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

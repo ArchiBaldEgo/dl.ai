@@ -312,3 +312,17 @@
 #changelist .actions .button:focus, #changelist .actions .button:hover {
     border-color: var(--body-quiet-color);
 }
+
+/* AJAX-фильтры: пока таблица перерисовывается, фильтры и результаты
+   приглушены и не принимают повторных кликов (static/admin/ai/change_list/
+   index.js вешает класс на <html>). */
+.ai-changelist-busy #changelist-filter,
+.ai-changelist-busy #changelist {
+    opacity: 0.55;
+    transition: opacity 0.12s ease;
+}
+
+.ai-changelist-busy #changelist-filter,
+.ai-changelist-busy #changelist select {
+    pointer-events: none;
+}

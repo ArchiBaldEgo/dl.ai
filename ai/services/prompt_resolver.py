@@ -72,43 +72,50 @@ class PromptResolver:
         ui_language: str = "",
     ) -> tuple[str, str, str]:
         """Return (programming_language_name, topic_name, prompt_name) for logging."""
+        # Один thread-hop на все три запроса вместо трёх sync_to_async
+        # (каждый — переключение потока и, на некоторых бэкендах, работа в
+        # отдельном воркере). Семантика резолва та же.
+        return await self._load_context_names(
+            prog_lng_id, topic_id, prompt_id, ui_language,
+        )
+
+    @sync_to_async
+    def _load_context_names(
+        self, prog_lng_id, topic_id, prompt_id, ui_language,
+    ) -> tuple[str, str, str]:
         from ..models import ProgrammingLanguage, Prompt, SharedPrompt, Topic
 
         prog_lng_name = ""
-        topic_name = ""
-        prompt_name = ""
-
         if prog_lng_id:
-            try:
-                prog_lng_name = await self._get_programming_language_name(prog_lng_id)
-            except ProgrammingLanguage.DoesNotExist:
-                pass
+            prog_lng_name = (
+                ProgrammingLanguage.objects
+                .filter(pk=prog_lng_id)
+                .values_list("language_name", flat=True)
+                .first()
+            ) or ""
 
+        topic_name = ""
         if topic_id:
-            try:
-                topic = await self._get_topic(topic_id)
+            topic = Topic.objects.filter(pk=topic_id).first()
+            if topic is not None:
                 topic_name = get_localized_name(topic, ui_language, "topic_name")
-            except Topic.DoesNotExist:
-                pass
 
+        prompt_name = ""
+        prompt = None
+        shared_pk = parse_shared_prompt_id(prompt_id)
         try:
-            prompt = await self._resolve_prompt(prompt_id)
-            if prompt is not None:
-                prompt_name = get_localized_name(prompt, ui_language, "prompt_name")
-        except (Prompt.DoesNotExist, SharedPrompt.DoesNotExist):
-            pass
+            if shared_pk is not None:
+                prompt = SharedPrompt.objects.get(pk=shared_pk)
+            elif prompt_id:
+                prompt = Prompt.objects.select_related("shared_prompt").get(
+                    pk=int(prompt_id),
+                )
+        except (Prompt.DoesNotExist, SharedPrompt.DoesNotExist, ValueError, TypeError):
+            prompt = None
+        if prompt is not None:
+            prompt_name = get_localized_name(prompt, ui_language, "prompt_name")
 
         return prog_lng_name, topic_name, prompt_name
-
-    @sync_to_async
-    def _get_programming_language_name(self, prog_lng_id) -> str:
-        from ..models import ProgrammingLanguage
-        return ProgrammingLanguage.objects.values_list("language_name", flat=True).get(id=prog_lng_id)
-
-    @sync_to_async
-    def _get_topic(self, topic_id):
-        from ..models import Topic
-        return Topic.objects.get(id=topic_id)
 
     @sync_to_async
     def _get_shared_prompt(self, shared_pk: int):
@@ -120,23 +127,30 @@ class PromptResolver:
         from ..models import Prompt
         return Prompt.objects.select_related("shared_prompt").get(id=pk)
 
-    async def _resolve_prompt(self, prompt_id):
-        from ..models import Prompt, SharedPrompt
-        shared_pk = parse_shared_prompt_id(prompt_id)
-        if shared_pk is not None:
-            return await self._get_shared_prompt(shared_pk)
-        if prompt_id:
-            try:
-                return await self._get_prompt(int(prompt_id))
-            except (ValueError, TypeError):
-                return None
-        return None
-
 
 @sync_to_async
 def get_default_shared_prompt(mode: str):
+    """Общий промпт режима (solve/find_error) с кэшем на 60 с.
+
+    Вызывается на каждом WS-сообщении; текст меняется редко. Ключ включает
+    эпоху ``prompt_meta``, которую бампают сигналы SharedPrompt/Prompt, —
+    правка промпта в админке видна сразу, без ожидания TTL. Возвращается
+    копия, чтобы вызывающий код не мог мутировать закэшированный объект.
+    """
+    import copy
+
     from ..models import SharedPrompt
-    try:
-        return SharedPrompt.objects.get(mode=mode)
-    except SharedPrompt.DoesNotExist:
-        return None
+    from .cache_epochs import cache_key, cached_call, epoch
+
+    def _load():
+        try:
+            return SharedPrompt.objects.get(mode=mode)
+        except SharedPrompt.DoesNotExist:
+            return None
+
+    prompt = cached_call(
+        cache_key("prompt", "default_shared", epoch("prompt_meta"), mode),
+        _load,
+        60,
+    )
+    return copy.copy(prompt) if prompt is not None else None
