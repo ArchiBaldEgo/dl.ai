@@ -543,11 +543,25 @@
           name.className = 'arm-tree-task-name';
           name.textContent = node.name || '(без названия)';
           // TODO: Здесь проверяем статус задачи и меняем по нему имя
-          function getClassName() {
+          async function getClassName() {
             // TODO: ...
+            const body = new URLSearchParams();
+            const courseId = 1450;
+            body.set('course_id', courseId);
+            const response = await fetch("https://dl.gsu.by/restapi/get-solutions", {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
+              body: body.toString(),
+            })
+              .then(r => r.json())
+              .then(data => console.log(data))
+              .catch(err => console.error(err));
+
             options = ["arm-tree-task-good", "arm-tree-task-bad", "arm-tree-task-undefined"]
             return options[Math.floor(Math.random() * options.length)];
           }
+
+          
           name.className = getClassName(node);
           
           li.appendChild(name);

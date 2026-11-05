@@ -954,6 +954,7 @@ function getCsrfToken() {
     return '';
 }
 
+// function getClientId()
 function resolveClientId() {
     var sessionIdFromMeta = getMetaContent('external-session-id');
     var sessionId = sessionIdFromMeta || getCookieValue('DLSID');
