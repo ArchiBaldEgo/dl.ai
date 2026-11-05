@@ -355,6 +355,7 @@ form {
     min-width: 0;
 }
 
+/* --- СТИЛИ ДЛЯ ВЫПАДАЮЩЕГО МЕНЮ --- */
 .voice-menu-wrapper {
     position: relative;
     flex: 0 0 auto;
@@ -384,11 +385,11 @@ form {
     position: absolute;
     top: 100%;
     right: 0;
-    background-color: #ffffff;
-    border: 1px solid #ccc;
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: 5px;
     padding: 8px;
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    box-shadow: 0 4px 8px var(--shadow);
     z-index: 9999;
     min-width: 320px;
     gap: 2px;
@@ -408,7 +409,7 @@ form {
     padding: 8px 12px;
     height: 36px;
     background: transparent;
-    color: #333;
+    color: var(--text-primary);
     border: none;
     border-radius: 4px;
     box-shadow: none;
@@ -420,7 +421,7 @@ form {
 }
 
 .voice-btn:hover {
-    background: #f0f0f0;
+    background: var(--bg-accordion);
 }
 
 .voice-btn.recording { background-color: #ff4444; color: #fff; }
@@ -442,10 +443,11 @@ form {
     border-radius: 4px;
     cursor: pointer;
     box-sizing: border-box;
+    color: var(--text-primary);
 }
 
 .think-checkbox:hover {
-    background: #f0f0f0;
+    background: var(--bg-accordion);
 }
 
 .think-checkbox label {
@@ -467,7 +469,7 @@ form {
 
 #voiceInputBtn::after {
     content: "F2";
-    color: #888;
+    color: var(--text-muted);
     font-size: 11px;
     margin-left: 10px;
     flex: 0 0 auto;
@@ -475,7 +477,7 @@ form {
 
 #voiceOutputBtn::after {
     content: "F3";
-    color: #888;
+    color: var(--text-muted);
     font-size: 11px;
     margin-left: 10px;
     flex: 0 0 auto;
@@ -483,7 +485,7 @@ form {
 
 .think-checkbox label::after {
     content: "F4";
-    color: #888;
+    color: var(--text-muted);
     font-size: 11px;
     margin-left: 10px;
     flex: 0 0 auto;
@@ -492,12 +494,12 @@ form {
 .voice-status {
     text-align: left;
     font-size: 11px;
-    color: #888;
+    color: var(--text-muted);
     padding: 6px 12px;
     margin: 0;
-    border-top: 1px solid #eee;
+    border-top: 1px solid var(--border);
     width: 100%;
-    background: #fafafa;
+    background: var(--bg-accordion);
     box-sizing: border-box;
     white-space: normal;
     word-break: break-word;
@@ -506,7 +508,7 @@ form {
 .panel-date {
     position: absolute;
     left: 12px; 
-    bottom: 4px; 
+    bottom: 0px; 
     font-size: 12px;
     color: #333;
     opacity: 0.8;
@@ -633,4 +635,59 @@ form {
     user-select: none;
     z-index: 1000;
     font-variant-numeric: tabular-nums;
+}
+
+/* Принудительно применяем стили кнопки-тетрадки к кнопке подсказок (ai-wizard-restart) */
+#ai-wizard-restart {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 38px !important;
+    height: 38px !important;
+    padding: 0 !important;
+    margin: 0 0 0 4px !important;
+    flex-shrink: 0 !important;
+    background-color: var(--bg-toggle, rgb(207, 205, 205)) !important;
+    color: var(--text-primary, #333) !important;
+    border: 1px solid var(--border, #ccc) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    cursor: pointer !important;
+    font-size: 18px !important;
+    font-weight: 700 !important;
+    line-height: 1 !important;
+    transition: background-color 0.2s ease !important;
+    vertical-align: middle !important;
+}
+
+#ai-wizard-restart:hover {
+    background-color: var(--bg-toggle-hover, rgb(119, 119, 119)) !important;
+}
+
+/* Принудительно применяем стили кнопки-тетрадки к кнопке подсказок (ai-wizard-restart) */
+#ai-wizard-restart {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 32px !important;
+    height: 32px !important;
+    padding: 0 !important;
+    margin: 0 0 0 4px !important;
+    flex-shrink: 0 !important;
+    background-color: var(--bg-toggle, rgb(207, 205, 205)) !important;
+    color: var(--text-primary, #333) !important;
+    border: 1px solid var(--border, #ccc) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    cursor: pointer !important;
+    font-size: 18px !important;
+    font-weight: 700 !important;
+    line-height: 1 !important;
+    transition: background-color 0.2s ease !important;
+    vertical-align: middle !important;
+    box-sizing: border-box !important;
+}
+
+#ai-wizard-restart:hover {
+    background-color: var(--bg-toggle-hover, rgb(119, 119, 119)) !important;
 }

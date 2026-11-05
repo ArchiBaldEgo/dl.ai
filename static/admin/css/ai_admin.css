@@ -803,3 +803,146 @@ a.ai-docs-chapter:hover {
     grid-template-columns: 1fr;
   }
 }
+
+/* =========================================================
+   НАСТРОЙКА ТАБЛИЦ (Сжатие и перенос текста)
+   ========================================================= */
+
+/* Заставляем таблицы занимать ровно 100% ширины контейнера */
+#changelist table,
+.module table,
+.results table {
+    width: 100% !important;
+    table-layout: fixed !important; /* Фиксированная верстка для сжатия */
+}
+
+/* Разрешаем перенос длинного текста внутри ячеек */
+#changelist table td,
+#changelist table th,
+.module table td,
+.module table th,
+.results table td,
+.results table th {
+    white-space: normal !important; /* Отменяем запрет на перенос */
+    word-wrap: break-word !important;
+    overflow-wrap: break-word !important;
+    word-break: break-all !important; /* Ломаем длинные слова/ссылки */
+    vertical-align: top;
+}
+
+/* Контейнер таблицы: если совсем не влезает — будет скролл внутри блока, а не на всей странице */
+#changelist-form .results,
+.ai-scroll {
+    overflow-x: auto !important;
+    width: 100% !important;
+}
+
+/* Фильтры над таблицей (Журнал запросов): разрешаем им переноситься на новую строку */
+#changelist-filter {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 10px 15px !important;
+}
+#changelist-filter .ai-filter-select select {
+    width: 100% !important;
+    max-width: 100% !important;
+}
+
+/* =========================================================
+   ОТКЛЮЧЕНИЕ МОБИЛЬНОГО РЕЖИМА (Принудительный десктоп)
+   ========================================================= */
+
+@media (max-width: 1024px) {
+    /* Возвращаем стандартное расположение колонок */
+    .colMS { margin-right: 300px !important; }
+    .colSM { margin-left: 300px !important; }
+    
+    #content-related {
+        float: right !important;
+        margin-right: -300px !important;
+        width: 260px !important;
+    }
+    .colSM #content-related {
+        float: left !important;
+        margin-left: -300px !important;
+        margin-right: 0 !important;
+    }
+}
+
+@media (max-width: 767px) {
+    /* Принудительно оставляем таблицу в строку, не перестраиваем в колонку */
+    #changelist {
+        flex-direction: row !important;
+        align-items: flex-start !important;
+    }
+    
+    /* Возвращаем боковую панель фильтров (если она используется) */
+    #changelist-filter {
+        position: static !important;
+        width: auto !important;
+    }
+
+    /* Убираем мобильные отступы для форм */
+    .form-row {
+        padding: 10px !important;
+    }
+    .aligned label {
+        width: 160px !important;
+        min-width: 160px !important;
+        padding: 4px 10px 0 0 !important;
+    }
+    .aligned .form-row input,
+    .aligned .form-row select,
+    .aligned .form-row textarea {
+        max-width: none !important;
+    }
+}
+
+/* =========================================================
+   ЖЕСТКОЕ СЖАТИЕ ТАБЛИЦ НА КАСТОМНЫХ СТРАНИЦАХ (Состояние моделей и др.)
+   ========================================================= */
+
+/* 1. Принудительно задаем таблице фиксированную ширину */
+.status-table,
+.status-wrap table,
+.arm-summary-table,
+.module table {
+    width: 100% !important;
+    max-width: 100% !important;
+    table-layout: fixed !important; /* Заставляет колонки сжиматься пропорционально */
+    border-collapse: collapse !important;
+}
+
+/* 2. Разрешаем тексту в ячейках переноситься на новые строки */
+.status-table th,
+.status-table td,
+.status-wrap table th,
+.status-wrap table td,
+.module table th,
+.module table td {
+    white-space: normal !important; /* Отменяем nowrap */
+    word-wrap: break-word !important;
+    overflow-wrap: anywhere !important; /* Ломаем длинные слова, если нужно */
+    padding: 10px 8px !important; /* Чуть уменьшаем отступы, чтобы влезало больше */
+    vertical-align: top !important;
+}
+
+/* 3. Усмиряем "пилюли" (бейджи) в колонке ВОЗМОЖНОСТИ */
+/* Если у них стоит nowrap, они не дают таблице сжаться */
+.status-table td span,
+.status-table td div,
+.status-table td .badge,
+.status-table td .tag {
+    white-space: normal !important;
+    display: inline-block;
+    margin-bottom: 4px;
+}
+
+/* 4. Контейнер таблицы: если совсем не влезает — скролл будет только внутри блока, а не на всей странице */
+.status-card,
+.arm-card,
+.status-wrap {
+    overflow-x: auto !important;
+    width: 100% !important;
+    box-sizing: border-box;
+}

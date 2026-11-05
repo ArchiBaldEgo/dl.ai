@@ -169,9 +169,6 @@
                     </svg>
                 </button>
 
-                <button type="button" class="theme-toggle doc-toggle" id="userDocsBtn"
-                    aria-label="{{ t.userDocs }}" title="{{ t.userDocs }}">?</button>
-
                 <div class="voice-menu-wrapper">
                     <button type="button" class="voice-mode-btn" id="voiceModeBtn" onclick="this.parentElement.classList.toggle('open')">
                         Голосовой режим
@@ -192,6 +189,9 @@
                         <div class="voice-status" id="voiceStatus"></div>
                     </div>
                 </div>
+
+                <button type="button" class="theme-toggle doc-toggle" id="userDocsBtn"
+                    aria-label="{{ t.userDocs }}" title="{{ t.userDocs }}">📓</button>
             </div>
             <div id="modelLimitsWidget"></div>
             <div class="panel-date"><span class="ai-last-update-label">{{ t.lastUpdate }}</span>: {{ last_update_date|date:"d.m.Y" }}</div>
@@ -256,7 +256,6 @@
         <div class="ai-docs-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="aiDocsTitle">
             <div class="ai-docs-modal-header">
                 <h2 id="aiDocsTitle"></h2>
-                <button type="button" id="aiDocsTourBtn" class="ai-docs-modal-tour">{{ t.docsTour }}</button>
                 <a id="aiDocsDownload" class="ai-docs-modal-download" download>&#8681; {{ t.docsDownload }}</a>
                 <button type="button" id="aiDocsClose" class="ai-docs-modal-close" aria-label="{{ t.docsClose }}">&#10005;</button>
             </div>
