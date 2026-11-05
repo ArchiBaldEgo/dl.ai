@@ -112,13 +112,6 @@ button:hover {
     display: block;
 }
 
-<<<<<<< HEAD
-/* Убрали overflow-x: auto, чтобы выпадающее меню не обрезалось */
-.line-panel {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-=======
 /* --- Верхняя панель: один стандарт высоты/рамки/радиуса для всех
    контролов (селекторы, кнопки-иконки, текстовые ссылки). Раньше селекторы
    были ~27px, кнопки 32px, ссылки 32px — панель выглядела «рваной». --- */
@@ -126,7 +119,6 @@ button:hover {
     display: flex;
     flex-wrap: nowrap;
     align-items: center;
->>>>>>> origin/main
     justify-content: flex-start;
     gap: 12px;
     background-color: #d8d8d8;
@@ -168,42 +160,43 @@ button:hover {
     flex: 1 1 60px;
     min-width: 60px;
     max-width: 180px;
-<<<<<<< HEAD
-    padding: 0 6px;
-    height: 32px;
-    box-sizing: border-box;
-=======
->>>>>>> origin/main
 }
 
 #selectLang {
     flex: 0 1 auto;
     width: auto;
     min-width: 70px;
-<<<<<<< HEAD
-    padding: 0 6px;
-    height: 32px;
-    box-sizing: border-box;
-=======
->>>>>>> origin/main
 }
 
 .theme-toggle {
     flex: 0 0 auto;
-    padding: 0;
-<<<<<<< HEAD
-    height: 32px !important;
-    width: 32px !important;
+    padding: 0 12px;
+    height: 36px;
+    min-width: 36px;
+    width: auto;
     font-size: 16px;
+    box-sizing: border-box;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-=======
-    height: 36px;
-    width: 36px;
-    font-size: 16px;
->>>>>>> origin/main
-    box-sizing: border-box;
+    /* Возвращаем переменные темы вместо жесткого HEX */
+    background-color: var(--bg-toggle, rgb(207, 205, 205)) !important;
+    color: var(--text-primary, #333) !important;
+    border: 1px solid var(--border, #ccc) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+}
+
+.theme-toggle:hover {
+    background-color: var(--bg-toggle-hover, rgb(119, 119, 119)) !important;
+}
+
+.theme-toggle svg {
+    width: 20px !important;
+    height: 20px !important;
+    min-width: 20px !important;
+    min-height: 20px !important;
+    flex-shrink: 0 !important;
 }
 
 hr {
@@ -374,14 +367,26 @@ form {
 
 .voice-mode-btn {
     margin: 0;
-    height: 32px;
-    padding: 0 12px;
-    font-size: 13px;
-    display: flex;
+    height: 36px;
+    padding: 0 16px;
+    font-size: 14px;
+    display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
     white-space: nowrap;
     box-sizing: border-box;
+    border-radius: 8px;
+    background-color: #007BFF;
+    color: white;
+    border: none;
+    cursor: pointer;
+    box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+    transition: background-color 0.3s ease;
+}
+
+.voice-mode-btn:hover {
+    background-color: #0056b3;
 }
 
 .voice-mode-btn::after {
@@ -389,18 +394,18 @@ form {
     font-size: 10px;
 }
 
+/* Возвращаем исходный вид меню */
 .voice-controls {
     display: none;
     flex-direction: column;
     position: absolute;
     top: 100%;
     right: 0;
-    /* ИЗМЕНЕНО: используем переменные темы */
-    background-color: var(--bg-surface); 
-    border: 1px solid var(--border); 
+    background-color: var(--bg-surface, #ffffff); 
+    border: 1px solid var(--border, #ccc); 
     border-radius: 5px;
     padding: 8px;
-    box-shadow: 0 4px 8px var(--shadow); 
+    box-shadow: 0 4px 8px var(--shadow, rgba(0, 0, 0, 0.15)); 
     z-index: 9999;
     min-width: 320px;
     gap: 2px;
@@ -412,19 +417,15 @@ form {
     display: flex !important;
 }
 
-/* Голосовые кнопки живут в той же панели — высота/радиус как у остальных
-   контролов шапки (36px, 8px), иначе ряд «пляшет». */
 .voice-btn {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-<<<<<<< HEAD
     justify-content: space-between;
     width: 100%;
     padding: 8px 12px;
     height: 36px;
     background: transparent;
-    /* ИЗМЕНЕНО: цвет текста из темы */
-    color: var(--text-primary); 
+    color: var(--text-primary, #333);
     border: none;
     border-radius: 4px;
     box-shadow: none;
@@ -433,21 +434,10 @@ form {
     margin: 0;
     cursor: pointer;
     box-sizing: border-box;
-=======
-    justify-content: center;
-    padding: 0 12px;
-    font-size: 13px;
-    height: 36px;
-    border-radius: 8px;
-    margin: 0;
-    white-space: nowrap;
-    flex-shrink: 0;
->>>>>>> origin/main
 }
 
 .voice-btn:hover {
-    /* ИЗМЕНЕНО: цвет фона при наведении из темы */
-    background: var(--bg-accordion); 
+    background: var(--bg-accordion, #f0f0f0); 
 }
 
 .voice-btn.recording { background-color: #ff4444; color: #fff; }
@@ -469,13 +459,11 @@ form {
     border-radius: 4px;
     cursor: pointer;
     box-sizing: border-box;
-    /* Наследует цвет текста, но на всякий случай зададим явно */
-    color: var(--text-primary);
+    color: var(--text-primary, #333);
 }
 
 .think-checkbox:hover {
-    /* ИЗМЕНЕНО */
-    background: var(--bg-accordion); 
+    background: var(--bg-accordion, #f0f0f0); 
 }
 
 .think-checkbox label {
@@ -497,8 +485,7 @@ form {
 
 #voiceInputBtn::after {
     content: "F2";
-    /* ИЗМЕНЕНО: приглушенный цвет текста */
-    color: var(--text-muted); 
+    color: var(--text-muted, #888); 
     font-size: 11px;
     margin-left: 10px;
     flex: 0 0 auto;
@@ -506,8 +493,7 @@ form {
 
 #voiceOutputBtn::after {
     content: "F3";
-    /* ИЗМЕНЕНО */
-    color: var(--text-muted); 
+    color: var(--text-muted, #888); 
     font-size: 11px;
     margin-left: 10px;
     flex: 0 0 auto;
@@ -515,8 +501,7 @@ form {
 
 .think-checkbox label::after {
     content: "F4";
-    /* ИЗМЕНЕНО */
-    color: var(--text-muted); 
+    color: var(--text-muted, #888); 
     font-size: 11px;
     margin-left: 10px;
     flex: 0 0 auto;
@@ -525,13 +510,12 @@ form {
 .voice-status {
     text-align: left;
     font-size: 11px;
-    /* ИЗМЕНЕНО: цвета из темы */
-    color: var(--text-muted); 
+    color: var(--text-muted, #888); 
     padding: 6px 12px;
     margin: 0;
-    border-top: 1px solid var(--border); 
+    border-top: 1px solid var(--border, #eee); 
     width: 100%;
-    background: var(--bg-accordion); 
+    background: var(--bg-accordion, #fafafa); 
     box-sizing: border-box;
     white-space: normal;
     word-break: break-word;
@@ -714,22 +698,25 @@ html.ai-browser-warning-visible #content {
     margin-top: var(--ai-browser-warning-h, 0px);
 }
 
-/* Принудительно применяем стили кнопки-тетрадки к кнопке подсказок (ai-wizard-restart) */
-#ai-wizard-restart {
+/* Принудительное применение стилей кнопки-тетрадки к кнопке подсказок (ai-wizard-restart) */
+#ai-wizard-restart,
+button#ai-wizard-restart {
     display: inline-flex !important;
     align-items: center !important;
     justify-content: center !important;
-    width: 32px !important;
-    height: 32px !important;
+    width: 36px !important;
+    height: 36px !important;
     padding: 0 !important;
-    margin: 0 0 0 4px !important;
+    margin: 0 !important;
     flex-shrink: 0 !important;
-    background-color: var(--bg-toggle, rgb(207, 205, 205)) !important;
+    /* Заменили жесткий серый на переменную темы */
+    background-color: var(--bg-toggle, rgb(207, 205, 205)) !important; 
     color: var(--text-primary, #333) !important;
     border: 1px solid var(--border, #ccc) !important;
     border-radius: 8px !important;
     box-shadow: none !important;
     cursor: pointer !important;
+    font-family: 'Roboto', sans-serif !important;
     font-size: 18px !important;
     font-weight: 700 !important;
     line-height: 1 !important;
@@ -738,6 +725,29 @@ html.ai-browser-warning-visible #content {
     box-sizing: border-box !important;
 }
 
-#ai-wizard-restart:hover {
+#ai-wizard-restart:hover,
+button#ai-wizard-restart:hover {
+    /* Заменили жесткий цвет на переменную */
     background-color: var(--bg-toggle-hover, rgb(119, 119, 119)) !important;
+    color: var(--text-primary, #333) !important;
+}
+
+.doc-toggle {
+    font-size: 20px !important;
+}
+
+/*Выравнивание кнопки голосового режима */
+.voice-menu-wrapper {
+    display: flex !important;
+    align-items: center !important;
+    height: 36px !important;
+}
+
+.voice-mode-btn {
+    margin: 0 !important;
+    height: 36px !important; 
+    vertical-align: middle !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    line-height: 1 !important; 
 }

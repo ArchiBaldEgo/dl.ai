@@ -168,30 +168,6 @@
                         <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
                     </svg>
                 </button>
-<<<<<<< HEAD
-=======
-                <!-- Инструкция пользователя «?» (ai-common.js initUserDocs):
-                     модалка с HTML-рендером главы DOCX.md + скачивание .md -->
-                <button type="button" class="theme-toggle doc-toggle" id="userDocsBtn"
-                    aria-label="{{ t.userDocs }}" title="{{ t.userDocs }}">?</button>
-                {# Личные модели — всем (владелец = текущий пользователь,   #}
-                {# права проверяет сервер страницы). Вход в админку — только #}
-                {# тем, кому она реально доступна (can_access_admin: staff/  #}
-                {# super/ключ page.admin, т.е. «Разработчик промптов» и выше). #}
-                <a href="/ai/my-models/" class="panel-link" id="myModelsTopBtn">{{ t.myModels }}</a>
-                {% if can_access_admin %}
-                    <a href="/ai/admin/" class="panel-link" id="adminPanelTopBtn">{{ t.adminPanel }}</a>
-                {% endif %}
-            </div>
-            <div class="voice-controls" id="voiceControls">
-                <button type="button" class="voice-btn" id="voiceInputBtn">
-                    <span class="voice-input-indicator" id="voiceIndicator"></span>
-                    {{ t.voiceInput }}
-                </button>
-                <button type="button" class="voice-btn" id="voiceOutputBtn">
-                    {{ t.voiceOutput }}
-                </button>
->>>>>>> origin/main
 
                 <div class="voice-menu-wrapper">
                     <button type="button" class="voice-mode-btn" id="voiceModeBtn" onclick="this.parentElement.classList.toggle('open')">
@@ -214,6 +190,17 @@
                     </div>
                 </div>
 
+                {# Личные модели — всем (владелец = текущий пользователь,   #}
+                {# права проверяет сервер страницы). Вход в админку — только #}
+                {# тем, кому она реально доступна (can_access_admin: staff/  #}
+                {# super/ключ page.admin, т.е. «Разработчик промптов» и выше). #}
+                <a href="/ai/my-models/" class="panel-link" id="myModelsTopBtn">{{ t.myModels }}</a>
+                {% if can_access_admin %}
+                    <a href="/ai/admin/" class="panel-link" id="adminPanelTopBtn">{{ t.adminPanel }}</a>
+                {% endif %}
+
+                <!-- Инструкция пользователя (иконка тетради, ai-common.js initUserDocs):
+                     модалка с HTML-рендером главы DOCX.md + скачивание .md -->
                 <button type="button" class="theme-toggle doc-toggle" id="userDocsBtn"
                     aria-label="{{ t.userDocs }}" title="{{ t.userDocs }}">📓</button>
             </div>
