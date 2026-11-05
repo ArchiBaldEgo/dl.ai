@@ -38,7 +38,9 @@ from ..models import (
     TaskSolution,
     Topic,
 )
+from .changelist import FastChangelistAdminMixin
 from .forms import ExternalDLAccountAdminForm, PromptForm, SharedPromptForm, TopicForm
+from .search import UniversalUserSearchMixin
 from .permissions import (
     can_access_logs,
     can_access_prompt_admin,
@@ -54,11 +56,17 @@ from ..dl_api_client import (
     fetch_task_info,
 )
 from ..http_utils import resolve_dl_session_id
+from ..services.catalog import (
+    prompt_filter_languages,
+    prompt_filter_topic_label,
+    prompt_filter_topics,
+    prompt_filter_users,
+    prompts_have_untopiced,
+)
 from ..services.task_registry import apply_dl_task_info
 from ..services.task_registry import dl_task_url
 from ..services.user_directory import (
     display_name_for_user,
-    dl_id_for_user,
     search_users_for_sharing,
 )
 
@@ -121,6 +129,9 @@ class TopicAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 
     form = TopicForm
     list_display = ('topic_name_ru', 'programming_language')
+    # Колонка языка — FK на строку списка; без select_related это запрос на
+    # каждую строку.
+    list_select_related = ('programming_language',)
     list_filter = ('programming_language',)
     # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
     show_facets = admin.ShowFacets.NEVER
@@ -148,19 +159,6 @@ class TopicAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         self.message_user(request, msg, level=("success" if not failed else "warning"))
 
 
-def _user_filter_label(user):
-    """Подпись пользователя в фильтрах: «ФИО (DL-id)», без дублей.
-
-    Для DL-аккаунтов без имён ``display_name_for_user`` возвращает сам DL-id
-    (``user_42`` → ``42``) — тогда не повторяем его дважды.
-    """
-    display = (display_name_for_user(user) or "").strip()
-    dl_id = (dl_id_for_user(user) or "").strip()
-    if not display or display == dl_id:
-        return dl_id or display
-    return f"{display} ({dl_id})"
-
-
 class PromptUserIdFilter(admin.SimpleListFilter):
     title = "Владелец / редактор"
     parameter_name = "user_id"
@@ -170,16 +168,9 @@ class PromptUserIdFilter(admin.SimpleListFilter):
         # супер-обход отключённым.
         if not is_superuser_user(request.user):
             return ()
-
-        users = (
-            User.objects.filter(
-                Q(owned_prompts__isnull=False) | Q(editable_prompts__isnull=False)
-            )
-            .select_related("external_dl_account")
-            .distinct()
-            .order_by("id")
-        )
-        return [(str(user.id), _user_filter_label(user)) for user in users]
+        # Список строится на каждой загрузке changelist'а — из кэша
+        # ai/services/catalog.py (инвалидация — сигналы Prompt/редакторов).
+        return prompt_filter_users()
 
     def queryset(self, request, queryset):
         value = self.value()
@@ -199,10 +190,7 @@ class PromptLanguageFilter(admin.SimpleListFilter):
     parameter_name = "lang"
 
     def lookups(self, request, model_admin):
-        return [
-            (str(lang.pk), lang.language_name)
-            for lang in ProgrammingLanguage.objects.order_by("language_name")
-        ]
+        return prompt_filter_languages()
 
     def choices(self, changelist):
         """Как стоковый ``SimpleListFilter.choices``, но смена языка снимает
@@ -254,45 +242,22 @@ class PromptTopicFilter(admin.SimpleListFilter):
         value = (request.GET.get("lang") or "").strip()
         return value if value.isdigit() else None
 
-    @staticmethod
-    def _label(topic):
-        name = topic.topic_name_ru or f"Тема #{topic.pk}"
-        language = getattr(topic.programming_language, "language_name", "") or ""
-        return f"{language} — {name}" if language else name
-
     # Старые закладки со стоковым topic__id__exact не ломаются и без
     # объявления параметра: ChangeList пропускает необработанный параметр как
     # обычный ORM-lookup (topic__id__exact — валидный путь поля).
 
     def lookups(self, request, model_admin):
-        topics = (
-            Topic.objects.select_related("programming_language")
-            .filter(prompt__isnull=False)
-            .distinct()
-            .order_by(
-                "programming_language__language_name", "topic_name_ru", "pk",
-            )
-        )
         language_id = self._active_language(request)
-        if language_id:
-            topics = topics.filter(programming_language_id=language_id)
-        # dict — без дублей. Активное значение обязано быть среди опций даже
-        # если у темы нет промптов (или она другого языка): иначе браузер
-        # показывает первый пункт «Все», и фильтр выглядит сброшенным.
-        choices = {str(topic.pk): self._label(topic) for topic in topics}
+        choices = dict(prompt_filter_topics(language_id))
+        # Активное значение обязано быть среди опций даже если у темы нет
+        # промптов (или она другого языка): иначе браузер показывает первый
+        # пункт «Все», и фильтр выглядит сброшенным.
         value = self.value()
         if value and value != _TOPIC_NONE and value not in choices:
-            topic = (
-                Topic.objects.select_related("programming_language")
-                .filter(pk=value)
-                .first()
-            )
-            if topic is not None:
-                choices[str(topic.pk)] = self._label(topic)
-        if (
-            value == _TOPIC_NONE
-            or model_admin.model.objects.filter(topic__isnull=True).exists()
-        ):
+            label = prompt_filter_topic_label(value)
+            if label is not None:
+                choices[value] = label
+        if value == _TOPIC_NONE or prompts_have_untopiced():
             choices[_TOPIC_NONE] = "— без темы (на весь язык)"
         return list(choices.items())
 
@@ -367,8 +332,10 @@ class PromptEditorAutocomplete(AutocompleteSelectMultiple):
         return reverse("admin:ai_prompt_editor_search")
 
 
-class PromptAdmin(admin.ModelAdmin):
+class PromptAdmin(FastChangelistAdminMixin, UniversalUserSearchMixin, admin.ModelAdmin):
     form = PromptForm
+    # Поиск владельца/редактора: id (pk или DL-id), ФИО в любом порядке.
+    user_search_relations = ("owner", "editors")
     list_display = (
         'prompt_name_ru',
         'programming_language_name',
@@ -389,27 +356,35 @@ class PromptAdmin(admin.ModelAdmin):
     # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
     show_facets = admin.ShowFacets.NEVER
     list_per_page = 25
-    # Владельца ищем и по ФИО: в списке видна колонка «Владелец», и поиск по
-    # введённой оттуда фамилии раньше давал пусто.
-    search_fields = (
-        'prompt_name_ru', 'prompt_text_ru',
-        'owner__username', '=owner__id',
-        'owner__first_name', 'owner__last_name',
-    )
+    # Владельца/редакторов ищет ТОЛЬКО универсальный миксин (id точно, ФИО в
+    # любом порядке, инициалы): дублировать owner__* здесь нельзя — подстрочный
+    # owner__username ломал бы точность числового запроса («30» находил user_302).
+    search_fields = ('prompt_name_ru', 'prompt_text_ru')
     autocomplete_fields = ("owner", "editors")
     actions = (
         "export_prompts_csv", "auto_translate_selected", "set_mode_solve",
         "set_mode_find_error", "add_editor",
     )
 
+    @staticmethod
+    def _bump_prompt_catalogs():
+        # queryset.update() не поднимает post_save, поэтому эпоху каталогов
+        # (списки чата/«Реши задачу» и фильтров админки) сбрасываем явно —
+        # иначе правка была бы видна только после TTL кэша.
+        from ..services.cache_epochs import bump_epoch
+
+        bump_epoch("prompt_meta")
+
     @admin.action(description='Назначить режим «Реши задачу»')
     def set_mode_solve(self, request, queryset):
         queryset.update(mode=Prompt.MODE_SOLVE)
+        self._bump_prompt_catalogs()
         self.message_user(request, "Выбранным промптам назначен режим «Реши задачу».")
 
     @admin.action(description='Назначить режим «В чём ошибка»')
     def set_mode_find_error(self, request, queryset):
         queryset.update(mode=Prompt.MODE_FIND_ERROR)
+        self._bump_prompt_catalogs()
         self.message_user(request, "Выбранным промптам назначен режим «В чём ошибка».")
 
     def has_add_editor_permission(self, request):
@@ -467,11 +442,19 @@ class PromptAdmin(admin.ModelAdmin):
     date_hierarchy = None
 
     def get_queryset(self, request):
+        # Аннотация — превью текста для колонки «Текст промпта»: без неё список
+        # тянет полноценный prompt_text_ru каждой строки (мегабайты на полной
+        # странице), хотя в ячейку попадают первые 100 символов.
+        from django.db.models.functions import Substr
+
         queryset = (
             super()
             .get_queryset(request)
-            .select_related("topic", "topic__programming_language", "owner")
-            .prefetch_related("editors")
+            .select_related(
+                "topic", "topic__programming_language",
+                "programming_language", "owner",
+            )
+            .annotate(prompt_text_preview=Substr("prompt_text_ru", 1, 101))
         )
         from .my_prompt import is_mine_only_request
         if is_mine_only_request(request):
@@ -728,12 +711,18 @@ class PromptAdmin(admin.ModelAdmin):
     owner_username.short_description = "Владелец"
 
     def short_prompt_text(self, obj):
-        text = obj.prompt_text_ru or ""
+        # Превью посчитано БД (Substr 101): 101 символ = текст длиннее 100,
+        # показываем первые 100 + «...» — ровно как раньше. Fallback для
+        # объектов не из changelist-queryset (например, тесты/другие вьюхи).
+        text = getattr(obj, "prompt_text_preview", None)
+        if text is None:
+            text = obj.prompt_text_ru or ""
+            return f"{text[:100]}..." if len(text) > 100 else text
         return f"{text[:100]}..." if len(text) > 100 else text
     short_prompt_text.short_description = "Текст промпта"
 
 
-class SharedPromptAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+class SharedPromptAdmin(FastChangelistAdminMixin, _StaffOnlyAdminMixin, admin.ModelAdmin):
     # Шаблоны промптов (shared): staff, либо ключ page.mgmt_shared_prompt.
     ACCESS_KEY = "page.mgmt_shared_prompt"
 
@@ -752,10 +741,11 @@ class SharedPromptAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     actions = ("auto_translate_selected",)
 
     def get_queryset(self, request):
-        # prefetch_related убирает N+1: language_list дёргал
-        # programming_languages по одному запросу на строку списка.
-        return super().get_queryset(request).prefetch_related(
-            "programming_languages", "owner",
+        # language_list дёргал programming_languages по запросу на строку —
+        # prefetch; владелец колонки — select_related (JOIN дешевле отдельного
+        # prefetch-запроса).
+        return super().get_queryset(request).select_related("owner").prefetch_related(
+            "programming_languages",
         )
 
     def language_list(self, obj):
@@ -859,12 +849,17 @@ class AIAppSettingsAdmin(admin.ModelAdmin):
         from .request_logs import build_recent_batch_rows, build_recent_log_rows
 
         extra_context = {**(extra_context or {})}
-        extra_context.update(build_recent_log_rows(request, limit=5))
-        extra_context.update(build_recent_batch_rows(request, limit=5))
+        # На add-странице (object_id is None) таблиц последних запросов быть не
+        # может (нет объекта) — не собираем их впустую.
+        if object_id is not None:
+            extra_context.update(build_recent_log_rows(request, limit=5))
+            extra_context.update(build_recent_batch_rows(request, limit=5))
         return super().changeform_view(request, object_id, form_url, extra_context)
 
 
-class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+class ExternalDLAccountAdmin(
+    FastChangelistAdminMixin, _StaffOnlyAdminMixin, UniversalUserSearchMixin, admin.ModelAdmin,
+):
     """Admin for viewing external DL accounts (dl.gsu.by user info).
 
     Карточка — основное место выдачи «Групп доступа» конкретному человеку
@@ -882,12 +877,24 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
                     "external_last_name", "dl_email", "education_summary",
                     "user_link", "created_at", "updated_at")
     list_display_links = ("external_user_id",)
+    # user_link/education_summary читают связанного user'а — один JOIN вместо
+    # запроса на каждую строку.
+    list_select_related = ("user",)
     list_filter = ("created_at", "updated_at")
     # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
     show_facets = admin.ShowFacets.NEVER
+    # Связанного пользователя ищет универсальный миксин (user_search_relations),
+    # поэтому user__username здесь не дублируется.
     search_fields = ("external_user_id", "external_login",
                      "external_first_name", "external_last_name",
-                     "dl_email", "education_school_no", "user__username")
+                     "dl_email", "education_school_no")
+    # id (DL-id / pk / логин) и ФИО в любом порядке — по самому DL-аккаунту
+    # и по связанному локальному пользователю.
+    user_search_relations = ("user",)
+    user_search_flat_fields = (
+        "external_user_id", "external_login",
+        "external_first_name", "external_last_name",
+    )
     # Учебные данные приходят из dl.gsu.by при входе пользователя (dl-rest-api.json
     # get-user-info) — руками их не правим, только смотрим. external_login
     # («Логин dl.gsu.by») тоже приходит извне — из формы убран полностью,
@@ -940,7 +947,7 @@ class ExternalDLAccountAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     education_summary.short_description = "Учебные данные"
 
 
-class UpdateLogAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+class UpdateLogAdmin(FastChangelistAdminMixin, _StaffOnlyAdminMixin, admin.ModelAdmin):
     """Управление записями «Обновлений»: публикация отклонённых и скрытие шумных.
 
     Интерактивная синхронизация (sync_update_log --interactive) пишет невыбранные
@@ -1054,18 +1061,30 @@ class DLEducationNameAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     show_facets = admin.ShowFacets.NEVER
     search_fields = ("key", "title")
 
+    def get_queryset(self, request):
+        # Название школы для group-строк — коррелированный подзапрос в том же
+        # SQL (одна поездка в БД на всю страницу) вместо запроса на строку.
+        from django.db.models import OuterRef, Subquery
+
+        school_title = (
+            DLEducationName.objects
+            .filter(kind=DLEducationName.KIND_SCHOOL, key=OuterRef("school"))
+            .values("title")[:1]
+        )
+        return super().get_queryset(request).annotate(
+            _ai_school_title=Subquery(school_title),
+        )
+
     @admin.display(description="Вуз/школа группы")
     def school_title(self, obj):
-        """Название привязанного заведения (только для group-строк).
-
-        Справочник — десятки строк, lookup по (kind, key) на строку таблицы
-        дёшев; map на запрос здесь не нужен (таблица пагинирована).
-        """
+        """Название привязанного заведения (только для group-строк)."""
         if obj.kind != DLEducationName.KIND_GROUP or not obj.school:
             return "—"
-        title = DLEducationName.objects.filter(
-            kind=DLEducationName.KIND_SCHOOL, key=obj.school,
-        ).values_list("title", flat=True).first()
+        title = getattr(obj, "_ai_school_title", None)
+        if title is None:
+            title = DLEducationName.objects.filter(
+                kind=DLEducationName.KIND_SCHOOL, key=obj.school,
+            ).values_list("title", flat=True).first()
         return title or obj.school
 
 
@@ -1087,7 +1106,9 @@ class PromptEditorshipInline(admin.TabularInline):
     verbose_name_plural = "Права редактирования промптов"
 
 
-class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
+class RestrictedUserAdmin(
+    FastChangelistAdminMixin, _StaffOnlyAdminMixin, UniversalUserSearchMixin, UserAdmin,
+):
     # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
     ACCESS_KEY = "page.mgmt_users"
 
@@ -1109,7 +1130,12 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
     list_filter = ("is_staff", "is_superuser", "groups")
     # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
     show_facets = admin.ShowFacets.NEVER
-    search_fields = ("username", "first_name", "last_name", "email")
+    # Логин/ФИО ищет универсальный миксин (user_search_self): id точно, ФИО в
+    # любом порядке, инициалы. Здесь остаётся только поле, которого миксин не
+    # знает, — email.
+    search_fields = ("email",)
+    # Сама модель — пользователь: id/ФИО в любом порядке/инициалы.
+    user_search_self = True
     ordering = ("last_name", "first_name")
 
     def get_form(self, request, obj=None, **kwargs):
@@ -1215,7 +1241,7 @@ class RestrictedUserAdmin(_StaffOnlyAdminMixin, UserAdmin):
     dl_id.admin_order_field = "username"
 
 
-class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+class TaskAdmin(FastChangelistAdminMixin, _StaffOnlyAdminMixin, admin.ModelAdmin):
     """Admin for the local Task table used by batch-solve ARM.
 
     The operator enters the DL ``node_id`` and assigns a topic / programming
@@ -1228,6 +1254,9 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
 
     list_display = ("node_id", "name", "topic", "programming_language", "file_extension", "active", "updated_at")
     list_display_links = ("node_id", "name")
+    # topic и programming_language — отдельные колонки-FK: JOIN вместо двух
+    # запросов на строку.
+    list_select_related = ("topic", "topic__programming_language", "programming_language")
     list_filter = ("active", "topic", "topic__programming_language")
     # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
     show_facets = admin.ShowFacets.NEVER
@@ -1303,7 +1332,9 @@ class TaskAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     refresh_from_dl.short_description = "Обновить название и условие из DL"
 
 
-class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+class TaskSolutionAdmin(
+    FastChangelistAdminMixin, _StaffOnlyAdminMixin, UniversalUserSearchMixin, admin.ModelAdmin,
+):
     """Кэш решённых задач «Реши задачу» (узел DL + язык → проверенный код).
 
     Записи создаются автоматически (send-solution + успешное тестирование со
@@ -1324,6 +1355,9 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
     # Без list_filter: в кэш попадают только решения, прошедшие тестирование
     # (verdict=passed всегда); на странице нужны только поиск и пагинация.
     search_fields = ("task_node_id", "external_user_id", "model_key", "topic_name", "prompt_name")
+    # В кэше пользователь хранится только DL-id: id и ФИО в любом порядке
+    # разрешаются через справочник User.
+    user_search_flat_fields = ("external_user_id",)
     # Каждая строка несёт полный код решения — режем страницу.
     list_per_page = 25
     readonly_fields = ("task_node_id", "programming_language_id", "tree_path", "file_extension", "code", "verdict",
@@ -1395,7 +1429,9 @@ class TaskSolutionAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         return is_superuser_user(request.user)
 
 
-class AIWizardSeenAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+class AIWizardSeenAdmin(
+    _StaffOnlyAdminMixin, UniversalUserSearchMixin, admin.ModelAdmin,
+):
     """Кто какой онбординг-wizard уже видел и в какой версии.
 
     Главная роль листинга — «отследить, получил ли пользователь тур» и сброс
@@ -1411,10 +1447,15 @@ class AIWizardSeenAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
         # суперюзер либо держатель ключа.
         return user_has_key(request.user, self.ACCESS_KEY)
     list_display = ("user", "scope", "version", "created_at")
+    list_select_related = ("user",)
     list_filter = ("scope",)
     # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
     show_facets = admin.ShowFacets.NEVER
+    # Штатные поля оставляем: без непустого search_fields Django вообще не
+    # рисует строку поиска. Универсальный миксин добавляет к ним id/ФИО в
+    # любом порядке и инициалы.
     search_fields = ("user__username", "user__first_name", "user__last_name")
+    user_search_relations = ("user",)
 
     def has_module_permission(self, request):
         return is_superuser_user(request.user) or self._has_access(request)

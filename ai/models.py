@@ -158,6 +158,30 @@ class ExternalDLAccount(models.Model):
     class Meta:
         verbose_name = "Внешняя учётная запись DL"
         verbose_name_plural = "Внешние учётные записи DL"
+        indexes = [
+            # date_hierarchy / фильтры «по дате» в админке.
+            models.Index(fields=["created_at"], name="ai_ext_dl_created_idx"),
+            models.Index(fields=["updated_at"], name="ai_ext_dl_updated_idx"),
+            # Поиск по id/логину/ФИО (icontains) — expression-индексы на UPPER:
+            # предикат UPPER(col::text) LIKE UPPER(%p%) обычный индекс не
+            # обслуживает. В БД создаёт миграция 0079 (только Postgres).
+            GinIndex(
+                OpClass(Upper("external_user_id"), "gin_trgm_ops"),
+                name="ai_ext_dl_extid_trgm_idx",
+            ),
+            GinIndex(
+                OpClass(Upper("external_login"), "gin_trgm_ops"),
+                name="ai_ext_dl_login_trgm_idx",
+            ),
+            GinIndex(
+                OpClass(Upper("external_first_name"), "gin_trgm_ops"),
+                name="ai_ext_dl_fname_trgm_idx",
+            ),
+            GinIndex(
+                OpClass(Upper("external_last_name"), "gin_trgm_ops"),
+                name="ai_ext_dl_lname_trgm_idx",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.user.username} (DL: {self.external_login})"
@@ -255,6 +279,18 @@ class Task(models.Model):
         verbose_name = "Задача (DL)"
         verbose_name_plural = "Задачи (DL)"
         ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=["created_at"], name="ai_task_created_idx"),
+            # Поиск по названию/условию задачи (icontains) — триграммы, 0079.
+            GinIndex(
+                OpClass(Upper("name"), "gin_trgm_ops"),
+                name="ai_task_name_trgm_idx",
+            ),
+            GinIndex(
+                OpClass(Upper("statement"), "gin_trgm_ops"),
+                name="ai_task_statement_trgm_idx",
+            ),
+        ]
 
     def __str__(self):
         return self.name or f"DL #{self.node_id}"
@@ -432,6 +468,18 @@ class Prompt(models.Model):
         db_table = 'ai_prompt'
         verbose_name = "Промпт"
         verbose_name_plural = "Промпты"
+        indexes = [
+            # Поиск по названию/тексту промпта в админке (icontains) —
+            # триграммы, создаются на Postgres миграцией 0079.
+            GinIndex(
+                OpClass(Upper("prompt_name_ru"), "gin_trgm_ops"),
+                name="ai_prompt_name_trgm_idx",
+            ),
+            GinIndex(
+                OpClass(Upper("prompt_text_ru"), "gin_trgm_ops"),
+                name="ai_prompt_text_trgm_idx",
+            ),
+        ]
 
 
 class ArmPromptBinding(models.Model):
@@ -580,6 +628,26 @@ class TaskSolution(models.Model):
         verbose_name = "Решённая задача (кэш кода)"
         verbose_name_plural = "Решённые задачи (кэш кода)"
         ordering = ("-updated_at",)
+        indexes = [
+            models.Index(fields=["updated_at"], name="ai_task_solution_updated_idx"),
+            # Поиск по id/модели/теме/промпту (icontains) — триграммы, 0079.
+            GinIndex(
+                OpClass(Upper("external_user_id"), "gin_trgm_ops"),
+                name="ai_tsol_extid_trgm_idx",
+            ),
+            GinIndex(
+                OpClass(Upper("model_key"), "gin_trgm_ops"),
+                name="ai_tsol_model_trgm_idx",
+            ),
+            GinIndex(
+                OpClass(Upper("topic_name"), "gin_trgm_ops"),
+                name="ai_tsol_topic_trgm_idx",
+            ),
+            GinIndex(
+                OpClass(Upper("prompt_name"), "gin_trgm_ops"),
+                name="ai_tsol_prompt_trgm_idx",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=["task_node_id", "programming_language_id"],
@@ -614,15 +682,41 @@ class AIAppSettings(models.Model):
         verbose_name = "Настройки ИИ-приложения"
         verbose_name_plural = "Настройки ИИ-приложения"
 
+    # Кэш «одиночных» настроек: get_solo() зовётся на каждый рендер страницы,
+    # на подключение WebSocket и при ранжировании фаворитов. 30 с — достаточно,
+    # чтобы снять повторные SELECT'ы, и мало, чтобы рассинхрон с админкой был
+    # заметен; save()/delete() сбрасывают ключ немедленно.
+    CACHE_KEY = "ai:app_settings:solo"
+    CACHE_TTL = 30
+    # Ссылка на change-форму синглтона в навигации админки (ai/admin/site.py).
+    NAV_URL_CACHE_KEY = "ai:app_settings:nav_url"
+
     def save(self, *args, **kwargs):
         # Keep a single row for global app state.
         self.pk = 1
         super().save(*args, **kwargs)
+        self._invalidate_cache()
+
+    def delete(self, *args, **kwargs):
+        result = super().delete(*args, **kwargs)
+        self._invalidate_cache()
+        return result
+
+    @classmethod
+    def _invalidate_cache(cls):
+        from django.core.cache import cache
+        cache.delete_many([cls.CACHE_KEY, cls.NAV_URL_CACHE_KEY])
 
     @classmethod
     def get_solo(cls):
-        obj, _ = cls.objects.get_or_create(pk=1)
-        return obj
+        import copy
+
+        from .services.cache_epochs import cached_call
+
+        obj = cached_call(cls.CACHE_KEY, lambda: cls.objects.get_or_create(pk=1)[0], cls.CACHE_TTL)
+        # Копия: вызывающий код мутирует атрибуты перед save(), и закэшированный
+        # объект не должен меняться.
+        return copy.copy(obj)
 
     def __str__(self):
         return "AI app settings"
@@ -809,6 +903,19 @@ class AIRequestLog(models.Model):
                 OpClass(Upper("external_user_id"), "gin_trgm_ops"),
                 name="ai_log_extid_trgm_idx",
             ),
+            # Топ-модели пользователя (ai/views.py::_get_user_top_model_keys):
+            # status='success' + user + срез по sent_at + ORDER BY -sent_at
+            # LIMIT 200. Без составного индекса — скан всей истории юзера.
+            models.Index(
+                fields=["user", "status", "sent_at"],
+                name="ai_log_user_status_sent_idx",
+            ),
+            # Фильтр журнала по модели (`model_names__contains=[model]`,
+            # jsonb @> …): без GIN это seq-scan по всей таблице.
+            GinIndex(
+                OpClass("model_names", name="jsonb_path_ops"),
+                name="ai_log_model_names_gin_idx",
+            ),
         ]
 
     def __str__(self):
@@ -919,6 +1026,13 @@ class AIDevTask(models.Model):
         verbose_name = "Таск (доска задач)"
         verbose_name_plural = "Таски (доска задач)"
         ordering = ("kind", "priority_no", "-created_at", "-id")
+        indexes = [
+            # Доска «Таски» сортирует по Meta.ordering и фильтрует по kind.
+            models.Index(
+                fields=["kind", "priority_no", "created_at", "id"],
+                name="ai_dev_task_order_idx",
+            ),
+        ]
         constraints = [
             # «Цифры повторяться не могут» — уникальный номер ВНУТРИ вида
             # (фронт и хотелки нумеруются независимо, оба с №1).
@@ -1121,6 +1235,8 @@ class AIModelTestRun(models.Model):
             # статусу («идущие/завершённые») — частый.
             models.Index(fields=["started_at"], name="ai_model_test_run_started_idx"),
             models.Index(fields=["status", "started_at"], name="ai_model_test_run_status_idx"),
+            # Выборки «только batch-прогоны» (run_type) с сортировкой по дате.
+            models.Index(fields=["run_type", "started_at"], name="ai_model_test_run_type_idx"),
         ]
 
     def __str__(self):
@@ -1290,6 +1406,12 @@ class AIModelTestResult(models.Model):
             # сортировали весь результат прогона на каждой загрузке.
             models.Index(fields=["model_title"], name="ai_model_test_result_title_idx"),
             models.Index(fields=["run", "model_title"], name="ai_mtr_run_title_idx"),
+            # Лёгкий снапшот прогона: run + ORDER BY -updated_at, -pk (индекс
+            # читается в обратном порядке) — поллинг /arm/solve/ каждые 2 с.
+            models.Index(fields=["run", "updated_at", "id"], name="ai_mtr_run_updated_idx"),
+            # Счётчики пар по прогону (solved/failed/skipped) — COUNT по
+            # (run, verdict).
+            models.Index(fields=["run", "verdict"], name="ai_mtr_run_verdict_idx"),
             # Поиск пар по названию модели (icontains) — expression-индекс
             # на UPPER(model_title) с триграммами (см. AIRequestLog: предикат
             # UPPER(col::text) LIKE UPPER(%p%) не обслуживается обычным
@@ -1473,6 +1595,24 @@ class UpdateLog(models.Model):
         verbose_name = "Обновление"
         verbose_name_plural = "Обновления"
         ordering = ("-commit_date", "-created_at", "-id")
+        indexes = [
+            # Список «Обновлений» всегда отсортирован по Meta.ordering и
+            # фильтруется по hidden — один составной индекс вместо сортировки
+            # всей таблицы на каждой загрузке.
+            models.Index(
+                fields=["hidden", "commit_date", "created_at", "id"],
+                name="ai_update_log_order_idx",
+            ),
+            # Поиск по описанию/автору (icontains) — триграммы, см. 0079.
+            GinIndex(
+                OpClass(Upper("description"), "gin_trgm_ops"),
+                name="ai_update_desc_trgm_idx",
+            ),
+            GinIndex(
+                OpClass(Upper("author"), "gin_trgm_ops"),
+                name="ai_update_author_trgm_idx",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.commit_date} — {self.author} — {self.description[:80]}"
@@ -1599,6 +1739,12 @@ class AIUserModel(models.Model):
         verbose_name = "Личная AI-модель"
         verbose_name_plural = "Личные AI-модели"
         ordering = ("title",)
+        indexes = [
+            # Селектор моделей на каждой странице: «свои активные» и
+            # «публичные активные» — две выборки по этим предикатам.
+            models.Index(fields=["user", "is_active"], name="ai_user_model_owner_idx"),
+            models.Index(fields=["is_public", "is_active"], name="ai_user_model_public_idx"),
+        ]
 
     def __str__(self) -> str:
         return f"{self.title} ({self.model_id}) — {self.user_id}"
@@ -1652,6 +1798,10 @@ class AIDLApiRequest(models.Model):
         verbose_name = "Запрос API к DL"
         verbose_name_plural = "Запросы API к DL"
         ordering = ("-created_at",)
+        indexes = [
+            # Вкладки «актуальные/неактуальные» + сортировка по дате.
+            models.Index(fields=["status", "created_at"], name="ai_dl_api_req_status_idx"),
+        ]
 
     def __str__(self) -> str:
         who = self.user_full_name or self.username or self.external_user_id or "—"

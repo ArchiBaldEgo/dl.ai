@@ -41,3 +41,9 @@ CACHES = {
         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
     }
 }
+
+# Производительные кэши (ai/services/cache_epochs.py) в сюите выключены:
+# LocMem живёт между тестами, и записи, созданные в тесте и откаченные
+# TestCase'ом в конце, «протекали» бы в следующий тест до истечения TTL.
+# Тесты самого кэширования включают его через override_settings.
+AI_PERF_CACHE_TTL = 0

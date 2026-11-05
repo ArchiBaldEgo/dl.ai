@@ -36,6 +36,8 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   - HTTP headers/Puppeteer-пул-протокол → `ai/model_clients/_base.py` (`bearer_headers`,
     `proxy_bypass_session`, `make_table_handlers`, `BotPoolClient`); `web_deepseek.py` /
     `web_kimi.py` — тонкие конфиги, новый web-пул = конфиг, не копия;
+  - поиск человека (id точно / «Фамилия Имя» / «Имя Фамилия» / инициалы) →
+    `ai/services/user_search.py` (+ changelist-миксин `ai/admin/search.py`);
   - identity для `AIRequestLog` → `ai/services/auth.py::get_user_identity_for_log`;
   - DL verdict из комментария → `ai/dl_api_client.py::dl_verdict_from_comment`
     (fail-маркеры приоритетнее success; нераспознанное → failed);

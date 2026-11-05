@@ -4471,6 +4471,173 @@ class BatchRunnerIntegrationTests(TestCase):
         self.assertEqual(job["completed_pairs"], 1)
 
 
+class BatchPromptCacheTests(TestCase):
+    """Кэш промпта в пакетном решении.
+
+    Провайдер (Ollama Cloud) кэширует ПРЕФИКС запроса и дешевле биллит
+    повторяющуюся часть. Здесь проверяются два условия попадания в кэш:
+    промпт фиксируется на старте прогона (снимок) и задачи с одинаковым
+    префиксом выполняются подряд, а не вперемешку с другими темами.
+    """
+
+    def setUp(self):
+        from ai.models import Task
+
+        self.user = get_user_model().objects.create_user(
+            username="cache_user", password="x",
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic_a = Topic.objects.create(
+            topic_name_ru="Тема A", programming_language=self.lang,
+        )
+        self.topic_b = Topic.objects.create(
+            topic_name_ru="Тема B", programming_language=self.lang,
+        )
+        self.task_a1 = Task.objects.create(
+            node_id=9101, task_id=9201, name="A1", statement="Условие A1",
+            topic=self.topic_a, programming_language=self.lang,
+            file_extension=".pas",
+        )
+        self.task_b = Task.objects.create(
+            node_id=9102, task_id=9202, name="B1", statement="Условие B1",
+            topic=self.topic_b, programming_language=self.lang,
+            file_extension=".pas",
+        )
+        self.task_a2 = Task.objects.create(
+            node_id=9103, task_id=9203, name="A2", statement="Условие A2",
+            topic=self.topic_a, programming_language=self.lang,
+            file_extension=".pas",
+        )
+        self.prompt_a = Prompt.objects.create(
+            prompt_name_ru="Промпт A", prompt_text_ru="ПРОМПТ A: {message}",
+            owner=self.user, programming_language=self.lang, topic=self.topic_a,
+        )
+        self.prompt_b = Prompt.objects.create(
+            prompt_name_ru="Промпт B", prompt_text_ru="ПРОМПТ B: {message}",
+            owner=self.user, programming_language=self.lang, topic=self.topic_b,
+        )
+
+    def _bind(self, topic, prompt):
+        from ai.models import ArmPromptBinding
+
+        return ArmPromptBinding.objects.create(
+            programming_language=self.lang, topic=topic,
+            mode=ArmPromptBinding.MODE_SOLVE, prompt=prompt,
+        )
+
+    def _run(self, run_id, node_ids, *, handler=None, prompt_id=None):
+        import time as _t
+        from ai import arm_runner
+
+        messages = []
+
+        async def wrapped(message, client_id):
+            messages.append(message)
+            if handler is not None:
+                return await handler(message, client_id)
+            return ("program a; begin writeln(1); end.", 12)
+
+        now_ts = _t.time()
+        arm_runner._jobs[run_id] = {
+            "run_id": run_id, "run_type": "batch", "status": "running",
+            "error_message": "", "total_models": 1,
+            "total_pairs": len(node_ids), "completed_pairs": 0,
+            "completed_models": 0,
+            "current_model_key": "CacheModel", "current_model_title": "CacheModel",
+            "current_task_node_id": "", "current_task_name": "",
+            "results": [], "report": None,
+            "created_at_ts": now_ts, "updated_at_ts": now_ts,
+        }
+        dl_ok = lambda sid, node_id, code, ext, **kw: {
+            "verdict": "solved", "comment": "Все тесты успешно пройдены",
+            "submit_error": "", "queue_id": 1, "code_sent": code,
+        }
+        try:
+            with patch("ai.arm_runner._test_solution_on_dl", dl_ok):
+                arm_runner._run_batch_job_worker(
+                    run_id, node_ids,
+                    [{"key": "CacheModel", "title": "CacheModel",
+                      "handler": wrapped}],
+                    self.user.id, "DLSID-1", ui_language="Русский", dl_test=True,
+                    prompt_id=prompt_id, course_id=1450,
+                    programming_language_id=self.lang.id,
+                    programming_language_name=self.lang.language_name,
+                )
+        finally:
+            job = arm_runner._jobs.pop(run_id, {}) or {}
+        return job, messages
+
+    def test_solve_message_is_snapshotted_at_run_start(self):
+        """Сообщение собирается на старте прогона, а не на каждую пару.
+
+        Снимок строится по одной сборке на задачу в подготовке прогона; пары
+        получают готовый текст. Правка промпта в БД посреди прогона на
+        следующие пары не влияет — а повторной сборки в цикле нет вовсе.
+        """
+        self._bind(self.topic_a, self.prompt_a)
+
+        from ai.arm_runner import _SOLVE_PREFIX_SENTINEL
+
+        built = []
+
+        def snapshot_build(*args, **kwargs):
+            statement = args[0]
+            built.append(statement)
+            return f"СНИМОК: {statement}"
+
+        with patch("ai.arm_runner._build_solve_message", side_effect=snapshot_build):
+            _job, messages = self._run(
+                "f" * 32, [self.task_a1.node_id, self.task_a2.node_id],
+            )
+
+        # Сборки с настоящим условием — только снимок в подготовке: по одной
+        # на задачу. Пары их переиспользуют (иначе было бы 4, по одной на пару).
+        snapshots = [s for s in built if s != _SOLVE_PREFIX_SENTINEL]
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(len(messages), 2)
+        self.assertIn("СНИМОК: Условие A1", messages[0])
+        self.assertIn("СНИМОК: Условие A2", messages[1])
+
+    def test_tasks_with_same_prefix_run_back_to_back(self):
+        """Задачи одной темы идут подряд: тёплый префикс не вытесняется.
+
+        Порядок формы A1 → B1 → A2, но выполнение — A1, A2, B1: провайдер
+        получает подряд запросы с одинаковым префиксом промпта.
+        """
+        self._bind(self.topic_a, self.prompt_a)
+        self._bind(self.topic_b, self.prompt_b)
+
+        run_id = "e" * 32
+        job, messages = self._run(
+            run_id,
+            [self.task_a1.node_id, self.task_b.node_id, self.task_a2.node_id],
+        )
+
+        self.assertEqual(len(messages), 3)
+        self.assertTrue(messages[0].startswith("ПРОМПТ A"))
+        self.assertTrue(messages[1].startswith("ПРОМПТ A"))
+        self.assertTrue(messages[2].startswith("ПРОМПТ B"))
+        self.assertEqual(job["completed_pairs"], 3)
+        # Диагностика: группа из двух задач с общим префиксом.
+        log_text = " ".join(line["text"] for line in job.get("log_lines") or [])
+        self.assertIn("Кэш промпта «Промпт A»", log_text)
+        self.assertIn("2 задач", log_text)
+
+    def test_cache_prefix_diagnostic_for_small_shared_part(self):
+        """{message} в начале шаблона — предупреждение в журнале прогона."""
+        self.prompt_a.prompt_text_ru = "{message}\n\nПРОМПТ-ХВОСТ " + "х" * 400
+        self.prompt_a.save(update_fields=["prompt_text_ru"])
+        self._bind(self.topic_a, self.prompt_a)
+
+        job, _messages = self._run(
+            "d" * 32, [self.task_a1.node_id, self.task_a2.node_id],
+        )
+
+        log_text = " ".join(line["text"] for line in job.get("log_lines") or [])
+        self.assertIn("Кэш промпта «Промпт A»", log_text)
+        self.assertIn("перенесите", log_text)
+
+
 class BatchParallelWorkerTests(TransactionTestCase):
     """Параллельное решение batch-solve: каждая модель — независимый цикл.
 
@@ -9736,6 +9903,50 @@ class SolveMessageTests(TestCase):
         self.assertIn("Условие задачи:", message)
         self.assertIn("Найти максимум в массиве", message)
 
+    def test_preloaded_prompt_object_matches_db_path_without_queries(self):
+        # Снимок batch-прогона передаёт уже загруженный Prompt: текст тот же,
+        # что и у DB-пути, но без запроса на каждую задачу.
+        from ai.arm_runner import _build_solve_message
+
+        db_message = self._message(prompt_id=self.prompt.id)
+        with self.assertNumQueries(0):
+            preloaded = _build_solve_message(
+                "Найти максимум в массиве", "Pascal", "Массивы",
+                prompt_id=self.prompt.id, prompt=self.prompt,
+            )
+        self.assertEqual(preloaded, db_message)
+
+    def test_cache_prefix_stops_before_task_statement(self):
+        # Общий префикс задач темы — текст ДО условия задачи: именно он
+        # кэшируется провайдером, хвост сообщения — нет.
+        from ai.arm_runner import _solve_cache_prefix
+
+        prefix = _solve_cache_prefix(
+            "Pascal", "Массивы", "Русский", self.prompt.id,
+        )
+        self.assertEqual(prefix, "ПИШИ КАПСОМ: ")
+
+        # С предзагруженным объектом — без запросов.
+        with self.assertNumQueries(0):
+            preloaded = _solve_cache_prefix(
+                "Pascal", "Массивы", "Русский", self.prompt.id,
+                prompt=self.prompt,
+            )
+        self.assertEqual(preloaded, prefix)
+
+    def test_cache_prefix_covers_whole_prompt_without_placeholder(self):
+        # Нет {message} → условие дописывается после промпта; в префикс
+        # попадает весь текст промпта вместе с заголовком условия.
+        from ai.arm_runner import _solve_cache_prefix
+
+        self.prompt.prompt_text_ru = "Стиль без плейсхолдера"
+        self.prompt.save()
+        prefix = _solve_cache_prefix(
+            "Pascal", "Массивы", "Русский", self.prompt.id,
+        )
+        self.assertIn("Стиль без плейсхолдера", prefix)
+        self.assertIn("Условие задачи:", prefix)
+
     def test_no_comments_instruction_appended_always(self):
         # Требование «без комментариев» приписывается к ЛЮБОМУ сообщению
         # пакетного решения — и с привязкой, и без неё.
@@ -10654,6 +10865,27 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         self.assertIn("dl_test_number", src)
         self.assertIn("тест №", src)
         self.assertIn("test_number", src)
+
+    def test_prompt_debug_attempts_show_input_and_expected_output(self):
+        """«Отладка промптов»: у КАЖДОЙ неудачной попытки (и у проверки)
+        показываются входные и эталонные данные проваленного теста — тем же
+        рендером, что в карточке результата."""
+        src = self._static_source("admin", "ai", "batch_results", "index.js")
+        self.assertIn("function testDataEntriesHtml", src)
+        self.assertIn("function normalizeNewlines", src)
+        # Попытка: вход/эталон рендерятся из a.test_data, проверка — из ver.test_data.
+        i = src.find("attempts.forEach(function (a)")
+        self.assertNotEqual(i, -1)
+        block = src[i:i + 2000]
+        self.assertIn("testDataEntriesHtml(a.test_data", block)
+        self.assertIn("arm-pd-testdata", block)
+        j = src.find("if (ver.verdict)")
+        self.assertNotEqual(j, -1)
+        self.assertIn("testDataEntriesHtml(ver.test_data", src[j:j + 1500])
+        self.assertIn("Входные данные", src)
+        self.assertIn("Выходные данные (эталон)", src)
+        css = self._static_source("admin", "ai", "batch_results", "index.css")
+        self.assertIn(".arm-pd-testdata pre", css)
 
     def test_log_detail_resend_session_label_and_rerun_route(self):
         src = self._static_source("admin", "ai", "request_logs_detail", "index.js")
@@ -11925,7 +12157,9 @@ class PromptChangelistFilterTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(self._names(response), ["A", "C", "D"])
 
     def test_search_by_owner_first_name(self):
-        self.assertEqual(self._names(self._view({"q": "Сидорова"})), ["A", "C"])
+        # Универсальный поиск видит и владельца, и редактора: Алиса — владелец
+        # A/C и редактор D.
+        self.assertEqual(self._names(self._view({"q": "Сидорова"})), ["A", "C", "D"])
 
 
 class PromptEditorOwnerTests(_AdminViewRequestMixin, TestCase):
@@ -19965,10 +20199,11 @@ class SettingsPagesAlignmentTests(TestCase):
 
 class AutoFiltersStaticTests(TestCase):
     """Динамические фильтры «сам применяет, без кнопки»: общий хелпер
-    ai_auto_filters.js (текст с паузой, селекты/даты мгновенно, Enter — сразу,
-    submit-перехват против двойной отправки) + страницы без кнопки
-    «Фильтровать». Журнал и changelists не трогаем — у каждого своя механика
-    (AJAX-партиал / select[data-ai-filter] в change_list.html)."""
+    ai_ajax_filters.js (текст с паузой, селекты/даты мгновенно, Enter — сразу,
+    submit-перехват, подмена только области результатов AJAX'ом — без
+    перезагрузки) + страницы без кнопки «Фильтровать». Журнал не трогаем —
+    у него свой AJAX-партиал; стандартные changelist'ы — свой механизм
+    (select[data-ai-filter], AJAX в static/admin/ai/change_list/index.js)."""
 
     def _read(self, *parts):
         from django.conf import settings
@@ -19976,16 +20211,36 @@ class AutoFiltersStaticTests(TestCase):
             return fh.read()
 
     def test_helper_mechanics(self):
-        js = self._read("static", "admin", "js", "ai_auto_filters.js")
-        self.assertIn("initAiAutoFilters", js)
+        js = self._read("static", "admin", "js", "ai_ajax_filters.js")
+        self.assertIn("initAiAjaxFilters", js)
         # Текстовые поля — с паузой (debounce), селекты и даты — мгновенно.
         self.assertIn("setTimeout", js)
         self.assertIn("'change'", js)
         # Enter — сразу (и preventDefault, чтобы не было второй отправки).
         self.assertIn("Enter", js)
         self.assertIn("preventDefault", js)
-        # Полная GET-отправка формы (у страниц-потребителей нет партиала).
-        self.assertIn("formEl.submit()", js)
+        # Без перезагрузки: fetch + подмена областей результатов из ответа.
+        self.assertIn("fetch(", js)
+        self.assertIn("AbortController", js)
+        self.assertIn("targets", js)
+        # Протухшая сессия/ошибка — честный полный переход.
+        self.assertIn("window.location.href = url", js)
+
+    def test_changelist_filters_are_ajax(self):
+        """Стандартные changelist'ы: фильтры/поиск/пагинация без перезагрузки;
+        после подмены таблицы массовые действия пере-инициализируются."""
+        js = self._read("static", "admin", "ai", "change_list", "index.js")
+        for token in (
+            "DOMParser", "AbortController", "history.pushState",
+            "window.Actions(", "syncFilterSelects", "ai-changelist-busy",
+        ):
+            self.assertIn(token, js)
+        # Относительные ссылки пагинации резолвятся от текущего адреса.
+        self.assertIn("new URL(url, window.location.href)", js)
+        tpl = self._read("ai", "templates", "admin", "change_list.html")
+        self.assertIn("admin/ai/change_list/index.js", tpl)
+        filter_tpl = self._read("ai", "templates", "admin", "filter.html")
+        self.assertIn("data-ai-filter", filter_tpl)
 
     def test_daily_report_template(self):
         """Дневной отчёт: ФИО-фильтр ПЕРВЫМ (до «Группа»), inline onchange
@@ -19995,10 +20250,13 @@ class AutoFiltersStaticTests(TestCase):
         self.assertLess(student, src.index('id="daily-filter-group"'))
         self.assertIn('name="student"', src)
         self.assertNotIn("onchange=", src)
-        self.assertIn("ai_auto_filters.js", src)
+        self.assertIn("ai_ajax_filters.js", src)
+        # Результат завёрнут в область, которую подменяет AJAX.
+        self.assertIn('id="ai-daily-results"', src)
         # Инициализация хелпера — в вынесенном JS страницы.
         js = self._read("static", "admin", "ai", "daily_report", "index.js")
-        self.assertIn("initAiAutoFilters(document.querySelector('.ai-daily-filters'))", js)
+        self.assertIn("initAiAjaxFilters(document.querySelector('.ai-daily-filters')", js)
+        self.assertIn("'#ai-daily-results'", js)
 
     def test_updates_template_no_filter_button(self):
         """«Обновления»: кнопки «Фильтровать» больше нет, «Сбросить» и
@@ -20007,9 +20265,11 @@ class AutoFiltersStaticTests(TestCase):
         self.assertNotIn("Фильтровать", src)
         self.assertIn("Сбросить", src)
         self.assertIn('href="/ai/admin/ai/updatelog/?hidden__exact=1"', src)
-        self.assertIn("ai_auto_filters.js", src)
+        self.assertIn("ai_ajax_filters.js", src)
+        self.assertIn('id="ai-updates-results"', src)
         js = self._read("static", "admin", "ai", "updates", "index.js")
-        self.assertIn("initAiAutoFilters(document.querySelector('.ai-updates-filter'))", js)
+        self.assertIn("initAiAjaxFilters(document.querySelector('.ai-updates-filter')", js)
+        self.assertIn("'#ai-updates-results'", js)
         self.assertIn("{% load i18n static %}", src)
 
     def test_wizard_registry_updated(self):
@@ -21525,6 +21785,168 @@ class UserSearchTests(TestCase):
                 "user_", exclude_user=self.me, limit=20,
             )
         self.assertEqual(len(result), 1)
+
+
+class UniversalUserSearchTests(TestCase):
+    """Универсальный поиск по человеку: id — ТОЧНО, ФИО — в любом порядке,
+    инициалы — по началу слов (единый сервис ai/services/user_search.py)."""
+
+    def setUp(self):
+        from ai.models import ExternalDLAccount
+        User = get_user_model()
+        self.ivanov = User.objects.create_user(
+            username="user_201", password="x",
+            first_name="Ivan", last_name="Ivanov",
+        )
+        ExternalDLAccount.objects.create(
+            user=self.ivanov, external_user_id="201", external_login="ivanov",
+            external_first_name="Ivan", external_last_name="Ivanov",
+        )
+        self.petrov = User.objects.create_user(
+            username="user_202", password="x",
+            first_name="Petr", last_name="Petrov",
+        )
+        ExternalDLAccount.objects.create(
+            user=self.petrov, external_user_id="202", external_login="petrov",
+        )
+
+    def _usernames(self, query):
+        from ai.services.user_search import filter_users
+        return set(
+            filter_users(get_user_model().objects.all(), query)
+            .values_list("username", flat=True)
+        )
+
+    def test_numeric_query_is_exact_id(self):
+        # «20» — не подстрока: иначе находились бы 201 и 202.
+        self.assertEqual(self._usernames("20"), set())
+        self.assertEqual(self._usernames("201"), {"user_201"})
+
+    def test_full_name_any_word_order(self):
+        self.assertEqual(self._usernames("Ivanov Ivan"), {"user_201"})
+        self.assertEqual(self._usernames("Ivan Ivanov"), {"user_201"})
+
+    def test_initials_match_word_prefixes(self):
+        self.assertEqual(self._usernames("Ivanov I."), {"user_201"})
+        # Инициал «P» у Петрова — это имя Petr, но не Ivanov.
+        self.assertEqual(self._usernames("Ivanov P."), set())
+
+    def test_flat_text_numeric_is_exact(self):
+        from ai.services.user_search import flat_text_q
+        from ai.models import AIRequestLog
+        log = AIRequestLog.objects.create(
+            user=self.ivanov, source="chat", mode="solve", message="m",
+            sent_at=timezone.now(), external_user_id="201",
+            username="user_201", user_full_name="Ivanov Ivan",
+        )
+        ids = AIRequestLog.objects.filter(
+            flat_text_q(("external_user_id",), "20")
+        ).values_list("id", flat=True)
+        self.assertNotIn(log.id, set(ids))
+        ids = AIRequestLog.objects.filter(
+            flat_text_q(("external_user_id",), "201")
+        ).values_list("id", flat=True)
+        self.assertEqual(set(ids), {log.id})
+
+    def test_flat_user_q_resolves_initials_through_user_table(self):
+        """Денормализованное ФИО («Ivanov Ivan») находится и по «Ivanov I.»:
+        инициал разрешается через User, а не строкой journal'а."""
+        from ai.services.user_search import flat_user_q
+        from ai.models import AIRequestLog
+        log = AIRequestLog.objects.create(
+            user=self.ivanov, source="chat", mode="solve", message="m",
+            sent_at=timezone.now(), external_user_id="201",
+            username="user_201", user_full_name="Ivanov Ivan",
+        )
+        fields = ("external_user_id", "username", "user_full_name")
+        q = flat_user_q(fields, "Ivanov I.")
+        self.assertEqual(set(AIRequestLog.objects.filter(q).values_list("id", flat=True)), {log.id})
+        # Чужой инициал — не совпадение.
+        self.assertFalse(AIRequestLog.objects.filter(flat_user_q(fields, "Ivanov P.")).exists())
+
+    def test_identity_matches(self):
+        from ai.services.user_search import identity_matches
+        self.assertTrue(identity_matches("", texts=("Ivanov Ivan",)))
+        self.assertTrue(identity_matches("Ivan Ivanov", texts=("Ivanov Ivan",)))
+        self.assertTrue(identity_matches("Ivanov I.", texts=("Ivanov Ivan",)))
+        self.assertFalse(identity_matches("Ivanov P.", texts=("Ivanov Ivan",)))
+        self.assertTrue(identity_matches("201", ids=("201",)))
+        self.assertFalse(identity_matches("20", ids=("201",)))
+
+    def test_user_identity_resolve(self):
+        from ai.services.user_search import UserIdentity
+        identity = UserIdentity.resolve("Ivanov Ivan")
+        self.assertIn(self.ivanov.pk, identity.pks)
+        self.assertIn("user_201", identity.usernames)
+        self.assertIn("201", identity.dl_ids)
+        self.assertTrue(identity.contains(external_id="201"))
+        self.assertFalse(identity.contains(pk=self.petrov.pk))
+
+
+class UniversalUserSearchAdminTests(TestCase):
+    """Миксин changelist'а: универсальный запрос объединяется со штатным
+    search_fields и работает по связям (owner/editors) и плоским полям."""
+
+    def setUp(self):
+        from ai.models import ExternalDLAccount, Prompt
+        User = get_user_model()
+        self.ivanov = User.objects.create_user(
+            username="user_301", password="x",
+            first_name="Ivan", last_name="Ivanov",
+        )
+        ExternalDLAccount.objects.create(
+            user=self.ivanov, external_user_id="301", external_login="ivanov",
+            external_first_name="Ivan", external_last_name="Ivanov",
+        )
+        self.petrov = User.objects.create_user(
+            username="user_302", password="x",
+            first_name="Petr", last_name="Petrov",
+        )
+        ExternalDLAccount.objects.create(
+            user=self.petrov, external_user_id="302", external_login="petrov",
+        )
+        self.owned = Prompt.objects.create(prompt_name_ru="owned", owner=self.ivanov)
+        self.edited = Prompt.objects.create(prompt_name_ru="edited", owner=self.petrov)
+        self.edited.editors.add(self.ivanov)
+        self.other = Prompt.objects.create(prompt_name_ru="other", owner=self.petrov)
+
+    def _prompt_search(self, term):
+        from ai.admin.models import PromptAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import Prompt
+        request = RequestFactory().get("/ai/admin/ai/prompt/", {"q": term})
+        request.user = self.ivanov
+        admin_obj = PromptAdmin(Prompt, ai_admin_site)
+        results, _ = admin_obj.get_search_results(request, Prompt.objects.all(), term)
+        return set(results.values_list("prompt_name_ru", flat=True))
+
+    def test_owner_and_editor_relations(self):
+        self.assertIn("owned", self._prompt_search("Ivanov Ivan"))
+        self.assertIn("edited", self._prompt_search("Ivanov Ivan"))
+        self.assertNotIn("other", self._prompt_search("Ivanov Ivan"))
+
+    def test_numeric_query_is_exact_user(self):
+        self.assertEqual(self._prompt_search("302"), {"edited", "other"})
+        self.assertEqual(self._prompt_search("30"), set())
+
+    def test_one_letter_query_does_not_drag_in_people(self):
+        """«a» нет в названиях промптов, но есть в «Ivanov»: без минимальной
+        длины универсальный поиск притащил бы все промпты Иванова."""
+        self.assertEqual(self._prompt_search("a"), set())
+
+    def test_flat_fields_admin(self):
+        """Плоские поля DL-аккаунта: инициалы «Ivanov I.» штатный поиск не
+        находит (icontains «I.»), а универсальный — да (через таблицу User)."""
+        from ai.admin.models import ExternalDLAccountAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import ExternalDLAccount
+        request = RequestFactory().get("/ai/admin/ai/externaldlaccount/", {"q": "Ivanov I."})
+        request.user = self.ivanov
+        admin_obj = ExternalDLAccountAdmin(ExternalDLAccount, ai_admin_site)
+        results, _ = admin_obj.get_search_results(
+            request, ExternalDLAccount.objects.all(), "Ivanov I.",
+        )
+        self.assertEqual(set(results.values_list("external_user_id", flat=True)), {"301"})
 
 
 class UserModelClientAccessViewTests(TestCase):
@@ -24380,6 +24802,14 @@ class PromptDebugRunnerTests(TestCase):
         # Данные теста сохраняются в строке пары (карточка результата).
         row = run.results.get()
         self.assertEqual(row.dl_test_data, json.dumps(test_data, ensure_ascii=False))
+        # И в КАЖДОЙ попытке + в проверке: в карточке видно вход/эталон
+        # ровно того теста, на котором пара упала в этой попытке.
+        payload = row.prompt_debug
+        self.assertEqual(len(payload["attempts"]), 2)
+        for attempt in payload["attempts"]:
+            self.assertEqual(attempt["test_data"], test_data)
+        self.assertEqual(payload["verification"]["verdict"], "failed")
+        self.assertEqual(payload["verification"]["test_data"], test_data)
 
     def test_first_try_solve_is_not_fixed(self):
         """Пара, решённая с первой попытки, — НЕ «исправленная» правкой."""
@@ -24501,6 +24931,34 @@ class PromptDebugRunnerTests(TestCase):
         # usage пары суммирует попытки, редактора и проверку (токены моделей).
         self.assertGreater(payload["usage"]["tokens"], 0)
 
+    def test_prompt_debug_creates_no_solve_message_snapshot(self):
+        """«Отладка промтов» не фиксирует сообщение пары на старте.
+
+        Снимок и кэш-порядок — только у batch: здесь основной проход шлёт
+        override, а проверка обязана собрать сообщение заново из свежего
+        промпта в БД (иначе правки редактора не учитывались бы).
+        """
+        from ai import arm_runner
+
+        real_prepare = arm_runner._prepare_batch_run
+        contexts = []
+
+        def spy_prepare(*args, **kwargs):
+            ctx = real_prepare(*args, **kwargs)
+            contexts.append(ctx)
+            return ctx
+
+        model = self._Model()
+        dl_mock, _calls = self._dl(["failed", "solved", "solved"])
+        with patch("ai.arm_runner._prepare_batch_run", side_effect=spy_prepare):
+            self._run("c" * 32, model, dl_mock, prompt_attempts=1)
+
+        self.assertEqual(len(contexts), 1)
+        ctx = contexts[0]
+        self.assertFalse(
+            any("solve_message" in tc for tc in ctx["task_ctxs"]),
+        )
+        self.assertIs(ctx["execution_ctxs"], ctx["task_ctxs"])
 
     def test_default_binding_keeps_edits_across_runs(self):
         """Промпт «по привязке» правится в ТОЙ ЖЕ строке и остаётся действующим.
@@ -25111,3 +25569,636 @@ class PromptDebugJournalTests(TestCase):
         row = next(r for r in runs if r["run_id"] == run_id)
         self.assertEqual(row["run_type"], "prompt_debug")
         self.assertEqual(row["page_url"], "/ai/admin/arm/prompt-debug/")
+
+
+# ---------------------------------------------------------------------------
+# Производительность: бюджеты запросов, кэши справочников, индексы
+# ---------------------------------------------------------------------------
+
+
+class PerformanceIndexesTests(SimpleTestCase):
+    """Индексы, ради которых заведена миграция 0079, не пропали при рефакторинге.
+
+    btree-индексы создаются и в SQLite, GIN-триграммы/JSON — только на
+    Postgres (migration 0079 через SeparateDatabaseAndState), но объявлены
+    в Meta у моделей на любой БД.
+    """
+
+    def test_expected_indexes_present(self):
+        from ai.models import (
+            AIDevTask,
+            AIDLApiRequest,
+            AIModelTestResult,
+            AIModelTestRun,
+            AIUserModel,
+        )
+
+        expected = {
+            AIRequestLog: (
+                "ai_log_user_status_sent_idx", "ai_log_model_names_gin_idx",
+            ),
+            AIModelTestResult: (
+                "ai_mtr_run_updated_idx", "ai_mtr_run_verdict_idx",
+            ),
+            AIModelTestRun: ("ai_model_test_run_type_idx",),
+            ExternalDLAccount: (
+                "ai_ext_dl_created_idx", "ai_ext_dl_updated_idx",
+                "ai_ext_dl_extid_trgm_idx", "ai_ext_dl_login_trgm_idx",
+                "ai_ext_dl_fname_trgm_idx", "ai_ext_dl_lname_trgm_idx",
+            ),
+            UpdateLog: (
+                "ai_update_log_order_idx", "ai_update_desc_trgm_idx",
+                "ai_update_author_trgm_idx",
+            ),
+            Task: (
+                "ai_task_created_idx", "ai_task_name_trgm_idx",
+                "ai_task_statement_trgm_idx",
+            ),
+            TaskSolution: (
+                "ai_task_solution_updated_idx", "ai_tsol_extid_trgm_idx",
+                "ai_tsol_model_trgm_idx", "ai_tsol_topic_trgm_idx",
+                "ai_tsol_prompt_trgm_idx",
+            ),
+            Prompt: ("ai_prompt_name_trgm_idx", "ai_prompt_text_trgm_idx"),
+            AIUserModel: ("ai_user_model_owner_idx", "ai_user_model_public_idx"),
+            AIDevTask: ("ai_dev_task_order_idx",),
+            AIDLApiRequest: ("ai_dl_api_req_status_idx",),
+        }
+        for model, names in expected.items():
+            declared = {index.name for index in model._meta.indexes}
+            for name in names:
+                self.assertIn(
+                    name, declared, f"{model.__name__}: нет индекса {name}",
+                )
+
+
+class AppSettingsCacheTests(TestCase):
+    """AIAppSettings.get_solo(): кэш на 30 с + немедленный сброс при save/delete."""
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+
+    def tearDown(self):
+        from django.core.cache import cache
+
+        cache.clear()
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_get_solo_is_cached_and_returns_copy(self):
+        from ai.models import AIAppSettings
+
+        AIAppSettings.objects.get_or_create(pk=1)
+        first = AIAppSettings.get_solo()
+        with self.assertNumQueries(0):
+            second = AIAppSettings.get_solo()
+        self.assertEqual(first.pk, second.pk)
+        # Мутация копии не «протекает» в закэшированный объект.
+        second.is_enabled = not second.is_enabled
+        self.assertEqual(
+            AIAppSettings.get_solo().is_enabled, first.is_enabled,
+        )
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_save_invalidates_immediately(self):
+        from ai.models import AIAppSettings
+
+        AIAppSettings.objects.get_or_create(pk=1, defaults={"is_enabled": True})
+        self.assertTrue(AIAppSettings.get_solo().is_enabled)
+        solo = AIAppSettings.get_solo()
+        solo.is_enabled = False
+        solo.save()
+        self.assertFalse(AIAppSettings.get_solo().is_enabled)
+
+
+class CatalogCacheTests(TestCase):
+    """Каталоги ai/services/catalog.py: повторный вызов без запросов,
+    правка промпта/темы/языка видна сразу (эпоха prompt_meta)."""
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.user = get_user_model().objects.create_user(
+            username="catalog-user", password="x",
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Массивы", programming_language=self.lang,
+        )
+        self.prompt = Prompt.objects.create(
+            prompt_name_ru="Реши задачу", prompt_text_ru="Текст {message}",
+            mode=Prompt.MODE_SOLVE, topic=self.topic, owner=self.user,
+        )
+
+    def tearDown(self):
+        from django.core.cache import cache
+
+        cache.clear()
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_second_catalog_call_does_not_hit_db(self):
+        from ai.services.catalog import language_list, prompt_list, topic_list
+
+        prompt_list("Русский")
+        language_list()
+        topic_list("Русский")
+        with self.assertNumQueries(0):
+            prompt_list("Русский")
+            language_list()
+            topic_list("Русский")
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_prompt_edit_invalidates_catalog(self):
+        from ai.services.catalog import prompt_list
+
+        names = [item["name"] for item in prompt_list("Русский")]
+        self.assertIn("Реши задачу", names)
+        self.prompt.prompt_name_ru = "Переименованный"
+        self.prompt.save()
+        names = [item["name"] for item in prompt_list("Русский")]
+        self.assertIn("Переименованный", names)
+        self.assertNotIn("Реши задачу", names)
+
+    def test_shared_prompt_language_ids_use_prefetch(self):
+        from ai.serializers import shared_prompt as serialize_shared_prompt
+
+        shared = SharedPrompt.objects.create(
+            prompt_name_ru="Общий", prompt_text_ru="Текст", mode="",
+        )
+        shared.programming_languages.add(self.lang)
+        items = list(
+            SharedPrompt.objects.prefetch_related("programming_languages")
+            .filter(pk=shared.pk)
+        )
+        with self.assertNumQueries(0):
+            data = [serialize_shared_prompt(item, "Русский") for item in items]
+        self.assertEqual(data[0]["language_ids"], [self.lang.pk])
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_problem_data_second_call_is_served_from_cache(self):
+        from ai.views import get_problem_data
+
+        request = RequestFactory().get("/ai/api/problem-data/")
+        request.COOKIES = {"userId": self.user.username}
+        request.user = self.user
+        first = get_problem_data(request)
+        self.assertEqual(first.status_code, 200)
+        with self.assertNumQueries(0):
+            second = get_problem_data(request)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.content, second.content)
+
+
+class FilterCacheTests(TestCase):
+    """Списки фильтров админки: кэш по эпохе prompt_meta, свежесть после правок."""
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.alice = get_user_model().objects.create_user(
+            username="alice", password="x", first_name="Алиса", last_name="Сидорова",
+        )
+        self.lang_a = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.lang_b = ProgrammingLanguage.objects.create(language_name="C")
+        self.topic_a = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.lang_a,
+        )
+        self.topic_b = Topic.objects.create(
+            topic_name_ru="Циклы", programming_language=self.lang_b,
+        )
+        self.prompt_a = Prompt.objects.create(
+            prompt_name_ru="A", prompt_text_ru="t", mode="solve",
+            topic=self.topic_a, owner=self.alice,
+        )
+
+    def tearDown(self):
+        from django.core.cache import cache
+
+        cache.clear()
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_filter_lookups_cached(self):
+        from ai.services.catalog import prompt_filter_languages, prompt_filter_users
+
+        prompt_filter_users()
+        prompt_filter_languages()
+        with self.assertNumQueries(0):
+            prompt_filter_users()
+            prompt_filter_languages()
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_new_prompt_refreshes_owner_filter(self):
+        from ai.services.catalog import prompt_filter_users
+
+        self.assertNotIn("bob", " ".join(label for _pk, label in prompt_filter_users()))
+        bob = get_user_model().objects.create_user(
+            username="bob", password="x", first_name="Боб", last_name="Ким",
+        )
+        Prompt.objects.create(
+            prompt_name_ru="B", prompt_text_ru="t", mode="solve",
+            topic=self.topic_b, owner=bob,
+        )
+        labels = " ".join(label for _pk, label in prompt_filter_users())
+        self.assertIn("Ким", labels)
+        self.assertIn("Сидорова", labels)
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_topics_are_scoped_by_language(self):
+        from ai.services.catalog import prompt_filter_topics
+
+        Prompt.objects.create(
+            prompt_name_ru="B", prompt_text_ru="t", mode="solve",
+            topic=self.topic_b, owner=self.alice,
+        )
+        pascal_topics = prompt_filter_topics(self.lang_a.pk)
+        c_topics = prompt_filter_topics(self.lang_b.pk)
+        self.assertEqual([pk for pk, _label in pascal_topics], [str(self.topic_a.pk)])
+        self.assertEqual([pk for pk, _label in c_topics], [str(self.topic_b.pk)])
+
+
+class MiddlewareProvisionTests(TestCase):
+    """Быстрый путь провижининга: маркер сессии = тот же внешний пользователь
+    → нет SELECT по ExternalDLAccount; другой userId → полный путь."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.middleware = ExternalAuthMiddleware(lambda req: HttpResponse("ok"))
+        self.user = get_user_model().objects.create_user(
+            username="prov-user", password="x",
+        )
+
+    def _request(self, external_id):
+        request = self.factory.get("/ai/chat/")
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.COOKIES["DLSID"] = "session-123"
+        request.session["external_session_id"] = "session-123"
+        request.session["external_user_info"] = {"userId": external_id}
+        request.session["external_user_info_fetched_at"] = time.time()
+        request.user = self.user
+        return request
+
+    def test_fresh_marker_skips_provisioning(self):
+        request = self._request("42")
+        request.session["ai_provisioned_external_id"] = "42"
+        request.session["ai_provisioned_user_pk"] = self.user.pk
+
+        with patch("ai.middleware.get_or_create_user_from_external") as provision:
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        provision.assert_not_called()
+        self.assertEqual(request.user_info, {"userId": "42"})
+        self.assertEqual(request._ai_provisioned_user, self.user)
+
+    def test_changed_external_id_falls_back_to_full_provisioning(self):
+        request = self._request("42")
+        # Маркер от ДРУГОГО внешнего пользователя — доверять нельзя.
+        request.session["ai_provisioned_external_id"] = "7"
+        request.session["ai_provisioned_user_pk"] = self.user.pk
+
+        with patch(
+            "ai.middleware.get_or_create_user_from_external",
+            return_value=(self.user, False),
+        ) as provision:
+            response = self.middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        provision.assert_called_once()
+        # Маркер перезаписан подтверждённым пользователем.
+        self.assertEqual(request.session["ai_provisioned_external_id"], "42")
+        self.assertEqual(request.session["ai_provisioned_user_pk"], self.user.pk)
+
+
+class UserModelOptionsCacheTests(TestCase):
+    """Селектор личных моделей: три группы одним закэшированным вызовом."""
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.user = get_user_model().objects.create_user(
+            username="models-user", password="x",
+        )
+
+    def tearDown(self):
+        from django.core.cache import cache
+
+        cache.clear()
+
+    def _model(self, title, **kwargs):
+        from ai.models import AIUserModel
+
+        return AIUserModel.objects.create(
+            user=self.user, title=title, model_id="m-" + title.lower(), **kwargs,
+        )
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_options_page_is_cached(self):
+        from ai.services.user_models import user_model_options_page
+
+        self._model("Own")
+        first = user_model_options_page(self.user)
+        with self.assertNumQueries(0):
+            second = user_model_options_page(self.user)
+        self.assertEqual(first, second)
+        self.assertEqual(len(first["own"]), 1)
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_new_model_invalidates_options(self):
+        from ai.services.user_models import user_model_options_page
+
+        self.assertEqual(user_model_options_page(self.user)["own"], [])
+        self._model("Fresh")
+        self.assertEqual(len(user_model_options_page(self.user)["own"]), 1)
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_shared_with_change_invalidates_options(self):
+        from ai.services.user_models import user_model_options_page
+
+        other = get_user_model().objects.create_user(
+            username="models-other", password="x",
+        )
+        model = self._model("Shared")
+        self.assertEqual(user_model_options_page(other)["shared"], [])
+        model.shared_with.add(other)
+        shared = user_model_options_page(other)["shared"]
+        self.assertEqual(len(shared), 1)
+        self.assertEqual(shared[0]["key"], f"User_{model.pk}")
+
+
+class BatchLightSnapshotTests(TestCase):
+    """Лёгкий снапшот batch-прогона не тащит тяжёлое JSON-поле dl_test_data."""
+
+    def setUp(self):
+        from ai.models import AIModelTestResult, AIModelTestRun
+
+        self.run = AIModelTestRun.objects.create(
+            run_id="e" * 32, run_type=AIModelTestRun.RUN_TYPE_BATCH,
+            status=AIModelTestRun.STATUS_COMPLETED, course_id=1450,
+        )
+        self.with_data = AIModelTestResult.objects.create(
+            run=self.run, model_key="M_yes", model_title="M yes", status="error",
+            verdict="failed",
+            dl_test_data=json.dumps([
+                {"test_number": 1, "input": "1 2\n", "expected_output": "3\n"},
+            ]),
+        )
+        self.without_data = AIModelTestResult.objects.create(
+            run=self.run, model_key="M_no", model_title="M no", status="ok",
+            verdict="solved", dl_test_data="",
+        )
+
+    def test_has_test_data_flag_without_transporting_payload(self):
+        from ai.arm_runner import _batch_results_from_db
+
+        rows = {
+            row["model_key"]: row
+            for row in _batch_results_from_db(self.run, light=True)
+        }
+        self.assertTrue(rows["M_yes"]["has_test_data"])
+        self.assertFalse(rows["M_no"]["has_test_data"])
+        # Тело проваленного теста в лёгкий снапшот не попадает.
+        self.assertNotIn("dl_test_data", rows["M_yes"])
+        self.assertTrue(rows["M_yes"]["lazy_body"])
+
+    def test_length_is_computed_in_database(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from ai.arm_runner import _batch_results_from_db
+
+        with CaptureQueriesContext(connection) as ctx:
+            _batch_results_from_db(self.run, light=True)
+        sql = ctx.captured_queries[0]["sql"].upper()
+        self.assertIn("LENGTH(", sql)
+        # Колонка встречается РОВНО один раз — внутри LENGTH(...): сырое
+        # значение не выбирается (иначе был бы второй SELECT-элемент).
+        # Считаем именно кавыченное имя: оно же — префикс псевдонима
+        # DL_TEST_DATA_LEN, который дал бы ложное второе совпадение.
+        self.assertEqual(sql.count('"DL_TEST_DATA"'), 1, sql)
+
+
+class AssetEtagCacheTests(TestCase):
+    """asset_view: ETag кэшируется по (путь, mtime_ns, размер, boot-salt);
+    304 не читает файл, 200 отдаёт его потоком."""
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(
+            username="asset-etag-user", password="x",
+        )
+
+    def tearDown(self):
+        from django.core.cache import cache
+
+        cache.clear()
+
+    def _get(self, headers=None):
+        from ai.views import asset_view
+
+        request = self.factory.get("/ai/assets/admin/css/ai.css")
+        request.COOKIES = {"userId": self.user.username}
+        request.user = self.user
+        for key, value in (headers or {}).items():
+            request.META[key] = value
+        return asset_view(request, "admin/css/ai.css")
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_conditional_request_does_not_read_file(self):
+        first = self._get()
+        self.assertEqual(first.status_code, 200)
+        etag = first["ETag"]
+
+        with patch(
+            "builtins.open", side_effect=AssertionError("файл не должен читаться"),
+        ):
+            second = self._get({"HTTP_IF_NONE_MATCH": etag})
+        self.assertEqual(second.status_code, 304)
+        self.assertEqual(second["ETag"], etag)
+
+    @override_settings(AI_PERF_CACHE_TTL=60)
+    def test_cached_etag_matches_content_hash(self):
+        import hashlib
+
+        from django.contrib.staticfiles import finders
+        from ai.views import _ASSET_BOOT_SALT
+
+        first = self._get()
+        path = finders.find("admin/css/ai.css")
+        with open(path, "rb") as fh:
+            expected = hashlib.md5(_ASSET_BOOT_SALT + fh.read()).hexdigest()
+        self.assertEqual(first["ETag"].strip('"'), expected)
+        # Повторный 200 после промаха кэша по другому заголовку — тот же ETag.
+        self.assertEqual(self._get()["ETag"].strip('"'), expected)
+
+
+class QueryBudgetTests(_AdminViewRequestMixin, TestCase):
+    """Число запросов changelist'ов не растёт с числом строк (нет N+1).
+
+    Сравниваем 3 строки и 25 (полная страница list_per_page): одинаковое
+    количество запросов — это и есть контракт; абсолютные числа зависят от
+    версии Django и не проверяются.
+    """
+
+    def setUp(self):
+        from ai.models import ProgrammingLanguage, Topic
+
+        self.factory = RequestFactory()
+        self.su = get_user_model().objects.create_user(
+            username="budget-su", password="x",
+            is_superuser=True, is_staff=True,
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="Pascal")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Линейные", programming_language=self.lang,
+        )
+
+    def _count(self, admin, path):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        # Свежий инстанс юзера на «запрос»: request-scoped кэши прав/профиля
+        # живут на объекте user и в проде не переживают запрос. Иначе второй
+        # замер «выигрывал» бы 2 запроса не из-за числа строк, а из-за того,
+        # что тест переиспользует тот же Python-объект.
+        user = get_user_model().objects.get(pk=self.su.pk)
+        request = self._admin_request(user, path=path)
+        with CaptureQueriesContext(connection) as ctx:
+            response = admin.changelist_view(request)
+        self.assertEqual(response.status_code, 200)
+        return len(ctx.captured_queries)
+
+    def _make_prompts(self, count, start=0):
+        for index in range(start, start + count):
+            Prompt.objects.create(
+                prompt_name_ru=f"Промпт {index}",
+                prompt_text_ru="текст " * 40,  # > 101 символа — тест превью
+                mode=Prompt.MODE_SOLVE, topic=self.topic, owner=self.su,
+            )
+
+    def test_prompt_changelist_query_count_is_flat(self):
+        from ai.admin.models import PromptAdmin
+        from ai.admin.site import ai_admin_site
+
+        self._make_prompts(3)
+        admin = PromptAdmin(Prompt, ai_admin_site)
+        small = self._count(admin, "/ai/admin/ai/prompt/")
+        self._make_prompts(22, start=3)
+        large = self._count(admin, "/ai/admin/ai/prompt/")
+        self.assertEqual(small, large)
+
+    def test_task_changelist_query_count_is_flat(self):
+        from ai.admin.models import TaskAdmin
+        from ai.admin.site import ai_admin_site
+
+        def make(count, start=0):
+            for index in range(start, start + count):
+                Task.objects.create(
+                    node_id=10000 + index, name=f"Задача {index}",
+                    statement="Условие", topic=self.topic,
+                    programming_language=self.lang, file_extension=".pas",
+                )
+
+        make(3)
+        admin = TaskAdmin(Task, ai_admin_site)
+        small = self._count(admin, "/ai/admin/ai/task/")
+        make(22, start=3)
+        large = self._count(admin, "/ai/admin/ai/task/")
+        self.assertEqual(small, large)
+
+    def test_external_account_changelist_query_count_is_flat(self):
+        from ai.admin.models import ExternalDLAccountAdmin
+        from ai.admin.site import ai_admin_site
+
+        def make(count, start=0):
+            for index in range(start, start + count):
+                user = get_user_model().objects.create_user(
+                    username=f"ext-{index}", password="x",
+                )
+                ExternalDLAccount.objects.create(
+                    user=user, external_user_id=str(20000 + index),
+                    external_login=f"login{index}",
+                )
+
+        make(3)
+        admin = ExternalDLAccountAdmin(ExternalDLAccount, ai_admin_site)
+        small = self._count(admin, "/ai/admin/ai/externaldlaccount/")
+        make(22, start=3)
+        large = self._count(admin, "/ai/admin/ai/externaldlaccount/")
+        self.assertEqual(small, large)
+
+    def test_wizard_seen_changelist_query_count_is_flat(self):
+        from ai.admin.models import AIWizardSeenAdmin
+        from ai.admin.site import ai_admin_site
+
+        def make(count, start=0):
+            for index in range(start, start + count):
+                AIWizardSeen.objects.create(
+                    user=self.su, scope=f"scope-{index}", version=1,
+                )
+
+        make(3)
+        admin = AIWizardSeenAdmin(AIWizardSeen, ai_admin_site)
+        small = self._count(admin, "/ai/admin/ai/aiwizardseen/")
+        make(22, start=3)
+        large = self._count(admin, "/ai/admin/ai/aiwizardseen/")
+        self.assertEqual(small, large)
+
+    def test_prompt_list_shows_db_preview_not_full_text(self):
+        from ai.admin.models import PromptAdmin
+        from ai.admin.site import ai_admin_site
+
+        long_text = "x" * 500
+        prompt = Prompt.objects.create(
+            prompt_name_ru="Длинный", prompt_text_ru=long_text,
+            mode=Prompt.MODE_SOLVE, topic=self.topic, owner=self.su,
+        )
+        admin = PromptAdmin(Prompt, ai_admin_site)
+        request = self._admin_request(self.su, path="/ai/admin/ai/prompt/")
+        queryset = admin.get_queryset(request)
+        # Превью считает БД (Substr 101), а не Python после полной загрузки.
+        self.assertIn("SUBSTR", str(queryset.query).upper())
+        obj = queryset.get(pk=prompt.pk)
+        self.assertEqual(len(obj.prompt_text_preview), 101)
+        self.assertEqual(admin.short_prompt_text(obj), "x" * 100 + "...")
+
+    def test_blank_changelist_skips_duplicate_count(self):
+        """Пустой GET → фильтров нет, оба COUNT заведомо равны: второй не нужен.
+
+        С параметром (поиск) штатная ветка Django остаётся — числа могут
+        различаться, и «N из M» должно быть честным.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from ai.admin.models import TaskAdmin
+        from ai.admin.site import ai_admin_site
+
+        Task.objects.create(
+            node_id=70001, name="Задача", statement="Условие",
+            topic=self.topic, programming_language=self.lang,
+            file_extension=".pas",
+        )
+        admin = TaskAdmin(Task, ai_admin_site)
+
+        def count_queries(params):
+            user = get_user_model().objects.get(pk=self.su.pk)
+            request = self._admin_request(
+                user, path="/ai/admin/ai/task/", data=params,
+            )
+            with CaptureQueriesContext(connection) as ctx:
+                response = admin.changelist_view(request)
+            self.assertEqual(response.status_code, 200)
+            return [
+                query["sql"] for query in ctx.captured_queries
+                if "__count" in query["sql"]
+            ]
+
+        self.assertEqual(len(count_queries({})), 1)
+        self.assertEqual(len(count_queries({"q": "Задача"})), 2)

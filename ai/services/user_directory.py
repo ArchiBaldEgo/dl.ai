@@ -6,21 +6,19 @@
 админка делегирует сюда.
 
 Поиск ограничен сознательно: только активные пользователи, без email, групп
-и прав; в ответе — исключительно ``{id, display, dl_id}``. Целое число
-трактуется как точный DL-id (его можно ввести коротким), иначе — подстрока
-от 2 символов по username/ФИО.
+и прав; в ответе — исключительно ``{id, display, dl_id}``. Правила запроса —
+в ``ai/services/user_search.py``: число — точный id (pk/DL-id/логин), текст
+от 2 символов — ФИО/логин в любом порядке («Иванов Иван» = «Иван Иванов»).
 """
 
 from __future__ import annotations
 
 from django.contrib.auth import get_user_model
-from django.db.models import Q
+
+from .user_search import MIN_TEXT_QUERY_LEN, user_identity_q
 
 #: Потолок выдачи поиска: выпадающий список в форме, а не справочник.
 MAX_SEARCH_RESULTS = 20
-
-#: Минимальная длина текстового запроса (короче — слишком много совпадений).
-MIN_QUERY_LEN = 2
 
 
 def _external_account(user):
@@ -87,7 +85,7 @@ def user_brief(user) -> dict:
 
 def search_users_for_sharing(query, exclude_user=None,
                              limit: int = MAX_SEARCH_RESULTS) -> list[dict]:
-    """Найти получателей доступа по DL-id (точно) или ФИО/логину (подстрока).
+    """Найти получателей доступа: id точно, ФИО/логин в любом порядке.
 
     Возвращает ``[{id, display, dl_id}]`` — без email, групп и прав.
     Неактивные и сам инициатор исключены; пустой/слишком короткий текстовый
@@ -102,19 +100,15 @@ def search_users_for_sharing(query, exclude_user=None,
     if exclude_user is not None and getattr(exclude_user, "pk", None):
         queryset = queryset.exclude(pk=exclude_user.pk)
 
-    if text.isdigit():
-        # Точный DL-id: пользователь вводит его целиком, длина не важна.
-        queryset = queryset.filter(external_dl_account__external_user_id=text)
-    else:
-        if len(text) < MIN_QUERY_LEN:
-            return []
-        queryset = queryset.filter(
-            Q(username__icontains=text)
-            | Q(first_name__icontains=text)
-            | Q(last_name__icontains=text)
-            | Q(external_dl_account__external_first_name__icontains=text)
-            | Q(external_dl_account__external_last_name__icontains=text)
-        )
+    if not text.isdigit() and len(text) < MIN_TEXT_QUERY_LEN:
+        return []
+    # Единые правила (ai/services/user_search.py): число — точный id
+    # (pk / DL-id / логин user_<id>), текст — ФИО/логин в любом порядке,
+    # «Фамилия И.» — инициал по началу имени.
+    identity_q = user_identity_q(text)
+    if identity_q is None:
+        return []
+    queryset = queryset.filter(identity_q)
 
     try:
         limit = max(1, min(int(limit), MAX_SEARCH_RESULTS))

@@ -57,7 +57,9 @@ def shared_prompt(obj, ui_language=""):
         "name": get_localized_name(obj, ui_language, "prompt_name"),
         "prompt_text": obj.prompt_text_ru,
         "effective_text": obj.get_effective_text(ui_language, ""),
-        "language_ids": list(obj.programming_languages.values_list("id", flat=True)),
+        # Из prefetch-кэша: values_list() игнорировал prefetch_related и делал
+        # отдельный запрос на каждый общий промпт списка.
+        "language_ids": [lang.id for lang in obj.programming_languages.all()],
         "mode": obj.mode or "",
     }
 

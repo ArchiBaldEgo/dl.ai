@@ -12,7 +12,6 @@
 import json
 import os
 import hashlib
-import io
 import mimetypes
 import logging
 import threading
@@ -65,11 +64,9 @@ from .services.user_models import (
     PROVIDER_BASE_URLS,
     admin_user_model_rows,
     delete_user_model,
-    public_user_model_options,
     save_user_model,
     set_user_model_access,
-    shared_user_model_options,
-    user_model_options,
+    user_model_options_page,
     user_model_rows,
 )
 from .services.user_directory import search_users_for_sharing
@@ -102,9 +99,9 @@ from .i18n import (
 )
 from .serializers import (
     programming_language as serialize_programming_language,
+    # Ре-экспорт: исторически публичное имя ai.views.serialize_prompt
+    # (его импортируют в тестах); сама сериализация живёт в ai/serializers.py.
     prompt as serialize_prompt,
-    shared_prompt as serialize_shared_prompt,
-    shared_prompt_with_dates as serialize_shared_prompt_with_dates,
     topic as serialize_topic,
 )
 
@@ -478,9 +475,11 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
     # Личные модели: три optgroup внизу селектора — свои («Мои модели»),
     # адресно выданные («Доступные мне») и публичные. Приватные чужие модели
     # не попадают ни в одну группу (ai/services/user_models.py).
-    user_models_options = user_model_options(request.user)
-    shared_user_models = shared_user_model_options(request.user)
-    public_user_models = public_user_model_options(request.user)
+    # Одна закэшированная выборка на все три группы (ai/services/user_models.py).
+    page_user_models = user_model_options_page(request.user)
+    user_models_options = page_user_models["own"]
+    shared_user_models = page_user_models["shared"]
+    public_user_models = page_user_models["public"]
     # Клиентские строки трёхъязычного UI (ai/i18n.client_strings): язык — тот
     # же, что у #selectLang (ai_state cookie, «Русский» по умолчанию). JS
     # перелокализует DOM при каждой смене языка сам; серверный словарь нужен
@@ -724,14 +723,15 @@ def my_models_view(request):
     # Строки таблицы панели — ``user_models``; селектор моделей страницы —
     # ``user_models_options`` (раньше оба звались ``user_models``, из-за чего
     # optgroup рендерился с пустыми value — строки таблицы не опции селектора).
+    page_user_models = user_model_options_page(request.user)
     return render(
         request,
         "ai/my_models.html",
         {
             "user_models": user_model_rows(request.user),
-            "user_models_options": user_model_options(request.user),
-            "shared_user_models": shared_user_model_options(request.user),
-            "public_user_models": public_user_model_options(request.user),
+            "user_models_options": page_user_models["own"],
+            "shared_user_models": page_user_models["shared"],
+            "public_user_models": page_user_models["public"],
             # Таблица «Все модели» — только реальному суперюзеру («Посмотреть
             # как…» её не показывает: эмуляция честная).
             "all_models": admin_user_model_rows() if is_superuser_user(request.user) else None,
@@ -843,11 +843,9 @@ def get_languages(request):
     """API: возвращает список всех языков программирования."""
     if not _has_page_access(request):
         return _deny_access(request, as_json=True)
-    languages = [
-        serialize_programming_language(lang)
-        for lang in ProgrammingLanguage.objects.order_by('language_name')
-    ]
-    return JsonResponse(languages, safe=False)
+    from .services.catalog import language_list
+
+    return JsonResponse(language_list(), safe=False)
 
 
 def get_topics(request):
@@ -855,11 +853,9 @@ def get_topics(request):
     if not _has_page_access(request):
         return _deny_access(request, as_json=True)
     ui_language = request.GET.get('ui_language', 'Русский')
-    topics = [
-        serialize_topic(topic, ui_language)
-        for topic in Topic.objects.select_related("programming_language").order_by('topic_name_ru')
-    ]
-    return JsonResponse(topics, safe=False)
+    from .services.catalog import topic_list
+
+    return JsonResponse(topic_list(ui_language), safe=False)
 
 
 def get_prompts(request):
@@ -868,11 +864,10 @@ def get_prompts(request):
         return _deny_access(request, as_json=True)
 
     ui_language = request.GET.get('ui_language', 'Русский')
-    prompts = [
-        serialize_prompt(p, ui_language)
-        for p in Prompt.objects.select_related("topic", "topic__programming_language", "programming_language", "owner", "shared_prompt").order_by('prompt_name_ru', 'id')
-    ]
-    return JsonResponse(prompts, safe=False)
+    # Каталог кэшируется с инвалидацией по сигналам Prompt (ai/services/catalog.py).
+    from .services.catalog import prompt_list
+
+    return JsonResponse(prompt_list(ui_language), safe=False)
 
 
 def get_shared_prompts(request):
@@ -882,19 +877,14 @@ def get_shared_prompts(request):
 
     ui_language = request.GET.get('ui_language', 'Русский')
     language_id = request.GET.get('language_id')
-    qs = SharedPrompt.objects.prefetch_related('programming_languages').filter(Q(mode__isnull=True) | Q(mode=''))
+    # Фильтр: либо общий промпт привязан к этому языку, либо без привязки (для
+    # всех). Каталог кэшируется (ai/services/catalog.py).
+    from .services.catalog import shared_prompt_list
 
-    if language_id:
-        # Фильтруем: либо общий промпт привязан к этому языку, либо без привязки (для всех)
-        qs = qs.filter(
-            models.Q(programming_languages__id=language_id) | models.Q(programming_languages__isnull=True)
-        ).distinct()
-
-    shared = [
-        serialize_shared_prompt_with_dates(sp, ui_language)
-        for sp in qs
-    ]
-    return JsonResponse(shared, safe=False)
+    return JsonResponse(
+        shared_prompt_list(ui_language, language_id=language_id, with_dates=True),
+        safe=False,
+    )
 
 
 def get_problem_data(request):
@@ -904,28 +894,15 @@ def get_problem_data(request):
 
     ui_language = request.GET.get('ui_language', 'Русский')
 
-    languages = [
-        serialize_programming_language(lang)
-        for lang in ProgrammingLanguage.objects.order_by('language_name')
-    ]
-    topics = [
-        serialize_topic(topic, ui_language)
-        for topic in Topic.objects.select_related("programming_language").order_by('topic_name_ru')
-    ]
-    prompts = [
-        serialize_prompt(p, ui_language)
-        for p in Prompt.objects.select_related("topic", "topic__programming_language", "programming_language", "owner", "shared_prompt").order_by('prompt_name_ru', 'id')
-    ]
-    shared_prompts = [
-        serialize_shared_prompt(sp, ui_language)
-        for sp in SharedPrompt.objects.prefetch_related('programming_languages').filter(Q(mode__isnull=True) | Q(mode=''))
-    ]
+    # Один вызов отдаёт готовые к JSON списки из кэша (ai/services/catalog.py):
+    # запрос идёт на каждое открытие страницы чата/«Реши задачу»/«В чём ошибка».
+    from .services.catalog import language_list, prompt_list, shared_prompt_list, topic_list
 
     return JsonResponse({
-        'languages': languages,
-        'topics': topics,
-        'prompts': prompts,
-        'shared_prompts': shared_prompts,
+        'languages': language_list(),
+        'topics': topic_list(ui_language),
+        'prompts': prompt_list(ui_language),
+        'shared_prompts': shared_prompt_list(ui_language),
     })
 
 
@@ -991,9 +968,27 @@ def asset_view(request, asset_path):
     if not asset_full_path or not os.path.isfile(asset_full_path):
         raise Http404("Asset not found")
 
-    with open(asset_full_path, "rb") as fh:
-        data = fh.read()
-    etag = f'"{hashlib.md5(_ASSET_BOOT_SALT + data).hexdigest()}"'
+    # ETag считается по КОНТЕНТУ (md5 + boot-salt), но результат запоминается
+    # по (путь, mtime_ns, размер, соль): на каждый условный запрос файл больше
+    # не читается и не хэшируется. Соль в ключе — после рестарта (деплоя)
+    # ключи новые, как и сами ETag'и; правка файла на живом процессе меняет
+    # mtime_ns. Значение кэша — готовый валидатор в кавычках.
+    from .services.cache_epochs import cache_key, cached_call
+
+    statobj = os.stat(asset_full_path)
+    etag_cache_key = cache_key(
+        "asset_etag", _ASSET_BOOT_SALT.hex(), asset_full_path,
+        statobj.st_mtime_ns, statobj.st_size,
+    )
+
+    def _compute_etag():
+        digest = hashlib.md5(_ASSET_BOOT_SALT)
+        with open(asset_full_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                digest.update(chunk)
+        return f'"{digest.hexdigest()}"'
+
+    etag = cached_call(etag_cache_key, _compute_etag, 300)
 
     if_none_match = request.META.get("HTTP_IF_NONE_MATCH", "")
     if if_none_match:
@@ -1007,21 +1002,21 @@ def asset_view(request, asset_path):
             not_modified["ETag"] = etag
             not_modified["Cache-Control"] = "no-cache"
             return not_modified
-    else:
-        statobj = os.stat(asset_full_path)
-        if not was_modified_since(
-            request.META.get("HTTP_IF_MODIFIED_SINCE"), statobj.st_mtime
-        ):
-            not_modified = HttpResponseNotModified()
-            not_modified["ETag"] = etag
-            not_modified["Cache-Control"] = "no-cache"
-            return not_modified
+    elif not was_modified_since(
+        request.META.get("HTTP_IF_MODIFIED_SINCE"), statobj.st_mtime
+    ):
+        not_modified = HttpResponseNotModified()
+        not_modified["ETag"] = etag
+        not_modified["Cache-Control"] = "no-cache"
+        return not_modified
 
     content_type, _ = mimetypes.guess_type(asset_path)
-    response = FileResponse(io.BytesIO(data), content_type=content_type)
+    # FileResponse отдаёт файл потоком с диска (wsgi.file_wrapper под Daphne —
+    # sendfile-подобная передача), без чтения всего файла в память.
+    response = FileResponse(open(asset_full_path, "rb"), content_type=content_type)
     response["Cache-Control"] = "no-cache"
     response["ETag"] = etag
-    response["Last-Modified"] = http_date(os.stat(asset_full_path).st_mtime)
+    response["Last-Modified"] = http_date(statobj.st_mtime)
     return response
 
 @require_http_methods(["GET"])

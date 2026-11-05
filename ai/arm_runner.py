@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections
+from django.db.models import Value
+from django.db.models.functions import Coalesce, Length
 from django.utils import timezone
 
 # Хелперы распознавания прозы/кода живут в services/code_carver.py
@@ -355,19 +357,84 @@ def _compose_solve_message(message, task_statement, prog_lang_name, topic_name, 
     return message
 
 
+#: Сентинел вместо условия задачи при вычислении общего префикса. В тексте
+#: промптов/условий он не встречается, поэтому split даёт точную границу
+#: «кэшируемая часть / условие задачи».
+_SOLVE_PREFIX_SENTINEL = "\x00"
+
+
+def _solve_cache_prefix(prog_lang_name, topic_name, ui_language, prompt_id,
+                        file_extension="", prompt=None):
+    """Общий (кэшируемый провайдером) префикс сообщения пары.
+
+    Кэш промпта у провайдеров — ПРЕФИКСНЫЙ: у задач с одинаковым промптом он
+    совпадает ровно до подстановки условия (``{message}``). Рендерим сообщение
+    с сентинелом вместо условия и берём текст до него — так учитываются и
+    ``{language}``/``{topic}``, и ``{message}`` в середине шаблона.
+    """
+    try:
+        rendered = _build_solve_message(
+            _SOLVE_PREFIX_SENTINEL, prog_lang_name, topic_name, ui_language,
+            prompt_id, file_extension=file_extension, prompt=prompt,
+        )
+    except Exception:  # noqa: BLE001 — диагностика не должна ронять прогон
+        logger.exception("ARM batch: префикс промпта не посчитан")
+        return ""
+    return rendered.split(_SOLVE_PREFIX_SENTINEL, 1)[0]
+
+
+def _log_batch_cache_groups(run_id, groups):
+    """Журнал прогона: сколько сообщения реально кэшируется по группам.
+
+    Одна строка на группу задач с общим префиксом (до 5 групп): провайдер
+    кэширует только префикс, поэтому «дешёвая» доля = prefix / всё сообщение.
+    Маленькая доля — сигнал перенести ``{message}`` ближе к концу шаблона;
+    сами промпты не переписываем.
+    """
+    shared = [
+        (gid, group) for gid, group in groups.items() if group["count"] > 1
+    ]
+    shared.sort(key=lambda item: (-item[1]["count"], item[0]))
+    for _gid, group in shared[:5]:
+        avg_chars = group["message_chars"] / max(1, group["count"])
+        pct = int(round(100 * group["prefix_len"] / max(1, avg_chars)))
+        text = (
+            f"Кэш промпта «{group['prompt_name'] or 'без промпта'}»: "
+            f"{group['count']} задач, общий префикс ≈{pct}% сообщения"
+        )
+        if pct < 30:
+            text += (
+                " — условие задачи стоит рано в шаблоне; перенесите "
+                + "{message}"
+                + " ближе к концу, тогда кэшируется весь промпт"
+            )
+        _append_run_log(run_id, text)
+    if len(shared) > 5:
+        _append_run_log(
+            run_id, f"…и ещё {len(shared) - 5} групп задач с общим промптом",
+        )
+
+
 def _build_solve_message(task_statement, prog_lang_name, topic_name, ui_language="Русский", prompt_id=None,
-                         file_extension=""):
+                         file_extension="", prompt=None):
     """Compose the solve prompt for one task.
 
     Промпт берётся только по явному ``prompt_id`` — это pk ``Prompt`` из
     суперпюзерской привязки ArmPromptBinding (mode=solve); ручного выбора и
     fallback'ов (topic-bound Prompt, SharedPrompt mode=solve) больше нет:
     нет привязки → прогон без промпта, только базовая инструкция.
+
+    ``prompt`` — уже загруженный объект ``Prompt`` (снимок прогона): если
+    передан, БД не дёргается. None — прежний путь по ``prompt_id``.
     """
     from .models import Prompt
 
     message = None
-    if prompt_id:
+    if prompt is not None:
+        message = prompt.get_effective_text(
+            ui_language, prog_lang_name, topic_name, task_statement, ""
+        )
+    elif prompt_id:
         try:
             p = Prompt.objects.get(pk=int(prompt_id))
             message = p.get_effective_text(
@@ -2202,17 +2269,100 @@ def _prepare_batch_run(
             "tree_path": task.tree_path or "",
         })
 
-    # Кэш имён промптов для записи в «Решённые задачи» (save_solutions):
-    # предзаполняем всеми используемыми prompt_id ЗДЕСЬ (однопоточно) — в
-    # model-потоках кэш дальше только читается.
-    prompt_name_cache: dict = {}
-    for pid in {tc["prompt_id"] for tc in task_ctxs if tc["prompt_id"]}:
+    # ── Снимок сообщений и кэш-порядок ────────────────────────────────────
+    # Промпт фиксируется на старте прогона: одна сборка сообщения на задачу
+    # вместо сборки на каждую пару (N×M) и защита от правок промпта во время
+    # прогона. «Отладка промтов» исключена: её основной проход передаёт
+    # override, а проверочный цикл обязан перечитывать промпт из БД уже с
+    # закоммиченными правками (иначе проверка шла бы по старому тексту).
+    batch_snapshot = run_type == AIModelTestRun.RUN_TYPE_BATCH
+    prompt_ids = set()
+    for tc in task_ctxs:
         try:
-            pid_int = int(pid)
+            tc["prompt_id"] = int(tc["prompt_id"]) if tc["prompt_id"] else None
         except (TypeError, ValueError):
-            continue
-        if pid_int not in prompt_name_cache:
-            prompt_name_cache[pid_int] = _prompt_display_name(pid_int)
+            tc["prompt_id"] = None
+        if tc["prompt_id"]:
+            prompt_ids.add(tc["prompt_id"])
+    prompts_by_id: dict = {}
+    if prompt_ids:
+        from .models import Prompt
+
+        prompts_by_id = Prompt.objects.select_related("shared_prompt").in_bulk(
+            prompt_ids
+        )
+
+    def _prompt_obj(tc):
+        return prompts_by_id.get(tc["prompt_id"]) if tc["prompt_id"] else None
+
+    if batch_snapshot:
+        for tc in task_ctxs:
+            try:
+                tc["solve_message"] = _build_solve_message(
+                    tc["task"].statement, tc["prog_lang_name"], tc["topic_name"],
+                    ui_language, tc["prompt_id"],
+                    file_extension=tc["effective_ext"], prompt=_prompt_obj(tc),
+                )
+            except Exception:  # noqa: BLE001 — одна задача не должна ронять прогон
+                logger.exception(
+                    "ARM batch: сообщение задачи «%s» не собрано",
+                    tc["task_name"],
+                )
+                _append_run_log(
+                    run_id,
+                    f"«{tc['task_name']}»: промпт не собрался — "
+                    "используется базовая инструкция",
+                )
+                tc["solve_message"] = _build_solve_message(
+                    tc["task"].statement, tc["prog_lang_name"], tc["topic_name"],
+                    ui_language, file_extension=tc["effective_ext"],
+                )
+
+    # Кэш имён промптов для записи в «Решённые задачи» (save_solutions) и
+    # диагностики: из уже загруженных объектов, без запроса на каждый pk.
+    prompt_name_cache: dict = {
+        pid: (obj.prompt_name_ru or "") for pid, obj in prompts_by_id.items()
+    }
+    for tc in task_ctxs:
+        pid = tc["prompt_id"]
+        if pid and pid not in prompt_name_cache:
+            prompt_name_cache[pid] = _prompt_display_name(pid)
+
+    # Точная группировка по общему префиксу: провайдер кэширует только
+    # префикс, поэтому задачи одной группы должны идти подряд — иначе тёплый
+    # кэш темы вытесняется задачами других тем. Только batch: у «Отладки
+    # промтов» порядок попыток и проверки задаётся своей логикой.
+    execution_ctxs = task_ctxs
+    if batch_snapshot:
+        prefix_to_group: dict = {}
+        cache_groups: dict = {}
+        for tc in task_ctxs:
+            prefix = _solve_cache_prefix(
+                tc["prog_lang_name"], tc["topic_name"], ui_language,
+                tc["prompt_id"], tc["effective_ext"], prompt=_prompt_obj(tc),
+            )
+            gid = prefix_to_group.get(prefix)
+            if gid is None:
+                gid = len(prefix_to_group)
+                prefix_to_group[prefix] = gid
+                cache_groups[gid] = {
+                    "count": 0,
+                    "prefix_len": len(prefix),
+                    "message_chars": 0,
+                    "prompt_name": prompt_name_cache.get(tc["prompt_id"]) or "",
+                }
+            tc["cache_group"] = gid
+            group = cache_groups[gid]
+            group["count"] += 1
+            group["message_chars"] += len(tc.get("solve_message") or "") or (
+                len(prefix) + len(tc["task"].statement or "")
+            )
+
+        # Порядок выполнения: стабильная сортировка по группе (внутри группы —
+        # исходный порядок). task_ctxs не мутируем: отображение, прогресс и
+        # отчёт остаются в прежнем порядке.
+        execution_ctxs = sorted(task_ctxs, key=lambda tc: tc.get("cache_group", 0))
+        _log_batch_cache_groups(run_id, cache_groups)
 
     return {
         "run_id": run_id,
@@ -2230,6 +2380,9 @@ def _prepare_batch_run(
         "test_run": test_run,
         "log": log,
         "task_ctxs": task_ctxs,
+        # Порядок обхода задач моделью: подряд по общему префиксу промпта
+        # (кэш провайдера). Остальные потребители читают task_ctxs.
+        "execution_ctxs": execution_ctxs,
         "prompt_name_cache": prompt_name_cache,
         "rerun_pairs": rerun_pairs,
         "start_time": start_time,
@@ -2663,6 +2816,11 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
         # «Отладка промтов» подкладывает готовое сообщение с дополнениями
         # промпта (все гейты пары ниже переиспользуются как есть).
         message = task_ctx.get("solve_message_override")
+        if not message:
+            # Снимок batch-прогона: промпт зафиксирован на старте (одна сборка
+            # на задачу вместо сборки на пару). У «Отладки промтов» снимка нет
+            # намеренно — проверочный проход обязан видеть свежие правки из БД.
+            message = task_ctx.get("solve_message")
         if not message:
             message = _build_solve_message(
                 task.statement, prog_lang_name, topic_name, ctx["ui_language"], task_prompt_id,
@@ -3531,6 +3689,10 @@ def _run_prompt_debug_attempts(ctx, task_ctx, model, dl_lock, prompt, payload, s
             "attempt": attempt,
             "verdict": item.get("verdict") or _VERDICT_FAILED,
             "dl_comment": (item.get("dl_comment") or "")[:2000],
+            # Вход/эталон проваленного теста — те же данные, что уходят
+            # редактору промпта (build_debug_message): в карточке видно, НА
+            # каком именно входе модель ошиблась в этой попытке.
+            "test_data": item.get("dl_test_data") or [],
             "addition": "",
             "applied": False,
         })
@@ -3765,6 +3927,9 @@ def _attach_prompt_debug_verification(ctx, model, task_ctx, item):
     payload["verification"] = {
         "verdict": item.get("verdict") or _VERDICT_FAILED,
         "dl_comment": (item.get("dl_comment") or "")[:2000],
+        # Провал проверки тоже показываем с входом/эталоном — иначе видно
+        # только «не решено», без того, на чём именно.
+        "test_data": item.get("dl_test_data") or [],
     }
     usage = payload.get("usage") or {"duration": 0.0, "tokens": 0, "prompt_tokens": 0}
     _accumulate_usage(
@@ -4053,7 +4218,9 @@ def _run_batch_model_loop(ctx, model, model_index, dl_lock):
     run_id = ctx["run_id"]
     processor = _PAIR_PROCESSORS.get(ctx.get("run_type"), _process_batch_pair)
     try:
-        for task_ctx in ctx["task_ctxs"]:
+        # execution_ctxs — тот же набор задач, сгруппированный по общему
+        # префиксу промпта (кэш провайдера); порядок прогресса/отчёта не важен.
+        for task_ctx in ctx.get("execution_ctxs") or ctx["task_ctxs"]:
             # Перезапуск: у задачи фиксированный список моделей (только
             # нерешённые пары) — остальные модели пропускаются.
             if ctx["rerun_pairs"] is not None and model["key"] not in (
@@ -4379,10 +4546,16 @@ def _batch_results_from_db(test_run, light=False):
     """
     if light:
         results = []
-        rows = test_run.results.values(
+        # dl_test_data в снапшот НЕ тянем: это JSON-поле с входными/эталонными
+        # данными проваленного теста, самое тяжёлое в строке. Наружу нужно
+        # только «есть ли данные» — считаем длину на стороне БД (индекс
+        # (run, -updated_at, -pk) отдаёт строки без чтения TOAST-поля).
+        rows = test_run.results.annotate(
+            dl_test_data_len=Coalesce(Length("dl_test_data"), Value(0)),
+        ).values(
             "pk", "model_key", "model_title", "duration_seconds", "tokens",
             "tokens_prompt", "status", "verdict", "failure_reason",
-            "dl_queue_id", "dl_file_name", "dl_test_data", "dl_comment",
+            "dl_queue_id", "dl_file_name", "dl_test_data_len", "dl_comment",
             "file_extension_snapshot", "delta_id", "delta_name",
             "topic_name_snapshot", "topic_id_snapshot", "prog_lang_snapshot",
             "truncated", "prompt_id", "prompt_name", "prompt_debug",
@@ -4414,7 +4587,7 @@ def _batch_results_from_db(test_run, light=False):
                 # лёгкий снапшот не берём — он грузится с телом результата).
                 "dl_test_number": _dl_failed_test_number(r["dl_comment"] or ""),
                 # Данные проваленного теста грузятся вместе с телом (body-эндпоинт).
-                "has_test_data": bool(r["dl_test_data"]),
+                "has_test_data": bool(r["dl_test_data_len"]),
                 "delta_id": r["delta_id"] or 0,
                 "delta_name": r["delta_name"] or "",
                 "file_extension": r["file_extension_snapshot"] or (r["task__file_extension"] or ""),

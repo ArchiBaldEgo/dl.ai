@@ -108,6 +108,9 @@
   </form>
   {% endif %}
 
+  {# Результаты фильтра (таблица/пустое состояние) — заменяются AJAX'ом. #}
+  {# Сама форма фильтров и форма создания таска остаются на месте. #}
+  <div id="ai-tasks-results">
   {% if rows %}
   {% if active_kind == 'closed' %}
   {# Архив «Закрытые»: тип таска, кто дал (создал), кто выполнил (взял), даты; возврат на доску. #}
@@ -229,9 +232,11 @@
       {% if active_kind == 'wish' %}Хотелок пока нет.{% elif active_kind == 'mine' %}Вы пока не взяли ни одного таска — возьмите его со «Фронта работы» или из «Хотелок».{% elif active_kind == 'unclaimed' %}Свободных тасков на фронте нет — всё либо взято, либо закрыто.{% elif active_kind == 'search' %}Ничего не найдено.{% elif active_kind == 'closed' %}Закрытых тасков по этим фильтрам нет{% if closed_from or closed_to or closed_kind or closed_done_by %} — измените фильтры или сбросьте их{% endif %}.{% else %}Пока тасков нет.{% endif %}{% if can_create and active_kind != 'search' and active_kind != 'closed' %} Создайте первый таск формой выше.{% endif %}
     </p>
   {% endif %}
+  </div>
 </div>
 
 {# Состояние страницы (прокрутка, черновик формы, фильтры) — общий хелпер. #}
 <script src="{% static 'admin/js/ai_page_state.js' %}"></script>
+<script src="{% static 'admin/js/ai_ajax_filters.js' %}"></script>
 <script src="{% static 'admin/ai/tasks/index.js' %}"></script>
 {% endblock %}

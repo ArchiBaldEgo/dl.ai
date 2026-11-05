@@ -618,10 +618,18 @@ class AIAdminSite(admin.AdminSite):
         """
         from ..models import AIAppSettings
 
-        try:
-            pk = AIAppSettings.objects.values_list("pk", flat=True).first()
-        except Exception:  # например, таблица ещё не создана при migrate
-            return "/ai/admin/ai/aiappsettings/"
+        def _resolve_pk():
+            try:
+                return AIAppSettings.objects.values_list("pk", flat=True).first()
+            except Exception:  # например, таблица ещё не создана при migrate
+                return None
+
+        from ..services.cache_epochs import cached_call
+
+        # Навигация строится на КАЖДУЮ страницу админки, а pk синглтона меняется
+        # только при создании/удалении строки — держим 300 с и сбрасываем ключ
+        # из AIAppSettings.save()/delete().
+        pk = cached_call(AIAppSettings.NAV_URL_CACHE_KEY, _resolve_pk, 300)
         if pk:
             return f"/ai/admin/ai/aiappsettings/{pk}/change/"
         return "/ai/admin/ai/aiappsettings/"
