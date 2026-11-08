@@ -112,13 +112,27 @@ button:hover {
 
 .voice-mode-btn {
     margin: 0;
-    height: 32px;
-    padding: 0 12px;
-    font-size: 13px;
-    display: flex;
+    height: 36px;
+    padding: 0 16px;
+    font-size: 14px;
+    display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
     white-space: nowrap;
+    box-sizing: border-box;
+    border-radius: 8px;
+    background-color: #007BFF;
+    color: white;
+    border: none;
+    cursor: pointer;
+    box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+    transition: background-color 0.3s ease;
+    font-weight: normal !important;
+}
+
+.voice-mode-btn:hover {
+    background-color: #0056b3;
 }
 
 .voice-mode-btn::after {
@@ -479,48 +493,23 @@ form {
 }
 
 /* Принудительно применяем стили кнопки-тетрадки к кнопке подсказок (ai-wizard-restart) */
-#ai-wizard-restart {
+#ai-wizard-restart,
+button#ai-wizard-restart {
     display: inline-flex !important;
     align-items: center !important;
     justify-content: center !important;
-    width: 38px !important;
-    height: 38px !important;
+    width: 36px !important;
+    height: 36px !important;
     padding: 0 !important;
-    margin: 0 0 0 4px !important;
+    margin: 0 !important;
     flex-shrink: 0 !important;
-    background-color: var(--bg-toggle, rgb(207, 205, 205)) !important;
+    background-color: var(--bg-toggle, rgb(207, 205, 205)) !important; 
     color: var(--text-primary, #333) !important;
     border: 1px solid var(--border, #ccc) !important;
     border-radius: 8px !important;
     box-shadow: none !important;
     cursor: pointer !important;
-    font-size: 18px !important;
-    font-weight: 700 !important;
-    line-height: 1 !important;
-    transition: background-color 0.2s ease !important;
-    vertical-align: middle !important;
-}
-
-#ai-wizard-restart:hover {
-    background-color: var(--bg-toggle-hover, rgb(119, 119, 119)) !important;
-}
-
-/* Принудительно применяем стили кнопки-тетрадки к кнопке подсказок (ai-wizard-restart) */
-#ai-wizard-restart {
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    width: 32px !important;
-    height: 32px !important;
-    padding: 0 !important;
-    margin: 0 0 0 4px !important;
-    flex-shrink: 0 !important;
-    background-color: var(--bg-toggle, rgb(207, 205, 205)) !important;
-    color: var(--text-primary, #333) !important;
-    border: 1px solid var(--border, #ccc) !important;
-    border-radius: 8px !important;
-    box-shadow: none !important;
-    cursor: pointer !important;
+    font-family: 'Roboto', sans-serif !important;
     font-size: 18px !important;
     font-weight: 700 !important;
     line-height: 1 !important;
@@ -529,6 +518,8 @@ form {
     box-sizing: border-box !important;
 }
 
-#ai-wizard-restart:hover {
+#ai-wizard-restart:hover,
+button#ai-wizard-restart:hover {
     background-color: var(--bg-toggle-hover, rgb(119, 119, 119)) !important;
+    color: var(--text-primary, #333) !important;
 }
