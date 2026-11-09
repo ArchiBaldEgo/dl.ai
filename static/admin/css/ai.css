@@ -751,3 +751,54 @@ button#ai-wizard-restart:hover {
     padding-bottom: 0 !important;
     line-height: 1 !important; 
 }
+/* PDF-вложение в чате (chat.html: #pdfAttach). Кнопка не растягивается
+   правилом .dv button { flex: 1 1 0% } — она узкая и прижата влево. */
+.pdf-attach {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 6px 0;
+    min-height: 30px;
+}
+
+.pdf-attach[hidden] {
+    display: none !important;
+}
+
+.pdf-attach-btn,
+.pdf-attach-clear {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    height: 30px !important;
+    padding: 0 10px !important;
+    font-size: 14px !important;
+    line-height: 1 !important;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+}
+
+.pdf-attach-clear {
+    padding: 0 8px !important;
+}
+
+.pdf-attach-btn:disabled {
+    opacity: .5;
+    cursor: not-allowed;
+}
+
+.pdf-attach-status {
+    font-size: 13px;
+    opacity: .85;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.pdf-attach-status.is-error {
+    color: #c0392b;
+    opacity: 1;
+}

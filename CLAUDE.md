@@ -46,6 +46,9 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   - входные/эталонные данные DL-тестов (нормализация `\r\n`, обрезка, разбор
     сохранённых снапшотов) → `ai/services/dl_test_data.py` (единственный владелец;
     ARM и «Реши задачу» импортируют оттуда);
+  - загрузка PDF в чат (строгая валидация magic/активного содержимого,
+    извлечение только текста, гейт «только модель со зрением») →
+    `ai/services/pdf_upload.py`;
   - доступ к личным AI-моделям (свои/shared/public, поиск получателя, правка
     доступа суперюзером) → `ai/services/user_models.py` + `ai/services/
     user_directory.py` (DL-id/ФИО); ключи/endpoint'ы чужих моделей суперюзеру
@@ -99,7 +102,9 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   целиком; JS на делегировании).
 - Онбординг-wizard — `ai/services/onboarding.py` + движок `static/admin/js/ai-wizard.js`;
   правило «каждый видел тур», бамп `WIZARD_VERSION` — gotchas-deep.
-- Templates: `ai/templates/ai/` (юзер-страницы), `ai/templates/admin/ai/` (админка); статик
+- Templates: `ai/templates/ai/` (юзер-страницы; шапка всех клиентских страниц —
+  единый partial `_top_panel.html`, активный режим — контекст `active_page`),
+  `ai/templates/admin/ai/` (админка); статик
   в `static/admin/js/`: `chat_template.js` (только чат), `decide_task.js`/`find_error.js`
   self-contained, `ai_processes.js` (меню «Процессы» через `admin/base_site.html`),
   `test_console.js`.

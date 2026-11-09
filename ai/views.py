@@ -70,6 +70,12 @@ from .services.user_models import (
     user_model_rows,
 )
 from .services.user_directory import search_users_for_sharing
+from .services.pdf_upload import (
+    PdfValidationError,
+    max_size_mb as pdf_max_size_mb,
+    pdf_supports_vision,
+    validate_pdf_upload,
+)
 from .services.onboarding import (
     MARK_URL_USER,
     record_wizard_seen,
@@ -383,7 +389,31 @@ def _ai_disabled_reason(request):
     return ai_disabled_reason(request)
 
 
-def _render_ai_page(request, template_name, extra_context=None, wizard_scope=None):
+def _user_wizard_payload(request, scope):
+    """Конфиг онбординг-тура клиентской страницы (ai/services/onboarding.py).
+
+    Решение «показывать ли» принимает сервис по флагу в БД; шаблон рендерит
+    конфиг через json_script, ai-wizard.js читает его с DOM. Роль нужна движку
+    для ролевых шагов (prompt_dev/staff/super видят шаг про админ-панель),
+    basics_seen — были ли уже показаны «общие» шаги в туре другой страницы.
+    """
+    user = request.user
+    if getattr(user, "is_superuser", False):
+        role = "super"
+    elif getattr(user, "is_staff", False):
+        role = "staff"
+    elif is_prompt_developer_user(user):
+        role = "prompt_dev"
+    else:
+        role = ""
+    return wizard_boot_payload(
+        user, scope, mark_url=MARK_URL_USER,
+        role=role, basics_seen=user_basics_seen(user, scope),
+    )
+
+
+def _render_ai_page(request, template_name, extra_context=None,
+                    wizard_scope=None, active_page=""):
     """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
 
     Проверяет доступ, загружает список доступных моделей (с self-heal при пустом
@@ -395,6 +425,10 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
     wizard_scope — scope онбординг-wizard для этой страницы (ai/services/
     onboarding.py); с ним в контекст попадает конфиг тур-подсказок
     (ai_wizard → json_script в base_chat.html).
+
+    active_page — какой пункт #selectType подсветить в общей верхней панели
+    (ai/_top_panel.html): "chat"/"solve"/"find_error". Пусто — ни один
+    (например, «Мои AI-модели»).
     """
     if not _has_page_access(request):
         return _deny_access(request, as_json=False)
@@ -500,28 +534,13 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         # Кнопка «Админ-Панель» в верхней панели — только тем, кому админка
         # реально доступна (super/staff/page.admin: «Разработчик промптов»+).
         'can_access_admin': can_access_admin(request.user),
+        'active_page': active_page,
+        # Лимит PDF — один источник (ai/services/pdf_upload.py) для сервера
+        # и клиентской предпроверки размера.
+        'pdf_max_size_mb': pdf_max_size_mb(),
     }
     if wizard_scope:
-        # Онбординг-wizard этой страницы: решение «показывать ли» принимает
-        # сервис по флагу в БД (ai/services/onboarding.py), шаблон рендерит его
-        # через json_script — ai-wizard.js конфиг читает с DOM. Роль отдаётся
-        # движку для ролевых шагов (prompt_dev/staff/super видят шаг про
-        # админ-панель), basics_seen — были ли уже показаны «общие» шаги в туре
-        # другой страницы (режут они только common-шаги solve/find_error; чат
-        # всегда полный).
-        user = request.user
-        if getattr(user, "is_superuser", False):
-            role = "super"
-        elif getattr(user, "is_staff", False):
-            role = "staff"
-        elif is_prompt_developer_user(user):
-            role = "prompt_dev"
-        else:
-            role = ""
-        context["ai_wizard"] = wizard_boot_payload(
-            user, wizard_scope, mark_url=MARK_URL_USER,
-            role=role, basics_seen=user_basics_seen(user, wizard_scope),
-        )
+        context["ai_wizard"] = _user_wizard_payload(request, wizard_scope)
     if extra_context:
         context.update(extra_context)
     response = render(request, template_name, context)
@@ -670,6 +689,7 @@ def chat_view(request):
         'ai/chat.html',
         extra_context={"node_id": request.GET.get("nid", "")},
         wizard_scope="chat",
+        active_page="chat",
     )
 
 
@@ -682,6 +702,7 @@ def decide_task_view(request):
             "node_id": request.GET.get("nid", ""),
         },
         wizard_scope="solve",
+        active_page="solve",
     )
 
 
@@ -697,6 +718,7 @@ def find_error_view(request):
         'ai/find-error.html',
         extra_context={"node_id": request.GET.get("nid", "")},
         wizard_scope="find_error",
+        active_page="find_error",
     )
 
 
@@ -747,6 +769,14 @@ def my_models_view(request):
             # Все языки панели — для переключения языка на клиенте
             # (JS-апплаер перерисовывает подписи при смене #selectLang).
             "um_i18n": user_models_strings_all(),
+            # Общая верхняя панель: режим не подсвечен (это не чат/реши/ошибка),
+            # но шапка та же — и свой онбординг-тур по панели личных моделей.
+            "active_page": "",
+            "ai_wizard": _user_wizard_payload(request, "my_models"),
+            # Поля шапки, которые раньше передавали только страницы чата:
+            # выбранный язык и дата последнего обновления.
+            "saved_lang": ui_lang,
+            "last_update_date": _get_last_update_date(),
         },
     )
 
@@ -1548,6 +1578,31 @@ def transcribe_audio(request):
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         return JsonResponse({'success': False, 'error': str(e)})
+
+
+@require_http_methods(["POST"])
+def upload_pdf_view(request):
+    """Загрузка PDF в чат: строгая проверка + извлечение только текста.
+
+    Доступно любому пользователю страниц чата (_has_page_access, как у страниц),
+    НО только для модели со зрением: ключ модели приходит в POST ``model`` и
+    перепроверяется на сервере (реестр/личная модель). Извлечённый текст уходит
+    в браузер и затем в WS-payload; сам файл не сохраняется.
+    """
+    if not _has_page_access(request):
+        return _deny_access(request, as_json=True)
+    if not _is_ai_app_enabled():
+        return JsonResponse({"ok": False, "code": "pdf_bad"}, status=404)
+    model_key = str(request.POST.get("model") or "").strip()
+    if not pdf_supports_vision(model_key, request.user):
+        return JsonResponse(
+            {"ok": False, "code": "pdf_requires_vision"}, status=403,
+        )
+    try:
+        info = validate_pdf_upload(request.FILES.get("file"))
+    except PdfValidationError as exc:
+        return JsonResponse({"ok": False, "code": exc.code}, status=400)
+    return JsonResponse({"ok": True, **info})
 
 
 @require_http_methods(["GET"])

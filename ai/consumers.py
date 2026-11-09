@@ -17,6 +17,7 @@ from .constants import MOSCOW_TZ
 from .i18n import ws_text
 from .model_clients import registry
 from .model_clients.exceptions import humanize_model_error
+from .services.pdf_upload import pdf_supports_vision, sanitize_filename
 from .services import (
     LogWriter,
     MessageComposer,
@@ -283,6 +284,21 @@ class MyConsumer(AsyncWebsocketConsumer):
         language = data.get("language", "Russian")
         model_key = data.get("value", "DeepSeek_R1")
 
+        # PDF — только в чате и только моделям со зрением. Проверка на сервере
+        # обязательна: клиентский гейт (data-vision) обходится правкой JS.
+        # В модель уходит лишь текст, извлечённый /ai/api/pdf/.
+        pdf_info = data.get("pdf")
+        if pdf_info:
+            if message_type != "1" or not isinstance(pdf_info, dict):
+                await self.send(text_data=_with_status(
+                    ws_text(language, "pdf_chat_only"), "error"))
+                return
+            vision_ok = await sync_to_async(pdf_supports_vision)(model_key, self.user)
+            if not vision_ok:
+                await self.send(text_data=_with_status(
+                    ws_text(language, "pdf_requires_vision"), "error"))
+                return
+
         prog_lng_id = data.get("progLng") if message_type in ("2", "3") else None
         topic_id = data.get("topic") if message_type in ("2", "3") else None
         prompt_id = data.get("preprompt")
@@ -327,9 +343,20 @@ class MyConsumer(AsyncWebsocketConsumer):
         message, log_mode = await self.composer.compose(compose_data, getattr(self, "old_language", None))
         self.old_language = language
 
+        # В ленте «Вы: …» не показываем извлечённый текст PDF (иначе он
+        # вываливается в чат простынёй) — только сообщение и имя файла.
+        display_message = message
+        if pdf_info:
+            raw_message = str(data.get("message") or "").strip()
+            display_message = "\n".join(filter(None, [
+                raw_message,
+                f"📄 {sanitize_filename(pdf_info.get('name'))}",
+            ]))
+
         start_time = timezone.now()
         start_str = timezone.localtime(start_time, MOSCOW_TZ).strftime("%H:%M:%S")
-        await self.send(text_data=self.formatter.format_user_processing(start_str, message, language))
+        await self.send(text_data=self.formatter.format_user_processing(
+            start_str, display_message, language))
 
         identity = self._get_identity_for_log()
         log = await self.log_writer.create(

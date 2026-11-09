@@ -1902,6 +1902,199 @@ class ModelCapabilitiesTests(SimpleTestCase):
                 self.assertIsInstance(value, bool)
 
 
+class PdfUploadServiceTests(SimpleTestCase):
+    """Строгая загрузка PDF: magic-байты, шифрование, активное содержимое, текст."""
+
+    @staticmethod
+    def _blank_pdf(encrypt=None, open_action=False):
+        import io
+        from pypdf import PdfWriter
+        from pypdf.generic import DictionaryObject, NameObject
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=200)
+        if open_action:
+            writer._root_object[NameObject("/OpenAction")] = DictionaryObject()
+        if encrypt:
+            writer.encrypt(encrypt)
+        buffer = io.BytesIO()
+        writer.write(buffer)
+        return buffer.getvalue()
+
+    @staticmethod
+    def _upload(name, data, content_type="application/pdf"):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        return SimpleUploadedFile(name, data, content_type=content_type)
+
+    def test_rejects_non_pdf_extension_and_magic(self):
+        from ai.services.pdf_upload import PdfValidationError, validate_pdf_upload
+
+        with self.assertRaises(PdfValidationError) as ctx:
+            validate_pdf_upload(self._upload("doc.txt", b"%PDF-1.3\n%%EOF"))
+        self.assertEqual(ctx.exception.code, "pdf_only")
+
+        with self.assertRaises(PdfValidationError) as ctx:
+            validate_pdf_upload(self._upload("doc.pdf", b"<html>hello</html>"))
+        self.assertEqual(ctx.exception.code, "pdf_only")
+
+    def test_rejects_encrypted_pdf(self):
+        from ai.services.pdf_upload import PdfValidationError, validate_pdf_upload
+
+        with self.assertRaises(PdfValidationError) as ctx:
+            validate_pdf_upload(self._upload("secret.pdf", self._blank_pdf(encrypt="pw")))
+        self.assertEqual(ctx.exception.code, "pdf_encrypted")
+
+    def test_rejects_active_content(self):
+        from ai.services.pdf_upload import PdfValidationError, validate_pdf_upload
+
+        with self.assertRaises(PdfValidationError) as ctx:
+            validate_pdf_upload(self._upload("bad.pdf", self._blank_pdf(open_action=True)))
+        self.assertEqual(ctx.exception.code, "pdf_active_content")
+
+    def test_blank_pdf_has_no_text(self):
+        from ai.services.pdf_upload import PdfValidationError, validate_pdf_upload
+
+        with self.assertRaises(PdfValidationError) as ctx:
+            validate_pdf_upload(self._upload("blank.pdf", self._blank_pdf()))
+        self.assertEqual(ctx.exception.code, "pdf_no_text")
+
+    def test_rejects_oversized_upload(self):
+        from django.test import override_settings
+
+        from ai.services.pdf_upload import PdfValidationError, validate_pdf_upload
+
+        data = self._blank_pdf()
+        with override_settings(AI_PDF_MAX_SIZE_MB=0):
+            with self.assertRaises(PdfValidationError) as ctx:
+                validate_pdf_upload(self._upload("big.pdf", data))
+        self.assertEqual(ctx.exception.code, "pdf_too_large")
+
+    def test_sanitizes_filename_and_text(self):
+        from ai.services.pdf_upload import sanitize_filename, sanitize_text
+
+        self.assertEqual(sanitize_filename("../../etc/pass\x00wd.pdf"), "passwd.pdf")
+        self.assertEqual(sanitize_text("A\x00B\r\n\r\n\r\nC  \nD"), "AB\n\nC\nD")
+
+    def test_build_pdf_block_is_localized_and_capped(self):
+        from ai.services.pdf_upload import build_pdf_block, sanitize_text
+
+        pdf = {"name": "lecture.pdf", "pages": 3, "text": "Hello\x00 world", "truncated": False}
+        self.assertIn("Содержимое PDF-файла", build_pdf_block(pdf, "Russian"))
+        self.assertIn("PDF file content", build_pdf_block(pdf, "English"))
+        self.assertIn("Contenu du fichier PDF", build_pdf_block(pdf, "French"))
+        self.assertEqual(
+            build_pdf_block({"name": "x.pdf", "text": "  \x00  "}, "Russian"), "",
+        )
+        self.assertEqual(sanitize_text("ok"), "ok")
+
+    def test_pdf_supports_vision_uses_registry(self):
+        from ai.services.pdf_upload import pdf_supports_vision
+
+        self.assertTrue(pdf_supports_vision("Ollama_Gemma_4_Cloud"))
+        self.assertFalse(pdf_supports_vision("Ollama_DeepSeek_V4_Pro_Cloud"))
+        self.assertFalse(pdf_supports_vision("does_not_exist"))
+        self.assertFalse(pdf_supports_vision(""))
+        # Личная модель без пользователя не резолвится.
+        self.assertFalse(pdf_supports_vision("User_1"))
+
+
+class PdfComposerTests(SimpleTestCase):
+    """PDF-блок добавляется к сообщению чата, но не подменяет его."""
+
+    class _Resolver:
+        async def resolve_text(self, *args, **kwargs):
+            return "SYSTEM"
+
+    def _build(self, data):
+        import asyncio
+
+        from ai.services.message_composer import ChatModeBuilder
+
+        return asyncio.run(ChatModeBuilder().build(data, self._Resolver()))
+
+    def test_pdf_block_appended_after_user_message(self):
+        message = self._build({
+            "message": "Что здесь написано?",
+            "language": "Russian",
+            "pdf": {"name": "doc.pdf", "pages": 2, "text": "PDF TEXT", "truncated": False},
+        })
+        self.assertTrue(message.startswith("Что здесь написано?"))
+        self.assertIn("[Содержимое PDF-файла: doc.pdf (2 стр.)]", message)
+        self.assertIn("PDF TEXT", message)
+
+    def test_pdf_block_survives_preprompt(self):
+        message = self._build({
+            "message": "Hi",
+            "language": "English",
+            "preprompt": "42",
+            "pdf": {"name": "doc.pdf", "pages": 1, "text": "PDF TEXT"},
+        })
+        self.assertIn("PDF file content", message)
+        self.assertIn("Preprompt: SYSTEM", message)
+        self.assertLess(message.index("PDF TEXT"), message.index("Preprompt: SYSTEM"))
+
+    def test_empty_pdf_is_ignored(self):
+        message = self._build({"message": "Hi", "language": "English", "pdf": {"text": ""}})
+        self.assertEqual(message, "Hi")
+
+
+class TopPanelIncludeTests(SimpleTestCase):
+    """Шапка — единый partial; активный пункт режима берётся из active_page."""
+
+    @staticmethod
+    def _render(active_page, **extra):
+        from django.template.loader import render_to_string
+
+        context = {
+            "active_page": active_page,
+            "saved_lang": "Russian",
+            "t": {},
+            "available_models": [],
+            "user_models_options": [],
+            "shared_user_models": [],
+            "public_user_models": [],
+            "last_update_date": None,
+        }
+        context.update(extra)
+        return render_to_string("ai/_top_panel.html", context)
+
+    def test_active_page_marks_only_its_mode(self):
+        self.assertIn('/ai/chat/" selected', self._render("chat"))
+        self.assertNotIn('/ai/solve-problem/" selected', self._render("chat"))
+        self.assertIn('/ai/solve-problem/" selected', self._render("solve"))
+        self.assertIn('/ai/find-error/" selected', self._render("find_error"))
+        panel = self._render("my_models")
+        self.assertNotIn('/ai/chat/" selected', panel)
+        self.assertNotIn('/ai/solve-problem/" selected', panel)
+        self.assertNotIn('/ai/find-error/" selected', panel)
+
+    def test_model_option_carries_vision_flag_for_client_gate(self):
+        from ai.model_clients import registry
+
+        model = {
+            "key": "Ollama_Gemma_4_Cloud",
+            "title": "Ollama Gemma 4",
+            "capabilities": registry.capabilities("Ollama_Gemma_4_Cloud"),
+        }
+        panel = self._render(
+            "chat",
+            available_models=[model],
+            other_models=[model],
+            default_model_key=model["key"],
+        )
+        self.assertIn('id="selectLang"', panel)
+        self.assertIn('id="selectType"', panel)
+        self.assertIn('data-vision="1"', panel)
+
+    def test_user_model_option_uses_supports_vision(self):
+        panel = self._render(
+            "chat",
+            user_models_options=[{"key": "User_1", "title": "Mine", "supports_vision": True}],
+        )
+        self.assertIn('data-vision="1"', panel)
+
+
 class ArmReportTests(SimpleTestCase):
     """ТЗ D: _build_summary / _build_report aggregation and ordering."""
 
@@ -6787,16 +6980,24 @@ class OllamaRegistryTests(SimpleTestCase):
         "Ollama_MiniMax_M3_1_Flash_Cloud",
     ]
 
-    # gpt-oss:cloud (harmony) и minimax-m3.1-flash:cloud стримят отдельное поле
-    # thinking → reasoning-модели.
-    REASONING_KEYS = {
-        "Ollama_Gpt_Oss_20B_Cloud",
-        "Ollama_Gpt_Oss_120B_Cloud",
+    # Все Ollama-модели в наборе умеют thinking (reasoning).
+    REASONING_KEYS = set(OLLAMA_KEYS)
+    # Мультимодальные (изображения/видео) — по документации ollama.com/library.
+    VISION_KEYS = {
+        "Ollama_Glm_5_3_Flash_Cloud",
+        "Ollama_DeepSeek_V4_1_Flash_Cloud",
+        "Ollama_Gemma_4_Cloud",
+        "Ollama_Kimi_K2_7_Code_Cloud",
+        "Ollama_Kimi_K2_6_Cloud",
         "Ollama_MiniMax_M3_1_Flash_Cloud",
     }
 
     def _expected_caps(self, key):
-        return {"text": True, "vision": False, "reasoning": key in self.REASONING_KEYS}
+        return {
+            "text": True,
+            "vision": key in self.VISION_KEYS,
+            "reasoning": key in self.REASONING_KEYS,
+        }
 
     def test_registry_contains_ollama_models(self):
         from ai.model_clients import registry, ollama
@@ -17317,6 +17518,8 @@ class OnboardingServiceTests(TestCase):
             "admin_test_data",
         ):
             self.assertTrue(scope_name_valid(page_scope))
+        # Клиентская страница «Мои AI-модели» — свой тур по шапке и панели.
+        self.assertTrue(scope_name_valid("my_models"))
         self.assertFalse(scope_name_valid("admin"))
         self.assertFalse(scope_name_valid("nope"))
         self.assertFalse(scope_name_valid(None))
@@ -20030,7 +20233,10 @@ class ClientStatsGatingTests(SimpleTestCase):
         self.assertGreaterEqual(js.count("updateScopedModelStats();"), 4)
 
     def test_base_chat_keeps_sort_data_attrs(self):
-        tpl = self._read("ai", "templates", "ai", "base_chat.html")
+        # Шапка вынесена в общий partial — проверяем её вместе с базовым
+        # шаблоном (base_chat только подключает _top_panel.html).
+        tpl = self._read("ai", "templates", "ai", "base_chat.html") + self._read(
+            "ai", "templates", "ai", "_top_panel.html")
         self.assertIn("data-avg-seconds", tpl)
         self.assertIn("data-percent-solved", tpl)
         self.assertIn("selectModelSort", tpl)
@@ -20325,8 +20531,11 @@ class ChatThinkToggleStaticTests(TestCase):
             return fh.read()
 
     def test_button_in_shared_header(self):
-        """"Кнопка в общей шапке base_chat.html — по ней достаются все 3 страницы."""
-        src = self._read("ai", "templates", "ai", "base_chat.html")
+        """Кнопка в общей шапке (_top_panel.html) — по ней достаются все 3 страницы."""
+        base = self._read("ai", "templates", "ai", "base_chat.html")
+        src = self._read("ai", "templates", "ai", "_top_panel.html")
+        # Шапка подключается базовым шаблоном, а не дублируется в нём.
+        self.assertIn('{% include "ai/_top_panel.html" %}', base)
         self.assertIn('id="thinkToggleBtn"', src)
         self.assertIn('class="think-toggle"', src)
         self.assertIn("hidden", src)

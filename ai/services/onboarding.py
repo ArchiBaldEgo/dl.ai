@@ -33,6 +33,7 @@ SCOPES = (
     "chat",
     "solve",
     "find_error",
+    "my_models",
     "admin_pd",
     "admin_staff",
     "admin_super",
