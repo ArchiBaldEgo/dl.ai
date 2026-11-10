@@ -734,8 +734,8 @@ def admin_arm_solve_refresh_task_statuses_view(request):
         )
 
     # Время ответа видно в логах: внешний nginx на dl.gsu.by держит дефолтный
-    # proxy_read_timeout 60 с и на более долгий запрос отдаёт HTML 504 (клиент
-    # раньше показывал его как «сессия истекла»).
+    # proxy_read_timeout 60 с и на более долгий запрос отдаёт HTML 504 — по логу
+    # видно, приближаемся ли мы к этому потолку.
     elapsed = time.monotonic() - started
     log = logger.warning if elapsed >= 30 else logger.info
     log(

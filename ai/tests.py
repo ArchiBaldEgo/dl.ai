@@ -10991,6 +10991,26 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         # держит дефолтный proxy_read_timeout 60 с).
         self.assertIn("HTTP ' + response.status", src)
 
+    def test_read_json_script_ids_exist_in_template(self):
+        """Каждый `readJsonScript('id')` обязан иметь `json_script:"id"` в шаблоне.
+
+        Рассинхрон id даёт пустую строку вместо URL, `fetch('')` уходит POST-ом
+        на саму страницу, она отдаёт HTML 200 — кнопка «Обновить статусы из DL»
+        показывала «Сессия истекла» при живой сессии (id расходился на слово
+        «task»).
+        """
+        import re as _re
+
+        src = self._static_source("admin", "ai", "arm_solve", "index.js")
+        tpl = self._source("admin/ai/arm_solve.html")
+        ids = set(_re.findall(r"readJsonScript\('([^']+)'", src))
+        self.assertTrue(ids)
+        for script_id in ids:
+            self.assertIn(
+                'json_script:"%s"' % script_id, tpl,
+                "в шаблоне нет json_script с id %r, который читает index.js" % script_id,
+            )
+
     def test_task_status_refresh_chunk_fits_proxy_timeout(self):
         """Пачка refresh-запроса обязана укладываться в 60 с внешнего nginx.
 

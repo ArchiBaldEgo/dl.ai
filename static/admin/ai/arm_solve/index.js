@@ -66,14 +66,26 @@
     // Статусы задач по языку: дерево читает ТОЛЬКО флаги из локальной БД
     // (в DL при загрузке/смене языка не ходим). Адреса — из json_script.
     const TASK_STATUS_URL = readJsonScript('arm-solve-task-status-url', '');
-    const REFRESH_TASK_STATUS_URL = readJsonScript('arm-solve-refresh-task-status-url', '');
+    // id ОБЯЗАН совпадать с json_script в шаблоне (arm-solve-refresh-status-url).
+    // Опечатка в id давала пустой URL, fetch('') уходил POST-ом на саму страницу
+    // /ai/admin/arm/solve/, она отдавала HTML 200, и кнопка «Обновить статусы
+    // из DL» показывала «Сессия истекла» при живой сессии.
+    const REFRESH_TASK_STATUS_URL = readJsonScript('arm-solve-refresh-status-url', '');
+    // Пустой адрес = рассинхрон шаблона и JS. Молча постить на текущую страницу
+    // (fetch('') = URL документа) нельзя — ошибка выглядит как проблема сессии.
+    function requireUrl(url, what) {
+        if (!url) {
+            throw new Error('Адрес эндпоинта «' + what + '» не найден на странице — '
+                + 'обновите страницу (Ctrl+F5); если не помогает, это баг шаблона');
+        }
+        return url;
+    }
     // nodeId → 0|1|2 для текущего языка. Пересоздаётся при смене языка.
     let taskStatusCache = new Map();
-    // Сервер обновляет ≤100 узлов за запрос; клиент режет по 10 (ровно размер
-    // пула сервера — пачка уходит одним кругом). Причина — внешний nginx на
-    // dl.gsu.by без явного proxy_read_timeout (дефолт 60 с): пачка из 50 узлов
-    // при 5 потоках и таймауте узла 10 с тянулась дольше минуты, nginx отдавал
-    // HTML 504, а клиент показывал его как «сессия истекла».
+    // Сервер обновляет ≤100 узлов за запрос; клиент режет по 10 — ровно размер
+    // пула сервера, пачка уходит одним кругом. Ограничение снизу — внешний
+    // nginx на dl.gsu.by без явного proxy_read_timeout (дефолт 60 с): запрос
+    // длиннее минуты придёт как HTML 504, а не JSON.
     const TASK_REFRESH_CHUNK = 10;
 
     function statusToClass(status) {
@@ -137,7 +149,7 @@
         body.set('language_id', lang.id);
         body.set('node_ids', nodeIds.join(','));
 
-        const response = await fetch(TASK_STATUS_URL, {
+        const response = await fetch(requireUrl(TASK_STATUS_URL, 'статусы задач'), {
             method: 'POST',
             credentials: 'same-origin',
             headers: {
@@ -188,7 +200,7 @@
                 body.set('course_id', courseId);
                 body.set('language_id', lang.id);
                 body.set('node_ids', chunk.join(','));
-                const response = await fetch(REFRESH_TASK_STATUS_URL, {
+                const response = await fetch(requireUrl(REFRESH_TASK_STATUS_URL, 'обновление статусов'), {
                     method: 'POST',
                     credentials: 'same-origin',
                     headers: {

@@ -42,9 +42,9 @@ REFRESH_MAX_NODES = 100
 # таймаут внешнего прокси).
 REFRESH_WORKERS = 10
 # Таймаут одного запроса /get-solutions: зависший DL не должен растягивать пакет.
-# 10 с — потолок времени HTTP-запроса страницы ARM: внешний nginx на dl.gsu.by
-# не задаёт proxy_read_timeout (дефолт 60 с) и на более долгий пакет отвечает
-# HTML 504, который клиент принимал за «сессию истекла».
+# Держим весь HTTP-запрос страницы ARM заведомо короче 60 с: внешний nginx на
+# dl.gsu.by не задаёт proxy_read_timeout (дефолт 60 с) и на более долгий запрос
+# отвечает HTML 504, который клиент покажет как ошибку, а не статусы.
 REFRESH_TIMEOUT = 10
 
 _FATAL_ERRORS = (DLUnauthorizedError, DLForbiddenError, DLApiUnavailable)
