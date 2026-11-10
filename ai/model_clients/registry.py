@@ -190,6 +190,13 @@ _MODELS: Dict[str, Dict[str, object]] = {
         # minimax-m3.1-flash:cloud — image/video input + reasoning.
         "capabilities": _VISION_REASONING,
     },
+    "Ollama_Beam_Cloud": {
+        "title": "Ollama Beam",
+        "handler": ollama.ask_Ollama_Beam_Cloud_async,
+        # beam:cloud (Reflection, 501B MoE / 23B active) — reasoning + tools,
+        # мультимодальности нет: «Text in, text out».
+        "capabilities": _REASONING,
+    },
 }
 
 

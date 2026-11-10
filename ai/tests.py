@@ -6978,6 +6978,7 @@ class OllamaRegistryTests(SimpleTestCase):
         "Ollama_Gpt_Oss_20B_Cloud",
         "Ollama_Gpt_Oss_120B_Cloud",
         "Ollama_MiniMax_M3_1_Flash_Cloud",
+        "Ollama_Beam_Cloud",
     ]
 
     # Ollama-модели с vision по их страницам в библиотеке Ollama. Все
@@ -18825,7 +18826,9 @@ class ModelStatusCapabilityBadgeTests(SimpleTestCase):
 
         Vision+thinking: glm-5.3-flash, deepseek-v4.1-flash, gemma4,
         kimi-k2.7-code, kimi-k2.6, minimax-m3.1-flash. Thinking без vision:
-        glm-5.2, deepseek-v4-pro, nemotron-3-super, gpt-oss 20b/120b.
+        glm-5.2, deepseek-v4-pro, nemotron-3-super, gpt-oss 20b/120b, beam
+        (Reflection, «Text in, text out»). Clef сюда не входит — это
+        decision-модель (System One API), а не чат: /api/chat её не обслуживает.
         """
         from ai.model_clients.registry import registry, IMPLEMENTED_CAPABILITIES
 
@@ -18843,6 +18846,7 @@ class ModelStatusCapabilityBadgeTests(SimpleTestCase):
             "Ollama_Nemotron_3_Super_Cloud",
             "Ollama_Gpt_Oss_20B_Cloud",
             "Ollama_Gpt_Oss_120B_Cloud",
+            "Ollama_Beam_Cloud",
         }
         for key in vision_and_thinking:
             caps = registry.capabilities(key)
