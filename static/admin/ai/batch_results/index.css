@@ -188,6 +188,15 @@
 .arm-pd-addition.applied { background: color-mix(in srgb, #16a34a 20%, var(--body-bg)); }
 .arm-pd-addition.pending { color: var(--body-quiet-color); background: color-mix(in srgb, var(--body-fg) 8%, var(--body-bg)); }
 .arm-pd-note { color: var(--body-quiet-color); }
+/* Вход/эталон проваленного теста внутри попытки: компактнее карточки
+   результата (попыток бывает несколько), длинный ввод скроллится. */
+.arm-pd-testdata pre {
+  max-height: 180px; overflow: auto; margin: 0 0 4px;
+  white-space: pre-wrap; word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px; line-height: 1.45; padding: 6px 8px; border-radius: 4px;
+  background: var(--darkened-bg); color: var(--body-fg);
+}
 .arm-pd-stopped {
   margin-top: 6px; font-size: 12px; padding: 4px 6px; border-radius: 4px;
   color: color-mix(in srgb, #b45309 80%, var(--body-fg));

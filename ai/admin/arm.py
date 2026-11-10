@@ -157,8 +157,42 @@ def _resolve_active_course_id_for_session(session_id):
 
 
 def _resolve_active_course_id(request):
-    """Тонкая обёртка над _resolve_active_course_id_for_session для HTTP-запроса."""
-    return _resolve_active_course_id_for_session(_resolve_session_id(request))
+    """Активный курс пользователя для страницы ARM и send-solution.
+
+    Порядок (дешёвое → дорогое):
+    1. ``courseID`` из user_info, который middleware уже подтвердил у DL
+       (сессионный кэш, ``AI_AUTH_CACHE_TTL``) — HTTP не нужен;
+    2. кэш результата на 300 с по DLSID: повторные заходы на /arm/solve/ и
+       правки формы не ходят в DL каждый раз. Ошибки не кэшируются — следующий
+       заход попробует снова.
+    """
+    info = getattr(request, "user_info", None)
+    if not isinstance(info, dict) and hasattr(request, "session"):
+        info = request.session.get("external_user_info")
+    if isinstance(info, dict) and info.get("courseID"):
+        return info.get("courseID"), ""
+
+    session_id = _resolve_session_id(request)
+    if not session_id:
+        return _resolve_active_course_id_for_session(session_id)
+
+    import hashlib
+
+    from django.core.cache import cache
+
+    from ..services.cache_epochs import cached_call
+
+    # Ключ — хеш DLSID: сам cookie в ключах кэша (Redis) хранить незачем.
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
+    key = f"{AI_CACHE_KEY_PREFIX}:arm_active_course:{digest}"
+    course_id, error = cached_call(
+        key,
+        lambda: _resolve_active_course_id_for_session(session_id),
+        300,
+    )
+    if error:
+        cache.delete(key)
+    return course_id, error
 
 
 def _fetch_delta_options() -> list[dict]:
@@ -299,7 +333,17 @@ def _render_arm_solve_page(request, *, run_type):
                 else (p.topic.programming_language.language_name if p.topic and p.topic.programming_language else "")
             ),
         }
-        for p in Prompt.objects.select_related("topic", "topic__programming_language", "programming_language").filter(
+        for p in Prompt.objects.select_related(
+            "topic", "topic__programming_language", "programming_language",
+        ).only(
+            # Тексты промптов здесь не нужны — только подписи селектора.
+            # Без .only() страница тянула полные prompt_text_* всех
+            # solve-промптов (десятки КБ каждая) на каждый заход.
+            "id", "prompt_name_ru", "topic_id", "programming_language_id",
+            "topic__topic_name_ru", "topic__programming_language_id",
+            "topic__programming_language__language_name",
+            "programming_language__language_name",
+        ).filter(
             mode=Prompt.MODE_SOLVE
         ).order_by("topic__topic_name_ru", "prompt_name_ru")
     ]

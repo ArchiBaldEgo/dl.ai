@@ -7,7 +7,7 @@
     <meta name="viewport"
         content="width=device-width, initial-scale=1">
     <meta http-equiv="X-UA-Compatible" content="ie=edge">
-    <!-- Тема применяется до первой отрисовки (без FOUC): по умолчанию светлая.
+        <!-- Тема применяется до первой отрисовки (без FOUC): по умолчанию светлая.
          ИСКЛЮЧЕНИЕ из правила «JS — в файлах»: скрипт обязан выполниться
          СИНХРОННО, до отрисовки первого кадра (внешний файл с defer — после
          неё, и тема мигнёт). Сам он — 10 строк, ради него отдельный файл
@@ -37,8 +37,8 @@
     <!-- Тема подключается ПОСЛЕ страничных CSS, чтобы переменные перепобивали значения. -->
     <link rel="stylesheet" href="/ai/assets/admin/css/ai_theme.css?v=3"/>
     {% block js %}
-    <script src="/ai/assets/admin/js/ai-common.js?v=22" defer></script>
-    <script src="/ai/assets/admin/js/chat_template.js?v=6" defer></script>
+    <script src="/ai/assets/admin/js/ai-common.js?v=23" defer></script>
+    <script src="/ai/assets/admin/js/chat_template.js?v=7" defer></script>
     {% endblock %}
     {% block extra_js %}
     <!-- Онбординг-wizard: решение «показывать ли» принимает сервер
@@ -46,151 +46,17 @@
          Скрипт после ai-common.js (defer-порядок), сам стартует только при
          show:true. -->
     {% if ai_wizard %}{{ ai_wizard|json_script:"ai-wizard-config" }}{% endif %}
-    <script src="/ai/assets/admin/js/ai-wizard.js?v=6" defer></script>
+    <script src="/ai/assets/admin/js/ai-wizard.js?v=7" defer></script>
     {% endblock %}
     <title>DLAPI</title>
 </head>
 
 <body>
     <div id="content">
-        <div class="line-panel">
-            <div>
-                <select id="selectLang">
-                    <option language="Russian"{% if saved_lang == 'Russian' %} selected{% endif %}>Русский</option>
-                    <option language="English"{% if saved_lang == 'English' %} selected{% endif %}>English</option>
-                    <option language="French"{% if saved_lang == 'French' %} selected{% endif %}>Français</option>
-                </select>
-                <select id="select">
-                    {% if available_models or user_models_options or shared_user_models or public_user_models %}
-                        {% if favorite_models %}
-                            <optgroup data-ai-group="favorites" label="{{ t.favoritesGroup }}">
-                                {% for model in favorite_models %}
-                                    <option value="{{ model.key }}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}">
-                                        {{ model.title }}
-                                    </option>
-                                {% endfor %}
-                            </optgroup>
-                        {% endif %}
-                        {% if available_models %}
-                        <optgroup data-ai-group="all" label="{{ t.allModelsGroup }}">
-                            {% for model in other_models %}
-                                <option value="{{ model.key }}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}"{% if model.key == default_model_key %} selected{% endif %}>
-                                    {{ model.title }}
-                                </option>
-                            {% endfor %}
-                        </optgroup>
-                        {% endif %}
-                        <!-- Экспериментальные бесплатные модели (OpenRouter) — всегда самый низ селектора -->
-                        {% if experimental_models %}
-                            <optgroup data-ai-group="experimental" label="{{ t.experimentalModelsGroup }}">
-                                {% for model in experimental_models %}
-                                    <option value="{{ model.key }}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}">
-                                        {{ model.title }}
-                                    </option>
-                                {% endfor %}
-                            </optgroup>
-                        {% endif %}
-                        <!-- Личные модели — три группы в самом низу селектора:
-                             свои («Мои модели»), адресно выданные («Доступные мне»)
-                             и публичные. Приватные чужие сюда не попадают; резолв
-                             ключа — ai/services/user_models.py::find_user_model. -->
-                        {% if user_models_options %}
-                            <optgroup data-ai-group="mine" label="{{ t.myModelsGroup }}">
-                                {% for model in user_models_options %}
-                                    <option value="{{ model.key }}" data-avg-seconds="" data-percent-solved="">
-                                        {{ model.title }}
-                                    </option>
-                                {% endfor %}
-                            </optgroup>
-                        {% endif %}
-                        {% if shared_user_models %}
-                            <optgroup data-ai-group="shared" label="{{ t.sharedModelsGroup }}">
-                                {% for model in shared_user_models %}
-                                    <option value="{{ model.key }}" data-avg-seconds="" data-percent-solved="">
-                                        {{ model.title }}
-                                    </option>
-                                {% endfor %}
-                            </optgroup>
-                        {% endif %}
-                        {% if public_user_models %}
-                            <optgroup data-ai-group="public" label="{{ t.publicModelsGroup }}">
-                                {% for model in public_user_models %}
-                                    <option value="{{ model.key }}" data-avg-seconds="" data-percent-solved="">
-                                        {{ model.title }}
-                                    </option>
-                                {% endfor %}
-                            </optgroup>
-                        {% endif %}
-                    {% else %}
-                        <option value="" selected disabled>{{ t.noModels }}</option>
-                    {% endif %}
-                </select>
-                <!-- Переключатель рассуждений think (ai-common.js: initThinkToggle):
-                     виден ТОЛЬКО при выбранной модели Ollama_* (там есть API-переключатель
-                     think — docs.ollama.com/capabilities/thinking). Выкл по умолчанию:
-                     think=false («request no thinking output»), вкл: think=true.
-                     Chip «Think» ставит ai-common.js, вкл-состояние — класс
-                     .ai-think-on + aria-pressed/title. -->
-                <button type="button" class="think-toggle" id="thinkToggleBtn" hidden></button>
-                <!-- Сортировка «Все модели» по статистике прогонов /arm/solve/
-                     (среднее время / % решённых); управляет ai-common.js
-                     (initModelSortSelector). Пересортировка касается только
-                     optgroup «Все модели» — favorite-first контракт не трогаем. -->
-                <select id="selectModelSort">
-                    <option value="default" selected>{{ t.sortDefault }}</option>
-                    <option value="speed">{{ t.sortSpeed }}</option>
-                    <option value="accuracy">{{ t.sortAccuracy }}</option>
-                    <option value="both">{{ t.sortBoth }}</option>
-                </select>
-                <select id="selectType">
-                    <option data-link="/ai/chat/" {% block chat_selected %}{% endblock %}>{{ t.chat }}</option>
-                    <option data-link="/ai/solve-problem/" {% block solve_selected %}{% endblock %}>{{ t.decideTask }}</option>
-                    <option data-link="/ai/find-error/" {% block error_selected %}{% endblock %}>{{ t.findError }}</option>
-                </select>
-                <button type="button" class="theme-toggle" id="themeToggleBtn"
-                    aria-label="{{ t.themeToggle }}" title="{{ t.themeToggle }}">
-                    <svg class="icon-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
-                        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" aria-hidden="true">
-                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-                    </svg>
-                    <svg class="icon-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
-                        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" aria-hidden="true">
-                        <circle cx="12" cy="12" r="5"/>
-                        <line x1="12" y1="1" x2="12" y2="3"/>
-                        <line x1="12" y1="21" x2="12" y2="23"/>
-                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
-                        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-                        <line x1="1" y1="12" x2="3" y2="12"/>
-                        <line x1="21" y1="12" x2="23" y2="12"/>
-                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
-                        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-                    </svg>
-                </button>
-                <!-- Инструкция пользователя «?» (ai-common.js initUserDocs):
-                     модалка с HTML-рендером главы DOCX.md + скачивание .md -->
-                <button type="button" class="theme-toggle doc-toggle" id="userDocsBtn"
-                    aria-label="{{ t.userDocs }}" title="{{ t.userDocs }}">?</button>
-            </div>
-            <div class="voice-controls" id="voiceControls">
-                <button type="button" class="voice-btn" id="voiceInputBtn">
-                    <span class="voice-input-indicator" id="voiceIndicator"></span>
-                    {{ t.voiceInput }}
-                </button>
-                <button type="button" class="voice-btn" id="voiceOutputBtn">
-                    {{ t.voiceOutput }}
-                </button>
-
-                <div class="think-checkbox">
-                    <input type="checkbox" id="speakThinkContent" checked>
-                    <label for="speakThinkContent" id="speakThinkLabel">{{ t.speakThinkLabel }}</label>
-                </div>
-                <div class="voice-status" id="voiceStatus"></div>
-            </div>
-            <div id="modelLimitsWidget"></div>
-            <div class="panel-date"><span class="ai-last-update-label">{{ t.lastUpdate }}</span>: {{ last_update_date|date:"d.m.Y" }}</div>
-        </div>
+        {% comment %}Верхняя панель — единый partial для всех клиентских страниц
+        (ai/_top_panel.html): правки шапки применяются везде сразу, клиентские
+        страницы её не дублируют. Активный режим — active_page из вьюхи.{% endcomment %}
+        {% include "ai/_top_panel.html" %}
         <hr/>
 
         {% comment %}Основная область страницы. Блок вынесен, чтобы страницы со
@@ -205,6 +71,7 @@
                 <form action="" method="post" id="chatForm">
                     {% csrf_token %}
                     {% block form_content %}{% endblock %}
+                    {% block attach_control %}{% endblock %}
                     <div class="buttons-block">
                         <button type="submit">{{ t.send }}</button>
                         <button type="button" id="clearContextBtn">{{ t.clear }}</button>
@@ -219,28 +86,6 @@
         </div>
         {% endblock %}
 
-        <div class="sidebar">
-            <a href="/ai/admin/login/?next=/ai/admin/" class="sidebar-admin-link">
-                <div class="sidebar-header" id="adminPanelLink">
-                    {{ t.adminPanel }}
-                </div>
-            </a>
-            {# Свои AI-модели (личные провайдер+модель+ключ) — доступны только #}
-            {# владельцу, поэтому ссылка ведёт на клиентскую страницу: там   #}
-            {# права проверяет сам сервер (владелец — текущий пользователь).  #}
-            <a href="/ai/my-models/" class="sidebar-admin-link">
-                <div class="sidebar-header" id="myModelsLink">
-                    {{ t.myModels }}
-                </div>
-            </a>
-        </div>
-
-        <button class="toggle-button" type="button" aria-label="{{ t.openMenu }}">
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="9 18 15 12 9 6" />
-            </svg>
-        </button>
     </div>
     <footer id="load-time-footer" class="load-time-footer" aria-live="polite"></footer>
 
@@ -251,6 +96,8 @@
         <div class="ai-docs-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="aiDocsTitle">
             <div class="ai-docs-modal-header">
                 <h2 id="aiDocsTitle"></h2>
+                <!-- Повторный показ онбординг-туров (ai-wizard.js: слушатель
+                     #aiDocsTourBtn, без повторной отметки «просмотрено»). -->
                 <button type="button" id="aiDocsTourBtn" class="ai-docs-modal-tour">{{ t.docsTour }}</button>
                 <a id="aiDocsDownload" class="ai-docs-modal-download" download>&#8681; {{ t.docsDownload }}</a>
                 <button type="button" id="aiDocsClose" class="ai-docs-modal-close" aria-label="{{ t.docsClose }}">&#10005;</button>

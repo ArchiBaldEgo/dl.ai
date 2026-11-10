@@ -1457,6 +1457,7 @@ var localization = {
         clear: "Очистить контекст",
         placeholder: "Задайте вопрос (желательно на английском во избежание ошибок), для красивого форматирования оберните код в ```(буква Ё на клавиатуре)\nПример форматирования кода:\n```\nprint('Hello, world!')\n```",
         adminPanel: "Админ-Панель",
+        myModels: "Мои AI-модели",
         testPanel: "Тест-панель",
         chat: "Чат с DLAI",
         decideTask: "Реши задачу",
@@ -1510,6 +1511,21 @@ var localization = {
         dlTestOutput: "Выходные данные (эталон)",
         dlTestTruncated: "(начало)",
         dlTestUnavailable: "DL не выдал данные теста: выдача тестовых данных запрещена настройками курса или данные теста недоступны.",
+        // PDF в чате: прикрепить можно только моделью со зрением.
+        pdfAttach: "PDF",
+        pdfAttachTitle: "Прикрепить PDF (только для моделей со зрением)",
+        pdfRemove: "Убрать PDF",
+        pdfUploading: "Загрузка PDF…",
+        pdfReady: "PDF приложен: {0}",
+        pdfOnly: "Можно прикреплять только PDF-файлы",
+        pdfTooLarge: "PDF слишком большой (максимум {0} МБ)",
+        pdfBad: "Не удалось прочитать PDF",
+        pdfNoText: "В PDF не найден текст (возможно, это сканы)",
+        pdfEncrypted: "PDF защищён паролем — прикрепите другой файл",
+        pdfActiveContent: "PDF содержит активное содержимое и отклонён",
+        pdfNoVision: "Эта модель не умеет работать с PDF. Выберите модель со зрением.",
+        pdfSendFailed: "Не удалось отправить PDF на сервер",
+        sessionExpired: "Сессия истекла. Обновите страницу.",
         voiceStatus: {
             listening: "Запись голоса",
             recognized: "Распознано: ",
@@ -1584,6 +1600,7 @@ var localization = {
         clear: "Clear Context",
         placeholder: "Ask a question (preferably in English to avoid errors), for nice formatting wrap the code in ```\nExample of code formatting:\n```\nprint('Hello, world!')\n```",
         adminPanel: "Admin Panel",
+        myModels: "My AI models",
         testPanel: "Test Panel",
         chat: "Chat with DLAI",
         decideTask: "Solve the task",
@@ -1637,6 +1654,20 @@ var localization = {
         dlTestOutput: "Output (expected)",
         dlTestTruncated: "(beginning)",
         dlTestUnavailable: "DL did not provide the test data: test-data issuance is disabled by the course settings or the test data is unavailable.",
+        pdfAttach: "PDF",
+        pdfAttachTitle: "Attach a PDF (vision models only)",
+        pdfRemove: "Remove PDF",
+        pdfUploading: "Uploading PDF…",
+        pdfReady: "PDF attached: {0}",
+        pdfOnly: "Only PDF files can be attached",
+        pdfTooLarge: "The PDF is too large (maximum {0} MB)",
+        pdfBad: "Could not read the PDF",
+        pdfNoText: "No text found in the PDF (it may be scanned)",
+        pdfEncrypted: "The PDF is password-protected — attach another file",
+        pdfActiveContent: "The PDF contains active content and was rejected",
+        pdfNoVision: "This model cannot work with PDFs. Choose a model with vision.",
+        pdfSendFailed: "Failed to send the PDF to the server",
+        sessionExpired: "The session has expired. Please reload the page.",
         voiceStatus: {
             listening: "Voice recording",
             recognized: "Recognized: ",
@@ -1710,6 +1741,7 @@ var localization = {
         clear: "Effacer le contexte",
         placeholder: "Posez une question (de préférence en anglais pour éviter les erreurs), pour un bon formatage, encadrez le code dans ```\nExemple de formatage du code:\n```\nprint('Hello, world!')\n```",
         adminPanel: "Panneau Admin",
+        myModels: "Mes modèles IA",
         testPanel: "Panneau Test",
         chat: "Chat avec DLAI",
         decideTask: "Résoudre la tâche",
@@ -1763,6 +1795,20 @@ var localization = {
         dlTestOutput: "Sortie (attendue)",
         dlTestTruncated: "(début)",
         dlTestUnavailable: "DL n'a pas fourni les données du test : la diffusion des données de test est interdite par les paramètres du cours ou les données sont indisponibles.",
+        pdfAttach: "PDF",
+        pdfAttachTitle: "Joindre un PDF (modèles avec vision uniquement)",
+        pdfRemove: "Retirer le PDF",
+        pdfUploading: "Chargement du PDF…",
+        pdfReady: "PDF joint : {0}",
+        pdfOnly: "Seuls les fichiers PDF peuvent être joints",
+        pdfTooLarge: "Le PDF est trop volumineux (maximum {0} Mo)",
+        pdfBad: "Impossible de lire le PDF",
+        pdfNoText: "Aucun texte trouvé dans le PDF (il s'agit peut-être de scans)",
+        pdfEncrypted: "Le PDF est protégé par mot de passe — joignez un autre fichier",
+        pdfActiveContent: "Le PDF contient du contenu actif et a été rejeté",
+        pdfNoVision: "Ce modèle ne peut pas traiter les PDF. Choisissez un modèle avec vision.",
+        pdfSendFailed: "Échec de l'envoi du PDF au serveur",
+        sessionExpired: "La session a expiré. Rechargez la page.",
         voiceStatus: {
             listening: "Enregistrement vocal",
             recognized: "Reconnu : ",
@@ -2303,16 +2349,6 @@ document.addEventListener("keydown", function(event) {
     }
 });
 
-// === Common: sidebar toggle ===
-
-var toggleButton = document.querySelector('.toggle-button');
-var sidebar = document.querySelector('.sidebar');
-if (toggleButton && sidebar) {
-    toggleButton.addEventListener('click', function() {
-        sidebar.classList.toggle('open');
-    });
-}
-
 // === Common: theme toggle (light/dark), persisted in localStorage('ai-theme') ===
 // Атрибут data-theme на <html> выставляется инлайн-скриптом в <head> до отрисовки
 // (без FOUC) — по умолчанию 'light'. Здесь только переключаем по клику и храним выбор.
@@ -2698,8 +2734,12 @@ function applySharedUiLanguageTexts() {
     }
     var thinkBtn = document.getElementById('thinkToggleBtn');
     if (thinkBtn) updateThinkToggleLabel();
-    var menuBtn = document.querySelector('.toggle-button');
-    if (menuBtn) menuBtn.setAttribute('aria-label', getUiString('openMenu', 'Открыть меню'));
+    // Верхняя панель: «Мои модели» и «Админ-Панель» (последняя рендерится
+    // только при can_access_admin — здесь только текст для видимой ссылки).
+    var myModelsBtn = document.getElementById('myModelsTopBtn');
+    if (myModelsBtn) myModelsBtn.textContent = getUiString('myModels', 'Мои AI-модели');
+    var adminPanelBtn = document.getElementById('adminPanelTopBtn');
+    if (adminPanelBtn) adminPanelBtn.textContent = getUiString('adminPanel', 'Админ-Панель');
     var docsBtn = document.getElementById('userDocsBtn');
     if (docsBtn) {
         var docsLabel = getUiString('userDocs', 'Инструкция пользователя');
@@ -2847,3 +2887,31 @@ function updateLoadTimeFooter() {
         if (el) el.textContent = fmt.replace('{total}', (tm.total / 1000).toFixed(2));
     } catch (e) {}
 }
+
+window.addEventListener('keydown', function(event) {
+    // Ищем обертку меню
+    const menuWrapper = document.querySelector('.voice-menu-wrapper');
+    
+    // Проверяем, открыто ли меню (есть ли класс 'open')
+    // Если меню нет или оно закрыто — выходим, хоткеи не работают
+    if (!menuWrapper || !menuWrapper.classList.contains('open')) {
+        return;
+    }
+
+    // Если меню открыто — перехватываем F2, F3, F4
+    if (event.key === 'F2') {
+        event.preventDefault(); // Отменяем стандартное действие браузера
+        event.stopPropagation();
+        document.getElementById('voiceInputBtn')?.click();
+    } 
+    else if (event.key === 'F3') {
+        event.preventDefault();
+        event.stopPropagation();
+        document.getElementById('voiceOutputBtn')?.click();
+    } 
+    else if (event.key === 'F4') {
+        event.preventDefault();
+        event.stopPropagation();
+        document.getElementById('speakThinkContent')?.click();
+    }
+});

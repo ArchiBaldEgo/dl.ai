@@ -33,6 +33,7 @@ SCOPES = (
     "chat",
     "solve",
     "find_error",
+    "my_models",
     "admin_pd",
     "admin_staff",
     "admin_super",
@@ -84,10 +85,23 @@ def user_basics_seen(user, exclude_scope):
     if user is None or not getattr(user, "is_authenticated", False):
         return False
     others = tuple(s for s in USER_SCOPES if s != exclude_scope)
+
+    def _query():
+        try:
+            return AIWizardSeen.objects.filter(
+                user=user, scope__in=others, version__gte=WIZARD_VERSION,
+            ).exists()
+        except Exception:
+            raise
+
     try:
-        return AIWizardSeen.objects.filter(
-            user=user, scope__in=others, version__gte=WIZARD_VERSION,
-        ).exists()
+        from .cache_epochs import cache_key, cached_call, epoch
+
+        return cached_call(
+            cache_key("wizard", "basics", epoch("wizard"), user.pk, exclude_scope),
+            _query,
+            60,
+        )
     except Exception:
         # Нет таблицы до миграции — не повод ронять ради подсказок страницу.
         logger.exception("Failed to read wizard basics: exclude=%s", exclude_scope)
@@ -105,18 +119,24 @@ def should_show_wizard(user, scope):
     if user is None or not getattr(user, "is_authenticated", False):
       return False
     
-    try:
-      if AIWizardSeen.objects.filter(user=user, scope="disabled").exists():
-        return False
+    def _query():
+        if AIWizardSeen.objects.filter(user=user, scope="disabled").exists():
+            return False
+        row = AIWizardSeen.objects.filter(user=user, scope=scope).only("version").first()
+        return row is None or row.version < WIZARD_VERSION
 
-      row = AIWizardSeen.objects.filter(user=user, scope=scope).only("version").first()
-    
+    try:
+        from .cache_epochs import cache_key, cached_call, epoch
+
+        return cached_call(
+            cache_key("wizard", "show", epoch("wizard"), user.pk, scope),
+            _query,
+            60,
+        )
     except Exception:
       # Таблицы может не быть до миграции — не роняем ради тура страницу.
       logger.exception("Failed to read wizard state: scope=%s", scope)
       return False
-
-    return row is None or row.version < WIZARD_VERSION
 
 
 def record_wizard_seen(user, scope):

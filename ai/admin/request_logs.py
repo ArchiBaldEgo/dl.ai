@@ -50,7 +50,9 @@ from ..services.task_registry import (  # DRY: единственное опре
     EXTENSION_TO_LANG,
     dl_task_url,
 )
+from ..services.user_search import flat_user_q, identity_matches
 from .permissions import can_access_arm, can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
+from .search import UniversalUserSearchMixin
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +228,7 @@ def _get_scoped_log(request, log_id, json_errors=True, allow_pinned=True):
     return log, None
 
 
-class AIRequestLogAdmin(admin.ModelAdmin):
+class AIRequestLogAdmin(UniversalUserSearchMixin, admin.ModelAdmin):
     list_display = (
         "sent_at_display",
         "received_at_display",
@@ -241,6 +243,11 @@ class AIRequestLogAdmin(admin.ModelAdmin):
         "duration_seconds_display",
     )
     list_filter = ("status", "mode", "programming_language_name", "sent_at")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра: на самом большом
+    # журнале это самая дорогая часть загрузки списка. Модуль не зарегистрирован
+    # в ai_admin_site, но флаг ставим и здесь, чтобы его нельзя было включить
+    # в медленном виде, зарегистрировав как есть.
+    show_facets = admin.ShowFacets.NEVER
     search_fields = (
         "external_user_id",
         "username",
@@ -251,6 +258,9 @@ class AIRequestLogAdmin(admin.ModelAdmin):
         "prompt_name",
         "task_name",
     )
+    # Журнал хранит денормализованные ФИО/логин/DL-id: id и ФИО в любом
+    # порядке разрешаются через справочник User.
+    user_search_flat_fields = ("external_user_id", "username", "user_full_name")
     date_hierarchy = "sent_at"
     ordering = ("-sent_at",)
     readonly_fields = [f.name for f in AIRequestLog._meta.fields]
@@ -505,7 +515,7 @@ def build_journal_rows(request, logs, batch_contexts=None):
             })
     return entries
 
-def build_batch_rows_for_logs(request, logs):
+def build_batch_rows_for_logs(request, logs, pinned_log_ids=None):
     """Лёгкие строки batch-прогонов для списка записей журнала.
 
     Общий хелпер «Последних пакетных решений» на «Настройке ИИ-приложения» и
@@ -513,6 +523,10 @@ def build_batch_rows_for_logs(request, logs):
     — шапка прогона (AIModelTestRun) + count-агрегат результатов, без текстов;
     развёртка результатов — лениво, AJAX по snapshot_url. Для каждого прогона
     проставляется флаг ``pinned`` (закреплён ли текущим пользователем).
+
+    ``pinned_log_ids`` — уже известный набор закреплений текущего пользователя
+    (страница «Закреплённые» читает пины и так): передаётся, чтобы не делать
+    повторный запрос к AIPinnedBatchRun. None — вычислить самим.
     """
 
     run_ids = {}
@@ -524,10 +538,11 @@ def build_batch_rows_for_logs(request, logs):
         r.run_id: r
         for r in AIModelTestRun.objects.filter(run_id__in=set(run_ids.values()))
     }
-    pinned_log_ids = set(
-        AIPinnedBatchRun.objects.filter(user=request.user, log_id__in=[l.pk for l in logs])
-        .values_list("log_id", flat=True)
-    ) if logs else set()
+    if pinned_log_ids is None:
+        pinned_log_ids = set(
+            AIPinnedBatchRun.objects.filter(user=request.user, log_id__in=[l.pk for l in logs])
+            .values_list("log_id", flat=True)
+        ) if logs else set()
     # Сводка по результатам прогонов — count-запросом, без текстов;
     # семантика как в _build_batch_report (total/solved/failed).
     counters = {}
@@ -867,6 +882,23 @@ def admin_request_logs_counters_view(request):
     if not wanted:
         return JsonResponse({"ok": True, "runs": {}})
 
+    # Страница опрашивает эндпоинт раз в несколько секунд; 5-секундный кэш
+    # склеивает одновременные опросы (и повторные заходы) без видимой
+    # задержки цифр. Ключ — пользователь + набор прогонов: чужой прогон
+    # prompt_developer'а в чужой ответ не попадёт.
+    from django.core.cache import cache
+
+    from ..services.cache_epochs import cache_key as perf_cache_key, perf_cache_ttl
+
+    counters_cache_key = perf_cache_key(
+        "request_logs_counters", request.user.pk, ",".join(wanted),
+    )
+    counters_ttl = perf_cache_ttl(5)
+    if counters_ttl:
+        cached_payload = cache.get(counters_cache_key)
+        if cached_payload is not None:
+            return JsonResponse(cached_payload)
+
     # Видимость — через batch-запись журнала (та же скоуп-функция, что у
     # страницы): чужой прогон prompt_developer не получит даже счётчиков.
     visible_logs = list(
@@ -922,7 +954,10 @@ def admin_request_logs_counters_view(request):
             "time_display": finish_meta.get("run_duration_display") or "",
             "finished": bool(run and run.finished_at),
         }
-    return JsonResponse({"ok": True, "runs": payload})
+    response_payload = {"ok": True, "runs": payload}
+    if counters_ttl:
+        cache.set(counters_cache_key, response_payload, counters_ttl)
+    return JsonResponse(response_payload)
 
 
 def admin_daily_report_view(request):
@@ -962,7 +997,10 @@ def admin_daily_report_view(request):
     start_msk = timezone.localtime(start_utc, MOSCOW_TZ)
     end_msk = timezone.localtime(end_utc, MOSCOW_TZ)
     # .only() — без message/response_text: тексты тяжёлые, отчёту не нужны.
-    logs = list(
+    # .iterator(chunk_size=...) — строки дня читаются порциями, а не одной
+    # материализованной выборкой (пик памяти на «тяжёлый» день ниже; набор
+    # строк и HTML те же).
+    logs = (
         _scope_logs_qs(AIRequestLog.objects.all(), request.user)
         .exclude(source=AIRequestLog.SOURCE_ARM)
         .filter(
@@ -978,7 +1016,7 @@ def admin_daily_report_view(request):
     )
 
     students = {}
-    for log in logs:
+    for log in logs.iterator(chunk_size=2000):
         key = log.external_user_id or f"local:{log.username or '?'}"
         rec = students.get(key)
         if rec is None:
@@ -1074,8 +1112,15 @@ def admin_daily_report_view(request):
     group_filter = (request.GET.get("group") or "").strip()
     school_filter = (request.GET.get("school") or "").strip()
     if student_filter:
-        needle = student_filter.casefold()
-        rows = [r for r in rows if needle in r["display_name"].casefold()]
+        # id / «Фамилия Имя» / «Имя Фамилия» / «Фамилия И.» — общий матчер.
+        rows = [
+            r for r in rows
+            if identity_matches(
+                student_filter,
+                texts=(r["display_name"],),
+                ids=(r["external_user_id"],),
+            )
+        ]
     if group_filter:
         needle = group_filter.casefold()
         rows = [
@@ -1130,11 +1175,12 @@ def admin_request_logs_view(request):
     if model:
         qs = qs.filter(model_names__contains=[model])
     if user_q:
-        qs = qs.filter(
-            Q(user_full_name__icontains=user_q)
-            | Q(username__icontains=user_q)
-            | Q(external_user_id__icontains=user_q)
+        # Универсальный поиск: id (DL-id/логин) и ФИО в любом порядке.
+        user_filter = flat_user_q(
+            ("external_user_id", "username", "user_full_name"), user_q,
         )
+        if user_filter is not None:
+            qs = qs.filter(user_filter)
     # Период «от и до» (МСК) — диапазон по sent_at (индекс-хостильно).
     qs = _apply_date_range(qs, date_from, date_to)
 

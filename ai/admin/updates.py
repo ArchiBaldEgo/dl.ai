@@ -13,6 +13,7 @@ from django.http import HttpResponseForbidden
 from django.db.models import Q
 
 from ..models import AuthorAlias, UpdateLog
+from ..services.user_search import flat_text_q
 from .permissions import can_access_updates
 from .site import ai_admin_site
 
@@ -31,18 +32,19 @@ def admin_updates_view(request):
     queryset = visible.all()  # копия — фильтры ниже не должны трогать visible
 
     # Search by author or description. Поиск расширяется справочником: «Иванов»
-    # находит коммиты ника, чей display_label содержит «Иванов».
+    # находит коммиты ника, чей display_label содержит «Иванов»; ФИО — в любом
+    # порядке («Иванов Иван» = «Иван Иванов»), инициалы — по началу слов.
     search_query = request.GET.get('q', '').strip()
     if search_query:
-        aliased_nicks = (
-            AuthorAlias.objects.filter(
-                Q(full_name__icontains=search_query) | Q(group__icontains=search_query)
-            )
-            .values_list("nick", flat=True)
+        alias_q = flat_text_q(("nick", "full_name", "group"), search_query)
+        alias_nicks = (
+            AuthorAlias.objects.filter(alias_q).values_list("nick", flat=True)
+            if alias_q is not None else AuthorAlias.objects.none()
         )
-        queryset = queryset.filter(
-            Q(author__icontains=search_query) | Q(author__in=aliased_nicks)
-        )
+        text_q = flat_text_q(("description", "author"), search_query)
+        if text_q is not None:
+            text_q |= Q(author__in=alias_nicks)
+            queryset = queryset.filter(text_q)
 
     # Filter by date range
     date_from = request.GET.get('date_from', '').strip()
@@ -60,14 +62,11 @@ def admin_updates_view(request):
     # Distinct authors for filter dropdown: pairs (raw nick, display label)
     # sorted by the displayed label; nicks without an alias keep the nick.
     # Строится из ВСЕХ видимых записей (не только отфильтрованных), value —
-    # сырой ник, фильтр author= не меняется.
-    authors = sorted(
-        (
-            (nick, author_map.get(nick, nick))
-            for nick in visible.values_list('author', flat=True).distinct()
-        ),
-        key=lambda pair: pair[1].lower(),
-    )
+    # сырой ник, фильтр author= не меняется. Список кэшируется
+    # (ai/services/catalog.py); инвалидация — сигналы UpdateLog/AuthorAlias.
+    from ..services.catalog import update_authors
+
+    authors = update_authors()
 
     # Paginate
     from django.core.paginator import Paginator

@@ -152,7 +152,7 @@ def admin_tasks_view(request):
     rows_qs = AIDevTask.objects.select_related(
         "taken_by", "taken_by__external_dl_account",
         "closed_by", "closed_by__external_dl_account",
-        "created_by",
+        "created_by", "created_by__external_dl_account",
     )
     is_closed_tab = kind == VIEW_CLOSED
     # Рабочие виды показывают ТОЛЬКО незакрытое (closed_at IS NULL), архив —

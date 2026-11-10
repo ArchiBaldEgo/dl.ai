@@ -380,6 +380,40 @@ def public_user_model_options(user) -> list:
     ]
 
 
+def user_model_options_page(user) -> dict:
+    """Все три группы опций селектора за один (закэшированный) вызов.
+
+    Страница рендерит селектор на каждый заход — три отдельных запроса к
+    AIUserModel (свои / выданные / публичные) плюс select_related владельцев.
+    Здесь они собираются вместе и кэшируются на 60 с; эпоха ``user_models``
+    (ai/signals.py) сбрасывается при сохранении/удалении модели и изменении
+    ``shared_with``, поэтому правки видны сразу. Формат словарей тот же, что
+    возвращают три старые функции (они остаются для точечных вызовов/тестов).
+    """
+    if (
+        not user
+        or not getattr(user, "is_authenticated", False)
+        or not hasattr(user, "_meta")
+        or not isinstance(getattr(user, "pk", None), int)
+    ):
+        return {"own": [], "shared": [], "public": []}
+
+    from .cache_epochs import cache_key, cached_call, epoch
+
+    def compute():
+        return {
+            "own": user_model_options(user),
+            "shared": shared_user_model_options(user),
+            "public": public_user_model_options(user),
+        }
+
+    return cached_call(
+        cache_key("user_models", "page", epoch("user_models"), user.pk),
+        compute,
+        60,
+    )
+
+
 def find_user_model(user, model_key: str):
     """Найти ЛИЧНУЮ модель по ключу ``User_<pk>`` с учётом доступа.
 

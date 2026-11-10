@@ -22,9 +22,97 @@ from .models import (
     AIAccessGroup,
     AIAdminGroupPermission,
     AIModelAvailability,
+    AIUserModel,
+    AIWizardSeen,
+    AuthorAlias,
     DLEducationName,
+    ProgrammingLanguage,
+    Prompt,
+    SharedPrompt,
+    Topic,
     UpdateLog,
 )
+
+
+def _bump_perf_epoch(name):
+    """Инвалидирует производные кэши, зависящие от справочника ``name``."""
+    from .services.cache_epochs import bump_epoch
+
+    bump_epoch(name)
+
+
+@receiver(post_save, sender=Prompt)
+@receiver(post_delete, sender=Prompt)
+@receiver(post_save, sender=SharedPrompt)
+@receiver(post_delete, sender=SharedPrompt)
+@receiver(post_save, sender=Topic)
+@receiver(post_delete, sender=Topic)
+@receiver(post_save, sender=ProgrammingLanguage)
+@receiver(post_delete, sender=ProgrammingLanguage)
+def _invalidate_prompt_meta_epoch(sender, **kwargs):
+    """Сбрасывает каталоги промптов/тем/языков и списки фильтров админки.
+
+    Эпоха ``prompt_meta`` входит в ключи ai/services/catalog.py и кэша
+    подписи по умолчанию для режимов: правка промпта, темы, языка или общего
+    промпта видна сразу, без ожидания TTL.
+    """
+    _bump_perf_epoch("prompt_meta")
+
+
+@receiver(
+    m2m_changed,
+    sender=Prompt.editors.through,
+    dispatch_uid="ai_prompt_editors_prompt_meta",
+)
+@receiver(
+    m2m_changed,
+    sender=SharedPrompt.programming_languages.through,
+    dispatch_uid="ai_sharedprompt_langs_prompt_meta",
+)
+@receiver(
+    m2m_changed,
+    sender=SharedPrompt.editors.through,
+    dispatch_uid="ai_sharedprompt_editors_prompt_meta",
+)
+def _invalidate_prompt_meta_epoch_m2m(sender, action, **kwargs):
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+    _bump_perf_epoch("prompt_meta")
+
+
+@receiver(post_save, sender=AIWizardSeen)
+@receiver(post_delete, sender=AIWizardSeen)
+def _invalidate_wizard_epoch(sender, **kwargs):
+    """Сбрасывает кэш «показывать ли тур» при отметке/сбросе просмотра."""
+    _bump_perf_epoch("wizard")
+
+
+@receiver(post_save, sender=AIUserModel)
+@receiver(post_delete, sender=AIUserModel)
+def _invalidate_user_models_epoch(sender, **kwargs):
+    """Сбрасывает кэш опций личных моделей в селекторе (сохранение/удаление)."""
+    _bump_perf_epoch("user_models")
+
+
+@receiver(
+    m2m_changed,
+    sender=AIUserModel.shared_with.through,
+    dispatch_uid="ai_usermodel_shared_with_epoch",
+)
+def _invalidate_user_models_epoch_m2m(sender, action, **kwargs):
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+    _bump_perf_epoch("user_models")
+
+
+@receiver(post_save, sender=AuthorAlias)
+@receiver(post_delete, sender=AuthorAlias)
+def _invalidate_update_authors_cache(sender, **kwargs):
+    """Список авторов на странице «Обновления» — из кэша; правка алиаса видна сразу."""
+    from .services.catalog import UPDATE_AUTHORS_CACHE_KEY
+    from django.core.cache import cache
+
+    cache.delete(UPDATE_AUTHORS_CACHE_KEY)
 
 
 @receiver(post_save, sender=UpdateLog)
@@ -32,7 +120,13 @@ from .models import (
 def _invalidate_last_update_date_cache(sender, **kwargs):
     """Сбрасывает кеш даты последнего обновления при изменении UpdateLog."""
     from django.core.cache import cache
+
+    from .services.catalog import UPDATE_AUTHORS_CACHE_KEY
+
     cache.delete("ai_last_update_date")
+    # Список авторов в фильтре «Обновлений» — новый ник/удаление записи
+    # должны появиться сразу.
+    cache.delete(UPDATE_AUTHORS_CACHE_KEY)
 
 
 @receiver(post_save, sender=AIModelAvailability)

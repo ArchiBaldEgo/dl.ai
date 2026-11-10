@@ -1,22 +1,26 @@
 // Логика страницы «Дневной отчёт» (журнал запросов × сегодняшний день).
 // Вынесена из ai/templates/admin/ai/daily_report.html.
 // Шаблонных переменных здесь нет: все адреса эндпоинтов и тексты — в коде.
-// Хелпер initAiAutoFilters (static/admin/js/ai_auto_filters.js) подключается
+// Хелпер initAiAjaxFilters (static/admin/js/ai_ajax_filters.js) подключается
 // отдельным <script> в шаблоне — он должен загрузиться ДО этого файла.
 (function () {
-  // Фильтры применяются сами (без кнопок): общий хелпер админки.
-  initAiAutoFilters(document.querySelector('.ai-daily-filters'));
+  // Фильтры применяются сами (без кнопок), AJAX'ом: заменяются заголовок,
+  // строка счётчиков и таблица; форма с фокусом остаётся на месте.
+  initAiAjaxFilters(document.querySelector('.ai-daily-filters'), {
+    targets: ['#ai-daily-header', '#ai-daily-note', '#ai-daily-results'],
+  });
   // Клик по колонке «Запросов» → развёртка всех запросов студента за
   // сегодня (свёрнутый блок уже в HTML — без запроса к серверу).
-  document.querySelectorAll('.ai-daily-count').forEach(function (cell) {
-    cell.addEventListener('click', function () {
-      var row = cell.closest('.ai-daily-row');
-      var detail = row && row.nextElementSibling;
-      if (!detail || !detail.classList.contains('ai-daily-detail')) { return; }
-      var willOpen = detail.hidden;
-      detail.hidden = !willOpen;
-      cell.classList.toggle('open', willOpen);
-    });
+  // Делегирование: таблица перерисовывается AJAX-фильтрами.
+  document.addEventListener('click', function (event) {
+    var cell = event.target.closest('.ai-daily-count');
+    if (!cell) return;
+    var row = cell.closest('.ai-daily-row');
+    var detail = row && row.nextElementSibling;
+    if (!detail || !detail.classList.contains('ai-daily-detail')) { return; }
+    var willOpen = detail.hidden;
+    detail.hidden = !willOpen;
+    cell.classList.toggle('open', willOpen);
   });
   // Клик по строке запроса: разворачивает на месте информацию запроса —
   // ровно ту же, что в журнале запросов. Тексты запроса/ответа в дневном
@@ -112,25 +116,27 @@
     });
   }
 
-  document.querySelectorAll('.ai-daily-req-row').forEach(function (row) {
-    row.addEventListener('click', function () {
-      var detail = row.nextElementSibling;
-      if (detail && detail.classList.contains('ai-daily-req-detail')) {
-        detail.hidden = !detail.hidden;  // повторный клик сворачивает
-        return;
-      }
-      detail = document.createElement('tr');
-      detail.className = 'ai-daily-req-detail';
-      var cell = document.createElement('td'); cell.colSpan = 6;
-      cell.textContent = 'Загрузка…';
-      detail.appendChild(cell);
-      row.parentNode.insertBefore(detail, row.nextSibling);
-      fetch('/ai/admin/ai/request_logs/' + row.dataset.logId + '/detail-json/')
-        .then(parseJsonResponse)
-        .then(function (data) { renderLogInfo(cell, data.log); })
-        .catch(function (err) {
-          cell.textContent = 'Ошибка: ' + err.message;
-        });
-    });
+  // Делегирование (таблица перерисовывается AJAX-фильтрами): клик по строке
+  // запроса разворачивает информацию один раз, повторный — сворачивает.
+  document.addEventListener('click', function (event) {
+    var row = event.target.closest('.ai-daily-req-row');
+    if (!row) return;
+    var detail = row.nextElementSibling;
+    if (detail && detail.classList.contains('ai-daily-req-detail')) {
+      detail.hidden = !detail.hidden;  // повторный клик сворачивает
+      return;
+    }
+    detail = document.createElement('tr');
+    detail.className = 'ai-daily-req-detail';
+    var cell = document.createElement('td'); cell.colSpan = 6;
+    cell.textContent = 'Загрузка…';
+    detail.appendChild(cell);
+    row.parentNode.insertBefore(detail, row.nextSibling);
+    fetch('/ai/admin/ai/request_logs/' + row.dataset.logId + '/detail-json/')
+      .then(parseJsonResponse)
+      .then(function (data) { renderLogInfo(cell, data.log); })
+      .catch(function (err) {
+        cell.textContent = 'Ошибка: ' + err.message;
+      });
   });
 })();

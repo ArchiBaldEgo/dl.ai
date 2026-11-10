@@ -270,9 +270,6 @@ document.addEventListener("DOMContentLoaded", function() {
             var messageTextEl = document.getElementById("messageText");
             if (messageTextEl) messageTextEl.setAttribute("placeholder", localization[selectedLang].placeholder);
 
-            var sidebarHeader = document.querySelector(".sidebar-header");
-            if (sidebarHeader) sidebarHeader.textContent = localization[selectedLang].adminPanel;
-
             var testPanelLink = document.getElementById("testPanelLink");
             if (testPanelLink) testPanelLink.textContent = localization[selectedLang].testPanel;
 

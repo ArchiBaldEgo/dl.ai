@@ -14,6 +14,9 @@ PROMPT_DEVELOPER_GROUP = "prompt_developer"
 # Состав и права правятся суперюзером на /ai/admin/ai-groups/.
 BUILTIN_GROUP_PROMPT_DEV = "Разработчик промптов"
 BUILTIN_GROUP_DEVELOPER = "Разработчик"
+# «Пользователи» — baseline новой аудитории (миграция 0078): ни одного права,
+# входа в админку нет вовсе. Роли выдаются суперюзером поверх этой группы.
+BUILTIN_GROUP_USERS = "Пользователи"
 ADMIN_LOGOUT_COOKIE_NAME = "ai_admin_logged_out"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 AI_CACHE_KEY_PREFIX = "ai"

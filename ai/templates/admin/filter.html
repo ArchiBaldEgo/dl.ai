@@ -1,11 +1,15 @@
 {% comment %}Группа фильтров changelist — селектор (dropdown) вместо стокового details.
    Тот же контракт choices (choice.selected / query_string / display), что и в
    стоковом admin/filter.html; filters.js не нужен — нет details. Выбор опции
-   уводит на choice.query_string (обработчик в change_list.html).{% endcomment %}
+   уводит на choice.query_string (обработчик в
+   static/admin/ai/change_list/index.js). Подпись — русский title фильтра без
+   английского «By» (LANGUAGE_CODE проекта — en-us).{% endcomment %}
 {% load i18n %}
 <label class="ai-filter-select">
-  <span class="ai-filter-select-label">{% blocktranslate with filter_title=title %} By {{ filter_title }} {% endblocktranslate %}</span>
-  <select data-ai-filter autocomplete="off">
+  <span class="ai-filter-select-label">{{ title }}</span>
+  {# data-ai-filter-param = имя GET-параметра (parameter_name SimpleListFilter или lookup_kwarg ChoicesFieldListFilter) #}
+  {% firstof spec.parameter_name spec.lookup_kwarg as filter_param %}
+  <select data-ai-filter data-ai-filter-param="{{ filter_param }}" autocomplete="off">
   {% for choice in choices %}
     <option value="{{ choice.query_string|iriencode }}"{% if choice.selected %} selected{% endif %}>{{ choice.display }}</option>
   {% endfor %}

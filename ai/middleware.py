@@ -126,6 +126,13 @@ class ExternalAuthMiddleware:
         self.cache_session_key = "external_session_id"
         self.cache_user_key = "external_user_info"
         self.cache_fetched_at_key = "external_user_info_fetched_at"
+        # Маркеры уже выполненного провижининга: (внешний userId, pk Django-юзера).
+        # Совпали с подтверждённым user_info и текущей сессией — значит, этот же
+        # DLSID уже создал/привязал этого пользователя, и повторный
+        # get_or_create_user_from_external (SELECT + возможный HTTP-обогащение)
+        # на каждом запросе не нужен.
+        self.provision_external_key = "ai_provisioned_external_id"
+        self.provision_user_key = "ai_provisioned_user_pk"
         # How long a cached user_info is trusted without revalidating the DLSID
         # against dl.gsu.by (seconds). Default 60s; 0 = always revalidate.
         try:
@@ -161,6 +168,29 @@ class ExternalAuthMiddleware:
         if isinstance(cached_user_info, dict) and cached_user_info:
             return cached_user_info
         return None
+
+    def _session_provision_is_fresh(self, request, user_info: dict) -> bool:
+        """Сессия уже привязана к этому же внешнему пользователю?
+
+        Маркеры пишет сам middleware после успешного провижининга. Сессия
+        серверная (подписана/в БД), поэтому маркеру можно доверять: подделать
+        его без валидного DLSID нельзя, а сам DLSID всё равно проверяется
+        внешним API не реже ``AI_AUTH_CACHE_TTL``.
+        """
+        if not hasattr(request, "session"):
+            return False
+        user = getattr(request, "user", None)
+        if user is None or not getattr(user, "is_authenticated", False):
+            return False
+        user_pk = getattr(user, "pk", None)
+        if user_pk is None:
+            return False
+        external_id = str((user_info or {}).get("userId") or "")
+        if not external_id or external_id == "None":
+            return False
+        marker_external = request.session.get(self.provision_external_key)
+        marker_user = request.session.get(self.provision_user_key)
+        return marker_external == external_id and marker_user == user_pk
 
     def _attach_cached_user_info(self, request) -> None:
         if not hasattr(request, "session"):
@@ -204,6 +234,16 @@ class ExternalAuthMiddleware:
         """
         request.user_info = user_info
 
+        # Быстрый путь: тот же DLSID уже провижинил этого же пользователя в этой
+        # сессии (маркеры пишутся ниже, после успешного провижининга), а
+        # user_info только что подтверждён/взят из свежего кэша. Пропускаем
+        # SELECT по ExternalDLAccount и возможное блокирующее HTTP-обогащение
+        # профиля. Смена userId в DLSID-кэше даёт несовпадение маркера → полный
+        # путь с перепривязкой сессии.
+        if self._session_provision_is_fresh(request, user_info):
+            request._ai_provisioned_user = request.user
+            return self.get_response(request)
+
         # Auto-provision user if needed. We do this for /ai/admin/...
         # paths too, even though the admin views have their own
         # permission checks: the admin's has_permission() verifies
@@ -229,6 +269,12 @@ class ExternalAuthMiddleware:
                 # code (notably AIAdminSite.has_permission) can verify
                 # the request user matches the DLSID chain.
                 request._ai_provisioned_user = user
+                if hasattr(request, "session"):
+                    request.session[self.provision_external_key] = str(
+                        user_info.get("userId") or ""
+                    )
+                    request.session[self.provision_user_key] = user.pk
+                    request.session.modified = True
                 if created:
                     logger.info(f"New user provisioned: {user.username} (external_id={user_info.get('userId')})")
         except Exception as e:

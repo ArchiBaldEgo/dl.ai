@@ -105,9 +105,11 @@
                 "#themeToggleBtn": { title: "Light or dark", text: "Click — the page turns dark. Click again — light." },
                 "#userDocsBtn": { title: "The “?” button", text: "This is the user guide. Click if anything is unclear. You can also show these tips again there." },
                 "#voiceModeBtn": { title: "Voice mode", text: "Would you rather speak than type? Click it — you can speak by voice." },
-                "#content .toggle-button": { title: "Side menu", text: "The arrow on the right opens the menu with a link to the admin panel." },
+                "#myModelsTopBtn": { title: "My models", text: "Here you can connect your own AI model: your key and address, so it appears in the model list. If you don’t need it, you can skip this." },
+                "#adminPanelTopBtn": { title: "Admin panel", text: "The admin panel entry button. It is shown only if you have the rights: “Prompt developer” or higher." },
                 "#messages": { title: "History", text: "History: everything you write and the model answers appears here." },
                 "#messageText": { title: "Type your question here", text: "Just type your question into this field." },
+                "#pdfAttachBtn": { title: "PDF in chat", text: "You can attach a PDF file here — only for models with vision (they show a “Vision” badge on the “Model status” page). The server reads the file and passes only the text to the model; the file itself is never stored. Models without vision have no such button. Don’t need it — skip." },
                 '.buttons-block button[type="submit"]': { title: "The “Send” button", text: "When the question is written, click this button." },
                 '#clearContextBtn': { title: "Erase everything", text: "This button clears the conversation and starts over." }
             },
@@ -125,6 +127,21 @@
                 "#select": { title: "Model selection", text: "Pick the model helper that will check your code." },
                 "#taskText": { title: "Task text", text: "Copy the task condition from dl.gsu.by here." },
                 "#codeText": { title: "Code text", text: "And paste the whole program here." }
+            },
+            my_models: {
+                "#selectLang": { title: "Page language", text: "This changes the language of the interface: Russian, English, French." },
+                "#select": { title: "Model selection", text: "The common model list. Once you connect your own model, it will appear here in the “My models” group." },
+                "#selectType": { title: "Modes", text: "From here you switch to “Chat”, “Solve the task” or “What's the error?”." },
+                "#myModelsTopBtn": { title: "You are here", text: "This is the “My AI models” page. Here you connect your own models with your own key." },
+                "#userDocsBtn": { title: "The “?” button", text: "The full user guide. You can also show these tips again there." },
+                ".ai-um-intro": { title: "Why do this", text: "Your own model is useful if you have a provider key (OpenAI-compatible, Anthropic, Ollama, etc.). The model is visible only to you until you grant access yourself." },
+                "#ai-um-form": { title: "Model form", text: "Title — how the model is named in the list. Provider — where it comes from. Model ID — its exact name at the provider." },
+                "#ai-um-provider": { title: "Provider", text: "Choose where the model is registered. The API address will be filled in automatically; you can adjust it in the “Base URL” field if needed." },
+                '#ai-um-form input[name="model_id"]': { title: "Model ID", text: "The exact model name at the provider — for example, gpt-4o-mini or llama3. If it is wrong, the model will not answer." },
+                '#ai-um-form input[name="api_key"]': { title: "API key", text: "Your secret key from the provider. It is stored encrypted and never shown. When editing a model, leave the field empty to keep the key." },
+                ".ai-um-row-checks": { title: "Model capabilities", text: "Tick “Vision” if the model accepts images (needed for PDF in chat) and “Think” if it can reason. “Public” makes the model visible to all users." },
+                "#ai-um-save": { title: "Save", text: "Fill in the form and click. The model appears in the list below and in the model selector on all pages." },
+                "#ai-um-table": { title: "My models", text: "All your models: “Edit” — change, “Delete” — remove, “Access” — grant it to a specific person." }
             }
         },
         fr: {
@@ -137,9 +154,11 @@
                 "#themeToggleBtn": { title: "Clair ou sombre", text: "Clique — la page devient sombre. Clique encore — claire à nouveau." },
                 "#userDocsBtn": { title: "Le bouton « ? »", text: "C’est le guide utilisateur. Clique si quelque chose n’est pas clair. Tu peux aussi réafficher ces astuces ici." },
                 "#voiceModeBtn": { title: "Mode vocal", text: "Tu préfères parler plutôt que taper ? Clique — tu peux parler avec la voix." },
-                "#content .toggle-button": { title: "Menu latéral", text: "La flèche à droite ouvre le menu, qui contient le lien vers le panneau admin." },
+                "#myModelsTopBtn": { title: "Mes modèles", text: "Ici, tu peux connecter ton propre modèle d’IA : ta clé et ton adresse, pour qu’il apparaisse dans la liste des modèles. Si tu n’en as pas besoin, tu peux ne pas l’ouvrir." },
+                "#adminPanelTopBtn": { title: "Panneau admin", text: "Le bouton d’entrée du panneau admin. Il s’affiche seulement si tu as les droits : « Développeur de prompts » ou plus." },
                 "#messages": { title: "Historique", text: "Historique : tout ce que tu écris et que le modèle répond s’affiche ici." },
                 "#messageText": { title: "Tu écris ta question ici", text: "Écris simplement ta question dans ce champ." },
+                "#pdfAttachBtn": { title: "PDF dans le chat", text: "Ici, tu peux joindre un fichier PDF — uniquement pour les modèles dotés de la vision (ils ont un badge « Vision » sur la page « État des modèles »). Le serveur lit le fichier et transmet seulement le texte au modèle ; le fichier lui-même n’est jamais conservé. Les modèles sans vision n’ont pas ce bouton. Pas besoin — passe." },
                 '.buttons-block button[type="submit"]': { title: "Le bouton « Envoyer »", text: "Quand la question est écrite, clique sur ce bouton." },
                 '#clearContextBtn': { title: "Tout effacer", text: "Ce bouton efface la conversation et recommence." }
             },
@@ -157,6 +176,21 @@
                 "#select": { title: "Choix du modèle", text: "Choisis le modèle-assistant qui vérifiera ton code." },
                 "#taskText": { title: "Texte de la tâche", text: "Colle ici l’énoncé de la tâche depuis dl.gsu.by." },
                 "#codeText": { title: "Texte du code", text: "Et colle ici le programme en entier." }
+            },
+            my_models: {
+                "#selectLang": { title: "Langue de la page", text: "C’est ici que change la langue des textes : Russe, English, Français." },
+                "#select": { title: "Choix du modèle", text: "La liste commune des modèles. Après avoir connecté ton propre modèle, il apparaîtra ici dans le groupe « Mes modèles »." },
+                "#selectType": { title: "Modes", text: "D’ici, tu passes au « Chat », à « Résoudre la tâche » ou à « Quelle est l’erreur ? »." },
+                "#myModelsTopBtn": { title: "Tu es ici", text: "C’est la page « Mes modèles d’IA ». Ici, tu connectes tes propres modèles avec ta propre clé." },
+                "#userDocsBtn": { title: "Le bouton « ? »", text: "Le guide utilisateur complet. Tu peux aussi y réafficher ces astuces." },
+                ".ai-um-intro": { title: "À quoi ça sert", text: "Ton propre modèle est utile si tu as une clé de fournisseur (compatible OpenAI, Anthropic, Ollama, etc.). Le modèle n’est visible que par toi jusqu’à ce que tu donnes l’accès toi-même." },
+                "#ai-um-form": { title: "Formulaire du modèle", text: "Titre — le nom du modèle dans la liste. Fournisseur — d’où il vient. ID du modèle — son nom exact chez le fournisseur." },
+                "#ai-um-provider": { title: "Fournisseur", text: "Choisis où le modèle est enregistré. L’adresse de l’API se remplit toute seule ; tu peux la corriger dans le champ « Adresse de base »." },
+                '#ai-um-form input[name="model_id"]': { title: "ID du modèle", text: "Le nom exact du modèle chez le fournisseur — par exemple gpt-4o-mini ou llama3. S’il est faux, le modèle ne répondra pas." },
+                '#ai-um-form input[name="api_key"]': { title: "Clé API", text: "Ta clé secrète du fournisseur. Elle est stockée chiffrée et jamais affichée. Lors d’une modification, laisse le champ vide pour garder la clé." },
+                ".ai-um-row-checks": { title: "Capacités du modèle", text: "Coche « Vision » si le modèle accepte des images (nécessaire pour les PDF dans le chat) et « Think » s’il sait raisonner. « Public » rend le modèle visible à tous." },
+                "#ai-um-save": { title: "Enregistrer", text: "Remplis le formulaire puis clique. Le modèle apparaît dans la liste ci-dessous et dans le sélecteur de modèles de toutes les pages." },
+                "#ai-um-table": { title: "Mes modèles", text: "Tous tes modèles : « Modifier » — changer, « Supprimer » — retirer, « Accès » — l’accorder à une personne précise." }
             }
         }
     };
@@ -267,8 +301,8 @@
         chat: [
             // Строгий порядок чата (ранг: явный rank сильнее геометрии):
             // язык → модель → think → сортировка → режим → тема → «?» →
-            // голосовой → боковое меню (супер/штаб) → история → ввод →
-            // отправить → очистить.
+            // голосовой → «Мои модели» → «Админ-Панель» (по правам) →
+            // история → ввод → отправить → очистить.
             // Шагов с common в чате НЕТ: basics_seen не режет чат — тур всегда
             // полный и строгий (ранги).
             { sel: "#selectLang", rank: 10, title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français. Сам текст вопросов и ответов — всегда на том языке, на котором ты пишешь.", pos: "bottom" },
@@ -279,34 +313,55 @@
             { sel: "#themeToggleBtn", rank: 15, title: "Светлое или тёмное", text: "Нажми — страница станет тёмной. Ещё раз — снова светлой. Как тебе удобнее читать.", pos: "bottom" },
             { sel: "#userDocsBtn", rank: 16, title: "Кнопка «?»", text: "Это полная инструкция — нажми, если что-то непонятно. Она есть на русском, английском и французском (язык как у страницы); если перевод не подгрузился — покажется русская версия. Там же можно снова показать эти подсказки.", pos: "bottom" },
             { sel: "#voiceModeBtn", rank: 17, title: "Голосовой ввод", text: "Хочешь говорить, а не печатать? Нажми — можно говорить голосом.", pos: "bottom" },
-            { sel: "#content .toggle-button", rank: 18, title: "Боковое меню", text: "Стрелочка справа открывает меню, там ссылка на админ-панель.", pos: "left", roles: ["super", "staff"] },
-            { sel: "#messages", rank: 19, title: "История", text: "История: всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
-            { sel: "#messageText", rank: 20, title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
-            { sel: '.buttons-block button[type="submit"]', rank: 21, title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
-            { sel: '#clearContextBtn', rank: 22, title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top" }
+            { sel: "#myModelsTopBtn", rank: 18, title: "Мои модели", text: "Здесь можно подключить свою AI-модель: свой ключ и адрес — она появится в списке моделей. Не нужно — можно не открывать.", pos: "bottom" },
+            { sel: "#adminPanelTopBtn", rank: 19, title: "Админ-Панель", text: "Кнопка входа в админ-панель. Видна, только если у тебя есть права: «Разработчик промптов» и выше.", pos: "bottom", roles: ["super", "staff", "prompt_dev"] },
+            { sel: "#messages", rank: 20, title: "История", text: "История: всё, что ты пишешь и что отвечает модель, видно здесь.", pos: "center" },
+            { sel: "#messageText", rank: 21, title: "Здесь пишешь вопрос", text: "Просто печатай свой вопрос в это поле.", pos: "top" },
+            { sel: "#pdfAttachBtn", rank: 22, title: "PDF в чате", text: "Сюда можно приложить PDF-файл — только для моделей со зрением (у них в «Состоянии моделей» есть значок «Зрение»). Сервер читает файл и передаёт модели только текст; сам файл нигде не сохраняется. У модели без зрения этой кнопки нет. Не нужно — пропусти.", pos: "top" },
+            { sel: '.buttons-block button[type="submit"]', rank: 23, title: "Кнопка «Отправить»", text: "Написал вопрос — жми эту кнопку.", pos: "top" },
+            { sel: '#clearContextBtn', rank: 24, title: "Стереть всё", text: "Эта кнопка стирает переписку и начинает сначала.", pos: "top" }
         ],
 
         // Эталон пользователя (v4): «Реши задачу — Язык программирования, тема,
         // промпт». Общие шаги (язык/модель/режим) добавляются сами, когда базу
         // ещё не показывали; всё остальное — только на чате.
         solve: [
-            { sel: "#selectType", title: "Где ты", text: "Ты на странице «Реши задачу». Через этот список вернёшься в «Чат».", pos: "bottom", common: true },
-            { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписей.", pos: "bottom", common: true },
-            { sel: "#select", title: "Выбор модели", text: "Список моделей — помощников, которые будут решать задачу. Рядом с именем могут стоять цифры: % решённых задач и среднее время ответа. Смотри на них как на подсказку: они показывают, как модель справляется именно с твоим выбором ниже.", pos: "bottom", common: true },
-            { sel: "#selectProgLng", title: "Язык программирования", text: "Выбери, на каком языке пишешь код: C или Ассемблер. От выбора зависит всё остальное: какие будут темы, промпты и цифры у моделей выше.", pos: "bottom" },
-            { sel: "#selectTheme", title: "Тема", text: "Выбери тему — она объясняет модели, о чём задача. Выбрал тему — цифры у моделей пересчитаются под статистику именно этой темы.", pos: "top" },
-            { sel: "#selectPrompt", title: "Промпт", text: "Промпт — маленькая подсказка для модели: как ей отвечать и оформлять код. Обычно подходит тот, что уже выбран.", pos: "top" }
+            { sel: "#selectType", rank: 10, title: "Где ты", text: "Ты на странице «Реши задачу». Через этот список вернёшься в «Чат».", pos: "bottom", common: true },
+            { sel: "#selectLang", rank: 11, title: "Язык страницы", text: "Тут меняется язык надписей.", pos: "bottom", common: true },
+            { sel: "#select", rank: 12, title: "Выбор модели", text: "Список моделей — помощников, которые будут решать задачу. Рядом с именем могут стоять цифры: % решённых задач и среднее время ответа. Смотри на них как на подсказку: они показывают, как модель справляется именно с твоим выбором ниже.", pos: "bottom", common: true },
+            { sel: "#selectProgLng", rank: 13, title: "Язык программирования", text: "Выбери, на каком языке пишешь код: C или Ассемблер. От выбора зависит всё остальное: какие будут темы, промпты и цифры у моделей выше.", pos: "bottom" },
+            { sel: "#selectTheme", rank: 14, title: "Тема", text: "Выбери тему — она объясняет модели, о чём задача. Выбрал тему — цифры у моделей пересчитаются под статистику именно этой темы.", pos: "top" },
+            { sel: "#selectPrompt", rank: 15, title: "Промпт", text: "Промпт — маленькая подсказка для модели: как ей отвечать и оформлять код. Обычно подходит тот, что уже выбран.", pos: "top" }
         ],
 
         // Эталон пользователя (v4): «В чём ошибка — текст для задачи, текст для
         // кода». Селекты языка/темы/промпта объясняет тур «Реши задачу» —
         // здесь их не повторяем.
         find_error: [
-            { sel: "#selectType", title: "Где ты", text: "Ты на странице «В чём ошибка». Через список вернёшься в «Чат» или в «Реши задачу».", pos: "bottom", common: true },
-            { sel: "#selectLang", title: "Язык страницы", text: "Тут меняется язык надписи.", pos: "bottom", common: true },
-            { sel: "#select", title: "Выбор модели", text: "Выбери помощника-модель, которая проверит код. Рядом с именем могут стоять цифры: % решённых задач и среднее время — считаются по выбранному языку и теме (нет цифр — по такому сочетанию модель ещё не прогонялась).", pos: "bottom", common: true },
-            { sel: "#taskText", title: "Текст для задачи", text: "Вставь сюда условие задачи целиком — скопируй его со страницы dl.gsu.by, где задача написана.", pos: "top" },
-            { sel: "#codeText", title: "Текст для кода", text: "А ниже вставь свою программу целиком — модель посмотрит её вместе с условием и скажет, где ошибка.", pos: "top" }
+            { sel: "#selectType", rank: 10, title: "Где ты", text: "Ты на странице «В чём ошибка». Через список вернёшься в «Чат» или в «Реши задачу».", pos: "bottom", common: true },
+            { sel: "#selectLang", rank: 11, title: "Язык страницы", text: "Тут меняется язык надписи.", pos: "bottom", common: true },
+            { sel: "#select", rank: 12, title: "Выбор модели", text: "Выбери помощника-модель, которая проверит код. Рядом с именем могут стоять цифры: % решённых задач и среднее время — считаются по выбранному языку и теме (нет цифр — по такому сочетанию модель ещё не прогонялась).", pos: "bottom", common: true },
+            { sel: "#taskText", rank: 13, title: "Текст для задачи", text: "Вставь сюда условие задачи целиком — скопируй его со страницы dl.gsu.by, где задача написана.", pos: "top" },
+            { sel: "#codeText", rank: 14, title: "Текст для кода", text: "А ниже вставь свою программу целиком — модель посмотрит её вместе с условием и скажет, где ошибка.", pos: "top" }
+        ],
+
+        // Клиентская страница «Мои AI-модели» (/ai/my-models/): шапка (как у
+        // чата, поэтому шаги-«общие») → форма своей модели → список.
+        // Порядок строгий (ранги), цели, скрытые правами/состоянием, выпадают.
+        my_models: [
+            { sel: "#selectLang", rank: 10, title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français.", pos: "bottom", common: true },
+            { sel: "#select", rank: 11, title: "Выбор модели", text: "Общий список моделей. После подключения своей модели она появится здесь в группе «Мои модели».", pos: "bottom", common: true },
+            { sel: "#selectType", rank: 12, title: "Режимы", text: "Отсюда переключаешься в «Чат», «Реши задачу» или «В чём ошибка».", pos: "bottom", common: true },
+            { sel: "#myModelsTopBtn", rank: 13, title: "Ты здесь", text: "Это страница «Мои AI-модели». Здесь подключаются твои собственные модели с твоим ключом.", pos: "bottom" },
+            { sel: "#userDocsBtn", rank: 14, title: "Кнопка «?»", text: "Полная инструкция пользователя. Там же можно снова показать эти подсказки.", pos: "bottom" },
+            { sel: ".ai-um-intro", rank: 20, title: "Зачем это", text: "Своя модель нужна, если у тебя есть ключ провайдера (OpenAI-совместимого, Anthropic, Ollama и т. п.). Модель появится только у тебя — другие её не увидят, пока ты сам не откроешь доступ.", pos: "bottom" },
+            { sel: "#ai-um-form", rank: 21, title: "Форма модели", text: "Название — как модель называть в списке. Провайдер — откуда она. ID модели — её точное имя у провайдера.", pos: "bottom" },
+            { sel: "#ai-um-provider", rank: 22, title: "Провайдер", text: "Выбери, где зарегистрирована модель. От этого зависит адрес API, который подставится сам; при необходимости его можно поправить в поле «Базовый адрес».", pos: "bottom" },
+            { sel: '#ai-um-form input[name="model_id"]', rank: 23, title: "ID модели", text: "Точное имя модели у провайдера — например, gpt-4o-mini или llama3. Если ошибиться, модель не ответит.", pos: "bottom" },
+            { sel: '#ai-um-form input[name="api_key"]', rank: 24, title: "Ключ API", text: "Твой секретный ключ от провайдера. Он хранится зашифрованным и никому не показывается. При правке модели оставь поле пустым, чтобы не менять ключ.", pos: "bottom" },
+            { sel: ".ai-um-row-checks", rank: 25, title: "Возможности модели", text: "Отметь «Зрение», если модель принимает изображения (это нужно для PDF в чате), и «Think», если она умеет рассуждать. «Публичная» — модель увидят все пользователи.", pos: "bottom" },
+            { sel: "#ai-um-save", rank: 26, title: "Сохранить", text: "Заполнил — жми. Модель сразу появится в списке ниже и в селекторе моделей на всех страницах.", pos: "top" },
+            { sel: "#ai-um-table", rank: 27, title: "Мои модели", text: "Здесь все твои модели: «Править» — изменить, «Удалить» — убрать, «Доступ» — выдать конкретному человеку.", pos: "top" }
         ],
 
         // Главный экран админки — свой scope на каждый уровень прав (флаг
@@ -343,7 +398,7 @@
             { sel: "#refreshModelsBtn", title: "Обновить сейчас", text: "Не хочешь ждать ночи — нажми, и модели проверятся сразу.", pos: "bottom" },
             { sel: "#refreshInProgressHint", title: "Идёт проверка", text: "Пока работает проверка, страница обновляется сама.", pos: "right" },
             { sel: "#modelStatusRowsBody", title: "Список моделей", text: "«Активна» — работает; «Неактивна» — надо разбираться. В таблице время, код и расшифровка.", pos: "top" },
-            { sel: "#modelStatusRowsBody .cap-cell", title: "Возможности модели", text: "Зелёный — модель умеет и это уже реализовано в приложении. Зелёный зачёркнутый — модель умеет, но в приложении пока не реализовано. Серый зачёркнутый — модель не умеет. Так видно, например, что vision у модели есть, но картинки в чат ещё не принимаются.", pos: "left" }
+            { sel: "#modelStatusRowsBody .cap-cell", title: "Возможности модели", text: "Зелёный — модель умеет и это уже реализовано в приложении. Зелёный зачёркнутый — модель умеет, но в приложении пока не реализовано. Серый зачёркнутый — модель не умеет.", pos: "left" }
         ],
 
         admin_tasks: [
@@ -1435,8 +1490,8 @@
       // open wizard 
       help.addEventListener("click", (event) => {
         var conf = readConfig() || fallbackConfig();
-        var scope = btn.dataset && btn.dataset.scope
-            ? String(btn.dataset.scope)
+        var scope = help.dataset && help.dataset.scope
+            ? String(help.dataset.scope)
             : (conf ? String(conf.scope || "") : "");
         
         if (!conf || !scope) return;

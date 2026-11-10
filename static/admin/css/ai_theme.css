@@ -12,7 +12,6 @@
     --bg-body: #ffffff;
     --bg-panel: #d8d8d8;
     --bg-surface: #ffffff;          /* #messages, .panel, textarea */
-    --bg-sidebar: #ffffff;
     --bg-toggle: rgb(207, 205, 205);
     --bg-toggle-hover: rgb(119, 119, 119);
     --bg-think: #f0f8ff;
@@ -33,7 +32,6 @@
     --footer-bg: rgba(255, 255, 255, 0.82);
     --footer-text: #444444;
     --footer-border: rgba(0, 0, 0, 0.08);
-    --sidebar-link: #000000;
     --accent-blue: #2196F3;
     color-scheme: light;
 }
@@ -43,7 +41,6 @@
     --bg-body: #121212;
     --bg-panel: #2a2a2a;
     --bg-surface: #1e1e1e;
-    --bg-sidebar: #242424;
     --bg-toggle: #3a3a3a;
     --bg-toggle-hover: #555555;
     --bg-think: #1c2530;
@@ -64,7 +61,6 @@
     --footer-bg: rgba(20, 20, 20, 0.85);
     --footer-text: #cccccc;
     --footer-border: rgba(255, 255, 255, 0.08);
-    --sidebar-link: #e0e0e0;
     --accent-blue: #5ea8f5;
     color-scheme: dark;
 }
@@ -136,28 +132,27 @@ hr { border-color: var(--border); }
     background-color: var(--bg-surface);
 }
 
-.sidebar {
-    background-color: var(--bg-sidebar);
-    box-shadow: -2px 0 5px var(--shadow);
-    border-left-color: var(--border-soft);
+/* Ссылки верхней панели («Мои модели» / «Админ-Панель») — тема-aware.
+   Контурный стиль: фон прозрачный, цвета берутся из переменных темы. */
+.panel-link {
+    background-color: transparent;
+    color: var(--text-primary);
+    border-color: var(--border);
 }
 
-.sidebar-header {
-    border-bottom-color: var(--border-soft);
-}
-
-/* Ссылка на админ-панель в боковой панели — тема-aware (вместо inline color:black). */
-.sidebar-admin-link {
-    text-decoration: none;
-    color: var(--sidebar-link);
-}
-
-.toggle-button {
+.panel-link:hover {
     background-color: var(--bg-toggle);
+    color: var(--text-primary);
 }
 
-.toggle-button:hover {
-    background-color: var(--bg-toggle-hover);
+#adminPanelTopBtn {
+    color: var(--accent-blue);
+    border-color: var(--accent-blue);
+}
+
+#adminPanelTopBtn:hover {
+    background-color: var(--accent-blue);
+    color: #fff;
 }
 
 .voice-status {
@@ -191,6 +186,23 @@ option {
     color: var(--text-primary);
 }
 
+/* Селекторы правой колонки «Реши задачу» / «Найти ошибку» (.top-dv):
+   тот же стандарт рамки/радиуса/высоты, что и в главной панели, но
+   компактнее — они стоят вертикально в узкой колонке. ID-селекторы
+   дублируют страничные правила, чтобы перебить их по source order. */
+.top-dv select,
+#selectProgLng, #selectTheme, #selectPrompt {
+    height: 32px;
+    box-sizing: border-box;
+    padding: 0 8px;
+    font-size: 14px;
+    line-height: 1.2;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background-color: var(--bg-input);
+    color: var(--text-primary);
+}
+
 /* --- Кнопка-переключатель темы --- */
 /* vertical-align: middle — обе кнопки шапки («тема» и «?» — класс общий)
    выравниваются по одному правилу: без него текстовая «?» стоит ниже
@@ -200,18 +212,19 @@ option {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 38px;
-    height: 38px;
+    width: 36px;
+    height: 36px;
     padding: 0;
-    margin: 0 0 0 4px;
+    margin: 0;
     flex-shrink: 0;
-    background-color: var(--bg-toggle);
+    background-color: var(--bg-input);
     color: var(--text-primary);
     border: 1px solid var(--border);
     border-radius: 8px;
     box-shadow: none;
     cursor: pointer;
-    transition: background-color 0.2s ease;
+    font-family: inherit;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
     vertical-align: middle;
 }
 
@@ -244,7 +257,7 @@ option {
     justify-content: center;
     height: 36px;
     padding: 0 12px;
-    margin: 0 0 0 4px;
+    margin: 0;
     flex-shrink: 0;
     background-color: transparent;
     color: var(--text-primary);
@@ -252,6 +265,7 @@ option {
     border-radius: 8px;
     box-shadow: none;
     cursor: pointer;
+    font-family: inherit;
     font-size: 13px;
     font-weight: 500;
     letter-spacing: 0.02em;

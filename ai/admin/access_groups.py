@@ -127,20 +127,21 @@ def _require_superuser(request):
 
 
 def _search_users(group, q):
-    """Юзеры по подстроке (username/имя/фамилия), ещё не в выбранной группе."""
+    """Юзеры по id / ФИО в любом порядке, ещё не в выбранной группе."""
     from django.contrib.auth import get_user_model
-    from django.db.models import Q
+
+    from ..services.user_search import filter_users
 
     User = get_user_model()
     member_ids = set(
         AIAccessGroup.objects.filter(id=group.id)
         .values_list("users__pk", flat=True)
     )
-    query = Q(username__icontains=q) | Q(first_name__icontains=q) \
-        | Q(last_name__icontains=q)
     users = (
-        User.objects.filter(is_active=True)
-        .filter(query)
+        filter_users(
+            User.objects.filter(is_active=True).select_related("external_dl_account"),
+            q,
+        )
         .exclude(pk__in={pk for pk in member_ids if pk})
         .order_by("username")[:_SEARCH_LIMIT]
     )
@@ -166,8 +167,18 @@ def admin_access_groups_view(request):
     if not _require_superuser(request):
         return HttpResponseForbidden("Access denied")
 
+    from django.contrib.auth import get_user_model
+    from django.db.models import Prefetch
+
+    # Состав показывается ФИО из ExternalDLAccount — select_related в Prefetch
+    # убирает запрос на каждого участника (в группе их может быть сотни).
+    User = get_user_model()
     groups = list(AIAccessGroup.objects.prefetch_related(
-        "permissions", "users"
+        "permissions",
+        Prefetch(
+            "users",
+            queryset=User.objects.select_related("external_dl_account"),
+        ),
     ).order_by("is_builtin", "name"))
 
     dynamic = _dynamic_page_doc_permissions(request)

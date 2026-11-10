@@ -10,7 +10,12 @@
 «Разработчик промптов» миграцией и из проверок удалена.
 """
 
-from ..constants import AI_CACHE_KEY_PREFIX, BUILTIN_GROUP_DEVELOPER, BUILTIN_GROUP_PROMPT_DEV
+from ..constants import (
+    AI_CACHE_KEY_PREFIX,
+    BUILTIN_GROUP_DEVELOPER,
+    BUILTIN_GROUP_PROMPT_DEV,
+    BUILTIN_GROUP_USERS,
+)
 from ..models import AIAccessGroup, AIAdminGroupPermission
 
 #: pk группы-эмуляции режима «Посмотреть как…» (ai/admin/guest_mode.py), на
@@ -92,21 +97,53 @@ BASELINE_ACCESS_KEYS = frozenset({
 })
 
 
-def is_prompt_developer_user(user):
-    """Членство во встроенной группе «Разработчик промптов».
+#: Атрибут request.user для request-scoped кэша членства в группах доступа.
+#: is_prompt_developer_user/is_developer_user/user_has_group_name дёргаются
+#: десятками гейтов на запрос админки, и каждый — m2m-джойн.
+_GROUP_NAME_CACHE_ATTR = "_ai_group_name_cache"
 
-    Табличное право (AIAccessGroup), а не Django-Group: выдаётся
-    автоматически при провиженинге нового DL-пользователя и правится
-    суперюзером на «Группах доступа» (отзыв теперь «липкий»).
-    В режиме «Посмотреть как…» — только выбранная группа.
+
+def user_has_group_name(user, name):
+    """Участие юзера в группе доступа ПО ИМЕНИ (честная эмуляция смотрит в неё же).
+
+    Результат кэшируется на инстансе user на время запроса. Ключ включает
+    pk эмулируемой группы («Посмотреть как…») и глобальную эпоху состава
+    групп — правка групп инвалидирует кэш немедленно (bump_access_keys_epoch).
     """
     if not user or not getattr(user, "is_authenticated", False):
         return False
     if getattr(user, "is_active", True) is False:
         return False
-    if _view_as_group_pk(user):
-        return user_has_group_name(user, BUILTIN_GROUP_PROMPT_DEV)
-    return user.ai_access_groups.filter(name=BUILTIN_GROUP_PROMPT_DEV).exists()
+    view_as_pk = _view_as_group_pk(user)
+    cache_key = (view_as_pk, _ACCESS_KEYS_EPOCH)
+    cache = getattr(user, _GROUP_NAME_CACHE_ATTR, None)
+    if not isinstance(cache, dict) or cache.get("key") != cache_key:
+        cache = {"key": cache_key, "map": {}}
+        try:
+            setattr(user, _GROUP_NAME_CACHE_ATTR, cache)
+        except Exception:  # pragma: no cover - нестандартный user-объект
+            pass
+    mapping = cache["map"]
+    if name in mapping:
+        return mapping[name]
+    if view_as_pk:
+        group = AIAccessGroup.objects.filter(pk=view_as_pk).first()
+        result = bool(group and group.name == name)
+    else:
+        result = user.ai_access_groups.filter(name=name).exists()
+    mapping[name] = result
+    return result
+
+
+def is_prompt_developer_user(user):
+    """Членство во встроенной группе «Разработчик промптов».
+
+    Табличное право (AIAccessGroup), а не Django-Group: выдаётся
+    суперюзером на «Группах доступа» (новичок получает только «Пользователи»;
+    отзыв «липкий» — повторный вход и установка пароля его не возвращают).
+    В режиме «Посмотреть как…» — только выбранная группа.
+    """
+    return user_has_group_name(user, BUILTIN_GROUP_PROMPT_DEV)
 
 
 def is_developer_user(user):
@@ -115,31 +152,15 @@ def is_developer_user(user):
     Табличное право, как у «Разработчика промптов»; в режиме
     «Посмотреть как…» — только выбранная группа.
     """
-    if not user or not getattr(user, "is_authenticated", False):
-        return False
-    if getattr(user, "is_active", True) is False:
-        return False
-    if _view_as_group_pk(user):
-        return user_has_group_name(user, BUILTIN_GROUP_DEVELOPER)
-    return user.ai_access_groups.filter(name=BUILTIN_GROUP_DEVELOPER).exists()
+    return user_has_group_name(user, BUILTIN_GROUP_DEVELOPER)
 
 
-def user_has_group_name(user, name):
-    """Участие юзера в группе доступа ПО ИМЕНИ (честная эмуляция смотрит в неё же)."""
-    if not user or not getattr(user, "is_authenticated", False):
-        return False
-    group_pk = _view_as_group_pk(user)
-    if group_pk:
-        group = AIAccessGroup.objects.filter(pk=group_pk).first()
-        return bool(group and group.name == name)
-    return user.ai_access_groups.filter(name=name).exists()
-
-
-def add_user_to_builtin_ai_group(user, name=BUILTIN_GROUP_PROMPT_DEV):
+def add_user_to_builtin_ai_group(user, name=BUILTIN_GROUP_USERS):
     """Зачисляет пользователя во встроенную группу доступа по имени.
 
-    Используется провиженингом внешних DL-аккаунтов (baseline-доступ новой
-    аудитории) и тестами; группу создаёт, если миграционный сид потерян.
+    Дефолт — «Пользователи»: baseline новой аудитории не даёт входа в
+    админку вовсе (роли выдаются суперюзером явно). Тесты/явные вызовы для
+    роли передают имя группы. Группу создаёт, если миграционный сид потерян.
     """
     group, _ = AIAccessGroup.objects.get_or_create(
         name=name, defaults={"is_builtin": True}
