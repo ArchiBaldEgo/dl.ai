@@ -63,6 +63,56 @@
       const input = form.querySelector('input[name="csrfmiddlewaretoken"]');
       return (document.cookie.split('; ').find(function (r) { return r.startsWith('csrftoken='); }) || '').split('=').slice(1).join('=') || (input ? input.value : '');
     }
+    const TASK_STATUS_URL = '/ai/api/get_task_status/';
+    const taskStatusCache = new Map();
+
+    function statusToClass(status) {
+        if (status === 1) return 'arm-tree-task-good';
+        if (status === 2) return 'arm-tree-task-bad';
+        return 'arm-tree-task-undefined';
+    }
+
+    function updateTaskClasses() {
+        treeContainer.querySelectorAll('input.arm-task-check').forEach(function (cb) {
+            const nameEl = cb.parentElement.querySelector('.arm-tree-task-name');
+            if (!nameEl) return;
+        
+            const status = taskStatusCache.get(String(cb.value));
+            nameEl.className = 'arm-tree-task-name ' + statusToClass(status == null ? 0 : status);
+        });
+    }
+
+    async function loadTaskStatuses(nodeIds) {
+        const courseId = courseIdInput ? courseIdInput.value.trim() : '';
+        if (!courseId || !nodeIds.length) return;
+    
+        const body = new URLSearchParams();
+        body.set('course_id', courseId);
+        body.set('node_ids', nodeIds.join(','));
+    
+        const response = await fetch(TASK_STATUS_URL, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'X-CSRFToken': getCsrfToken(),
+                'X-Requested-With': 'XMLHttpRequest',
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            },
+            body: body.toString(),
+        });
+      
+        const data = await parseJsonResponse(response);
+      
+        if (!response.ok || !data.ok) {
+            throw new Error(data.message || 'Не удалось получить статусы задач');
+        }
+      
+        Object.entries(data.statuses || {}).forEach(function ([nodeId, status]) {
+            taskStatusCache.set(String(nodeId), status);
+        });
+      
+        updateTaskClasses();
+    }
     // AJAX админки всегда ждёт JSON; HTML (например, редирект на страницу
     // логина при протухшей сессии — fetch молча следует за 302) даёт сырую
     // ошибку JSON.parse. Показываем внятный текст вместо неё.
@@ -508,6 +558,13 @@
               c.checked = checked;
             });
             refreshAllFolderStates();
+            const nodeIds = Array.from(
+                treeContainer.querySelectorAll('input.arm-task-check')
+            ).map(function (cb) { return cb.value; });
+
+            loadTaskStatuses(nodeIds).catch(function (e) {
+                console.error('ARM task statuses error:', e);
+            });
           });
           summary.appendChild(folderCb);
 
@@ -539,31 +596,15 @@
           cb.checked = false;
           cb.addEventListener('change', refreshAllFolderStates);
           li.appendChild(cb);
+          // TODO: Здесь проверяем статус задачи и меняем по нему имя
+          
           const name = document.createElement('span');
           name.className = 'arm-tree-task-name';
           name.textContent = node.name || '(без названия)';
-          // TODO: Здесь проверяем статус задачи и меняем по нему имя
-          async function getClassName() {
-            // TODO: ...
-            const body = new URLSearchParams();
-            const courseId = 1450;
-            body.set('course_id', courseId);
-            const response = await fetch("https://dl.gsu.by/restapi/get-solutions", {
-              method: 'POST', credentials: 'same-origin',
-              headers: { 'X-CSRFToken': getCsrfToken(), 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
-              body: body.toString(),
-            })
-              .then(r => r.json())
-              .then(data => console.log(data))
-              .catch(err => console.error(err));
-
-            options = ["arm-tree-task-good", "arm-tree-task-bad", "arm-tree-task-undefined"]
-            return options[Math.floor(Math.random() * options.length)];
-          }
-
-          
-          name.className = getClassName(node);
-          
+                  
+          // Статус подставим позже bulk-запросом
+          name.classList.add('arm-tree-task-undefined');
+                  
           li.appendChild(name);
           container.appendChild(li);
         }
@@ -571,22 +612,34 @@
     }
 
     function renderTree(tree) {
-      treeContainer.innerHTML = '';
-      treeContainer.classList.remove('arm-empty');
-      const toolbar = document.getElementById('armTreeToolbar');
-      if (!tree || !tree.length) {
-        treeContainer.classList.add('arm-empty');
-        treeContainer.textContent = 'Дерево пусто.';
-        if (toolbar) { toolbar.style.display = 'none'; }
-        return;
-      }
-      const ul = document.createElement('ul');
-      ul.className = 'arm-tree';
-      renderTreeNodes(tree, ul);
-      treeContainer.appendChild(ul);
-      if (toolbar) { toolbar.style.display = 'flex'; }
-      refreshAllFolderStates();
-    }
+  taskStatusCache.clear();
+  treeContainer.innerHTML = '';
+  treeContainer.classList.remove('arm-empty');
+  const toolbar = document.getElementById('armTreeToolbar');
+  if (!tree || !tree.length) {
+    treeContainer.classList.add('arm-empty');
+    treeContainer.textContent = 'Дерево пусто.';
+    if (toolbar) { toolbar.style.display = 'none'; }
+    return;
+  }
+  const ul = document.createElement('ul');
+  ul.className = 'arm-tree';
+  renderTreeNodes(tree, ul);
+  treeContainer.appendChild(ul);
+  if (toolbar) { toolbar.style.display = 'flex'; }
+  refreshAllFolderStates();
+
+  // Единственное место, где грузим статусы: сразу после отрисовки дерева.
+  // Один bulk-запрос на все node_ids — иначе был бы N+1 по каждой задаче.
+  const nodeIds = Array.from(
+    treeContainer.querySelectorAll('input.arm-task-check')
+  ).map(function (cb) { return cb.value; });
+  if (nodeIds.length) {
+    loadTaskStatuses(nodeIds).catch(function (e) {
+      console.error('ARM task statuses error:', e);
+    });
+  }
+}
 
     async function loadTree() {
       const courseId = courseIdInput.value.trim();
