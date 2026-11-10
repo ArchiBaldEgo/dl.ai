@@ -5,7 +5,7 @@
 
 {% block extrastyle %}
   {{ block.super }}
-  <link rel="stylesheet" href="{% static 'admin/ai/arm_solve/index.css' %}?v=3">
+  <link rel="stylesheet" href="{% static 'admin/ai/arm_solve/index.css' %}?v=5">
 {% endblock %}
 
 {% block content %}
@@ -39,6 +39,33 @@
         <span id="armLoadTreeMsg" style="font-size:13px;"></span>
       </div>
 
+      {# Язык — единый выбор для статусов дерева И для прогона (single-select). #}
+      {# Панель показывается после загрузки дерева: раскраска имеет смысл только #}
+      {# когда есть задачи. Цвет: зелёный — решена, красный — были попытки, #}
+      {# серый — посылок не было (или флаги ещё не заполнялись). #}
+      <div id="armTreeStatusBar" style="display:none; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px;">
+          Язык программирования:
+          <select name="language_id" id="armLanguageSelect" style="padding:6px 10px;">
+            <option value="">— выберите язык —</option>
+            {% for lang in language_options %}
+              <option value="{{ lang.id }}" data-ext="{{ lang.extension }}" data-name="{{ lang.name }}">{{ lang.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <input type="text" name="file_extension" id="armExtensionInput" readonly placeholder="расширение" style="padding:6px 10px; width:120px;">
+        <button type="button" class="button" id="armRefreshStatusesBtn">Обновить статусы из DL</button>
+        <span id="armStatusMsg" style="font-size:13px; color:var(--body-quiet-color);"></span>
+      </div>
+      <p class="arm-section-note" style="margin:0 0 12px;">
+        Статусы задач считаются по выбранному языку: <span style="color:#067647;">зелёный</span> — решена (на DL есть верное решение),
+        <span style="color:#b30000;">красный</span> — были попытки, но ни одна не прошла, серый — посылок не было.
+        Прогон отправляется строго по этому языку. Расширение выводится автоматически.
+      </p>
+      {% if not language_options %}
+        <div class="arm-empty">Нет языков, допущенных к пакетному решению.</div>
+      {% endif %}
+
       <div id="armTreeToolbar" style="display:none; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
         <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; user-select:none;">
           <input type="checkbox" id="armTreeSelectAll" data-no-state> Выбрать всё дерево
@@ -71,28 +98,6 @@
       {% endif %}
 
       <input type="hidden" name="interface_language" value="Русский">
-      <div class="arm-section-head" style="margin-top:18px;">
-        <div>
-          <h2>Язык(и) программирования</h2>
-          <p class="arm-section-note">DL REST send-solution требует расширение файла — оно определяется языком автоматически. Можно выбрать НЕСКОЛЬКО языков (например сразу .i86 и .mpc): по каждому языку запускается ОТДЕЛЬНЫЙ процесс с теми же задачами и моделями; процессы идут параллельно и видны в списке «Процессы».</p>
-        </div>
-      </div>
-      {% if language_options %}
-        <div class="arm-models" id="armLanguageChecks">
-          {% for lang in language_options %}
-            <label class="arm-model">
-              {# id — ключ сохранения формы (ai_admin_state.js): у чекбокса без name/id выбор языка не запоминался. #}
-              <input type="checkbox" class="arm-lang-check" id="armLangCheck{{ lang.id }}" value="{{ lang.id }}" data-ext="{{ lang.extension }}" data-name="{{ lang.name }}"> {{ lang.name }}
-            </label>
-          {% endfor %}
-        </div>
-      {% else %}
-        <div class="arm-empty">Нет языков, допущенных к пакетному решению.</div>
-      {% endif %}
-      <div style="display:flex; gap:8px; align-items:center; margin-top:8px; margin-bottom:12px;">
-        <input type="text" name="file_extension" id="armExtensionInput" readonly placeholder="расширение" style="padding:6px 10px; width:180px;">
-        <span class="arm-section-note" style="margin:0;">Расширение выводится из выбранных языков автоматически</span>
-      </div>
 
       <div class="arm-section-head" style="margin-top:18px;">
         <div>
@@ -251,8 +256,11 @@
 {# «Далее» — пропустить зацикленную пару (только «Отладка промтов»). #}
 {{ arm_prompt_debug_skip_url|json_script:"arm-prompt-debug-skip-url" }}
 {{ arm_solve_tree_url|json_script:"arm-solve-tree-url" }}
+{# Статусы задач по языку: чтение флагов из БД и прогон обновления по DL. #}
+{{ arm_solve_task_status_url|json_script:"arm-solve-task-status-url" }}
+{{ arm_solve_refresh_status_url|json_script:"arm-solve-refresh-status-url" }}
 
 {% include "admin/ai/_ai_batch_results.html" %}
 
-<script src="{% static 'admin/ai/arm_solve/index.js' %}?v=2"></script>
+<script src="{% static 'admin/ai/arm_solve/index.js' %}?v=4"></script>
 {% endblock %}

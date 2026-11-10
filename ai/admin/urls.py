@@ -24,6 +24,8 @@ from .arm import (
     admin_arm_prompt_debug_skip_view,
     admin_arm_solve_status_view,
     admin_arm_solve_load_tree_view,
+    admin_arm_solve_task_statuses_view,
+    admin_arm_solve_refresh_task_statuses_view,
     admin_arm_solve_cancel_view,
     admin_arm_solve_pause_view,
     admin_arm_solve_resume_view,
@@ -67,6 +69,7 @@ from .pinned import admin_pinned_run_toggle_view, admin_pinned_runs_view
 from .prompt_defaults import admin_prompt_defaults_view
 from .site import ai_admin_site
 from .tasks import (
+    admin_task_assign_view,
     admin_task_claim_view,
     admin_task_close_view,
     admin_task_create_view,
@@ -114,6 +117,8 @@ def get_ai_admin_urls():
         path("arm/solve/start/", ai_admin_site.admin_view(admin_arm_solve_start_view), name="ai_arm_solve_start"),
         path("arm/solve/status/", ai_admin_site.admin_view(admin_arm_solve_status_view), name="ai_arm_solve_status"),
         path("arm/solve/load-tree/", ai_admin_site.admin_view(admin_arm_solve_load_tree_view), name="ai_arm_solve_load_tree"),
+        path("arm/solve/task-statuses/", ai_admin_site.admin_view(admin_arm_solve_task_statuses_view), name="ai_arm_solve_task_statuses"),
+        path("arm/solve/refresh-task-statuses/", ai_admin_site.admin_view(admin_arm_solve_refresh_task_statuses_view), name="ai_arm_solve_refresh_task_statuses"),
         path("arm/solve/cancel/", ai_admin_site.admin_view(admin_arm_solve_cancel_view), name="ai_arm_solve_cancel"),
         path("arm/solve/pause/", ai_admin_site.admin_view(admin_arm_solve_pause_view), name="ai_arm_solve_pause"),
         path("arm/solve/resume/", ai_admin_site.admin_view(admin_arm_solve_resume_view), name="ai_arm_solve_resume"),
@@ -142,6 +147,7 @@ def get_ai_admin_urls():
         path("tasks/<int:task_id>/edit/", ai_admin_site.admin_view(admin_task_edit_view), name="ai_task_edit"),
         path("tasks/reorder/", ai_admin_site.admin_view(admin_task_reorder_view), name="ai_task_reorder"),
         path("tasks/<int:task_id>/claim/", ai_admin_site.admin_view(admin_task_claim_view), name="ai_task_claim"),
+        path("tasks/<int:task_id>/assign/", ai_admin_site.admin_view(admin_task_assign_view), name="ai_task_assign"),
         path("tasks/<int:task_id>/close/", ai_admin_site.admin_view(admin_task_close_view), name="ai_task_close"),
         path("tasks/<int:task_id>/reopen/", ai_admin_site.admin_view(admin_task_reopen_view), name="ai_task_reopen"),
         path("tasks/", ai_admin_site.admin_view(admin_tasks_view), name="ai_tasks"),

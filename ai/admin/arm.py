@@ -56,6 +56,13 @@ from ..services.task_registry import (
     extension_to_language_ids,
     solve_language_options,
 )
+from ..services.task_language_status import (
+    REFRESH_MAX_NODES,
+    TaskStatusRefreshError,
+    latest_refreshed_at,
+    refresh_statuses,
+    statuses_for_nodes,
+)
 from ..constants import AI_CACHE_KEY_PREFIX, DL_DEFAULT_COURSE_ID
 from .permissions import can_access_arm, can_edit_prompt, is_superuser_user
 
@@ -366,6 +373,10 @@ def _render_arm_solve_page(request, *, run_type):
         # Дерево/статус/отмена/тело результата — общие эндпоинты по run_id
         # (страницы различаются только стартом и собственным списком прогонов).
         "arm_solve_tree_url": "/ai/admin/arm/solve/load-tree/",
+        # Статусы задач по языку: чтение флагов из БД и прогон по DL
+        # (/get-solutions). URL-ы отдаются через json_script — в JS нет хардкода.
+        "arm_solve_task_status_url": "/ai/admin/arm/solve/task-statuses/",
+        "arm_solve_refresh_status_url": "/ai/admin/arm/solve/refresh-task-statuses/",
         "results": results,
         "report": report,
         "error_message": error_message,
@@ -580,6 +591,149 @@ def admin_arm_solve_load_tree_view(request):
         )
     except Exception as exc:
         return JsonResponse({"ok": False, "message": f"Ошибка: {exc}"}, status=500)
+
+
+def _parse_task_status_payload(request, *, max_nodes):
+    """Разобрать course_id / language_id / node_ids из JSON или form-body.
+
+    Возвращает ``(payload, error)``: payload — dict с валидными значениями,
+    error — готовый JsonResponse(400) или None. Общий парсер для обоих
+    эндпоинтов статусов задач (DRY).
+    """
+    try:
+        if request.content_type == "application/json":
+            raw = json.loads(request.body or "{}")
+        else:
+            raw = request.POST
+        if not isinstance(raw, dict) and not hasattr(raw, "get"):
+            raise TypeError("payload must be an object")
+        course_id = int(raw.get("course_id"))
+        language_id = int(raw.get("language_id"))
+        raw_nodes = raw.get("node_ids")
+        if isinstance(raw_nodes, str):
+            node_ids = [int(x) for x in raw_nodes.split(",") if str(x).strip()]
+        else:
+            node_ids = [int(x) for x in (raw_nodes or [])]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, JsonResponse(
+            {"ok": False, "message": "Некорректные course_id, language_id или node_ids"},
+            status=400,
+        )
+
+    if course_id <= 0 or language_id <= 0:
+        return None, JsonResponse(
+            {"ok": False, "message": "course_id и language_id должны быть положительными"},
+            status=400,
+        )
+
+    unique_nodes = []
+    seen = set()
+    for node_id in node_ids:
+        if node_id <= 0:
+            return None, JsonResponse(
+                {"ok": False, "message": "node_ids должны быть положительными"},
+                status=400,
+            )
+        if node_id not in seen:
+            seen.add(node_id)
+            unique_nodes.append(node_id)
+
+    if not unique_nodes:
+        return None, JsonResponse(
+            {"ok": False, "message": "node_ids пуст"}, status=400,
+        )
+    if len(unique_nodes) > max_nodes:
+        return None, JsonResponse(
+            {"ok": False, "message": f"Слишком много node_ids (максимум {max_nodes})"},
+            status=400,
+        )
+    return {
+        "course_id": course_id,
+        "language_id": language_id,
+        "node_ids": unique_nodes,
+    }, None
+
+
+def admin_arm_solve_task_statuses_view(request):
+    """Флаги решённости задач по языку — только из локальной БД.
+
+    Дерево вызывает этот эндпоинт при загрузке и смене языка: в DL не ходим,
+    поэтому смена языка перекрашивает уже открытое дерево мгновенно.
+    """
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+    if not can_access_arm(request):
+        return JsonResponse({"ok": False, "message": "Доступ запрещён."}, status=403)
+
+    payload, error = _parse_task_status_payload(request, max_nodes=2000)
+    if error is not None:
+        return error
+
+    statuses = statuses_for_nodes(
+        course_id=payload["course_id"],
+        programming_language_id=payload["language_id"],
+        node_ids=payload["node_ids"],
+    )
+    return JsonResponse({
+        "ok": True,
+        "statuses": {str(node_id): status for node_id, status in statuses.items()},
+        "refreshed_at": latest_refreshed_at(
+            course_id=payload["course_id"],
+            programming_language_id=payload["language_id"],
+            node_ids=payload["node_ids"],
+        ),
+    })
+
+
+def admin_arm_solve_refresh_task_statuses_view(request):
+    """Прогон обновления флагов по DL ``POST /restapi/get-solutions``.
+
+    Агрегирует все посылки, доступные DLSID-сессии (у админа DL — всех
+    пользователей курса). Клиент присылает пачки узлов, чтобы показывать
+    прогресс и не держать один долгий запрос.
+    """
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+    if not can_access_arm(request):
+        return JsonResponse({"ok": False, "message": "Доступ запрещён."}, status=403)
+
+    payload, error = _parse_task_status_payload(
+        request, max_nodes=REFRESH_MAX_NODES,
+    )
+    if error is not None:
+        return error
+
+    session_id = _resolve_session_id(request)
+    if not session_id:
+        return JsonResponse(
+            {"ok": False, "message": "Нет DLSID — требуется авторизация на dl.gsu.by."},
+            status=400,
+        )
+
+    try:
+        result = refresh_statuses(
+            session_id=session_id,
+            course_id=payload["course_id"],
+            programming_language_id=payload["language_id"],
+            node_ids=payload["node_ids"],
+        )
+    except ValueError as exc:
+        return JsonResponse({"ok": False, "message": str(exc)}, status=400)
+    except TaskStatusRefreshError as exc:
+        # 502 — ошибка внешнего DL, а не запроса клиента.
+        return JsonResponse({"ok": False, "message": str(exc)}, status=502)
+
+    return JsonResponse({
+        "ok": True,
+        "statuses": {
+            str(node_id): status
+            for node_id, status in result["statuses"].items()
+        },
+        "summary": result["summary"],
+        "errors": result["errors"],
+        "extension": result["extension"],
+        "refreshed_at": result["refreshed_at"],
+    })
 
 
 def admin_arm_solve_start_view(request):

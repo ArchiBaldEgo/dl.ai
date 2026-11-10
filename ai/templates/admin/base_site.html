@@ -47,6 +47,7 @@ file AND admin/app_list.html are not shadowed by the stock admin templates
   сюда json_script'ом; ПОСЛЕ трёх глобальных скриптов (defer-порядок).{% endcomment %}
   {% if ai_wizard %}{{ ai_wizard|json_script:"ai-wizard-config" }}{% endif %}
   <script src="{% static 'admin/js/ai-wizard.js' %}" defer></script>
+  <script src="{% static 'admin/js/base.js' %}"></script>
 {% endblock %}
 
 {% comment %}Приветствие кликабельно: рядом с именем чип-счётчик «Процессы (N)»

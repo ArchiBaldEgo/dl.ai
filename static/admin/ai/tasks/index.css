@@ -74,6 +74,9 @@ table[data-reorder="1"] tbody tr[data-task-id] { cursor: grab; }
    вид) с подкраской по виду. */
 
 .ai-task-btn-claim { padding: 3px 12px; }
+.ai-task-btn-assign { padding: 3px 12px; }
+/* Селект «Поручено» раскрывается прямо в ячейке действий. */
+.ai-task-assign { max-width: 280px; padding: 2px 6px; }
 .ai-task-btn-close {
   padding: 3px 12px;
   color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color));

@@ -6978,11 +6978,12 @@ class OllamaRegistryTests(SimpleTestCase):
         "Ollama_Gpt_Oss_20B_Cloud",
         "Ollama_Gpt_Oss_120B_Cloud",
         "Ollama_MiniMax_M3_1_Flash_Cloud",
+        "Ollama_Beam_Cloud",
     ]
 
-    # Все Ollama-модели в наборе умеют thinking (reasoning).
-    REASONING_KEYS = set(OLLAMA_KEYS)
-    # Мультимодальные (изображения/видео) — по документации ollama.com/library.
+    # Ollama-модели с vision по их страницам в библиотеке Ollama. Все
+    # остальные — thinking без vision; gpt-oss/minimax тоже стримят отдельное
+    # поле thinking.
     VISION_KEYS = {
         "Ollama_Glm_5_3_Flash_Cloud",
         "Ollama_DeepSeek_V4_1_Flash_Cloud",
@@ -6996,7 +6997,7 @@ class OllamaRegistryTests(SimpleTestCase):
         return {
             "text": True,
             "vision": key in self.VISION_KEYS,
-            "reasoning": key in self.REASONING_KEYS,
+            "reasoning": True,
         }
 
     def test_registry_contains_ollama_models(self):
@@ -10900,10 +10901,9 @@ class BatchLogDetailTemplateTests(TestCase):
 class ArmSolveTopicsKeyTests(TestCase):
     """Темы в контексте /arm/solve/ обязаны нести ключ сериализатора
     serialize_topic (``programming_language``): JS arm_solve.html фильтрует
-    темы по ``langIds.has(String(t.programming_language))`` (объединение тем
-    ВСЕХ выбранных языков) — чтение другого ключа оставляет селектор тем
-    пустым и ломает привязки «Промпты по умолчанию» (регрессия из
-    удалённой страницы arm_find_error.html)."""
+    темы по ``String(t.programming_language)`` (единственный выбранный язык) —
+    чтение другого ключа оставляет селектор тем пустым и ломает привязки
+    «Промпты по умолчанию» (регрессия из удалённой страницы arm_find_error.html)."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -10934,10 +10934,9 @@ class ArmSolveTopicsKeyTests(TestCase):
             Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
             / "arm_solve" / "index.js"
         ).read_text(encoding="utf-8")
-        # Темы фильтруются по ключу сериализатора через Set (объединение
-        # тем всех выбранных языков).
+        # Темы фильтруются по ключу сериализатора (единственный язык страницы).
         self.assertIn(
-            "langIds.has(String(t.programming_language))", src,
+            "String(t.programming_language) === String(lang.id)", src,
         )
         self.assertNotIn("t.programming_language_id", src)
 
@@ -10969,12 +10968,12 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
     def test_prompt_debug_form_state_is_remembered(self):
         """Форма «Отладки промтов» запоминается между визитами: страница
         зарегистрирована в общем механизме ai_admin_state.js (свой pathname —
-        без записи форма сбрасывалась), а у чекбоксов языков есть id — без
-        name/id у них нет ключа сохранения, и выбор языка терялся."""
+        без записи форма сбрасывалась), а у селектора языка есть id — без
+        name/id у него нет ключа сохранения, и выбор языка терялся."""
         src = self._static_source("admin", "js", "ai_admin_state.js")
         self.assertIn('"/ai/admin/arm/prompt-debug/": "#armSolveForm"', src)
         tpl = self._source("admin/ai/arm_solve.html")
-        self.assertIn('id="armLangCheck{{ lang.id }}"', tpl)
+        self.assertIn('id="armLanguageSelect"', tpl)
         self.assertIn('name="prompt_attempts"', tpl)
 
     def test_rerun_pairs_post_sends_csrf_token(self):
@@ -15352,6 +15351,7 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
 
     def setUp(self):
         from ai.admin.tasks import (
+            admin_task_assign_view,
             admin_task_claim_view,
             admin_task_close_view,
             admin_task_create_view,
@@ -15365,6 +15365,7 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.create_view = admin_task_create_view
         self.reorder_view = admin_task_reorder_view
         self.claim_view = admin_task_claim_view
+        self.assign_view = admin_task_assign_view
         self.close_view = admin_task_close_view
         self.reopen_view = admin_task_reopen_view
         self.edit_view = admin_task_edit_view
@@ -15416,12 +15417,21 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.context_data["can_create"])
         self.assertFalse(resp.context_data["can_close"])
+        self.assertFalse(resp.context_data["can_assign"])
+        self.assertEqual(resp.context_data["developer_options"], [])
         self.assertTrue(resp.context_data["can_reorder"])
 
         resp = self.page_view(self._request(self.superuser, path=self.tasks_url))
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.context_data["can_create"])
         self.assertTrue(resp.context_data["can_close"])
+        self.assertTrue(resp.context_data["can_assign"])
+        # «Поручено» предлагает только активных членов группы «Разработчик»
+        # (pd/outsider в списке нет).
+        self.assertEqual(
+            {option["id"] for option in resp.context_data["developer_options"]},
+            {self.dev.pk, self.other_dev.pk},
+        )
         self.assertTrue(resp.context_data["can_reorder"])
 
     def test_rows_are_draggable_on_front_and_wish_tabs(self):
@@ -15582,35 +15592,134 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         resp = self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
         self.assertEqual(resp.status_code, 409)
 
-    # --- Закрытие (superuser) ----------------------------------------------
+    # --- Поручение (superuser → «Разработчик») ----------------------------
 
-    def test_close_requires_superuser(self):
+    def test_assign_requires_superuser(self):
+        task = AIDevTask.objects.create(title="Т-поручение", created_by=self.superuser)
+        resp = self.assign_view(
+            self._request(self.dev, "post", f"/x/{task.id}/assign/", body={"user_id": self.other_dev.pk}),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 403)
+        task.refresh_from_db()
+        self.assertIsNone(task.taken_by)
+
+    def test_assign_sets_assignee_and_allows_reassignment(self):
+        task = AIDevTask.objects.create(title="Т-поручение", created_by=self.superuser)
+        resp = self.assign_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": self.dev.pk}),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.dev)
+        self.assertIsNotNone(task.taken_at)
+
+        # Перепоручение — суперюзер может назначить другого разработчика.
+        resp = self.assign_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": self.other_dev.pk}),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.other_dev)
+
+    def test_assign_rejects_non_developer(self):
+        task = AIDevTask.objects.create(title="Т-поручение", created_by=self.superuser)
+        for user in (self.pd, self.outsider):
+            resp = self.assign_view(
+                self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": user.pk}),
+                task.id,
+            )
+            self.assertEqual(resp.status_code, 400)
+        task.refresh_from_db()
+        self.assertIsNone(task.taken_by)
+
+    def test_assign_validates_task_and_payload(self):
+        task = AIDevTask.objects.create(title="Т-поручение", created_by=self.superuser)
+        # Нет user_id / не число — 400.
+        for body in ({}, {"user_id": "5"}, {"user_id": True}):
+            resp = self.assign_view(
+                self._request(self.superuser, "post", f"/x/{task.id}/assign/", body=body),
+                task.id,
+            )
+            self.assertEqual(resp.status_code, 400, body)
+        # Неизвестный таск — 404.
+        resp = self.assign_view(
+            self._request(self.superuser, "post", "/x/99999/assign/", body={"user_id": self.dev.pk}),
+            99999,
+        )
+        self.assertEqual(resp.status_code, 404)
+        # Закрытый таск — 409 (сначала «Вернуть»).
+        AIDevTask.objects.filter(pk=task.pk).update(closed_at=timezone.now())
+        resp = self.assign_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": self.dev.pk}),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 409)
+
+    # --- Закрытие ---------------------------------------------------------
+
+    def test_close_superuser_or_assignee(self):
         """Закрытие уводит таск с доски, но НЕ удаляет строку: closed_at/
         closed_by ставятся, приоритетный номер сбрасывается, taken-поля
-        остаются (в архиве видно «кто выполнил»); второй close — 409."""
+        остаются (в архиве видно «кто выполнил»); второй close — 409.
+        Назначенный исполнитель закрывает СВОЙ таск; чужой — 403."""
         task = AIDevTask.objects.create(
             title="Т3", created_by=self.superuser, taken_by=self.dev,
             priority_no=5,
         )
-        resp = self.close_view(self._request(self.dev, "post", f"/x/{task.id}/close/"), task.id)
+        # Не назначенный на этот таск разработчик — 403.
+        resp = self.close_view(self._request(self.other_dev, "post", f"/x/{task.id}/close/"), task.id)
         self.assertEqual(resp.status_code, 403)
         task.refresh_from_db()
         self.assertIsNone(task.closed_at)
 
+        # Назначенный исполнитель закрывает свой таск сам.
         self.assertEqual(
-            self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id).status_code,
+            self.close_view(self._request(self.dev, "post", f"/x/{task.id}/close/"), task.id).status_code,
             200,
         )
         task.refresh_from_db()
         # Строка жива: архив, а не удаление.
         self.assertIsNotNone(task.closed_at)
-        self.assertEqual(task.closed_by, self.superuser)
+        self.assertEqual(task.closed_by, self.dev)
         self.assertIsNone(task.priority_no)
         self.assertEqual(task.taken_by, self.dev)
 
         # Повторное закрытие закрытого — 409.
         resp = self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
         self.assertEqual(resp.status_code, 409)
+
+    def test_close_superuser_closes_any_task(self):
+        task = AIDevTask.objects.create(
+            title="Т4", created_by=self.superuser, taken_by=self.other_dev,
+        )
+        resp = self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.closed_by, self.superuser)
+        # ФИО разработчика в архиве — из taken_by, а не из закрывшего.
+        self.assertEqual(task.taken_by, self.other_dev)
+
+        # Незанятый таск суперюзер тоже может закрыть.
+        free = AIDevTask.objects.create(title="Т5", created_by=self.superuser)
+        resp = self.close_view(self._request(self.superuser, "post", f"/x/{free.id}/close/"), free.id)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_closed_archive_shows_assignee_for_superuser_close(self):
+        """После закрытия суперюзером в архивной строке — ФИО разработчика
+        (taken_by), даже если closed_by — суперюзер."""
+        task = AIDevTask.objects.create(
+            title="Т-архив", created_by=self.superuser, taken_by=self.dev,
+        )
+        self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+        resp = self.page_view(
+            self._request(self.superuser, path=f"{self.tasks_url}?kind=closed")
+        )
+        row = next(r for r in resp.context_data["rows"] if r["id"] == task.pk)
+        self.assertTrue(row["claimant"])
+        self.assertIn("task_dev", row["claimant"])
 
     def test_close_unknown_task_is_404(self):
         resp = self.close_view(self._request(self.superuser, "post", "/x/99999/close/"), 99999)
@@ -17515,7 +17624,7 @@ class OnboardingServiceTests(TestCase):
             "admin_my_prompt", "admin_prompt_defaults", "admin_logs",
             "admin_pinned_runs", "admin_aiappsettings", "admin_updates",
             "admin_test_console", "admin_tasksolution",
-            "admin_test_data",
+            "admin_test_data", "admin_model_status", "admin_tasks",
         ):
             self.assertTrue(scope_name_valid(page_scope))
         # Клиентская страница «Мои AI-модели» — свой тур по шапке и панели.
@@ -18641,14 +18750,15 @@ class MpaMultiWindowExtractionTests(SimpleTestCase):
 
 class ModelStatusCapabilityBadgeTests(SimpleTestCase):
     """Три состояния бейджа способности («Состояние моделей»): зелёный —
-    способность есть и модель активна; зелёный зачёркнутый — способность
-    есть, но модель сейчас неактивна; серый зачёркнутый — способности нет."""
+    способность есть у модели И реализована в приложении; зелёный
+    зачёркнутый — есть у модели, но не реализована; серый зачёркнутый —
+    у модели нет. Доступность модели на бейдж не влияет."""
 
     def test_badge_states(self):
         from ai.admin.model_status import _capability_badge
 
         self.assertEqual(_capability_badge(True, True)["class"], "cap-on")
-        self.assertEqual(_capability_badge(True, False)["class"], "cap-on cap-inactive")
+        self.assertEqual(_capability_badge(True, False)["class"], "cap-on cap-unimplemented")
         self.assertEqual(_capability_badge(False, True)["class"], "cap-off")
         self.assertEqual(_capability_badge(False, False)["class"], "cap-off")
         for badge in (
@@ -18664,14 +18774,17 @@ class ModelStatusCapabilityBadgeTests(SimpleTestCase):
         rows = _with_capability_badges([
             {
                 "key": "A",
-                "capabilities": {"text": True, "vision": False, "reasoning": True},
+                "capabilities": {"text": True, "vision": True, "reasoning": True},
                 "is_active": False,
             },
         ])
         caps = rows[0]["cap_classes"]
-        self.assertEqual(caps["text"]["class"], "cap-on cap-inactive")
-        self.assertEqual(caps["vision"]["class"], "cap-off")
-        self.assertEqual(caps["reasoning"]["class"], "cap-on cap-inactive")
+        # Все три способности реализованы в приложении (vision — загрузка PDF
+        # в чат, ai/services/pdf_upload.py), поэтому все бейджи зелёные.
+        # is_active на классы не влияет.
+        self.assertEqual(caps["text"]["class"], "cap-on")
+        self.assertEqual(caps["vision"]["class"], "cap-on")
+        self.assertEqual(caps["reasoning"]["class"], "cap-on")
 
     def test_api_serializer_passes_cap_classes(self):
         from ai.admin.model_status import _serialize_model_status_rows_for_api
@@ -18693,7 +18806,7 @@ class ModelStatusCapabilityBadgeTests(SimpleTestCase):
 
     def test_template_and_css_use_three_states(self):
         """Разметка бейджа — из cap_classes (сервер), CSS — с классом
-        зачёркивания для «есть, но модель неактивна»."""
+        зачёркивания для «есть у модели, но не реализовано»."""
         from django.template.loader import get_template
         from pathlib import Path
 
@@ -18705,8 +18818,49 @@ class ModelStatusCapabilityBadgeTests(SimpleTestCase):
             Path(__file__).resolve().parent.parent
             / "static" / "admin" / "ai" / "model_status" / "index.css"
         ).read_text(encoding="utf-8")
-        self.assertIn(".cap-inactive", css)
+        self.assertIn(".cap-unimplemented", css)
         self.assertIn("text-decoration: line-through", css)
+
+    def test_ollama_capabilities_match_docs(self):
+        """Возможности Ollama-моделей — по их страницам в библиотеке Ollama.
+
+        Vision+thinking: glm-5.3-flash, deepseek-v4.1-flash, gemma4,
+        kimi-k2.7-code, kimi-k2.6, minimax-m3.1-flash. Thinking без vision:
+        glm-5.2, deepseek-v4-pro, nemotron-3-super, gpt-oss 20b/120b, beam
+        (Reflection, «Text in, text out»). Clef сюда не входит — это
+        decision-модель (System One API), а не чат: /api/chat её не обслуживает.
+        """
+        from ai.model_clients.registry import registry, IMPLEMENTED_CAPABILITIES
+
+        vision_and_thinking = {
+            "Ollama_Glm_5_3_Flash_Cloud",
+            "Ollama_DeepSeek_V4_1_Flash_Cloud",
+            "Ollama_Gemma_4_Cloud",
+            "Ollama_Kimi_K2_7_Code_Cloud",
+            "Ollama_Kimi_K2_6_Cloud",
+            "Ollama_MiniMax_M3_1_Flash_Cloud",
+        }
+        thinking_only = {
+            "Ollama_Glm_5_2_Cloud",
+            "Ollama_DeepSeek_V4_Pro_Cloud",
+            "Ollama_Nemotron_3_Super_Cloud",
+            "Ollama_Gpt_Oss_20B_Cloud",
+            "Ollama_Gpt_Oss_120B_Cloud",
+            "Ollama_Beam_Cloud",
+        }
+        for key in vision_and_thinking:
+            caps = registry.capabilities(key)
+            self.assertTrue(caps["vision"], key)
+            self.assertTrue(caps["reasoning"], key)
+        for key in thinking_only:
+            caps = registry.capabilities(key)
+            self.assertFalse(caps["vision"], key)
+            self.assertTrue(caps["reasoning"], key)
+        # Все три способности реализованы в приложении: vision — приём PDF
+        # в чате (ai/services/pdf_upload.py), text — чат, reasoning — think.
+        self.assertTrue(IMPLEMENTED_CAPABILITIES["text"])
+        self.assertTrue(IMPLEMENTED_CAPABILITIES["vision"])
+        self.assertTrue(IMPLEMENTED_CAPABILITIES["reasoning"])
 
 
 class LanguageRequirementsTests(SimpleTestCase):
@@ -25537,6 +25691,227 @@ class PromptDebugRunnerTests(TestCase):
         self.assertEqual(dl_calls["n"], 0)
 
 
+class TaskLanguageStatusTests(_AdminViewRequestMixin, TestCase):
+    """Флаги решённости задач по языку: сервис, прогон по DL и ARM-эндпоинты."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(
+            username="tl_admin", password="x", is_staff=True,
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="C-MPA")
+
+    def test_statuses_for_nodes_defaults_to_not_attempted(self):
+        from ai.models import TaskLanguageStatus
+        from ai.services.task_language_status import statuses_for_nodes
+
+        TaskLanguageStatus.objects.create(
+            course_id=1450, node_id=101,
+            programming_language_id=self.lang.id,
+            status=TaskLanguageStatus.STATUS_SOLVED,
+        )
+        TaskLanguageStatus.objects.create(
+            course_id=1450, node_id=102,
+            programming_language_id=self.lang.id,
+            status=TaskLanguageStatus.STATUS_ATTEMPTED,
+        )
+        statuses = statuses_for_nodes(
+            course_id=1450, programming_language_id=self.lang.id,
+            node_ids=[101, 102, 103],
+        )
+        self.assertEqual(statuses, {101: 1, 102: 2, 103: 0})
+
+    def test_refresh_statuses_classifies_and_upserts(self):
+        from ai.models import TaskLanguageStatus
+        from ai.services.task_language_status import refresh_statuses
+
+        solutions = {
+            101: [{"isCorrect": True}],
+            102: [{"isCorrect": False}, {"isCorrect": False}],
+            103: [],
+        }
+        calls = []
+
+        def fake_get(session_id, course_id, node_id, **kwargs):
+            calls.append((node_id, kwargs.get("extension")))
+            return {"solutions": solutions[node_id]}
+
+        with patch(
+            "ai.services.task_language_status.get_solutions_from_dl",
+            side_effect=fake_get,
+        ):
+            result = refresh_statuses(
+                session_id="DLSID-TEST", course_id=1450,
+                programming_language_id=self.lang.id,
+                node_ids=[101, 102, 103],
+            )
+
+        self.assertEqual(result["statuses"], {101: 1, 102: 2, 103: 0})
+        self.assertEqual(result["summary"], {"solved": 1, "attempted": 1, "none": 1})
+        self.assertEqual(result["extension"], "mpc")
+        self.assertTrue(result["refreshed_at"])
+        # /get-solutions ждёт расширение БЕЗ точки — единый маппинг языков.
+        self.assertTrue(calls)
+        self.assertTrue(all(ext == "mpc" for _node, ext in calls))
+
+        row = TaskLanguageStatus.objects.get(
+            course_id=1450, node_id=102,
+            programming_language_id=self.lang.id,
+        )
+        self.assertEqual(row.status, TaskLanguageStatus.STATUS_ATTEMPTED)
+        self.assertEqual(row.solutions_total, 2)
+        self.assertEqual(row.solutions_correct, 0)
+        self.assertEqual(row.file_extension, ".mpc")
+        self.assertIsNotNone(row.refreshed_at)
+
+    def test_refresh_statuses_fatal_error_aborts(self):
+        from ai.dl_api_client import DLUnauthorizedError
+        from ai.models import TaskLanguageStatus
+        from ai.services.task_language_status import (
+            TaskStatusRefreshError,
+            refresh_statuses,
+        )
+
+        with patch(
+            "ai.services.task_language_status.get_solutions_from_dl",
+            side_effect=DLUnauthorizedError(),
+        ):
+            with self.assertRaises(TaskStatusRefreshError):
+                refresh_statuses(
+                    session_id="DLSID-TEST", course_id=1450,
+                    programming_language_id=self.lang.id,
+                    node_ids=[201, 202],
+                )
+        self.assertFalse(
+            TaskLanguageStatus.objects.filter(course_id=1450).exists()
+        )
+
+    def test_refresh_statuses_node_error_preserves_old_flag(self):
+        from ai.dl_api_client import DLServerError
+        from ai.models import TaskLanguageStatus
+        from ai.services.task_language_status import refresh_statuses
+
+        TaskLanguageStatus.objects.create(
+            course_id=1450, node_id=201,
+            programming_language_id=self.lang.id,
+            status=TaskLanguageStatus.STATUS_SOLVED,
+            solutions_total=1, solutions_correct=1,
+        )
+
+        def fake_get(session_id, course_id, node_id, **kwargs):
+            if node_id == 201:
+                raise DLServerError("boom")
+            return {"solutions": []}
+
+        with patch(
+            "ai.services.task_language_status.get_solutions_from_dl",
+            side_effect=fake_get,
+        ):
+            result = refresh_statuses(
+                session_id="DLSID-TEST", course_id=1450,
+                programming_language_id=self.lang.id, node_ids=[201, 202],
+            )
+
+        self.assertIn("201", result["errors"])
+        self.assertEqual(result["statuses"][201], 1)
+        self.assertEqual(result["statuses"][202], 0)
+
+    def test_statuses_endpoint_returns_flags(self):
+        from ai.admin.arm import admin_arm_solve_task_statuses_view
+        from ai.models import TaskLanguageStatus
+
+        TaskLanguageStatus.objects.create(
+            course_id=1450, node_id=301,
+            programming_language_id=self.lang.id,
+            status=TaskLanguageStatus.STATUS_SOLVED,
+        )
+        request = self._admin_request(
+            self.user, method="post", path="/ai/admin/arm/solve/task-statuses/",
+            data=json.dumps({
+                "course_id": 1450, "language_id": self.lang.id,
+                "node_ids": [301, 302],
+            }),
+            content_type="application/json",
+        )
+        response = admin_arm_solve_task_statuses_view(request)
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["statuses"], {"301": 1, "302": 0})
+
+    def test_statuses_endpoint_rejects_empty_nodes(self):
+        from ai.admin.arm import admin_arm_solve_task_statuses_view
+
+        request = self._admin_request(
+            self.user, method="post", path="/ai/admin/arm/solve/task-statuses/",
+            data=json.dumps({
+                "course_id": 1450, "language_id": self.lang.id, "node_ids": [],
+            }),
+            content_type="application/json",
+        )
+        response = admin_arm_solve_task_statuses_view(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(json.loads(response.content)["ok"])
+
+    def test_statuses_endpoint_denies_arm_access(self):
+        from ai.admin.arm import admin_arm_solve_task_statuses_view
+
+        plain = get_user_model().objects.create_user(
+            username="tl_plain", password="x",
+        )
+        request = self._admin_request(
+            plain, method="post", path="/ai/admin/arm/solve/task-statuses/",
+            data=json.dumps({
+                "course_id": 1450, "language_id": self.lang.id, "node_ids": [1],
+            }),
+            content_type="application/json",
+        )
+        response = admin_arm_solve_task_statuses_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_refresh_endpoint_requires_dlsid(self):
+        from ai.admin.arm import admin_arm_solve_refresh_task_statuses_view
+
+        request = self._admin_request(
+            self.user, method="post",
+            path="/ai/admin/arm/solve/refresh-task-statuses/",
+            data=json.dumps({
+                "course_id": 1450, "language_id": self.lang.id, "node_ids": [1],
+            }),
+            content_type="application/json",
+        )
+        response = admin_arm_solve_refresh_task_statuses_view(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("DLSID", json.loads(response.content)["message"])
+
+    def test_refresh_endpoint_updates_flags(self):
+        from ai.admin.arm import admin_arm_solve_refresh_task_statuses_view
+
+        request = self._admin_request(
+            self.user, method="post",
+            path="/ai/admin/arm/solve/refresh-task-statuses/",
+            data=json.dumps({
+                "course_id": 1450, "language_id": self.lang.id, "node_ids": [401],
+            }),
+            content_type="application/json",
+        )
+        request.session["external_session_id"] = "DLSID-TEST"
+        expected = {
+            "statuses": {401: 2},
+            "summary": {"solved": 0, "attempted": 1, "none": 0},
+            "errors": {},
+            "extension": "mpc",
+            "refreshed_at": timezone.now(),
+        }
+        with patch("ai.admin.arm.refresh_statuses", return_value=expected):
+            response = admin_arm_solve_refresh_task_statuses_view(request)
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["statuses"], {"401": 2})
+        self.assertEqual(body["summary"]["attempted"], 1)
+
+
 class PromptDebugAdminViewTests(_AdminViewRequestMixin, TestCase):
     """Страница /arm/prompt-debug/ и её старт: режим, попытки, права."""
 
@@ -25587,12 +25962,13 @@ class PromptDebugAdminViewTests(_AdminViewRequestMixin, TestCase):
         self.assertNotIn('id="armSaveSolutions"', html)
         # Фильтр промптов по языку: у опций есть language_id.
         self.assertIn('"language_id": %d' % self.lang.id, html)
-        # Чекбокс языка несёт value=id: по нему селектор промптов фильтрует
-        # список и восстанавливается язык из run_params. Без value браузер
-        # отдаёт "on" — селект промптов оказывался пустым.
+        # Язык — единственный single-select; опция несёт id, расширение и имя
+        # (data-ext/data-name), чтобы JS красил дерево и подставлял темы/промпты
+        # без запросов к DL.
+        self.assertIn('id="armLanguageSelect"', html)
         self.assertIn(
-            'class="arm-lang-check" id="armLangCheck%d" value="%d"'
-            % (self.lang.id, self.lang.id),
+            '<option value="%d" data-ext=".pas" data-name="Pascal">Pascal</option>'
+            % self.lang.id,
             html,
         )
 

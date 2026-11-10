@@ -64,6 +64,7 @@ from .services.user_models import (
     PROVIDER_BASE_URLS,
     admin_user_model_rows,
     delete_user_model,
+    public_user_model_options,
     save_user_model,
     set_user_model_access,
     user_model_options_page,

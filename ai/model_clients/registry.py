@@ -25,6 +25,12 @@ _REASONING = {"text": True, "vision": False, "reasoning": True}
 # Multimodal thinking models (image/video input + reasoning output).
 _VISION_REASONING = {"text": True, "vision": True, "reasoning": True}
 
+#: Возможности, РЕАЛИЗОВАННЫЕ в приложении (не «рекламируемые» моделью).
+#: Страница «Состояние моделей» различает три состояния: есть и работает /
+#: есть у модели, но не реализовано / нет. Менять только вместе с кодом,
+#: который реально реализует возможность.
+IMPLEMENTED_CAPABILITIES = {"text": True, "vision": True, "reasoning": True}
+
 # Модель по умолчанию для селектора на страницах AI: предвыбирается, когда у
 # пользователя нет своего топ-1 фаворита (см. views._render_ai_page).
 DEFAULT_MODEL_KEY = "Ollama_Gemma_4_Cloud"
@@ -183,6 +189,13 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "handler": ollama.ask_Ollama_MiniMax_M3_1_Flash_Cloud_async,
         # minimax-m3.1-flash:cloud — image/video input + reasoning.
         "capabilities": _VISION_REASONING,
+    },
+    "Ollama_Beam_Cloud": {
+        "title": "Ollama Beam",
+        "handler": ollama.ask_Ollama_Beam_Cloud_async,
+        # beam:cloud (Reflection, 501B MoE / 23B active) — reasoning + tools,
+        # мультимодальности нет: «Text in, text out».
+        "capabilities": _REASONING,
     },
 }
 

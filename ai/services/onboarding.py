@@ -39,6 +39,7 @@ SCOPES = (
     "admin_super",
     "admin_arm_solve",
     "admin_model_status",
+    "admin_tasks",
     "admin_my_prompt",
     "admin_prompt_defaults",
     "admin_logs",
