@@ -69,9 +69,12 @@
     const REFRESH_TASK_STATUS_URL = readJsonScript('arm-solve-refresh-task-status-url', '');
     // nodeId → 0|1|2 для текущего языка. Пересоздаётся при смене языка.
     let taskStatusCache = new Map();
-    // Сервер обновляет ≤100 узлов за запрос; клиент режет по 50 — так виден
-    // прогресс и один запрос не длится минутами.
-    const TASK_REFRESH_CHUNK = 50;
+    // Сервер обновляет ≤100 узлов за запрос; клиент режет по 10 (ровно размер
+    // пула сервера — пачка уходит одним кругом). Причина — внешний nginx на
+    // dl.gsu.by без явного proxy_read_timeout (дефолт 60 с): пачка из 50 узлов
+    // при 5 потоках и таймауте узла 10 с тянулась дольше минуты, nginx отдавал
+    // HTML 504, а клиент показывал его как «сессия истекла».
+    const TASK_REFRESH_CHUNK = 10;
 
     function statusToClass(status) {
         if (status === 1) return 'arm-tree-task-good';
@@ -148,7 +151,8 @@
         const data = await parseJsonResponse(response);
 
         if (!response.ok || !data.ok) {
-            throw new Error(data.message || 'Не удалось получить статусы задач');
+            throw new Error((data.message || 'Не удалось получить статусы задач')
+                + (response.ok ? '' : ' (HTTP ' + response.status + ')'));
         }
 
         taskStatusCache = new Map(Object.entries(data.statuses || {}));
@@ -196,7 +200,10 @@
                 });
                 const data = await parseJsonResponse(response);
                 if (!response.ok || !data.ok) {
-                    throw new Error(data.message || 'Не удалось обновить статусы');
+                    // Статус-код не теряем: 502 (DL недоступен) и 400 (кривые
+                    // параметры) лечатся по-разному.
+                    throw new Error((data.message || 'Не удалось обновить статусы')
+                        + (response.ok ? '' : ' (HTTP ' + response.status + ')'));
                 }
                 Object.entries(data.statuses || {}).forEach(function ([nodeId, status]) {
                     taskStatusCache.set(String(nodeId), status);
@@ -221,7 +228,10 @@
             if (when) { text += ' · статусы от ' + when; }
             setStatusMessage(text, errors ? '#b54708' : '#067647');
         } catch (error) {
-            setStatusMessage(error.message || 'Ошибка обновления статусов', '#b42318');
+            // Обрыв на середине не отменяет уже записанные пачки — честно
+            // показываем, сколько узлов успело обновиться.
+            const partial = done ? ' (обновлено ' + done + ' из ' + nodeIds.length + ')' : '';
+            setStatusMessage((error.message || 'Ошибка обновления статусов') + partial, '#b42318');
         } finally {
             if (btn) {
                 btn.disabled = false;
@@ -231,13 +241,25 @@
     }
     // AJAX админки всегда ждёт JSON; HTML (например, редирект на страницу
     // логина при протухшей сессии — fetch молча следует за 302) даёт сырую
-    // ошибку JSON.parse. Показываем внятный текст вместо неё.
+    // ошибку JSON.parse. Не-JSON с другим статусом (CSRF 403, 500, 502/504 от
+    // прокси) показываем со статусом и началом тела: маскировать всё под
+    // «сессию истекла» нельзя — это скрывает настоящую причину (см. ту же
+    // конвенцию в tasks/index.js).
     async function parseJsonResponse(response) {
-      const contentType = response.headers.get('content-type') || '';
-      if (contentType.indexOf('application/json') === -1) {
-        throw new Error('Сессия истекла или сервер вернул неожиданный ответ. Обновите страницу и войдите заново.');
+      const text = await response.text();
+      try {
+        return JSON.parse(text);
+      } catch (e) {
+        const head = text.replace(/\s+/g, ' ').slice(0, 120);
+        if (response.status === 403) {
+          throw new Error('CSRF-проверка не прошла (HTTP 403): ' + head +
+            ' — обновите страницу (Ctrl+F5) и повторите');
+        }
+        throw new Error('Сервер вернул не JSON, HTTP ' + response.status + ': ' + head +
+          (head.indexOf('<!DOCTYPE') === 0 || head.indexOf('<html') === 0
+            ? ' — Сессия истекла, войдите заново'
+            : ''));
       }
-      return response.json();
     }
     function setSubmitDisabled(disabled) {
       // Блокировка только на время ЗАПУСКА: сами прогоны идут параллельно и

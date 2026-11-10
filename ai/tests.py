@@ -10986,6 +10986,21 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         src = self._static_source("admin", "ai", "arm_solve", "index.js")
         self.assertIn("function parseJsonResponse", src)
         self.assertIn("Сессия истекла", src)
+        # Не-JSON НЕ 403 — показываем статус и начало тела: 504 от прокси
+        # раньше маскировался под «сессию истекла» (внешний nginx на dl.gsu.by
+        # держит дефолтный proxy_read_timeout 60 с).
+        self.assertIn("HTTP ' + response.status", src)
+
+    def test_task_status_refresh_chunk_fits_proxy_timeout(self):
+        """Пачка refresh-запроса обязана укладываться в 60 с внешнего nginx.
+
+        Пачка 50 узлов при 5 потоках и таймауте узла 10 с могла длиться до
+        150 с → HTML 504 → «сессия истекла». Держим пачку ≤ 10.
+        """
+        src = self._static_source("admin", "ai", "arm_solve", "index.js")
+        self.assertIn("const TASK_REFRESH_CHUNK = 10;", src)
+        from ai.services.task_language_status import REFRESH_TIMEOUT
+        self.assertLessEqual(REFRESH_TIMEOUT, 10)
 
     def test_batch_results_body_fetch_has_expired_session_parser(self):
         """Ленивое тело результата (partial используется на /arm/solve/ и в
@@ -25910,6 +25925,69 @@ class TaskLanguageStatusTests(_AdminViewRequestMixin, TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(body["statuses"], {"401": 2})
         self.assertEqual(body["summary"]["attempted"], 1)
+
+    def test_refresh_endpoint_accepts_form_encoded_payload(self):
+        """Клиент ARM шлёт form-urlencoded, а node_ids — строкой через запятую.
+
+        Покрываем именно продакшн-формат: JSON-ветка тестами уже покрыта, а
+        расхождение форматов на клиенте и сервере давало 400 при исправном
+        дереве.
+        """
+        from urllib.parse import urlencode
+        from ai.admin.arm import admin_arm_solve_refresh_task_statuses_view
+
+        request = self._admin_request(
+            self.user, method="post",
+            path="/ai/admin/arm/solve/refresh-task-statuses/",
+            data=urlencode({
+                "course_id": 1450, "language_id": self.lang.id,
+                "node_ids": "401,402",
+            }),
+            content_type="application/x-www-form-urlencoded",
+        )
+        request.session["external_session_id"] = "DLSID-TEST"
+        expected = {
+            "statuses": {401: 1, 402: 0},
+            "summary": {"solved": 1, "attempted": 0, "none": 1},
+            "errors": {},
+            "extension": "mpc",
+            "refreshed_at": timezone.now(),
+        }
+        with patch(
+            "ai.admin.arm.refresh_statuses", return_value=expected,
+        ) as refresh_mock:
+            response = admin_arm_solve_refresh_task_statuses_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            refresh_mock.call_args.kwargs["node_ids"], [401, 402],
+        )
+        self.assertEqual(json.loads(response.content)["statuses"], {"401": 1, "402": 0})
+
+    def test_refresh_endpoint_unexpected_error_stays_json(self):
+        """Незапланированный сбой — JSON 500, а не HTML-страница ошибки Django.
+
+        HTML ломал клиентский парсер, и пользователь видел «сессия истекла».
+        """
+        from ai.admin.arm import admin_arm_solve_refresh_task_statuses_view
+
+        request = self._admin_request(
+            self.user, method="post",
+            path="/ai/admin/arm/solve/refresh-task-statuses/",
+            data=json.dumps({
+                "course_id": 1450, "language_id": self.lang.id, "node_ids": [401],
+            }),
+            content_type="application/json",
+        )
+        request.session["external_session_id"] = "DLSID-TEST"
+        with patch(
+            "ai.admin.arm.refresh_statuses", side_effect=RuntimeError("boom"),
+        ):
+            response = admin_arm_solve_refresh_task_statuses_view(request)
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response["Content-Type"], "application/json")
+        body = json.loads(response.content)
+        self.assertFalse(body["ok"])
+        self.assertIn("boom", body["message"])
 
 
 class PromptDebugAdminViewTests(_AdminViewRequestMixin, TestCase):

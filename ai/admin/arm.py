@@ -12,6 +12,7 @@
 import json
 import logging
 import re
+import time
 
 from .site import ai_admin_site
 
@@ -710,6 +711,7 @@ def admin_arm_solve_refresh_task_statuses_view(request):
             status=400,
         )
 
+    started = time.monotonic()
     try:
         result = refresh_statuses(
             session_id=session_id,
@@ -722,6 +724,25 @@ def admin_arm_solve_refresh_task_statuses_view(request):
     except TaskStatusRefreshError as exc:
         # 502 — ошибка внешнего DL, а не запроса клиента.
         return JsonResponse({"ok": False, "message": str(exc)}, status=502)
+    except Exception as exc:  # noqa: BLE001 — AJAX не должен получать HTML 500
+        # Незапланированный сбой страницы ошибок Django отдал бы HTML, и клиент
+        # показал бы его как «сессия истекла». Отдаём честный JSON 500.
+        logger.exception("ARM task status refresh failed")
+        return JsonResponse(
+            {"ok": False, "message": f"Ошибка обновления статусов: {exc}"},
+            status=500,
+        )
+
+    # Время ответа видно в логах: внешний nginx на dl.gsu.by держит дефолтный
+    # proxy_read_timeout 60 с и на более долгий запрос отдаёт HTML 504 (клиент
+    # раньше показывал его как «сессия истекла»).
+    elapsed = time.monotonic() - started
+    log = logger.warning if elapsed >= 30 else logger.info
+    log(
+        "ARM task status refresh: course=%s lang=%s nodes=%s %.1fs errors=%s",
+        payload["course_id"], payload["language_id"], len(payload["node_ids"]),
+        elapsed, len(result["errors"]),
+    )
 
     return JsonResponse({
         "ok": True,
