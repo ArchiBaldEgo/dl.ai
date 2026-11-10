@@ -1,7 +1,7 @@
 """URL-маршруты AI-приложения для основных страниц и API."""
 from django.urls import path
 from . import views
-from . import api
+
 urlpatterns = [
     path('ai/', views.ai_root_view, name='ai_root'),
     path('ai/chat/', views.chat_view, name='chat_view'),
@@ -16,5 +16,4 @@ urlpatterns = [
     path('ai/my-models/search-users/', views.my_model_search_users_view, name='ai_my_model_search_users'),
     path('ai/docs/', views.chat_user_docs_view, name='ai_user_docs'),
     path('ai/docs/download/', views.chat_user_docs_download_view, name='ai_user_docs_download'),
-    path('ai/api/get_task_status/', api.get_task_status, name='ai_get_task_status')
 ]

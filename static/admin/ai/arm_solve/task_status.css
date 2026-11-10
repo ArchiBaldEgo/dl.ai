@@ -11,6 +11,7 @@
   color: rgb(179, 0, 0);
 }
 
-.arm-tree-task-none {
-  
+/* Серый: посылок не было либо флаги ещё не заполнялись. */
+.arm-tree-task-undefined {
+  color: #6b7280;
 }

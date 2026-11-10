@@ -63,8 +63,15 @@
       const input = form.querySelector('input[name="csrfmiddlewaretoken"]');
       return (document.cookie.split('; ').find(function (r) { return r.startsWith('csrftoken='); }) || '').split('=').slice(1).join('=') || (input ? input.value : '');
     }
-    const TASK_STATUS_URL = '/ai/api/get_task_status/';
-    const taskStatusCache = new Map();
+    // Статусы задач по языку: дерево читает ТОЛЬКО флаги из локальной БД
+    // (в DL при загрузке/смене языка не ходим). Адреса — из json_script.
+    const TASK_STATUS_URL = readJsonScript('arm-solve-task-status-url', '');
+    const REFRESH_TASK_STATUS_URL = readJsonScript('arm-solve-refresh-task-status-url', '');
+    // nodeId → 0|1|2 для текущего языка. Пересоздаётся при смене языка.
+    let taskStatusCache = new Map();
+    // Сервер обновляет ≤100 узлов за запрос; клиент режет по 50 — так виден
+    // прогресс и один запрос не длится минутами.
+    const TASK_REFRESH_CHUNK = 50;
 
     function statusToClass(status) {
         if (status === 1) return 'arm-tree-task-good';
@@ -72,24 +79,61 @@
         return 'arm-tree-task-undefined';
     }
 
+    function statusTitle(status) {
+        if (status === 1) return 'Решена на DL: есть верное решение';
+        if (status === 2) return 'Были попытки, но ни одна не прошла';
+        return 'Посылок не было или статусы ещё не обновлялись';
+    }
+
+    function treeNodeIds() {
+        return Array.from(
+            treeContainer.querySelectorAll('input.arm-task-check')
+        ).map(function (cb) { return cb.value; });
+    }
+
     function updateTaskClasses() {
         treeContainer.querySelectorAll('input.arm-task-check').forEach(function (cb) {
             const nameEl = cb.parentElement.querySelector('.arm-tree-task-name');
             if (!nameEl) return;
-        
+
             const status = taskStatusCache.get(String(cb.value));
-            nameEl.className = 'arm-tree-task-name ' + statusToClass(status == null ? 0 : status);
+            const value = status == null ? 0 : status;
+            nameEl.className = 'arm-tree-task-name ' + statusToClass(value);
+            nameEl.title = statusTitle(value);
+        });
+    }
+
+    function setStatusMessage(text, color) {
+        const el = document.getElementById('armStatusMsg');
+        if (!el) return;
+        el.textContent = text || '';
+        el.style.color = color || '';
+    }
+
+    function formatRefreshedAt(iso) {
+        if (!iso) return '';
+        const date = new Date(iso);
+        if (isNaN(date.getTime())) return '';
+        return date.toLocaleString('ru-RU', {
+            day: '2-digit', month: '2-digit', year: 'numeric',
+            hour: '2-digit', minute: '2-digit',
         });
     }
 
     async function loadTaskStatuses(nodeIds) {
         const courseId = courseIdInput ? courseIdInput.value.trim() : '';
-        if (!courseId || !nodeIds.length) return;
-    
+        const lang = selectedLanguage();
+        if (!courseId || !lang || !nodeIds.length) {
+            taskStatusCache = new Map();
+            updateTaskClasses();
+            return;
+        }
+
         const body = new URLSearchParams();
         body.set('course_id', courseId);
+        body.set('language_id', lang.id);
         body.set('node_ids', nodeIds.join(','));
-    
+
         const response = await fetch(TASK_STATUS_URL, {
             method: 'POST',
             credentials: 'same-origin',
@@ -100,18 +144,90 @@
             },
             body: body.toString(),
         });
-      
+
         const data = await parseJsonResponse(response);
-      
+
         if (!response.ok || !data.ok) {
             throw new Error(data.message || 'Не удалось получить статусы задач');
         }
-      
-        Object.entries(data.statuses || {}).forEach(function ([nodeId, status]) {
-            taskStatusCache.set(String(nodeId), status);
-        });
-      
+
+        taskStatusCache = new Map(Object.entries(data.statuses || {}));
         updateTaskClasses();
+        const when = formatRefreshedAt(data.refreshed_at);
+        setStatusMessage(when
+            ? ('Статусы от ' + when)
+            : 'Статусы ещё не обновлялись — нажмите «Обновить статусы из DL».');
+    }
+
+    // Прогон обновления флагов по DL (/get-solutions). Пачки узлов идут
+    // последовательно; после каждой пачки перекрашиваем дерево. Кнопка
+    // блокируется, чтобы не запускать два прогона параллельно.
+    async function refreshTaskStatuses() {
+        const btn = document.getElementById('armRefreshStatusesBtn');
+        const courseId = courseIdInput ? courseIdInput.value.trim() : '';
+        const lang = selectedLanguage();
+        const nodeIds = treeNodeIds();
+        if (!courseId || !lang || !nodeIds.length) {
+            setStatusMessage('Сначала загрузите дерево и выберите язык', '#b42318');
+            return;
+        }
+        if (btn) { btn.disabled = true; btn.textContent = 'Обновляем...'; }
+        const summary = { solved: 0, attempted: 0, none: 0 };
+        let errors = 0;
+        let done = 0;
+        let refreshedAt = null;
+        setStatusMessage('Обновление статусов: 0 из ' + nodeIds.length + '...');
+        try {
+            for (let i = 0; i < nodeIds.length; i += TASK_REFRESH_CHUNK) {
+                const chunk = nodeIds.slice(i, i + TASK_REFRESH_CHUNK);
+                const body = new URLSearchParams();
+                body.set('course_id', courseId);
+                body.set('language_id', lang.id);
+                body.set('node_ids', chunk.join(','));
+                const response = await fetch(REFRESH_TASK_STATUS_URL, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: {
+                        'X-CSRFToken': getCsrfToken(),
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    },
+                    body: body.toString(),
+                });
+                const data = await parseJsonResponse(response);
+                if (!response.ok || !data.ok) {
+                    throw new Error(data.message || 'Не удалось обновить статусы');
+                }
+                Object.entries(data.statuses || {}).forEach(function ([nodeId, status]) {
+                    taskStatusCache.set(String(nodeId), status);
+                });
+                const chunkSummary = data.summary || {};
+                summary.solved += chunkSummary.solved || 0;
+                summary.attempted += chunkSummary.attempted || 0;
+                summary.none += chunkSummary.none || 0;
+                errors += Object.keys(data.errors || {}).length;
+                if (data.refreshed_at) { refreshedAt = data.refreshed_at; }
+                done += chunk.length;
+                updateTaskClasses();
+                if (done < nodeIds.length) {
+                    setStatusMessage('Обновление статусов: ' + done + ' из ' + nodeIds.length + '...');
+                }
+            }
+            let text = 'Готово: решено ' + summary.solved
+                + ', попытки ' + summary.attempted
+                + ', нет ' + summary.none;
+            if (errors) { text += ', ошибок ' + errors; }
+            const when = formatRefreshedAt(refreshedAt);
+            if (when) { text += ' · статусы от ' + when; }
+            setStatusMessage(text, errors ? '#b54708' : '#067647');
+        } catch (error) {
+            setStatusMessage(error.message || 'Ошибка обновления статусов', '#b42318');
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = 'Обновить статусы из DL';
+            }
+        }
     }
     // AJAX админки всегда ждёт JSON; HTML (например, редирект на страницу
     // логина при протухшей сессии — fetch молча следует за 302) даёт сырую
@@ -558,13 +674,6 @@
               c.checked = checked;
             });
             refreshAllFolderStates();
-            const nodeIds = Array.from(
-                treeContainer.querySelectorAll('input.arm-task-check')
-            ).map(function (cb) { return cb.value; });
-
-            loadTaskStatuses(nodeIds).catch(function (e) {
-                console.error('ARM task statuses error:', e);
-            });
           });
           summary.appendChild(folderCb);
 
@@ -596,8 +705,7 @@
           cb.checked = false;
           cb.addEventListener('change', refreshAllFolderStates);
           li.appendChild(cb);
-          // TODO: Здесь проверяем статус задачи и меняем по нему имя
-          
+
           const name = document.createElement('span');
           name.className = 'arm-tree-task-name';
           name.textContent = node.name || '(без названия)';
@@ -612,14 +720,16 @@
     }
 
     function renderTree(tree) {
-  taskStatusCache.clear();
+  taskStatusCache = new Map();
   treeContainer.innerHTML = '';
   treeContainer.classList.remove('arm-empty');
   const toolbar = document.getElementById('armTreeToolbar');
+  const statusBar = document.getElementById('armTreeStatusBar');
   if (!tree || !tree.length) {
     treeContainer.classList.add('arm-empty');
     treeContainer.textContent = 'Дерево пусто.';
     if (toolbar) { toolbar.style.display = 'none'; }
+    if (statusBar) { statusBar.style.display = 'none'; }
     return;
   }
   const ul = document.createElement('ul');
@@ -627,17 +737,22 @@
   renderTreeNodes(tree, ul);
   treeContainer.appendChild(ul);
   if (toolbar) { toolbar.style.display = 'flex'; }
+  // Панель языка появляется после загрузки дерева (её выбор управляет и
+  // раскраской, и прогоном).
+  if (statusBar) { statusBar.style.display = 'flex'; }
   refreshAllFolderStates();
 
-  // Единственное место, где грузим статусы: сразу после отрисовки дерева.
-  // Один bulk-запрос на все node_ids — иначе был бы N+1 по каждой задаче.
-  const nodeIds = Array.from(
-    treeContainer.querySelectorAll('input.arm-task-check')
-  ).map(function (cb) { return cb.value; });
-  if (nodeIds.length) {
+  // Цвета зависят только от языка, а не от отметок задач: один bulk-запрос
+  // на все узлы (в БД, не в DL). Без языка — всё серое + подсказка.
+  const nodeIds = treeNodeIds();
+  if (nodeIds.length && selectedLanguage()) {
     loadTaskStatuses(nodeIds).catch(function (e) {
       console.error('ARM task statuses error:', e);
+      setStatusMessage(e.message || 'Не удалось загрузить статусы', '#b42318');
     });
+  } else {
+    updateTaskClasses();
+    setStatusMessage('Выберите язык, чтобы увидеть статусы задач.');
   }
 }
 
@@ -774,34 +889,12 @@
           + (manual ? (manual.name || 'Prompt #' + manual.id) : 'Prompt #' + manualId);
         return;
       }
-      const sel = selectedLanguages();
-      if (!sel.length) {
+      const lang = selectedLanguage();
+      if (!lang) {
         boundPromptLabel.style.display = 'none';
         return;
       }
-      if (sel.length > 1) {
-        // Мультиязычный запуск: показываем привязку КАЖДОГО выбранного языка
-        // (для языка выбранной темы — точная привязка «язык+тема», для
-        // остальных — «на весь язык»; тем без привязки — «без промпта»).
-        const chosenTopicId = topicSelect ? String(topicSelect.value || '') : '';
-        const chosenTopic = chosenTopicId
-          ? allTopics.find(function (t) { return String(t.id) === chosenTopicId; })
-          : null;
-        const lines = sel.map(function (lang) {
-          const tid = (chosenTopic && String(chosenTopic.programming_language) === String(lang.id))
-            ? chosenTopicId : '';
-          const binding = findBoundPrompt(lang.id, tid, 'solve');
-          return lang.name + ': '
-            + (binding
-              ? 'промпт по умолчанию — «' + (binding.prompt_name || 'Prompt #' + binding.prompt_id) + '»'
-              : 'привязка не задана — прогон без промпта');
-        });
-        boundPromptLabel.style.display = '';
-        boundPromptLabel.style.whiteSpace = 'pre-line';
-        boundPromptLabel.textContent = 'Промпты по привязке:\n' + lines.join('\n');
-        return;
-      }
-      const languageId = sel[0].id;
+      const languageId = lang.id;
       const topicId = topicSelect ? topicSelect.value : '';
       const binding = languageId ? findBoundPrompt(languageId, topicId, 'solve') : null;
       if (!binding) {
@@ -839,11 +932,11 @@
       topicSelect.disabled = !topics.length;
     }
 
-    // Ручной выбор промпта фильтруется по выбранным языкам: показываются
+    // Ручной выбор промпта фильтруется по выбранному языку: показываются
     // только промпты этого языка (topic.programming_language) или промпты
     // «на весь язык» (programming_language у самого промпта). Placeholder
     // остаётся всегда: value="" = «по привязке» (промпт по умолчанию).
-    // Без выбранных языков селект выключен — выбирать нечего.
+    // Без выбранного языка селект выключен — выбирать нечего.
     function promptOptionLabel(p) {
       let suffix = '';
       if (p.topic_name) {
@@ -855,23 +948,23 @@
     }
     function rebuildPromptOptions() {
       if (!promptSelect) { return; }
-      const langIds = new Set(selectedLanguages().map(function (l) { return String(l.id); }));
+      const lang = selectedLanguage();
       const previous = String(promptSelect.value || '');
       promptSelect.innerHTML = '';
       const ph = document.createElement('option');
       ph.value = '';
-      ph.textContent = langIds.size ? 'По привязке (по умолчанию)' : '— выберите язык(и) —';
+      ph.textContent = lang ? 'По привязке (по умолчанию)' : '— выберите язык —';
       promptSelect.appendChild(ph);
-      if (langIds.size) {
+      if (lang) {
         allPrompts
           .filter(function (p) {
             // Промпт без языка (ни своего, ни через тему) — общий для всех
             // языков: показываем его при любом выборе. Промпты другого языка
-            // скрываем — в селекте только выбранные язык(и).
+            // скрываем — в селекте только выбранный язык.
             if (p.language_id === null || p.language_id === undefined || p.language_id === '') {
               return true;
             }
-            return langIds.has(String(p.language_id));
+            return String(p.language_id) === String(lang.id);
           })
           .slice()
           .sort(function (a, b) { return promptOptionLabel(a).localeCompare(promptOptionLabel(b), 'ru'); })
@@ -882,7 +975,7 @@
             promptSelect.appendChild(o);
           });
       }
-      promptSelect.disabled = !langIds.size;
+      promptSelect.disabled = !lang;
       // Если прежний ручной выбор выпал из нового набора языков — сброс на
       // «по привязке», чтобы на сервер не ушёл чужой язык промпт.
       const stillValid = Array.prototype.some.call(promptSelect.options, function (o) {
@@ -892,49 +985,57 @@
       updateBoundPromptLabel();
     }
 
-    // Язык(и) → чекбоксы: расширения выбранных языков (readonly), темы
-    // (только при ровно одном языке — при нескольких тема для журнала не
-    // задаётся, привязки всё равно резолвятся per-task в worker'е). Смена
-    // набора языков сбрасывает тему и пересобирает список промптов этого
-    // языка(ов).
-    function selectedLanguages() {
-      return Array.prototype.map.call(
-        document.querySelectorAll('input.arm-lang-check:checked'),
-        function (cb) {
-          return {
-            id: cb.value,
-            ext: cb.getAttribute('data-ext') || '',
-            name: cb.getAttribute('data-name') || '',
-          };
-        }
-      );
+    // Единственный язык страницы: он же управляет статусами дерева и
+    // отправкой прогона (CMPA → статистика и прогон строго по CMPA).
+    function selectedLanguage() {
+      const select = document.getElementById('armLanguageSelect');
+      if (!select || !select.value) { return null; }
+      const opt = select.options[select.selectedIndex];
+      return {
+        id: select.value,
+        ext: opt ? (opt.getAttribute('data-ext') || '') : '',
+        name: opt ? (opt.getAttribute('data-name') || opt.textContent || '') : '',
+      };
     }
     function syncLanguageSelection() {
-      const sel = selectedLanguages();
-      if (extensionInput) { extensionInput.value = sel.map(function (l) { return l.ext; }).join(', '); }
-      // Темы — объединение тем ВСЕХ выбранных языков (тема принадлежит ровно
-      // одному языку); при ни одном выбранном — селект выключен.
-      const langIds = new Set(sel.map(function (l) { return String(l.id); }));
-      const langTopics = allTopics
-        .filter(function (t) { return langIds.has(String(t.programming_language)); })
-        .sort(function (a, b) {
-          return String(a.name || a.topic_name || '').localeCompare(
-            String(b.name || b.topic_name || ''), 'ru');
-        });
+      const lang = selectedLanguage();
+      if (extensionInput) { extensionInput.value = lang ? lang.ext : ''; }
+      const langTopics = lang
+        ? allTopics
+          .filter(function (t) { return String(t.programming_language) === String(lang.id); })
+          .sort(function (a, b) {
+            return String(a.name || a.topic_name || '').localeCompare(
+              String(b.name || b.topic_name || ''), 'ru');
+          })
+        : [];
       if (topicSelect) {
-        if (langIds.size) {
+        if (lang) {
           setTopicOptions(langTopics);
         } else {
           topicSelect.innerHTML = '';
           const ph = document.createElement('option');
           ph.value = '';
-          ph.textContent = '— выберите язык(и) —';
+          ph.textContent = '— выберите язык —';
           topicSelect.appendChild(ph);
           topicSelect.disabled = true;
         }
       }
       rebuildPromptOptions();
       applyTopicSelection('');
+      // Смена языка делает прежние флаги недействительными: перекрашиваем
+      // (без перерисовки дерева — раскрытые папки и отметки сохраняются).
+      taskStatusCache = new Map();
+      updateTaskClasses();
+      const nodeIds = treeNodeIds();
+      if (lang && nodeIds.length) {
+        setStatusMessage('Загрузка статусов...');
+        loadTaskStatuses(nodeIds).catch(function (e) {
+          console.error('ARM task statuses error:', e);
+          setStatusMessage(e.message || 'Не удалось загрузить статусы', '#b42318');
+        });
+      } else if (!lang) {
+        setStatusMessage('Выберите язык, чтобы увидеть статусы задач.');
+      }
     }
 
     if (topicSelect) {
@@ -943,10 +1044,17 @@
       });
     }
 
-    document.querySelectorAll('input.arm-lang-check').forEach(function (cb) {
-      cb.addEventListener('change', syncLanguageSelection);
-    });
-    // Начальное состояние: расширение/тема/подпись привязки по текущим отметкам.
+    // Единственный селектор языка: смена пересобирает темы/промпты и статусы.
+    const languageSelect = document.getElementById('armLanguageSelect');
+    if (languageSelect) {
+      languageSelect.addEventListener('change', syncLanguageSelection);
+    }
+    // Кнопка прогона обновления флагов по DL (/get-solutions).
+    const refreshStatusesBtn = document.getElementById('armRefreshStatusesBtn');
+    if (refreshStatusesBtn) {
+      refreshStatusesBtn.addEventListener('click', refreshTaskStatuses);
+    }
+    // Начальное состояние: расширение/тема/подпись привязки по выбранному языку.
     syncLanguageSelection();
 
     // «Выбрать все модели» одним кликом; три состояния чекбоса отражают
@@ -1071,57 +1179,37 @@
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
       if (submitBtn.disabled) { return; }
-      // Языки обязательны (дублируем серверную валидацию). На каждый выбранный
-      // язык запускается ОТДЕЛЬНЫЙ процесс (те же задачи/модели): БД хранит
-      // результат как (прогон, модель, задача), поэтому языки нельзя смешивать
-      // в одном прогоне — а так они идут параллельно и независимы.
-      const langs = selectedLanguages();
-      if (!langs.length) { setError('Выберите хотя бы один язык программирования.'); return; }
+      // Язык обязателен (дублируем серверную валидацию). Ровно один язык:
+      // он же выбран для статусов дерева — прогон идёт строго по нему.
+      const lang = selectedLanguage();
+      if (!lang) { setError('Выберите язык программирования.'); return; }
       setSubmitDisabled(true);
       setError('');
       // Старую таблицу не гасим: она останется до первого снапшота нового
       // прогона (при неудаче запуска таблица сохраняется — не теряем данные).
-      setProgress('Запускаем ' + modeLabel + (langs.length > 1 ? ' (' + langs.length + ' процесса)...' : '...'), true);
-      const baseBody = new URLSearchParams(new FormData(form));
-      // Чекбоксы языков без name в FormData не попадают; language_id и
-      // расширение подставляются per-язык ниже.
-      baseBody.delete('language_id');
-      const startedRuns = [];
-      const failedLangs = [];
-      const baseRunName = runNameInput ? runNameInput.value.trim() : '';
-      for (let i = 0; i < langs.length; i++) {
-        const lang = langs[i];
-        const body = new URLSearchParams(baseBody);
-        body.set('language_id', lang.id);
-        body.set('file_extension', lang.ext);
-        // При нескольких языках различаем прогоны в журнале по расширению.
-        const runName = (baseRunName && langs.length > 1) ? (baseRunName + ' — ' + lang.ext) : baseRunName;
-        body.set('run_name', runName);
-        try {
-          const data = await postStart(body);
-          const runId = data.run_id || '';
-          if (runId) {
-            startedRuns.push(runId);
-            trackRun(runId, { ext: lang.ext, name: runName, lang: lang.name, snapshot: data.run || {} });
-          }
-        } catch (error) {
-          failedLangs.push((lang.name || lang.ext || 'язык') + ': ' + (error.message || 'ошибка'));
-        }
-      }
-      setSubmitDisabled(false);
-      if (!startedRuns.length) {
-        setError(failedLangs.join('; ') || ('Ошибка запуска: ' + modeLabel));
+      setProgress('Запускаем ' + modeLabel + '...', true);
+      const body = new URLSearchParams(new FormData(form));
+      body.set('language_id', lang.id);
+      body.set('file_extension', lang.ext);
+      const runName = runNameInput ? runNameInput.value.trim() : '';
+      body.set('run_name', runName);
+      try {
+        const data = await postStart(body);
+        const runId = data.run_id || '';
+        if (!runId) { throw new Error('Сервер не вернул run_id'); }
+        trackRun(runId, {
+          ext: lang.ext, name: runName, lang: lang.name, snapshot: data.run || {},
+        });
+        focusRun(runId);
+        // Прогон должен попасть в меню «Процессы» в шапке сразу, а не на
+        // следующем 15-секундном тике поллинга.
+        document.dispatchEvent(new Event('ai-processes:refresh'));
+      } catch (error) {
+        setError(error.message || ('Ошибка запуска: ' + modeLabel));
         stopProgress();
         setCancelVisible(false);
-        return;
       }
-      if (failedLangs.length) { setError('Не удалось запустить: ' + failedLangs.join('; ')); }
-      // Фокус — на последний запущенный (его снапшот уже в ответе старта);
-      // остальные видны и переключаемы в списке «Процессов».
-      focusRun(startedRuns[startedRuns.length - 1]);
-      // Прогон должен попасть в меню «Процессы» в шапке сразу, а не на
-      // следующем 15-секундном тике поллинга.
-      document.dispatchEvent(new Event('ai-processes:refresh'));
+      setSubmitDisabled(false);
     });
     // Surface a server-rendered error (e.g. "процесс не найден") without the
     // now-removed |tojson filter — read the auto-escaped text content directly.
@@ -1204,25 +1292,25 @@
         });
         syncSelectAllModelsCheckbox();
         let languageRestored = false;
-        if (rp.language_id) {
-          const langCb = document.querySelector(
-            'input.arm-lang-check[value="' + String(rp.language_id) + '"]'
+        const langSelect = document.getElementById('armLanguageSelect');
+        if (langSelect && rp.language_id) {
+          const wanted = String(rp.language_id);
+          const exists = Array.prototype.some.call(
+            langSelect.options, function (o) { return o.value === wanted; }
           );
-          if (langCb) {
-            document.querySelectorAll('input.arm-lang-check').forEach(function (x) { x.checked = false; });
-            langCb.checked = true;
+          if (exists) {
+            langSelect.value = wanted;
             languageRestored = true;
           }
         }
-        if (!languageRestored && rp.file_extension) {
+        if (langSelect && !languageRestored && rp.file_extension) {
           // Legacy run_params: подбор языка по расширению прогона.
           const byExt = Array.prototype.find.call(
-            document.querySelectorAll('input.arm-lang-check'),
-            function (x) { return x.getAttribute('data-ext') === rp.file_extension; }
+            langSelect.options,
+            function (o) { return o.getAttribute('data-ext') === rp.file_extension; }
           );
           if (byExt) {
-            document.querySelectorAll('input.arm-lang-check').forEach(function (x) { x.checked = false; });
-            byExt.checked = true;
+            langSelect.value = byExt.value;
             languageRestored = true;
           }
         }

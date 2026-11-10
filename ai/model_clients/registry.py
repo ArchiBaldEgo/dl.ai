@@ -22,6 +22,15 @@ Handler = Callable[..., Coroutine]
 _TEXT_ONLY = {"text": True, "vision": False, "reasoning": False}
 # Reasoning / "thinking" models: text-only but advertised as reasoning-capable.
 _REASONING = {"text": True, "vision": False, "reasoning": True}
+# Vision + thinking (Ollama library pages: vision/tools/thinking).
+_VISION_REASONING = {"text": True, "vision": True, "reasoning": True}
+
+#: Возможности, РЕАЛИЗОВАННЫЕ в приложении (не «рекламируемые» моделью).
+#: Модель может уметь vision, но чат не принимает изображения, поэтому
+#: страница «Состояние моделей» различает три состояния: есть и работает /
+#: есть у модели, но не реализовано / нет. Менять только вместе с кодом,
+#: который реально реализует возможность.
+IMPLEMENTED_CAPABILITIES = {"text": True, "vision": False, "reasoning": True}
 
 # Модель по умолчанию для селектора на страницах AI: предвыбирается, когда у
 # пользователя нет своего топ-1 фаворита (см. views._render_ai_page).
@@ -117,42 +126,50 @@ _MODELS: Dict[str, Dict[str, object]] = {
     "Ollama_Glm_5_3_Flash_Cloud": {
         "title": "Ollama GLM 5.3 Flash",
         "handler": ollama.ask_Ollama_Glm_5_3_Flash_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # ollama.com/library/glm-5.3-flash: vision/tools/thinking.
+        "capabilities": _VISION_REASONING,
     },
     "Ollama_Glm_5_2_Cloud": {
         "title": "Ollama GLM 5.2",
         "handler": ollama.ask_Ollama_Glm_5_2_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # ollama.com/library/glm-5.2: tools/thinking, без vision.
+        "capabilities": _REASONING,
     },
     "Ollama_DeepSeek_V4_1_Flash_Cloud": {
         "title": "Ollama DeepSeek 4.1 Flash",
         "handler": ollama.ask_Ollama_DeepSeek_V4_1_Flash_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # ollama.com/library/deepseek-v4.1-flash: vision/tools/thinking.
+        "capabilities": _VISION_REASONING,
     },
     "Ollama_DeepSeek_V4_Pro_Cloud": {
         "title": "Ollama DeepSeek V4 Pro",
         "handler": ollama.ask_Ollama_DeepSeek_V4_Pro_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # ollama.com/library/deepseek-v4-pro: tools/thinking, без vision.
+        "capabilities": _REASONING,
     },
     "Ollama_Gemma_4_Cloud": {
         "title": "Ollama Gemma 4",
         "handler": ollama.ask_Ollama_Gemma_4_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # ollama.com/library/gemma4: vision/tools/thinking.
+        "capabilities": _VISION_REASONING,
     },
     "Ollama_Nemotron_3_Super_Cloud": {
         "title": "Ollama Nemotron 3 Super",
         "handler": ollama.ask_Ollama_Nemotron_3_Super_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # ollama.com/library/nemotron-3-super: tools/thinking, без vision.
+        "capabilities": _REASONING,
     },
     "Ollama_Kimi_K2_7_Code_Cloud": {
         "title": "Ollama Kimi K2.7 Code",
         "handler": ollama.ask_Ollama_Kimi_K2_7_Code_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # ollama.com/library/kimi-k2.7-code: vision/tools/thinking.
+        "capabilities": _VISION_REASONING,
     },
     "Ollama_Kimi_K2_6_Cloud": {
         "title": "Ollama Kimi K2.6",
         "handler": ollama.ask_Ollama_Kimi_K2_6_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # ollama.com/library/kimi-k2.6: vision/tools/thinking.
+        "capabilities": _VISION_REASONING,
     },
     "Ollama_Gpt_Oss_20B_Cloud": {
         "title": "Ollama GPT-OSS 20B",
@@ -171,8 +188,8 @@ _MODELS: Dict[str, Dict[str, object]] = {
     "Ollama_MiniMax_M3_1_Flash_Cloud": {
         "title": "Ollama MiniMax M3.1 Flash",
         "handler": ollama.ask_Ollama_MiniMax_M3_1_Flash_Cloud_async,
-        # minimax-m3.1-flash:cloud умеет thinking отдельным полем — reasoning.
-        "capabilities": _REASONING,
+        # ollama.com/library/minimax-m3.1-flash: vision/tools/thinking.
+        "capabilities": _VISION_REASONING,
     },
 }
 

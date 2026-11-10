@@ -69,9 +69,10 @@
               {% endif %}
             </td>
             <td class="cap-cell">
-              {# Три состояния бейджа: зелёный (есть и модель активна), зелёный #}
-              {# зачёркнутый (есть, но модель неактивна), серый зачёркнутый   #}
-              {# (способности нет). Классы считает сервер — cap_classes.      #}
+              {# Три состояния бейджа: зелёный (есть у модели и реализовано), #}
+              {# зелёный зачёркнутый (есть у модели, но не реализовано),      #}
+              {# серый зачёркнутый (у модели нет). Классы считает сервер —   #}
+              {# cap_classes.                                               #}
               <span class="cap {{ row.cap_classes.text.class }}" title="{{ row.cap_classes.text.title }}">Текст</span>
               <span class="cap {{ row.cap_classes.vision.class }}" title="{{ row.cap_classes.vision.title }}">Зрение</span>
               <span class="cap {{ row.cap_classes.reasoning.class }}" title="{{ row.cap_classes.reasoning.title }}">Рассуждения</span>
@@ -99,6 +100,11 @@
         {% endfor %}
       </tbody>
     </table>
+    <p class="quiet cap-legend">
+      Возможности: <span class="cap cap-on">зелёный</span> — есть у модели и реализовано в приложении;
+      <span class="cap cap-on cap-unimplemented">зелёный зачёркнутый</span> — есть у модели, но не реализовано;
+      <span class="cap cap-off">серый зачёркнутый</span> — у модели нет.
+    </p>
   </div>
 </div>
 

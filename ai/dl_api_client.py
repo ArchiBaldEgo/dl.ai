@@ -1157,6 +1157,7 @@ def get_solutions_from_dl(
     include_incorrect: bool = True,
     start_date: str = "",
     end_date: str = "",
+    timeout: int = 30,
 ) -> dict[str, Any]:
     """Fetch list of solutions for a task from DL.
 
@@ -1167,6 +1168,8 @@ def get_solutions_from_dl(
     ``extension`` is the file extension WITHOUT a leading dot (e.g. "cpp",
     "pas", "java"); when empty, solutions with any extension are returned.
     Dates use the 'YYYY-MM-DD' or 'YYYY-MM-DD HH:mm:ss' format.
+    ``timeout`` — HTTP-таймаут запроса (секунды); прогон флагов дерева ARM
+    передаёт меньше 30, чтобы зависший DL не растягивал пакет узлов.
     """
     payload: dict[str, Any] = {
         "sessionId": session_id,
@@ -1186,6 +1189,7 @@ def get_solutions_from_dl(
         "POST",
         "/restapi/get-solutions",
         json=payload,
+        timeout=timeout,
     )
 
     _raise_for_status(response)

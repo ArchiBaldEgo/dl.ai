@@ -89,6 +89,32 @@
         }
     }
 
+    // «Поручено» (суперюзер): раскрывает в строке таска селект активных
+    // членов группы «Разработчик» (шаблон #aiTaskAssignOptions на странице).
+    function cancelAssignPicker(select) {
+        var btn = select.previousElementSibling;
+        if (btn && btn.hasAttribute('data-assign-open')) btn.hidden = false;
+        select.remove();
+    }
+
+    function openAssignPicker(btn) {
+        var row = btn.closest('tr[data-task-id]');
+        var options = document.getElementById('aiTaskAssignOptions');
+        if (!row || !options || row.querySelector('.ai-task-assign')) return;
+        var select = options.cloneNode(true);
+        select.removeAttribute('hidden');
+        select.removeAttribute('id');
+        select.className = 'ai-task-assign';
+        select.setAttribute('data-assign-url', btn.getAttribute('data-assign-url') || '');
+        btn.hidden = true;
+        btn.after(select);
+        select.focus();
+        // Клик мимо без выбора — вернуть кнопку (выбор уходит в change).
+        select.addEventListener('blur', function () {
+            if (!select.value) cancelAssignPicker(select);
+        });
+    }
+
     // Взять/закрыть/вернуть — успех перезагружает страницу: статусы строк
     // пересчитывает сервер (на фронте после reorder reload не нужен).
     // «Вернуть» — одним кликом: исполнитель сохраняется сервером.
@@ -99,6 +125,8 @@
         if (editToggle) { toggleEditForm(editToggle, true); return; }
         var editCancel = event.target.closest('.ai-task-btn-edit-cancel');
         if (editCancel) { toggleEditForm(editCancel, false); return; }
+        var assignBtn = event.target.closest('[data-assign-open]');
+        if (assignBtn) { openAssignPicker(assignBtn); return; }
         var btn = event.target.closest(
             '[data-claim-url], [data-close-url], [data-reopen-url]'
         );
@@ -133,6 +161,23 @@
                 });
         });
     }
+
+    // «Поручено»: выбран разработчик — POST tasks/<id>/assign/ {"user_id"}.
+    // Пустое значение = отмена (вернуть кнопку, ничего не отправлять).
+    document.addEventListener('change', function (event) {
+        var assign = event.target.closest('.ai-task-assign');
+        if (!assign) return;
+        var url = assign.getAttribute('data-assign-url');
+        var userId = parseInt(assign.value, 10);
+        if (!url || !userId) { cancelAssignPicker(assign); return; }
+        assign.disabled = true;
+        post(url, JSON.stringify({ user_id: userId }))
+            .then(function () { window.location.reload(); })
+            .catch(function (err) {
+                assign.disabled = false;
+                alert(err.message);
+            });
+    });
 
     // Фильтр «Кто взял» на «Поиске»: смена селекта — GET этой же страницы.
     document.addEventListener('change', function (event) {

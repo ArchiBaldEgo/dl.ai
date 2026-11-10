@@ -8,7 +8,11 @@
 Псевдо-вкладки-фильтры: «Не взятые» (unclaimed) — весь свободный фронт,
 «Поиск» (search) — ВСЕ активные таски (фронт первым) с фильтром «Кто взял»,
 «Мои таски» (mine) — взятые пользователем, «Закрытые» (closed) — архив
-выполненных. Закрытие НЕ удаляет таск: closed_at/closed_by ставятся,
+выполненных. Поручать таск (кнопка «Поручено» на доске) может ТОЛЬКО суперюзер —
+и только активному члену группы «Разработчик»; назначение перезаписывает
+taken_by/taken_at (перепоручение разрешено). Закрыть таск может
+суперюзер/action.task_close ЛИБО назначенный разработчик (taken_by).
+Закрытие НЕ удаляет таск: closed_at/closed_by ставятся,
 priority_no сбрасывается (номерное пространство свободно), взятый
 (closed) таск пропадает из всех рабочих видов и попадает в «Закрытые»
 (разграничение по датам закрытия, типу и исполнителю + «кто дал»/«кто
@@ -37,13 +41,14 @@ from django.template.response import TemplateResponse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from ..constants import MOSCOW_TZ
+from ..constants import BUILTIN_GROUP_DEVELOPER, MOSCOW_TZ
 from ..models import AIDevTask, ExternalDLAccount
 from ..services.education_backfill import schedule_education_backfill
 from ..services.education_directory import education_title_maps, group_display
 
 from .permissions import (
     can_access_tasks,
+    is_developer_user,
     is_prompt_developer_user,
     is_staff_or_superuser,
     is_superuser_user,
@@ -145,7 +150,9 @@ def admin_tasks_view(request):
         kind = AIDevTask.Kind.FRONT
 
     rows_qs = AIDevTask.objects.select_related(
-        "taken_by", "taken_by__external_dl_account", "created_by"
+        "taken_by", "taken_by__external_dl_account",
+        "closed_by", "closed_by__external_dl_account",
+        "created_by",
     )
     is_closed_tab = kind == VIEW_CLOSED
     # Рабочие виды показывают ТОЛЬКО незакрытое (closed_at IS NULL), архив —
@@ -213,11 +220,18 @@ def admin_tasks_view(request):
     # Пользователи, чьё ФИО/группа показываются на доске («кто дал»/«кто взял»
     # и варианты фильтров) — по ним дозагружаем название группы из DL.
     participant_ids = set()
+    # Закрывать может суперюзер/action.task_close или НАЗНАЧЕННЫЙ исполнитель
+    # (taken_by) — кнопка «Закрыть» показывается по строке, а не глобально.
+    can_close_globally = (
+        superuser or user_has_key(request.user, "action.task_close")
+    )
     for task in rows_qs:
         if task.created_by_id:
             participant_ids.add(task.created_by_id)
         if task.taken_by_id:
             participant_ids.add(task.taken_by_id)
+        if task.closed_by_id:
+            participant_ids.add(task.closed_by_id)
         rows.append({
             "id": task.pk,
             "kind": task.kind,
@@ -231,12 +245,22 @@ def admin_tasks_view(request):
             "creator": _claimant_display(task.created_by, edu_maps),
             "created_at": task.created_at,
             "taken": task.taken_by_id is not None,
-            "claimant": _claimant_display(task.taken_by, edu_maps),
+            # «Кто выполнил»: исполнитель (в т.ч. НАЗНАЧЕННЫЙ суперюзером);
+            # легаси-страховка — закрывший, если исполнителя нет.
+            "claimant": _claimant_display(
+                task.taken_by or task.closed_by, edu_maps
+            ),
             "taken_at": task.taken_at,
             "closed_at": task.closed_at,
             "claim_url": f"{TASKS_URL}{task.pk}/claim/",
             "close_url": f"{TASKS_URL}{task.pk}/close/",
             "reopen_url": f"{TASKS_URL}{task.pk}/reopen/",
+            "assign_url": f"{TASKS_URL}{task.pk}/assign/",
+            # Назначенный разработчик закрывает СВОЙ таск; суперюзер —
+            # любой (сюда же action.task_close).
+            "can_close": (
+                can_close_globally or task.taken_by_id == request.user.pk
+            ),
             # Правка — только автору (ТЗ владельца) и только на рабочих
             # видах (фронт/хотелки); в архиве кнопки правки нет.
             "can_edit": _can_edit_task(request, task) and task.closed_at is None,
@@ -260,6 +284,20 @@ def admin_tasks_view(request):
                 {"id": user.pk, "name": _claimant_display(user, edu_maps)}
             )
         return options
+
+    # «Поручено» — только суперюзер, только активные члены встроенной группы
+    # «Разработчик». Список отдаём лишь тем, кто вправе назначать (обычному
+    # разработчику чужая группа в контексте не нужна).
+    can_assign = superuser
+    developer_options = []
+    if can_assign:
+        for user in get_user_model().objects.filter(
+            ai_access_groups__name=BUILTIN_GROUP_DEVELOPER, is_active=True
+        ).distinct().order_by("username"):
+            participant_ids.add(user.pk)
+            developer_options.append(
+                {"id": user.pk, "name": _claimant_display(user, edu_maps)}
+            )
 
     # Фильтр «Кто взял» на «Поиске»: только те, кто хоть что-то взял.
     taken_options = []
@@ -328,9 +366,9 @@ def admin_tasks_view(request):
         "can_create": (
             (superuser or user_has_key(request.user, "action.task_create"))
         ),
-        "can_close": (
-            (superuser or user_has_key(request.user, "action.task_close"))
-        ),
+        "can_close": can_close_globally,
+        "can_assign": can_assign,
+        "developer_options": developer_options,
         "moscow_tz": MOSCOW_TZ,
     }
     return TemplateResponse(request, "admin/ai/tasks.html", context)
@@ -573,10 +611,71 @@ def admin_task_claim_view(request, task_id):
 
 
 @require_POST
-def admin_task_close_view(request, task_id):
-    """Закрыть таск — увод с доски в архив «Закрытые», НЕ удаление
-    (суперюзер/action.task_close).
+def admin_task_assign_view(request, task_id):
+    """Поручать таск — ТОЛЬКО суперюзер, ТОЛЬКО члену группы «Разработчик».
 
+    Тело — JSON ``{"user_id": <pk>}``. Назначать можно и на уже взятого
+    (перепоручение): taken_by/taken_at перезаписываются, closed-поля не
+    трогаются. Закрытый таск не поручается — сначала «Вернуть» (409).
+    ФИО назначенного сохраняется в taken_by и после закрытия: архив всегда
+    показывает, кто выполнял.
+    """
+    if not request.user.is_authenticated:
+        return _forbid()
+    if not is_superuser_user(request.user):
+        return _forbid("Поручать таски может только суперпользователь")
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return _forbid("Некорректный запрос", status=400)
+    user_id = payload.get("user_id")
+    if not isinstance(user_id, int) or isinstance(user_id, bool):
+        return JsonResponse(
+            {"ok": False, "message": "Выберите разработчика"}, status=400
+        )
+    task = AIDevTask.objects.filter(pk=task_id).only(
+        "pk", "closed_at"
+    ).first()
+    if task is None:
+        return JsonResponse({"ok": False, "message": "Таск не найден"}, status=404)
+    if task.closed_at is not None:
+        return JsonResponse(
+            {"ok": False, "message": "Таск закрыт — верните его на доску"},
+            status=409,
+        )
+    assignee = get_user_model().objects.filter(
+        pk=user_id, is_active=True
+    ).first()
+    if assignee is None:
+        return JsonResponse(
+            {"ok": False, "message": "Пользователь не найден"}, status=404
+        )
+    if not is_developer_user(assignee):
+        return JsonResponse(
+            {"ok": False, "message": "Пользователь не входит в группу «Разработчик»"},
+            status=400,
+        )
+    assigned = (
+        AIDevTask.objects.filter(pk=task_id, closed_at__isnull=True)
+        .update(taken_by=assignee, taken_at=timezone.now())
+    )
+    if not assigned:
+        return JsonResponse(
+            {"ok": False, "message": "Доска изменилась — обновите страницу"},
+            status=409,
+        )
+    return JsonResponse({
+        "ok": True,
+        "claimant": _claimant_display(assignee),
+    })
+
+
+@require_POST
+def admin_task_close_view(request, task_id):
+    """Закрыть таск — увод с доски в архив «Закрытые», НЕ удаление.
+
+    Права: суперюзер / action.task_close — ЛЮБОЙ таск; назначенный
+    исполнитель (taken_by) — ТОЛЬКО свой.
     Строка остаётся: closed_at/closed_by ставятся, priority_no сбрасывается
     (номерное пространство вида освобождается целиком — закрытые никогда не
     конфликтуют с нумерацией и перенумерацией активных строк); taken_by/
@@ -586,8 +685,20 @@ def admin_task_close_view(request, task_id):
     """
     if not request.user.is_authenticated:
         return _forbid()
-    if not (is_superuser_user(request.user) or user_has_key(request.user, "action.task_close")):
-        return _forbid("Закрывать таски может только суперпользователь")
+    task = AIDevTask.objects.filter(pk=task_id).only(
+        "pk", "taken_by_id"
+    ).first()
+    if task is None:
+        return JsonResponse({"ok": False, "message": "Таск не найден"}, status=404)
+    can_close = (
+        is_superuser_user(request.user)
+        or user_has_key(request.user, "action.task_close")
+        or task.taken_by_id == request.user.pk
+    )
+    if not can_close:
+        return _forbid(
+            "Закрыть таск может суперпользователь или назначенный разработчик"
+        )
     closed = AIDevTask.objects.filter(
         pk=task_id, closed_at__isnull=True
     ).update(

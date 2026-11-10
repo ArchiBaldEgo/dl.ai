@@ -25,6 +25,7 @@ from .permissions import can_access_admin, is_staff_or_superuser, is_superuser_u
 _ADMIN_SCOPES_BY_PATH = (
     ("/ai/admin/arm/solve/", "admin_arm_solve"),
     ("/ai/admin/arm/models/", "admin_model_status"),
+    ("/ai/admin/tasks/", "admin_tasks"),
     ("/ai/admin/ai/request_logs/", "admin_logs"),
     ("/ai/admin/pinned-runs/", "admin_pinned_runs"),
     ("/ai/admin/ai/tasksolution/", "admin_tasksolution"),
