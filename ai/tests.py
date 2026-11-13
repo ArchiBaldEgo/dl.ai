@@ -46,7 +46,12 @@ from ai.models import (
     AIWizardSeen,
     ArmPromptBinding,
     ExternalDLAccount,
+    FindErrorCase,
+    FindErrorCaseGroup,
+    FindErrorCaseLabel,
     ProgrammingLanguage,
+    PromptLabResult,
+    PromptLabRun,
     Prompt,
     SharedPrompt,
     Task,
@@ -166,6 +171,8 @@ class ChatViewTests(SimpleTestCase):
 @override_settings(SESSION_ENGINE="django.contrib.sessions.backends.signed_cookies")
 class ExternalAuthMiddlewareTests(TestCase):
     def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # L2-кэш авторизации не должен протекать между тестами
         self.factory = RequestFactory()
         self.middleware = ExternalAuthMiddleware(lambda req: HttpResponse("ok"))
         self.user_model = get_user_model()
@@ -252,8 +259,9 @@ class ExternalAuthMiddlewareTests(TestCase):
         fetch_user_info.assert_not_called()
         self.assertEqual(request.user_info, {"userId": "42"})
 
-    def test_stale_cached_user_info_revalidates_dlsid(self):
-        # Кэш старше TTL → middleware заново проверяет DLSID через внешний API.
+    def test_stale_cached_user_info_revalidates_dlsid_in_background(self):
+        # Кэш старше TTL → ревалидация DLSID запускается в ФОНЕ; запрос
+        # отдаёт stale-кэш немедленно и не ждёт dl.gsu.by.
         from ai.models import ExternalDLAccount
         u = self.user_model.objects.create_user(username="user_42b", password="x")
         ExternalDLAccount.objects.create(user=u, external_user_id="42")
@@ -268,39 +276,55 @@ class ExternalAuthMiddlewareTests(TestCase):
 
         with patch(
             "ai.middleware.fetch_external_user_info",
-            return_value={"userId": "42", "login": "alice"},
-        ) as fetch_user_info:
+            side_effect=AssertionError("request path must not call dl.gsu.by"),
+        ) as fetch_user_info, patch.object(
+            self.middleware, "_schedule_user_info_refresh"
+        ) as schedule_refresh:
             response = self.middleware(request)
 
         self.assertEqual(response.status_code, 200)
-        fetch_user_info.assert_called_once()
-        # Кэш обновлён свежим user_info и свежим timestamp.
-        self.assertEqual(request.session["external_user_info"], {"userId": "42", "login": "alice"})
+        fetch_user_info.assert_not_called()
+        schedule_refresh.assert_called_once_with("session-123")
+        self.assertEqual(request.user_info, {"userId": "42"})
 
-    def test_unavailable_external_api_falls_back_to_stale_cache(self):
-        # dl.gsu.by недоступен, но есть свежий кэш → graceful degradation,
-        # доступ сохраняется (не 503).
-        from ai.models import ExternalDLAccount
+    def test_background_refresh_updates_l2_cache(self):
+        from ai.middleware import ExternalAuthMiddleware
+
+        with patch(
+            "ai.middleware.fetch_external_user_info",
+            return_value={"userId": "42", "login": "alice"},
+        ):
+            self.middleware._refresh_user_info("session-123", "lock-key")
+
+        cached, fetched_at = self.middleware._load_external_user_info("session-123")
+        self.assertEqual(cached, {"userId": "42", "login": "alice"})
+        self.assertGreater(fetched_at, 0)
+
+    def test_background_unauthorized_sets_tombstone(self):
+        from django.core.cache import cache
+        from ai.external_auth import ExternalAuthUnauthorized
+
+        with patch(
+            "ai.middleware.fetch_external_user_info",
+            side_effect=ExternalAuthUnauthorized("revoked"),
+        ):
+            self.middleware._refresh_user_info("session-123", "lock-key")
+
+        key = self.middleware._invalid_cache_key("session-123")
+        self.assertTrue(cache.get(key))
+
+    def test_unavailable_background_refresh_keeps_stale_cache(self):
         from ai.external_auth import ExternalAuthUnavailable
-        u = self.user_model.objects.create_user(username="user_42c", password="x")
-        ExternalDLAccount.objects.create(user=u, external_user_id="42")
 
-        request = self.factory.get("/ai/admin/")
-        self._add_session(request)
-        request.COOKIES["DLSID"] = "session-123"
-        request.session["external_session_id"] = "session-123"
-        request.session["external_user_info"] = {"userId": "42"}
-        # Протухший кэш провоцирует ревалидацию, которая упадёт с Unavailable.
-        request.session["external_user_info_fetched_at"] = time.time() - 3600
-
+        self.middleware._cache_external_user_info("session-123", {"userId": "42"})
         with patch(
             "ai.middleware.fetch_external_user_info",
             side_effect=ExternalAuthUnavailable("dl.gsu.by down"),
         ):
-            response = self.middleware(request)
+            self.middleware._refresh_user_info("session-123", "lock-key")
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(request.user_info, {"userId": "42"})
+        cached, _ = self.middleware._load_external_user_info("session-123")
+        self.assertEqual(cached, {"userId": "42"})
 
     def test_unavailable_external_api_returns_503_without_cache(self):
         # dl.gsu.by недоступен И кэша нет → 503 (некому предоставить доступ).
@@ -5230,11 +5254,13 @@ class BatchParallelWorkerTests(TransactionTestCase):
         pair_threads = {}
         orig_pair = arm_runner._process_batch_pair
 
-        def spy_pair(ctx, task_ctx, model, dl_lock):
+        def spy_pair(ctx, task_ctx, model, dl_lock, context_block=""):
             pair_threads.setdefault(
                 model["key"], set()
             ).add((threading.get_ident(), task_ctx["node_id"]))
-            return orig_pair(ctx, task_ctx, model, dl_lock)
+            return orig_pair(
+                ctx, task_ctx, model, dl_lock, context_block=context_block,
+            )
 
         try:
             # Процессор пары выбирается из реестра _PAIR_PROCESSORS (полиморфизм
@@ -11514,14 +11540,14 @@ class DocsServiceTests(SimpleTestCase):
         from ai.services.docs import visible_chapter_slugs
         self.assertEqual(
             visible_chapter_slugs(is_superuser=False, is_staff=False, is_authenticated=True),
-            ["user", "prompt-developer"],
+            ["user", "prompt-developer", "find-error-prompt"],
         )
         staff_slugs = visible_chapter_slugs(is_superuser=False, is_staff=True, is_authenticated=True)
         self.assertIn("developer", staff_slugs)
         self.assertNotIn("superuser", staff_slugs)
         self.assertEqual(
             visible_chapter_slugs(is_superuser=True, is_staff=True, is_authenticated=True),
-            ["user", "prompt-developer", "developer", "superuser"],
+            ["user", "prompt-developer", "find-error-prompt", "developer", "superuser"],
         )
         self.assertEqual(
             visible_chapter_slugs(is_superuser=False, is_staff=False, is_authenticated=False),
@@ -11907,7 +11933,7 @@ class ViewAsContextTests(_AdminViewRequestMixin, TestCase):
         self.assertTrue(context["show_test_console_link"])
         self.assertEqual(
             self._doc_tool_names(context),
-            ["Разработчик промптов", "Разработчик", "Суперюзер"],
+            ["Разработчик промптов", "Препромпт «В чём ошибка»", "Разработчик", "Суперюзер"],
         )
 
     def test_view_as_group_shows_only_group_pages(self):
@@ -16894,7 +16920,9 @@ class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
             # всей базовой аудитории админки (как «Мой промпт»).
             {"page.admin", "page.arm_solve", "page.prompt_admin",
              "page.prompt_defaults", "page.logs_own",
-             "page.model_status", "page.tasks", "page.user_models"},
+             "page.model_status", "page.tasks", "page.user_models",
+             # 0081: «Лаборатория промптов» (и база ошибочных программ).
+             "page.prompt_lab"},
         )
         self.assertEqual(
             {p.key for p in dev.permissions.all()},
@@ -16904,7 +16932,7 @@ class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
              "page.prompt_admin", "page.test_console",
              "page.tasks", "page.logs_own", "page.updates",
              "page.user_models", "page.tokens", "page.dl_api_requests",
-             "docs.developer", "action.task_reorder"},
+             "page.prompt_lab", "docs.developer", "action.task_reorder"},
         )
         # Базовые права (BASELINE_ACCESS_KEYS): seeds групп могли и не менять
         # — baseline выдаётся В КОДЕ любому с page.admin, а не сидами.
@@ -26885,3 +26913,541 @@ class QueryBudgetTests(_AdminViewRequestMixin, TestCase):
 
         self.assertEqual(len(count_queries({})), 1)
         self.assertEqual(len(count_queries({"q": "Задача"})), 2)
+
+
+class FindErrorCatalogTests(SimpleTestCase):
+    def test_catalog_has_no_19_and_expected_codes(self):
+        from ai.services.find_error_catalog import ERROR_CATALOG, VALID_ERROR_CODES
+
+        self.assertEqual(set(ERROR_CATALOG), set(range(1, 19)) - {19} | {20, 21, 22})
+        self.assertNotIn(19, VALID_ERROR_CODES)
+
+    def test_eval_suffix_asks_for_last_line(self):
+        from ai.services.find_error_catalog import build_eval_suffix
+
+        suffix = build_eval_suffix()
+        self.assertIn("КОДЫ:", suffix)
+        self.assertIn("последней строкой", suffix)
+        self.assertIn("21.", suffix)
+
+
+class ParseErrorCodesTests(SimpleTestCase):
+    def test_parses_last_line_variants(self):
+        from ai.grading import parse_error_codes
+
+        self.assertEqual(parse_error_codes("разбор\nКОДЫ: 3, 17"), [3, 17])
+        self.assertEqual(parse_error_codes("КОДЫ: error_3 error_17"), [3, 17])
+        self.assertEqual(parse_error_codes("КОДЫ: 3 17 3"), [3, 17])
+        # Берём ПОСЛЕДНЮЮ строку, даже если слово «коды» встречалось раньше.
+        self.assertEqual(parse_error_codes("КОДЫ: 3\nещё разбор\nКОДЫ: 21"), [21])
+
+    def test_no_errors_tokens(self):
+        from ai.grading import parse_error_codes
+
+        self.assertEqual(parse_error_codes("КОДЫ: —"), [])
+        self.assertEqual(parse_error_codes("КОДЫ: нет"), [])
+        self.assertEqual(parse_error_codes("КОДЫ: ошибок нет"), [])
+        # «нет» в хвосте фразы не должно стирать уже перечисленные коды.
+        self.assertEqual(parse_error_codes("КОДЫ: 3, 17 — других нет"), [3, 17])
+
+    def test_missing_line_and_invalid_codes(self):
+        from ai.grading import parse_error_codes
+
+        self.assertEqual(parse_error_codes("просто разбор без строки"), [])
+        self.assertEqual(parse_error_codes(""), [])
+        self.assertEqual(parse_error_codes("КОДЫ: 19, 999, 3"), [3])
+
+
+class CompareErrorCodesTests(SimpleTestCase):
+    def test_partial_match_metrics(self):
+        from ai.grading import compare_error_codes
+
+        result = compare_error_codes([3, 17], [3, 17, 21])
+        self.assertEqual(result["matched"], [3, 17])
+        self.assertEqual(result["missed"], [21])
+        self.assertEqual(result["extra"], [])
+        self.assertFalse(result["exact"])
+        self.assertEqual(result["precision"], 1.0)
+        self.assertAlmostEqual(result["recall"], 2 / 3)
+        self.assertAlmostEqual(result["f1"], 0.8)
+
+    def test_extra_and_exact(self):
+        from ai.grading import compare_error_codes
+
+        result = compare_error_codes([3, 7], [3])
+        self.assertEqual(result["extra"], [7])
+        self.assertTrue(compare_error_codes([3, 17], [17, 3])["exact"])
+
+    def test_empty_sets(self):
+        from ai.grading import compare_error_codes
+
+        empty = compare_error_codes([], [])
+        self.assertTrue(empty["exact"])
+        self.assertEqual(empty["precision"], 1.0)
+        self.assertEqual(empty["recall"], 1.0)
+
+        missed = compare_error_codes([], [3])
+        self.assertFalse(missed["exact"])
+        self.assertEqual(missed["recall"], 0.0)
+
+    def test_aggregate_per_code(self):
+        from ai.grading import aggregate_error_code_metrics
+
+        report = aggregate_error_code_metrics([
+            {"parsed_codes": [3], "expected_codes": [3, 17]},
+            {"parsed_codes": [3], "expected_codes": [3]},
+        ])
+        self.assertEqual(report["cases"], 2)
+        self.assertEqual(report["exact"], 1)
+        self.assertEqual(report["per_code"][3]["expected"], 2)
+        self.assertEqual(report["per_code"][3]["found"], 2)
+        self.assertEqual(report["per_code"][17]["missed"], 1)
+        self.assertEqual(report["per_code"][17]["recall"], 0.0)
+
+
+class ImportFindErrorCasesTests(TestCase):
+    def setUp(self):
+        self.lang = ProgrammingLanguage.objects.create(language_name="C-MPA")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Одномерный массив", programming_language=self.lang,
+        )
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        group = self.root / "1. Отчисление"
+        case = group / "1"
+        case.mkdir(parents=True)
+        (case / "1.mpc").write_text("int __bits(8) b[20];\nvoid main() {}\n", encoding="utf-8")
+        (case / "error_3.txt").write_bytes("Не инициализирована\n".encode("cp1251"))
+        (case / "error_17.txt").write_bytes("Нет __bits\n".encode("cp1251"))
+        (group / "url.txt").write_bytes(
+            "https://dl.gsu.by/task.jsp?nid=123456&cid=42\n".encode("cp1251")
+        )
+        (group / "info.txt").write_bytes("Найдите ошибку\n".encode("cp1251"))
+
+    def _run(self, *args, **kwargs):
+        import io
+
+        from django.core.management import call_command
+
+        out = io.StringIO()
+        call_command(
+            "import_find_error_cases", str(self.root),
+            "--dataset", "ds", "--language", "C-MPA",
+            "--topic", "Одномерный массив", *args, stdout=out, **kwargs,
+        )
+        return out.getvalue()
+
+    def test_dry_run_writes_nothing(self):
+        output = self._run("--dry-run")
+        self.assertIn("Dry-run", output)
+        self.assertFalse(FindErrorCaseGroup.objects.exists())
+
+    def test_creates_group_case_labels_and_parses_url(self):
+        output = self._run()
+        self.assertIn("кейсов +1", output)
+        group = FindErrorCaseGroup.objects.get(source_ref="ds/1. Отчисление")
+        self.assertEqual(group.dl_node_id, 123456)
+        self.assertEqual(group.dl_course_id, 42)
+        self.assertEqual(group.statement_source, "info_txt")
+        self.assertIn("Найдите ошибку", group.statement)
+        case = FindErrorCase.objects.get(source_ref="ds/1. Отчисление/1")
+        self.assertEqual(case.status, FindErrorCase.STATUS_READY)
+        self.assertEqual(sorted(case.labels.values_list("code", flat=True)), [3, 17])
+
+    def test_reimport_is_idempotent_and_keeps_manual_label_edit(self):
+        self._run()
+        case = FindErrorCase.objects.get(source_ref="ds/1. Отчисление/1")
+        label = case.labels.get(code=3)
+        label.text = "ручная правка"
+        label.save()
+
+        output = self._run()
+        self.assertIn("пропущено 1", output)
+        label.refresh_from_db()
+        self.assertEqual(label.text, "ручная правка")
+
+    def test_force_updates_and_source_change_updates(self):
+        self._run()
+        case = FindErrorCase.objects.get(source_ref="ds/1. Отчисление/1")
+        case.labels.filter(code=3).update(text="ручная правка")
+
+        # Исходник не изменился: без --force пропуск.
+        self._run()
+        self.assertEqual(case.labels.get(code=3).text, "ручная правка")
+
+        # Исходник изменился: обновляемся и затираем метки (источник — истина).
+        (self.root / "1. Отчисление" / "1" / "1.mpc").write_text(
+            "int __bits(8) b[21];\n", encoding="utf-8"
+        )
+        self._run()
+        case.refresh_from_db()
+        self.assertIn("b[21]", case.code)
+        self.assertEqual(case.labels.get(code=3).text, "Не инициализирована")
+
+    def test_unknown_language_is_a_clear_error(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError) as ctx:
+            call_command(
+                "import_find_error_cases", str(self.root),
+                "--dataset", "ds", "--language", "Нет такого",
+            )
+        self.assertIn("Язык не найден", str(ctx.exception))
+        self.assertIn("C-MPA", str(ctx.exception))
+
+
+class SeedFindErrorPromptTests(TestCase):
+    def setUp(self):
+        self.lang = ProgrammingLanguage.objects.create(language_name="C-MPA")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Одномерный массив", programming_language=self.lang,
+        )
+
+    def _seed(self, *args):
+        import io
+
+        from django.core.management import call_command
+
+        out = io.StringIO()
+        call_command(
+            "seed_find_error_prompt", "--language", "C-MPA",
+            "--topic", "Одномерный массив", *args, stdout=out,
+        )
+        return out.getvalue()
+
+    def test_creates_prompt_and_is_create_only(self):
+        self._seed()
+        prompt = Prompt.objects.get(mode="find_error")
+        self.assertEqual(prompt.topic, self.topic)
+        self.assertIn("__bits", prompt.prompt_text_ru)
+        prompt.prompt_text_ru = "изменено в админке"
+        prompt.save()
+
+        output = self._seed()
+        self.assertIn("Текст не изменён", output)
+        prompt.refresh_from_db()
+        self.assertEqual(prompt.prompt_text_ru, "изменено в админке")
+
+        self._seed("--force")
+        prompt.refresh_from_db()
+        self.assertIn("__bits", prompt.prompt_text_ru)
+
+    def test_unknown_topic_lists_candidates(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError) as ctx:
+            call_command(
+                "seed_find_error_prompt", "--language", "C-MPA", "--topic", "Нет темы",
+            )
+        self.assertIn("Тема", str(ctx.exception))
+
+
+class PromptLabRunnerTests(TransactionTestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="labuser", password="x", is_staff=True,
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="C-MPA")
+        self.group = FindErrorCaseGroup.objects.create(
+            dataset="ds", name="Группа", source_ref="ds/Группа",
+            programming_language=self.lang, topic_name="Массив",
+            statement="Найдите ошибку",
+        )
+        self.case_exact = FindErrorCase.objects.create(
+            group=self.group, name="1", source_ref="ds/Группа/1",
+            code="int b[20];", source_hash="h1",
+        )
+        FindErrorCaseLabel.objects.create(case=self.case_exact, code=3)
+        self.case_partial = FindErrorCase.objects.create(
+            group=self.group, name="2", source_ref="ds/Группа/2",
+            code="int b[20];", source_hash="h2",
+        )
+        FindErrorCaseLabel.objects.create(case=self.case_partial, code=3)
+        FindErrorCaseLabel.objects.create(case=self.case_partial, code=21)
+
+    def _wait(self, run, timeout=8.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            run.refresh_from_db()
+            if run.status != PromptLabRun.STATUS_RUNNING:
+                return run
+            time.sleep(0.05)
+        self.fail("Прогон не завершился за отведённое время")
+
+    def test_run_records_results_metrics_and_request_log(self):
+        from ai.prompt_lab_runner import start_prompt_lab_run
+
+        async def handler(message, client_id):
+            self.assertIn("КОДЫ:", message)
+            return "Разбор.\nКОДЫ: 3", 5, False, False, 10
+
+        models = [{"key": "Ollama_test", "title": "Test", "handler": handler}]
+        with patch("ai.prompt_lab_runner._resolve_models", return_value=models):
+            run = start_prompt_lab_run(
+                user=self.user,
+                case_ids=[self.case_exact.pk, self.case_partial.pk],
+                model_keys=["Ollama_test"],
+                prompt_id=None,
+                ui_language="ru",
+                include_eval_suffix=True,
+            )
+            run = self._wait(run)
+
+        self.assertEqual(run.status, PromptLabRun.STATUS_COMPLETED)
+        results = {r.case.name: r for r in run.results.all()}
+        self.assertTrue(results["1"].exact_match)
+        self.assertEqual(results["1"].parsed_codes, [3])
+        self.assertFalse(results["2"].exact_match)
+        self.assertEqual(results["2"].missed_codes, [21])
+        self.assertEqual(results["2"].recall, 0.5)
+        self.assertIn("КОДЫ:", results["1"].message)
+        report = run.report
+        self.assertEqual(report["models"][0]["exact"], 1)
+        self.assertEqual(report["models"][0]["cases"], 2)
+        # JSONField отдаёт ключи словаря строками после чтения из БД.
+        self.assertEqual(report["models"][0]["per_code"]["21"]["missed"], 1)
+        # Один вызов модели на каждую пару «модель × кейс».
+        self.assertEqual(AIRequestLog.objects.count(), 2)
+        log = AIRequestLog.objects.first()
+        self.assertEqual(log.mode, AIRequestLog.MODE_PROMPT_DEBUG)
+        self.assertEqual(log.source, AIRequestLog.SOURCE_ARM)
+        self.assertEqual(log.batch_run_id, "")
+        self.assertEqual(log.tokens, 5)
+        self.assertEqual(log.tokens_prompt, 10)
+
+    def test_validation_errors(self):
+        from ai.prompt_lab_runner import PromptLabError, start_prompt_lab_run
+
+        with self.assertRaises(PromptLabError):
+            start_prompt_lab_run(
+                user=self.user, case_ids=[], model_keys=["Ollama_test"],
+            )
+        with self.assertRaises(PromptLabError):
+            start_prompt_lab_run(
+                user=self.user, case_ids=[self.case_exact.pk], model_keys=[],
+            )
+
+        other = Prompt.objects.create(
+            mode="solve", prompt_name_ru="Реши", prompt_text_ru="x",
+        )
+        with patch("ai.prompt_lab_runner._resolve_models", return_value=[
+            {"key": "Ollama_test", "title": "Test", "handler": AsyncMock()},
+        ]):
+            with self.assertRaises(PromptLabError):
+                start_prompt_lab_run(
+                    user=self.user, case_ids=[self.case_exact.pk],
+                    model_keys=["Ollama_test"], prompt_id=other.pk,
+                )
+
+    def test_cancel_orphan_run(self):
+        from ai.prompt_lab_runner import cancel_prompt_lab_run
+
+        run = PromptLabRun.objects.create(
+            run_id=uuid.uuid4().hex, status=PromptLabRun.STATUS_RUNNING,
+            case_count=1, case_ids=[self.case_exact.pk],
+        )
+        self.assertTrue(cancel_prompt_lab_run(run.run_id))
+        run.refresh_from_db()
+        self.assertEqual(run.status, PromptLabRun.STATUS_CANCELLED)
+        self.assertFalse(cancel_prompt_lab_run(run.run_id))
+
+
+class PromptLabAdminTests(_AdminViewRequestMixin, TestCase):
+    def setUp(self):
+        # Вью лаборатории проверяют права сами (can_access_prompt_lab), поэтому
+        # зовём их напрямую: admin_view дополнительно требует external id и
+        # «свежую» сессию, которых у RequestFactory-теста нет.
+        self.factory = RequestFactory()
+        self.staff = get_user_model().objects.create_user(
+            username="labstaff", password="x", is_staff=True,
+        )
+
+    def _call(self, user, view, method="get", path="/ai/admin/prompts/lab/",
+              data=None, content_type=None):
+        request = self._admin_request(
+            user, method=method, path=path, data=data, content_type=content_type,
+        )
+        return view(request)
+
+    def test_page_requires_access(self):
+        from ai.admin.prompt_lab import admin_prompt_lab_view
+
+        response = self._call(AnonymousUser(), admin_prompt_lab_view)
+        self.assertEqual(response.status_code, 403)
+        response = self._call(self.staff, admin_prompt_lab_view)
+        self.assertEqual(response.status_code, 200)
+
+    def test_key_grants_access_to_non_staff(self):
+        from ai.admin.prompt_lab import admin_prompt_lab_view
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+
+        user = get_user_model().objects.create_user(username="labpd", password="x")
+        perm, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.prompt_lab", defaults={"label": "Лаборатория", "section": "page"},
+        )
+        admin_perm, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.admin", defaults={"label": "Админка", "section": "page"},
+        )
+        group = AIAccessGroup.objects.create(name="Тестовая лаборатория")
+        group.permissions.add(perm, admin_perm)
+        group.users.add(user)
+        response = self._call(user, admin_prompt_lab_view)
+        self.assertEqual(response.status_code, 200)
+
+    def test_start_endpoint_rejects_empty_payload(self):
+        from ai.admin.prompt_lab import admin_prompt_lab_start_view
+
+        response = self._call(
+            self.staff, admin_prompt_lab_start_view,
+            method="post", path="/ai/admin/prompts/lab/start/",
+            data=json.dumps({}), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(json.loads(response.content)["ok"])
+
+    def test_status_and_export(self):
+        from ai.admin.prompt_lab import (
+            admin_prompt_lab_export_view,
+            admin_prompt_lab_result_body_view,
+            admin_prompt_lab_status_view,
+        )
+
+        run = PromptLabRun.objects.create(
+            run_id="run-export-1", status=PromptLabRun.STATUS_COMPLETED,
+            case_count=1, case_ids=[], model_keys=["Ollama_test"],
+            model_titles=["Test"], prompt_name="P",
+        )
+        group = FindErrorCaseGroup.objects.create(
+            dataset="ds", name="Группа", source_ref="ds/Группа",
+        )
+        case = FindErrorCase.objects.create(
+            group=group, name="1", source_ref="ds/Группа/1", code="x", source_hash="h",
+        )
+        result = PromptLabResult.objects.create(
+            run=run, case=case, case_ref=case.source_ref, case_name="1",
+            group_name="Группа", model_key="Ollama_test", model_title="Test",
+            status=PromptLabResult.STATUS_OK, parsed_codes=[3],
+            expected_codes=[3], matched_codes=[3], exact_match=True,
+            precision=1.0, recall=1.0, f1=1.0,
+            raw_response="Разбор.\nКОДЫ: 3",
+        )
+        response = self._call(
+            self.staff, admin_prompt_lab_status_view,
+            path="/ai/admin/prompts/lab/status/?run_id=run-export-1",
+        )
+        self.assertEqual(response.status_code, 200)
+        snapshot = json.loads(response.content)["snapshot"]
+        self.assertTrue(snapshot["results"][0]["exact_match"])
+
+        response = self._call(
+            self.staff, admin_prompt_lab_export_view,
+            path="/ai/admin/prompts/lab/export/?run_id=run-export-1",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8")
+        self.assertIn("Ожидаемые коды", response.content.decode("utf-8-sig"))
+
+        response = admin_prompt_lab_result_body_view(
+            self._admin_request(
+                self.staff, path=f"/ai/admin/prompts/lab/result/{result.pk}/body/",
+            ),
+            result.pk,
+        )
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)["result"]
+        self.assertEqual(body["parsed_codes"], [3])
+        self.assertIn("КОДЫ: 3", body["raw_response"])
+
+
+class FindErrorCaseAdminTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.staff = get_user_model().objects.create_user(
+            username="fe_staff", password="x", is_staff=True,
+        )
+        self.group = FindErrorCaseGroup.objects.create(
+            dataset="ds", name="Группа", source_ref="ds/Группа",
+            dl_node_id=123, dl_course_id=9, statement="Старое условие",
+        )
+
+    def _request(self, user):
+        request = self.factory.get("/ai/admin/ai/finderrorcase/")
+        request.user = user
+        return request
+
+    def test_access_staff_and_key_holder(self):
+        from ai.admin.find_error_cases import FindErrorCaseAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+
+        admin_obj = FindErrorCaseAdmin(FindErrorCase, ai_admin_site)
+        self.assertTrue(admin_obj.has_view_permission(self._request(self.staff)))
+        self.assertFalse(admin_obj.has_view_permission(self._request(AnonymousUser())))
+
+        user = get_user_model().objects.create_user(username="fe_pd", password="x")
+        perm, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.prompt_lab", defaults={"label": "Лаборатория", "section": "page"},
+        )
+        group, _ = AIAccessGroup.objects.get_or_create(name="Тестовая база ошибок")
+        group.permissions.add(perm)
+        group.users.add(user)
+        self.assertTrue(admin_obj.has_view_permission(self._request(user)))
+        # Контент-владелец не удаляет историю — удаление только staff/superuser.
+        self.assertFalse(admin_obj.has_delete_permission(self._request(user)))
+        self.assertTrue(admin_obj.has_delete_permission(self._request(self.staff)))
+
+    def test_inline_code_choices_from_catalog(self):
+        from ai.admin.find_error_cases import FindErrorCaseLabelInline
+        from ai.admin.site import ai_admin_site
+
+        inline = FindErrorCaseLabelInline(FindErrorCase, ai_admin_site)
+        field = inline.formfield_for_dbfield(
+            FindErrorCaseLabel._meta.get_field("code"), self._request(self.staff),
+        )
+        values = [value for value, _label in field.widget.choices]
+        self.assertIn(3, values)
+        self.assertIn(22, values)
+        self.assertNotIn(19, values)
+
+    def test_fetch_statement_updates_group(self):
+        from unittest.mock import patch
+
+        from ai.admin.find_error_cases import _fetch_statement_for_group
+
+        with patch(
+            "ai.admin.find_error_cases.resolve_dl_session_id", return_value="DLSID",
+        ), patch(
+            "ai.admin.find_error_cases.fetch_task_info",
+            return_value={"statement": " Новое условие "},
+        ):
+            ok, message = _fetch_statement_for_group(self.group, self._request(self.staff))
+        self.assertTrue(ok)
+        self.assertIn("обновлено", message)
+        self.group.refresh_from_db()
+        self.assertEqual(self.group.statement, "Новое условие")
+        self.assertEqual(self.group.statement_source, "dl")
+
+    def test_fetch_statement_without_session_raises(self):
+        from unittest.mock import patch
+
+        from ai.admin.find_error_cases import _fetch_statement_for_group
+        from ai.dl_api_client import DLApiError
+
+        with patch("ai.admin.find_error_cases.resolve_dl_session_id", return_value=""):
+            with self.assertRaises(DLApiError):
+                _fetch_statement_for_group(self.group, self._request(self.staff))
+
+
+class FindErrorPromptDocsTests(SimpleTestCase):
+    def test_chapter_registered_and_readable(self):
+        from ai.services.docs import get_chapter, read_chapter_markdown
+
+        chapter = get_chapter("find-error-prompt")
+        self.assertIsNotNone(chapter)
+        self.assertEqual(chapter.min_role, "prompt_developer")
+        document = read_chapter_markdown("find-error-prompt")
+        self.assertIn("КОДЫ", document["text"])
+        self.assertIn("Лаборатория промптов", document["text"])

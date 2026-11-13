@@ -27,6 +27,7 @@ from .permissions import (
     can_access_prompt_admin,
     can_access_prompt_developer_docs,
     can_access_prompt_defaults,
+    can_access_prompt_lab,
     can_access_tasks,
     can_access_test_console,
     can_access_test_data,
@@ -64,6 +65,8 @@ _REAL_MODEL_ICONS = {
     "Prompt": "✎",
     "SharedPrompt": "⁂",
     "ExternalDLAccount": "☰",
+    "FindErrorCaseGroup": "▤",
+    "FindErrorCase": "⚠",
 }
 
 
@@ -492,6 +495,7 @@ class AIAdminSite(admin.AdminSite):
         show_tasks = can_access_tasks(request)
         show_test_data = can_access_test_data(request)
         show_groups = can_access_access_groups(request)
+        show_prompt_lab = can_access_prompt_lab(request)
 
         docs_url = "/ai/admin/docs/"
         aiappsettings_url = self._aiappsettings_url()
@@ -531,7 +535,9 @@ class AIAdminSite(admin.AdminSite):
                 ("page.prompt_admin.edit_others", "Перезаписывать чужие промпты"),
             )),
             ("Промпты", "Промпты по умолчанию", "AiArmPromptDefaults", "/ai/admin/prompt-defaults/", can_access_prompt_defaults(request), "⚙", "Авто-подстановка по языку/теме ARM", "page.prompt_defaults", ()),
+            ("Промпты", "Лаборатория промптов", "AiPromptLab", "/ai/admin/prompts/lab/", show_prompt_lab, "⚗", "Прогон препромптов на базе ошибочных программ", "page.prompt_lab", ()),
             ("Документация", "Разработчик промптов", "AiDocsPromptDeveloper", docs_url + "prompt-developer/", can_access_prompt_developer_docs(user), "✎", "Инструкция для разработчика промптов", "docs.prompt_developer", ()),
+            ("Документация", "Препромпт «В чём ошибка»", "AiDocsFindErrorPrompt", docs_url + "find-error-prompt/", can_access_prompt_developer_docs(user), "✎", "Как устроен и как отлаживать препромпт режима «В чём ошибка»", "docs.prompt_developer", ()),
             ("Документация", "Разработчик", "AiDocsDeveloper", docs_url + "developer/", (is_staff or user_has_key(request.user, "docs.developer")), "⚙", "Документация для разработчика", "docs.developer", ()),
             ("Документация", "Суперюзер", "AiDocsSuperuser", docs_url + "superuser/", user_has_key(request.user, "docs.superuser"), "⚙", "Инструкция для суперадмина", "docs.superuser", ()),
             ("ARM", "Пакетное решение", "AiArmSolve", "/ai/admin/arm/solve/", show_arm, "▤", "Пакетный прогон моделей по задачам DL", "page.arm_solve", ()),

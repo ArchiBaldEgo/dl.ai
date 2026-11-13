@@ -73,6 +73,17 @@ table[data-reorder="1"] tbody tr[data-task-id] { cursor: grab; }
 /* Тип таска: «Фронт работы» / «Хотелки» — чип .ai-task-kind (ниже, общий
    вид) с подкраской по виду. */
 
+/* «Поручить» (только суперюзер): select разработчика + кнопка в колонке
+   действий; select компактный, чтобы колонка не разъезжалась. */
+.ai-task-assign {
+  display: inline-flex; align-items: center; gap: 4px;
+  vertical-align: middle; margin-right: 4px;
+}
+.ai-task-assign-select {
+  max-width: 170px; height: 26px; padding: 1px 4px; font-size: 12px;
+}
+.ai-task-btn-assign { padding: 3px 12px; }
+
 .ai-task-btn-claim { padding: 3px 12px; }
 .ai-task-btn-assign { padding: 3px 12px; }
 /* Селект «Поручено» раскрывается прямо в ячейке действий. */

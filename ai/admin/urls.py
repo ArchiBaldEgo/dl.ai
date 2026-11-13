@@ -67,6 +67,14 @@ from .request_logs import admin_request_log_detail_json_view
 from .onboarding import admin_wizard_seen_view
 from .pinned import admin_pinned_run_toggle_view, admin_pinned_runs_view
 from .prompt_defaults import admin_prompt_defaults_view
+from .prompt_lab import (
+    admin_prompt_lab_cancel_view,
+    admin_prompt_lab_export_view,
+    admin_prompt_lab_result_body_view,
+    admin_prompt_lab_start_view,
+    admin_prompt_lab_status_view,
+    admin_prompt_lab_view,
+)
 from .site import ai_admin_site
 from .tasks import (
     admin_task_assign_view,
@@ -152,6 +160,12 @@ def get_ai_admin_urls():
         path("tasks/<int:task_id>/reopen/", ai_admin_site.admin_view(admin_task_reopen_view), name="ai_task_reopen"),
         path("tasks/", ai_admin_site.admin_view(admin_tasks_view), name="ai_tasks"),
         path("prompt-defaults/", ai_admin_site.admin_view(admin_prompt_defaults_view), name="ai_prompt_defaults"),
+        path("prompts/lab/start/", ai_admin_site.admin_view(admin_prompt_lab_start_view), name="ai_prompt_lab_start"),
+        path("prompts/lab/status/", ai_admin_site.admin_view(admin_prompt_lab_status_view), name="ai_prompt_lab_status"),
+        path("prompts/lab/cancel/", ai_admin_site.admin_view(admin_prompt_lab_cancel_view), name="ai_prompt_lab_cancel"),
+        path("prompts/lab/export/", ai_admin_site.admin_view(admin_prompt_lab_export_view), name="ai_prompt_lab_export"),
+        path("prompts/lab/result/<int:result_id>/body/", ai_admin_site.admin_view(admin_prompt_lab_result_body_view), name="ai_prompt_lab_result_body"),
+        path("prompts/lab/", ai_admin_site.admin_view(admin_prompt_lab_view), name="ai_prompt_lab"),
         path("ai-groups/<int:group_id>/save/", ai_admin_site.admin_view(admin_access_group_save_view), name="ai_access_group_save"),
         path("ai-groups/<int:group_id>/delete/", ai_admin_site.admin_view(admin_access_group_delete_view), name="ai_access_group_delete"),
         path("ai-groups/<int:group_id>/members/search/", ai_admin_site.admin_view(admin_access_group_member_search_view), name="ai_access_group_member_search"),

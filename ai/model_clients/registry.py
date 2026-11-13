@@ -95,6 +95,9 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "title": "OR Nemotron Nano 30B Reasoning",
         "handler": openrouter.ask_OR_Nemotron_Nano_30B_Reasoning_async,
         "capabilities": _REASONING,
+        # Модель заявляет reasoning, но handler OpenRouter читает только
+        # message.content: reasoning_content в приложение не попадает.
+        "implemented": {"reasoning": False},
     },
     "OR_Nemotron_Nano_30B": {
         "title": "OR Nemotron Nano 30B",
@@ -351,6 +354,23 @@ class ModelRegistry:
             "vision": bool(caps.get("vision", False)),
             "reasoning": bool(caps.get("reasoning", False)),
         }
+
+    def implemented(self, key: str) -> dict:
+        """Which declared capabilities are actually wired in the application.
+
+        Defaults to ``capabilities(key)``; a model may override individual
+        flags in its registry row via ``"implemented": {"reasoning": False}``.
+        Used by «Состояние моделей» to show «заявлено, но не подключено»
+        without confusing it with the model's current health.
+        """
+        implemented = dict(self.capabilities(key))
+        info = self._models.get(key)
+        overrides = info.get("implemented") if info else None
+        if isinstance(overrides, dict):
+            for key_name in ("text", "vision", "reasoning"):
+                if key_name in overrides:
+                    implemented[key_name] = bool(overrides[key_name])
+        return implemented
 
     def register(self, key: str, title: str, handler: Handler, capabilities: dict | None = None) -> None:
         self._models[key] = {

@@ -722,8 +722,17 @@ function initProblemSelectors(mode) {
     }
 
     function selectFirstIfSingle(selectElement) {
-        if (selectElement && selectElement.options.length === 1) {
-            selectElement.selectedIndex = 0;
+        // Placeholder («Выберите …», value="") уже добавлен, поэтому одна
+        // реальная опция даёт options.length === 2. Выбираем единственную
+        // НЕПУСТУЮ опцию — так препромпт темы подставляется студенту сразу,
+        // без ручного выбора (и то же работает для единственного языка/темы).
+        if (!selectElement) return;
+        const realOptions = Array.prototype.filter.call(
+            selectElement.options,
+            function (option) { return option.value !== ''; }
+        );
+        if (realOptions.length === 1) {
+            selectElement.value = realOptions[0].value;
         }
     }
 
@@ -2530,13 +2539,17 @@ document.addEventListener('DOMContentLoaded', initCommonPageActions);
 // Каждое пришедшее по WS сообщение диалога (эхо пользователя «Обрабатываю
 // запрос пользователя. Вы: …» + ответ ИИ «Запрос успешно обработан…») сохраняется
 // в localStorage и восстанавливается после перезагрузки страницы, чтобы переписка
-// не пропадала, пока пользователь не нажмёт «Clear Context». Ключ привязан к
-// пользователю (client_id = dlsid_<DLSID>) и странице (pathname) — у разных
-// страниц (чат / решить / ошибка) и разных пользователей отдельные переписки.
+// не пропадала, пока пользователь не нажмёт «Clear Context». Ключ привязан
+// ТОЛЬКО к пользователю (client_id = dlsid_<DLSID>): чат, «Реши задачу» и
+// «В чём ошибка» делят одну ленту, чтобы история не терялась при переходах.
 // Служебные/транзитные сообщения («Контекст очищен», «Слишком много сообщений»,
 // «Что-то пошло не так» и т.п.) не содержат маркеров диалога и не сохраняются.
 var AI_MSGS_KEY_PREFIX = 'ai_msgs_';
 var AI_MSGS_MAX_CHARS = 2000000; // ~2 МБ上限, чтобы не упереться в квоту localStorage
+
+// Старые (до единой ленты) ключи были привязаны к pathname. При первом
+// открытии любой из трёх страниц склеиваем их в общий ключ и удаляем.
+var AI_MSGS_LEGACY_PATHS = ['/ai/chat', '/ai/solve-problem', '/ai/find-error'];
 
 // [[DL]]-записи в том же массиве — DL-статусы кнопки «Тестирование» страницы
 // «Реши задачу» (restore рендерит их через _appendDlMessage страничного скрипта).
@@ -2548,8 +2561,40 @@ var DL_MSG_MARKER = '[[DL]]';
 var _restoringPersistedMessages = false;
 
 function aiMessagesKey() {
-    var path = (location.pathname || '/').replace(/\/+$/, '') || '/';
+    // Одна лента на пользователя для всех трёх клиентских страниц.
+    return AI_MSGS_KEY_PREFIX + client_id;
+}
+
+function _legacyMessagesKey(path) {
     return AI_MSGS_KEY_PREFIX + client_id + ':' + path;
+}
+
+// Однократная миграция старых per-page переписок в общую ленту. Если общий
+// ключ уже существует — старые только удаляем, чтобы не задвоить историю.
+function _migrateLegacyMessages() {
+    var sharedKey = aiMessagesKey();
+    var hasShared = false;
+    try {
+        hasShared = localStorage.getItem(sharedKey) !== null;
+    } catch (e) {
+        return; // приватный режим / квота — миграция невозможна
+    }
+    var merged = [];
+    for (var i = 0; i < AI_MSGS_LEGACY_PATHS.length; i++) {
+        var key = _legacyMessagesKey(AI_MSGS_LEGACY_PATHS[i]);
+        var raw = null;
+        try { raw = localStorage.getItem(key); } catch (e) { raw = null; }
+        if (!hasShared && raw) {
+            try {
+                var arr = JSON.parse(raw);
+                if (Array.isArray(arr)) merged = merged.concat(arr);
+            } catch (e) { /* битый старый ключ — пропускаем */ }
+        }
+        try { localStorage.removeItem(key); } catch (e) { /* ignore */ }
+    }
+    if (!hasShared && merged.length) {
+        savePersistedMessages(merged);
+    }
 }
 
 function loadPersistedMessages() {
@@ -2661,8 +2706,17 @@ function clearPersistedMessages() {
 // через тот же onmessage-обработчик, что и при живом приёме — весь страничный
 // рендер (accordion, think-блоки, markdown) переиспользуется без дублей логики.
 // Вызывается из window.onload каждой страницы сразу после initWebSocket().
+// [[DL]]-запись умеет рендерить только страница «Реши задачу»
+// (_appendDlMessage из decide_task.js). В общей ленте такие записи попадают
+// и на чат/«В чём ошибка» — там их пропускаем, иначе маркер виден текстом.
+function _canRenderPersistedEntry(raw) {
+    if (String(raw || '').lastIndexOf(DL_MSG_MARKER, 0) !== 0) return true;
+    return typeof _appendDlMessage === 'function';
+}
+
 function restorePersistedMessages() {
     try {
+        _migrateLegacyMessages();
         if (!ws || typeof ws.onmessage !== 'function') return;
         var arr = loadPersistedMessages();
         if (!arr.length) return;
@@ -2671,6 +2725,7 @@ function restorePersistedMessages() {
         _restoringPersistedMessages = true;
         try {
             for (var i = 0; i < arr.length; i++) {
+                if (!_canRenderPersistedEntry(arr[i])) continue;
                 ws.onmessage({ data: arr[i] });
             }
         } finally {

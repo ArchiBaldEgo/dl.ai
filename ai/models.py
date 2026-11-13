@@ -561,6 +561,277 @@ class ArmPromptBinding(models.Model):
         return f"{self.get_mode_display()}: {self.programming_language} / {topic} → {self.prompt}"
 
 
+class FindErrorCaseGroup(models.Model):
+    """Группа ошибочных программ: одна задача/папка датасета «В чём ошибка».
+
+    Условие задачи хранится на группе, а не на каждой программе: в датасете
+    все программы одной папки относятся к одной задаче DL. ``dl_node_id`` /
+    ``dl_course_id`` позволяют обновлять условие из DL (``fetch_task_info``);
+    ``info.txt`` — офлайн-фолбэк. Группа не связана с ``Task`` жёстко, чтобы
+    контент-владельцы могли пополнять базу без заведения DL-задач.
+    """
+
+    dataset = models.CharField(
+        max_length=128, default="odnomerny_massiv", db_index=True,
+        verbose_name="Датасет",
+    )
+    name = models.CharField(max_length=255, verbose_name="Название группы")
+    source_ref = models.CharField(
+        max_length=512, unique=True, verbose_name="Ссылка в датасете",
+        help_text="Например: odnomerny_massiv/1. Отчисление",
+    )
+    programming_language = models.ForeignKey(
+        ProgrammingLanguage, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="find_error_case_groups", verbose_name="Язык программирования",
+    )
+    topic_name = models.CharField(
+        max_length=255, blank=True, default="", verbose_name="Тема (подпись)",
+    )
+    dl_node_id = models.PositiveBigIntegerField(
+        null=True, blank=True, db_index=True, verbose_name="ID узла DL",
+    )
+    dl_course_id = models.PositiveBigIntegerField(
+        null=True, blank=True, verbose_name="ID курса DL",
+    )
+    statement = models.TextField(blank=True, default="", verbose_name="Условие задачи")
+    statement_source = models.CharField(
+        max_length=16, blank=True, default="",
+        choices=(
+            ("dl", "DL"),
+            ("task", "Локальная задача"),
+            ("info_txt", "info.txt"),
+            ("manual", "Вручную"),
+        ),
+        verbose_name="Источник условия",
+    )
+    statement_updated_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="Условие обновлено",
+    )
+    notes = models.TextField(blank=True, default="", verbose_name="Примечания")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создана")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлена")
+
+    class Meta:
+        db_table = "ai_find_error_case_group"
+        verbose_name = "Группа ошибочных программ"
+        verbose_name_plural = "Группы ошибочных программ"
+        ordering = ("dataset", "name")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("dataset", "name"), name="ai_find_error_group_dataset_name_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["programming_language", "topic_name"], name="ai_fe_group_lang_topic_idx"),
+        ]
+
+    def __str__(self):
+        return self.name or f"Группа #{self.pk}"
+
+
+class FindErrorCase(models.Model):
+    """Одна ошибочная программа с размеченными ошибками (метки — FK-строки)."""
+
+    STATUS_DRAFT = "draft"
+    STATUS_READY = "ready"
+    STATUS_VERIFIED = "verified"
+    STATUS_DISABLED = "disabled"
+    STATUS_CHOICES = (
+        (STATUS_DRAFT, "Черновик"),
+        (STATUS_READY, "Готова"),
+        (STATUS_VERIFIED, "Проверена"),
+        (STATUS_DISABLED, "Отключена"),
+    )
+
+    group = models.ForeignKey(
+        FindErrorCaseGroup, on_delete=models.CASCADE, related_name="cases",
+        verbose_name="Группа",
+    )
+    name = models.CharField(max_length=255, verbose_name="Название программы")
+    source_ref = models.CharField(
+        max_length=512, unique=True, verbose_name="Ссылка в датасете",
+        help_text="Например: odnomerny_massiv/1. Отчисление/1",
+    )
+    code = models.TextField(verbose_name="Код программы")
+    status = models.CharField(
+        max_length=16, choices=STATUS_CHOICES, default=STATUS_READY,
+        db_index=True, verbose_name="Статус",
+    )
+    source_hash = models.CharField(
+        max_length=64, blank=True, default="", db_index=True,
+        verbose_name="Хэш исходников",
+        help_text="Считается импортом из кода и меток; ручная правка его не меняет.",
+    )
+    notes = models.TextField(blank=True, default="", verbose_name="Примечания")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="find_error_cases", verbose_name="Создал",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создана")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлена")
+
+    class Meta:
+        db_table = "ai_find_error_case"
+        verbose_name = "Ошибочная программа"
+        verbose_name_plural = "Ошибочные программы"
+        ordering = ("group", "name")
+        indexes = [
+            models.Index(fields=["group", "status"], name="ai_fe_case_group_status_idx"),
+            models.Index(fields=["status"], name="ai_fe_case_status_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.group.name} / {self.name}" if self.group_id else self.name
+
+
+class FindErrorCaseLabel(models.Model):
+    """Метка ошибки кейса: код из каталога + пояснение из error_N.txt."""
+
+    case = models.ForeignKey(
+        FindErrorCase, on_delete=models.CASCADE, related_name="labels",
+        verbose_name="Программа",
+    )
+    code = models.PositiveSmallIntegerField(verbose_name="Код ошибки")
+    text = models.TextField(blank=True, default="", verbose_name="Текст ошибки")
+
+    class Meta:
+        db_table = "ai_find_error_case_label"
+        verbose_name = "Метка ошибки"
+        verbose_name_plural = "Метки ошибок"
+        ordering = ("code",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("case", "code"), name="ai_find_error_label_case_code_uniq",
+            ),
+        ]
+
+    def __str__(self):
+        return f"error_{self.code}"
+
+
+class PromptLabRun(models.Model):
+    """Прогон лаборатории промптов: промпт × модели × набор кейсов.
+
+    Отдельная от ``AIModelTestRun`` сущность: «Отладка промтов» правит промпт
+    по провалам DL, а лаборатория измеряет промпт на размеченной базе
+    ошибочных программ. Смешивать статистику нельзя.
+    """
+
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_CANCELLED = "cancelled"
+    STATUS_CHOICES = (
+        (STATUS_RUNNING, "Выполняется"),
+        (STATUS_COMPLETED, "Завершён"),
+        (STATUS_FAILED, "Ошибка"),
+        (STATUS_CANCELLED, "Прерван"),
+    )
+
+    run_id = models.CharField(max_length=32, unique=True, db_index=True, verbose_name="ID прогона")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="prompt_lab_runs", verbose_name="Запустил",
+    )
+    status = models.CharField(
+        max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING,
+        db_index=True, verbose_name="Статус",
+    )
+    prompt = models.ForeignKey(
+        Prompt, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="lab_runs", verbose_name="Промпт",
+    )
+    prompt_id_snapshot = models.PositiveBigIntegerField(
+        null=True, blank=True, verbose_name="ID промпта (снимок)",
+    )
+    prompt_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Имя промпта (снимок)")
+    prompt_text = models.TextField(blank=True, default="", verbose_name="Текст промпта (снимок)")
+    base_prompt_text = models.TextField(blank=True, default="", verbose_name="Общий промпт режима (снимок)")
+    model_keys = models.JSONField(default=list, verbose_name="Модели (ключи)")
+    model_titles = models.JSONField(default=list, verbose_name="Модели (подписи)")
+    case_ids = models.JSONField(default=list, verbose_name="Кейсы (id)")
+    case_count = models.PositiveIntegerField(default=0, verbose_name="Кейсов")
+    ui_language = models.CharField(max_length=8, default="ru", verbose_name="Язык интерфейса")
+    include_eval_suffix = models.BooleanField(default=True, verbose_name="Добавлять строку КОДЫ")
+    started_at = models.DateTimeField(auto_now_add=True, verbose_name="Начат")
+    finished_at = models.DateTimeField(null=True, blank=True, verbose_name="Завершён")
+    error_message = models.TextField(blank=True, default="", verbose_name="Ошибка")
+    report = models.JSONField(default=dict, blank=True, verbose_name="Отчёт")
+    run_params = models.JSONField(default=dict, blank=True, verbose_name="Параметры запуска")
+
+    class Meta:
+        db_table = "ai_prompt_lab_run"
+        verbose_name = "Прогон лаборатории промптов"
+        verbose_name_plural = "Прогоны лаборатории промптов"
+        ordering = ("-started_at",)
+        indexes = [
+            models.Index(fields=["status", "started_at"], name="ai_lab_run_status_started_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.run_id} ({self.get_status_display()})"
+
+
+class PromptLabResult(models.Model):
+    """Результат пары «модель × кейс» в прогоне лаборатории."""
+
+    STATUS_OK = "ok"
+    STATUS_ERROR = "error"
+    STATUS_CHOICES = ((STATUS_OK, "OK"), (STATUS_ERROR, "Ошибка"))
+
+    run = models.ForeignKey(
+        PromptLabRun, on_delete=models.CASCADE, related_name="results",
+        verbose_name="Прогон",
+    )
+    case = models.ForeignKey(
+        FindErrorCase, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="lab_results", verbose_name="Кейс",
+    )
+    case_ref = models.CharField(max_length=512, blank=True, default="", verbose_name="Ссылка кейса (снимок)")
+    case_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Имя кейса (снимок)")
+    group_name = models.CharField(max_length=255, blank=True, default="", verbose_name="Группа (снимок)")
+    model_key = models.CharField(max_length=128, verbose_name="Модель")
+    model_title = models.CharField(max_length=255, blank=True, default="", verbose_name="Модель (подпись)")
+    status = models.CharField(
+        max_length=16, choices=STATUS_CHOICES, default=STATUS_OK, verbose_name="Статус",
+    )
+    error_message = models.TextField(blank=True, default="", verbose_name="Ошибка")
+    message = models.TextField(blank=True, default="", verbose_name="Отправленное сообщение")
+    raw_response = models.TextField(blank=True, default="", verbose_name="Ответ модели")
+    parsed_codes = models.JSONField(default=list, blank=True, verbose_name="Найденные коды")
+    expected_codes = models.JSONField(default=list, blank=True, verbose_name="Ожидаемые коды")
+    matched_codes = models.JSONField(default=list, blank=True, verbose_name="Совпавшие коды")
+    missed_codes = models.JSONField(default=list, blank=True, verbose_name="Пропущенные коды")
+    extra_codes = models.JSONField(default=list, blank=True, verbose_name="Лишние коды")
+    exact_match = models.BooleanField(default=False, verbose_name="Точное совпадение")
+    precision = models.FloatField(null=True, blank=True, verbose_name="Precision")
+    recall = models.FloatField(null=True, blank=True, verbose_name="Recall")
+    f1 = models.FloatField(null=True, blank=True, verbose_name="F1")
+    duration_seconds = models.FloatField(default=0.0, verbose_name="Длительность, с")
+    tokens = models.PositiveIntegerField(default=0, verbose_name="Токены")
+    tokens_prompt = models.PositiveIntegerField(default=0, verbose_name="Токены промпта")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
+
+    class Meta:
+        db_table = "ai_prompt_lab_result"
+        verbose_name = "Результат лаборатории промптов"
+        verbose_name_plural = "Результаты лаборатории промптов"
+        ordering = ("case_ref", "model_key")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("run", "model_key", "case"), name="ai_lab_result_run_model_case_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["run", "model_key"], name="ai_lab_result_run_model_idx"),
+            models.Index(fields=["run", "case"], name="ai_lab_result_run_case_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.model_key} × {self.case_name or self.case_ref}"
+
+
 class TaskSolution(models.Model):
     """Кэш решённых задач «Реши задачу» (узел DL + язык → проверенный код).
 

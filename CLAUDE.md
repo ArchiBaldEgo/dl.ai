@@ -25,6 +25,8 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   (`tests.py::test_ollama_table_and_registry_in_sync`) green — it guards this rule.
 - **DRY.** Import, don't copy. Canonical owners:
   - grading/answer comparison → `ai/grading.py` (deterministic difflib, no LLM-judge);
+  - каталог кодов ошибок «В чём ошибка?» и суффикс `КОДЫ:` →
+    `ai/services/find_error_catalog.py`; парсинг/сравнение кодов → `ai/grading.py`;
   - prompt visibility: all prompts visible READ-ONLY to every admin entrant (baseline
     `page.prompt_admin_all`); overwriting someone else's prompt is gated by
     `page.prompt_admin.edit_others` (`PromptAdmin._can_edit_prompt`). Chat-facing APIs
@@ -97,6 +99,16 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   source of truth; батч-солв, перезапуски пар, карвер кода — gotchas-deep.
   Подписи модели (`Код:`, `**Код**:`, `Функция main():` и т. п.) вычищает
   `code_carver.strip_prose_heading_lines` (оба режима + финальный гейт всех языков).
+- База ошибочных программ «В чём ошибка?» — `FindErrorCaseGroup` →
+  `FindErrorCase` → `FindErrorCaseLabel` (`ai/models.py`), импорт из датасета
+  `ai/management/commands/import_find_error_cases.py` (идемпотентный, cp1251-aware),
+  админка `ai/admin/find_error_cases.py`; каталог кодов — единственный
+  `ai/services/find_error_catalog.py`.
+- Лаборатория промптов — `ai/prompt_lab_runner.py` (`PromptLabRun`/`PromptLabResult`,
+  потоки по моделям, live-прогресс в памяти, БД — source of truth) + страница
+  `ai/admin/prompt_lab.py`/`ai/templates/admin/ai/prompt_lab.html`; метрики кодов
+  считает `ai/grading.py` (`parse_error_codes`/`compare_error_codes`/
+  `aggregate_error_code_metrics`, детерминированно, без LLM-judge).
 - Журнал запросов — `ai/admin/request_logs.py` (`/ai/admin/ai/request_logs/`;
   `request_logs.html` скелет + партиал `request_logs_table.html`, AJAX меняет обёртку
   целиком; JS на делегировании).
@@ -147,6 +159,13 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   `+ timedelta(hours=3)`.
 - Model selector: топ-1 фаворит юзера (`_get_user_top_model_keys`, gated `AIAppSettings.
   favorites_epoch`) первой, дальше строго алфавит по title.
+- `ExternalAuthMiddleware` — stale-while-revalidate: кэш identity отдаётся сразу,
+  dl.gsu.by обновляется фоновым daemon-потоком (L2 `django.core.cache`, lock +
+  tombstone на 401); блокирующий запрос — только когда кэша нет вовсе
+  (`AI_AUTH_CACHE_TTL` / `AI_AUTH_STALE_TTL`). Не возвращать блокировку на каждый запрос.
+- История клиентских страниц — ОДИН ключ `ai_msgs_<client_id>` (чат / «Реши задачу» /
+  «В чём ошибка»); старые per-page ключи мигрирует `_migrateLegacyMessages`. `[[DL]]`-
+  записи рендерит только страница с `_appendDlMessage` (`_canRenderPersistedEntry`).
 
 ## Update log / git hooks
 

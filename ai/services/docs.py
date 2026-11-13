@@ -68,6 +68,12 @@ _CHAPTERS = {
         source=("docx", "Инструкция для разработчика промптов"),
         min_role="prompt_developer",
     ),
+    "find-error-prompt": DocChapter(
+        slug="find-error-prompt",
+        title="Разработчику препромпта «В чём ошибка»",
+        source=("file", "docs/find_error_prompt.md"),
+        min_role="prompt_developer",
+    ),
     "developer": DocChapter(
         slug="developer",
         title="Документация для разработчика",

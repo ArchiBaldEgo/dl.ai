@@ -29,6 +29,7 @@ _ADMIN_SCOPES_BY_PATH = (
     ("/ai/admin/ai/request_logs/", "admin_logs"),
     ("/ai/admin/pinned-runs/", "admin_pinned_runs"),
     ("/ai/admin/ai/tasksolution/", "admin_tasksolution"),
+    ("/ai/admin/tasks/", "admin_tasks"),
     ("/ai/admin/ai/aiappsettings/", "admin_aiappsettings"),
     ("/ai/admin/updates/", "admin_updates"),
     ("/ai/admin/prompt-defaults/", "admin_prompt_defaults"),

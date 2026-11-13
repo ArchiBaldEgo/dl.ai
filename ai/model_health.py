@@ -865,6 +865,7 @@ def get_model_status_rows():
                 "key": key,
                 "title": item["title"],
                 "capabilities": item.get("capabilities") or registry.capabilities(key),
+                "implemented": registry.implemented(key),
                 "is_active": is_active,
                 "status_label": "Активна" if is_active else "Неактивна",
                 "window_date": row.window_date if row else None,

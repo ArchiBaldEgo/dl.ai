@@ -48,6 +48,7 @@ SCOPES = (
     "admin_updates",
     "admin_test_console",
     "admin_tasksolution",
+    "admin_tasks",
     "admin_test_data",
     "admin_tokens",
     "admin_user_models",

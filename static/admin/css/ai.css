@@ -780,6 +780,30 @@ button#ai-wizard-restart:hover {
     cursor: pointer;
 }
 
+/* Кнопка PDF — заметный акцентный CTA: пользователи не находили прозрачную
+   кнопку 30px. Общие правила .dv button (растягивание, отступы) перебиваем
+   !important, как и раньше. */
+.pdf-attach-btn {
+    height: 36px !important;
+    padding: 0 18px !important;
+    font-size: 14px !important;
+    font-weight: 700 !important;
+    border: 2px solid var(--accent-blue) !important;
+    border-radius: 8px !important;
+    background: var(--accent-blue) !important;
+    color: #fff !important;
+    box-shadow: 0 2px 8px rgba(33, 150, 243, .28);
+    transition: filter .15s ease, box-shadow .15s ease;
+}
+.pdf-attach-btn:hover:not(:disabled) {
+    filter: brightness(1.08);
+    box-shadow: 0 3px 12px rgba(33, 150, 243, .38);
+}
+.pdf-attach-btn:focus-visible {
+    outline: 2px solid var(--accent-blue);
+    outline-offset: 2px;
+}
+
 .pdf-attach-clear {
     padding: 0 8px !important;
 }
@@ -796,6 +820,20 @@ button#ai-wizard-restart:hover {
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+}
+
+@media (max-width: 600px) {
+    .pdf-attach {
+        flex-wrap: wrap;
+    }
+    .pdf-attach-btn {
+        width: 100% !important;
+        justify-content: center;
+    }
+    .pdf-attach-status {
+        flex-basis: 100%;
+        white-space: normal;
+    }
 }
 
 .pdf-attach-status.is-error {

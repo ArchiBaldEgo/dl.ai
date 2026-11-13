@@ -321,6 +321,88 @@ _CUT_RETRY_INSTRUCTION = {
     "fr": "Ta réponse précédente a été tronquée par la limite de longueur. Ni texte, ni calculs, ni explications — produis uniquement le code final complet de la solution en un seul bloc ``` sans texte après.",
 }
 
+# ── Память пакетного прогона + few-shot из кэша решённых задач ────────────
+# Контекст между парами НЕ накапливается в истории провайдера (у каждой пары
+# свой client_id): обогащаем сам промпт детерминированным, ограниченным
+# блоком. Опыт — только последние пары этого прогона (без кода), пример —
+# один ранее принятый код по теме из TaskSolution.
+_BATCH_MEMORY_LIMIT = 5
+_FEWSHOT_MAX_CHARS = 3000
+
+_BATCH_MEMORY_HEADER = {
+    "ru": "Опыт этого прогона: предыдущие задачи уже проверены на DL. Учитывай результаты, но каждую новую задачу решай самостоятельно.",
+    "en": "Experience from this run: previous tasks have already been checked on DL. Take the results into account, but solve each new task independently.",
+    "fr": "Expérience de cette exécution : les tâches précédentes ont déjà été vérifiées sur DL. Tiens compte des résultats, mais résous chaque nouvelle tâche toi-même.",
+}
+_BATCH_MEMORY_SOLVED = {"ru": "решена", "en": "solved", "fr": "résolue"}
+_BATCH_MEMORY_FAILED = {"ru": "не решена", "en": "not solved", "fr": "non résolue"}
+
+_FEWSHOT_HEADER = {
+    "ru": "Пример ранее принятого решения по этой теме (для образца). НЕ КОПИРУЙ его — реши СВОЮ задачу самостоятельно; пример задаёт только стиль и структуру.",
+    "en": "An example of a previously accepted solution for this topic (for reference). DO NOT COPY it — solve YOUR OWN task yourself; the example only shows style and structure.",
+    "fr": "Exemple d'une solution déjà acceptée pour ce thème (à titre de référence). NE LE COPIE PAS — résous TA propre tâche toi-même ; l'exemple n'indique que le style et la structure.",
+}
+
+
+def _build_batch_memory_block(entries, ui_language="Русский"):
+    """Блок «опыт этого прогона»: последние пары модели, без кода.
+
+    ``entries`` — список ``{task_name, topic_name, solved,
+    failure_reason_label}`` в порядке выполнения. Пустой список → "".
+    """
+    if not entries:
+        return ""
+    suffix = get_ui_language_suffix(ui_language)
+    solved_label = _BATCH_MEMORY_SOLVED[suffix]
+    failed_label = _BATCH_MEMORY_FAILED[suffix]
+    lines = []
+    for entry in entries[-_BATCH_MEMORY_LIMIT:]:
+        task_name = (entry.get("task_name") or "").strip() or "—"
+        topic_name = (entry.get("topic_name") or "").strip()
+        if topic_name:
+            task_name = f"{task_name} ({topic_name})"
+        if entry.get("solved"):
+            outcome = solved_label
+        else:
+            reason = (entry.get("failure_reason_label") or "").strip()
+            outcome = f"{failed_label}: {reason}" if reason else failed_label
+        lines.append(f"- {task_name} — {outcome}")
+    return _BATCH_MEMORY_HEADER[suffix] + "\n" + "\n".join(lines)
+
+
+def _build_fewshot_block(example, ui_language="Русский"):
+    """Блок-пример кода из кэша решённых задач (``TaskSolution``) по теме.
+
+    Код обрезается до ``_FEWSHOT_MAX_CHARS``; ограда ``~~~``, а не ``` —
+    контракт ответа требует РОВНО ОДИН ```-блок в конце сообщения, пример не
+    должен с ним путаться.
+    """
+    code = (getattr(example, "code", "") or "").strip()
+    if not code:
+        return ""
+    if len(code) > _FEWSHOT_MAX_CHARS:
+        code = code[:_FEWSHOT_MAX_CHARS].rstrip() + "\n…"
+    suffix = get_ui_language_suffix(ui_language)
+    return f"{_FEWSHOT_HEADER[suffix]}\n~~~\n{code}\n~~~"
+
+
+def _inject_solve_context(message, context_block, ui_language="Русский"):
+    """Вставить контекст ПЕРЕД финальной инструкцией формата ответа.
+
+    Контракт «ровно один ```-блок в самом конце» обязан остаться последним,
+    иначе память/few-shot ломают извлечение кода.
+    """
+    block = (context_block or "").strip()
+    if not block:
+        return message
+    message = message or ""
+    suffix = get_ui_language_suffix(ui_language)
+    marker = _OUTPUT_FENCE_INSTRUCTION[suffix]
+    index = message.rfind(marker)
+    if index == -1:
+        return message.rstrip() + "\n\n" + block
+    return message[:index].rstrip() + "\n\n" + block + "\n\n" + message[index:]
+
 
 def _compose_solve_message(message, task_statement, prog_lang_name, topic_name, ui_language="Русский",
                            file_extension=""):
@@ -2318,6 +2400,41 @@ def _prepare_batch_run(
                     ui_language, file_extension=tc["effective_ext"],
                 )
 
+    # Few-shot из кэша решённых задач: один пример на тему, кэш за прогон
+    # (не N запросов к TaskSolution). Код берётся из ранее принятого решения
+    # ТОГО ЖЕ языка и темы; текущая задача исключается. «Отладка промтов»
+    # примеров не получает — её промпт изменяется и проверяется отдельно.
+    if batch_snapshot:
+        from .services.solution_cache import find_topic_example
+
+        fewshot_cache: dict = {}
+        for tc in task_ctxs:
+            topic_key = tc["topic_id"] or (tc["topic_name"] or "").strip().lower()
+            if not topic_key:
+                tc["fewshot_block"] = ""
+                continue
+            if topic_key not in fewshot_cache:
+                try:
+                    fewshot_cache[topic_key] = find_topic_example(
+                        programming_language_id,
+                        topic_id=tc["topic_id"],
+                        topic_name=tc["topic_name"],
+                        exclude_node_id=tc["node_id"],
+                    )
+                except Exception:  # noqa: BLE001 — пример не должен ронять прогон
+                    logger.exception(
+                        "ARM batch: пример по теме «%s» не найден",
+                        tc["topic_name"],
+                    )
+                    fewshot_cache[topic_key] = None
+            example = fewshot_cache[topic_key]
+            if example is not None and example.task_node_id == tc["node_id"]:
+                # Кэш темы мог отдать решение ЭТОЙ задачи (первый запрос по
+                # теме делался с другим exclude) — себе пример не подсовываем.
+                tc["fewshot_block"] = ""
+            else:
+                tc["fewshot_block"] = _build_fewshot_block(example, ui_language)
+
     # Кэш имён промптов для записи в «Решённые задачи» (save_solutions) и
     # диагностики: из уже загруженных объектов, без запроса на каждый pk.
     prompt_name_cache: dict = {
@@ -2758,8 +2875,12 @@ def _pair_file_name(model, task_id, file_extension, run_file_name=""):
     return _build_dl_file_name(f"{title}_{task_id}", file_extension) or ""
 
 
-def _process_batch_pair(ctx, task_ctx, model, dl_lock):
+def _process_batch_pair(ctx, task_ctx, model, dl_lock, context_block=""):
     """Тело одной пары задача×модель. Возвращает result_item; None — отмена.
+
+    ``context_block`` — память прогона + few-shot по теме; вставляется в
+    сообщение ПЕРЕД финальной инструкцией формата, поэтому контракт «ровно
+    один ```-блок в конце» сохраняется, а авто-ретраи идут уже с контекстом.
 
     Отмена возвращает None (пара не пишется) в трёх точках: после LLM-вызова,
     в ожидании DL-лока и после поллинга DL — model-loop прекращает цикл модели
@@ -2825,6 +2946,12 @@ def _process_batch_pair(ctx, task_ctx, model, dl_lock):
             message = _build_solve_message(
                 task.statement, prog_lang_name, topic_name, ctx["ui_language"], task_prompt_id,
                 file_extension=effective_ext,
+            )
+        # Память прогона + few-shot по теме — до вызова модели, чтобы и
+        # авто-ретраи отправлялись с тем же контекстом.
+        if context_block:
+            message = _inject_solve_context(
+                message, context_block, ctx.get("ui_language") or "Русский",
             )
         # Вызов модели с автоповтором при «Сбое ответа модели»: сбой
         # печатается в журнал прогона, запрос пересылается СРАЗУ, попыток —
@@ -3844,7 +3971,10 @@ def _finish_prompt_debug_pair(ctx, task_ctx, model, payload, state):
     return item
 
 
-def _process_prompt_debug_pair(ctx, task_ctx, model, dl_lock):
+def _process_prompt_debug_pair(ctx, task_ctx, model, dl_lock, context_block=""):
+    # context_block принимается ради единого контракта _PAIR_PROCESSORS и
+    # НЕ применяется: «Отладка промтов» проверяет сам промпт, память/few-shot
+    # исказили бы сравнение попыток.
     """Пара «Отладки промтов»: решить → дополнить промпт → решить заново.
 
     Пара обязана закрыться ВСЕГДА и с payload'ом: сбой редактора/провайдера
@@ -4217,6 +4347,10 @@ def _run_batch_model_loop(ctx, model, model_index, dl_lock):
     _close_stale_connections_if_safe()
     run_id = ctx["run_id"]
     processor = _PAIR_PROCESSORS.get(ctx.get("run_type"), _process_batch_pair)
+    # Память прогона — только batch (у «Отладки промтов» свой сценарий).
+    memory_enabled = ctx.get("run_type") == AIModelTestRun.RUN_TYPE_BATCH
+    ui_language = ctx.get("ui_language") or "Русский"
+    memory_entries: list = []
     try:
         # execution_ctxs — тот же набор задач, сгруппированный по общему
         # префиксу промпта (кэш провайдера); порядок прогресса/отчёта не важен.
@@ -4237,8 +4371,20 @@ def _run_batch_model_loop(ctx, model, model_index, dl_lock):
             # Строка «выполняется…» — сразу, а не по завершении пары: иначе
             # первые минуты прогона таблица «Ответы моделей» пуста.
             _publish_pair_started(ctx, task_ctx, model)
+            # Контекст пары: опыт этой модели в прогоне + few-shot по теме.
+            # Вставляется перед финальной инструкцией формата (её контракт
+            # «ровно один ```-блок в конце» должен остаться последним).
+            context_block = ""
+            if memory_enabled:
+                blocks = (
+                    _build_batch_memory_block(memory_entries, ui_language),
+                    task_ctx.get("fewshot_block") or "",
+                )
+                context_block = "\n\n".join(block for block in blocks if block)
             try:
-                item = processor(ctx, task_ctx, model, dl_lock)
+                item = processor(
+                    ctx, task_ctx, model, dl_lock, context_block=context_block,
+                )
             except Exception as exc:  # noqa: BLE001 — сбой ПАРЫ, не модели
                 # Непредвиденный сбой одной пары не должен обрывать цикл
                 # модели: иначе оставшиеся задачи вообще не решаются (в
@@ -4258,6 +4404,17 @@ def _run_batch_model_loop(ctx, model, model_index, dl_lock):
                 _mark_batch_pair_finished(run_id, model_index)
                 continue
             _mark_batch_pair_finished(run_id, model_index, item)
+            # Память модели: факт проверки пары на DL, без кода (код новой
+            # задачи модель должна написать сама). Храним последние N.
+            if item is not None and memory_enabled:
+                memory_entries.append({
+                    "task_name": task_ctx.get("task_name") or "",
+                    "topic_name": task_ctx.get("topic_name") or "",
+                    "solved": item.get("verdict") == _VERDICT_SOLVED,
+                    "failure_reason_label": item.get("failure_reason_label") or "",
+                })
+                if len(memory_entries) > _BATCH_MEMORY_LIMIT:
+                    del memory_entries[:-_BATCH_MEMORY_LIMIT]
             if item is None:
                 # Отмена — модель прекращает работу; записанные другими
                 # моделями результаты остаются.
