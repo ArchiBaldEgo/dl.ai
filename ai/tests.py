@@ -11896,6 +11896,67 @@ class ViewAsViewTests(_AdminViewRequestMixin, TestCase):
                          "реальные группы не тронуты")
 
 
+class AdminFreshAuthRedirectTests(_AdminViewRequestMixin, TestCase):
+    """admin_view не зацикливает login ↔ страницы админки.
+
+    Регресс: маркер ``admin_fresh_auth`` ставился только «Разработчику
+    промптов»/staff. Член группы «Разработчик» (``page.admin`` без PD-роли)
+    и суперюзер в режиме «Посмотреть как…» попадали в петлю
+    ``/ai/admin/`` → ``/ai/admin/login/?next=…`` → ``/ai/admin/``
+    (next рос каждый переход, браузер — «циклическое перенаправление»).
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def _wrapped(self):
+        from django.http import HttpResponse
+        from ai.admin.site import ai_admin_site
+        return ai_admin_site.admin_view(lambda request: HttpResponse("ok"))
+
+    def _request_without_marker(self, user, path="/ai/admin/"):
+        request = self._admin_request(user, path=path)
+        request.session.pop("admin_fresh_auth", None)
+        return request
+
+    def test_page_admin_only_user_gets_marker_and_no_loop(self):
+        from unittest.mock import patch
+        user = self.user_model.objects.create_user(username="loop-dev", password="x")
+        group = self._view_as_group("Петля-разработчик", ["page.admin"])
+        group.users.add(user)
+        request = self._request_without_marker(user)
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = self._wrapped()(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(request.session.get("admin_fresh_auth"))
+
+    def test_superuser_in_view_as_does_not_loop(self):
+        from unittest.mock import patch
+        superuser = self.user_model.objects.create_user(
+            username="loop-super", password="x", is_superuser=True, is_staff=True,
+        )
+        group = self._view_as_group("Петля-эмуляция", ["page.admin"])
+        request = self._request_without_marker(superuser)
+        self._enter_view_as(request, group)
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = self._wrapped()(request)
+        # В эмуляции super-обход выключен, но page.admin у группы есть —
+        # маркер ставится и рендера страницы не миновать.
+        self.assertEqual(response.status_code, 200)
+
+    def test_login_page_never_redirects_to_itself(self):
+        from unittest.mock import patch
+        # Пользователь без прав вовсе: маркер не поставить, но и петли быть
+        # не должно — login-вью сама покажет «Нет доступа».
+        user = self.user_model.objects.create_user(username="loop-none", password="x")
+        request = self._request_without_marker(user, path="/ai/admin/login/")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = self._wrapped()(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("login/?next", response.headers.get("Location", ""))
+
+
 class ViewAsContextTests(_AdminViewRequestMixin, TestCase):
     """each_context в честной эмуляции «Посмотреть как…»: доступ РОВНО
     по ключам эмулируемой группы (+baseline при page.admin), супер-обход

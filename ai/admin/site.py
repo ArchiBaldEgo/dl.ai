@@ -251,7 +251,15 @@ class AIAdminSite(admin.AdminSite):
 
             if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
                 if get_external_user_id_from_request(request):
-                    if is_prompt_developer_user(request.user) or is_staff_or_superuser(request.user):
+                    # Маркер «свежей» аутентификации ставится всякому, кто
+                    # вообще допущен в админку (staff/super/ключ page.admin),
+                    # а не только «Разработчику промптов»: иначе член
+                    # «Разработчика» (page.admin без PD-роли) и суперюзер
+                    # в режиме «Посмотреть как…» навсегда застревали в
+                    # петле login → has_permission → login (next рос с
+                    # каждым переходом, браузер показывал «циклическое
+                    # перенаправление»).
+                    if can_access_admin(request.user):
                         request.session["admin_fresh_auth"] = True
 
             if request.user.is_authenticated and (not request.user.has_usable_password()):
@@ -259,7 +267,15 @@ class AIAdminSite(admin.AdminSite):
                     next_query = urlencode({"next": request.get_full_path()})
                     return redirect(f"/ai/admin/set-password/?{next_query}")
 
-            if request.user.is_authenticated and not request.session.get("admin_fresh_auth"):
+            # Страницу входа в админку не редиректим на саму себя: если
+            # маркер поставить всё-таки не удалось (нет прав), login-вью
+            # сама покажет «Нет доступа». Без этого исключения next рос
+            # с каждым переходом и получалась бесконечная петля.
+            if (
+                request.user.is_authenticated
+                and not request.session.get("admin_fresh_auth")
+                and not _is_admin_login_path(request.path)
+            ):
                 next_query = urlencode({"next": request.get_full_path()})
                 return redirect(f"/ai/admin/login/?{next_query}")
 
