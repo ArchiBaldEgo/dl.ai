@@ -97,6 +97,20 @@ def all_chapters() -> list[DocChapter]:
     return list(_CHAPTERS.values())
 
 
+#: Главы клиентской модалки «?» (шапка чата/«Реши задачу»/«В чём ошибка»),
+#: в порядке вкладок. «user» доступна всем; остальные — только тем, кому
+#: открыта промпт-документация (проверка прав — в ai/views.py).
+CLIENT_HELP_SLUGS = ("user", "find-error-prompt")
+
+
+def chapter_title(slug: str, lang: str = "ru") -> str:
+    """Заголовок главы для вкладок/модалки (``user`` локализуется)."""
+    chapter = _CHAPTERS.get(slug)
+    if chapter is None:
+        raise DocUnavailableError(f"Неизвестная глава: {slug}")
+    return _chapter_title(chapter, lang)
+
+
 def _base_dir() -> Path:
     return Path(settings.BASE_DIR)
 

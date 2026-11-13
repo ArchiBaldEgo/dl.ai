@@ -12069,9 +12069,11 @@ class ChatUserDocsViewTests(TestCase):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
 
-    def _request(self, path):
+    def _request(self, path, *, user=None):
         request = self.factory.get(path)
-        request.user = self.user_model.objects.create_user(username="chat-docs", password="x")
+        request.user = user or self.user_model.objects.create_user(
+            username="chat-docs", password="x"
+        )
         return request
 
     def test_forbidden_without_external_id(self):
@@ -12089,8 +12091,54 @@ class ChatUserDocsViewTests(TestCase):
         self.assertTrue(data["success"])
         self.assertIn("<h", data["html"])
         self.assertEqual(data["lang"], "ru")
+        self.assertEqual(data["chapter"], "user")
         self.assertEqual(len(data["fingerprint"]), 2)
-        self.assertEqual(data["download_url"], "/ai/docs/download/?lang=ru")
+        self.assertEqual(data["download_url"], "/ai/docs/download/?chapter=user&lang=ru")
+        # Обычному пользователю доступна только инструкция пользователя.
+        self.assertEqual([c["slug"] for c in data["chapters"]], ["user"])
+        self.assertEqual(data["chapters"][0]["title"], "Инструкция для пользователя")
+
+    def test_find_error_chapter_requires_prompt_docs_access(self):
+        from unittest.mock import patch
+        from ai.views import chat_user_docs_view
+        with patch("ai.views.get_external_user_id_from_request", return_value="12345"):
+            response = chat_user_docs_view(
+                self._request("/ai/docs/?chapter=find-error-prompt")
+            )
+        self.assertEqual(response.status_code, 403)
+
+    def test_unknown_chapter_forbidden(self):
+        from unittest.mock import patch
+        from ai.views import chat_user_docs_view
+        with patch("ai.views.get_external_user_id_from_request", return_value="12345"):
+            response = chat_user_docs_view(
+                self._request("/ai/docs/?chapter=developer")
+            )
+        self.assertEqual(response.status_code, 403)
+
+    def test_prompt_developer_sees_find_error_chapter(self):
+        from unittest.mock import patch
+        from ai.views import chat_user_docs_view
+        staff = self.user_model.objects.create_user(
+            username="chat-docs-staff", password="x", is_staff=True
+        )
+        with patch("ai.views.get_external_user_id_from_request", return_value="12345"):
+            response = chat_user_docs_view(
+                self._request("/ai/docs/?chapter=find-error-prompt", user=staff)
+            )
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertEqual(data["chapter"], "find-error-prompt")
+        self.assertIn("<h", data["html"])
+        # Технические главы не переводятся: даже при ?lang=English — ru.
+        self.assertEqual(data["lang"], "ru")
+        self.assertEqual(
+            [c["slug"] for c in data["chapters"]], ["user", "find-error-prompt"]
+        )
+        self.assertEqual(
+            data["download_url"],
+            "/ai/docs/download/?chapter=find-error-prompt&lang=ru",
+        )
 
     def test_download_headers(self):
         from unittest.mock import patch
@@ -12099,6 +12147,27 @@ class ChatUserDocsViewTests(TestCase):
             response = chat_user_docs_download_view(self._request("/ai/docs/download/"))
         self.assertEqual(response["Content-Type"], "text/markdown; charset=utf-8")
         self.assertIn("attachment", response["Content-Disposition"])
+
+    def test_download_find_error_chapter_gated(self):
+        from unittest.mock import patch
+        from ai.views import chat_user_docs_download_view
+        with patch("ai.views.get_external_user_id_from_request", return_value="12345"):
+            forbidden = chat_user_docs_download_view(
+                self._request("/ai/docs/download/?chapter=find-error-prompt")
+            )
+        self.assertEqual(forbidden.status_code, 403)
+
+        staff = self.user_model.objects.create_user(
+            username="chat-docs-staff-dl", password="x", is_staff=True
+        )
+        with patch("ai.views.get_external_user_id_from_request", return_value="12345"):
+            allowed = chat_user_docs_download_view(
+                self._request(
+                    "/ai/docs/download/?chapter=find-error-prompt", user=staff
+                )
+            )
+        self.assertEqual(allowed.status_code, 200)
+        self.assertIn("Разработчику препромпта", allowed.content.decode("utf-8"))
 
     def test_download_forbidden_without_external_id(self):
         from ai.views import chat_user_docs_download_view
@@ -14500,7 +14569,8 @@ class ChatUserDocsLangTests(TestCase):
         data = json.loads(response.content)
         self.assertEqual(data["title"], "User Guide")
         self.assertEqual(data["lang"], "en")
-        self.assertEqual(data["download_url"], "/ai/docs/download/?lang=en")
+        self.assertEqual(data["download_url"],
+                         "/ai/docs/download/?chapter=user&lang=en")
         self.assertIn("[en]Привет", data["html"])
 
     def test_french_download_filename(self):

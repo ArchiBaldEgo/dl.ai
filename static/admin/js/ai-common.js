@@ -2412,10 +2412,14 @@ function initUserDocs() {
 
     var titleEl = document.getElementById('aiDocsTitle');
     var bodyEl = document.getElementById('aiDocsBody');
+    var chaptersEl = document.getElementById('aiDocsChapters');
     var downloadEl = document.getElementById('aiDocsDownload');
     var closeEl = document.getElementById('aiDocsClose');
     var pollTimer = null;
     var fingerprint = null;
+    // Текущая вкладка модалки: сервер по умолчанию отдаёт «user». Список
+    // вкладок приходит в ответе (chapters) — не хардкодим слаги на клиенте.
+    var currentChapter = '';
 
     function localize() {
         var label = getUiString('userDocs', 'Инструкция пользователя');
@@ -2433,12 +2437,46 @@ function initUserDocs() {
         return selectLang.options[selectLang.selectedIndex].getAttribute('language') || '';
     }
 
-    function docsUrl(lang) {
-        return '/ai/docs/' + (lang ? '?lang=' + encodeURIComponent(lang) : '');
+    function docsUrl(lang, chapter) {
+        var params = [];
+        if (chapter) params.push('chapter=' + encodeURIComponent(chapter));
+        if (lang) params.push('lang=' + encodeURIComponent(lang));
+        return '/ai/docs/' + (params.length ? '?' + params.join('&') : '');
+    }
+
+    // Вкладки глав (одна глава → панель скрыта: не плодим пустую полосу).
+    // Заголовки приходят с сервера уже локализованными/экранированными —
+    // textContent, никакого innerHTML.
+    function renderChapters(data) {
+        if (!chaptersEl) return;
+        var chapters = data.chapters || [];
+        chaptersEl.innerHTML = '';
+        if (chapters.length < 2) {
+            chaptersEl.hidden = true;
+            return;
+        }
+        chapters.forEach(function(chapter) {
+            var tab = document.createElement('button');
+            tab.type = 'button';
+            tab.className = 'ai-docs-chapter-tab' + (chapter.slug === data.chapter ? ' active' : '');
+            tab.setAttribute('role', 'tab');
+            tab.setAttribute('aria-selected', chapter.slug === data.chapter ? 'true' : 'false');
+            tab.dataset.chapter = chapter.slug;
+            tab.textContent = chapter.title;
+            tab.addEventListener('click', function() {
+                if (currentChapter === chapter.slug) return;
+                currentChapter = chapter.slug;
+                fetchDocs();
+            });
+            chaptersEl.appendChild(tab);
+        });
+        chaptersEl.hidden = false;
     }
 
     function applyDocs(data) {
+        currentChapter = data.chapter || currentChapter;
         titleEl.textContent = data.title || getUiString('userDocs', 'Инструкция пользователя');
+        renderChapters(data);
         var scroll = bodyEl.scrollTop;
         bodyEl.innerHTML = data.html;
         // Честная плашка о сбое рантайм-перевода (на проде translate.google.com
@@ -2459,7 +2497,7 @@ function initUserDocs() {
 
     function fetchDocs() {
         bodyEl.textContent = getUiString('docsLoadError', 'Не удалось загрузить инструкцию') + '…';
-        fetch(docsUrl(currentUiLang()), {credentials: 'same-origin'})
+        fetch(docsUrl(currentUiLang(), currentChapter), {credentials: 'same-origin'})
             .then(function(response) {
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 return response.json();
@@ -2483,7 +2521,7 @@ function initUserDocs() {
     function startPolling() {
         stopPolling();
         pollTimer = setInterval(function() {
-            fetch(docsUrl(currentUiLang()), {credentials: 'same-origin'})
+            fetch(docsUrl(currentUiLang(), currentChapter), {credentials: 'same-origin'})
                 .then(function(response) {
                     if (!response.ok) throw new Error('HTTP ' + response.status);
                     return response.json();

@@ -376,6 +376,42 @@ option {
 
 .ai-docs-modal-close:hover { background-color: var(--bg-toggle-hover); }
 
+/* Вкладки глав (появляются, только если глав больше одной: «Инструкция для
+   пользователя» у всех, «Разработчику препромпта…» — у разработчиков промптов). */
+.ai-docs-chapters {
+    display: flex;
+    gap: 4px;
+    padding: 8px 16px 0;
+    border-bottom: 1px solid var(--border-soft);
+    flex-shrink: 0;
+    overflow-x: auto;
+}
+
+.ai-docs-chapters[hidden] { display: none; }
+
+.ai-docs-chapter-tab {
+    padding: 6px 12px;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    background: none;
+    color: var(--text-secondary, inherit);
+    font-size: 13px;
+    line-height: 1.3;
+    cursor: pointer;
+    white-space: nowrap;
+    margin-bottom: -1px;
+}
+
+.ai-docs-chapter-tab:hover { background: var(--bg-toggle-hover); }
+
+.ai-docs-chapter-tab.active {
+    background: var(--bg-toggle);
+    border-color: var(--border);
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
 /* Тело: рендер markdown (DOCX.md) — таблицы и код насыщенные. */
 .ai-docs-modal-body {
     padding: 16px 20px;

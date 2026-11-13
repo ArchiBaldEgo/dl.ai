@@ -118,7 +118,7 @@ WebPools/
 | `RETRY_AFTER_SEC` | `3` | Что писать в HTTP-заголовок `Retry-After` при 429/503 |
 | `REQUEST_TIMEOUT_MS` | `180000` | Таймаут на один запрос к DeepSeek (3 минуты) |
 | `SERVICE_MODEL` | `deepseek` | Ключ сервиса из `worker/data.json`. Сейчас поддерживается только `deepseek` |
-| `HEADLESS` | `true` | Запускать ли Chrome без окна. В коде сейчас захардкожено `"new"` — параметр игнорируется |
+| `HEADLESS` | `true` | Запускать ли Chrome без окна (значение `'new'`). На проде обязателен `true`: без X-сервера headed-Chrome падает с «Missing X server or $DISPLAY» и пул остаётся без ботов. `false` — только для ручного seed-логина с проброшенным X11/VNC |
 | `VIEWPORT_W` / `VIEWPORT_H` | `800` / `800` | Размер viewport браузера |
 | `BOT_USERNAME` | — | Email аккаунта **Google**, к которому привязан DeepSeek (**обязательно**) |
 | `BOT_PASSWORD` | — | Пароль от этого Google-аккаунта (**обязательно**) |

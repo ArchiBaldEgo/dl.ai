@@ -54,12 +54,19 @@ from .auth_backends import (
 from .admin.permissions import (
     add_user_to_builtin_ai_group,
     can_access_admin,
+    can_access_prompt_developer_docs,
     is_prompt_developer_user,
     is_superuser_user,
 )
 from .middleware import _dev_bypass_enabled
 from .services.auth import ai_disabled_reason, can_use_ai, get_user_identity_for_log
-from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
+from .services.docs import (
+    CLIENT_HELP_SLUGS,
+    DocUnavailableError,
+    chapter_title,
+    read_chapter_markdown,
+    render_chapter_html,
+)
 from .services.user_models import (
     PROVIDER_BASE_URLS,
     admin_user_model_rows,
@@ -1606,48 +1613,103 @@ def upload_pdf_view(request):
     return JsonResponse({"ok": True, **info})
 
 
+def _client_doc_slugs(user) -> list[str]:
+    """Главы, доступные в клиентской модалке «?» этому пользователю.
+
+    «user» — всем авторизованным; гид по написанию препромпта
+    «В чём ошибка» — тем же, кому открыта промпт-документация в админке
+    (staff/суперюзер или ключ docs.prompt_developer).
+    """
+    slugs = ["user"]
+    if can_access_prompt_developer_docs(user):
+        slugs.extend(slug for slug in CLIENT_HELP_SLUGS if slug != "user")
+    return slugs
+
+
+def _client_doc_slug(request) -> str:
+    """Запрошенная глава модалки; по умолчанию — инструкция пользователя."""
+    return (request.GET.get("chapter") or "user").strip() or "user"
+
+
+def _client_doc_lang(slug: str, requested_lang: str) -> str:
+    """Язык главы: инструкция пользователя переводится, техдоки — по-русски.
+
+    Технические главы (гид по препромпту) в админке тоже не переводятся —
+    держим одинаковое поведение и не тратим перевод на большой текст.
+    """
+    return requested_lang if slug == "user" else "ru"
+
+
 @require_http_methods(["GET"])
 def chat_user_docs_view(request):
-    """Инструкция пользователя для модалки «?» в шапке чата.
+    """Документация для модалки «?» в шапке клиентских страниц.
 
-    Рендер главы «Инструкция для пользователя» (DOCX.md) в HTML
-    (ai/services/docs.py). Гейт как у страниц чата (_has_page_access → 403):
-    доступна любому аутентифицированному DL-пользователю, роль не нужна.
+    По умолчанию — глава «Инструкция для пользователя» (DOCX.md); для
+    пользователей с промпт-документацией доступна вкладка «Разработчику
+    препромпта „В чём ошибка“» (docs/find_error_prompt.md). Гейт как у
+    страниц чата (_has_page_access → 403); выбор главы — ?chapter=slug,
+    неизвестная/запрещённая глава → 403 JSON.
 
     ?lang= — язык интерфейса (значение атрибута language селекта #selectLang,
-    напр. "Russian"/"English"/"French"); глава переводится (en/fr, Google),
-    ответ несёт lang и fingerprint (mtime, size) для поллинга изменений.
+    напр. "Russian"/"English"/"French"); инструкция пользователя переводится
+    (en/fr, Google), техдоки остаются русскими. Ответ несёт chapter, список
+    доступных вкладок chapters, lang и fingerprint (mtime, size) для поллинга.
     """
     if not _has_page_access(request):
         return JsonResponse(
             {'success': False, 'error': _access_denied_reason(request)}, status=403,
         )
-    lang = get_ui_language_suffix(request.GET.get('lang', ''))
+    slug = _client_doc_slug(request)
+    slugs = _client_doc_slugs(request.user)
+    if slug not in slugs:
+        return JsonResponse(
+            {'success': False, 'error': 'Глава документации недоступна'}, status=403,
+        )
+    requested_lang = get_ui_language_suffix(request.GET.get('lang', ''))
+    lang = _client_doc_lang(slug, requested_lang)
     try:
-        rendered = render_chapter_html("user", lang=lang)
+        rendered = render_chapter_html(slug, lang=lang)
     except DocUnavailableError as exc:
         return JsonResponse({'success': False, 'error': str(exc)}, status=404)
     return JsonResponse({
         'success': True,
+        'chapter': slug,
         'title': rendered['title'],
         'html': rendered['html'],
         'lang': rendered['lang'],
         'translated': rendered.get('translated', True),
         'fingerprint': rendered['fingerprint'],
-        'download_url': f'/ai/docs/download/?lang={lang}',
+        # Вкладки — заголовки на языке интерфейса (у «user» он переводится,
+        # у техдоков всегда русский).
+        'chapters': [
+            {
+                'slug': item,
+                'title': chapter_title(
+                    item, requested_lang if item == 'user' else 'ru'
+                ),
+            }
+            for item in slugs
+        ],
+        'download_url': f'/ai/docs/download/?chapter={slug}&lang={lang}',
     })
 
 
 @require_http_methods(["GET"])
 def chat_user_docs_download_view(request):
-    """Скачивание инструкции пользователя как .md-файла (с учётом ?lang=)."""
+    """Скачивание главы модалки «?» как .md-файла (?chapter= + ?lang=)."""
     if not _has_page_access(request):
         return JsonResponse(
             {'success': False, 'error': _access_denied_reason(request)}, status=403,
         )
-    lang = get_ui_language_suffix(request.GET.get('lang', ''))
+    slug = _client_doc_slug(request)
+    if slug not in _client_doc_slugs(request.user):
+        return JsonResponse(
+            {'success': False, 'error': 'Глава документации недоступна'}, status=403,
+        )
+    requested_lang = get_ui_language_suffix(request.GET.get('lang', ''))
+    lang = _client_doc_lang(slug, requested_lang)
     try:
-        data = read_chapter_markdown("user", lang=lang)
+        data = read_chapter_markdown(slug, lang=lang)
     except DocUnavailableError as exc:
         return JsonResponse({'success': False, 'error': str(exc)}, status=404)
     from urllib.parse import quote
