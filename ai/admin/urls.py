@@ -84,6 +84,7 @@ from .tasks import (
     admin_task_edit_view,
     admin_task_reopen_view,
     admin_task_reorder_view,
+    admin_task_user_search_view,
     admin_tasks_view,
 )
 from .test_console import (
@@ -151,6 +152,7 @@ def get_ai_admin_urls():
         path("test-console/", ai_admin_site.admin_view(admin_test_console_view), name="ai_test_console"),
         path("prompts/my/", ai_admin_site.admin_view(admin_my_prompt_view), name="ai_my_prompt"),
         path("pinned-runs/", ai_admin_site.admin_view(admin_pinned_runs_view), name="ai_pinned_runs"),
+        path("tasks/users/search/", ai_admin_site.admin_view(admin_task_user_search_view), name="ai_task_user_search"),
         path("tasks/create/", ai_admin_site.admin_view(admin_task_create_view), name="ai_task_create"),
         path("tasks/<int:task_id>/edit/", ai_admin_site.admin_view(admin_task_edit_view), name="ai_task_edit"),
         path("tasks/reorder/", ai_admin_site.admin_view(admin_task_reorder_view), name="ai_task_reorder"),

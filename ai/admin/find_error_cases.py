@@ -3,6 +3,12 @@
 Доступ — ключ ``page.prompt_lab`` (он же открывает лабораторию). Удаление
 кейсов/групп — только staff/superuser: контент-владельцы пополняют базу, но
 не должны терять историю случайным удалением.
+
+Формы добавления намеренно короткие (KISS): при создании показываются только
+поля, нужные разработчику и привязке к DL (название, язык/тема, nid/cid,
+условие; для кейса — группа, название, код и метки). Технические поля импорта
+(``dataset``/``source_ref``/``source_hash``/``statement_source`` и служебные
+даты) заполняются автоматически и видны только на форме редактирования.
 """
 
 from __future__ import annotations
@@ -38,6 +44,20 @@ class FindErrorCaseLabelInline(admin.TabularInline):
         return formfield
 
 
+def _unique_source_ref(model, base: str) -> str:
+    """Уникальный ``source_ref`` для записи, созданной вручную в админке.
+
+    Импорт ищет группы/кейсы по ``source_ref``; ручные записи получают
+    префикс ``manual/`` и суффикс ``(2)``, ``(3)``… при совпадении имени.
+    """
+    candidate = base
+    index = 2
+    while model.objects.filter(source_ref=candidate).exists():
+        candidate = f"{base} ({index})"
+        index += 1
+    return candidate
+
+
 def _fetch_statement_for_group(group, request) -> tuple[bool, str]:
     """Обновить условие группы из DL; (успех, сообщение)."""
     if not group.dl_node_id:
@@ -70,14 +90,54 @@ class FindErrorCaseGroupAdmin(FastChangelistAdminMixin, _StaffOnlyAdminMixin, ad
     show_facets = admin.ShowFacets.NEVER
     actions = ("fetch_statement_from_dl", "mark_verified")
 
+    # Полная форма — только при редактировании: на добавлении технические
+    # поля импорта (dataset/source_ref/источник условия) не показываем,
+    # их заполняет save_model.
     fieldsets = (
-        (None, {"fields": ("dataset", "name", "source_ref", "notes")}),
-        ("Задача", {"fields": (
-            "programming_language", "topic_name", "dl_node_id", "dl_course_id",
+        (None, {"fields": (
+            "name", "programming_language", "topic_name", "notes",
         )}),
+        ("DL", {
+            "description": (
+                "Скопируйте nid= (и cid=) из адреса задачи на dl.gsu.by. "
+                "Условие можно вставить вручную или обновить из DL действием "
+                "«Загрузить условие из DL» в списке групп."
+            ),
+            "fields": ("dl_node_id", "dl_course_id"),
+        }),
         ("Условие", {"fields": ("statement", "statement_source", "statement_updated_at")}),
+        ("Импорт", {"fields": ("dataset", "source_ref")}),
         ("Служебное", {"fields": ("created_at", "updated_at")}),
     )
+
+    def get_fieldsets(self, request, obj=None):
+        if obj is None:
+            return (
+                (None, {"fields": ("name", "programming_language", "topic_name")}),
+                ("DL", {
+                    "description": (
+                        "Скопируйте nid= (и cid=) из адреса задачи на dl.gsu.by — "
+                        "по ним обновляется условие. Необязательно для ручных кейсов."
+                    ),
+                    "fields": ("dl_node_id", "dl_course_id"),
+                }),
+                ("Условие", {"fields": ("statement", "notes")}),
+            )
+        return self.fieldsets
+
+    def save_model(self, request, obj, form, change):
+        if not (obj.source_ref or "").strip():
+            # Ручная запись: отдельный «датасет», чтобы импорт её не искал.
+            obj.dataset = "manual"
+            obj.source_ref = _unique_source_ref(
+                FindErrorCaseGroup, f"manual/{obj.name.strip()}"
+            )
+        if not (obj.statement_source or "").strip() and obj.statement.strip():
+            obj.statement_source = "manual"
+        previous_statement = (form.initial.get("statement") or "").strip()
+        if obj.statement.strip() and obj.statement != previous_statement:
+            obj.statement_updated_at = timezone.now()
+        super().save_model(request, obj, form, change)
 
     def get_queryset(self, request):
         return super().get_queryset(request).annotate(case_count=Count("cases"))
@@ -147,11 +207,29 @@ class FindErrorCaseAdmin(FastChangelistAdminMixin, _StaffOnlyAdminMixin, admin.M
     show_facets = admin.ShowFacets.NEVER
     actions = ("mark_ready", "mark_verified", "mark_draft", "fetch_statement_from_dl")
 
+    # На добавлении — только то, что реально нужно разработчику: группа,
+    # название, код и метки (inline). Ссылка в датасете и служебные поля
+    # заполняются автоматически и видны при редактировании.
     fieldsets = (
-        (None, {"fields": ("group", "name", "source_ref", "status", "notes")}),
+        (None, {"fields": ("group", "name", "status", "notes")}),
         ("Код", {"fields": ("code",)}),
+        ("Импорт", {"fields": ("source_ref",)}),
         ("Служебное", {"fields": ("source_hash", "created_by", "created_at", "updated_at")}),
     )
+
+    def get_fieldsets(self, request, obj=None):
+        if obj is None:
+            return (
+                (None, {
+                    "description": (
+                        "Выберите группу (задачу) и вставьте ошибочную программу. "
+                        "Метки ошибок добавьте ниже — код из каталога и пояснение."
+                    ),
+                    "fields": ("group", "name", "status"),
+                }),
+                ("Код", {"fields": ("code",)}),
+            )
+        return self.fieldsets
 
     def get_queryset(self, request):
         return (
@@ -167,6 +245,11 @@ class FindErrorCaseAdmin(FastChangelistAdminMixin, _StaffOnlyAdminMixin, admin.M
     def save_model(self, request, obj, form, change):
         if not obj.created_by_id:
             obj.created_by = request.user
+        if not (obj.source_ref or "").strip():
+            obj.source_ref = _unique_source_ref(
+                FindErrorCase,
+                f"{obj.group.source_ref}/{obj.name.strip()}",
+            )
         super().save_model(request, obj, form, change)
 
     @admin.action(description="Статус: готова")

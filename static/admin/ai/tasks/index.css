@@ -73,21 +73,44 @@ table[data-reorder="1"] tbody tr[data-task-id] { cursor: grab; }
 /* Тип таска: «Фронт работы» / «Хотелки» — чип .ai-task-kind (ниже, общий
    вид) с подкраской по виду. */
 
-/* «Поручить» (только суперюзер): select разработчика + кнопка в колонке
-   действий; select компактный, чтобы колонка не разъезжалась. */
+/* «Поручено» (только суперюзер): автокомплит раскрывается прямо в ячейке
+   действий — инпут ФИО/ID + выпадающий список найденных пользователей. */
 .ai-task-assign {
-  display: inline-flex; align-items: center; gap: 4px;
-  vertical-align: middle; margin-right: 4px;
+  position: relative; display: inline-block; vertical-align: middle;
+  margin-right: 4px; min-width: 240px; text-align: left;
 }
-.ai-task-assign-select {
-  max-width: 170px; height: 26px; padding: 1px 4px; font-size: 12px;
+.ai-task-assign.busy { pointer-events: none; opacity: 0.6; }
+.ai-task-assign-input {
+  width: 100%; box-sizing: border-box; height: 28px;
+  padding: 2px 6px; font-size: 12px;
 }
+.ai-task-assign-results {
+  position: absolute; z-index: 30; left: 0; right: 0; top: 100%;
+  max-height: 260px; overflow-y: auto;
+  background: var(--body-bg); border: 1px solid var(--hairline-color);
+  border-radius: 0 0 6px 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+.ai-task-assign-results:empty { display: none; }
+.ai-task-assign-item {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  padding: 5px 8px; border: 0; border-bottom: 1px solid var(--hairline-color);
+  background: transparent; color: var(--body-fg); font-size: 12px;
+  white-space: normal;
+}
+.ai-task-assign-item:last-child { border-bottom: 0; }
+.ai-task-assign-item:hover,
+.ai-task-assign-item:focus-visible { background: var(--darkened-bg); }
+.ai-task-assign-name { display: block; font-weight: 600; }
+.ai-task-assign-meta { display: block; color: var(--body-quiet-color); }
+.ai-task-assign-empty {
+  padding: 6px 8px; font-size: 12px; color: var(--body-quiet-color);
+}
+
+/* «Поручить» (только суперюзер): кнопка в колонке действий. */
 .ai-task-btn-assign { padding: 3px 12px; }
 
 .ai-task-btn-claim { padding: 3px 12px; }
-.ai-task-btn-assign { padding: 3px 12px; }
-/* Селект «Поручено» раскрывается прямо в ячейке действий. */
-.ai-task-assign { max-width: 280px; padding: 2px 6px; }
 .ai-task-btn-close {
   padding: 3px 12px;
   color: #b42318; border-color: color-mix(in srgb, #b42318 50%, var(--hairline-color));

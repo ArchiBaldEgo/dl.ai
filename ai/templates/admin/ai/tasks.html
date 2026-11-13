@@ -18,8 +18,12 @@
 <div class="ai-tasks-wrap">
   <p class="help">
     Доска задач для разработчиков. Создают таски суперюзеры; взять таск
-    может любой с доступом, а поручить его конкретному человеку из группы
-    «Разработчик» — только суперюзер кнопкой «Поручено». «Фронт работы» и
+    может любой с доступом, а поручить его конкретному человеку — только
+    суперюзер кнопкой «Поручено»: введите фамилию/имя (в любом порядке) или
+    ID (12345, id_12345) и выберите человека из найденных.
+    Если его нет в группе «Разработчик», он будет добавлен туда
+    автоматически, а после закрытия всех его тасков — исключён (членство,
+    выданное вручную на «Группах доступа», не снимается). «Фронт работы» и
     «Хотелки» — свои нумерации с №1, чем меньше — тем важнее; порядок
     {% if can_reorder %}меняется перетаскиванием строк{% else %}задан суперюзерами{% endif %}.
     «Не взятые» — весь свободный фронт, взять можно прямо отсюда; «Поиск» —
@@ -194,12 +198,13 @@
                 <button type="button" class="button ai-task-btn-claim"
                         data-claim-url="{{ row.claim_url }}">Взять</button>
               {% endif %}
-              {% if can_assign and developer_options %}
-                {# «Поручено» — суперюзер назначает исполнителя из группы #}
-                {# «Разработчик»; клик раскрывает селект прямо в строке.   #}
+              {% if can_assign %}
+                {# «Поручено» — суперюзер назначает любого человека: клик #}
+                {# раскрывает в строке автокомплит (ФИО/ID) с AJAX-поиском. #}
                 <button type="button" class="button ai-task-btn-assign"
                         data-assign-open="1"
-                        data-assign-url="{{ row.assign_url }}">Поручено</button>
+                        data-assign-url="{{ row.assign_url }}"
+                        data-assign-search-url="{{ assign_search_url }}">Поручено</button>
               {% endif %}
               {% if row.can_close and row.taken %}
                 <button type="button" class="button ai-task-btn-close"
@@ -244,17 +249,6 @@
   {% endif %}
   </div>
 </div>
-
-{% if can_assign and developer_options %}
-{# Шаблон-селект для «Поручено»: JS клонирует его в строку таска и #}
-{# отправляет tasks/<id>/assign/. #}
-<select id="aiTaskAssignOptions" hidden>
-  <option value="">— выберите разработчика —</option>
-  {% for d in developer_options %}
-    <option value="{{ d.id }}">{{ d.name }}</option>
-  {% endfor %}
-</select>
-{% endif %}
 
 {# Состояние страницы (прокрутка, черновик формы, фильтры) — общий хелпер. #}
 <script src="{% static 'admin/js/ai_page_state.js' %}"></script>

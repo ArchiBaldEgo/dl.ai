@@ -9,6 +9,7 @@ CLAUDE.md): его используют поиск changelist'ов (``UniversalU
 
 * целиком числовой запрос — это **точный** id (Django pk, DL-id или логин
   ``user_<id>``), а не подстрока: ``10`` не находит пользователя ``101``;
+  явная форма ``id_10`` равнозначна числу ``10`` (тот же точный id);
 * текстовый запрос разбивается на слова; каждое слово должно найтись в
   ЛЮБОМ из полей ФИО/логина (AND по словам, OR по полям) — поэтому
   «Иванов Иван» и «Иван Иванов» находят одного человека;
@@ -56,9 +57,20 @@ _ID_FIELDS = (
 
 _TOKEN_SPLIT_RE = re.compile(r"\s+")
 
+#: Явная форма id: ``id_12345`` (= ``12345``). Регистр не важен; сам текст
+#: всё равно сравнивается с логином целиком — локальные логины ``id_*``
+#: находятся как раньше.
+_ID_PREFIX_RE = re.compile(r"id_(\d+)", re.IGNORECASE)
+
 
 def _tokens(query: str) -> list[str]:
     return [token for token in _TOKEN_SPLIT_RE.split((query or "").strip()) if token]
+
+
+def _id_digits(text: str) -> str | None:
+    """``id_12345`` → ``"12345"``; иначе None."""
+    match = _ID_PREFIX_RE.fullmatch((text or "").strip())
+    return match.group(1) if match else None
 
 
 def _prefix(prefix: str) -> str:
@@ -84,19 +96,21 @@ def _initial_parts(token: str) -> list[str] | None:
 
 
 def exact_user_id_q(query: str, prefix: str = "") -> Q | None:
-    """Q точного совпадения id: pk, DL-id или логин (``user_<id>``)."""
+    """Q точного совпадения id: pk, DL-id, логин или форма ``id_<id>``."""
     text = (query or "").strip()
     if not text:
         return None
     base = _prefix(prefix)
     q = Q(**{f"{base}username__iexact": text})
     q |= Q(**{f"{base}external_dl_account__external_user_id__iexact": text})
-    if text.isdigit():
+    digits = text if text.isdigit() else _id_digits(text)
+    if digits is not None:
         try:
-            q |= Q(**{f"{base}pk": int(text)})
+            q |= Q(**{f"{base}pk": int(digits)})
         except (TypeError, ValueError):
             pass
-        q |= Q(**{f"{base}username__iexact": f"user_{text}"})
+        q |= Q(**{f"{base}external_dl_account__external_user_id__iexact": digits})
+        q |= Q(**{f"{base}username__iexact": f"user_{digits}"})
     return q
 
 
@@ -116,7 +130,7 @@ def _term_q(term: str, prefix: str) -> Q:
     q = Q()
     for field_name in NAME_FIELDS:
         q |= Q(**{f"{base}{field_name}__icontains": term})
-    if term.isdigit():
+    if term.isdigit() or _id_digits(term) is not None:
         id_q = exact_user_id_q(term, prefix)
         if id_q is not None:
             q |= id_q
@@ -131,7 +145,7 @@ def user_identity_q(query: str, prefix: str = "") -> Q | None:
     text = (query or "").strip()
     if not text:
         return None
-    if text.isdigit():
+    if text.isdigit() or _id_digits(text) is not None:
         return exact_user_id_q(text, prefix)
 
     q = Q()
@@ -225,8 +239,9 @@ def identity_matches(query: str, *, texts=(), ids=()) -> bool:
     if not text:
         return True
     id_values = {str(value) for value in ids if value not in (None, "")}
-    if text.isdigit():
-        return text in id_values
+    digits = text if text.isdigit() else _id_digits(text)
+    if digits is not None:
+        return digits in id_values
 
     word_sources = [str(source or "") for source in texts]
     words = [

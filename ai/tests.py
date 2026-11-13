@@ -40,7 +40,9 @@ from ai.i18n import get_localized_name, get_ui_language_suffix
 from ai.external_account import get_or_create_user_from_external
 from ai.models import (
     AuthorAlias,
+    AIAccessGroup,
     AIDevTask,
+    AIDevTaskDeveloperGrant,
     AIRequestLog,
     AIPinnedBatchRun,
     AIWizardSeen,
@@ -15479,21 +15481,30 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.assertFalse(resp.context_data["can_create"])
         self.assertFalse(resp.context_data["can_close"])
         self.assertFalse(resp.context_data["can_assign"])
-        self.assertEqual(resp.context_data["developer_options"], [])
+        # Статического списка разработчиков больше нет: исполнителя ищет
+        # AJAX-автокомплит по ВСЕМ пользователям.
+        self.assertNotIn("developer_options", resp.context_data)
+        self.assertEqual(
+            resp.context_data["assign_search_url"],
+            f"{self.tasks_url}users/search/",
+        )
         self.assertTrue(resp.context_data["can_reorder"])
 
+        AIDevTask.objects.create(title="Т-кнопка", created_by=self.superuser)
         resp = self.page_view(self._request(self.superuser, path=self.tasks_url))
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.context_data["can_create"])
         self.assertTrue(resp.context_data["can_close"])
         self.assertTrue(resp.context_data["can_assign"])
-        # «Поручено» предлагает только активных членов группы «Разработчик»
-        # (pd/outsider в списке нет).
         self.assertEqual(
-            {option["id"] for option in resp.context_data["developer_options"]},
-            {self.dev.pk, self.other_dev.pk},
+            resp.context_data["assign_search_url"],
+            f"{self.tasks_url}users/search/",
         )
         self.assertTrue(resp.context_data["can_reorder"])
+        resp.render()
+        html = resp.content.decode()
+        self.assertIn("data-assign-open", html)
+        self.assertIn("data-assign-search-url", html)
 
     def test_rows_are_draggable_on_front_and_wish_tabs(self):
         """Перетаскивание: HTML5 DnD требует draggable на строках (регрессия
@@ -15685,16 +15696,122 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         task.refresh_from_db()
         self.assertEqual(task.taken_by, self.other_dev)
 
-    def test_assign_rejects_non_developer(self):
+    def test_assign_any_active_user_gets_auto_developer_role(self):
+        """Поручать можно ЛЮБОМУ активному: не-разработчик автоматически
+        зачисляется в группу «Разработчик» и получает маркер авто-роли."""
         task = AIDevTask.objects.create(title="Т-поручение", created_by=self.superuser)
         for user in (self.pd, self.outsider):
             resp = self.assign_view(
                 self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": user.pk}),
                 task.id,
             )
-            self.assertEqual(resp.status_code, 400)
+            self.assertEqual(resp.status_code, 200, user.username)
+            payload = json.loads(resp.content)
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["added_to_group"], user.username)
+            task.refresh_from_db()
+            self.assertEqual(task.taken_by, user)
+            self.assertTrue(
+                user.ai_access_groups.filter(name="Разработчик").exists(),
+                user.username,
+            )
+            self.assertTrue(
+                AIDevTaskDeveloperGrant.objects.filter(user=user).exists(),
+                user.username,
+            )
+
+        # Уже член группы «Разработчик»: назначается, но маркер НЕ ставится —
+        # такое членство может быть ручным, автоматика его не снимает.
+        resp = self.assign_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": self.dev.pk}),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(json.loads(resp.content)["added_to_group"])
+        self.assertFalse(
+            AIDevTaskDeveloperGrant.objects.filter(user=self.dev).exists()
+        )
+
+    def test_assign_rejects_inactive_user(self):
+        self.pd.is_active = False
+        self.pd.save(update_fields=["is_active"])
+        task = AIDevTask.objects.create(title="Т-поручение", created_by=self.superuser)
+        resp = self.assign_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": self.pd.pk}),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 404)
         task.refresh_from_db()
         self.assertIsNone(task.taken_by)
+
+    def test_close_last_task_revokes_auto_developer_role(self):
+        """Закрытие последнего активного таска снимает авто-роль и маркер;
+        пока есть другой активный таск — роль остаётся; «Вернуть» выдаёт её
+        снова."""
+        auto = get_user_model().objects.create_user(username="task_auto", password="x")
+        first = AIDevTask.objects.create(title="Т-авто-1", created_by=self.superuser)
+        second = AIDevTask.objects.create(title="Т-авто-2", created_by=self.superuser)
+        for task in (first, second):
+            self.assign_view(
+                self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": auto.pk}),
+                task.id,
+            )
+        self.assertTrue(auto.ai_access_groups.filter(name="Разработчик").exists())
+
+        # Закрыт один из двух — роль нужна (есть ещё активный таск).
+        self.assertEqual(
+            self.close_view(self._request(self.superuser, "post", f"/x/{first.id}/close/"), first.id).status_code,
+            200,
+        )
+        self.assertTrue(auto.ai_access_groups.filter(name="Разработчик").exists())
+        self.assertTrue(AIDevTaskDeveloperGrant.objects.filter(user=auto).exists())
+
+        # Закрыт последний — авто-роль и маркер сняты.
+        self.assertEqual(
+            self.close_view(self._request(self.superuser, "post", f"/x/{second.id}/close/"), second.id).status_code,
+            200,
+        )
+        self.assertFalse(auto.ai_access_groups.filter(name="Разработчик").exists())
+        self.assertFalse(AIDevTaskDeveloperGrant.objects.filter(user=auto).exists())
+
+        # «Вернуть» — таск снова активен у того же исполнителя, роль выдана.
+        self.assertEqual(
+            self.reopen_view(self._request(self.superuser, "post", f"/x/{second.id}/reopen/"), second.id).status_code,
+            200,
+        )
+        self.assertTrue(auto.ai_access_groups.filter(name="Разработчик").exists())
+        self.assertTrue(AIDevTaskDeveloperGrant.objects.filter(user=auto).exists())
+
+    def test_manual_group_membership_is_not_revoked(self):
+        """Членство, добавленное вручную на «Группах доступа», рвёт маркер
+        авто-роли — закрытие тасков его больше не снимает."""
+        from ai.admin.access_groups import admin_access_group_member_toggle_view
+
+        auto = get_user_model().objects.create_user(username="task_manual", password="x")
+        task = AIDevTask.objects.create(title="Т-ручной", created_by=self.superuser)
+        self.assign_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": auto.pk}),
+            task.id,
+        )
+        group = AIAccessGroup.objects.get(name="Разработчик")
+        self.assertTrue(AIDevTaskDeveloperGrant.objects.filter(user=auto).exists())
+
+        # Суперюзер «переподтверждает» членство вручную на «Группах доступа»:
+        # toggle add снимает маркер.
+        resp = admin_access_group_member_toggle_view(
+            self._request(self.superuser, "post", path=f"/x/{group.pk}/members/toggle/",
+                          data={"user_id": auto.pk, "action": "add"}),
+            group.pk,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(AIDevTaskDeveloperGrant.objects.filter(user=auto).exists())
+
+        # Закрытие последнего таска роль НЕ снимает.
+        self.assertEqual(
+            self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id).status_code,
+            200,
+        )
+        self.assertTrue(auto.ai_access_groups.filter(name="Разработчик").exists())
 
     def test_assign_validates_task_and_payload(self):
         task = AIDevTask.objects.create(title="Т-поручение", created_by=self.superuser)
@@ -16560,6 +16677,93 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self._enter_view_as(request, action_group)
         self.assertEqual(self.create_view(request).status_code, 200)
         self.assertTrue(AIDevTask.objects.filter(title="Т6-view-as").exists())
+
+
+class AIDevTaskUserSearchTests(TestCase):
+    """AJAX-поиск исполнителя для «Поручено» (/ai/admin/tasks/users/search/).
+
+    Ищет по ВСЕМ активным пользователям (не только по группе «Разработчик»)
+    универсальными правилами ai/services/user_search.py: ФИО в любом порядке,
+    точный id и форма id_<id>. Доступ — только суперюзер.
+    """
+
+    def setUp(self):
+        from ai.admin.tasks import admin_task_user_search_view
+
+        self.view = admin_task_user_search_view
+        self.superuser = get_user_model().objects.create_superuser(
+            username="search_admin", password="x", email="s@a.com",
+        )
+        self.ivanov = get_user_model().objects.create_user(
+            username="user_501", password="x",
+            first_name="Иван", last_name="Иванов",
+        )
+        self.petrova = get_user_model().objects.create_user(
+            username="user_502", password="x",
+            first_name="Анна", last_name="Петрова",
+        )
+        make_developer(self.petrova)
+
+    def _get(self, user, query):
+        request = RequestFactory().get(
+            "/ai/admin/tasks/users/search/", {"q": query}
+        )
+        request.user = user
+        return self.view(request)
+
+    def _names(self, user, query):
+        resp = self._get(user, query)
+        self.assertEqual(resp.status_code, 200)
+        payload = json.loads(resp.content)
+        self.assertTrue(payload["ok"])
+        return {row["name"] for row in payload["users"]}
+
+    def test_search_requires_superuser(self):
+        resp = self._get(self.ivanov, "Иванов")
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(json.loads(resp.content)["ok"])
+
+    def test_search_by_full_name_in_any_order(self):
+        for query in ("Иванов Иван", "Иван Иванов", "Ив Ив"):
+            self.assertIn("Иван Иванов", self._names(self.superuser, query), query)
+
+    def test_search_by_id_and_id_prefix(self):
+        for query in (
+            str(self.ivanov.pk),
+            f"id_{self.ivanov.pk}",
+            f"ID_{self.ivanov.pk}",
+            "501",  # логин user_501
+        ):
+            names = self._names(self.superuser, query)
+            self.assertIn("Иван Иванов", names, query)
+            self.assertNotIn("Анна Петрова", names, query)
+
+    def test_search_reports_group_membership(self):
+        resp = self._get(self.superuser, "Петрова")
+        payload = json.loads(resp.content)
+        row = next(r for r in payload["users"] if r["name"] == "Анна Петрова")
+        self.assertTrue(row["is_developer"])
+        self.assertEqual(row["dl_id"], "502")
+
+        resp = self._get(self.superuser, "Иванов")
+        row = next(
+            r for r in json.loads(resp.content)["users"]
+            if r["name"] == "Иван Иванов"
+        )
+        self.assertFalse(row["is_developer"])
+
+    def test_search_empty_query_is_empty_list(self):
+        self.assertEqual(self._names(self.superuser, ""), set())
+        self.assertEqual(self._names(self.superuser, "id_999999999"), set())
+
+    def test_search_respects_limit(self):
+        for index in range(25):
+            get_user_model().objects.create_user(
+                username=f"many_{index}", password="x",
+                first_name=f"Иван{index}", last_name="Многочисленный",
+            )
+        resp = self._get(self.superuser, "Многочисленный")
+        self.assertLessEqual(len(json.loads(resp.content)["users"]), 20)
 
 
 class TasksPageStateTests(SimpleTestCase):
@@ -22248,6 +22452,14 @@ class UniversalUserSearchTests(TestCase):
         self.assertEqual(self._usernames("20"), set())
         self.assertEqual(self._usernames("201"), {"user_201"})
 
+    def test_id_prefix_query_is_exact_id(self):
+        """Форма id_12345 равнозначна точному id: без подстановок-подстрок."""
+        self.assertEqual(self._usernames("id_201"), {"user_201"})
+        self.assertEqual(self._usernames("ID_201"), {"user_201"})
+        self.assertEqual(self._usernames("id_999999"), set())
+        # Токен id_<id> распознаётся и в многословном запросе.
+        self.assertEqual(self._usernames("Ivanov id_201"), {"user_201"})
+
     def test_full_name_any_word_order(self):
         self.assertEqual(self._usernames("Ivanov Ivan"), {"user_201"})
         self.assertEqual(self._usernames("Ivan Ivanov"), {"user_201"})
@@ -22298,6 +22510,8 @@ class UniversalUserSearchTests(TestCase):
         self.assertFalse(identity_matches("Ivanov P.", texts=("Ivanov Ivan",)))
         self.assertTrue(identity_matches("201", ids=("201",)))
         self.assertFalse(identity_matches("20", ids=("201",)))
+        self.assertTrue(identity_matches("id_201", ids=("201",)))
+        self.assertFalse(identity_matches("id_20", ids=("201",)))
 
     def test_user_identity_resolve(self):
         from ai.services.user_search import UserIdentity
@@ -27411,6 +27625,81 @@ class FindErrorCaseAdminTests(TestCase):
         self.assertIn(3, values)
         self.assertIn(22, values)
         self.assertNotIn(19, values)
+
+    def test_add_forms_hide_import_fields(self):
+        from ai.admin.find_error_cases import FindErrorCaseAdmin, FindErrorCaseGroupAdmin
+        from ai.admin.site import ai_admin_site
+
+        group_admin = FindErrorCaseGroupAdmin(FindErrorCaseGroup, ai_admin_site)
+        group_fields = [
+            name for _title, options in group_admin.get_fieldsets(self._request(self.staff))
+            for name in options["fields"]
+        ]
+        self.assertIn("dl_node_id", group_fields)
+        self.assertIn("statement", group_fields)
+        for hidden in ("dataset", "source_ref", "statement_source", "statement_updated_at"):
+            self.assertNotIn(hidden, group_fields)
+
+        case_admin = FindErrorCaseAdmin(FindErrorCase, ai_admin_site)
+        case_fields = [
+            name for _title, options in case_admin.get_fieldsets(self._request(self.staff))
+            for name in options["fields"]
+        ]
+        self.assertIn("group", case_fields)
+        self.assertIn("code", case_fields)
+        for hidden in ("source_ref", "source_hash", "notes"):
+            self.assertNotIn(hidden, case_fields)
+
+        # И сами ModelForm'ы добавления не тянут технические поля импорта.
+        group_admin = FindErrorCaseGroupAdmin(FindErrorCaseGroup, ai_admin_site)
+        group_form = group_admin.get_form(self._request(self.staff), None)
+        self.assertNotIn("source_ref", group_form.base_fields)
+        self.assertNotIn("dataset", group_form.base_fields)
+        self.assertIn("dl_node_id", group_form.base_fields)
+        case_admin = FindErrorCaseAdmin(FindErrorCase, ai_admin_site)
+        case_form = case_admin.get_form(self._request(self.staff), None)
+        self.assertNotIn("source_ref", case_form.base_fields)
+        self.assertIn("code", case_form.base_fields)
+
+    def test_manual_group_gets_auto_source_fields(self):
+        from ai.admin.find_error_cases import FindErrorCaseGroupAdmin
+        from ai.admin.site import ai_admin_site
+
+        admin_obj = FindErrorCaseGroupAdmin(FindErrorCaseGroup, ai_admin_site)
+        group = FindErrorCaseGroup(name="Новая задача", statement="Условие руками")
+        admin_obj.save_model(
+            self._request(self.staff), group, SimpleNamespace(initial={}), change=False,
+        )
+        group.refresh_from_db()
+        self.assertEqual(group.dataset, "manual")
+        self.assertEqual(group.source_ref, "manual/Новая задача")
+        self.assertEqual(group.statement_source, "manual")
+        self.assertIsNotNone(group.statement_updated_at)
+
+        # Коллизия ссылки (модель запрещает одинаковые dataset+name, поэтому
+        # занимаем ссылку записью с другим именем) — получаем суффикс.
+        FindErrorCaseGroup.objects.create(
+            dataset="manual", name="Другая", source_ref="manual/Ещё задача",
+        )
+        twin = FindErrorCaseGroup(name="Ещё задача")
+        admin_obj.save_model(
+            self._request(self.staff), twin, SimpleNamespace(initial={}), change=False,
+        )
+        twin.refresh_from_db()
+        self.assertEqual(twin.source_ref, "manual/Ещё задача (2)")
+
+    def test_manual_case_gets_auto_source_ref(self):
+        from ai.admin.find_error_cases import FindErrorCaseAdmin
+        from ai.admin.site import ai_admin_site
+
+        admin_obj = FindErrorCaseAdmin(FindErrorCase, ai_admin_site)
+        case = FindErrorCase(group=self.group, name="1", code="void main() {}")
+        admin_obj.save_model(
+            self._request(self.staff), case, SimpleNamespace(initial={}), change=False,
+        )
+        case.refresh_from_db()
+        self.assertEqual(case.source_ref, "ds/Группа/1")
+        self.assertEqual(case.created_by, self.staff)
 
     def test_fetch_statement_updates_group(self):
         from unittest.mock import patch

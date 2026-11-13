@@ -89,30 +89,130 @@
         }
     }
 
-    // «Поручено» (суперюзер): раскрывает в строке таска селект активных
-    // членов группы «Разработчик» (шаблон #aiTaskAssignOptions на странице).
-    function cancelAssignPicker(select) {
-        var btn = select.previousElementSibling;
+    // «Поручено» (суперюзер): в строке таска раскрывается автокомплит по
+    // ВСЕМ активным пользователям — ФИО в любом порядке или ID (12345,
+    // id_12345). Поиск — GET tasks/users/search/?q=…; выбор — POST
+    // tasks/<id>/assign/ {"user_id"}. Имена людей вставляются textContent
+    // (не innerHTML) — чужой HTML из данных не исполняется.
+    var ASSIGN_DEBOUNCE_MS = 250;
+
+    function closeAssignPicker(picker) {
+        if (!picker) return;
+        if (picker._outsideHandler) {
+            document.removeEventListener('mousedown', picker._outsideHandler);
+        }
+        var btn = picker.previousElementSibling;
         if (btn && btn.hasAttribute('data-assign-open')) btn.hidden = false;
-        select.remove();
+        picker.remove();
+    }
+
+    function renderAssignResults(list, users, onPick) {
+        list.textContent = '';
+        if (!users.length) {
+            var empty = document.createElement('div');
+            empty.className = 'ai-task-assign-empty';
+            empty.textContent =
+                'Никого не нашли — попробуйте другое написание или ID';
+            list.appendChild(empty);
+            return;
+        }
+        users.forEach(function (user) {
+            var item = document.createElement('button');
+            item.type = 'button';
+            item.className = 'ai-task-assign-item';
+            var name = document.createElement('span');
+            name.className = 'ai-task-assign-name';
+            name.textContent = user.name || ('#' + user.id);
+            item.appendChild(name);
+            var meta = document.createElement('span');
+            meta.className = 'ai-task-assign-meta';
+            var parts = [];
+            if (user.dl_id) parts.push('DL ' + user.dl_id);
+            parts.push(user.is_developer
+                ? 'уже в группе «Разработчик»'
+                : 'будет добавлен в «Разработчик»');
+            meta.textContent = parts.join(' · ');
+            item.appendChild(meta);
+            item.addEventListener('click', function () { onPick(user); });
+            list.appendChild(item);
+        });
     }
 
     function openAssignPicker(btn) {
         var row = btn.closest('tr[data-task-id]');
-        var options = document.getElementById('aiTaskAssignOptions');
-        if (!row || !options || row.querySelector('.ai-task-assign')) return;
-        var select = options.cloneNode(true);
-        select.removeAttribute('hidden');
-        select.removeAttribute('id');
-        select.className = 'ai-task-assign';
-        select.setAttribute('data-assign-url', btn.getAttribute('data-assign-url') || '');
+        if (!row || row.querySelector('.ai-task-assign')) return;
+        var picker = document.createElement('span');
+        picker.className = 'ai-task-assign';
+        var input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'ai-task-assign-input';
+        input.placeholder = 'Фамилия Имя или ID (id_12345)';
+        input.autocomplete = 'off';
+        var list = document.createElement('div');
+        list.className = 'ai-task-assign-results';
+        picker.appendChild(input);
+        picker.appendChild(list);
         btn.hidden = true;
-        btn.after(select);
-        select.focus();
-        // Клик мимо без выбора — вернуть кнопку (выбор уходит в change).
-        select.addEventListener('blur', function () {
-            if (!select.value) cancelAssignPicker(select);
+        btn.after(picker);
+        input.focus();
+
+        var timer = null;
+        var seq = 0; // гонка: ответ устаревшего запроса не перетирает новый
+
+        function assign(user) {
+            if (picker.classList.contains('busy')) return;
+            picker.classList.add('busy');
+            post(btn.getAttribute('data-assign-url'),
+                 JSON.stringify({ user_id: user.id }))
+                .then(function () { window.location.reload(); })
+                .catch(function (err) {
+                    picker.classList.remove('busy');
+                    alert(err.message);
+                });
+        }
+
+        function search() {
+            var q = input.value.trim();
+            if (!q) { list.textContent = ''; return; }
+            var current = ++seq;
+            var url = btn.getAttribute('data-assign-search-url') +
+                '?q=' + encodeURIComponent(q);
+            fetch(url, {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                credentials: 'same-origin',
+            })
+                .then(parseJsonResponse)
+                .then(function (data) {
+                    if (current !== seq) return;
+                    if (!data.ok) {
+                        throw new Error(data.message || 'Поиск не удался');
+                    }
+                    renderAssignResults(list, data.users || [], assign);
+                })
+                .catch(function (err) {
+                    if (current !== seq) return;
+                    list.textContent = '';
+                    var item = document.createElement('div');
+                    item.className = 'ai-task-assign-empty';
+                    item.textContent = err.message;
+                    list.appendChild(item);
+                });
+        }
+
+        input.addEventListener('input', function () {
+            clearTimeout(timer);
+            timer = setTimeout(search, ASSIGN_DEBOUNCE_MS);
         });
+        input.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape') closeAssignPicker(picker);
+        });
+        // Клик мимо — закрыть без запроса; клик по результату обрабатывает
+        // сам результат (mousedown на нём picker содержит).
+        function onOutside(event) {
+            if (!picker.contains(event.target)) closeAssignPicker(picker);
+        }
+        picker._outsideHandler = onOutside;
+        document.addEventListener('mousedown', onOutside);
     }
 
     // Взять/закрыть/вернуть — успех перезагружает страницу: статусы строк
@@ -161,23 +261,6 @@
                 });
         });
     }
-
-    // «Поручено»: выбран разработчик — POST tasks/<id>/assign/ {"user_id"}.
-    // Пустое значение = отмена (вернуть кнопку, ничего не отправлять).
-    document.addEventListener('change', function (event) {
-        var assign = event.target.closest('.ai-task-assign');
-        if (!assign) return;
-        var url = assign.getAttribute('data-assign-url');
-        var userId = parseInt(assign.value, 10);
-        if (!url || !userId) { cancelAssignPicker(assign); return; }
-        assign.disabled = true;
-        post(url, JSON.stringify({ user_id: userId }))
-            .then(function () { window.location.reload(); })
-            .catch(function (err) {
-                assign.disabled = false;
-                alert(err.message);
-            });
-    });
 
     // Фильтры «Кто взял» / архива: AJAX без перезагрузки, заменяется только
     // #ai-tasks-results (форма и позиция прокрутки остаются).
