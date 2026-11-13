@@ -1,3 +1,4 @@
+# ai/admin/test_data/view.py
 """Генератор тестовых записей журнала (/ai/admin/test_data/, только суперюзер).
 
 Создаёт случайную запись AIRequestLog из РЕАЛЬНЫХ данных приложения —
@@ -25,13 +26,13 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from ..i18n import get_localized_name
-from ..model_clients import registry
-from ..models import AIRequestLog, ProgrammingLanguage, Prompt, Task, Topic
-from ..services.auth import get_user_identity_for_log
-from ..services.log_writer import LogWriter
-from .permissions import can_access_test_data
-from .site import ai_admin_site
+from ...i18n import get_localized_name
+from ...model_clients import registry
+from ...models import AIRequestLog, ProgrammingLanguage, Prompt, Task, Topic
+from ...services.auth import get_user_identity_for_log
+from ...services.log_writer import LogWriter
+from ..permissions import can_access_test_data
+from ..site import ai_admin_site
 
 
 #region Register
